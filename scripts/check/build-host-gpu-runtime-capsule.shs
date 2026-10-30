@@ -23,6 +23,9 @@ fail() {
     exit 1
 }
 
+. "$ROOT_DIR/scripts/check/lib/host-gpu-provider.shs"
+host_gpu_host_init || fail "unsupported-host"
+
 OUTPUT_ROOT=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -58,10 +61,11 @@ HOST_CC=${CC:-cc}
 HOST_NM=${NM:-nm}
 command -v "$HOST_CC" >/dev/null 2>&1 || fail "cc-not-found:$HOST_CC"
 command -v "$HOST_NM" >/dev/null 2>&1 || fail "nm-not-found:$HOST_NM"
-command -v cargo >/dev/null 2>&1 || fail "cargo-not-found"
+HOST_CARGO=${CARGO:-cargo}
+command -v "$HOST_CARGO" >/dev/null 2>&1 || fail "cargo-not-found:$HOST_CARGO"
 
 hash_file() {
-    sha256sum "$1" | awk '{print $1}'
+    host_gpu_hash_file "$1"
 }
 
 # This definition is intentionally identical to the strict web wrapper and
@@ -80,11 +84,13 @@ runtime_source_tree_sha256() {
                     src/runtime/*.o|src/runtime/*.a|src/runtime/*.so) continue ;;
                     src/runtime/miniaudio.h|src/runtime/stb_image.h|src/runtime/stb_truetype.h) continue ;;
                 esac
-                [ -f "$source" ] && sha256sum "$source"
+                [ -f "$source" ] && host_gpu_sha256_rows "$source"
             done
-    ) | sha256sum | awk '{print $1}'
+    ) | host_gpu_sha256_rows | awk '{print $1}'
 }
 
+host_gpu_resolve_crypto || fail "openssl-provider-unavailable"
+CRYPTO_SOURCE_SHA256=$CRYPTO_PROVIDER_SHA256
 SOURCE_TREE_BEFORE=$(runtime_source_tree_sha256)
 HEAD_REVISION=$(git rev-parse HEAD)
 FINAL_DIR="$OUTPUT_ROOT"
@@ -98,10 +104,15 @@ CARGO_TARGET_DIR="$TMP_DIR/cargo-target"
 mkdir -p "$CARGO_TARGET_DIR"
 CARGO_LOG="$TMP_DIR/cargo.log"
 set +e
-CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo build --locked --offline \
-    --manifest-path "$ROOT_DIR/src/compiler_rust/Cargo.toml" \
-    --package simple-runtime --lib --profile bootstrap \
-    --features vulkan,cuda >"$CARGO_LOG" 2>&1
+(
+    # Cargo discovers source replacement/configuration from its working
+    # directory, not --manifest-path. Keep the checked-in vendor authority.
+    cd "$ROOT_DIR/src/compiler_rust" || exit 1
+    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" "$HOST_CARGO" build --locked --offline \
+        --manifest-path "$ROOT_DIR/src/compiler_rust/Cargo.toml" \
+        --package simple-runtime --lib --profile bootstrap \
+        --features vulkan,cuda
+) >"$CARGO_LOG" 2>&1
 CARGO_STATUS=$?
 set -e
 [ "$CARGO_STATUS" -eq 0 ] || {
@@ -114,29 +125,19 @@ RUNTIME_ARCHIVE="$CARGO_TARGET_DIR/bootstrap/libsimple_runtime.a"
 
 TLS_SOURCE="$ROOT_DIR/src/runtime/runtime_tls_hosted.c"
 TLS_OBJECT="$TMP_DIR/runtime_tls_hosted.o"
-"$HOST_CC" -std=gnu11 -O2 -ffunction-sections -fdata-sections \
-    -I"$ROOT_DIR/src/runtime" -c "$TLS_SOURCE" -o "$TLS_OBJECT" \
-    || fail "hosted-tls-compile-failed"
+set -- -std=gnu11 -O2 -ffunction-sections -fdata-sections -I"$ROOT_DIR/src/runtime"
+[ -z "$CRYPTO_INCLUDE_DIR" ] || set -- "$@" -I"$CRYPTO_INCLUDE_DIR"
+"$HOST_CC" "$@" -c "$TLS_SOURCE" -o "$TLS_OBJECT" || fail "hosted-tls-compile-failed"
 
-for symbol in \
+host_gpu_require_symbols "$RUNTIME_ARCHIVE" \
     rt_cuda_available rt_cuda_device_count rt_cuda_init rt_cuda_launch_kernel \
     rt_vulkan_provider_is_available rt_vulkan_provider_device_count \
-    rt_vulkan_init rt_vulkan_compile_spirv_raw rt_vulkan_create_compute_pipeline
-do
-    "$HOST_NM" -g --defined-only "$RUNTIME_ARCHIVE" 2>/dev/null \
-        | awk -v expected="$symbol" 'NF >= 1 && $NF == expected { found = 1 } END { exit(found ? 0 : 1) }' \
-        || fail "runtime-gpu-symbol-missing:$symbol"
-done
-for symbol in rt_byte_char rt_rsa_decrypt rt_wire_to_hex rt_hex_to_wire rt_random_i64; do
-    "$HOST_NM" -g --defined-only "$TLS_OBJECT" 2>/dev/null \
-        | awk -v expected="$symbol" 'NF >= 1 && $NF == expected { found = 1 } END { exit(found ? 0 : 1) }' \
-        || fail "hosted-tls-symbol-missing:$symbol"
-done
-
-CRYPTO_LINK_NAME=$($HOST_CC -print-file-name=libcrypto.so)
-[ "$CRYPTO_LINK_NAME" != libcrypto.so ] && [ -f "$CRYPTO_LINK_NAME" ] || \
-    fail "host-cc-cannot-resolve-libcrypto"
-CRYPTO_PROVIDER=$(realpath "$CRYPTO_LINK_NAME")
+    rt_vulkan_init rt_vulkan_compile_spirv_raw rt_vulkan_create_compute_pipeline \
+    || fail "runtime-gpu-symbol-contract"
+host_gpu_require_symbols "$TLS_OBJECT" \
+    rt_byte_char rt_rsa_decrypt rt_wire_to_hex rt_hex_to_wire rt_random_i64 \
+    || fail "hosted-tls-symbol-contract"
+[ "$(hash_file "$CRYPTO_PROVIDER")" = "$CRYPTO_SOURCE_SHA256" ] || fail "crypto-provider-changed"
 
 # Detect a source move during Cargo/TLS compilation before publishing.  A
 # manifest that describes only the pre-build tree would otherwise create a
@@ -169,6 +170,9 @@ MANIFEST="$TMP_DIR/capsule/capsule.manifest"
     echo "archive=$ARCHIVE_REL"
     echo "archive_sha256=$(hash_file "$RUNTIME_ARCHIVE")"
     echo "runtime_features=vulkan,cuda"
+    echo "host_os=$HOST_GPU_OS"
+    echo "host_provider_helper_sha256=$(hash_file scripts/check/lib/host-gpu-provider.shs)"
+    echo "openssl_include_dir=$CRYPTO_INCLUDE_DIR"
     echo "cargo_lock_sha256=$(hash_file src/compiler_rust/Cargo.lock)"
     echo "tls_provider_source=src/runtime/runtime_tls_hosted.c"
     echo "tls_provider_source_sha256=$(hash_file "$TLS_SOURCE")"

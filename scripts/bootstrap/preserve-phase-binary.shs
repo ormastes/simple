@@ -14,9 +14,38 @@
 #       use `chmod u+w <dir>` before touching, `chmod u-w` after — or simply rely
 #       on gc honouring any PINNED.* present).
 #   Env: PHASE_SNAPSHOT_ROOT overrides the snapshot root (for tests).
+#        PHASE_SNAPSHOT_KEEP (default 3) controls count-based retention for normal
+#        snapshot operations (not --gc).
 set -u
 root="${PHASE_SNAPSHOT_ROOT:-$(cd "$(dirname -- "$0")/../.." && pwd)/build/phase_snapshots}"
 mkdir -p "${root}" || exit 1
+
+# Keep only the newest PHASE_SNAPSHOT_KEEP snapshots per phase. A dir's phase
+# is the token before its final _<epoch> (phase1_E, ..._phase2_E,
+# ..._phase3_E). Dirs holding a PINNED.* marker are never evicted.
+phase_snapshot_keep_newest() {
+  pk_keep=${PHASE_SNAPSHOT_KEEP:-3}
+  case "${pk_keep}" in
+    [1-9]|[1-9][0-9]*) ;;
+    *) echo "error: PHASE_SNAPSHOT_KEEP must be a positive integer (got '${pk_keep}')" >&2; return 1 ;;
+  esac
+  for pk_phase in phase1 phase2 phase3; do
+    pk_count=0
+    for pk_d in "${root}"/*; do
+        [ -d "$pk_d" ] || continue
+        pk_base=${pk_d##*/}; pk_epoch=${pk_base##*_}; pk_pre=${pk_base%_*}
+        case "$pk_epoch" in ''|*[!0-9]*) continue ;; esac
+        case "$pk_pre" in "$pk_phase"|*_"$pk_phase") printf '%s %s
+' "$pk_epoch" "$pk_d" ;; esac
+      done | sort -rn | cut -d' ' -f2- | while IFS= read -r pk_dir; do
+      set -- "$pk_dir"/PINNED.*
+      [ -e "$1" ] && continue
+      pk_count=$((pk_count + 1))
+      [ "$pk_count" -gt "$pk_keep" ] || continue
+      chmod -R u+w "$pk_dir" && rm -rf "$pk_dir" && echo "gc: evicted ${pk_dir##*/}" >&2
+    done
+  done
+}
 
 if [ "${1:-}" = "--gc" ]; then
   days="${2:?usage: --gc <days>}"
@@ -37,6 +66,10 @@ if [ "${1:-}" = "--gc" ]; then
   exit 0
 fi
 
+case "${PHASE_SNAPSHOT_KEEP:-3}" in
+  [1-9]|[1-9][0-9]*) ;;
+  *) echo "error: PHASE_SNAPSHOT_KEEP must be a positive integer" >&2; exit 1 ;;
+esac
 bin="${1:?usage: preserve-phase-binary.shs <binary> <phase>}"
 phase="${2:?usage: preserve-phase-binary.shs <binary> <phase>}"
 [ -x "${bin}" ] || { echo "error: not an executable: ${bin}" >&2; exit 1; }
@@ -70,3 +103,5 @@ printf '%s\n' "${lineage}" > "${dest}/LINEAGE"
 chmod a-w "${dest}/simple" "${dest}/LINEAGE"
 chmod a-w "${dest}"
 echo "preserved: ${dest}/simple"
+# Run count-based retention after successfully creating the new snapshot
+phase_snapshot_keep_newest || exit 1

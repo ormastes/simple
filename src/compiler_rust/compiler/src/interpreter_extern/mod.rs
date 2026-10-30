@@ -134,6 +134,7 @@ pub mod sha256;
 pub mod sha512;
 pub mod dynamic_sffi;
 pub mod host_dynlib;
+pub mod host_capacity;
 #[cfg(feature = "gui")]
 pub mod winit_sffi;
 pub mod rapier2d_sffi;
@@ -272,6 +273,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         };
     }
     insert_simple!("abs", math::abs);
+    insert_simple!("rt_host_memory_headroom_bytes_v1", host_capacity::memory_headroom);
+    insert_simple!("rt_host_commit_headroom_bytes_v1", host_capacity::commit_headroom);
+    insert_simple!("rt_host_disk_headroom_bytes_v1", host_capacity::disk_headroom);
     insert_simple!("rt_host_dynlib_open", host_dynlib::rt_host_dynlib_open);
     insert_simple!("rt_host_dynlib_symbol", host_dynlib::rt_host_dynlib_symbol);
     insert_simple!("rt_host_dynlib_close", host_dynlib::rt_host_dynlib_close);
@@ -358,6 +362,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // source itself) failed with "unknown extern function" (task #113).
     insert_simple!("rt_enum_discriminant", enum_sffi::rt_enum_discriminant_fn);
     insert_simple!("rt_enum_payload", enum_sffi::rt_enum_payload_fn);
+    insert_simple!("rt_enum_id", enum_sffi::rt_enum_id_fn);
     insert_simple!("dprint", io::print::dprint);
     insert_simple!("eprintln", io::print::eprintln);
     insert_simple!("exit", process::exit);
@@ -431,6 +436,17 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_transient_heap_promote", memory::rt_transient_heap_promote);
     insert_simple!("rt_transient_heap_promote_share_begin", memory::rt_transient_heap_promote_share_begin);
     insert_simple!("rt_transient_heap_promote_share_end", memory::rt_transient_heap_promote_share_end);
+    insert_simple!("rt_rc_share", memory::rt_rc_share);
+    insert_simple!("rt_rc_retain", memory::rt_rc_retain);
+    insert_simple!("rt_rc_release", memory::rt_rc_release);
+    insert_simple!("rt_rc_count", memory::rt_rc_count);
+    insert_simple!("rt_heap_graph_bytes", memory::rt_heap_graph_bytes);
+    insert_simple!("rt_session_heap_begin", memory::rt_session_heap_begin);
+    insert_simple!("rt_session_heap_end", memory::rt_session_heap_end);
+    insert_simple!("rt_session_alloc_begin", memory::rt_session_alloc_begin);
+    insert_simple!("rt_session_alloc_end", memory::rt_session_alloc_end);
+    insert_simple!("rt_transient_heap_adopt", memory::rt_transient_heap_adopt);
+    insert_simple!("rt_session_heap_id", memory::rt_session_heap_id);
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -1356,6 +1372,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_dict_new", sffi_dict::rt_dict_new_fn);
     insert_simple!("rt_dict_set", sffi_dict::rt_dict_set_fn);
     insert_simple!("rt_dict_values", sffi_dict::rt_dict_values_fn);
+    insert_simple!("rt_dict_scope_read_bound_v1", sffi_dict::rt_dict_scope_read_bound_v1_fn);
+    insert_simple!("rt_dict_scope_read_owner_v1", sffi_dict::rt_dict_scope_read_owner_v1_fn);
+    insert_simple!("rt_dict_scope_read_epoch_v1", sffi_dict::rt_dict_scope_read_epoch_v1_fn);
+    insert_simple!("rt_dict_scope_read_meta_v1", sffi_dict::rt_dict_scope_read_meta_v1_fn);
+    insert_simple!("rt_dict_scope_read_slot_v1", sffi_dict::rt_dict_scope_read_slot_v1_fn);
     insert_simple!("rt_dir_create_all", file_io::rt_dir_create_all);
     insert_simple!("rt_dir_create", file_io::rt_dir_create);
     insert_simple!("rt_dir_exists", file_io::rt_dir_exists);
@@ -1584,6 +1605,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_stat_mtime", file_io::rt_file_stat_mtime);
     insert_simple!("rt_file_stat_size", file_io::rt_file_stat_size);
     insert_simple!("rt_file_truncate", file_io::rt_file_truncate);
+    insert_simple!("rt_mmap_create", file_io::rt_mmap_create);
+    insert_simple!("rt_munmap", file_io::rt_munmap);
+    insert_simple!("rt_msync", file_io::rt_msync);
     insert_simple!("rt_file_unlock", file_io::rt_file_unlock);
     insert_simple!("rt_file_write_bytes", file_io::rt_file_write_bytes);
     insert_simple!("rt_file_write_bytes_array", file_io::rt_file_write_bytes);
@@ -1619,6 +1643,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // were implemented -- see
     // doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
     insert_simple!("rt_io_file_open", io_file::rt_io_file_open);
+    insert_simple!("rt_io_file_open_read", io_file::rt_io_file_open_read);
+    insert_simple!("rt_io_file_open_write", io_file::rt_io_file_open_write);
+    insert_simple!("rt_io_file_open_append", io_file::rt_io_file_open_append);
     insert_simple!("rt_io_file_read", io_file::rt_io_file_read);
     insert_simple!("rt_io_file_read_all", io_file::rt_io_file_read_all);
     insert_simple!("rt_io_file_read_line", io_file::rt_io_file_read_line);
@@ -1627,6 +1654,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_io_file_seek", io_file::rt_io_file_seek);
     insert_simple!("rt_io_file_flush", io_file::rt_io_file_flush);
     insert_simple!("rt_io_file_close", io_file::rt_io_file_close);
+    insert_simple!("rt_io_file_close_value", io_file::rt_io_file_close_value);
     insert_simple!("rt_io_file_meta_size", io_file::rt_io_file_meta_size);
     insert_simple!("rt_io_file_meta_flags", io_file::rt_io_file_meta_flags);
     insert_simple!("rt_io_file_meta_modified", io_file::rt_io_file_meta_modified);
@@ -1900,6 +1928,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_kill", system::rt_process_kill);
     insert_simple!("rt_process_run", system::rt_process_run);
     insert_simple!("rt_process_run_bounded", system::rt_process_run_bounded);
+    insert_simple!("rt_process_run_bounded_bytes", system::rt_process_run_bounded_bytes);
     insert_simple!("rt_process_run_inherit", system::rt_process_run_inherit);
     // Declared by src/lib/nogc_sync_mut/io/resource_scope.spl and reached by
     // every directory-mode `simple test` run via _run_scoped_child; the C
@@ -1968,6 +1997,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_process_owned_v3_start_pinned_value",
         system::rt_process_owned_v3_adapter_unavailable
     );
+    insert_simple!("rt_sosix_darwin_snapshot_v1_capabilities_value", system::rt_sosix_darwin_snapshot_v1_capabilities_unavailable);
+    insert_simple!("rt_sosix_darwin_snapshot_v1_start_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
+    insert_simple!("rt_sosix_darwin_snapshot_v1_poll_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
+    insert_simple!("rt_sosix_darwin_snapshot_v1_cancel_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
+    insert_simple!("rt_sosix_darwin_snapshot_v1_output_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
+    insert_simple!("rt_sosix_darwin_snapshot_v1_ack_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
     insert_simple!(
         "rt_process_observation_v4_capabilities_value",
         system::rt_process_observation_v4_capabilities_unavailable
@@ -2365,7 +2400,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("spl_thread_join", concurrency::rt_thread_join);
     insert_simple!("spl_thread_detach", concurrency::rt_thread_free);
-    insert_simple!("spl_thread_current_id", concurrency::rt_thread_id);
+    insert_simple!("spl_thread_current_id", concurrency::spl_thread_current_id);
     insert_simple!(
         "rt_cpu_affinity_avx2_acquire",
         concurrency::rt_cpu_affinity_avx2_unavailable_i64
@@ -2425,6 +2460,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_thread_local_set_i64", concurrency::rt_thread_local_set_i64);
     insert_simple!("rt_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("rt_thread_yield", concurrency::rt_thread_yield);
+    insert_simple!("rt_cpu_topology_count", concurrency::rt_cpu_topology_count);
+    insert_simple!("rt_cpu_topology_field", concurrency::rt_cpu_topology_field);
+    insert_simple!("rt_thread_pin_current", concurrency::rt_thread_pin_current);
+    insert_simple!("rt_thread_current_cpu", concurrency::rt_thread_current_cpu);
+    insert_simple!("rt_par_atomic_add_i64", concurrency::rt_par_atomic_add_i64);
+    insert_simple!("rt_par_atomic_xchg_i64", concurrency::rt_par_atomic_xchg_i64);
+    insert_simple!("rt_par_atomic_cmpxchg_i64", concurrency::rt_par_atomic_cmpxchg_i64);
     insert_simple!("rt_time_format", time::rt_time_format);
     insert_simple!("rt_time_monotonic_ns", time::rt_time_monotonic_ns);
     insert_simple!("rt_time_ms", time::rt_time_ms_fn);
@@ -3578,6 +3620,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn host_capacity_externs_dispatch_typed_snapshots() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        for (name, args) in [
+            ("rt_host_memory_headroom_bytes_v1", vec![]),
+            ("rt_host_commit_headroom_bytes_v1", vec![]),
+            ("rt_host_disk_headroom_bytes_v1", vec![Value::text(".")]),
+        ] {
+            let handler = EXTERN_DISPATCH.get(name).expect("capacity extern must bypass dynamic SFFI");
+            let value = handler(&args, &mut env, &mut functions, &mut classes, &enums, &impl_methods).unwrap();
+            let Value::Int(bytes) = value else { panic!("{name} returned a non-integer") };
+            #[cfg(windows)]
+            assert!(bytes > 0, "{name} returned unavailable capacity");
+            #[cfg(not(windows))]
+            assert_eq!(bytes, 0);
+        }
+        assert!(host_capacity::disk_headroom(&[]).is_err());
+        assert!(host_capacity::disk_headroom(&[Value::Int(1)]).is_err());
+    }
+
+    #[test]
     fn env_snapshot_aliases_have_identical_typed_results_and_arity() {
         let all = EXTERN_DISPATCH.get("rt_env_all").expect("registered rt_env_all");
         let vars = EXTERN_DISPATCH.get("rt_env_vars").expect("registered rt_env_vars");
@@ -3786,6 +3852,17 @@ mod tests {
             "rt_transient_heap_promote",
             "rt_transient_heap_promote_share_begin",
             "rt_transient_heap_promote_share_end",
+            "rt_rc_share",
+            "rt_rc_retain",
+            "rt_rc_release",
+            "rt_rc_count",
+            "rt_heap_graph_bytes",
+            "rt_session_heap_begin",
+            "rt_session_heap_end",
+            "rt_session_alloc_begin",
+            "rt_session_alloc_end",
+            "rt_transient_heap_adopt",
+            "rt_session_heap_id",
         ] {
             assert!(EXTERN_DISPATCH.contains_key(name));
         }

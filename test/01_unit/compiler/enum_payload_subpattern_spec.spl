@@ -29,24 +29,26 @@ Depth-1 bindings (`case E.I(n)`) and top-level literals (`case 7:` on a bare
 i64) are unaffected and are asserted here as controls, so a regression in this
 spec localises to the enum-payload sub-pattern walk specifically.
 
-## This spec is GREEN on the lane that runs it -- read the bug doc
+## Historical engine observations; new nested-tuple cases are unrun
 
-The defect is **engine-specific**, and the spec runner is on the good engine:
+The observations below describe the pre-existing enum-payload literal and
+nested-enum probes. The nested-tuple literal/guard cases added to this spec
+have not yet been run on the interpreter, JIT, or native compiler. A prior
+P2run11 native diagnostic compiled and ran the B shape but printed
+`71\n71\n93\n` instead of `71\n82\n93\n`; that observation predates this candidate source fix and is not validation
+of the new code.
 
-| lane | enum-payload literal / nested-enum sub-pattern |
+| lane | historical enum-payload literal / nested-enum probes |
 |---|---|
-| `bin/simple_seed test` (tree-walking interpreter) | correct -- this spec passes |
-| `bin/simple_seed run` (JIT) | **wrong** |
-| pure-Simple `native-build --backend llvm` | **wrong** |
+| `bin/simple_seed test` (tree-walking interpreter) | historically correct for the cases then in this spec |
+| `bin/simple_seed run` (JIT) | historically **wrong** |
+| pure-Simple `native-build --backend llvm` | historically **wrong** |
 
-So a green result here is **not** evidence the defect is fixed; it only proves
-the interpreter matcher still recurses. The wrong value is also not a stable
-sentinel -- `0`, `32` and a raw pointer were all observed, and one shape
-coincidentally produced the correct answer -- so spot-checks are not evidence
-either. Reproduce on a compiled lane using the probes recorded in the bug doc.
-
-This spec becomes an active gate once the runner executes on the native/JIT
-engine; until then it is a forward-looking guard.
+A green result for the earlier probes is **not** evidence the compiler defect is
+fixed. The wrong value is also not a stable sentinel -- `0`, `32` and a raw
+pointer were all observed, and one shape coincidentally produced the correct
+answer -- so spot-checks are not evidence either. Run the new cases on the
+intended engines and inspect their exact outputs before claiming a fix.
 
 ## Syntax
 
@@ -208,6 +210,50 @@ fn guard_over_nested_binding() -> i64:
         case Outer.W(Inner.B(n)): return -1
         case _: return -2
 
+# --- nested tuple payload tests and source-guard binding scope --------------
+
+var nested_tuple_guard_calls: i64 = 0
+
+fn nested_tuple_guard_accept(n: i64) -> bool:
+    nested_tuple_guard_calls = nested_tuple_guard_calls + 1
+    return n == 3
+
+fn nested_tuple_literal_match(value: Result<(i64, i64), i64>) -> i64:
+    match value:
+        case Ok((7, _)): return 71
+        case Ok((other, _)): return 82
+        case Err(code): return code
+
+fn nested_tuple_conjunction(value: Result<(i64, i64), i64>) -> i64:
+    match value:
+        case Ok((7, 9)): return 71
+        case Ok((a, b)): return 82
+        case Err(code): return code
+
+fn nested_tuple_guarded(value: Result<(i64, i64), i64>) -> i64:
+    match value:
+        case Ok((7, n)) if nested_tuple_guard_accept(n): return 71
+        case Ok((a, b)): return 82
+        case Err(code): return code
+
+fn nested_tuple_guard_observation() -> i64:
+    nested_tuple_guard_calls = 0
+    val literal_miss = nested_tuple_guarded(Ok((8, 3)))
+    if literal_miss != 82 or nested_tuple_guard_calls != 0: return -1
+    val guard_miss = nested_tuple_guarded(Ok((7, 4)))
+    if guard_miss != 82 or nested_tuple_guard_calls != 1: return -2
+    val guard_hit = nested_tuple_guarded(Ok((7, 3)))
+    if guard_hit != 71 or nested_tuple_guard_calls != 2: return -3
+    0
+
+# This nested tuple has no refutable subpattern. The user guard still reads
+# the nested binding created by the flatten prelude and can reject the arm.
+fn nested_tuple_binding_guard(value: Result<(i64, i64), i64>) -> i64:
+    match value:
+        case Ok((n, _)) if n == 7: return 71
+        case Ok((other, _)): return 82
+        case Err(code): return code
+
 describe("enum payload sub-patterns"):
     # Controls -- unaffected by the defect.
     it("binds a depth-1 enum payload"):
@@ -265,3 +311,22 @@ describe("enum payload sub-patterns"):
 
     it("evaluates a guard over a nested binding"):
         assert_equal(guard_over_nested_binding(), 9)
+
+    it("tests nested tuple literals and falls through to the next payload arm"):
+        assert_equal(nested_tuple_literal_match(Ok((7, 3))), 71)
+        assert_equal(nested_tuple_literal_match(Ok((8, 3))), 82)
+        assert_equal(nested_tuple_literal_match(Err(93)), 93)
+
+    it("requires every nested tuple literal to match"):
+        assert_equal(nested_tuple_conjunction(Ok((7, 9))), 71)
+        assert_equal(nested_tuple_conjunction(Ok((7, 8))), 82)
+        assert_equal(nested_tuple_conjunction(Ok((8, 9))), 82)
+        assert_equal(nested_tuple_conjunction(Err(93)), 93)
+
+    it("keeps a source guard after nested literal tests and skips it on mismatch"):
+        assert_equal(nested_tuple_guard_observation(), 0)
+
+    it("binds an irrefutable nested tuple before evaluating its source guard"):
+        assert_equal(nested_tuple_binding_guard(Ok((7, 0))), 71)
+        assert_equal(nested_tuple_binding_guard(Ok((8, 0))), 82)
+        assert_equal(nested_tuple_binding_guard(Err(93)), 93)

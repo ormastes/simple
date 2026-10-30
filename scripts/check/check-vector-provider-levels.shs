@@ -1,0 +1,227 @@
+#!/bin/sh
+# Levelled vector provider: ONE DSO per OS/arch holding one kernel OBJECT per
+# SIMD level (clang microarchitecture levels on x86-64), a baseline dispatcher
+# that admits the highest level the CPU+OS enables, and capped variants
+# (SIMPLE_VECTOR_MAX_LEVEL=N) so each level is measured on the same machine.
+#
+#   x86_64 : L1 -march=x86-64  L2 x86-64-v2  L3 x86-64-v3  L4 x86-64-v4 (AVX-512)
+#   aarch64: L1 NEON  L2 SVE  L3 SVE2          riscv64: L1 RVV (scalar = L0)
+#
+# Lanes (each prints one line; unavailable toolchains are reported, never PASS):
+#   run      host-native DSO (.dll on Windows, .so on Linux) + every cap, parity+timing
+#   qemu     aarch64/riscv64 .so under qemu-user with CPU models per level
+#   compile  FreeBSD/macOS/SimpleOS/Windows-ARM objects (no sysroot: libc-free TUs only)
+# Usage: check-vector-provider-levels.shs ABS_OUT [run|qemu|compile|all]
+set -u
+out=${1:?usage: check-vector-provider-levels.shs ABS_OUT [run|qemu|compile|all]}
+lanes=${2:-all}
+case "$out" in /*) ;; *) echo 'absolute output path required' >&2; exit 2;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+src=$root/src/runtime/providers/vector
+bench=$root/src/runtime/test/vector_level_bench.c
+mkdir -p "$out"
+cc=${CLANG:-clang}
+command -v "$cc" >/dev/null 2>&1 || cc=/c/llvm/install/bin/clang
+# Cross-target ISA gates need llvm-objdump; GNU objdump cannot read Mach-O or
+# foreign-arch objects, and a gate that cannot read the object is no gate.
+objdump=${OBJDUMP:-}
+for o in llvm-objdump "$(dirname "$(command -v "$cc")")/llvm-objdump" llvm-objdump-23 /usr/lib/llvm-*/bin/llvm-objdump; do
+    [ -n "$objdump" ] && break
+    command -v "$o" >/dev/null 2>&1 && objdump=$o
+done
+[ -n "$objdump" ] || { echo 'ERROR — nothing was checked (llvm-objdump not found)'; exit 2; }
+checked=0 failed=0 skipped=0
+log=$out/build.log
+: >"$log"
+note() { printf '%s\n' "$*"; printf '%s\n' "$*" >>"$log"; }
+fail() { failed=$((failed + 1)); note "FAIL $*"; }
+ok() { checked=$((checked + 1)); note "ok   $*"; }
+skip() { skipped=$((skipped + 1)); note "SKIP $*"; }
+c() { printf '+ %s\n' "$*" >>"$log"; "$@" >>"$log" 2>&1; }
+
+warn='-std=c11 -O2 -Wall -Wextra -Werror -fvisibility=hidden -DSIMPLE_VECTOR_ENABLE_HTTP -DSIMPLE_VECTOR_LEVELLED'
+novec='-fno-vectorize -fno-slp-vectorize'
+
+arch_of() { case $1 in x86_64*) echo x86_64;; aarch64*|arm64*) echo aarch64;; riscv64*) echo riscv64;; esac; }
+base_flags() {
+    case $(arch_of "$1") in
+        x86_64) echo "-march=x86-64";;
+        aarch64) echo "-march=armv8-a -mgeneral-regs-only";;
+        riscv64) echo "-march=rv64gc -mabi=lp64d";;
+    esac
+}
+# level objects: "<level> <march-flags> <bitmap.c> <http.c>"
+levels_of() {
+    case $(arch_of "$1") in
+        x86_64) cat <<EOF
+1 -march=x86-64 vector_level_portable.c -
+2 -march=x86-64-v2 vector_level_portable.c -
+3 -march=x86-64-v3 vector_level_portable.c -
+4 -march=x86-64 bitmap_avx512.c http_avx512.c
+EOF
+        ;;
+        aarch64) cat <<EOF
+1 -march=armv8-a+simd bitmap_neon.c http_neon.c
+2 -march=armv8-a+sve bitmap_sve.c http_sve.c
+3 -march=armv8-a+sve2 bitmap_sve.c http_sve.c
+EOF
+        ;;
+        riscv64) echo "1 -march=rv64gcv -mabi=lp64d bitmap_rvv.c http_rvv.c";;
+    esac
+}
+
+# build_target TRIPLE DIR EXTRA_FLAGS LINK(yes|no)  -> objects (+ DSO set when LINK=yes)
+build_target() {
+    t=$1 d=$2 extra=$3 link=$4
+    mkdir -p "$d"
+    rm -f "$d"/*.o "$d"/*.dis "$d"/*.dll "$d"/*.so "$d"/vector_level_bench*  # never gate or ship a stale object
+    tf="--target=$t $extra"
+    base=$(base_flags "$t")
+    impl=$(cat "$src"/*.c "$src"/*.h | sha256sum | cut -c1-16)
+    levels_of "$t" >"$d/levels.txt"
+    while read -r row; do
+        # row: level, 1+ march words (rv64gcv carries -mabi), bitmap TU, http TU
+        set -- $row
+        lv=$1; shift
+        mflags=""
+        while [ $# -gt 2 ]; do mflags="$mflags $1"; shift; done
+        f1=$1 f2=$2
+        ren="-Dsimple_bitmap_kernel=simple_bitmap_kernel_l$lv -Dsimple_http_kernel=simple_http_kernel_l$lv"
+        c "$cc" $tf $warn $mflags $ren -c "$src/$f1" -o "$d/l$lv-bitmap.o" || fail "$t L$lv $f1 compile"
+        if [ "$f2" != - ]; then
+            c "$cc" $tf $warn $mflags $ren -c "$src/$f2" -o "$d/l$lv-http.o" || fail "$t L$lv $f2 compile"
+        fi
+    done <"$d/levels.txt"
+    for cap in 0 1 2 3 4; do
+        c "$cc" $tf $warn $base $novec -DSIMPLE_VECTOR_MAX_LEVEL=$cap -c "$src/vector_level_dispatch.c" -o "$d/dispatch-cap$cap.o" \
+            || { fail "$t dispatcher cap$cap compile"; return; }
+        [ "$link" = yes ] || continue
+        # The cap changes behaviour, so it is part of the implementation identity.
+        mkdir -p "$d/id$cap"
+        printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' \
+            "$(printf '%s' "simple-vector-levelled-v1:$t" | sha256sum | cut -c1-16)" \
+            "$(printf '%s' "$impl:max-level=$cap" | sha256sum | cut -c1-16)" >"$d/id$cap/provider_identity.h"
+        c "$cc" $tf $warn $base $novec -I"$d/id$cap" -c "$src/bitmap_provider.c" -o "$d/provider-cap$cap.o" \
+            || { fail "$t provider cap$cap compile"; return; }
+    done
+    gate_isa "$t" "$d"
+    [ "$link" = yes ] || return
+    for cap in 0 1 2 3 4; do
+        name=simple_vector_provider_levelled; [ $cap = 4 ] || name=${name}_cap$cap
+        objs=""
+        for o in "$d"/l*-*.o; do
+            [ "$(basename "$o" | cut -c2)" -le $cap ] && objs="$objs $o"
+        done
+        case $t in
+            *windows*)
+                printf 'EXPORTS\nsimple_provider_query_v1\nsimple_vector_apply_v1\nsimple_vector_executed_iterations_v1\nsimple_vector_selected_level_v1\n' >"$d/provider.def"
+                c "$cc" $tf -shared -fuse-ld=lld -Wl,--no-insert-timestamp "$d/provider-cap$cap.o" "$d/dispatch-cap$cap.o" $objs "$d/provider.def" -o "$d/$name.dll" \
+                    || { fail "$t link $name"; continue; } ;;
+            *)
+                c "$cc" $tf -shared -fuse-ld=lld "$d/provider-cap$cap.o" "$d/dispatch-cap$cap.o" $objs -o "$d/$name.so" \
+                    || { fail "$t link $name"; continue; } ;;
+        esac
+    done
+    case $t in *windows*) exe=$d/vector_level_bench.exe;; *) exe=$d/vector_level_bench;; esac
+    c "$cc" $tf -std=c11 -O2 -Wall -Wextra -Werror -fuse-ld=lld "$bench" -o "$exe" $( case $t in *windows*) ;; *) echo -ldl;; esac ) \
+        || fail "$t bench harness compile"
+    (cd "$d" && sha256sum ./*.dll ./*.so 2>/dev/null) >"$d/artifacts.sha256"
+    ok "$t built $(wc -l <"$d/artifacts.sha256") levelled DSO(s)"
+}
+
+gate_isa() {
+    t=$1 d=$2
+    for f in "$d"/dispatch-cap4.o "$d"/provider-cap4.o; do
+        [ -f "$f" ] || continue
+        "$objdump" -d "$f" >"$f.dis" 2>&1
+        case $(arch_of "$t") in
+            x86_64) pat='[yz]mm[0-9]|kmov';;
+            aarch64) pat='\bz[0-9]+\.|\bv[0-9]+\.(16b|4s|8h)';;
+            riscv64) pat='vsetvli|vle[0-9]|vse[0-9]';;
+        esac
+        if grep -Eiq "$pat" "$f.dis"; then fail "$t $(basename "$f") baseline object carries vector-extension instructions"; else ok "$t $(basename "$f") baseline-only"; fi
+    done
+    for f in "$d"/l*-*.o; do
+        "$objdump" -d "$f" >"$f.dis" 2>&1
+        lv=$(basename "$f" | sed 's/^l\([0-9]\).*/\1/')
+        case $(arch_of "$t"):$lv in
+            x86_64:1|x86_64:2) need='(pand|por|pcmpeqb)[^ ]* +%?xmm|xmm[0-9]'; deny='[yz]mm[0-9]';;
+            x86_64:3) need='ymm[0-9]'; deny='zmm[0-9]';;
+            x86_64:4) need='zmm[0-9]'; deny='^$';;
+            # Mach-O disassembles in Apple syntax (and.16b v0, ...), ELF/PE in v0.16b.
+            aarch64:1) need='\.(16b|4s)\b'; deny='\bz[0-9]+\.';;
+            aarch64:*) need='\bz[0-9]+\.'; deny='^$';;
+            riscv64:*) need='vsetvli|vsetivli'; deny='^$';;
+        esac
+        if ! grep -Eiq "$need" "$f.dis"; then fail "$t $(basename "$f") no L$lv vector instructions (scalar under a SIMD label)"
+        elif [ "$deny" != '^$' ] && grep -Eiq "$deny" "$f.dis"; then fail "$t $(basename "$f") exceeds L$lv ISA"
+        else ok "$t $(basename "$f") L$lv ISA"; fi
+    done
+}
+
+run_caps() { # run_caps DIR HOSTLEVEL RUNNER... ; caps above host level must report host level
+    d=$1 host=$2; shift 2
+    for cap in 0 1 2 3 4; do
+        name=simple_vector_provider_levelled; [ $cap = 4 ] || name=${name}_cap$cap
+        dso=$(ls "$d/$name".dll "$d/$name".so 2>/dev/null | head -1)
+        [ -n "$dso" ] || continue
+        expect=$cap; [ $cap -gt "$host" ] && expect=$host
+        exe=$(ls "$d"/vector_level_bench.exe "$d"/vector_level_bench 2>/dev/null | head -1)
+        line=$("$@" "$exe" "$dso" "$expect" "${REPS:-300}" 2>&1); rc=$?
+        if [ $rc -eq 0 ]; then ok "$(basename "$d") cap$cap: $line"; printf '%s cap%s %s\n' "$(basename "$d")" $cap "$line" >>"$out/results.txt"
+        else fail "$(basename "$d") cap$cap rc=$rc: $line"; fi
+    done
+}
+
+: >"$out/results.txt"
+case $lanes in all|run)
+    case $(uname -s) in
+        MINGW*|MSYS*|CYGWIN*) t=x86_64-w64-windows-gnu;;
+        Linux) t=$(uname -m)-linux-gnu; [ "$(uname -m)" = x86_64 ] && t=x86_64-linux-gnu;;
+        *) t="";;
+    esac
+    if [ -n "$t" ]; then
+        extra=""; case $t in *linux*) extra="--gcc-toolchain=/usr";; esac
+        build_target "$t" "$out/$t" "$extra" yes
+        host=$(sh -c '"$1" "$2" -1 1' _ "$(ls "$out/$t"/vector_level_bench* | head -1)" "$(ls "$out/$t"/simple_vector_provider_levelled.dll "$out/$t"/simple_vector_provider_levelled.so 2>/dev/null | head -1)" 2>/dev/null | sed -n 's/.*level=\([0-9]\).*/\1/p')
+        if [ -n "$host" ]; then note "host $t admits L$host"; run_caps "$out/$t" "$host"; else fail "$t host level probe did not run"; fi
+    else skip "run lane: unsupported host $(uname -s)"; fi
+;; esac
+case $lanes in all|qemu)
+    if [ "$(uname -s)" = Linux ] && command -v qemu-aarch64 >/dev/null 2>&1; then
+        build_target aarch64-linux-gnu "$out/aarch64-linux-gnu" --gcc-toolchain=/usr yes
+        q="qemu-aarch64 -L /usr/aarch64-linux-gnu"
+        REPS=2; run_caps "$out/aarch64-linux-gnu" 3 $q -cpu max; unset REPS
+        d=$out/aarch64-linux-gnu
+        for m in "neoverse-n1 1" "a64fx 2" "max 3"; do
+            set -- $m
+            line=$($q -cpu $1 "$d/vector_level_bench" "$d/simple_vector_provider_levelled.so" $2 2 2>&1) && ok "aarch64 -cpu $1 admits L$2: $line" || fail "aarch64 -cpu $1 expected L$2: $line"
+        done
+    else skip "qemu lane aarch64: needs Linux + qemu-aarch64 + aarch64-linux-gnu sysroot"; fi
+    if [ "$(uname -s)" = Linux ] && command -v qemu-riscv64 >/dev/null 2>&1; then
+        build_target riscv64-linux-gnu "$out/riscv64-linux-gnu" --gcc-toolchain=/usr yes
+        d=$out/riscv64-linux-gnu q="qemu-riscv64 -L /usr/riscv64-linux-gnu"
+        for m in "rva23u64,vlen=128,elen=64 1" "rva23u64,vlen=256,elen=64 1" "max,v=false 0"; do
+            set -- $m
+            line=$($q -cpu $1 "$d/vector_level_bench" "$d/simple_vector_provider_levelled.so" $2 2 2>&1) && ok "riscv64 -cpu $1 admits L$2: $line" || fail "riscv64 -cpu $1 expected L$2: $line"
+        done
+    else skip "qemu lane riscv64: needs Linux + qemu-riscv64 + riscv64-linux-gnu sysroot"; fi
+;; esac
+case $lanes in all|compile)
+    # No target sysroot here: libc-free TUs (dispatcher + every level kernel) only.
+    # bitmap_provider.c needs <string.h> and is built in the run/qemu lanes.
+    for t in x86_64-unknown-freebsd aarch64-unknown-freebsd riscv64-unknown-freebsd \
+             x86_64-apple-darwin arm64-apple-darwin aarch64-w64-windows-gnu \
+             x86_64-unknown-none-elf aarch64-unknown-none-elf riscv64-unknown-none-elf; do
+        extra="-ffreestanding"; case $t in *none-elf) extra="-ffreestanding -D__simpleos__";; esac
+        # A clang without this LLVM backend is a missing toolchain (SKIP), not a regression.
+        if ! "$cc" --print-targets 2>/dev/null | grep -Eq "^ *$(case $(arch_of "$t") in x86_64) echo x86-64;; aarch64) echo aarch64;; riscv64) echo riscv64;; esac) "; then
+            skip "$t: $cc has no $(arch_of "$t") backend"; continue
+        fi
+        build_target "$t" "$out/$t" "$extra" no
+    done
+;; esac
+
+if [ "$failed" -gt 0 ]; then echo "FAIL — $failed failed, $checked checked, $skipped skipped (log: $log)"; exit 1; fi
+if [ "$checked" -eq 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
+echo "PASS — $checked checked, 0 failed, $skipped skipped (results: $out/results.txt)"

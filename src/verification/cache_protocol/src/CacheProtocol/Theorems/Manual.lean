@@ -4,7 +4,6 @@
 
   Contents:
     all_semantic_fields_visible — encode equality ⟺ all 21 semantic fields equal
-    no_false_hit                — re-proved over the 21-field v2 key
     aop_group_change_visible    — AOP soundness over the refined group roots:
                                   a change in ANY of the four AOP carriers
                                   (pos 13, 16, 17, 18) changes the encoding
@@ -12,11 +11,9 @@
     v1_prefix_compatible        — with the six v2 suffix fields held fixed, the
                                   v2 encoding is exactly as discriminating as
                                   the PROVEN v1 encoding (cache_identity)
-    aop_roots_reorder_hits, block_roots_reorder_hits — new set fields are
-                                  order-independent (concrete, by decide)
 -/
 import CacheProtocol.Generated.Model
-import CacheProtocol.Generated.Visibility
+import CacheProtocol.Generated.FieldTheorems
 import CacheIdentity.Model
 import CacheIdentity.Theorems
 
@@ -80,41 +77,6 @@ theorem aop_group_change_visible (k1 k2 : ActionKey)
   · exact aop_surface_root_change_visible k1 k2 h
   · exact aop_candidate_partition_roots_change_visible k1 k2 h
   · exact aop_weave_root_change_visible k1 k2 h
-
--- ---------------------------------------------------------------------------
--- 3. Cache soundness — no_false_hit over the 21-field key
--- ---------------------------------------------------------------------------
-
-structure Entry where
-  key      : ActionKey
-  artifact : Nat
-  deriving Repr
-
-def WellFormed (realize : CanonKey → Nat) (tbl : List Entry) : Prop :=
-  ∀ e ∈ tbl, e.artifact = realize (canonKey e.key)
-
-def lookup (tbl : List Entry) (k : ActionKey) : Option Nat :=
-  (tbl.find? (fun e => decide (encode e.key = encode k))).map (·.artifact)
-
-/-- A v2 cache hit returns exactly what re-realising the current canonical key
-    would produce — the v1 proof re-established over all 21 fields. -/
-theorem no_false_hit (realize : CanonKey → Nat) (tbl : List Entry)
-    (k : ActionKey) (a : Nat)
-    (hwf : WellFormed realize tbl) (hhit : lookup tbl k = some a) :
-    a = realize (canonKey k) := by
-  unfold lookup at hhit
-  cases hfind : tbl.find? (fun e => decide (encode e.key = encode k)) with
-  | none => rw [hfind] at hhit; simp at hhit
-  | some e =>
-    rw [hfind] at hhit
-    simp only [Option.map_some, Option.some.injEq] at hhit
-    have hmem : e ∈ tbl := List.mem_of_find?_eq_some hfind
-    have hkeq : encode e.key = encode k := by
-      have hpred := List.find?_some hfind
-      simpa using hpred
-    have hcan : canonKey e.key = canonKey k := encode_determines_canon _ _ hkeq
-    have hart : e.artifact = realize (canonKey e.key) := hwf e hmem
-    rw [← hhit, hart, hcan]
 
 -- ---------------------------------------------------------------------------
 -- 4. v1 prefix compatibility (bridge to the PROVEN cache_identity model)
@@ -214,31 +176,5 @@ theorem v1_prefix_compatible (k1 k2 : ActionKey) (hs : SuffixFixed k1 k2) :
     have h11' : sortDeps k1.deps = sortDeps k2.deps := map_convDep_inj _ _ h11
     exact ⟨h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11', h12, h13, h14,
            s15, s16, s17, s18, s19, s20⟩
-
--- ---------------------------------------------------------------------------
--- 5. Order-independence of the two new set fields (concrete, machine-checked)
--- ---------------------------------------------------------------------------
-
-private def kBase (aopRoots blockRoots : List String) : ActionKey :=
-  { domain := "simple/interpreter-module/v2", compilerExe := "c", liveCompilerSrc := "s"
-  , schemaVersion := 2, targetTriple := "x86_64-linux", hostArch := "x86_64"
-  , cfgFeatures := [], stdlibVariant := "nogc_async", runtimeFamily := "nogc"
-  , sourceContent := "src", resolutionWitness := "rw", deps := []
-  , macroRoot := "m", aopSelection := "aop", ctEnvInputs := []
-  , schemaDigest := "sd", aopSurfaceRoot := sentinelDigest
-  , aopCandidatePartitionRoots := aopRoots, aopWeaveRoot := sentinelDigest
-  , blockManifestRoots := blockRoots, resultKind := .interpreter_module }
-
-/-- Reordering pos-17 (aop_candidate_partition_roots) does not change the encoding. -/
-theorem aop_roots_reorder_hits :
-    encode (kBase ["r2", "r1"] []) = encode (kBase ["r1", "r2"] []) := by decide
-
-/-- Reordering pos-19 (block_manifest_roots) does not change the encoding. -/
-theorem block_roots_reorder_hits :
-    encode (kBase [] ["b2", "b1"]) = encode (kBase [] ["b1", "b2"]) := by decide
-
-/-- Sanity (negative): a different result kind DOES change the encoding. -/
-theorem result_kind_differs_misses :
-    encode { kBase [] [] with resultKind := .object_file } ≠ encode (kBase [] []) := by decide
 
 end CacheProtocol

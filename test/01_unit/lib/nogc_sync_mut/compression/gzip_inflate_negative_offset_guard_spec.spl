@@ -1,11 +1,45 @@
-extern fn rt_file_read_text(path: text) -> text
+# @req REQ-CLI-007
+# @cover src/lib/nogc_sync_mut/compression/gzip/inflate.spl
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.compression.gzip.inflate.{deflate_block_parse}
 
-fn _contains_gzip_inflate_negative_guard(path: text) -> bool:
-    val source = rt_file_read_text(path) ?? ""
-    return source.to_contain("fn deflate_block_parse(data, offset):") and
-        source.to_contain("if offset < 0:\n        return nil") and
-        source.to_contain("val header_byte = data[offset].to_i64()")
+describe "Legacy DEFLATE block parsing":
+    it "should reject negative and out-of-range byte offsets":
+        step("Parse a stored block with offsets outside its input")
+        val data: [u8] = [1u8, 0u8, 0u8, 255u8, 255u8]
+        expect(deflate_block_parse(data, -1)).to_be_nil()
+        expect(deflate_block_parse(data, -9223372036854775807)).to_be_nil()
+        expect(deflate_block_parse(data, 5)).to_be_nil()
 
-describe "GZIP inflate negative offset guards":
-    it "guards legacy block parsing before indexed reads":
-        expect(_contains_gzip_inflate_negative_guard("src/lib/nogc_sync_mut/compression/gzip/inflate.spl")).to_equal(true)
+    it "should return every stored-block field with its declared type":
+        step("Parse a final stored block containing abc")
+        val data: [u8] = [1u8, 3u8, 0u8, 252u8, 255u8, 97u8, 98u8, 99u8]
+        val parsed = deflate_block_parse(data, 0)
+        expect(parsed == nil).to_equal(false)
+        step("Check the block type, final marker, payload, and next offset")
+        val block = parsed!
+        expect(block.block_type).to_equal(0)
+        expect(block.is_final).to_equal(true)
+        expect(block.data.len()).to_equal(3)
+        expect(block.data[0]).to_equal(97u8)
+        expect(block.data[1]).to_equal(98u8)
+        expect(block.data[2]).to_equal(99u8)
+        expect(block.next_offset).to_equal(8)
+
+    it "should reject truncated stored-block headers and payloads":
+        step("Parse incomplete length fields and a missing payload byte")
+        expect(deflate_block_parse([1u8, 0u8], 0)).to_be_nil()
+        expect(deflate_block_parse([1u8, 1u8, 0u8, 254u8, 255u8], 0)).to_be_nil()
+
+    it "should reject a stored-block length with an invalid complement":
+        step("Parse a length whose NLEN field is not its one's complement")
+        expect(deflate_block_parse([1u8, 0u8, 0u8, 0u8, 0u8], 0)).to_be_nil()
+
+    it "should retain the marker contract for fixed-Huffman blocks":
+        step("Parse a fixed-Huffman block header without consuming its bits")
+        val marker = deflate_block_parse([3u8], 0)!
+        expect(marker.block_type).to_equal(1)
+        expect(marker.is_final).to_equal(true)
+        expect(marker.data.len()).to_equal(0)
+        expect(marker.next_offset).to_equal(0)

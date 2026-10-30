@@ -1,0 +1,51 @@
+# Regression coverage for the std test-runner coverage aggregation keys.
+
+use std.spec
+use std.test_runner.test_runner_coverage.{reset_coverage_state, decision_key, accumulate_coverage_sdn, build_coverage_data_from_state, render_coverage_state_sdn, coverage_owner_outcome_summary, check_critical_branch_outcomes}
+
+describe "std test-runner coverage key paths":
+    it "keeps delimiter, percent, Unicode, and ordinary paths distinct":
+        reset_coverage_state()
+        expect(decision_key("src/a.spl", "10", "5", "1")).to_equal("src/a.spl|10|5|1")
+        var sdn = "decision src/a|b.spl:10 1 true\ndecision src/a|b.spl:10 1 false\n"
+        sdn = sdn + "decision src/a|c.spl:10 1 true\ndecision src/a|c.spl:10 1 false\n"
+        sdn = sdn + "decision src/a%7Cb.spl:10 1 true\ndecision src/a%7Cb.spl:10 1 false\n"
+        sdn = sdn + "decision src/a%25b.spl:10 1 true\ndecision src/a%25b.spl:10 1 false\n"
+        sdn = sdn + "decision src/한글.spl:10 1 true\ndecision src/한글.spl:10 1 false\n"
+        sdn = sdn + "decision src/a.spl:10 1 true\ndecision src/a.spl:10 1 false"
+        sdn = sdn + "\ncondition src/a|b.spl:11 1 true\ncondition src/a|b.spl:11 1 false"
+        sdn = sdn + "\ncondition src/a|c.spl:11 1 true\ncondition src/a|c.spl:11 1 false"
+        sdn = sdn + "\ncondition src/a%7Cb.spl:11 1 true\ncondition src/a%7Cb.spl:11 1 false"
+        sdn = sdn + "\ncondition src/a%25b.spl:11 1 true\ncondition src/a%25b.spl:11 1 false"
+        sdn = sdn + "\ncondition src/한글.spl:11 1 true\ncondition src/한글.spl:11 1 false"
+        sdn = sdn + "\ncondition src/a.spl:11 1 true\ncondition src/a.spl:11 1 false"
+        accumulate_coverage_sdn(sdn)
+        val data = build_coverage_data_from_state("")
+        expect(data.total_decisions).to_equal(6)
+        expect(data.total_decisions_covered).to_equal(6)
+        expect(data.total_conditions).to_equal(6)
+        expect(data.total_conditions_covered).to_equal(6)
+        expect(data.files.len()).to_equal(6)
+        val rendered = render_coverage_state_sdn()
+        expect(rendered).to_contain("src/a|b.spl")
+        expect(rendered).to_contain("src/a|c.spl")
+        expect(rendered).to_contain("src/a%7Cb.spl")
+        expect(rendered).to_contain("src/a%25b.spl")
+        expect(rendered).to_contain("src/한글.spl")
+        expect(rendered).to_contain("src/a.spl")
+        val owner = coverage_owner_outcome_summary("owner", "src/a|b.spl")
+        expect(owner.path).to_equal("src/a|b.spl")
+        expect(owner.condition_site_total).to_equal(1)
+        expect(owner.branch_outcome_covered).to_equal(2)
+        reset_coverage_state()
+        accumulate_coverage_sdn("condition src/a|b.spl:11 1 true")
+        val partial_owner = coverage_owner_outcome_summary("owner", "src/a|b.spl")
+        expect(partial_owner.zero_outcome_rows.len()).to_equal(1)
+        expect(partial_owner.zero_outcome_rows[0]).to_equal("owner|src/a%7Cb.spl|11|0|1|false")
+        val check = check_critical_branch_outcomes([
+            "owner|src/a%7Cb.spl|11|0|1|true",
+            "owner|src/a%7Cb.spl|11|0|1|false"
+        ])
+        expect(check.valid_inventory).to_equal(true)
+        expect(check.covered_outcome_total).to_equal(1)
+        expect(check.missing_outcome_rows.len()).to_equal(1)

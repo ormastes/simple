@@ -19,7 +19,7 @@
 # Mapping tables and rationale:
 #   doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md §3
 
-use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, json_value_has, json_value_at, json_value_len, json_value_serialize}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, json_value_has, json_value_at, json_value_len, json_value_serialize, json_value_as_text, json_value_escape_string}
 
 
 # ============================================================================
@@ -29,12 +29,13 @@ use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_field, js
 
 fn _js(obj: JsonValue, key: text) -> text:
     """String field off a JSON object; "" when missing."""
-    val s = json_value_serialize(json_value_field(obj, key))
-    if s.starts_with("\"") and s.ends_with("\""):
-        return s[1:s.len() - 1]
-    if s == "null":
+    val value = json_value_field(obj, key)
+    if val decoded = json_value_as_text(value):
+        return decoded
+    val encoded = json_value_serialize(value)
+    if encoded == "null":
         return ""
-    s
+    encoded
 
 
 fn _jnested(obj: JsonValue, path: [text]) -> text:
@@ -55,21 +56,7 @@ fn _jnested(obj: JsonValue, path: [text]) -> text:
 
 fn json_escape(s: text) -> text:
     """Escape a string for embedding in JSON output."""
-    var out = ""
-    for ch in s:
-        if ch == "\"":
-            out = out + "\\\""
-        else if ch == "\\":
-            out = out + "\\\\"
-        else if ch == "\n":
-            out = out + "\\n"
-        else if ch == "\r":
-            out = out + "\\r"
-        else if ch == "\t":
-            out = out + "\\t"
-        else:
-            out = out + ch
-    out
+    json_value_escape_string(s)
 
 
 fn _quoted(s: text) -> text:
@@ -190,14 +177,17 @@ fn bb_pr_to_gh_json(raw: text) -> text:
 # appears because a direct caller (not going through cmd_git.spl, which strips
 # it) may legitimately still carry it. Output flags (`--json`, `--jq`,
 # `--no-pager`) and Bitbucket coordinates are accepted everywhere.
-val _COMMON_KNOWN = ["--json", "--jq", "--no-pager", "--workspace", "--repo", "--backend"]
+val _COMMON_KNOWN: [text] = ["--json", "--jq", "--no-pager", "--workspace", "--repo", "--backend"]
 
-val PR_CREATE_KNOWN = _COMMON_KNOWN + ["--title", "--head", "--base", "--body", "--reviewer"]
-val PR_LIST_KNOWN = _COMMON_KNOWN + ["--state", "--limit"]
-val PR_VIEW_KNOWN = _COMMON_KNOWN
-val PR_REVIEW_KNOWN = _COMMON_KNOWN + ["--approve", "--unapprove"]
-val PR_MERGE_KNOWN = _COMMON_KNOWN + ["--squash", "--rebase", "--merge", "--strategy", "--keep-source"]
-val PR_COMMENT_KNOWN = _COMMON_KNOWN + ["--body", "--content", "--inline-path", "--inline-from", "--inline-to"]
+# Literal tables retain the same public values without requiring executable
+# array concatenation during native module-static initialization.
+# @workaround bug=phase2_module_static_array_concat_initialization_2026_10_27 reason=Keep literal flag catalogs until deployed P2 module-static array concatenation is qualified
+val PR_CREATE_KNOWN: [text] = ["--json", "--jq", "--no-pager", "--workspace", "--repo", "--backend", "--title", "--head", "--base", "--body", "--reviewer"]
+val PR_LIST_KNOWN: [text] = ["--json", "--jq", "--no-pager", "--workspace", "--repo", "--backend", "--state", "--limit"]
+val PR_VIEW_KNOWN: [text] = _COMMON_KNOWN
+val PR_REVIEW_KNOWN: [text] = ["--json", "--jq", "--no-pager", "--workspace", "--repo", "--backend", "--approve", "--unapprove"]
+val PR_MERGE_KNOWN: [text] = ["--json", "--jq", "--no-pager", "--workspace", "--repo", "--backend", "--squash", "--rebase", "--merge", "--strategy", "--keep-source"]
+val PR_COMMENT_KNOWN: [text] = ["--json", "--jq", "--no-pager", "--workspace", "--repo", "--backend", "--body", "--content", "--inline-path", "--inline-from", "--inline-to"]
 
 # Flags that consume the NEXT argv element as their value. Everything else is
 # boolean. This distinction is load-bearing, not bookkeeping: a pull-request

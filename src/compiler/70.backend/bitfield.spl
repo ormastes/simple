@@ -30,7 +30,7 @@
 # Dropping the unused import removes the walk entirely. This is the same remedy
 # as the cycle-6 `Effect` facade fix in 50.mir/__init__.spl: collapse the
 # dependency rather than try to satisfy it. (2026-08-08 stage3)
-use compiler.hir.hir_types.{HirType, SymbolId}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
@@ -188,9 +188,22 @@ impl BitfieldError:
             case BitfieldError.DuplicateField(_, s): s
             case BitfieldError.InvalidBitWidth(_, _, s): s
 
+# Source-level spelling of a scalar or named HirType (HirType has no to_text).
+fn bitfield_type_text(type_: HirType) -> text:
+    match type_.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed: "i" + bits.to_text() else: "u" + bits.to_text()
+        case HirTypeKind.Float(bits): "f" + bits.to_text()
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Unit: "()"
+        case HirTypeKind.Named(symbol, _): symbol.name
+        case _: "<non-scalar>"
+
 # Get bit width for a type
 fn type_bit_width(type_: HirType) -> BitLayout?:
-    val name = type_.to_text()
+    val name = bitfield_type_text(type_)
 
     # Check for explicit bit-width types (u4, i12, etc.)
     val primitive_width = primitive_integer_bit_width_from_name(name)
@@ -215,7 +228,7 @@ fn type_bit_width(type_: HirType) -> BitLayout?:
 
 # Get backing type bit width
 fn backing_type_bits(type_: HirType) -> i64?:
-    val name = type_.to_text()
+    val name = bitfield_type_text(type_)
     val primitive_bits = primitive_backing_bits_from_name(name)
     if primitive_bits > 0:
         return Some(primitive_bits)
@@ -266,7 +279,7 @@ fn compile_bitfield(
     # Validate backing type
     val bits = backing_type_bits(backing_type)
     if not bits.?:
-        return Err(BitfieldError.InvalidBackingType(backing_type.to_text(), span))
+        return Err(BitfieldError.InvalidBackingType(bitfield_type_text(backing_type), span))
 
     val backing_bits = bits.unwrap()
     var seen_names: Dict<text, bool> = {}
@@ -281,7 +294,7 @@ fn compile_bitfield(
 
         val layout_value = type_bit_width(field_type)
         if not layout_value.?:
-            return Err(BitfieldError.UnknownFieldType(field_name, field_type.to_text(), field_span))
+            return Err(BitfieldError.UnknownFieldType(field_name, bitfield_type_text(field_type), field_span))
 
         val field_repr = layout_value.unwrap()
         if field_repr.bit_width <= 0 or field_repr.bit_width > 64:

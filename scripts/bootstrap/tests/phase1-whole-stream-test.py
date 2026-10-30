@@ -1,34 +1,44 @@
+"""Bounded diagnostic report handling; these checks do not execute Simple tests."""
 import importlib.util
-import json
 from pathlib import Path
 import tempfile
 import unittest
 
 p = Path(__file__).resolve().parents[1] / 'phase1-whole-tests.py'
 s = importlib.util.spec_from_file_location('phase1', p)
-m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+m = importlib.util.module_from_spec(s)
+s.loader.exec_module(m)
+
 
 class StreamingTests(unittest.TestCase):
-    def test_large_non_json_stream_keeps_only_summary(self):
+    def test_large_report_preserves_raw_diagnostic_lines(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d)/'stdout'; path.write_bytes((b'log entry\n'*100000)+b'{"success":true}\n')
-            self.assertEqual(list(m.read_summary_lines(path, 128)), ['{"success":true}\n'])
+            path = Path(d) / 'stdout'
+            report = 'log entry\n' * 100000 + 'Results: 1 total, 1 passed, 0 failed\n'
+            path.write_text(report, encoding='utf-8')
+            self.assertEqual(m.read_report(path), report)
+
+    def test_report_size_limit_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'stdout'
+            path.write_bytes(b'x' * 129)
+            with self.assertRaisesRegex(ValueError, 'bounded report size'):
+                m.read_report(path, 128)
 
     def test_giant_unterminated_line_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d)/'stdout'; path.write_bytes(b'x'*10000)
-            with self.assertRaisesRegex(ValueError, 'bounded summary'):
-                list(m.read_summary_lines(path, 128))
+            path = Path(d) / 'stdout'
+            path.write_bytes(b'x' * (m.MAX_LINE_BYTES + 1))
+            with self.assertRaisesRegex(ValueError, 'bounded line size'):
+                m.read_report(path)
 
-    def test_per_file_partition_and_abort(self):
-        row=dict(path='one.spl',passed=1,failed=0,skipped=0,pending=0,error=None)
-        spec=dict(files=[row],total_passed=1,total_failed=0,total_skipped=0,total_pending=0)
-        doc=dict(files=[],passed=0,failed=0,skipped=0,errors=0,total=0)
-        result=dict(success=True,spec=spec,spl_doctest=doc,sdoctest=doc)
-        self.assertEqual(m.validate_partitions(result),'')
-        row['error']='TIMEOUT'
-        self.assertIn('aborted',m.validate_partitions(result))
-        row['error']=None;spec['total_passed']=2
-        self.assertIn('disagree',m.validate_partitions(result))
+    def test_invalid_utf8_is_not_silently_replaced(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'stdout'
+            path.write_bytes(b'\xff\n')
+            with self.assertRaises(UnicodeError):
+                m.read_report(path)
 
-if __name__=='__main__':unittest.main()
+
+if __name__ == '__main__':
+    unittest.main()

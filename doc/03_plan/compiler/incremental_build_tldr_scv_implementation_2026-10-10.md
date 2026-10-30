@@ -595,3 +595,34 @@ Local diagnostic packets are evidence locators, not fresh-clone deliverables:
   physical manifest `5425587a47e37e512e8546210a53846020bf80304579d4a9be5012f605d63b02`.
 - Landed source-projection report:
   `doc/08_tracking/bug/bootstrap_source_projection_missing_transitive_header_2026-10-11.md`.
+
+## Design consolidation — 2026-10-24
+
+The authoritative design for the incremental build is now
+[`src_based_tldr_build_v1.md`](../../05_design/compiler/incremental_build/src_based_tldr_build_v1.md)
+(per-file src→obj jobs with no stage barrier; `SourceReader`
+{`read_tldr`, `read_src`, `update_tldr`, `update_src`} with async file and cache
+readers; one parse → full AST + TLDR; temp+rename publication; single-flight;
+shared binary AST cache; TLDR as forward declaration with set-once async
+pointers; in-memory xxh3 id scopes; cache limits; no locks). WP0–WP11 and the
+28 requirements remain; where their wording conflicts with that document, it
+wins. The additive generic/AOP/macro work package is
+[`cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md`](cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md).
+
+Landed since the 10-11 checkpoint: #4352 #4354 #4355 (`.tldr` v4 companion),
+#4360 (`SourceReader` trait, `src/compiler/80.driver/cache/source_reader_v1.spl`),
+#4362 (companion rendered from `PublicSummaryV1` facts), #4364 (atomic
+incremental writes), #4366 (cache decisions), #4368 (parse shard workers),
+#4371 (struct spans, `inline` attribute).
+
+Resolved conflicts (details in the design doc §15): cache root = single
+`$SIMPLE_CACHE` (`cache_root.spl`), per-lane is bootstrap-only; shared-state
+writer = daemon `CacheWriterV1`, workspace-local stores allowed and atomic;
+object reuse stays shadow-only until admitted; over-limit **rejects**, never
+queues; `.tldr` is written by the compiler (`update_tldr`) to an explicit
+`--out` root and is never importable — the package `.tld` stays canonical.
+
+**Dropped:** the "private synchronous lease" / "synchronous native parse lease"
+(Windows kernel-mutex) explored in the 10-10 evidence rows above. It conflicts
+with the no-lock, fully-async rule and never landed in `src/`; its evidence
+rows are history only. Replacement: single-flight futures (design doc §6).

@@ -4,8 +4,10 @@ set -eu
 # Internal worker for resume-stage3-from-admitted.sh.  The launcher runs this
 # file in a dedicated systemd user-service cgroup so every descendant remains
 # kernel-owned even after double-fork/reparenting.
+# The private ABI is a fixed 32-field control prefix followed by its resolved
+# RSS mode, versioned source-policy marker and non-empty source-policy tail.
 worker_arg_count=$#
-[ "$#" -eq 28 ] || [ "$#" -eq 30 ] || [ "$#" -eq 31 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
+[ "$#" -ge 36 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
 transcript=$1 root=$2 log=$3 worker_home=$4 worker_tmp=$5 worker_path=$6
 admitted=$7 platform=$8 backend=$9
 shift 9
@@ -19,18 +21,53 @@ abi_policy=$8 abi_receipt=$9 abi_receipt_sha=${10}
 compiler_ceiling_env=${11:-}
 compiler_cap=${12:-}
 
-# The new positional value is the controller authority, including across a
-# systemd manager that drops or supplies stale ambient environment. Legacy
-# 28/30-argument callers retain only the historical host-platform default.
-if [ "$worker_arg_count" -eq 31 ]; then
-  observation_budget_ms=${13}
-else
-  observation_host=$(uname -s) || { echo 'stage3 worker: cannot identify observation host' >&2; exit 64; }
-  case "$observation_host" in FreeBSD) observation_budget_ms=5000 ;; *) observation_budget_ms=1000 ;; esac
-  [ "${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS-$observation_budget_ms}" = "$observation_budget_ms" ] || {
-    echo 'stage3 worker: unrecorded observation budget' >&2; exit 64;
-  }
+# This positional value is the controller authority, including across a
+# systemd manager that drops or supplies stale ambient environment.
+observation_budget_ms=${13}
+# Lowering lane is explicit in the versioned worker protocol. Per-file src->obj is the
+# default: SIMPLE_BOOTSTRAP is passed EMPTY so the compiler never takes the
+# SIMPLE_BOOTSTRAP=1 whole-program bootstrap_fixed shortcut, whose HIR shard
+# identity and cross-module import resolution do not serve the per-module
+# lane. "whole-program" restores SIMPLE_BOOTSTRAP=1 plus
+# SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1.
+# A per-file lane may carry a ":fw=0|1" suffix, forwarded as
+# SIMPLE_FILE_WORKERS (systemd does not inherit).
+bootstrap_flag=1 whole_program_env= per_file_env=
+if [ "$worker_arg_count" -ge 34 ]; then
+  case "${14}" in
+    per-file|per-file:*)
+      bootstrap_flag= lane_rest=${14#per-file}
+      while [ -n "$lane_rest" ]; do
+        lane_rest=${lane_rest#:} lane_item=${lane_rest%%:*}
+        lane_rest=${lane_rest#"$lane_item"}
+        case "$lane_item" in
+          fw=0|fw=1) per_file_env="$per_file_env SIMPLE_FILE_WORKERS=${lane_item#fw=}" ;;
+          *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
+        esac
+      done ;;
+    whole-program) whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
+    *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
+  esac
 fi
+# The service manager may supply stale ambient mode state. The parent has
+# already resolved and validated this control value; transport it explicitly
+# so the nested command-snapshot watchdog sees the same mode as the outer one.
+case "${15-}" in
+  enforce|monitor) SIMPLE_BOOTSTRAP_RSS_CAP_MODE=${15} ;;
+  *) echo 'stage3 worker: invalid typed RSS cap mode' >&2; exit 64 ;;
+esac
+export SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+# Stage 3 recovery has authenticated the source policy before reaching this
+# private worker. Keep the policy as argv throughout transport; validate it
+# with the shared parser and reject legacy calls without the versioned tail.
+[ "${16-}" = --stage3-source-policy-v1 ] || {
+  echo 'stage3 worker: missing versioned source policy' >&2; exit 64;
+}
+shift 16
+. "$root/scripts/bootstrap/lib/stage3-source-policy.shs"
+bootstrap_stage3_source_policy transfer "$@" >/dev/null || {
+  echo 'stage3 worker: invalid versioned source policy' >&2; exit 64;
+}
 case "$observation_budget_ms" in
   ''|0*|*[!0-9]*) echo 'stage3 worker: invalid observation budget' >&2; exit 64 ;;
 esac
@@ -120,7 +157,7 @@ timeout_args=
 [ -z "$timeout_seconds" ] || timeout_args="--timeout $timeout_seconds"
 bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   "$worker_home" "$worker_tmp" "$worker_path" RUST_LOG=error LIBRARY_PATH= \
-  SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP=1 \
+  SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP="${bootstrap_flag}" ${whole_program_env} ${per_file_env} \
   SIMPLE_ABI_POLICY="$abi_policy" SIMPLE_ABI_ADMISSION_RECEIPT="$abi_receipt" \
   SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=0 \
   SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$requested_route" \
@@ -141,4 +178,4 @@ bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   ${diagnostic_env} ${compiler_ceiling_env:+"$compiler_ceiling_env"} -- "$admitted" native-build --target "$platform" \
   --backend "$backend" --runtime-bundle core-c-bootstrap --threads "$threads" \
   ${timeout_args} --cache-dir "$cache" --mode dynload --runtime-path "$runtime" \
-  -o "$candidate" src/app/cli/bootstrap_main.spl
+  -o "$candidate" "$@" src/app/cli/bootstrap_main.spl

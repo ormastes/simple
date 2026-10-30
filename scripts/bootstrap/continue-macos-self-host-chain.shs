@@ -1,0 +1,578 @@
+#!/bin/sh
+# Diagnostic-only Darwin continuation: immutable P2 -> full P3 -> P3 rebuild -> P4 CLI.
+# It never creates admission or publication authority.
+set -eu
+umask 077
+usage() {
+  echo 'usage: continue-macos-self-host-chain.shs --source-root DIR --phase2 FILE --phase2-transcript FILE [--phase2-build-log FILE --phase2-rss-receipt FILE] --runtime-path DIR --sdk-root DIR --deployment-target VERSION --output FRESH_DIR --backend llvm|cranelift --rss-cap-kib N --timeout-seconds N [--jobs N] [--stop-after-stage3|--stop-after-stage3-rebuild]' >&2
+  exit 2
+}
+source_root_arg= phase2_arg= phase2_transcript_arg= phase2_build_log_arg= phase2_rss_arg= runtime_arg= sdk_root_arg= deployment_target= output_arg= backend= rss_cap= timeout= jobs=10 checkpoint=stage4
+parse_options() {
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --source-root|--phase2|--phase2-transcript|--phase2-build-log|--phase2-rss-receipt|--runtime-path|--sdk-root|--deployment-target|--output|--backend|--rss-cap-kib|--timeout-seconds|--jobs)
+      [ "$#" -ge 2 ] || usage
+      option=$1 value=$2
+      case "$option" in
+        --source-root) source_root_arg=$value;; --phase2) phase2_arg=$value;;
+        --phase2-transcript) phase2_transcript_arg=$value;;
+        --phase2-build-log) phase2_build_log_arg=$value;;
+        --phase2-rss-receipt) phase2_rss_arg=$value;;
+        --runtime-path) runtime_arg=$value;; --sdk-root) sdk_root_arg=$value;;
+        --deployment-target) deployment_target=$value;; --output) output_arg=$value;;
+        --backend) backend=$value;; --rss-cap-kib) rss_cap=$value;;
+        --timeout-seconds) timeout=$value;; --jobs) jobs=$value;;
+      esac
+      shift 2;;
+    --stop-after-stage3) checkpoint=stage3; shift;;
+    --stop-after-stage3-rebuild) checkpoint=stage3-rebuild; shift;;
+    --stop-after-stage4) checkpoint=stage4; shift;;
+    --help|-h) usage;; *) echo "chain-error: unknown argument: $1" >&2; usage;;
+  esac
+done
+}
+# Preserve the original argument vector for the shared owner's worker re-entry.
+parse_options "$@"
+[ -n "$source_root_arg" ] && [ -n "$phase2_arg" ] && [ -n "$phase2_transcript_arg" ] && [ -n "$runtime_arg" ] && [ -n "$sdk_root_arg" ] && [ -n "$deployment_target" ] && [ -n "$output_arg" ] && [ -n "$backend" ] && [ -n "$rss_cap" ] && [ -n "$timeout" ] || usage
+case "$backend" in llvm|cranelift) ;; *) usage;; esac
+for n in "$jobs" "$rss_cap" "$timeout"; do case "$n" in ''|0*|*[!0-9]*) usage;; esac; done
+[ "${#jobs}" -le 3 ] && [ "$jobs" -le 128 ] &&
+  [ "${#rss_cap}" -le 8 ] && [ "$rss_cap" -ge 1048576 ] &&
+  [ "${#timeout}" -le 5 ] && [ "$timeout" -le 86400 ] || usage
+[ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ] || {
+  echo 'chain-error: provisional chain requires enforced process-tree RSS' >&2; exit 2;
+}
+case "$output_arg" in /*) ;; *) usage;; esac
+case "$deployment_target" in ''|*[!0-9.]*) usage;; esac
+case "$deployment_target" in .*|*.|*..*) usage;; esac
+case "$(uname -s 2>/dev/null || echo unknown)" in Darwin) ;; *) echo 'chain-error: Darwin host required' >&2; exit 2;; esac
+case "$(uname -m 2>/dev/null || echo unknown)" in arm64|aarch64) target=aarch64-apple-darwin;; x86_64) target=x86_64-apple-darwin;; *) echo 'chain-error: unsupported Darwin architecture' >&2; exit 2;; esac
+
+adapter_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+source_root=$(CDPATH= cd -- "$source_root_arg" && pwd -P)
+phase2=$(CDPATH= cd -- "$(dirname -- "$phase2_arg")" && pwd -P)/$(basename -- "$phase2_arg")
+runtime_path=$(CDPATH= cd -- "$runtime_arg" && pwd -P)
+sdk_root=$(CDPATH= cd -- "$sdk_root_arg" && pwd -P)
+[ -f "$phase2" ] && [ ! -L "$phase2" ] && [ -x "$phase2" ] || { echo 'chain-error: Phase 2 must be an executable regular file' >&2; exit 2; }
+[ -d "$runtime_path" ] && [ ! -L "$runtime_path" ] || { echo 'chain-error: runtime path must be a physical directory' >&2; exit 2; }
+[ -d "$sdk_root" ] && [ ! -L "$sdk_root" ] || { echo 'chain-error: SDK root must be a physical directory' >&2; exit 2; }
+[ -f "$sdk_root/SDKSettings.plist" ] && [ ! -L "$sdk_root/SDKSettings.plist" ] || { echo 'chain-error: SDK root lacks regular SDKSettings.plist' >&2; exit 2; }
+[ ! -e "$output_arg" ] && [ ! -L "$output_arg" ] || { echo 'chain-error: output must be fresh and absent' >&2; exit 2; }
+
+# The public adapter PID becomes the real watchdog, not a shell waiting for a
+# background function. It owns every nested compiler process group in one
+# session, and survives cancellation long enough to reap them and publish the
+# final quiescence proof. Inner command guards inherit this verified session.
+chain_owner_receipt="$output_arg.process.env"
+case "${SIMPLE_MACOS_CHAIN_OWNER_OUTPUT:-}" in
+  '')
+    [ ! -e "$chain_owner_receipt" ] && [ ! -L "$chain_owner_receipt" ] || {
+      echo 'chain-error: preserve existing chain process receipt; use a fresh output' >&2; exit 2;
+    }
+    chain_parent=$(CDPATH= cd -- "$(dirname -- "$output_arg")" && pwd -P)
+    # A managed parent forbids descendant session escapes. Reject nested
+    # public launches before creating work; do not join or escape its session.
+    [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" = "" ] || {
+      echo 'chain-error: public launch requires a clean unmanaged session; inherited managed session controls are unsupported' >&2
+      exit 2
+    }
+    # Nested compiler guards create process groups inside our new session.
+    # Group-only scope would miss those descendants during cancellation.
+    SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=0
+    export SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP
+    SIMPLE_PROCESS_TREE_RSS_RECEIPT=$chain_owner_receipt
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$rss_cap
+    SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS=$jobs
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    TMPDIR=$chain_parent
+    export SIMPLE_PROCESS_TREE_RSS_RECEIPT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+    export SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS SIMPLE_BOOTSTRAP_RSS_CAP_MODE TMPDIR
+    exec sh "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+      "$((timeout * 16))" 5 env "SIMPLE_MACOS_CHAIN_OWNER_OUTPUT=$output_arg" \
+      sh "$adapter_root/scripts/bootstrap/continue-macos-self-host-chain.shs" "$@"
+    ;;
+  "$output_arg")
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}:${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in
+      [1-9]*:/*) ;;
+      *) echo 'chain-error: chain worker requires the shared session owner' >&2; exit 125;;
+    esac
+    "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check || exit 125
+    ;;
+  *) echo 'chain-error: inherited chain owner names a different output' >&2; exit 125;;
+esac
+
+mkdir -m 700 "$output_arg"
+output=$(CDPATH= cd -- "$output_arg" && pwd -P)
+mkdir -m 700 "$output/identity" "$output/stage3-a" "$output/stage3-b" "$output/stage4" "$output/hello"
+for d in "$output/stage3-a" "$output/stage3-b" "$output/stage4" "$output/hello"; do mkdir -m 700 "$d/home" "$d/tmp" "$d/cache"; done
+chain_finalized=0
+chain_on_exit() {
+  exit_code=$1
+  if [ "$chain_finalized" -ne 1 ] && [ -d "$output/identity" ]; then
+    case "$exit_code" in 0) chain_exit_state=incomplete;; *) chain_exit_state=failed;; esac
+    printf 'schema=macos-provisional-self-host-chain-v1\nstatus=%s\nexit_code=%s\ndiagnostic_only=1\nadmitted=0\npublished=0\n' \
+      "$chain_exit_state" "$exit_code" >"$output/identity/chain.env.tmp" 2>/dev/null || :
+    if [ -f "$output/identity/chain.env.tmp" ]; then
+      mv -f "$output/identity/chain.env.tmp" "$output/identity/chain.env" 2>/dev/null || :
+    fi
+  fi
+}
+chain_on_signal() {
+  signal_status=$1
+  trap '' HUP INT TERM
+  # Only the outer watchdog signals descendants. This worker records its
+  # interruption; it must not kill a guard before that guard finishes reaping.
+  printf 'schema=macos-provisional-self-host-chain-v1\nstatus=interrupted\nexit_code=%s\nprocess_receipt=%s\ndiagnostic_only=1\nadmitted=0\npublished=0\n' \
+    "$signal_status" "$chain_owner_receipt" >"$output/identity/chain.env.tmp" 2>/dev/null || :
+  mv -f "$output/identity/chain.env.tmp" "$output/identity/chain.env" 2>/dev/null || :
+  chain_finalized=1
+  exit "$signal_status"
+}
+trap 'chain_on_exit "$?"' EXIT
+trap 'chain_on_signal 129' HUP
+trap 'chain_on_signal 130' INT
+trap 'chain_on_signal 143' TERM
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$source_root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+fail() { echo "chain-error: $*" >&2; exit 1; }
+hash_file() { bootstrap_stage3_hash_file "$1"; }
+source_snapshot() { bootstrap_stage3_source_snapshot "$1" "$source_root" || fail "source snapshot failed ($2)"; }
+receipt_field() { awk -F= -v key="$1" '$1==key {n++;v=substr($0,length(key)+2)} END {if(n!=1) exit 1; print v}' "$2"; }
+verify_watchdog_receipt() {
+  chain_watchdog_receipt=$1 chain_watchdog_label=$2
+  [ -f "$chain_watchdog_receipt" ] || fail "$chain_watchdog_label lacks process-owner RSS receipt"
+  [ "$(receipt_field status "$chain_watchdog_receipt")" = complete ] &&
+    [ "$(receipt_field exit_status "$chain_watchdog_receipt")" = 0 ] &&
+    [ "$(receipt_field quiescent "$chain_watchdog_receipt")" = 1 ] &&
+    [ "$(receipt_field observer_errors "$chain_watchdog_receipt")" = 0 ] &&
+    [ "$(receipt_field rss_cap_enforced "$chain_watchdog_receipt")" = 1 ] &&
+    [ "$(receipt_field rss_cap_mode "$chain_watchdog_receipt")" = enforce ] || {
+      cat "$chain_watchdog_receipt" >&2
+      fail "$chain_watchdog_label process-owner receipt is incomplete or unenforced"
+    }
+}
+
+phase2_transcript=$(CDPATH= cd -- "$(dirname -- "$phase2_transcript_arg")" && pwd -P)/$(basename -- "$phase2_transcript_arg")
+phase2_transcript_path=$phase2_transcript
+[ -f "$phase2_transcript" ] && [ ! -L "$phase2_transcript" ] || fail 'Phase 2 transcript is not a regular file'
+[ "$(grep -c '^schema=simple-bootstrap-command-transcript-v2$' "$phase2_transcript")" -eq 1 ] || fail 'Phase 2 transcript schema is invalid'
+grep -qx 'argv:12:native-build' "$phase2_transcript" || fail 'Phase 2 transcript is not a native-build command'
+[ "$(bootstrap_stage3_transcript_argv_value_after "$phase2_transcript" -o)" = "$phase2" ] || fail 'Phase 2 transcript output does not bind the supplied compiler'
+[ "$(bootstrap_stage3_transcript_argv_value_after "$phase2_transcript" --target)" = "$target" ] || fail 'Phase 2 transcript target differs from this host'
+[ "$(bootstrap_stage3_transcript_argv_value_after "$phase2_transcript" --entry)" = src/app/cli/bootstrap_main.spl ] || fail 'Phase 2 transcript entry is not bootstrap_main'
+[ "$(bootstrap_stage3_transcript_argv_value_after "$phase2_transcript" --mode)" = dynload ] || fail 'Phase 2 transcript mode is not dynload'
+phase2_transcript_sha=$(hash_file "$phase2_transcript") || fail 'cannot hash Phase 2 transcript'
+phase2_build_log_sha=unavailable phase2_rss_sha=unavailable
+if [ -n "$phase2_build_log_arg" ] || [ -n "$phase2_rss_arg" ]; then
+  [ -n "$phase2_build_log_arg" ] && [ -n "$phase2_rss_arg" ] || fail 'Phase 2 build log and RSS receipt must be supplied together'
+  phase2_build_log=$(CDPATH= cd -- "$(dirname -- "$phase2_build_log_arg")" && pwd -P)/$(basename -- "$phase2_build_log_arg")
+  phase2_rss=$(CDPATH= cd -- "$(dirname -- "$phase2_rss_arg")" && pwd -P)/$(basename -- "$phase2_rss_arg")
+  [ -f "$phase2_build_log" ] && [ ! -L "$phase2_build_log" ] || fail 'Phase 2 build log is missing or not regular'
+  [ -f "$phase2_rss" ] && [ ! -L "$phase2_rss" ] || fail 'Phase 2 RSS receipt is missing or not regular'
+  grep -F "Binary: $phase2 (" "$phase2_build_log" >/dev/null || fail 'Phase 2 build log does not identify the supplied output'
+  grep -Eq '^Build complete: [1-9][0-9]* compiled, [0-9]+ cached, 0 failed$' "$phase2_build_log" || fail 'Phase 2 build log lacks a successful nonvacuous completion'
+  verify_watchdog_receipt "$phase2_rss" 'Phase 2'
+  phase2_build_log_sha=$(hash_file "$phase2_build_log") || fail 'cannot hash Phase 2 build log'
+  phase2_rss_sha=$(hash_file "$phase2_rss") || fail 'cannot hash Phase 2 RSS receipt'
+  cp -p "$phase2_build_log" "$output/identity/phase2-build.log" || fail 'cannot pin Phase 2 build log'
+  cp -p "$phase2_rss" "$output/identity/phase2-rss.env" || fail 'cannot pin Phase 2 RSS receipt'
+  chmod 0444 "$output/identity/phase2-build.log" "$output/identity/phase2-rss.env"
+  [ "$(hash_file "$output/identity/phase2-build.log")" = "$phase2_build_log_sha" ] &&
+    [ "$(hash_file "$output/identity/phase2-rss.env")" = "$phase2_rss_sha" ] || fail 'Phase 2 evidence copy digest differs'
+fi
+cp -p "$phase2_transcript" "$output/identity/phase2.command.transcript" || fail 'cannot pin Phase 2 transcript'
+chmod 0444 "$output/identity/phase2.command.transcript"
+[ "$(hash_file "$output/identity/phase2.command.transcript")" = "$phase2_transcript_sha" ] || fail 'Phase 2 transcript copy digest differs'
+source_roots_file="$output/identity/phase2-source-roots.txt"
+awk '
+  /^argv:[0-9]+:/ {
+    row=$0; sub(/^argv:/,"",row); sub(/:.*/,"",row); declared=row+0
+    payload=$0; sub(/^argv:[0-9]+:/,"",payload)
+    if (length(payload) != declared) exit 2
+    if (waiting) { print payload; waiting=0 }
+    if (payload == "--source") waiting=1
+  }
+  END { if (waiting) exit 1 }
+' "$phase2_transcript" >"$source_roots_file" || fail 'Phase 2 source vector is malformed'
+chmod 0444 "$source_roots_file"
+source_count=0
+while IFS= read -r source_root_row; do
+  source_count=$((source_count + 1))
+  case "$source_count:$source_root_row" in
+    1:src/compositions/kernel_llvm_cranelift) k1_policy=llvm-cranelift; k1_root=$source_root_row ;;
+    1:src/compositions/kernel_llvm) k1_policy=llvm; k1_root=$source_root_row ;;
+    2:src/compositions/cuda_static) cuda_mode=static; cuda_root=$source_root_row ;;
+    2:src/compositions/cuda_dynamic) cuda_mode=dynamic; cuda_root=$source_root_row ;;
+    2:src/compositions/cuda_disabled) cuda_mode=disabled; cuda_root=$source_root_row ;;
+    3:src/compiler|4:src/app|5:src/lib|6:src/plugins) ;;
+    *) fail 'Phase 2 source vector differs from canonical six-root Stage 3 contract' ;;
+  esac
+done <"$source_roots_file"
+[ "$source_count" -eq 6 ] || fail 'Phase 2 transcript does not contain six Stage 3 source roots'
+case "${SIMPLE_KERNEL_K1_POLICY:-$k1_policy}" in "$k1_policy") ;; *) fail 'requested K1 policy differs from P2 source transcript';; esac
+case "${SIMPLE_BOOTSTRAP_CUDA_MODE:-$cuda_mode}" in "$cuda_mode") ;; *) fail 'requested CUDA mode differs from P2 source transcript';; esac
+plugin_root=src/plugins
+for rel in "$k1_root" "$cuda_root" src/compiler src/app src/lib "$plugin_root"; do [ -d "$source_root/$rel" ] && [ ! -L "$source_root/$rel" ] || fail "canonical source root unavailable: $rel"; done
+k1_composition_file="$source_root/$k1_root/compiler/driver/bootstrap_k1_selected.spl"
+[ -f "$k1_composition_file" ] && [ ! -L "$k1_composition_file" ] || fail 'selected K1 composition source is unavailable'
+k1_composition_sha=$(hash_file "$k1_composition_file") || fail 'cannot hash selected K1 composition source'
+source_roots_sha=$(hash_file "$source_roots_file") || fail 'cannot hash pinned source-root vector'
+source_arity_cap=$(sed -n 's/.*sources\.len()[[:space:]]*>[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+  "$source_root/src/app/cli/bootstrap_focused_native_build.spl" | head -1)
+case "$source_arity_cap" in
+  '') ;;
+  *[!0-9]*) fail 'cannot parse Stage 3 producer source-root arity';;
+  *) [ "$source_arity_cap" -ge 6 ] || fail 'Stage 3 producer capsule accepts fewer than six roots; canonical build requires K1, CUDA, compiler, app, lib, and plugins';;
+esac
+source_snapshot "$output/identity/source-before.snapshot" before
+runtime_snapshot="$output/identity/runtime-before.snapshot"
+bootstrap_stage3_directory_snapshot "$runtime_snapshot" "$runtime_path" || fail 'runtime snapshot failed'
+sdk_settings="$sdk_root/SDKSettings.plist"
+sdk_settings_sha=$(hash_file "$sdk_settings") || fail 'cannot hash SDKSettings.plist'
+sdk_canonical_name=$(plutil -extract CanonicalName raw -o - "$sdk_settings" 2>/dev/null) || fail 'cannot read SDK CanonicalName'
+phase2_sha=$(hash_file "$phase2") || fail 'cannot hash Phase 2 compiler'
+cp -p "$phase2" "$output/identity/phase2.compiler" || fail 'cannot pin Phase 2 compiler'
+chmod 0555 "$output/identity/phase2.compiler"
+[ "$(hash_file "$output/identity/phase2.compiler")" = "$phase2_sha" ] || fail 'Phase 2 copy digest differs'
+adapter_file="$adapter_root/scripts/bootstrap/continue-macos-self-host-chain.shs"
+adapter_sha=$(hash_file "$adapter_file") || fail 'cannot hash adapter source'
+cp -p "$adapter_file" "$output/identity/adapter.shs" || fail 'cannot pin adapter source'
+chmod 0444 "$output/identity/adapter.shs"
+[ "$(hash_file "$output/identity/adapter.shs")" = "$adapter_sha" ] || fail 'adapter copy digest differs'
+
+# Carry forward the exact native-tool environment pinned by the P2 transcript.
+# Explicit PATH excludes transient launcher shims recorded in host PATH.
+canonical_path=$(bootstrap_stage3_transcript_explicit_env_value "$phase2_transcript" PATH) || fail 'P2 transcript lacks explicit PATH authority'
+case "$canonical_path" in /*) ;; *) fail 'P2 transcript PATH is not absolute';; esac
+tool_env_file="$output/identity/phase2-tool-env.txt"
+tool_env_names="$output/identity/phase2-llvm-env-names.txt"
+: >"$tool_env_file"
+for tool_env_name in PATH CC CXX AR LD LLVM_CONFIG SIMPLE_LLVM_REQUIRED_VERSION SIMPLE_LLVM_PATH LIBRARY_PATH RUST_LOG; do
+  if grep -Eq "^explicit-env:[0-9]+:$tool_env_name=" "$phase2_transcript"; then
+    tool_env_value=$(bootstrap_stage3_transcript_explicit_env_value "$phase2_transcript" "$tool_env_name") || fail "cannot read pinned tool env $tool_env_name"
+    printf '%s=%s\n' "$tool_env_name" "$tool_env_value" >>"$tool_env_file"
+  fi
+done
+awk '/^explicit-env:[0-9]+:LLVM_SYS_[A-Za-z0-9_]+=/{row=$0; sub(/^explicit-env:[0-9]+:/,"",row); sub(/=.*/,"",row); print row}' \
+  "$phase2_transcript" >"$tool_env_names" || fail 'cannot parse pinned LLVM_SYS environment names'
+while IFS= read -r tool_env_name; do
+  tool_env_value=$(bootstrap_stage3_transcript_explicit_env_value "$phase2_transcript" "$tool_env_name") || fail "cannot read pinned tool env $tool_env_name"
+  printf '%s=%s\n' "$tool_env_name" "$tool_env_value" >>"$tool_env_file"
+done <"$tool_env_names"
+transcript_sdk_root= transcript_deployment_target=
+if grep -Eq '^explicit-env:[0-9]+:SDKROOT=' "$phase2_transcript"; then
+  transcript_sdk_root=$(bootstrap_stage3_transcript_explicit_env_value "$phase2_transcript" SDKROOT) || fail 'cannot read P2 SDKROOT'
+  transcript_sdk_root=$(CDPATH= cd -- "$transcript_sdk_root" && pwd -P) || fail 'P2 SDKROOT is unavailable'
+  [ "$transcript_sdk_root" = "$sdk_root" ] || fail 'caller SDK root differs from P2 transcript SDKROOT'
+fi
+if grep -Eq '^explicit-env:[0-9]+:MACOSX_DEPLOYMENT_TARGET=' "$phase2_transcript"; then
+  transcript_deployment_target=$(bootstrap_stage3_transcript_explicit_env_value "$phase2_transcript" MACOSX_DEPLOYMENT_TARGET) || fail 'cannot read P2 deployment target'
+  [ "$transcript_deployment_target" = "$deployment_target" ] || fail 'caller deployment target differs from P2 transcript'
+fi
+printf 'SDKROOT=%s\nMACOSX_DEPLOYMENT_TARGET=%s\n' "$sdk_root" "$deployment_target" >>"$tool_env_file"
+[ -s "$tool_env_file" ] || fail 'P2 transcript contains no native tool environment'
+awk -F= 'NF<2 || seen[$1]++ {exit 1}' "$tool_env_file" || fail 'P2 native tool environment has duplicate or malformed rows'
+old_ifs=$IFS; IFS=:
+for entry in $canonical_path; do
+  [ -n "$entry" ] || fail 'P2 PATH contains an empty component'
+  case "$entry" in /*) ;; *) fail 'P2 PATH contains a relative component';; esac
+  [ -d "$entry" ] || fail "P2 PATH component is unavailable: $entry"
+done
+IFS=$old_ifs
+chmod 0444 "$tool_env_file" "$tool_env_names"
+tool_env_sha=$(hash_file "$tool_env_file") || fail 'cannot hash pinned native tool environment'
+sdk_profile_file="$output/identity/sdk-profile.env"
+if [ -n "$transcript_sdk_root" ]; then sdk_root_origin=p2-transcript-and-caller; else sdk_root_origin=caller; fi
+if [ -n "$transcript_deployment_target" ]; then deployment_target_origin=p2-transcript-and-caller; else deployment_target_origin=caller; fi
+cat >"$sdk_profile_file" <<EOF2
+schema=macos-caller-sdk-profile-v1
+sdkroot=$sdk_root
+sdkroot_origin=$sdk_root_origin
+sdksettings_path=$sdk_settings
+sdksettings_sha256=$sdk_settings_sha
+sdk_canonical_name=$sdk_canonical_name
+deployment_target=$deployment_target
+deployment_target_origin=$deployment_target_origin
+EOF2
+chmod 0444 "$sdk_profile_file"
+sdk_profile_sha=$(hash_file "$sdk_profile_file") || fail 'cannot hash SDK caller profile'
+SIMPLE_BOOTSTRAP_NATIVE_BUILD_TIMEOUT_SECONDS=$timeout
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$rss_cap
+SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+export SIMPLE_BOOTSTRAP_NATIVE_BUILD_TIMEOUT_SECONDS SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+
+run_owned() {
+  "$@"
+}
+
+assert_authority() {
+  authority_label=$1 authority_compiler=${2:-} authority_record=${3:-$1}
+  source_snapshot "$output/identity/source-$authority_label.snapshot" "$authority_label"
+  bootstrap_stage3_directory_snapshot "$output/identity/runtime-$authority_label.snapshot" "$runtime_path" || fail "$authority_label runtime snapshot failed"
+  cmp -s "$output/identity/source-before.snapshot" "$output/identity/source-$authority_label.snapshot" || fail "source changed before $authority_label"
+  cmp -s "$runtime_snapshot" "$output/identity/runtime-$authority_label.snapshot" || fail "runtime changed before $authority_label"
+  [ "$(hash_file "$phase2")" = "$phase2_sha" ] || fail "Phase 2 changed before $authority_label"
+  [ "$(hash_file "$phase2_transcript")" = "$phase2_transcript_sha" ] || fail "Phase 2 transcript changed before $authority_label"
+  [ "$(hash_file "$tool_env_file")" = "$tool_env_sha" ] || fail "tool environment changed before $authority_label"
+  [ "$(hash_file "$sdk_settings")" = "$sdk_settings_sha" ] || fail "SDK settings changed before $authority_label"
+  [ "$(hash_file "$sdk_profile_file")" = "$sdk_profile_sha" ] || fail "SDK caller profile changed before $authority_label"
+  [ "$(hash_file "$source_roots_file")" = "$source_roots_sha" ] || fail "source-root vector changed before $authority_label"
+  [ "$(hash_file "$adapter_file")" = "$adapter_sha" ] || fail "adapter changed before $authority_label"
+  [ "$(hash_file "$k1_composition_file")" = "$k1_composition_sha" ] || fail "selected K1 composition changed before $authority_label"
+  if [ -n "$authority_compiler" ]; then
+    authority_identity="$output/identity/$authority_record.compiler.env"
+    authority_bound_sha=$(receipt_field sha256 "$authority_identity") || fail "$authority_label compiler lacks recorded digest"
+    [ "$(hash_file "$authority_compiler")" = "$authority_bound_sha" ] || fail "$authority_label compiler changed after its Hello/version probes"
+  fi
+}
+
+run_build() {
+  label=$1 producer=$2 stage_dir=$3 kind=$4 entry=$5 output_bin=$6
+  mkdir -p "$stage_dir/cache/frontend" "$stage_dir/cache/hir"
+  transcript="$stage_dir/$label.command.transcript" log="$stage_dir/$label.native-build.log"
+  set -- "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_STUB_FALLBACK=1" \
+    'SIMPLE_ABI_POLICY=v1' 'SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn' \
+    "SIMPLE_COVERAGE_CUTOVER_STATE=atomic-apk-only" \
+    'SIMPLE_NO_DEPRECATED_WARNINGS=1' 'SIMPLE_NATIVE_ARENA_DECLS=1' \
+    'SIMPLE_PACKAGE_INDEX_COLD_INIT=1' \
+    "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=$k1_composition_sha" \
+    "SIMPLE_BUILD_PROGRESS_EVENTS=$stage_dir/build-progress.events" \
+    'SIMPLE_FRONTEND_CACHE=1' "SIMPLE_FRONTEND_CACHE_DIR=$stage_dir/cache/frontend" \
+    'SIMPLE_HIR_CACHE=1' "SIMPLE_HIR_CACHE_DIR=$stage_dir/cache/hir" \
+    "SIMPLE_NATIVE_BUILD_TARGET=$target" "SIMPLE_NATIVE_BUILD_THREADS=$jobs" \
+    "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage_dir/cache" "SIMPLE_RUNTIME_PATH=$runtime_path" \
+    'SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap' "SIMPLE_KERNEL_K1_POLICY=$k1_policy" \
+    "SIMPLE_BINARY=$producer"
+  case "$kind" in
+    stage3) set -- "$@" 'SIMPLE_BOOTSTRAP_STAGE3=1' 'SIMPLE_STAGE3_STREAMING_SURFACES=0';;
+    stage4) set -- "$@" 'SIMPLE_BOOTSTRAP_STAGE4=1';;
+    hello) ;;
+    *) fail "internal build kind invalid: $kind";;
+  esac
+  while IFS= read -r tool_env_assignment; do set -- "$@" "$tool_env_assignment"; done <"$tool_env_file"
+  case "$kind" in
+    stage3)
+      TMPDIR="$stage_dir/tmp" run_owned bootstrap_stage3_run_transcribed \
+        "$transcript" "$source_root" "$log" "$stage_dir/home" "$stage_dir/tmp" "$canonical_path" "$@" -- \
+        "$producer" native-build --target "$target" --backend "$backend" \
+        --runtime-bundle core-c-bootstrap --threads "$jobs" --cache-dir "$stage_dir/cache" \
+        --runtime-path "$runtime_path" \
+        --source "$k1_root" --source "$cuda_root" --source src/compiler --source src/app --source src/lib --source "$plugin_root" \
+        --entry-closure --mode dynload --entry "$entry" -o "$output_bin" \
+        || fail "$label native-build failed; see $log" ;;
+    stage4)
+      TMPDIR="$stage_dir/tmp" run_owned bootstrap_stage3_run_transcribed \
+        "$transcript" "$source_root" "$log" "$stage_dir/home" "$stage_dir/tmp" "$canonical_path" "$@" -- \
+        "$producer" native-build --target "$target" --backend "$backend" \
+        --runtime-bundle core-c-bootstrap --threads "$jobs" --cache-dir "$stage_dir/cache" \
+        --runtime-path "$runtime_path" --mode one-binary --entry "$entry" -o "$output_bin" \
+        || fail "$label native-build failed; see $log" ;;
+  esac
+  [ -s "$transcript" ] && [ -f "$log" ] || fail "$label produced no transcript or log"
+  verify_watchdog_receipt "$log.rss.env" "$label"
+  printf 'status=pass\ntranscript_sha256=%s\nlog_sha256=%s\nrss_receipt_sha256=%s\npeak_rss_kib=%s\nmax_rss_kib=%s\ntimeout_seconds=%s\n' \
+    "$(hash_file "$transcript")" "$(hash_file "$log")" "$(hash_file "$log.rss.env")" \
+    "$(receipt_field peak_rss_kib "$log.rss.env")" "$(receipt_field max_rss_kib "$log.rss.env")" "$timeout" \
+    >"$output/identity/$label.build.env"
+}
+run_hello_build() {
+  label=$1 producer=$2 stage_dir=$3 source=$4 output_bin=$5
+  mkdir -p "$stage_dir/cache/frontend" "$stage_dir/cache/hir"
+  transcript="$stage_dir/hello.command.transcript" log="$stage_dir/hello.native-build.log"
+  set -- 'SIMPLE_BOOTSTRAP=1' 'SIMPLE_NO_STUB_FALLBACK=1' 'SIMPLE_ABI_POLICY=v1' \
+    'SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn' 'SIMPLE_COVERAGE_CUTOVER_STATE=atomic-apk-only' \
+    'SIMPLE_NO_DEPRECATED_WARNINGS=1' 'SIMPLE_NATIVE_ARENA_DECLS=1' 'SIMPLE_PACKAGE_INDEX_COLD_INIT=1' \
+    "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=$k1_composition_sha" \
+    "SIMPLE_BUILD_PROGRESS_EVENTS=$stage_dir/build-progress.events" \
+    'SIMPLE_FRONTEND_CACHE=1' "SIMPLE_FRONTEND_CACHE_DIR=$stage_dir/cache/frontend" \
+    'SIMPLE_HIR_CACHE=1' "SIMPLE_HIR_CACHE_DIR=$stage_dir/cache/hir" \
+    "SIMPLE_NATIVE_BUILD_TARGET=$target" "SIMPLE_NATIVE_BUILD_THREADS=$jobs" \
+    "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage_dir/cache" "SIMPLE_RUNTIME_PATH=$runtime_path" \
+    'SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap' "SIMPLE_KERNEL_K1_POLICY=$k1_policy" \
+    "SIMPLE_BINARY=$producer"
+  while IFS= read -r tool_env_assignment; do set -- "$@" "$tool_env_assignment"; done <"$tool_env_file"
+  TMPDIR="$stage_dir/tmp" run_owned bootstrap_stage3_run_transcribed \
+    "$transcript" "$source_root" "$log" "$stage_dir/home" "$stage_dir/tmp" "$canonical_path" "$@" -- \
+    "$producer" native-build --target "$target" --backend "$backend" \
+    --runtime-bundle core-c-bootstrap --threads "$jobs" --cache-dir "$stage_dir/cache" \
+    --runtime-path "$runtime_path" -o "$output_bin" "$source" || fail "$label Hello compile failed"
+  [ -x "$output_bin" ] && [ -f "$output_bin" ] || fail "$label Hello compiler emitted no executable"
+  verify_watchdog_receipt "$log.rss.env" "$label Hello build"
+  printf 'status=pass\ntranscript_sha256=%s\nlog_sha256=%s\nrss_receipt_sha256=%s\npeak_rss_kib=%s\nmax_rss_kib=%s\ntimeout_seconds=%s\n' \
+    "$(hash_file "$transcript")" "$(hash_file "$log")" "$(hash_file "$log.rss.env")" \
+    "$(receipt_field peak_rss_kib "$log.rss.env")" "$(receipt_field max_rss_kib "$log.rss.env")" "$timeout" \
+    >"$output/identity/$label.hello-build.env"
+}
+record_compiler() {
+  label=$1 binary=$2 version_role=$3 expected_version=$4
+  [ -x "$binary" ] && [ -f "$binary" ] && [ ! -L "$binary" ] || fail "$label compiler missing or not executable"
+  sha=$(hash_file "$binary") || fail "cannot hash $label compiler"
+  chmod 0555 "$binary" || fail "cannot freeze $label compiler"
+  stdout="$output/hello/$label.version.stdout" stderr="$output/hello/$label.version.stderr"
+  : >"$stderr"
+  SIMPLE_PROCESS_TREE_RSS_RECEIPT="$output/hello/$label.version.process.env" TMPDIR="$output/hello/tmp" \
+    run_owned sh "$source_root/scripts/bootstrap/run-process-group-timeout.shs" "$timeout" 1 "$binary" --version >"$stdout" 2>"$stderr" || {
+      cat "$stderr" >&2
+      fail "$label --version failed"
+    }
+  [ -s "$stdout" ] && [ ! -s "$stderr" ] || fail "$label version output empty/noisy"
+  verify_watchdog_receipt "$output/hello/$label.version.process.env" "$label version"
+  case "$version_role" in
+    bootstrap)
+      grep -Eiq 'simple-bootstrap' "$stdout" || fail "$label bootstrap version banner is missing"
+      if [ -n "$expected_version" ]; then cmp -s "$expected_version" "$stdout" || fail "$label bootstrap version differs from P2"; fi
+      ;;
+    cli)
+      grep -Eq '^Simple v[^[:space:]]+$' "$stdout" || fail "$label CLI version banner is invalid"
+      ;;
+    *) fail "$label version oracle role is invalid";;
+  esac
+  printf 'schema=macos-provisional-compiler-identity-v1\nlabel=%s\nsha256=%s\nversion_sha256=%s\nversion_receipt_sha256=%s\nversion_peak_rss_kib=%s\nadmitted=0\n' \
+    "$label" "$sha" "$(hash_file "$stdout")" \
+    "$(hash_file "$output/hello/$label.version.process.env")" \
+    "$(receipt_field peak_rss_kib "$output/hello/$label.version.process.env")" \
+    >"$output/identity/$label.compiler.env"
+  printf '%s\n' "$stdout"
+}
+verify_hello() {
+  label=$1 compiler=$2 stage=$3
+  source="$output/hello/$label.spl" binary="$output/hello/$label" expected="$output/hello/$label.expected" empty="$output/hello/empty.stderr"
+  printf 'fn main():\n    print "chain-%s-ok"\n' "$label" >"$source"
+  printf 'chain-%s-ok\n' "$label" >"$expected"
+  recorded_compiler_sha=$(receipt_field sha256 "$output/identity/$label.compiler.env") || fail "$label compiler digest record missing before Hello"
+  [ "$(hash_file "$compiler")" = "$recorded_compiler_sha" ] || fail "$label compiler bytes changed before Hello"
+  : >"$empty"
+  build_dir="$output/hello/$label-build"; mkdir -m 700 "$build_dir" "$build_dir/home" "$build_dir/tmp" "$build_dir/cache"
+  run_hello_build "$label" "$compiler" "$build_dir" "$source" "$binary"
+  run_exact_probe "$label" "$binary" "$output/hello/$label-run" "$expected" "$empty"
+  printf 'status=pass\ncompiler_sha256=%s\nsource_sha256=%s\noutput_sha256=%s\nrun_receipt_sha256=%s\nrun_stdout_sha256=%s\nrun_stderr_sha256=%s\n' \
+    "$recorded_compiler_sha" "$(hash_file "$source")" "$(hash_file "$binary")" \
+    "$(hash_file "$output/hello/$label-run/process.env")" \
+    "$(hash_file "$output/hello/$label-run/stdout.log")" \
+    "$(hash_file "$output/hello/$label-run/stderr.log")" \
+    >"$output/identity/$label.hello.env"
+}
+run_exact_probe() {
+  label=$1 binary=$2 probe_dir=$3 expected_out=$4 expected_err=$5
+  mkdir -m 700 "$probe_dir"
+  receipt="$probe_dir/process.env"
+  code=0
+  SIMPLE_PROCESS_TREE_RSS_RECEIPT="$receipt" TMPDIR="$output/hello/tmp" \
+    run_owned sh "$source_root/scripts/bootstrap/run-process-group-timeout.shs" "$timeout" 1 "$binary" \
+    >"$probe_dir/stdout.log" 2>"$probe_dir/stderr.log" || code=$?
+  [ -f "$receipt" ] || fail "$label Hello lacks process-owner receipt"
+  status=$(receipt_field status "$receipt") || fail "$label Hello process receipt malformed"
+  exit_status=$(receipt_field exit_status "$receipt") || fail "$label Hello process exit missing"
+  quiescent=$(receipt_field quiescent "$receipt") || fail "$label Hello process quiescence missing"
+  observer_errors=$(receipt_field observer_errors "$receipt") || fail "$label Hello observer state missing"
+  rss_enforced=$(receipt_field rss_cap_enforced "$receipt") || fail "$label Hello RSS enforcement missing"
+  cap_mode=$(receipt_field rss_cap_mode "$receipt") || fail "$label Hello RSS mode missing"
+  [ "$status" = complete ] && [ "$exit_status" = "$code" ] && [ "$quiescent" = 1 ] && [ "$observer_errors" = 0 ] && [ "$rss_enforced" = 1 ] && [ "$cap_mode" = enforce ] || {
+    echo "chain-error: $label process status=$status receipt_exit=$exit_status child_exit=$code quiescent=$quiescent observer_errors=$observer_errors rss_enforced=$rss_enforced cap_mode=$cap_mode" >&2
+    fail "$label Hello process owner did not complete under enforced limits"
+  }
+  [ "$code" -eq 0 ] && cmp -s "$expected_out" "$probe_dir/stdout.log" && cmp -s "$expected_err" "$probe_dir/stderr.log" || fail "$label Hello output mismatch"
+}
+finish_chain() {
+  chain_status=$1
+  source_snapshot "$output/identity/source-after.snapshot" after
+  runtime_after="$output/identity/runtime-after.snapshot"
+  bootstrap_stage3_directory_snapshot "$runtime_after" "$runtime_path" || fail 'final runtime snapshot failed'
+  cmp -s "$output/identity/source-before.snapshot" "$output/identity/source-after.snapshot" || fail 'source changed during chain'
+  cmp -s "$runtime_snapshot" "$runtime_after" || fail 'runtime changed during chain'
+  [ "$(hash_file "$sdk_settings")" = "$sdk_settings_sha" ] || fail 'SDK settings changed during chain'
+  [ "$(hash_file "$phase2")" = "$phase2_sha" ] || fail 'Phase 2 changed during chain'
+  [ "$(hash_file "$phase2_transcript")" = "$phase2_transcript_sha" ] || fail 'Phase 2 transcript changed during chain'
+  [ "$(hash_file "$tool_env_file")" = "$tool_env_sha" ] || fail 'pinned native tool environment changed during chain'
+  [ "$(hash_file "$sdk_profile_file")" = "$sdk_profile_sha" ] || fail 'SDK caller profile changed during chain'
+  [ "$(hash_file "$source_roots_file")" = "$source_roots_sha" ] || fail 'source-root vector changed during chain'
+  [ "$(hash_file "$adapter_file")" = "$adapter_sha" ] || fail 'adapter changed during chain'
+  [ "$(hash_file "$k1_composition_file")" = "$k1_composition_sha" ] || fail 'selected K1 composition changed during chain'
+  if [ "$phase2_build_log_sha" != unavailable ]; then
+    [ "$(hash_file "$phase2_build_log")" = "$phase2_build_log_sha" ] || fail 'Phase 2 build log changed during chain'
+    [ "$(hash_file "$phase2_rss")" = "$phase2_rss_sha" ] || fail 'Phase 2 RSS receipt changed during chain'
+  fi
+  for compiler_label in phase2 stage3-a stage3-b stage4; do
+    compiler_path="$output/identity/phase2.compiler"
+    case "$compiler_label" in
+      stage3-a) compiler_path="$output/stage3-a/simple";;
+      stage3-b) compiler_path="$output/stage3-b/simple";;
+      stage4) compiler_path="$output/stage4/simple";;
+    esac
+    if [ -f "$compiler_path" ]; then
+      compiler_record="$output/identity/$compiler_label.compiler.env"
+      hello_record="$output/identity/$compiler_label.hello.env"
+      compiler_identity_sha=$(receipt_field sha256 "$compiler_record") || fail "$compiler_label compiler identity digest missing"
+      hello_bound_sha=$(receipt_field compiler_sha256 "$hello_record") || fail "$compiler_label Hello lacks compiler digest binding"
+      [ "$(hash_file "$compiler_path")" = "$compiler_identity_sha" ] &&
+        [ "$compiler_identity_sha" = "$hello_bound_sha" ] || fail "$compiler_label compiler differs from its earlier Hello-bound digest"
+    fi
+  done
+  stage3a_sha=not-built stage3b_sha=not-built stage4_sha=not-built
+  [ ! -f "$output/stage3-a/simple" ] || stage3a_sha=$(hash_file "$output/stage3-a/simple")
+  [ ! -f "$output/stage3-b/simple" ] || stage3b_sha=$(hash_file "$output/stage3-b/simple")
+  [ ! -f "$output/stage4/simple" ] || stage4_sha=$(hash_file "$output/stage4/simple")
+  cat >"$output/identity/chain.env" <<EOF2
+schema=macos-provisional-self-host-chain-v1
+status=$chain_status
+source_snapshot_sha256=$(hash_file "$output/identity/source-before.snapshot")
+adapter_sha256=$adapter_sha
+runtime_snapshot_sha256=$(hash_file "$runtime_snapshot")
+sdkroot=$sdk_root
+sdkroot_origin=$sdk_root_origin
+sdksettings_canonical_name=$sdk_canonical_name
+sdksettings_sha256=$sdk_settings_sha
+deployment_target=$deployment_target
+deployment_target_origin=$deployment_target_origin
+phase2_sha256=$phase2_sha
+phase2_transcript_sha256=$phase2_transcript_sha
+phase2_tool_env_sha256=$tool_env_sha
+phase2_build_log_sha256=$phase2_build_log_sha
+phase2_rss_receipt_sha256=$phase2_rss_sha
+phase2_k1_policy=$k1_policy
+phase2_cuda_mode=$cuda_mode
+phase2_source_roots_sha256=$source_roots_sha
+k1_composition_sha256=$k1_composition_sha
+stage3a_sha256=$stage3a_sha
+stage3b_sha256=$stage3b_sha
+stage4_sha256=$stage4_sha
+backend=$backend
+jobs=$jobs
+rss_cap_kib=$rss_cap
+timeout_seconds=$timeout
+diagnostic_only=1
+admitted=0
+published=0
+EOF2
+  chmod 0444 "$output/identity/chain.env"
+  chmod -R a-w "$output/identity" "$output/stage3-a" "$output/stage3-b" "$output/stage4" "$output/hello"
+  chain_finalized=1
+}
+
+phase2_version=$(record_compiler phase2 "$output/identity/phase2.compiler" bootstrap '')
+verify_hello phase2 "$output/identity/phase2.compiler" "$output/identity/phase2"
+assert_authority before-stage3-a "$output/identity/phase2.compiler" phase2
+stage3a="$output/stage3-a/simple"
+run_build stage3-a "$output/identity/phase2.compiler" "$output/stage3-a" stage3 src/app/cli/bootstrap_main.spl "$stage3a"
+record_compiler stage3-a "$stage3a" bootstrap "$phase2_version" >/dev/null
+verify_hello stage3-a "$stage3a" "$output/stage3-a"
+if [ "$checkpoint" = stage3 ]; then finish_chain checkpoint-stage3; exit 0; fi
+
+stage3b="$output/stage3-b/simple"
+assert_authority before-stage3-b "$stage3a" stage3-a
+run_build stage3-b "$stage3a" "$output/stage3-b" stage3 src/app/cli/bootstrap_main.spl "$stage3b"
+record_compiler stage3-b "$stage3b" bootstrap "$phase2_version" >/dev/null
+verify_hello stage3-b "$stage3b" "$output/stage3-b"
+if [ "$checkpoint" = stage3-rebuild ]; then finish_chain checkpoint-stage3-rebuild; exit 0; fi
+
+stage4="$output/stage4/simple"
+assert_authority before-stage4 "$stage3b" stage3-b
+run_build stage4 "$stage3b" "$output/stage4" stage4 src/app/cli/main.spl "$stage4"
+record_compiler stage4 "$stage4" cli '' >/dev/null
+verify_hello stage4 "$stage4" "$output/stage4"
+finish_chain pass
+echo "PASS: provisional Stage3 -> Stage3 rebuild -> Stage4 CLI artifacts and Hello probes; output=$output"

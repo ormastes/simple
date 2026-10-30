@@ -7,6 +7,9 @@ use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_write_u32, vo
 use std.nogc_sync_mut.io.windows_pty_codec.{windows_pty_size_valid_v1, windows_pty_coord_v1, windows_pty_decode_v1}
 use std.common.base_encoding.utilities.{text_to_bytes_linear}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetExitCodeProcess}
+use std.sys.pty_launch.{PtyLaunchV1}
+use std.nogc_sync_mut.io.windows_pty_launch_config.{WindowsPtyLaunchPreparedV1, windows_pty_launch_prepare_v1}
+use std.nogc_sync_mut.io.windows_pty_launch_abi.{FreeEnvironmentStringsW}
 
 struct WindowsPtyStateV1:
     heap: i64
@@ -30,6 +33,7 @@ struct WindowsPtyStateV1:
     release_failed: bool = false
     tail: [u8] = []
     temporaries: [i64] = []
+    environment_snapshot: i64 = 0
 
 var _windows_pty_slots_v1: [WindowsPtyStateV1] = []
 var _windows_pty_quarantine_v1: [i64] = []
@@ -84,6 +88,24 @@ fn _windows_pty_free_v1(heap: i64, address: i64) -> i64:
     _windows_pty_cleanup_failed_v1 = true
     address
 
+@unsafe(reason: "releases launch temporaries while retaining every failed native release", capabilities: [ffi, raw_ptr])
+fn _windows_pty_launch_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
+    var next = state
+    if next.environment_snapshot != 0:
+        if FreeEnvironmentStringsW(next.environment_snapshot) != 0:
+            next.environment_snapshot = 0
+        else:
+            next.release_failed = true
+            _windows_pty_cleanup_failed_v1 = true
+    var retained: [i64] = []
+    for address in next.temporaries:
+        val remaining = _windows_pty_free_v1(next.heap, address)
+        if remaining != 0:
+            retained = retained.push(remaining)
+            next.release_failed = true
+    next.temporaries = retained
+    next
+
 @unsafe(reason: "releases only terminal retained requests and their owned resources", capabilities: [ffi, raw_ptr])
 fn _windows_pty_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
     var next = state
@@ -100,15 +122,11 @@ fn _windows_pty_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
     next.thread = _windows_pty_close_handle_v1(next.thread)
     next.process = _windows_pty_close_handle_v1(next.process)
     next.job = _windows_pty_close_handle_v1(next.job)
-    var retained: [i64] = []
-    for address in next.temporaries:
-        val remaining = _windows_pty_free_v1(next.heap, address)
-        if remaining != 0: retained = retained.push(remaining)
-    next.temporaries = retained
+    next = _windows_pty_launch_release_v1(next)
     val handles_released = next.input_server == 0 and next.input == 0 and next.output_server == 0 and next.output == 0 and next.event == 0 and next.thread == 0 and next.process == 0 and next.job == 0 and next.console == 0
-    if handles_released and next.temporaries.len() == 0:
+    if handles_released and next.temporaries.len() == 0 and next.environment_snapshot == 0:
         next.arena = _windows_pty_free_v1(next.heap, next.arena)
-    next.closed = handles_released and next.temporaries.len() == 0 and next.arena == 0
+    next.closed = handles_released and next.temporaries.len() == 0 and next.environment_snapshot == 0 and next.arena == 0
     if not next.closed:
         next.failed = true
         next.release_failed = true
@@ -141,7 +159,12 @@ pub fn windows_pty_cleanup_proof_v1(handle: i32) -> bool:
     _windows_pty_reap_v1()
     if handle < 0 or (handle as i64) >= _windows_pty_slots_v1.len(): return false
     val state = _windows_pty_slots_v1[handle as i64]
-    state.closed and state.terminal_observed and not state.release_failed and state.arena == 0 and state.job == 0 and state.process == 0 and state.thread == 0 and state.temporaries.len() == 0 and not state.pending
+    _windows_pty_cleanup_complete_v1(state)
+
+# Historical spawn/I/O failure is separate from terminal resource discharge.
+# Failed native releases remain sticky and can never produce a clean proof.
+fn _windows_pty_cleanup_complete_v1(state: WindowsPtyStateV1) -> bool:
+    state.closed and state.terminal_observed and not state.release_failed and state.arena == 0 and state.job == 0 and state.process == 0 and state.thread == 0 and state.temporaries.len() == 0 and state.environment_snapshot == 0 and not state.pending
 
 @unsafe(reason: "unwinds a not-yet-published ConPTY without pending requests", capabilities: [ffi, raw_ptr])
 fn _windows_pty_open_failed_v1(state: WindowsPtyStateV1) -> i32:
@@ -212,6 +235,38 @@ pub fn windows_pty_spawn_v1(handle: i32, command: text) -> i64:
     if state.process != 0 or state.failed: return -1
     val argv = _windows_process_wide_v1(state.heap, command)
     if argv == 0: return -1
+    # Compatibility retains its raw command line, NULL application/env/cwd and
+    # original flags. Only the native process/Job owner is shared below.
+    _windows_pty_spawn_prepared_v1(handle, WindowsPtyLaunchPreparedV1(command: argv, allocations: [argv]), false)
+
+pub fn windows_pty_spawn_configured_v1(handle: i32, launch: PtyLaunchV1) -> Result<i64, text>:
+    _windows_pty_reap_v1()
+    if not _windows_pty_live_v1(handle): return Err("invalid or closed Windows PTY handle")
+    var state = _windows_pty_slots_v1[handle as i64]
+    if state.process != 0 or state.failed: return Err("Windows PTY already spawned or failed")
+    val prepared = windows_pty_launch_prepare_v1(state.heap, launch)
+    if prepared.error != "":
+        state.temporaries = prepared.allocations
+        state.environment_snapshot = prepared.snapshot
+        # A snapshot-release error is historical failed cleanup even if the
+        # retry below succeeds; it must never become a clean admission proof.
+        if prepared.snapshot != 0:
+            state.release_failed = true
+            _windows_pty_cleanup_failed_v1 = true
+        state = _windows_pty_launch_release_v1(state)
+        _windows_pty_slots_v1[handle as i64] = state
+        if state.release_failed:
+            val _closed = windows_pty_close_v1(handle)
+        return Err(prepared.error)
+    val pid = _windows_pty_spawn_prepared_v1(handle, prepared, true)
+    if pid <= 0: return Err("Windows PTY configured process admission failed; owner retains cleanup authority")
+    Ok(pid)
+
+@unsafe(reason: "starts a suspended child using retained launch storage and checked Job ownership", capabilities: [ffi, raw_ptr])
+fn _windows_pty_spawn_prepared_v1(handle: i32, prepared: WindowsPtyLaunchPreparedV1, configured: bool) -> i64:
+    var state = _windows_pty_slots_v1[handle as i64]
+    state.temporaries = prepared.allocations
+    state.environment_snapshot = prepared.snapshot
     val startup = state.arena + 12704
     val process_info = state.arena + 12816
     val limits = state.arena + 12504
@@ -240,7 +295,9 @@ pub fn windows_pty_spawn_v1(handle: i32, command: text) -> i64:
     if admitted:
         # CREATE_SUSPENDED|EXTENDED_STARTUPINFO_PRESENT, inheritHandles=FALSE.
         # HPCON is attached through the attribute, never inherited std handles.
-        admitted = CreateProcessW(0, argv, 0, 0, 0, 524292u32, 0, 0, startup, process_info) != 0
+        val flags = if configured: 525316u32 else: 524292u32
+        admitted = CreateProcessW(prepared.application, prepared.command, 0, 0, 0, flags,
+            prepared.environment, prepared.directory, startup, process_info) != 0
         if admitted:
             state.process = volatile_read_u64(process_info)
             thread = volatile_read_u64(process_info + 8)
@@ -248,17 +305,15 @@ pub fn windows_pty_spawn_v1(handle: i32, command: text) -> i64:
             admitted = AssignProcessToJobObject(state.job, state.process) != 0
             if admitted: admitted = ResumeThread(thread) != 4294967295u32
     if initialized: DeleteProcThreadAttributeList(attributes)
+    var retained_attributes: i64 = 0
     if attributes != 0:
-        val retained_attributes = _windows_pty_free_v1(state.heap, attributes)
+        retained_attributes = _windows_pty_free_v1(state.heap, attributes)
         if retained_attributes != 0:
-            state.temporaries = state.temporaries.push(retained_attributes)
             state.release_failed = true
             admitted = false
-    val retained_argv = _windows_pty_free_v1(state.heap, argv)
-    if retained_argv != 0:
-        state.temporaries = state.temporaries.push(retained_argv)
-        state.release_failed = true
-        admitted = false
+    state = _windows_pty_launch_release_v1(state)
+    if retained_attributes != 0: state.temporaries = state.temporaries.push(retained_attributes)
+    if state.release_failed: admitted = false
     if thread != 0:
         state.thread = _windows_pty_close_handle_v1(thread)
         if state.thread != 0:
@@ -419,7 +474,7 @@ pub fn windows_pty_close_v1(handle: i32) -> bool:
     _windows_pty_reap_v1()
     if handle < 0 or (handle as i64) >= _windows_pty_slots_v1.len(): return false
     var state = _windows_pty_slots_v1[handle as i64]
-    if state.closed: return not state.failed
+    if state.closed: return _windows_pty_cleanup_complete_v1(state)
     if state.closing: return false
     state.closing = true
     _windows_pty_slots_v1[handle as i64] = state
@@ -445,4 +500,4 @@ pub fn windows_pty_close_v1(handle: i32) -> bool:
         if state.closed: _windows_pty_active_v1 = _windows_pty_active_v1 - 1
         else: _windows_pty_quarantine_v1 = _windows_pty_quarantine_v1.push(handle as i64)
     _windows_pty_slots_v1[handle as i64] = state
-    state.closed and not state.failed
+    _windows_pty_cleanup_complete_v1(state)

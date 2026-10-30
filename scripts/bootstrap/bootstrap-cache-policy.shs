@@ -69,3 +69,51 @@ bootstrap_strategy_failure_policy() {
 # Compatibility hook: automatic scope pruning is prohibited. An explicit
 # owned, idle lineage clean is provided by clean-bootstrap-cache.shs.
 bootstrap_prune_stale_seed_scope_dirs() { return 0; }
+
+# Bounded retention for keyed cache directories: under <parent>, keep the
+# <current> child plus the newest others, <keep> children in total. A child
+# with any file modified in the last 6 hours, or holding a .in-use.<pid>
+# marker of a live process, is in use by another lane and is never removed.
+# The caller's current child gets its own marker. Eviction renames first so a
+# half-deleted dir is never reused.
+bootstrap_prune_lru_dirs() (
+  [ "$#" -eq 4 ] || return 64
+  lru_parent=$1 lru_current=$2 lru_keep=$3 lru_label=$4
+  case "$lru_keep" in
+    [1-9]|[1-9][0-9]*) ;;
+    *) echo "error: $lru_label keep count must be a positive integer (got '$lru_keep')" >&2; return 1 ;;
+  esac
+  [ -d "$lru_parent" ] || return 0
+  if [ -d "$lru_parent/$lru_current" ]; then
+    touch "$lru_parent/$lru_current"
+    : > "$lru_parent/$lru_current/.in-use.$$" 2>/dev/null || :
+  fi
+  lru_kept=0
+  ls -1dt -- "$lru_parent"/* 2>/dev/null | while IFS= read -r lru_d; do
+    [ -d "$lru_d" ] || continue
+    lru_name=${lru_d##*/}
+    case "$lru_name" in *.evict.*) rm -rf "$lru_d"; continue ;; esac
+    [ "$lru_name" != "$lru_current" ] || continue
+    if [ "$lru_kept" -lt "$((lru_keep - 1))" ]; then
+      lru_kept=$((lru_kept + 1)); continue
+    fi
+    lru_live=0
+    for lru_marker in "$lru_d"/.in-use.*; do
+      [ -e "$lru_marker" ] || continue
+      lru_pid=${lru_marker##*.in-use.}
+      case "$lru_pid" in ''|*[!0-9]*) continue ;; esac
+      ! kill -0 "$lru_pid" 2>/dev/null || lru_live=1
+    done
+    # find -mmin is GNU and BSD; a failing find keeps the dir (fail closed).
+    lru_recent=$(find "$lru_d" -maxdepth 5 -mmin -360 -print 2>/dev/null | head -1) || lru_recent=failed
+    if [ "$lru_live" -eq 1 ] || [ -n "$lru_recent" ]; then
+      echo "bootstrap: keeping in-use $lru_label $lru_name" >&2; continue
+    fi
+    if mv "$lru_d" "$lru_d.evict.$$"; then
+      chmod -R u+w "$lru_d.evict.$$" 2>/dev/null
+      rm -rf "$lru_d.evict.$$" && echo "bootstrap: evicted $lru_label $lru_name" >&2
+    else
+      echo "bootstrap: warning: could not evict $lru_label $lru_name" >&2
+    fi
+  done
+)

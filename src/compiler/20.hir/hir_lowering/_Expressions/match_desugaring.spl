@@ -223,7 +223,7 @@ impl HirLowering:
     me hir_wildcard_pattern(span: Span) -> HirPattern:
         """A fresh `_` sub-pattern, used to fill the payload slots this
         lane is not currently interrogating."""
-        HirPattern(kind: HirPatternKind.Wildcard, type_: nil, span: span)
+        HirPattern(kind: HirPatternKind.Wildcard, has_type_: false, type_: nil, span: span)
 
     me enum_wildcard_payload(payload: HirPatternPayload?, span: Span) -> HirPatternPayload?:
         """The same payload SHAPE as `payload` with every sub-pattern
@@ -255,7 +255,7 @@ impl HirLowering:
         pre-existing, tested MIR enum lowering (lower_enum_match /
         emit_enum_payload_deep, switch_operators_calls.spl) already handles,
         so this reuses proven machinery instead of adding a new node."""
-        val pat = HirPattern(kind: HirPatternKind.Enum(etype, variant, self.enum_wildcard_payload(payload, span)), type_: nil, span: span)
+        val pat = HirPattern(kind: HirPatternKind.Enum(etype, variant, self.enum_wildcard_payload(payload, span)), has_type_: false, type_: nil, span: span)
         val yes = HirBlock(stmts: [], has: true, value: HirExpr(kind: HirExprKind.BoolLit(true), has_type_: false, type_: nil, span: span), span: span)
         val no = HirBlock(stmts: [], has: true, value: HirExpr(kind: HirExprKind.BoolLit(false), has_type_: false, type_: nil, span: span), span: span)
         val arm_yes = HirMatchArm(pattern: pat, has_guard: false, guard: nil, body: yes, span: span)
@@ -269,7 +269,7 @@ impl HirLowering:
         enum_variant_test -- it is the only payload accessor HIR/MIR agree on
         (there is no `Field`/`Index` path into an enum payload)."""
         val fresh = self.symbols.define("__mp_enum_slot", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
-        val binding_pattern = HirPattern(kind: HirPatternKind.Binding(fresh, false), type_: nil, span: span)
+        val binding_pattern = HirPattern(kind: HirPatternKind.Binding(fresh, false), has_type_: false, type_: nil, span: span)
         var pl_out: HirPatternPayload? = nil
         if val pl = payload:
             match pl:
@@ -291,7 +291,7 @@ impl HirLowering:
                         else:
                             nf = nf.push((f.0, self.hir_wildcard_pattern(span)))
                     pl_out = Some(HirPatternPayload.Struct(nf))
-        val pat = HirPattern(kind: HirPatternKind.Enum(etype, variant, pl_out), type_: nil, span: span)
+        val pat = HirPattern(kind: HirPatternKind.Enum(etype, variant, pl_out), has_type_: false, type_: nil, span: span)
         val hit = HirBlock(stmts: [], has: true, value: HirExpr(kind: HirExprKind.Var(fresh), has_type_: false, type_: nil, span: span), span: span)
         val miss = HirBlock(stmts: [], has: true, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: span), span: span)
         val arm_hit = HirMatchArm(pattern: pat, has_guard: false, guard: nil, body: hit, span: span)
@@ -529,7 +529,7 @@ impl HirLowering:
         var out = arm
         match arm.pattern.kind:
             case Enum(etype, variant, _):
-                val np = HirPattern(kind: HirPatternKind.Enum(etype, variant, Some(HirPatternPayload.Tuple(pats))), type_: nil, span: arm.pattern.span)
+                val np = HirPattern(kind: HirPatternKind.Enum(etype, variant, Some(HirPatternPayload.Tuple(pats))), has_type_: false, type_: nil, span: arm.pattern.span)
                 out = HirMatchArm(pattern: np, has_guard: arm.has_guard, guard: arm.guard, body: body, span: arm.span)
             case _:
                 ()
@@ -659,7 +659,7 @@ impl HirLowering:
                     ()
             if is_range:
                 val fresh = self.symbols.define("__mp_payload_range", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
-                new_pats = new_pats.push(HirPattern(kind: HirPatternKind.Binding(fresh, false), type_: nil, span: span))
+                new_pats = new_pats.push(HirPattern(kind: HirPatternKind.Binding(fresh, false), has_type_: false, type_: nil, span: span))
                 val fresh_var = HirExpr(kind: HirExprKind.Var(fresh), has_type_: false, type_: nil, span: span)
                 val rc = self.pattern_test_condition(fresh_var, pats[pi], span)
                 if val rcv = rc:
@@ -705,18 +705,19 @@ impl HirLowering:
         sub-patterns...are skipped and simply left unbound"), which left `x`/
         `y` referencing a never-populated local -- observed as a MIR/
         interpreter crash ("undefined field 'id': cannot access field on
-        value of type 'nil'"), not a clean compile error. A sub-pattern that
-        needs a genuine runtime TEST (Literal/Range/Or/Enum) has no
-        single-dispatch-arm fallthrough semantics available here and is NOT
-        silently accepted: it is a loud compile error instead (self.error),
-        never a silently-wrong bind. Only Tuple/Struct sub-patterns are
-        flattened (the two kinds destructure_pattern_prelude actually
-        destructures); everything else hits the explicit error() case below
-        rather than being inferred from pattern_test_condition's nil/non-nil
-        split (both a genuinely-irrefutable AND several genuinely-refutable
-        kinds return nil there, so that split alone is not a safe signal for
-        this dispatch). Arms with no complex sub-pattern (the pre-existing,
-        already-working shape) pass through completely unchanged."""
+        value of type 'nil'), not a clean compile error. Tuple/Struct payload
+        children can contain refutable nested patterns as well as bindings.
+        Before replacing such an aggregate with a fresh binding, collect any
+        tests returned by pattern_test_condition and attach their conjunction
+        as a synthesized arm guard. A false test then uses the ordinary enum
+        guard edge to fall through to the next arm. Keep the destructure
+        prelude for binding creation: when a source guard reads nested names,
+        wrap that guard in a block that executes the prelude first, even when
+        the nested pattern itself has no test. Also retain the prelude in the
+        selected arm body. This branch synthesizes tests only for its explicit
+        Tuple/Struct cases; the dedicated handling/error policy for other
+        payload kinds remains in force. Arms with no complex sub-pattern (the
+        pre-existing, already-working shape) pass through completely unchanged."""
         match arm.pattern.kind:
             case Enum(etype, variant, payload):
                 var out_arm = arm
@@ -761,6 +762,7 @@ impl HirLowering:
                             if any_complex:
                                 var new_patterns: [HirPattern] = []
                                 var prelude: [HirStmt] = []
+                                var nested_pattern_tests: [HirExpr] = []
                                 for raw_pat in patterns:
                                     val pat: HirPattern = raw_pat
                                     match pat.kind:
@@ -796,27 +798,29 @@ impl HirLowering:
                                             val fresh_pat = HirPattern(kind: HirPatternKind.Binding(fresh, false), has_type_: nested_known, type_: nested_type, span: span)
                                             new_patterns = new_patterns.push(fresh_pat)
                                             val fresh_var = HirExpr(kind: HirExprKind.Var(fresh), has_type_: nested_known, type_: nested_type, span: span)
-                                            # ONLY Tuple/Struct sub-patterns are safe to flatten this
-                                            # way: they are the sole two kinds destructure_pattern_
-                                            # prelude actually destructures (everything else --
-                                            # Literal/Range/Or/Enum/Error -- is a documented no-op
-                                            # there, and pattern_test_condition's catch-all ALSO
-                                            # returns nil for those same kinds -- so relying on
-                                            # "test == nil means irrefutable" is NOT a safe signal
-                                            # for this dispatch; a nested Enum sub-pattern in
-                                            # particular genuinely needs a runtime variant test with
-                                            # no fallthrough-to-next-arm semantics available here, and
-                                            # must not be silently treated as always-matching). Match
-                                            # explicitly on the sub-pattern kind instead of trusting
-                                            # pattern_test_condition's nil/non-nil split.
+                                            # Only Tuple/Struct sub-patterns are flattened here because
+                                            # destructure_pattern_prelude recursively creates their
+                                            # bindings. Their refutable descendant predicates are
+                                            # collected separately with pattern_test_condition and
+                                            # evaluated as a guard before this body can be selected.
+                                            # For a source guard, the same prelude must also run in
+                                            # the guard block even when the aggregate has no predicate,
+                                            # so nested names remain visible. Other direct payload
+                                            # kinds stay on their existing dedicated paths.
                                             match pat.kind:
                                                 case Tuple(_):
+                                                    val nested_test_opt = self.pattern_test_condition(fresh_var, pat, span)
+                                                    if val nested_test = nested_test_opt:
+                                                        nested_pattern_tests = nested_pattern_tests.push(nested_test)
                                                     val sub_stmts = self.destructure_pattern_prelude(fresh_var, pat, span)
                                                     var si = 0
                                                     while si < sub_stmts.len():
                                                         prelude = prelude.push(sub_stmts[si])
                                                         si = si + 1
                                                 case Struct(_, _):
+                                                    val nested_test_opt2 = self.pattern_test_condition(fresh_var, pat, span)
+                                                    if val nested_test2 = nested_test_opt2:
+                                                        nested_pattern_tests = nested_pattern_tests.push(nested_test2)
                                                     val sub_stmts2 = self.destructure_pattern_prelude(fresh_var, pat, span)
                                                     var si2 = 0
                                                     while si2 < sub_stmts2.len():
@@ -842,8 +846,19 @@ impl HirLowering:
                                     new_body_stmts = new_body_stmts.push(arm.body.stmts[bi])
                                     bi = bi + 1
                                 val new_body = HirBlock(stmts: new_body_stmts, has: arm.body.has, value: arm.body.value, span: arm.body.span)
-                                val new_pattern = HirPattern(kind: HirPatternKind.Enum(etype, variant, Some(HirPatternPayload.Tuple(new_patterns))), type_: nil, span: arm.pattern.span)
-                                out_arm = HirMatchArm(pattern: new_pattern, has_guard: arm.has_guard, guard: arm.guard, body: new_body, span: arm.span)
+                                val new_pattern = HirPattern(kind: HirPatternKind.Enum(etype, variant, Some(HirPatternPayload.Tuple(new_patterns))), has_type_: false, type_: nil, span: arm.pattern.span)
+                                var flattened_has_guard = arm.has_guard
+                                var flattened_guard = arm.guard
+                                if arm.has_guard and prelude.len() > 0:
+                                    flattened_guard = HirExpr(kind: HirExprKind.Block(HirBlock(stmts: prelude, has: true, value: arm.guard, span: arm.guard.span)), has_type_: false, type_: nil, span: arm.guard.span)
+                                if nested_pattern_tests.len() > 0:
+                                    val nested_pattern_test = self.combine_pattern_conditions(nested_pattern_tests, nested_pattern_tests.len(), HirBinOp.And, span)
+                                    if flattened_has_guard:
+                                        flattened_guard = _hir_match_binary_payload(HirBinOp.And, nested_pattern_test, flattened_guard, span)
+                                    else:
+                                        flattened_has_guard = true
+                                        flattened_guard = nested_pattern_test
+                                out_arm = HirMatchArm(pattern: new_pattern, has_guard: flattened_has_guard, guard: flattened_guard, body: new_body, span: arm.span)
                         case Struct(_):
                             ()
                 out_arm

@@ -1,6 +1,6 @@
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.types.dim_constraints.{DimCheckTiming}
-use compiler.hir.hir_types.{HirTypeKind}
+use compiler.hir.hir_types.{HirTypeKind, DeviceType}
 # Pipeline, Dimension, Control Flow, and Effect Inference
 #
 # Implements advanced operator inference and program-level type checking:
@@ -74,7 +74,12 @@ impl HmInferContext:
         val resolved_right = self.resolve(right)
 
         match (resolved_left.kind, resolved_right.kind):
-            case (Function(params_f, ret_f, _), Function(params_g, ret_g, _)):
+            case (Function(params_f_p, ret_f_p, _), Function(params_g_p, ret_g_p, _)):
+                # @workaround bug=enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24 reason=tuple-pattern variant payload binders carry no static type; rebind to typed locals
+                val params_f: [HirType] = params_f_p
+                val ret_f: HirType = ret_f_p
+                val params_g: [HirType] = params_g_p
+                val ret_g: HirType = ret_g_p
                 if params_g.len() == 0:
                     return Err(TypeInferError.Other("composed function must accept at least one argument", span))
                 # f's output must match g's input
@@ -122,7 +127,12 @@ impl HmInferContext:
 
         match (resolved_left.kind, resolved_right.kind):
             # Two functions: create parallel function
-            case (Function(params_l, ret_l, _), Function(params_r, ret_r, _)):
+            case (Function(params_l_p, ret_l_p, _), Function(params_r_p, ret_r_p, _)):
+                # @workaround bug=enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24 reason=tuple-pattern variant payload binders carry no static type; rebind to typed locals
+                val params_l: [HirType] = params_l_p
+                val ret_l: HirType = ret_l_p
+                val params_r: [HirType] = params_r_p
+                val ret_r: HirType = ret_r_p
                 var combined_params: [HirType] = []
                 for p in params_l:
                     combined_params = combined_params.push(p)
@@ -137,7 +147,12 @@ impl HmInferContext:
                     span: span
                 ))
             # Two layers: create parallel layer
-            case (Layer(in_l, out_l), Layer(in_r, out_r)):
+            case (Layer(in_l_p, out_l_p), Layer(in_r_p, out_r_p)):
+                # @workaround bug=enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24 reason=tuple-pattern variant payload binders carry no static type; rebind to typed locals
+                val in_l: [DimExpr] = in_l_p
+                val out_l: [DimExpr] = out_l_p
+                val in_r: [DimExpr] = in_r_p
+                val out_r: [DimExpr] = out_r_p
                 # Parallel layers have combined inputs and outputs
                 var combined_in: [DimExpr] = []
                 var combined_out: [DimExpr] = []
@@ -170,7 +185,12 @@ impl HmInferContext:
         val resolved_right = self.resolve(right)
 
         match (resolved_left.kind, resolved_right.kind):
-            case (Layer(in_l, out_l), Layer(in_r, out_r)):
+            case (Layer(in_l_p, out_l_p), Layer(in_r_p, out_r_p)):
+                # @workaround bug=enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24 reason=tuple-pattern variant payload binders carry no static type; rebind to typed locals
+                val in_l: [DimExpr] = in_l_p
+                val out_l: [DimExpr] = out_l_p
+                val in_r: [DimExpr] = in_r_p
+                val out_r: [DimExpr] = out_r_p
                 # Add dimension constraint: out_l must be compatible with in_r
                 self.dim_solver.add_layer_compatible(out_l, in_r, span)
 
@@ -181,7 +201,10 @@ impl HmInferContext:
                 ))
 
             # Allow connecting with inference variables
-            case (Layer(in_l, out_l), Infer(_, _)):
+            case (Layer(in_l_p, out_l_p), Infer(_, _)):
+                # @workaround bug=enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24 reason=tuple-pattern variant payload binders carry no static type; rebind to typed locals
+                val in_l: [DimExpr] = in_l_p
+                val out_l: [DimExpr] = out_l_p
                 # Create fresh layer type for right side
                 val batch_dim = self.dim_solver.fresh_var(span)
                 var in_dims: [DimExpr] = [batch_dim]
@@ -203,7 +226,10 @@ impl HmInferContext:
                             span: span
                         ))
 
-            case (Infer(_, _), Layer(in_r, out_r)):
+            case (Infer(_, _), Layer(in_r_p, out_r_p)):
+                # @workaround bug=enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24 reason=tuple-pattern variant payload binders carry no static type; rebind to typed locals
+                val in_r: [DimExpr] = in_r_p
+                val out_r: [DimExpr] = out_r_p
                 # Create fresh layer type for left side
                 val batch_dim = self.dim_solver.fresh_var(span)
                 var in_dims: [DimExpr] = [batch_dim]
@@ -262,7 +288,13 @@ impl HmInferContext:
         val resolved_right = self.resolve(right)
 
         match (resolved_left.kind, resolved_right.kind):
-            case (Tensor(elem_l, dims_l, dev_l), Tensor(elem_r, dims_r, dev_r)):
+            case (Tensor(elem_l_p, dims_l_p, dev_l_p), Tensor(elem_r_p, dims_r_p, dev_r_p)):
+                # @workaround bug=enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24 reason=tuple-pattern variant payload binders carry no static type; rebind to typed locals
+                val elem_l: HirType = elem_l_p
+                val dims_l: [DimExpr] = dims_l_p
+                val dev_l: DeviceType? = dev_l_p
+                val elem_r: HirType = elem_r_p
+                val dims_r: [DimExpr] = dims_r_p
                 # Unify element types
                 match self.unify(elem_l, elem_r):
                     case Err(e): return Err(e)
@@ -302,7 +334,13 @@ impl HmInferContext:
         val resolved_right = self.resolve(right)
 
         match (resolved_left.kind, resolved_right.kind):
-            case (Tensor(elem_l, dims_l, dev), Tensor(elem_r, dims_r, _)):
+            case (Tensor(elem_l_p, dims_l_p, dev_p), Tensor(elem_r_p, dims_r_p, _)):
+                # @workaround bug=enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24 reason=tuple-pattern variant payload binders carry no static type; rebind to typed locals
+                val elem_l: HirType = elem_l_p
+                val dims_l: [DimExpr] = dims_l_p
+                val dev: DeviceType? = dev_p
+                val elem_r: HirType = elem_r_p
+                val dims_r: [DimExpr] = dims_r_p
                 # Unify element types
                 match self.unify(elem_l, elem_r):
                     case Err(e): return Err(e)
@@ -315,14 +353,22 @@ impl HmInferContext:
                     span: span
                 ))
 
-            case (Tensor(elem, dims, dev), _):
+            case (Tensor(elem_p, dims_p, dev_p), _):
+                # @workaround bug=enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24 reason=tuple-pattern variant payload binders carry no static type; rebind to typed locals
+                val elem: HirType = elem_p
+                val dims: [DimExpr] = dims_p
+                val dev: DeviceType? = dev_p
                 # Scalar broadcast
                 Ok(HirType(
                     kind: HirTypeKind.Tensor(elem, dims, dev),
                     span: span
                 ))
 
-            case (_, Tensor(elem, dims, dev)):
+            case (_, Tensor(elem_p, dims_p, dev_p)):
+                # @workaround bug=enum_payload_type_mismatch_tuple_pattern_binders_2026-10-24 reason=tuple-pattern variant payload binders carry no static type; rebind to typed locals
+                val elem: HirType = elem_p
+                val dims: [DimExpr] = dims_p
+                val dev: DeviceType? = dev_p
                 # Scalar broadcast
                 Ok(HirType(
                     kind: HirTypeKind.Tensor(elem, dims, dev),

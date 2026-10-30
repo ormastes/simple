@@ -1,15 +1,83 @@
 # A nil sentinel in a non-optional scalar slot must refuse the blob.
+# The guard reads the RAW wire token: `value == nil` on a decoded i64/bool is
+# miscompiled under staged-native codegen (every 3 / every true reads as nil),
+# which made the selfcheck refuse nearly every module in the phase-3 self-host
+# build. Nil TEXT slots are legitimate and round-trip as `\N` by design, so
+# they must NOT be refused (put_text/put_nil_text_wire).
 use std.spec.*
+use std.io_runtime.{file_read}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
-use compiler.hir.generated.hir_codec.{hc_dec_hir_expr_kind}
+use compiler.hir.generated.hir_codec.{hc_dec_hir_expr_kind, hc_dec_asm_target_spec}
 
 describe "HIR codec non-optional scalar decode":
+    it "keeps required-scalar rejection and names the owning field":
+        val src = file_read("src/compiler/20.hir/generated/hir_codec.spl")
+        expect(src.contains("r.reject_malformed(\"nil_in_non_optional_scalar:LayoutAttr.has_explicit_align\")")).to_equal(true)
+        expect(src.contains("r.reject_malformed(\"nil_in_non_optional_scalar:DimExprKind.Literal.value\")")).to_equal(true)
+
     it "rejects N in the IntLit value slot":
         var r = FlatPoolReader.new("0\nN\n0\n")
         val _k = hc_dec_hir_expr_kind(r)
         expect(r.ok).to_equal(false)
+        expect(r.failure_detail).to_equal("nil_in_non_optional_scalar:HirExprKind.IntLit.value")
+
+    it "reports the owning struct field when a required bool is nil":
+        var r = FlatPoolReader.new("0\nN\n\\N\n0\n\\N\n0\n\\N\n0\n")
+        val _s = hc_dec_asm_target_spec(r)
+        expect(r.ok).to_equal(false)
+        expect(r.failure_detail).to_equal("nil_in_non_optional_scalar:AsmTargetSpec.has_os")
 
     it "accepts a real integer in the IntLit value slot":
         var r = FlatPoolReader.new("0\n7\n0\n")
         val _k = hc_dec_hir_expr_kind(r)
         expect(r.ok).to_equal(true)
+
+    it "accepts 3 in the IntLit value slot (staged-native i64 == nil hazard)":
+        var r = FlatPoolReader.new("0\n3\n0\n")
+        val _k = hc_dec_hir_expr_kind(r)
+        expect(r.ok).to_equal(true)
+
+    it "accepts a true bool slot (staged-native bool == nil hazard)":
+        # AsmTargetSpec frame: 0 archs, has_os=true, os=nil, has_abi=false,
+        # abi=nil, has_backend=false, backend=nil, 0 version constraints.
+        var r = FlatPoolReader.new("0\n1\n\\N\n0\n\\N\n0\n\\N\n0\n")
+        val _s = hc_dec_asm_target_spec(r)
+        expect(r.ok).to_equal(true)
+
+    it "accepts a nil text slot (AsmTargetSpec os/abi/backend unset)":
+        var r = FlatPoolReader.new("0\n0\n\\N\n0\n\\N\n0\n\\N\n0\n")
+        val _s = hc_dec_asm_target_spec(r)
+        expect(r.ok).to_equal(true)
+
+# Encoder side of the same class: a Dict<_, bool> value read straight off a
+# field projection (`node.f[k]`) decodes through the i64 `>>3` arm under
+# staged-native codegen, so put_bool renders "1"/"0" and writes N; every
+# module with an impl (HirImpl.method_return_is_array/_optional) was then
+# refused by the selfcheck. The generator must route those reads through a
+# typed Dict<_, bool> local.
+# doc/08_tracking/bug/hir_cache_selfcheck_nil_in_non_optional_scalar_2026-10-25.md
+describe "HIR codec Dict<_, bool> encode":
+    it "never reads a bool dict value straight off a field projection":
+        val src = file_read("src/compiler/20.hir/generated/hir_codec.spl")
+        var direct = 0
+        for line in src.split("\n"):
+            val t = line.trim()
+            if t.starts_with("w.put_bool(node.") and t.contains("["):
+                direct = direct + 1
+        expect(direct).to_equal(0)
+        expect(src.contains("val dm9: Dict<text, bool> = node.method_return_is_array")).to_equal(true)
+        expect(src.contains("val dm10: Dict<text, bool> = node.method_return_is_optional")).to_equal(true)
+
+    it "never renders a dict bool value through put_bool (branches on it)":
+        # Stage2 d72188e68ec still wrote N via put_bool(dm9[dk9]): the
+        # int-decoded word renders as 1/0. Only literal put_bool may follow.
+        val src = file_read("src/compiler/20.hir/generated/hir_codec.spl")
+        var rendered = 0
+        for line in src.split("\n"):
+            val t = line.trim()
+            if t.starts_with("w.put_bool(dm"):
+                rendered = rendered + 1
+        expect(rendered).to_equal(0)
+        expect(src.contains("        if dm9[dk9]:\n            w.put_bool(true)\n        else:\n            w.put_bool(false)\n")).to_equal(true)
+        val gen = file_read("src/app/compiler_schema/codec_gen.spl")
+        expect(gen.contains("w.put_bool(true)")).to_equal(true)

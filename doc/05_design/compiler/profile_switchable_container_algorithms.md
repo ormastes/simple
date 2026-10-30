@@ -1,5 +1,42 @@
 # Profile-switchable container detail design
 
+## 2026-10-27 typed capability admission
+
+Use the [shared capability contract](../../04_architecture/compiler/collection_backend_capabilities.md)
+for the runtime/compiler bridge. Existing `AdaptiveSetAlgorithm`,
+`AdaptiveSetAttribute`, `AdaptiveSetProfile` and workload observations keep
+their original meanings; map them through typed adapters to the proposed
+common description. Backend capability is not another `.sprof` threshold or
+target string. Preserve ordinary overwrite/remove APIs separately from the
+strict registry's insert-once/request API and stable AsyncRef result.
+
+Resolve semantics → required capabilities → layout/ownership → memory/progress
+before cost ranking. Explicit unsupported requests diagnose; advisory choices
+can keep Original. No profile may enable a forbidden transition, hidden lock,
+changed key equality, unqualified native provider, or capture callback that
+violates progress. Report no-capture/static-only/constructor-only and supported
+directed migration pairs through common explain fields. A static capability tag
+does not imply new accepted annotation syntax. See CBC-01–12 in the
+[TDD plan](../../03_plan/sys_test/collection_backend_capabilities.md); all new
+cases remain planned/UNRUN, including native and future pure-Simple parity.
+
+## Status reconciliation (2026-10-25)
+
+Verified against `origin/release/1.0.0` and its git log on 2026-10-25. Docs-only; no tests were run for this note.
+
+| Area | Status | Evidence |
+|---|---|---|
+| Adaptive text/generic set/map runtimes (`src/lib/nogc_sync_mut/src/collections/adaptive_*.spl`) | PARTIAL — source present; no admitted pure-Simple execution receipt | source tree |
+| `@collection_algorithm` parser rewrite and site identity (`src/compiler/10.frontend/core/collection_feedback.spl`) | PARTIAL — source present; parser feedback state gained take/install in PR #4535 (`6578c2c1037`, merge `de2297fcc5d`) | git log |
+| `.sprof` v2 collection profile, capture channel (`runtime_collection_capture.c`, `sffi/collection_capture.spl`), `simple run --collection-profile-out` | PARTIAL — source present; four-metric capture and append path not executed on a qualified runner | source tree |
+| Guarded MIR consumer, literal membership only (`50.mir/_MirLoweringExpr/collection_literal_membership.spl`) | PARTIAL — landed `97b13f9eb09`, explicit target admission `bb7d5313b2f` (2026-10-11) | git log |
+| Typed CLI policy/budget/explanation (`88ca1e4dfde`, `93bc526ff95`, `e1c2cce4157`) | PARTIAL — source only | git log |
+| General typed CollectionPlan lowering (generic set/map, nested/hash/merge joins) | OPEN | no consumer beyond literal membership |
+| Two-run A/B profile selection on native Windows and Linux/WSL (umbrella done gate) | OPEN — no execution evidence; Item 7 remains TEST_BLOCKED per the 2026-10-16 continuation (PR #3504, `bcb8876fbe3`) | no receipts |
+| PSC-AC-001..008 | OPEN — none has an execution receipt | — |
+
+Item 7 is **not DONE** on any host.
+
 ## Concrete typed integration and TDD contract (2026-10-03)
 
 The [architecture acceptance matrix](../../04_architecture/compiler/profile_switchable_container_algorithms.md#completion-contract-supplement-2026-10-03) binds PSC-AC-001..008 to REQ-PSC-001..008. Existing unary typed extraction must be extended, not replaced with source-name matching.

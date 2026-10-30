@@ -1,0 +1,74 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Module-scoped monomorphization plan
+
+Each module plans only the instances its own code requests, read through
+concrete TLDR views. Identity is the ConcreteTldrKey + MonoSemanticKey and the
+symbol is a deterministic link name. The first requester to win the instance
+cache's single-flight produces the instance. Once it is published, others
+reuse it; while it is in flight, others await it.
+
+Interpreter-lane evidence only. The MonomorphizationPass/MIR wiring and the
+native path are UNRUN.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+
+use std.spec
+use compiler.common.cache_contract.generic_tldr_view_v1.*
+use compiler.common.cache_contract.guard_id_v1.{active_guard_root_empty_v1}
+use compiler.frontend.cache_artifact.generic_tldr_projector.*
+use compiler.mono.model.generic_subst_model.*
+use compiler.driver.cache.generic_tldr_view_table_v1.*
+use compiler.driver.cache.generic_instance_cache_v1.*
+use compiler.driver.cache.mono_module_scope_v1.*
+
+fn pair_section() -> GenericTemplateSectionV1:
+    val d = GenericDeclInputV1(module_path: "pkg_a", name: "Pair", params: ["First", "Second"],
+        param_kinds: [GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_TYPE],
+        fields: [GenericFieldInputV1(name: "first", type_text: "First"),
+            GenericFieldInputV1(name: "second", type_text: "Second")],
+        visibility_root: "vis:pub", active_guard_root: active_guard_root_empty_v1("").root_digest,
+        source_digest: "src:pair")
+    build_generic_template_section_v1([project_generic_template_v1(d).unwrap()])
+
+fn view_of(args: [MType]) -> ConcreteTldrAstViewV1:
+    acquire_concrete_tldr(generic_tldr_view_table_new(), pair_section(), "pkg_a.Pair", args,
+        "snap:1", "profile:default", active_guard_root_empty_v1("profile:default")).view
+
+fn pif() -> ConcreteTldrAstViewV1:
+    view_of([mt_con("i64"), mt_con("f64")])
+
+describe "module-scoped mono plan":
+    it "first requester produces; a concurrent requester awaits the same instance":
+        val cache = generic_instance_cache_new()
+        val a = mono_module_plan_v1(cache, "pkg_b", [pif()], 0)
+        val c = mono_module_plan_v1(cache, "pkg_c", [pif()], 0)
+        expect(a.requests[0].action).to_equal(MONO_PLAN_PRODUCE_V1)
+        expect(c.requests[0].action).to_equal(MONO_PLAN_AWAIT_V1)
+        expect(c.requests[0].link_name).to_equal(a.requests[0].link_name)
+
+    it "reuses an instance once it is published":
+        val cache = generic_instance_cache_new()
+        val a = mono_module_plan_v1(cache, "pkg_b", [pif()], 0)
+        val sem = generic_instance_semantic_key_v1(pif())[0]
+        expect(cache.put_mir(a.requests[0].instance_key, sem, "pkg_b", [1u8])).to_equal(true)
+        val d = mono_module_plan_v1(cache, "pkg_d", [pif()], 5)
+        expect(d.requests[0].action).to_equal(MONO_PLAN_REUSE_V1)
+
+    it "dedups repeated requests in one module and keeps reversed arguments apart":
+        val cache = generic_instance_cache_new()
+        val rev = view_of([mt_con("f64"), mt_con("i64")])
+        val p = mono_module_plan_v1(cache, "pkg_b", [pif(), pif(), rev], 0)
+        expect(p.requests.len()).to_equal(2)
+        expect(p.requests[0].link_name == p.requests[1].link_name).to_equal(false)
+        expect(p.requests[0].link_name.starts_with("__spl_inst$")).to_equal(true)
+
+    it "never plans a non-Concrete view as codegen input":
+        val cache = generic_instance_cache_new()
+        val p = mono_module_plan_v1(cache, "pkg_b", [view_of([mt_var("U"), mt_con("f64")])], 0)
+        expect(p.requests.len()).to_equal(0)
+        expect(p.rejected.len()).to_equal(1)

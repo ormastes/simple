@@ -1,0 +1,298 @@
+# Synchronous explicit-endpoint CoreMux client. The server is the sole owner
+# of children, leases and receipt history; these fields are transport bookkeeping.
+# Keep one composition-owned instance. Copies never duplicate server authority.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.port_v1.{CoreMuxV1}
+use std.common.contracts.mux.validation_v1.*
+use std.common.contracts.mux.request_validation_v1.*
+use std.common.contracts.mux.wire_types_v1.*
+use std.common.contracts.mux.wire_envelope_v1.*
+use std.common.contracts.mux.wire_exchange_v1.*
+use std.common.contracts.mux.wire_validation_v1.*
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms}
+use std.nogc_sync_mut.sosix.mux.config_v1.*
+use std.nogc_sync_mut.sosix.mux.admission_v1.*
+use std.nogc_sync_mut.sosix.mux.transport_v1.*
+
+fn call_timeout(call: MuxWireCallV1) -> i64:
+    match call:
+        case MuxWireCallV1.Connect(_, deadline): deadline.timeout_ms
+        case MuxWireCallV1.Query(_, _, deadline): deadline.timeout_ms
+        case MuxWireCallV1.Execute(request): request.deadline.timeout_ms
+        case MuxWireCallV1.PollEvents(_, _, _, deadline): deadline.timeout_ms
+        case MuxWireCallV1.Disconnect(request): request.deadline.timeout_ms
+
+fn query_operation(query: MuxQueryV1) -> MuxOperationV1:
+    match query:
+        case MuxQueryV1.Snapshot(_, _): MuxOperationV1.Snapshot
+        case MuxQueryV1.ResolveTarget(_, _, _): MuxOperationV1.ResolveTarget
+        case MuxQueryV1.Capture(_): MuxOperationV1.Capture
+        case MuxQueryV1.CurrentContext(_): MuxOperationV1.CurrentContext
+        case MuxQueryV1.RequestStatus(_): MuxOperationV1.RequestStatus
+        case MuxQueryV1.Capabilities: MuxOperationV1.Capabilities
+
+pub class SosixMuxClientV1 with CoreMuxV1:
+    config: MuxSosixConfigV1
+    next_correlation: u64 = 1
+    connection: MuxConnectionV1? = nil
+    lease_active: bool = false
+    cleanup_only: bool = false
+    connect_uncertain: bool = false
+    recovery_reply_limit: i64 = 4096
+    admission_rejection: MuxErrorV1? = nil
+    lease_started_ms: i64 = 0
+    lease_expires_ms: i64 = 0
+    recovery_expires_ms: i64 = 0
+    last_disconnect: MuxDisconnectRequestV1? = nil
+
+    fn backend() -> MuxBackendV1: MuxBackendV1.Smux
+
+    # Exposes only a received owner-issued handle for explicit pending cleanup.
+    # It does not mint a lease or certify that the server still accepts it.
+    pub fn recovery_handle() -> MuxHandleV1?:
+        match self.connection:
+            case Some(connection): Some(connection.snapshot.handle)
+            case nil: nil
+
+    fn known(handle: MuxHandleV1, recovery: bool, request_id: u64) -> Result<MuxConnectionV1, MuxErrorV1>:
+        val connection = match self.connection:
+            case Some(value): value
+            case nil: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "no admitted client lease", request_id, MuxCommitStateV1.NotApplied, false))
+        if not mux_wire_same_handle_v1(handle, connection.snapshot.handle):
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "client lease identity differs", request_id, MuxCommitStateV1.NotApplied, false))
+        val now = sosix_time_now_monotonic_ms()
+        if now < self.lease_started_ms or now >= self.recovery_expires_ms:
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "lease recovery interval ended", request_id, MuxCommitStateV1.Unknown, false))
+        if not recovery and (not self.lease_active or now >= self.lease_expires_ms):
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "normal lease authority expired or revoked", request_id, MuxCommitStateV1.NotApplied, false))
+        Ok(connection)
+
+    me exchange(call: MuxWireCallV1, started_ms: i64) -> Result<MuxWireResultV1, MuxErrorV1>:
+        val request_id = mux_wire_call_request_id_v1(call)
+        mux_sosix_validate_config_v1(self.config)?
+        if self.next_correlation == 0 or self.next_correlation == 18446744073709551615u64:
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "transport correlation exhausted", request_id, MuxCommitStateV1.NotApplied, false))
+        val correlation = self.next_correlation
+        self.next_correlation = self.next_correlation + 1u64
+        val request = MuxWireRequestV1(correlation: correlation, auth_token: self.config.auth_token, call: call)
+        val negotiated_limit: i64? = match self.connection:
+            case Some(connection): Some(connection.snapshot.limits.discovery.max_reply_bytes)
+            case nil: nil
+        val reply_limit = match mux_sosix_reply_limit_v1(call, self.config.max_frame_bytes, negotiated_limit, self.recovery_reply_limit):
+            case Ok(limit): limit
+            case Err(failure):
+                var correlated = failure
+                correlated.request_id = request_id
+                return Err(correlated)
+        if mux_wire_validate_limit_v1(reply_limit).is_err() or reply_limit > self.config.max_frame_bytes or mux_wire_validate_call_v1(call, reply_limit).is_err():
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.InvalidRequest, "request cannot fit negotiated reply budget", request_id, MuxCommitStateV1.NotApplied, false))
+        val body = match mux_wire_encode_request_v1(request, self.config.max_frame_bytes):
+            case Ok(value): value
+            case Err(_): return Err(mux_sosix_error_v1(MuxErrorKindV1.InvalidRequest, "request exceeds typed wire limits", request_id, MuxCommitStateV1.NotApplied, false))
+        val address = "127.0.0.1:" + self.config.port.to_text()
+        val response_bytes = match mux_transport_exchange_v1(address, body, self.config.max_frame_bytes, reply_limit, started_ms, call_timeout(call)):
+            case Ok(value): value
+            case Err(failure):
+                val commitment = if failure.submitted: MuxCommitStateV1.Unknown else: MuxCommitStateV1.NotApplied
+                val kind = if failure.kind == MuxTransportFailureKindV1.Timeout: MuxErrorKindV1.Timeout else: MuxErrorKindV1.Unavailable
+                return Err(mux_sosix_error_v1(kind, "CoreMux transport failed; reconcile submitted requests", request_id, commitment, failure.submitted))
+        val response = match mux_wire_decode_response_v1(response_bytes, reply_limit, correlation, mux_wire_call_tag_v1(call)):
+            case Ok(value): value
+            case Err(_): return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "invalid CoreMux response; reconcile request", request_id, MuxCommitStateV1.Unknown, true))
+        # Save only namespace/backend-bound decoded issuance BEFORE late/semantic
+        # exits. Invalid raw bytes or wrong correlation never reach this point.
+        match call:
+            case MuxWireCallV1.Connect(options, deadline):
+                match response.outcome:
+                    case MuxWireOutcomeV1.Success(MuxWireResultV1.Connection(connection)):
+                        match mux_sosix_connect_disposition_v1(options, deadline, connection, self.config.max_frame_bytes, started_ms, sosix_time_now_monotonic_ms()):
+                            case Ok(disposition):
+                                self.connection = Some(disposition.connection)
+                                self.lease_active = false
+                                self.cleanup_only = true
+                                self.lease_started_ms = started_ms
+                                self.lease_expires_ms = disposition.lease_expires_ms
+                                self.recovery_expires_ms = disposition.recovery_expires_ms
+                                self.recovery_reply_limit = disposition.recovery_reply_limit
+                                self.admission_rejection = disposition.rejection
+                            case Err(_): () # foreign/malformed candidates confer no recovery authority
+                    case _: ()
+            case _: ()
+        if mux_transport_remaining_v1(started_ms, call_timeout(call), sosix_time_now_monotonic_ms()).is_err():
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.Timeout, "response exceeded total deadline", request_id, MuxCommitStateV1.Unknown, true))
+        match response.outcome:
+            case MuxWireOutcomeV1.Failure(failure):
+                if failure.request_id != request_id:
+                    return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "remote error correlation differs", request_id, MuxCommitStateV1.Unknown, true))
+                match self.connection:
+                    case Some(connection):
+                        for target in failure.affected:
+                            if mux_wire_ref_v1(connection.snapshot.handle.owner_id, connection.snapshot.handle.owner_generation, target, target.kind).is_err():
+                                return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "remote error owner differs", request_id, MuxCommitStateV1.Unknown, true))
+                    case nil: ()
+                var sanitized = failure
+                # Never forward peer-controlled text that might echo auth/pane data.
+                sanitized.detail = "remote CoreMux operation failed"
+                Err(sanitized)
+            case MuxWireOutcomeV1.Success(result):
+                if mux_wire_validate_exchange_v1(call, result, MuxBackendV1.Smux).is_err():
+                    return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "CoreMux result differs from request", request_id, MuxCommitStateV1.Unknown, true))
+                Ok(result)
+
+    me renew(started_ms: i64, request_id: u64) -> Result<(), MuxErrorV1>:
+        val connection = match self.connection:
+            case Some(value): value
+            case nil: return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "missing renewal terms", request_id, MuxCommitStateV1.Unknown, true))
+        val now = sosix_time_now_monotonic_ms()
+        # Response arrival + TTL would overstate authority. Also never revive an
+        # interval that expired locally while this call was in flight.
+        if not self.lease_active or started_ms < self.lease_started_ms or now < started_ms or now >= self.lease_expires_ms:
+            self.lease_active = false
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "lease expired during renewal", request_id, MuxCommitStateV1.Unknown, true))
+        val expires = mux_sosix_lease_deadline_v1(started_ms, connection.lease_terms.lifetime_ms)?
+        if now >= expires:
+            self.lease_active = false
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "renewed interval already elapsed", request_id, MuxCommitStateV1.Unknown, true))
+        self.lease_started_ms = started_ms
+        self.lease_expires_ms = expires
+        self.recovery_expires_ms = mux_sosix_lease_deadline_v1(expires, connection.lease_terms.retained_receipt_ms)?
+        Ok(())
+
+    me connect(options: MuxConnectV1, deadline: MuxDeadlineV1) -> Result<MuxConnectionV1, MuxErrorV1>:
+        if options.backend != MuxBackendV1.Smux or options.endpoint_policy != MuxEndpointPolicyV1.ExistingOnly:
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.Unsupported, "client requires explicit existing Smux endpoint", 0, MuxCommitStateV1.NotApplied, false))
+        if self.connection != nil or self.connect_uncertain:
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.Busy, "client already retains a lease; use a separate instance to reconnect", 0, MuxCommitStateV1.NotApplied, false))
+        mux_make_connect_v1(options.backend, options.namespace, options.endpoint_policy, options.client_identity, options.limits)?
+        mux_validate_deadline_v1(deadline)?
+        if options.limits.max_reply_bytes < 4096 or options.limits.max_reply_bytes > self.config.max_frame_bytes:
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.InvalidRequest, "discovery reply budget outside transport limits", 0, MuxCommitStateV1.NotApplied, false))
+        val started = sosix_time_now_monotonic_ms()
+        val result = match self.exchange(MuxWireCallV1.Connect(options, deadline), started):
+            case Ok(value): value
+            case Err(failure):
+                if failure.commit_state != MuxCommitStateV1.NotApplied: self.connect_uncertain = true
+                return Err(failure)
+        val connection = match result:
+            case MuxWireResultV1.Connection(value): value
+            case _: return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "connect result kind differs", 0, MuxCommitStateV1.Unknown, true))
+        match self.admission_rejection:
+            case Some(failure):
+                self.connect_uncertain = true
+                return Err(failure)
+            case nil: ()
+        if self.connection == nil:
+            self.connect_uncertain = true
+            return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "connect lacks trusted recovery disposition", 0, MuxCommitStateV1.Unknown, true))
+        self.lease_active = true
+        self.cleanup_only = false
+        Ok(connection)
+
+    me query(handle: MuxHandleV1, query: MuxQueryV1, deadline: MuxDeadlineV1) -> Result<MuxQueryResultV1, MuxErrorV1>:
+        val recovery = match query:
+            case MuxQueryV1.RequestStatus(_): true
+            case _: false
+        val call = MuxWireCallV1.Query(handle, query, deadline)
+        val request_id = mux_wire_call_request_id_v1(call)
+        val connection = self.known(handle, recovery, request_id)?
+        mux_validate_query_v1(handle, query, deadline)?
+        if not recovery: mux_require_operation_v1(handle, MuxBackendV1.Smux, query_operation(query), connection.snapshot.capabilities)?
+        val started = sosix_time_now_monotonic_ms()
+        val result = self.exchange(call, started)?
+        val reply = match result:
+            case MuxWireResultV1.Query(value): value
+            case _: return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "query result kind differs", request_id, MuxCommitStateV1.Unknown, false))
+        # RequestStatus is always receipt-only and never renews, even while live.
+        if not recovery:
+            self.renew(started, request_id)?
+            match reply:
+                case MuxQueryResultV1.Capabilities(capabilities):
+                    if mux_require_core_capabilities_v1(handle, MuxBackendV1.Smux, capabilities).is_err():
+                        self.lease_active = false
+                        self.cleanup_only = true
+                        return Err(mux_sosix_error_v1(MuxErrorKindV1.PartialFailure, "remote mandatory support changed", request_id, MuxCommitStateV1.Unknown, true))
+                    var updated = connection
+                    updated.snapshot.capabilities = capabilities
+                    self.connection = Some(updated)
+                case _: ()
+        Ok(reply)
+
+    me execute(request: MuxRequestV1) -> Result<MuxMutationV1, MuxErrorV1>:
+        val connection = self.known(request.handle, false, request.request_id)?
+        mux_validate_request_v1(request)?
+        match mux_require_operation_v1(request.handle, MuxBackendV1.Smux, mux_command_operation_v1(request.command), connection.snapshot.capabilities):
+            case Ok(_): ()
+            case Err(failure):
+                var correlated = failure
+                correlated.request_id = request.request_id
+                return Err(correlated)
+        val started = sosix_time_now_monotonic_ms()
+        match self.exchange(MuxWireCallV1.Execute(request), started)?:
+            case MuxWireResultV1.Mutation(mutation): Ok(mutation)
+            case _: Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "mutation result kind differs", request.request_id, MuxCommitStateV1.Unknown, true))
+
+    me poll_events(handle: MuxHandleV1, cursor: u64, limits: MuxEventLimitsV1, deadline: MuxDeadlineV1) -> Result<MuxEventBatchV1, MuxErrorV1>:
+        val connection = self.known(handle, false, 0)?
+        mux_require_operation_v1(handle, MuxBackendV1.Smux, MuxOperationV1.PollEvents, connection.snapshot.capabilities)?
+        val started = sosix_time_now_monotonic_ms()
+        val result = self.exchange(MuxWireCallV1.PollEvents(handle, cursor, limits, deadline), started)?
+        val events = match result:
+            case MuxWireResultV1.Events(value): value
+            case _: return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "event result kind differs", 0, MuxCommitStateV1.Unknown, false))
+        var revoked = false
+        for event in events.events:
+            if event.kind == MuxEventKindV1.LeaseRevoked: revoked = true
+        if revoked:
+            self.lease_active = false
+            self.recovery_expires_ms = mux_sosix_lease_deadline_v1(started, connection.lease_terms.retained_receipt_ms)?
+        else:
+            self.renew(started, 0)?
+        Ok(events)
+
+    me disconnect(request: MuxDisconnectRequestV1) -> Result<MuxDisconnectV1, MuxErrorV1>:
+        mux_validate_disconnect_v1(request)?
+        val connection = self.known(request.handle, true, request.request_id)?
+        val now = sosix_time_now_monotonic_ms()
+        if (not self.lease_active and not self.cleanup_only) or now >= self.lease_expires_ms:
+            match self.last_disconnect:
+                case Some(original):
+                    if original != request: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "only original disconnect replay is permitted", request.request_id, MuxCommitStateV1.NotApplied, false))
+                case nil: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "no retained disconnect request", request.request_id, MuxCommitStateV1.NotApplied, false))
+        self.last_disconnect = Some(request)
+        val result = self.exchange(MuxWireCallV1.Disconnect(request), now)
+        match result:
+            case Ok(MuxWireResultV1.Disconnect(disconnect)):
+                self.lease_active = false
+                self.cleanup_only = false
+                val recovery_end = mux_sosix_lease_deadline_v1(now, connection.lease_terms.retained_receipt_ms)?
+                if recovery_end < self.recovery_expires_ms: self.recovery_expires_ms = recovery_end
+                Ok(disconnect)
+            case Ok(_): Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "disconnect result kind differs", request.request_id, MuxCommitStateV1.Unknown, true))
+            case Err(failure):
+                if failure.commit_state != MuxCommitStateV1.NotApplied:
+                    self.lease_active = false
+                    self.cleanup_only = false
+                    val recovery_end = mux_sosix_lease_deadline_v1(now, connection.lease_terms.retained_receipt_ms)?
+                    if recovery_end < self.recovery_expires_ms: self.recovery_expires_ms = recovery_end
+                Err(failure)
+
+    # Convenience only; the composition supplies a real idle timer. Generic users
+    # perform the same Capabilities query through CoreMuxV1 at advertised cadence.
+    pub me maintain_lease() -> Result<bool, MuxErrorV1>:
+        val handle = match self.recovery_handle():
+            case Some(value): value
+            case nil: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "no client lease to maintain", 0, MuxCommitStateV1.NotApplied, false))
+        val connection = self.known(handle, false, 0)?
+        val now = sosix_time_now_monotonic_ms()
+        if now - self.lease_started_ms < connection.lease_terms.renew_after_ms: return Ok(false)
+        val remaining = self.lease_expires_ms - now
+        val timeout = if remaining < connection.snapshot.limits.max_request_timeout_ms: remaining else: connection.snapshot.limits.max_request_timeout_ms
+        self.query(handle, MuxQueryV1.Capabilities, MuxDeadlineV1(timeout_ms: timeout))?
+        Ok(true)
+
+pub fn mux_sosix_client_v1(config: MuxSosixConfigV1) -> Result<SosixMuxClientV1, MuxErrorV1>:
+    mux_sosix_validate_config_v1(config)?
+    # No descriptor or server-side resource is acquired by this constructor.
+    Ok(SosixMuxClientV1(config: config))

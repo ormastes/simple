@@ -1,6 +1,7 @@
 /* Included by runtime_process_owned.c on Linux only. One broker owns one
  * grouped compiler attempt. The worker enters a fresh monitored cgroup
  * atomically in clone3, before its first instruction or execveat. */
+#include "runtime_linux_cgroup_events_private.h"
 #include <linux/magic.h>
 #include <linux/memfd.h>
 #include <linux/sched.h>
@@ -39,7 +40,7 @@ typedef struct {
     pid_t pid;
     char name[80];
     int64_t started_ms, timeout_ms, peak, current;
-    int leader_reaped, tree_empty, timed_out, cancelled, exit_code;
+    int leader_reaped, tree_empty, timed_out, cancelled, exit_code, kill_pending;
 } RtLinuxGroup;
 
 static RtLinuxGroup rt_linux_group = {0};
@@ -66,6 +67,7 @@ static int rt_lg_read_fd(int fd, char *out, size_t cap) {
     ssize_t n = read(fd, out, cap - 1);
     if (n < 0) return 0;
     if (n == 0) { errno = ENODATA; return 0; }
+    if (memchr(out, 0, (size_t)n)) { errno = EPROTO; return 0; }
     if ((size_t)n >= cap - 1) { errno = EOVERFLOW; return 0; }
     out[n] = 0; return 1;
 }
@@ -235,10 +237,10 @@ static void rt_lg_free_strings(char **items) {
 static int rt_lg_populated(int fd, int *populated) {
     char events[256];
     if (!rt_lg_read_at(fd, "cgroup.events", events, sizeof(events))) return 0;
-    char *line = strstr(events, "populated ");
-    if (!line || (line != events && line[-1] != '\n') ||
-        (line[10] != '0' && line[10] != '1')) return 0;
-    *populated = line[10] == '1'; return 1;
+    if (!rt_lg_parse_populated(events, strlen(events), populated)) {
+        errno = EPROTO; return 0;
+    }
+    return 1;
 }
 
 static int rt_lg_peak(int fd, int64_t *peak) {
@@ -254,7 +256,12 @@ static int64_t rt_lg_now_ms(void) {
 }
 
 static int rt_lg_kill(RtLinuxGroup *owner) {
-    return rt_lg_write_at(owner->group_fd, "cgroup.kill", "1");
+    /* Intent survives a failed write. A timeout/cancel latch is not evidence
+     * that the kernel received the kill request. */
+    owner->kill_pending = 1;
+    if (!rt_lg_write_at(owner->group_fd, "cgroup.kill", "1")) return 0;
+    owner->kill_pending = 0;
+    return 1;
 }
 
 /* A controller being available is not a delegation to child groups. Do not
@@ -403,8 +410,9 @@ static int rt_lg_poll(RtLinuxGroup *owner) {
     if (owner->timeout_ms > 0 && !owner->timed_out && !owner->leader_reaped &&
         now - owner->started_ms >= owner->timeout_ms) {
         owner->timed_out = 1;
-        if (!rt_lg_kill(owner)) return errno ? errno : EIO;
+        owner->kill_pending = 1;
     }
+    if (owner->kill_pending && !rt_lg_kill(owner)) return errno ? errno : EIO;
     if (!owner->leader_reaped) {
         int status = 0;
         pid_t observed = waitpid(owner->pid, &status, WNOHANG);
@@ -417,14 +425,16 @@ static int rt_lg_poll(RtLinuxGroup *owner) {
     }
     int populated = 1;
     char current_text[128];
-    if (!rt_lg_populated(owner->group_fd, &populated) ||
-        !rt_lg_read_at(owner->group_fd, "memory.current", current_text,
-            sizeof(current_text)) ||
-        !rt_lg_number(current_text, &owner->current) ||
-        !rt_lg_peak(owner->group_fd, &owner->peak)) return EIO;
+    if (!rt_lg_populated(owner->group_fd, &populated)) return EIO;
+    /* Retire remaining descendants even when resource telemetry fails.
+     * Telemetry errors still retain ownership and block collection. */
     if (owner->leader_reaped && populated) {
         if (!rt_lg_kill(owner)) return errno ? errno : EIO;
     }
+    if (!rt_lg_read_at(owner->group_fd, "memory.current", current_text,
+            sizeof(current_text)) ||
+        !rt_lg_number(current_text, &owner->current) ||
+        !rt_lg_peak(owner->group_fd, &owner->peak)) return EIO;
     owner->tree_empty = owner->leader_reaped && !populated;
     return 0;
 }
@@ -506,11 +516,11 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     int64_t answer[2] = {0, EINVAL};
     char program[4096], directory[4096], root[4096], stdout_path[4096], stderr_path[4096];
     char expected[65], identity[65], memory_text[64], verify[128];
-    int64_t readback = 0;
+    int64_t readback = 0, started_ms = -1;
     char **argv = NULL, **envp = NULL;
     int64_t argc = 0; int copy_error = 0;
     int parent_fd = -1, group_fd = -1, exec_fd = -1, cwd_fd = -1, out_fd = -1, err_fd = -1;
-    int created = 0, child_started = 0, pidfd = -1;
+    int created = 0, pidfd = -1;
     pid_t pid = -1;
     if (rt_linux_group.active || memory_limit < 0 || memory_limit > 1125899906842624LL ||
         timeout_ms < 0 || timeout_ms > 604800000 ||
@@ -552,15 +562,21 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
             (!rt_lg_number(verify, &readback) || readback != memory_limit)) ||
         !rt_lg_write_at(group_fd, "memory.swap.max", memory_limit == 0 ? "max" : "0") ||
         !rt_lg_read_at(group_fd, "memory.swap.max", verify, sizeof(verify)) ||
-        (memory_limit == 0 ? (strcmp(verify, "max") != 0 && strcmp(verify, "max\n") != 0) : verify[0] != '0') ||
+        (memory_limit == 0 ? (strcmp(verify, "max") != 0 && strcmp(verify, "max\n") != 0) :
+            (!rt_lg_number(verify, &readback) || readback != 0)) ||
         !rt_lg_write_at(group_fd, "memory.oom.group", "1") ||
         !rt_lg_read_at(group_fd, "memory.oom.group", verify, sizeof(verify)) ||
-        verify[0] != '1' || !rt_lg_read_at(group_fd, "memory.peak", verify, sizeof(verify))) {
+        !rt_lg_number(verify, &readback) || readback != 1 ||
+        !rt_lg_read_at(group_fd, "memory.peak", verify, sizeof(verify))) {
         answer[1] = errno ? errno : ENOTSUP; goto done;
     }
     out_fd = open(stdout_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     err_fd = open(stderr_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (out_fd < 0 || err_fd < 0) { answer[1] = errno; goto done; }
+    /* Finish fallible admission before clone: a clock failure must never
+     * launch a child and then discard its cleanup authority. */
+    started_ms = rt_lg_now_ms();
+    if (started_ms < 0) { answer[1] = EIO; goto done; }
 #if defined(SYS_clone3) && defined(SYS_execveat) && defined(SYS_close_range)
     struct clone_args clone = {0};
     clone.flags = CLONE_PIDFD | CLONE_INTO_CGROUP;
@@ -583,24 +599,17 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     answer[1] = ENOTSUP; goto done;
 #endif
     if (pid < 0) { answer[1] = errno ? errno : ENOTSUP; goto done; }
-    child_started = 1;
-    if (pidfd < 0) { answer[1] = ENOTSUP; goto done; }
+    /* CLONE_PIDFD stores the allocated descriptor before clone3 returns
+     * success (clone(2)). No fallible work belongs between this successful
+     * spawn and returning the lease. Cancellation/collection failures keep
+     * these handles owned, instead of entering a blocking best-effort reap. */
     rt_linux_group = (RtLinuxGroup){.active=1, .parent_fd=parent_fd,
         .group_fd=group_fd, .pidfd=pidfd, .pid=pid,
-        .started_ms=rt_lg_now_ms(), .timeout_ms=timeout_ms};
+        .started_ms=started_ms, .timeout_ms=timeout_ms};
     memcpy(rt_linux_group.name, name, strlen(name) + 1);
-    if (rt_linux_group.started_ms < 0) {
-        answer[1] = EIO; rt_lg_kill(&rt_linux_group); rt_linux_group.active = 0;
-        goto done;
-    }
     answer[0] = 1; answer[1] = 0;
     parent_fd = group_fd = pidfd = -1; created = 0;
 done:
-    if (answer[0] == 0 && child_started) {
-        if (group_fd >= 0) (void)rt_lg_write_at(group_fd, "cgroup.kill", "1");
-        if (pidfd >= 0) close(pidfd);
-        if (pid > 0) (void)waitpid(pid, NULL, 0);
-    }
     if (out_fd >= 0) close(out_fd);
     if (err_fd >= 0) close(err_fd);
     if (exec_fd >= 0) close(exec_fd);

@@ -1,0 +1,39 @@
+# Opt-in diagnostics only: never task admission or process ownership evidence.
+use app.bootstrap_builder.contracts.{BuildTaskV1, builder_task_identity_v1}
+
+pub fn build_runner_stage_trace_encode_v1(enabled: bool, owner: text, stage: text,
+        event: text, task: BuildTaskV1? = nil, exit_code: i64 = -1) -> text:
+    if not enabled: return ""
+    var result = "build_trace:\n    format: \"build-stage-v1\"\n    owner: \"" + owner +
+        "\"\n    stage: \"" + stage + "\"\n    event: \"" + event + "\"\n"
+    if val item = task:
+        # No argv, paths, environment values, or free-form error messages.
+        # Backend/route are emitted only when recognized from the task argv.
+        var backend = "unspecified"
+        var route = "unspecified"
+        var explicit_entry = false
+        for index in 0..item.args.len():
+            if item.args[index] == "--entry" or item.args[index].starts_with("--entry="): explicit_entry = true
+            if item.args[index] == "--backend=llvm": backend = "llvm"
+            if item.args[index] == "--backend=cranelift": backend = "cranelift"
+            if item.args[index] == "--backend" and index + 1 < item.args.len():
+                if ["llvm", "cranelift"].contains(item.args[index + 1]): backend = item.args[index + 1]
+            if item.args[index] == "--compile-route" and index + 1 < item.args.len():
+                if ["positional", "coordinator"].contains(item.args[index + 1]): route = item.args[index + 1]
+        if route == "unspecified" and item.args.len() > 0 and item.args[0] == "native-build":
+            if explicit_entry:
+                route = "coordinator"
+            elif item.args.len() > 1 and not item.args[1].starts_with("--"):
+                route = "positional"
+        result = result + "    task_identity: \"" + builder_task_identity_v1(item) +
+            "\"\n    producer_sha256: \"" + item.producer_digest +
+            "\"\n    attempt: " + str(item.attempt) + "\n    backend: \"" + backend +
+            "\"\n    compile_route: \"" + route + "\"\n"
+    result + "    exit_code: " + str(exit_code)
+
+pub fn build_runner_stage_trace_v1(enabled: bool, owner: text, stage: text,
+        event: text, task: BuildTaskV1? = nil, exit_code: i64 = -1):
+    val payload = build_runner_stage_trace_encode_v1(enabled, owner, stage, event, task, exit_code)
+    if payload != "": print payload
+
+export build_runner_stage_trace_v1, build_runner_stage_trace_encode_v1

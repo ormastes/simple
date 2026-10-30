@@ -802,7 +802,8 @@ bootstrap_stage3_diagnostic_env() {
         SIMPLE_MIRB_TRACE \
         SIMPLE_MIR_DEFAULT_PAD_TRACE \
         SIMPLE_MIR_FIELD_TRACE \
-        SIMPLE_MIR_RET_TRACE; do
+        SIMPLE_MIR_RET_TRACE \
+        SIMPLE_BUILD_SESSION_END; do
         [ "$bootstrap_stage3_diag_name" != "${1:-}" ] || continue
         bootstrap_stage3_diag_value=$(
             eval "printf '%s' \"\${${bootstrap_stage3_diag_name}-}\""
@@ -1291,19 +1292,44 @@ bootstrap_stage3_target_c_compiler() {
 }
 
 bootstrap_stage3_windows_gnu_tool_path() {
-    bootstrap_stage3_gnu_tool_selected=$(command -v "$1" 2>/dev/null) || return 1
+    bootstrap_stage3_gnu_tool_request=$1
+    # The bootstrap exports CC/LD in native drive-letter spelling
+    # (`C:/.../bin/clang.exe`) because Cargo and the native compiler consume
+    # it; `command -v` echoes that verbatim and the canonical-path helper only
+    # accepts POSIX `/...` input, so the admitted llvm-mingw clang was rejected
+    # ("Windows GNU phase requires CC to be llvm-mingw clang"). Normalize the
+    # spelling first, then bind the physical `.exe` when the extensionless
+    # alias was recorded.
+    case "$bootstrap_stage3_gnu_tool_request" in
+        [A-Za-z]:[\/]*)
+            bootstrap_stage3_gnu_tool_request=$(cygpath -u "$bootstrap_stage3_gnu_tool_request" \
+                2>/dev/null) || return 1 ;;
+    esac
+    bootstrap_stage3_gnu_tool_selected=$(command -v "$bootstrap_stage3_gnu_tool_request" \
+        2>/dev/null) || return 1
+    case "$bootstrap_stage3_gnu_tool_selected" in
+        *.exe) ;;
+        *) [ -f "$bootstrap_stage3_gnu_tool_selected.exe" ] &&
+            bootstrap_stage3_gnu_tool_selected=$bootstrap_stage3_gnu_tool_selected.exe ;;
+    esac
     bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_canonical_file \
         "$bootstrap_stage3_gnu_tool_selected") || return 1
     [ -x "$bootstrap_stage3_gnu_tool_path" ] || return 1
     printf '%s\n' "$bootstrap_stage3_gnu_tool_path"
 }
 
+# llvm-mingw identity is the driver's default target, not its file name: a
+# stock LLVM clang.exe (Target: x86_64-pc-windows-msvc) must not satisfy the
+# GNU lane just because ambient PATH found it first.
 bootstrap_stage3_windows_gnu_clang_path() {
     bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_windows_gnu_tool_path "$1") || return 1
     case "${bootstrap_stage3_gnu_tool_path##*/}" in
-        clang|clang.exe) printf '%s\n' "$bootstrap_stage3_gnu_tool_path" ;;
+        clang|clang.exe) ;;
         *) return 1 ;;
     esac
+    "$bootstrap_stage3_gnu_tool_path" --version 2>/dev/null |
+        grep -Eq '^Target: [A-Za-z0-9_]+-w64-(windows-gnu|mingw32)' || return 1
+    printf '%s\n' "$bootstrap_stage3_gnu_tool_path"
 }
 
 bootstrap_stage3_windows_gnu_llvm_ar_path() {
@@ -1683,12 +1709,14 @@ bootstrap_stage3_native_metadata_probe() (
 # `rustup show active-toolchain` / `RUSTUP_TOOLCHAIN=<channel> rustc` would
 # also resolve correctly, but only by executing rustup/rustc; this reads the
 # filesystem the same way the rest of this file already does. Requires
-# EXACTLY one non-symlink "<channel>-*" directory -- zero or several (e.g. a
-# dated nightly alongside a plain one) is ambiguous and fails closed.
+# EXACTLY one non-symlink "<channel>-*" directory, optionally restricted to
+# the host suffix of a fully qualified default toolchain. Zero or several
+# matches remain ambiguous and fail closed.
 bootstrap_stage3_channel_toolchain_host() (
-    [ "$#" -eq 2 ] || return 1
+    [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || return 1
     bootstrap_stage3_scan_home=$1
     bootstrap_stage3_scan_channel=$2
+    bootstrap_stage3_scan_default=${3-}
     case "$bootstrap_stage3_scan_channel" in
         ''|*[!A-Za-z0-9._-]*) return 1 ;;
     esac
@@ -1700,6 +1728,17 @@ bootstrap_stage3_channel_toolchain_host() (
     do
         [ -d "$bootstrap_stage3_scan_dir" ] || continue
         [ ! -L "$bootstrap_stage3_scan_dir" ] || continue
+        # A different default channel still names the authoritative host.
+        # Match its full host suffix rather than guessing an ABI or accepting
+        # an ambient RUSTUP_TOOLCHAIN that the execution path does not use.
+        if [ -n "$bootstrap_stage3_scan_default" ]; then
+            bootstrap_stage3_scan_candidate=${bootstrap_stage3_scan_dir##*/}
+            bootstrap_stage3_scan_host=${bootstrap_stage3_scan_candidate#"$bootstrap_stage3_scan_prefix"}
+            case "$bootstrap_stage3_scan_default" in
+                *-"$bootstrap_stage3_scan_host") ;;
+                *) continue ;;
+            esac
+        fi
         bootstrap_stage3_scan_count=$((bootstrap_stage3_scan_count + 1))
         bootstrap_stage3_scan_match=$bootstrap_stage3_scan_dir
     done
@@ -1814,7 +1853,7 @@ ${bootstrap_stage3_installed_frontend%/.cargo/bin/rustc.exe}
                     # no host at all) does not and stays a hard parse-fail.
                     modern_dashes = modern
                     dash_count = gsub(/-/, "-", modern_dashes)
-                    if (dash_count >= 2) exit 3
+                    if (dash_count >= 2) { print modern; exit 3 }
                     exit 1
                 }
                 host = substr(modern, length(prefix) + 1)
@@ -1831,7 +1870,8 @@ ${bootstrap_stage3_installed_frontend%/.cargo/bin/rustc.exe}
         bootstrap_stage3_installed_host=$(
             bootstrap_stage3_channel_toolchain_host \
                 "$bootstrap_stage3_installed_home" \
-                "$bootstrap_stage3_installed_channel"
+                "$bootstrap_stage3_installed_channel" \
+                "$bootstrap_stage3_installed_host"
         ) || {
             bootstrap_stage3_rust_toolchain_trace settings-host=channel-toolchain-absent
             return 1
@@ -5024,7 +5064,7 @@ public static class Stage3MaterializedConsumer {
     // bound is a runaway guard only, not a buffer size.
     static readonly long MaxDiffBytes = (long)Budget("BOOTSTRAP_STAGE3_GIT_MAX_DIFF_BYTES", 1024UL * 1024 * 1024);
     static readonly ulong MaxBytes = Budget("BOOTSTRAP_STAGE3_GIT_MAX_BYTES", 512UL * 1024 * 1024);
-    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 300000);
+    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 1200000);
     static ulong bytes;
     static int entries;
     static System.Diagnostics.Process ActiveChild;
@@ -5724,8 +5764,20 @@ bootstrap_stage3_materialized_git_state() (
     # The C# watchdog budget (MaxMillis, default 300s after the 2026-09-16
     # full-checkout measurement) must win the race against this outer kill:
     # a too-tight timeout here reports a healthy, still-walking consumer as a
-    # generic bind failure.
-    /usr/bin/timeout -k 2s 330s powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
+    # generic bind failure. The budget is host-scaled (WA-PREFLIGHT-RETRY: a
+    # fixed 330s kill fired under load): unset -> 300s x (1 + load1/ncpu),
+    # capped at 4x; the outer kill always derives from the same budget + 30s.
+    if [ -z "${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS:-}" ]; then
+        stage3_ncpu=$(nproc 2>/dev/null || echo 1)
+        stage3_load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null | cut -d. -f1)
+        stage3_scale=$(( 1 + ${stage3_load:-0} / (stage3_ncpu > 0 ? stage3_ncpu : 1) ))
+        [ "$stage3_scale" -le 4 ] || stage3_scale=4
+        BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=$((300000 * stage3_scale))
+        export BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS
+    fi
+    case "$BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS" in ''|*[!0-9]*) exit 1 ;; esac
+    stage3_outer_s=$((BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS / 1000 + 30))
+    /usr/bin/timeout -k 2s "${stage3_outer_s}s" powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
 )
 
 bootstrap_stage3_git_state() {
@@ -6138,23 +6190,76 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         return 1
     }
     (
+        bootstrap_stage3_seed_find_literal_path() {
+            [ "$#" -eq 1 ] || return 1
+            printf '%s\n' "$1" | awk '
+                {
+                    escaped = ""
+                    for (position = 1; position <= length($0); position++) {
+                        character = substr($0, position, 1)
+                        if (character == "\\")
+                            escaped = escaped "\\\\"
+                        else if (character == "*")
+                            escaped = escaped "[*]"
+                        else if (character == "?")
+                            escaped = escaped "[?]"
+                        else if (character == "[")
+                            escaped = escaped "[[]"
+                        else if (character == "]")
+                            escaped = escaped "[]]"
+                        else
+                            escaped = escaped character
+                    }
+                    print escaped
+                }
+            '
+        }
+        bootstrap_stage3_seed_root_has_symlink() (
+            bootstrap_stage3_seed_scan_root=$1
+            bootstrap_stage3_seed_scan_dependencies=$2
+            bootstrap_stage3_seed_scan_compiler_root=$3
+            set -- "$bootstrap_stage3_seed_find" \
+                "$bootstrap_stage3_seed_scan_root"
+            bootstrap_stage3_seed_scan_prune_count=0
+            if [ "$bootstrap_stage3_seed_scan_compiler_root" = yes ]; then
+                bootstrap_stage3_seed_scan_target=$(
+                    bootstrap_stage3_seed_find_literal_path \
+                        "$bootstrap_stage3_seed_scan_root/target"
+                ) || return 1
+                set -- "$@" \( -type d \( -path \
+                    "$bootstrap_stage3_seed_scan_target"
+                bootstrap_stage3_seed_scan_prune_count=1
+            fi
+            while IFS= read -r bootstrap_stage3_seed_scan_dependency; do
+                [ -n "$bootstrap_stage3_seed_scan_dependency" ] || continue
+                case "$bootstrap_stage3_seed_scan_dependency" in
+                    "$bootstrap_stage3_seed_scan_root"|\
+                    "$bootstrap_stage3_seed_scan_root"/*)
+                        if [ "$bootstrap_stage3_seed_scan_prune_count" -gt 0 ]; then
+                            set -- "$@" -o
+                        else
+                            set -- "$@" \( -type d \(
+                        fi
+                        bootstrap_stage3_seed_scan_target=$(
+                            bootstrap_stage3_seed_find_literal_path \
+                                "$bootstrap_stage3_seed_scan_dependency/target"
+                        ) || return 1
+                        set -- "$@" -path \
+                            "$bootstrap_stage3_seed_scan_target"
+                        bootstrap_stage3_seed_scan_prune_count=$((
+                            bootstrap_stage3_seed_scan_prune_count + 1
+                        ))
+                        ;;
+                esac
+            done <"$bootstrap_stage3_seed_scan_dependencies"
+            if [ "$bootstrap_stage3_seed_scan_prune_count" -gt 0 ]; then
+                set -- "$@" \) -prune \) -o
+            fi
+            set -- "$@" -type l -print -quit
+            "$@" | grep -q .
+        )
         cd "$bootstrap_stage3_seed_root" || exit 1
         bootstrap_stage3_seed_trace reject-symlink-inputs
-        if "$bootstrap_stage3_seed_find" src/compiler_rust src/runtime \
-            \( -type d -name target -prune \) -o \
-            -type l -print -quit | grep -q .; then
-            exit 1
-        fi
-        bootstrap_stage3_seed_trace collect-compiler-inputs
-        "$bootstrap_stage3_seed_find" src/compiler_rust \
-            \( -type d -name target \) -prune -o \
-            -type f -print 2>/dev/null \
-            >"$bootstrap_stage3_seed_tmp/compiler.unsorted" || exit 1
-        LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/compiler.unsorted" \
-            >"$bootstrap_stage3_seed_tmp/compiler.paths" || exit 1
-        bootstrap_stage3_hash_path_list \
-            "$bootstrap_stage3_seed_tmp/compiler.paths" \
-            >>"$bootstrap_stage3_seed_records" || exit 1
         # Cargo path dependencies may live outside src/compiler_rust (the
         # hosted runtime currently does). Discover them from dependency
         # sections instead of maintaining a partial hand-written allowlist.
@@ -6162,7 +6267,7 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         # traverse a symlink, and must contribute all Cargo.toml/Rust inputs.
         bootstrap_stage3_seed_trace collect-cargo-path-dependencies
         "$bootstrap_stage3_seed_find" src/compiler_rust \
-            \( -type d -name target -prune \) -o \
+            \( -type d -path src/compiler_rust/target -prune \) -o \
             \( -name Cargo.toml -type f -print \) \
             >"$bootstrap_stage3_seed_tmp/cargo-manifests" || exit 1
         : >"$bootstrap_stage3_seed_tmp/path-deps.unsorted" || exit 1
@@ -6194,14 +6299,54 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         done <"$bootstrap_stage3_seed_tmp/path-dep-pairs"
         LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/path-deps.unsorted" \
             >"$bootstrap_stage3_seed_tmp/path-deps" || exit 1
+        # Reject symlinks before accepting any collected inputs. Only the
+        # compiler's actual generated target root and each discovered Cargo
+        # dependency's direct target root are excluded from this walk.
+        if bootstrap_stage3_seed_root_has_symlink \
+            src/compiler_rust "$bootstrap_stage3_seed_tmp/path-deps" yes; then
+            exit 1
+        fi
+        if bootstrap_stage3_seed_root_has_symlink \
+            src/runtime "$bootstrap_stage3_seed_tmp/path-deps" no; then
+            exit 1
+        fi
+        while IFS= read -r bootstrap_stage3_seed_dep_root; do
+            [ -n "$bootstrap_stage3_seed_dep_root" ] || continue
+            case "$bootstrap_stage3_seed_dep_root" in
+                */target|*/target/*) exit 1 ;;
+            esac
+            bootstrap_stage3_seed_dep_target=$(
+                bootstrap_stage3_seed_find_literal_path \
+                    "$bootstrap_stage3_seed_dep_root/target"
+            ) || exit 1
+            if "$bootstrap_stage3_seed_find" "$bootstrap_stage3_seed_dep_root" \
+                \( -type d -path "$bootstrap_stage3_seed_dep_target" -prune \) -o \
+                -type l -print -quit | grep -q .; then
+                exit 1
+            fi
+        done <"$bootstrap_stage3_seed_tmp/path-deps"
+        bootstrap_stage3_seed_trace collect-compiler-inputs
+        "$bootstrap_stage3_seed_find" src/compiler_rust \
+            \( -type d -path src/compiler_rust/target -prune \) -o \
+            -type f -print 2>/dev/null \
+            >"$bootstrap_stage3_seed_tmp/compiler.unsorted" || exit 1
+        LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/compiler.unsorted" \
+            >"$bootstrap_stage3_seed_tmp/compiler.paths" || exit 1
+        bootstrap_stage3_hash_path_list \
+            "$bootstrap_stage3_seed_tmp/compiler.paths" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
         bootstrap_stage3_seed_trace hash-cargo-path-dependencies
         while IFS= read -r bootstrap_stage3_seed_dep_root; do
             [ -n "$bootstrap_stage3_seed_dep_root" ] || continue
             case "$bootstrap_stage3_seed_dep_root" in
                 */target|*/target/*) exit 1 ;;
             esac
+            bootstrap_stage3_seed_dep_target=$(
+                bootstrap_stage3_seed_find_literal_path \
+                    "$bootstrap_stage3_seed_dep_root/target"
+            ) || exit 1
             "$bootstrap_stage3_seed_find" "$bootstrap_stage3_seed_dep_root" \
-                \( -type d -name target -prune \) -o \
+                \( -type d -path "$bootstrap_stage3_seed_dep_target" -prune \) -o \
                 -type f -print \
                 >"$bootstrap_stage3_seed_tmp/path-dep-files.unsorted" ||
                 exit 1

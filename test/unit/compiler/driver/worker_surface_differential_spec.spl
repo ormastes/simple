@@ -1,0 +1,80 @@
+# P5 worker surfaces (true_per_file_pipeline_v1.md): the skeleton surface
+# must equal the full-parse surface (incl. primitive parameter types, bug
+# module_surface_projection_blind_to_primitive_param_types_2026-10-24), and a
+# worker builds surfaces only for its seeds' import closure.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_projection}
+use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
+use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_selected_v1,
+    worker_surface_seed_v1, worker_surface_import_ids_v1, worker_surface_closure_v1,
+    worker_surface_ready_v1, worker_surface_restrict_claims_v1, worker_surface_claim_allowed_v1}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn projection(src: text, path: text) -> text:
+    module_surface_semantic_projection(parse_full_frontend(src, path, "fx", Logger(level: 0)))
+
+fn digest(src: text, path: text) -> text:
+    module_surface_canonical_digest_v1(parse_full_frontend(src, path, "fx", Logger(level: 0)))
+
+fn common_files() -> [text]:
+    ["src/lib/common/base_encoding.spl", "src/lib/common/binary_io.spl",
+     "src/lib/common/ctype.spl", "src/lib/common/format_utils.spl",
+     "src/lib/common/numeric_round.spl"]
+
+describe "worker skeleton surface equals the full-parse surface":
+    it "distinguishes primitive parameter types (bug fixture)":
+        val a = projection("pub fn add(a: i64) -> i64:\n    a\n", "fx.spl")
+        val b = projection("pub fn add(a: i32) -> i64:\n    a\n", "fx.spl")
+        expect(a == b).to_equal(false)
+
+    it "keeps primitive parameter types through the skeleton":
+        val src = "pub fn add(a: i64) -> i64:\n    a\n"
+        expect(projection(module_surface_skeleton_v1(src), "fx.spl")).to_equal(projection(src, "fx.spl"))
+
+    it "matches projection and canonical digest on real src/lib/common files":
+        for path in common_files():
+            val source = rt_file_read_text(path) ?? ""
+            expect(source == "").to_equal(false)
+            val skel = module_surface_skeleton_v1(source)
+            expect(projection(skel, path)).to_equal(projection(source, path))
+            expect(digest(skel, path)).to_equal(digest(source, path))
+
+describe "worker surface closure":
+    it "is default-on for HIR shard workers with an explicit opt-out":
+        expect(worker_surface_closure_selected_v1("0/4", "")).to_equal(true)
+        expect(worker_surface_closure_selected_v1("0/4", "0")).to_equal(false)
+        expect(worker_surface_closure_selected_v1("", "1")).to_equal(false)
+
+    it "seeds everything for a malformed spec":
+        expect(worker_surface_seed_v1("bad", "a.spl")).to_equal(true)
+        val owners = [worker_surface_seed_v1("0/2", "a.spl"), worker_surface_seed_v1("1/2", "a.spl")]
+        expect(owners[0] != owners[1]).to_equal(true)
+
+    it "reads use, export use and group members as import ids":
+        val ids = worker_surface_import_ids_v1("use a.b.{c, d as e}\nexport use f.g.*\nfn x():\n    pass\n")
+        expect(ids.contains("a.b")).to_equal(true)
+        expect(ids.contains("a.b.c")).to_equal(true)
+        expect(ids.contains("a.b.d")).to_equal(true)
+        expect(ids.contains("f.g")).to_equal(true)
+
+    it "keeps an unseeded module out when nothing imports it":
+        val paths = ["src/lib/common/ctype.spl", "src/lib/common/numeric_round.spl"]
+        val contents = ["fn a():\n    pass\n", "fn b():\n    pass\n"]
+        val needed = worker_surface_closure_v1(paths, paths, contents, [true, false])
+        expect(needed[0]).to_equal(true)
+        expect(needed[1]).to_equal(false)
+
+    it "is ready only when every transitive target is built":
+        # 0 -> 1 -> 2 (placeholder); 3 -> 1 ... 4 standalone
+        val ready = worker_surface_ready_v1([true, true, false, true, true],
+            [[1], [2], [], [-1, 1], []])
+        expect(ready).to_equal([false, false, false, false, true])
+
+    it "restricts claims to ready paths":
+        worker_surface_restrict_claims_v1(["x.spl"])
+        expect(worker_surface_claim_allowed_v1("x.spl")).to_equal(true)
+        expect(worker_surface_claim_allowed_v1("y.spl")).to_equal(false)

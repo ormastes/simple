@@ -776,6 +776,7 @@ pub(crate) fn compile_file_to_object(
         // instead of deep-cloning the whole graph's maps for every module
         // (O(graph^2) copies on wide closures).
         lowerer.set_global_struct_defs(std::sync::Arc::clone(&imports.struct_defs));
+        lowerer.set_global_struct_field_defaults(std::sync::Arc::clone(&imports.struct_field_defaults));
         lowerer.set_unique_global_struct_owners(std::sync::Arc::clone(&imports.unique_struct_owners));
         lowerer.set_struct_module_owners(std::sync::Arc::clone(&imports.struct_module_owners));
         lowerer.set_duplicate_global_struct_defs(std::sync::Arc::clone(&imports.duplicate_struct_defs));

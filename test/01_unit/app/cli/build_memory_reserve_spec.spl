@@ -1,0 +1,50 @@
+use std.spec
+use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1}
+use app.io.env_ops.{env_get, env_set}
+use app.cli.native_build_main.{native_build_memory_gate_applies_v1, native_build_memory_admission_refusal_v1}
+
+# A build must not start when RAM+commit headroom is below the reserve
+# (default 24 GiB): host filled up during concurrent builds, 2026-10-26.
+describe "build memory reserve admission":
+    it "defaults the reserve to 24 GiB and honours SIMPLE_BUILD_MEMORY_RESERVE_BYTES":
+        val old = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "")
+        expect(build_memory_reserve_kib()).to_equal(25165824)
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1073741824")
+        expect(build_memory_reserve_kib()).to_equal(1048576)
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", old)
+
+    it "refuses below the reserve with a clear message and admits at or above it":
+        val refusal = build_memory_start_refusal_v1(1048576, 25165824)
+        expect(refusal.contains("1024 MiB")).to_be_true()
+        expect(refusal.contains("SIMPLE_BUILD_MEMORY_RESERVE_BYTES")).to_be_true()
+        expect(build_memory_start_refusal_v1(25165824, 25165824)).to_equal("")
+
+    it "admits when headroom cannot be measured":
+        expect(build_memory_start_refusal_v1(0, 25165824)).to_equal("")
+        expect(build_memory_start_refusal_v1(-1, 25165824)).to_equal("")
+
+    it "gates only the coordinator, never workers or shard children":
+        expect(native_build_memory_gate_applies_v1("", false, "", "", ["--entry", "a.spl"])).to_be_true()
+        expect(native_build_memory_gate_applies_v1("1", false, "", "", [])).to_be_false()
+        expect(native_build_memory_gate_applies_v1("", true, "", "", [])).to_be_false()
+        expect(native_build_memory_gate_applies_v1("", false, "/r", "", [])).to_be_false()
+        expect(native_build_memory_gate_applies_v1("", false, "", "1", [])).to_be_false()
+        expect(native_build_memory_gate_applies_v1("", false, "", "", ["--file-worker=x"])).to_be_false()
+
+    it "refuses through the shared admission entry used by both CLIs":
+        val old = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1125899906842624")
+        val refusal = native_build_memory_admission_refusal_v1(["hello.spl"])
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", old)
+        expect(refusal.contains("build refused")).to_be_true()
+
+    it "never gates the MIR export-summary child":
+        val old = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
+        val old_export = env_get("SIMPLE_MIR_SHARD_EXPORT_WRITE") ?? ""
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1125899906842624")
+        env_set("SIMPLE_MIR_SHARD_EXPORT_WRITE", "/tmp/x")
+        val refusal = native_build_memory_admission_refusal_v1(["hello.spl"])
+        env_set("SIMPLE_MIR_SHARD_EXPORT_WRITE", old_export)
+        env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", old)
+        expect(refusal).to_equal("")

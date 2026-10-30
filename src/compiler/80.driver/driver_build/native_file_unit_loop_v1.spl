@@ -1,0 +1,75 @@
+# Per-file worker loop over compile units (NativeFileUnitInvokerV1,
+# native_file_worker_v1.spl). Written once against the invoker: the worker
+# only runs units, seals their ledger rows and records receipts.
+use std.io_runtime.{file_exists, time_now_monotonic_ms}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal, hir_shard_recovery_complete,
+    HIR_SHARD_FORK_OWNER_MARK_V1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_unit_drained_path_v1, worker_unit_pick_seal_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{NativeFileUnitInvokerV1, NativeFileWorkerReceiptV1,
+    native_file_worker_mir_done_read_v1, native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1,
+    native_file_worker_mono_pending_path_v1, native_file_worker_receipt_publish_v1, native_file_worker_object_path_v1,
+    native_file_worker_error_reason_publish_v1}
+
+# P4/P-G3 worker loop (default in the per-file lane): one compile unit per
+# round (parse -> HIR -> MIR -> object for <= batch modules, one process), no
+# HIR/MIR phase split and no whole-ledger wait. Fail-closed rules:
+#   - any unit exit != 0, or a MONO-PENDING target -> return 1;
+#   - picks the unit never claimed are dropped (re-pickable); a unit that
+#     exited 0 with such picks failed silently -> return 1;
+#   - a unit with no HIR claim ends the worker only with its drained proof
+#     (worker_unit_pick_v1 scanned the whole order under the ledger lock);
+#     otherwise it compiled nothing without saying why -> return 1.
+pub fn native_file_unit_worker_loop_v1(invoker: NativeFileUnitInvokerV1, owner: text, mir_queue: text,
+        hir_queue: text) -> i64:
+    var round: i64 = 0
+    var units: i64 = 0
+    while true:
+        val hir_owner = "{owner}~h{round}"
+        val mir_owner = "{owner}{HIR_SHARD_FORK_OWNER_MARK_V1}-m{round}"
+        round = round + 1
+        val unit_start = time_now_monotonic_ms()
+        val code = invoker.run_unit(hir_owner, mir_owner)
+        val obj_done = time_now_monotonic_ms()
+        val seal_state = if code < 0: "CRASH" else: "FAILED"
+        val hir_sealed = hir_shard_recovery_seal(hir_queue, hir_owner, seal_state)
+        val mir_sealed = hir_shard_recovery_seal(mir_queue, mir_owner, seal_state)
+        val orphan_picks = worker_unit_pick_seal_v1(hir_queue, hir_owner)
+        val mir_done = native_file_worker_mir_done_read_v1(mir_queue, mir_owner)
+        val hir_claimed = native_file_worker_owner_claims_v1(hir_queue, hir_owner)
+        var mono_pending = false
+        for path in hir_claimed:
+            val passed = native_file_worker_terminal_state_v1(hir_queue, path) == "PASS"
+            val pending = file_exists(native_file_worker_mono_pending_path_v1(mir_queue, path))
+            if pending:
+                mono_pending = true
+            var status = if passed: "PASS" else: "FAILED"
+            if pending:
+                status = "MONO-PENDING"
+            val _hir_receipt = native_file_worker_receipt_publish_v1(hir_queue, NativeFileWorkerReceiptV1(
+                module: path, hir_start_ms: unit_start, hir_done_ms: -1, deps_ready_ms: -1,
+                mir_done_ms: -1, obj_done_ms: -1, status: status, object: ""))
+        val one = hir_claimed.len() == 1
+        val mir_claimed = native_file_worker_owner_claims_v1(mir_queue, mir_owner)
+        for name in mir_claimed:
+            val passed = native_file_worker_terminal_state_v1(mir_queue, name) == "PASS"
+            val object_path = native_file_worker_object_path_v1(mir_queue, name)
+            val _published = native_file_worker_receipt_publish_v1(mir_queue, NativeFileWorkerReceiptV1(
+                module: name, hir_start_ms: if one: unit_start else: -1, hir_done_ms: -1, deps_ready_ms: -1,
+                mir_done_ms: mir_done, obj_done_ms: obj_done,
+                status: if passed: "PASS" else: "FAILED", object: if passed: object_path else: ""))
+        if code != 0 or mono_pending or hir_sealed < 0 or mir_sealed < 0 or orphan_picks != 0:
+            val reason = "unit exit={code} hir_claimed={hir_claimed.len()} mir_claimed={mir_claimed.len()} mono_pending={mono_pending} orphan_picks={orphan_picks}"
+            eprint "[file-worker] owner={owner} {reason}"
+            val _recorded = native_file_worker_error_reason_publish_v1(mir_queue, owner, reason)
+            return 1
+        if hir_claimed.len() == 0:
+            if not file_exists(worker_unit_drained_path_v1(hir_queue, hir_owner)):
+                eprint "[file-worker] owner={owner} unit exited 0 with no claim and no drained proof"
+                val _recorded = native_file_worker_error_reason_publish_v1(mir_queue, owner, "unit exited 0 with no claim and no drained proof")
+                return 1
+            break
+        units = units + 1
+    if not hir_shard_recovery_complete(mir_queue, owner):
+        return 1
+    print "[file-worker] done owner={owner} units={units} scoped_mono=true"
+    0

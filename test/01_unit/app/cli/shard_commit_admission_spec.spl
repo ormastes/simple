@@ -1,0 +1,71 @@
+# @cover src/app/cli/shard_mem_clamp.spl
+# Purpose: shard pool admits each further worker by LIVE commit headroom
+# against the measured worker footprint (s3-wa: 5 workers at a fixed 6 GB
+# estimate exhausted the host commit limit and all died together).
+use std.spec
+use app.cli.shard_mem_clamp.{shard_commit_estimate_kib_v1, shard_commit_spawn_admit_v1, shard_commit_live_footprint_v1}
+use app.cli.shard_mem_clamp.{shard_commit_unmeasured_estimate_kib_v1, shard_worker_exit_hint_v1}
+
+fn warmup_admitted(headroom: i64, reserve: i64, est: i64, window: i64) -> i64:
+    var live: [i64] = []
+    while live.len() < window and (live.len() == 0 or shard_commit_spawn_admit_v1(headroom, reserve, est, live)):
+        live = live.push(0)
+    live.len()
+
+describe "unmeasured warmup admission (phase 3 6b0ba5f3 HIR alloc abort)":
+    it "does not fill an 8-slot window at the static 6 GB with no recorded peak":
+        # 80.4 GB free, 24 GiB reserve: real workers peaked at ~11 GB each.
+        val est = shard_commit_unmeasured_estimate_kib_v1(6000000, 0)
+        val admitted = warmup_admitted(80402160, 25165824, est, 8)
+        expect(admitted * 10989479 <= 80402160 - 4627064).to_equal(true)
+
+    it "trusts a recorded peak once one exists":
+        expect(shard_commit_unmeasured_estimate_kib_v1(6000000, 11000000)).to_equal(11000000)
+        expect(shard_commit_unmeasured_estimate_kib_v1(6000000, 1000)).to_equal(6000000)
+
+    it "honors an explicit override as-is when no peak is recorded":
+        expect(shard_commit_unmeasured_estimate_kib_v1(12000000, 0, 12000000)).to_equal(12000000)
+        expect(warmup_admitted(80402160, 25165824, shard_commit_unmeasured_estimate_kib_v1(12000000, 0, 12000000), 8)).to_equal(4)
+        expect(shard_commit_unmeasured_estimate_kib_v1(12000000, 13000000, 12000000)).to_equal(13000000)
+
+    it "names the HIR knob for a file-worker pool abort":
+        expect(shard_worker_exit_hint_v1(-1073740791, "file-worker").contains("SIMPLE_HIR_SHARD_WORKER_KB (file-worker pool)")).to_equal(true)
+
+    it "names the commit cause on a 0xC0000409 worker exit":
+        expect(shard_worker_exit_hint_v1(-1073740791, "hir-shard").contains("SIMPLE_HIR_SHARD_WORKER_KB")).to_equal(true)
+        expect(shard_worker_exit_hint_v1(3221226505, "mir-shard").contains("SIMPLE_MIR_SHARD_WORKER_KB")).to_equal(true)
+        expect(shard_worker_exit_hint_v1(1, "hir-shard")).to_equal("")
+
+describe "measured commit admission":
+    it "takes the larger of static estimate and measured peak":
+        expect(shard_commit_estimate_kib_v1(6000000, 0)).to_equal(6000000)
+        expect(shard_commit_estimate_kib_v1(6000000, 18000000)).to_equal(18000000)
+
+    it "always admits the first worker and keeps static cap when headroom is unknown":
+        expect(shard_commit_spawn_admit_v1(0, 4000000, 18000000, [])).to_equal(true)
+        expect(shard_commit_spawn_admit_v1(-1, 4000000, 18000000, [100, 200])).to_equal(true)
+
+    it "reserves the growth still owed by live workers":
+        # 94 GB headroom, 4 GB reserve, 18 GB measured peak, 4 workers at 1 GB:
+        # need 18 + 4*17 = 86 GB of the 90 GB usable -> admit a 5th
+        expect(shard_commit_spawn_admit_v1(94000000, 4000000, 18000000, [1000000, 1000000, 1000000, 1000000])).to_equal(true)
+        # a 5th live young worker makes the 6th need 18 + 5*17 = 103 GB -> refuse
+        expect(shard_commit_spawn_admit_v1(94000000, 4000000, 18000000, [1000000, 1000000, 1000000, 1000000, 1000000])).to_equal(false)
+
+    it "counts workers already at their peak as owing nothing":
+        expect(shard_commit_spawn_admit_v1(30000000, 4000000, 18000000, [18000000, 19000000])).to_equal(true)
+        expect(shard_commit_spawn_admit_v1(20000000, 4000000, 18000000, [18000000])).to_equal(false)
+
+    it "treats an unreadable live worker as owing a full estimate":
+        expect(shard_commit_spawn_admit_v1(40000000, 4000000, 18000000, [-1])).to_equal(true)
+        expect(shard_commit_spawn_admit_v1(39000000, 4000000, 18000000, [-1])).to_equal(false)
+
+    it "falls back to the static cap when commit headroom is unavailable":
+        # No probe (-1): admit exactly as the static cap would, never fail.
+        expect(shard_commit_live_footprint_v1(-1, -1, 3)).to_equal([])
+        expect(shard_commit_spawn_admit_v1(-1, 4000000, 18000000, shard_commit_live_footprint_v1(-1, -1, 3))).to_equal(true)
+
+    it "splits the pool's commit use over live workers":
+        expect(shard_commit_live_footprint_v1(90000000, 60000000, 3)).to_equal([10000000, 10000000, 10000000])
+        expect(shard_commit_live_footprint_v1(90000000, 95000000, 2)).to_equal([0, 0])
+        expect(shard_commit_live_footprint_v1(90000000, 60000000, 0)).to_equal([])

@@ -1,0 +1,56 @@
+"""Exercise host-backed SOSIX facade leaves on the macOS runtime.
+
+These scenarios observe linked host services through the public SOSIX facade:
+identity, file existence, environment lookup, clocks, and the process
+observation capability gate. They do not infer provider behavior from source.
+"""
+
+use std.spec
+use std.nogc_sync_mut.sosix.host.{sosix_getpid, sosix_platform_name, sosix_file_exists}
+use std.nogc_sync_mut.sosix.time.{sosix_sleep_ms}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use std.nogc_async_mut.sosix.time.{sosix_time_monotonic_sample_v1, sosix_time_realtime_sample_v1}
+use std.nogc_async_mut.sosix.process_observation_v1.{
+    process_observation_provider_v1, ProcessObservationProviderV1}
+
+fn sosix_host_runtime_is_macos() -> bool:
+    sosix_platform_name() == "macos"
+
+describe "SOSIX macOS host runtime access":
+    if sosix_host_runtime_is_macos():
+        it "reports the macOS host and a live process identifier":
+            step("Read host identity through SOSIX leaves")
+            expect(sosix_platform_name()).to_equal("macos")
+            expect(sosix_getpid() > 0).to_be(true)
+
+        it "observes an existing executable and a missing path through SOSIX":
+            step("Query host filesystem existence through SOSIX")
+            expect(sosix_file_exists("/bin/sh")).to_be(true)
+            expect(sosix_file_exists("/tmp/sosix-host-runtime-access-absent-20261029")).to_be(false)
+
+        it "reads a populated host environment key and preserves a missing key":
+            step("Read PATH and a unique absent key through SOSIX")
+            val path = sosix_env_get_nullable("PATH")
+            val missing = sosix_env_get_nullable("SIMPLE_SOSIX_HOST_RUNTIME_ABSENT_20261029")
+            assert_true(path != nil)
+            expect(path.unwrap() != "").to_be(true)
+            expect(missing).to_be_nil()
+
+        it "returns advancing monotonic and epoch-based realtime samples":
+            step("Sample both SOSIX clock domains")
+            val monotonic_first = sosix_time_monotonic_sample_v1().unwrap()
+            sosix_sleep_ms(3)
+            val monotonic_second = sosix_time_monotonic_sample_v1().unwrap()
+            val realtime = sosix_time_realtime_sample_v1().unwrap()
+            expect(monotonic_second > monotonic_first).to_be(true)
+            expect(realtime > 1000000000000000000u64).to_be(true)
+
+        it "reports the unavailable native process observation provider explicitly":
+            step("Read the linked V1 provider capability through SOSIX")
+            expect(process_observation_provider_v1()).to_equal(ProcessObservationProviderV1.Unsupported)
+    else:
+        skip("reports the macOS host and a live process identifier", "requires macOS runtime provider; current platform is " + sosix_platform_name())
+        skip("observes an existing executable and a missing path through SOSIX", "requires macOS runtime provider; current platform is " + sosix_platform_name())
+        skip("reads a populated host environment key and preserves a missing key", "requires macOS runtime provider; current platform is " + sosix_platform_name())
+        skip("returns advancing monotonic and epoch-based realtime samples", "requires macOS runtime provider; current platform is " + sosix_platform_name())
+        skip("reports the unavailable native process observation provider explicitly", "requires macOS runtime provider; current platform is " + sosix_platform_name())

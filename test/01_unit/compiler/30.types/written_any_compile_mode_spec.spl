@@ -5,54 +5,162 @@ use std.spec.step
 
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.core.parser.{parser_error_count}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 
 """
 # Written `Any` policy
 
-The driver sets `HirLowering.forbid_written_any`
-(`driver_hir_forbids_written_any`) for compiled code under the robust or
-critical profile:
+The HIR type traversal diagnoses source-written `Any` whenever the source goes
+through HIR lowering. Robust and critical compiled code retain the hard error;
+other HIR-lowered paths get a warning. Direct flat-AST interpreter execution
+does not pass through this HIR diagnostic. Only a block carrying
+`type_erasure` authorizes an `Any` annotation:
 
-| Build | Written `Any` |
+| HIR lowering policy | Written `Any` |
 |-------|---------------|
-| script (interpreter) | allowed |
-| compiled, below robust | allowed |
-| compiled, robust / critical | allowed only inside `unsafe:` / `danger:` |
+| `forbid_written_any = false` | warning |
+| `forbid_written_any = true` | error |
+| any mode, inside `unsafe(capabilities: [type_erasure])` | allowed |
 
-A violation is `[E-ANY-COMPILE-001]`.
+A violation is `[W-ANY-COMPILE-001]` or `[E-ANY-COMPILE-001]`, according to
+the current compilation policy.
 """
 
-fn lowering_errors(source: text, deny_any: bool) -> text:
+struct WrittenAnyDiagnostics:
+    errors: text
+    warnings: text
+    parse_errors: i64
+
+fn lowering_diagnostics(source: text, deny_any: bool) -> WrittenAnyDiagnostics:
     val ast = parse_full_frontend(source, "written_any.spl", "written_any.spl", Logger(level: 0))
+    val parse_errors = parser_error_count()
     var lowering = HirLowering.with_filename("written_any.spl")
     lowering.forbid_written_any = deny_any
     val _hir = lowering.lower_module(ast)
-    var out = ""
-    for err in lowering.errors:
-        out = out + err.message + "\n"
-    out
+    var errors = ""
+    var warnings = ""
+    var idx = 0
+    while idx < lowering.lowering_error_count():
+        val message = lowering.lowering_error_message_at(idx, "written_any.spl")
+        if lowering.lowering_error_is_recovered_at(idx):
+            warnings = warnings + message + "\n"
+        else:
+            errors = errors + message + "\n"
+        idx = idx + 1
+    WrittenAnyDiagnostics(errors: errors, warnings: warnings, parse_errors: parse_errors)
+
+fn lowering_errors(source: text, deny_any: bool) -> text:
+    lowering_diagnostics(source, deny_any).errors
 
 fn any_error_count(errors: text) -> i64:
     errors.split("[E-ANY-COMPILE-001]").len() - 1
 
+fn any_warning_count(warnings: text) -> i64:
+    warnings.split("[W-ANY-COMPILE-001]").len() - 1
+
 describe "Written Any policy":
-    it "rejects Any only in robust compiled code outside an unsafe block":
+    it "warns outside type_erasure in lenient mode and errors in robust compiled mode":
         val outside = "fn f(x: Any) -> i64:\n    val y: Any = x\n    0\n"
         val inside = "fn g() -> i64:\n    unsafe:\n        val z: Any = 1\n    0\n"
+        val authorized = "fn g() -> i64:\n" +
+            "    unsafe(capabilities: [type_erasure]):\n" +
+            "        val z: Any = 1\n" +
+            "        0\n"
+        val invalid_grant = "fn g() -> i64:\n" +
+            "    unsafe(capabilities: [type_erasure, typo]):\n" +
+            "        val z: Any = 1\n" +
+            "        0\n"
 
-        step("Scripts and non-robust builds accept Any everywhere")
-        assert_equal(any_error_count(lowering_errors(outside, false)), 0)
-        assert_equal(any_error_count(lowering_errors(inside, false)), 0)
+        step("Scripts and non-robust builds report written Any as warnings")
+        val lenient_outside = lowering_diagnostics(outside, false)
+        assert_equal(any_error_count(lenient_outside.errors), 0)
+        assert_equal(any_warning_count(lenient_outside.warnings) >= 2, true)
+        val lenient_unsafe = lowering_diagnostics(inside, false)
+        assert_equal(any_error_count(lenient_unsafe.errors), 0)
+        assert_equal(any_warning_count(lenient_unsafe.warnings), 1)
+        val nested_written_any = lowering_diagnostics(
+            "fn f(values: Dict<text, any>) -> [Any]:\n    values\n", false)
+        assert_equal(nested_written_any.parse_errors, 0)
+        assert_equal(any_warning_count(nested_written_any.warnings), 2)
 
-        step("Robust compiled code rejects Any outside unsafe and accepts it inside")
+        step("Robust compiled code rejects Any outside type_erasure")
         assert_equal(any_error_count(lowering_errors(outside, true)) >= 2, true)
-        assert_equal(any_error_count(lowering_errors(inside, true)), 0)
+        assert_equal(any_error_count(lowering_errors(inside, true)), 1)
+
+        step("Only an actual type_erasure capability suppresses the diagnostic")
+        val allowed_lenient = lowering_diagnostics(authorized, false)
+        val allowed_strict = lowering_diagnostics(authorized, true)
+        assert_equal(allowed_lenient.parse_errors, 0)
+        assert_equal(allowed_strict.parse_errors, 0)
+        assert_equal(any_warning_count(allowed_lenient.warnings), 0)
+        assert_equal(allowed_lenient.errors, "")
+        assert_equal(any_error_count(allowed_strict.errors), 0)
+        val invalid_grant_result = lowering_diagnostics(invalid_grant, false)
+        assert_equal(any_warning_count(invalid_grant_result.warnings), 1)
+        assert_equal(invalid_grant_result.errors.contains("unknown unsafe capability `typo`"), true)
+
+        step("The internal Any spelling is rejected when written in source")
+        val authored_magic_param = lowering_diagnostics("fn f(value: __any) -> i64:\n    0\n", false)
+        val authored_magic_local = lowering_diagnostics("fn f() -> i64:\n    val value: __any = 1\n    0\n", false)
+        val authored_magic_alias = lowering_diagnostics("type Hidden = __any\n", false)
+        assert_equal(authored_magic_param.parse_errors > 0, true)
+        assert_equal(authored_magic_local.parse_errors > 0, true)
+        assert_equal(authored_magic_alias.parse_errors > 0, true)
+
+        step("Unused aliases diagnose their own Any syntax, even when used only inside type_erasure")
+        val unused_any_alias = lowering_diagnostics("type Hidden = Dict<text, any>\n", false)
+        assert_equal(unused_any_alias.parse_errors, 0)
+        assert_equal(any_warning_count(unused_any_alias.warnings), 1)
+        val strict_unused_any_alias = lowering_diagnostics("type Hidden = Any\n", true)
+        assert_equal(strict_unused_any_alias.parse_errors, 0)
+        assert_equal(any_error_count(strict_unused_any_alias.errors), 1)
+        val unsafe_use_any_alias = lowering_diagnostics(
+            "type Hidden = Any\n" +
+            "fn f() -> i64:\n" +
+            "    unsafe(capabilities: [type_erasure]):\n" +
+            "        val value: Hidden = 1\n" +
+            "        0\n", false)
+        assert_equal(unsafe_use_any_alias.parse_errors, 0)
+        assert_equal(any_warning_count(unsafe_use_any_alias.warnings), 1)
+        assert_equal(any_error_count(unsafe_use_any_alias.errors), 0)
+
+        step("Alias validation leaves generic and forward references lazy")
+        val forward_alias = lowering_diagnostics(
+            "type Before = Later\ntype Later = i64\nfn id<T>(x: T) -> T:\n    x\n", false)
+        assert_equal(forward_alias.parse_errors, 0)
+        assert_equal(forward_alias.errors, "")
+        assert_equal(any_warning_count(forward_alias.warnings), 0)
+
+        step("A closure does not inherit its enclosing type_erasure grant")
+        val escaping_closure = "fn g():\n" +
+            "    unsafe(capabilities: [type_erasure]):\n" +
+            "        val f = \\: \n" +
+            "            val inside: Any = 1\n" +
+            "            inside\n" +
+            "        val inside_after_lambda: Any = 1\n"
+        val closure_result = lowering_diagnostics(escaping_closure, false)
+        assert_equal(any_warning_count(closure_result.warnings), 1)
+        assert_equal(closure_result.errors, "")
+
+        step("The grant ends with its block and does not authorize following declarations")
+        val after_grant = "fn g():\n" +
+            "    unsafe(capabilities: [type_erasure]):\n" +
+            "        val inside: Any = 1\n" +
+            "    val outside: Any = 2\n"
+        val after_grant_result = lowering_diagnostics(after_grant, false)
+        assert_equal(any_warning_count(after_grant_result.warnings), 1)
+        assert_equal(after_grant_result.errors, "")
 
         step("Parser fallbacks (nested arrays, empty array annotation) are not written Any")
         val nested = "fn f(rows: [[text]]) -> i64:\n    val empty: [] = []\n    rows.len()\n"
-        assert_equal(any_error_count(lowering_errors(nested, true)), 0)
+        val nested_result = lowering_diagnostics(nested, true)
+        assert_equal(nested_result.parse_errors, 0)
+        assert_equal(any_error_count(nested_result.errors), 0)
+        assert_equal(any_warning_count(nested_result.warnings), 0)
 
         step("Generic code needs no Any")
-        assert_equal(any_error_count(lowering_errors("fn id<T>(x: T) -> T:\n    x\n", true)), 0)
+        val generic_result = lowering_diagnostics("fn id<T>(x: T) -> T:\n    x\n", true)
+        assert_equal(generic_result.parse_errors, 0)
+        assert_equal(any_error_count(generic_result.errors), 0)

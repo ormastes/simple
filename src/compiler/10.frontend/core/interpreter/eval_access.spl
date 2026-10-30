@@ -15,7 +15,7 @@
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
 use compiler.core.ast.{decl_fn, expr_get}
-use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, expr_i_val}
+use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, expr_owner_int, expr_owner_int_set}
 use compiler.core.ast_stmt.{stmt_expr_stmt}
 use compiler.core.interpreter.env.{env_assign, env_has_frame, env_set_local}
 use compiler.core.interpreter.eval.{eval_caller_file, eval_current_decl_id, eval_expr, eval_had_error, eval_return_value}
@@ -101,7 +101,7 @@ fn eval_field_access(eid: i64) -> i64:
 
     if val_is_struct(base_val):
         # Fast path: cached field index from previous access
-        val cached_idx = expr_i_val[eid]
+        val cached_idx = expr_owner_int(eid)
         if cached_idx >= 0:
             val ok = val_struct_check_field_idx(base_val, cached_idx, field_name)
             if ok:
@@ -109,7 +109,7 @@ fn eval_field_access(eid: i64) -> i64:
         # Slow path: linear search + cache index
         val fi = val_struct_find_field_idx(base_val, field_name)
         if fi >= 0:
-            expr_i_val[eid] = fi
+            expr_owner_int_set(eid, fi)
             return val_struct_get_field_idx(base_val, fi)
         eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
         return -1
@@ -299,7 +299,7 @@ fn eval_assign_expr(eid: i64) -> i64:
         # LOAD_FAST: the resolver gave this target the same fast-local slot
         # eval_ident reads; update it too, or the next read returns the stale
         # pre-assignment value (eval_stmt_assign does the same).
-        var fast_slot = expr_i_val[target_eid]
+        var fast_slot = expr_owner_int(target_eid)
         if fast_slot < 0 and eval_current_decl_id >= 0:
             fast_slot = resolve_is_fast_local(eval_current_decl_id, name)
         if fast_slot >= 0 and env_has_frame():
@@ -318,7 +318,7 @@ fn eval_assign_expr(eid: i64) -> i64:
             # two duplicates cannot drift on the identity contract.
             val store_val = val_copy_if_value_struct(new_val)
             # Fast path: cached field index
-            val cached_idx = expr_i_val[target_eid]
+            val cached_idx = expr_owner_int(target_eid)
             if cached_idx >= 0:
                 val ok = val_struct_check_field_idx(base_val, cached_idx, field_name)
                 if ok:
@@ -328,7 +328,7 @@ fn eval_assign_expr(eid: i64) -> i64:
             val fi = val_struct_find_field_idx(base_val, field_name)
             if fi >= 0:
                 val_struct_set_field_idx(base_val, fi, store_val)
-                expr_i_val[target_eid] = fi
+                expr_owner_int_set(target_eid, fi)
                 return store_val
             eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
             return -1

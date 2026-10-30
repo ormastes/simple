@@ -1,0 +1,122 @@
+# Diagnostic executable for real Phase 2 schema parsing; never a passing stub.
+extern fn rt_file_read_text(path: text) -> text
+
+fn tuple_arrays() -> ([text], [text]):
+    (["left"], ["right"])
+
+struct LeftRecord:
+    name: text
+    pos: i64
+    tag: text
+    ftype: text
+
+struct RightRecord:
+    name: text
+    kind: text
+
+fn record_tuple_arrays() -> ([LeftRecord], [RightRecord]):
+    var left: [LeftRecord] = []
+    var right: [RightRecord] = []
+    left.push(LeftRecord(name: "left", pos: 1, tag: "left", ftype: "text"))
+    right.push(RightRecord(name: "right", kind: "value"))
+    (left, right)
+
+fn schema_value(line: text, key: text) -> text:
+    val marker = key + ":"
+    val idx = line.index_of(marker)
+    if idx < 0: return ""
+    var rest = line.substring(idx + marker.len(), line.len())
+    rest = rest.trim()
+    var out = ""
+    var depth = 0
+    for ch in rest.chars():
+        if ch == "<": depth = depth + 1
+        if ch == ">": depth = depth - 1
+        if depth == 0 and (ch == "," or ch == "}"): break
+        out = out + ch
+    out.trim()
+
+fn schema_record_arrays(content: text) -> ([LeftRecord], [RightRecord]):
+    var fields: [LeftRecord] = []
+    var excluded: [RightRecord] = []
+    var in_canon = false
+    var in_excl = false
+    for line in content.split("\n"):
+        val t = line.trim()
+        if t.starts_with("canonical_order:"):
+            in_canon = true
+            in_excl = false
+            continue
+        if t.starts_with("excluded_from_key:"):
+            in_excl = true
+            in_canon = false
+            continue
+        if in_canon:
+            if t.starts_with("- {"):
+                val pos_s = schema_value(t, "pos")
+                fields.push(LeftRecord(name: schema_value(t, "name"), pos: pos_s.to_i64(),
+                    tag: schema_value(t, "tag"), ftype: schema_value(t, "type")))
+            else:
+                if not t.starts_with("#") and t != "":
+                    in_canon = false
+        if in_excl:
+            if t.starts_with("- {"):
+                excluded.push(RightRecord(name: schema_value(t, "name"), kind: schema_value(t, "class")))
+            else:
+                if not t.starts_with("#") and t != "":
+                    in_excl = false
+    (fields, excluded)
+
+fn main() -> i64:
+    val content = rt_file_read_text("src/compiler/80.driver/cache/schema/cache_protocol.sdn")
+    if content.len() < 100:
+        print "FAIL read_text_length"
+        return 1
+    if not content.contains("canonical_order:"):
+        print "FAIL read_text_content"
+        return 2
+    print "PASS read_text"
+    if "  canonical_order:  ".trim() != "canonical_order:":
+        print "FAIL trim"
+        return 3
+    if not "canonical_order:".starts_with("canonical_order:"):
+        print "FAIL starts_with"
+        return 4
+    val lines = content.split("\n")
+    if lines.len() < 20:
+        print "FAIL split_count"
+        return 5
+    print "PASS split_count"
+    var count = 0
+    var found = 0
+    for line in lines:
+        count = count + 1
+        if line.trim().starts_with("canonical_order:"):
+            found = found + 1
+    if count != lines.len() or found != 1:
+        print "FAIL loop_or_schema_marker count={count} lines={lines.len()} found={found}"
+        return 6
+    print "PASS loop_schema_marker"
+    val (left, right) = tuple_arrays()
+    if left.len() != 1 or right.len() != 1:
+        print "FAIL tuple_array_lengths"
+        return 7
+    if left[0] != "left" or right[0] != "right":
+        print "FAIL tuple_array_values"
+        return 8
+    print "PASS tuple_arrays"
+    val (records, other) = record_tuple_arrays()
+    if records.len() != 1 or other.len() != 1:
+        print "FAIL record_tuple_lengths"
+        return 9
+    if records[0].name != "left" or records[0].pos != 1 or other[0].kind != "value":
+        print "FAIL record_tuple_fields"
+        return 10
+    print "PASS record_tuple_arrays"
+    val (fields, excluded) = schema_record_arrays(content)
+    if fields.len() != 20 or excluded.len() != 26:
+        print "FAIL stateful_schema_loop fields={fields.len()} excluded={excluded.len()}"
+        return 11
+    print "PASS stateful_schema_loop"
+    print "schema-parse-probe-complete"
+    0

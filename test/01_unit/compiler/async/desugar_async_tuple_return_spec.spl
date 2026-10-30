@@ -1,0 +1,40 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/desugar_async_array_literal_for_tuple_return_2026-10-25.md
+
+use std.spec.step
+
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+
+# A function declared `-> (A, [B], [C])` must build a TUPLE. Returning the
+# array literal `[a, [], []]` type-checked, but natively the caller read the
+# tuple's field 0 out of the array header (0x100000002) and desugar_module
+# SEGV'd on every module the Phase 3 Stage 3 compiler parsed.
+val DESUGAR_FILES = [
+    "src/compiler/10.frontend/desugar/desugar_async.spl",
+    "src/compiler/90.tools/desugar_async.spl"
+]
+
+fn tuple_fn_array_returns(src: text) -> i64:
+    var count = 0
+    var in_tuple_fn = false
+    for line in src.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("fn ") or trimmed.starts_with("pub fn "):
+            in_tuple_fn = trimmed.contains(") -> (")
+        elif in_tuple_fn and (trimmed.starts_with("return [") or
+                (trimmed.starts_with("[") and trimmed.ends_with("]") and trimmed.contains(", "))):
+            count = count + 1
+    count
+
+describe "desugar_async tuple returns":
+    it "returns tuple literals, never array literals, from tuple-typed functions":
+        for path in DESUGAR_FILES:
+            val src = file_read(path)
+            expect(src.len()).to_be_greater_than(0)
+            expect(tuple_fn_array_returns(src)).to_equal(0)
+
+    it "detects the array-literal shape it guards against":
+        val bad = "fn f(x: i64) -> (i64, [i64]):\n    return [x, []]\n"
+        expect(tuple_fn_array_returns(bad)).to_equal(1)

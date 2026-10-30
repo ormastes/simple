@@ -2,7 +2,7 @@
 #
 # Uses shared mcp_sdk for JSON, shell helpers, and tool result building.
 
-use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _is_ws, _find_json_value_start}
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _char_len, _slice_text, _is_ws, _find_json_value_start}
 use app.io.minimal_runtime_ops.{cwd, env_get, process_run_timeout, process_run_bounded}
 # Import process_run_timeout from the light std module, NOT app.io.mod — the
 # latter is a CLI/compiler re-export hub whose graph makes `bin/simple run` skip
@@ -15,7 +15,7 @@ extern fn rt_bytes_to_text(data: [u8]) -> text
 
 # Base-repair (mirrors origin/main): run_command_text calls process_run_bounded
 # with these bounds, but the merge left them undefined here.
-val LSP_COMMAND_TIMEOUT_MS: i64 = 10000
+val LSP_COMMAND_TIMEOUT_MS: i64 = 30000
 val LSP_COMMAND_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
 
 fn lsp_query_path() -> text:
@@ -34,10 +34,14 @@ fn command_failure(code: i64, stderr: text, stdout: text) -> text:
         return prefix
     prefix + ": " + detail
 
+val LSP_TIMEOUT_PREFIX = "lsp request timed out after "
+
 fn run_command_text(binary: text, args: [text]) -> text:
     val (stdout, stderr, code) = process_run_bounded(
         binary, args, LSP_COMMAND_TIMEOUT_MS, LSP_COMMAND_OUTPUT_CAPTURE_BYTES)
     val clean = clean_command_output(stdout)
+    if _lsp_child_timed_out(code, stderr):
+        return LSP_TIMEOUT_PREFIX + str(LSP_COMMAND_TIMEOUT_MS) + " ms"
     if code == 0:
         return clean
     command_failure(code, stderr, clean)
@@ -127,13 +131,13 @@ fn lsp_parse_diag_line(line: text) -> text:
     if colon3 < 0:
         return ""
 
-    val line_str = trimmed.substring(colon1 + 1, colon2).trim()
-    val col_str = trimmed.substring(colon2 + 1, colon3).trim()
+    val line_str = _slice_text(trimmed, colon1 + 1, colon2).trim()
+    val col_str = _slice_text(trimmed, colon2 + 1, colon3).trim()
     val line_num = parse_nonnegative_int_or_minus_one(line_str)
     if line_num < 0:
         return ""
 
-    val after = trimmed.substring(colon3 + 1, trimmed.len()).trim()
+    val after = _slice_text(trimmed, colon3 + 1, _char_len(trimmed)).trim()
     var severity = "Error"
     var message = after
     if after.starts_with("error"):
@@ -230,34 +234,35 @@ fn handle_logging_set_level(id: text, body: text) -> text:
     jsonrpc_result(id, jo1(jp(key: "level", value: js(level))))
 
 fn arg_field(args: text, key: text) -> text:
+    val args_n = _char_len(args)
     # Manual scanner - avoids the Cranelift `match Some(i)` codegen bug.
     # _find_json_value_start already handles whitespace after the colon,
     # so the three original search variants (no-space, with-space,
     # numeric) collapse into a single call.
     val start = _find_json_value_start(json: args, key: key)
-    if start < 0 or start >= args.len():
+    if start < 0 or start >= args_n:
         return ""
     val first = _char_at(args, start)
     if first == Q():
         var i = start + 1
         var escaped = false
-        while i < args.len():
+        while i < args_n:
             val ch = _char_at(args, i)
             if escaped:
                 escaped = false
             elif ch == "\\":
                 escaped = true
             elif ch == Q():
-                return args.substring(start + 1, i)
+                return _slice_text(args, start + 1, i)
             i = i + 1
         return ""
     var end = start
-    while end < args.len():
+    while end < args_n:
         val ch = _char_at(args, end)
         if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
             break
         end = end + 1
-    args.substring(start, end)
+    _slice_text(args, start, end)
 
 fn _digit_val(ch: text) -> i64:
     # Explicit `==` match only. `text.to_int()` and text ordering (`>=`/`<=`)
@@ -287,19 +292,20 @@ fn _digit_val(ch: text) -> i64:
     -1
 
 fn arg_int_field(args: text, key: text) -> i64:
+    val args_n = _char_len(args)
     # Extract + parse an integer field in one pass using only primitives proven
     # to compile correctly here (_find_json_value_start, _char_at, `==`). Avoids
     # the codegen-broken `.to_int()` round-trip that produced garbage line/char
     # values. Returns -1 when the field is absent or non-numeric.
     val start = _find_json_value_start(json: args, key: key)
-    if start < 0 or start >= args.len():
+    if start < 0 or start >= args_n:
         return -1
     var i = start
     if _char_at(args, i) == Q():
         i = i + 1
     var result = 0
     var seen = false
-    while i < args.len():
+    while i < args_n:
         val d = _digit_val(_char_at(args, i))
         if d < 0:
             break
@@ -410,6 +416,12 @@ fn detect_tool_name(body: text) -> text:
         return "saml_analyze"
     ""
 
+# A timed-out child becomes a JSON-RPC error; the server loop keeps serving.
+fn position_result(id: text, out: text) -> text:
+    if out.starts_with(LSP_TIMEOUT_PREFIX):
+        return jsonrpc_error(id, -32001, out)
+    make_tool_result(id, out)
+
 fn handle_tool_call(id: text, body: text) -> text:
     val tool_name = detect_tool_name(body)
     if tool_name == "":
@@ -433,22 +445,22 @@ fn handle_tool_call(id: text, body: text) -> text:
         lsp_record_location(file, line0)
 
         if tool_name == "lsp_definition":
-            return make_tool_result(id, run_lsp_query(subcmd: "definition", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "definition", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_references":
-            return make_tool_result(id, run_lsp_query(subcmd: "references", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "references", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_hover":
-            return make_tool_result(id, run_visibility_hover(file: file, line0: line0, char0: char0, requester: hover_requester))
+            return position_result(id, run_visibility_hover(file: file, line0: line0, char0: char0, requester: hover_requester))
         if tool_name == "lsp_completion":
-            return make_tool_result(id, run_visibility_query(subcmd: "completions", file: file, line0: line0, char0: char0))
+            return position_result(id, run_visibility_query(subcmd: "completions", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_type_at":
-            return make_tool_result(id, run_lsp_query(subcmd: "type-at", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "type-at", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_signature_help":
-            return make_tool_result(id, run_lsp_query(subcmd: "signature-help", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "signature-help", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_implementation":
-            return make_tool_result(id, run_lsp_query(subcmd: "implementation", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "implementation", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_document_highlight":
-            return make_tool_result(id, run_lsp_query(subcmd: "document-highlight", file: file, line0: line0, char0: char0))
-        return make_tool_result(id, run_lsp_query(subcmd: "type-definition", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "document-highlight", file: file, line0: line0, char0: char0))
+        return position_result(id, run_lsp_query(subcmd: "type-definition", file: file, line0: line0, char0: char0))
 
     # Requester-scoped two-set view; `file` defaults to the requester's file.
     if tool_name == "lsp_visibility":
@@ -500,3 +512,14 @@ export handle_resource_read
 export handle_prompts_list
 export handle_roots_list
 export handle_logging_set_level
+
+# Mirrors std process_ops.process_bounded_timed_out (anchored trailing marker,
+# exit -1). Inlined to keep this server off the heavy std io import graph.
+fn _lsp_child_timed_out(exit_code: i64, stderr: text) -> bool:
+    if exit_code != -1:
+        return false
+    if stderr.ends_with("\nTIMEOUT\n"):
+        return true
+    if stderr.ends_with("Process timed out"):
+        return true
+    stderr.ends_with("ms]") and stderr.contains("[TIMEOUT: Process killed after ")

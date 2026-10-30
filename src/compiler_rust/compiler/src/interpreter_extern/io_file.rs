@@ -206,6 +206,38 @@ pub fn rt_io_file_open(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Two-argument open twins `rt_io_file_open_{read,write,append}(path_ptr,
+/// path_len)`: `std.nogc_sync_mut.sffi.fs` calls these with
+/// `rt_string_data(path)` / `rt_string_len(path)` (the three-argument form is
+/// mis-passed by seed-produced candidates). The interpreter had no handler, so
+/// every interpreted file open died with "unknown extern function". The
+/// pointer is the interpreter's borrowed `rt_string_data` buffer, valid for
+/// this call.
+fn open_twin(args: &[Value], symbol: &str, mode: i64) -> Result<Value, CompileError> {
+    let ptr = extract_i64(args, 0, symbol)?;
+    let len = extract_i64(args, 1, symbol)?;
+    if ptr == 0 || len <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as usize as *const u8, len as usize) };
+    let Ok(path) = std::str::from_utf8(bytes) else {
+        return Ok(Value::Int(-1));
+    };
+    rt_io_file_open(&[Value::text(path.to_string()), Value::Int(mode)])
+}
+
+pub fn rt_io_file_open_read(args: &[Value]) -> Result<Value, CompileError> {
+    open_twin(args, "rt_io_file_open_read", 0)
+}
+
+pub fn rt_io_file_open_write(args: &[Value]) -> Result<Value, CompileError> {
+    open_twin(args, "rt_io_file_open_write", 1)
+}
+
+pub fn rt_io_file_open_append(args: &[Value]) -> Result<Value, CompileError> {
+    open_twin(args, "rt_io_file_open_append", 3)
+}
+
 /// Read up to `size` bytes from `fd`. Returns a bare `[u8]`, empty at EOF or
 /// on error (see module-level divergence note).
 pub fn rt_io_file_read(args: &[Value]) -> Result<Value, CompileError> {
@@ -350,9 +382,37 @@ pub fn rt_io_file_close(args: &[Value]) -> Result<Value, CompileError> {
         drop(file);
         Ok(Value::Bool(ok))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        if fd <= 0 {
+            return Ok(Value::Bool(false));
+        }
+        use std::os::windows::io::FromRawHandle;
+        let file = unsafe { File::from_raw_handle(fd as *mut std::ffi::c_void) };
+        // FlushFileBuffers on a handle opened without write access fails with
+        // ACCESS_DENIED, so every read-only open (every `file_read`) used to
+        // report "file text close failed" and `file_read` returned nothing.
+        // A read-only handle has nothing to flush: that error is a success.
+        let ok = match file.sync_all() {
+            Ok(()) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
+        };
+        drop(file);
+        Ok(Value::Bool(ok))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Ok(Value::Bool(false))
+    }
+}
+
+/// i64 twin of `rt_io_file_close` (`fd -> 0/1`), the form `std` calls
+/// (`sffi/fs.spl` `io_file_close`). Without it every interpreter-mode
+/// `file_read` failed with `unknown extern function: rt_io_file_close_value`.
+pub fn rt_io_file_close_value(args: &[Value]) -> Result<Value, CompileError> {
+    match rt_io_file_close(args)? {
+        Value::Bool(true) => Ok(Value::Int(1)),
+        _ => Ok(Value::Int(0)),
     }
 }
 
@@ -448,6 +508,21 @@ pub fn rt_io_file_exists(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_io_file_delete(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     Ok(Value::Bool(std::fs::remove_file(&path).is_ok()))
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod close_value_tests {
+    use super::*;
+
+    #[test]
+    fn close_value_reports_one_for_an_open_fd() {
+        let path = std::env::temp_dir().join(format!("rt_io_close_value_{}", std::process::id()));
+        let path = path.to_string_lossy().to_string();
+        let fd = rt_io_file_open(&[Value::text(path.clone()), Value::Int(1)]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n > 0));
+        assert_eq!(rt_io_file_close_value(&[fd]).unwrap(), Value::Int(1));
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -591,5 +666,45 @@ mod bytes_basis_write_tests {
         drop(packed);
         rt_io_file_close(&[Value::Int(fd)]).unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"abc");
+    }
+}
+
+#[cfg(test)]
+mod open_twin_tests {
+    use super::*;
+
+    #[test]
+    fn two_argument_open_twins_open_by_pointer_and_length() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("simple_open_twin_{}.txt", std::process::id()));
+        let path_text = path.to_string_lossy().to_string();
+        let ptr = Value::Int(path_text.as_ptr() as i64);
+        let len = Value::Int(path_text.len() as i64);
+        let fd = rt_io_file_open_write(&[ptr.clone(), len.clone()]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n >= 0), "write twin opens: {fd:?}");
+        rt_io_file_close(&[fd]).unwrap();
+        let fd = rt_io_file_open_read(&[ptr.clone(), len.clone()]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n >= 0), "read twin opens: {fd:?}");
+        rt_io_file_close(&[fd]).unwrap();
+        let fd = rt_io_file_open_append(&[ptr, len]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n >= 0), "append twin opens: {fd:?}");
+        rt_io_file_close(&[fd]).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(rt_io_file_open_read(&[Value::Int(0), Value::Int(3)]).unwrap(), Value::Int(-1));
+    }
+}
+
+#[cfg(test)]
+mod close_read_only_tests {
+    use super::*;
+
+    #[test]
+    fn closing_a_read_only_open_reports_success() {
+        let path = std::env::temp_dir().join(format!("simple_close_ro_{}.txt", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let fd = rt_io_file_open(&[Value::text(path.to_string_lossy().to_string()), Value::Int(0)]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n > 0), "read-only open: {fd:?}");
+        assert_eq!(rt_io_file_close_value(&[fd]).unwrap(), Value::Int(1));
+        let _ = std::fs::remove_file(&path);
     }
 }

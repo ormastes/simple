@@ -1,0 +1,90 @@
+"""
+# Native `--entry-closure`: array `==` / `!=` compares contents, not identity
+
+**Category:** Codegen / MIR binary operators
+**Bug:** doc/08_tracking/bug/array_eq_lowered_as_identity_compare_2026-10-25.md
+(also native_u8_array_ne_compares_reference_2026-10-25.md)
+
+MIR lowered an array-typed `Eq` / `NotEq` to the generic word compare, so two
+separately built equal lists compared by handle identity: `[1,2] != [1,2]` was
+true. The fix routes array operands through rt_native_eq, which compares
+length and elements (byte-packed, u64-packed and generic lanes).
+
+Measured red on Stage 2 p2shard-17 (2026-10-25): every `eq` below prints false
+and every `ne` prints true for equal lists.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# No `{...}` interpolation in the embedded source: the spec's own lexer would
+# resolve it.
+val ARRAY_EQ_SOURCE: text = ("fn mk_i(n: i64) -> [i64]:\n" +
+    "    var out: [i64] = []\n" +
+    "    var i = 0\n" +
+    "    while i < n:\n" +
+    "        out.push(i + 1)\n" +
+    "        i = i + 1\n" +
+    "    out\n" +
+    "\n" +
+    "fn mk_t(a: text, b: text) -> [text]:\n" +
+    "    var out: [text] = []\n" +
+    "    out.push(a)\n" +
+    "    out.push(b)\n" +
+    "    out\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    print(\"BEGIN\")\n" +
+    "    val i1 = mk_i(3)\n" +
+    "    val i2 = mk_i(3)\n" +
+    "    val i3 = mk_i(2)\n" +
+    "    print(i1 == i2)\n" +
+    "    print(i1 != i2)\n" +
+    "    print(i1 == i3)\n" +
+    "    print(i1 != i3)\n" +
+    "    val t1 = mk_t(\"p\", \"q\")\n" +
+    "    val t2 = mk_t(\"p\", \"\" + \"q\")\n" +
+    "    val t3 = mk_t(\"p\", \"r\")\n" +
+    "    print(t1 == t2)\n" +
+    "    print(t1 != t3)\n" +
+    "    val b1: [u8] = [1u8, 2u8, 3u8]\n" +
+    "    val b2: [u8] = [1u8, 2u8, 3u8]\n" +
+    "    val b3: [u8] = [1u8, 2u8, 4u8]\n" +
+    "    print(b1 == b2)\n" +
+    "    print(b1 != b2)\n" +
+    "    print(b1 == b3)\n" +
+    "    print(\"END\")\n" +
+    "    0\n")
+
+fn native_build_and_run_array_eq() -> text:
+    val dir = "build/test-artifacts/native_array_eq_compares_contents"
+    val src = dir + "/array_eq_repro.spl"
+    val bin_out = dir + "/array_eq_repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, ARRAY_EQ_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "array == / != compares contents (native)":
+
+    it "compares [i64], [text] and [u8] lists element-wise":
+        # One example = one native-build; spec globals do not persist.
+        step("Build the fixture once and run it")
+        val out = native_build_and_run_array_eq()
+
+        step("Refuse to pass on a build or run that produced nothing")
+        expect(out.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("BEGIN")
+        expect(out).to_contain("END")
+
+        step("[i64]: equal lists ==, not !=; a shorter list differs")
+        step("[text]: equal contents == (one side built by concat, not the same literal); a differing element !=")
+        step("[u8]: equal bytes ==, not !=; a differing byte is not ==")
+        expect(out).to_contain("BEGIN\ntrue\nfalse\nfalse\ntrue\ntrue\ntrue\ntrue\nfalse\nfalse\nEND")

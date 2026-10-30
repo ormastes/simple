@@ -1,0 +1,147 @@
+# Only bounded envelope entry points are transport-facing. Preflight traverses
+# typed values before SDN/hex allocation and accounts for escaping and framing.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.wire_types_v1.*
+use std.common.contracts.mux.wire_primitives_v1.*
+use std.common.contracts.mux.wire_values_03_v1.*
+use std.common.contracts.mux.wire_values_06_v1.*
+use std.common.contracts.mux.wire_validation_v1.*
+use std.common.contracts.mux.wire_budget_01_v1.*
+use std.common.contracts.mux.wire_budget_02_v1.*
+use std.common.contracts.mux.wire_budget_03_v1.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.text_bytes.{text_to_bytes}
+
+pub fn mux_wire_call_tag_v1(call: MuxWireCallV1) -> text:
+    match call:
+        case MuxWireCallV1.Connect(_, _): "connect"
+        case MuxWireCallV1.Query(_, _, _): "query"
+        case MuxWireCallV1.Execute(_): "execute"
+        case MuxWireCallV1.PollEvents(_, _, _, _): "poll_events"
+        case MuxWireCallV1.Disconnect(_): "disconnect"
+
+pub fn mux_wire_result_tag_v1(result: MuxWireResultV1) -> text:
+    match result:
+        case MuxWireResultV1.Connection(_): "connect"
+        case MuxWireResultV1.Query(_): "query"
+        case MuxWireResultV1.Mutation(_): "execute"
+        case MuxWireResultV1.Events(_): "poll_events"
+        case MuxWireResultV1.Disconnect(_): "disconnect"
+
+pub fn mux_wire_validate_limit_v1(limit: i64) -> Result<i64, MuxWireErrorV1>:
+    if MUX_WIRE_TYPED_MAX_DEPTH_V1 > MUX_WIRE_MAX_DEPTH_V1: return Err(mux_wire_error_v1("schema_depth_budget"))
+    if limit < MUX_WIRE_MIN_FRAME_V1 or limit > MUX_WIRE_MAX_FRAME_V1: return Err(mux_wire_error_v1("invalid_frame_limit"))
+    Ok(limit)
+
+pub fn mux_wire_validate_auth_v1(token: text) -> Result<(), MuxWireErrorV1>:
+    if token.len() < 32 or token.len() > 256: return Err(mux_wire_error_v1("invalid_auth_shape"))
+    for byte in text_to_bytes(token):
+        if byte < 33 or byte > 126: return Err(mux_wire_error_v1("invalid_auth_shape"))
+    Ok(())
+
+fn check_envelope_budget(size: i64, limit: i64) -> Result<(), MuxWireErrorV1>:
+    mux_wire_validate_limit_v1(limit)?
+    if size > limit: return Err(mux_wire_error_v1("frame_budget"))
+    Ok(())
+
+fn write_body(value: SdnValue, limit: i64) -> Result<[u8], MuxWireErrorV1>:
+    val bytes = text_to_bytes(sdn_encode_canonical(value))
+    if bytes.len() < 1 or bytes.len() > limit: return Err(mux_wire_error_v1("encoded_size_mismatch"))
+    Ok(bytes)
+
+pub fn mux_wire_encode_request_v1(request: MuxWireRequestV1, limit: i64) -> Result<[u8], MuxWireErrorV1>:
+    mux_wire_validate_limit_v1(limit)?
+    mux_wire_validate_auth_v1(request.auth_token)?
+    if request.correlation == 0: return Err(mux_wire_error_v1("zero_correlation"))
+    mux_wire_node_sum_v1(6, mux_wire_nodes_mux_wire_call_v1(request.call)?)?
+    mux_wire_validate_call_v1(request.call, limit)?
+    val size = mux_wire_sum_v1(128, mux_wire_size_text_v1(request.auth_token)?)?
+    check_envelope_budget(mux_wire_sum_v1(size, mux_wire_size_mux_wire_call_v1(request.call)?)?, limit)?
+    write_body(SdnValue.Array([SdnValue.String("coremux.v1"), SdnValue.String("request"),
+        mux_wire_encode_u64_v1(request.correlation), SdnValue.String(request.auth_token),
+        SdnValue.String(mux_wire_call_tag_v1(request.call)), mux_wire_encode_mux_wire_call_v1(request.call)]), limit)
+
+pub fn mux_wire_encode_response_v1(response: MuxWireResponseV1, limit: i64) -> Result<[u8], MuxWireErrorV1>:
+    mux_wire_validate_limit_v1(limit)?
+    if response.correlation == 0: return Err(mux_wire_error_v1("zero_correlation"))
+    check_call_tag(response.call_tag)?
+    match response.outcome:
+        case MuxWireOutcomeV1.Success(result):
+            if mux_wire_result_tag_v1(result) != response.call_tag: return Err(mux_wire_error_v1("result_call_mismatch"))
+            mux_wire_node_sum_v1(6, mux_wire_nodes_mux_wire_result_v1(result)?)?
+            mux_wire_validate_result_v1(result)?
+            check_envelope_budget(mux_wire_sum_v1(128, mux_wire_size_mux_wire_result_v1(result)?)?, limit)?
+            write_body(SdnValue.Array([SdnValue.String("coremux.v1"), SdnValue.String("response"),
+                mux_wire_encode_u64_v1(response.correlation), SdnValue.String("ok"),
+                SdnValue.String(response.call_tag), mux_wire_encode_mux_wire_result_v1(result)]), limit)
+        case MuxWireOutcomeV1.Failure(failure):
+            mux_wire_node_sum_v1(6, mux_wire_nodes_mux_error_v1(failure)?)?
+            mux_wire_validate_error_v1(failure)?
+            check_envelope_budget(mux_wire_sum_v1(128, mux_wire_size_mux_error_v1(failure)?)?, limit)?
+            write_body(SdnValue.Array([SdnValue.String("coremux.v1"), SdnValue.String("response"),
+                mux_wire_encode_u64_v1(response.correlation), SdnValue.String("error"),
+                SdnValue.String(response.call_tag), mux_wire_encode_mux_error_v1(failure)]), limit)
+
+fn read_body(bytes: [u8], limit: i64, direction: text) -> Result<[SdnValue], MuxWireErrorV1>:
+    mux_wire_validate_limit_v1(limit)?
+    if bytes.len() < 1 or bytes.len() > limit: return Err(mux_wire_error_v1("frame_length"))
+    val limits = SdnStrictLimitsV1(max_source_bytes: limit, max_depth: 64, max_nodes: 250000,
+        max_rows: 0, max_cells: 0, max_columns: 0)
+    val document = match sdn_parse_strict_bytes_v1(bytes, limits):
+        case Ok(parsed): parsed
+        case Err(_): return Err(mux_wire_error_v1("invalid_strict_sdn"))
+    if document.consumed_bytes != bytes.len(): return Err(mux_wire_error_v1("trailing_content"))
+    val fields = mux_wire_array_v1(document.value, 6)?
+    mux_wire_tag_v1(fields, "coremux.v1")?
+    if mux_wire_decode_text_v1(fields[1])? != direction: return Err(mux_wire_error_v1("envelope_direction"))
+    Ok(fields)
+
+fn check_call_tag(tag: text) -> Result<(), MuxWireErrorV1>:
+    if tag != "connect" and tag != "query" and tag != "execute" and tag != "poll_events" and tag != "disconnect": return Err(mux_wire_error_v1("unknown_call_tag"))
+    Ok(())
+
+pub fn mux_wire_decode_request_v1(bytes: [u8], limit: i64) -> Result<MuxWireRequestV1, MuxWireErrorV1>:
+    val fields = read_body(bytes, limit, "request")?
+    val correlation = mux_wire_decode_u64_v1(fields[2])?
+    if correlation == 0: return Err(mux_wire_error_v1("zero_correlation"))
+    val token = mux_wire_decode_text_v1(fields[3])?
+    mux_wire_validate_auth_v1(token)?
+    val call = mux_wire_decode_mux_wire_call_v1(fields[5])?
+    if mux_wire_decode_text_v1(fields[4])? != mux_wire_call_tag_v1(call): return Err(mux_wire_error_v1("call_tag_mismatch"))
+    mux_wire_validate_call_v1(call, limit)?
+    Ok(MuxWireRequestV1(correlation: correlation, auth_token: token, call: call))
+
+pub fn mux_wire_decode_response_v1(bytes: [u8], limit: i64, correlation: u64, call_tag: text) -> Result<MuxWireResponseV1, MuxWireErrorV1>:
+    check_call_tag(call_tag)?
+    val fields = read_body(bytes, limit, "response")?
+    if correlation == 0 or mux_wire_decode_u64_v1(fields[2])? != correlation or mux_wire_decode_text_v1(fields[4])? != call_tag: return Err(mux_wire_error_v1("response_correlation"))
+    val status = mux_wire_decode_text_v1(fields[3])?
+    val outcome = if status == "ok":
+        val result = mux_wire_decode_mux_wire_result_v1(fields[5])?
+        if mux_wire_result_tag_v1(result) != call_tag: return Err(mux_wire_error_v1("result_call_mismatch"))
+        mux_wire_validate_result_v1(result)?
+        MuxWireOutcomeV1.Success(result)
+    elif status == "error":
+        val failure = mux_wire_decode_mux_error_v1(fields[5])?
+        mux_wire_validate_error_v1(failure)?
+        MuxWireOutcomeV1.Failure(failure)
+    else:
+        return Err(mux_wire_error_v1("unknown_status"))
+    Ok(MuxWireResponseV1(correlation: correlation, call_tag: call_tag, outcome: outcome))
+
+pub fn mux_wire_frame_header_v1(length: i64, limit: i64) -> Result<[u8], MuxWireErrorV1>:
+    mux_wire_validate_limit_v1(limit)?
+    if length < 1 or length > limit: return Err(mux_wire_error_v1("frame_length"))
+    Ok([((length / 16777216) % 256) as u8, ((length / 65536) % 256) as u8,
+        ((length / 256) % 256) as u8, (length % 256) as u8])
+
+pub fn mux_wire_frame_length_v1(header: [u8], limit: i64) -> Result<i64, MuxWireErrorV1>:
+    mux_wire_validate_limit_v1(limit)?
+    if header.len() != 4: return Err(mux_wire_error_v1("frame_header"))
+    var length: i64 = 0
+    for byte in header: length = length * 256 + (byte as i64)
+    if length < 1 or length > limit: return Err(mux_wire_error_v1("frame_length"))
+    Ok(length)

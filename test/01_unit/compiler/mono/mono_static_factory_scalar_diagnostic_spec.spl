@@ -1,0 +1,57 @@
+# @req REQ-SSPEC-COMPILER
+# Additional pass diagnostic; the exact nested Future/Poll qualification tests
+# remain unchanged and cannot be replaced by this scalar-only evidence.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+
+val SCALAR_OWNER_FACTORY = "class ScalarOwnerFuture<T>:\n    static fn from_value(value: T) -> T:\n        value\n    static fn pending() -> T?:\n        nil\n"
+
+fn scalar_owner_factory_lower(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "testdata/scalar_owner_factory.spl", "scalar_factory", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/scalar_owner_factory.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+describe "scalar synthetic static owner diagnostic":
+    it "rewrites an inferred factory to a concrete bool callable":
+        val hir = scalar_owner_factory_lower(SCALAR_OWNER_FACTORY + "\nfn create() -> bool:\n    ScalarOwnerFuture.from_value(true)\n")
+        var modules: Dict<text, HirModule> = {}
+        modules["scalar_factory"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+        val module: HirModule = output["scalar_factory"]
+        var checked = false
+        for key in module.functions.keys():
+            val function: HirFunction = module.functions[key]
+            if function.name != "create": continue
+            val tail: HirExpr = function.body.value
+            match tail.kind:
+                case HirExprKind.Call(callee, args, type_args):
+                    expect(args.len()).to_equal(1)
+                    expect(type_args.len()).to_equal(0)
+                    expect(callee.has_type_).to_equal(true)
+                    match callee.type_.kind:
+                        case HirTypeKind.Function(parameters, result, _):
+                            match result.kind:
+                                case HirTypeKind.Bool: ()
+                                case _: fail("specialized factory result retained T")
+                        case _: fail("specialized factory lacks callable signature")
+                    checked = true
+                case _: fail("scalar static owner factory was not rewritten")
+        expect(checked).to_equal(true)
+
+    it "rejects a missing owner argument without specializing any template":
+        val hir = scalar_owner_factory_lower(SCALAR_OWNER_FACTORY + "\nfn unbound():\n    ScalarOwnerFuture.pending()\n")
+        var modules: Dict<text, HirModule> = {}
+        modules["scalar_factory"] = hir
+        val (output, stats) = run_monomorphization(modules)
+        expect(stats.specializations_created).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(1)

@@ -1,6 +1,55 @@
 # Simple Test Runner entrypoint.
 
 use app.test_runner_new.test_runner_main.{run_test_cli}
+use std.io_runtime.{env_get_opt, env_remove_process}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.test_runner.runner_self_coverage.{runner_self_coverage_start, runner_self_coverage_sdn}
+
+use std.nogc_sync_mut.test_runner.test_executor_parsing.{explicit_simple_binary_from_env}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use app.io.cli_ops.{cli_current_exe_path}
+
+extern fn sys_get_args() -> [text]
+
+fn runner_identity_path(path: text) -> text:
+    var normalized = path.replace("\\", "/").lower()
+    if normalized.starts_with("//?/unc/"):
+        return "//" + normalized.substring(8)
+    if normalized.starts_with("//?/"):
+        return normalized.substring(4)
+    normalized
 
 fn main() -> i64:
-    run_test_cli()
+    # A standalone runner cannot execute `run <spec>` as a compiler. Require
+    # an explicitly selected, different executable to prevent recursive runs.
+    # Interpreted source entrypoints retain their invoking compiler identity.
+    val args = sys_get_args()
+    val source_entry = (args.len() > 0 and args[0].replace("\\", "/").ends_with("/app/test_runner_new/main.spl")) or (args.len() > 1 and args[1].replace("\\", "/").ends_with("/app/test_runner_new/main.spl"))
+    if not source_entry and ((args.len() > 0 and args[0] == "run") or (args.len() > 1 and args[1] == "run")):
+        print "error: standalone test runner cannot execute compiler run commands"
+        return 2
+    if not source_entry:
+        val compiler = explicit_simple_binary_from_env()
+        if compiler == "":
+            print "error: standalone test runner requires SIMPLE_BINARY or SIMPLE_RUNTIME to name a Simple compiler"
+            return 2
+        val child = path_absolute(compiler) ?? ""
+        val self_path = path_absolute(cli_current_exe_path()) ?? ""
+        if child == "" or self_path == "" or runner_identity_path(child) == runner_identity_path(self_path):
+            print "error: standalone test runner compiler must be a different executable"
+            return 2
+    val self_coverage_output = env_get_opt("SIMPLE_RUNNER_SELF_COVERAGE_OUTPUT") ?? ""
+    if self_coverage_output != "":
+        # Descendant runners must not overwrite this process's receipt.
+        if not env_remove_process("SIMPLE_RUNNER_SELF_COVERAGE_OUTPUT"):
+            print "ERROR: cannot isolate scoped runner self-coverage output"
+            return 1
+        runner_self_coverage_start()
+    val result = run_test_cli()
+    if self_coverage_output != "":
+        # Refuse existing receipts and destination symlinks; never clobber a
+        # previous run's evidence. The caller owns the parent directory.
+        if not file_create_exclusive(self_coverage_output, runner_self_coverage_sdn()):
+            print "ERROR: cannot create scoped runner self-coverage at {self_coverage_output}"
+            return 1
+    result

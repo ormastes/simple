@@ -70,6 +70,10 @@ struct ObjectModuleContext {
     // The same ISA Arc passed to ObjectBuilder. V1 modules have no acceptance
     // evidence; only the configured V2 constructor may expose readback.
     configured_isa_v2: Option<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>>,
+    // Module-scoped mono instances (declared with CRANELIFT_LINKAGE_COMDAT).
+    // Each gets its own COMDAT(any) group at emit time so every object that
+    // instantiated it may carry a copy and the linker keeps one.
+    comdat_funcs: Vec<FuncId>,
 }
 
 /// Backing storage for a function being built.
@@ -120,6 +124,97 @@ lazy_static! {
     static ref DECLARED_DATA: Mutex<HashMap<i64, DataId>> = Mutex::new(HashMap::new());
     /// Content-addressed dedup cache for string constants: (module, raw bytes) -> data handle.
     static ref STRING_DATA_CACHE: Mutex<HashMap<(i64, Vec<u8>), i64>> = Mutex::new(HashMap::new());
+    /// Function/data handles and signatures owned by one module, released by
+    /// `rt_cranelift_free_module`. Without this every module's signatures,
+    /// declaration handles and string-constant copies stayed in the maps above
+    /// for the process lifetime (bug native_codegen_cranelift_registry_leak_2026-10-25).
+    static ref MODULE_OWNED: Mutex<HashMap<i64, ModuleOwnedHandles>> = Mutex::new(HashMap::new());
+    /// Signature handle -> the one module that consumed it, or SIG_SHARED.
+    static ref SIG_OWNER: Mutex<HashMap<i64, i64>> = Mutex::new(HashMap::new());
+    /// First provider refusal for a live module. A zero call result is also a
+    /// valid void result, so errors must travel independently of value handles.
+    static ref MODULE_FAILURES: Mutex<HashMap<i64, Option<String>>> = Mutex::new(HashMap::new());
+}
+
+// Module construction registers the slot; arbitrary invalid handles never
+// allocate failure state. Independent modules cannot poison one another.
+fn record_module_failure(module: i64, reason: String) {
+    if let Some(first) = MODULE_FAILURES.lock().unwrap().get_mut(&module) {
+        if first.is_none() { *first = Some(reason); }
+    }
+}
+
+fn module_has_failure(module: i64) -> bool {
+    MODULE_FAILURES.lock().unwrap().get(&module).is_some_and(Option::is_some)
+}
+
+fn record_builder_failure(ctx: i64, reason: String) {
+    let module = ACTIVE_BUILDERS.lock().unwrap().get(&ctx).map(|ab| ab.module_handle);
+    if let Some(module) = module { record_module_failure(module, reason); }
+}
+
+/// A signature consumed by two modules is never released with either.
+const SIG_SHARED: i64 = -1;
+
+#[derive(Default)]
+struct ModuleOwnedHandles {
+    sigs: Vec<i64>,
+    funcs: Vec<i64>,
+    data: Vec<i64>,
+}
+
+fn own_func_handle(module: i64, handle: i64) {
+    MODULE_OWNED.lock().unwrap().entry(module).or_default().funcs.push(handle);
+}
+
+fn own_data_handle(module: i64, handle: i64) {
+    MODULE_OWNED.lock().unwrap().entry(module).or_default().data.push(handle);
+}
+
+fn note_sig_use(sig: i64, module: i64) {
+    let mut owners = SIG_OWNER.lock().unwrap();
+    match owners.get(&sig).copied() {
+        None => {
+            owners.insert(sig, module);
+            drop(owners);
+            MODULE_OWNED.lock().unwrap().entry(module).or_default().sigs.push(sig);
+        }
+        Some(owner) if owner == module || owner == SIG_SHARED => {}
+        Some(_) => {
+            owners.insert(sig, SIG_SHARED);
+        }
+    }
+}
+
+/// Drop every handle `module` owns. Its FuncIds/DataIds are meaningless once
+/// the module is gone, and its signatures were consumed by it alone.
+fn release_module_handles(module: i64) {
+    let Some(owned) = MODULE_OWNED.lock().unwrap().remove(&module) else {
+        return;
+    };
+    {
+        let mut owners = SIG_OWNER.lock().unwrap();
+        let mut sigs = SIGNATURES.lock().unwrap();
+        for sig in owned.sigs {
+            if owners.get(&sig) == Some(&module) {
+                owners.remove(&sig);
+                sigs.remove(&sig);
+            }
+        }
+    }
+    {
+        let mut funcs = DECLARED_FUNCS.lock().unwrap();
+        for handle in owned.funcs {
+            funcs.remove(&handle);
+        }
+    }
+    {
+        let mut data = DECLARED_DATA.lock().unwrap();
+        for handle in owned.data {
+            data.remove(&handle);
+        }
+    }
+    STRING_DATA_CACHE.lock().unwrap().retain(|(owner, _), _| *owner != module);
 }
 
 /// Clear all Cranelift SFFI global registries.
@@ -128,11 +223,9 @@ pub fn clear_cranelift_registries() {
     // Drop builders BEFORE backings to maintain safety invariant
     {
         let mut active = ACTIVE_BUILDERS.lock().unwrap();
-        for (_, mut ab) in active.drain() {
-            if let Some(builder) = ab.builder.take() {
-                builder.finalize();
-            }
-        }
+        // Reset is cancellation, not successful completion. Incomplete IR may
+        // contain unsealed/unfilled blocks and must never reach finalize().
+        active.clear();
     }
     BUILDER_BACKINGS.lock().unwrap().clear();
     FINISHED_FUNCS.lock().unwrap().clear();
@@ -140,6 +233,9 @@ pub fn clear_cranelift_registries() {
     DECLARED_DATA.lock().unwrap().clear();
     STRING_DATA_CACHE.lock().unwrap().clear();
     SIGNATURES.lock().unwrap().clear();
+    MODULE_OWNED.lock().unwrap().clear();
+    SIG_OWNER.lock().unwrap().clear();
+    MODULE_FAILURES.lock().unwrap().clear();
     JIT_MODULES.lock().unwrap().clear();
     AOT_MODULES.lock().unwrap().clear();
 }
@@ -220,6 +316,71 @@ fn float_cc_from_code(code: i64) -> cranelift_codegen::ir::condcodes::FloatCC {
     }
 }
 
+/// Function linkage code for a module-scoped mono instance (MIR `is_comdat`):
+/// the cranelift analogue of LLVM `linkonce_odr` + `comdat any`.
+const CRANELIFT_LINKAGE_COMDAT: i64 = 4;
+
+/// Linkage a COMDAT instance is declared with for `format`. ELF: weak inside
+/// a COMDAT group (what clang emits for C++ inline). COFF: external inside an
+/// IMAGE_COMDAT_SELECT_ANY section -- object 0.36 writes a *defined* weak COFF
+/// symbol as a bare WEAK_EXTERNAL without its aux record, so weak is not
+/// usable there. Mach-O: object has no COMDAT support, so N_WEAK_DEF alone,
+/// which ld64 coalesces. Returns (linkage, needs_comdat_group).
+fn comdat_instance_linkage(format: target_lexicon::BinaryFormat) -> (Linkage, bool) {
+    match format {
+        target_lexicon::BinaryFormat::Coff => (Linkage::Export, true),
+        target_lexicon::BinaryFormat::Macho => (Linkage::Preemptible, false),
+        _ => (Linkage::Preemptible, true),
+    }
+}
+
+/// Put a defined COMDAT instance in its own COMDAT(any) group. Relies on
+/// `per_function_section(true)`, so the function owns its section.
+///
+/// COFF: lld (and link.exe) take the COMDAT leader to be the first external
+/// symbol *after* the section-definition symbol. cranelift-object creates the
+/// function symbol at declare time, long before the section exists, so the
+/// leader would precede its section symbol and lld discards every copy
+/// ("relocation against symbol in discarded section"). Instead the original
+/// symbol -- which this object's relocations already target -- is turned into
+/// an undefined reference, and a fresh defined leader of the same name is
+/// added after the section symbol. Every caller then binds to whichever copy
+/// the linker keeps.
+fn add_function_comdat(product: &mut cranelift_object::ObjectProduct, id: FuncId) -> bool {
+    let Some((symbol, true)) = product.functions[id] else { return false };
+    let object::write::SymbolSection::Section(section) = product.object.symbol(symbol).section else {
+        return false;
+    };
+    let mut leader = symbol;
+    if product.object.format() == object::BinaryFormat::Coff {
+        let def = product.object.symbol(symbol);
+        let defined = object::write::Symbol {
+            name: def.name.clone(),
+            value: def.value,
+            size: def.size,
+            kind: def.kind,
+            scope: def.scope,
+            weak: false,
+            section: def.section,
+            flags: object::SymbolFlags::None,
+        };
+        let reference = product.object.symbol_mut(symbol);
+        reference.section = object::write::SymbolSection::Undefined;
+        reference.value = 0;
+        reference.size = 0;
+        product.object.section_symbol(section);
+        leader = product.object.add_symbol(defined);
+    } else {
+        product.object.section_symbol(section);
+    }
+    product.object.add_comdat(object::write::Comdat {
+        kind: object::ComdatKind::Any,
+        symbol: leader,
+        sections: vec![section],
+    });
+    true
+}
+
 fn linkage_from_code(code: i64) -> Linkage {
     match code {
         0 => Linkage::Export,
@@ -285,10 +446,10 @@ fn build_isa_for_triple(triple: Triple) -> Option<(Triple, std::sync::Arc<dyn cr
     Some((triple, isa))
 }
 
-fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
+fn triple_for_target(target: i64) -> Triple {
     // When target arch matches host arch, use Triple::host() for correct OS/ABI detection
     // (e.g., windows-gnu vs windows-msvc). Only use explicit triples for cross-compilation.
-    let triple = match target {
+    match target {
         CL_TARGET_X86_64 if cfg!(target_arch = "x86_64") => Triple::host(),
         CL_TARGET_AARCH64 if cfg!(target_arch = "aarch64") => Triple::host(),
         CL_TARGET_X86_64 => "x86_64-unknown-linux-gnu"
@@ -301,9 +462,35 @@ fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn crane
             .parse::<Triple>()
             .unwrap_or_else(|_| Triple::host()),
         _ => Triple::host(),
-    };
+    }
+}
 
-    build_isa_for_triple(triple)
+fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
+    build_isa_for_triple(triple_for_target(target))
+}
+
+/// JIT relocation policy is distinct from AOT object emission. The vendored
+/// JIT preallocates x86-only PLT entries whenever PIC is enabled, including for
+/// libcalls during JITModule::new. Non-x86 hosts therefore require its supported
+/// non-PIC path. Preserve AOT PIC and x86 JIT PIC behavior.
+fn build_jit_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
+    let triple = triple_for_target(target);
+    // A callable JIT module must match the host; cross targets belong to AOT.
+    // Refuse before JITModule::new can invoke architecture-specific machinery.
+    if triple.architecture != Triple::host().architecture {
+        return None;
+    }
+    let mut flag_builder = settings::builder();
+    flag_builder.set("opt_level", "speed").ok()?;
+    // JITBuilder::with_flags requires long-range libcall relocations, notably
+    // on AArch64. Its default PIC=true assumes the x86-only PLT implementation;
+    // use with_isa to select the supported non-PIC path on other native hosts.
+    flag_builder.set("use_colocated_libcalls", "false").ok()?;
+    flag_builder.set("is_pic", if cfg!(target_arch = "x86_64") { "true" } else { "false" }).ok()?;
+    configure_target_stack_probes(&mut flag_builder, &triple)?;
+    let isa = cranelift_codegen::isa::lookup(triple.clone()).ok()?
+        .finish(settings::Flags::new(flag_builder)).ok()?;
+    Some((triple, isa))
 }
 
 fn build_aot_isa_and_triple(target: &str) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
@@ -391,7 +578,7 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
         return 0;
     }
 
-    let (_, isa) = match build_isa_and_triple(target) {
+    let (_, isa) = match build_jit_isa_and_triple(target) {
         Some(v) => v,
         None => return 0,
     };
@@ -400,6 +587,7 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
     let module = JITModule::new(builder);
     let handle = next_handle();
 
+    MODULE_FAILURES.lock().unwrap().insert(handle, None);
     JIT_MODULES.lock().unwrap().insert(
         handle,
         JITModuleContext {
@@ -413,6 +601,7 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
 /// Finalize the module after all functions are defined.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_finalize_module(module: i64) -> i64 {
+    if module_has_failure(module) { return 0; }
     {
         let mut modules = JIT_MODULES.lock().unwrap();
         if let Some(ctx) = modules.get_mut(&module) {
@@ -432,10 +621,28 @@ pub unsafe extern "C" fn rt_cranelift_finalize_module(module: i64) -> i64 {
 /// Free module resources.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_free_module(module: i64) {
-    if JIT_MODULES.lock().unwrap().remove(&module).is_some() {
-        return;
+    if JIT_MODULES.lock().unwrap().remove(&module).is_none() {
+        AOT_MODULES.lock().unwrap().remove(&module);
     }
-    AOT_MODULES.lock().unwrap().remove(&module);
+    release_module_handles(module);
+    discard_module_functions(module);
+    MODULE_FAILURES.lock().unwrap().remove(&module);
+}
+
+// Retain the release/1.0.0 MODULE_OWNED/SIG_OWNER handle lifecycle above;
+// discard only this module's function builders and their borrowing backings.
+fn discard_module_functions(module: i64) {
+    FINISHED_FUNCS.lock().unwrap().retain(|_, function| function.module_handle != module);
+    // Detach builders before their backing allocations, as in registry reset.
+    let mut active = ACTIVE_BUILDERS.lock().unwrap();
+    let owned: Vec<i64> = active.iter().filter_map(|(&handle, builder)|
+        (builder.module_handle == module).then_some(handle)).collect();
+    for handle in owned {
+        // Drop the borrowing builder before its backing, without requiring
+        // the unfinished function to satisfy finalization invariants.
+        drop(active.remove(&handle));
+        BUILDER_BACKINGS.lock().unwrap().remove(&handle);
+    }
 }
 
 // ============================================================================
@@ -481,7 +688,7 @@ pub unsafe extern "C" fn rt_cranelift_sig_set_return(sig: i64, type_: i64) {
 // ============================================================================
 
 /// Declare a function in a module (for forward references and imports).
-/// linkage: 0=Export, 1=Import, 2=Local
+/// linkage: 0=Export, 1=Import, 2=Local, 4=COMDAT instance (see comdat_instance_linkage)
 /// Returns a function handle, or 0 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_declare_function(
@@ -492,88 +699,102 @@ pub unsafe extern "C" fn rt_cranelift_declare_function(
     linkage: i64,
 ) -> i64 {
     let name = string_from_ptr(name_ptr, name_len);
-    if name.is_empty() {
-        return 0;
-    }
-
-    let signature = {
-        let sigs = SIGNATURES.lock().unwrap();
-        match sigs.get(&sig) {
-            Some(s) => s.clone(),
-            None => return 0,
+    match declare_function_checked(module, &name, sig, linkage) {
+        Ok(handle) => handle,
+        Err(reason) => {
+            eprintln!("cranelift: declare_function failed: {reason}");
+            record_module_failure(module, reason);
+            0
         }
-    };
+    }
+}
 
-    let link = linkage_from_code(linkage);
-
-    // Try JIT module first, then AOT
+fn declare_function_checked(module: i64, name: &str, sig: i64, linkage: i64) -> Result<i64, String> {
+    let identity = || format!("module={module} symbol={name:?} signature_handle={sig} linkage={linkage}");
+    if name.is_empty() {
+        return Err(format!("{}: empty symbol", identity()));
+    }
+    let signature = SIGNATURES.lock().unwrap().get(&sig).cloned()
+        .ok_or_else(|| format!("{}: missing signature", identity()))?;
+    let detailed_identity = || format!("{} signature={signature}", identity());
+    let mut link = linkage_from_code(linkage);
+    if linkage == CRANELIFT_LINKAGE_COMDAT {
+        link = Linkage::Export;
+    }
     let func_id = {
         let mut jit = JIT_MODULES.lock().unwrap();
         if let Some(mod_ctx) = jit.get_mut(&module) {
-            let id = mod_ctx.module.declare_function(&name, link, &signature).ok();
-            if let Some(id) = id {
-                mod_ctx.func_ids.insert(name.clone(), id);
-            }
+            let id = mod_ctx.module.declare_function(name, link, &signature)
+                .map_err(|error| format!("{}: {}", detailed_identity(), describe_module_error(&error)))?;
+            mod_ctx.func_ids.insert(name.to_owned(), id);
             id
         } else {
             drop(jit);
             let mut aot = AOT_MODULES.lock().unwrap();
-            if let Some(mod_ctx) = aot.get_mut(&module) {
-                let id = mod_ctx.module.declare_function(&name, link, &signature).ok();
-                if let Some(id) = id {
-                    mod_ctx.func_ids.insert(name.clone(), id);
-                }
-                id
-            } else {
-                None
+            let mod_ctx = aot.get_mut(&module)
+                .ok_or_else(|| format!("{}: missing JIT/AOT module", detailed_identity()))?;
+            let mut needs_group = false;
+            if linkage == CRANELIFT_LINKAGE_COMDAT {
+                let (comdat_link, group) =
+                    comdat_instance_linkage(mod_ctx.module.isa().triple().binary_format);
+                link = comdat_link;
+                needs_group = group;
             }
+            let id = mod_ctx.module.declare_function(name, link, &signature)
+                .map_err(|error| format!("{}: {}", detailed_identity(), describe_module_error(&error)))?;
+            mod_ctx.func_ids.insert(name.to_owned(), id);
+            if needs_group {
+                mod_ctx.comdat_funcs.push(id);
+            }
+            id
         }
     };
-
-    match func_id {
-        Some(id) => {
-            let handle = next_handle();
-            DECLARED_FUNCS.lock().unwrap().insert(handle, id);
-            handle
-        }
-        None => 0,
-    }
+    let handle = next_handle();
+    DECLARED_FUNCS.lock().unwrap().insert(handle, func_id);
+    own_func_handle(module, handle);
+    note_sig_use(sig, module);
+    Ok(handle)
 }
 
 /// Import a declared function into the current function being built.
 /// Returns a func_ref handle for use with call instructions, or 0 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_import_function(ctx: i64, func_handle: i64) -> i64 {
-    let func_id = {
-        let declared = DECLARED_FUNCS.lock().unwrap();
-        match declared.get(&func_handle) {
-            Some(&id) => id,
-            None => return 0,
+    match import_function_checked(ctx, func_handle) {
+        Ok(handle) => handle,
+        Err(reason) => {
+            eprintln!("cranelift: import_function failed: {reason}");
+            record_builder_failure(ctx, reason);
+            0
         }
-    };
+    }
+}
 
+fn import_function_checked(ctx: i64, func_handle: i64) -> Result<i64, String> {
+    let identity = || format!("context={ctx} declaration_handle={func_handle}");
+    let func_id = DECLARED_FUNCS.lock().unwrap().get(&func_handle).copied()
+        .ok_or_else(|| format!("{}: missing declared function", identity()))?;
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
-    let Some(ab) = active.get_mut(&ctx) else { return 0 };
-    let Some(builder) = ab.builder.as_mut() else { return 0 };
-
+    let ab = active.get_mut(&ctx)
+        .ok_or_else(|| format!("{}: missing active context", identity()))?;
+    let module_handle = ab.module_handle;
+    let builder = ab.builder.as_mut()
+        .ok_or_else(|| format!("{} module={module_handle}: missing function builder", identity()))?;
     let func_ref = if ab.is_jit {
         let mut modules = JIT_MODULES.lock().unwrap();
-        let Some(mod_ctx) = modules.get_mut(&ab.module_handle) else {
-            return 0;
-        };
+        let mod_ctx = modules.get_mut(&module_handle)
+            .ok_or_else(|| format!("{} module={module_handle}: missing JIT module", identity()))?;
         mod_ctx.module.declare_func_in_func(func_id, builder.func)
     } else {
         let mut modules = AOT_MODULES.lock().unwrap();
-        let Some(mod_ctx) = modules.get_mut(&ab.module_handle) else {
-            return 0;
-        };
+        let mod_ctx = modules.get_mut(&module_handle)
+            .ok_or_else(|| format!("{} module={module_handle}: missing AOT module", identity()))?;
         mod_ctx.module.declare_func_in_func(func_id, builder.func)
     };
-
     let id = ab.next_value_id;
     ab.next_value_id += 1;
     ab.func_refs.insert(id, func_ref);
-    id
+    Ok(id)
 }
 
 // ============================================================================
@@ -650,6 +871,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_string_data(module: i64, bytes_ptr
     let handle = next_handle();
     DECLARED_DATA.lock().unwrap().insert(handle, data_id);
     STRING_DATA_CACHE.lock().unwrap().insert(cache_key, handle);
+    own_data_handle(module, handle);
     handle
 }
 
@@ -749,6 +971,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
 
     let handle = next_handle();
     DECLARED_DATA.lock().unwrap().insert(handle, data_id);
+    own_data_handle(module, handle);
     handle
 }
 
@@ -845,6 +1068,7 @@ pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64,
     if !is_jit && !is_aot {
         return 0;
     }
+    note_sig_use(sig, module);
 
     let handle = next_handle();
 
@@ -894,6 +1118,16 @@ pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64,
 /// Returns the context handle for use with define_function.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_end_function(ctx: i64) -> i64 {
+    // A rejected instruction may leave otherwise valid IR (e.g. only Abort).
+    // Do not finalize or publish it. Drop its borrowing builder before backing.
+    {
+        let mut active = ACTIVE_BUILDERS.lock().unwrap();
+        if active.get(&ctx).is_some_and(|ab| module_has_failure(ab.module_handle)) {
+            drop(active.remove(&ctx));
+            BUILDER_BACKINGS.lock().unwrap().remove(&ctx);
+            return 0;
+        }
+    }
     // Step 1: Finalize builder and extract metadata
     let (name, module_handle, is_jit) = {
         let mut active = ACTIVE_BUILDERS.lock().unwrap();
@@ -950,6 +1184,7 @@ fn describe_module_error(err: &ModuleError) -> String {
 pub unsafe extern "C" fn rt_cranelift_define_function(module: i64, _func_id: i64, ctx: i64) -> bool {
     let finished = FINISHED_FUNCS.lock().unwrap().remove(&ctx);
     let Some(finished) = finished else { return false };
+    if module_has_failure(module) || module_has_failure(finished.module_handle) { return false; }
 
     let mut modules = JIT_MODULES.lock().unwrap();
     let Some(mod_ctx) = modules.get_mut(&module) else {
@@ -1379,7 +1614,9 @@ pub unsafe extern "C" fn rt_cranelift_call(ctx: i64, func_ref_handle: i64, args_
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
     let Some(&func_ref) = ab.func_refs.get(&func_ref_handle) else {
-        eprintln!("cranelift: call missing func-ref handle {func_ref_handle}");
+        let reason = format!("call missing func-ref handle {func_ref_handle} in {}", ab.func_name);
+        eprintln!("cranelift: {reason}");
+        record_module_failure(ab.module_handle, reason);
         return 0;
     };
 
@@ -1392,7 +1629,9 @@ pub unsafe extern "C" fn rt_cranelift_call(ctx: i64, func_ref_handle: i64, args_
         let arg_handles = std::slice::from_raw_parts(args_ptr as *const i64, args_len as usize);
         for &h in arg_handles {
             let Some(&val) = ab.values.get(&h) else {
-                eprintln!("cranelift: call missing value handle {h}");
+                let reason = format!("call missing value handle {h} in {}", ab.func_name);
+                eprintln!("cranelift: {reason}");
+                record_module_failure(ab.module_handle, reason);
                 return 0;
             };
             args.push(val);
@@ -1430,6 +1669,10 @@ pub unsafe extern "C" fn rt_cranelift_call_indirect(
             None => return 0,
         }
     };
+    let owner = ACTIVE_BUILDERS.lock().unwrap().get(&ctx).map(|ab| ab.module_handle);
+    if let Some(module) = owner {
+        note_sig_use(sig, module);
+    }
 
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
@@ -1595,6 +1838,7 @@ pub unsafe extern "C" fn rt_cranelift_append_func_params(ctx: i64, block: i64) {
 /// Get a function pointer from a JIT module.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_get_function_ptr(module: i64, name_ptr: i64, name_len: i64) -> i64 {
+    if module_has_failure(module) { return 0; }
     let name = string_from_ptr(name_ptr, name_len);
     if name.is_empty() {
         return 0;
@@ -1797,12 +2041,14 @@ fn rt_cranelift_new_aot_module_impl(
     let module = ObjectModule::new(builder);
     let handle = next_handle();
 
+    MODULE_FAILURES.lock().unwrap().insert(handle, None);
     AOT_MODULES.lock().unwrap().insert(
         handle,
         ObjectModuleContext {
             module,
             func_ids: HashMap::new(),
             configured_isa_v2,
+            comdat_funcs: Vec::new(),
         },
     );
     handle
@@ -1832,9 +2078,17 @@ pub unsafe extern "C" fn rt_cranelift_emit_object_raw(module: i64, path_ptr: i64
 }
 
 fn rt_cranelift_emit_object_impl(module: i64, path: &str) -> bool {
+    // Refuse before consuming the module or touching a pre-existing output.
+    if module_has_failure(module) { return false; }
     let mut aot_modules = AOT_MODULES.lock().unwrap();
     if let Some(ctx) = aot_modules.remove(&module) {
-        let product = ctx.module.finish();
+        let comdat_funcs = ctx.comdat_funcs;
+        let mut product = ctx.module.finish();
+        for id in comdat_funcs {
+            if !add_function_comdat(&mut product, id) {
+                return false;
+            }
+        }
         let bytes = product.emit().unwrap_or_default();
         if bytes.is_empty() {
             return false;
@@ -1855,6 +2109,7 @@ pub unsafe extern "C" fn rt_cranelift_aot_define_function(
 ) -> bool {
     let finished = FINISHED_FUNCS.lock().unwrap().remove(&ctx);
     let Some(finished) = finished else { return false };
+    if module_has_failure(module) || module_has_failure(finished.module_handle) { return false; }
     let name = finished.name;
 
     let mut modules = AOT_MODULES.lock().unwrap();
@@ -2561,6 +2816,92 @@ mod tests {
         }
     }
 
+    /// Emit an object defining COMDAT instance `Box__get__i64` (and, with
+    /// `entry`, an exported caller of it) exactly as the AOT path does.
+    fn emit_comdat_instance_object(triple: &str, entry: Option<&str>) -> Vec<u8> {
+        let isa = cranelift_codegen::isa::lookup(triple.parse::<Triple>().unwrap())
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let format = isa.triple().binary_format;
+        let mut builder =
+            ObjectBuilder::new(isa, "comdat_probe", cranelift_module::default_libcall_names()).unwrap();
+        builder.per_function_section(true).per_data_object_section(true);
+        let mut module = ObjectModule::new(builder);
+        let mut sig = module.make_signature();
+        sig.returns.push(AbiParam::new(types::I64));
+        let (link, group) = comdat_instance_linkage(format);
+        let inst = module.declare_function("Box__get__i64", link, &sig).unwrap();
+        let mut fbc = FunctionBuilderContext::new();
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig.clone();
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+            let blk = b.create_block();
+            b.switch_to_block(blk);
+            b.seal_block(blk);
+            let v = b.ins().iconst(types::I64, 42);
+            b.ins().return_(&[v]);
+            b.finalize();
+        }
+        module.define_function(inst, &mut ctx).unwrap();
+        if let Some(entry) = entry {
+            let e = module.declare_function(entry, Linkage::Export, &sig).unwrap();
+            let mut ctx = module.make_context();
+            ctx.func.signature = sig.clone();
+            let callee = module.declare_func_in_func(inst, &mut ctx.func);
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+            let blk = b.create_block();
+            b.switch_to_block(blk);
+            b.seal_block(blk);
+            let call = b.ins().call(callee, &[]);
+            let r = b.inst_results(call)[0];
+            b.ins().return_(&[r]);
+            b.finalize();
+            module.define_function(e, &mut ctx).unwrap();
+        }
+        let mut product = module.finish();
+        if group {
+            assert!(add_function_comdat(&mut product, inst));
+        }
+        product.emit().unwrap()
+    }
+
+    #[test]
+    fn test_comdat_instance_is_grouped_on_elf_and_coff_and_weak_on_macho() {
+        use object::{Object, ObjectComdat, ObjectSymbol};
+
+        for triple in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"] {
+            let bytes = emit_comdat_instance_object(triple, Some("entry_main"));
+            let file = object::File::parse(bytes.as_slice()).unwrap();
+            let comdats: Vec<_> = file.comdats().collect();
+            assert_eq!(comdats.len(), 1, "{triple}: one COMDAT group");
+            assert_eq!(comdats[0].kind(), object::ComdatKind::Any, "{triple}");
+            let leader = file.symbol_by_index(comdats[0].symbol()).unwrap();
+            assert_eq!(leader.name().unwrap(), "Box__get__i64", "{triple}");
+            assert!(leader.is_definition(), "{triple}: leader is the definition");
+        }
+        // COFF: the leader must FOLLOW its section-definition symbol, or lld
+        // discards every copy of the section.
+        let bytes = emit_comdat_instance_object("x86_64-pc-windows-msvc", None);
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        let comdat = file.comdats().next().unwrap();
+        let leader_index = comdat.symbol().0;
+        let section_symbol_index = file
+            .symbols()
+            .find(|s| s.kind() == object::SymbolKind::Section && s.section_index() == file.symbol_by_index(comdat.symbol()).unwrap().section_index())
+            .unwrap()
+            .index()
+            .0;
+        assert!(section_symbol_index < leader_index);
+
+        let bytes = emit_comdat_instance_object("x86_64-apple-darwin", None);
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        assert_eq!(file.comdats().count(), 0);
+        let inst = file.symbols().find(|s| s.name() == Ok("_Box__get__i64")).unwrap();
+        assert!(inst.is_weak(), "Mach-O: N_WEAK_DEF");
+    }
+
     #[test]
     fn test_global_data_v2_address_identity_alignment_and_linkage_mapping() {
         unsafe {
@@ -2670,3 +3011,122 @@ mod tests {
         }
     }
 }
+
+// Not arch-gated: AOT object modules for x86_64 build on every host.
+#[cfg(test)]
+mod owned_handle_tests {
+    use super::*;
+
+    #[test]
+    fn test_free_module_releases_owned_handles() {
+        unsafe {
+            let name = "owned_handles";
+            let a = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
+            let b = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
+            assert!(a > 0 && b > 0);
+            let own_sig = rt_cranelift_new_signature(0);
+            rt_cranelift_sig_set_return(own_sig, CL_TYPE_I64);
+            let shared_sig = rt_cranelift_new_signature(0);
+            let fname = "rt_owned_handle_probe";
+            let func = rt_cranelift_declare_function(a, fname.as_ptr() as i64, fname.len() as i64, own_sig, 1);
+            assert!(func > 0);
+            let other = "rt_owned_handle_other";
+            assert!(rt_cranelift_declare_function(a, other.as_ptr() as i64, other.len() as i64, shared_sig, 1) > 0);
+            assert!(rt_cranelift_declare_function(b, other.as_ptr() as i64, other.len() as i64, shared_sig, 1) > 0);
+            let text = b"owned string constant";
+            let data = rt_cranelift_declare_string_data(a, text.as_ptr() as i64, text.len() as i64);
+            assert!(data > 0);
+            assert_eq!(rt_cranelift_declare_string_data(a, text.as_ptr() as i64, text.len() as i64), data);
+
+            rt_cranelift_free_module(a);
+            assert!(!SIGNATURES.lock().unwrap().contains_key(&own_sig), "module-owned signature released");
+            assert!(!DECLARED_FUNCS.lock().unwrap().contains_key(&func), "function handle released");
+            assert!(!DECLARED_DATA.lock().unwrap().contains_key(&data), "data handle released");
+            assert!(!STRING_DATA_CACHE
+                .lock()
+                .unwrap()
+                .contains_key(&(a, text.to_vec())), "string cache entry released");
+            assert!(SIGNATURES.lock().unwrap().contains_key(&shared_sig), "shared signature kept");
+            // b still declares through the shared signature.
+            let late = "rt_owned_handle_late";
+            assert!(rt_cranelift_declare_function(b, late.as_ptr() as i64, late.len() as i64, shared_sig, 1) > 0);
+            rt_cranelift_free_module(b);
+            assert!(!MODULE_OWNED.lock().unwrap().contains_key(&a));
+            assert!(!MODULE_OWNED.lock().unwrap().contains_key(&b));
+        }
+    }
+}
+
+#[cfg(test)]
+mod function_handle_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn conflicting_declaration_retains_symbol_signatures_and_valid_original() {
+        unsafe {
+            let name = "handle_diagnostic_conflict";
+            let module = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
+            assert!(module > 0);
+            let original = rt_cranelift_new_signature(0);
+            rt_cranelift_sig_set_return(original, CL_TYPE_I64);
+            let conflicting = rt_cranelift_new_signature(0);
+            rt_cranelift_sig_set_return(conflicting, CL_TYPE_F64);
+            let symbol = "diagnostic_callee";
+            let declared = declare_function_checked(module, symbol, original, 1).unwrap();
+            let reason = declare_function_checked(module, symbol, conflicting, 1).unwrap_err();
+            assert!(reason.contains(&format!("module={module}")), "{reason}");
+            assert!(reason.contains("symbol=\"diagnostic_callee\""), "{reason}");
+            assert!(reason.contains("incompatible with previous declaration"), "{reason}");
+            assert!(reason.contains("types::I64") && reason.contains("types::F64"), "{reason}");
+            assert_eq!(rt_cranelift_declare_function(module, symbol.as_ptr() as i64,
+                symbol.len() as i64, conflicting, 1), 0);
+            // A rejected redeclaration must not erase the valid original.
+            let caller = "diagnostic_caller";
+            let ctx = rt_cranelift_begin_function(module, caller.as_ptr() as i64, caller.len() as i64, original);
+            assert!(ctx > 0);
+            assert!(import_function_checked(ctx, declared).unwrap() > 0);
+            rt_cranelift_free_module(module);
+            SIGNATURES.lock().unwrap().remove(&conflicting);
+        }
+    }
+
+    #[test]
+    fn invalid_import_distinguishes_declaration_from_context() {
+        unsafe {
+            let name = "handle_diagnostic_import";
+            let module = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
+            assert!(module > 0);
+            let sig = rt_cranelift_new_signature(0);
+            let declared = declare_function_checked(module, "valid_callee", sig, 1).unwrap();
+            let absent_declaration = import_function_checked(0, 0).unwrap_err();
+            assert!(absent_declaration.contains("missing declared function"));
+            let absent_context = import_function_checked(0, declared).unwrap_err();
+            assert!(absent_context.contains("missing active context"));
+            assert!(absent_context.contains(&format!("declaration_handle={declared}")));
+            assert_eq!(rt_cranelift_import_function(0, declared), 0);
+            assert!(declare_function_checked(module, "valid_callee", sig, 1).is_ok());
+            rt_cranelift_free_module(module);
+        }
+    }
+
+    #[test]
+    fn declaration_distinguishes_missing_signature_from_missing_module() {
+        unsafe {
+            let missing_signature = declare_function_checked(0, "probe", 0, 1).unwrap_err();
+            assert!(missing_signature.contains("missing signature"));
+            let sig = rt_cranelift_new_signature(0);
+            let missing_module = declare_function_checked(0, "probe", sig, 1).unwrap_err();
+            assert!(missing_module.contains("missing JIT/AOT module"));
+            assert!(missing_module.contains("symbol=\"probe\""));
+            SIGNATURES.lock().unwrap().remove(&sig);
+        }
+    }
+}
+
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[path = "cranelift_abort_tests.rs"]
+mod abort_tests;
+
+#[cfg(test)]
+#[path = "cranelift_error_latch_tests.rs"]
+mod error_latch_tests;

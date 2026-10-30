@@ -1,5 +1,7 @@
 # HIR: `match self:` inside a generic enum's own method is rejected (2026-10-23)
 
+**Status:** open
+
 Symptom: Stage 2 full-CLI build fails on `src/lib/nogc_async_mut/failsafe/core.spl`:
 `generic enum pattern requires concrete declaration-ordered type arguments`, then
 `E-HIR-MATCH-UNHANDLED-PATTERN: error-recovery pattern reached match lowering`.

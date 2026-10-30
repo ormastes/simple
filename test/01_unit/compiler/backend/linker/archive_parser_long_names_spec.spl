@@ -1,0 +1,81 @@
+# Archive parser: extended ("//") name tables as written by MSVC lib.exe.
+#
+# MSVC terminates each long-name entry with NUL instead of GNU's "/\n".
+# Before the fix the parser mapped NUL to "?" and ran the lookup on to the
+# next "/" or "\n", so every MSVC long name swallowed its successors, and it
+# built the table with one string concatenation per byte (quadratic; on the
+# 125 KB table of msvcrt.lib this exhausted >100 GB under @no_gc).
+
+use std.spec.*
+use compiler.backend.linker.archive_parser.{ar_parse}
+
+fn _lp_text_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < s.len():
+        out.push(s.byte_at(i) as u8)
+        i = i + 1
+    out
+
+fn _lp_append(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+fn _lp_field(value: text, width: i64) -> [u8]:
+    var out = _lp_text_bytes(value)
+    while out.len() < width:
+        out.push(0x20 as u8)
+    out
+
+fn _lp_member(name: text, data: [u8]) -> [u8]:
+    var out: [u8] = []
+    out = _lp_append(out, _lp_field(name, 16))
+    out = _lp_append(out, _lp_field("0", 12))
+    out = _lp_append(out, _lp_field("0", 6))
+    out = _lp_append(out, _lp_field("0", 6))
+    out = _lp_append(out, _lp_field("644", 8))
+    out = _lp_append(out, _lp_field("{data.len()}", 10))
+    out.push(0x60 as u8)
+    out.push(0x0A as u8)
+    out = _lp_append(out, data)
+    if data.len() % 2 != 0: out.push(0x0A as u8)
+    out
+
+fn _lp_archive(table: [u8], second: i64) -> [u8]:
+    var out = _lp_text_bytes("!<arch>\n")
+    out = _lp_append(out, _lp_member("//", table))
+    out = _lp_append(out, _lp_member("/0", [1 as u8, 2 as u8]))
+    out = _lp_append(out, _lp_member("/{second}", [3 as u8, 4 as u8]))
+    out
+
+describe "ArParser - MSVC NUL-terminated long names":
+    it "resolves each NUL-terminated entry to exactly its own name":
+        # entry 1 = 19 name bytes + NUL, so entry 2 starts at offset 20.
+        var table = _lp_text_bytes("first_long_name.obj")
+        table.push(0 as u8)
+        table = _lp_append(table, _lp_text_bytes("second_long_name.obj"))
+        table.push(0 as u8)
+        val reader = ar_parse(_lp_archive(table, 20)).unwrap()
+        expect(reader.members.len()).to_equal(3)
+        expect(reader.members[1].name).to_equal("first_long_name.obj")
+        expect(reader.members[2].name).to_equal("second_long_name.obj")
+
+    it "still resolves GNU slash-newline terminated entries":
+        var table = _lp_text_bytes("first_long_name.obj/\n")
+        table = _lp_append(table, _lp_text_bytes("second_long_name.obj/\n"))
+        val reader = ar_parse(_lp_archive(table, 21)).unwrap()
+        expect(reader.members[1].name).to_equal("first_long_name.obj")
+        expect(reader.members[2].name).to_equal("second_long_name.obj")
+
+    it "keeps forward slashes inside an MSVC long name":
+        # "dir/sub/first.obj" is 17 bytes + NUL, so entry 2 starts at 18.
+        var table = _lp_text_bytes("dir/sub/first.obj")
+        table.push(0 as u8)
+        table = _lp_append(table, _lp_text_bytes("second_long_name.obj"))
+        table.push(0 as u8)
+        val reader = ar_parse(_lp_archive(table, 18)).unwrap()
+        expect(reader.members[1].name).to_equal("dir/sub/first.obj")
+        expect(reader.members[2].name).to_equal("second_long_name.obj")

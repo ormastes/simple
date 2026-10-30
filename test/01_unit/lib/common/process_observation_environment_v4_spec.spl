@@ -1,0 +1,76 @@
+"""As a V4 process caller, I need an explicit canonical environment in the bound
+request. These pure schema checks prove environment admission and serialization;
+they grant no executable authority and claim no child/provider execution.
+"""
+use std.spec
+use std.common.process.observation_v4.{ProcessObservationEnvironmentV4,
+    ProcessObservationRequestV4, ProcessObservationEnforcementKindV4,
+    ProcessObservationDescendantPolicyV4, process_observation_request_valid_v4,
+    canonical_encode_process_observation_request_v4,
+    canonical_decode_process_observation_request_v4}
+
+fn env_v4_digest() -> [u8]:
+    var digest: [u8] = []
+    for index in 0..32:
+        digest.push(index as u8)
+    digest
+
+fn env_v4_request(environment: [ProcessObservationEnvironmentV4]) -> ProcessObservationRequestV4:
+    # Nonzero claims and fixed digests only satisfy the pure request shape.
+    # They are never passed to a provider and are not executable/cwd pins.
+    ProcessObservationRequestV4(argv: ["/bin/echo", "environment-schema"],
+        environment: environment, canonical_cwd: "/work",
+        canonical_pinned_directory: "/work/bin", executable_pin: 9,
+        executable_digest: env_v4_digest(), cwd_pin_claim: 10,
+        cwd_identity_digest: env_v4_digest(), capability_bits: 1,
+        wall_budget_ns: 1000000000, term_grace_ns: 100000000,
+        cleanup_budget_ns: 1000000000, stdout_limit_bytes: 1024,
+        stderr_limit_bytes: 1024, memory_limit_bytes: 0,
+        enforcement_kind: ProcessObservationEnforcementKindV4.None,
+        descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup,
+        max_clock_resolution_ns: 1000000)
+
+# @manual_section: V4 explicit environment request schema
+# @req REQ-SOSIX-ENV-V4
+describe "V4 explicit process environment request":
+    it "roundtrips empty and Unicode values without changing canonical order":
+        step("Encode and decode explicit environment entries through the production V4 codec")
+        val request = env_v4_request([
+            ProcessObservationEnvironmentV4(key: "A_EMPTY", value: ""),
+            ProcessObservationEnvironmentV4(key: "B_TEXT", value: "한é🙂=value with spaces")])
+        assert_true(process_observation_request_valid_v4(request))
+        val encoded = canonical_encode_process_observation_request_v4(request).unwrap()
+        val decoded = canonical_decode_process_observation_request_v4(encoded).unwrap()
+        expect(decoded.environment.len()).to_equal(2)
+        expect(decoded.environment[0].key).to_equal("A_EMPTY")
+        expect(decoded.environment[0].value).to_equal("")
+        expect(decoded.environment[1].key).to_equal("B_TEXT")
+        expect(decoded.environment[1].value).to_equal("한é🙂=value with spaces")
+        expect(canonical_encode_process_observation_request_v4(decoded).unwrap()).to_equal(encoded)
+
+    it "retains an explicit empty environment without synthesizing host entries":
+        step("Roundtrip an explicit empty environment through the V4 request codec")
+        val request = env_v4_request([])
+        assert_true(process_observation_request_valid_v4(request))
+        val encoded = canonical_encode_process_observation_request_v4(request).unwrap()
+        val decoded = canonical_decode_process_observation_request_v4(encoded).unwrap()
+        expect(decoded.environment.len()).to_equal(0)
+
+    it "rejects duplicate and unsorted environment keys instead of reordering them":
+        step("Submit ambiguous or noncanonical environment lists")
+        for second in ["A", "0"]:
+            val request = env_v4_request([
+                ProcessObservationEnvironmentV4(key: "A", value: "first"),
+                ProcessObservationEnvironmentV4(key: second, value: "second")])
+            assert_false(process_observation_request_valid_v4(request))
+            assert_true(canonical_encode_process_observation_request_v4(request).is_err())
+
+    it "rejects empty equals-containing and NUL names plus NUL values":
+        step("Apply V4 environment admission before any provider or pin operation")
+        for key in ["", "A=B", "A\0B"]:
+            val request = env_v4_request([ProcessObservationEnvironmentV4(key: key, value: "safe")])
+            assert_false(process_observation_request_valid_v4(request))
+            assert_true(canonical_encode_process_observation_request_v4(request).is_err())
+        val bad_value = env_v4_request([ProcessObservationEnvironmentV4(key: "A", value: "before\0after")])
+        assert_false(process_observation_request_valid_v4(bad_value))
+        assert_true(canonical_encode_process_observation_request_v4(bad_value).is_err())

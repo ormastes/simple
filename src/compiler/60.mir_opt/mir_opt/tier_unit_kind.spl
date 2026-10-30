@@ -1,0 +1,59 @@
+# CPU tier classification for MIR units.
+#
+# A TierUnitKind tracks whether a function or module is tier-neutral
+# (executable on all targets) or tier-specific (requires a specific CPU tier).
+# Tier-specific units bear @simd or @must(simd) attributes, or cfg atoms
+# with feature/target_feature keys that constrain the target feature set.
+
+"""Categorizes a compilation unit by CPU tier specificity."""
+pub enum TierUnitKind:
+    Neutral          # Executable on all CPU tiers
+    TierSpecific     # Requires specific CPU tier features
+
+"""Classifies unit attributes and cfg atoms for tier specificity.
+
+A unit is TierSpecific if:
+- Any declaration attribute is "simd" or "must(simd)" (callers render @must(arg) as "must(arg)"), OR
+- Any cfg atom has key "feature" or "target_feature"
+
+Otherwise Neutral.
+
+Integration point for PR4: caller (likely mir_opt_pass or a decl lowering fn)
+will extract attr_names from real decl_attrs and cfg atoms from real @cfg conditions.
+"""
+pub fn tier_unit_kind_of_attrs(attr_names: [text], cfg_feature_atoms: [text]) -> TierUnitKind:
+    # @simd and @must(simd) trigger tier specificity; other @must(x) do not
+    for name in attr_names:
+        if name == "simd" or name == "must(simd)":
+            return TierUnitKind.TierSpecific
+
+    # Check cfg atoms for feature keys
+    # Atoms are key="value" format; extract the key and match exactly
+    for atom in cfg_feature_atoms:
+        val key_end = atom.index_of("=")
+        if key_end > 0:
+            val key = atom.substring(0, key_end).trim()
+            if key == "feature" or key == "target_feature":
+                return TierUnitKind.TierSpecific
+
+    TierUnitKind.Neutral
+
+"""Classifies a module by aggregating its member units.
+
+A module is TierSpecific if any member is TierSpecific.
+Otherwise Neutral.
+"""
+pub fn tier_unit_kind_of_module(kinds: [TierUnitKind]) -> TierUnitKind:
+    for kind in kinds:
+        if kind == TierUnitKind.TierSpecific:
+            return TierUnitKind.TierSpecific
+    TierUnitKind.Neutral
+
+"""Renders a TierUnitKind as text for witness fields.
+
+Returns "tier" for TierSpecific, "neutral" for Neutral.
+"""
+pub fn tier_unit_kind_text(k: TierUnitKind) -> text:
+    match k:
+        case TierUnitKind.Neutral: "neutral"
+        case TierUnitKind.TierSpecific: "tier"

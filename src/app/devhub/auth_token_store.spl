@@ -3,17 +3,30 @@
 # This module owns parsing and rewriting plaintext token sections. Token
 # resolution policy (environment, command, then file) remains in config.spl.
 
-use std.nogc_async_mut.sosix.host_facade.{sosix_file_read, sosix_file_exists, sosix_file_atomic_write}
+use std.io.file_ops.{file_exists}
+use std.io_runtime.{read_file_text_result}
+use std.sffi.fs.{file_atomic_write_mode}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_as_text, json_value_serialize}
+
+fn auth_provider_is_valid(provider: text) -> bool:
+    if provider == "": return false
+    var i = 0
+    while i < provider.len():
+        val ch = provider.char_at(i)
+        if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_" or
+                (i > 0 and ((ch >= "0" and ch <= "9") or ch == "-" or ch == "."))):
+            return false
+        i = i + 1
+    true
 
 
 fn load_auth_token_from(path: text, provider: text) -> text:
     """Load one provider token from an auth.sdn path."""
-    if not sosix_file_exists(path):
+    if not auth_provider_is_valid(provider):
         return ""
-
-    val content = sosix_file_read(path)
-    if content == nil:
-        return ""
+    val content: text = match read_file_text_result(path):
+        case Ok(value): value
+        case Err(_): return ""
 
     var section = ""
     for line in content.split("\n"):
@@ -26,8 +39,10 @@ fn load_auth_token_from(path: text, provider: text) -> text:
             # Split at the first colon so values such as user:pass survive.
             val colon_idx = trimmed.find(":")
             val token = trimmed[colon_idx + 1:].trim()
-            if token.starts_with("\"") and token.ends_with("\""):
-                return token[1:token.len() - 1]
+            if token.starts_with("\""):
+                match json_value_parse_opt(token):
+                    case Some(value): return json_value_as_text(value) ?? ""
+                    case nil: return ""
             return token
     ""
 
@@ -46,8 +61,16 @@ fn _without_auth_section(content: text, section_name: text) -> text:
 
 fn save_auth_token_to(path: text, provider: text, token: text) -> bool:
     """Save one provider token while preserving all other auth.sdn sections."""
-    val existing = if sosix_file_exists(path): sosix_file_read(path) else: "# ITF Auth Tokens (do not share)\n\n"
+    if path == "" or not auth_provider_is_valid(provider):
+        return false
+    val existing: text = if file_exists(path):
+        match read_file_text_result(path):
+            case Ok(value): value
+            case Err(_): return false
+    else:
+        "# ITF Auth Tokens (do not share)\n\n"
     var content = _without_auth_section(existing, provider)
     if token != "":
-        content = content + "\n{provider}:\n    token: \"{token}\"\n"
-    sosix_file_atomic_write(path, content)
+        val quoted = json_value_serialize(JsonValue.Str(token))
+        content = content + "\n{provider}:\n    token: {quoted}\n"
+    file_atomic_write_mode(path, content, 384 as i32)

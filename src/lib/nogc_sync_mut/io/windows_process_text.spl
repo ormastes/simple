@@ -1,0 +1,111 @@
+# Shared native Windows text preparation. Canonical checked byte extraction and
+# strict UTF8 validation precede monotonic byte-offset UTF16 traversal. No
+# char_code_at ordinal rescan, text slicing per scalar, or permissive decoding.
+use std.common.text_bytes.{boxed_text_bytes_checked, utf8_bytes_valid, bytes_to_text, text_byte_extraction_checked}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{HeapAlloc}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16}
+
+pub fn windows_process_text_bytes_v1(value: text) -> Result<[u8], text>:
+    match boxed_text_bytes_checked(value):
+        case Err(_reason): Err("Windows text byte extraction failed")
+        case Ok(bytes): Ok(bytes)
+
+# Count only after the canonical strict validator admits every byte sequence.
+# Internal environment blocks allow NUL; public launch fields explicitly do not.
+pub fn windows_process_utf16_units_bytes_v1(bytes: [u8], allow_nul: bool) -> i64:
+    if not utf8_bytes_valid(bytes): return -1
+    var offset = 0
+    var units = 0
+    while offset < bytes.len():
+        val first = bytes[offset] as i64
+        if first == 0 and not allow_nul: return -1
+        val width = if first < 128: 1 elif first < 224: 2 elif first < 240: 3 else: 4
+        units = units + (if width == 4: 2 else: 1)
+        offset = offset + width
+    units
+
+pub fn windows_process_utf16_units_v1(value: text, allow_nul: bool) -> i64:
+    match windows_process_text_bytes_v1(value):
+        case Err(_reason): -1
+        case Ok(bytes): windows_process_utf16_units_bytes_v1(bytes, allow_nul)
+
+@unsafe(reason: "writes strictly validated UTF8 into one checked exact-sized owned UTF16 allocation", capabilities: [ffi, raw_ptr])
+pub fn windows_process_wide_linear_v1(heap: i64, value: text) -> i64:
+    val extracted = windows_process_text_bytes_v1(value)
+    if extracted.is_err(): return 0
+    val bytes = extracted.unwrap()
+    val units = windows_process_utf16_units_bytes_v1(bytes, true)
+    if units < 0 or units > 4611686018427387902: return 0
+    val buffer = HeapAlloc(heap, 8u32, ((units + 1) * 2) as u64)
+    if buffer == 0: return 0
+    var offset = 0
+    var target = 0
+    while offset < bytes.len():
+        val first = bytes[offset] as i64
+        var scalar = first
+        var width = 1
+        if first >= 240:
+            width = 4
+            scalar = ((first & 7) << 18) | (((bytes[offset + 1] as i64) & 63) << 12) | (((bytes[offset + 2] as i64) & 63) << 6) | ((bytes[offset + 3] as i64) & 63)
+        elif first >= 224:
+            width = 3
+            scalar = ((first & 15) << 12) | (((bytes[offset + 1] as i64) & 63) << 6) | ((bytes[offset + 2] as i64) & 63)
+        elif first >= 192:
+            width = 2
+            scalar = ((first & 31) << 6) | ((bytes[offset + 1] as i64) & 63)
+        if scalar < 65536:
+            volatile_write_u16(buffer + target * 2, scalar)
+            target = target + 1
+        else:
+            val supplementary = scalar - 65536
+            volatile_write_u16(buffer + target * 2, 55296 + (supplementary >> 10))
+            volatile_write_u16(buffer + (target + 1) * 2, 56320 + (supplementary & 1023))
+            target = target + 2
+        offset = offset + width
+    buffer
+
+# Quote raw bytes, preserving even malformed input until the strict wide owner
+# rejects it. Escapes depend only on ASCII quote/backslash, never Unicode case.
+pub fn windows_process_quote_arg_bytes_v1(argument: text) -> Result<[u8], text>:
+    val bytes = windows_process_text_bytes_v1(argument)?
+    if bytes.len() > 4611686018427387902: return Err("Windows quoted argument size overflow")
+    var size = 2
+    var slashes = 0
+    for byte in bytes:
+        if byte == 92u8:
+            slashes = slashes + 1
+        else:
+            size = size + (if byte == 34u8: slashes * 2 + 1 else: slashes) + 1
+            slashes = 0
+    size = size + slashes * 2
+    var quoted: [u8] = [0u8; size]
+    if text_byte_extraction_checked(size, quoted).is_err(): return Err("Windows quoted argument allocation failed")
+    quoted[0] = 34u8
+    var target = 1
+    slashes = 0
+    for byte in bytes:
+        if byte == 92u8:
+            slashes = slashes + 1
+        else:
+            val copies = if byte == 34u8: slashes * 2 + 1 else: slashes
+            for index in 0..copies:
+                quoted[target] = 92u8
+                target = target + 1
+            quoted[target] = byte
+            target = target + 1
+            slashes = 0
+    for index in 0..(slashes * 2):
+        quoted[target] = 92u8
+        target = target + 1
+    quoted[target] = 34u8
+    Ok(quoted)
+
+pub fn windows_process_quote_arg_linear_v1(argument: text) -> text:
+    # The historical text-returning API cannot encode allocation failure. Fail
+    # closed instead of dropping an argument or inventing a partial command.
+    match windows_process_quote_arg_bytes_v1(argument):
+        case Err(reason): panic(reason)
+        case Ok(bytes):
+            val quoted = bytes_to_text(bytes)
+            if quoted.len() != bytes.len(): panic("Windows quoted argument text allocation failed")
+            quoted

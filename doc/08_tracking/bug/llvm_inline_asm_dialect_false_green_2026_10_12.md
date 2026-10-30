@@ -25,3 +25,37 @@ workaround commit is `ef00661e2e38368279179acdfeb5fb4424514dba`, and the source 
 now use `recover=5c225cff453d79a5a1c8b172d5bda6f0215f86f7`, its parent on that
 branch, which still has the original port instructions. A row was added to
 `bug_db.sdn` by hand; qualified bug-database reconciliation remains pending.
+
+## Typed Rust dialect transport candidate (2026-10-25)
+
+Source audit on release `f9d07913dcc4ca9623445150c7b8b5e4947610aa`
+found that the Rust HIR lowerer discarded `AsmConstraintKind::Options`, HIR
+and MIR carried no syntax metadata, and LLVM emission selected ATT explicitly.
+The pure-Simple emitter already retained `intel_syntax`; its existing llc
+error-diagnostic admission and failed-object deletion are separate source fixes.
+
+The candidate retains a typed `AsmDialect` from parser options through HIR and
+MIR, with an unspecified default preserving each backend's established behavior
+(LLVM ATT; sidecar target-driven syntax), plus explicit ATT or Intel selection. Conflicting
+`att_syntax`/`intel_syntax` options fail during HIR lowering. Ordinary LLVM,
+the generic LLVM emitter, and the naked raw-block emitter select the requested
+Inkwell dialect. Cranelift's sidecar retains the dialect in its registry and
+symbol hash, honors explicit ATT and Intel through its existing syntax mechanism,
+and rejects explicit Intel on a non-x86 target before writing the sidecar.
+Unsupported generic emitters reject explicit syntax. Unrelated
+options keep their existing policy. No assembly instruction, operand, clobber,
+volatile marker or workaround directive is deleted.
+
+Authored Rust regressions cover default/conflicting options, parsed option
+transport through HIR and MIR, sidecar dialect identity/default preservation,
+explicit syntax selection and non-x86 rejection without sidecar publication,
+and LLVM IR dialect selection across the three LLVM emission paths. These tests
+are **UNEXECUTED**: this session prohibits Cargo, Rust/runtime builds and native
+compiler builds. Source diff whitespace validation alone passed; there is no
+compiled or native qualification claim.
+
+The bug remains **OPEN** and all six port-source directive workarounds remain.
+This metadata repair does not establish LLVM callback error handling, failed
+object/cache publication prevention in the Rust path, original x86 port opcode
+bytes, hardware execution, or current-source bootstrap qualification. Those
+remain removal gates; ARM host execution would not establish x86-native success.

@@ -1,0 +1,64 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: value-position if merges an unresolved arm with a struct arm
+
+`val r = if c: <match yielding Ok payload> else: make()` typed r from the first
+arm (bare I64), so `for x in r.items` failed "for-in over non-array iterables
+(#143)". mir_merge_arm_types now keeps a struct-typed later arm over an I64 one.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn if_merge_messages(src: text) -> [text]:
+    val file = "testdata/fixture_if_merge.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_if_merge", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    messages
+
+val src = "struct Route:\n" +
+    "    items: [i64]\n" +
+    "\n" +
+    "fn make() -> Route:\n" +
+    "    Route(items: [1, 2])\n" +
+    "\n" +
+    "fn pick() -> Result<Route, text>:\n" +
+    "    Ok(make())\n" +
+    "\n" +
+    "fn total(c: bool) -> i64:\n" +
+    "    val route = if c:\n" +
+    "        val m = match pick():\n" +
+    "            case Ok(v): v\n" +
+    "            case Err(_): return 0\n" +
+    "        m\n" +
+    "    else:\n" +
+    "        make()\n" +
+    "    var s = 0\n" +
+    "    for i in route.items:\n" +
+    "        s = s + i\n" +
+    "    s\n"
+
+describe "MIR lowering: if merge with unresolved first arm":
+    it "keeps the struct type so for-in over a field lowers":
+        val messages = if_merge_messages(src)
+        var bad = 0
+        for m in messages:
+            if m.contains("for-in over non-array"):
+                bad = bad + 1
+        expect(bad).to_equal(0)

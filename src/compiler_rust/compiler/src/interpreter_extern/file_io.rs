@@ -983,6 +983,23 @@ pub fn rt_file_write_text_at(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Read text at an absolute byte offset without reading the full file.
+/// Read up to `size` bytes at `offset`. `size` is a caller cap, not the expected
+/// length (SCV inventory passes 1 GiB per source file): allocate only what the
+/// file still holds. Zero-filling the cap per call made the seed spend ~93% of
+/// cold inventory in Vec::extend_with (single core, 40+ min). Interpreter twin
+/// of the clamp in runtime file_ops.rs rt_file_read_text_at_checked.
+fn read_at_capped(file: &mut fs::File, offset: u64, size: usize) -> Option<Vec<u8>> {
+    let remaining = file.metadata().ok().filter(|m| m.is_file()).map(|m| m.len().saturating_sub(offset));
+    let cap = match remaining {
+        Some(r) => usize::try_from(r).map_or(size, |r| size.min(r)),
+        None => size.min(1 << 20),
+    };
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(cap).ok()?;
+    file.take(size as u64).read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
 pub fn rt_file_read_text_at(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let offset = match args.get(1) {
@@ -1000,13 +1017,9 @@ pub fn rt_file_read_text_at(args: &[Value]) -> Result<Value, CompileError> {
     if file.seek(SeekFrom::Start(offset)).is_err() {
         return Ok(Value::text(String::new()));
     }
-    let mut buf = vec![0u8; size];
-    match file.read(&mut buf) {
-        Ok(n) => {
-            buf.truncate(n);
-            Ok(Value::text(String::from_utf8_lossy(&buf).to_string()))
-        }
-        Err(_) => Ok(Value::text(String::new())),
+    match read_at_capped(&mut file, offset, size) {
+        Some(buf) => Ok(Value::text(String::from_utf8_lossy(&buf).to_string())),
+        None => Ok(Value::text(String::new())),
     }
 }
 
@@ -1032,17 +1045,9 @@ pub fn rt_file_read_text_at_checked(args: &[Value]) -> Result<Value, CompileErro
     if file.seek(SeekFrom::Start(offset)).is_err() {
         return Ok(Value::Nil);
     }
-    let mut buf = Vec::new();
-    if buf.try_reserve_exact(size).is_err() {
-        return Ok(Value::Nil);
-    }
-    buf.resize(size, 0);
-    match file.read(&mut buf) {
-        Ok(n) => {
-            buf.truncate(n);
-            Ok(Value::text(String::from_utf8_lossy(&buf).to_string()))
-        }
-        Err(_) => Ok(Value::Nil),
+    match read_at_capped(&mut file, offset, size) {
+        Some(buf) => Ok(Value::text(String::from_utf8_lossy(&buf).to_string())),
+        None => Ok(Value::Nil),
     }
 }
 
@@ -1918,6 +1923,50 @@ pub fn rt_file_truncate(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_mmap_create(path, size) -> addr`: create/truncate `path` to exactly
+/// `size` bytes and map it read-write, via the linked runtime twin
+/// (`simple_runtime::value::rt_mmap_create`). 0 on any failure.
+pub fn rt_mmap_create(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let size = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        Some(Value::UInt { value, .. }) => *value as i64,
+        other => {
+            return Err(CompileError::semantic(format!(
+                "rt_mmap_create() expects (path: text, size: i64), got size arg {:?}",
+                other
+            )))
+        }
+    };
+    let path_rv = simple_runtime::value::rt_string_new(path.as_ptr(), path.len() as u64);
+    let addr = simple_runtime::value::rt_mmap_create(path_rv.to_raw() as i64, size);
+    Ok(Value::Int(addr))
+}
+
+fn mapping_extent(args: &[Value], symbol: &str) -> Result<(i64, i64), CompileError> {
+    let int_at = |idx: usize| match args.get(idx) {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(Value::UInt { value, .. }) => Ok(*value as i64),
+        other => Err(CompileError::semantic(format!(
+            "{symbol}() expects (addr: i64, size: i64), got {:?}",
+            other
+        ))),
+    };
+    Ok((int_at(0)?, int_at(1)?))
+}
+
+/// `rt_munmap(addr, size) -> bool`: release a view from `rt_mmap` / `rt_mmap_create`.
+pub fn rt_munmap(args: &[Value]) -> Result<Value, CompileError> {
+    let (addr, size) = mapping_extent(args, "rt_munmap")?;
+    Ok(Value::Bool(simple_runtime::value::rt_munmap(addr, size)))
+}
+
+/// `rt_msync(addr, size) -> bool`: flush a writable view to its file.
+pub fn rt_msync(args: &[Value]) -> Result<Value, CompileError> {
+    let (addr, size) = mapping_extent(args, "rt_msync")?;
+    Ok(Value::Bool(simple_runtime::value::rt_msync(addr, size)))
+}
+
 /// Move file (works across filesystems)
 pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
     let src = extract_path(args, 0)?;
@@ -2119,6 +2168,34 @@ pub fn rt_file_publish_noreplace(args: &[Value]) -> Result<Value, CompileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 1 GiB size cap (what SCV inventory passes per source file) must not
+    /// allocate or zero-fill 1 GiB per call: the read is bounded by the bytes the
+    /// file holds and returns the whole file even when one read() is short.
+    #[test]
+    fn read_text_at_checked_bounds_allocation_by_file_length() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("src.spl");
+        fs::write(&path, "fn main():
+    0
+").expect("write");
+        let p = Value::text(path.to_string_lossy().to_string());
+        let start = std::time::Instant::now();
+        for _ in 0..40 {
+            let v = rt_file_read_text_at_checked(&[p.clone(), Value::Int(0), Value::Int(1 << 30)]).unwrap();
+            assert_eq!(v, Value::text("fn main():
+    0
+".to_string()));
+            let tail = rt_file_read_text_at(&[p.clone(), Value::Int(3), Value::Int(1 << 30)]).unwrap();
+            assert_eq!(tail, Value::text("main():
+    0
+".to_string()));
+        }
+        // Old behaviour zero-filled 80 x 1 GiB here (tens of seconds).
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "took {:?}", start.elapsed());
+        let past = rt_file_read_text_at_checked(&[p, Value::Int(999), Value::Int(1 << 30)]).unwrap();
+        assert_eq!(past, Value::text(String::new()));
+    }
 
     /// Interpreter twin of the cycle-170 split crossing
     /// (runtime_native.c rt_secure_temp_dir_set_parent/_set_prefix/_make):

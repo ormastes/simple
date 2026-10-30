@@ -1,0 +1,76 @@
+# Pure projection of canonical shared focus, never a private client controller.
+# Authentication/closing/native focus checks belong to the API owner.
+use os.apps.smux.service.{ServiceState}
+use os.apps.smux.contract.{MuxClientAttachment}
+use os.apps.smux.pane_presentation.{pane_is_hidden}
+
+fn projected(attachment: MuxClientAttachment, window: text, pane: text) -> MuxClientAttachment:
+    return MuxClientAttachment(client_id: attachment.client_id, session_id: attachment.session_id,
+        attached: attachment.attached, cols: attachment.cols, rows: attachment.rows,
+        attachment_generation: attachment.attachment_generation,
+        current_window: window, current_pane: pane)
+
+pub fn client_context_project(st: ServiceState, attachment: MuxClientAttachment) -> MuxClientAttachment:
+    """Derive shared current window and visible active pane without changing focus."""
+    if not attachment.attached or st.find_session_idx(attachment.session_id) < 0:
+        return projected(attachment, "", "")
+    var wi = -1
+    var i = 0
+    while i < st.window_count:
+        val window = st.get_window(i)
+        if window.session_id == attachment.session_id and window.is_active:
+            if wi >= 0: return projected(attachment, "", "")
+            wi = i
+        i = i + 1
+    if wi < 0: return projected(attachment, "", "")
+    val window = st.get_window(wi)
+    var pane_id = ""
+    i = 0
+    while i < st.pane_count:
+        val record = st.get_pane(i)
+        if record.pane.session_id == attachment.session_id and record.pane.window_id == window.id and record.focus:
+            # Multiple focused records are ambiguous even if only one is visible.
+            if pane_id != "": return projected(attachment, window.id, "")
+            pane_id = record.pane.id
+        i = i + 1
+    if pane_id == "" or pane_is_hidden(st, attachment.session_id, window.id, pane_id):
+        return projected(attachment, window.id, "")
+    if window.zoom_pane != "" and window.zoom_pane != pane_id:
+        return projected(attachment, window.id, "")
+    return projected(attachment, window.id, pane_id)
+
+pub fn client_context_put(st: ServiceState, index: int, attachment: MuxClientAttachment) -> ServiceState:
+    """Replace a bounded attachment slot in order, deriving its context from shared state."""
+    val canonical = client_context_project(st, attachment)
+    if index < 0: return st.add_client(canonical)
+    if index >= st.client_count: return st
+    var changed = st
+    while changed.client_count > 0:
+        changed = changed.remove_client(changed.client_count - 1)
+    var i = 0
+    while i < st.client_count:
+        if i == index:
+            changed = changed.add_client(canonical)
+        else:
+            changed = changed.add_client(st.get_client(i))
+        i = i + 1
+    return changed
+
+pub fn client_context_reconcile(st: ServiceState) -> ServiceState:
+    """Refresh all existing attachment projections after a checked shared-state change."""
+    var changed = st
+    var i = 0
+    while i < st.client_count:
+        changed = client_context_put(changed, i, st.get_client(i))
+        i = i + 1
+    return changed
+
+pub fn client_context_lookup(st: ServiceState, session: text, client: text, generation: i64) -> Result<MuxClientAttachment, text>:
+    """Read an exact current generation; this does not authenticate or renew a lease."""
+    val index = st.find_client_idx(client)
+    if generation <= 0 or index < 0: return Err("client attachment identity unavailable")
+    val attachment = st.get_client(index)
+    if not attachment.attached or attachment.session_id != session or attachment.attachment_generation != generation:
+        return Err("client attachment generation or session mismatch")
+    if st.find_session_idx(session) < 0: return Err("client attachment session unavailable")
+    return Ok(client_context_project(st, attachment))

@@ -2,7 +2,7 @@
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_support.{MirBinOp, MirOperand, MirOperandKind}
 use compiler.mir.mir_instruction_graph.{MirInst}
-use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.mir_types.{MirConstValue, MirTypeKind}
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use std.io_runtime.{env_get_nullable}
 use compiler.semantics.match_exhaustiveness.{match_coverage_profile_is_critical}
@@ -32,6 +32,7 @@ use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{mir_hir_type_is_sy
 # - Method calls (instance, trait, static, free function / UFCS)
 # - Array, tuple, set, and constant expression lowering
 # - Field access
+use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol, custom_primitive_underlying_type_tag_by_name}
 
 use compiler.mir.mir_data.*
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
@@ -42,6 +43,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_instructions.{MirPlace}
+use compiler.mir.mir_instruction_support.{MirUnaryOp}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.mir_types.{MirType}
@@ -240,6 +242,24 @@ fn hir_type_has_unresolved_type_param(ty: HirType) -> bool:
 # ============================================================================
 
 impl MirLowering:
+    me binary_struct_owner(receiver: HirExpr, local: LocalId, fallback: text) -> text:
+        # Constructor and array-element layout spellings may be bare names.
+        # Dispatch uses the exact declared owner, as ordinary method calls do.
+        if val declared = self.receiver_declared_or_result_type(receiver, local):
+            match declared.kind:
+                case Named(owner_id, _):
+                    if val owner = self.symbols.get_symbol_raw(owner_id.id):
+                        match owner.kind:
+                            case Struct | Class:
+                                # Structural fallback needs the declaration's
+                                # layout identity. Custom dispatch translates
+                                # this exact owner through struct_owner_method_key.
+                                val identity = self.declared_struct_layout_key(self.composite_layout_key(owner))
+                                if identity != "": return identity
+                            case _: ()
+                case _: ()
+        fallback
+
     me begin_expr_trace_session():
         """Snapshot the process trace policy for one module-lowering session.
 
@@ -652,10 +672,10 @@ impl MirLowering:
         # Comparing discriminants does not depend on arm binding.
         if self.runtime_array_locals.contains(local.id): return true
         if val type_ = self.builder.local_type(local):
-            val lira_disc = _sffi_enum_discriminant<i64>(type_.kind)
-            if lira_disc == _sffi_enum_discriminant<i64>(MirTypeKind.Array(MirType.i64(), 0)):
+            val lira_disc = _sffi_enum_discriminant<MirTypeKind>(type_.kind)
+            if lira_disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Array(MirType.i64(), 0)):
                 return true
-            if lira_disc == _sffi_enum_discriminant<i64>(MirTypeKind.Slice(MirType.i64())):
+            if lira_disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Slice(MirType.i64())):
                 return true
             return false
         false
@@ -665,11 +685,11 @@ impl MirLowering:
         # Keep Ref in the signature/ownership metadata; unwrap only this
         # collection view, never arbitrary Ptr or Ref(Array) values.
         var dict_type = container_type
-        if _sffi_enum_discriminant<i64>(dict_type.kind) == _sffi_enum_discriminant<i64>(MirTypeKind.Ref(MirType.i64(), false)):
+        if _sffi_enum_discriminant<MirTypeKind>(dict_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Ref(MirType.i64(), false)):
             match dict_type.kind:
                 case MirTypeKind.Ref(inner, _): dict_type = inner
                 case _: ()
-        if _sffi_enum_discriminant<i64>(dict_type.kind) == _sffi_enum_discriminant<i64>(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
+        if _sffi_enum_discriminant<MirTypeKind>(dict_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
             match dict_type.kind:
                 case MirTypeKind.Dict(_, value_type): return Some(value_type)
                 case _: ()
@@ -688,7 +708,7 @@ impl MirLowering:
         if self.runtime_dict_locals.contains(local.id):
             return true
         if val type_ = self.builder.local_type(local):
-            return _sffi_enum_discriminant(type_.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Dict(MirType.i64(), MirType.i64()))
+            return self.runtime_dict_value_mir_type(type_) != nil
         false
     fn noted_runtime_elem_type(container_local: LocalId) -> MirType?:
         """Nil-discriminating read of the store-observed element/value note.
@@ -1908,6 +1928,38 @@ impl MirLowering:
         acc = self.emit_raw_strcat(acc, close_paren)
         acc
 
+    me box_runtime_value_local_is_record(local: LocalId) -> bool:
+        """True when `local` is known to hold a struct/class value although
+        its MIR type may be the erased I64: a struct-name provenance entry, or
+        a remembered HIR type naming a Struct/Class symbol. Enums are left
+        out on purpose (unit variants may be immediates), and so are bitfield
+        values, which are plain integer words."""
+        if self.bitfield_value_syms.contains(local.id):
+            return false
+        if self.struct_value_syms.contains(local.id):
+            val record_name = self.struct_value_syms[local.id]
+            # Only a name with a registered record layout: struct_value_syms
+            # also carries sentinels (`__runtime_array__`, a bare generic
+            # parameter name such as `T`), and a newtype over a primitive is
+            # an integer word.
+            if record_name != "" and self.struct_field_order.contains(record_name) and
+                    custom_primitive_underlying_type_tag_by_name(record_name) < 0:
+                return true
+        if val record_hir_type = self.find_local_hir_type(local.id):
+            match record_hir_type.kind:
+                case HirTypeKind.Named(record_owner, _):
+                    # Bitfields are declared as SymbolKind.Struct, and so are
+                    # newtypes over a primitive (lower_type maps those to
+                    # their I64/F64/Bool word).
+                    if self.bitfield_map.contains(record_owner.id):
+                        return false
+                    if custom_primitive_underlying_type_tag_by_symbol(record_owner.id) >= 0:
+                        return false
+                    val record_kind = enum_payload_nominal_kind(record_owner, self.symbols)
+                    return record_kind == 1 or record_kind == 2
+                case _: ()
+        false
+
     me box_runtime_value(local: LocalId) -> LocalId:
         if self.nil_locals.contains(local.id):
             var nil_builder = self.builder
@@ -1974,6 +2026,16 @@ impl MirLowering:
         if type_ == nil:
             return local
         var b = self.builder
+        # An erased I64 MIR type is not evidence of an integer. A local whose
+        # nominal provenance says struct/class (an untyped `val k = if c:
+        # f() else: K(..)` merge, an `if val p = opt` binding, a struct
+        # pushed into `[HirExpr]`) is a record handle; int-boxing it turned
+        # the pointer into `ptr << 3` before rt_dict_set / rt_array_push
+        # (doc/08_tracking/bug/record_local_int_boxed_as_wide_int_2026-10-25.md).
+        # A Struct-typed local already passes through via `case _` below.
+        if self.box_runtime_value_local_is_record(local):
+            self.builder = b
+            return local
         val boxed = match type_.kind:
             case MirTypeKind.I64 | MirTypeKind.U64:
                 # 64-bit-wide integers are the ONLY kinds that can overflow the
@@ -2129,6 +2191,22 @@ impl MirLowering:
         if state == 1:
             self.remember_local_hir_type(container.id, HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Error, span: Span.empty()), None), span: Span.empty()), 0, 0)
 
+    fn array_element_owner_is_enum_v1(owner: text) -> bool:
+        # An enum call result carries its enum's qualified layout key in
+        # struct_value_syms (the prescan registers a return shape for every
+        # Named return), but an enum is a tagged word, not a record. Lending it
+        # to array_element_struct_syms made the next index read fail in
+        # checked_array_record_layout. Positive test only: an owner whose record
+        # layout is merely not demanded yet must keep its element owner.
+        # doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 1)
+        val identity = result_err_layout_identity(owner)
+        if identity == "": return false
+        if self.struct_field_order.has(self.declared_struct_layout_key(owner)): return false
+        if self.enum_variant_index_q.has(identity) or self.enum_variant_index_q.has(identity.replace("::", ".")):
+            return true
+        val bare = identity.substring(identity.rfind("::") + 2)
+        self.enum_variant_index.contains(bare) and not self.enum_bare_ambiguous.contains(bare)
+
     # Record the f64/f32 type of a value stored into a container whose
     # declared element type may be the erased i64 default (empty `{}`/`[]`
     # literal). Reads consult runtime_elem_value_type so decode takes the
@@ -2164,7 +2242,7 @@ impl MirLowering:
         # element type regardless of how the container was declared.
         val struct_name = self.struct_value_syms.get(value_local.id)
         if val sn = struct_name:
-            if sn != "":
+            if sn != "" and not self.array_element_owner_is_enum_v1(sn):
                 self.array_element_struct_syms[container.id] = sn
         # Same shredding class, ARRAY elements (nested `[[text]]` /
         # `[[[text]]]`). Nothing else in the pipeline can tell an Index READ
@@ -2216,7 +2294,7 @@ impl MirLowering:
             val decoded = b.emit_cast(mir_operand_copy(value), result_type)
             self.builder = b
             return decoded
-        if disc == _sffi_enum_discriminant<i64>(MirTypeKind.Bool):
+        if disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Bool):
             val true_value = b.emit_const_int(11)
             val decoded = b.emit_binop(MirBinOp.Eq, mir_operand_copy(raw), mir_operand_copy(true_value), result_type)
             self.builder = b
@@ -2259,7 +2337,7 @@ impl MirLowering:
             val decoded = b.emit_cast(mir_operand_copy(float64), result_type)
             self.builder = b
             return decoded
-        if disc == _sffi_enum_discriminant<i64>(MirTypeKind.Array(MirType.i64(), 0)) or disc == _sffi_enum_discriminant<i64>(MirTypeKind.Slice(MirType.i64())):
+        if disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Array(MirType.i64(), 0)) or disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Slice(MirType.i64())):
             val typed = b.new_temp(result_type)
             b.emit_copy(typed, raw)
             self.runtime_array_locals[typed.id] = true
@@ -2354,7 +2432,7 @@ impl MirLowering:
     me lower_dict_runtime_get(base: HirExpr, base_local: LocalId, dict_key: LocalId) -> LocalId:
         self.lower_dict_runtime_read(base, base_local, dict_key, false)
 
-    me lower_dict_runtime_read(base: HirExpr, base_local: LocalId, dict_key: LocalId, as_option: bool) -> LocalId:
+    me lower_dict_runtime_read(base: HirExpr, base_local: LocalId, dict_key: LocalId, as_option: bool, raw_probe: bool = false) -> LocalId:
         """The one `rt_dict_get` read shared by `d[k]` AND `d.get(k)`.
 
         `as_option` is true only for `d.get(k)`, whose declared result is
@@ -2408,12 +2486,9 @@ impl MirLowering:
         else:
             false
         if has_dict_mir_type:
-            if _sffi_enum_discriminant<MirTypeKind>(resolved_dict_mir_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
-                match resolved_dict_mir_type.kind:
-                    case MirTypeKind.Dict(_, value_type):
-                        dict_result_type = value_type
-                        resolved_from_local = true
-                    case _: ()
+            if val mir_value_type = self.runtime_dict_value_mir_type(resolved_dict_mir_type):
+                dict_result_type = mir_value_type
+                resolved_from_local = true
         # Global storage and projected fields can use an i64 handle while
         # their semantic Dict type lives in the declaration/local metadata.
         # Never decode a nominal value as an integer just because the handle
@@ -2435,6 +2510,15 @@ impl MirLowering:
             if val hir_value_type = dict_value_hir_type:
                 dict_result_type = self.lower_type(hir_value_type)
                 resolved_from_local = true
+        # A builder-tracked `Dict(K, i64)` is often the ERASED default (field
+        # projection / codec temp), not the declared V. When the HIR V is
+        # Bool, the i64 `>>3` arm would turn a stored true/false into int 1/0
+        # (bug native_dict_bool_index_int_2026-10-25), so prefer the HIR V.
+        if not value_type_from_hir and _sffi_enum_discriminant<MirTypeKind>(dict_result_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64):
+            if val hir_v = dict_value_hir_type:
+                val hir_v_mir = self.lower_type(hir_v)
+                if _sffi_enum_discriminant<MirTypeKind>(hir_v_mir.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Bool):
+                    dict_result_type = hir_v_mir
         # Store-side refinement: an empty `{}` literal fixes the declared
         # value type at the i64 default, so an f64 stored later would decode
         # via the integer `>>3` arm and leak the heap-box POINTER. Use the
@@ -2450,6 +2534,25 @@ impl MirLowering:
         val get_res = b_dget.emit_call(get_op, [mir_operand_copy(base_local), mir_operand_copy(dict_key)], MirType.i64())
         self.builder = b_dget
         if val get_local = get_res:
+            if raw_probe and dict_value_hir_type != nil:
+                # `d[k] ?? x`: hand the consumer the UNDECODED word. Its
+                # present branch is the single decode (decode_runtime_value
+                # on a runtime-value local), and its rt_is_some test sees the
+                # miss word 3 intact. Decoding here as well would decode a
+                # hit twice (an i64 5 -> 5>>3 = 0), which is what the
+                # decoded `as_option` lane does under `??`. Only taken when
+                # the declared value type V is known: the `??` present branch
+                # recovers its decode type from the Optional(V) recorded
+                # here, so without V fall through to the decoded read.
+                self.mark_runtime_value_local(get_local.id)
+                if val probe_value_hir_type = dict_value_hir_type:
+                    val probe_value_type: HirType = probe_value_hir_type
+                    self.remember_local_hir_type(get_local.id, HirType(kind: HirTypeKind.Optional(probe_value_type), span: base.span), 0, 0)
+                # Bug #189 parity: carry the store-observed struct name.
+                val probe_struct_name = self.array_element_struct_syms.get(base_local.id) ?? ""
+                if probe_struct_name != "" and probe_struct_name != "__runtime_array__":
+                    self.struct_value_syms[get_local.id] = probe_struct_name
+                return get_local
             var value_is_bool = false
             match dict_result_type.kind:
                 case MirTypeKind.Bool: value_is_bool = true
@@ -2483,7 +2586,12 @@ impl MirLowering:
                     # `x.unwrap()` / `x ?? d` on the binding sees an Option
                     # receiver instead of an untyped word.
                     self.remember_local_hir_type(decoded.id, HirType(kind: HirTypeKind.Optional(value_hir_type), span: base.span), 0, 0)
-                elif value_type_from_hir:
+                else:
+                    # bug=enum_payload_type_mismatch_dict_elem_untyped_2026-10-24:
+                    # the declared V is the read's type whichever source fixed
+                    # the MIR decode. Gating this on value_type_from_hir left
+                    # `self.impls[k]` (MIR Dict(K, V) already known) untyped,
+                    # so `xs[i]` on the binding had no element owner.
                     self.remember_local_hir_type(decoded.id, value_hir_type, 0, 0)
             # Bug #189 (struct-valued Dict read misread): a struct-typed dict
             # result decodes via decode_runtime_value's default raw-passthrough
@@ -2895,6 +3003,14 @@ impl MirLowering:
                         if val shape = bootstrap_fn_ret_array_element_shape_lookup(call_symbol.name):
                             val rebound = self.rebind_record_element_owner(element, shape)
                             self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Array(rebound, size), span: found_type.span), 0, 0)
+                    # Same recovery as the Named arm below: the name-keyed
+                    # element registry can miss, and then the untyped
+                    # `val lines = make_lines(s)` binding inherited no
+                    # array_element_struct_syms row from this temp.
+                    if not self.array_element_struct_syms.contains(local.id):
+                        val array_return_elem_owner = self.optional_payload_struct_name(element)
+                        if array_return_elem_owner != "":
+                            self.array_element_struct_syms[local.id] = array_return_elem_owner
                 case HirTypeKind.Slice(element):
                     if val present_call_symbol = optional_call_symbol:
                         val call_symbol: HirSymbol = present_call_symbol
@@ -3087,7 +3203,19 @@ impl MirLowering:
     me lower_return_expr(value: HirExpr?) -> LocalId:
         # Return's payload is HirExpr? (Optional): Some(expr) for
         # `return expr`, nil for a bare `return`.
-        if val rv = value:
+        # `return <expr>` inside a function whose MIR signature returns Unit
+        # (e.g. `-> ()` with `return ()`) must terminate exactly like a bare
+        # `return`, as the implicit tail does (function_lowering.spl,
+        # `return_type.kind == MirTypeKind.Unit` -> terminate_return(nil)).
+        # Ret(Some(unit_temp)) made Cranelift emit `return v53` against a
+        # signature with no result (cranelift_unit_fn_return_unit_value_2026-10-24).
+        # The value is still lowered for its side effects.
+        var return_value: HirExpr? = value
+        if val unit_rv = value:
+            if self.current_mir_signature_returns_unit():
+                self.lower_expr(unit_rv)
+                return_value = nil
+        if val rv = return_value:
             var br = self.builder
             # Lower for the DECLARED return slot, so a conditional returned
             # from a scalar-optional function boxes per arm.
@@ -3178,6 +3306,18 @@ impl MirLowering:
         self.builder = br2
         ret_temp
 
+    me current_mir_signature_returns_unit() -> bool:
+        # Mirrors the backend's build_signature: `main` always returns i64.
+        var cur_builder = self.builder
+        match cur_builder.current_function:
+            case Some(active_fn):
+                if active_fn.name == "main":
+                    return false
+                match active_fn.signature.return_type.kind:
+                    case MirTypeKind.Unit: true
+                    case _: false
+            case None: false
+
     me emit_pending_finally_for_transfer() -> ():
         """Run active finally blocks inner-to-outer before a nonlocal exit.
 
@@ -3213,7 +3353,7 @@ impl MirLowering:
         val has_result_hir_type = expr_value.has_type_ == true and expr_value.type_ != nil
         self.lower_index_expr(base, index, has_result_hir_type, expr_value.type_)
 
-    me lower_index_expr(base: HirExpr, index: HirExpr, has_index_result_hir_type: bool, index_result_hir_type: HirType) -> LocalId:
+    me lower_index_expr(base: HirExpr, index: HirExpr, has_index_result_hir_type: bool, index_result_hir_type: HirType, nil_probe: bool = false) -> LocalId:
         # Bug (array-slice-index SIGSEGV, CONFLICT-FLAG: expr_dispatch.spl
         # is fenced, touched here per the fence rule's "CONFLICT-FLAG if
         # must touch" allowance): `a[1:3]` where `a` is a runtime array
@@ -3279,7 +3419,7 @@ impl MirLowering:
             # `d.get(k)` method lowering (method_calls_literals.spl) so the two
             # readers of rt_dict_get can never drift apart again.
             val dict_key = self.lower_dict_key(index)
-            return self.lower_dict_runtime_get(base, base_local, dict_key)
+            return self.lower_dict_runtime_read(base, base_local, dict_key, false, nil_probe)
         var index_local = self.lower_expr(index)
         if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
             return cli_arg_local
@@ -3463,6 +3603,14 @@ impl MirLowering:
         val runtime_array = self.local_is_runtime_array(base_local)
         val typed_u8_runtime_read = (runtime_array and
             rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.U8))
+        # Unsafe `Any` read: the receiver is an erased runtime value that may
+        # hold a byte-packed `[u8]`, whose slots are raw octets. A raw GEP+load
+        # (or rt_array_get under SIMPLE_BOOTSTRAP) misreads them, so go through
+        # the flag-aware, tagged-in/tagged-out rt_index_get. The result stays a
+        # tagged runtime value; unsafe code owns decoding it. Typed arrays,
+        # tuples, raw pointers and GPU paths are untouched.
+        if self.is_any_runtime_index_base(base_local, runtime_array, is_tuple_base, raw_pointer_base):
+            return self.lower_any_runtime_index_get(base_local, index_local)
         if not gpu_raw_pointer and not typed_u8_runtime_read:
             self.emit_bounds_check_for_index(base.type_, base_local, index_local)
         # Bug (native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02,
@@ -3524,7 +3672,25 @@ impl MirLowering:
                 # untag); see the revert commit for the falsified
                 # unconditional version.
                 val elem_struct_name = self.array_element_struct_syms.get(base_local.id)
-                val esn = elem_struct_name ?? ""
+                var esn = elem_struct_name ?? ""
+                # WA-MIR-UNRESOLVED-slice root fix: a local bound from a call
+                # result or a typed let (`val lines: [Line] = make_lines(s)`)
+                # carries its Array HIR type (remember_call_hir_return /
+                # remember_local_hir_type) but no array_element_struct_syms
+                # row, so `lines[i]` decoded an untyped word, `.field` lost
+                # its declared type and `cl.raw.slice(..)` became
+                # "unresolved method call: slice". Recover the element owner
+                # from that HIR type through the same fail-closed
+                # Struct/Class + known-layout gate the Named-return arm uses.
+                if esn == "":
+                    if val base_hir_type = self.find_local_hir_type(base_local.id):
+                        match base_hir_type.kind:
+                            case HirTypeKind.Array(base_elem_type, _) | HirTypeKind.Slice(base_elem_type):
+                                val recovered_elem_owner = self.optional_payload_struct_name(base_elem_type)
+                                if recovered_elem_owner != "":
+                                    esn = recovered_elem_owner
+                                    self.array_element_struct_syms[base_local.id] = recovered_elem_owner
+                            case _: ()
                 val has_real_struct_name = esn != "" and esn != "__runtime_array__"
                 # A1 (bug cranelift_native_aggregate_return_nil_receiver_
                 # hosted_wm_2026-07-26): an element that is ITSELF an array
@@ -3619,6 +3785,29 @@ impl MirLowering:
             val loaded = b.emit_load(mir_operand_copy(ptr), result_type)
             self.builder = b
             loaded
+
+    fn is_any_runtime_index_base(base_local: LocalId, runtime_array: bool, is_tuple_base: bool, raw_pointer_base: bool) -> bool:
+        """True for an index base that is a positive `Any` runtime-value local."""
+        if runtime_array or is_tuple_base or raw_pointer_base:
+            return false
+        if not self.is_runtime_value_local(base_local.id):
+            return false
+        if val base_hir_type = self.find_local_hir_type(base_local.id):
+            return base_hir_type.kind == HirTypeKind.Any
+        false
+
+    me lower_any_runtime_index_get(base_local: LocalId, index_local: LocalId) -> LocalId:
+        val tagged_index = self.box_runtime_value(index_local)
+        val getter = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_index_get"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b = self.builder
+        val got = b.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(tagged_index)], MirType.i64())
+        self.builder = b
+        val result = got ?? base_local
+        self.mark_runtime_value_local(result.id)
+        result
 
     me mark_native_tuple_projection(local: LocalId, field_type: MirType):
         match field_type.kind:
@@ -3769,7 +3958,7 @@ impl MirLowering:
         position where a trait-to-trait `e as T` may yield its `T?`."""
         val probe_type = HirType(kind: HirTypeKind.Unit, span: base.span)
         val probe = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: probe_type, span: base.span)
-        if _sffi_enum_discriminant<i64>(base.kind) == _sffi_enum_discriminant<i64>(HirExprKind.Cast(probe, probe_type)):
+        if _sffi_enum_discriminant<HirExprKind>(base.kind) == _sffi_enum_discriminant<HirExprKind>(HirExprKind.Cast(probe, probe_type)):
             # Explicit payload decode, as the Cast arm of lower_expr_impl does.
             val cast_payload = _sffi_enum_payload<HirExprKind>(base.kind)
             val cast_operand: HirExpr = _sffi_tuple_get<HirExpr>(cast_payload, 0)
@@ -3779,6 +3968,41 @@ impl MirLowering:
                     val operand_local = self.lower_expr(cast_operand)
                     return self.lower_native_trait_as(operand_local, cast_operand, cast_target, base.span, true)
         self.lower_expr(base)
+
+    me lower_optional_probe_operand(operand: HirExpr) -> LocalId:
+        """Lower the left operand of `??`, whose nil-ness is about to be
+        TESTED. A `d[k]` read hands back the UNDECODED rt_dict_get word
+        (`nil_probe` -> `raw_probe`), so a miss keeps the nil word 3 for
+        rt_is_some and a hit is decoded exactly once, by the `??` present
+        branch. Before this, `d[k]` was decoded first: `rt_interp_cstr(3)` is
+        NULL and `rt_is_some(NULL)` is true, so `d[k] ?? ""` on a
+        Dict<_, text> miss returned a raw 0
+        (doc/08_tracking/bug/dict_index_coalesce_decodes_before_nil_test_2026-10-25.md).
+        Non-dict index reads are unaffected: `nil_probe` is only consulted on
+        the runtime-dict branch of lower_index_expr. Everything else goes
+        through lower_expr unchanged."""
+        val probe_nil_type = HirType(kind: HirTypeKind.Unit, span: operand.span)
+        val probe_nil = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: probe_nil_type, span: operand.span)
+        if _sffi_enum_discriminant<HirExprKind>(operand.kind) != _sffi_enum_discriminant<HirExprKind>(HirExprKind.Index(probe_nil, probe_nil)):
+            return self.lower_expr(operand)
+        val payload = _sffi_enum_payload<HirExprKind>(operand.kind)
+        val base: HirExpr = _sffi_tuple_get<HirExpr>(payload, 0)
+        val index: HirExpr = _sffi_tuple_get<HirExpr>(payload, 1)
+        if base == nil or index == nil:
+            return self.lower_expr(operand)
+        # Same span discipline and static-scalar mark lower_expr applies.
+        var b_span = self.builder
+        val saved_span = b_span.current_span
+        b_span.current_span = Some(operand.span)
+        self.builder = b_span
+        val has_result_hir_type = operand.has_type_ == true and operand.type_ != nil
+        val read_local = self.lower_index_expr(base, index, has_result_hir_type, operand.type_, true)
+        if self.index_expr_reads_declared_scalar_element(operand):
+            self.static_scalar_locals[read_local.id] = true
+        var b_restore = self.builder
+        b_restore.current_span = saved_span
+        self.builder = b_restore
+        read_local
 
     me lower_cast_or_convert(operand: HirExpr, target: HirType, span: Span, conversion_call: bool) -> LocalId:
         """Lower casts, extracting a runtime enum's resolved discriminant."""
@@ -3926,7 +4150,7 @@ impl MirLowering:
                 mir_lower_expr_trace_state = 0
             mir_lower_expr_trace_generation = trace_generation
         if mir_lower_garbage_debug_state == 1 and expr != nil:
-            val garbage_disc = _sffi_enum_discriminant<i64>(expr.kind)
+            val garbage_disc = _sffi_enum_discriminant<HirExprKind>(expr.kind)
             if garbage_disc < 0:
                 garbage_expr_here = true
                 mir_lower_garbage_expr_count = mir_lower_garbage_expr_count + 1
@@ -4407,32 +4631,31 @@ impl MirLowering:
                 # calls; reuse them here so operator syntax gets the
                 # identical dispatch a written-out `.method()` call
                 # already gets.
-                # struct_value_syms is a Dict<LocalId, text> spanning the
-                # WHOLE lowering pass (all functions), but LocalId
-                # numbering restarts per function -- a plain i64 local
-                # in one function can numerically collide with a
-                # *different*, earlier function's struct-typed local id
-                # (verified empirically: `r * r` inside an unrelated
-                # `area(s: Shape)` function using a numeric match arm
-                # falsely matched a stale "Vec2" entry left behind by
-                # `main`, because `r`'s LocalId happened to equal a
-                # Vec2-typed local's id in main). Gate the name lookup
-                # on the local's own MIR type actually being a Struct so
-                # a same-numbered plain int/float local from another
-                # function can never be misread as a struct operand.
-                var binop_left_is_struct = false
+                # Runtime-array elements can carry record pointers in i64
+                # locals. Their current-function declared HIR owner is still
+                # authoritative. A raw layout-name note alone must never
+                # classify an unrelated scalar as a record operand.
+                val binop_left_owner = self.binary_struct_owner(left, left_local, "")
+                val binop_right_owner = self.binary_struct_owner(right, right_local, "")
+                var binop_left_is_struct = binop_left_owner != ""
                 if val binop_left_ty = self.local_mir_type_of(left_local):
                     match binop_left_ty.kind:
                         case MirTypeKind.Struct(_): binop_left_is_struct = true
                         case _: ()
-                var binop_right_is_struct = false
+                var binop_right_is_struct = binop_right_owner != ""
                 if val binop_right_ty = self.local_mir_type_of(right_local):
                     match binop_right_ty.kind:
                         case MirTypeKind.Struct(_): binop_right_is_struct = true
                         case _: ()
                 val binop_left_struct = if binop_left_is_struct: self.struct_value_syms.get(left_local.id) ?? "" else: ""
                 val binop_right_struct = if binop_right_is_struct: self.struct_value_syms.get(right_local.id) ?? "" else: ""
-                val binop_struct_name = if binop_left_struct != "": binop_left_struct else: binop_right_struct
+                val binop_layout_name = if binop_left_struct != "": binop_left_struct else: binop_right_struct
+                val binop_struct_name = if binop_left_is_struct:
+                    if binop_left_owner != "": binop_left_owner else: binop_left_struct
+                else if binop_right_is_struct:
+                    if binop_right_owner != "": binop_right_owner else: binop_right_struct
+                else:
+                    ""
                 if binop_struct_name != "":
                     var binop_dunder = ""
                     match op:
@@ -4440,14 +4663,15 @@ impl MirLowering:
                         case Sub: binop_dunder = "__sub__"
                         case Mul: binop_dunder = "__mul__"
                         case Div: binop_dunder = "__div__"
-                        case Eq: binop_dunder = "__eq__"
+                        case Eq | NotEq: binop_dunder = "__eq__"
                         case Lt: binop_dunder = "__lt__"
                         case Gt: binop_dunder = "__gt__"
                         case _: ()
                     var binop_dispatched = false
                     if binop_dunder != "":
-                        val binop_method_key = "{binop_struct_name}::{binop_dunder}"
-                        if self.struct_method_key_present_v1(binop_method_key):
+                        val binop_method_key = self.struct_owner_method_key(binop_struct_name, binop_dunder)
+                        val binop_method_present = self.struct_method_key_present_v1(binop_method_key)
+                        if binop_method_present and not self.struct_method_ambiguous.has(binop_method_key):
                             val binop_method_id = self.struct_method_syms[binop_method_key]
                             val binop_method_operand = self.symbol_to_operand(binop_method_id)
                             val binop_return_type = self.resolved_call_return_type(binop_method_id)
@@ -4456,6 +4680,15 @@ impl MirLowering:
                             self.builder = b_op
                             binop_dispatched = true
                             if val binop_result_local = binop_call_result:
+                                # Inequality has the same user-defined equality
+                                # semantics, with one call and a boolean negation.
+                                # Nil presence was handled before struct dispatch.
+                                if op == HirBinOp.NotEq:
+                                    var b_ne = self.builder
+                                    val binop_neq_result = b_ne.emit_unary(MirUnaryOp.Not,
+                                        mir_operand_copy(binop_result_local), MirType.bool())
+                                    self.builder = b_ne
+                                    return binop_neq_result
                                 # Register the call result's STRUCT name
                                 # (mirrors lower_struct_construct/
                                 # self-param-copy registration) so a
@@ -4471,30 +4704,26 @@ impl MirLowering:
                                 # #168 (it isn't specific to operator
                                 # overloading), but this new dispatch
                                 # site can register its own result.
-                                var binop_result_struct_name = ""
-                                if val binop_method_sym = self.symbols.get_symbol_raw(binop_method_id.id):
-                                    if val binop_method_sym_type = binop_method_sym.type_:
-                                        match binop_method_sym_type.kind:
-                                            case HirTypeKind.Function(_, binop_ret_hir_type, _):
-                                                match binop_ret_hir_type.kind:
-                                                    case Named(binop_ret_named_sym, _):
-                                                        if val binop_ret_struct_sym = self.symbols.get_symbol_raw(binop_ret_named_sym.id):
-                                                            binop_result_struct_name = binop_ret_struct_sym.name
-                                                    case _: ()
-                                            case _: ()
-                                # Arithmetic dunders (__add__/__sub__/__mul__/__div__) return
-                                # Self by convention (mirrors the newtype auto-derive shape:
-                                # `fn __add__(self, other: T) -> T`), so fall back to the
-                                # OPERAND's own struct name when the declared-return-type
-                                # resolution above didn't find a Named type (native path HIR
-                                # types are frequently Infer/nil).
-                                if binop_result_struct_name == "":
+                                var return_type_unresolved = true
+                                if val binop_hir_return_type = self.resolved_call_hir_return_type(binop_method_id):
+                                    self.remember_function_value_return(binop_result_local, binop_hir_return_type)
+                                    match binop_hir_return_type.kind:
+                                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                                            ()
+                                        case _:
+                                            return_type_unresolved = false
+                                # Only an actually unresolved return may use
+                                # the arithmetic same-owner convention. A
+                                # declared primitive or a different nominal
+                                # provider is authoritative and must never be
+                                # relabeled as the operand's layout.
+                                if return_type_unresolved:
                                     match op:
                                         case Add | Sub | Mul | Div:
-                                            binop_result_struct_name = binop_struct_name
+                                            val fallback_layout = if binop_layout_name != "": binop_layout_name else: binop_struct_name
+                                            if fallback_layout != "":
+                                                self.struct_value_syms[binop_result_local.id] = fallback_layout
                                         case _: ()
-                                if binop_result_struct_name != "":
-                                    self.struct_value_syms[binop_result_local.id] = binop_result_struct_name
                                 return binop_result_local
                             var b_op2 = self.builder
                             val binop_temp = b_op2.new_temp(MirType.i64())
@@ -4775,6 +5004,42 @@ impl MirLowering:
                         val bool_local = b_narrow.emit_binop(MirBinOp.Eq, mir_operand_copy(raw_bool_val), mir_operand_const_int(1), MirType.bool())
                         self.builder = b_narrow
                         return bool_local
+
+                # Array `==` / `!=` compares CONTENTS (length + elements), as
+                # the interpreter does. An array value is a heap handle, so the
+                # generic emit_binop(Eq/Ne) below compared two handles by
+                # identity: two separately built equal lists were `!=`
+                # (doc/08_tracking/bug/array_eq_lowered_as_identity_compare_2026-10-25.md,
+                # native_u8_array_ne_compares_reference_2026-10-25.md).
+                # rt_native_eq compares registered arrays element-wise
+                # (byte-packed, u64-packed and generic lanes). Detection is the
+                # one the array-concat `+` arm uses. An integer-literal peer
+                # (`xs == 0`, a zero-word probe) keeps the word compare.
+                var bin_is_array_eq = false
+                match op:
+                    case Eq | NotEq:
+                        if self.local_is_runtime_array(left_local) or self.local_is_runtime_array(right_local):
+                            bin_is_array_eq = true
+                            match left.kind:
+                                case IntLit(_, _): bin_is_array_eq = false
+                                case _: ()
+                            match right.kind:
+                                case IntLit(_, _): bin_is_array_eq = false
+                                case _: ()
+                    case _:
+                        ()
+                if bin_is_array_eq:
+                    val array_eq_local = self.emit_runtime_word_eq(left_local, right_local)
+                    match op:
+                        case NotEq:
+                            var b_array_ne = self.builder
+                            val array_false = b_array_ne.new_temp(MirType.bool())
+                            b_array_ne.emit_const(array_false, MirConstValue.Bool(false), MirType.bool())
+                            val array_ne_local = b_array_ne.emit_binop(MirBinOp.Eq, mir_operand_copy(array_eq_local), mir_operand_copy(array_false), MirType.bool())
+                            self.builder = b_array_ne
+                            return array_ne_local
+                        case _:
+                            return array_eq_local
 
                 # Any values use the tagged RuntimeValue ABI. Once either
                 # operand carries that provenance, normalize its peer and use
@@ -5100,7 +5365,7 @@ impl MirLowering:
             val binary_op: HirBinOp = _sffi_tuple_get<HirBinOp>(binary_payload, 0)
             val binary_left: HirExpr = _sffi_tuple_get<HirExpr>(binary_payload, 1)
             val binary_right: HirExpr = _sffi_tuple_get<HirExpr>(binary_payload, 2)
-            if binary_left == nil or binary_right == nil or _sffi_enum_discriminant<i64>(binary_op) < 0:
+            if binary_left == nil or binary_right == nil or _sffi_enum_discriminant<HirBinOp>(binary_op) < 0:
                 self.error_fatal("empty HIR Binary payload", Some(expr_value.span))
                 return self.builder.emit_const_int(0)
             return self.lower_binary_expr(expr_value, binary_op, binary_left, binary_right)
@@ -5131,9 +5396,11 @@ impl MirLowering:
         val if_chain_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.IfChain([], None))
         if expr_disc == if_chain_disc:
             val if_chain_payload = _sffi_enum_payload<HirExprKind>(expr_value.kind)
-            val if_chain_arms: [HirIfArm] = _sffi_tuple_get<[HirIfArm]>(if_chain_payload, 0)
+            # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+            val if_chain_arms_opt: [HirIfArm]? = _sffi_tuple_get<[HirIfArm]>(if_chain_payload, 0)
+            val if_chain_arms: [HirIfArm] = if_chain_arms_opt ?? []
             val if_chain_else: HirBlock? = _sffi_tuple_get<HirBlock>(if_chain_payload, 1)
-            if if_chain_arms == nil or if_chain_arms.len() == 0:
+            if if_chain_arms.len() == 0:
                 self.error_fatal("empty HIR IfChain payload", Some(expr_value.span))
                 var b_bad_if_chain = self.builder
                 val bad_if_chain = b_bad_if_chain.new_temp(MirType.unit())
@@ -5145,7 +5412,7 @@ impl MirLowering:
                 if_chain_index = if_chain_index + 1
             val expected_if_chain_type: HirType? = if expr_value.has_type_ and expr_value.type_ != nil: expr_value.type_ else: nil
             return self.lower_if_chain(if_chain_arms, if_chain_else, expected_if_chain_type)
-        val field_disc = _sffi_enum_discriminant<i64>(HirExprKind.Field(nil_expr, "", None))
+        val field_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Field(nil_expr, "", None))
         if expr_disc == field_disc:
             match expr_value.kind:
                 case HirExprKind.Field(base, field_name, resolved):
@@ -5168,7 +5435,8 @@ impl MirLowering:
                             self.result_err_hir_type(base)
                         if val payload_type = projection_type:
                             return self.lower_result_projection(base, payload_type, field_name == "err")
-                    val base_local = self.lower_expr(base)
+                    # A `T?` record receiver reads the record, not its Option box.
+                    val base_local = self.option_record_receiver_payload_v1(base, self.lower_expr(base))
                     # `.len`/`.length` on a native string must route to
                     # rt_strlen, not emit_get_field: the string is a raw char*
                     # and a struct get_field reads its first data byte (or
@@ -5355,7 +5623,7 @@ impl MirLowering:
                     return field_result
                 case _:
                     self.payload_decode_failed("HirExprKind.Field", expr_value.span)
-        val cast_disc = _sffi_enum_discriminant<i64>(HirExprKind.Cast(nil_expr, nil_expr.type_))
+        val cast_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Cast(nil_expr, nil_expr.type_))
         if expr_disc == cast_disc:
             # Stage-3 blocker #9: the `case HirExprKind.Cast(operand, target)`
             # match-arm binding decoded slot 1 (`target: HirType`) as nil, so
@@ -5379,7 +5647,7 @@ impl MirLowering:
                 self.error_fatal("empty HIR Cast payload", Some(expr_value.span))
                 return self.builder.emit_const_int(0)
             return self.lower_cast_expr(cast_operand, cast_target, expr.span)
-        val convert_disc = _sffi_enum_discriminant<i64>(HirExprKind.ConvertCall(nil_expr, nil_expr.type_))
+        val convert_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.ConvertCall(nil_expr, nil_expr.type_))
         if expr_disc == convert_disc:
             # Same explicit payload decode as Cast above (same two-slot shape).
             val convert_payload = _sffi_enum_payload<HirExprKind>(expr_value.kind)
@@ -5389,7 +5657,7 @@ impl MirLowering:
                 self.error_fatal("empty HIR ConvertCall payload", Some(expr_value.span))
                 return self.builder.emit_const_int(0)
             return self.lower_convert_call_expr(convert_operand, convert_target, expr.span)
-        val call_disc = _sffi_enum_discriminant<i64>(HirExprKind.Call(nil_expr, [], []))
+        val call_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Call(nil_expr, [], []))
         if expr_disc == call_disc:
             match expr_value.kind:
                 case HirExprKind.Call(callee, args, _):
@@ -5401,8 +5669,8 @@ impl MirLowering:
                     # interception in switch_operators_calls' lower_call, but
                     # placed here so Option support needs no edit to that file.
                     val callee_kind: HirExprKind = callee.kind
-                    val nv_disc = _sffi_enum_discriminant<i64>(HirExprKind.NamedVar(SymbolId(id: -1), ""))
-                    if _sffi_enum_discriminant<i64>(callee_kind) == nv_disc:
+                    val nv_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.NamedVar(SymbolId(id: -1), ""))
+                    if _sffi_enum_discriminant<HirExprKind>(callee_kind) == nv_disc:
                         match callee_kind:
                             case HirExprKind.NamedVar(nv_symbol, nv_name):
                                 # A typed Result constructor is a semantic MIR
@@ -5422,7 +5690,7 @@ impl MirLowering:
                     return self.lower_call(callee, args)
                 case _:
                     self.payload_decode_failed("HirExprKind.Call", expr_value.span)
-        val block_disc = _sffi_enum_discriminant<i64>(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))
+        val block_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))
         if expr_disc == block_disc:
             match expr_value.kind:
                 case HirExprKind.Block(block):
@@ -5435,14 +5703,14 @@ impl MirLowering:
                     return block_temp
                 case _:
                     self.payload_decode_failed("HirExprKind.Block", expr_value.span)
-        val return_disc = _sffi_enum_discriminant<i64>(HirExprKind.Return(None))
+        val return_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Return(None))
         if expr_disc == return_disc:
             match expr_value.kind:
                 case HirExprKind.Return(value):
                     return self.lower_return_expr(value)
                 case _:
                     self.payload_decode_failed("HirExprKind.Return", expr_value.span)
-        val index_disc = _sffi_enum_discriminant<i64>(HirExprKind.Index(nil_expr, nil_expr))
+        val index_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Index(nil_expr, nil_expr))
         if expr_disc == index_disc:
             return self.lower_index_expr_from_hir(expr_value)
         # Var/NamedVar reads need the same disc-guarded pre-dispatch as
@@ -5455,7 +5723,7 @@ impl MirLowering:
         # 'i64'" on the dict probe). Confirmed by disc trace: a NamedVar base
         # reached `case Index` with rt_enum_discriminant(base.kind) equal to the
         # NamedVar exemplar disc while the NamedVar match arm never fired.
-        val var_pre_disc = _sffi_enum_discriminant<i64>(HirExprKind.Var(SymbolId(id: -1)))
+        val var_pre_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Var(SymbolId(id: -1)))
         if expr_disc == var_pre_disc:
             match expr_value.kind:
                 case HirExprKind.Var(pre_symbol):
@@ -5473,7 +5741,7 @@ impl MirLowering:
                             return pre_var_glob
                 case _:
                     self.payload_decode_failed("HirExprKind.Var", expr_value.span)
-        val namedvar_pre_disc = _sffi_enum_discriminant<i64>(HirExprKind.NamedVar(SymbolId(id: -1), ""))
+        val namedvar_pre_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.NamedVar(SymbolId(id: -1), ""))
         if expr_disc == namedvar_pre_disc:
             val named_var_payload = _sffi_enum_payload<HirExprKind>(expr_value.kind)
             val named_var_symbol: SymbolId = _sffi_tuple_get<SymbolId>(named_var_payload, 0)
@@ -5549,7 +5817,9 @@ impl MirLowering:
             # call): construct Option.None (disc 1) via rt_enum_new.
             # A local of the same name shadows it (handled above).
             if named_var_name == "None" and self.enum_variant_index.contains("Option") and not (pre_sym_id >= 0 and pre_named_local.id >= 0):
-                return self.lower_enum_construct_named("Option", "None", [])
+                val none_local = self.lower_enum_construct_named("Option", "None", [])
+                self.option_none_locals[none_local.id] = true
+                return none_local
             # A top-level function named as a VALUE (`var slot: fn() =
             # default_cleanup`, or the RHS of `slot = replacement_cleanup`).
             # Same `Const(Str(name), FuncPtr(..))` shape
@@ -5816,7 +6086,7 @@ impl MirLowering:
                     # the probing wrapper would emit a second MC/DC condition
                     # probe for it. For every operand that is not nil-shaped
                     # the two are identical, so this is a no-op there.
-                    val is_logical_not = op_disc == _sffi_enum_discriminant<i64>(HirUnaryOp.Not)
+                    val is_logical_not = op_disc == _sffi_enum_discriminant<HirUnaryOp>(HirUnaryOp.Not)
                     val operand_local = if is_logical_not:
                         self.lower_cond_operand(operand)
                     else:
@@ -5894,7 +6164,7 @@ impl MirLowering:
                 # ("PHI nodes not grouped at top of basic block!"). Mirror the
                 # ExistsCheck (`.?`) fix just below, which sidesteps this the
                 # same way `lower_if` (mir_lowering_stmts.spl) does.
-                val left_local = self.lower_expr(left)
+                val left_local = self.lower_optional_probe_operand(left)
                 # A STATICALLY non-optional primitive scalar on the left has
                 # no nil state: `v ?? d` is `v`. Branching on rt_is_some(v)
                 # here read the payload bits against the raw nil sentinel,
@@ -6189,6 +6459,7 @@ impl MirLowering:
                 # lower_result_unwrap/emit_resolved_direct_call register
                 # struct_value_syms for their own freshly-produced locals.
                 var result_struct_name = ""
+                var exists_nominal_payload = false
                 if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):
                     match exists_inner_type.kind:
                         case HirTypeKind.Tuple(_):
@@ -6197,6 +6468,13 @@ impl MirLowering:
                             # Only the authored present edge may recover it.
                             result_type = MirType.i64()
                         case HirTypeKind.Named(exists_struct_symbol, _):
+                            val exists_nominal_kind = enum_payload_nominal_kind(exists_struct_symbol, self.symbols)
+                            if exists_nominal_kind >= 1 and exists_nominal_kind <= 3:
+                                # #3016: the absent edge stores the raw nil word,
+                                # never an integer constant typed as a pointer.
+                                # Preserve the semantic owner separately below.
+                                result_type = MirType.i64()
+                                exists_nominal_payload = true
                             if val present_exists_type_symbol = self.symbols.get_symbol_raw(exists_struct_symbol.id):
                                 val exists_type_symbol: HirSymbol = present_exists_type_symbol
                                 match exists_type_symbol.kind:
@@ -6251,7 +6529,12 @@ impl MirLowering:
                 b_then.switch_to_block(then_block)
                 self.builder = b_then
                 var some_value = self.option_payload_or_self(base_local)
-                if self.is_runtime_value_local(base_local.id) and not self.option_value_locals.contains(base_local.id):
+                if exists_nominal_payload:
+                    # Native records/classes/enums stored in runtime containers
+                    # retain their handle bits. The i64 merge carrier is not a
+                    # scalar payload: integer unboxing would destroy that handle.
+                    ()
+                elif self.is_runtime_value_local(base_local.id) and not self.option_value_locals.contains(base_local.id):
                     some_value = self.decode_runtime_value(base_local, result_type)
                 else:
                     some_value = self.enum_payload_value(some_value, result_type)
@@ -6305,6 +6588,16 @@ impl MirLowering:
                     match exists_payload_type.kind:
                         case HirTypeKind.Float(_) | HirTypeKind.Bool:
                             self.remember_local_hir_type(result_local.id, exists_payload_type, 0, 0)
+                        case HirTypeKind.Str:
+                            # bug=enum_payload_type_mismatch_optional_text_2026-10-24:
+                            # the raw word is not a text value (the payload
+                            # needs rt_interp_cstr), so keep `text?` until the
+                            # present edge decodes it (decode_present_collection).
+                            # Without this the if-val binder had no type and
+                            # `E.V(binder)` into a `text` slot was rejected.
+                            self.exists_collection_locals[result_local.id] = true
+                            val optional_text = HirType(kind: HirTypeKind.Optional(exists_payload_type), span: base.span)
+                            self.remember_local_hir_type(result_local.id, optional_text, 0, 0)
                         case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                             # ExistsCheck still yields payload-or-nil. Keep an
                             # Optional type until the authored present edge;
@@ -6560,6 +6853,10 @@ impl MirLowering:
             case InlineAsm(asm_expr):
                 self.lower_inline_asm(asm_expr)
 
+            # Target-neutral @cfg select: MIR picks the arm for this target
+            case CfgSelect(cs_conds, cs_arms, cs_else):
+                self.lower_cfg_select(cs_conds, cs_arms, cs_else)
+
             # Target-qualified inline assembly
             case InlineAsmMatch(arms):
                 self.lower_inline_asm_match(arms)
@@ -6593,7 +6890,8 @@ impl MirLowering:
                         self.result_err_hir_type(base)
                     if val payload_type = projection_type:
                         return self.lower_result_projection(base, payload_type, field_name == "err")
-                val base_local = self.lower_expr(base)
+                # A `T?` record receiver reads the record, not its Option box.
+                val base_local = self.option_record_receiver_payload_v1(base, self.lower_expr(base))
                 # `.len`/`.length` as a BARE FIELD ACCESS on a string must route
                 # to the raw-char* length helper `rt_strlen`, not emit_get_field.
                 # On the native path a string (literal, `+` concat, or interp
@@ -7173,6 +7471,17 @@ impl MirLowering:
                             self.enum_variant_is_unit(match_subject_owner, bname):
                         selected_owner = match_subject_owner
                         selected_type = match_subject_type
+                    # match_unqualified_imported_enum_variant_default_arms_2026-10-24:
+                    # a bare Capitalized arm naming a PAYLOAD variant of the
+                    # subject's known enum (`case Clocked:` over a
+                    # VhdlProcessKind) is that variant's payload-ignoring test,
+                    # not a catch-all capture; as a Binding the second such arm
+                    # tripped the B5b multiple-default check.
+                    if selected_owner == "" and match_subject_owner != "" and bname != "" and
+                            "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(bname[0:1]) and
+                            self.enum_variant_discriminant(match_subject_owner, bname) >= 0:
+                        selected_owner = match_subject_owner
+                        selected_type = match_subject_type
                     if selected_owner == "" and bname != "":
                         # Unique-owner inference whenever the subject route
                         # missed — not only when the subject type is absent.
@@ -7203,6 +7512,7 @@ impl MirLowering:
                                 bname,
                                 None
                             ),
+                            has_type_: false,
                             type_: nil,
                             span: arm0.pattern.span
                         )

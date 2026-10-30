@@ -3,11 +3,12 @@
 
 use compiler.backend.backend.backend_types.{BackendKind}
 use plugins.backend_cuda.cuda_backend.{CudaBackend}
+use plugins.backend_cuda.cuda.ptx_builder.{PtxBuilder}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
-use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, GpuAtomicOpKind}
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, MirUnaryOp, GpuAtomicOpKind, AggregateKind}
 use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, MirConstValue, LocalKind, MirTypeDef, MirTypeDefKind, MirFieldDef}
 use std.common.spec.evidence.untyped_capture.{UntypedCapture, untyped_capture_to_canonical}
 use std.common.spec.evidence.model.{EvidenceStatus, oracle_spec, check_exact}
@@ -15,6 +16,16 @@ use std.common.spec.evidence.evidence_comparator.{compare_evidence}
 
 fn cuda_u32() -> MirType: MirType(kind: MirTypeKind.U32)
 fn cuda_u64() -> MirType: MirType(kind: MirTypeKind.U64)
+fn cuda_i8() -> MirType: MirType(kind: MirTypeKind.I8)
+fn cuda_i16() -> MirType: MirType(kind: MirTypeKind.I16)
+fn cuda_i32() -> MirType: MirType(kind: MirTypeKind.I32)
+fn cuda_i64() -> MirType: MirType(kind: MirTypeKind.I64)
+fn cuda_u8() -> MirType: MirType(kind: MirTypeKind.U8)
+fn cuda_u16() -> MirType: MirType(kind: MirTypeKind.U16)
+fn cuda_f32() -> MirType: MirType(kind: MirTypeKind.F32)
+fn cuda_f64() -> MirType: MirType(kind: MirTypeKind.F64)
+fn cuda_i32_ptr() -> MirType: MirType.ptr(cuda_i32(), true)
+fn cuda_u64_ptr() -> MirType: MirType.ptr(cuda_u64(), true)
 fn cuda_bool() -> MirType: MirType(kind: MirTypeKind.Bool)
 fn cuda_ptr() -> MirType: MirType.ptr(cuda_u32(), true)
 
@@ -40,6 +51,11 @@ fn cuda_module(functions: [MirFunction]) -> MirModule:
     var map: Dict<SymbolId, MirFunction> = {}
     for fn_ in functions: map[fn_.symbol] = fn_
     MirModule(name: "cuda_intensive", functions: map, statics: {}, constants: {}, types: {})
+
+fn cuda_module_with_types(functions: [MirFunction], types: Dict<SymbolId, MirTypeDef>) -> MirModule:
+    var map: Dict<SymbolId, MirFunction> = {}
+    for fn_ in functions: map[fn_.symbol] = fn_
+    MirModule(name: "cuda_layout", functions: map, statics: {}, constants: {}, types: types)
 
 fn compile_supported_cuda(functions: [MirFunction]) -> text:
     val result = CudaBackend.create((8, 6)).compile(cuda_module(functions))
@@ -843,7 +859,7 @@ describe "CUDA backend intensive MIR contract":
         expect(ptx.contains("WARN: unresolved aggregate layout")).to_equal(false)
         assert_no_placeholder_output(ptx)
 
-    it "still emits the loud WARN fallback for a struct symbol absent from the module's type table":
+    it "rejects an unresolved struct field without returning a PTX artifact":
         val unknown_symbol = SymbolId(id: 999999)
         val struct_ty = MirType(kind: MirTypeKind.Struct(unknown_symbol))
         val ptr_ty = MirType.ptr(struct_ty, true)
@@ -852,7 +868,132 @@ describe "CUDA backend intensive MIR contract":
         ], terminator: MirTerminator.Ret(nil))
         val fn_ = cuda_function(15, "cuda_struct_field_unknown", [ptr_ty], MirType.unit(), [cuda_arg(0, 0, "p", ptr_ty), cuda_temp(1, cuda_u64())], [block], true)
         val result = CudaBackend.create((8, 6)).compile(cuda_module([fn_]))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().phase).to_contain(BackendKind.Cuda.to_text())
+        expect(result.unwrap_err().message).to_contain("aggregate type is not sizable")
+
+    it "rejects unresolved aggregate construction writes and GEP without artifacts":
+        val unknown = MirType(kind: MirTypeKind.Struct(SymbolId(id: 999998)))
+        val pointer = MirType.ptr(unknown, true)
+        val bad_instructions = [
+            MirInst(kind: MirInstKind.SetField(MirOperand.copy(LocalId(id: 0)), 0, MirOperand.copy(LocalId(id: 1))), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), [MirOperand.copy(LocalId(id: 1))]), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), []), span: nil)
+        ]
+        for instruction in bad_instructions:
+            val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [instruction], terminator: MirTerminator.Ret(nil))
+            val fn_ = cuda_function(160, "cuda_unknown_layout", [pointer, cuda_u64()], MirType.unit(), [
+                cuda_arg(0, 0, "base", pointer), cuda_arg(1, 1, "value", cuda_u64()),
+                cuda_temp(3, pointer)
+            ], [block], true)
+            val result = CudaBackend.create((8, 6)).compile(cuda_module([fn_]))
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err().phase).to_contain(BackendKind.Cuda.to_text())
+            expect(result.unwrap_err().message).to_contain("CUDA layout:")
+        # Aggregate-valued locals remain outside the production ABI.
+        # Exercise the owner directly as unit rejection evidence only.
+        val aggregate_fn = cuda_function(160, "cuda_unknown_aggregate", [], MirType.unit(), [cuda_temp(2, unknown), cuda_temp(1, cuda_u64())], [], true)
+        val production_result = CudaBackend.create((8, 6)).compile(cuda_module([aggregate_fn]))
+        expect(production_result.is_err()).to_equal(true)
+        expect(production_result.unwrap_err().message).to_contain("does not support local type")
+        var backend = CudaBackend.create((8, 6))
+        val builder = PtxBuilder.create((8, 6))
+        val aggregate_result = backend.compile_aggregate(builder, LocalId(id: 2), AggregateKind.Struct(SymbolId(id: 999998)), [MirOperand.copy(LocalId(id: 1))], aggregate_fn)
+        expect(aggregate_result.is_err()).to_equal(true)
+        expect(aggregate_result.unwrap_err().message).to_contain("aggregate type is not sizable")
+
+    it "uses mixed width struct offsets for loads stores and padded GEP stride":
+        val symbol = SymbolId(id: 161)
+        val byte = MirType(kind: MirTypeKind.U8)
+        val short = MirType(kind: MirTypeKind.U16)
+        val aggregate = MirType(kind: MirTypeKind.Struct(symbol))
+        val pointer = MirType.ptr(aggregate, true)
+        val types: Dict<SymbolId, MirTypeDef> = {
+            symbol: MirTypeDef(symbol: symbol, name: "Mixed", kind: MirTypeDefKind.Struct([
+                MirFieldDef(name: "byte", type_: byte, offset: 0, has_bits_attr: false, bits_width: 0),
+                MirFieldDef(name: "wide", type_: cuda_u64(), offset: 8, has_bits_attr: false, bits_width: 0),
+                MirFieldDef(name: "short", type_: short, offset: 16, has_bits_attr: false, bits_width: 0)
+            ]), is_export_c: false, export_name: "")
+        }
+        val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 5), MirOperand.copy(LocalId(id: 0)), 2), span: nil),
+            MirInst(kind: MirInstKind.SetField(MirOperand.copy(LocalId(id: 0)), 1, MirOperand.copy(LocalId(id: 2))), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 6), MirOperand.copy(LocalId(id: 0)), [MirOperand.copy(LocalId(id: 2))]), span: nil)
+        ], terminator: MirTerminator.Ret(nil))
+        val fn_ = cuda_function(161, "cuda_mixed_layout", [pointer, byte, cuda_u64(), short], MirType.unit(), [
+            cuda_arg(0, 0, "base", pointer), cuda_arg(1, 1, "byte", byte), cuda_arg(2, 2, "wide", cuda_u64()), cuda_arg(3, 3, "short", short),
+            cuda_temp(5, short), cuda_temp(6, pointer)
+        ], [block], true)
+        val result = CudaBackend.create((8, 6)).compile(cuda_module_with_types([fn_], types))
         expect(result.is_ok()).to_equal(true)
         val ptx = result.unwrap().ptx
-        expect(ptx).to_contain("WARN: unresolved aggregate layout; using legacy 8-byte field slots")
-        expect(ptx).to_contain("ld.local.u64 %r1, [%r0+0];")
+        expect(ptx).to_contain("ld.local.u16 %r5, [%r0+16];")
+        expect(ptx).to_contain("st.local.u64 [%r0+8], %r2;")
+        expect(ptx).to_contain(", 24;")
+        expect(ptx.contains("WARN:")).to_equal(false)
+
+    it "rejects missing nested wrong kind and cyclic by value layouts":
+        val symbol = SymbolId(id: 170)
+        val aggregate = MirType(kind: MirTypeKind.Struct(symbol))
+        val missing = MirType(kind: MirTypeKind.Struct(SymbolId(id: 171)))
+        val pointer = MirType.ptr(aggregate, true)
+        val bad_definitions = [
+            MirTypeDefKind.Struct([MirFieldDef(name: "missing", type_: missing, offset: 0, has_bits_attr: false, bits_width: 0)]),
+            MirTypeDefKind.Struct([MirFieldDef(name: "cycle", type_: aggregate, offset: 0, has_bits_attr: false, bits_width: 0)]),
+            MirTypeDefKind.Enum([])
+        ]
+        for definition in bad_definitions:
+            val types: Dict<SymbolId, MirTypeDef> = {
+                symbol: MirTypeDef(symbol: symbol, name: "Bad", kind: definition, is_export_c: false, export_name: "")
+            }
+            val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+                MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 2), MirOperand.copy(LocalId(id: 0)), [MirOperand.copy(LocalId(id: 1))]), span: nil)
+            ], terminator: MirTerminator.Ret(nil))
+            val fn_ = cuda_function(170, "cuda_bad_nested_layout", [pointer, cuda_u64()], MirType.unit(), [
+                cuda_arg(0, 0, "base", pointer), cuda_arg(1, 1, "index", cuda_u64()), cuda_temp(2, pointer)
+            ], [block], true)
+            val result = CudaBackend.create((8, 6)).compile(cuda_module_with_types([fn_], types))
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err().message).to_contain("GEP element type is not sizable")
+
+    it "rejects aggregate arity type mismatch compound transfers and invalid array fields":
+        val byte = MirType(kind: MirTypeKind.U8)
+        val tuple = MirType(kind: MirTypeKind.Tuple([byte, cuda_u64()]))
+        val compound = MirType(kind: MirTypeKind.Tuple([tuple]))
+        val array = MirType(kind: MirTypeKind.Array(byte, 2))
+        val bad_instructions = [
+            MirInst(kind: MirInstKind.Aggregate(LocalId(id: 1), AggregateKind.Tuple, []), span: nil),
+            MirInst(kind: MirInstKind.Aggregate(LocalId(id: 1), AggregateKind.Array(byte), [MirOperand.copy(LocalId(id: 4)), MirOperand.copy(LocalId(id: 0))]), span: nil),
+            MirInst(kind: MirInstKind.Aggregate(LocalId(id: 1), AggregateKind.Tuple, [MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 0))]), span: nil),
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 1), MirOperand.copy(LocalId(id: 2)), 0), span: nil),
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 4), MirOperand.copy(LocalId(id: 3)), -1), span: nil),
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 4), MirOperand.copy(LocalId(id: 3)), 2), span: nil),
+            MirInst(kind: MirInstKind.SetField(MirOperand.copy(LocalId(id: 1)), 0, MirOperand.copy(LocalId(id: 0))), span: nil),
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 0), MirOperand.copy(LocalId(id: 1)), 0), span: nil)
+        ]
+        for instruction in bad_instructions:
+            val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [instruction], terminator: MirTerminator.Ret(nil))
+            val fn_ = cuda_function(172, "cuda_bad_field_contract", [], MirType.unit(), [
+                cuda_temp(0, cuda_u64()), cuda_temp(1, tuple), cuda_temp(2, compound), cuda_temp(3, array), cuda_temp(4, byte)
+            ], [block], true)
+            var backend = CudaBackend.create((8, 6))
+            val builder = PtxBuilder.create((8, 6))
+            val result = backend.compile_instruction(builder, instruction, fn_)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err().phase).to_contain(BackendKind.Cuda.to_text())
+            expect(result.unwrap_err().message).to_contain("CUDA layout:")
+
+    it "pads mixed width tuple GEP strides consistently with field offsets":
+        val byte = MirType(kind: MirTypeKind.U8)
+        val tuple = MirType(kind: MirTypeKind.Tuple([byte, cuda_u64(), byte]))
+        val pointer = MirType.ptr(tuple, true)
+        val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 2), MirOperand.copy(LocalId(id: 0)), [MirOperand.copy(LocalId(id: 1))]), span: nil),
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), 2), span: nil)
+        ], terminator: MirTerminator.Ret(nil))
+        val fn_ = cuda_function(173, "cuda_tuple_stride", [pointer, cuda_u64()], MirType.unit(), [
+            cuda_arg(0, 0, "base", pointer), cuda_arg(1, 1, "index", cuda_u64()), cuda_temp(2, pointer), cuda_temp(3, byte)
+        ], [block], true)
+        val ptx = compile_supported_cuda([fn_])
+        expect(ptx).to_contain(", 24;")
+        expect(ptx).to_contain("ld.local.u8 %r3, [%r0+16];")

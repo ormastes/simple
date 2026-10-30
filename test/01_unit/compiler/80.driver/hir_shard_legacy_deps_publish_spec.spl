@@ -1,0 +1,54 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_file_worker_v1.spl 0%
+"""
+# HIR shard deps/hirkey publication shared by streaming and legacy HIR paths
+
+Phase-3 per-file workers admit MIR(F) only from a `<sha>.deps` record. The
+legacy HIR path (lower_and_check_retained_owner_impl) never published one, so
+every worker logged "has no deps record". Both paths now call the single
+helper `native_file_worker_hir_records_publish_v1`.
+"""
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.io_runtime.{file_read, dir_create_all, dir_remove_all}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    native_file_worker_hir_records_publish_v1, native_file_worker_deps_read_v1,
+    native_file_worker_hirkey_read_v1}
+
+fn fresh_queue(name: text) -> text:
+    val dir = "build/spec_{name}"
+    val _removed = dir_remove_all(dir)
+    val _made = dir_create_all(dir)
+    dir
+
+describe "native_file_worker_hir_records_publish_v1":
+    it "publishes a readable deps record and hirkey record into the ledger dir":
+        val queue = fresh_queue("hir_records_publish_a")
+        val reason = native_file_worker_hir_records_publish_v1(queue, "src/a.spl", "key-a", ["src/b.spl", "src/c.spl"])
+        assert_equal(reason, "")
+        val deps = native_file_worker_deps_read_v1(queue, "src/a.spl")
+        assert_true(deps.is_ok())
+        assert_equal(deps.unwrap().len(), 2)
+        assert_equal(deps.unwrap()[0], "src/b.spl")
+        val key = native_file_worker_hirkey_read_v1(queue, "src/a.spl")
+        assert_equal(key.unwrap(), "key-a")
+
+    it "publishes an own-path-only deps record for a module with no imports":
+        val queue = fresh_queue("hir_records_publish_b")
+        assert_equal(native_file_worker_hir_records_publish_v1(queue, "src/leaf.spl", "k", []), "")
+        assert_equal(native_file_worker_deps_read_v1(queue, "src/leaf.spl").unwrap().len(), 0)
+
+    it "fails closed with a named reason when the queue or key is unusable":
+        assert_equal(native_file_worker_hir_records_publish_v1("", "src/a.spl", "k", []), "HIR shard deps record publication failed")
+        assert_equal(native_file_worker_hir_records_publish_v1(fresh_queue("hir_records_publish_c"), "src/a.spl", "", []), "HIR shard hirkey record publication failed")
+
+    it "is called by both the streaming and the legacy HIR paths":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val parts = src.split("hir_shard_publish_records_v1(")
+        assert_true(parts.len() >= 3)
+        assert_false(src.contains("hir_shard_publish_deps_v1("))
+
+    it "fails closed in the legacy path when no module surface is found":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        assert_true(src.contains("HIR shard deps record: missing module surface for"))
+        assert_true(src.contains("retained_module_surfaces.surfaces[probe].source_index == source_idx"))

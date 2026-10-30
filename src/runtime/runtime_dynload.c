@@ -32,7 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
+#if defined(_MSC_VER) && !defined(__clang__)
 #define SIMPLE_GPU_THREAD_LOCAL __declspec(thread)
 #else
 #define SIMPLE_GPU_THREAD_LOCAL _Thread_local

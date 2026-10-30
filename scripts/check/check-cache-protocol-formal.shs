@@ -31,7 +31,8 @@ GEN=src/app/gen_cache_model/main.spl
 [ -f "$SCHEMA" ] || err "no schema at $SCHEMA"
 [ -f "$GEN" ] || err "no generator at $GEN"
 [ -d src/verification/cache_identity ] || err "no cache_identity project"
-command -v lake >/dev/null 2>&1 || err "lake not on PATH"
+[ -x "$HOME/.elan/bin/lake" ] && PATH="$HOME/.elan/bin:$PATH"
+command -v lake >/dev/null 2>&1 || err "lake not on PATH (install elan)"
 
 # ---- 1. lake build ---------------------------------------------------------
 if ! (cd "$PROJ" && lake build >/tmp/cache_protocol_lake.log 2>&1); then
@@ -42,54 +43,102 @@ fi
 # ---- 2. trust-bypass scan --------------------------------------------------
 # `axiom` has no approved instances in these roots today; any hit is a FAIL
 # until it is explicitly added to the allowlist below.
-BAD=$(grep -rnE "(^|[^A-Za-z_])(sorry|admit|native_decide)([^A-Za-z_]|$)|^[[:space:]]*axiom[[:space:]]" \
-        "$PROJ/src" src/verification/cache_identity/src --include='*.lean' \
-      | grep -v "allowed-axiom:" | grep -vE '`(sorry|admit|native_decide)`' || true)
+# Comments (`-- …` and nested `/- … -/`) are stripped first: prose such as
+# "no sorry, no axioms" in a docstring is not a trust bypass (this scan used to
+# FAIL on exactly that, so the gate had never been green).
+lean_code_lines() {
+  find "$PROJ/src" src/verification/cache_identity/src -name '*.lean' | sort | while IFS= read -r _f; do
+    awk -v F="$_f" '
+      { s = $0; out = ""; i = 1
+        while (i <= length(s)) {
+          two = substr(s, i, 2)
+          if (depth > 0) {
+            if (two == "/-") { depth++; i += 2; continue }
+            if (two == "-/") { depth--; i += 2; continue }
+            i++; continue
+          }
+          if (two == "/-") { depth = 1; i += 2; continue }
+          if (two == "--") break
+          out = out substr(s, i, 1); i++
+        }
+        if (out ~ /[^[:space:]]/) printf "%s:%d:%s\n", F, NR, out }' "$_f"
+  done
+}
+BAD=$(lean_code_lines \
+      | grep -E ":[0-9]+:.*(^|[^A-Za-z_])(sorry|admit|native_decide)([^A-Za-z_]|$)|:[0-9]+:[[:space:]]*axiom[[:space:]]" \
+      | grep -v "allowed-axiom:" || true)
 [ -z "$BAD" ] || { echo "$BAD"; fail "trust bypass (sorry/admit/native_decide/axiom) in cache proof roots"; }
 
-# ---- 3. coverage: fields == theorems --------------------------------------
-key_fields=$(awk '
-  /canonical_order:/ { f=1; next }
-  f && /^[[:space:]]*- \{/ { n++; next }
-  f && /^[[:space:]]*#/ { next }
-  f { f=0 }
-  END { print n+0 }' "$SCHEMA")
-excluded=$(awk '
-  /excluded_from_key:/ { f=1; next }
-  f && /^[[:space:]]*- \{/ { n++; next }
-  f && /^[[:space:]]*#/ { next }
-  f { f=0 }
-  END { print n+0 }' "$SCHEMA")
-[ "$key_fields" -gt 0 ] || err "schema parse found 0 canonical_order rows"
-[ "$excluded" -gt 0 ] || err "schema parse found 0 excluded_from_key rows"
+# ---- 3. coverage: per-name, against the COMPILED generated files ----------
+# (Until 2026-10-24 this counted theorems in Generated/Visibility.lean, a stale
+# file that did not compile and that `lake build` never reached, so the count
+# proved nothing. Every file counted below is imported by CacheProtocol.lean.)
+FT="$PROJ/src/CacheProtocol/Generated/FieldTheorems.lean"
+LK="$PROJ/src/CacheProtocol/Generated/LiveKey.lean"
+LIVE=src/compiler/80.driver/cache/schema/live_object_key.sdn
+BIND=src/verification/cache_protocol/source_bindings.txt
+for f in "$FT" "$LK" "$LIVE" "$BIND"; do [ -f "$f" ] || err "missing $f"; done
+for m in CacheProtocol.Generated.FieldTheorems CacheProtocol.Generated.LiveKey CacheProtocol.Theorems.LiveKey; do
+  grep -qx "import $m" "$PROJ/src/CacheProtocol.lean" || fail "$m is not imported by CacheProtocol.lean, so lake build never checks it"
+done
 
-VIS="$PROJ/src/CacheProtocol/Generated/Visibility.lean"
-vis_count=$(grep -c '^theorem [a-z_0-9]*_change_visible (k1 k2 : ActionKey)' "$VIS" || true)
-abs_count=$(grep -c '^theorem [a-z_0-9]*_absent (r : FullRecord)' "$VIS" || true)
+block_names() {  # block_names <block-key> <name-key> <file>
+  awk -v b="$1:" -v k="$2" '
+    index($0, b) && $0 ~ ("^[[:space:]]*" b) { f=1; next }
+    f && /^[[:space:]]*- \{/ { if (match($0, k ": *[A-Za-z_0-9]+")) { s=substr($0,RSTART,RLENGTH); sub(/^[^:]*: */,"",s); print s }; next }
+    f && /^[[:space:]]*(#|$)/ { next }
+    f { f=0 }' "$3"
+}
+has_thm() { grep -q "^theorem $1[[:space:](:]" "$2" || grep -qx "theorem $1" "$2"; }
 
-want_vis=$((key_fields + 1))   # +1: domain (position 0, outer tag)
-[ "$vis_count" -eq "$want_vis" ] || \
-  fail "coverage: $key_fields KEY fields (+1 domain = $want_vis) but $vis_count *_change_visible theorems"
-[ "$abs_count" -eq "$excluded" ] || \
-  fail "coverage: $excluded excluded_from_key entries but $abs_count *_absent theorems"
+key_fields=$(block_names canonical_order name "$SCHEMA")
+excluded=$(block_names excluded_from_key name "$SCHEMA")
+[ -n "$key_fields" ] || err "schema parse found 0 canonical_order rows"
+[ -n "$excluded" ] || err "schema parse found 0 excluded_from_key rows"
+vis_count=0; abs_count=0
+for n in domain $key_fields; do has_thm "${n}_change_visible" "$FT" || fail "coverage: no ${n}_change_visible in FieldTheorems.lean"; vis_count=$((vis_count+1)); done
+for n in $excluded; do has_thm "${n}_absent" "$FT" || fail "coverage: no ${n}_absent in FieldTheorems.lean"; abs_count=$((abs_count+1)); done
+
+# ---- 3b. live key accounting (T-K1 / T-I1, plan §4.2) ----------------------
+live_comps=$(block_names components name "$LIVE")
+live_gaps=$(block_names known_gaps id "$LIVE")
+live_total=$(awk '/^[[:space:]]*inputs_total:/ { print $2; exit }' "$LIVE")
+nc=$(printf '%s\n' $live_comps | grep -c .); ng=$(printf '%s\n' $live_gaps | grep -c .)
+[ "$nc" -gt 0 ] || err "live_object_key.sdn parse found 0 components"
+case "$live_total" in ''|*[!0-9]*) err "live_object_key.sdn has no numeric inputs_total" ;; esac
+[ $((nc + ng)) -eq "$live_total" ] || fail "live key accounting: $nc components + $ng known_gaps != inputs_total $live_total"
+for n in $live_comps; do has_thm "${n}_live_change_visible" "$LK" || fail "coverage: no ${n}_live_change_visible in LiveKey.lean"; done
+for n in $live_gaps; do has_thm "${n}_gap_invisible" "$LK" || fail "coverage: no ${n}_gap_invisible in LiveKey.lean"; done
+lk_vis=$(grep -c '^theorem [a-z_0-9]*_live_change_visible ' "$LK"); lk_gap=$(grep -c '^theorem [a-z_0-9]*_gap_invisible ' "$LK")
+[ "$lk_vis" -eq "$nc" ] || fail "LiveKey.lean has $lk_vis *_live_change_visible for $nc components"
+[ "$lk_gap" -eq "$ng" ] || fail "LiveKey.lean has $lk_gap *_gap_invisible for $ng known gaps (a gap may not disappear silently)"
+for t in live_key_sound live_key_sound_without_gaps invalidation_complete; do
+  has_thm "$t" "$PROJ/src/CacheProtocol/Theorems/LiveKey.lean" || fail "missing manual theorem $t"
+done
+# every component's source declaration must be pinned by the source binding
+for s in $(awk '/source:/ { if (match($0, /source: *[^ }]+/)) { s=substr($0,RSTART,RLENGTH); sub(/^source: */,"",s); print s } }' "$LIVE" | sort -u); do
+  awk '!/^#/ {print $2}' "$BIND" | grep -qx "$s" || fail "live key source $s is not pinned in $BIND"
+done
 
 # ---- 4. regeneration is clean ---------------------------------------------
 [ -x bin/simple ] || [ -f bin/simple ] || err "bin/simple missing; cannot verify regeneration"
 TMP=$(mktemp -d) || err "mktemp failed"
 trap 'rm -rf "$TMP"' EXIT
 G1="$PROJ/src/CacheProtocol/Generated/Model.lean"
-G2="$PROJ/src/CacheProtocol/Generated/Visibility.lean"
+G2="$FT"
 G3="$PROJ/src/CacheProtocol/Generated/Golden.lean"
-G4="$PROJ/golden/golden_vectors.sdn"
-for f in "$G1" "$G2" "$G3" "$G4"; do
+G4="$LK"
+G5=src/app/gen_cache_model/generated/action_key_v2.spl
+G6=src/app/gen_cache_model/generated/golden_vectors.txt
+for f in "$G1" "$G2" "$G3" "$G4" "$G5" "$G6"; do
   [ -f "$f" ] || fail "generated artifact missing: $f"
   cp "$f" "$TMP/$(basename "$f")"
 done
 OUT=$(SIMPLE_EXECUTION_MODE=interpreter bin/simple run "$GEN" 2>/dev/null | tail -1)
-[ "$OUT" = "GEN OK" ] || fail "generator did not report GEN OK (got: ${OUT:-<empty>})"
-for f in "$G1" "$G2" "$G3" "$G4"; do
+case "$OUT" in "PASS — generated "*) ;; *) fail "generator did not report PASS (got: ${OUT:-<empty>})" ;; esac
+for f in "$G1" "$G2" "$G3" "$G4" "$G5" "$G6"; do
   cmp -s "$f" "$TMP/$(basename "$f")" || fail "regeneration changed $(basename "$f") — generated files are stale"
 done
 
-echo "PASS — lake build green; no trust bypass; $vis_count/$want_vis visibility + $abs_count/$excluded absence theorems; regeneration byte-clean"
+echo "PASS — lake build green; no trust bypass; $vis_count visibility + $abs_count absence theorems; live key $nc components + $ng known gaps = $live_total inputs; regeneration byte-clean"
 exit 0

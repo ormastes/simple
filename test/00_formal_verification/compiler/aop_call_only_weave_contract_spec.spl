@@ -1,0 +1,32 @@
+# Contract twin of src/verification/build_cache/src/WeaveCallOnlyV1.lean: the
+# load-bearing assumption is that weaving only INSERTS calls to advice
+# functions by name and never copies an advice body into a join point. This
+# pins it on the real weaver sources; a weaver that starts copying bodies must
+# fail here (and the source binding) before the advice-body gap can reopen.
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn count(haystack: text, needle: text) -> i64:
+    (haystack.split(needle).len() - 1) as i64
+
+describe "AOP weaving is call-only":
+    it "MIR injection builds exactly one instruction kind: a Call to the advice name":
+        val src = rt_file_read_text("src/compiler/50.mir/mir_aop_injection.spl")
+        expect(src.len() > 0).to_equal(true)
+        expect(count(src, "MirInst(")).to_equal(1)
+        expect(src.contains("kind: MirInstKind.Call(None, func_operand, [])")).to_equal(true)
+        expect(src.contains("MirConstValue.Str(advice_fn_name)")).to_equal(true)
+        # never looks up another function's body
+        expect(count(src, "functions[")).to_equal(0)
+
+    it "HIR forward weaving inserts one call statement and reads only the join point's own body":
+        val src = rt_file_read_text("src/compiler/35.semantics/aspect_weave.spl")
+        expect(src.len() > 0).to_equal(true)
+        expect(count(src, "HirStmt(")).to_equal(1)
+        expect(src.contains("kind: HirStmtKind.Expr(_advice_call_expr(advice_fn_name, body.span))")).to_equal(true)
+        expect(src.contains("HirExprKind.Call(callee, [], [])")).to_equal(true)
+        # never resolves the ADVICE function to read its body
+        expect(count(src, "functions[claim.advice_fn")).to_equal(0)
+        expect(count(src, "functions[advice")).to_equal(0)
+        expect(count(src, "advice_fn].body")).to_equal(0)

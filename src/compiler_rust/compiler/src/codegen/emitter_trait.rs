@@ -84,7 +84,10 @@ pub trait CodegenEmitter {
         args: &[VReg],
         effect: Effect,
     ) -> Result<(), Self::Error>;
-    fn emit_inline_asm(&mut self, _instructions: &[String], _volatile: bool) -> Result<(), Self::Error> {
+    fn emit_inline_asm(&mut self, _instructions: &[String], _volatile: bool, dialect: crate::hir::AsmDialect) -> Result<(), Self::Error> {
+        if dialect != crate::hir::AsmDialect::Default {
+            return Err("E-ASM-DIALECT: this backend does not support explicit assembly syntax".to_string().into());
+        }
         Ok(())
     }
 

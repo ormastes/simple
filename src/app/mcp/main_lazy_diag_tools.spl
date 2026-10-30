@@ -6,7 +6,7 @@
 
 use .main_session_state
 use .main_lazy_json.{extract_field, first_n_chars, jo2, jo4, jp, js, make_json_result, make_tool_error, make_tool_result, mcp_run_argv, shell_cmd}
-use std.io_runtime.{file_read, file_write}
+use std.io_runtime.{file_read, file_write, process_run_bounded}
 # Module-level, not function-local: a braced function-local `use` segfaults the
 # seed JIT on first call (doc/08_tracking/bug/seed_jit_function_local_use_segfaults_2026-09-13.md).
 # This module is itself loaded lazily by main_dispatch._dispatch_ip_diag.
@@ -270,9 +270,9 @@ fn handle_simple_symbols(id: text, body: text) -> text:
     # Requester: explicit > last file read this session > none. Never `path`
     # itself (that answered "visible from inside itself" for every call).
     val (requester, _source) = mcp_resolve_requester(extract_field(body, "requester"))
-    val (out, exit_code) = shell_cmd("timeout 30 " + _bin + " run src/app/cli/query_visibility.spl symbols " + path + " --requester '" + requester + "' 2>/dev/null")
+    val (out, _vis_err, exit_code) = process_run_bounded(_bin, ["run", "src/app/cli/query_visibility.spl", "symbols", path, "--requester", requester], 30000, 262144)
     if exit_code != 0:
-        return make_tool_error(id, "Could not list symbols for: " + path)
+        return make_tool_error(id, -32603, "Could not list symbols for: " + path)
     make_tool_result(id, out)
 
 # simple_visibility(file?, requester?) — MDSOC two-set view (layerPublic /
@@ -283,9 +283,9 @@ fn handle_simple_visibility(id: text, body: text) -> text:
     if file == "" and requester == "":
         return make_tool_error(id, -32602, "simple_visibility: no requester (none given and no file read/opened in this session) and no file")
     val _bin = _mcp_find_simple_binary()
-    val (out, exit_code) = shell_cmd("timeout 30 " + _bin + " run src/app/cli/query_visibility.spl visibility '" + file + "' --requester '" + requester + "' --requester-source " + source + " 2>/dev/null")
+    val (out, _vis_err, exit_code) = process_run_bounded(_bin, ["run", "src/app/cli/query_visibility.spl", "visibility", file, "--requester", requester, "--requester-source", source], 30000, 262144)
     if exit_code != 0 or out.trim() == "":
-        return make_tool_error(id, "Could not compute visibility for: " + file + " (requester " + requester + ")")
+        return make_tool_error(id, -32603, "Could not compute visibility for: " + file + " (requester " + requester + ")")
     make_tool_result(id, out)
 
 fn handle_simple_diagnostics(id: text, body: text) -> text:

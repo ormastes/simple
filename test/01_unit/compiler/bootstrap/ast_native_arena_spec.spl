@@ -8,11 +8,11 @@
 use compiler.core.ast.{ast_reset, decl_get_body, module_decl_at}
 use compiler.core.ast_expr.{
     EXPR_INT_LIT, expr_call, expr_call_named, expr_count, expr_get_arg_names,
-    expr_get_args, expr_get_int, expr_get_tag, expr_int_lit, expr_tag
+    expr_get_args, expr_get_int, expr_get_tag, expr_int_lit, expr_owner_len
 }
 use compiler.core.ast_stmt.{
     STMT_EXPR, stmt_block_stmt, stmt_count, stmt_expr_stmt, stmt_get_body, stmt_get_expr,
-    stmt_get_tag, stmt_tag
+    stmt_get_tag, stmt_owner_len
 }
 use compiler.core.types.{named_type_fields, named_type_find}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
@@ -41,8 +41,8 @@ fn first_body_int(module: ParserModule, name: text) -> i64:
             return -4
 
 fn expect_current_native_arena(value: i64):
-    expect(stmt_count()).to_equal(stmt_tag.len())
-    expect(expr_count()).to_equal(expr_tag.len())
+    expect(stmt_count()).to_equal(stmt_owner_len())
+    expect(expr_count()).to_equal(expr_owner_len())
 
     # Module decl 0 is the fixture's leading struct (f7853bd7a01 put
     # `struct FirstOnly`/`struct SecondOnly` ahead of the fn); the fn whose
@@ -90,9 +90,9 @@ describe "bootstrap native AST arena isolation":
         val bridge_source = read_file_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
 
         expect(module_source.contains("\n    decl_tag = []\n")).to_equal(false)
-        expect(expr_source.contains("\n    expr_tag = []\n")).to_equal(false)
-        expect(stmt_source.contains("\n    stmt_tag = []\n")).to_equal(false)
-        expect(module_source).to_contain("decl_body_stmts_flat.clear()")
+        expect(reset_body(expr_source, "fn expr_reset():").contains("\n    expr_tag = []\n")).to_equal(false)
+        expect(reset_body(stmt_source, "fn stmt_reset():").contains("\n    stmt_tag = []\n")).to_equal(false)
+        expect(decl_source).to_contain("decl_body_stmts_flat.clear()")
         expect(stmt_source).to_contain("stmt_gpu_grid_exprs.clear()")
         expect(stmt_source).to_contain("stmt_gpu_block_exprs.clear()")
         # 4b88aebf00b replaced the one-element `[bool]` mode slots with
@@ -247,3 +247,12 @@ describe "bootstrap native AST arena isolation":
         expect(stmt_get_expr(stmt_id)).to_equal(expr_id)
         expect(expr_get_tag(expr_id)).to_equal(EXPR_INT_LIT)
         expect(expr_get_int(expr_id)).to_equal(7)
+
+# The ParseContext take() snapshots in these files deliberately install fresh
+# owners, so the no-reallocation check is scoped to the reset body.
+fn reset_body(source: text, header: text) -> text:
+    val begin = source.index_of(header)
+    if begin < 0: return ""
+    val finish = source.index_of("\nfn ", begin + header.len())
+    if finish < 0: return source.substring(begin, source.len())
+    source.substring(begin, finish)

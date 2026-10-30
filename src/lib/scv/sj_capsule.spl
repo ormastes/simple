@@ -40,7 +40,7 @@ use app.io.mod (file_exists, file_read, file_delete, dir_create, dir_remove_all,
 use std.scv.event_coalesce.{scv_coalesce_open, scv_coalesce_add, scv_coalesce_flush_ready, scv_coalesce_atomic_save}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 use std.scv.store.{scv_hash_text, scv_write_text}
-use std.scv.journal.{scv_event_batch_record, scv_event_batch_commit, scv_event_batch_is_committed}
+use std.scv.journal.{ScvEventBatchEntry, scv_event_batch_record_all, scv_event_batch_commit, scv_event_batch_is_committed}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 fn scv_sj_capsule_version() -> text:
@@ -360,8 +360,15 @@ fn scv_sj_capsule_transaction(root: text, holder: text, txn_id: text, paths: [te
     report = report + "capture: {captured.len()} stable bytes\n"
 
     # 5 wal — E-03 pending/committed event batch lifecycle.
+    var wal_events: [ScvEventBatchEntry] = []
     for row in captured:
-        scv_event_batch_record(root, txn_id, "capture", scv_sj_capture_row_path(row), scv_sj_capture_row_id(row))
+        wal_events.push(ScvEventBatchEntry(
+            kind: "capture", path: scv_sj_capture_row_path(row), related: scv_sj_capture_row_id(row)))
+    val wal_recorded = scv_event_batch_record_all(root, txn_id, wal_events)
+    if not wal_recorded:
+        report = report + "wal: failed to durably record complete batch\nobjects: skipped\nindex: skipped\njj_snapshot: skipped\njj_read_ids: skipped\nbackend_map: skipped\npublish: skipped\n"
+        report = report + "release: {scv_sj_lease_release(root, holder)}\n"
+        return report + "verdict: aborted\n"
     val wal_committed = scv_event_batch_commit(root, txn_id)
     report = report + "wal: {if wal_committed: "committed" else: "failed"}\n"
     if not wal_committed:

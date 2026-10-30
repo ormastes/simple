@@ -587,6 +587,7 @@ impl LlvmBackend {
         &self,
         instructions: &[String],
         constraints: &str,
+        dialect: crate::hir::AsmDialect,
         builder: &inkwell::builder::Builder<'static>,
     ) -> Result<(), CompileError> {
         let fn_type = self.context_ref().void_type().fn_type(&[], false);
@@ -596,7 +597,10 @@ impl LlvmBackend {
             constraints.to_string(),
             true,
             false,
-            Some(InlineAsmDialect::ATT),
+            Some(match dialect {
+                crate::hir::AsmDialect::Default | crate::hir::AsmDialect::Att => InlineAsmDialect::ATT,
+                crate::hir::AsmDialect::Intel => InlineAsmDialect::Intel,
+            }),
             false,
         );
         builder
@@ -624,6 +628,7 @@ impl LlvmBackend {
             for inst in &block.instructions {
                 match inst {
                     crate::mir::MirInst::InlineAsm {
+                        dialect,
                         instructions,
                         constraints,
                         inputs,
@@ -646,7 +651,7 @@ impl LlvmBackend {
                                 func.name, constraints
                             )));
                         }
-                        self.emit_raw_asm_block(instructions, "~{memory}", builder)?;
+                        self.emit_raw_asm_block(instructions, "~{memory}", *dialect, builder)?;
                         asm_blocks += 1;
                     }
                     other => {
@@ -1297,13 +1302,14 @@ impl LlvmBackend {
                 self.compile_call(*dest, target, args, vreg_map, vreg_types, builder, module)?;
             }
             MirInst::InlineAsm {
+                dialect,
                 instructions,
                 volatile,
                 constraints,
                 inputs,
                 outputs,
             } => {
-                self.compile_inline_asm(instructions, *volatile, constraints, inputs, outputs, vreg_map, builder)?;
+                self.compile_inline_asm(instructions, *dialect, *volatile, constraints, inputs, outputs, vreg_map, builder)?;
                 self.emit_no_reorder_fence(builder)?;
             }
             MirInst::IndirectCall {
@@ -5641,4 +5647,41 @@ mod tests {
         );
         backend.verify().unwrap();
     }
+    #[test]
+    fn explicit_asm_dialect_reaches_normal_generic_and_naked_emitters() {
+        use crate::hir::AsmDialect;
+        for dialect in [AsmDialect::Default, AsmDialect::Att, AsmDialect::Intel] {
+            let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+            backend.create_module("asm_dialect_transport").unwrap();
+            {
+                let module_ref = backend.module.borrow();
+                let module = module_ref.as_ref().unwrap();
+                let builder_ref = backend.builder.borrow();
+                let builder = builder_ref.as_ref().unwrap();
+                let ty = backend.context_ref().void_type();
+                let function = module.add_function("emit", ty.fn_type(&[], false), None);
+                builder.position_at_end(backend.context_ref().append_basic_block(function, "entry"));
+                let instructions = vec!["nop".to_string()];
+                backend.compile_inline_asm(&instructions, dialect, true, "~{memory}", &[], &[], &mut HashMap::new(), builder).unwrap();
+                backend.emit_raw_asm_block(&instructions, "~{memory}", dialect, builder).unwrap();
+                backend.compile_emitter_simd_instruction(
+                    &MirInst::InlineAsm {
+                        dialect,
+                        instructions,
+                        volatile: true,
+                        constraints: "~{memory}".to_string(),
+                        inputs: vec![],
+                        outputs: vec![],
+                    },
+                    &mut HashMap::new(), &HashMap::new(), builder, module,
+                ).unwrap();
+                builder.build_return(None).unwrap();
+            }
+            backend.verify().unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert_eq!(ir.matches("inteldialect").count(), if dialect == AsmDialect::Intel { 3 } else { 0 }, "{ir}");
+            assert_eq!(ir.matches("asm sideeffect").count(), 3, "{ir}");
+        }
+    }
+
 }

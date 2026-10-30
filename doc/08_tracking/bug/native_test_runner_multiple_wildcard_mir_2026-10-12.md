@@ -11,3 +11,13 @@ This failure occurs earlier than producer4c's native-cache RSS cap. It neither p
 A source-only diagnostic improvement now includes the duplicate wildcard arm index, owning function and module in this same rejection branch, matching the adjacent binding-default diagnostic's owner information. The duplicate-default guard, error severity, source span and return behavior are unchanged. This does not repair the failure and has not been rebuilt or executed. No speculative source match was rewritten.
 
 Terminal matrix confirms test_runner_build FAIL status1 after373 seconds, peak2946784 KiB; the CLI independently failed status88/RSS after793 seconds. Overall bootstrap exited1 at stage2-compiler-tests. There is no remaining live session30186 to wait on.
+
+## Item-2 source probe reproduction — 2026-10-20
+
+The admitted pure-Simple producer645e62a8 additionally fails
+`lib.scv.db_pages.db_page_decode` with
+`B5b: match has multiple wildcard arms (arm 1)` while compiling the197-module
+budgeted-store probe closure. This is production DB code, not a test-runner
+placeholder. Retained grouped diagnostics and source/snapshot identities:
+`doc/03_plan/evidence/seven_plans/items247_store_compile_diagnostics_2026-10-20.md`.
+No native executable or Phase3 PASS resulted.

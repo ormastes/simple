@@ -1,0 +1,222 @@
+# Existing CLI file/input/output/root helpers, split without changing behavior.
+use app.io.env_ops.{cwd, host_os}
+use app.buildrunner.scv_session_v1.{BuildRunnerScvSessionV1, build_runner_scv_task_error_v1}
+use app.io.file_ops.{file_exists, file_hash_sha256, file_is_regular_no_follow,
+    path_absolute, secure_temp_dir, file_copy, file_publish_noreplace, file_delete}
+use app.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
+use std.nogc_sync_mut.sffi.fs.{file_mode}
+use std.nogc_sync_mut.io_runtime.{dir_exists, dir_remove}
+use app.bootstrap_builder.cli_args.{BuilderCliV1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1}
+use app.bootstrap_builder.link_inputs.{builder_link_inputs_match_v1, builder_regular_input_parents_safe_v1}
+use app.buildrunner.runner.{build_runner_output_error}
+
+fn builder_cli_hash_outputs_v1(task: BuildTaskV1, root: text,
+        process: BuilderProcessPortV1) -> [BuildInputV1]:
+    var observed: [BuildInputV1] = []
+    for path in task.outputs:
+        val absolute = root + "/" + path
+        if not builder_cli_output_parent_safe_v1(root, path, process): return []
+        if not file_is_regular_no_follow(absolute): return []
+        val digest = file_hash_sha256(absolute)
+        if digest.len() != 64: return []
+        observed = observed.push(BuildInputV1(path: path, digest: digest))
+    observed
+
+fn builder_cli_input_error_v1(task: BuildTaskV1, root: text,
+        scv: BuildRunnerScvSessionV1? = nil) -> text:
+    val source_error = build_runner_scv_task_error_v1(scv, task, root)
+    if source_error != "": return source_error
+    if not builder_regular_input_parents_safe_v1(task, root):
+        return "input parent is missing or unsafe"
+    var program = task.program
+    if not program.starts_with("/") and not program.contains(":"): program = root + "/" + program
+    if not file_is_regular_no_follow(program):
+        return "producer is missing or not a no-follow regular file"
+    if file_hash_sha256(program) != task.producer_digest:
+        return "producer hash differs from task producer digest"
+    for input in task.inputs:
+        val path = root + "/" + input.path
+        if not file_is_regular_no_follow(path):
+            return "declared input is missing or not a no-follow regular file: " + input.path
+        if file_hash_sha256(path) != input.digest:
+            return "declared input hash differs: " + input.path
+    builder_link_inputs_match_v1(task, root)
+
+fn builder_cli_inputs_match_v1(task: BuildTaskV1, root: text,
+        scv: BuildRunnerScvSessionV1? = nil) -> bool:
+    builder_cli_input_error_v1(task, root, scv) == ""
+
+fn builder_cli_parent_directory_v1(path: text) -> text:
+    var offset = path.len() - 1
+    while offset >= 0:
+        if path[offset:offset + 1] == "/" or path[offset:offset + 1] == "\\": return path[0:offset]
+        offset = offset - 1
+    "."
+
+fn builder_cli_output_parent_safe_v1(root: text, relative: text,
+        process: BuilderProcessPortV1) -> bool:
+    val parent = builder_cli_parent_directory_v1(root + "/" + relative)
+    if host_os() == "windows": return builder_cli_no_reparse_directories_v1(parent, process)
+    val canonical_root = path_absolute(root).replace("\\", "/")
+    val canonical_parent = path_absolute(parent).replace("\\", "/")
+    if canonical_root == "" or canonical_parent == "": return false
+    val prefix = if canonical_root.ends_with("/"): canonical_root else: canonical_root + "/"
+    canonical_parent == canonical_root or canonical_parent.starts_with(prefix)
+
+fn builder_cli_output_mode_v1(source: text, destination: text, repair: bool) -> bool:
+    if not file_is_regular_no_follow(source) or not file_is_regular_no_follow(destination):
+        return false
+    # Windows execution does not use POSIX mode bits. On POSIX the retained
+    # artifact owns ordinary permissions; never propagate setuid/setgid bits.
+    if host_os() == "windows": return true
+    val source_mode = file_mode(source)
+    val destination_mode = file_mode(destination)
+    if source_mode < 0 or destination_mode < 0: return false
+    val expected = source_mode & 0o777
+    if destination_mode == expected: return true
+    # Output/attempt roots and their ancestors are manager-owned, as for
+    # publication's existing no-follow checks followed by path-based copying.
+    if not repair or not set_permissions(destination, expected.to_i32()): return false
+    file_is_regular_no_follow(destination) and file_mode(destination) == expected
+
+fn builder_cli_output_modes_match_v1(task: BuildTaskV1, attempt_root: text,
+        output_root: text, process: BuilderProcessPortV1) -> bool:
+    for path in task.outputs:
+        if not builder_cli_output_parent_safe_v1(output_root, path, process): return false
+        if not builder_cli_output_mode_v1(attempt_root + "/work/" + path,
+                output_root + "/" + path, false): return false
+    true
+
+fn builder_cli_create_output_parents_v1(root: text, relative: text,
+        process: BuilderProcessPortV1) -> bool:
+    # Validate each existing prefix before creating its child. Creating the
+    # whole path first can follow an escaping symlink and mutate another tree
+    # even when the later publication check refuses the output.
+    if relative.contains("\\") or relative.contains(":"): return false
+    val parts = relative.split("/")
+    for part in parts:
+        if part == "" or part == "." or part == "..": return false
+    if not dir_exists(root) or not builder_cli_output_parent_safe_v1(root, "output", process):
+        return false
+    var prefix = ""
+    for index in 0..parts.len() - 1:
+        prefix = prefix + parts[index] + "/"
+        val parent = root + "/" + prefix
+        if not dir_exists(parent) and not dir_create(parent, false): return false
+        if not builder_cli_output_parent_safe_v1(root, prefix + "output", process):
+            return false
+    true
+
+fn builder_cli_publish_one_v1(source: text, output_root: text, relative: text,
+        digest: text, process: BuilderProcessPortV1) -> bool:
+    if not file_is_regular_no_follow(source) or file_hash_sha256(source) != digest: return false
+    val destination = output_root + "/" + relative
+    val parent = builder_cli_parent_directory_v1(destination)
+    if not builder_cli_create_output_parents_v1(output_root, relative, process) or
+            not builder_cli_output_parent_safe_v1(output_root, relative, process):
+        return false
+    if file_exists(destination):
+        return file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest and
+            builder_cli_output_mode_v1(source, destination, true) and file_hash_sha256(destination) == digest
+    val stage_root = match secure_temp_dir(parent, "builder-publish"):
+        case Ok(value): value
+        case Err(_reason): return false
+    val stage = stage_root + "/output"
+    var ready = file_copy(source, stage)
+    if ready: ready = file_is_regular_no_follow(stage) and file_hash_sha256(stage) == digest
+    if ready: ready = builder_cli_output_mode_v1(source, stage, true)
+    # Recheck the full parent chain immediately before the no-replace move.
+    if ready: ready = builder_cli_output_parent_safe_v1(output_root, relative, process)
+    var published = false
+    if ready:
+        match file_publish_noreplace(stage, destination):
+            case Ok(value): published = value
+            case Err(_reason): ()
+    if not published: file_delete(stage)
+    if not dir_remove(stage_root, false): return false
+    file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest and
+        builder_cli_output_mode_v1(source, destination, true) and file_hash_sha256(destination) == digest
+
+fn builder_cli_publish_v1(task: BuildTaskV1, receipt: BuildResultV1, attempt_root: text,
+        output_root: text, process: BuilderProcessPortV1) -> bool:
+    for path in task.outputs:
+        var digest = ""
+        for item in receipt.outputs:
+            if item.path == path: digest = item.digest
+        if digest == "" or not builder_cli_publish_one_v1(attempt_root + "/work/" + path,
+                output_root, path, digest, process):
+            return false
+    # Rehash the destination too: a copy/write failure never produces a cache hit.
+    build_runner_output_error(task, receipt,
+        builder_cli_hash_outputs_v1(task, output_root, process)) == ""
+
+fn builder_cli_private_path_v1(path: text) -> bool:
+    if path == "" or path.contains("\\") or path.contains("\0") or
+            path.contains("\n") or path.contains("\r") or path.contains("//"):
+        return false
+    if not path.starts_with("/") and not (path.len() > 3 and path[1:3] == ":/"):
+        return false
+    for part in path.split("/"):
+        if part == "." or part == "..": return false
+    true
+
+fn builder_cli_no_reparse_directories_v1(path: text,
+        process: BuilderProcessPortV1) -> bool:
+    if host_os() != "windows": return true
+    val parts = path.split("/")
+    if parts.len() < 2: return false
+    var prefix = parts[0] + "/"
+    if not process.directory_no_follow_operation(prefix): return false
+    for index in 1..parts.len():
+        if parts[index] != "":
+            prefix = prefix + parts[index]
+            if not process.directory_no_follow_operation(prefix): return false
+            prefix = prefix + "/"
+    true
+
+fn builder_cli_roots_overlap_v1(left: text, right: text) -> bool:
+    val left_prefix = if left.ends_with("/"): left else: left + "/"
+    val right_prefix = if right.ends_with("/"): right else: right + "/"
+    left == right or left.starts_with(right_prefix) or right.starts_with(left_prefix)
+
+fn builder_cli_resolve_roots_v1(config: BuilderCliV1,
+        process: BuilderProcessPortV1) -> Result<BuilderCliV1, text>:
+    var resolved = config
+    if not resolved.state.starts_with("/") and not resolved.state.contains(":"):
+        resolved.state = cwd() + "/" + resolved.state
+    if resolved.source_root == "": resolved.source_root = cwd()
+    elif not resolved.source_root.starts_with("/") and not resolved.source_root.contains(":"):
+        resolved.source_root = cwd() + "/" + resolved.source_root
+    if not dir_exists(resolved.source_root): return Err("source root does not exist")
+    if resolved.output_root == "":
+        resolved.output_root = resolved.source_root
+    else:
+        # An explicit output owner is a separate existing tree. The manager
+        # never creates that root inside an immutable source snapshot.
+        if not builder_cli_private_path_v1(resolved.source_root) or
+                not builder_cli_private_path_v1(resolved.output_root) or
+                not builder_cli_private_path_v1(resolved.state):
+            return Err("explicit source, output, and state roots must be clean absolute paths")
+        if not dir_exists(resolved.output_root) or not dir_exists(resolved.state):
+            return Err("private output and state roots must already exist")
+        if not builder_cli_no_reparse_directories_v1(resolved.source_root, process) or
+                not builder_cli_no_reparse_directories_v1(resolved.output_root, process) or
+                not builder_cli_no_reparse_directories_v1(resolved.state, process):
+            return Err("source, output, or state root crosses a reparse directory")
+        val source = path_absolute(resolved.source_root).replace("\\", "/").lower()
+        val output = path_absolute(resolved.output_root).replace("\\", "/").lower()
+        val state = path_absolute(resolved.state).replace("\\", "/").lower()
+        if source == "" or output == "" or state == "" or
+                builder_cli_roots_overlap_v1(source, output):
+            return Err("explicit output root must be outside source root")
+        if builder_cli_roots_overlap_v1(source, state):
+            return Err("manager state must be outside source root")
+    Ok(resolved)
+
+export builder_cli_hash_outputs_v1, builder_cli_input_error_v1, builder_cli_inputs_match_v1
+export builder_cli_parent_directory_v1, builder_cli_output_parent_safe_v1, builder_cli_publish_v1
+export builder_cli_resolve_roots_v1
+export builder_cli_output_modes_match_v1

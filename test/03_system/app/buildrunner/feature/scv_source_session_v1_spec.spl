@@ -1,0 +1,89 @@
+"""Actual source capture and exact session replay; authored, execution deferred.
+
+Requires SIMPLE_LIB=src and no inherited SIMPLE_SCV/source overrides. Git creates
+an isolated miniature checkout; no compiler, native builder or worker executes.
+"""
+use std.spec.{describe, it, expect, step}
+use app.buildrunner.scv_session_v1.{build_runner_scv_session_open_v1, build_runner_scv_task_error_v1}
+use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1}
+use app.bootstrap_builder.worker.{builder_worker_environment_digest_v1}
+use app.bootstrap_builder.cli_args.{BuilderCliV1}
+use app.bootstrap_builder.contracts.{BuildRunV1, BuildInputV1, BuildHostV1}
+use app.io.file_ops.{secure_temp_dir_raw, file_atomic_write, file_read, file_hash_sha256}
+use app.io.dir_ops.{dir_create_all}
+use app.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_async_mut.sosix.host_facade.{sosix_run}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.{compile_source_inventory_apply_and_publish_v1, compile_source_inventory_git_event_v1, compile_source_inventory_read_current_v1}
+use test.fixtures.buildrunner.scv_cli_fixture_v1.{setup_scv_cli_task_v1, setup_scv_cli_plan_v1}
+
+fn setup_scv_source_session_fixture() -> (text, BuildRunV1, BuilderCliV1, text):
+    expect(env_get("SIMPLE_LIB") ?? "").to_equal("src")
+    val root = secure_temp_dir_raw("/tmp", "buildrunner-scv-session-")
+    expect(root.len()).to_be_greater_than(0)
+    val checkout = root + "/checkout"
+    for path in ["checkout/src", "checkout/task-context", "checkout/tools", "state", "output"]:
+        expect(dir_create_all(root + "/" + path)).to_equal(true)
+    expect(file_atomic_write(checkout + "/src/main.spl", "fn main(): 1\n")).to_equal(true)
+    expect(file_atomic_write(checkout + "/tools/compiler", "fixture-image-not-executed\n")).to_equal(true)
+    for args in [["init", "-q"], ["add", "src"], ["-c", "user.name=SCV fixture", "-c", "user.email=scv@example.invalid", "commit", "-qm", "source fixture"]]:
+        expect(sosix_run("git", ["-C", checkout] + args).exit_code).to_equal(0)
+    val digest = sha256_text("fixture")
+    val context = build_runner_context_encode_v1(BuildRunnerTaskContextV1(backend: "llvm",
+        runtime_digest: digest, policy_digest: digest, environment_digest: builder_worker_environment_digest_v1().unwrap())).unwrap()
+    expect(file_atomic_write(checkout + "/task-context/compile.sdn", context)).to_equal(true)
+    var task = setup_scv_cli_task_v1()
+    task.producer_digest = file_hash_sha256(checkout + "/tools/compiler")
+    task.inputs = [BuildInputV1(path: "src/main.spl", digest: sha256_text("fn main(): 1\n")),
+        BuildInputV1(path: "task-context/compile.sdn", digest: sha256_text(context))]
+    val run = BuildRunV1(tasks: [task], hosts: [BuildHostV1(id: "local", transport: "local", endpoint: "",
+        workspace: root, worker_program: checkout + "/tools/compiler", worker_digest: task.producer_digest, slots: 1)],
+        keep_going: true, max_attempts: 2)
+    val config = BuilderCliV1(command: "run", manifest: "", state: root + "/state", source_root: checkout,
+        output_root: root + "/output", request: "", attempt_root: "", host: "", error: "")
+    val plan = root + "/source-plan.sdn"
+    expect(file_atomic_write(plan, setup_scv_cli_plan_v1())).to_equal(true)
+    (root, run, config, plan)
+
+describe "BuildRunner captures one actual frozen source session":
+    it "reopens the saved immutable inventory pointer after CURRENT advances":
+        step("setup: prepare a real tiny checkout and exact task input context")
+        val (root, run, config, plan) = setup_scv_source_session_fixture()
+        step("capture: call the actual compiler authority and V1 snapshot adapter")
+        val first = build_runner_scv_session_open_v1(run, config, plan, false).unwrap().unwrap()
+        expect(file_read(first.adapter.legacy.snapshot_root + "/src/main.spl")).to_equal("fn main(): 1\n")
+        expect(first.bindings["compile"].source_only).to_equal(true)
+        val cache = config.source_root + "/build/scv"
+        val original_pointer = compile_source_inventory_read_current_v1(cache).digest
+        step("exercise: advance CURRENT and reopen the persisted session")
+        val advanced = compile_source_inventory_apply_and_publish_v1(cache,
+            [compile_source_inventory_git_event_v1("create", "src/new.spl", "fn added(): 2\n")])
+        expect(advanced.valid).to_equal(true)
+        expect(advanced.digest == original_pointer).to_equal(false)
+        val reopened = build_runner_scv_session_open_v1(run, config, plan, true).unwrap().unwrap()
+        step("assert: retain the exact original source subject and raw pointer binding")
+        expect(reopened.adapter.snapshot.snapshot_id).to_equal(first.adapter.snapshot.snapshot_id)
+        expect(reopened.record_payload).to_equal(first.record_payload)
+        expect(reopened.adapter.source_inventory_digest).to_equal("sha256_" + original_pointer)
+        expect(build_runner_scv_task_error_v1(Some(reopened), run.tasks[0], config.source_root)).to_equal("")
+        var retry = run.tasks[0]
+        retry.attempt = 2
+        expect(build_runner_scv_task_error_v1(Some(reopened), retry, config.source_root)).to_equal("")
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "refuses a changed plan omitted mode changed task and tampered session record":
+        step("setup: capture one real source session")
+        val (root, run, config, plan) = setup_scv_source_session_fixture()
+        val session = build_runner_scv_session_open_v1(run, config, plan, false).unwrap().unwrap()
+        step("exercise: try to attach different inputs to the retained source session")
+        expect(build_runner_scv_session_open_v1(run, config, "", true).is_err()).to_equal(true)
+        expect(file_atomic_write(plan, setup_scv_cli_plan_v1().replace("cold_init: false", "cold_init: true"))).to_equal(true)
+        expect(build_runner_scv_session_open_v1(run, config, plan, true).is_err()).to_equal(true)
+        var changed = run.tasks[0]
+        changed.toolchain_digest = sha256_text("different toolchain")
+        expect(build_runner_scv_task_error_v1(Some(session), changed, config.source_root)).to_equal("scv-task-identity-drift")
+        step("assert: a source-only record cannot be edited into artifact authority")
+        expect(file_atomic_write(session.record_path, session.record_payload.replace("full_artifact_authorized: false", "full_artifact_authorized: true"))).to_equal(true)
+        expect(build_runner_scv_task_error_v1(Some(session), run.tasks[0], config.source_root)).to_equal("scv-session-binding-changed")
+        expect(dir_remove_all(root)).to_equal(true)

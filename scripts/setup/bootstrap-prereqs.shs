@@ -5,7 +5,7 @@ set -eu
 # FreeBSD, macOS, and Windows (Git Bash).
 #
 # Usage:
-#   sh scripts/setup/bootstrap-prereqs.shs [check|install|install-llvm23] [--dry-run] [--selftest]
+#   sh scripts/setup/bootstrap-prereqs.shs [check|install|install-llvm23|install-llvm-mingw] [--dry-run] [--selftest]
 #
 # Modes:
 #   check   (default) — detect every prerequisite with its required version,
@@ -23,6 +23,8 @@ set -eu
 #   install-llvm23 — install and check LLVM 23 (any 23.x.y; owner decision 2026-10-22,
 #           major is strict, minor/patch only warn). Installs the 23.1.1 reference:
 #           aya-llvm-sys binds LLVM 23 through LLVM_SYS_231_PREFIX.
+#   install-llvm-mingw — install only the Windows gnu-lane toolchain (pinned,
+#           checksummed llvm-mingw UCRT: clang + lld, no GCC); used by CI.
 #   --dry-run — with `install`, print the exact plan (same "installing ..."
 #           lines) WITHOUT executing anything. Changes nothing. Exit code
 #           mirrors what `check` would report, since no state changed.
@@ -1155,7 +1157,11 @@ do_install_llvm_mingw() {
     if [ ! -f "$zip" ] || [ "$(sha256_of "$zip")" != "$LLVM_MINGW_PIN_SHA256" ]; then
         rm -f "$zip"
         set +e
-        wget -qO "$zip" "$url"
+        if command -v wget >/dev/null 2>&1; then
+            wget -qO "$zip" "$url"
+        else
+            curl -fsSL -o "$zip" "$url"
+        fi
         dl_rc=$?
         set -e
         if [ "$dl_rc" -ne 0 ]; then
@@ -2107,11 +2113,12 @@ for arg in "$@"; do
         check) mode="check" ;;
         install) mode="install" ;;
         install-llvm23) mode="install-llvm23" ;;
+        install-llvm-mingw) mode="install-llvm-mingw" ;;
         --dry-run) dry_run="1" ;;
         --selftest) do_selftest="1" ;;
         *)
             echo "unknown argument: $arg" >&2
-            echo "usage: sh scripts/setup/bootstrap-prereqs.shs [check|install|install-llvm23] [--dry-run] [--selftest]" >&2
+            echo "usage: sh scripts/setup/bootstrap-prereqs.shs [check|install|install-llvm23|install-llvm-mingw] [--dry-run] [--selftest]" >&2
             exit 2
             ;;
     esac
@@ -2133,6 +2140,10 @@ case "$mode" in
         ;;
     install-llvm23)
         run_install_llvm23_only "$dry_run"
+        exit $?
+        ;;
+    install-llvm-mingw)
+        do_install_llvm_mingw "$dry_run"
         exit $?
         ;;
 esac

@@ -30,7 +30,7 @@ use compiler.mir.mir_types.*
 use compiler.mir.mir_instruction_support.*
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_graph.{MirInst, MirBlock, MirFunction, MirModule}
-use compiler.mir.mir_verify_levels.{MirVerifyRule, MirVerifyLevels, mir_verify_rules, mir_verify_rule_lifecycle, mir_verify_levels_from_spec, mir_verify_levels_from_env, mir_verify_rule_level_from_spec, mir_verify_rule_level}
+use compiler.mir.mir_verify_levels.{MirVerifyRule, MirVerifyLevels, mir_verify_rules, mir_verify_rule_lifecycle, mir_verify_levels_from_spec, mir_verify_levels_from_env, mir_verify_rule_level_from_spec, mir_verify_rule_level, mir_verify_rule_is_mandatory_v1}
 
 var mir_verify_profile_state: i64 = -1
 var mir_verify_profile_receipts: i64 = 0
@@ -55,6 +55,9 @@ struct MirVerifyFinding:
     message: text
     span: Span?
 
+fn mir_verify_finding_is_mandatory_v1(finding: MirVerifyFinding) -> bool:
+    mir_verify_rule_is_mandatory_v1(finding.rule)
+
 impl MirVerifyFinding:
     fn level() -> text:
         """Resolved level: registry default overridden by SIMPLE_MIR_VERIFY_LEVELS.
@@ -64,9 +67,11 @@ impl MirVerifyFinding:
         mir_verify_rule_level(self.rule)
 
     fn is_fatal() -> bool:
+        if mir_verify_finding_is_mandatory_v1(self): return true
         self.level() == "error"
 
     fn is_suppressed() -> bool:
+        if mir_verify_finding_is_mandatory_v1(self): return false
         self.level() == "off"
 
     fn format() -> text:
@@ -104,6 +109,11 @@ impl MirVerifyReport:
 # ============================================================================
 # Type helpers (no allocation beyond the returned text in the error path)
 # ============================================================================
+
+val MIR_VERIFY_MISSING_TYPE_REASON_V1: text = "missing MIR type declaration"
+
+fn mir_verify_type_reason_rule_v1(reason: text) -> text:
+    if reason == MIR_VERIFY_MISSING_TYPE_REASON_V1: "MIRV-001n" else: "MIRV-001"
 
 # Coarse representation classes used by the cast / call-agreement rules.
 val MVT_UNKNOWN: i64 = 0
@@ -171,6 +181,9 @@ fn mir_verify_is_text(t: MirType) -> bool:
         case _: false
 
 fn mir_verify_type_text(t: MirType) -> text:
+    # Malformed nested type records must still be printable in a finding.
+    if t == nil:
+        return "<missing MIR type declaration>"
     match t.kind:
         case MirTypeKind.I8: "i8"
         case MirTypeKind.I16: "i16"
@@ -283,6 +296,12 @@ fn mir_verify_type_unresolved_reason(t: MirType, depth: i64) -> text:
     `<…>` marker name, a nominal with a negative symbol id, and unknown
     callee signatures. Depth-bounded so a pathological nested type cannot make
     this super-linear."""
+    # Verify the carrier before reading kind, including recursively projected
+    # Result/tuple children. The retained Phase2 producer crashed here on a
+    # missing MirType receiver; absence is an unresolved declaration, not the
+    # valid Unit/I64 type and not a successful depth-limit exit.
+    if t == nil:
+        return MIR_VERIFY_MISSING_TYPE_REASON_V1
     if depth > 8:
         return ""
     match t.kind:
@@ -301,14 +320,18 @@ fn mir_verify_type_unresolved_reason(t: MirType, depth: i64) -> text:
         case MirTypeKind.Array(element, _): mir_verify_type_unresolved_reason(element, depth + 1)
         case MirTypeKind.Slice(element): mir_verify_type_unresolved_reason(element, depth + 1)
         case MirTypeKind.Tuple(elements):
+            var first_reason = ""
             for e in elements:
                 val r = mir_verify_type_unresolved_reason(e, depth + 1)
-                if r != "": return r
-            ""
+                if r == MIR_VERIFY_MISSING_TYPE_REASON_V1: return r
+                if first_reason == "" and r != "": first_reason = r
+            first_reason
         case MirTypeKind.Result(ok, err):
-            val r = mir_verify_type_unresolved_reason(ok, depth + 1)
-            if r != "": return r
-            mir_verify_type_unresolved_reason(err, depth + 1)
+            val ok_reason = mir_verify_type_unresolved_reason(ok, depth + 1)
+            if ok_reason == MIR_VERIFY_MISSING_TYPE_REASON_V1: return ok_reason
+            val err_reason = mir_verify_type_unresolved_reason(err, depth + 1)
+            if err_reason == MIR_VERIFY_MISSING_TYPE_REASON_V1: return err_reason
+            if ok_reason != "": ok_reason else: err_reason
         case _: ""
 
 # ============================================================================
@@ -596,7 +619,7 @@ impl MirFnVerifier:
                 self.def_local(dest)
                 val reason = mir_verify_type_unresolved_reason(type_, 0)
                 if reason != "":
-                    self.report("MIRV-001", "Const result has {reason}")
+                    self.report(mir_verify_type_reason_rule_v1(reason), "Const result has {reason}")
             case MirInstKind.Copy(dest, src):
                 self.def_local(dest)
                 self.use_local(src)
@@ -642,7 +665,7 @@ impl MirFnVerifier:
                 self.def_local(dest)
                 val reason = mir_verify_type_unresolved_reason(type_, 0)
                 if reason != "":
-                    self.report("MIRV-001", "Alloc has {reason}")
+                    self.report(mir_verify_type_reason_rule_v1(reason), "Alloc has {reason}")
             case MirInstKind.Load(dest, ptr):
                 self.def_local(dest)
                 self.use_operand(ptr)
@@ -920,21 +943,28 @@ fn _mir_verify_function_indexed(func: MirFunction, module: MirModule, fn_by_name
     elif not v.block_exists(func.entry_block):
         v.report("MIRV-005", "entry block {func.entry_block.id} does not exist")
     # --- signature / local types (rule 1 and 3b) ----------------------------
+    var missing_type = false
     var si = 0
     while si < func.signature.params.len():
         val reason = mir_verify_type_unresolved_reason(func.signature.params[si], 0)
         if reason != "":
-            v.report("MIRV-001", "parameter {si} has {reason}")
+            v.report(mir_verify_type_reason_rule_v1(reason), "parameter {si} has {reason}")
+            if reason == MIR_VERIFY_MISSING_TYPE_REASON_V1: missing_type = true
         si = si + 1
     val ret_reason = mir_verify_type_unresolved_reason(func.signature.return_type, 0)
     if ret_reason != "":
-        v.report("MIRV-001", "return type has {ret_reason}")
+        v.report(mir_verify_type_reason_rule_v1(ret_reason), "return type has {ret_reason}")
+        if ret_reason == MIR_VERIFY_MISSING_TYPE_REASON_V1: missing_type = true
     p = 0
     while p < func.locals.len():
         val l: MirLocal = func.locals[p]
         val reason = mir_verify_type_unresolved_reason(l.type_, 0)
         if reason != "":
-            v.report("MIRV-001", "local %{l.id.id} ('" + (l.name ?? "") + "') has {reason}")
+            v.report(mir_verify_type_reason_rule_v1(reason), "local %{l.id.id} ('" + (l.name ?? "") + "') has {reason}")
+            if reason == MIR_VERIFY_MISSING_TYPE_REASON_V1: missing_type = true
+        if l.type_ == nil:
+            p = p + 1
+            continue
         match l.kind:
             case LocalKind.Var:
                 match l.type_.kind:
@@ -943,6 +973,10 @@ fn _mir_verify_function_indexed(func: MirFunction, module: MirModule, fn_by_name
                     case _: ()
             case _: ()
         p = p + 1
+    # Instruction checks dereference declared type children. Once a missing
+    # carrier is recorded, this function is structurally invalid; preserve its
+    # fatal findings instead of traversing those unsafe declarations again.
+    if missing_type: return v.findings
     # --- instructions and terminators (rules 2, 4, 5, 6) ---------------------
     var instructions = 0
     bi = 0
@@ -1005,18 +1039,21 @@ fn mir_verify_module(module: MirModule) -> MirVerifyReport:
             findings = findings.push(MirVerifyFinding(
                 rule: "MIRV-007", module: module.name, function: "", block: -1, inst: -1,
                 message: "static '{s.name}' is defined more than once in this module", span: nil))
-        # --- rule 3: unit static; rule 1: unresolved static type -------------
+        # Report absent carriers before kind/initializer dereferences.
+        val reason = mir_verify_type_unresolved_reason(s.type_, 0)
+        if reason != "":
+            findings = findings.push(MirVerifyFinding(
+                rule: mir_verify_type_reason_rule_v1(reason), module: module.name, function: "", block: -1, inst: -1,
+                message: "static '{s.name}' has {reason}", span: nil))
+        if reason == MIR_VERIFY_MISSING_TYPE_REASON_V1:
+            continue
+        # --- rule 3: unit static ------------------------------------------
         match s.type_.kind:
             case MirTypeKind.Unit:
                 findings = findings.push(MirVerifyFinding(
                     rule: "MIRV-003", module: module.name, function: "", block: -1, inst: -1,
                     message: "static '{s.name}' has type unit (`global void`); a static must have a sized type", span: nil))
             case _: ()
-        val reason = mir_verify_type_unresolved_reason(s.type_, 0)
-        if reason != "":
-            findings = findings.push(MirVerifyFinding(
-                rule: "MIRV-001", module: module.name, function: "", block: -1, inst: -1,
-                message: "static '{s.name}' has {reason}", span: nil))
         # --- rule 7b: initializer type agrees with the declared type ---------
         if val init = s.init:
             mir_verify_profile_note("module:static:initializer:start name={s.name}")
@@ -1056,3 +1093,5 @@ export mir_verify_rules, mir_verify_rule_lifecycle, mir_verify_levels_from_spec,
 export mir_verify_rule_level_from_spec, mir_verify_rule_level
 export mir_verify_module, mir_verify_function
 export mir_verify_type_class, mir_verify_type_text, mir_verify_type_unresolved_reason
+
+export mir_verify_finding_is_mandatory_v1, mir_verify_type_reason_rule_v1

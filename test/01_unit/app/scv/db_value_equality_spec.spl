@@ -1,0 +1,95 @@
+# Explicit value equality is separate from record validation/authorization.
+# @cover src/lib/scv/db_pages.spl
+# @cover src/lib/scv/db_page_records.spl
+# @cover src/lib/scv/distributed_identity.spl
+# @cover src/app/scv/db/local_store.spl
+use std.spec.*
+use std.scv.db_pages.*
+use std.scv.db_page_records.{DbPageContext}
+use std.scv.distributed_identity.*
+use app.scv.db.local_store.{DbStoreView}
+
+fn equality_uid(namespace: text, kind: text, actor: text, counter: u64) -> EntityUid:
+    EntityUid(database_namespace: namespace, entity_kind: kind,
+        actor: ActorIncarnation(hex: actor), counter: counter)
+
+describe "database value-record equality":
+    it "compares every page-quota and page-entry field":
+        step("Compare independently constructed quota and entry records")
+        val quota = DbPageQuota(max_page_bytes: 10u64, max_page_records: 20u64, max_records: 30u64)
+        expect(quota.__eq__(DbPageQuota(max_page_bytes: 10u64, max_page_records: 20u64, max_records: 30u64))).to_be(true)
+        for changed in [DbPageQuota(max_page_bytes: 11u64, max_page_records: 20u64, max_records: 30u64),
+                DbPageQuota(max_page_bytes: 10u64, max_page_records: 21u64, max_records: 30u64),
+                DbPageQuota(max_page_bytes: 10u64, max_page_records: 20u64, max_records: 31u64)]:
+            expect(quota.__eq__(changed)).to_be(false)
+        val entry = DbPageEntry(bucket: "a", digest: "digest", count: 2u64)
+        expect(entry.__eq__(DbPageEntry(bucket: "a", digest: "digest", count: 2u64))).to_be(true)
+        for changed in [DbPageEntry(bucket: "b", digest: "digest", count: 2u64),
+                DbPageEntry(bucket: "a", digest: "other", count: 2u64),
+                DbPageEntry(bucket: "a", digest: "digest", count: 3u64)]:
+            expect(entry.__eq__(changed)).to_be(false)
+
+    it "compares page-record keys, enum payloads and every payload byte":
+        step("Compare byte contents rather than array identities")
+        val record = DbPageRecord(key: "k", kind: DbPageKind.HighWater(5u64), payload: [0u8,255u8])
+        expect(record.__eq__(DbPageRecord(key: "k", kind: DbPageKind.HighWater(5u64), payload: [0u8,255u8]))).to_be(true)
+        for changed in [DbPageRecord(key: "x", kind: DbPageKind.HighWater(5u64), payload: [0u8,255u8]),
+                DbPageRecord(key: "k", kind: DbPageKind.HighWater(6u64), payload: [0u8,255u8]),
+                DbPageRecord(key: "k", kind: DbPageKind.Row, payload: [0u8,255u8]),
+                DbPageRecord(key: "k", kind: DbPageKind.HighWater(5u64), payload: [0u8]),
+                DbPageRecord(key: "k", kind: DbPageKind.HighWater(5u64), payload: [1u8,255u8]),
+                DbPageRecord(key: "k", kind: DbPageKind.HighWater(5u64), payload: [0u8,254u8])]:
+            expect(record.__eq__(changed)).to_be(false)
+        val empty = DbPageRecord(key: "k", kind: DbPageKind.Row, payload: [])
+        expect(empty.__eq__(DbPageRecord(key: "k", kind: DbPageKind.Row, payload: []))).to_be(true)
+
+    it "preserves repository namespace epoch and both schema identities":
+        step("Reject each independent context drift")
+        val context = DbPageContext(repository: "r", namespace: "n", epoch: 1u64, schema_revision: "s", reducer_revision: "m")
+        expect(context.__eq__(DbPageContext(repository: "r", namespace: "n", epoch: 1u64, schema_revision: "s", reducer_revision: "m"))).to_be(true)
+        for changed in [DbPageContext(repository: "x", namespace: "n", epoch: 1u64, schema_revision: "s", reducer_revision: "m"),
+                DbPageContext(repository: "r", namespace: "x", epoch: 1u64, schema_revision: "s", reducer_revision: "m"),
+                DbPageContext(repository: "r", namespace: "n", epoch: 2u64, schema_revision: "s", reducer_revision: "m"),
+                DbPageContext(repository: "r", namespace: "n", epoch: 1u64, schema_revision: "x", reducer_revision: "m"),
+                DbPageContext(repository: "r", namespace: "n", epoch: 1u64, schema_revision: "s", reducer_revision: "x")]:
+            expect(context.__eq__(changed)).to_be(false)
+
+    it "compares complete provisional and settled reference fields without authorizing them":
+        step("Compare each identity dimension and each optional representation")
+        val uid = equality_uid("11111111111111111111111111111111", "bug", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1u64)
+        val provisional = entity_ref_provisional(uid)
+        expect(entity_ref_validate(provisional).valid).to_be(true)
+        expect(provisional.__eq__(entity_ref_provisional(equality_uid("11111111111111111111111111111111", "bug", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1u64)))).to_be(true)
+        for changed in [equality_uid("22222222222222222222222222222222", "bug", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1u64), equality_uid("11111111111111111111111111111111", "x", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1u64),
+                equality_uid("11111111111111111111111111111111", "bug", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1u64), equality_uid("11111111111111111111111111111111", "bug", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 2u64)]:
+            expect(provisional.__eq__(entity_ref_provisional(changed))).to_be(false)
+        val alias = SettledAlias(database_namespace: "11111111111111111111111111111111", authority_epoch: 1u64, entity_kind: "bug", sequence: 7u64)
+        val settled = entity_ref_settled(alias)
+        expect(entity_ref_validate(settled).valid).to_be(true)
+        expect(settled.__eq__(entity_ref_settled(SettledAlias(database_namespace: "11111111111111111111111111111111", authority_epoch: 1u64, entity_kind: "bug", sequence: 7u64)))).to_be(true)
+        expect(provisional.__eq__(settled)).to_be(false)
+        for changed in [SettledAlias(database_namespace: "22222222222222222222222222222222", authority_epoch: 1u64, entity_kind: "bug", sequence: 7u64),
+                SettledAlias(database_namespace: "11111111111111111111111111111111", authority_epoch: 2u64, entity_kind: "bug", sequence: 7u64),
+                SettledAlias(database_namespace: "11111111111111111111111111111111", authority_epoch: 1u64, entity_kind: "x", sequence: 7u64),
+                SettledAlias(database_namespace: "11111111111111111111111111111111", authority_epoch: 1u64, entity_kind: "bug", sequence: 8u64)]:
+            expect(settled.__eq__(entity_ref_settled(changed))).to_be(false)
+        val none = EntityRef(provisional: nil, settled: nil)
+        expect(none.__eq__(EntityRef(provisional: nil, settled: nil))).to_be(true)
+        expect(entity_ref_validate(none).valid).to_be(false)
+        val both = EntityRef(provisional: Some(uid), settled: Some(alias))
+        expect(both.__eq__(EntityRef(provisional: Some(uid), settled: Some(alias)))).to_be(true)
+        expect(both.__eq__(provisional)).to_be(false)
+        expect(both.__eq__(settled)).to_be(false)
+        expect(entity_ref_validate(both).valid).to_be(false)
+
+    it "includes state parent transaction and checkpoint anchor in a store-view comparison":
+        step("Compare all captured generation fields")
+        val view = DbStoreView(code: "ok", head: "h", parent: "p", transaction_id: "t", state: "s", checkpoint_anchor: "a")
+        expect(view.__eq__(DbStoreView(code: "ok", head: "h", parent: "p", transaction_id: "t", state: "s", checkpoint_anchor: "a"))).to_be(true)
+        for changed in [DbStoreView(code: "error", head: "h", parent: "p", transaction_id: "t", state: "s", checkpoint_anchor: "a"),
+                DbStoreView(code: "ok", head: "x", parent: "p", transaction_id: "t", state: "s", checkpoint_anchor: "a"),
+                DbStoreView(code: "ok", head: "h", parent: "x", transaction_id: "t", state: "s", checkpoint_anchor: "a"),
+                DbStoreView(code: "ok", head: "h", parent: "p", transaction_id: "x", state: "s", checkpoint_anchor: "a"),
+                DbStoreView(code: "ok", head: "h", parent: "p", transaction_id: "t", state: "x", checkpoint_anchor: "a"),
+                DbStoreView(code: "ok", head: "h", parent: "p", transaction_id: "t", state: "s", checkpoint_anchor: "x")]:
+            expect(view.__eq__(changed)).to_be(false)

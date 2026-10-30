@@ -38,7 +38,9 @@ It is in-development: it fails until every `Option<T>` spelling keeps `T`.
 use std.spec.{describe, it, expect, step, fail}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.core.parser.{parser_has_errors}
+use compiler.core.parser.{parser_init, parser_parse_type, parser_has_errors}
+use compiler.core.types.{TYPE_NAMED_BASE, named_type_register, option_generic_type_register}
+use compiler.frontend.flat_ast_bridge.{flat_pools_dump_all, flat_pools_restore_all}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
@@ -110,6 +112,38 @@ describe "Option<T> inner types below TYPE_NAMED_BASE":
 
     it "keeps Option<Result<i64, text>> as Optional(Result)":
         expect(gap_field_type("struct H:\n    r: Option<Result<i64, text>>\n", "r")).to_equal("optional<result<i64,text>>")
+
+    it "keeps the existing postfix Result optional spelling":
+        expect(gap_field_type("struct H:\n    r: Result<i64, text>?\n", "r")).to_equal("optional<result<i64,text>>")
+
+    it "keeps nominal Result payloads inside an explicit Option":
+        val source = "struct Payload:\n    value: i64\nstruct Failure:\n    message: text\nstruct H:\n    r: Option<Result<Payload, Failure>>\n"
+        expect(gap_field_type(source, "r")).to_equal("optional<result<named,named>>")
+
+    it "preserves actual Any rather than inventing a concrete payload":
+        # The independent RTI 'refuses an Any return at export' negative must
+        # keep rejecting this semantic term; parser repair is not permission
+        # to admit Any or substitute i64.
+        expect(gap_field_type("struct H:\n    r: Option<Any>\n", "r")).to_equal("optional<any>")
+
+    it "reports Option registry exhaustion instead of silently erasing a payload":
+        parser_init("Option<Result<OptionCapacityPayloadSpec20261028, text>>")
+        val original = flat_pools_dump_all()
+        expect(original != "").to_equal(true)
+        var full = false
+        for index in 0..201:
+            val owner = named_type_register("OptionCapacityOwner{index}", [], [])
+            if option_generic_type_register(TYPE_NAMED_BASE + owner) < 0:
+                full = true
+                break
+        val parsed = parser_parse_type()
+        val rejected = parser_has_errors()
+        # Restore shared registries before asserting, even on the old parser.
+        val restored = flat_pools_restore_all(original)
+        parser_init("")
+        expect(full).to_equal(true)
+        expect(restored).to_equal(true)
+        expect(rejected).to_equal(true)
 
     it "keeps the postfix (fn(text) -> i64)? as Optional(Function)":
         expect(gap_field_type("struct H:\n    cb: (fn(text) -> i64)?\n", "cb")).to_equal("optional<fn(text)->i64>")

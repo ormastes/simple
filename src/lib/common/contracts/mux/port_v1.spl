@@ -1,0 +1,35 @@
+# Complete mandatory provider contract, independent from D1 discovery. No
+# default implementation, implicit backend fallback, registry or controller copy.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+
+# One composition-owned provider/transport instance serves owner-issued leases.
+# All transport operations are me: correlation/ingestion mutates transport state.
+# Query metadata is still non-draining and does not advance configuration revision.
+# Unsupported is checked BEFORE capture polling, child I/O or any mutation.
+# Authenticate live lease/incarnation/membership for normal calls. The only
+# revoked/expired-lease exception is retained receipt-only reconciliation: original
+# token + owner incarnation + already-bound original request ID, limited to RequestStatus or
+# identical disconnect replay. Authenticate against retained lease history; no
+# fresh effects/data authority/renewal. Evicted history is Unknown, not NotApplied.
+# Receipt reads never extend retention. After retention expires, reject all
+# old-token calls. If original ID binding is lost, return Unknown with no data.
+# Successful normal query/poll_events renew only an already-live lease, using the
+# owner monotonic clock; transport polls by renew_after_ms when idle. Neither
+# failed calls nor receipt-only recovery renew. Recheck liveness at renewal so
+# a call completing after expiry cannot revive it. Expiry requires a new token.
+# The transport retains connection.lease_terms for its full lease lifetime.
+# Public records/shape checks cannot mint authority. Required unsupported operations
+# block admission; optional terminal extension ports are acquired separately.
+# A native failure AFTER side effects can be Partial or Unknown. Never apply
+# validation-time NotApplied to a tmux error that already unzoomed a window.
+# StopOwnedNamespace needs separately issued stop authority. Disconnect only
+# revokes the client lease; closed controllers do not own background sessions.
+pub trait CoreMuxV1:
+    fn backend() -> MuxBackendV1
+    me connect(options: MuxConnectV1, deadline: MuxDeadlineV1) -> Result<MuxConnectionV1, MuxErrorV1>
+    me query(handle: MuxHandleV1, query: MuxQueryV1, deadline: MuxDeadlineV1) -> Result<MuxQueryResultV1, MuxErrorV1>
+    me execute(request: MuxRequestV1) -> Result<MuxMutationV1, MuxErrorV1>
+    me poll_events(handle: MuxHandleV1, cursor: u64, limits: MuxEventLimitsV1, deadline: MuxDeadlineV1) -> Result<MuxEventBatchV1, MuxErrorV1>
+    me disconnect(request: MuxDisconnectRequestV1) -> Result<MuxDisconnectV1, MuxErrorV1>

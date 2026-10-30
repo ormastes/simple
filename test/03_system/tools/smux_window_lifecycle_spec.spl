@@ -1,0 +1,251 @@
+"""
+## Purpose
+REQ-CMUX-002/004/005/008/010: checked window deletion and final-session lifetime.
+## Evidence boundary
+Authoring is NOT_RUN. Pure record cases prove pruning invariants only. Native
+cases require actual Windows children and an admitted Phase 3 runner.
+# @manual: primary
+# @capture: text
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_new_window,
+    smux_list_sessions, smux_list_windows, smux_list_panes, smux_list_clients,
+    smux_attach, smux_attach_leased, smux_client_check_lease, smux_detach_from,
+    smux_kill_window, smux_kill_session, smux_window_closing,
+    smux_focus_window, smux_active_window, smux_metrics, smux_capture,
+    smux_pane_spawn, smux_pane_spawn_pty, smux_send_command,
+    smux_rollback_split, smux_split_pane}
+use os.apps.smux.session_lifecycle.{remove_window_state}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane, MuxClientAttachment}
+use os.apps.smux.smux_remote.{smux_remote_dispatch, smux_remote_reply_ok}
+use os.apps.smux.lifecycle_reply.{smux_missing_window_reply, smux_missing_session_reply}
+use os.apps.smux.client_view.{client_frame_body}
+use os.apps.smux.client_notifications.{smux_notifications_enqueue, smux_notifications_peek}
+use std.nogc_sync_mut.sosix.process.{sosix_platform, sosix_sleep_ms}
+use std.nogc_sync_mut.sosix.pty.{sosix_pty_cleanup_pending}
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms}
+
+# @inline
+fn window_lifecycle_setup() -> [text]:
+    smux_reset_for_test()
+    val session = smux_create_session("windows")
+    val first = smux_list_windows(session.id)[0]
+    val first_pane = smux_list_panes(session.id, first.id)[0]
+    val second = smux_new_window(session.id, "second")
+    val second_pane = smux_list_panes(session.id, second.id)[0]
+    return [session.id, first.id, first_pane.id, second.id, second_pane.id]
+
+# @inline
+fn window_lifecycle_check(session: text, removed: text, remaining: text):
+    val windows = smux_list_windows(session)
+    expect(windows.len()).to_equal(1)
+    expect(windows[0].id).to_equal(remaining)
+    expect(smux_list_panes(session, removed).len()).to_equal(0)
+    expect(smux_window_closing(session, removed)).to_equal(false)
+
+# @inline
+fn window_lifecycle_registry() -> ServiceState:
+    var st = ServiceState.empty().with_next_id(41)
+    st = st.add_session(MuxSession.create("s", "main"))
+    st = st.add_session(MuxSession.create("other", "unrelated"))
+    st = st.add_window(MuxWindow.create("w1", "s", "first").with_active(true))
+    st = st.add_window(MuxWindow.create("w2", "s", "second").with_layout("tiled", 91, 31))
+    st = st.add_window(MuxWindow.create("w3", "other", "other").with_active(true))
+    st = st.add_pane(PaneRecord.create(MuxPane.create("p1", "w1", "s")))
+    st = st.add_pane(PaneRecord.create(MuxPane.create("p2", "w2", "s")).feed("retained").with_focus(true))
+    st = st.add_client(MuxClientAttachment.create("viewer", "s", 91, 31))
+    return st
+
+# @inline
+fn window_lifecycle_output(session: text, window: text, pane: text, marker: text) -> text:
+    var output = ""
+    var attempts = 0
+    while attempts < 200 and not output.contains(marker):
+        val captured = smux_capture(session, window, pane, 40)
+        if captured.is_ok(): output = captured.unwrap().content
+        if not output.contains(marker): sosix_sleep_ms(25)
+        attempts = attempts + 1
+    return output
+
+# @inline
+fn window_lifecycle_kill(session: text, window: text) -> Result<bool, text>:
+    val deadline = sosix_time_now_monotonic_ms() + 5000
+    var result = smux_kill_window(session, window)
+    var attempts = 0
+    while result.is_err() and attempts < 200 and sosix_time_now_monotonic_ms() < deadline:
+        sosix_sleep_ms(25)
+        result = smux_kill_window(session, window)
+        attempts = attempts + 1
+    return result
+
+# @inline
+fn window_lifecycle_cleanup(session: text) -> Result<bool, text>:
+    var present = false
+    for existing in smux_list_sessions():
+        if existing.id == session: present = true
+    if not present: return Ok(true)
+    val deadline = sosix_time_now_monotonic_ms() + 5000
+    var result = smux_kill_session(session)
+    var attempts = 0
+    while result.is_err() and attempts < 200 and sosix_time_now_monotonic_ms() < deadline:
+        sosix_sleep_ms(25)
+        result = smux_kill_session(session)
+        attempts = attempts + 1
+    return result
+
+describe "smux removes owned windows without phantom sessions":
+    it "should preserve active focus attachments notices and counters when deleting an inactive window":
+        val ids = window_lifecycle_setup()
+        expect(smux_attach(ids[0], "viewer", 80, 24).attached).to_equal(true)
+        expect(smux_notifications_enqueue(ids[0], "viewer", "retained").is_ok()).to_equal(true)
+        val metrics = smux_metrics()
+        step("Delete the inactive window through the production API")
+        expect(smux_kill_window(ids[0], ids[3]).is_ok()).to_equal(true)
+        window_lifecycle_check(ids[0], ids[3], ids[1])
+        expect(smux_active_window(ids[0]).unwrap().id).to_equal(ids[1])
+        expect(smux_list_clients().len()).to_equal(1)
+        expect(smux_notifications_peek(ids[0], "viewer").body).to_equal("retained")
+        expect(smux_metrics().startup_count).to_equal(metrics.startup_count)
+        expect(smux_metrics().resize_count).to_equal(metrics.resize_count)
+        expect(smux_new_window(ids[0], "next").id).to_equal("id6")
+
+    it "should select the first surviving window only when the active window is removed":
+        val ids = window_lifecycle_setup()
+        val third = smux_new_window(ids[0], "third")
+        expect(smux_focus_window(ids[0], ids[3])).to_equal(true)
+        step("Remove the active middle window and retain deterministic survivor focus")
+        expect(smux_kill_window(ids[0], ids[3]).is_ok()).to_equal(true)
+        expect(smux_active_window(ids[0]).unwrap().id).to_equal(ids[1])
+        expect(smux_list_windows(ids[0])[1].id).to_equal(third.id)
+
+    it "should remove the session and its attachment only after its final window closes":
+        val ids = window_lifecycle_setup()
+        val other = smux_create_session("other")
+        expect(smux_attach(ids[0], "viewer", 80, 24).attached).to_equal(true)
+        expect(smux_attach(other.id, "survivor", 80, 24).attached).to_equal(true)
+        expect(smux_notifications_enqueue(ids[0], "viewer", "drop").is_ok()).to_equal(true)
+        step("Delete both windows and verify there is no empty phantom session")
+        expect(smux_kill_window(ids[0], ids[3]).is_ok()).to_equal(true)
+        expect(smux_kill_window(ids[0], ids[1]).is_ok()).to_equal(true)
+        expect(smux_list_windows(ids[0]).len()).to_equal(0)
+        expect(smux_list_sessions().len()).to_equal(1)
+        expect(smux_list_sessions()[0].id).to_equal(other.id)
+        expect(smux_list_clients().len()).to_equal(1)
+        expect(smux_list_clients()[0].session_id).to_equal(other.id)
+        expect(smux_notifications_peek(ids[0], "viewer").id).to_equal(0)
+        expect(smux_kill_window(ids[0], ids[1]).is_err()).to_equal(true)
+
+    it "should reject missing cross-session and malformed targets without mutation":
+        val ids = window_lifecycle_setup()
+        val other = smux_create_session("other")
+        step("Refuse invalid public API and remote targets")
+        expect(smux_kill_window(other.id, ids[1]).is_err()).to_equal(true)
+        expect(smux_kill_window(ids[0], "missing").is_err()).to_equal(true)
+        expect(smux_remote_reply_ok(smux_remote_dispatch("kill-window " + ids[0]))).to_equal(false)
+        expect(smux_remote_reply_ok(smux_remote_dispatch("kill-window " + ids[0] + " " + ids[1] + " extra"))).to_equal(false)
+        expect(smux_list_windows(ids[0]).len()).to_equal(2)
+        expect(smux_list_sessions().len()).to_equal(2)
+
+    it "should refuse pure pruning with target child authority and preserve unrelated records":
+        val st = window_lifecycle_registry()
+        step("Exercise the actual pure pruning gate without pretending to close native handles")
+        expect(remove_window_state(st.replace_pane(0, st.get_pane(0).with_child(123)), "s", "w1").is_err()).to_equal(true)
+        expect(remove_window_state(st.replace_pane(0, st.get_pane(0).with_pty(-1, 0)), "s", "w1").is_err()).to_equal(true)
+        expect(remove_window_state(st, "other", "w1").is_err()).to_equal(true)
+        expect(remove_window_state(st, "s", "missing").is_err()).to_equal(true)
+        val retained = st.replace_pane(1, st.get_pane(1).with_pty(456, 789))
+        val after = remove_window_state(retained, "s", "w1").unwrap()
+        expect(after.next_id).to_equal(41)
+        expect(after.get_window(0).id).to_equal("w2")
+        expect(after.get_window(0).is_active).to_equal(true)
+        expect(after.get_window(0).layout).to_equal("tiled")
+        expect(after.get_pane(0).tail).to_equal("retained")
+        expect(after.get_pane(0).child_pid).to_equal(456)
+        expect(after.get_pane(0).pty_fd).to_equal(789)
+        expect(after.get_client(0).client_id).to_equal("viewer")
+        expect(after.get_window(1).is_active).to_equal(true)
+
+    it "should invalidate only removed-window rollback checkpoints":
+        val ids = window_lifecycle_setup()
+        val removed_split = smux_split_pane(ids[0], ids[1], ids[2], "vertical").unwrap()
+        val retained_split = smux_split_pane(ids[0], ids[3], ids[4], "horizontal").unwrap()
+        step("Delete one split window and retain the other window's actual rollback checkpoint")
+        expect(smux_kill_window(ids[0], ids[1]).is_ok()).to_equal(true)
+        expect(smux_rollback_split(ids[0], ids[1], removed_split.id).is_err()).to_equal(true)
+        expect(smux_rollback_split(ids[0], ids[3], retained_split.id).is_ok()).to_equal(true)
+        expect(smux_list_panes(ids[0], ids[3]).len()).to_equal(1)
+
+    it "should validate managed leases and expose exact deleted-view replies for two clients":
+        val ids = window_lifecycle_setup()
+        val first = smux_attach_leased(ids[0], "first", 80, 24).unwrap()
+        val second = smux_attach_leased(ids[0], "second", 80, 24).unwrap()
+        val other = smux_create_session("other")
+        val prefix = "client-request " + ids[0] + " first " + first + " "
+        step("Reject stale lease and cross-session envelope before actual window deletion")
+        expect(smux_remote_reply_ok(smux_remote_dispatch("client-request " + ids[0] + " first stale kill-window " + ids[0] + " " + ids[1]))).to_equal(false)
+        expect(smux_remote_reply_ok(smux_remote_dispatch(prefix + "kill-window " + other.id + " " + ids[1]))).to_equal(false)
+        expect(smux_remote_reply_ok(smux_remote_dispatch(prefix + "kill-window " + ids[0] + " " + ids[1]))).to_equal(true)
+        expect(smux_client_check_lease(ids[0], "first", first).is_ok()).to_equal(true)
+        expect(smux_client_check_lease(ids[0], "second", second).is_ok()).to_equal(true)
+        val second_prefix = "client-request " + ids[0] + " second " + second + " "
+        expect(smux_remote_dispatch(second_prefix + "frame " + ids[0] + " " + ids[1] + " " + ids[2])).to_equal(smux_missing_window_reply(ids[1]))
+        step("Validate replacement frame without routing stale input to its pane")
+        val frame = smux_remote_dispatch(second_prefix + "frame " + ids[0] + " " + ids[3] + " " + ids[4])
+        expect(client_frame_body(frame, 80, 24).is_ok()).to_equal(true)
+        expect(smux_remote_dispatch(second_prefix + "input " + ids[0] + " " + ids[1] + " " + ids[2] + " 78")).to_equal(smux_missing_window_reply(ids[1]))
+        expect(smux_kill_window(ids[0], ids[3]).is_ok()).to_equal(true)
+        expect(smux_remote_dispatch(second_prefix + "windows " + ids[0])).to_equal(smux_missing_session_reply(ids[0]))
+        expect(smux_client_check_lease(ids[0], "second", second).is_err()).to_equal(true)
+
+    it "should terminate a real detached Windows PTY window while its sibling child keeps working":
+        val ids = window_lifecycle_setup()
+        expect(sosix_platform()).to_equal("windows")
+        val target_spawned = smux_pane_spawn_pty(ids[0], ids[1], ids[2], "cmd.exe /Q")
+        val sibling_spawned = smux_pane_spawn_pty(ids[0], ids[3], ids[4], "cmd.exe /Q")
+        val attached = smux_attach(ids[0], "viewer", 80, 24).attached
+        val detached = smux_detach_from(ids[0], "viewer")
+        val initial_sent = smux_send_command(ids[0], ids[1], ids[2], "set /a 3141+2718")
+        val before = window_lifecycle_output(ids[0], ids[1], ids[2], "5859")
+        step("Close the real detached target and require fresh computation from the surviving child")
+        val killed = window_lifecycle_kill(ids[0], ids[1])
+        val sent = smux_send_command(ids[0], ids[3], ids[4], "set /a 1618+1414")
+        val after = window_lifecycle_output(ids[0], ids[3], ids[4], "3032")
+        val remaining = smux_list_windows(ids[0])
+        val cleaned = window_lifecycle_kill(ids[0], ids[3])
+        # Always retry every retained owner, including a failed first target,
+        # before any assertion can abort this case. Never reset as cleanup proof.
+        val all_cleaned = window_lifecycle_cleanup(ids[0])
+        expect(all_cleaned.is_ok()).to_equal(true)
+        expect(target_spawned.is_ok()).to_equal(true)
+        expect(sibling_spawned.is_ok()).to_equal(true)
+        expect(attached and detached).to_equal(true)
+        expect(initial_sent.is_ok()).to_equal(true)
+        expect(before).to_contain("5859")
+        expect(killed.is_ok()).to_equal(true)
+        expect(sent.is_ok()).to_equal(true)
+        expect(after).to_contain("3032")
+        expect(remaining.len()).to_equal(1)
+        expect(remaining[0].id).to_equal(ids[3])
+        expect(cleaned.is_ok()).to_equal(true)
+        expect(sosix_pty_cleanup_pending()).to_equal(0)
+
+    it "should close a real Windows piped child before removing the final window":
+        smux_reset_for_test()
+        expect(sosix_platform()).to_equal("windows")
+        val session = smux_create_session("piped")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+        val spawned = smux_pane_spawn(session.id, window.id, pane.id, "cmd.exe", ["/Q"])
+        val sent = smux_send_command(session.id, window.id, pane.id, "set /a 2718+1618")
+        val output = window_lifecycle_output(session.id, window.id, pane.id, "4336")
+        step("Use checked piped-process close through final-window session teardown")
+        val killed = window_lifecycle_kill(session.id, window.id)
+        val cleaned = window_lifecycle_cleanup(session.id)
+        expect(cleaned.is_ok()).to_equal(true)
+        expect(spawned.is_ok()).to_equal(true)
+        expect(sent.is_ok()).to_equal(true)
+        expect(output).to_contain("4336")
+        expect(killed.is_ok()).to_equal(true)
+        expect(smux_list_sessions().len()).to_equal(0)

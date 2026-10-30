@@ -1,0 +1,46 @@
+use std.spec
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_section_kind_v1,
+    module_tldr_sections_of_source_v1, module_tldr_sections_render_v1,
+    module_tldr_sections_parse_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_render_v1,
+    module_tldr_companion_sections_v1, module_tldr_companion_body_v1}
+
+val SRC: text = "use std.x\n\npub struct Point:\n    x: i64\n    y: i64\n\nval LIMIT: i64 = 42\n\ntrait Shape:\n    fn area() -> i64\n\nimpl Shape for Point:\n    fn area() -> i64:\n        self.x * self.y\n\nfn first<T>(xs: [T]) -> T:\n    xs[0]\n\npub fn plain(a: i64) -> i64:\n    a + 1\n"
+
+describe "TLDR companion sections":
+    it "classifies top-level declaration lines":
+        expect(module_tldr_section_kind_v1("pub struct P:")).to_equal("layout")
+        expect(module_tldr_section_kind_v1("enum E:")).to_equal("layout")
+        expect(module_tldr_section_kind_v1("trait T:")).to_equal("trait")
+        expect(module_tldr_section_kind_v1("val X: i64 = 1")).to_equal("const")
+        expect(module_tldr_section_kind_v1("impl T for P:")).to_equal("impl")
+        expect(module_tldr_section_kind_v1("fn id<T>(x: T) -> T:")).to_equal("generic")
+        expect(module_tldr_section_kind_v1("fn plain(x: i64) -> i64:")).to_equal("")
+        expect(module_tldr_section_kind_v1("    struct Nested:")).to_equal("")
+
+    it "extracts layouts, consts, traits, impl headers and generic bodies only":
+        val s = module_tldr_sections_of_source_v1(SRC)
+        expect(s.len()).to_equal(5)
+        expect(s[0]).to_equal("layout|pub struct Point:\n    x: i64\n    y: i64")
+        expect(s[1]).to_equal("const|val LIMIT: i64 = 42")
+        expect(s[2]).to_equal("trait|trait Shape:\n    fn area() -> i64")
+        expect(s[3]).to_equal("impl|impl Shape for Point:\n    fn area() -> i64:")
+        expect(s[4]).to_equal("generic|fn first<T>(xs: [T]) -> T:\n    xs[0]")
+
+    it "round-trips the self-delimiting wire form":
+        val s = module_tldr_sections_of_source_v1(SRC)
+        val wire = module_tldr_sections_render_v1(s)
+        val (parsed, consumed) = module_tldr_sections_parse_v1(wire + "sif:\n")
+        expect(consumed).to_equal(wire.len())
+        expect(parsed.len()).to_equal(s.len())
+        expect(parsed[4]).to_equal(s[4])
+
+    it "rejects a record whose count overruns the text":
+        val (_p, consumed) = module_tldr_sections_parse_v1("section: layout 999\nstruct A:\n")
+        expect(consumed).to_equal(-1)
+
+    it "carries sections inside a source-bound companion":
+        val c = module_tldr_companion_render_v1("m", SRC)
+        expect(module_tldr_companion_sections_v1(c, SRC).len()).to_equal(5)
+        expect(module_tldr_companion_body_v1(c, SRC) != "").to_equal(true)
+        expect(module_tldr_companion_sections_v1(c, SRC + " ").len()).to_equal(0)

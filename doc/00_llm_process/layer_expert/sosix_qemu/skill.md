@@ -1,5 +1,9 @@
 # SOSIX/QEMU Layer Expert
 
+## 2026-10-29 host process boundary
+
+Host process adapters follow the [SOSIX coordination contract](../../../05_design/runtime/sosix_runtime_unification_design.md#2026-10-29-host-process-coordination-contract) and [integration guide](../../../07_guide/lib/sosix_runtime_library.md#host-process-integration-workflow--2026-10-29). The landed Mac cooperative snapshot API does not qualify strict V4 or any SimpleOS/QEMU guest matrix cell. Preserve host/profile-specific native evidence and the existing guest evidence authority.
+
 Canonical settings live behind `src/os/qemu_systest_contract.spl`; execution belongs to `src/os/_QemuRunner/`. Refactors may split private modules but must not create a second argv/settings owner.
 
 Required matrix: Linux, Windows, macOS, FreeBSD hosts; x86, ARM, RISC-V guests at 32 and 64 bits. TCG proves correctness only. Native accelerator claims require the retained executed argv and available KVM/HVF/WHPX.

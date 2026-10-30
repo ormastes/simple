@@ -297,7 +297,10 @@ class DeclUniverse:
         NodeDecl(name: name, is_enum: false, fields: fields, variants: [])
 
     me classify(type_text: text) -> FieldClass:
+        # [text] is hashed in hash mode; InlineAsmMatch.archs is not hashed because AsmTargetSpec is outside the HIR decl sources.
         val t = _strip_opt(type_text)
+        if t == "[text]":
+            return FieldClass("textlist", "", "")
         if t.starts_with("[") and t.ends_with("]"):
             val elem = _strip_opt(t.substring(1, t.len() - 1))
             if elem.starts_with("(") and elem.ends_with(")"):
@@ -440,7 +443,7 @@ fn _binders(u: DeclUniverse, fields: [FieldDecl], keep_prims: bool) -> text:
         val f = fields[i]
         val c = u.classify(f.type_text)
         var used = c.cat == "node" or c.cat == "list" or c.cat == "pair"
-        if keep_prims and c.cat == "prim":
+        if keep_prims and (c.cat == "prim" or c.cat == "textlist"):
             used = true
         if used:
             out = out + "b_" + f.binder
@@ -507,6 +510,11 @@ fn _recurse_lines(u: DeclUniverse, type_text: text, v: text, indent: text, mode:
         return out
     if c.cat == "prim" and mode == "hash":
         return indent + "h = _hir_mix_prim(h, " + v + ")\n"
+    if c.cat == "textlist" and mode == "hash":
+        var out = indent + "h = _hir_mix_i64(h, " + v + ".len())\n"
+        out = out + indent + "for ts{idx} in " + v + ":\n"
+        out = out + indent + "    h = _hir_mix_text(h, ts{idx})\n"
+        return out
     ""
 
 fn _one_frame_call(type_name: text, v: text) -> text:
@@ -629,7 +637,7 @@ fn _struct_body(u: DeclUniverse, decl: NodeDecl, mode: text, indent: text) -> te
         if f.binder == "kind" and _is_base_carrier(decl.name):
             continue
         val c = u.classify(f.type_text)
-        val useful = c.cat == "node" or c.cat == "list" or c.cat == "pair" or (mode == "hash" and c.cat == "prim")
+        val useful = c.cat == "node" or c.cat == "list" or c.cat == "pair" or (mode == "hash" and (c.cat == "prim" or c.cat == "textlist"))
         if not useful:
             continue
         val guard = u.guard_of(decl, f)

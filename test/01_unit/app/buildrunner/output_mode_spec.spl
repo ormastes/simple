@@ -1,0 +1,115 @@
+use std.spec.{describe, it, expect, after_each, pending}
+use app.buildrunner.cli_files_v1.{builder_cli_publish_v1, builder_cli_output_modes_match_v1}
+use app.io.env_ops.{host_os}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1, builder_task_identity_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write, file_hash_sha256}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_remove_all, dir_exists, process_run_timeout}
+use std.nogc_sync_mut.package_sffi.{set_permissions, create_symlink}
+use std.nogc_sync_mut.sffi.fs.{file_mode}
+
+var output_mode_root = ""
+
+fn output_mode_fixture() -> (BuildTaskV1, BuildResultV1):
+    output_mode_root = secure_temp_dir("/tmp", "builder-output-mode-").unwrap()
+    expect(dir_create_all(output_mode_root + "/attempt/work")).to_equal(true)
+    expect(dir_create_all(output_mode_root + "/output")).to_equal(true)
+    val source = output_mode_root + "/attempt/work/hello"
+    expect(file_write(source, "#!/bin/sh\nprintf 'Hello, World!\\n'\n")).to_equal(true)
+    expect(set_permissions(source, 0o750)).to_equal(true)
+    val digest = file_hash_sha256(source)
+    val task = BuildTaskV1(id: "hello", attempt: 1, phase: "sanity",
+        producer_digest: digest, source_digest: digest, toolchain_digest: digest,
+        dependencies: [], program: source, args: [], inputs: [], outputs: ["hello"],
+        cache_key: digest, timeout_ms: 1000, memory_limit_bytes: 1048576, links: [])
+    val receipt = BuildResultV1(task_id: "hello", attempt: 1,
+        identity_digest: builder_task_identity_v1(task), host_id: "local", status: "OK",
+        exit_code: 0, outputs: [BuildInputV1(path: "hello", digest: digest)],
+        cache_hits: 0, cache_misses: 0, cache_stores: 0)
+    (task, receipt)
+
+fn output_mode_publish(task: BuildTaskV1, receipt: BuildResultV1) -> bool:
+    builder_cli_publish_v1(task, receipt, output_mode_root + "/attempt",
+        output_mode_root + "/output", builder_process_portable_v1())
+
+describe "BuildRunner retained output permissions":
+    after_each():
+        if output_mode_root != "":
+            expect(dir_remove_all(output_mode_root)).to_equal(true)
+            output_mode_root = ""
+
+    if host_os() == "windows":
+        it "requires POSIX mode bits and executable scripts":
+            pending("POSIX output-mode regression; Windows execution does not use permission bits")
+    else:
+        it "repairs matching cached bytes and executes the restored output":
+            val (task, receipt) = output_mode_fixture()
+            expect(output_mode_publish(task, receipt)).to_equal(true)
+            val output = output_mode_root + "/output/hello"
+            expect(file_mode(output)).to_equal(0o750)
+            expect(set_permissions(output, 0o640)).to_equal(true)
+            expect(file_hash_sha256(output)).to_equal(receipt.outputs[0].digest)
+            expect(builder_cli_output_modes_match_v1(task, output_mode_root + "/attempt",
+                output_mode_root + "/output", builder_process_portable_v1())).to_equal(false)
+            expect(file_mode(output)).to_equal(0o640)
+            expect(output_mode_publish(task, receipt)).to_equal(true)
+            expect(file_mode(output)).to_equal(0o750)
+            expect(builder_cli_output_modes_match_v1(task, output_mode_root + "/attempt",
+                output_mode_root + "/output", builder_process_portable_v1())).to_equal(true)
+            val (stdout, stderr, code) = process_run_timeout(output, [], 1000)
+            expect(code).to_equal(0)
+            expect(stderr).to_equal("")
+            expect(stdout).to_equal("Hello, World!\n")
+
+        it "removes stray execution permission from a nonexecutable retained output":
+            val (task, receipt) = output_mode_fixture()
+            expect(set_permissions(output_mode_root + "/attempt/work/hello", 0o640)).to_equal(true)
+            expect(output_mode_publish(task, receipt)).to_equal(true)
+            val output = output_mode_root + "/output/hello"
+            expect(set_permissions(output, 0o755)).to_equal(true)
+            expect(output_mode_publish(task, receipt)).to_equal(true)
+            expect(file_mode(output)).to_equal(0o640)
+
+        it "refuses different bytes before changing destination permissions":
+            val (task, receipt) = output_mode_fixture()
+            val output = output_mode_root + "/output/hello"
+            expect(file_write(output, "different bytes\n")).to_equal(true)
+            expect(set_permissions(output, 0o600)).to_equal(true)
+            expect(output_mode_publish(task, receipt)).to_equal(false)
+            expect(file_mode(output)).to_equal(0o600)
+
+        it "refuses a destination symlink without changing the linked file":
+            val (task, receipt) = output_mode_fixture()
+            val other = output_mode_root + "/other"
+            expect(file_write(other, "#!/bin/sh\nprintf 'Hello, World!\\n'\n")).to_equal(true)
+            expect(set_permissions(other, 0o600)).to_equal(true)
+            expect(create_symlink(other, output_mode_root + "/output/hello")).to_equal(true)
+            expect(output_mode_publish(task, receipt)).to_equal(false)
+            expect(file_mode(other)).to_equal(0o600)
+
+        it "refuses an escaping parent before creating directories outside the output root":
+            var (task, receipt) = output_mode_fixture()
+            val nested = "escape/new/deep/hello"
+            expect(dir_create_all(output_mode_root + "/attempt/work/escape/new/deep")).to_equal(true)
+            expect(file_write(output_mode_root + "/attempt/work/" + nested,
+                "#!/bin/sh\nprintf 'Hello, World!\\n'\n")).to_equal(true)
+            task.outputs = [nested]
+            receipt.outputs = [BuildInputV1(path: nested, digest: receipt.outputs[0].digest)]
+            receipt.identity_digest = builder_task_identity_v1(task)
+            val outside = output_mode_root + "/outside"
+            expect(dir_create_all(outside)).to_equal(true)
+            expect(create_symlink(outside, output_mode_root + "/output/escape")).to_equal(true)
+            expect(output_mode_publish(task, receipt)).to_equal(false)
+            expect(dir_exists(outside + "/new")).to_equal(false)
+
+        it "creates nested output parents inside the output owner":
+            var (task, receipt) = output_mode_fixture()
+            val nested = "new/deep/hello"
+            expect(dir_create_all(output_mode_root + "/attempt/work/new/deep")).to_equal(true)
+            expect(file_write(output_mode_root + "/attempt/work/" + nested,
+                "#!/bin/sh\nprintf 'Hello, World!\\n'\n")).to_equal(true)
+            task.outputs = [nested]
+            receipt.outputs = [BuildInputV1(path: nested, digest: receipt.outputs[0].digest)]
+            receipt.identity_digest = builder_task_identity_v1(task)
+            expect(output_mode_publish(task, receipt)).to_equal(true)
+            expect(file_hash_sha256(output_mode_root + "/output/" + nested)).to_equal(receipt.outputs[0].digest)

@@ -95,3 +95,15 @@ allocated a substring per input byte and made every typed-`text`
 (SCV cold init, `doc/08_tracking/bug/stage2_scv_cold_init_str_contains_per_byte_slice_2026-10-09.md`).
 Rule: never scan `text` byte-by-byte with slices in this layer; use the
 native search and slice once per match. Specs: `string_core_{ops,basic_coverage,advanced_coverage}_spec`.
+
+## Native test-runner capture limit visibility (2026-10-30)
+
+`TEST_OUTPUT_CAPTURE_BYTES` is shared across runner, doctest, lifecycle, and
+process-tracker modules and is exported by the test-runner facade. Its defining
+declaration must also be public for native imported-static code generation.
+The limit remains 4 MiB; keep rejection of genuinely private statics intact.
+The native import fixture is
+`test/fixtures/test_runner/native_output_capture_limit.spl`; failure and
+validation evidence are recorded in
+`doc/08_tracking/bug/test_runner_capture_limit_visibility_2026_10_30.md`.
+A compiled fixture is not evidence that native SSpec or HAL/SOSIX suites ran.

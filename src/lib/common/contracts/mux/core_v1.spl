@@ -1,0 +1,128 @@
+# Caret CoreMux discovery values. No provider, host call or authority is created
+# by constructing these public records. See doc/05_design/caret_mux_tui.md.
+use std.common.debug.capability.{CapLevel}
+
+pub val MUX_NAMESPACE_MAX_BYTES_V1: i64 = 128
+pub val MUX_ID_MAX_BYTES_V1: i64 = 128
+pub val MUX_NAME_MAX_BYTES_V1: i64 = 256
+pub val MUX_SESSIONS_MAX_V1: i64 = 256
+pub val MUX_DETAIL_MAX_BYTES_V1: i64 = 1024
+
+pub enum MuxBackendV1:
+    Smux
+    Tmux
+
+pub enum MuxEndpointPolicyV1:
+    ExistingOnly
+    CreateOwned
+
+pub enum MuxObjectKindV1:
+    Session
+    Window
+    Pane
+    Client
+
+pub enum MuxErrorKindV1:
+    Unsupported
+    InvalidRequest
+    InvalidTarget
+    PermissionDenied
+    Unavailable
+    StaleRevision
+    Busy
+    Timeout
+    PartialFailure
+
+pub enum MuxCommitStateV1:
+    NotApplied
+    Applied
+    Partial
+    Unknown
+
+# Only the implemented discovery slice is named here. Adding a command to this
+# contract does not establish provider support or execution evidence.
+pub enum MuxDiscoveryOperationV1:
+    Connect
+    DiscoverSessions
+    HasSession
+
+pub enum MuxEvidenceV1:
+    NotRun
+    Blocked(reason: text)
+    Qualified(receipt: text)
+
+pub struct MuxLimitsV1:
+    max_sessions: i64
+    max_reply_bytes: i64
+
+pub struct MuxConnectV1:
+    backend: MuxBackendV1
+    namespace: text
+    endpoint_policy: MuxEndpointPolicyV1
+    client_identity: text
+    limits: MuxLimitsV1
+
+# owner_id includes an owner incarnation, not merely the namespace. An owner
+# restart must not reuse it. lease_id is an opaque owner-issued client token;
+# parsing/validating its shape grants no right to act on the owner.
+pub struct MuxHandleV1:
+    owner_id: text
+    owner_generation: u64
+    lease_id: text
+
+pub struct MuxObjectRefV1:
+    owner_id: text
+    owner_generation: u64
+    kind: MuxObjectKindV1
+    object_id: text
+
+pub struct MuxErrorV1:
+    kind: MuxErrorKindV1
+    detail: text
+    request_id: u64
+    commit_state: MuxCommitStateV1
+    observed_revision: u64?
+    affected: [MuxObjectRefV1]
+    cleanup_pending: bool
+
+pub struct MuxCapabilityV1:
+    operation: MuxDiscoveryOperationV1
+    level: CapLevel
+    backend: MuxBackendV1
+    backend_version: text
+    owner_id: text
+    owner_generation: u64
+    limits: MuxLimitsV1
+    constraints: [text]
+    evidence: MuxEvidenceV1
+
+pub struct MuxSessionSummaryV1:
+    identity: MuxObjectRefV1
+    name: text
+
+# An immutable, non-draining metadata observation. No capture content belongs
+# here. Configuration revision is distinct from autonomous output ingestion.
+pub struct MuxDiscoveryV1:
+    backend: MuxBackendV1
+    namespace: text
+    handle: MuxHandleV1
+    revision: u64
+    sessions: [MuxSessionSummaryV1]
+    capabilities: [MuxCapabilityV1]
+
+pub enum MuxDiscoveryQueryV1:
+    Sessions
+    HasSession(target: text)
+
+pub enum MuxDiscoveryResultV1:
+    Sessions(snapshot: MuxDiscoveryV1)
+    HasSession(found: bool)
+
+# Abstract composition port, deliberately without default bodies. Implementers
+# must authenticate endpoint/lease/generation on every call. Query is metadata
+# only; ambiguous targets return InvalidTarget, never a guessed session.
+# The mutable connect method establishes an owner-backed lease, not a copied
+# session controller. No CoreMux lifecycle/command provider is implemented here.
+pub trait MuxProviderPortV1:
+    me connect(options: MuxConnectV1) -> Result<MuxDiscoveryV1, MuxErrorV1>
+    fn query(handle: MuxHandleV1, query: MuxDiscoveryQueryV1) -> Result<MuxDiscoveryResultV1, MuxErrorV1>

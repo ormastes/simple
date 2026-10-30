@@ -7,10 +7,27 @@
 # and extern fn declarations.
 
 use app.io.minimal_runtime_ops.{env_get, file_exists, process_run}
-use app.protocol.framing.{frame_strip_line_end, frame_parse_decimal}
+use app.protocol.framing.{frame_strip_line_end, frame_parse_decimal, frame_line_is_jsonl_payload}
 
 extern fn stdin_read_char() -> text
-use std.nogc_async_mut.sosix.stdio.{sosix_print_raw as print_raw, sosix_stdout_flush}
+use std.nogc_sync_mut.sffi.diag.{stdout_flush as sosix_stdout_flush}
+use std.nogc_sync_mut.sffi.fs.{io_file_write_all}
+use std.nogc_sync_mut.io.external_text_io.{io_text_encode, io_text_error_message}
+use std.common.encoding.external_text.{utf8_format}
+use std.nogc_async_mut.sosix.text_boundary.{sosix_text_check_size}
+
+# MCP stdout is a byte-framed transport, including on Windows. The ordinary
+# SOSIX console provider rejects Windows; the checked descriptor-write owner
+# already supports its binary CRT descriptors without charset inference.
+fn print_raw(value: text):
+    match sosix_text_check_size(value):
+        case Err(error): panic(io_text_error_message(error))
+        case Ok(_): ()
+    val bytes = match io_text_encode(value, utf8_format()):
+        case Ok(encoded): encoded
+        case Err(error): panic(io_text_error_message(error))
+    if not io_file_write_all(1, bytes):
+        panic("LSP MCP stdout transport write failed; output may be partial")
 
 # --- JSON building helpers ---
 
@@ -74,6 +91,13 @@ fn _slice_text(s: text, start: i64, end: i64) -> text:
         i = i + 1
     out
 
+fn _char_len(s: text) -> i64:
+    # CHAR count (text.len() counts bytes); pairs with the char-indexed _slice_text.
+    var n = 0
+    for _ch in s:
+        n = n + 1
+    n
+
 fn _char_at(s: text, i: i64) -> text:
     _slice_text(s, i, i + 1)
 
@@ -82,31 +106,34 @@ fn _is_ws(ch: text) -> bool:
 
 fn _find_json_value_start(json: text, key: text) -> i64:
     val search = Q() + key + Q()
+    val search_n = _char_len(search)
+    val json_n = _char_len(json)
     var offset = 0
-    while offset + search.len() <= json.len():
-        if _slice_text(json, offset, offset + search.len()) != search:
+    while offset + search_n <= json_n:
+        if _slice_text(json, offset, offset + search_n) != search:
             offset = offset + 1
             continue
-        var value_start = offset + search.len()
-        while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+        var value_start = offset + search_n
+        while value_start < json_n and _is_ws(_char_at(json, value_start)):
             value_start = value_start + 1
-        if value_start < json.len() and _char_at(json, value_start) == ":":
+        if value_start < json_n and _char_at(json, value_start) == ":":
             value_start = value_start + 1
-            while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+            while value_start < json_n and _is_ws(_char_at(json, value_start)):
                 value_start = value_start + 1
             return value_start
-        offset = offset + search.len()
+        offset = offset + search_n
     return -1
 
 fn extract_field(json: text, key: text) -> text:
+    val json_n = _char_len(json)
     val start = _find_json_value_start(json, key)
-    if start < 0 or start >= json.len():
+    if start < 0 or start >= json_n:
         return ""
     val first = _char_at(json, start)
     if first == Q():
         var i = start + 1
         var escaped = false
-        while i < json.len():
+        while i < json_n:
             val ch = _char_at(json, i)
             if escaped:
                 escaped = false
@@ -121,7 +148,7 @@ fn extract_field(json: text, key: text) -> text:
         var depth = 1
         var i = start + 1
         var escaped = false
-        while i < json.len():
+        while i < json_n:
             val ch = _char_at(json, i)
             if escaped:
                 escaped = false
@@ -131,7 +158,7 @@ fn extract_field(json: text, key: text) -> text:
                 # skip quoted strings while tracking nesting.
                 var j = i + 1
                 var string_escaped = false
-                while j < json.len():
+                while j < json_n:
                     val string_ch = _char_at(json, j)
                     if string_escaped:
                         string_escaped = false
@@ -154,7 +181,7 @@ fn extract_field(json: text, key: text) -> text:
         var depth = 1
         var i = start + 1
         var escaped = false
-        while i < json.len():
+        while i < json_n:
             val ch = _char_at(json, i)
             if escaped:
                 escaped = false
@@ -163,7 +190,7 @@ fn extract_field(json: text, key: text) -> text:
             elif ch == Q():
                 var j = i + 1
                 var string_escaped = false
-                while j < json.len():
+                while j < json_n:
                     val string_ch = _char_at(json, j)
                     if string_escaped:
                         string_escaped = false
@@ -182,7 +209,7 @@ fn extract_field(json: text, key: text) -> text:
             i = i + 1
         return ""
     var end = start
-    while end < json.len():
+    while end < json_n:
         val ch = _char_at(json, end)
         if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
             break
@@ -190,14 +217,15 @@ fn extract_field(json: text, key: text) -> text:
     return _slice_text(json, start, end)
 
 fn extract_id(json: text) -> text:
+    val json_n = _char_len(json)
     val start = _find_json_value_start(json, "id")
-    if start < 0 or start >= json.len():
+    if start < 0 or start >= json_n:
         return "null"
     val first = _char_at(json, start)
     if first == Q():
         var i = start + 1
         var escaped = false
-        while i < json.len():
+        while i < json_n:
             val ch = _char_at(json, i)
             if escaped:
                 escaped = false
@@ -208,7 +236,7 @@ fn extract_id(json: text) -> text:
             i = i + 1
         return "null"
     var end = start
-    while end < json.len():
+    while end < json_n:
         val ch = _char_at(json, end)
         if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
             break
@@ -319,6 +347,19 @@ fn strip_ansi(s: text) -> text:
         parts.push(ch)
     parts.join("")
 
+# Drop trailing newlines by CHARACTER. `text.len()` counts bytes while
+# `_slice_text` counts characters, so a non-ASCII char in the output (e.g. the
+# em dash in "[search truncated: ... — part of the tree ...]") made the old
+# `while ends_with("\n"): _slice_text(s, 0, s.len() - 1)` loop never shrink the
+# string: an infinite loop that wedged the whole server.
+fn _trim_trailing_newlines(s: text) -> text:
+    var chars: [text] = []
+    for ch in s:
+        chars.push(ch)
+    while chars.len() > 0 and chars[chars.len() - 1] == "\n":
+        chars.pop()
+    chars.join("")
+
 fn clean_command_output(stdout: text) -> text:
     val lines = stdout.split("\n")
     var kept: [text] = []
@@ -327,10 +368,7 @@ fn clean_command_output(stdout: text) -> text:
         if not lines[i].starts_with("[DEBUG] "):
             kept.push(lines[i])
         i = i + 1
-    var joined = kept.join("\n")
-    while joined.ends_with("\n"):
-        joined = _slice_text(joined, 0, joined.len() - 1)
-    joined
+    _trim_trailing_newlines(kept.join("\n"))
 
 fn run_command_text(binary: text, args: [text]) -> text:
     val (stdout, stderr, code) = process_run(binary, args)
@@ -381,33 +419,23 @@ fn _parse_decimal_raw(s: text) -> i64:
     frame_parse_decimal(s)
 
 fn read_stdin_message() -> text:
-    val first_line = _read_line()
-    if first_line.len() == 0:
-        return ""
-    val use_content_length = first_line.starts_with("Content-Length:")
-    if not use_content_length:
-        _TRANSPORT_MODE = "jsonl"
-        return _strip_line_end(first_line)
-
     var content_length = 0
-    var line = first_line
     while true:
-        if line.len() == 0:
-            if content_length > 0:
-                break
+        val raw_line = _read_line()
+        if raw_line.len() == 0:
             return ""
-        if line.starts_with("\r\n") or line.starts_with("\r") or line.starts_with("\n"):
+        val line = _strip_line_end(raw_line)
+        if line.trim().len() == 0:
             if content_length > 0:
                 break
             continue
-        line = _strip_line_end(line)
+        if frame_line_is_jsonl_payload(line):
+            _TRANSPORT_MODE = "jsonl"
+            return line
         if line.starts_with("Content-Length:"):
-            var len_str = line.replace("Content-Length:", "")
-            len_str = len_str.trim()
+            val len_str = line.replace("Content-Length:", "").trim()
             content_length = _parse_decimal_raw(len_str)
-        line = _read_line()
-    if content_length <= 0:
-        return ""
+    _TRANSPORT_MODE = "framed"
     _read_chars(content_length)
 
 fn write_stdout_message(body: text):

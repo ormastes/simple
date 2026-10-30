@@ -4,33 +4,27 @@
 # and @cfg per-declaration conditionals.
 # Extracted from parser.spl.
 
-use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch, cfg_os_is_unix}
+use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch, cfg_os_is_unix, cfg_feature_enabled, cfg_guard_context_identity_v1}
+use std.nogc_sync_mut.io_runtime.{env_get}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{
     FrontendCfgDecisionV1, FrontendTargetPreprocessV1}
 
 # ===== Preprocessor State =====
 
-var _pp_tokens: [text] = []
-var _pp_pos: i64 = 0
-var _pp_target_mode: bool = false
-var _pp_target_os: text = ""
-var _pp_target_arch: text = ""
-var _pp_target_error: text = ""
-var _pp_target_decisions: [FrontendCfgDecisionV1] = []
 
 # One condition evaluator for both modes. Target mode (receipted native
 # builds) evaluates against the explicit target and records an error for
 # anything it does not recognize; ambient mode evaluates against the build
 # target / host from cfg_platform and treats unknown atoms as false.
 fn _pp_current_os() -> text:
-    if _pp_target_mode: _pp_target_os else: cfg_detect_os()
+    if pp_state._pp_target_mode: pp_state._pp_target_os else: cfg_detect_os()
 
 fn _pp_current_arch() -> text:
-    if _pp_target_mode: _pp_target_arch else: cfg_detect_arch()
+    if pp_state._pp_target_mode: pp_state._pp_target_arch else: cfg_detect_arch()
 
 fn _pp_unsupported(message: text) -> bool:
-    if _pp_target_mode:
-        _pp_target_error = message
+    if pp_state._pp_target_mode:
+        pp_state._pp_target_error = message
     false
 
 # Canonical atom set shared with the Rust seed (`parser/src/cond_compile.rs`;
@@ -55,7 +49,7 @@ fn _pp_arch_name(raw: text) -> text:
     if value == "arm" or value == "arm32" or value == "armv6" or value == "armv7": return "arm"
     if value == "ppc64le" or value == "ppc64el" or value == "powerpc64le": return "ppc64le"
     if value == "riscv64" or value == "riscv32" or value == "thumbv6m" or
-            value == "thumbv7m" or value == "thumbv7em":
+            value == "thumbv7m" or value == "thumbv7em" or value == "thumbv8m.main":
         return value
     ""
 
@@ -85,7 +79,7 @@ fn _pp_eval_atom(token: text) -> bool:
     val lowered = t.to_lower()
     if lowered == "true" or lowered == "compiled" or lowered == "debug": return true
     if lowered == "false" or lowered == "interpreter" or lowered == "release": return false
-    if not _pp_target_mode and t == "": return false
+    if not pp_state._pp_target_mode and t == "": return false
     if _pp_os_name(t) != "": return _pp_os_match(t)
     if _pp_arch_name(t) != "": return _pp_arch_match(t)
     val parts = if t.contains("=="): t.split("==") else: t.split("=")
@@ -98,9 +92,9 @@ fn _pp_eval_atom(token: text) -> bool:
             return _pp_family_match(value)
         if key == "arch" or key == "target_arch" or key == "cpu":
             return _pp_arch_match(value)
-        # No build features are defined: a feature gate is always false.
+        # Opt-in build feature tags (SIMPLE_FEATURES); see cfg_feature_enabled.
         if key == "feature":
-            return false
+            return cfg_feature_enabled(value)
     _pp_unsupported("unsupported target cfg condition atom: {t}")
 
 fn _pp_tokenize_condition(condition: text) -> [text]:
@@ -175,14 +169,14 @@ fn _pp_tokenize_condition(condition: text) -> [text]:
     tokens
 
 fn _pp_peek() -> text:
-    if _pp_pos >= _pp_tokens.len():
+    if pp_state._pp_pos >= pp_state._pp_tokens.len():
         return ""
-    _pp_tokens[_pp_pos]
+    pp_state._pp_tokens[pp_state._pp_pos]
 
 fn _pp_take() -> text:
     val token = _pp_peek()
     if token != "":
-        _pp_pos = _pp_pos + 1
+        pp_state._pp_pos = pp_state._pp_pos + 1
     token
 
 fn _pp_parse_or() -> bool:
@@ -250,15 +244,15 @@ fn _pp_parse_primary() -> bool:
     _pp_eval_atom(atom)
 
 fn _pp_eval_condition(condition: text) -> bool:
-    _pp_tokens = _pp_tokenize_condition(condition)
-    _pp_pos = 0
-    if _pp_tokens.len() == 0:
-        if _pp_target_mode:
-            _pp_target_error = "empty target cfg condition"
+    pp_state._pp_tokens = _pp_tokenize_condition(condition)
+    pp_state._pp_pos = 0
+    if pp_state._pp_tokens.len() == 0:
+        if pp_state._pp_target_mode:
+            pp_state._pp_target_error = "empty target cfg condition"
         return false
     val result = _pp_parse_or()
-    if _pp_target_mode and _pp_pos != _pp_tokens.len():
-        _pp_target_error = "malformed target cfg condition: {condition}"
+    if pp_state._pp_target_mode and pp_state._pp_pos != pp_state._pp_tokens.len():
+        pp_state._pp_target_error = "malformed target cfg condition: {condition}"
     result
 
 fn _pp_extract_paren_condition(line: text) -> text:
@@ -377,22 +371,202 @@ fn _pp_target_decl_end(lines: [text], start: i64) -> i64:
 fn _pp_target_record(line: i64, directive_kind: text, condition: text,
     parent_active: bool, condition_result: bool, effective_active: bool,
     excluded_kind: text, excluded_start: i64, excluded_end: i64):
-    if not _pp_target_mode: return
-    _pp_target_decisions.push(FrontendCfgDecisionV1(
+    if not pp_state._pp_target_mode: return
+    pp_state._pp_target_decisions.push(FrontendCfgDecisionV1(
         line: line, directive_kind: directive_kind, condition: condition,
         parent_active: parent_active, condition_result: condition_result,
         effective_active: effective_active,
         excluded_declaration_kind: excluded_kind,
         excluded_start_line: excluded_start, excluded_end_line: excluded_end))
 
+# ===== Target-neutral cfg-select marker (SIMPLE_HIR_CFG_SELECT=1) =====
+# An indented (function-body) @when chain is NOT stripped in flag mode. It is
+# rewritten to an ordinary if/elif/else chain whose conditions are the marker
+# call `__cfg_when__("<condition text>")`, with arm bodies indented one level.
+# HIR lowering turns such a chain into HirExprKind.CfgSelect (all arms kept,
+# target picked later by MIR). No lexer/parser change; line count is stable.
+fn _pp_cfg_select_flag() -> bool:
+    env_get("SIMPLE_HIR_CFG_SELECT") == "1"
+
+fn _pp_leading_ws(line: text) -> text:
+    var i = 0
+    while i < line.len() and (line[i] == " " or line[i] == "\t"):
+        i = i + 1
+    line.substring(0, i)
+
+fn _pp_marker_cond_literal(cond: text) -> text:
+    # An empty condition would read as the `else` arm downstream; make it an
+    # unknown atom so MIR reports a fatal malformed-@cfg error instead.
+    var c = cond
+    if c.trim() == "": c = "<empty @when condition>"
+    c = c.replace("\\", "\\\\")
+    c = c.replace("\"", "\\\"")
+    "\"" + c + "\""
+
+fn _pp_marker_spaces(levels: i64) -> text:
+    var s = ""
+    var i = 0
+    while i < levels:
+        s = s + "    "
+        i = i + 1
+    s
+
+fn _pp_starts_binding(t: text) -> bool:
+    t.starts_with("val ") or t.starts_with("var ") or t.starts_with("let ")
+
+# Statement-only arms; binding-declaring chains keep flat-strip semantics until
+# a non-scoping CfgSelect design lands. Marker mode turns each arm into a
+# nested block, so a `val`/`var`/`let` declared at the chain's own indent would
+# stop being visible after @end (the flat-strip contract, e.g. retained_file.spl).
+# Scan from the @when at `start` to its matching @end; the chain is marker-safe
+# only if no line at the chain's indent declares a binding, no condition holds
+# `{`/`}`, and every arm has real (non-blank, non-comment) content.
+fn _pp_chain_marker_ok(lines: [text], start: i64) -> bool:
+    val indent = _pp_target_indent(lines[start])
+    var nested = 0
+    var arm_has_content = false
+    var i = start
+    while i < lines.len():
+        val t = lines[i].trim()
+        if t.starts_with("@when(") or t.starts_with("@elif("):
+            if t.contains("{") or t.contains("}"): return false
+            if t.starts_with("@when("):
+                if i != start:
+                    nested = nested + 1
+                    arm_has_content = true
+            elif nested == 0:
+                if not arm_has_content: return false
+                arm_has_content = false
+        elif t == "@else" or t == "@else:":
+            if nested == 0:
+                if not arm_has_content: return false
+                arm_has_content = false
+        elif t == "@end":
+            if nested == 0:
+                return arm_has_content
+            nested = nested - 1
+        elif t != "" and not t.starts_with("#"):
+            arm_has_content = true
+            if _pp_target_indent(lines[i]) == indent and _pp_starts_binding(t): return false
+        i = i + 1
+    false
+
+fn _pp_marker_count(stack_is_marker: [bool], upto: i64) -> i64:
+    var n = 0
+    var i = 0
+    while i < upto and i < stack_is_marker.len():
+        if stack_is_marker[i]: n = n + 1
+        i = i + 1
+    n
+
+# ===== Strip-decision record (target-neutral HIR cache key) =====
+# Every arm the preprocessor keeps or strips by TARGET evaluation (top-level or
+# binding-declaring @when/@elif/@else, per-declaration @cfg) is logged here,
+# unconditionally and independent of _pp_target_mode. Arms rewritten to
+# `__cfg_when__` markers are NOT logged: they keep every arm. The log is the
+# ordered (kind, condition, kept/stripped) decisions of the LAST preprocess;
+# zero decisions == target-neutral. See hir_cfg_decl_select_design.md section 3.
+#
+# Memo: every run (marker mode with the flag on, or target-receipted mode) is
+# recorded under (content_hash, cfg_guard_context_identity_v1(), native_target,
+# mode), so one target's result is never served to another and a target-receipted
+# run (which flat-strips chains) can never be read back as a marker-mode answer.
+# The driver declares which mode its parse uses (pp_declare_parse_scope); a
+# neutral answer is only ever read from a marker-mode entry while the declared
+# mode is marker. Anything else is unknown (-1), which callers treat as non-neutral.
+extern fn rt_hash_text(content: text) -> i64
+
+var pp_strip_log: text = ""
+var pp_strip_count: i64 = 0
+var pp_strip_memo_log: Dict<text, text> = {}
+var pp_strip_memo_count: Dict<text, i64> = {}
+var pp_scope_mode: text = ""
+var pp_scope_target: text = ""
+
+fn _pp_strip_note(kind: text, condition: text, kept: bool):
+    pp_strip_count = pp_strip_count + 1
+    pp_strip_log = pp_strip_log + kind + "|" + condition + "|" + (if kept: "kept" else: "stripped") + "\n"
+
+fn pp_last_strip_decision_count() -> i64:
+    pp_strip_count
+
+fn pp_last_strip_decision_log() -> text:
+    pp_strip_log
+
+# Driver declaration of the parse mode its sources go through: target-receipted
+# (selection active) or marker. Undeclared == "" == neutral is never granted.
+fn pp_declare_parse_scope(target_receipted: bool, native_target: text):
+    pp_scope_mode = if target_receipted: "target" else: "marker"
+    pp_scope_target = native_target
+
+fn pp_declared_target() -> text:
+    pp_scope_target
+
+fn pp_declared_marker_mode() -> bool:
+    pp_scope_mode == "marker"
+
+fn pp_strip_memo_size() -> i64:
+    pp_strip_memo_count.len()
+
+fn _pp_memo_key(content_hash: i64, native_target: text, mode: text) -> text:
+    "{content_hash}|" + cfg_guard_context_identity_v1() + "|{native_target.len()}:{native_target}|" + mode
+
+# Decision count recorded by a MARKER-mode run for (content, identity, native_target),
+# or -1 when unknown or when the declared parse mode is not marker.
+fn pp_marker_strip_count(content_hash: i64, native_target: text) -> i64:
+    if pp_scope_mode != "marker":
+        return -1
+    pp_strip_memo_count[_pp_memo_key(content_hash, native_target, "marker")] ?? -1
+
+fn pp_marker_strip_log(content_hash: i64, native_target: text) -> text:
+    pp_strip_memo_log[_pp_memo_key(content_hash, native_target, "marker")] ?? ""
+
+# Entry recorded by a target-receipted run (inspection only).
+fn pp_target_strip_count(content_hash: i64, native_target: text) -> i64:
+    pp_strip_memo_count[_pp_memo_key(content_hash, native_target, "target")] ?? -1
+
+# Make sure a marker-mode entry exists for `source` under `native_target`.
+# Runs the preprocessor (same function the parser calls) ONLY when the driver
+# declared marker mode; otherwise records nothing and the answer stays unknown.
+fn pp_ensure_marker_strip_decisions(source: text, native_target: text):
+    if not _pp_cfg_select_flag() or pp_scope_mode != "marker":
+        return
+    if pp_marker_strip_count(rt_hash_text(source), native_target) >= 0:
+        return
+    val saved_log = pp_strip_log
+    val saved_count = pp_strip_count
+    val saved_target = pp_scope_target
+    pp_scope_target = native_target
+    _pp_preprocess_conditionals(source)
+    pp_scope_target = saved_target
+    pp_strip_log = saved_log
+    pp_strip_count = saved_count
+
 fn _pp_preprocess_conditionals(source: text) -> text:
+    pp_strip_log = ""
+    pp_strip_count = 0
+    val out = _pp_preprocess_conditionals_body(source)
+    if pp_state._pp_target_mode:
+        val tgt = pp_scope_target + "|{pp_state._pp_target_os}/{pp_state._pp_target_arch}"
+        val k = _pp_memo_key(rt_hash_text(source), tgt, "target")
+        pp_strip_memo_log[k] = pp_strip_log
+        pp_strip_memo_count[k] = pp_strip_count
+    elif _pp_cfg_select_flag():
+        val k = _pp_memo_key(rt_hash_text(source), pp_scope_target, "marker")
+        pp_strip_memo_log[k] = pp_strip_log
+        pp_strip_memo_count[k] = pp_strip_count
+    out
+
+fn _pp_preprocess_conditionals_body(source: text) -> text:
     # The compiler closure is overwhelmingly ordinary source. Avoid building
     # three full line arrays when none of the recognized directives can occur.
     if not _pp_may_have_conditionals(source):
         return source
 
+    val cfg_select_mode = _pp_cfg_select_flag() and not pp_state._pp_target_mode
     val lines = _pp_split_lines(source)
     var out_lines: [text] = []
+    var stack_is_marker: [bool] = []
 
     var stack_parent_active: [bool] = []
     var stack_branch_taken: [bool] = []
@@ -409,10 +583,15 @@ fn _pp_preprocess_conditionals(source: text) -> text:
         val is_when = trimmed.starts_with("@when(")
         if is_when:
             val cond = _pp_extract_paren_condition(trimmed)
-            if _pp_target_mode and cond == "":
-                _pp_target_error = "empty @when condition at line {source_line}"
+            if pp_state._pp_target_mode and cond == "":
+                pp_state._pp_target_error = "empty @when condition at line {source_line}"
             val parent = active
-            val cond_ok = _pp_eval_condition(cond)
+            var is_marker = cfg_select_mode and parent and _pp_target_indent(line) > 0
+            if is_marker and depth > 0 and not stack_is_marker[depth - 1]:
+                is_marker = false
+            if is_marker:
+                is_marker = _pp_chain_marker_ok(lines, source_line - 1)
+            val cond_ok = if is_marker: true else: _pp_eval_condition(cond)
             val current = parent and cond_ok
 
             if depth >= stack_parent_active.len():
@@ -420,15 +599,23 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 stack_branch_taken.push(current)
                 stack_branch_active.push(current)
                 stack_else_seen.push(false)
+                stack_is_marker.push(is_marker)
             else:
                 stack_parent_active[depth] = parent
                 stack_branch_taken[depth] = current
                 stack_branch_active[depth] = current
                 stack_else_seen[depth] = false
+                stack_is_marker[depth] = is_marker
+            if is_marker:
+                val header_ws = _pp_leading_ws(line) + _pp_marker_spaces(_pp_marker_count(stack_is_marker, depth))
+                out_lines.push(header_ws + "if __cfg_when__(" + _pp_marker_cond_literal(cond) + "):")
             depth = depth + 1
             active = current
+            if is_marker:
+                continue
             _pp_target_record(source_line, "when", cond, parent, cond_ok,
                 current, "", 0, 0)
+            _pp_strip_note("when", cond, cond_ok)
             out_lines.push("")
             continue
 
@@ -436,29 +623,35 @@ fn _pp_preprocess_conditionals(source: text) -> text:
         if is_elif:
             if depth > 0:
                 val idx = depth - 1
+                if stack_is_marker[idx]:
+                    val elif_cond = _pp_extract_paren_condition(trimmed)
+                    val elif_ws = _pp_leading_ws(line) + _pp_marker_spaces(_pp_marker_count(stack_is_marker, idx))
+                    out_lines.push(elif_ws + "elif __cfg_when__(" + _pp_marker_cond_literal(elif_cond) + "):")
+                    continue
                 val parent = stack_parent_active[idx]
                 var taken = stack_branch_taken[idx]
                 var current = false
                 val cond = _pp_extract_paren_condition(trimmed)
-                if _pp_target_mode and cond == "":
-                    _pp_target_error = "empty @elif condition at line {source_line}"
-                if _pp_target_mode and stack_else_seen[idx]:
-                    _pp_target_error = "@elif after @else at line {source_line}"
+                if pp_state._pp_target_mode and cond == "":
+                    pp_state._pp_target_error = "empty @elif condition at line {source_line}"
+                if pp_state._pp_target_mode and stack_else_seen[idx]:
+                    pp_state._pp_target_error = "@elif after @else at line {source_line}"
                 var condition_result = false
                 if parent and not taken:
                     condition_result = _pp_eval_condition(cond)
                     current = condition_result
                     if current:
                         taken = true
-                elif _pp_target_mode:
+                elif pp_state._pp_target_mode:
                     condition_result = _pp_eval_condition(cond)
                 stack_branch_taken[idx] = taken
                 stack_branch_active[idx] = current
                 active = current
                 _pp_target_record(source_line, "elif", cond, parent,
                     condition_result, current, "", 0, 0)
-            elif _pp_target_mode:
-                _pp_target_error = "@elif without @when at line {source_line}"
+                _pp_strip_note("elif", cond, current)
+            elif pp_state._pp_target_mode:
+                pp_state._pp_target_error = "@elif without @when at line {source_line}"
             out_lines.push("")
             continue
 
@@ -466,8 +659,12 @@ fn _pp_preprocess_conditionals(source: text) -> text:
         if is_else:
             if depth > 0:
                 val idx = depth - 1
-                if _pp_target_mode and stack_else_seen[idx]:
-                    _pp_target_error = "duplicate @else at line {source_line}"
+                if stack_is_marker[idx]:
+                    val else_ws = _pp_leading_ws(line) + _pp_marker_spaces(_pp_marker_count(stack_is_marker, idx))
+                    out_lines.push(else_ws + "else:")
+                    continue
+                if pp_state._pp_target_mode and stack_else_seen[idx]:
+                    pp_state._pp_target_error = "duplicate @else at line {source_line}"
                 stack_else_seen[idx] = true
                 val parent = stack_parent_active[idx]
                 val taken = stack_branch_taken[idx]
@@ -477,8 +674,9 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 active = current
                 _pp_target_record(source_line, "else", "", parent,
                     not taken, current, "", 0, 0)
-            elif _pp_target_mode:
-                _pp_target_error = "@else without @when at line {source_line}"
+                _pp_strip_note("else", "", current)
+            elif pp_state._pp_target_mode:
+                pp_state._pp_target_error = "@else without @when at line {source_line}"
             out_lines.push("")
             continue
 
@@ -486,8 +684,8 @@ fn _pp_preprocess_conditionals(source: text) -> text:
         if is_end:
             if depth > 0:
                 depth = depth - 1
-            elif _pp_target_mode:
-                _pp_target_error = "@end without @when at line {source_line}"
+            elif pp_state._pp_target_mode:
+                pp_state._pp_target_error = "@end without @when at line {source_line}"
             if depth <= 0:
                 active = true
             else:
@@ -499,11 +697,17 @@ fn _pp_preprocess_conditionals(source: text) -> text:
 
         if active:
             # Branch bodies are flat: kept lines are emitted verbatim, never
-            # dedented (same contract as the seed's cond_compile pass).
-            out_lines.push(line)
+            # dedented (same contract as the seed's cond_compile pass). Lines
+            # inside cfg-select marker arms are indented one level per open
+            # marker so they nest under the emitted `if`/`elif`/`else`.
+            val open_markers = _pp_marker_count(stack_is_marker, depth)
+            if open_markers > 0 and trimmed != "":
+                out_lines.push(_pp_marker_spaces(open_markers) + line)
+            else:
+                out_lines.push(line)
         else:
             # Keep line count stable for diagnostics.
-            if _pp_target_mode and trimmed.starts_with("@cfg("):
+            if pp_state._pp_target_mode and trimmed.starts_with("@cfg("):
                 val inactive_cond = _pp_extract_cfg_condition(trimmed)
                 val inactive_result = _pp_eval_condition(inactive_cond)
                 _pp_target_record(source_line, "cfg", inactive_cond, false,
@@ -515,8 +719,8 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                     _pp_target_decl_end(lines, source_line - 1))
             out_lines.push("")
 
-    if _pp_target_mode and depth != 0:
-        _pp_target_error = "unclosed @when block"
+    if pp_state._pp_target_mode and depth != 0:
+        pp_state._pp_target_error = "unclosed @when block"
 
     # Second pass: @cfg(condition) per-declaration conditionals
     var final_lines: [text] = []
@@ -629,7 +833,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             # In target mode adjacent decorators jointly gate one declaration.
             # The ambient path retains its existing single-decorator behavior.
             var declaration_index = i + 1
-            if _pp_target_mode:
+            if pp_state._pp_target_mode:
                 while declaration_index < out_lines.len() and
                         out_lines[declaration_index].trim().starts_with("@cfg("):
                     declaration_index = declaration_index + 1
@@ -655,6 +859,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 _pp_target_record(cfg_index + 1, "cfg", cfg_cond, parent,
                     condition_result, cfg_ok, excluded_kind,
                     excluded_start, excluded_end)
+                _pp_strip_note("cfg", cfg_cond, condition_result)
                 final_lines.push("")
                 cfg_index = cfg_index + 1
             if cfg_ok:
@@ -726,19 +931,19 @@ pub fn _pp_preprocess_conditionals_target_receipted_v1(
 ) -> Result<FrontendTargetPreprocessV1, text>:
     if target_os == "" or target_arch == "":
         return Err("explicit target cfg OS and architecture are required")
-    _pp_target_mode = true
-    _pp_target_os = target_os
-    _pp_target_arch = target_arch
-    _pp_target_error = ""
-    _pp_target_decisions = []
+    pp_state._pp_target_mode = true
+    pp_state._pp_target_os = target_os
+    pp_state._pp_target_arch = target_arch
+    pp_state._pp_target_error = ""
+    pp_state._pp_target_decisions = []
     val preprocessed = _pp_preprocess_conditionals(source)
-    val error = _pp_target_error
-    val decisions = _pp_target_decisions
-    _pp_target_mode = false
-    _pp_target_os = ""
-    _pp_target_arch = ""
-    _pp_target_error = ""
-    _pp_target_decisions = []
+    val error = pp_state._pp_target_error
+    val decisions = pp_state._pp_target_decisions
+    pp_state._pp_target_mode = false
+    pp_state._pp_target_os = ""
+    pp_state._pp_target_arch = ""
+    pp_state._pp_target_error = ""
+    pp_state._pp_target_decisions = []
     if error != "": return Err(error)
     Ok(FrontendTargetPreprocessV1(source: preprocessed, decisions: decisions))
 
@@ -749,5 +954,34 @@ fn preprocess_conditionals(source: text) -> text:
 
 # ===== Exports =====
 
-export _pp_preprocess_conditionals, preprocess_conditionals
+export _pp_preprocess_conditionals, preprocess_conditionals, _pp_cfg_select_flag
+export pp_declared_target, pp_last_strip_decision_count, pp_last_strip_decision_log, pp_declare_parse_scope, pp_strip_memo_size, pp_marker_strip_count, pp_marker_strip_log, pp_target_strip_count, pp_ensure_marker_strip_decisions
 export _pp_preprocess_conditionals_target_receipted_v1
+
+# ===== PreprocessorState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct PreprocessorState:
+    _pp_tokens: [text]
+    _pp_pos: i64
+    _pp_target_mode: bool
+    _pp_target_os: text
+    _pp_target_arch: text
+    _pp_target_error: text
+    _pp_target_decisions: [FrontendCfgDecisionV1]
+
+fn preprocessor_state_fresh() -> PreprocessorState:
+    PreprocessorState(_pp_tokens: [], _pp_pos: 0, _pp_target_mode: false, _pp_target_os: "", _pp_target_arch: "", _pp_target_error: "", _pp_target_decisions: [])
+
+var pp_state: PreprocessorState = preprocessor_state_fresh()
+
+pub fn preprocessor_state_take() -> PreprocessorState:
+    val s = pp_state
+    pp_state = preprocessor_state_fresh()
+    s
+
+pub fn preprocessor_state_install(s: PreprocessorState):
+    pp_state = s
+
+export PreprocessorState, preprocessor_state_take, preprocessor_state_install

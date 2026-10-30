@@ -30,6 +30,11 @@ fn ty(kind: MirTypeKind) -> MirType:
 fn text_type() -> MirType:
     ty(MirTypeKind.Opaque("str"))
 
+# Deliberately malformed internal IR, never a source-language valid type.
+fn missing_result_payload_type() -> MirType:
+    unsafe:
+        ty(MirTypeKind.Result(ty(MirTypeKind.I64), nil))
+
 fn fat_text_type() -> MirType:
     ty(MirTypeKind.Tuple([ty(MirTypeKind.Ptr(ty(MirTypeKind.U8), false)), ty(MirTypeKind.U64)]))
 
@@ -96,6 +101,55 @@ fn rules_of(report: MirVerifyReport) -> [text]:
     for f in report.findings:
         out = out.push(f.rule)
     out
+
+describe "MIR verifier missing nested type records":
+    it "reports a missing Result error type instead of dereferencing it":
+        step("Verify actual malformed Result metadata in a function parameter")
+        val malformed = missing_result_payload_type()
+        val f = mk_fn(7101, "fixture.missing_result_error", [malformed], MirType.unit(),
+            [arg(0, malformed)], one_block([], nil))
+        val report = mir_verify_module(mk_module([f]))
+        expect(report.is_clean()).to_equal(false)
+        expect(report.fatal_count()).to_be_greater_than(0)
+        expect(has_rule(report, "MIRV-001n")).to_equal(true)
+        expect(first_message(report, "MIRV-001n").contains("missing MIR type declaration")).to_equal(true)
+
+    it "reports a missing type nested through Optional tuple representation":
+        step("Walk the optional tag and nested Result declaration using the real verifier")
+        val malformed = ty(MirTypeKind.Tuple([ty(MirTypeKind.Bool), missing_result_payload_type()]))
+        val f = mk_fn(7102, "fixture.missing_optional_result", [malformed], MirType.unit(),
+            [arg(0, malformed)], one_block([], nil))
+        val report = mir_verify_module(mk_module([f]))
+        expect(report.is_clean()).to_equal(false)
+        expect(report.fatal_count()).to_be_greater_than(0)
+        expect(first_message(report, "MIRV-001n").contains("missing MIR type declaration")).to_equal(true)
+        expect(mir_verify_type_text(malformed)).to_contain("<missing MIR type declaration>")
+
+    it "does not accept missing type metadata at the recursion limit":
+        step("Check carrier absence before applying the type-walk depth budget")
+        val reason = unsafe:
+            mir_verify_type_unresolved_reason(nil, 9)
+        expect(reason).to_equal("missing MIR type declaration")
+
+    it "does not hide a missing carrier behind an earlier warn-first unresolved sibling":
+        step("Prioritize structural absence over unresolved opaque Result or tuple siblings")
+        val result_type = unsafe:
+            ty(MirTypeKind.Result(ty(MirTypeKind.Opaque("<unknown>")), nil))
+        val tuple_type = unsafe:
+            ty(MirTypeKind.Tuple([ty(MirTypeKind.Opaque("<unknown>")), nil]))
+        for malformed in [result_type, tuple_type]:
+            val f = mk_fn(7103, "fixture.missing_after_unresolved", [malformed], MirType.unit(),
+                [arg(0, malformed)], one_block([], nil))
+            val report = mir_verify_module(mk_module([f]))
+            expect(has_rule(report, "MIRV-001n")).to_equal(true)
+            expect(report.fatal_count()).to_be_greater_than(0)
+            expect(first_message(report, "MIRV-001n")).to_contain("missing MIR type declaration")
+
+    it "accepts a complete Result array declaration without changing its type":
+        step("Keep the valid Result control resolved and printable")
+        val complete = MirType.result(ty(MirTypeKind.Array(ty(MirTypeKind.U8), 2)), text_type())
+        expect(mir_verify_type_unresolved_reason(complete, 0)).to_equal("")
+        expect(mir_verify_type_text(complete)).to_equal("result<array<u8;2>,opaque<str>>")
 
 fn has_rule(report: MirVerifyReport, rule: text) -> bool:
     for f in report.findings:

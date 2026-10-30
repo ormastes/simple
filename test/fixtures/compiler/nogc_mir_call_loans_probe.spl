@@ -5,6 +5,7 @@ use compiler.mir.mir_instruction_graph.{MirBody, MirBlock, MirInst}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_support.{BlockId, MirTerminator, MirOperand, MirOperandKind, MirBorrowKind, MirPlace, MirProjection, mir_operand_copy, mir_operand_const_int}
 use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirConstValue, MirLocal, LocalKind}
+use compiler.hir.hir_types.{SymbolId}
 use std.nogc_sync_mut.io_runtime.{exit}
 
 fn call_guard(condition: bool, message: text):
@@ -19,7 +20,7 @@ fn short_parameter(id: i64, mutable: bool, boundary: i64) -> MirLocal:
 fn scalar_local(id: i64) -> MirLocal:
     MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)
 
-fn short_call_accepts(arguments: [MirOperand], modes: [text], parameters: [MirLocal], known: bool = true, strict: bool = true, prefix: [MirInst] = [], reference_result: bool = false, terminating: bool = false, result_aliases_first: bool = false) -> bool:
+fn short_call_accepts(arguments: [MirOperand], modes: [text], parameters: [MirLocal], known: bool = true, strict: bool = true, prefix: [MirInst] = [], reference_result: bool = false, terminating: bool = false, result_aliases_first: bool = false, enum_result: bool = false) -> bool:
     var contracts: Dict<text, [text]> = {}
     if known: contracts["checked-target"] = modes
     val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("checked-target"), MirType.i64()))
@@ -43,7 +44,8 @@ fn short_call_accepts(arguments: [MirOperand], modes: [text], parameters: [MirLo
         match parameter.kind:
             case LocalKind.Arg(_): argument_count = argument_count + 1
             case _: pass
-    val result_type = if reference_result: MirType(kind: MirTypeKind.Ref(MirType.i64(), false)) else: MirType.i64()
+    var result_type = if reference_result: MirType(kind: MirTypeKind.Ref(MirType.i64(), false)) else: MirType.i64()
+    if enum_result: result_type = MirType(kind: MirTypeKind.Enum(SymbolId(id: 900)))
     if not result_aliases_first:
         locals = locals.push(MirLocal(id: result, name: nil, type_: result_type, kind: LocalKind.Temp, is_ghost: false))
     val body = MirBody(name: "short-call-probe", blocks: blocks, locals: locals, arg_count: argument_count, return_ty: result_type,
@@ -104,5 +106,17 @@ fn main() -> i64:
         "a legacy scalar call required an irrelevant borrowing contract")
     call_guard(short_call_accepts([first], [], [scalar_local(0)], false, false),
         "a legacy scalar local call required an irrelevant borrowing contract")
+    # Legacy modules never receive checked contracts; a direct `f(&mut x)` must
+    # not demand one. doc/08_tracking/bug/legacy_direct_call_short_contract_unsatisfiable_2026-10-24.md
+    call_guard(short_call_accepts([first], [], [short_parameter(0, false, 41)], false, false),
+        "a legacy direct call demanded an unpublishable checked contract")
+    call_guard(short_call_accepts([first], [], [fresh_first, fresh_owner], false, false, [fresh_refs[0]]),
+        "a legacy direct call rejected a fresh local `&mut` argument")
+    call_guard(short_call_accepts([first], [], [short_parameter(0, false, 41)], false, false, [], false, false, false, true),
+        "a legacy unknown-layout call result inherited its argument loan")
+    call_guard(not short_call_accepts([first], [], [short_parameter(0, false, 41)], false, false, [], true),
+        "a legacy reference-typed call result dropped its argument loan")
+    call_guard(not short_call_accepts([first], ["read-short"], [short_parameter(0, false, 41)], true, true, [], false, false, false, true),
+        "a strict unknown-layout call result was admitted without a type authority")
     print "nogc-mir-call-loans: checked calls, alias conflicts, original boundaries and legacy scalar controls passed"
     0

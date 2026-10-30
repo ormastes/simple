@@ -21,6 +21,11 @@ separate processes that share only files.
 
 ## Feature Links
 
+- HAL behavior scenarios prefer Simple SSpec through production SOSIX/HAL,
+  with focused runtime FFI where needed; see the
+  [HAL testing procedure](../../../07_guide/infra/testing.md#hal-and-runtime-tests-through-simple).
+  Native acceptance requires real provider execution; C probes remain
+  supporting evidence for documented gaps in Simple reachability.
 - Research: [doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md](../../../01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md)
 - Design: [doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md](../../../05_design/infra/sspec/modern_sspec_typed_evidence_design.md)
 - Plan (wave breakdown E0-E9, design authority for scope/sequencing):
@@ -435,3 +440,15 @@ implements.
 
 ## Lane docs (2026-09-05)
 - design: `doc/05_design/infra/sspec/sspec_training_heldout_gate_design.md` · plan: `doc/03_plan/infra/sspec/sspec_training_heldout_gate_plan.md` · state: `.spipe/sspec_training_heldout_gate/state.md`
+
+## Native test-runner capture limit visibility (2026-10-30)
+
+`TEST_OUTPUT_CAPTURE_BYTES` is shared across runner, doctest, lifecycle, and
+process-tracker modules and is exported by the test-runner facade. Its defining
+declaration must also be public for native imported-static code generation.
+The limit remains 4 MiB; keep rejection of genuinely private statics intact.
+The native import fixture is
+`test/fixtures/test_runner/native_output_capture_limit.spl`; failure and
+validation evidence are recorded in
+`doc/08_tracking/bug/test_runner_capture_limit_visibility_2026_10_30.md`.
+A compiled fixture is not evidence that native SSpec or HAL/SOSIX suites ran.

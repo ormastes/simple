@@ -93,7 +93,7 @@ in step 0) exports `SIMPLE_HOST_RUSTUP_HOST_TRIPLE` for this host from
 `config/host/<hostname>.sdn`:
 
 ```sh
-rustup set default-host "${SIMPLE_HOST_RUSTUP_HOST_TRIPLE:-x86_64-pc-windows-gnu}"
+rustup set default-host "${SIMPLE_HOST_RUSTUP_HOST_TRIPLE:-x86_64-pc-windows-gnullvm}"
 ```
 
 **That alone is not enough, and the reason is easy to miss.** The resolver

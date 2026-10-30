@@ -1,0 +1,70 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.*
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use app.compiler_entrypoint.source_authority.{CompilerSourceAuthorityV1}
+use app.compiler_entrypoint.entry_closure_selection.{compiler_entry_closure_prepare_v1, compiler_entry_closure_select_v1}
+use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_admit_v1}
+use std.io_runtime.{dir_create_all, file_write, getpid}
+use app.io.file_ops.{path_absolute}
+
+fn staged_selection_fixture(label: text) -> (text, CompilerSourceAuthorityV1, NativeEntryClosureBindingV1):
+    val root = path_absolute("build/test-artifacts/staged-selection-{label}-{getpid()}")
+    val cache = root + "/build/scv"
+    val code = "fn main() -> i64: 42"
+    val event = compile_source_inventory_git_event_v1("create", "src/main.spl", code)
+    val inventory = CompileSourceInventoryV1(1, 1, [CompileSourceInventoryEntryV1(
+        event.source_identity, event.content_digest, event.semantic_digest,
+        event.export_digest, event.initializer_digest, event.provider_digest, event.byte_count)])
+    val digest = compile_source_inventory_publish_v1(cache, inventory)
+    expect(digest.len()).to_equal(64)
+    val revision = "scv-revision-v1-" + sha256_text(label)
+    val frozen = cache + "/snapshots/" + revision
+    val manifest = "src/main.spl|sha256_{event.content_digest}|{event.byte_count}"
+    expect(dir_create_all(frozen)).to_equal(true)
+    expect(file_write(frozen + "/SCV_COMPILE_INVENTORY", manifest)).to_equal(true)
+    val snapshot = ScvCompileSnapshotV1(true, "ok", revision, "commit", "tree",
+        sha256_text(manifest), 1, frozen, "", "", false)
+    val authority = CompilerSourceAuthorityV1(true, "ok", snapshot, digest, 1)
+    val binding = NativeEntryClosureBindingV1(revision, "commit", "tree", snapshot.inventory_digest,
+        "src/main.spl", ["src"], sha256_text("policy"), sha256_text("producer"))
+    (root, authority, binding)
+
+describe "staged closure preparation retains final physical authentication":
+    it "matches the existing complete selection for authentic bytes":
+        val (root, authority, binding) = staged_selection_fixture("valid")
+        val paths = [authority.snapshot.snapshot_root + "/src/main.spl"]
+        val prepared = compiler_entry_closure_prepare_v1(root, authority, binding, paths)
+        expect(prepared.is_ok()).to_equal(true)
+        val admitted = native_entry_closure_admit_v1(root, authority.snapshot,
+            authority.source_inventory_digest, authority.inventory_generation, binding, prepared.unwrap())
+        val complete = compiler_entry_closure_select_v1(root, authority, binding, paths)
+        expect(admitted.is_ok()).to_equal(true)
+        expect(complete.is_ok()).to_equal(true)
+        expect(admitted.unwrap().identities).to_equal(complete.unwrap().identities)
+        expect(admitted.unwrap().digests).to_equal(complete.unwrap().digests)
+        expect(admitted.unwrap().byte_counts).to_equal(complete.unwrap().byte_counts)
+
+    it "rejects source generation corruption between preparation and final admission":
+        val (root, authority, binding) = staged_selection_fixture("generation-corrupt")
+        val prepared = compiler_entry_closure_prepare_v1(root, authority, binding,
+            [authority.snapshot.snapshot_root + "/src/main.spl"])
+        expect(prepared.is_ok()).to_equal(true)
+        expect(file_write(root + "/build/scv/source-inventory/generations/" +
+            authority.source_inventory_digest + ".inventory", "corrupt")).to_equal(true)
+        val rejected = native_entry_closure_admit_v1(root, authority.snapshot,
+            authority.source_inventory_digest, authority.inventory_generation, binding, prepared.unwrap())
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal("entry-closure-inventory-generation-invalid")
+
+    it "rejects snapshot manifest corruption between preparation and final admission":
+        val (root, authority, binding) = staged_selection_fixture("manifest-corrupt")
+        val prepared = compiler_entry_closure_prepare_v1(root, authority, binding,
+            [authority.snapshot.snapshot_root + "/src/main.spl"])
+        expect(prepared.is_ok()).to_equal(true)
+        expect(file_write(authority.snapshot.snapshot_root + "/SCV_COMPILE_INVENTORY", "corrupt")).to_equal(true)
+        val rejected = native_entry_closure_admit_v1(root, authority.snapshot,
+            authority.source_inventory_digest, authority.inventory_generation, binding, prepared.unwrap())
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal("entry-closure-snapshot-inventory-changed")

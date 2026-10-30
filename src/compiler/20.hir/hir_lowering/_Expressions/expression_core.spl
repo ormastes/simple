@@ -9,21 +9,38 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
-use compiler.common.assurance.unsafe_capabilities.{unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
+use compiler.common.assurance.unsafe_capabilities.{UnsafeCapability, unsafe_capability_set_contains, unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, is_tuple_positional_field, parse_tuple_field_index, primitive_cast_type_kind, _hir_expr_symbol_or_invalid}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_lowering._Expressions.type_test_operand.{binary_is_type_operand}
 use compiler.hir.hir_lowering._Expressions.source_union_pattern_v1.*
 use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
+use compiler.hir.hir_lowering._Expressions.accessor_forwarding.*
 use compiler.hir.hir_lowering._Expressions.collection_factory_types.{collection_factory_type_concrete}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_lowering._Expressions.cfg_when_marker.{cfg_when_marker_cond, cfg_when_chain_is_marker}
 
 # A concrete parameter retains the symbol owner after optional extraction.
 fn _hir_callable_named_var_payload(symbol: SymbolId, name: text) -> HirExprKind:
     HirExprKind.NamedVar(symbol, name)
 
 impl HirLowering:
+    # Preprocessor cfg-select marker chain -> target-neutral CfgSelect: every
+    # arm is kept with its condition text; MIR picks the arm for its target.
+    me lower_cfg_when_chain(arms: [IfArm], else_block: Block?, span: Span) -> HirExpr:
+        var conds: [text] = []
+        var hir_arms: [HirBlock] = []
+        for arm in arms:
+            val arm_t: IfArm = arm
+            val marker = cfg_when_marker_cond(arm_t.cond)
+            conds = conds.push(marker ?? "")
+            hir_arms = hir_arms.push(self.lower_hir_block(arm_t.then_))
+        var hir_else: HirBlock? = nil
+        if val else_src = else_block:
+            hir_else = Some(self.lower_hir_block(else_src))
+        HirExpr(kind: HirExprKind.CfgSelect(conds, hir_arms, hir_else), has_type_: false, type_: nil, span: span)
+
     fn attributed_collection_family_identity(name: text, owner: text) -> text:
         # A local type may reuse an adaptive leaf name. Only the stdlib type's
         # defining module grants this compiler-owned attribute admission.
@@ -612,6 +629,9 @@ impl HirLowering:
         if kind_disc_v == hir_expr_kind_disc(ExprKind.IfChain([], None)):
             match expr_kind_value:
                 case ExprKind.IfChain(arms, else_):
+                    if cfg_when_chain_is_marker(arms):
+                        val marker_else: Block? = else_
+                        return self.lower_cfg_when_chain(arms, marker_else, e.span)
                     var hir_arms: [HirIfArm] = []
                     var arm_idx = 0
                     while arm_idx < arms.len():
@@ -638,6 +658,11 @@ impl HirLowering:
         if kind_disc_v == hir_expr_kind_disc(ExprKind.If(kind_disc_dummy, Block(stmts: [], span: e.span), None)):
             match expr_kind_value:
                 case ExprKind.If(cond, then_, else_):
+                    val marker_cond_expr: Expr = cond
+                    val single_arm = IfArm(cond: marker_cond_expr, then_: then_, span: e.span)
+                    if cfg_when_chain_is_marker([single_arm]):
+                        val single_else: Block? = else_
+                        return self.lower_cfg_when_chain([single_arm], single_else, e.span)
                     val hir_cond = self.lower_hir_expr(cond)
                     val hir_then = self.lower_hir_block(then_)
                     val else_opt: Block? = else_
@@ -750,6 +775,12 @@ impl HirLowering:
                                 has_type_: true,
                                 type_: live_field_type,
                                 span: e.span)
+                    # Accessor forwarding (REQ-SELFHOST-ACCESSOR-001): no real field.
+                    var fld_acc_owner = self.field_owner_for_hir_expr(fld_lowered_base)
+                    if fld_acc_owner < 0 and fld_base_sym.is_valid():
+                        fld_acc_owner = self.owner_type_id_for_base_raw(fld_base_sym.id)
+                    if val fld_forwarded = self.lower_accessor_read(fld_lowered_base, fld_name_t, fld_acc_owner, e.span):
+                        return fld_forwarded
                     return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, None), has_type_: false, type_: nil, span: e.span)
                 case _:
                     pass
@@ -1115,6 +1146,10 @@ impl HirLowering:
                 self.build_match_expr(hir_scrutinee, hir_arms, scrutinee.span)
 
             case ExprKind.Lambda(params, body):
+                # The closure may escape its enclosing unsafe block, so an
+                # outer type_erasure grant cannot authorize its stored types.
+                val enclosing_any_unsafe_depth = self.written_any_unsafe_depth
+                self.written_any_unsafe_depth = 0
                 self.symbols.push_scope(ScopeKind.Function)
                 var hir_params: [HirParam] = []
                 # Cycle-161 (v22, 2026-10-18): NO for-in element rebind --
@@ -1135,6 +1170,7 @@ impl HirLowering:
                         symbol: symbol,
                         name: lam_p_name,
                         type_: type_,
+                        has_default: false,
                         default: nil,
                         span: lam_p_span,
                         is_mutable: false
@@ -1142,6 +1178,7 @@ impl HirLowering:
                     lam_param_i = lam_param_i + 1
                 val hir_body = self.lower_hir_expr(body)
                 self.symbols.pop_scope()
+                self.written_any_unsafe_depth = enclosing_any_unsafe_depth
                 HirExprKind.Lambda(hir_params, hir_body, [])
 
             case ExprKind.Return(value):
@@ -1289,9 +1326,13 @@ impl HirLowering:
                 val unknown_caps = unknown_unsafe_capability_names(caps)
                 if unknown_caps.len() > 0:
                     self.error("unknown unsafe capability `" + unknown_caps[0] + "`; " + valid_unsafe_capability_names_help(), e.span)
-                self.written_any_unsafe_depth = self.written_any_unsafe_depth + 1
+                val grants_type_erasure = unknown_caps.len() == 0 and
+                    unsafe_capability_set_contains(caps, UnsafeCapability.TypeErasure)
+                if grants_type_erasure:
+                    self.written_any_unsafe_depth = self.written_any_unsafe_depth + 1
                 var unsafe_hir_body = self.lower_hir_block(body)
-                self.written_any_unsafe_depth = self.written_any_unsafe_depth - 1
+                if grants_type_erasure:
+                    self.written_any_unsafe_depth = self.written_any_unsafe_depth - 1
                 unsafe_hir_body.unsafe_caps = caps
                 HirExprKind.UnsafeBlock(unsafe_hir_body)
 

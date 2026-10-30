@@ -1,12 +1,13 @@
 """Positional parent cache selection and exact environment restoration."""
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
 use app.cli.bootstrap_focused_native_build_args.{focused_native_build_cache_dir}
 use std.nogc_async_mut.sosix.environment.{sosix_env_set, sosix_env_remove}
 use std.io_runtime.{file_read}
 
 describe "positional native-build cache binding":
-    it "binds explicit CLI cache over a conflicting inherited phase root":
+    it "should restore a present inherited cache path after an explicit override":
+        step("Bind an explicit cache path, then restore the inherited value")
         val original = native_build_cache_snapshot()
         expect(sosix_env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", "build/phase3/producer-a/scopeprobe")).to_equal(true)
         val before = native_build_cache_snapshot()
@@ -24,7 +25,8 @@ describe "positional native-build cache binding":
         expect(native_build_cache_snapshot()).to_equal("build/phase4/producer-b/worker-2")
         expect(native_build_cache_restore(original)).to_equal(true)
 
-    it "restores an absent environment variable without creating an empty value":
+    it "should restore an absent cache variable after a temporary binding":
+        step("Bind a temporary cache path when no cache variable exists, then remove it")
         val original = native_build_cache_snapshot()
         expect(sosix_env_remove("SIMPLE_NATIVE_BUILD_CACHE_DIR")).to_equal(true)
         val absent = native_build_cache_snapshot()
@@ -32,6 +34,17 @@ describe "positional native-build cache binding":
         expect(native_build_cache_bind("build/phase2/producer-c/entry")).to_equal(true)
         expect(native_build_cache_restore(absent)).to_equal(true)
         expect(native_build_cache_snapshot()).to_be_nil()
+        expect(native_build_cache_restore(original)).to_equal(true)
+
+    it "should restore a present empty cache value distinctly from absence":
+        step("Temporarily replace an explicitly empty cache variable")
+        val original = native_build_cache_snapshot()
+        expect(sosix_env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", "")).to_equal(true)
+        val previous = native_build_cache_snapshot()
+        expect(previous).to_equal("")
+        expect(native_build_cache_bind("build/phase2/producer-empty/entry")).to_equal(true)
+        expect(native_build_cache_restore(previous)).to_equal(true)
+        expect(native_build_cache_snapshot()).to_equal("")
         expect(native_build_cache_restore(original)).to_equal(true)
 
     it "restores before success, returned failure and artifact refusal branches":

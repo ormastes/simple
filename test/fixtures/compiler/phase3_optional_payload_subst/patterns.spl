@@ -1,0 +1,70 @@
+# Separately qualify the pattern payload owner without replaying expression cases.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.monomorphize.type_subst.{typesubstitution_from_params}
+use compiler.monomorphize.hir_subst.body_subst.{subst_hir_body_with_report}
+
+fn main() -> i64:
+    val span = Span.empty()
+    val t = HirType(kind: HirTypeKind.TypeParam("T", []), span: span)
+    val integer = HirType(kind: HirTypeKind.Int(64, true), span: span)
+    val owner = HirType(kind: HirTypeKind.Optional(t), span: span)
+    val parameter = HirTypeParam(symbol: SymbolId(id: 0), name: "T", bounds: [],
+        has_default: false, default: nil, span: span)
+    val subst = typesubstitution_from_params([parameter], [integer])
+    val binding = HirPattern(kind: HirPatternKind.Binding(SymbolId(id: 2), false),
+        has_type_: true, type_: t, span: span)
+    val payloads: [HirPatternPayload?] = [HirPatternPayload.Tuple([binding]),
+        Some(HirPatternPayload.Tuple([binding])), HirPatternPayload.Struct([("value", binding)]),
+        Some(HirPatternPayload.Struct([("value", binding)])), nil]
+    var checked = 0
+    for candidate in payloads:
+        val payload: HirPatternPayload? = candidate
+        val pattern = HirPattern(kind: HirPatternKind.Enum(owner, "Some", payload),
+            has_type_: true, type_: owner, span: span)
+        val value = HirExpr(kind: HirExprKind.Var(SymbolId(id: 2)), has_type_: true,
+            type_: t, span: span)
+        val arm_body = HirBlock(stmts: [], has: true, value: value, span: span)
+        val arm = HirMatchArm(pattern: pattern, has_guard: false, guard: nil,
+            body: arm_body, span: span)
+        val subject = HirExpr(kind: HirExprKind.Var(SymbolId(id: 1)), has_type_: true,
+            type_: owner, span: span)
+        val expression = HirExpr(kind: HirExprKind.MatchCase(subject, [arm]),
+            has_type_: true, type_: t, span: span)
+        var body = HirBlock(stmts: [], has: true, value: expression, span: span)
+        var round = 0
+        while round < 2:
+            val report = subst_hir_body_with_report(body, subst)
+            assert(report.diagnostics.len() == 0)
+            body = report.body
+            match body.value.kind:
+                case HirExprKind.MatchCase(_, arms):
+                    assert(arms.len() == 1)
+                    val result_arm: HirMatchArm = arms[0]
+                    match result_arm.pattern.kind:
+                        case HirPatternKind.Enum(_, _, result):
+                            if val concrete = result:
+                                var item: HirPattern = binding
+                                match concrete:
+                                    case HirPatternPayload.Tuple(items):
+                                        assert(items.len() == 1)
+                                        item = items[0]
+                                    case HirPatternPayload.Struct(fields):
+                                        assert(fields.len() == 1)
+                                        val pair: (text, HirPattern) = fields[0]
+                                        assert(pair.0 == "value")
+                                        item = pair.1
+                                match item.type_.kind:
+                                    case HirTypeKind.Int(bits, signed):
+                                        assert(bits == 64 and signed)
+                                    case _: assert(false)
+                            else:
+                                assert(payload == nil)
+                        case _: assert(false)
+                case _: assert(false)
+            round = round + 1
+        checked = checked + 1
+    assert(checked == 5)
+    print "optional pattern substitution: 5 cases, 2 passes each"
+    0

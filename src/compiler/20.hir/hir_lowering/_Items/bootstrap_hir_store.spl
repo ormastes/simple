@@ -1,0 +1,286 @@
+# BootstrapHirStore — the flat per-module HIR rows the bootstrap MIR bridge
+# reads, as ONE owner instead of seven parallel module-level globals.
+#
+# Design: doc/05_design/compiler/memory/build_session_memory_model_v1.md
+#   §3 I1-I3, §5, §6, §7 P2.
+#
+# Publish protocol with a live build session (I1-I3):
+#   1. `stage` (called from lowering while the module scope RUNS) only records
+#      the row; nothing session-owned references module memory yet.
+#   2. `publish_pending` (called by the driver after the scope is PAUSED)
+#      adopts the row payload into the session — O(nodes this module
+#      allocated) — then appends to the outer arrays under the session
+#      allocator so their reallocated backing stores are session-tagged, and
+#      advances `committed_count` LAST.
+# Without a session (`session_on == false`, e.g. the pre-P1 seed whose
+# `rt_session_heap_begin` returns 0) rows are appended immediately and the
+# driver promotes the new row + outer arrays exactly as before
+# (`promote_last_legacy`).
+#
+# The session surface is injected as a HirPublishPort so the store is
+# testable on a runtime that predates the rt_session_* externs.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+@unsafe(reason: "raw process termination ABI", capabilities: [ffi])
+extern fn rt_exit(code: i64)
+@unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+@unsafe(reason: "move a module-scope graph into the build session", capabilities: [ffi])
+extern fn rt_transient_heap_adopt<T>(value: T) -> bool
+@unsafe(reason: "allocate session-owned containers inside a module scope", capabilities: [ffi])
+extern fn rt_session_alloc_begin() -> bool
+@unsafe(reason: "end session-owned allocation", capabilities: [ffi])
+extern fn rt_session_alloc_end() -> bool
+@unsafe(reason: "observe the transient scope state", capabilities: [ffi])
+extern fn rt_transient_array_scope_state_v1() -> i64
+
+# Adopt one staged row: the name and the six payload arrays (typed, so no
+# `Any` erasure crosses the port).
+fn _sffi_hir_store_adopt_row(name: text, symbols: [HirSymbol], functions: [HirFunction], constants: [HirConst], enums: [HirEnum], structs: [HirStruct], classes: [HirClass]) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_adopt(name) and
+            rt_transient_heap_adopt(symbols) and
+            rt_transient_heap_adopt(functions) and
+            rt_transient_heap_adopt(constants) and
+            rt_transient_heap_adopt(enums) and
+            rt_transient_heap_adopt(structs) and
+            rt_transient_heap_adopt(classes)
+
+# Generic so each owner keeps its static type (no `Any` erasure).
+@always_inline
+fn _hir_store_promote<T>(value: T) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
+
+fn _sffi_hir_store_alloc_begin() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_session_alloc_begin()
+
+fn _sffi_hir_store_alloc_end() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_session_alloc_end()
+
+fn _sffi_hir_store_scope_running() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_state_v1() == 1
+
+struct HirPublishPort:
+    adopt_row: fn(text, [HirSymbol], [HirFunction], [HirConst], [HirEnum], [HirStruct], [HirClass]) -> bool
+    alloc_begin: fn() -> bool
+    alloc_end: fn() -> bool
+    scope_running: fn() -> bool
+
+fn hir_publish_port_runtime() -> HirPublishPort:
+    HirPublishPort(adopt_row: _sffi_hir_store_adopt_row, alloc_begin: _sffi_hir_store_alloc_begin,
+        alloc_end: _sffi_hir_store_alloc_end, scope_running: _sffi_hir_store_scope_running)
+
+val _BOOTSTRAP_HIR_MODULE_LIMIT: i64 = 4096
+val _BOOTSTRAP_HIR_ITEMS_PER_MODULE_LIMIT: i64 = 131072
+
+fn bootstrap_hir_store_fail(message: text):
+    eprint("error: bootstrap HIR store rejected update: {message}\n")
+    unsafe(capabilities: [ffi]):
+        rt_exit(1)
+    panic("rt_exit returned after bootstrap HIR store rejection")
+
+fn bootstrap_hir_item_count_allowed(count: i64) -> bool:
+    count >= 0 and count <= _BOOTSTRAP_HIR_ITEMS_PER_MODULE_LIMIT
+
+class BootstrapHirStore:
+    port: HirPublishPort
+    session_on: bool
+    functions: [HirFunction]
+    names: [text]
+    module_symbols: [[HirSymbol]]
+    module_functions: [[HirFunction]]
+    # The --entry-closure flat lowering path builds MIR from this reduced
+    # per-module store (not a full HirModule), so it also needs each module's
+    # own enum/struct/class TYPE DEFS (bug
+    # native_enum_variant_flat_undefined_2026-07-24).
+    module_constants: [[HirConst]]
+    module_enums: [[HirEnum]]
+    module_structs: [[HirStruct]]
+    module_classes: [[HirClass]]
+    entry_index: i64
+    # Readers observe only fully published rows. The parallel arrays above are
+    # a bootstrap ABI constraint; this scalar is advanced only after every
+    # owner has accepted the new row, so a partially appended row is never
+    # addressable.
+    committed_count: i64
+    has_pending: bool
+    pending_is_entry: bool
+    pending_name: text
+    pending_symbols: [HirSymbol]
+    pending_functions: [HirFunction]
+    pending_constants: [HirConst]
+    pending_enums: [HirEnum]
+    pending_structs: [HirStruct]
+    pending_classes: [HirClass]
+
+    fn aligned(expected: i64) -> bool:
+        self.names.len() == expected and
+            self.module_symbols.len() == expected and
+            self.module_functions.len() == expected and
+            self.module_constants.len() == expected and
+            self.module_enums.len() == expected and
+            self.module_structs.len() == expected and
+            self.module_classes.len() == expected
+
+    fn index_valid(index: i64) -> bool:
+        index >= 0 and index < self.committed_count
+
+    me reset():
+        self.committed_count = 0
+        self.entry_index = -1
+        self.names = []
+        self.module_symbols = []
+        self.module_functions = []
+        self.module_constants = []
+        self.module_enums = []
+        self.module_structs = []
+        self.module_classes = []
+        self.discard_pending()
+
+    me discard_pending():
+        self.has_pending = false
+        self.pending_is_entry = false
+        self.pending_name = ""
+        self.pending_symbols = []
+        self.pending_functions = []
+        self.pending_constants = []
+        self.pending_enums = []
+        self.pending_structs = []
+        self.pending_classes = []
+
+    fn check_row(is_entry: bool, symbols: [HirSymbol], functions: [HirFunction], constants: [HirConst], enums: [HirEnum], structs: [HirStruct], classes: [HirClass]):
+        val module_index = self.committed_count
+        if module_index >= _BOOTSTRAP_HIR_MODULE_LIMIT:
+            bootstrap_hir_store_fail("module limit exceeded")
+        if not self.aligned(module_index):
+            bootstrap_hir_store_fail("parallel owners are misaligned before publication")
+        if (not bootstrap_hir_item_count_allowed(symbols.len()) or
+            not bootstrap_hir_item_count_allowed(functions.len()) or
+            not bootstrap_hir_item_count_allowed(constants.len()) or
+            not bootstrap_hir_item_count_allowed(enums.len()) or
+            not bootstrap_hir_item_count_allowed(structs.len()) or
+            not bootstrap_hir_item_count_allowed(classes.len())):
+            bootstrap_hir_store_fail("per-module item limit exceeded")
+        if is_entry and self.entry_index >= 0:
+            bootstrap_hir_store_fail("multiple entry modules")
+        if self.has_pending:
+            bootstrap_hir_store_fail("previous row is still pending publication")
+
+    me append_row(name: text, is_entry: bool, symbols: [HirSymbol], functions: [HirFunction], constants: [HirConst], enums: [HirEnum], structs: [HirStruct], classes: [HirClass]):
+        val module_index = self.committed_count
+        self.names = self.names.push(name)
+        self.module_symbols = self.module_symbols.push(symbols)
+        self.module_functions = self.module_functions.push(functions)
+        self.module_constants = self.module_constants.push(constants)
+        self.module_enums = self.module_enums.push(enums)
+        self.module_structs = self.module_structs.push(structs)
+        self.module_classes = self.module_classes.push(classes)
+        if not self.aligned(module_index + 1):
+            bootstrap_hir_store_fail("parallel owners are misaligned after append")
+        self.committed_count = module_index + 1
+        if is_entry:
+            self.entry_index = module_index
+
+    # Lowering entry point. With a live session and a RUNNING module scope the
+    # row is only staged (I1: adopt before publish); otherwise it is appended
+    # immediately (pre-session behaviour, and cache replays outside a scope).
+    me add(name: text, is_entry: bool, symbols: [HirSymbol], functions: [HirFunction], constants: [HirConst], enums: [HirEnum], structs: [HirStruct], classes: [HirClass]):
+        self.check_row(is_entry, symbols, functions, constants, enums, structs, classes)
+        val scope_running = self.port.scope_running
+        if self.session_on and scope_running():
+            self.has_pending = true
+            self.pending_is_entry = is_entry
+            self.pending_name = name
+            self.pending_symbols = symbols
+            self.pending_functions = functions
+            self.pending_constants = constants
+            self.pending_enums = enums
+            self.pending_structs = structs
+            self.pending_classes = classes
+            return
+        self.append_row(name, is_entry, symbols, functions, constants, enums, structs, classes)
+
+    # Adopt-then-append (I1-I3). Called with the module scope PAUSED.
+    me publish_pending() -> bool:
+        if not self.has_pending:
+            return true
+        val adopt_row = self.port.adopt_row
+        val adopted = adopt_row(self.pending_name, self.pending_symbols,
+            self.pending_functions, self.pending_constants, self.pending_enums,
+            self.pending_structs, self.pending_classes)
+        if not adopted:
+            return false
+        val alloc_begin = self.port.alloc_begin
+        if not alloc_begin():
+            return false
+        self.append_row(self.pending_name, self.pending_is_entry, self.pending_symbols,
+            self.pending_functions, self.pending_constants, self.pending_enums,
+            self.pending_structs, self.pending_classes)
+        self.discard_pending()
+        val alloc_end = self.port.alloc_end
+        if not alloc_end():
+            bootstrap_hir_store_fail("session allocator did not close after publication")
+        true
+
+    # No-session path only: promote the new row and the seven outer owners,
+    # exactly as the pre-session `bootstrap_hir_modules_promote_last` did.
+    fn promote_last_legacy() -> bool:
+        val committed = self.committed_count
+        if committed <= 0 or not self.aligned(committed):
+            return false
+        val last = committed - 1
+        val name_ok = _hir_store_promote(self.names[last])
+        val symbols_ok = _hir_store_promote(self.module_symbols[last])
+        val functions_ok = _hir_store_promote(self.module_functions[last])
+        val constants_ok = _hir_store_promote(self.module_constants[last])
+        val enums_ok = _hir_store_promote(self.module_enums[last])
+        val structs_ok = _hir_store_promote(self.module_structs[last])
+        val classes_ok = _hir_store_promote(self.module_classes[last])
+        val names_outer_ok = _hir_store_promote(self.names)
+        val symbols_outer_ok = _hir_store_promote(self.module_symbols)
+        val functions_outer_ok = _hir_store_promote(self.module_functions)
+        val constants_outer_ok = _hir_store_promote(self.module_constants)
+        val enums_outer_ok = _hir_store_promote(self.module_enums)
+        val structs_outer_ok = _hir_store_promote(self.module_structs)
+        val classes_outer_ok = _hir_store_promote(self.module_classes)
+        name_ok and symbols_ok and functions_ok and constants_ok and enums_ok and
+            structs_ok and classes_ok and names_outer_ok and symbols_outer_ok and
+            functions_outer_ok and constants_outer_ok and enums_outer_ok and
+            structs_outer_ok and classes_outer_ok
+
+    me rollback_last(expected_count: i64) -> bool:
+        val committed = self.committed_count
+        if expected_count < 0 or committed != expected_count + 1:
+            return false
+        if not self.aligned(committed):
+            return false
+        val removed_index = committed - 1
+        # push/pop mutate the canonical outer owners in place. Rebuilding with a
+        # slice here would allocate replacement owners in the doomed scope.
+        self.names.pop()
+        self.module_symbols.pop()
+        self.module_functions.pop()
+        self.module_constants.pop()
+        self.module_enums.pop()
+        self.module_structs.pop()
+        self.module_classes.pop()
+        if self.entry_index == removed_index:
+            self.entry_index = -1
+        self.committed_count = expected_count
+        self.aligned(expected_count)
+
+fn bootstrap_hir_store_with_port(port: HirPublishPort) -> BootstrapHirStore:
+    BootstrapHirStore(port: port, session_on: false, functions: [], names: [],
+        module_symbols: [], module_functions: [], module_constants: [],
+        module_enums: [], module_structs: [], module_classes: [], entry_index: -1,
+        committed_count: 0, has_pending: false, pending_is_entry: false,
+        pending_name: "", pending_symbols: [], pending_functions: [],
+        pending_constants: [], pending_enums: [], pending_structs: [],
+        pending_classes: [])

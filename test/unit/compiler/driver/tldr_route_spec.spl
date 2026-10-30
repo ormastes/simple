@@ -1,0 +1,298 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# plan: doc/03_plan/compiler/build_system/true_per_file_src_to_obj_plan.md (PR2c)
+#
+# PR2c: with SIMPLE_TLDR_IMPORTS=1 a file worker parses only its claimed files
+# and resolves imports through TLDR summaries; a closure walk is an error.
+use std.spec
+use std.io_runtime.{file_read, file_write, getpid, rt_env_get, rt_env_set}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_flag_on_v1, tldr_closure_walk_check_v1,
+    tldr_route_import_specs_v1, tldr_route_worker_v1, tldr_import_handle_fill_v1, tldr_import_generic_body_v1, tldr_imports_enabled_v1, tldr_imports_memo_reset_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_v1}
+use compiler.driver.driver.{compiler_driver_create}
+use compiler.driver.cache.tldr_summary_v1.{tldr_summary_entries_v1}
+use compiler.driver.driver_tldr_surface_register_v1.{driver_register_tldr_surfaces_v1}
+use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.common.driver_core_modes.{CompileMode}
+
+val A_SRC: text = "pub fn base_val() -> i64:\n    1\n\npub fn ident<T>(x: T) -> T:\n    x\n"
+val B_SRC: text = 'use pkg.a.{base_val}' + "\n\npub fn mid() -> i64:\n    base_val() + 1\n"
+val C_SRC: text = 'use pkg.b.{mid}' + "\n\nfn main() -> i64:\n    mid()\n"
+val D_SRC: text = "export use pkg.a.*\n\npub fn dval() -> i64:\n    4\n"
+val E_SRC: text = 'use pkg.b.{mid}' + "\n" + 'use pkg.d.{dval}' + "\n\nfn main() -> i64:\n    mid() + dval()\n"
+
+fn fixture_root(tag: text) -> text:
+    val r = "build/tmp/tldr_route_spec_{getpid()}_{tag}"
+    val _d = dir_create_all(r + "/src")
+    r
+
+fn put(root: text, module_id: text, src: text) -> text:
+    val module_path = module_id.replace(".", "/")
+    val p = root + "/src/" + module_path + ".spl"
+    val dir = root + "/src/" + module_path.substring(0, module_path.last_index_of("/"))
+    val _d = dir_create_all(dir)
+    val _w = file_write(p, src)
+    p
+
+fn inventory(root: text) -> Dict<text, text>:
+    var m: Dict<text, text> = {}
+    m["pkg.a"] = put(root, "pkg.a", A_SRC)
+    m["pkg.b"] = put(root, "pkg.b", B_SRC)
+    m["pkg.d"] = put(root, "pkg.d", D_SRC)
+    m
+
+describe "TLDR import route (PR2c)":
+    it "routes the leaf of a 3-module chain parsing only its own file (HIR gap pinned)":
+        val root = fixture_root("chain")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        val r = tldr_route_worker_v1(root + "/tldr", [leaf], mods)
+        expect(r.modules_parsed).to_equal(1)
+        expect(r.summaries_read).to_equal(1)
+        expect(r.fallbacks).to_equal(0)
+        expect(r.missing.len()).to_equal(0)
+        expect(r.handles.len()).to_equal(1)
+        expect(r.handles[0].module_id).to_equal("pkg.b")
+        expect(r.handles[0].name).to_equal("mid")
+        val filled = tldr_import_handle_fill_v1(root + "/tldr", r.handles[0])
+        expect(filled.unwrap().contains("sig=pub fn mid() -> i64:")).to_equal(true)
+        # Flag-off sibling and flag-on gap are separate cases below.
+
+    it "loads a generic body lazily for one decl only":
+        val root = fixture_root("generic")
+        val mods = inventory(root)
+        val leaf = put(root, "g", 'use pkg.a.{ident}' + "\n\nfn main() -> i64:\n    ident(3)\n")
+        val r = tldr_route_worker_v1(root + "/tldr", [leaf], mods)
+        expect(r.handles.len()).to_equal(1)
+        val body = tldr_import_generic_body_v1(r.handles[0], mods["pkg.a"])
+        expect(body.unwrap()).to_equal("pub fn ident<T>(x: T) -> T:\n    x")
+
+    it "counts a fallback and limits it to that one module":
+        val root = fixture_root("fallback")
+        val mods = inventory(root)
+        val leaf = put(root, "e", E_SRC)
+        val r = tldr_route_worker_v1(root + "/tldr", [leaf], mods)
+        expect(r.fallbacks).to_equal(1)
+        expect(r.fallback_modules).to_equal(["pkg.d"])
+        expect(r.summaries_read).to_equal(2)
+        expect(r.modules_parsed).to_equal(2)
+
+    it "keeps the old route when the flag is off":
+        expect(tldr_imports_flag_on_v1("")).to_equal(false)
+        expect(tldr_imports_flag_on_v1("0")).to_equal(false)
+        expect(tldr_imports_flag_on_v1("1")).to_equal(true)
+        expect(tldr_closure_walk_check_v1(false, "x").is_ok()).to_equal(true)
+        val needed = worker_surface_closure_v1(["a.spl", "b.spl"], ["a.spl", "b.spl"], ["", ""], [true, false])
+        expect(needed).to_equal([true, false])
+
+    it "rejects a closure walk with the flag on":
+        val got = tldr_closure_walk_check_v1(true, "worker_surface_closure_v1")
+        expect(got.is_err()).to_equal(true)
+        match got:
+            case Err(msg): expect(msg.contains("TLDR-IMPORTS-E-CLOSURE-WALK")).to_equal(true)
+            case Ok(_): expect(false).to_equal(true)
+
+    it "parses bare, glob and brace import specs":
+        val specs = tldr_route_import_specs_v1("use a.b\nuse c.*\n" + 'use d.{x, y as z}')
+        expect(specs.len()).to_equal(3)
+        expect(specs[2]).to_equal(("d", ["x", "y"]))
+
+    it "parses multi-line brace imports with names spanning lines":
+        val line1 = "use pkg.{a,"
+        val line2 = "  b}"
+        val multiline_src = line1 + "\n" + line2
+        val specs = tldr_route_import_specs_v1(multiline_src)
+        expect(specs.len()).to_equal(1)
+        expect(specs[0].0).to_equal("pkg")
+        expect(specs[0].1.len()).to_equal(2)
+        expect(specs[0].1[0]).to_equal("a")
+        expect(specs[0].1[1]).to_equal("b")
+
+    it "guards the closure walk with SIMPLE_TLDR_IMPORTS=1":
+        val saved_tldr = rt_env_get("SIMPLE_TLDR_IMPORTS") ?? ""
+        val saved_cache_min = rt_env_get("SIMPLE_CACHE_MIN_FREE_BYTES") ?? ""
+        rt_env_set("SIMPLE_TLDR_IMPORTS", "1")
+        rt_env_set("SIMPLE_CACHE_MIN_FREE_BYTES", "0")
+        val got = tldr_closure_walk_check_v1(true, "test_site")
+        expect(got.is_err()).to_equal(true)
+        match got:
+            case Err(msg): expect(msg.contains("TLDR-IMPORTS-E-CLOSURE-WALK")).to_equal(true)
+            case Ok(_): expect(false).to_equal(true)
+        rt_env_set("SIMPLE_TLDR_IMPORTS", saved_tldr)
+        rt_env_set("SIMPLE_CACHE_MIN_FREE_BYTES", saved_cache_min)
+
+# Lower the leaf alone with the fixture src/ as a source root; "none" = lowering succeeded.
+fn lower_leaf_alone(root: text, leaf: text) -> text:
+    var options = driver_core_compile_options_default()
+    options.input_files = [leaf]
+    options.mode = CompileMode.Check
+    options.bootstrap_input_count = 0
+    options.native_source_roots = ["src"]
+    options.native_source_snapshot_root = root
+    var driver = compiler_driver_create(options)
+    val (_ctx, loaded) = driver.load_sources_impl()
+    if not loaded:
+        return "load-failed"
+    if not driver.stage_parse().is_none():
+        return "parse-failed"
+    var gap = ""
+    match driver.stage_lower_hir("check", false):
+        case Some(stop):
+            match stop:
+                case TypeError(errs): gap = errs.join(" | ")
+                case ResolveError(errs): gap = errs.join(" | ")
+                case _: gap = "other"
+        case None: gap = "none"
+    gap
+
+fn with_flag(value: text) -> text:
+    val saved = rt_env_get("SIMPLE_TLDR_IMPORTS") ?? ""
+    rt_env_set("SIMPLE_TLDR_IMPORTS", value)
+    tldr_imports_memo_reset_v1()
+    saved
+
+fn restore_flag(saved: text):
+    rt_env_set("SIMPLE_TLDR_IMPORTS", saved)
+    tldr_imports_memo_reset_v1()
+
+fn fn_body(path: text, header: text) -> text:
+    val src = file_read(path)
+    val at = src.index_of(header)
+    if at < 0:
+        return ""
+    val rest = src.substring(at + header.len())
+    val nxt = rest.index_of("\nfn ")
+    val nxt_pub = rest.index_of("\npub fn ")
+    val nxt_me = rest.index_of("\n    me ")
+    var end = rest.len()
+    if nxt >= 0 and nxt < end: end = nxt
+    if nxt_pub >= 0 and nxt_pub < end: end = nxt_pub
+    if nxt_me >= 0 and nxt_me < end: end = nxt_me
+    rest.substring(0, end)
+
+fn guard_precedes_walk(body: text, walk: text) -> bool:
+    val g = body.index_of("tldr_imports_enabled_v1()")
+    val w = body.index_of(walk)
+    g >= 0 and w >= 0 and g < w
+
+describe "TLDR import route gap and guard sites (PR2c)":
+    it "flag OFF on the same resolvable fixture ALSO stops on the missing pkg.b surface (gap is not route-caused)":
+        val saved = with_flag("")
+        val root = fixture_root("gap_off")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        expect(mods.len()).to_equal(3)
+        val gap = lower_leaf_alone(root, leaf)
+        expect(gap.contains("missing module surface for pkg.b")).to_equal(true)
+        restore_flag(saved)
+
+    it "flag ON on the same fixture stops on the missing pkg.b surface":
+        val saved = with_flag("1")
+        val root = fixture_root("gap_on")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        expect(mods.len()).to_equal(3)
+        val gap = lower_leaf_alone(root, leaf)
+        expect(gap.contains("missing module surface for pkg.b")).to_equal(true)
+        restore_flag(saved)
+
+    it "memoizes the flag once per process until reset":
+        val saved = with_flag("1")
+        expect(tldr_imports_enabled_v1()).to_equal(true)
+        rt_env_set("SIMPLE_TLDR_IMPORTS", "")
+        expect(tldr_imports_enabled_v1()).to_equal(true)
+        tldr_imports_memo_reset_v1()
+        expect(tldr_imports_enabled_v1()).to_equal(false)
+        restore_flag(saved)
+
+    it "[source-text] driver_resolve_closure_import_v1 guards before the closure selection":
+        val body = fn_body("src/compiler/80.driver/driver_entry_closure_core.spl", "fn driver_resolve_closure_import_v1(")
+        expect(body.len() > 0).to_equal(true)
+        expect(guard_precedes_walk(body, "_driver_resolve_source_root_entry_import_from_v1(")).to_equal(true)
+
+    it "[source-text] parse_all_streaming_surfaces_in_place_impl guards before worker_surface_closure_v1":
+        val body = fn_body("src/compiler/80.driver/driver_source_pipeline_parsing.spl", "me parse_all_streaming_surfaces_in_place_impl(")
+        expect(body.len() > 0).to_equal(true)
+        expect(guard_precedes_walk(body, "worker_surface_closure_v1(source_paths")).to_equal(true)
+
+    it "[source-text] the guard before worker_surface_import_closure_v1 precedes the walk":
+        val src = file_read("src/compiler/80.driver/driver_source_pipeline_parsing.spl")
+        val w = src.index_of("val closure = worker_surface_import_closure_v1(")
+        expect(w > 0).to_equal(true)
+        val before = src.substring(w - 400, w)
+        expect(before.contains("tldr_imports_enabled_v1()")).to_equal(true)
+        expect(before.contains("tldr_closure_walk_check_v1(true, \"worker_surface_import_closure_v1\")")).to_equal(true)
+
+    it "[source-text] native_build_main skips the closure publish when the flag is on":
+        val src = file_read("src/app/cli/native_build_main.spl")
+        val g = src.index_of("if not tldr_imports_enabled_v1():")
+        val p = src.index_of("native_build_closure_publish_once_v1(args, frontend_cache_dir")
+        expect(g > 0).to_equal(true)
+        expect(p > g).to_equal(true)
+
+# 3-module fixture leaf -> b -> a, resolvable from the fixture src/ root.
+# Differential: the same leaf lowers (None) when its imports are satisfied by
+# real surfaces (closure inputs) or by summary-built surfaces; it stops on
+# "missing module surface" with neither.
+fn lower_inputs(root: text, inputs: [text], extras: [text]) -> text:
+    var options = driver_core_compile_options_default()
+    options.input_files = inputs
+    options.mode = CompileMode.Check
+    options.bootstrap_input_count = 0
+    options.native_source_roots = ["src"]
+    options.native_source_snapshot_root = root
+    var driver = compiler_driver_create(options)
+    val (_ctx, loaded) = driver.load_sources_impl()
+    if not loaded:
+        return "load-failed"
+    if not driver.stage_parse().is_none():
+        return "parse-failed"
+    if extras.len() > 0:
+        var built: [ModuleSurface] = []
+        for module_id in extras:
+            val rows = tldr_summary_entries_v1(module_id, file_read(root + "/src/" + module_id.replace(".", "/") + ".spl"))
+            match module_surface_from_tldr_v1(module_id, rows):
+                case Some(surface): built.push(surface)
+                case nil: return "surface-build-failed:" + module_id
+        val registered = driver_register_tldr_surfaces_v1(driver, built)
+        if registered != "":
+            return "register-failed:" + registered
+    var gap = ""
+    match driver.stage_lower_hir("check", false):
+        case Some(stop):
+            match stop:
+                case TypeError(errs): gap = errs.join(" | ")
+                case ResolveError(errs): gap = errs.join(" | ")
+                case _: gap = "other"
+        case None: gap = "none"
+    gap
+
+describe "TLDR summary surfaces differential (PR2d)":
+    it "flag OFF with the full chain as inputs lowers the leaf":
+        val saved = with_flag("")
+        val root = fixture_root("diff_a")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        expect(lower_inputs(root, [leaf, mods["pkg.b"], mods["pkg.a"]], [])).to_equal("none")
+        restore_flag(saved)
+
+    it "leaf alone with no surfaces fails with missing module surface":
+        val saved = with_flag("")
+        val root = fixture_root("diff_b")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        expect(mods.len()).to_equal(3)
+        expect(lower_inputs(root, [leaf], []).contains("missing module surface")).to_equal(true)
+        restore_flag(saved)
+
+    it "leaf alone lowers when b and a surfaces are built from TLDR summaries":
+        val saved = with_flag("1")
+        val root = fixture_root("diff_c")
+        val mods = inventory(root)
+        val leaf = put(root, "c", C_SRC)
+        expect(mods.len()).to_equal(3)
+        expect(lower_inputs(root, [leaf], ["pkg.b", "pkg.a"])).to_equal("none")
+        restore_flag(saved)

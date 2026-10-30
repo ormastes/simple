@@ -1,0 +1,197 @@
+# Exact metadata resolution only, not tmux target grammar or lease authentication.
+# The caller supplies an authenticated namespace/handle and a current snapshot.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.request_validation_v1.{mux_validate_name_v1}
+use std.common.contracts.mux.wire_validation_v1.{mux_wire_validate_snapshot_v1, mux_wire_same_handle_v1, mux_wire_context_v1}
+
+struct ExactCandidate:
+    identity: MuxObjectRefV1
+    label: text
+    session_id: text
+    window_id: text
+
+fn target_error(kind: MuxErrorKindV1, detail: text) -> MuxErrorV1:
+    MuxErrorV1(kind: kind, detail: detail, request_id: 0,
+        commit_state: MuxCommitStateV1.NotApplied, observed_revision: nil,
+        affected: [], cleanup_pending: false)
+
+fn invalid_target(detail: text) -> MuxErrorV1:
+    target_error(MuxErrorKindV1.InvalidTarget, detail)
+
+fn optional_id(value: MuxObjectRefV1?) -> text:
+    match value:
+        case Some(identity): return identity.object_id
+        case nil: return ""
+
+fn incomplete_candidates() -> MuxErrorV1:
+    target_error(MuxErrorKindV1.Unavailable, "exact target candidate storage incomplete")
+
+fn exact_candidates(snapshot: MuxSnapshotV1, kind: MuxObjectKindV1) -> Result<[ExactCandidate], MuxErrorV1>:
+    var result: [ExactCandidate] = []
+    var expected: i64 = 0
+    var inserted: i64 = 0
+    match kind:
+        case MuxObjectKindV1.Session:
+            expected = snapshot.sessions.len()
+            for item in snapshot.sessions:
+                inserted = inserted + 1
+                result.push(ExactCandidate(identity: item.identity, label: item.name,
+                    session_id: item.identity.object_id, window_id: ""))
+                if result.len() != inserted: return Err(incomplete_candidates())
+        case MuxObjectKindV1.Window:
+            expected = snapshot.windows.len()
+            for item in snapshot.windows:
+                inserted = inserted + 1
+                result.push(ExactCandidate(identity: item.identity, label: item.name,
+                    session_id: item.session.object_id, window_id: item.identity.object_id))
+                if result.len() != inserted: return Err(incomplete_candidates())
+        case MuxObjectKindV1.Pane:
+            expected = snapshot.panes.len()
+            for item in snapshot.panes:
+                inserted = inserted + 1
+                result.push(ExactCandidate(identity: item.identity, label: item.title,
+                    session_id: item.session.object_id, window_id: item.window.object_id))
+                if result.len() != inserted: return Err(incomplete_candidates())
+        case MuxObjectKindV1.Client:
+            expected = snapshot.clients.len()
+            for item in snapshot.clients:
+                inserted = inserted + 1
+                result.push(ExactCandidate(identity: item.identity, label: "",
+                    session_id: optional_id(item.context.session), window_id: optional_id(item.context.window)))
+                if result.len() != inserted: return Err(incomplete_candidates())
+    # Never decide uniqueness using a silently shortened collection. A native
+    # push failure can otherwise erase a second matching label and grant a ref.
+    if inserted != expected or result.len() != expected: return Err(incomplete_candidates())
+    Ok(result)
+
+fn context_member(snapshot: MuxSnapshotV1, target: MuxObjectRefV1) -> Result<ExactCandidate, MuxErrorV1>:
+    val candidates = exact_candidates(snapshot, target.kind)?
+    for item in candidates:
+        if item.identity.object_id == target.object_id: return Ok(item)
+    Err(invalid_target("context object is absent from snapshot"))
+
+fn check_context(snapshot: MuxSnapshotV1, context: MuxContextV1) -> Result<(), MuxErrorV1>:
+    # Shape validation binds each optional field's kind and owner incarnation.
+    # Membership and ancestry are separate; matching ID text alone is insufficient.
+    if mux_wire_context_v1(snapshot.handle, context).is_err():
+        return Err(invalid_target("context owner, incarnation or kind differs"))
+    match context.client:
+        case Some(identity): context_member(snapshot, identity)?
+        case nil: ()
+    match context.session:
+        case Some(identity): context_member(snapshot, identity)?
+        case nil: ()
+    match context.window:
+        case Some(identity):
+            val item = context_member(snapshot, identity)?
+            match context.session:
+                case Some(session):
+                    if item.session_id != session.object_id:
+                        return Err(invalid_target("context window is outside context session"))
+                case nil: ()
+        case nil: ()
+    match context.pane:
+        case Some(identity):
+            val item = context_member(snapshot, identity)?
+            match context.session:
+                case Some(session):
+                    if item.session_id != session.object_id:
+                        return Err(invalid_target("context pane is outside context session"))
+                case nil: ()
+            match context.window:
+                case Some(window):
+                    if item.window_id != window.object_id:
+                        return Err(invalid_target("context pane is outside context window"))
+                case nil: ()
+        case nil: ()
+    Ok(())
+
+fn in_context(item: ExactCandidate, kind: MuxObjectKindV1, context: MuxContextV1) -> bool:
+    # Context is a search scope, not an access-control grant. Session lookup is
+    # namespace-wide; current window/pane does not restrict sibling navigation.
+    if kind == MuxObjectKindV1.Session: return true
+    match context.session:
+        case Some(session):
+            if item.session_id != session.object_id: return false
+        case nil: ()
+    if kind == MuxObjectKindV1.Pane or kind == MuxObjectKindV1.Client:
+        match context.window:
+            case Some(window):
+                if item.window_id != window.object_id: return false
+            case nil: ()
+    true
+
+fn merge_context_ref(explicit: MuxObjectRefV1?, stored: MuxObjectRefV1?) -> Result<MuxObjectRefV1?, MuxErrorV1>:
+    match explicit:
+        case Some(identity):
+            match stored:
+                case Some(canonical):
+                    if identity.object_id != canonical.object_id:
+                        return Err(invalid_target("explicit context contradicts stored ancestry"))
+                case nil: ()
+            return Ok(explicit)
+        case nil: return Ok(stored)
+
+fn expand_context(snapshot: MuxSnapshotV1, context: MuxContextV1) -> Result<MuxContextV1, MuxErrorV1>:
+    check_context(snapshot, context)?
+    var result = context
+    match context.client:
+        case Some(identity):
+            for client in snapshot.clients:
+                if client.identity.object_id == identity.object_id:
+                    result.session = merge_context_ref(result.session, client.context.session)?
+                    result.window = merge_context_ref(result.window, client.context.window)?
+                    result.pane = merge_context_ref(result.pane, client.context.pane)?
+        case nil: ()
+    match result.pane:
+        case Some(identity):
+            for pane in snapshot.panes:
+                if pane.identity.object_id == identity.object_id:
+                    result.session = merge_context_ref(result.session, Some(pane.session))?
+                    result.window = merge_context_ref(result.window, Some(pane.window))?
+        case nil: ()
+    match result.window:
+        case Some(identity):
+            for window in snapshot.windows:
+                if window.identity.object_id == identity.object_id:
+                    result.session = merge_context_ref(result.session, Some(window.session))?
+        case nil: ()
+    # Expansion follows only supplied references and stored context. It does not
+    # pick a session's current window or a window's active pane when absent.
+    Ok(result)
+
+pub fn core_mux_resolve_exact_v1(snapshot: MuxSnapshotV1, namespace: text,
+        handle: MuxHandleV1, target: text, kind: MuxObjectKindV1,
+        context: MuxContextV1) -> Result<MuxObjectRefV1, MuxErrorV1>:
+    """Return an existing exact ID/unique label from a validated metadata graph.
+
+    IDs take precedence over labels, including refusing an out-of-context ID.
+    Session/window names and pane titles are literal, case-sensitive labels.
+    Clients have IDs only. No prefix/index/relative/tmux selector parsing occurs.
+    Supplied client context and child-reference ancestors expand existing scope;
+    contradictions refuse. Missing focus is never invented from active defaults.
+    Hidden/exited objects can resolve when supplied in the snapshot; this neither
+    authenticates a lease nor authorizes effects or proves that a child is live.
+    """
+    if snapshot.namespace != namespace or not mux_wire_same_handle_v1(snapshot.handle, handle):
+        return Err(invalid_target("snapshot namespace or handle differs"))
+    if mux_wire_validate_snapshot_v1(snapshot).is_err():
+        return Err(target_error(MuxErrorKindV1.InvalidRequest, "invalid target snapshot"))
+    if mux_validate_name_v1(target).is_err():
+        return Err(invalid_target("invalid exact target text"))
+    val scope = expand_context(snapshot, context)?
+    val candidates = exact_candidates(snapshot, kind)?
+    for item in candidates:
+        if item.identity.object_id == target:
+            if not in_context(item, kind, scope):
+                return Err(invalid_target("exact identity is outside context"))
+            return Ok(item.identity)
+    var selected: MuxObjectRefV1? = nil
+    for item in candidates:
+        if item.label == target and in_context(item, kind, scope):
+            if selected != nil: return Err(invalid_target("ambiguous exact target label"))
+            selected = Some(item.identity)
+    match selected:
+        case Some(identity): return Ok(identity)
+        case nil: return Err(invalid_target("exact target is absent from snapshot"))

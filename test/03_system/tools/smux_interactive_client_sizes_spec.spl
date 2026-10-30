@@ -8,7 +8,7 @@ TEST_BLOCKED: source scenarios, not evidence of two rendered native consoles.
 use std.spec.{describe, it, expect, step}
 use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
     smux_list_panes, smux_select_layout, smux_detach_from,
-    smux_list_clients, smux_window_layout, smux_split_pane}
+    smux_list_clients, smux_window_layout, smux_window_rects, smux_split_pane}
 use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
 
 fn size_session(name: text) -> [text]:
@@ -60,15 +60,46 @@ describe "interactive clients arbitrate a bounded shared canvas":
         expect(smux_list_clients()[0].cols).to_equal(72)
         expect(smux_list_clients()[0].rows).to_equal(20)
 
-    it "reflows manual geometry before a sibling frame even when canvas dimensions match":
+    it "retains manual split IDs and boundaries across repeated sibling frames":
         # @req REQ-SMUX-INTERACTIVE-003
         smux_reset_for_test()
         val ids = size_session("sizes")
         expect(smux_interactive_dispatch("client-size sizes first 20 6")).to_equal("smux: attached first")
         expect(smux_interactive_dispatch("client-size sizes second 20 6")).to_equal("smux: attached second")
         step("Split through the real service before the requesting client can arrange")
-        expect(smux_split_pane(ids[0], ids[1], ids[2], "vertical").is_ok()).to_equal(true)
+        val split = smux_split_pane(ids[0], ids[1], ids[2], "vertical")
+        expect(split.is_ok()).to_equal(true)
+        val added = split.unwrap()
         expect(smux_window_layout(ids[0], ids[1]).unwrap()).to_equal("manual")
-        step("A sibling frame recovers named geometry without disconnecting")
-        expect(smux_interactive_dispatch("frame sizes " + ids[1] + " " + ids[2])).to_start_with("SMUX-FRAME/1 20 6\n")
-        expect(smux_window_layout(ids[0], ids[1]).unwrap()).to_equal("tiled")
+        val before = smux_window_rects(ids[0], ids[1])
+        expect(before.len()).to_equal(2)
+        expect(before[0].pane_id).to_equal(ids[2])
+        expect(before[0].col).to_equal(0)
+        expect(before[0].row).to_equal(0)
+        expect(before[0].cols).to_equal(9)
+        expect(before[0].rows).to_equal(6)
+        expect(before[1].pane_id).to_equal(added.id)
+        expect(before[1].col).to_equal(10)
+        expect(before[1].row).to_equal(0)
+        expect(before[1].cols).to_equal(10)
+        expect(before[1].rows).to_equal(6)
+        step("Sibling frames preserve the directional split without selecting another layout")
+        for request in [0, 1]:
+            expect(smux_interactive_dispatch("frame sizes " + ids[1] + " " + ids[2])).to_start_with("SMUX-FRAME/1 20 6\n")
+            expect(smux_window_layout(ids[0], ids[1]).unwrap()).to_equal("manual")
+            val after = smux_window_rects(ids[0], ids[1])
+            val panes = smux_list_panes(ids[0], ids[1])
+            expect(after.len()).to_equal(2)
+            expect(panes.len()).to_equal(2)
+            var i = 0
+            while i < after.len():
+                expect(after[i].pane_id).to_equal(before[i].pane_id)
+                expect(after[i].col).to_equal(before[i].col)
+                expect(after[i].row).to_equal(before[i].row)
+                expect(after[i].cols).to_equal(before[i].cols)
+                expect(after[i].rows).to_equal(before[i].rows)
+                expect(panes[i].id).to_equal(after[i].pane_id)
+                expect(panes[i].cols).to_equal(after[i].cols)
+                expect(panes[i].rows).to_equal(after[i].rows)
+                i = i + 1
+        expect(smux_list_clients().len()).to_equal(2)

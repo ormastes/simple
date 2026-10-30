@@ -1,0 +1,74 @@
+# Native LLVM/core-C regression: both layouts must iterate the same raw bytes.
+use std.common.text_bytes.{text_to_bytes, bytes_to_text}
+use std.common.encoding.external_text.{external_text, external_text_from_internal, utf8_format}
+use std.common.crypto.sha256.{sha256_text}
+use app.build.targets.artifact_receipt.{publish_dependency_manifest_layer_v1}
+
+extern fn rt_array_new(capacity: i64) -> [u8]
+extern fn rt_array_bytes_basis_len(bytes: [u8]) -> i64
+
+fn check_sequence(bytes: [u8]) -> bool:
+    var index = 0
+    for byte in bytes:
+        if (byte as i64) != index: return false
+        index = index + 1
+    index == 256
+
+fn main() -> i64:
+    # Explicit runtime allocation pins slot layout; a typed local literal may
+    # be optimized into packed storage and would not exercise this control.
+    var slots: [u8] = rt_array_new(256)
+    var index = 0
+    while index < 256:
+        slots.push(index as u8)
+        index = index + 1
+    if rt_array_bytes_basis_len(slots) != -1:
+        print "FAIL expected-slot-layout"
+        return 1
+    val packed = text_to_bytes(bytes_to_text(slots))
+    if rt_array_bytes_basis_len(packed) != 256:
+        print "FAIL expected-packed-layout"
+        return 2
+    if not check_sequence(slots):
+        print "FAIL slot-iteration"
+        return 3
+    if not check_sequence(packed):
+        print "FAIL packed-iteration"
+        return 4
+
+    val body = "simple-target-dependency-manifest-v1\nconsumer=h08px-native-byte-copy\n"
+    var external = match external_text_from_internal(body, utf8_format()):
+        case Ok(value): value
+        case Err(error):
+            print "FAIL initial-encode"
+            return 5
+    var copies = 0
+    while copies < 3:
+        val bytes = match external.encoded_bytes():
+            case Ok(value): value
+            case Err(error):
+                print "FAIL encoded-copy"
+                return 6
+        external = match external_text(bytes, utf8_format()):
+            case Ok(value): value
+            case Err(error):
+                print "FAIL external-copy"
+                return 7
+        val decoded = match external.to_internal_text():
+            case Ok(value): value
+            case Err(error):
+                print "FAIL decode-copy"
+                return 8
+        if decoded != body or sha256_text(decoded) != sha256_text(body):
+            print "FAIL copy-content"
+            return 9
+        copies = copies + 1
+
+    # Real publication goes through the external-text atomic-write boundary.
+    # The Rust host test independently checks exact disk bytes and the filename.
+    val digest = publish_dependency_manifest_layer_v1(".", "receipts", "h08px-native-byte-copy", [])
+    if digest != sha256_text(body):
+        print "FAIL publication-digest"
+        return 10
+    print "PASS packed-slot-copies-publication"
+    0

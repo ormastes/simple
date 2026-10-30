@@ -8,6 +8,8 @@ Source selection remains in the existing sparse resolver. CPU SIMD uses prepared
 
 Status: design update, not implemented or admitted.
 
+Superseded 2026-10-25: still not implemented end to end. Landed pieces: admission rejection reasons/dependency identity (`4efd8885ded`), AOP directory cache (#4393/#4398/#4399/#4412), import-closure HIR (#4588). Open: member authority (I5-04), per-module dynlibs (bug `dynload_mode_emits_no_per_module_dynlibs_2026-10-24`), forward weave (#4401/#4414 held). See `doc/03_plan/evidence/item5_tdd_progress_2026-10-02.md` status table.
+
 ## Ownership and boundaries
 
 Compiler dependency planning owns an exact entry/runtime feature closure before

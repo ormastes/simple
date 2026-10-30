@@ -1,0 +1,53 @@
+# Real `@when`/`@elif`/`@else`/`@cfg` evaluation for the AOP directory facts
+# (GuardIdV1 / ActiveGuardRootV1, cache_contract/guard_id_v1).
+#
+# Reuses the frontend's ONE condition evaluator in its receipted target mode
+# (core/parser_preprocessor._pp_preprocess_conditionals_target_receipted_v1):
+# every directive becomes a GuardEvalV1 whose value is the decision's
+# effective activity. Target mode rejects unknown atoms and malformed
+# conditions instead of treating them as false, and an unreadable source has
+# no decisions at all; both are reported UNEVALUABLE, which makes the
+# directory's guard root incomplete and its shards a miss.
+
+use std.file_system.{file_read_text}
+use compiler.frontend.core.parser_preprocessor.{_pp_preprocess_conditionals_target_receipted_v1}
+use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch}
+use compiler.common.cache_contract.guard_id_v1.{GuardEvalV1, guard_id_v1}
+
+pub fn aop_guard_profile_v1() -> text:
+    "{cfg_detect_os()}/{cfg_detect_arch()}"
+
+fn _unevaluable(reason: text) -> [GuardEvalV1]:
+    [GuardEvalV1(guard: guard_id_v1("when", reason), evaluable: false, active: false)]
+
+fn _has_directives(source: text) -> bool:
+    source.contains("@when") or source.contains("@elif") or source.contains("@else") or
+        source.contains("@cfg")
+
+# Guard evaluations for one module source against an explicit target.
+pub fn aop_source_guard_evals_v1(source: text, target_os: text, target_arch: text) -> [GuardEvalV1]:
+    var out: [GuardEvalV1] = []
+    if not _has_directives(source): return out
+    match _pp_preprocess_conditionals_target_receipted_v1(source, target_os, target_arch):
+        case Ok(pre):
+            for d in pre.decisions:
+                if d.directive_kind == "end" or d.directive_kind == "excluded": continue
+                val kind = if d.directive_kind == "cfg": "cfg" else: "when"
+                out.push(GuardEvalV1(
+                    guard: guard_id_v1(kind, "{d.line}:{d.directive_kind}:{d.condition}"),
+                    evaluable: true, active: d.effective_active))
+        case Err(e):
+            return _unevaluable("unevaluable:{e}")
+    out
+
+fn _read_source(path: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        file_read_text(path)
+
+pub fn aop_module_guard_evals_v1(path: text) -> [GuardEvalV1]:
+    if path == "": return _unevaluable("no-source-path")
+    if val source = _read_source(path):
+        return aop_source_guard_evals_v1(source, cfg_detect_os(), cfg_detect_arch())
+    _unevaluable("unreadable:{path}")
+
+export aop_guard_profile_v1, aop_source_guard_evals_v1, aop_module_guard_evals_v1

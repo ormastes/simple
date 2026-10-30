@@ -80,6 +80,15 @@ bin/simple query hover <file> <line>                 # Type + docs
 
 ## Fault Detection
 
+For memory fixes, investigate performance as well as correctness: retain a
+representative workload and measure elapsed time or throughput alongside peak
+memory before and after the change. For performance fixes, also measure peak
+memory and check for leaks or unbounded growth. Add regression coverage for
+both dimensions when the workload and environment permit meaningful limits;
+record the producer, host, workload, baseline, and any unmeasured dimension.
+Use calibrated tolerances or a dedicated benchmark for noisy timing, rather
+than arbitrary wall-clock assertions in ordinary unit tests.
+
 | Variable | Purpose |
 |----------|---------|
 | `SIMPLE_STACK_OVERFLOW_DETECTION` | Recursion depth (default: on in debug) |

@@ -246,6 +246,34 @@ fn cfg_eval_key_value(key_raw: text, value_raw: text) -> bool:
         val expected = cfg_normalize_arch(value)
         return expected != "" and cfg_detect_cpu() == expected
     if key == "feature":
-        return false
+        return cfg_feature_enabled(value)
 
     false
+
+# Build feature tags (`@cfg(feature = "macho")`): opt-in only, from the
+# comma/space separated SIMPLE_FEATURES env var, case-insensitive. No feature
+# is on by default; host-relevant code gates on os= instead, e.g. Mach-O is
+# `@when(os = "macos" or feature = "macho")` so a cross build enables it.
+pub fn cfg_enabled_features() -> [text]:
+    var result: [text] = []
+    for part in cfg_env("SIMPLE_FEATURES").replace(",", " ").split(" "):
+        val name = part.trim().to_lower()
+        if name != "" and not result.contains(name):
+            result.push(name)
+    result
+
+pub fn cfg_feature_enabled(name: text) -> bool:
+    val wanted = cfg_strip_quotes(name).trim().to_lower()
+    wanted != "" and cfg_enabled_features().contains(wanted)
+
+# Everything static-guard (@when / cfg) evaluation reads, as resolved values:
+# target/host OS, architecture and CPU after every env override and host probe.
+# Folded into the native cache scope key (live_object_key.sdn component
+# scope_guard_context; closes known gap guard_id) so two builds whose guards
+# could evaluate differently never share objects. Length-framed.
+pub fn cfg_guard_context_identity_v1() -> text:
+    val os = cfg_detect_os()
+    val arch = cfg_detect_arch()
+    val cpu = cfg_detect_cpu()
+    val features = cfg_enabled_features().join(",")
+    "os={os.len()}:{os};arch={arch.len()}:{arch};cpu={cpu.len()}:{cpu};features={features.len()}:{features}"

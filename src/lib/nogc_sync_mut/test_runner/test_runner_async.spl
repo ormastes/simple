@@ -5,18 +5,24 @@
 
 use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text_at, file_size, file_delete, file_exists}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
-use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.io.sysinfo_ops.{cpu_count}
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
-use std.test_runner.test_executor_parsing.{find_simple_binary, build_child_args, make_result_from_output}
+use std.test_runner.test_executor_parsing.{find_simple_binary, build_child_args, make_result_from_output, make_result_from_structured_evidence}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.test_runner.child_diagnostics.{native_cleanup_diagnostic}
-use std.test_runner.runner_lifecycle.{spawn_tracked_process, spawn_tracked_redirected_process, wait_tracked_process, poll_tracked_process, cleanup_all_children}
+use std.test_runner.runner_lifecycle.{spawn_tracked_test_process, wait_tracked_process, poll_tracked_process, cleanup_all_children}
 use std.test_runner.resource_governor.{ResourceGovernor, governor_create, governor_can_spawn}
 use std.nogc_sync_mut.io.signal_handlers.{install_signal_handlers}
 use std.nogc_sync_mut.io.signal_stubs.{signal_dispatch_pending}
 use std.nogc_sync_mut.io.process_governor.{proc_slot_configure_requested_workers, proc_slot_active, proc_slot_max}
-use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_failure_reason, windows_redirected_completion}
+use std.nogc_sync_mut.io.process_ops.{process_is_running}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_owned_capture, sosix_test_host_os, sosix_test_has_owned_completion, sosix_test_temp_dir, sosix_test_path_separator, sosix_test_process_failure_reason, sosix_test_process_completion}
+use std.common.task_runner.execution_schedule.{TaskExecutionScheduleV1,
+    task_execution_schedule_v1, task_execution_ready_v1,
+    task_execution_host_active_v1, task_execution_dispatch_v1,
+    task_execution_reap_v1, task_execution_finish_v1,
+    task_execution_spawn_denied_v1, task_execution_block_v1}
 
 use std.io_runtime.{thread_sleep, getpid}
 use std.nogc_sync_mut.test_runner.worker_memory.{sample_worker_memory, worker_memory_can_spawn, worker_memory_supported, WORKER_MEMORY_SAMPLE_INTERVAL_US}
@@ -33,6 +39,13 @@ struct AsyncTestRun:
     stderr_file: text
     timeout_ms: i64
     inventory_index: i64 = -1
+    evidence_file: text = ""
+
+struct ScheduledAsyncTestResultV1:
+    schedule: TaskExecutionScheduleV1
+    result: TestFileResult
+
+val _TEST_EXECUTION_HOST_V1 = "test-workers"
 
 val _WAIT_POLL_INITIAL_MS = 10
 val _WAIT_POLL_MEDIUM_MS = 50
@@ -44,7 +57,7 @@ fn _cleanup_tracked_test_children():
     val _ = cleanup_all_children()
 
 fn _ensure_runner_signal_handlers():
-    if not _runner_signal_handlers_installed and host_os() != "windows":
+    if not _runner_signal_handlers_installed and not sosix_test_owned_capture():
         _runner_signal_handlers_installed = install_signal_handlers(_cleanup_tracked_test_children)
 
 # ============================================================================
@@ -53,25 +66,7 @@ fn _ensure_runner_signal_handlers():
 
 fn _get_temp_dir() -> text:
     """Get platform-appropriate temp directory"""
-    val os = host_os()
-    if os == "windows":
-        # NIL-GUARD: `std.nogc_sync_mut.io.env_ops.env_get` is declared `-> text`
-        # but is a bare `rt_env_get(key)` passthrough, and the runtime returns
-        # nil for an UNSET variable. Calling `.trim()` on that aborts the whole
-        # enclosing function -- `_get_temp_dir` never reached ANY return, so
-        # every temp-file creation in the async runner died silently. TMPDIR is
-        # unset on a stock Linux shell, i.e. this was the DEFAULT path.
-        # `?? ""` is the codebase's dominant idiom (282 sites) and is proven to
-        # coalesce nil correctly. The wrapper itself cannot be guarded: 36 call
-        # sites rely on the nil leak to apply a NON-EMPTY `??` default.
-        val temp_env = (env_get("TEMP") ?? "").trim()
-        if temp_env != "":
-            return temp_env
-        return "C:\\Temp"
-    val tmpdir = (env_get("TMPDIR") ?? "").trim()
-    if tmpdir != "":
-        return tmpdir
-    "/tmp"
+    sosix_test_temp_dir()
 
 fn create_temp_files(file_path: text, initialize: bool = true) -> (text, text):
     """
@@ -102,10 +97,7 @@ fn create_temp_files(file_path: text, initialize: bool = true) -> (text, text):
     base = temp_chars.join("")
 
     val tmp_dir = _get_temp_dir()
-    val os = host_os()
-    var sep = "/"
-    if os == "windows":
-        sep = "\\"
+    val sep = sosix_test_path_separator()
     val stdout_file = "{tmp_dir}{sep}simple_test_{parent_id}_{base}_{timestamp}_{sequence}_out.txt"
     val stderr_file = "{tmp_dir}{sep}simple_test_{parent_id}_{base}_{timestamp}_{sequence}_err.txt"
 
@@ -158,24 +150,32 @@ fn spawn_async_test(file_path: text, options: TestOptions, inventory_index: i64 
     Returns: AsyncTestRun tracking structure
     """
     val binary = find_simple_binary()
-    val child_args = build_child_args(file_path, options)
+    var child_args = build_child_args(file_path, options)
     val timeout_ms = options.timeout * 1000
 
     # Create temp files for stdout/stderr
-    val (stdout_file, stderr_file) = create_temp_files(file_path, initialize: host_os() != "windows")
+    val (stdout_file, stderr_file) = create_temp_files(file_path, initialize: not sosix_test_owned_capture())
+
+    # Each interpreter child configures its own receipt through the CLI flag.
+    # Mutating the parent's SIMPLE_TEST_RESULT_FILE races concurrent children.
+    # The native `test` child has a separate evidence protocol; keep it intact.
+    var evidence_file = ""
+    var evidence_prepared = true
+    if child_args.len() > 0 and child_args[0] == "run" and (options.assert_ran or (env_get("SIMPLE_TEST_ASSERT_RAN") ?? "") == "1"):
+        evidence_file = stdout_file + ".bdd"
+        # Refuse a collision instead of deleting another child's evidence.
+        evidence_prepared = not file_exists(evidence_file) and not file_exists(evidence_file + ".expectations") and not file_exists(evidence_file + ".trace-events.sdnstream")
+        child_args.push("--test-result-file={evidence_file}")
 
     var pid: i64 = -1
-    if host_os() == "windows":
-        pid = spawn_tracked_redirected_process(binary, child_args, stdout_file,
-            stderr_file, timeout_ms)
-        if pid == -1:
-            file_write(stderr_file, "Windows owned redirected child admission failed")
+    if not evidence_prepared:
+        file_write(stderr_file, "cannot prepare unique structured child evidence")
+        # This run never acquired that receipt path; collection must not clean it.
+        evidence_file = ""
     else:
-        val redirect_script = "out=$1; err=$2; shift 2; exec \"$@\" >\"$out\" 2>\"$err\""
-        var shell_args = ["-c", redirect_script, "simple-test", stdout_file, stderr_file, binary]
-        for arg in child_args:
-            shell_args.push(arg)
-        pid = spawn_tracked_process("/bin/sh", shell_args)
+        pid = spawn_tracked_test_process(binary, child_args, stdout_file, stderr_file, timeout_ms)
+        if pid == -1 and sosix_test_owned_capture():
+            file_write(stderr_file, "Windows owned redirected child admission failed")
 
     val start_time = time_now_unix_micros()
 
@@ -186,7 +186,8 @@ fn spawn_async_test(file_path: text, options: TestOptions, inventory_index: i64 
         stdout_file: stdout_file,
         stderr_file: stderr_file,
         timeout_ms: timeout_ms,
-        inventory_index: inventory_index
+        inventory_index: inventory_index,
+        evidence_file: evidence_file
     )
 
 # ============================================================================
@@ -195,10 +196,21 @@ fn spawn_async_test(file_path: text, options: TestOptions, inventory_index: i64 
 
 fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64, deadline_expired: bool = false) -> TestFileResult:
     var result = _collect_async_result_output(run, observed_exit_code, deadline_expired)
-    if run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
-        match windows_redirected_completion(run.pid):
-            case Ok(receipt): result.process_completion = Some(receipt)
+    var child_reaped = run.pid <= 0
+    if sosix_test_has_owned_completion(run.pid):
+        match sosix_test_process_completion(run.pid):
+            case Ok(receipt):
+                result.process_completion = Some(receipt)
+                child_reaped = receipt.tree_reaped
             case Err(reason): pass
+    elif run.pid > 0:
+        child_reaped = not process_is_running(run.pid)
+    # Preserve evidence while cleanup is unresolved. The structured parser owns
+    # valid trace-sidecar cleanup and retains malformed trace diagnostics.
+    if child_reaped:
+        cleanup_temp_files(run.stdout_file, run.stderr_file)
+        if run.evidence_file != "":
+            cleanup_temp_files(run.evidence_file, run.evidence_file + ".expectations")
     result
 
 fn _collect_async_result_output(run: AsyncTestRun, observed_exit_code: i64, deadline_expired: bool = false) -> TestFileResult:
@@ -234,11 +246,8 @@ fn _collect_async_result_output(run: AsyncTestRun, observed_exit_code: i64, dead
         match read_bounded_temp_output(run.stderr_file):
             case Ok(value): stderr = value
             case Err(message): capture_error = message
-    if run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE and (not file_exists(run.stdout_file) or not file_exists(run.stderr_file)):
+    if sosix_test_has_owned_completion(run.pid) and (not file_exists(run.stdout_file) or not file_exists(run.stderr_file)):
         capture_error = "owned Windows capture file missing"
-
-    # Cleanup temp files
-    cleanup_temp_files(stdout_file: run.stdout_file, stderr_file: run.stderr_file)
 
     # Cleanup quarantine is authoritative even if a child exits zero and
     # presents green counts. Inspect the bounded raw captures before parsing.
@@ -266,12 +275,19 @@ fn _collect_async_result_output(run: AsyncTestRun, observed_exit_code: i64, dead
     if capture_error != "":
         return _parallel_admission_failure(run.file_path,
             "bounded child capture failure: " + capture_error + "\n" + stderr, duration_ms)
-    if host_os() == "windows" and (run.pid == -1 or (run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE and exit_code < 0)):
-        val reason = if run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE: windows_redirected_failure_reason(run.pid) else: "child admission refused"
+    if sosix_test_owned_capture() and (run.pid == -1 or (sosix_test_has_owned_completion(run.pid) and exit_code < 0)):
+        val reason = if sosix_test_has_owned_completion(run.pid): sosix_test_process_failure_reason(run.pid) else: "child admission refused"
         return _parallel_admission_failure(run.file_path,
             "owned Windows child admission or collection failed: " + reason + "\n" + stderr, duration_ms)
 
-    # Build normal completions using the same logic as sync execution.
+    # Authenticate the per-child BDD receipt before considering human output.
+    if run.evidence_file != "":
+        # A non-empty path means spawning admitted `--test-result-file`; keep
+        # the receipt mandatory even when the parent environment flag is absent.
+        return make_result_from_structured_evidence(
+            run.file_path, stdout, stderr, exit_code, duration_ms,
+            run.timeout_ms / 1000, run.evidence_file, require_evidence: true)
+    # Native-child and non-assert-ran compatibility paths retain their parser.
     make_result_from_output(
         run.file_path,
         stdout,
@@ -295,6 +311,37 @@ fn spawn_fork_test(file_path: text, options: TestOptions) -> TestFileResult:
 # Parallel Execution with Timeout Check
 # ============================================================================
 
+fn _collect_scheduled_async_result_v1(schedule: TaskExecutionScheduleV1,
+        run: AsyncTestRun, observed_exit_code: i64,
+        deadline_expired: bool = false) -> ScheduledAsyncTestResultV1:
+    var result = collect_async_result(run, observed_exit_code, deadline_expired)
+    var next = schedule
+    # A quarantined cleanup must not release a reservation or admit siblings.
+    if result.error.starts_with("NATIVE-CACHE-CLEANUP-FAILED:"):
+        return ScheduledAsyncTestResultV1(schedule: next, result: result)
+    if run.pid <= 0:
+        # No child was acquired. This is a reservation rollback, never a reap.
+        next = task_execution_spawn_denied_v1(next, run.inventory_index)
+        next = task_execution_block_v1(next, run.inventory_index)
+    else:
+        if sosix_test_has_owned_completion(run.pid):
+            match result.process_completion:
+                case Some(completion):
+                    if not completion.tree_reaped:
+                        next.error = "owned Windows child tree is not reaped"
+                case nil:
+                    next.error = "owned Windows child completion evidence is unavailable"
+        elif process_is_running(run.pid):
+            next.error = "owned child remains running after collection"
+        if next.error == "":
+            next = task_execution_reap_v1(next, run.inventory_index)
+            next = task_execution_finish_v1(next, run.inventory_index,
+                if result.is_ok(): "SUCCEEDED" else: "FAILED")
+    if next.error != "":
+        result = _parallel_admission_failure(run.file_path,
+            "SHARED-SCHEDULER-FAILED: " + next.error, result.duration_ms)
+    ScheduledAsyncTestResultV1(schedule: next, result: result)
+
 fn run_tests_parallel_with_monitoring(
     files: [text],
     options: TestOptions,
@@ -314,20 +361,29 @@ fn run_tests_parallel_with_monitoring(
     Returns: List of TestFileResult
     """
     _ensure_runner_signal_handlers()
-    if options.worker_memory_mb > 0 and not worker_memory_supported(host_os()):
+    if options.worker_memory_mb > 0 and not worker_memory_supported(sosix_test_host_os()):
         var unsupported_results: [TestFileResult] = []
         for file in files:
             unsupported_results.push(_parallel_admission_failure(file,
                 "worker-memory RSS sampling unsupported on this host", 0))
         return unsupported_results
     var results: [TestFileResult?] = []
+    var statuses: [text] = []
+    var host_ids: [text] = []
+    var eligible: [bool] = []
     for file in files:
         results.push(nil)
+        statuses.push("PENDING")
+        host_ids.push("")
+        eligible.push(true)
+    var schedule = task_execution_schedule_v1(statuses, host_ids)
     var active_runs: [AsyncTestRun] = []
-    var next_file_idx = 0
     var poll_iteration = 0
     var admission_started = time_now_unix_micros()
     var admission_blocked = false
+    var pending_closed = false
+    var admission_reason = "NATIVE-CACHE-CLEANUP-FAILED: further admission blocked"
+    var admission_duration_ms: i64 = 0
     val admission_timeout_ms = if options.timeout > 0: options.timeout * 1000 else: 60000
 
     # Fork mode is sequential — skip it when parallel is explicitly requested.
@@ -363,12 +419,15 @@ fn run_tests_parallel_with_monitoring(
     if worker_budget_kib > 0:
         print "  [parallel] Aggregate worker admission: {options.worker_memory_mb} MiB (CPU budget unchanged)"
 
-    while next_file_idx < files.len() or active_runs.len() > 0:
+    while (not admission_blocked and schedule.next_pending < files.len()) or active_runs.len() > 0:
         signal_dispatch_pending()
+        if schedule.error != "":
+            admission_blocked = true
+            admission_reason = "SHARED-SCHEDULER-FAILED: " + schedule.error
         # Refresh only when a dispatch slot exists. Never block collection on a
         # synchronous observer when the process owner has no spare slot.
         val memory_now = time_now_unix_micros()
-        if worker_budget_kib > 0 and next_file_idx < files.len() and active_runs.len() < max_workers and proc_slot_active() < proc_slot_max() and memory_now >= memory_next_sample:
+        if not admission_blocked and worker_budget_kib > 0 and schedule.next_pending < files.len() and task_execution_host_active_v1(schedule, _TEST_EXECUTION_HOST_V1) < max_workers and proc_slot_active() < proc_slot_max() and memory_now >= memory_next_sample:
             var worker_roots: [i64] = []
             for run in active_runs: worker_roots.push(run.pid)
             val charges = sample_worker_memory(worker_roots, memory_reserve_kib)
@@ -382,7 +441,7 @@ fn run_tests_parallel_with_monitoring(
                 print "  [parallel] Worker RSS sample: roots={worker_roots.len()} known={memory_known} charged_kib={memory_charged_kib} reserve_kib={memory_reserve_kib}"
             memory_next_sample = time_now_unix_micros() + WORKER_MEMORY_SAMPLE_INTERVAL_US
         # Spawn new tests (respecting both max_workers and resource governor)
-        while not admission_blocked and active_runs.len() < max_workers and next_file_idx < files.len():
+        while not admission_blocked and task_execution_host_active_v1(schedule, _TEST_EXECUTION_HOST_V1) < max_workers and schedule.next_pending < files.len():
             if proc_slot_active() >= proc_slot_max(): break
             # Check resource governor before spawning
             if not governor_can_spawn(gov, active_runs.len()):
@@ -390,14 +449,32 @@ fn run_tests_parallel_with_monitoring(
 
             if worker_budget_kib > 0 and (not memory_known or not worker_memory_can_spawn(worker_budget_kib, memory_charged_kib, memory_reserve_kib)):
                 break
-            val file_path = files[next_file_idx]
-            val run = spawn_async_test(file_path, options, next_file_idx)
+            val selected = task_execution_ready_v1(schedule, eligible, 1)
+            if selected.error != "":
+                admission_blocked = true
+                admission_reason = "SHARED-SCHEDULER-FAILED: " + selected.error
+                break
+            if selected.indices.len() == 0: break
+            val index = selected.indices[0]
+            val file_path = files[index]
+            schedule = task_execution_dispatch_v1(schedule, index,
+                _TEST_EXECUTION_HOST_V1, max_workers)
+            if schedule.error != "":
+                admission_blocked = true
+                admission_reason = "SHARED-SCHEDULER-FAILED: " + schedule.error
+                results[index] = Some(_parallel_admission_failure(file_path, admission_reason, 0))
+                break
+            val run = spawn_async_test(file_path, options, index)
             if run.pid == -3:
                 cleanup_temp_files(stdout_file: run.stdout_file, stderr_file: run.stderr_file)
+                schedule = task_execution_spawn_denied_v1(schedule, index)
+                if schedule.error != "":
+                    admission_blocked = true
+                    admission_reason = "SHARED-SCHEDULER-FAILED: " + schedule.error
+                    results[index] = Some(_parallel_admission_failure(file_path, admission_reason, 0))
                 break
             active_runs.push(run)
             memory_charged_kib = memory_charged_kib + memory_reserve_kib
-            next_file_idx = next_file_idx + 1
 
         # Check for timeouts and completions
         var new_runs: [AsyncTestRun] = []
@@ -409,7 +486,9 @@ fn run_tests_parallel_with_monitoring(
             # not a timeout.  Only still-pending work can expire.
             val exit_code = poll_tracked_process(run.pid)
             if exit_code != -2:
-                val result = collect_async_result(run, exit_code)
+                val completed = _collect_scheduled_async_result_v1(schedule, run, exit_code)
+                schedule = completed.schedule
+                val result = completed.result
                 if result.error.starts_with("NATIVE-CACHE-CLEANUP-FAILED:"):
                     admission_blocked = true
                 results[run.inventory_index] = Some(result)
@@ -418,7 +497,9 @@ fn run_tests_parallel_with_monitoring(
 
             val elapsed_ms = (current_time - run.start_time) / 1000
             if elapsed_ms > run.timeout_ms:
-                val result = collect_async_result(run, -2, true)
+                val completed = _collect_scheduled_async_result_v1(schedule, run, -2, true)
+                schedule = completed.schedule
+                val result = completed.result
                 if result.error.starts_with("NATIVE-CACHE-CLEANUP-FAILED:"):
                     admission_blocked = true
                 results[run.inventory_index] = Some(result)
@@ -427,20 +508,25 @@ fn run_tests_parallel_with_monitoring(
                 new_runs.push(run)
 
         active_runs = new_runs
-        if admission_blocked:
-            while next_file_idx < files.len():
-                results[next_file_idx] = Some(_parallel_admission_failure(files[next_file_idx],
-                    "NATIVE-CACHE-CLEANUP-FAILED: further admission blocked", 0))
-                next_file_idx = next_file_idx + 1
+        if schedule.error != "":
+            admission_blocked = true
+            admission_reason = "SHARED-SCHEDULER-FAILED: " + schedule.error
         if active_runs.len() > 0 or had_completion:
             admission_started = current_time
-        elif next_file_idx < files.len() and (current_time - admission_started) / 1000 >= admission_timeout_ms:
+        elif not admission_blocked and schedule.next_pending < files.len() and (current_time - admission_started) / 1000 >= admission_timeout_ms:
             # Admission has its own finite deadline even when another owner
             # holds every process slot and this pool has nothing to poll.
-            while next_file_idx < files.len():
-                results[next_file_idx] = Some(_parallel_admission_failure(files[next_file_idx],
-                    "process or worker-memory admission deadline exceeded", admission_timeout_ms))
-                next_file_idx = next_file_idx + 1
+            admission_blocked = true
+            admission_reason = "process or worker-memory admission deadline exceeded"
+            admission_duration_ms = admission_timeout_ms
+        if admission_blocked and not pending_closed:
+            for index in schedule.next_pending..files.len():
+                if schedule.statuses[index] == "PENDING":
+                    results[index] = Some(_parallel_admission_failure(files[index],
+                        admission_reason, admission_duration_ms))
+                    if schedule.error == "":
+                        schedule = task_execution_block_v1(schedule, index)
+            pending_closed = true
 
         # Only sleep after a full pass with no completion.
         if had_completion:

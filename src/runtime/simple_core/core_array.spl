@@ -36,6 +36,12 @@ extern fn rt_string_new(bytes: i64, len: i64) -> i64
 extern fn signed_integer_is_valid(value: i64) -> i64
 @unsafe(reason: "numeric owner signed integer projection including registered wide boxes", capabilities: [ffi])
 extern fn rt_value_as_int_wide(value: i64) -> i64
+@unsafe(reason: "bounded numeric registry capacity observation", capabilities: [ffi])
+extern fn scope_read_numeric_bound_v1() -> i64
+@unsafe(reason: "bounded text registry capacity observation", capabilities: [ffi])
+extern fn scope_read_string_bound_v1() -> i64
+@unsafe(reason: "registry-validated borrowed text byte or length projection", capabilities: [ffi])
+extern fn scope_read_string_scalar_v1(value: i64, index: i64, fuel: i64) -> i64
 
 @always_inline
 fn _sffi_core_array_transient_note(ptr: i64, kind: i64) -> i64:
@@ -111,6 +117,8 @@ var array_registry_head: i64 = 0
 # reclaimed transient dict handle reports invalid instead of dereferencing
 # freed memory.
 var dict_registry_head: i64 = 0
+var dict_registry_count: i64 = 0
+var dict_read_owner_counter: i64 = 0
 
 # ============================================================================
 # Internal ABI helpers — pub so split files (core_array_ops, core_array_query)
@@ -440,9 +448,15 @@ fn dict_reserve(dict: i64, needed: i64) -> i8:
     var new_cap = cap * 2
     if new_cap < needed:
         new_cap = needed
+    dict_read_advance(dict_ptr(dict))
     val new_items = _sffi_core_array_realloc(dict_items(dict), new_cap * 16)
     if new_items < 1:
         return 0
+    val backing = _sffi_core_array_load_i64(dict_ptr(dict), 56)
+    if backing == 9223372036854775807:
+        _sffi_core_array_store_i64(dict_ptr(dict), 48, 0)
+    else:
+        _sffi_core_array_store_i64(dict_ptr(dict), 56, backing + 1)
     _sffi_core_array_store_i64(dict_ptr(dict), 8, new_cap)
     _sffi_core_array_store_i64(dict_ptr(dict), 32, new_items)
     1
@@ -482,7 +496,7 @@ pub fn rt_tuple_get(tuple: i64, idx: i64) -> i64:
 pub fn rt_dict_new(cap: i64) -> i64:
     val _ = cap
     val actual_cap = 8
-    val dict = _sffi_core_array_calloc(1, 40)
+    val dict = _sffi_core_array_calloc(1, dict_header_bytes_v1())
     if dict < 1:
         return 3
     val items = _sffi_core_array_calloc(actual_cap, 16)
@@ -500,6 +514,15 @@ pub fn rt_dict_new(cap: i64) -> i64:
         _sffi_core_array_free(items)
         _sffi_core_array_free(dict)
         return 3
+    if dict_registry_count >= 0 and dict_registry_count < 9223372036854775807:
+        dict_registry_count = dict_registry_count + 1
+    else:
+        dict_registry_count = -1
+    if dict_read_owner_counter < 9223372036854775807:
+        dict_read_owner_counter = dict_read_owner_counter + 1
+        _sffi_core_array_store_i64(dict, 40, dict_read_owner_counter)
+    _sffi_core_array_store_i64(dict, 48, 1)
+    _sffi_core_array_store_i64(dict, 56, 1)
     dict | 1
 
 # Membership test for the transient machinery (core_memory.spl): registry
@@ -523,6 +546,8 @@ fn dict_unregister(ptr: i64):
     while current > 0:
         val next = _sffi_core_array_load_i64(current, 24)
         if current == ptr:
+            if dict_registry_count > 0:
+                dict_registry_count = dict_registry_count - 1
             if previous < 1:
                 dict_registry_head = next
             else:
@@ -548,6 +573,7 @@ pub fn rt_dict_get(dict: i64, key: i64) -> i64:
 pub fn rt_dict_set(dict: i64, key: i64, value: i64) -> i8:
     if dict_ptr(dict) < 1:
         return 0
+    dict_read_advance(dict_ptr(dict))
     var index = dict_find(dict, key)
     if index >= 0:
         _sffi_core_array_store_i64(dict_items(dict), index * 16 + 8, value)
@@ -572,6 +598,7 @@ pub fn rt_dict_remove(dict: i64, key: i64) -> i8:
     val index = dict_find(dict, key)
     if index < 0:
         return 0
+    dict_read_advance(dict_ptr(dict))
     val len = dict_len_value(dict)
     val last = len - 1
     val items = dict_items(dict)
@@ -621,8 +648,118 @@ pub fn rt_collection_remove(receiver: i64, key: i64) -> i64:
 pub fn rt_dict_clear(dict: i64) -> i8:
     if dict_ptr(dict) < 1:
         return 0
+    dict_read_advance(dict_ptr(dict))
     _sffi_core_array_store_i64(dict_ptr(dict), 16, 0)
     1
+
+# Appended header words belong only to the optional borrowed read capability.
+fn dict_read_advance(ptr: i64):
+    val epoch = _sffi_core_array_load_i64(ptr, 48)
+    if epoch > 0:
+        val next = if epoch == 9223372036854775807: 0 else: epoch + 1
+        _sffi_core_array_store_i64(ptr, 48, next)
+
+# Work units are registry probes plus one scalar payload operation. Pure core
+# is single-threaded; the raw readers recheck the current limits on each call.
+pub fn dict_header_bytes_v1() -> i64:
+    64
+
+pub fn rt_dict_scope_read_bound_v1() -> i64:
+    var string_cap = 0
+    var numeric_cap = 0
+    unsafe(capabilities: [ffi]):
+        string_cap = scope_read_string_bound_v1()
+        numeric_cap = scope_read_numeric_bound_v1()
+    if dict_registry_count < 0 or string_cap < 0 or numeric_cap < 0:
+        return -1
+    val available = 9223372036854775806 - dict_registry_count
+    if string_cap > available:
+        return -1
+    if numeric_cap > (available - string_cap) / 2:
+        return -1
+    dict_registry_count + string_cap + numeric_cap * 2 + 1
+
+fn dict_scope_read_ptr_v1(dict: i64, fuel: i64) -> i64:
+    val bound = rt_dict_scope_read_bound_v1()
+    if bound < 1 or fuel < bound or dict < 4096 or (dict & 7) != 1:
+        return 0
+    val candidate = dict & -8
+    var current = dict_registry_head
+    var probes = 0
+    while current > 0 and probes < dict_registry_count:
+        if current == candidate:
+            if _sffi_core_array_load_u8(current, 0) != 6:
+                return 0
+            return current
+        current = _sffi_core_array_load_i64(current, 24)
+        probes = probes + 1
+    0
+
+pub fn rt_dict_scope_read_owner_v1(dict: i64, fuel: i64) -> i64:
+    val ptr = dict_scope_read_ptr_v1(dict, fuel)
+    if ptr < 1 or _sffi_core_array_load_i64(ptr, 48) < 1:
+        return -1
+    val owner = _sffi_core_array_load_i64(ptr, 40)
+    if owner > 0: owner else: -1
+
+pub fn rt_dict_scope_read_epoch_v1(dict: i64, owner: i64, fuel: i64) -> i64:
+    val ptr = dict_scope_read_ptr_v1(dict, fuel)
+    if ptr < 1 or owner < 1 or _sffi_core_array_load_i64(ptr, 40) != owner:
+        return -1
+    val epoch = _sffi_core_array_load_i64(ptr, 48)
+    if epoch > 0: epoch else: -1
+
+fn dict_scope_read_checked_v1(dict: i64, owner: i64, epoch: i64, fuel: i64) -> i64:
+    val ptr = dict_scope_read_ptr_v1(dict, fuel)
+    if ptr < 1 or owner < 1 or epoch < 1:
+        return 0
+    if _sffi_core_array_load_i64(ptr, 40) != owner or _sffi_core_array_load_i64(ptr, 48) != epoch:
+        return 0
+    ptr
+
+pub fn rt_dict_scope_read_meta_v1(dict: i64, owner: i64, epoch: i64, field: i64, fuel: i64) -> i64:
+    val ptr = dict_scope_read_checked_v1(dict, owner, epoch, fuel)
+    if ptr < 1:
+        return -1
+    val cap = _sffi_core_array_load_i64(ptr, 8)
+    val len = _sffi_core_array_load_i64(ptr, 16)
+    if cap < 1 or cap > 576460752303423487 or len < 0 or len > cap:
+        return -1
+    if field == 0: return 2
+    if field == 1 or field == 3: return len
+    if field == 2: return cap
+    if field == 4: return _sffi_core_array_load_i64(ptr, 56)
+    if field == 5: return dict_header_bytes_v1()
+    if field == 6: return cap * 16
+    -1
+
+pub fn rt_dict_scope_read_slot_v1(dict: i64, owner: i64, epoch: i64, slot: i64, field: i64, byte_index: i64, fuel: i64) -> i64:
+    val ptr = dict_scope_read_checked_v1(dict, owner, epoch, fuel)
+    if ptr < 1:
+        return -1
+    val len = _sffi_core_array_load_i64(ptr, 16)
+    if slot < 0 or slot >= len:
+        return -1
+    if field == 0: return 1
+    val items = _sffi_core_array_load_i64(ptr, 32)
+    val key = _sffi_core_array_load_i64(items, slot * 16)
+    val value = _sffi_core_array_load_i64(items, slot * 16 + 8)
+    var key_len = -1
+    var scalar = -1
+    unsafe(capabilities: [ffi]):
+        key_len = scope_read_string_scalar_v1(key, -1, fuel - dict_registry_count)
+        if signed_integer_is_valid(value) > 0:
+            scalar = rt_value_as_int_wide(value)
+    if key_len < 0 or scalar < 0:
+        return -1
+    if field == 1: return scalar
+    if field == 2: return key_len
+    if field == 3:
+        if byte_index < 0 or byte_index >= key_len: return -1
+        # Reusing the validated string's registered representation avoids a
+        # second registry walk: pure-core string data begins at header +16.
+        return _sffi_core_array_load_u8((key & -8) + 16, byte_index)
+    -1
 
 pub fn rt_dict_len(dict: i64) -> i64:
     if dict_ptr(dict) < 1:

@@ -1,0 +1,113 @@
+# GuardId / ActiveGuardRoot contract (proposed in the generic/AOP/macro cache
+# plan; doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md
+# §3.2 "ActiveGuardRoot", §9 item 2).
+#
+# A GuardIdV1 names one static guard (`@when(...)`, cfg, feature) by its kind
+# and whitespace-normalized expression. An ActiveGuardRootV1 records, for one
+# semantic profile, which guards were evaluated and to what. Rule: a guard the
+# compiler could not evaluate makes the root INCOMPLETE, and an incomplete
+# root is never admissible as a cache key input (=> miss / conservative), so a
+# cache can never assume an unevaluable guard is false.
+#
+# Digests are DigestV1 text `<algo>:<hex>` from the shared registry
+# (cache_contract/hash_algorithm_registry_v1).
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1,
+    digest_v1_new, digest_v1_text, digest_v1_parse, digest_v1_identity_ok}
+
+pub struct GuardIdV1:
+    kind: text
+    canonical_expr: text
+    digest: text
+
+pub struct GuardEvalV1:
+    guard: GuardIdV1
+    evaluable: bool
+    active: bool
+
+pub struct ActiveGuardRootV1:
+    profile_digest: text
+    sorted_entries: [text]
+    complete: bool
+    unevaluable: [text]
+    root_digest: text
+
+fn _h(domain: text, parts: [text]) -> text:
+    var framed = "{domain}\u0000"
+    for p in parts:
+        framed = framed + "{p.len()}:{p}\u0000"
+    match digest_v1_new(HASH_ALGO_SHA256_V1, sha256_u8_hex(text_to_bytes(framed))):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
+
+fn _normalize(expr: text) -> text:
+    var out = ""
+    var pending_space = false
+    for ch in expr.trim().chars():
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            pending_space = true
+            continue
+        if pending_space and out != "":
+            out = out + " "
+        pending_space = false
+        out = out + ch
+    out
+
+fn _sorted(values: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        var i = out.len()
+        out.push(v)
+        while i > 0 and out[i - 1] > v:
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = v
+    out
+
+pub fn guard_kinds_v1() -> [text]:
+    ["when", "cfg", "feature"]
+
+# Unknown kinds yield an id with an empty digest; such a guard can only be
+# reported unevaluable.
+pub fn guard_id_v1(kind: text, expr: text) -> GuardIdV1:
+    val canon = _normalize(expr)
+    if not guard_kinds_v1().contains(kind):
+        return GuardIdV1(kind: kind, canonical_expr: canon, digest: "")
+    GuardIdV1(kind: kind, canonical_expr: canon, digest: _h("guard-id/v1", [kind, canon]))
+
+pub fn active_guard_root_v1(profile_digest: text, evals: [GuardEvalV1]) -> ActiveGuardRootV1:
+    var entries: [text] = []
+    var unevaluable: [text] = []
+    for e in evals:
+        if not e.evaluable or e.guard.digest == "":
+            unevaluable.push("{e.guard.kind}:{e.guard.canonical_expr}")
+            continue
+        val v = if e.active: "1" else: "0"
+        val entry = "{e.guard.digest}={v}"
+        if not entries.contains(entry):
+            entries.push(entry)
+    val sorted = _sorted(entries)
+    var joined: [text] = [profile_digest]
+    for s in sorted:
+        joined.push(s)
+    val complete = unevaluable.len() == 0
+    joined.push("{complete}")
+    ActiveGuardRootV1(profile_digest: profile_digest, sorted_entries: sorted, complete: complete,
+        unevaluable: _sorted(unevaluable),
+        root_digest: _h("active-guard-root/v1", joined))
+
+pub fn active_guard_root_empty_v1(profile_digest: text) -> ActiveGuardRootV1:
+    active_guard_root_v1(profile_digest, [])
+
+# Only a complete root may feed a cache key; anything else is a miss.
+pub fn active_guard_root_admissible_v1(root: ActiveGuardRootV1) -> bool:
+    if not root.complete: return false
+    match digest_v1_parse(root.root_digest):
+        case Some(d): digest_v1_identity_ok(d)
+        case nil: false
+
+export GuardIdV1, GuardEvalV1, ActiveGuardRootV1
+export guard_kinds_v1, guard_id_v1, active_guard_root_v1, active_guard_root_empty_v1
+export active_guard_root_admissible_v1

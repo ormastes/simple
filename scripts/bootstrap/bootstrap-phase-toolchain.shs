@@ -17,6 +17,15 @@ bootstrap_phase_windows_llvm_version_valid() {
 bootstrap_phase_c_compiler_path() (
     case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
+        if [ "$(bootstrap_phase_windows_abi)" = gnu ]; then
+            # llvm-mingw UCRT lane: the canonical owner binds CC to its clang.
+            phase_resolved_cc=$(bootstrap_stage3_windows_gnu_clang_path "${CC:-}") || {
+                bootstrap_phase_toolchain_error 'Windows GNU phase requires CC to be llvm-mingw clang'; exit 1;
+            }
+            [ -f "$phase_resolved_cc" ] && [ -x "$phase_resolved_cc" ] || exit 1
+            cygpath -am "$phase_resolved_cc"
+            exit $?
+        fi
         case "${LLVM_SYS_231_PREFIX:-}" in
             /*|[A-Za-z]:[\\/]*) ;;
             *) bootstrap_phase_toolchain_error 'Windows requires an absolute LLVM_SYS_231_PREFIX'; exit 1 ;;
@@ -36,9 +45,20 @@ bootstrap_phase_c_compiler_path() (
     esac
 )
 
+# Windows ABI lane: gnu (llvm-mingw clang + ld.lld) or msvc (clang-cl). Unset
+# keeps the historical msvc default of this owner; anything else is rejected.
+bootstrap_phase_windows_abi() {
+    case "${SIMPLE_WINDOWS_ABI:-msvc}" in
+    msvc|gnu) printf '%s\n' "${SIMPLE_WINDOWS_ABI:-msvc}" ;;
+    *) return 1 ;;
+    esac
+}
+
 bootstrap_phase_c_target_platform() {
     case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) printf '%s\n' x86_64-pc-windows-msvc ;;
+    MINGW*|MSYS*|CYGWIN*)
+        phase_target_abi=$(bootstrap_phase_windows_abi) || return 1
+        printf '%s\n' "x86_64-pc-windows-$phase_target_abi" ;;
     *) bootstrap_stage3_host_platform ;;
     esac
 }
@@ -49,6 +69,45 @@ bootstrap_phase_run_command() (
     [ "${2:-}" = native-build ] || { "$phase_executor" "$@"; exit $?; }
     case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
+        phase_abi=$(bootstrap_phase_windows_abi) || {
+            bootstrap_phase_toolchain_error 'SIMPLE_WINDOWS_ABI must be gnu or msvc'; exit 1;
+        }
+        if [ "$phase_abi" = gnu ]; then
+            # llvm-mingw UCRT lane: clang + ld.lld, never gcc or clang-cl.
+            phase_cc=$(bootstrap_phase_c_compiler_path) || exit 1
+            case "${SIMPLE_LINKER_FLAVOR:-gnu}" in
+                gnu|mingw) ;;
+                *) bootstrap_phase_toolchain_error 'Windows GNU phase requires GNU linker flavor'; exit 1 ;;
+            esac
+            phase_target_seen=0
+            phase_target_next=0
+            for phase_arg in "$@"; do
+                if [ "$phase_target_next" = 1 ]; then
+                    [ "$phase_arg" = x86_64-pc-windows-gnu ] || {
+                        bootstrap_phase_toolchain_error 'Windows GNU phase requires the GNU target'; exit 1;
+                    }
+                    phase_target_next=0
+                    continue
+                fi
+                case "$phase_arg" in
+                    --target) phase_target_seen=1; phase_target_next=1 ;;
+                    --target=x86_64-pc-windows-gnu) phase_target_seen=1 ;;
+                    --target=*) bootstrap_phase_toolchain_error 'Windows GNU phase requires the GNU target'; exit 1 ;;
+                esac
+            done
+            [ "$phase_target_next" = 0 ] || {
+                bootstrap_phase_toolchain_error 'missing native-build target'; exit 1;
+            }
+            phase_version=$("$phase_executor" "$phase_cc" --version) || exit 1
+            printf '%s\n' "$phase_version" | sed -n '1p' | grep -qi 'clang version' || {
+                bootstrap_phase_toolchain_error 'Windows GNU phase requires LLVM clang'; exit 1;
+            }
+            CC=$phase_cc
+            SIMPLE_WINDOWS_ABI=gnu
+            SIMPLE_LINKER_FLAVOR=gnu
+            export CC SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR
+            [ "$phase_target_seen" = 1 ] || set -- "$@" --target x86_64-pc-windows-gnu
+        else
         # Git Bash MSYSTEM otherwise selects GNU even for an MSVC compiler.
         # Keep LLVM 23.1.x clang-cl, MSVC ABI and CL=/TC together. Do not change
         # this to gcc, g++, cl.exe, or ambient PATH discovery on another host.
@@ -102,6 +161,7 @@ bootstrap_phase_run_command() (
         export CC SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CL
         bootstrap_windows_preserve_cl_mode
         [ "$phase_target_seen" = 1 ] || set -- "$@" --target x86_64-pc-windows-msvc
+        fi
         ;;
     *)
         CC=$(bootstrap_phase_c_compiler_path) || {

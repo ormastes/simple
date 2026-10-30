@@ -30,13 +30,17 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_definitions.{HirFunction, HirConst}
 use compiler.hir.nominal_type_relocation.{hir_relocate_types}
+use compiler.mono.mono_template_symbol_relocation_v1.{MonoTemplateRelocationPlanV1, mono_template_relocation_plan_v2, mono_relocation_error_v1, mono_template_closure_qualified_v1, mono_template_reject_unplanned_refs_v1, mono_target_declared_names_v1}
+use compiler.monomorphize.hir_subst.body_subst.{relocate_template_body_full_v1, collect_body_relocation_refs_v1}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
-use compiler.mono.nominal_type_identity.{mono_owned_type_key, mono_owned_type_keys}
+use compiler.mono.nominal_type_identity.{mono_owned_type_key, mono_owned_type_keys,
+    MonoObservedGenericUseV1, mono_generic_uses_of_type_v1, mono_type_source_text_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.return_type_interface_v1.{rti_semantic_callable_return_v1}
 use std.io_runtime.{env_get, time_now_monotonic_ms}
 use compiler.mono.mono_archive_types_v1.{
     MonoTemplateBodyModeV1, MonoTemplateSignatureV1, MonoTemplateRecipeV1,
@@ -78,7 +82,7 @@ val MONO_MAX_TYPE_DEPTH: i64 = 16
 #      this range); its counter is then set to the pass's FINAL counter, so
 #      what MIR mints there afterwards is past every specialization of the
 #      pass, not just past the ones this module owns.
-val MONO_SYMBOL_BASE: i64 = 1125899906842624
+pub val MONO_SYMBOL_BASE: i64 = 1125899906842624
 
 # Nominal ids are local to a symbol table. Inference between a template and
 # its caller compares declaration owners, including nested type arguments.
@@ -99,7 +103,22 @@ var _mono_diag_enabled_state: i64 = -1
 
 # Sub-phase wall times of the last `process_modules`, for the driver's
 # `phase4:monomorphize:breakdown` marker. One text, overwritten per pass.
-var mono_last_phase_profile_v1: text = ""
+pub var mono_last_phase_profile_v1: text = ""
+
+# Per-instance wall time (ms) of the last `process_modules`: mangled
+# specialization -> substitution (request_specialization) + body rewrite
+# (drain_worklist). Measures specialize cost per instance; codegen per
+# instance is measured downstream (MIR/LLVM run per module).
+pub var mono_instance_profile_v1: Dict<text, i64> = {}
+
+fn mono_instance_profile_summary_v1() -> text:
+    var total = 0
+    var max_ms = 0
+    for k in mono_instance_profile_v1.keys():
+        val ms: i64 = mono_instance_profile_v1[k]
+        total = total + ms
+        if ms > max_ms: max_ms = ms
+    "instances={mono_instance_profile_v1.len()} instance_ms_total={total} instance_ms_max={max_ms}"
 
 # WORKAROUND(mir_provider_optional_type_wrapper_segv_2026-10-14): the old
 # A174 producer passes ArrayLit optional metadata to a concrete HirType ABI
@@ -142,9 +161,12 @@ class MonomorphizationPass:
     # global i64 key let module B's symbol 5 resolve to module A's generic
     # at id 5 (mis-specialization) -- measured on a 2-module fixture 2026-08-22.
     sym_names: Dict<text, text>
-    # Symbol id -> declared return type of every NON-generic function, used by
-    # local argument-type inference.
+    # Symbol id -> semantic declared return type, including generic originals
+    # and concrete specializations. Physical function signatures stay separate.
     fn_returns: Dict<text, HirType>
+    # Canonical semantic template results, derived once after discovery. This
+    # invocation-owned cache never changes the physical archive signatures.
+    semantic_template_returns_v1: Dict<text, HirType> = {}
     # Same key -> full `fn(params) -> ret` type of every NON-generic
     # function, so a bare function REFERENCE passed as an argument
     # (`walk(e, acc, collect)`) binds a `fn(..., C) -> C` parameter.
@@ -230,6 +252,9 @@ class MonomorphizationPass:
     # receiver's arguments alone. A call on a concrete instantiation is then
     # a loud E-MONO-034, never a silent bind to the unspecialized template.
     generic_method_rejected: Dict<text, text>
+    # Positive local inherent ownership only; an empty value is poisoned.
+    # Archive-restored workers without this retained proof stay fail-closed.
+    inherent_method_owners: Dict<text, text> = {}
     # Module name -> its SymbolTable, to read a receiver type's identity.
     module_symbols: Dict<text, SymbolTable>
     # Generic struct/class tables, keyed by ownership identity
@@ -258,7 +283,7 @@ class MonomorphizationPass:
     archive_requests: [MonoSpecializationRequestV1] = mono_default_archive_requests_v1()
     # Filled only from completed FIFO emission records during archive assembly.
     archive_emitted_templates: Dict<text, text> = {}
-    # Root discovery (opt-in, SIMPLE_MONO_ROOT_DISCOVERY=1 or set directly):
+    # Root discovery (default on; SIMPLE_MONO_ROOT_DISCOVERY=0 disables it):
     # a read-only pre-walk proves a root body holds no mono-relevant node and
     # passes it through instead of rebuilding it. See
     # `mono_root_is_relevant_v1` for the soundness argument.
@@ -268,6 +293,15 @@ class MonomorphizationPass:
     # tables they are projected from.
     discovery_method_names: Dict<text, bool> = {}
     discovery_field_names: Dict<text, bool> = {}
+    # Module-scoped mode (`process_module_scoped_v1`, opt-in
+    # per-file lane): only `module_scoped_target_v1`'s roots are
+    # rewritten, and an unresolvable generic call there is E-MONO-040.
+    module_scoped_v1: bool = false
+    module_scoped_target_v1: text = ""
+    # Derived lookup index only; never serialized into archive facts. Values
+    # remain in named_symbol_names so same-key updates cannot stale the index.
+    named_symbol_suffix_index: Dict<text, [text]> = {}
+    named_symbol_index_count: i64 = -1
 
 pub struct MonoInvocationOutputV1:
     modules: Dict<text, HirModule>
@@ -316,6 +350,8 @@ impl MonomorphizationPass:
             named_types: {},
             named_ambiguous: {},
             named_symbol_names: {},
+            named_symbol_suffix_index: {},
+            named_symbol_index_count: -1,
             field_types: {},
             field_owner_modules: {},
             enum_payload_types: {},
@@ -332,6 +368,7 @@ impl MonomorphizationPass:
             unresolved_templates: {},
             generic_methods: {},
             generic_method_rejected: {},
+            inherent_method_owners: {},
             module_symbols: {},
             generic_type_params: {},
             generic_type_modules: {},
@@ -427,7 +464,7 @@ impl MonomorphizationPass:
             type_: signature, scope: ScopeId(id: 0), span: function.span,
             visibility: Visibility.Private, is_public: false,
             is_mutable: false, defining_module: module_name,
-            builtin_method_tag: BUILTIN_METHOD_NONE))
+            builtin_method_tag: BUILTIN_METHOD_NONE, generic_param_count: 0))
         mono_validate_function_signature_v1(module_name, output, function, budget, require_owned_row: true)?
         Ok(output)
 
@@ -469,6 +506,7 @@ impl MonomorphizationPass:
             self.root_discovery = mono_root_discovery_env_v1()
         val discovery = self.root_discovery and self.template_body_mode == MonoTemplateBodyModeV1.Retained
         val t_start = self.invocation_clock_v1()
+        mono_instance_profile_v1 = {}
         val mod_keys = modules.keys()
 
         # Step 1: Collect generic definitions
@@ -489,6 +527,7 @@ impl MonomorphizationPass:
             self.build_root_discovery_index_v1()
         var roots_total = 0
         var roots_rewritten = 0
+        val const_discovery = discovery and mono_const_discovery_env_v1()
 
         # Step 2: roots -> requests -> specializations -> fixed point.
         # Roots are walked in module-key order, then ascending symbol id, so
@@ -543,6 +582,14 @@ impl MonomorphizationPass:
             for const_key in const_keys:
                 val const: HirConst = consts[const_key]
                 if const.value == nil:
+                    continue
+                # Discovery (bug native_build_hir_phase_scopes_2026_10_24): an
+                # initializer with no mono-relevant node rewrites to an identical
+                # value with no side effect on requests, symbol ids or
+                # diagnostics (same argument as `mono_root_is_relevant_v1`), so
+                # keep it instead of rebuilding it and leaking the rebuild.
+                # SIMPLE_MONO_CONST_DISCOVERY=0 restores the full rewrite.
+                if const_discovery and not self.mono_relevant_expr_v1(const.value):
                     continue
                 # Hoist the empty statement list to a typed local: the seed
                 # parser rejects an inline `[]` literal in constructor-call
@@ -599,13 +646,18 @@ impl MonomorphizationPass:
                     if alias_owner == "" or (physical_owner[spec_owner] ?? "") != alias_owner:
                         continue
                 val spec: HirFunction = self.specialized_functions[m]
+                val placed_name = if spec.is_extern:
+                    self.template_signature_v1(self.spec_template[m]).name
+                else: m
                 funcs[spec.symbol] = spec
-                if publish_placements:
+                # An extern instance is a typed declaration, not an emitted body.
+                # Attach its signature below without certifying a body placement.
+                if publish_placements and not spec.is_extern:
                     # Provenance comes from the actual fixed-point placement,
                     # never a mangled-name pattern or a SymbolId range. Hash
                     # each completed specialization once, then record every
                     # logical alias that actually receives that exact body.
-                    if self.spec_symbols[m] != spec.symbol.id or spec.name != m or self.template_module[self.spec_template[m]] != spec_owner:
+                    if self.spec_symbols[m] != spec.symbol.id or spec.name != placed_name or self.template_module[self.spec_template[m]] != spec_owner:
                         placement_valid = false
                     if not placement_digests.has(m):
                         placement_digests[m] = mono_complete_function_digest_v1(spec)
@@ -619,7 +671,7 @@ impl MonomorphizationPass:
                 # MIR uses the owning table to resolve callable identity. A
                 # specialization must have a row just like a parsed function.
                 if val budget = self.invocation_budget:
-                    if spec == nil or spec.symbol == nil or self.spec_symbols[m] != spec.symbol.id or spec.name != m or self.template_module[self.spec_template[m]] != spec_owner:
+                    if spec == nil or spec.symbol == nil or self.spec_symbols[m] != spec.symbol.id or spec.name != placed_name or self.template_module[self.spec_template[m]] != spec_owner:
                         budget.fail_v1("E-MONO-SIGNATURE: specialization placement provenance differs")
                         return {}
                     match self.attach_specialized_signature_v1(name, out.symbols, spec):
@@ -633,7 +685,7 @@ impl MonomorphizationPass:
                         type_: nil, scope: ScopeId(id: 0), span: spec.span,
                         visibility: Visibility.Private, is_public: false,
                         is_mutable: false, defining_module: name,
-                        builtin_method_tag: BUILTIN_METHOD_NONE))
+                        builtin_method_tag: BUILTIN_METHOD_NONE, generic_param_count: 0))
                 owns_specialization = true
             # Rule 3 at MONO_SYMBOL_BASE: an owner also CALLS specializations
             # other modules own; its counter must clear all of them.
@@ -646,10 +698,175 @@ impl MonomorphizationPass:
             rewritten.remove(name)
 
         val t_placed = self.invocation_clock_v1()
-        if self.invocation_budget == nil: mono_last_phase_profile_v1 = "collect_ms={t_collected - t_start} roots_ms={t_roots - t_collected} drain_ms={t_drained - t_roots} place_ms={t_placed - t_drained} roots={roots_total} roots_rewritten={roots_rewritten} queue={self.spec_queue.len()} discovery={discovery}"
+        if self.invocation_budget == nil: mono_last_phase_profile_v1 = "collect_ms={t_collected - t_start} roots_ms={t_roots - t_collected} drain_ms={t_drained - t_roots} place_ms={t_placed - t_drained} roots={roots_total} roots_rewritten={roots_rewritten} queue={self.spec_queue.len()} discovery={discovery} {mono_instance_profile_summary_v1()}"
         if publish_placements and placement_valid and self.diagnostics.len() == 0 and not self.invocation_failed_v1():
             mono_selective_emission_publish_v1(placements)
         result
+
+    me process_module_scoped_v1(module_name: text, module: HirModule, templates: Dict<text, HirModule>) -> HirModule:
+        """Module-scoped monomorphization (design true_per_file_pipeline_v1
+        §4 P4; build_runner_fiber_scheduler_v1 §8).
+
+        Rewrites ONLY `module`'s roots and constant initializers, drains the
+        worklist for the instances it requested, and places every instance
+        into `module`'s OWN function table flagged `is_comdat_instance`, so
+        each object carries its own `linkonce_odr` + comdat copy and the
+        linker keeps one. `templates` are read-only template providers: they
+        are collected, never rewritten or returned. Instance names use the
+        same `mangled_name` as the global pass, so identical instances
+        requested by different modules spell one symbol."""
+        self.module_scoped_v1 = true
+        self.module_scoped_target_v1 = module_name
+        self.declared_global_types = {}
+        mono_instance_profile_v1 = {}
+        mono_scoped_generic_uses_reset_v1()
+        if self.invocation_budget == nil: mono_diag_refresh_v1()
+        val template_keys: [text] = templates.keys()
+        for tname in template_keys:
+            if tname == module_name:
+                continue
+            val provider: HirModule = templates[tname]
+            self.module_paths[tname] = provider.path
+            self.collect_declared_globals(provider, tname)
+            self.collect_generics(provider, tname)
+        self.module_paths[module_name] = module.path
+        self.collect_declared_globals(module, module_name)
+        self.collect_generics(module, module_name)
+        self.current_module = module_name
+        var funcs: Dict<SymbolId, HirFunction> = {}
+        val function_values: [HirFunction] = module.functions.values()
+        for function_index in sorted_function_indices(function_values):
+            val func: HirFunction = function_values[function_index]
+            if is_generic_function(func) or func.is_generic_template:
+                funcs[func.symbol] = func
+                continue
+            funcs[func.symbol] = self.rewrite_function(func)
+        var consts: Dict<SymbolId, HirConst> = module.constants
+        val const_keys: [SymbolId] = consts.keys()
+        for const_key in const_keys:
+            val const: HirConst = consts[const_key]
+            if const.value == nil:
+                continue
+            val no_stmts: [HirStmt] = []
+            val wrapped = HirBlock(stmts: no_stmts, has: true, value: const.value, span: Span.empty())
+            val rewritten_block = self.rewrite_block(wrapped, nil)
+            consts[const_key] = HirConst(
+                symbol: const.symbol, name: const.name, type_: const.type_,
+                value: rewritten_block.value, is_mutable: const.is_mutable,
+                visibility: const.visibility, is_public: const.is_public,
+                is_volatile: const.is_volatile,
+                has_fixed_address: const.has_fixed_address,
+                fixed_address: const.fixed_address)
+        self.drain_worklist()
+        var out = module
+        if self.module_symbols.has(module_name):
+            out.symbols = self.module_symbols[module_name]
+        out.constants = consts
+        val specialized_keys: [text] = self.specialized_functions.keys()
+        # Template-symbol relocation (E-MONO-041): an instance body copied
+        # from template module T still names T's SymbolIds. Rewrite each
+        # T function/constant reference to its module-qualified object
+        # symbol; an instance with an unrelocatable reference is NOT placed
+        # (the module falls back to MONO-PENDING via the diagnostic).
+        var plans: Dict<text, MonoTemplateRelocationPlanV1> = {}
+        var reloc_next = self.next_symbol
+        # P-B: placed instances are already valid ids in this module.
+        var keep: Dict<text, bool> = {}
+        for mangled in specialized_keys:
+            val km: text = mangled
+            val ks: HirFunction = self.specialized_functions[km]
+            keep["{ks.symbol.id}"] = true
+        val closure_qualified = mono_template_closure_qualified_v1()
+        val target_names = mono_target_declared_names_v1(module)
+        for mangled in specialized_keys:
+            val m: text = mangled
+            var spec: HirFunction = self.specialized_functions[m]
+            var owner = module_name
+            if self.spec_module.has(m):
+                owner = self.spec_module[m]
+            if owner != module_name and templates.has(owner):
+                val provider: HirModule = templates[owner]
+                if not plans.has(owner):
+                    val made = mono_template_relocation_plan_v2(provider, owner, reloc_next, closure_qualified, target_names)
+                    reloc_next = made.next_symbol
+                    plans[owner] = made
+                    self.register_relocated_symbols_v1(out, made, module_name)
+                val plan: MonoTemplateRelocationPlanV1 = plans[owner]
+                # Nominal types (nested type arguments included) the body
+                # names are transported T -> F by declared module + name,
+                # exactly like an instance signature (E-MONO-042 on failure).
+                val refs = collect_body_relocation_refs_v1(spec.body)
+                # Fresh relocation ids come from `reloc_next`; the type
+                # transport must allocate past them.
+                if self.next_symbol < reloc_next:
+                    self.next_symbol = reloc_next
+                val type_map = self.relocate_body_type_ids_v1(refs.types, owner, module_name, keep)
+                if self.next_symbol > reloc_next:
+                    reloc_next = self.next_symbol
+                if self.module_symbols.has(module_name):
+                    # The transport may hand back a new table: keep it, and
+                    # keep the relocated function rows on it.
+                    out.symbols = self.module_symbols[module_name]
+                    for planned_owner in plans.keys():
+                        val po: text = planned_owner
+                        self.register_relocated_symbols_v1(out, plans[po], module_name)
+                val reject = mono_template_reject_unplanned_refs_v1(provider, plan, refs.symbols, keep)
+                val relocated = relocate_template_body_full_v1(spec.body, plan.names, plan.ids, reject, type_map, keep, true)
+                if relocated.diagnostics.len() > 0:
+                    for what in relocated.diagnostics:
+                        val wt: text = what
+                        self.diagnostics = self.diagnostics.push(mono_relocation_error_v1(wt, owner, module_name))
+                    continue
+                spec.body = relocated.body
+            var attr: FunctionAttr = spec.func_attr
+            attr.is_comdat_instance = true
+            spec.func_attr = attr
+            funcs[spec.symbol] = spec
+            out.symbols.register_preserved_symbol(HirSymbol(
+                id: spec.symbol, name: spec.name, kind: SymbolKind.Function,
+                type_: nil, scope: ScopeId(id: 0), span: spec.span,
+                visibility: Visibility.Private, is_public: false,
+                is_mutable: false, defining_module: module_name,
+                builtin_method_tag: BUILTIN_METHOD_NONE, generic_param_count: 0))
+        if out.symbols.next_symbol_id < reloc_next:
+            out.symbols.next_symbol_id = reloc_next
+        out.functions = funcs
+        mono_scoped_generic_uses_ready_v1 = true
+        self.prune_consumed_templates(out)
+
+    me relocate_body_type_ids_v1(type_ids: [i64], source_module: text, target_module: text, keep: Dict<text, bool>) -> Dict<text, i64>:
+        """T-numbered nominal type id -> F id for every distinct id a body
+        names. Each id is transported alone through `relocate_mono_types`
+        (declared module + name); a failed one is left out, so the relocating
+        walk reports it unmapped (fail closed) next to the E-MONO-042 row."""
+        var out: Dict<text, i64> = {}
+        for raw in type_ids:
+            val id: i64 = raw
+            val key = "{id}"
+            if out.has(key) or keep.has(key):
+                continue
+            val probe = HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: Span.empty())
+            if val moved = self.relocate_mono_types([probe], source_module, target_module, "body type of template {source_module}"):
+                val moved_type: HirType = moved[0]
+                match moved_type.kind:
+                    case HirTypeKind.Named(target_id, _args): out[key] = target_id.id
+                    case _: ()
+        out
+
+    me register_relocated_symbols_v1(out: HirModule, plan: MonoTemplateRelocationPlanV1, module_name: text):
+        """Give every relocated T symbol a row in F's table under its fresh
+        id, named by its object symbol and owned by T."""
+        val keys: [text] = plan.names.keys()
+        for k in keys:
+            val key: text = k
+            val kind_name: text = plan.kinds[key]
+            val kind = if kind_name == "const": SymbolKind.Const elif kind_name == "method": SymbolKind.Method else: SymbolKind.Function
+            out.symbols.register_preserved_symbol(HirSymbol(
+                id: SymbolId(id: plan.ids[key]), name: plan.names[key], kind: kind,
+                type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
+                visibility: Visibility.Public, is_public: true,
+                is_mutable: false, defining_module: plan.template_module,
+                builtin_method_tag: BUILTIN_METHOD_NONE, generic_param_count: 0))
 
     # ========================================================================
     # Step 1: Collect Generic Definitions
@@ -696,7 +913,7 @@ impl MonomorphizationPass:
             eprint("[mono-diag] collect module={module_name} values={function_values.len()}")
         var function_index = 0
         while function_index < function_values.len():
-            self.collect_function_entry_v1(module_name, function_values, function_index, trace_provider and function_index < 32)
+            self.collect_function_entry_v1(module_name, module.symbols, function_values, function_index, trace_provider and function_index < 32)
             function_index = function_index + 1
         if trace_provider:
             eprint("[mono-diag] collected module={module_name} registered={self.stats.generic_functions_found}")
@@ -796,6 +1013,7 @@ impl MonomorphizationPass:
                     mono_type_identity(module.symbols, symbol.id, module_name)
         else:
             self.module_symbols[module_name] = module.symbols
+        self.collect_local_inherent_method_owners_v1(module, module_name)
         self.collect_generic_impl_methods(module, module_name)
         self.collect_class_static_templates_v1(module, module_name)
 
@@ -813,33 +1031,79 @@ impl MonomorphizationPass:
             for owner_param in owner.type_params:
                 val owner_tp: HirTypeParam = owner_param
                 owner_names = owner_names.push(owner_tp.name)
+            # The flat-AST bridge carries class-body methods in synthetic
+            # inherent impls, leaving HirClass.methods empty. Preserve those
+            # exact owner/impl binder aliases for canonicalization; the call
+            # still binds one argument per owner parameter, not per alias.
+            var static_methods: Dict<text, SymbolId> = {}
+            var canonical_params: Dict<i64, [HirTypeParam]> = {}
             for method_name in owner.methods.keys():
                 val method_symbol: SymbolId = owner.methods[method_name]
+                static_methods[method_name] = method_symbol
+                canonical_params[method_symbol.id] = owner.type_params
+            for raw_impl in module.impls:
+                val owner_impl: HirImpl = raw_impl
+                if owner_impl.has_trait_ or owner_impl.type_params.len() != owner.type_params.len(): continue
+                var exact_target = false
+                match owner_impl.type_.kind:
+                    case HirTypeKind.Named(impl_owner, target_args):
+                        exact_target = mono_type_identity(module.symbols, impl_owner, module_name) == identity and
+                            mono_impl_target_is_canonical(target_args, owner_impl.type_params)
+                    case _: ()
+                if not exact_target: continue
+                var same_binders = true
+                var binder_index = 0
+                while binder_index < owner.type_params.len():
+                    val impl_parameter: HirTypeParam = owner_impl.type_params[binder_index]
+                    val owner_parameter: HirTypeParam = owner.type_params[binder_index]
+                    if impl_parameter.name != owner_parameter.name:
+                        same_binders = false
+                    binder_index = binder_index + 1
+                if not same_binders: continue
+                var aliases: [HirTypeParam] = []
+                for parameter in owner.type_params: aliases = aliases.push(parameter)
+                for parameter in owner_impl.type_params: aliases = aliases.push(parameter)
+                for method_name in owner_impl.methods.keys():
+                    val method_symbol: SymbolId = owner_impl.methods[method_name]
+                    if module.functions[method_symbol] == nil: continue
+                    val method: HirFunction = module.functions[method_symbol]
+                    if not method.is_static or method.type_params.len() != 0: continue
+                    if static_methods.has(method_name):
+                        val prior_symbol: SymbolId = static_methods[method_name]
+                        if prior_symbol.id != method_symbol.id:
+                            self.generic_method_rejected["static::{identity}::{method_name}"] = "duplicate static owner template"
+                            continue
+                    static_methods[method_name] = method_symbol
+                    canonical_params[method_symbol.id] = aliases
+            for method_name in static_methods.keys():
+                val method_symbol: SymbolId = static_methods[method_name]
                 if module.functions[method_symbol] == nil: continue
                 val method: HirFunction = module.functions[method_symbol]
                 # Mixed owner/method generic scopes retain their existing
                 # route until their separate argument binding is qualified.
                 if not method.is_static or method.type_params.len() != 0: continue
-                # A signature that never names an owner parameter (e.g.
-                # PureTensor.zeros -> PureTensor<f64>, ScalableVec.min_lanes)
-                # offers no binding evidence; templating it would make every
-                # call unspecializable (E-MONO-032/033). Keep the erased route.
-                var mentions_owner = hir_type_mentions_any_param(method.return_type, owner_names)
-                for method_param in method.params:
-                    val signature_param: HirParam = method_param
-                    if hir_type_mentions_any_param(signature_param.type_, owner_names):
+                val key = "static::{identity}::{method_name}"
+                if self.generic_method_rejected.has(key): continue
+                val name = "{identity}::static::{method_name}"
+                val recipe = MonoTemplateRecipeV1(module_name: module_name,
+                    original_symbol: method.symbol, template_name: name,
+                    canonical_type_params: canonical_params[method_symbol.id],
+                    bound_type_params: owner.type_params, inherent_method: true)
+                # Inspect the exact-symbol canonical signature. A raw
+                # Named(impl_T, []) is an owner binding too, but guessing from
+                # its display name would capture unrelated same-named types.
+                val signature = mono_template_recipe_signature_v1(method, recipe)
+                # Owner-free signatures offer no binding evidence and retain
+                # their existing route (e.g. PureTensor.zeros -> PureTensor<f64>).
+                var mentions_owner = hir_type_mentions_any_param(signature.return_type, owner_names)
+                for param_type in signature.param_types:
+                    if hir_type_mentions_any_param(param_type, owner_names):
                         mentions_owner = true
                 if not mentions_owner: continue
-                val key = "static::{identity}::{method_name}"
-                val name = "{identity}::static::{method_name}"
                 if self.has_template_v1(name) or self.generic_methods.has(key):
                     self.generic_method_rejected[key] = "duplicate static owner template"
                     continue
-                val recipe = MonoTemplateRecipeV1(module_name: module_name,
-                    original_symbol: method.symbol, template_name: name,
-                    canonical_type_params: owner.type_params,
-                    bound_type_params: owner.type_params, inherent_method: true)
-                self.archive_template_signatures[name] = mono_template_recipe_signature_v1(method, recipe)
+                self.archive_template_signatures[name] = signature
                 if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
                     self.generic_functions[name] = method
                 self.template_recipes[name] = recipe
@@ -868,7 +1132,7 @@ impl MonomorphizationPass:
 
     # The typed array owner survives the complete scalar-index walk. Avoid
     # both an erased by-value extraction return and copied aggregate-key lookup.
-    me collect_function_entry_v1(module_name: text, functions: [HirFunction], index: i64, trace_entry: bool = false):
+    me collect_function_entry_v1(module_name: text, symbols: SymbolTable, functions: [HirFunction], index: i64, trace_entry: bool = false):
         val func: HirFunction = functions[index]
         if trace_entry:
             # The existing classifier also accepts an absent binder array.
@@ -879,6 +1143,12 @@ impl MonomorphizationPass:
         # the fresh-symbol counter past every id already in use.
         val fsym: SymbolId = func.symbol
         self.sym_names[mono_sym_key(module_name, fsym.id)] = func.name
+        # Inference needs the declared result, even when bootstrap keeps an
+        # erased physical return ABI. Cache once per function, including
+        # generic declarations whose signatures are instantiated later.
+        val semantic_return: HirType = self.semantic_function_return_v1(module_name, symbols, func)
+        self.fn_returns[mono_sym_key(module_name, fsym.id)] = semantic_return
+        self.semantic_template_returns_v1.remove(func.name)
         if fsym.id >= self.next_symbol:
             self.next_symbol = fsym.id + 1
         if is_generic_function(func):
@@ -895,14 +1165,63 @@ impl MonomorphizationPass:
             self.template_module[func.name] = module_name
             self.stats.generic_functions_found = self.stats.generic_functions_found + 1
         else:
-            self.fn_returns[mono_sym_key(module_name, fsym.id)] = func.return_type
             self.plain_fn_symbols[mono_sym_key(module_name, fsym.id)] = true
             if not func.is_method:
                 var ptys: [HirType] = []
                 for p in func.params:
                     val pp: HirParam = p
                     ptys = ptys.push(pp.type_)
-                self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, func.return_type, []), span: func.span)
+                self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, semantic_return, []), span: func.span)
+
+    me collect_local_inherent_method_owners_v1(module: HirModule, module_name: text):
+        if module.impls.len() == 0:
+            return
+        # Impl references may contain a different SymbolId wrapper from the
+        # function dictionary key. Resolve their scalar identity once, using
+        # actual dictionary keys to retrieve authoritative declarations.
+        var declarations: Dict<i64, HirFunction> = {}
+        var rejected_ids: Dict<i64, bool> = {}
+        val declaration_keys: [SymbolId] = module.functions.keys()
+        for stored_key in declaration_keys:
+            if module.functions[stored_key] == nil:
+                rejected_ids[stored_key.id] = true
+                continue
+            val declaration: HirFunction = module.functions[stored_key]
+            val declared_symbol: SymbolId = declaration.symbol
+            if stored_key.id != declared_symbol.id:
+                rejected_ids[stored_key.id] = true
+                rejected_ids[declared_symbol.id] = true
+            elif declarations.has(stored_key.id):
+                rejected_ids[stored_key.id] = true
+            else:
+                declarations[stored_key.id] = declaration
+        # Every association participates: a trait or unsupported association
+        # poisons the same symbol even if a later inherent impl names it too.
+        for raw_impl in module.impls:
+            val impl_: HirImpl = raw_impl
+            var identity = ""
+            if not impl_.has_trait_ and impl_.type_params.len() == 0:
+                match impl_.type_.kind:
+                    case HirTypeKind.Named(owner, arguments):
+                        if arguments.len() == 0:
+                            identity = mono_type_identity(module.symbols, owner, module_name)
+                    case _: ()
+            for method_name in impl_.methods.keys():
+                val target: SymbolId = impl_.methods[method_name]
+                val key = mono_sym_key(module_name, target.id)
+                var admitted = false
+                if identity != "" and not rejected_ids.has(target.id) and declarations.has(target.id):
+                    val declaration: HirFunction = declarations[target.id]
+                    admitted = declaration.symbol.id == target.id and declaration.is_method and
+                        not declaration.is_static and declaration.type_params.len() == 0 and
+                        not declaration.is_generic_template and hir_type_is_concrete(declaration.return_type)
+                if not admitted:
+                    self.inherent_method_owners[key] = ""
+                elif self.inherent_method_owners.has(key):
+                    if self.inherent_method_owners[key] != identity:
+                        self.inherent_method_owners[key] = ""
+                else:
+                    self.inherent_method_owners[key] = identity
 
     me collect_generic_impl_methods(module: HirModule, module_name: text):
         """Register each instance method of a generic inherent impl
@@ -1040,13 +1359,63 @@ impl MonomorphizationPass:
             if hir_type_is_concrete(declared): return declared
         nil
 
+    me observe_generic_uses_v1(t: HirType):
+        """P-G5: record the concrete generic type uses module-scoped mono
+        sees (after inference), for the TLDR `generic-spec` list."""
+        if not self.module_scoped_v1 or t == nil or not hir_type_is_concrete(t):
+            return
+        val symbols: SymbolTable? = self.module_symbols[self.current_module] ?? nil
+        val (uses, ok) = mono_generic_uses_of_type_v1(t, symbols)
+        if not ok:
+            mono_scoped_generic_uses_complete_v1 = false
+        for u in uses:
+            var use_: MonoObservedGenericUseV1 = u
+            if use_.owner == "":
+                use_.owner = self.current_module
+            val seen_key = use_.owner + "\u001f" + use_.name + "\u001f" + use_.arg_texts.join("\u001f")
+            if mono_scoped_generic_seen_v1.has(seen_key):
+                continue
+            mono_scoped_generic_seen_v1[seen_key] = true
+            mono_scoped_generic_uses_v1 = mono_scoped_generic_uses_v1.push(use_)
+
+    me semantic_function_return_v1(module_name: text, symbols: SymbolTable, func: HirFunction) -> HirType:
+        # Keep semantic evidence separate from HirFunction.return_type: the
+        # latter may deliberately carry the bootstrap physical ABI.
+        # Collection precedes module_symbols installation, and archive mode
+        # deliberately never retains that table. Use the current provider's
+        # table directly rather than caching its erased ABI on the first visit.
+        if symbols == nil: return func.return_type
+        rti_semantic_callable_return_v1(module_name, symbols,
+            func.symbol, func.name, func.return_type)
+
+    me template_semantic_return_v1(template: MonoTemplateSignatureV1) -> HirType:
+        if self.semantic_template_returns_v1.has(template.name):
+            return self.semantic_template_returns_v1[template.name]
+        if not self.template_recipes.has(template.name): return template.return_type
+        val recipe = self.template_recipes[template.name]
+        val key = mono_sym_key(recipe.module_name, recipe.original_symbol.id)
+        if not self.fn_returns.has(key): return template.return_type
+        # The declared symbol may still spell a binder as Named(T, []). Use
+        # the exact-symbol recipe used by the template's physical signature.
+        var substitution = typesubstitution_canonical(recipe.canonical_type_params)
+        substitution.budget = self.invocation_budget
+        val semantic_return = substitute_type(self.fn_returns[key], substitution)
+        if not self.invocation_failed_v1():
+            self.semantic_template_returns_v1[template.name] = semantic_return
+        semantic_return
+
     me rewrite_function(func: HirFunction) -> HirFunction:
         if not self.invocation_enter_v1(): return func
+        self.observe_generic_uses_v1(func.return_type)
+        for observed_param in func.params:
+            val op: HirParam = observed_param
+            self.observe_generic_uses_v1(op.type_)
         val previous_env = self.env
         val previous_return_type = self.current_return_type
         val previous_match_hint = self.match_enum_hint
         self.env = {}
-        self.current_return_type = func.return_type
+        val expected_return: HirType = self.fn_returns[mono_sym_key(self.current_module, func.symbol.id)] ?? func.return_type
+        self.current_return_type = expected_return
         var out = func
         var params: [HirParam] = []
         for raw in func.params:
@@ -1068,7 +1437,7 @@ impl MonomorphizationPass:
             if self.invocation_diag_enabled_v1():
                 eprint("[mono-diag] rewrite_function {func.name} stmts={func.body.stmts.len()}")
             self.collect_lets_block(func.body)
-            out.body = self.rewrite_block(func.body, func.return_type)
+            out.body = self.rewrite_block(func.body, expected_return)
         self.current_return_type = previous_return_type
         if self.invocation_budget != nil:
             self.env = previous_env
@@ -1088,7 +1457,10 @@ impl MonomorphizationPass:
             val mangled: text = self.spec_queue[i]
             val spec: HirFunction = self.specialized_functions[mangled]
             self.current_module = self.spec_module[mangled]
+            val t_rewrite = self.invocation_clock_v1()
             self.specialized_functions[mangled] = self.rewrite_function(spec)
+            val prior: i64 = if mono_instance_profile_v1.has(mangled): mono_instance_profile_v1[mangled] else: 0
+            mono_instance_profile_v1[mangled] = prior + self.invocation_clock_v1() - t_rewrite
             i = i + 1
 
     me mangled_name(func_name: text, type_args: [HirType]) -> text:
@@ -1204,13 +1576,21 @@ impl MonomorphizationPass:
     me specialization_signature_in_caller(spec_name: text, span: Span) -> HirType?:
         val specialized = self.specialization_signature_v1(spec_name)
         val signature = HirType(kind: HirTypeKind.Function(specialized.param_types, specialized.return_type, specialized.effects), span: span)
-        if val transported = self.relocate_mono_types([signature], self.spec_module[spec_name], self.current_module, "signature of `{spec_name}`"):
+        val owner_key = mono_sym_key(self.spec_module[spec_name], self.spec_symbols[spec_name])
+        val semantic_return: HirType = self.fn_returns[owner_key] ?? specialized.return_type
+        # Transport both views in the same owner-qualified operation. The
+        # physical call stamp must not overwrite the semantic result cache,
+        # including when caller and specialization share a module.
+        if val transported = self.relocate_mono_types([signature, semantic_return], self.spec_module[spec_name], self.current_module, "signature of `{spec_name}`"):
             val caller_signature: HirType = transported[0]
+            val caller_return: HirType = transported[1]
             match caller_signature.kind:
-                case HirTypeKind.Function(_, ret, _):
-                    self.fn_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = ret
+                case HirTypeKind.Function(_, _, _):
+                    if specialized.is_extern:
+                        self.sym_names[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = spec_name
+                    self.fn_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = caller_return
                     if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
-                        self.archive_caller_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = ret
+                        self.archive_caller_returns[mono_sym_key(self.current_module, self.spec_symbols[spec_name])] = caller_return
                 case _: ()
             return caller_signature
         nil
@@ -1314,6 +1694,18 @@ impl MonomorphizationPass:
         val sym = self.next_symbol
         self.next_symbol = self.next_symbol + 1
         self.spec_symbols[mangled] = sym
+        if self.module_scoped_v1 and spec_mod != self.module_scoped_target_v1:
+            # P-G5: an imported generic FUNCTION instance (`id(1)` -> id$i64)
+            # may carry no `Name<args>` type at all; record its identity so
+            # the generic-spec list cannot certify complete coverage without it.
+            var arg_texts: [text] = []
+            val symbols: SymbolTable? = self.module_symbols[self.current_module] ?? nil
+            for ta in completed_args:
+                val tat: HirType = ta
+                arg_texts = arg_texts.push(mono_type_source_text_v1(tat, symbols))
+            mono_scoped_generic_fn_instances_v1 = mono_scoped_generic_fn_instances_v1.push(
+                MonoObservedGenericUseV1(owner: spec_mod, name: func_name, arg_texts: arg_texts))
+            mono_scoped_generic_fn_instance_symbols_v1 = mono_scoped_generic_fn_instance_symbols_v1.push(mangled)
         var signature = self.template_signature_v1(func_name)
         if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
             # The archive consumer fulfills this request with
@@ -1335,16 +1727,22 @@ impl MonomorphizationPass:
             if self.template_recipes.has(func_name):
                 template = mono_apply_template_recipe_v1(template, self.template_recipes[func_name], self.invocation_budget != nil, self.invocation_budget)
             if template == nil or self.invocation_failed_v1(): return -1
+            val t_spec = self.invocation_clock_v1()
             var specialized: HirFunction = specialize_function_with_types(template, local_type_args, self.invocation_budget != nil, self.invocation_budget)
+            mono_instance_profile_v1[mangled] = self.invocation_clock_v1() - t_spec
             if specialized == nil or self.invocation_failed_v1(): return -1
-            specialized.name = mangled
+            specialized.name = if template.is_extern: template.name else: mangled
             specialized.symbol = SymbolId.new(sym)
             self.specialized_functions[mangled] = specialized
             signature = mono_template_signature_v1(specialized)
         # A specialization is a concrete callee from here on: its return
         # type feeds the inference of an ENCLOSING generic call (`wrap(wrap(v))`).
-        self.fn_returns[mono_sym_key(spec_mod, sym)] = signature.return_type
-        self.sym_names[mono_sym_key(spec_mod, sym)] = signature.name
+        val inference_template = self.template_signature_v1(func_name)
+        var return_substitution = typesubstitution_from_params(inference_template.type_params, local_type_args)
+        return_substitution.budget = self.invocation_budget
+        self.fn_returns[mono_sym_key(spec_mod, sym)] = substitute_type(self.template_semantic_return_v1(inference_template), return_substitution)
+        # Keep the instance lookup identity separate from an extern's C name.
+        self.sym_names[mono_sym_key(spec_mod, sym)] = mangled
         self.spec_template[mangled] = func_name
         self.spec_module[mangled] = spec_mod
         self.spec_queue = self.spec_queue.push(mangled)
@@ -1378,6 +1776,8 @@ impl MonomorphizationPass:
         # owned by the actual template declaration, shared by both body modes.
         val signature = self.template_signature_v1(template_name)
         val owner: text = self.template_module[template_name]
+        if signature.is_extern:
+            return signature.name
         if signature.global_linkage or owner == self.current_module:
             return spec_name
         # The provider emits under its canonical logical module, so a
@@ -1734,13 +2134,29 @@ impl MonomorphizationPass:
         val k = mono_sym_key(module_name, sym.id)
         if self.named_symbol_names.has(k):
             return self.named_symbol_names[k]
+        # Collection/archive scratch loading can fill the authoritative map
+        # directly. Build on the first fallback, and after key-count growth.
+        # Whole-map replacement must reset named_symbol_index_count (the archive
+        # scratch owner does so). No owned writer deletes/replaces keys in place.
+        if self.named_symbol_index_count != self.named_symbol_names.len():
+            var suffix_index: Dict<text, [text]> = {}
+            for key in self.named_symbol_names.keys():
+                val kt: text = key
+                val separator = kt.rfind("#")
+                if separator < 0: continue
+                val key_suffix = kt.substring(separator)
+                var bucket: [text] = suffix_index[key_suffix] ?? []
+                bucket.push(kt)
+                suffix_index[key_suffix] = bucket
+            self.named_symbol_suffix_index = suffix_index
+            self.named_symbol_index_count = self.named_symbol_names.len()
         val suffix = "#{sym.id}"
+        val candidates: [text] = self.named_symbol_suffix_index[suffix] ?? []
         var found = ""
         var distinct = 0
-        for key in self.named_symbol_names.keys():
-            val kt: text = key
-            if not kt.ends_with(suffix):
-                continue
+        # Each bucket keeps the authoritative dictionary's traversal order,
+        # including the legacy empty-name behavior. Do not sort or deduplicate.
+        for kt in candidates:
             val n: text = self.named_symbol_names[kt]
             if n != found:
                 distinct = distinct + 1
@@ -1789,14 +2205,20 @@ impl MonomorphizationPass:
             return ""
         match callee.kind:
             case HirExprKind.Var(sym_id):
+                val callee_symbol: SymbolId = sym_id
                 val name = self.sym_name(sym_id)
+                if self.spec_symbols.has(name) and self.spec_symbols[name] == callee_symbol.id:
+                    return ""
                 if self.has_template_v1(name):
                     if self.callee_local_plain(sym_id):
                         return ""
                     return name
                 ""
             case HirExprKind.NamedVar(sym_id, name):
+                val callee_symbol: SymbolId = sym_id
                 val by_sym = self.sym_name(sym_id)
+                if self.spec_symbols.has(by_sym) and self.spec_symbols[by_sym] == callee_symbol.id:
+                    return ""
                 if self.has_template_v1(by_sym):
                     if self.callee_local_plain(sym_id):
                         return ""
@@ -1904,9 +2326,10 @@ impl MonomorphizationPass:
         if expected_result != nil:
             val expected: HirType = expected_result
             if hir_type_is_concrete(expected):
-                if nominal_context == nil and (hir_type_has_nominal(template.return_type) or hir_type_has_nominal(expected)):
+                val semantic_return = self.template_semantic_return_v1(template)
+                if nominal_context == nil and (hir_type_has_nominal(semantic_return) or hir_type_has_nominal(expected)):
                     return Err("result inference lacks declaration/caller nominal context")
-                if not bind_type_params(template.return_type, expected, bindings, nominal_context):
+                if not bind_type_params(semantic_return, expected, bindings, nominal_context):
                     return Err("result inference conflicts with argument bindings")
         Ok(bindings)
 
@@ -1968,11 +2391,94 @@ impl MonomorphizationPass:
         if inferred.is_err(): return Err(inferred.unwrap_err())
         self.complete_template_type_args_v1(template, inferred.unwrap())
 
+    me builtin_result_call_type_v1(expr: HirExpr) -> HirType?:
+        # The explicit HIR tag, not the printed callee spelling, owns this
+        # closed constructor. Unknown calls never gain result-context authority.
+        if not self.module_symbols.has(self.current_module): return nil
+        match expr.kind:
+            case HirExprKind.Call(callee, arguments, type_args):
+                if arguments.len() != 1 or (type_args != nil and type_args.len() != 0): return nil
+                val argument: HirCallArg = arguments[0]
+                if argument.has_name: return nil
+                val callable: HirExpr = callee
+                var target = SymbolId(id: -1)
+                match callable.kind:
+                    case HirExprKind.NamedVar(symbol, _): target = symbol
+                    case _: return nil
+                val table: SymbolTable = self.module_symbols[self.current_module]
+                val row_opt: HirSymbol? = table.get_symbol_raw(target.id)
+                if not row_opt.?: return nil
+                val row: HirSymbol = row_opt.unwrap()
+                match row.kind:
+                    case SymbolKind.Function: ()
+                    case _: return nil
+                val tag = row.builtin_method_tag
+                if tag != BUILTIN_METHOD_RESULT_OK and tag != BUILTIN_METHOD_RESULT_ERR: return nil
+                val payload = self.infer_expr_type(mono_arg_value(argument))
+                if payload == nil or not hir_type_is_concrete(payload): return nil
+                val active: HirType = payload
+                val absent = HirType(kind: HirTypeKind.Infer(-1, 0), span: expr.span)
+                val kind = if tag == BUILTIN_METHOD_RESULT_OK: HirTypeKind.Result(active, absent) else: HirTypeKind.Result(absent, active)
+                HirType(kind: kind, span: expr.span)
+            case _: nil
+
+    me declared_local_method_return_v1(receiver: HirExpr, method: text, resolution: MethodResolution) -> HirType?:
+        val (receiver_type, module_name) = self.receiver_instance_type(receiver)
+        # Imported and dynamic dispatch require separate nominal transport.
+        if receiver_type == nil or module_name != self.current_module: return nil
+        if not self.module_symbols.has(module_name): return nil
+        val type_: HirType = receiver_type
+        var owner = SymbolId(id: -1)
+        match type_.kind:
+            case HirTypeKind.Named(symbol, arguments):
+                if arguments.len() != 0: return nil
+                owner = symbol
+            case _: return nil
+        val table: SymbolTable = self.module_symbols[module_name]
+        val target_opt: SymbolId? = table.lookup_method_in_type(owner, method)
+        if not target_opt.?: return nil
+        val target: SymbolId = target_opt.unwrap()
+        match resolution:
+            case MethodResolution.InstanceMethod(resolved_owner, resolved_target):
+                if resolved_owner.id != owner.id or resolved_target.id != target.id: return nil
+            case MethodResolution.Unresolved: ()
+            case _: return nil
+        val row_opt: HirSymbol? = table.get_symbol_raw(target.id)
+        if not row_opt.?: return nil
+        val row: HirSymbol = row_opt.unwrap()
+        match row.kind:
+            case SymbolKind.Method: ()
+            case _: return nil
+        val key = mono_sym_key(module_name, target.id)
+        if not self.inherent_method_owners.has(key): return nil
+        val identity = mono_type_identity(table, owner, module_name)
+        if identity == "" or self.inherent_method_owners[key] != identity: return nil
+        if not self.fn_returns.has(key): return nil
+        val result: HirType = self.fn_returns[key]
+        if not hir_type_is_concrete(result): return nil
+        result
+
     me call_evidence_is_valid_v1(expr: HirExpr, actual: HirType) -> bool:
         if hir_type_is_concrete(actual): return true
         # Only an actual Ok/Err value has a genuinely absent Result arm.
         # Raw cast targets and untrusted type stamps cannot create this hole.
         match expr.kind:
+            case HirExprKind.Call(_, _, _):
+                if val inferred = self.builtin_result_call_type_v1(expr):
+                    match actual.kind:
+                        case HirTypeKind.Result(actual_ok, actual_err):
+                            match inferred.kind:
+                                case HirTypeKind.Result(inferred_ok, inferred_err):
+                                    if hir_type_is_concrete(inferred_ok):
+                                        match actual_err.kind:
+                                            case HirTypeKind.Infer(_, _): return self.same_type_key(actual_ok, inferred_ok)
+                                            case _: return false
+                                    match actual_ok.kind:
+                                        case HirTypeKind.Infer(_, _): return self.same_type_key(actual_err, inferred_err)
+                                        case _: return false
+                                case _: return false
+                        case _: return false
+                return false
             case HirExprKind.EnumLit(_, variant, payload):
                 var active: HirType = nil
                 var absent: HirType = nil
@@ -2114,6 +2620,8 @@ impl MonomorphizationPass:
                     parts = parts.push(ptt)
                 HirType(kind: HirTypeKind.Tuple(parts), span: sp)
             case HirExprKind.Call(callee, call_args, type_args):
+                if val result_constructor = self.builtin_result_call_type_v1(expr):
+                    return result_constructor
                 val ce: HirExpr = callee
                 # A generic callee returns its declared return type under the
                 # instantiation this very call resolves to (`val a = keep("x")`
@@ -2132,14 +2640,17 @@ impl MonomorphizationPass:
                 if ctor != nil:
                     return ctor
                 self.callee_return_type(ce)
-            case HirExprKind.MethodCall(receiver, method, _, _):
+            case HirExprKind.MethodCall(receiver, method, margs, resolution):
                 # A method of a generic impl on a known instance returns its
                 # declared type under the receiver's arguments. Every other
-                # method (builtins, traits) stays unanswered.
+                # method (builtins, traits) stays unanswered, except the
+                # builtin `opt.unwrap()`, which yields the payload type.
                 val mrecv: HirExpr = receiver
                 val mname = self.generic_method_lookup(mrecv, method)
                 if mname == "":
-                    return nil
+                    if method == "unwrap" and margs.len() == 0:
+                        return self.optional_payload_type(self.infer_expr_type(mrecv))
+                    return self.declared_local_method_return_v1(mrecv, method, resolution)
                 val mtemplate = self.template_signature_v1(mname)
                 val (mrt, _mmod) = self.receiver_instance_type(mrecv)
                 if mrt == nil:
@@ -2238,6 +2749,11 @@ impl MonomorphizationPass:
             case HirExprKind.Unwrap(base):
                 val ub: HirExpr = base
                 self.optional_payload_type(self.infer_expr_type(ub))
+            case HirExprKind.UnsafeBlock(body):
+                # An unsafe block has the type of its value expression. Keep
+                # unresolved blocks unresolved; never infer from an erased ABI.
+                val block: HirBlock = body
+                self.block_value_type(block)
             case HirExprKind.NullCoalesce(left, right):
                 # `o ?? d`: the payload when `d` is one, still optional when
                 # `d` is itself the same optional. Anything else: no answer.
@@ -2343,16 +2859,17 @@ impl MonomorphizationPass:
         val tps: [HirTypeParam] = template.type_params
         if targs.len() == 0 or targs.len() != tps.len() or not all_concrete(targs):
             return nil
+        val semantic_return: HirType = self.template_semantic_return_v1(template)
         # A nominal type the TEMPLATE spells carries its declaring module's
         # SymbolId, which means something else in the caller's table; only the
         # caller's own type arguments may name one across modules.
         if self.template_module.has(template.name):
             val owner: text = self.template_module[template.name]
-            if owner != self.current_module and hir_type_has_nominal(template.return_type):
+            if owner != self.current_module and hir_type_has_nominal(semantic_return):
                 return nil
         var substitution = typesubstitution_from_params(tps, targs)
         substitution.budget = self.invocation_budget
-        val out = substitute_type(template.return_type, substitution)
+        val out = substitute_type(semantic_return, substitution)
         if self.invocation_failed_v1(): return nil
         if hir_type_is_concrete(out):
             return out
@@ -2465,6 +2982,7 @@ impl MonomorphizationPass:
                 val li: HirExpr = init
                 val ls: SymbolId = sym
                 if lt != nil and hir_type_is_concrete(lt):
+                    self.observe_generic_uses_v1(lt)
                     self.env[ls.id] = lt
                 else:
                     # HIR keeps the if-val payload type in the symbol table,
@@ -2716,6 +3234,11 @@ impl MonomorphizationPass:
                         self.collect_pattern_bindings(cc.pattern)
                     self.collect_lets_block(cc.body)
                 self.collect_lets_block_opt(finally_)
+            case HirExprKind.CfgSelect(_, cs_arms, cs_else):
+                for cs_arm in cs_arms:
+                    val csb: HirBlock = cs_arm
+                    self.collect_lets_block(csb)
+                self.collect_lets_block_opt(cs_else)
             case _:
                 pass
 
@@ -2980,9 +3503,9 @@ impl MonomorphizationPass:
         match payload:
             Some(p):
                 match p:
-                    case Tuple(values):
+                    case HirEnumPayload.Tuple(values):
                         HirEnumPayload.Tuple(self.rewrite_exprs(values))
-                    case Struct(fields):
+                    case HirEnumPayload.Struct(fields):
                         HirEnumPayload.Struct(self.rewrite_named_exprs(fields))
             nil:
                 nil
@@ -3028,8 +3551,83 @@ impl MonomorphizationPass:
         call site are used verbatim; otherwise they are inferred from the
         argument types. A generic call that can be neither is left as-is and
         recorded as a loud diagnostic (the post-mono verifier also counts it)."""
-        self.rewrite_template_call_v1(self.callee_generic_name(callee), callee,
+        val gname = self.callee_generic_name(callee)
+        if gname == "" and self.module_scoped_v1:
+            self.module_scoped_visibility_check_v1(callee, type_args, args)
+        self.rewrite_template_call_v1(gname, callee,
             args, type_args, expected_result, call_span)
+
+    me module_scoped_visibility_check_v1(callee: HirExpr, type_args: [HirType], args: [HirCallArg]):
+        """Module-scoped fail-closed rule: a call in the target module whose
+        callee carries generic evidence (explicit type args, an imported
+        signature that is not concrete, or no declaration at all) but names
+        no template in the caller-supplied visible set is E-MONO-040."""
+        if callee == nil or self.current_module != self.module_scoped_target_v1:
+            return
+        var sid = SymbolId(id: -1)
+        var name = ""
+        match callee.kind:
+            case HirExprKind.Var(s):
+                sid = s
+                name = self.sym_name(s)
+            case HirExprKind.NamedVar(s, n):
+                sid = s
+                name = n
+            case _: return
+        if self.callee_local_plain(sid):
+            return
+        if self.sym_names.has(mono_sym_key(self.current_module, sid.id)):
+            return
+        var evidence = type_args.len() > 0
+        if not evidence and self.module_symbols.has(self.current_module):
+            val table: SymbolTable = self.module_symbols[self.current_module]
+            match table.get_symbol_raw(sid.id):
+                Some(row):
+                    val sym_row: HirSymbol = row
+                    # Explicit marker first: an imported generic carries no
+                    # signature type, and a missing type is NOT generic evidence.
+                    if sym_row.kind == SymbolKind.Function and sym_row.generic_param_count > 0:
+                        evidence = true
+                    elif sym_row.kind == SymbolKind.Function and sym_row.type_ != nil:
+                        val sig: HirType = sym_row.type_ ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+                        evidence = not hir_type_is_concrete(sig)
+                nil:
+                    evidence = true
+        else:
+            evidence = true
+        if not evidence:
+            return
+        val code_key = "E-MONO-040|{name}"
+        if self.reported_once.has(code_key):
+            return
+        self.reported_once[code_key] = true
+        self.diagnostics = self.diagnostics.push(
+            "E-MONO-040: template {name} not visible to module {self.current_module}" +
+            self.module_scoped_missing_args_suffix_v1(type_args, args))
+        self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
+
+    me module_scoped_missing_args_suffix_v1(type_args: [HirType], args: [HirCallArg]) -> text:
+        """` type-args <k1 US k2>` (explicit) or ` arg-types <k1 US k2>` (argument
+        value types) for an E-MONO-040 row, so the template-body seam can key
+        the missing instance (P-G5b). "" when any key is unknown."""
+        var keys: [text] = []
+        var label = " type-args "
+        if type_args.len() > 0:
+            for ta in type_args:
+                val k = self.type_key(ta)
+                if k == "": return ""
+                keys = keys.push(k)
+        else:
+            label = " arg-types "
+            for raw in args:
+                val a: HirCallArg = raw
+                val t = self.infer_expr_type(a.value)
+                if t == nil: return ""
+                val k = self.type_key(t)
+                if k == "": return ""
+                keys = keys.push(k)
+        if keys.len() == 0: return ""
+        label + keys.join("\u001f")
 
     me rewrite_template_call_v1(gname: text, callee: HirExpr, args: [HirCallArg], type_args: [HirType], expected_result: HirType?, call_span: Span?) -> HirExprKind:
         val new_args = self.rewrite_call_args(args)
@@ -3230,11 +3828,84 @@ impl MonomorphizationPass:
                 val context: HirType? = if expected != nil: expected else: (if expr.has_type_: expr.type_ else: nil)
                 out.kind = self.rewrite_call(ct, at, type_args, context, expr.span)
                 out
+            case HirExprKind.If(cond, then_, else_):
+                self.rewrite_if_with_context(expr, cond, then_, else_, expected)
+            case HirExprKind.IfChain(arms, else_):
+                self.rewrite_if_chain_with_context(expr, arms, else_, expected)
+            case HirExprKind.MatchCase(scrutinee, arms):
+                self.rewrite_match_with_context(expr, scrutinee, arms, expected)
+            case HirExprKind.Block(block):
+                self.rewrite_block_expr_with_context(expr, block, expected)
+            case HirExprKind.CfgSelect(conds, arms, else_):
+                self.rewrite_cfg_select_with_context(expr, conds, arms, else_, expected)
             case _:
                 self.rewrite_expr(expr)
 
+    me rewrite_if_with_context(expr: HirExpr, cond: HirExpr, then_: HirBlock, else_: HirBlock?, expected: HirType?) -> HirExpr:
+        val cd: HirExpr = cond
+        val th: HirBlock = then_
+        var out = expr
+        out.kind = HirExprKind.If(self.rewrite_expr(cd), self.rewrite_block(th, expected), self.rewrite_block_opt_with_context(else_, expected))
+        out
+
+    me rewrite_if_chain_with_context(expr: HirExpr, arms: [HirIfArm], else_: HirBlock?, expected: HirType?) -> HirExpr:
+        var new_arms: [HirIfArm] = []
+        for arm in arms:
+            val at2: HirIfArm = arm
+            var na = at2
+            na.cond = self.rewrite_expr(at2.cond)
+            na.then_ = self.rewrite_block(at2.then_, expected)
+            if self.invocation_failed_v1(): return expr
+            new_arms = new_arms.push(na)
+        var out = expr
+        out.kind = HirExprKind.IfChain(new_arms, self.rewrite_block_opt_with_context(else_, expected))
+        out
+
+    me rewrite_match_with_context(expr: HirExpr, scrutinee: HirExpr, arms: [HirMatchArm], expected: HirType?) -> HirExpr:
+        val sc: HirExpr = scrutinee
+        var marms: [HirMatchArm] = []
+        for arm in arms:
+            val mt: HirMatchArm = arm
+            var nm = mt
+            if mt.has_guard:
+                nm.guard = self.rewrite_expr(mt.guard)
+            nm.body = self.rewrite_block(mt.body, expected)
+            if self.invocation_failed_v1(): return expr
+            marms = marms.push(nm)
+        var out = expr
+        out.kind = HirExprKind.MatchCase(self.rewrite_expr(sc), marms)
+        out
+
+    me rewrite_block_expr_with_context(expr: HirExpr, block: HirBlock, expected: HirType?) -> HirExpr:
+        var out = expr
+        out.kind = HirExprKind.Block(self.rewrite_block(block, expected))
+        out
+
+    me rewrite_cfg_select_with_context(expr: HirExpr, conds: [HirExpr], arms: [HirBlock], else_: HirBlock?, expected: HirType?) -> HirExpr:
+        # Conditions are compile-time cfg terms and pass through untouched,
+        # exactly as in rewrite_expr's CfgSelect arm; only the arm blocks
+        # receive the expected result type.
+        var new_arms: [HirBlock] = []
+        for arm in arms:
+            val arm_block: HirBlock = arm
+            new_arms = new_arms.push(self.rewrite_block(arm_block, expected))
+            if self.invocation_failed_v1(): return expr
+        var out = expr
+        out.kind = HirExprKind.CfgSelect(conds, new_arms, self.rewrite_block_opt_with_context(else_, expected))
+        out
+
+    me rewrite_block_opt_with_context(block: HirBlock?, expected: HirType?) -> HirBlock?:
+        match block:
+            Some(b):
+                val bt: HirBlock = b
+                self.rewrite_block(bt, expected)
+            None:
+                nil
+
     me rewrite_expr(expr: HirExpr) -> HirExpr:
         if not self.invocation_enter_v1(): return expr
+        if expr != nil and expr.has_type_:
+            self.observe_generic_uses_v1(expr.type_)
         val result = self.rewrite_expr_invocation_inner_v1(expr)
         self.invocation_leave_v1()
         result
@@ -3559,6 +4230,13 @@ impl MonomorphizationPass:
                     if self.invocation_failed_v1(): return expr
                     new_clauses = new_clauses.push(ncc)
                 out.kind = HirExprKind.TryCatch(self.rewrite_block(tcb), new_clauses, self.rewrite_block_opt(finally_))
+            case HirExprKind.CfgSelect(cs_conds, cs_arms, cs_else):
+                var new_cs_arms: [HirBlock] = []
+                for cs_arm in cs_arms:
+                    val csb: HirBlock = cs_arm
+                    new_cs_arms = new_cs_arms.push(self.rewrite_block(csb))
+                    if self.invocation_failed_v1(): return expr
+                out.kind = HirExprKind.CfgSelect(cs_conds, new_cs_arms, self.rewrite_block_opt(cs_else))
 
             # Leaves / opaque: literals, symbol references, Continue,
             # CustomBlock, inline asm (operands are substituted by
@@ -3914,9 +4592,9 @@ impl MonomorphizationPass:
                 match payload:
                     Some(p):
                         match p:
-                            case Tuple(values):
+                            case HirEnumPayload.Tuple(values):
                                 self.mono_relevant_exprs_v1(values)
-                            case Struct(fields):
+                            case HirEnumPayload.Struct(fields):
                                 self.mono_relevant_named_v1(fields)
                     nil:
                         false
@@ -4661,6 +5339,14 @@ fn run_monomorphization_with_diagnostics(modules: Dict<text, HirModule>) -> (Dic
     val result = pass_.process_modules(modules)
     (result, pass_.get_stats(), pass_.diagnostics)
 
+fn run_monomorphization_module_scoped_v1(module: HirModule, templates: Dict<text, HirModule>) -> (HirModule, MonoStats, [text]):
+    """Monomorphize ONE module against the caller-supplied visible templates
+    (see `MonomorphizationPass.process_module_scoped_v1`). Instances land in
+    `module` with COMDAT linkage; `templates` are never modified."""
+    var pass_ = MonomorphizationPass.create()
+    val result = pass_.process_module_scoped_v1(module.name, module, templates)
+    (result, pass_.get_stats(), pass_.diagnostics)
+
 # Cycle-121: the processed-modules dict travels through this module-global
 # owner instead of the 4-tuple return. The tuple's own call-site docstring
 # documents Stage-3 native value ABI corruption at this boundary, and the
@@ -4668,11 +5354,50 @@ fn run_monomorphization_with_diagnostics(modules: Dict<text, HirModule>) -> (Dic
 # every downstream reader. A module global carries the dict by reference
 # (pointer copy, the registry transport class); scalars/diagnostics stay in
 # the 3-tuple. Reset on every entry; single-threaded per lane.
-var mono_report_modules_owner: Dict<text, HirModule> = {}
+pub var mono_report_modules_owner: Dict<text, HirModule> = {}
 
-# @workaround bug=mir_phase_rss_retention_2026_10_24 reason=global kept a second reference to every post-mono HirModule after the driver took the dict
-fn mono_report_modules_owner_release():
+# P-G5: concrete generic type uses (`Name<args>`) the LAST module-scoped mono
+# run observed, after inference: let/param/return/expression types of the
+# module's roots and of every instance it placed. `complete` is false when a
+# use could not be rendered; `ready` is set only when the run finished, so a
+# caller can tell "no uses" from "no data". Single-threaded per lane.
+pub var mono_scoped_generic_uses_v1: [MonoObservedGenericUseV1] = []
+pub var mono_scoped_generic_uses_complete_v1: bool = true
+pub var mono_scoped_generic_uses_ready_v1: bool = false
+# Instances of generic FUNCTIONS declared in another module ("<module>.<fn>",
+# concrete argument spellings), requested by the last module-scoped run.
+pub var mono_scoped_generic_fn_instances_v1: [MonoObservedGenericUseV1] = []
+# P-G7: the mangled instance symbol of each row above (same index), so the
+# file worker can map a placed COMDAT instance to its ConcreteTldrKey.
+pub var mono_scoped_generic_fn_instance_symbols_v1: [text] = []
+
+# (uses, complete, ready) of the last module-scoped run.
+fn mono_scoped_generic_uses_last_v1() -> ([MonoObservedGenericUseV1], bool, bool):
+    (mono_scoped_generic_uses_v1, mono_scoped_generic_uses_complete_v1, mono_scoped_generic_uses_ready_v1)
+
+fn mono_scoped_generic_fn_instances_last_v1() -> [MonoObservedGenericUseV1]:
+    mono_scoped_generic_fn_instances_v1
+
+fn mono_scoped_generic_fn_instance_symbols_last_v1() -> [text]:
+    mono_scoped_generic_fn_instance_symbols_v1
+
+var mono_scoped_generic_seen_v1: Dict<text, bool> = {}
+
+fn mono_scoped_generic_uses_reset_v1():
+    mono_scoped_generic_seen_v1 = {}
+    mono_scoped_generic_fn_instances_v1 = []
+    mono_scoped_generic_fn_instance_symbols_v1 = []
+    mono_scoped_generic_uses_v1 = []
+    mono_scoped_generic_uses_complete_v1 = true
+    mono_scoped_generic_uses_ready_v1 = false
+
+# The global is a one-shot transport, never a retained owner: the consumer takes
+# the dict and the global is cleared in the same step, so no second reference to
+# the post-mono modules outlives the driver's own.
+fn mono_report_modules_take() -> Dict<text, HirModule>:
+    val taken = mono_report_modules_owner
     mono_report_modules_owner = {}
+    taken
 
 fn run_monomorphization_with_report(modules: Dict<text, HirModule>) -> (MonoStats, [text], [text]):
     """As `run_monomorphization_with_diagnostics`, plus the diagnostics whose
@@ -4738,8 +5463,24 @@ fn mono_diag_enabled() -> bool:
         mono_diag_refresh_v1()
     _mono_diag_enabled_state == 1
 
+# Default ON (bug=native_build_per_worker_baseline_rss_2026_10_24): the full
+# root walk rebuilds every non-template function body, and in this no-GC
+# runtime the replaced bodies are never freed. Measured on the p2shard-9
+# Stage 2 producer: mono+MIR-setup plateau 3151 -> 2807 MB at 204 modules
+# (roots_rewritten 4179 -> 2), same go-to-end verdicts; the mono step grows
+# superlinearly (+0.5 GB at 204, +3.45 GB at 472, ~+17 GB at 1471) and is
+# re-run by every MIR shard worker. Output identity is asserted by
+# test/01_unit/compiler/mono/mono_root_discovery_determinism_spec.spl (written
+# with the feature, not yet executed: no full-CLI binary on this host); the
+# soundness argument is at `build_root_discovery_index_v1`.
+# SIMPLE_MONO_ROOT_DISCOVERY=0 restores the full walk.
 fn mono_root_discovery_env_v1() -> bool:
-    env_get("SIMPLE_MONO_ROOT_DISCOVERY") == "1"
+    env_get("SIMPLE_MONO_ROOT_DISCOVERY") != "0"
+
+# Same discovery, applied to module constant initializers (default on with
+# discovery). SIMPLE_MONO_CONST_DISCOVERY=0 restores their full rewrite.
+fn mono_const_discovery_env_v1() -> bool:
+    env_get("SIMPLE_MONO_CONST_DISCOVERY") != "0"
 
 fn mono_key_last_member_v1(key: text) -> text:
     """`"<identity>::<member>"` -> `"<member>"` (identities may hold `::`)."""

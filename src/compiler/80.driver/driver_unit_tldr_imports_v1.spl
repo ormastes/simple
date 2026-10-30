@@ -1,0 +1,157 @@
+# PM3: per-file unit child resolves its imports through TLDR summaries instead of
+# parsing/lowering the imports' closure (true_per_file_src_to_obj_plan.md).
+#
+# Switch: SIMPLE_UNIT_TLDR_IMPORTS (driver_tldr_import_route_v1.spl), default ON
+# in the unit lane, "0" = the old import-HIR path unchanged.
+#
+# With the switch on a unit parses ONLY its picked files. Every import (and the
+# imports of those imports, text-scanned, never parsed) gets a summary via
+# tldr_summary_ensure_v1; its surface is built by module_surface_from_tldr_v1 and
+# registered with driver_register_tldr_surfaces_v1. No import HIR is lowered. A
+# summary that is missing, carries fallback rows, or yields no surface is a
+# fallback: only that module's source is parsed (counted, `[tldr-fallback]`).
+# An imported generic body is loaded for its one decl through the template-body
+# seam (template_body_loader_v1 / driver_template_owner_body_v1), unchanged.
+use std.io_runtime.{file_exists, file_read}
+use compiler.driver.cache.tldr_summary_v1.{tldr_summary_ensure_v1}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_tldr_import_route_v1.{tldr_route_import_specs_v1, unit_tldr_imports_enabled_v1}
+use compiler.driver.driver_tldr_surface_register_v1.{driver_register_tldr_surfaces_v1}
+use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
+
+struct UnitTldrPlanV1:
+    unit_id: text
+    picked: [text]
+    parse_paths: [text]
+    parsed: i64
+    summaries: i64
+    fallbacks: i64
+    fallback_modules: [text]
+    surfaces: [ModuleSurface]
+    import_hir_lowered: i64
+
+struct UnitLowerResultV1:
+    gap: text
+    parsed: i64
+    summaries: i64
+    fallbacks: i64
+    import_hir_lowered: i64
+    line: text
+
+pub fn unit_tldr_log_line_v1(unit_id: text, parsed: i64, summaries: i64, fallbacks: i64, import_hir_lowered: i64) -> text:
+    "[unit-tldr] unit={unit_id} parsed={parsed} summaries={summaries} fallbacks={fallbacks} import_hir_lowered={import_hir_lowered}"
+
+# `module_paths` maps module id -> source path (the frozen inventory).
+pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths: Dict<text, text>) -> UnitTldrPlanV1:
+    var parse_paths: [text] = []
+    for p in picked:
+        parse_paths.push(p)
+    var surfaces: [ModuleSurface] = []
+    var fallback_modules: [text] = []
+    var seen: [text] = []
+    var frontier: [text] = []
+    for p in picked:
+        for spec in tldr_route_import_specs_v1(file_read(p)):
+            val (module_id, _names) = spec
+            if not frontier.contains(module_id):
+                frontier.push(module_id)
+    var pos = 0
+    var summaries = 0
+    while pos < frontier.len():
+        val module_id = frontier[pos]
+        pos = pos + 1
+        if seen.contains(module_id) or not module_paths.contains_key(module_id):
+            continue
+        val src_path = module_paths[module_id]
+        if not file_exists(src_path):
+            continue
+        seen.push(module_id)
+        val source = file_read(src_path)
+        var built: ModuleSurface? = nil
+        match tldr_summary_ensure_v1(root, module_id, source):
+            case Some(rows):
+                summaries = summaries + 1
+                built = module_surface_from_tldr_v1(module_id, rows)
+            case nil: pass
+        match built:
+            case Some(surface): surfaces.push(surface)
+            case nil:
+                fallback_modules.push(module_id)
+                if not parse_paths.contains(src_path):
+                    parse_paths.push(src_path)
+                print("[tldr-fallback] module={module_id} reason=no-summary-surface source-load=1")
+        for spec in tldr_route_import_specs_v1(source):
+            val (next_id, _next_names) = spec
+            if not frontier.contains(next_id):
+                frontier.push(next_id)
+    UnitTldrPlanV1(unit_id: unit_id, picked: picked, parse_paths: parse_paths, parsed: parse_paths.len(),
+        summaries: summaries, fallbacks: fallback_modules.len(), fallback_modules: fallback_modules,
+        surfaces: surfaces, import_hir_lowered: 0)
+
+# Unit child entry for the lowering step. The driver has loaded + parsed its
+# inputs. Switch on: register the summary surfaces (no import HIR lowered).
+# Switch off: lower exactly as before and report how many non-picked modules
+# were lowered. Returns the `[unit-tldr]` line it logged.
+pub fn unit_lower_v1(driver: CompilerDriver, unit_id: text, root: text, picked: [text],
+        module_paths: Dict<text, text>, unit_active: bool) -> UnitLowerResultV1:
+    var parsed = picked.len()
+    var summaries = 0
+    var fallbacks = 0
+    if unit_tldr_imports_enabled_v1(unit_active):
+        val plan = unit_tldr_plan_v1(unit_id, root, picked, module_paths)
+        parsed = plan.parsed
+        summaries = plan.summaries
+        fallbacks = plan.fallbacks
+        val registered = driver_register_tldr_surfaces_v1(driver, plan.surfaces)
+        if registered != "":
+            val line = unit_tldr_log_line_v1(unit_id, parsed, summaries, fallbacks, 0)
+            return UnitLowerResultV1(gap: "register-failed:" + registered, parsed: parsed, summaries: summaries,
+                fallbacks: fallbacks, import_hir_lowered: 0, line: line)
+    var gap = ""
+    match driver.stage_lower_hir("check", false):
+        case Some(stop):
+            match stop:
+                case TypeError(errs): gap = errs.join(" | ")
+                case ResolveError(errs): gap = errs.join(" | ")
+                case _: gap = "other"
+        case None: gap = "none"
+    var lowered = driver.ctx.hir_modules.len() - picked.len()
+    if lowered < 0:
+        lowered = 0
+    val line = unit_tldr_log_line_v1(unit_id, parsed, summaries, fallbacks, lowered)
+    print(line)
+    UnitLowerResultV1(gap: gap, parsed: parsed, summaries: summaries, fallbacks: fallbacks,
+        import_hir_lowered: lowered, line: line)
+
+# ---- production wiring helpers (parse_all_streaming_surfaces_in_place_impl) ----
+
+pub fn unit_tldr_empty_plan_v1() -> UnitTldrPlanV1:
+    UnitTldrPlanV1(unit_id: "", picked: [], parse_paths: [], parsed: 0, summaries: 0, fallbacks: 0,
+        fallback_modules: [], surfaces: [], import_hir_lowered: 0)
+
+pub fn unit_tldr_module_paths_v1(module_names: [text], paths: [text]) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    var i = 0
+    while i < module_names.len() and i < paths.len():
+        if not out.contains_key(module_names[i]):
+            out[module_names[i]] = paths[i]
+        i = i + 1
+    out
+
+# Per-source "this process parses it": picked + fallback modules + extra (AOP advice).
+pub fn unit_tldr_needed_flags_v1(plan: UnitTldrPlanV1, source_paths: [text], extra: [text]) -> [bool]:
+    var out: [bool] = []
+    for p in source_paths:
+        out.push(plan.parse_paths.contains(p) or extra.contains(p))
+    out
+
+pub fn unit_tldr_surface_for_v1(plan: UnitTldrPlanV1, module_name: text) -> ModuleSurface?:
+    for s in plan.surfaces:
+        if s.module_name == module_name:
+            return Some(s)
+    nil
+
+export UnitTldrPlanV1, UnitLowerResultV1
+export unit_tldr_log_line_v1, unit_tldr_plan_v1, unit_lower_v1
+export unit_tldr_empty_plan_v1, unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1

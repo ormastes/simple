@@ -1,0 +1,56 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+fn source(path: text) -> text:
+    file_read(path)
+
+fn defines_fn(content: text, name: text) -> bool:
+    content.contains("\nfn {name}(") or content.contains("\npub fn {name}(") or content.starts_with("fn {name}(")
+
+describe "cross-module symbol collisions":
+    it "defines token_new nowhere in cancellation.spl":
+        val content = source("src/lib/nogc_async_mut/async/cancellation.spl")
+        expect(defines_fn(content, "token_new")).to_equal(false)
+        expect(defines_fn(content, "cancellation_token_new")).to_equal(true)
+
+    it "owns every timestamp_* fn only in common/time_utils.spl":
+        val owner = source("src/lib/common/time_utils.spl")
+        val sffi_time = source("src/lib/nogc_sync_mut/sffi/time.spl")
+        val time_ops = source("src/lib/nogc_sync_mut/io/time_ops.spl")
+        val names = ["timestamp_now", "timestamp_add_days", "timestamp_diff_days", "timestamp_from_components", "timestamp_get_year", "timestamp_get_month", "timestamp_get_day", "timestamp_get_hour", "timestamp_get_minute", "timestamp_get_second", "timestamp_get_microsecond"]
+        for name in names:
+            expect(defines_fn(owner, name)).to_equal(true)
+            expect(defines_fn(sffi_time, name)).to_equal(false)
+            expect(defines_fn(time_ops, name)).to_equal(false)
+
+    it "keeps time_ops timestamp_year-family public aliases (distinct names, not duplicates)":
+        val time_ops = source("src/lib/nogc_sync_mut/io/time_ops.spl")
+        expect(defines_fn(time_ops, "timestamp_year")).to_equal(true)
+        expect(defines_fn(time_ops, "timestamp_second")).to_equal(true)
+
+    it "re-exports timestamp_now from test_extended/stubs.spl instead of redefining it":
+        val stubs = source("src/lib/nogc_sync_mut/database/test_extended/stubs.spl")
+        expect(defines_fn(stubs, "timestamp_now")).to_equal(false)
+        expect(stubs.contains("pub use std.common.time_utils.")).to_equal(true)
+
+    it "renames timestamp_now in semihost_capture to avoid collision":
+        val semihost = source("src/lib/nogc_async_mut_noalloc/execution/semihost_capture.spl")
+        expect(defines_fn(semihost, "timestamp_now")).to_equal(false)
+        expect(defines_fn(semihost, "semihost_timestamp_now")).to_equal(true)
+
+    it "renames timestamp_to_iso stubs in database tests to avoid collision":
+        val sync_test = source("src/lib/nogc_sync_mut/database/test.spl")
+        val async_test = source("src/lib/nogc_async_mut/database/test.spl")
+        expect(defines_fn(sync_test, "timestamp_to_iso")).to_equal(false)
+        expect(defines_fn(sync_test, "test_timestamp_to_iso")).to_equal(true)
+        expect(defines_fn(async_test, "timestamp_to_iso")).to_equal(false)
+        expect(defines_fn(async_test, "test_timestamp_to_iso")).to_equal(true)
+
+    it "renames timestamp_to_iso in mcp/resource_utils to avoid collision":
+        val resource_utils = source("src/lib/nogc_async_mut/mcp/resource_utils.spl")
+        expect(defines_fn(resource_utils, "timestamp_to_iso")).to_equal(false)
+        expect(defines_fn(resource_utils, "resource_timestamp_to_iso")).to_equal(true)
+
+    it "re-exports timestamp_now from time_ops":
+        val time_ops = source("src/lib/nogc_sync_mut/io/time_ops.spl")
+        expect(time_ops.contains("pub use common.time_utils.")).to_equal(true)

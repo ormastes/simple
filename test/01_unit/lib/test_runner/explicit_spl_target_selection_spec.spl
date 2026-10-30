@@ -1,0 +1,57 @@
+use std.spec.{describe, it, expect}
+use std.test_runner.test_runner_files.{
+    discover_test_files_fast, discover_test_files_slow, is_test_file
+}
+use std.test_runner.test_manifest_scanner.{manifest_full_scan}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.io_runtime.{getpid, time_now_unix_micros}
+
+describe "explicit .spl test targets":
+    it "accepts production names only when a source file is explicitly named":
+        val root = "build/test_fixtures/explicit_spl_targets_{getpid()}_{time_now_unix_micros()}"
+        dir_create_all(root)
+        val production = root + "/embedded_examples.spl"
+        val conventional = root + "/existing_spec.spl"
+        val hidden = root + "/.hidden_spec.spl"
+        val note = root + "/notes.txt"
+        val missing = root + "/missing.spl"
+        file_write(production, "use std.spec.{describe, it, expect}\n")
+        file_write(conventional, "use std.spec.{describe, it, expect}\n")
+        file_write(hidden, "use std.spec.{describe, it, expect}\n")
+        file_write(note, "not a Simple source file\n")
+
+        val options = parse_test_args([production, "--no-cache"])
+        val fast_explicit = discover_test_files_fast(production, options, true)
+        val slow_explicit = discover_test_files_slow(production, options)
+        expect(fast_explicit.len()).to_equal(1)
+        expect(fast_explicit[0]).to_equal(production)
+        expect(slow_explicit.len()).to_equal(1)
+        expect(slow_explicit[0]).to_equal(production)
+
+        val fast_conventional = discover_test_files_fast(conventional, options, true)
+        val slow_conventional = discover_test_files_slow(conventional, options)
+        expect(fast_conventional.len()).to_equal(1)
+        expect(fast_conventional[0]).to_equal(conventional)
+        expect(slow_conventional.len()).to_equal(1)
+        expect(slow_conventional[0]).to_equal(conventional)
+
+        expect(discover_test_files_fast(missing, options, true).len()).to_equal(0)
+        expect(discover_test_files_slow(missing, options).len()).to_equal(0)
+        expect(discover_test_files_fast(hidden, options, true).len()).to_equal(0)
+        expect(discover_test_files_slow(hidden, options).len()).to_equal(0)
+        expect(discover_test_files_fast(note, options, true).len()).to_equal(0)
+        expect(discover_test_files_slow(note, options).len()).to_equal(0)
+
+        # Owner discovery remains conventional for directory and manifest
+        # scans; explicit selection does not broaden automatic discovery.
+        val directory_files = discover_test_files_slow(root, options)
+        expect(directory_files.len()).to_equal(1)
+        expect(directory_files[0]).to_equal(conventional)
+        expect(is_test_file(production)).to_equal(false)
+        expect(is_test_file(conventional)).to_equal(true)
+        val scanned_manifest = manifest_full_scan([root])
+        expect(scanned_manifest.entries.len()).to_equal(1)
+        expect(scanned_manifest.entries[0].path).to_equal(conventional)
+        dir_remove_all(root)

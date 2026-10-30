@@ -1,4 +1,10 @@
+# Purpose and audience: executable evidence for MDSOC compiler engineers that
+# member visibility enforcement works correctly in HIR lowering.
+# @req REQ-MDSOC-MEMBER-VIS-001
+# requirements: doc/02_requirements/compiler/mdsoc_matrix_visibility_requirements.md
+
 use std.spec
+use std.spec.step
 use compiler.common.config.Logger
 use compiler.common.driver_core_types.SourceFile
 use compiler.frontend.frontend.parse_full_frontend
@@ -63,6 +69,7 @@ fn lower_reexport_consumer_errors() -> [text]:
 
 describe "HIR member and aggregate constructor visibility enforcement":
     it "compile-allows a defining-module impl to read its private field":
+        step("given private field in defining module when reading in impl then access is allowed")
         val errors = lower_consumer_errors(
             "fixture.placeholder", "src/fixture/placeholder.spl",
             "fn placeholder():\n    ()",
@@ -71,6 +78,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "field `value` is not visible")).to_be(false)
 
     it "compile-rejects a private imported field read":
+        step("given private field in imported module when reading then access is rejected")
         val errors = lower_consumer_errors(
             "vault.provider", "src/vault/provider.spl",
             "pub struct Vault:\n    secret: i64",
@@ -79,6 +87,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "field `secret` is not visible")).to_be(true)
 
     it "compile-rejects aggregate construction when private state exists":
+        step("given struct with private field when constructing aggregate then construction is rejected")
         val errors = lower_consumer_errors(
             "vault.provider", "src/vault/provider.spl",
             "pub struct Vault:\n    secret: i64",
@@ -87,6 +96,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "aggregate constructor `Vault` is not visible")).to_be(true)
 
     it "compile-rejects private aggregate construction through an import alias":
+        step("given private struct with alias when constructing aggregate then construction is rejected")
         val errors = lower_consumer_errors(
             "vault.provider", "src/vault/provider.spl",
             "pub struct Vault:\n    secret: i64",
@@ -95,6 +105,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "aggregate constructor `AliasVault` is not visible")).to_be(true)
 
     it "compile-allows public fields and aggregate construction":
+        step("given struct with public fields when constructing aggregate then construction is allowed")
         val errors = lower_consumer_errors(
             "records.provider", "src/records/provider.spl",
             "pub struct Record:\n    pub value: i64",
@@ -103,6 +114,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "is not visible")).to_be(false)
 
     it "compile-allows package fields only for a same-package consumer":
+        step("given pub(package) field when accessing from same package then access is allowed")
         val errors = lower_consumer_errors(
             "pkg.provider", "src/pkg/provider.spl",
             "pub struct PackageRecord:\n    pub(package) value: i64",
@@ -111,6 +123,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "is not visible")).to_be(false)
 
     it "compile-rejects an SFFI authority carrier with private state":
+        step("given SFFI struct with private state when constructing aggregate then construction is rejected")
         val errors = lower_consumer_errors(
             "std.sffi.provider", "src/lib/nogc_sync_mut/sffi/provider.spl",
             "pub struct AdmissionToken:\n    generation: i64\n\nimpl AdmissionToken:\n    pub fn generation_value() -> i64:\n        self.generation",
@@ -120,6 +133,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
             errors, "aggregate constructor `AdmissionToken` is not visible")).to_be(true)
 
     it "compile-allows an internally exported field to a declared friend":
+        step("given internal_export and pub(friend) when accessing from friend module then access is allowed")
         val errors = lower_consumer_errors(
             "server.provider", "src/server/provider.spl",
             "friend client\ninternal_export FriendRecord\npub struct FriendRecord:\n    pub(friend) value: i64",
@@ -128,6 +142,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "is not visible")).to_be(false)
 
     it "compile-rejects an internal field when the type is not internally exported":
+        step("given pub(friend) without internal_export when accessing then field access is rejected")
         val errors = lower_consumer_errors(
             "server.provider", "src/server/provider.spl",
             "friend client\npub struct FriendRecord:\n    pub(friend) value: i64",
@@ -136,6 +151,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "field `value` is not visible")).to_be(true)
 
     it "compile-allows up fields from the immediate parent facade":
+        step("given pub(up) field when accessing from parent facade then field access is allowed")
         val errors = lower_consumer_errors(
             "pkg.child", "src/pkg/child.spl",
             "pub struct ParentRecord:\n    pub(up) value: i64",
@@ -144,6 +160,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "is not visible")).to_be(false)
 
     it "compile-rejects up fields from a non-parent sibling":
+        step("given pub(up) field when accessing from sibling module then field access is rejected")
         val errors = lower_consumer_errors(
             "pkg.child", "src/pkg/child.spl",
             "pub struct ParentRecord:\n    pub(up) value: i64",
@@ -152,6 +169,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "field `value` is not visible")).to_be(true)
 
     it "compile-allows peer fields at the same logical path in another compiler layer":
+        step("given pub(peer) field in different layer at same logical path when accessing then access is allowed")
         val errors = lower_consumer_errors(
             "compiler.10.frontend.shared.node", "src/compiler/10.frontend/shared/node.spl",
             "pub struct PeerRecord:\n    pub(peer) value: i64",
@@ -160,6 +178,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "is not visible")).to_be(false)
 
     it "compile-rejects peer fields at a different logical path":
+        step("given pub(peer) field at different logical path when accessing then field access is rejected")
         val errors = lower_consumer_errors(
             "compiler.10.frontend.shared.node", "src/compiler/10.frontend/shared/node.spl",
             "pub struct PeerRecord:\n    pub(peer) value: i64",
@@ -168,6 +187,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "field `value` is not visible")).to_be(true)
 
     it "compile-rejects a private field on a nominal function-call result":
+        step("given private field accessed from function call result when reading then access is rejected")
         val errors = lower_consumer_errors(
             "vault.provider", "src/vault/provider.spl",
             "pub struct Vault:\n    secret: i64\npub fn make_vault() -> Vault:\n    Vault(secret: 1)",
@@ -176,6 +196,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "field `secret` is not visible")).to_be(true)
 
     it "compile-rejects a private field after storing a nominal call result":
+        step("given private field accessed from stored nominal value when reading then access is rejected")
         val errors = lower_consumer_errors(
             "vault.provider", "src/vault/provider.spl",
             "pub struct Vault:\n    secret: i64\npub fn make_vault() -> Vault:\n    Vault(secret: 1)",
@@ -184,6 +205,7 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "field `secret` is not visible")).to_be(true)
 
     it "compile-rejects a qualified private aggregate constructor":
+        step("given private struct with qualified constructor when constructing then construction is rejected")
         val errors = lower_consumer_errors(
             "vault.provider", "src/vault/provider.spl",
             "pub struct Vault:\n    secret: i64",
@@ -192,5 +214,6 @@ describe "HIR member and aggregate constructor visibility enforcement":
         expect(messages_contain(errors, "aggregate constructor `Vault` is not visible")).to_be(true)
 
     it "compile-rejects private members using the terminal re-export owner":
+        step("given private field accessed through re-export chain when reading then access is rejected")
         val errors = lower_reexport_consumer_errors()
         expect(messages_contain(errors, "field `secret` is not visible")).to_be(true)

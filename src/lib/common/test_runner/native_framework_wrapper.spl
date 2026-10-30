@@ -1,0 +1,318 @@
+# Shared pure source partitioning for legacy SMF and complete-framework AOT.
+# Generic imports preserve configured library selection. This common owner
+# depends only on source text and lexical facts supplied by its caller.
+
+struct SpipeSourceParts:
+    imports: text
+    declarations: text
+    body: text
+
+fn spipe_rewrite_infix_expect_line(line: text) -> text:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("expect ") or trimmed.starts_with("expect("):
+        return line
+    val matchers: [text] = ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
+    var i = 0
+    while i < matchers.len():
+        val matcher = matchers[i]
+        val needle = " " + matcher + " "
+        val split_at = trimmed.index_of(needle)
+        if split_at >= 0:
+            val actual = trimmed.substring(7, split_at).trim()
+            val expected = trimmed.substring(split_at + needle.len()).trim()
+            if actual.len() == 0 or expected.len() == 0:
+                return line
+            val trimmed_line = line.trim_start()
+            val indent_len = line.len() - trimmed_line.len()
+            val indent = line.substring(0, indent_len)
+            return indent + "expect(" + actual + ")." + matcher + "(" + expected + ")"
+        i = i + 1
+    line
+
+fn native_rewrite_infix_expect_line(line: text, string_ranges: [i64]) -> Result<text, text>:
+    # Compiler-provided string ranges are byte-based and include the quotes.
+    # Unlike code_lines (character columns), this mask preserves raw UTF-8
+    # byte offsets and distinguishes a trailing comment from a quoted '#'.
+    if string_ranges.len() % 2 != 0: return Err("native-spec: invalid string ranges")
+    var mask_parts: [text] = []
+    var previous = 0
+    var range_index = 0
+    while range_index < string_ranges.len():
+        val start = string_ranges[range_index]
+        val finish = string_ranges[range_index + 1]
+        if start < previous or finish < start or finish > line.len():
+            return Err("native-spec: invalid string ranges")
+        mask_parts.push(line.substring(previous, start))
+        mask_parts.push(" ".repeat(finish - start))
+        previous = finish
+        range_index = range_index + 2
+    mask_parts.push(line.substring(previous))
+    val masked = mask_parts.join("")
+    val comment = masked.index_of("#")
+    val code_end = if comment >= 0: comment else: line.len()
+    val code = masked.substring(0, code_end)
+    val indent = line.len() - line.trim_start().len()
+    val actual_start = indent + 7
+    val matchers: [text] = ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
+    for matcher in matchers:
+        val needle = " " + matcher + " "
+        val split_at = code.index_of(needle)
+        if split_at > actual_start:
+            val actual = line.substring(actual_start, split_at).trim()
+            val expected_start = split_at + needle.len()
+            val expected_run = line.substring(expected_start, code_end)
+            val expected = expected_run.trim()
+            if actual != "" and expected != "":
+                val suffix = line.substring(expected_start + expected_run.trim_end().len())
+                return Ok(line.substring(0, indent) + "expect(" + actual + ")." + matcher + "(" + expected + ")" + suffix)
+    Ok(line)
+
+fn spipe_brace_delta(line: text) -> i64:
+    var delta = 0
+    var i = 0
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == "{":
+            delta = delta + 1
+        elif ch == "}":
+            delta = delta - 1
+        i = i + 1
+    delta
+
+fn spipe_open_bracket_delta(line: text) -> i64:
+    """Net count of unclosed `[`/`(`/`{` on one line.
+
+    String literals and `#` comments are skipped so a bracket inside spec
+    prose (e.g. `it "matrix[0] is zero":`) does not shift the depth.
+    Used to keep a multi-line top-level declaration such as
+    `val XS: [text] = [` ... `]` whole at module scope: without it the
+    closing `]` (at column 0, and not itself a declaration keyword) was
+    swept into the generated `fn main()`, leaving the module-scope list
+    literal unterminated -> "parse: expected RBracket, found Val".
+    """
+    var delta = 0
+    var i = 0
+    var in_str = false
+    var quote = ""
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if in_str:
+            if ch == "\\":
+                i = i + 2
+                continue
+            if ch == quote:
+                in_str = false
+        elif ch == "\"" or ch == "'":
+            in_str = true
+            quote = ch
+        elif ch == "#":
+            break
+        elif ch == "[" or ch == "(" or ch == "{":
+            delta = delta + 1
+        elif ch == "]" or ch == ")" or ch == "}":
+            delta = delta - 1
+        i = i + 1
+    delta
+
+fn spipe_is_top_level_start(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or
+    trimmed.starts_with("async fn ") or
+    trimmed.starts_with("static fn ") or
+    trimmed.starts_with("extern fn ") or
+    trimmed.starts_with("class ") or
+    trimmed.starts_with("impl ") or
+    trimmed.starts_with("enum ") or
+    trimmed.starts_with("trait ") or
+    trimmed.starts_with("type ") or
+    trimmed.starts_with("val ") or
+    trimmed.starts_with("let ") or
+    trimmed.starts_with("var ") or
+    trimmed.starts_with("mod ")
+
+fn spipe_is_partition_declaration(trimmed: text, preserve_framework: bool) -> bool:
+    if spipe_is_top_level_start(trimmed): return true
+    if not preserve_framework: return false
+    if trimmed.starts_with("struct "): return true
+    if trimmed.starts_with("pub "):
+        val declaration = trimmed.substring(4)
+        return spipe_is_top_level_start(declaration) or declaration.starts_with("struct ")
+    false
+
+fn spipe_partition_source(content: text, rendered_lines: [text], code_lines: [text], string_continuation: [bool], preserve_framework: bool, string_byte_ranges: [[i64]] = []) -> Result<SpipeSourceParts, text>:
+    val lines = content.split("\n")
+    if rendered_lines.len() != lines.len() or code_lines.len() != lines.len() or string_continuation.len() != lines.len():
+        return Err("native-spec: source line mapping changed")
+    if preserve_framework and string_byte_ranges.len() != lines.len():
+        return Err("native-spec: source string mapping changed")
+    var import_parts: [text] = []
+    var top_level_parts: [text] = []
+    var body_parts: [text] = []
+    # Element i pairs with lines[i]. Replaces a docstring flag that toggled on
+    # ANY line starting with `"""`, so a one-line docstring switched it on and
+    # nothing ever switched it off: every later import and top-level
+    # declaration was pushed verbatim into the main body (1,657 spec files
+    # carry a one-line docstring; measured 2026-09-06).
+    var in_top_fn = false
+    var top_fn_indent = 0
+    var in_import_block = false
+    var import_brace_depth = 0
+    var skipping_spec_import = false
+    # Unclosed bracket depth of the top-level declaration currently being
+    # collected (a multi-line `val XS: [text] = [` ... `]`). Non-zero keeps
+    # collecting into top_level_parts regardless of indentation.
+    var top_decl_depth = 0
+
+    var line_index = 0
+    while line_index < lines.len():
+        val fact_index = line_index
+        var line = rendered_lines[line_index]
+        line_index = line_index + 1
+        if preserve_framework and not string_continuation[fact_index]:
+            val code = code_lines[fact_index]
+            if code.starts_with("fn main(") or code.starts_with("pub fn main(") or code.starts_with("async fn main("):
+                return Err("native-spec: source defines main")
+            if code.trim().starts_with("expect "):
+                val rewritten = native_rewrite_infix_expect_line(line, string_byte_ranges[fact_index])
+                if rewritten.is_err(): return Err(rewritten.unwrap_err())
+                line = rewritten.unwrap()
+        val trimmed = line.trim()
+
+        if skipping_spec_import:
+            import_brace_depth = import_brace_depth + spipe_brace_delta(line)
+            if import_brace_depth <= 0:
+                skipping_spec_import = false
+                import_brace_depth = 0
+            continue
+
+        if in_import_block:
+            import_parts.push(line)
+            import_brace_depth = import_brace_depth + spipe_brace_delta(line)
+            if import_brace_depth <= 0:
+                in_import_block = false
+                import_brace_depth = 0
+            continue
+
+        # Track multi-line docstrings (""")
+         # Docstring lines pass through verbatim: a line inside a string opened
+        # earlier, or a line that is itself only a string (opener, closer, or a
+        # one-liner). Fixture-string interiors pass through too, instead of
+        # being classified as declarations.
+        if string_continuation[fact_index] or code_lines[fact_index].trim() == "\"\"":
+            if in_top_fn:
+                top_level_parts.push(line)
+            else:
+                body_parts.push("    " + line)
+            continue
+
+        # Native wrapping preserves local import scopes. Legacy SMF retains
+        # its historical hoisting behavior for compatibility.
+        val hoist_import = not preserve_framework or line.len() == line.trim_start().len()
+        if hoist_import and (trimmed.starts_with("import ") or trimmed.starts_with("use ")):
+            # Legacy SMF substitutes inline helpers; explicit native AOT keeps
+            # the complete configured framework. The
+            # `std.spec.scenario_governance` module is a plain library, and
+            # `build_coverage_wrapper` injects `use std.spec.scenario_governance
+            # .{scenario_governance_mcdc_exclusions_reset, ..._snapshot}` while
+            # its generated MC/DC dump code calls both — dropping that line
+            # left every MC/DC-lane spec at `Undefined("undefined identifier:
+            # scenario_governance_mcdc_exclusions_snapshot")`.
+            val is_spec_harness_import = (trimmed.starts_with("import std.spec") or
+                trimmed.starts_with("use std.spec")) and
+                not trimmed.starts_with("use std.spec.scenario_governance") and
+                not trimmed.starts_with("import std.spec.scenario_governance")
+            if is_spec_harness_import and not preserve_framework:
+                val delta = spipe_brace_delta(line)
+                if delta > 0:
+                    skipping_spec_import = true
+                    import_brace_depth = delta
+                continue
+            import_parts.push(trimmed)
+            val delta = spipe_brace_delta(line)
+            if delta > 0:
+                in_import_block = true
+                import_brace_depth = delta
+            continue
+
+        # Top-level declarations (at column 0 only) stay outside main.
+        if not in_top_fn:
+            val line_indent = line.len() - trimmed.len()
+            if line_indent == 0:
+                if spipe_is_partition_declaration(trimmed, preserve_framework):
+                    in_top_fn = true
+                    top_fn_indent = 0
+                    top_decl_depth = spipe_open_bracket_delta(line)
+                    if top_decl_depth < 0:
+                        top_decl_depth = 0
+                    top_level_parts.push(line)
+                    continue
+
+        # If we're inside a top-level function definition, keep collecting
+        # lines until we see a line at the same or lesser indentation (not blank)
+        if in_top_fn:
+            # A declaration whose first line left brackets open continues at
+            # column 0 (the closing `]`), so indentation alone cannot end it.
+            if top_decl_depth > 0:
+                top_decl_depth = top_decl_depth + spipe_open_bracket_delta(line)
+                if top_decl_depth < 0:
+                    top_decl_depth = 0
+                top_level_parts.push(line)
+                continue
+            if trimmed.len() == 0:
+                top_level_parts.push("")
+                continue
+            val current_indent = line.len() - trimmed.len()
+            if current_indent > top_fn_indent:
+                top_level_parts.push(line)
+                continue
+            else:
+                # This line is at same/lesser indent — end of function
+                in_top_fn = false
+                if current_indent == 0 and spipe_is_partition_declaration(trimmed, preserve_framework):
+                    in_top_fn = true
+                    top_fn_indent = 0
+                    top_decl_depth = spipe_open_bracket_delta(line)
+                    if top_decl_depth < 0:
+                        top_decl_depth = 0
+                    top_level_parts.push(line)
+                    continue
+                # Fall through to body processing
+
+        # Everything else goes into fn main() body
+        if trimmed.len() > 0:
+            body_parts.push("    " + line)
+        else:
+            body_parts.push("")
+
+    Ok(SpipeSourceParts(imports: import_parts.join("\n"), declarations: top_level_parts.join("\n"), body: body_parts.join("\n")))
+
+fn native_framework_result_prefix(content: text) -> text:
+    for index in 0..32:
+        val candidate = "__simple_native_spec_" + index.to_text() + "_"
+        if not content.contains(candidate): return candidate
+    ""
+
+fn native_framework_wrapper_source(content: text, code_lines: [text], string_continuation: [bool], string_byte_ranges: [[i64]]) -> Result<text, text>:
+    """Preserve configured SSpec calls, using real lexer facts supplied by caller.
+
+    This pure owner neither selects a family nor imports the compiler lexer.
+    The existing framework owns hooks, matchers, skip policy and case evidence.
+    """
+    if content.trim() == "": return Err("native-spec: source is empty")
+    val split = spipe_partition_source(content, content.split("\n"), code_lines, string_continuation, true, string_byte_ranges)
+    if split.is_err(): return Err(split.unwrap_err())
+    val parts = split.unwrap()
+    val prefix = native_framework_result_prefix(content)
+    if prefix == "": return Err("native-spec: result alias namespace exhausted")
+    val summary = prefix + "summary"
+    val executed = prefix + "executed"
+    val exit_code = prefix + "exit_code"
+    val result_import = "use std.spec.{print_summary as " + summary + ", get_executed_test_count as " + executed + ", get_exit_code as " + exit_code + "}\n"
+    val finish = "\n    " + summary + "()\n" +
+        "    if " + executed + "() == 0:\n" +
+        "        print \"test-runner: no examples executed\"\n" +
+        "        return 2\n" +
+        "    return " + exit_code + "()\n"
+    Ok(result_import + parts.imports + "\n" + parts.declarations + "\nfn main() -> i64:\n" + parts.body + finish)
+
+export SpipeSourceParts, spipe_partition_source, spipe_rewrite_infix_expect_line
+export native_framework_wrapper_source

@@ -1,0 +1,72 @@
+# @req MBH-REQ-006
+# rt_file_copy_create_excl_no_follow / rt_file_link_create_excl_no_follow:
+# exclusive create, no-follow source/destination, hard-link identity recheck.
+use std.spec.{describe, it, expect, step}
+use std.io.{file_write, file_read, file_exists}
+
+extern fn rt_path_absolute(path: text) -> text
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_copy_create_excl_no_follow(source: text, destination: text) -> bool
+extern fn rt_file_link_create_excl_no_follow(source: text, destination: text) -> bool
+extern fn rt_package_create_symlink(target: text, link_path: text) -> i32
+
+fn fresh_root(name: text) -> text:
+    val root = rt_path_absolute("build/test-artifacts/{name}").replace("\\", "/")
+    val _clean = rt_dir_remove_all(root)
+    root
+
+describe "exclusive no-follow copy and link":
+    it "should copy bytes exactly once and refuse an existing destination":
+        step("Copy a source to a fresh name")
+        val root = fresh_root("excl-copy")
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val source = root + "/source.o"
+        val dest = root + "/copy.o"
+        expect(file_write(source, "complete-object-bytes")).to_equal(true)
+        expect(rt_file_copy_create_excl_no_follow(source, dest)).to_equal(true)
+        expect(file_read(dest)).to_equal("complete-object-bytes")
+        step("A second copy onto the same name is refused and leaves it untouched")
+        expect(file_write(source, "different-bytes")).to_equal(true)
+        expect(rt_file_copy_create_excl_no_follow(source, dest)).to_equal(false)
+        expect(file_read(dest)).to_equal("complete-object-bytes")
+        step("A missing source creates no destination")
+        expect(rt_file_copy_create_excl_no_follow(root + "/missing.o", root + "/none.o")).to_equal(false)
+        expect(file_exists(root + "/none.o")).to_equal(false)
+        expect(rt_dir_remove_all(root)).to_equal(true)
+
+    it "should hard-link once and refuse an existing destination":
+        step("Link a source to a fresh name")
+        val root = fresh_root("excl-link")
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val source = root + "/source.o"
+        val dest = root + "/linked.o"
+        expect(file_write(source, "complete-object-bytes")).to_equal(true)
+        expect(rt_file_link_create_excl_no_follow(source, dest)).to_equal(true)
+        expect(file_read(dest)).to_equal("complete-object-bytes")
+        step("Linking again onto an existing name is refused")
+        expect(rt_file_link_create_excl_no_follow(source, dest)).to_equal(false)
+        expect(file_read(dest)).to_equal("complete-object-bytes")
+        expect(rt_dir_remove_all(root)).to_equal(true)
+
+    it "should refuse a directory source and a symlink source or destination":
+        step("A directory is not a regular source")
+        val root = fresh_root("excl-nofollow")
+        expect(rt_dir_create(root + "/sub", true)).to_equal(true)
+        expect(rt_file_copy_create_excl_no_follow(root + "/sub", root + "/d.o")).to_equal(false)
+        expect(rt_file_link_create_excl_no_follow(root + "/sub", root + "/d.o")).to_equal(false)
+        expect(file_exists(root + "/d.o")).to_equal(false)
+        val source = root + "/source.o"
+        expect(file_write(source, "complete-object-bytes")).to_equal(true)
+        val link = root + "/link"
+        if rt_package_create_symlink(source, link) == 0:
+            step("A symlink source is refused by copy and link")
+            expect(rt_file_copy_create_excl_no_follow(link, root + "/c.o")).to_equal(false)
+            expect(rt_file_link_create_excl_no_follow(link, root + "/l.o")).to_equal(false)
+            expect(file_exists(root + "/c.o")).to_equal(false)
+            step("A symlink destination is never written through")
+            expect(rt_file_copy_create_excl_no_follow(source, link)).to_equal(false)
+            expect(file_read(source)).to_equal("complete-object-bytes")
+        else:
+            print "SKIP: symlink creation unavailable; reparse-point negatives remain covered by the C probe"
+        expect(rt_dir_remove_all(root)).to_equal(true)

@@ -1,0 +1,53 @@
+"""Conservative comparison: both algorithms receive already-canonical paths.
+
+The old production sort also canonicalized on every selection comparison;
+omitting that cost here understates its time and allocation overhead.
+"""
+
+use compiler.driver.hir_admission_order_v1.{hir_admission_path_order_v1}
+
+fn previous_order(paths: [text]) -> [i64]:
+    var order: [i64] = []
+    var selected: {i64: bool} = {}
+    while order.len() < paths.len():
+        var best = -1
+        var best_path = ""
+        var index = 0
+        while index < paths.len():
+            if not selected.contains_key(index):
+                val path = paths[index]
+                if best < 0 or path < best_path:
+                    best = index
+                    best_path = path
+            index = index + 1
+        if best < 0: break
+        selected[best] = true
+        order.push(best)
+    order
+
+pub fn benchmark_admission_order(candidate: bool) -> i64:
+    var paths: [text] = []
+    var index = 0
+    while index < 2912:
+        # Repeated keys exercise stable ties as well as the long snapshot prefix.
+        val suffix = (2912 - index) % 1456
+        paths.push("/tmp/release-1.0.0-phase3-fixes/build/scv/snapshots/scv-revision-v1-1362576eae6502cfa9d0b125db3cdb318d647d8a868eb41eef75d94483da1a05/src/lib/probe/module-{suffix}.spl")
+        index = index + 1
+    val order = if candidate: hir_admission_path_order_v1(paths) else: previous_order(paths)
+    if order.len() != paths.len(): return 20
+    var seen: {i64: bool} = {}
+    var checksum: i64 = 0
+    index = 0
+    while index < order.len():
+        val current = order[index]
+        if current < 0 or current >= paths.len(): return 21
+        if seen.contains_key(current): return 22
+        seen[current] = true
+        if index > 0:
+            val previous = order[index - 1]
+            if paths[current] < paths[previous]: return 23
+            if paths[current] == paths[previous] and current < previous: return 24
+        checksum = (checksum * 131 + current) % 1000000007
+        index = index + 1
+    print "admission-order rows={order.len()} checksum={checksum} PASS"
+    0

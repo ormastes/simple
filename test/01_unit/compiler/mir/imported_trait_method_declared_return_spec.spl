@@ -1,0 +1,97 @@
+"""
+A bare `Ok`/`Err` arm matched on `recv.method()` through an IMPORTED
+trait-typed receiver needs the trait method's declared return type. The
+consumer's symbol table holds the imported trait symbol but no method
+symbols, so the declared `Result<...>` was lost and the arm reported
+"bare variant 'Ok' is ambiguous" (stage3 bootstrap, `self.codegen.
+compile_module(...)` in backend_api.spl). The provider prescan now registers
+every trait method signature under a module-canonical key that the consumer
+recomputes from its own table.
+
+Each example uses its own provider module: the registry is process-global
+and a second registration of one key marks it ambiguous by design.
+"""
+# @cover src/compiler/50.mir/_MirLowering/declaration_providers_v1.spl
+# @cover src/compiler/50.mir/_MirLowering/module_lowering.spl
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_data.{bootstrap_fn_ret_hir_type_lookup}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.declaration_providers_v1.{mir_trait_method_ret_key_v1}
+
+val PROVIDER_SOURCE = """
+pub trait Maker:
+    fn make(n: i64) -> Result<i64, text>
+
+pub fn helper() -> i64:
+    1
+"""
+
+fn provider_file(tag: text) -> text:
+    "src/repro_trait_ret_" + tag + "/kinds.spl"
+
+fn provider_module(tag: text) -> text:
+    "repro_trait_ret_" + tag + ".kinds"
+
+fn provider_hir(tag: text) -> HirModule:
+    val ast = parse_full_frontend(PROVIDER_SOURCE, provider_file(tag), provider_file(tag), Logger(level: 0))
+    var lowering = HirLowering.with_filename(provider_file(tag))
+    lowering.lower_module(ast)
+
+fn provider_trait_raw(hir: HirModule) -> i64:
+    var found: i64 = -1
+    for t in hir.traits.values():
+        if t.name == "Maker": found = t.symbol.id
+    found
+
+fn prescan_provider(hir: HirModule, tag: text):
+    var modules: Dict<text, HirModule> = {}
+    modules["kinds"] = hir
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.prescan_module_functions_v1(modules, "kinds", provider_module(tag), hir.symbols)
+
+fn consumer_trait(tag: text) -> (SymbolTable, i64):
+    var table = SymbolTable.new()
+    val span = Span(start: 0, end: 0, line: 0, col: 0, file: "")
+    val id = table.define("Maker", SymbolKind.Trait, nil, span, Visibility.Public, false, Some(provider_module(tag)))
+    (table, id.id)
+
+describe "imported trait method declared return":
+    it "provider and consumer compute the same canonical key":
+        val hir = provider_hir("key")
+        val raw = provider_trait_raw(hir)
+        expect(raw >= 0).to_equal(true)
+        val provider_key = mir_trait_method_ret_key_v1(hir.symbols, raw, "make")
+        val (table, consumer_raw) = consumer_trait("key")
+        expect(provider_key).to_equal("trait-ret:repro_trait_ret_key.kinds.Maker::make")
+        expect(mir_trait_method_ret_key_v1(table, consumer_raw, "make")).to_equal(provider_key)
+
+    it "provider prescan registers the trait method's Result return":
+        prescan_provider(provider_hir("reg"), "reg")
+        val (table, consumer_raw) = consumer_trait("reg")
+        val found = bootstrap_fn_ret_hir_type_lookup(mir_trait_method_ret_key_v1(table, consumer_raw, "make"))
+        expect(found.?).to_equal(true)
+        var is_result = false
+        if val ty = found:
+            match ty.kind:
+                case HirTypeKind.Result(_, _): is_result = true
+                case _: ()
+        expect(is_result).to_equal(true)
+
+    it "a non-trait symbol yields no key":
+        var table = SymbolTable.new()
+        val span = Span(start: 0, end: 0, line: 0, col: 0, file: "")
+        val id = table.define("Maker", SymbolKind.Struct, nil, span, Visibility.Public, false, Some(provider_module("struct")))
+        expect(mir_trait_method_ret_key_v1(table, id.id, "make")).to_equal("")
+
+    it "an unknown method stays unresolved":
+        prescan_provider(provider_hir("miss"), "miss")
+        val (table, consumer_raw) = consumer_trait("miss")
+        expect(bootstrap_fn_ret_hir_type_lookup(mir_trait_method_ret_key_v1(table, consumer_raw, "missing")).?).to_equal(false)

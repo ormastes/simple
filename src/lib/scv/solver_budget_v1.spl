@@ -1,0 +1,65 @@
+# Deterministic pre-serialization accounting, not a native heap sandbox.
+use std.scv.solver_contract_v1.*
+use std.scv.solver_source_v1.*
+
+struct SolverBudgetV1:
+    limit: i64
+    spent: i64
+    limited: bool
+
+fn solver_budget_new_v1(request: SolveRequestV1) -> SolverBudgetV1:
+    var limit = 16777216
+    if request.memory_budget < limit: limit = request.memory_budget
+    if request.logical_work_budget < limit: limit = request.logical_work_budget
+    SolverBudgetV1(limit: limit, spent: 0, limited: limit < 0)
+
+fn solver_budget_charge_v1(budget: SolverBudgetV1, count: i64) -> SolverBudgetV1:
+    if budget.limited: return budget
+    var next = budget
+    # Subtraction before addition/multiplication prevents aggregate overflow.
+    if count < 0 or count > (budget.limit - budget.spent) / 64:
+        next.limited = true
+        return next
+    next.spent = budget.spent + count * 64
+    next
+
+fn solver_budget_texts_v1(budget: SolverBudgetV1, values: [text]) -> SolverBudgetV1:
+    var next = solver_budget_charge_v1(budget, values.len())
+    for value in values:
+        if next.limited: return next
+        next = solver_budget_charge_v1(next, value.len())
+    next
+
+fn solver_budget_binding_v1(budget: SolverBudgetV1, binding: SolveBindingV1) -> SolverBudgetV1:
+    solver_budget_texts_v1(budget, [binding.repository, binding.namespace, binding.domain, binding.base_revision, binding.left_revision, binding.right_revision, binding.base_model_id, binding.left_model_id, binding.right_model_id, binding.expected_root, binding.schema_revision, binding.policy_revision, binding.routing_revision, binding.identity_map_revision, binding.parser_lock_digest, binding.solver_lock_digest, binding.profile_digest, binding.configuration_digest, binding.operation_bundle_digest, binding.authorization_scope])
+
+fn solver_budget_host_v1(request: SolveRequestV1, policy: SolverHostPolicyV1) -> SolverBudgetV1:
+    var next = solver_budget_binding_v1(solver_budget_new_v1(request), request.binding)
+    next = solver_budget_binding_v1(next, policy.expected)
+    next = solver_budget_texts_v1(next, [request.request_id, policy.parser.provider_id, policy.parser.lock_digest, policy.model.provider_id, policy.model.lock_digest, policy.solver.provider_id, policy.solver.lock_digest, policy.publisher.provider_id, policy.publisher.lock_digest])
+    if policy.validators.len() > 64:
+        next.limited = true
+        return next
+    for validator in policy.validators:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [validator.provider_id, validator.lock_digest])
+    next
+
+fn solver_budget_source_v1(request: SolveRequestV1, policy: SolverHostPolicyV1, input: SourceMergeInputV1) -> SolverBudgetV1:
+    var next = solver_budget_host_v1(request, policy)
+    for file in [input.base, input.left, input.right]:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [file.file_uid, file.revision, file.path, file.kind, file.mode])
+        next = solver_budget_charge_v1(next, file.bytes.len())
+    if input.moves.len() > 128:
+        next.limited = true
+        return next
+    # Bound quadratic duplicate/evidence comparisons before traversing records.
+    next = solver_budget_charge_v1(next, input.moves.len() * input.moves.len())
+    for move in input.moves:
+        if next.limited: return next
+        next = solver_budget_texts_v1(next, [move.operation_id, move.producer_id, move.file_uid, move.base_revision, move.side_revision, move.from_path, move.to_path, move.expected_base_bytes_digest, move.expected_side_bytes_digest])
+    next
+
+export SolverBudgetV1, solver_budget_new_v1, solver_budget_charge_v1
+export solver_budget_texts_v1, solver_budget_host_v1, solver_budget_source_v1

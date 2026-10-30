@@ -32,8 +32,9 @@ one window and one pane before returning their actual identifiers.
 
 1. Request `split work diagonal`. It refuses without adding a pane, spawning a
    child or changing the original 80 by 24 dimensions.
-2. Close the final pane and request a vertical split. It reports no focused
-   pane and does not allocate a replacement.
+2. Close the final pane and request a vertical split. Checked deletion removed
+   the final window/session, so the exact reply is `smux: unknown session work`.
+   Pane, window and session inventories remain empty; no replacement is created.
 3. Fill the eight-pane service capacity using eight ordinary session records.
    A protocol split refuses with a capacity error; work retains its original
    pane and dimensions.
@@ -54,8 +55,9 @@ acceptance requirements. These refusal scenarios do not prove those paths.
 4. Select logs and run `panes work`. Only logs' pane ID appears.
 5. Select a logs pane while the initial window remains active. It reports an
    unknown pane; the initial window's focus remains unchanged.
-6. Close the active window's final pane. Both capture and send report no
-   focused pane, and the window remains empty.
+6. Close the only window's final pane. Both capture and send report exactly
+   `smux: unknown session work`; pane, window and session inventories are empty.
+   These updated protocol oracles remain NOT_RUN pending admitted execution.
 7. Submit `send work` without command text. It reports the missing argument;
    capture remains empty and pane focus remains unchanged.
 
@@ -120,9 +122,10 @@ no socket reads, writes, fragmentation, deadlines or listener behavior.
    and `screen` contains two rows of four spaces. Return to the original
    window; its independent 12 by 6 geometry survives.
 5. Change work's layout. Monitoring retains its manual layout and original
-   80 by 24 pane dimensions; its rectangle list stays empty.
-6. Capture a manual window before selecting named geometry. Screen capture
-   refuses, rectangles stay empty and no pane capture occurs.
+   80 by 24 pane dimensions; its rectangle uses the real pane ID and full canvas.
+6. Capture a manual window before selecting named geometry. Persisted geometry
+   permits screen capture, rectangles show the real full-canvas pane, and the
+   capture count advances once without changing the layout.
 7. Select a valid layout, then request an invalid name. The request refuses;
    the selected layout and exact prior rectangles survive.
 8. Request two column bands in a one-column canvas. It refuses without

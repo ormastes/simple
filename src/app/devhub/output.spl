@@ -3,14 +3,16 @@
 # Supports: --json <fields>, --jq <expr>, --web, --no-pager
 # Respects: NO_COLOR, ITF_FORCE_COLOR, ITF_PAGER, PAGER
 
-use std.nogc_sync_mut.env.{env_get, env_has}
+use std.env.{env_get, env_has}
 use app.ui.render.ansi.{ansi_red, ansi_green, ansi_yellow, ansi_bold, ansi_reset, ansi_dim}
 use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_serialize, json_value_pretty, json_value_field, json_value_has, json_value_object_from, json_value_at, json_value_len, json_value_type}
 use app.devhub.flags.{_extract_flag, _has_flag}
 use std.tui.terminal.{terminal_get_size, terminal_stdout_is_tty}
 use std.io_runtime.{time_now_unix_micros}
-use std.nogc_sync_mut.file_system.file_ops.{file_write_text, file_delete}
-use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.io.file_ops.{file_delete, secure_temp_dir}
+use std.sffi.fs.{file_atomic_write_mode}
+use std.io.dir_ops.{dir_remove}
+use std.io.process_ops.{process_run}
 use app.io.process_ops.{process_run_inherit}
 
 
@@ -328,12 +330,12 @@ fn print_table_header(columns: [text]):
     if should_use_color():
         var header = ""
         for col in columns:
-            header = header + "{ansi_bold()}{col.pad_right(20)}{ansi_reset()}"
+            header = header + "{ansi_bold()}{_pad_visible(col, 20)}{ansi_reset()}"
         print header
     else:
         var header = ""
         for col in columns:
-            header = header + col.pad_right(20)
+            header = header + _pad_visible(col, 20)
         print header
 
 
@@ -341,7 +343,7 @@ fn print_table_row(values: [text]):
     """Print a table data row."""
     var row = ""
     for val_text in values:
-        row = row + val_text.pad_right(20)
+        row = row + _pad_visible(val_text, 20)
     print row
 
 
@@ -512,12 +514,25 @@ fn _emit_lines(lines: [text]):
             print line
         return
 
-    val tmp_path = "/tmp/itf_pager_output.txt"
-    file_write_text(tmp_path, lines.join("\n") + "\n")
+    var parent = env_get("TMPDIR")
+    if parent == "": parent = env_get("TEMP")
+    if parent == "": parent = env_get("TMP")
+    if parent == "": parent = "/tmp"
+    val private_dir: text = match secure_temp_dir(parent, "devhub-pager-"):
+        case Ok(path): path
+        case Err(_):
+            for line in lines: print line
+            return
+    val tmp_path = private_dir + "/output.txt"
+    if not file_atomic_write_mode(tmp_path, lines.join("\n") + "\n", 384):
+        val removed = dir_remove(private_dir, false)
+        for line in lines: print line
+        return
     val (pager_bin, pager_args) = _split_pager_cmd(resolve_pager_cmd())
     val code = process_run_inherit(pager_bin, pager_args + [tmp_path])
     file_delete(tmp_path)
-    if code < 0:
+    val removed = dir_remove(private_dir, false)
+    if code != 0:
         # Pager binary missing/unspawnable — never drop the output.
         for line in lines:
             print line

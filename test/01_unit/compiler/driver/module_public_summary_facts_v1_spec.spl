@@ -1,0 +1,39 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.driver.cache.module_public_summary_facts_v1.{module_public_extern_signature_v1,
+    module_public_facts_of_module_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_view_sections_v1}
+
+val SRC: text = "pub struct Point:\n    x: i64\n\npub fn add(a: i64, b: i64) -> i64:\n    a + b\n\npub fn first<T>(xs: [T]) -> T:\n    xs[0]\n\nfn hidden() -> i64:\n    7\n"
+
+describe "public summary facts (TLDR companion view)":
+    it "turns a one-line header into an extern signature":
+        expect(module_public_extern_signature_v1("pub fn add(a: i64) -> i64:")).to_equal("pub extern fn add(a: i64) -> i64")
+        expect(module_public_extern_signature_v1("pub fn split(a: i64,")).to_equal("")
+
+    it "projects every top-level declaration, with bodies as references":
+        val parsed = parse_full_frontend(SRC, "facts_fixture.spl", "facts_fixture", Logger(level: 0))
+        val facts = module_public_facts_of_module_v1(parsed, SRC, "facts_fixture")
+        var bytes: [text] = []
+        for fact in facts:
+            bytes.push(fact.canonical_bytes)
+        expect(bytes.contains("pub extern fn add(a: i64, b: i64) -> i64")).to_equal(true)
+        expect(bytes.contains("pub struct Point:\n    x: i64")).to_equal(true)
+        expect(bytes.contains("body first")).to_equal(true)
+        expect(bytes.contains("pub extern fn hidden() -> i64")).to_equal(true)
+        for b in bytes:
+            expect(b.contains("    7")).to_equal(false)
+            expect(b.contains("a + b")).to_equal(false)
+
+    it "renders the companion view through the public summary projector":
+        val parsed = parse_full_frontend(SRC, "facts_fixture.spl", "facts_fixture", Logger(level: 0))
+        val (sections, refusal) = module_tldr_companion_view_sections_v1(parsed, "facts_fixture.spl", SRC, "facts_fixture")
+        expect(refusal).to_equal("")
+        expect(sections[0].starts_with("summary|# @generated simple public summary v1")).to_equal(true)
+        expect(sections[0].contains("pub extern fn add(a: i64, b: i64) -> i64")).to_equal(true)
+        var has_generic_body = false
+        for s in sections:
+            if s.starts_with("generic|") and s.contains("xs[0]"):
+                has_generic_body = true
+        expect(has_generic_body).to_equal(true)

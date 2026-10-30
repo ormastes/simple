@@ -1,0 +1,377 @@
+"""
+Return-type interface (RTI) v1: one DeclRef-keyed declared-return table for
+free functions and struct/class methods (incl. static), consumed first by
+MIR `enum_match_expr_type`. Fixture: test/fixtures/compiler/rti/
+(kinds = provider, reexport = `pick as choose`, consumer = bare Ok/Err arms).
+Design: doc/05_design/compiler/types/return_type_interface_design.md.
+"""
+# @cover src/compiler/20.hir/return_type_interface_v1.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# @cover src/compiler/50.mir/_MirLowering/module_lowering.spl
+
+use std.spec.*
+use app.io.mod.{file_read}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.return_type_interface_v1.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val KINDS = "rti_fixture.kinds"
+val REEXPORT = "rti_fixture.reexport"
+val CONSUMER = "rti_fixture.consumer"
+
+fn fixture_hirs() -> Dict<text, HirModule>:
+    val names = [KINDS, REEXPORT, CONSUMER]
+    val files = ["test/fixtures/compiler/rti/kinds.spl", "test/fixtures/compiler/rti/reexport.spl", "test/fixtures/compiler/rti/consumer.spl"]
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    for i in 0..3:
+        val src = file_read(files[i])
+        modules[names[i]] = parse_full_frontend(src, files[i], names[i], Logger(level: 0))
+        sources.push(SourceFile(path: files[i], content: src, module_name: names[i]))
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: Dict<text, HirModule> = {}
+    for i in 0..3:
+        var lowering = hirlowering_for_module(names[i], surfaces)
+        hirs[names[i]] = lowering.lower_module(modules[names[i]])
+    hirs
+
+fn path_spelled_hir(source: text, path: text) -> HirModule:
+    val ast = parse_full_frontend(source, path, path, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(ast)
+
+fn fixture_table(hirs: Dict<text, HirModule>) -> ReturnTypeInterfaceTable:
+    var table = ReturnTypeInterfaceTable.new()
+    for name in [KINDS, REEXPORT, CONSUMER]:
+        val result = table.register_hir_module(hirs[name]).unwrap()
+        val _ = result  # skipped_infer count logged only if needed
+    table
+
+fn symbol_raw(symbols: SymbolTable, name: text) -> i64:
+    var found: i64 = -1
+    for sym in symbols.symbols.values():
+        if sym.name == name and found < 0: found = sym.id.id
+    found
+
+fn function_named(module: HirModule, name: text) -> HirFunction:
+    var found = module.functions.values()[0]
+    for f in module.functions.values():
+        if f.name == name: found = f
+    found
+
+fn match_subject(f: HirFunction) -> HirExpr:
+    var found = f.body.value
+    for st in f.body.stmts:
+        match st.kind:
+            case HirStmtKind.Expr(e):
+                match e.kind:
+                    case HirExprKind.MatchCase(scrutinee, _): found = scrutinee
+                    case _: ()
+            case _: ()
+    match f.body.value.kind:
+        case HirExprKind.MatchCase(scrutinee, _): found = scrutinee
+        case _: ()
+    found
+
+fn shape_result_text() -> text:
+    val shape = rti_type_ref(KINDS, "enum", "Shape")
+    rti_term_canonical_text(RtType.ResultT(RtType.Nominal(shape, []), RtType.Builtin("text")))
+
+fn subject_term_text(table: ReturnTypeInterfaceTable, consumer: HirModule, fn_name: text) -> text:
+    val entry = table.callee_return(match_subject(function_named(consumer, fn_name)), consumer.symbols, nil)
+    match entry:
+        case Ok(e):
+            match table.resolve(e):
+                case Ok(resolved):
+                    match table.require_concrete(resolved):
+                        case Ok(term): rti_term_canonical_text(term)
+                        case Err(err): err.message
+                case Err(err): err.message
+        case Err(err): err.message
+
+fn row_for(rows: [ReturnTypeRow], display: text) -> ReturnTypeRow?:
+    for row in rows:
+        if row.decl.display == display: return Some(row)
+    nil
+
+fn decided_row(module_id: text, name: text, term: RtType, count: i64) -> ReturnTypeRow:
+    val decl = rti_fn_ref(module_id, name)
+    ReturnTypeRow(decl: decl, key: CalleeKey(module_id: module_id, owner: nil, name: name, is_static: false),
+        type_param_count: count, entry: ReturnTypeEntry.Decided(term))
+
+fn async_row(module_id: text, name: text, target: DeclRef) -> ReturnTypeRow:
+    ReturnTypeRow(decl: rti_fn_ref(module_id, name), key: CalleeKey(module_id: module_id, owner: nil, name: name, is_static: false),
+        type_param_count: 0, entry: ReturnTypeEntry.AsyncRef(target))
+
+fn err_code<T>(r: Result<T, RtiError>) -> text:
+    match r:
+        case Ok(_): "ok"
+        case Err(e): e.code
+
+fn err_message<T>(r: Result<T, RtiError>) -> text:
+    match r:
+        case Ok(_): ""
+        case Err(e): e.message
+
+fn mir_subject_kind(hirs: Dict<text, HirModule>, fn_name: text) -> text:
+    val consumer = hirs[CONSUMER]
+    var lowering = MirLowering.new(consumer.symbols)
+    for name in [KINDS, REEXPORT, CONSUMER]:
+        lowering.prescan_module_struct_names(hirs, name)
+        lowering.prescan_module_functions_v1(hirs, name, name, hirs[name].symbols)
+    val _ = lowering.lower_module(consumer, [hirs[KINDS], hirs[REEXPORT], consumer])
+    var fatal_rti = 0
+    for e in lowering.errors:
+        if e.message.contains("E-RTI") or e.message.contains("is ambiguous"): fatal_rti = fatal_rti + 1
+    if fatal_rti > 0: return "errors"
+    val found = lowering.enum_match_expr_type(match_subject(function_named(consumer, fn_name)))
+    if val t = found:
+        match t.kind:
+            case HirTypeKind.Result(_, _): return "Result"
+            case _: return "other"
+    "none"
+
+describe "return-type interface v1":
+    it "publishes body-free imported Optional record returns with the provider owner":
+        val hir = path_spelled_hir("struct Payload:\n    value: i64\nfn maybe() -> Payload?:\n    Some(Payload(value: 42))\n", "src/rti_body_free/provider.spl")
+        val function = function_named(hir, "maybe")
+        val signature = RtiCallableSignatureV1(symbol: function.symbol, name: function.name,
+            type_params: [], owner_type_params: [], return_type: function.return_type, is_static: false)
+        val compact = rti_row_from_signature_v1("unrelated.consumer", hir.symbols, signature).unwrap()
+        val full = rti_rows_from_hir_v1(hir).unwrap().rows[0]
+        expect(rti_decl_ref_same(compact.decl, full.decl)).to_equal(true)
+        expect(compact.decl.module_id).to_equal("rti_body_free.provider")
+        val table = ReturnTypeInterfaceTable.new()
+        val compact_term = table.require_concrete(compact.entry).unwrap()
+        val full_term = table.require_concrete(full.entry).unwrap()
+        expect(rti_term_canonical_text(compact_term)).to_equal(rti_term_canonical_text(full_term))
+        expect(rti_term_canonical_text(compact_term)).to_start_with("opt(")
+
+    it "retains symbolic generic parameters in body-free signatures":
+        val hir = path_spelled_hir("fn maybe<T>(value: T) -> T?:\n    Some(value)\n", "src/rti_body_free/generic.spl")
+        val function = function_named(hir, "maybe")
+        val signature = RtiCallableSignatureV1(symbol: function.symbol, name: function.name,
+            type_params: rti_type_param_names(function.type_params), owner_type_params: [],
+            return_type: function.return_type, is_static: false)
+        val row = rti_row_from_signature_v1(hir.name, hir.symbols, signature).unwrap()
+        val table = ReturnTypeInterfaceTable.new()
+        expect(row.type_param_count).to_equal(1)
+        expect(err_code(table.require_concrete(row.entry))).to_equal("E-RTI-003")
+        expect(rti_term_canonical_text(table.instantiate(row, [RtType.Builtin("i64")]).unwrap())).to_equal("opt(b:i64)")
+
+    it "builds rows for a free function, an instance method and a static method":
+        val hirs = fixture_hirs()
+        val result = rti_rows_from_hir_v1(hirs[KINDS]).unwrap()
+        val rows = result.rows
+        val pick = row_for(rows, "fn:pick")
+        val open = row_for(rows, "struct:Box::open")
+        val make = row_for(rows, "struct:Box::make")
+        expect(pick.?).to_equal(true)
+        expect(open.?).to_equal(true)
+        expect(make.?).to_equal(true)
+        if val m = make:
+            expect(m.key.is_static).to_equal(true)
+            expect(m.type_param_count).to_equal(0)
+            expect(m.decl.module_id).to_equal(KINDS)
+        if val p = pick:
+            expect(rti_row_canonical_text_v1(p).starts_with("rti|" + p.decl.decl_id + "|0|decided|")).to_equal(true)
+
+    it "gives one DeclRef to Shape across tables and module spellings":
+        val hirs = fixture_hirs()
+        val consumer = hirs[CONSUMER]
+        val from_consumer = rti_type_decl_ref(consumer.symbols, symbol_raw(consumer.symbols, "Shape")).unwrap()
+        val path_kinds = path_spelled_hir(file_read("test/fixtures/compiler/rti/kinds.spl"), "src/rti_fixture/kinds.spl")
+        val from_path = rti_type_decl_ref(path_kinds.symbols, symbol_raw(path_kinds.symbols, "Shape")).unwrap()
+        expect(from_path.module_id).to_equal(KINDS)
+        expect(rti_decl_ref_same(from_consumer, from_path)).to_equal(true)
+        expect(from_consumer.display).to_equal("enum:Shape")
+
+    it "resolves the imported call, the method chain and the re-exported name":
+        val hirs = fixture_hirs()
+        val table = fixture_table(hirs)
+        val consumer = hirs[CONSUMER]
+        expect(subject_term_text(table, consumer, "via_fn")).to_equal(shape_result_text())
+        expect(subject_term_text(table, consumer, "via_method")).to_equal(shape_result_text())
+        expect(subject_term_text(table, consumer, "via_reexport")).to_equal(shape_result_text())
+
+    it "binds an interface term back to the consumer's local Shape symbol":
+        val hirs = fixture_hirs()
+        val table = fixture_table(hirs)
+        val consumer = hirs[CONSUMER]
+        val shape = rti_type_ref(KINDS, "enum", "Shape")
+        val bound = table.bind(RtType.Nominal(shape, []), consumer.symbols).unwrap()
+        var bound_raw: i64 = -1
+        match bound.kind:
+            case HirTypeKind.Named(sym, _): bound_raw = sym.id
+            case _: ()
+        expect(rti_decl_ref_same(rti_type_decl_ref(consumer.symbols, bound_raw).unwrap(), shape)).to_equal(true)
+        val missing = rti_type_ref("rti_fixture.nowhere", "enum", "Ghost")
+        expect(err_code(table.bind(RtType.Nominal(missing, []), consumer.symbols))).to_equal("E-RTI-004")
+
+    it "follows AsyncRef rows and fails closed on missing targets and cycles":
+        var table = ReturnTypeInterfaceTable.new()
+        val target = decided_row("m.a", "base", RtType.Builtin("i64"), 0)
+        val _ = table.register_module_rows("m.a", [target, async_row("m.a", "alias", target.decl)]).unwrap()
+        match table.resolve(ReturnTypeEntry.AsyncRef(target.decl)).unwrap():
+            case ReturnTypeEntry.Decided(term): expect(rti_term_canonical_text(term)).to_equal("b:i64")
+            case ReturnTypeEntry.Union(_): expect("union").to_equal("decided")
+            case ReturnTypeEntry.AsyncRef(_): expect("async").to_equal("decided")
+        expect(err_code(table.resolve(ReturnTypeEntry.AsyncRef(rti_fn_ref("m.a", "absent"))))).to_equal("E-RTI-002")
+        val _ = table.register_module_rows("m.c", [async_row("m.c", "x", rti_fn_ref("m.c", "y")), async_row("m.c", "y", rti_fn_ref("m.c", "x"))]).unwrap()
+        expect(err_code(table.resolve(ReturnTypeEntry.AsyncRef(rti_fn_ref("m.c", "x"))))).to_equal("E-RTI-005")
+
+    it "requires concrete terms and instantiates generic rows":
+        val table = ReturnTypeInterfaceTable.new()
+        val generic = decided_row("m.g", "first", RtType.OptionalT(RtType.Param(0)), 1)
+        expect(err_code(table.require_concrete(generic.entry))).to_equal("E-RTI-003")
+        expect(err_code(table.require_concrete(ReturnTypeEntry.Union([RtType.Builtin("i32"), RtType.Builtin("i64")])))).to_equal("E-RTI-002")
+        expect(err_code(table.require_concrete(ReturnTypeEntry.AsyncRef(generic.decl)))).to_equal("E-RTI-002")
+        expect(rti_term_canonical_text(table.instantiate(generic, [RtType.Builtin("text")]).unwrap())).to_equal("opt(b:text)")
+        expect(err_code(table.instantiate(generic, []))).to_equal("E-RTI-003")
+
+    it "rejects a conflicting second row and accepts an identical one":
+        var table = ReturnTypeInterfaceTable.new()
+        val first = decided_row("m.d", "f", RtType.Builtin("i64"), 0)
+        expect(table.register_module_rows("m.d", [first]).unwrap()).to_equal(1)
+        expect(table.register_module_rows("m.d", [first]).unwrap()).to_equal(0)
+        expect(err_code(table.register_module_rows("m.d", [decided_row("m.d", "f", RtType.Builtin("bool"), 0)]))).to_equal("E-RTI-006")
+
+    it "refuses an Any return at export":
+        val hir = path_spelled_hir("fn loose() -> Any:\n    0\n", "src/rti_any/mod.spl")
+        val rows = rti_rows_from_hir_v1(hir)
+        expect(err_code(rows)).to_equal("E-RTI-007")
+        expect(err_message(rows).contains("loose")).to_equal(true)
+
+    it "counts unannotated functions":
+        val hirs = fixture_hirs()
+        val result = rti_rows_from_hir_v1(hirs[KINDS]).unwrap()
+        # The fixture module has no unannotated functions, so skipped count should be 0
+        expect(result.skipped_infer).to_equal(0)
+        # And the rows count should match the number of declared functions
+        expect(result.rows.len() > 0).to_equal(true)
+
+    it "names the callee and module on a missing row":
+        val table = ReturnTypeInterfaceTable.new()
+        val miss = table.lookup(CalleeKey(module_id: "m.e", owner: nil, name: "gone", is_static: false))
+        expect(err_code(miss)).to_equal("E-RTI-001")
+        expect(err_message(miss).contains("'gone'")).to_equal(true)
+        expect(err_message(miss).contains("'m.e'")).to_equal(true)
+
+    it "keeps a qualified carried callee authoritative across a raw id collision":
+        val local = path_spelled_hir("fn main() -> i64:\n    0\n", "src/rti_collision/local.spl")
+        val raw_main = function_named(local, "main").symbol.id
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(local).unwrap()
+        val payload = RtType.Nominal(rti_type_ref("m.left", "struct", "Payload"), [])
+        val expected = RtType.OptionalT(payload)
+        table.register_rows([decided_row("m.left", "maybe", expected, 0)]).unwrap()
+        val carried = table.fn_return(local.symbols, raw_main, "m.left.maybe").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(carried).unwrap())).to_equal(rti_term_canonical_text(expected))
+        val ordinary = table.fn_return(local.symbols, raw_main, "main").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(ordinary).unwrap())).to_equal("b:i64")
+
+    it "never replaces a missing qualified owner with a local or suffix match":
+        val local = path_spelled_hir("fn main() -> i64:\n    0\n", "src/rti_collision/local.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(local).unwrap()
+        table.register_rows([decided_row("m.left", "maybe", RtType.Builtin("bool"), 0)]).unwrap()
+        val missing = table.fn_return(local.symbols, function_named(local, "main").symbol.id, "m.absent.maybe")
+        expect(err_code(missing)).to_equal("E-RTI-002")
+
+    it "keeps missing rows unknown only with exact raw declaration proof":
+        val local = path_spelled_hir("fn loose():\n    0\n", "src/rti_infer/local.spl")
+        val provider = path_spelled_hir("fn loose():\n    1\n", "src/rti_infer/provider.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        # Deliberately omit rows; this tests identity proof independently of
+        # the frontend's inference policy for the unannotated bodies.
+        val local_raw = function_named(local, "loose").symbol.id
+        val provider_raw = function_named(provider, "loose").symbol.id
+        expect(err_code(table.fn_return(local.symbols, local_raw, "rti_infer.local.loose"))).to_equal("E-RTI-001")
+        expect(err_code(table.fn_return(provider.symbols, provider_raw, "rti_infer.provider.loose"))).to_equal("E-RTI-001")
+        expect(err_code(table.fn_return(local.symbols, local_raw, "rti_infer.provider.loose"))).to_equal("E-RTI-002")
+
+    it "publishes semantic Optional and Result returns independently of bootstrap ABI erasure":
+        var hir = path_spelled_hir("struct Payload:\n    value: i64\nfn maybe() -> Payload?:\n    Some(Payload(value: 42))\nfn result() -> Result<Payload, text>:\n    Ok(Payload(value: 42))\n", "src/rti_abi/provider.spl")
+        # This is the exact retained bootstrap artifact state: function ABI
+        # fields are i64, while provider symbols keep the declared signature.
+        for name in ["maybe", "result"]:
+            var function = function_named(hir, name)
+            function.return_type = HirType(kind: HirTypeKind.Int(64, true), span: function.span)
+            hir.functions[function.symbol] = function
+            var symbol = hir.symbols.symbols[function.symbol.id]
+            symbol.name = "rti_abi.provider.{name}"
+            symbol.defining_module = nil
+            hir.symbols.symbols[function.symbol.id] = symbol
+        val rows = rti_rows_from_hir_v1(hir).unwrap()
+        val optional_row = row_for(rows.rows, "fn:maybe").unwrap()
+        val result_row = row_for(rows.rows, "fn:result").unwrap()
+        expect(rti_term_canonical_text(ReturnTypeInterfaceTable.new().require_concrete(optional_row.entry).unwrap())).to_start_with("opt(")
+        expect(rti_term_canonical_text(ReturnTypeInterfaceTable.new().require_concrete(result_row.entry).unwrap())).to_start_with("result(")
+        # Row publication must not widen the physical function signature.
+        expect(rti_term_canonical_text(rti_term_of_hir_type(function_named(hir, "maybe").return_type, hir.symbols, []).unwrap())).to_equal("b:i64")
+
+    it "rejects an ownerless qualified clone from a different enclosing provider":
+        var hir = path_spelled_hir("fn maybe() -> i32?:\n    Some(42)\n", "src/rti_abi/provider.spl")
+        val function = function_named(hir, "maybe")
+        var symbol = hir.symbols.symbols[function.symbol.id]
+        symbol.name = "rti_abi.provider.maybe"
+        symbol.defining_module = nil
+        hir.symbols.symbols[function.symbol.id] = symbol
+        val signature = RtiCallableSignatureV1(symbol: function.symbol, name: function.name,
+            type_params: [], owner_type_params: [], is_static: false,
+            return_type: HirType(kind: HirTypeKind.Int(64, true), span: function.span))
+        expect(err_code(rti_row_from_signature_v1("rti_abi.other", hir.symbols, signature))).to_equal("E-RTI-007")
+
+    it "does not invent a semantic scalar from an unresolved declared signature":
+        var hir = path_spelled_hir("fn unresolved() -> i64:\n    0\n", "src/rti_abi/unresolved.spl")
+        val function = function_named(hir, "unresolved")
+        var symbol = hir.symbols.symbols[function.symbol.id]
+        val unresolved = HirType(kind: HirTypeKind.Infer(0, 0), span: function.span)
+        symbol.type_ = Some(HirType(kind: HirTypeKind.Function([], unresolved, []), span: function.span))
+        hir.symbols.symbols[function.symbol.id] = symbol
+        val rows = rti_rows_from_hir_v1(hir).unwrap()
+        expect(rows.rows.len()).to_equal(0)
+        expect(rows.skipped_infer).to_equal(1)
+
+    it "keeps original qualified declarations authoritative over consumer aliases":
+        val local = path_spelled_hir("fn main() -> i64:\n    0\n", "src/rti_collision/local.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_rows([decided_row("m.left", "maybe", RtType.OptionalT(RtType.Builtin("i32")), 0)]).unwrap()
+        table.register_rows([decided_row("m.left", "choose", RtType.Builtin("bool"), 0)]).unwrap()
+        table.record_alias("m.left#choose", "maybe")
+        # Imported `maybe as choose` carries m.left.maybe; a real declaration
+        # m.left.choose is a different exact owner even in this consumer.
+        val entry = table.fn_return(local.symbols, -1, "m.left.maybe").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(entry).unwrap())).to_equal("opt(b:i32)")
+        val collision = table.fn_return(local.symbols, -1, "m.left.choose").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(collision).unwrap())).to_equal("b:bool")
+        table.record_alias("m.left#choose", "other")
+        val explicit = table.fn_return(local.symbols, -1, "m.left.choose").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(explicit).unwrap())).to_equal("b:bool")
+
+    it "keeps wildcard ambiguity loud while exact qualified names stay distinct":
+        val local = path_spelled_hir("fn main() -> i64:\n    0\nfn other() -> bool:\n    true\n", "src/rti_collision/local.spl")
+        var symbols = local.symbols
+        symbols.module_callables["m.left#maybe"] = function_named(local, "main").symbol.id
+        symbols.module_callables["m.right#maybe"] = function_named(local, "other").symbol.id
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_rows([decided_row("m.left", "maybe", RtType.Builtin("i32"), 0)]).unwrap()
+        table.register_rows([decided_row("m.right", "maybe", RtType.Builtin("bool"), 0)]).unwrap()
+        expect(err_code(table.fn_return(symbols, -1, "maybe"))).to_equal("E-RTI-006")
+        val entry = table.fn_return(symbols, -1, "m.right.maybe").unwrap()
+        expect(rti_term_canonical_text(table.require_concrete(entry).unwrap())).to_equal("b:bool")
+
+    it "lets MIR own bare Ok/Err arms over imported callees":
+        val hirs = fixture_hirs()
+        expect(mir_subject_kind(hirs, "via_fn")).to_equal("Result")
+        expect(mir_subject_kind(hirs, "via_method")).to_equal("Result")
+        expect(mir_subject_kind(hirs, "via_reexport")).to_equal("Result")

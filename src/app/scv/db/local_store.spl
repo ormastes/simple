@@ -19,6 +19,12 @@ struct DbStoreView:
     state: text
     checkpoint_anchor: text
 
+impl DbStoreView:
+    fn __eq__(other: DbStoreView) -> bool:
+        self.code == other.code and self.head == other.head and self.parent == other.parent and
+            self.transaction_id == other.transaction_id and self.state == other.state and
+            self.checkpoint_anchor == other.checkpoint_anchor
+
 fn _db_store_error(code: text) -> DbStoreView:
     DbStoreView(code: code, head: "", parent: "", transaction_id: "", state: "", checkpoint_anchor: "")
 
@@ -132,34 +138,7 @@ fn db_store_generation_head(parent: text, transaction_id: text, state: text, che
 
 # Read immutable state without holding the writer lease. Reopening after a
 # process crash yields the complete old or new generation, never mixed rows.
-fn db_store_read(root: text, channel: text = "semantic") -> DbStoreView:
-    if not is_dir(root):
-        return _db_store_error("SCVDB_STORE_ROOT")
-    val scope = _db_store_scope(root, channel)
-    if scope != "": return _db_store_error(scope)
-    val pointer = "{_db_store_directory(root, channel)}/HEAD"
-    if not is_dir(_db_store_directory(root, channel)):
-        return DbStoreView(code: "empty", head: "", parent: "", transaction_id: "", state: "", checkpoint_anchor: "")
-    val pointer_present = match path_entry_present(pointer):
-        Ok(value): value
-        Err(error): return _db_store_error("SCVDB_STORE_HEAD_CORRUPT")
-    if not pointer_present:
-        return DbStoreView(code: "empty", head: "", parent: "", transaction_id: "", state: "", checkpoint_anchor: "")
-    var raw_head = ""
-    match _db_store_read_bounded(pointer, 65):
-        Ok(value): raw_head = value
-        Err(error): return _db_store_error("SCVDB_STORE_HEAD_CORRUPT")
-    val head = raw_head.trim()
-    if not _db_store_digest(head) or raw_head != "{head}\n":
-        return _db_store_error("SCVDB_STORE_HEAD_CORRUPT")
-    val path = _db_store_object(root, head, channel)
-    if not file_exists(path):
-        return _db_store_error("SCVDB_STORE_OBJECT_MISSING")
-    var encoded = ""
-    val read_limit = if channel == "checkpoint-install": 2048 else: 67108864
-    match _db_store_read_bounded(path, read_limit):
-        Ok(value): encoded = value
-        Err(error): return _db_store_error("SCVDB_STORE_OBJECT_CORRUPT")
+fn _db_store_decode_read(head: text, encoded: text) -> DbStoreView:
     if sha256_text(encoded) != head:
         return _db_store_error("SCVDB_STORE_OBJECT_CORRUPT")
     val fields = encoded.split("\n")
@@ -177,6 +156,59 @@ fn db_store_read(root: text, channel: text = "semantic") -> DbStoreView:
     if not _db_store_digest(fields[3]) or sha256_text(state) != fields[3]:
         return _db_store_error("SCVDB_STORE_PAYLOAD_CORRUPT")
     DbStoreView(code: "ok", head: head, parent: fields[1], transaction_id: fields[2], state: state, checkpoint_anchor: anchor)
+
+struct DbStoreReadAccounting:
+    view: DbStoreView
+    io_bytes: u64
+
+fn _db_store_accounted(view: DbStoreView, io_bytes: u64) -> Result<DbStoreReadAccounting, text>:
+    Ok(DbStoreReadAccounting(view: view, io_bytes: io_bytes))
+
+# The remaining operation budget bounds each read before allocation. The
+# returned charge includes the actual HEAD and generation bytes, including
+# framing. Missing channels perform no content IO and have a zero charge.
+fn db_store_read_accounted(root: text, max_io_bytes: u64, channel: text = "semantic") -> Result<DbStoreReadAccounting, text>:
+    if not is_dir(root):
+        return Err("SCVDB_STORE_ROOT")
+    val scope = _db_store_scope(root, channel)
+    if scope != "": return Err(scope)
+    val pointer = "{_db_store_directory(root, channel)}/HEAD"
+    if not is_dir(_db_store_directory(root, channel)):
+        return _db_store_accounted(DbStoreView(code: "empty", head: "", parent: "", transaction_id: "", state: "", checkpoint_anchor: ""), 0u64)
+    val pointer_present = match path_entry_present(pointer):
+        Ok(value): value
+        Err(error): return Err("SCVDB_STORE_HEAD_CORRUPT")
+    if not pointer_present:
+        return _db_store_accounted(DbStoreView(code: "empty", head: "", parent: "", transaction_id: "", state: "", checkpoint_anchor: ""), 0u64)
+    if max_io_bytes < 65u64: return Err("SCVDB_STORE_READ_QUOTA")
+    val raw_head = match _db_store_read_bounded(pointer, 65):
+        Ok(value): value
+        Err(error): return Err("SCVDB_STORE_HEAD_CORRUPT")
+    val charged = raw_head.len() as u64
+    val head = raw_head.trim()
+    if not _db_store_digest(head) or raw_head != "{head}\n":
+        return Err("SCVDB_STORE_HEAD_CORRUPT")
+    val path = _db_store_object(root, head, channel)
+    if not file_exists(path):
+        return Err("SCVDB_STORE_OBJECT_MISSING")
+    val hard_limit = if channel == "checkpoint-install": 2048u64 else: 67108864u64
+    val remaining = max_io_bytes - charged
+    if remaining == 0u64: return Err("SCVDB_STORE_READ_QUOTA")
+    val limit = if remaining < hard_limit: remaining else: hard_limit
+    val encoded = match _db_store_read_bounded(path, limit as i64):
+        Ok(value): value
+        Err(error):
+            if limit < hard_limit: return Err("SCVDB_STORE_READ_QUOTA")
+            return Err("SCVDB_STORE_OBJECT_CORRUPT")
+    val view = _db_store_decode_read(head, encoded)
+    if view.code != "ok": return Err(view.code)
+    _db_store_accounted(view, charged + encoded.len() as u64)
+
+fn db_store_read(root: text, channel: text = "semantic") -> DbStoreView:
+    match db_store_read_accounted(root, 67108929u64, channel):
+        Ok(read): read.view
+        Err(error): _db_store_error(error)
+
 
 fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text, state: text, channel: text) -> DbStoreView:
     if channel != "checkpoint-install":
@@ -362,3 +394,5 @@ export DbStoreView, db_store_read, db_store_commit, db_store_commit_held
 export db_store_commit_with_absent_channels
 export db_local_path_scope, db_local_existing_canonical
 export db_store_generation_head, db_store_checkpoint_barrier, db_store_checkpoint_install_held
+
+export DbStoreReadAccounting, db_store_read_accounted

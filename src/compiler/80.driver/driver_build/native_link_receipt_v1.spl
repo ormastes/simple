@@ -1,0 +1,373 @@
+# Object-hash link receipt: skip the relink when nothing the link reads changed.
+#
+# After every successful native link a receipt `<output>.link-receipt` is
+# published (temp + rename) holding
+#   - the link key: sha256 over, IN LINK ORDER, each input object's content
+#     sha256, the output path, every NativeLinkOptions field, and the content
+#     sha256 of each regular file directly under the runtime path; and
+#   - the content sha256 of the produced output.
+# On the next link with the same key and an output whose bytes still match the
+# receipt, nothing the link reads has changed, so the existing output is the
+# result -- no new object, no relink.
+#
+# Modes (SIMPLE_LINK_RECEIPT):
+#   unset / "shadow"  link anyway; report whether the receipt WOULD have
+#                     skipped and whether the fresh output is byte-identical.
+#                     This is the default because the semantic cache manager
+#                     design keeps object/artifact reuse shadow-only until
+#                     differential evidence qualifies it
+#                     (doc/04_architecture/compiler_semantic_cache_manager.md).
+#   "1"               authoritative: skip the link on a receipt hit.
+#   "0"               receipts off entirely.
+# The AOP formal design (§16.6) relinks on every static change; this receipt
+# skips only when every link input hash is unchanged, which is the case it
+# leaves implicit. The toolchain part of the key (linker binary, CRT objects,
+# explicit and implicit libraries by content) is described at _toolchain_digests_v1.
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes, is_file, dir_list, env_get_opt}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.linker_wrapper.{link_to_shared}
+use compiler.backend.linker.mold.{find_linker_path}
+use compiler.backend.linker.crt_discovery.{find_crt_files}
+use compiler.driver.cache.action_key.{action_key_sort_texts}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, process_run_timeout}
+
+val LINK_RECEIPT_HEADER_V1: text = "simple-link-receipt: 1"
+
+pub fn native_link_options_text_v1(opts: NativeLinkOptions) -> text:
+    var parts: [text] = [
+        "target=" + opts.target_triple, "debug={opts.debug}", "strip={opts.strip_output}",
+        "pie={opts.pie}", "bare={opts.bare_metal}", "opt={opts.opt_level}",
+        "backend=" + opts.stage4_backend, "compiler=" + opts.stage4_compiler_hash,
+        "runtime=" + opts.runtime_path, "bundle=" + opts.runtime_bundle]
+    for library in opts.libraries:
+        parts.push("lib=" + library)
+    for path in opts.library_paths:
+        parts.push("libpath=" + path)
+    for flag in opts.linker_flags:
+        parts.push("flag=" + flag)
+    parts.join("\n")
+
+# Pure key: object digests in link order + output + options + runtime digests.
+pub fn native_link_key_v1(object_digests: [text], output: text, options_text: text,
+        runtime_digests: [text]) -> text:
+    var parts: [text] = ["simple.link.key.v1", "output=" + output, options_text]
+    for digest in object_digests:
+        parts.push("obj=" + digest)
+    for digest in runtime_digests:
+        parts.push("rt=" + digest)
+    sha256_text(parts.join("\n"))
+
+pub fn native_link_receipt_render_v1(key: text, output_digest: text) -> text:
+    LINK_RECEIPT_HEADER_V1 + "\nkey: " + key + "\noutput-sha256: " + output_digest + "\n"
+
+# The recorded output digest when `content` is a receipt for `key`, else "".
+pub fn native_link_receipt_output_digest_v1(content: text, key: text) -> text:
+    val prefix = LINK_RECEIPT_HEADER_V1 + "\nkey: " + key + "\noutput-sha256: "
+    if not content.starts_with(prefix) or not content.ends_with("\n"):
+        return ""
+    val digest = content.substring(prefix.len(), content.len() - 1)
+    if digest.len() != 64 or digest.contains("\n"):
+        return ""
+    digest
+
+fn _file_digest_v1(path: text) -> text:
+    if not file_exists(path):
+        return ""
+    sha256_u8_hex(file_read_bytes(path))
+
+fn _runtime_digests_v1(runtime_path: text) -> [text]:
+    var out: [text] = []
+    if runtime_path == "":
+        return out
+    for name in dir_list(runtime_path):
+        val path = runtime_path + "/" + name
+        if is_file(path):
+            out.push(name + "=" + _file_digest_v1(path))
+    out
+
+# ---------------------------------------------------------------------------
+# Toolchain part of the link key (live_object_key.sdn gaps
+# linker_binary_version, system_library_content, import_lib_export_sets).
+# A skipped relink is only sound when everything the linker READS is keyed:
+#   - linker identity: content digest of the direct linker binary
+#     (find_linker_path); no resolvable linker => no receipt claim;
+#   - CRT objects (find_crt_files) by content;
+#   - every EXPLICIT library on the link line, resolved through the library
+#     paths, the CRT lib dirs and LIB / LIBRARY_PATH, by content -- an import
+#     library's bytes carry its export set; an unresolvable explicit library
+#     => no receipt claim (fail closed);
+#   - the libraries the linker wrapper adds IMPLICITLY
+#     (LINK_IMPLICIT_LIBRARIES_V1), each as its content digest or `absent`, so
+#     a system library appearing, disappearing or changing changes the key.
+# ---------------------------------------------------------------------------
+val LINK_IMPLICIT_LIBRARIES_V1: [text] = [
+    "c", "m", "pthread", "dl", "gcc", "gcc_s", "c++", "z", "zstd", "execinfo",
+    "xml2", "ncurses", "ffi", "kernel32", "ws2_32", "userenv", "ntdll", "bcrypt",
+    "advapi32", "user32", "dxgi", "d3d11", "msvcrt", "ucrt", "vcruntime",
+    "legacy_stdio_definitions"]
+
+pub fn native_link_library_candidates_v1(name: text) -> [text]:
+    if name.contains("/") or name.contains("\\") or name.ends_with(".lib") or
+            name.ends_with(".a") or name.ends_with(".so") or name.ends_with(".dylib") or
+            name.ends_with(".dll"):
+        return [name]
+    ["lib" + name + ".a", "lib" + name + ".so", "lib" + name + ".dylib",
+     name + ".lib", "lib" + name + ".dll.a", "lib" + name + ".lib"]
+
+fn _resolve_library_v1(name: text, dirs: [text]) -> text:
+    for candidate in native_link_library_candidates_v1(name):
+        if candidate.contains("/") or candidate.contains("\\"):
+            if is_file(candidate): return candidate
+            continue
+        for dir in dirs:
+            if dir == "": continue
+            val path = dir + "/" + candidate
+            if is_file(path): return path
+    ""
+
+# Rows for explicit (fail closed) and implicit (absent recorded) libraries.
+pub fn native_link_library_rows_v1(explicit: [text], implicit: [text], dirs: [text]) -> [text]?:
+    var rows: [text] = []
+    for name in explicit:
+        val path = _resolve_library_v1(name, dirs)
+        if path == "": return nil
+        val digest = _file_digest_v1(path)
+        if digest == "": return nil
+        rows.push("lib:" + name + "=" + digest)
+    for name in implicit:
+        val path = _resolve_library_v1(name, dirs)
+        val digest = if path == "": "" else: _file_digest_v1(path)
+        rows.push("sys:" + name + "=" + (if digest == "": "absent" else: digest))
+    Some(rows)
+
+pub fn native_link_search_dirs_v1(library_paths: [text], crt_dirs: [text]) -> [text]:
+    var dirs: [text] = []
+    for d in library_paths: dirs.push(d)
+    for d in crt_dirs: dirs.push(d)
+    for d in (env_get_opt("LIB") ?? "").split(";"): dirs.push(d)
+    val library_path = env_get_opt("LIBRARY_PATH") ?? ""
+    for d in library_path.split(if library_path.contains(";"): ";" else: ":"): dirs.push(d)
+    for d in ["/usr/lib", "/lib", "/usr/local/lib", "/usr/lib/x86_64-linux-gnu",
+            "/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib/aarch64-linux-gnu"]:
+        dirs.push(d)
+    dirs
+
+# The C driver the wrapper would invoke: $CC, else clang, else cc, on PATH.
+pub fn native_link_cc_driver_path_v1() -> text:
+    val requested = env_get_opt("CC") ?? ""
+    for name in [requested, "clang", "cc"]:
+        if name == "": continue
+        if is_file(name): return name
+        val path = env_get_opt("PATH") ?? ""
+        for dir in path.split(if path.contains(";"): ";" else: ":"):
+            if dir == "": continue
+            for candidate in [dir + "/" + name, dir + "/" + name + ".exe"]:
+                if is_file(candidate): return candidate
+    ""
+
+fn _toolchain_digests_v1(libraries: [text], library_paths: [text], pie: bool) -> [text]?:
+    val linker = find_linker_path()
+    if linker.is_err(): return nil
+    val linker_digest = _file_digest_v1(linker.unwrap())
+    if linker_digest == "": return nil
+    var rows: [text] = ["linker=" + linker_digest]
+    # The link may fall back to the C driver wrapper (cc / clang): key that
+    # binary too, by content, or `absent` when none is on PATH.
+    val cc_path = native_link_cc_driver_path_v1()
+    val cc_digest = if cc_path == "": "" else: _file_digest_v1(cc_path)
+    rows.push("cc=" + (if cc_digest == "": "absent" else: cc_digest))
+    val crt = find_crt_files(pie, false)
+    for crt_path in [crt.crt1, crt.crti, crt.crtn, crt.crtbegin, crt.crtend]:
+        if crt_path != "":
+            rows.push("crt=" + _file_digest_v1(crt_path))
+    rows.push("dynamic-linker=" + crt.dynamic_linker)
+    match native_link_library_rows_v1(libraries, LINK_IMPLICIT_LIBRARIES_V1,
+            native_link_search_dirs_v1(library_paths, crt.lib_dirs)):
+        case Some(lib_rows):
+            for row in lib_rows: rows.push(row)
+        case nil:
+            return nil
+    Some(rows)
+
+fn _publish_receipt_v1(path: text, content: text) -> bool:
+    val temp = "{path}.{getpid()}.tmp"
+    if not file_write(temp, content):
+        val _w = file_delete(temp)
+        return false
+    if not file_rename(temp, path):
+        val _r = file_delete(temp)
+        return false
+    true
+
+# Drop-in for link_llvm_native at the driver's final-link sites.
+pub fn native_link_with_receipt_v1(objects: [text], output: text,
+        opts: NativeLinkOptions) -> Result<text, text>:
+    val mode = env_get_opt("SIMPLE_LINK_RECEIPT") ?? ""
+    if mode == "0":
+        return link_llvm_native(objects, output, opts)
+    var object_digests: [text] = []
+    for object in objects:
+        val digest = _file_digest_v1(object)
+        if digest == "":
+            # Unknown input: no receipt claim either way.
+            return link_llvm_native(objects, output, opts)
+        object_digests.push(digest)
+    # Toolchain (linker, CRT, explicit + implicit libraries): unkeyable => no claim.
+    val toolchain = _toolchain_digests_v1(opts.libraries, opts.library_paths, opts.pie)
+    if toolchain == nil:
+        return link_llvm_native(objects, output, opts)
+    var key_inputs = _runtime_digests_v1(opts.runtime_path)
+    for row in toolchain!: key_inputs.push(row)
+    val key = native_link_key_v1(object_digests, output, native_link_options_text_v1(opts),
+        key_inputs)
+    val receipt_path = output + ".link-receipt"
+    val recorded = if file_exists(receipt_path):
+        native_link_receipt_output_digest_v1(file_read(receipt_path), key)
+    else:
+        ""
+    val hit = recorded != "" and _file_digest_v1(output) == recorded
+    if hit and mode == "1":
+        eprint("[link-receipt] hit: {objects.len()} object(s) unchanged; relink skipped ({output})")
+        return Ok(output)
+    val linked = link_llvm_native(objects, output, opts)
+    if linked.is_ok():
+        val produced = _file_digest_v1(output)
+        if hit:
+            eprint("[link-receipt] shadow: would skip relink; fresh output identical={produced == recorded} ({output})")
+        if produced != "":
+            val _published = _publish_receipt_v1(receipt_path,
+                native_link_receipt_render_v1(key, produced))
+    linked
+
+export native_link_options_text_v1, native_link_key_v1
+export native_link_receipt_render_v1, native_link_receipt_output_digest_v1
+export native_link_with_receipt_v1, native_shared_link_with_receipt_v1
+export native_shared_link_config_text_v1, native_shared_receipt_render_v1, native_shared_receipt_read_v1
+export native_dynlib_replace_by_rename_v1
+
+# ---------------------------------------------------------------------------
+# Per-dynlib receipts. A shared library's receipt lives next to it and covers
+# exactly its own inputs (its objects in link order, every NativeLinkConfig
+# field, the runtime-path files), so a changed object relinks only the dynlib
+# that contains it. The receipt also records the dynlib's export digest
+# (defined external symbols), so a relink whose exports did not change is
+# reported as such -- importers and an import library need no update then.
+#
+# Replacement is temp + rename: the new library is linked under its own base
+# name inside a private temp directory (the DLL name embedded in the image is
+# unchanged), the current file is renamed aside, the new one renamed into
+# place, and the old one deleted when possible. On Windows a loaded DLL can be
+# renamed but not deleted, so a stale `<name>.<pid>.old` may remain until the
+# next link.
+
+pub fn native_shared_link_config_text_v1(config: NativeLinkConfig) -> text:
+    var parts: [text] = [
+        "target=" + config.target_triple, "abi=" + config.linker_abi, "pie={config.pie}",
+        "debug={config.debug}", "strip={config.strip_output}", "size={config.prefer_size_linker}",
+        "dupdefs={config.allow_duplicate_definitions}", "ccfallback={config.allow_cc_fallback}",
+        "runtime=" + config.runtime_path, "bundle=" + config.runtime_bundle]
+    for library in config.libraries:
+        parts.push("lib=" + library)
+    for path in config.library_paths:
+        parts.push("libpath=" + path)
+    for symbol in config.retained_symbols:
+        parts.push("retain=" + symbol)
+    for flag in config.extra_flags:
+        parts.push("flag=" + flag)
+    parts.join("\n")
+
+pub fn native_shared_receipt_render_v1(key: text, output_digest: text, exports_digest: text) -> text:
+    native_link_receipt_render_v1(key, output_digest) + "exports-sha256: " + exports_digest + "\n"
+
+# (output digest, exports digest) recorded for `key`; ("", "") when absent.
+pub fn native_shared_receipt_read_v1(content: text, key: text) -> (text, text):
+    val marker = "\nexports-sha256: "
+    val at = content.index_of(marker)
+    if at < 0:
+        return ("", "")
+    val base = content.substring(0, at + 1)
+    val exports = content.substring(at + marker.len()).trim()
+    (native_link_receipt_output_digest_v1(base, key), exports)
+
+# Digest of the defined external symbols of `objects` ("unknown" when no
+# symbol tool is available, which only disables the exports-unchanged report).
+fn _exports_digest_v1(objects: [text]) -> text:
+    var symbols: [text] = []
+    for object in objects:
+        val (out, _err, code) = process_run_timeout("llvm-nm", ["--defined-only", "--extern-only", "-j", object], 30000)
+        if code != 0:
+            return "unknown"
+        for line in out.split("\n"):
+            val name = line.trim()
+            if name != "":
+                symbols.push(name)
+    sha256_text(action_key_sort_texts(symbols).join("\n"))
+
+pub fn native_dynlib_replace_by_rename_v1(temp_output: text, output: text) -> bool:
+    val old = "{output}.{getpid()}.old"
+    val had_old = file_exists(output)
+    if had_old and not file_rename(output, old):
+        return false
+    if not file_rename(temp_output, output):
+        if had_old:
+            val _restored = file_rename(old, output)
+        return false
+    if had_old:
+        val _deleted = file_delete(old)
+    true
+
+# Drop-in for link_to_shared at the driver's shared-library site.
+pub fn native_shared_link_with_receipt_v1(objects: [text], output: text,
+        config: NativeLinkConfig) -> Result<text, text>:
+    val mode = env_get_opt("SIMPLE_LINK_RECEIPT") ?? ""
+    var object_digests: [text] = []
+    for object in objects:
+        val digest = _file_digest_v1(object)
+        if digest == "":
+            object_digests = []
+            break
+        object_digests.push(digest)
+    val toolchain = _toolchain_digests_v1(config.libraries, config.library_paths, config.pie)
+    var key_inputs = _runtime_digests_v1(config.runtime_path)
+    for row in toolchain ?? []: key_inputs.push(row)
+    val keyed = mode != "0" and object_digests.len() == objects.len() and objects.len() > 0 and toolchain != nil
+    val key = if keyed: native_link_key_v1(object_digests, output,
+        native_shared_link_config_text_v1(config), key_inputs) else: ""
+    val receipt_path = output + ".link-receipt"
+    val (recorded, recorded_exports) = if keyed and file_exists(receipt_path):
+        native_shared_receipt_read_v1(file_read(receipt_path), key)
+    else:
+        ("", "")
+    val hit = recorded != "" and _file_digest_v1(output) == recorded
+    if hit and mode == "1":
+        eprint("[link-receipt] dynlib hit: {objects.len()} object(s) unchanged; relink skipped ({output})")
+        return Ok(output)
+    val slash = output.rfind("/")
+    val dir = if slash > 0: output.substring(0, slash) else: "."
+    val base = if slash >= 0: output.substring(slash + 1) else: output
+    val temp_dir = "{dir}/.link-tmp-{getpid()}"
+    if not dir_create_all(temp_dir):
+        return Err("cannot create dynlib temp directory {temp_dir}")
+    val temp_output = temp_dir + "/" + base
+    val linked = match link_to_shared(objects, temp_output, config):
+        case Ok(_): true
+        case Err(e):
+            val _cleanup = file_delete(temp_output)
+            return Err("{e}")
+    if not linked or not native_dynlib_replace_by_rename_v1(temp_output, output):
+        return Err("cannot replace {output} with the newly linked dynlib")
+    if keyed:
+        val produced = _file_digest_v1(output)
+        val exports = _exports_digest_v1(objects)
+        if hit:
+            eprint("[link-receipt] shadow: would skip dynlib relink; fresh output identical={produced == recorded} ({output})")
+        if recorded_exports != "" and exports != "unknown":
+            eprint("[link-receipt] dynlib exports changed={exports != recorded_exports} ({output})")
+        if produced != "":
+            val _published = _publish_receipt_v1(receipt_path,
+                native_shared_receipt_render_v1(key, produced, exports))
+    Ok(output)

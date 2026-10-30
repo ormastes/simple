@@ -9,6 +9,8 @@ use simple_runtime::value::RuntimeValue;
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
     rt_dict_clear, rt_dict_contains, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_set, rt_dict_values,
+    rt_dict_scope_read_bound_v1, rt_dict_scope_read_owner_v1, rt_dict_scope_read_epoch_v1, rt_dict_scope_read_meta_v1,
+    rt_dict_scope_read_slot_v1,
 };
 
 // ============================================================================
@@ -202,6 +204,86 @@ pub fn rt_dict_values_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(rv.to_raw() as i64))
 }
 
+/// The scope reader accepts raw hosted handles encoded as exactly Value::Int.
+/// Interpreter Dict/FrozenDict backing is unsupported: never bridge/copy it or
+/// invent an owner generation. Other non-Int arguments also fail closed rather
+/// than using as_int(), which would coerce floats, booleans and rich wrappers.
+fn scope_read_scalars<const N: usize>(args: &[Value], name: &str) -> Result<Option<[i64; N]>, CompileError> {
+    if args.len() != N {
+        return Err(CompileError::semantic_with_context(
+            format!("{name} expects {N} arguments"),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ));
+    }
+    if matches!(args.first(), Some(Value::Dict(_) | Value::FrozenDict(_))) {
+        return Ok(None);
+    }
+    let mut scalars = [0; N];
+    for (index, value) in args.iter().enumerate() {
+        let Value::Int(value) = value else {
+            return Ok(None);
+        };
+        scalars[index] = *value;
+    }
+    Ok(Some(scalars))
+}
+
+pub fn rt_dict_scope_read_bound_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _ = scope_read_scalars::<0>(args, "rt_dict_scope_read_bound_v1")?;
+    Ok(Value::Int(rt_dict_scope_read_bound_v1()))
+}
+
+pub fn rt_dict_scope_read_owner_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some([dict, fuel]) = scope_read_scalars::<2>(args, "rt_dict_scope_read_owner_v1")? else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(rt_dict_scope_read_owner_v1(
+        RuntimeValue::from_raw(dict as u64),
+        fuel,
+    )))
+}
+
+pub fn rt_dict_scope_read_epoch_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some([dict, owner, fuel]) = scope_read_scalars::<3>(args, "rt_dict_scope_read_epoch_v1")? else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(rt_dict_scope_read_epoch_v1(
+        RuntimeValue::from_raw(dict as u64),
+        owner,
+        fuel,
+    )))
+}
+
+pub fn rt_dict_scope_read_meta_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some([dict, owner, epoch, field, fuel]) = scope_read_scalars::<5>(args, "rt_dict_scope_read_meta_v1")? else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(rt_dict_scope_read_meta_v1(
+        RuntimeValue::from_raw(dict as u64),
+        owner,
+        epoch,
+        field,
+        fuel,
+    )))
+}
+
+pub fn rt_dict_scope_read_slot_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some([dict, owner, epoch, slot, field, byte_index, fuel]) =
+        scope_read_scalars::<7>(args, "rt_dict_scope_read_slot_v1")?
+    else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(rt_dict_scope_read_slot_v1(
+        RuntimeValue::from_raw(dict as u64),
+        owner,
+        epoch,
+        slot,
+        field,
+        byte_index,
+        fuel,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,3 +320,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "sffi_dict_scope_read_tests.rs"]
+mod scope_read_tests;

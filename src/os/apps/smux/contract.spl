@@ -3,6 +3,17 @@
 # Defines public data shapes shared across the service, backends, and adapters.
 # No fn main needed — standalone value types.
 
+use os.apps.smux.mux_rects.{MuxRect}
+use std.common.contracts.mux.execution_v1.{MuxBorderV1, MuxBorderStatusV1}
+
+# At most one entry per live pane (the service admits at most eight panes).
+pub struct MuxPanePresentation:
+    pane_id: text
+    title: text
+    hidden: bool
+    border: MuxBorderV1
+    status: MuxBorderStatusV1
+
 enum MuxBackendKind:
     NativeShell
     HostTmux
@@ -29,22 +40,68 @@ class MuxWindow:
     layout: text
     canvas_cols: int
     canvas_rows: int
+    manual_rects: [MuxRect]
+    manual_cols: int
+    manual_rows: int
+    # Base layout stays intact while this pane occupies the visible canvas.
+    zoom_pane: text = ""
+    presentation: [MuxPanePresentation] = []
 
     me to_text() -> text:
         return "window[" + me.name + "/" + me.id + "]"
 
     static fn create(wid: text, sid: text, wname: text) -> MuxWindow:
         return MuxWindow(id: wid, session_id: sid, name: wname, is_active: false,
-            layout: "manual", canvas_cols: 80, canvas_rows: 24)
+            layout: "manual", canvas_cols: 80, canvas_rows: 24,
+            manual_rects: [], manual_cols: 80, manual_rows: 24)
 
     me with_active(active: bool) -> MuxWindow:
         return MuxWindow(id: me.id, session_id: me.session_id, name: me.name,
             is_active: active, layout: me.layout,
-            canvas_cols: me.canvas_cols, canvas_rows: me.canvas_rows)
+            canvas_cols: me.canvas_cols, canvas_rows: me.canvas_rows,
+            manual_rects: me.manual_rects, manual_cols: me.manual_cols, manual_rows: me.manual_rows, zoom_pane: me.zoom_pane, presentation: me.presentation)
 
     me with_layout(selected: text, cols: int, rows: int) -> MuxWindow:
         return MuxWindow(id: me.id, session_id: me.session_id, name: me.name,
-            is_active: me.is_active, layout: selected, canvas_cols: cols, canvas_rows: rows)
+            is_active: me.is_active, layout: selected, canvas_cols: cols, canvas_rows: rows,
+            manual_rects: [], manual_cols: cols, manual_rows: rows, presentation: me.presentation)
+
+    # Reference boundaries survive repeated attachment size changes without
+    # accumulating integer rounding. Splits/explicit pane edits re-anchor them.
+    me with_geometry(rects: [MuxRect], cols: int, rows: int) -> MuxWindow:
+        var kept: [MuxPanePresentation] = []
+        for entry in me.presentation:
+            for rect in rects:
+                if entry.pane_id == rect.pane_id:
+                    kept.push(entry)
+                    break
+        return MuxWindow(id: me.id, session_id: me.session_id, name: me.name,
+            is_active: me.is_active, layout: "manual", canvas_cols: cols, canvas_rows: rows,
+            manual_rects: rects, manual_cols: cols, manual_rows: rows, presentation: kept)
+
+    me with_canvas(cols: int, rows: int) -> MuxWindow:
+        return MuxWindow(id: me.id, session_id: me.session_id, name: me.name,
+            is_active: me.is_active, layout: me.layout, canvas_cols: cols, canvas_rows: rows,
+            manual_rects: me.manual_rects, manual_cols: me.manual_cols, manual_rows: me.manual_rows, zoom_pane: me.zoom_pane, presentation: me.presentation)
+
+    me with_zoom(pane_id: text) -> MuxWindow:
+        return MuxWindow(id: me.id, session_id: me.session_id, name: me.name,
+            is_active: me.is_active, layout: me.layout,
+            canvas_cols: me.canvas_cols, canvas_rows: me.canvas_rows,
+            manual_rects: me.manual_rects, manual_cols: me.manual_cols, manual_rows: me.manual_rows, zoom_pane: pane_id, presentation: me.presentation)
+
+    me with_presentation(entries: [MuxPanePresentation]) -> MuxWindow:
+        return MuxWindow(id: me.id, session_id: me.session_id, name: me.name,
+            is_active: me.is_active, layout: me.layout,
+            canvas_cols: me.canvas_cols, canvas_rows: me.canvas_rows,
+            manual_rects: me.manual_rects, manual_cols: me.manual_cols, manual_rows: me.manual_rows,
+            zoom_pane: me.zoom_pane, presentation: entries)
+
+    me without_pane_presentation(pane_id: text) -> MuxWindow:
+        var kept: [MuxPanePresentation] = []
+        for entry in me.presentation:
+            if entry.pane_id != pane_id: kept.push(entry)
+        return me.with_presentation(kept)
 
 
 class MuxPane:
@@ -86,6 +143,10 @@ class MuxClientAttachment:
     attached: bool
     cols: int
     rows: int
+    # Identity is per attachment; context mirrors shared session/window focus.
+    attachment_generation: i64 = 0
+    current_window: text = ""
+    current_pane: text = ""
 
     me to_text() -> text:
         return "client[" + me.client_id + "] -> session[" + me.session_id + "]"

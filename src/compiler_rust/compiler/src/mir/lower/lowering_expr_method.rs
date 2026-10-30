@@ -2076,6 +2076,32 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // Native scalar conversions must not enter nominal suffix-based method
+        // resolution: an unrelated enum method such as SdnValue.to_text can
+        // capture a primitive conversion in the native linker. HIR has already
+        // canonicalized aliases to their underlying primitive TypeId. Reuse
+        // the shared helper to retain each scalar's established representation.
+        if args.is_empty()
+            && matches!(method, "to_text" | "to_string" | "str")
+            && matches!(
+                receiver.ty,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::BOOL
+                    | TypeId::F32
+                    | TypeId::F64
+                    | TypeId::CHAR
+            )
+        {
+            return self.emit_to_string(receiver_reg, receiver.ty);
+        }
+
         // Builtin primitive .to_string()/.to_text()/.str() routes to
         // rt_to_string, which expects a tagged RuntimeValue receiver rather than
         // a raw native scalar.
@@ -2332,6 +2358,23 @@ impl<'a> MirLowerer<'a> {
             }
         } else {
             method.to_string()
+        };
+
+        // A `void.`/`Any.` qualifier is erasure, not a nominal owner: an
+        // unresolvable field type (e.g. a module-private dict alias seen from
+        // an importer) reaches here typed VOID. Qualifying a builtin-collection
+        // name with it lets backend suffix recovery bind an unrelated user
+        // method (`AdaptiveMap.contains_key` on a dict handle -> SEGV). Emit
+        // the bare name so every backend takes the tag-dispatched builtin.
+        // doc/08_tracking/bug/stage2_lower_trait_alias_dict_dispatch_segv_2026-10-24.md
+        let func_name = match func_name.split_once('.') {
+            Some(("void" | "Any" | "any", bare))
+                if bare == method
+                    && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(method, args.len()) =>
+            {
+                bare.to_string()
+            }
+            _ => func_name,
         };
 
         match dispatch {

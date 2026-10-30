@@ -1,14 +1,15 @@
 # Independent foreground owner for hosted smux. Request clients can exit while
 # this process keeps every pane and drains its output. No thread shares _svc.
 # TCP/ConPTY provider availability must be qualified on the selected runtime.
-use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream, tcp_backend_set_nonblocking}
+use std.io.tcp.{TcpListener, TcpStream, tcp_backend_set_nonblocking}
 use std.common.string_core.{bytes_to_text, text_to_bytes}
-use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms as time_now_monotonic_ms,
+use std.sosix.time.{sosix_time_now_monotonic_ms as time_now_monotonic_ms,
     sosix_sleep_ms as thread_sleep_ms}
-use std.nogc_sync_mut.sosix.pty.{sosix_pty_cleanup_pending as pty_cleanup_pending}
-use std.nogc_sync_mut.sosix.stdio.{sosix_println}
-use os.apps.smux.api.{smux_poll_output, smux_reset_for_test}
+use std.sosix.pty.{sosix_pty_cleanup_pending as pty_cleanup_pending}
+use std.sosix.stdio.{sosix_println}
+use os.apps.smux.api.{smux_poll_output, smux_reset_for_test, smux_reap_expired_clients}
 use os.apps.smux.smux_remote.{smux_remote_dispatch}
+use os.apps.smux.client_leases.{SMUX_CLIENT_LEASE_SWEEP_MS}
 
 const REQUEST_LIMIT: i64 = 4096
 const REPLY_LIMIT: i64 = 65536
@@ -90,8 +91,23 @@ pub fn smux_server_serve(address: text, token: text) -> i64:
     var clients: [PendingClient] = []
     var stop = false
     var socket_cleanup_failed = false
+    var client_reap_deadline: i64 = 0
+    var lease_error_reported = false
     sosix_println("smux: owner ready " + address)
     while not stop:
+        val reap_now = time_now_monotonic_ms()
+        if reap_now < 0 or reap_now >= client_reap_deadline:
+            val reaped = smux_reap_expired_clients()
+            if reaped.is_err():
+                # Keep background children alive when lease time cannot be
+                # established; report the failure once rather than flooding
+                # the owner log or pretending stale attachments were reaped.
+                if not lease_error_reported:
+                    sosix_println("smux: client lease sweep failed: " + reaped.unwrap_err())
+                    lease_error_reported = true
+            else:
+                lease_error_reported = false
+            client_reap_deadline = reap_now + SMUX_CLIENT_LEASE_SWEEP_MS
         val _polled = smux_poll_output()
         val accepted = listener.accept_timeout(10)
         if accepted.is_ok():

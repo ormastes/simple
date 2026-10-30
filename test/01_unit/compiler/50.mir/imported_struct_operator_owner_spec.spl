@@ -1,0 +1,339 @@
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+
+fn imported_operator_lowering(eager: bool, missing_second: bool = false, reverse_providers: bool = false) -> (MirModule, text):
+    val first_source = "use lib.second.\{SharedRecord as OtherRecord\}\npub struct SharedRecord:\n    value: i64\n\nimpl SharedRecord:\n    fn __eq__(other: SharedRecord) -> bool:\n        self.value % 10 == other.value % 10\n\n    fn __add__(other: i64) -> SharedRecord:\n        SharedRecord(value: self.value + other)\n\n    fn __sub__(other: i64) -> OtherRecord:\n        OtherRecord(prefix: self.value + other, value: other, marker: self.value + 77)\n"
+    var second_source = "pub struct SharedRecord:\n    prefix: i64\n    value: i64\n    marker: i64\n\nimpl SharedRecord:\n    fn __eq__(other: SharedRecord) -> bool:\n        self.value == other.value\n"
+    if missing_second: second_source = "pub struct SharedRecord:\n    prefix: i64\n    value: i64\n    marker: i64\n"
+    var source = "use lib.first.\{SharedRecord as FirstRecord\}\nuse lib.second.\{SharedRecord as SecondRecord\}\n\nfn same(a: FirstRecord, b: FirstRecord) -> bool:\n    a == b\n\nfn different(a: FirstRecord, b: FirstRecord) -> bool:\n    a != b\n\nfn array_different(values: [FirstRecord]) -> bool:\n    values[0] != values[1]\n\nfn numeric(value: i64) -> i64:\n    value * value\n\nfn plus(value: FirstRecord) -> FirstRecord:\n    value + 2\n\nfn second(a: SecondRecord, b: SecondRecord) -> bool:\n    a != b\n\nfn second_array(values: [SecondRecord]) -> bool:\n    values[0] != values[1]\n\nfn check_cross_provider_operator_return(value: FirstRecord) -> bool:\n    val returned = value - 20\n    returned.prefix == 21 and returned.value == 20 and returned.marker == 78\n\nfn mutate_borrowed_plain(record: &SecondRecord):\n    record.marker = record.marker + 1\n"
+    if missing_second:
+        source = source + "\nfn second_construct() -> SecondRecord:\n    SecondRecord(marker: 37, prefix: 11, value: 23)\n\nfn second_literal() -> SecondRecord:\n    SecondRecord{marker: 37, prefix: 11, value: 23}\n"
+    val logger = Logger(level: 0)
+    val first_ast = parse_full_frontend(first_source, "lib/first.spl", "lib.first", logger)
+    val second_ast = parse_full_frontend(second_source, "lib/second.spl", "lib.second", logger)
+    var modules: Dict<text, ParserModule> = {}
+    modules["lib.first"] = first_ast
+    modules["lib.second"] = second_ast
+    val sources = [SourceFile(path: "lib/first.spl", content: first_source, module_name: "lib.first"), SourceFile(path: "lib/second.spl", content: second_source, module_name: "lib.second")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var first_lowering = hirlowering_for_module("lib/first.spl", surfaces)
+    val first = first_lowering.lower_module(first_ast)
+    var second_lowering = hirlowering_for_module("lib/second.spl", surfaces)
+    val second = second_lowering.lower_module(second_ast)
+    var consumer_lowering = hirlowering_for_module("app/operators.spl", surfaces)
+    val consumer = consumer_lowering.lower_module(parse_full_frontend(source, "app/operators.spl", "app.operators", logger))
+    var lowering = MirLowering.new_for_target(consumer.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.provider_methods_eager = eager
+    val providers = if reverse_providers: [second, first] else: [first, second]
+    val mir = lowering.lower_module(consumer, providers, true)
+    var errors = ""
+    for error in lowering.errors: errors = errors + error.message + "\n"
+    (mir, errors)
+
+fn imported_operator_targets(module: MirModule, function_name: text, method: text) -> [text]:
+    var targets: [text] = []
+    var found = false
+    for function in module.functions.values():
+        if function.name != function_name and not function.name.ends_with("." + function_name): continue
+        found = true
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case Call(_, callee, _):
+                        match callee.kind:
+                            case Const(value, _):
+                                match value:
+                                    case Str(name):
+                                        if name.ends_with("." + method): targets.push(name)
+                                    case _: ()
+                            case _: ()
+                    case _: ()
+    expect(found).to_be(true)
+    targets
+
+
+fn imported_constructed_ints(module: MirModule, function_name: text) -> [i64]:
+    var values: [i64] = []
+    var found = false
+    var aggregates = 0
+    for function in module.functions.values():
+        if function.name != function_name and not function.name.ends_with("." + function_name): continue
+        found = true
+        var constants: Dict<i64, i64> = {}
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case Const(dest, value, _):
+                        match value:
+                            case Int(integer): constants[dest.id] = integer
+                            case _: ()
+                    case Aggregate(_, kind, operands):
+                        match kind:
+                            case Struct(_):
+                                aggregates = aggregates + 1
+                                for operand in operands:
+                                    match operand.kind:
+                                        case Copy(local) | Move(local):
+                                            expect(constants.has(local.id)).to_be(true)
+                                            values.push(constants[local.id])
+                                        case Const(value, _):
+                                            match value:
+                                                case Int(integer): values.push(integer)
+                                                case _: fail("constructor operand must retain its integer value")
+                                        case _: fail("constructor operand must resolve to its initializer")
+                            case _: ()
+                    case _: ()
+    expect(found).to_be(true)
+    expect(aggregates).to_equal(1)
+    values
+
+fn imported_parameter_copy_widths(module: MirModule, function_name: text) -> [i64]:
+    var widths: [i64] = []
+    var found = false
+    for function in module.functions.values():
+        if function.name != function_name and not function.name.ends_with("." + function_name): continue
+        found = true
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case Aggregate(_, kind, operands):
+                        match kind:
+                            case Struct(_): widths.push(operands.len())
+                            case _: ()
+                    case _: ()
+    expect(found).to_be(true)
+    widths
+
+fn imported_operand_local_id(operand: MirOperand) -> i64:
+    match operand.kind:
+        case Copy(local) | Move(local): local.id
+        case _: -1
+
+fn imported_result_field_indices(module: MirModule, function_name: text) -> [i64]:
+    var indices: [i64] = []
+    var found = false
+    var sub_call_count = 0
+    var sub_result_count = 0
+    for function in module.functions.values():
+        if function.name != function_name and not function.name.ends_with("." + function_name): continue
+        found = true
+        var result_locals: Dict<i64, bool> = {}
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case Call(dest, callee, _):
+                        var is_sub_call = false
+                        match callee.kind:
+                            case Const(value, _):
+                                match value:
+                                    case Str(name): is_sub_call = name.ends_with(".__sub__")
+                                    case _: ()
+                            case _: ()
+                        if is_sub_call:
+                            sub_call_count = sub_call_count + 1
+                            if val result = dest:
+                                result_locals[result.id] = true
+                                sub_result_count = sub_result_count + 1
+                            else:
+                                fail("cross-provider __sub__ call must produce a result local")
+                    case _: ()
+        # Follow only MIR value-preserving bindings from that call result.
+        # Parameter-copy GetField instructions therefore remain outside the
+        # oracle even when they use the same field indices.
+        var changed = true
+        while changed:
+            changed = false
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case Copy(dest, source) | Move(dest, source):
+                            if result_locals.contains(source.id) and not result_locals.contains(dest.id):
+                                result_locals[dest.id] = true
+                                changed = true
+                        case Cast(dest, operand, _) | Bitcast(dest, operand, _):
+                            val source_id = imported_operand_local_id(operand)
+                            if source_id >= 0 and result_locals.contains(source_id) and not result_locals.contains(dest.id):
+                                result_locals[dest.id] = true
+                                changed = true
+                        case _: ()
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case GetField(_, base, field_index):
+                        val base_id = imported_operand_local_id(base)
+                        if base_id >= 0 and result_locals.contains(base_id):
+                            indices.push(field_index)
+                    case _: ()
+    expect(found).to_be(true)
+    expect(sub_call_count).to_equal(1)
+    expect(sub_result_count).to_equal(1)
+    indices
+
+fn imported_field_access_indices(module: MirModule, function_name: text) -> ([i64], [i64]):
+    var loads: [i64] = []
+    var stores: [i64] = []
+    var found = false
+    for function in module.functions.values():
+        if function.name != function_name and not function.name.ends_with("." + function_name): continue
+        found = true
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case GetField(_, _, field_index): loads.push(field_index)
+                    case SetField(_, field_index, _): stores.push(field_index)
+                    case _: ()
+    expect(found).to_be(true)
+    (loads, stores)
+
+describe "imported struct operators use qualified method owners":
+    it "resolves provider equality for both equality and inequality on the demand path":
+        step("Lower operators with provider methods materialized on demand")
+        val result = imported_operator_lowering(false)
+        expect(result.1).to_equal("")
+        expect(serialize_mir_module(result.0)).to_contain("lib.first.SharedRecord.__eq__")
+        expect(serialize_mir_module(result.0)).to_contain("lib.second.SharedRecord.__eq__")
+
+    it "resolves provider equality on the eager path":
+        step("Lower the same provider-owned operators with eager method registration")
+        val result = imported_operator_lowering(true)
+        expect(result.1).to_equal("")
+        expect(serialize_mir_module(result.0)).to_contain("lib.first.SharedRecord.__eq__")
+        expect(serialize_mir_module(result.0)).to_contain("lib.second.SharedRecord.__eq__")
+
+    it "does not borrow equality from another provider with the same bare type name":
+        step("Leave the second same-named provider without an equality method")
+        val result = imported_operator_lowering(false, true)
+        # The upstream structural-equality contract applies when this
+        # provider has no custom dunder. Another provider's dunder must
+        # never substitute for that structural fallback.
+        expect(result.1).to_equal("")
+        expect(imported_operator_targets(result.0, "second", "__eq__").len()).to_equal(0)
+        val first_targets = imported_operator_targets(result.0, "same", "__eq__")
+        expect(first_targets.len()).to_equal(1)
+        expect(first_targets[0]).to_end_with("lib.first.SharedRecord.__eq__")
+
+    it "calls equality for record array elements represented by runtime handles":
+        step("Lower array-element inequality using its declared record owner")
+        val result = imported_operator_lowering(false)
+        expect(result.1).to_equal("")
+        val targets = imported_operator_targets(result.0, "array_different", "__eq__")
+        expect(targets.len()).to_equal(1)
+        expect(targets[0]).to_end_with("lib.first.SharedRecord.__eq__")
+
+    it "leaves ordinary integer multiplication outside record dispatch":
+        step("Lower a scalar function after record operations with reused local numbers")
+        val result = imported_operator_lowering(false)
+        expect(result.1).to_equal("")
+        expect(imported_operator_targets(result.0, "numeric", "__eq__").len()).to_equal(0)
+        expect(imported_operator_targets(result.0, "numeric", "__mul__").len()).to_equal(0)
+
+    it "continues to dispatch record arithmetic through its provider":
+        step("Resolve a record-returning addition independently of its field-layout spelling")
+        val result = imported_operator_lowering(false)
+        expect(result.1).to_equal("")
+        val targets = imported_operator_targets(result.0, "plus", "__add__")
+        expect(targets.len()).to_equal(1)
+        expect(targets[0]).to_end_with("lib.first.SharedRecord.__add__")
+
+    it "keeps an operator result's other-provider layout on demand":
+        step("Preserve the declared provider of an arithmetic result")
+        val result = imported_operator_lowering(false)
+        expect(result.1).to_equal("")
+        val targets = imported_operator_targets(result.0, "check_cross_provider_operator_return", "__sub__")
+        expect(targets.len()).to_equal(1)
+        expect(targets[0]).to_end_with("lib.first.SharedRecord.__sub__")
+        val indices = imported_result_field_indices(result.0, "check_cross_provider_operator_return")
+        expect(indices).to_equal([0, 1, 2])
+
+    it "keeps operator return and borrowed parameter owners under reversed eager registration":
+        step("Repeat provider checks with eager reversed registration")
+        val result = imported_operator_lowering(true, false, true)
+        expect(result.1).to_equal("")
+        val targets = imported_operator_targets(result.0, "check_cross_provider_operator_return", "__sub__")
+        expect(targets.len()).to_equal(1)
+        expect(targets[0]).to_end_with("lib.first.SharedRecord.__sub__")
+        val result_indices = imported_result_field_indices(result.0, "check_cross_provider_operator_return")
+        expect(result_indices).to_equal([0, 1, 2])
+        expect(imported_parameter_copy_widths(result.0, "mutate_borrowed_plain").len()).to_equal(0)
+        val accesses = imported_field_access_indices(result.0, "mutate_borrowed_plain")
+        expect(accesses.0).to_contain(2)
+        expect(accesses.1).to_contain(2)
+
+    it "keeps borrowed imported struct fields caller-owned without copying on demand":
+        step("Borrow the exact provider layout without copying it")
+        val result = imported_operator_lowering(false)
+        expect(result.1).to_equal("")
+        expect(imported_parameter_copy_widths(result.0, "mutate_borrowed_plain").len()).to_equal(0)
+        val accesses = imported_field_access_indices(result.0, "mutate_borrowed_plain")
+        expect(accesses.0).to_contain(2)
+        expect(accesses.1).to_contain(2)
+
+    it "uses the method-less provider's own structural layout on the eager path":
+        step("Lower same-named providers with different field layouts eagerly")
+        val result = imported_operator_lowering(true, true)
+        expect(result.1).to_equal("")
+        expect(imported_operator_targets(result.0, "second", "__eq__").len()).to_equal(0)
+        expect(imported_operator_targets(result.0, "second_array", "__eq__").len()).to_equal(0)
+
+    it "keeps structural array equality on the exact method-less provider":
+        step("Lower imported record array handles with structural equality")
+        val result = imported_operator_lowering(false, true)
+        expect(result.1).to_equal("")
+        expect(imported_operator_targets(result.0, "second_array", "__eq__").len()).to_equal(0)
+
+    it "constructs the exact imported layout in declared field order":
+        step("Construct same-named records using reordered named arguments")
+        val result = imported_operator_lowering(false, true)
+        expect(result.1).to_equal("")
+        val values = imported_constructed_ints(result.0, "second_construct")
+        expect(values.len()).to_equal(3)
+        expect(values[0]).to_equal(11)
+        expect(values[1]).to_equal(23)
+        expect(values[2]).to_equal(37)
+
+    it "uses the same exact layout for imported struct literals":
+        step("Lower an aliased struct literal with reordered named fields")
+        val result = imported_operator_lowering(true, true)
+        expect(result.1).to_equal("")
+        val values = imported_constructed_ints(result.0, "second_literal")
+        expect(values.len()).to_equal(3)
+        expect(values[0]).to_equal(11)
+        expect(values[1]).to_equal(23)
+        expect(values[2]).to_equal(37)
+
+    it "keeps construction layout stable when provider registration is reversed":
+        step("Reverse same-named provider registration before named construction")
+        val result = imported_operator_lowering(false, true, true)
+        expect(result.1).to_equal("")
+        val values = imported_constructed_ints(result.0, "second_construct")
+        expect(values.len()).to_equal(3)
+        expect(values[0]).to_equal(11)
+        expect(values[1]).to_equal(23)
+        expect(values[2]).to_equal(37)
+
+    it "copies every field of imported plain record parameters on demand":
+        step("Copy two three-field parameters beside another provider's two-field layout")
+        val result = imported_operator_lowering(false, true)
+        expect(result.1).to_equal("")
+        val widths = imported_parameter_copy_widths(result.0, "second")
+        expect(widths.len()).to_equal(2)
+        expect(widths[0]).to_equal(3)
+        expect(widths[1]).to_equal(3)
+
+    it "preserves complete parameter copies under reversed eager provider registration":
+        step("Register the same-named providers eagerly in reverse order")
+        val result = imported_operator_lowering(true, true, true)
+        expect(result.1).to_equal("")
+        val widths = imported_parameter_copy_widths(result.0, "second")
+        expect(widths.len()).to_equal(2)
+        expect(widths[0]).to_equal(3)
+        expect(widths[1]).to_equal(3)

@@ -1,0 +1,208 @@
+# AST -> FrozenPublicFactV1 producer for the frontend public summary.
+#
+# The TLDR companion is a non-authoritative VIEW of PublicSummaryV1
+# (10.frontend/cache_artifact/public_summary_projector.spl): this module turns
+# the producer's parsed module into the projector's public facts, and the
+# projector -- not this module -- validates, orders and renders them.
+#
+# Facts per top-level declaration -- Simple imports are not restricted to
+# `pub` items (non-`pub` top-level functions are imported directly across the
+# tree), so every top-level declaration is part of the importable surface
+# (the parsed module decides existence,
+# and kind; canonical bytes are the source block at that
+# declaration, via module_tldr_block_at_v1):
+#   struct/class/enum/bitfield/trait/type/const  ForwardDeclaration +
+#       Declaration, bytes = the declaration block (grammar-valid Simple)
+#   non-generic function  ForwardDeclaration + Declaration, bytes = its header
+#       as `pub extern fn ...` (signature only, no body)
+#   generic / inline function  BodyReference (the body itself travels in the
+#       companion's body sections; summaries never carry executable bodies)
+#   impl  TraitImplCoherence, bytes = the impl header line
+# Named gaps: dependency_symbol_ids are empty (no cross-symbol edges yet);
+# a multi-line function header is recorded as a BodyReference only.
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.cache_artifact.public_summary_projector.{FrontendPublicFactKindV1,
+    FrozenPublicFactV1}
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_block_at_v1}
+use compiler.driver.cache.module_tldr_ast_sections_v1.{module_tldr_decl_line_v1}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefinitionTableV1}
+use compiler.frontend.cache_artifact.generic_tldr_projector.{GenericDeclInputV1, GenericFieldInputV1}
+use compiler.common.cache_contract.generic_tldr_view_v1.{GENERIC_PARAM_KIND_TYPE}
+use compiler.common.cache_contract.guard_id_v1.{active_guard_root_empty_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _fact_v1(kind: FrontendPublicFactKindV1, symbol: text, bytes: text) -> FrozenPublicFactV1:
+    FrozenPublicFactV1(fact_kind: kind, stable_symbol_id: symbol, canonical_bytes: bytes,
+        is_public: true, contains_executable_body: false, contains_private_source: false,
+        dependency_symbol_ids: [])
+
+# `pub fn add(a: i64) -> i64:` -> `pub extern fn add(a: i64) -> i64`; "" when
+# the header does not fit on its line.
+pub fn module_public_extern_signature_v1(header: text) -> text:
+    var line = header.trim()
+    if not line.ends_with(":"):
+        return ""
+    line = line.substring(0, line.len() - 1)
+    if line.starts_with("pub fn "):
+        return "pub extern fn " + line.substring(7)
+    if line.starts_with("fn "):
+        return "pub extern fn " + line.substring(3)
+    ""
+
+fn _push_declaration_v1(facts: [FrozenPublicFactV1], symbol: text, bytes: text) -> [FrozenPublicFactV1]:
+    var out = facts
+    if bytes == "":
+        return out
+    out.push(_fact_v1(FrontendPublicFactKindV1.ForwardDeclaration, symbol, bytes))
+    out.push(_fact_v1(FrontendPublicFactKindV1.Declaration, symbol, bytes))
+    out
+
+pub fn module_public_facts_of_module_v1(module: ParserModule, source: text,
+        module_id: text) -> [FrozenPublicFactV1]:
+    val lines = source.replace("\r\n", "\n").split("\n")
+    var facts: [FrozenPublicFactV1] = []
+    for name in module.structs.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.structs[name].span.line, lines, ["struct"], name) - 1, "layout"))
+    for name in module.classes.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.classes[name].span.line, lines, ["class"], name) - 1, "layout"))
+    for name in module.enums.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.enums[name].span.line, lines, ["enum"], name) - 1, "layout"))
+    for name in module.traits.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.traits[name].span.line, lines, ["trait"], name) - 1, "trait"))
+    for name in module.type_aliases.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.type_aliases[name].span.line, lines, ["type"], name) - 1, "type"))
+    for name in module.constants.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.constants[name].span.line, lines, ["val", "const", "var"], name) - 1, "const"))
+    for name in module.functions.keys():
+        val f = module.functions[name]
+        if f.is_method or f.span.line <= 0 or f.span.line > lines.len():
+            continue
+        val symbol = "sym:" + module_id + "." + name
+        val signature = if f.type_params.len() > 0 or f.is_const: "" else:
+            module_public_extern_signature_v1(lines[f.span.line - 1])
+        if signature == "":
+            facts.push(_fact_v1(FrontendPublicFactKindV1.BodyReference, symbol, "body " + name))
+        else:
+            facts = _push_declaration_v1(facts, symbol, signature)
+    var impl_index = 0
+    for impl_ in module.impls:
+        if impl_.span.line > 0 and impl_.span.line <= lines.len():
+            facts.push(_fact_v1(FrontendPublicFactKindV1.TraitImplCoherence,
+                "impl:" + module_id + "#{impl_index}", lines[impl_.span.line - 1].trim()))
+        impl_index = impl_index + 1
+    facts
+
+
+# Macro facts (plan 2026-10-24 §6.1/§6.5.4): one MacroSignature fact per public
+# macro definition (its contract + exported-surface digests, never its users),
+# and one MacroSignature fact per macro-generated public member, so a
+# body-only macro edit leaves the module summary unchanged (green cutoff) while
+# a generated public declaration change refreshes it.
+pub fn module_public_macro_facts_v1(def_table: MacroDefinitionTableV1,
+        generated_public_names: [text], module_id: text) -> [FrozenPublicFactV1]:
+    var facts: [FrozenPublicFactV1] = []
+    for e in def_table.entries:
+        if e.is_public:
+            facts.push(_fact_v1(FrontendPublicFactKindV1.MacroSignature,
+                "macro:" + module_id + "." + e.macro_name,
+                "macro " + e.macro_name + " contract=" + e.contract_digest +
+                    " surface=" + e.exported_surface_digest))
+    for name in generated_public_names:
+        facts.push(_fact_v1(FrontendPublicFactKindV1.MacroSignature,
+            "macro-gen:" + module_id + "." + name, "macro-generated " + name))
+    facts
+
+# Generic template declarations (plan P3): every generic struct/class becomes
+# one GenericDeclInputV1 for the template-section projector. Binder names and
+# field names come from the parsed module; each field's type text is the
+# source spelling after `<name>:` inside the declaration block (the parser's
+# Type has no canonical renderer yet). Every parameter is a TYPE parameter
+# (ParserTypeParam carries no kind); no guard is evaluated per declaration yet, so
+# the guard root is the empty ActiveGuardRoot (guard_id_v1).
+fn _field_type_text_v1(block_lines: [text], field: text) -> text:
+    val prefix = field + ":"
+    for line in block_lines:
+        val t = line.trim()
+        if line.starts_with(" ") and t.starts_with(prefix):
+            var ty = t.substring(prefix.len()).trim()
+            val hash = ty.index_of("#")
+            if hash >= 0:
+                ty = ty.substring(0, hash).trim()
+            val eq = ty.index_of("=")
+            if eq >= 0:
+                ty = ty.substring(0, eq).trim()
+            return ty
+    ""
+
+fn _generic_decl_v1(module_id: text, name: text, block: text, type_params: [text],
+        field_names: [text], is_public: bool) -> GenericDeclInputV1:
+    val block_lines = block.split("\n")
+    var kinds: [text] = []
+    for _p in type_params:
+        kinds.push(GENERIC_PARAM_KIND_TYPE)
+    var fields: [GenericFieldInputV1] = []
+    for field in field_names:
+        fields.push(GenericFieldInputV1(name: field, type_text: _field_type_text_v1(block_lines, field)))
+    GenericDeclInputV1(module_path: module_id, name: name, params: type_params,
+        param_kinds: kinds, fields: fields,
+        visibility_root: if is_public: "visibility:pub" else: "visibility:module",
+        active_guard_root: active_guard_root_empty_v1("").root_digest, source_digest: sha256_text(block))
+
+pub fn module_generic_template_decls_of_module_v1(module: ParserModule, source: text,
+        module_id: text) -> [GenericDeclInputV1]:
+    val lines = source.replace("\r\n", "\n").split("\n")
+    var out: [GenericDeclInputV1] = []
+    for name in module.structs.keys():
+        val s = module.structs[name]
+        if s.type_params.len() == 0:
+            continue
+        var params: [text] = []
+        for p in s.type_params:
+            params.push(p.name)
+        var field_names: [text] = []
+        for fd in s.fields:
+            field_names.push(fd.name)
+        val block = module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(s.span.line, lines, ["struct"], name) - 1, "layout")
+        out.push(_generic_decl_v1(module_id, name, block, params, field_names, s.is_public))
+    for name in module.classes.keys():
+        val c = module.classes[name]
+        if c.type_params.len() == 0:
+            continue
+        var params: [text] = []
+        for p in c.type_params:
+            params.push(p.name)
+        var field_names: [text] = []
+        for fd in c.fields:
+            field_names.push(fd.name)
+        val block = module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(c.span.line, lines, ["class"], name) - 1, "layout")
+        out.push(_generic_decl_v1(module_id, name, block, params, field_names, c.is_public))
+    # P-G6: generic FUNCTION templates (`fn id<T>(x: T) -> T`) so an imported
+    # function instance keys as `owner.id` + its type arguments. No fields:
+    # source_digest covers signature and body. A name a type template already
+    # owns is skipped (section symbols are unique); its instances stay unkeyed.
+    var taken: [text] = []
+    for d in out:
+        taken.push(d.name)
+    for name in module.function_order:
+        if not module.functions.contains_key(name) or taken.contains(name):
+            continue
+        val f = module.functions[name]
+        if f.type_params.len() == 0:
+            continue
+        var params: [text] = []
+        for p in f.type_params:
+            params.push(p.name)
+        val block = module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(f.span.line, lines, ["fn"], name) - 1, "generic")
+        out.push(_generic_decl_v1(module_id, name, block, params, [], f.is_public))
+        taken.push(name)
+    out
+
+export module_public_extern_signature_v1, module_public_facts_of_module_v1
+export module_generic_template_decls_of_module_v1
+export module_public_macro_facts_v1

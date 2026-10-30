@@ -3,6 +3,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.common.encoding.utf8.{text_byte_len}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
 use std.io_runtime.{getpid}
+use std.scv.compile_cost_v1.{ScvCompileCostV1}
 
 fn inventory_trace_token_valid_v1(token: text) -> bool:
     if token.len() < 16 or token.len() > 64: return false
@@ -118,8 +119,23 @@ fn inventory_trace_create_v1(token: text) -> CompilerInventoryTraceV1?:
     if not inventory_trace_token_valid_v1(token): return nil
     Some(CompilerInventoryTraceV1(prefix: "inventory-trace-v1 attempt={token} pid={getpid()}"))
 
+fn inventory_trace_cost_create_v1(token: text) -> ScvCompileCostV1?:
+    if not inventory_trace_token_valid_v1(token): return nil
+    Some(ScvCompileCostV1())
+
+fn inventory_trace_cost_emit_v1(token: text, cost: ScvCompileCostV1?):
+    if cost == nil: return
+    if not cost!.lock_released or cost!.emitted: return
+    val trace = inventory_trace_create_v1(token)
+    if trace == nil: return
+    cost!.emitted = true
+    # One bounded aggregate, outside the refresh lock and every scratch scope.
+    # Buckets overlap: event_ns includes canonicalization and hash_ns.
+    stderr_write("{trace!.prefix} phase=cost exists_calls={cost!.exists_calls} exists_ns={cost!.exists_ns} read_calls={cost!.read_calls} read_ns={cost!.read_ns} bytes={cost!.read_bytes} events={cost!.event_calls} event_ns={cost!.event_ns} hash_calls={cost!.hash_calls} hash_ns={cost!.hash_ns} materialize_calls={cost!.materialize_calls} materialize_ns={cost!.materialize_ns} copy_calls={cost!.copy_calls} copy_ns={cost!.copy_ns} verify_calls={cost!.verify_calls} verify_ns={cost!.verify_ns} inventory_ns={cost!.inventory_ns} snapshot_ns={cost!.snapshot_ns}\n")
+
 export CompilerInventoryTraceV1
 export inventory_trace_token_valid_v1
 export inventory_trace_create_v1
 
 export inventory_trace_digest_v1
+export inventory_trace_cost_create_v1, inventory_trace_cost_emit_v1

@@ -1,0 +1,168 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_types.{LocalId}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLoweringExpr.optional_record_owner.*
+
+fn optional_nil_join_result(arms: [LocalId], owners: Dict<i64, text>, nil_ids: [i64], none_ids: [i64]) -> text:
+    var lowering = MirLowering.new(SymbolTable.new())
+    lowering.optional_record_owners = owners
+    for id in nil_ids:
+        lowering.nil_locals[id] = true
+    for id in none_ids:
+        lowering.option_none_locals[id] = true
+    lowering.join_optional_record_owners(arms, 99)
+    lowering.optional_record_owners.get(99) ?? "<absent>"
+
+class OptionalNilProviderFixture:
+    lowering: MirLowering
+    provider_id: i64
+    twin_id: i64
+
+fn optional_nil_provider_fixture() -> OptionalNilProviderFixture:
+    val source = "pub class Seed:\n    value: i64\npub class Twin:\n    value: i64\n"
+    val ast = parse_full_frontend(source, "app/optional/provider.spl", "app.optional.provider", Logger(level: 0))
+    var hir = HirLowering.with_filename("app/optional/provider.spl")
+    val provider = hir.lower_module(ast)
+    expect(hir.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(provider.symbols)
+    var modules: Dict<text, HirModule> = {}
+    modules["provider"] = provider
+    lowering.prescan_module_struct_names(modules, "provider")
+    var provider_id = -1
+    var twin_id = -1
+    for record in provider.classes.values():
+        if record.name == "Seed" or record.name == "Twin":
+            val relocated = lowering.relocate_provider_type_symbol(record.symbol, provider.symbols)
+            expect(relocated.id).to_be_greater_than(-1)
+            val owner = "app.optional.provider." + record.name
+            lowering.register_composite_field_metadata(owner, record.fields, provider.symbols, false)
+            if record.name == "Seed": provider_id = relocated.id
+            else: twin_id = relocated.id
+    expect(lowering.errors.len()).to_equal(0)
+    expect(provider_id).to_be_greater_than(-1)
+    expect(twin_id).to_be_greater_than(-1)
+    OptionalNilProviderFixture(lowering: lowering, provider_id: provider_id, twin_id: twin_id)
+
+fn joined_provider_type(arms: [LocalId], nil_ids: [i64], none_ids: [i64]) -> (i64, i64, i64):
+    val fixture = optional_nil_provider_fixture()
+    var lowering = fixture.lowering
+    for id in nil_ids:
+        lowering.nil_locals[id] = true
+    for id in none_ids:
+        lowering.option_none_locals[id] = true
+    lowering.optional_record_owners[arms[0].id] = "app.optional.provider.Seed"
+    lowering.join_optional_record_owners(arms, 99)
+    val resolved = lowering.checked_optional_record_type(99, Span.empty())
+    var resolved_id = -1
+    match resolved.kind:
+        case HirTypeKind.Named(symbol, _): resolved_id = symbol.id
+        case _: ()
+    (lowering.errors.len(), resolved_id, fixture.provider_id)
+
+fn optional_nil_join_rejects_without_unique_layout(arms: [LocalId], owners: Dict<i64, text>, nil_ids: [i64], none_ids: [i64]) -> bool:
+    val fixture = optional_nil_provider_fixture()
+    var lowering = fixture.lowering
+    lowering.optional_record_owners = owners
+    for id in nil_ids:
+        lowering.nil_locals[id] = true
+    for id in none_ids:
+        lowering.option_none_locals[id] = true
+    lowering.join_optional_record_owners(arms, 99)
+    val resolved = lowering.checked_optional_record_type(99, Span.empty())
+    var has_unique_layout_diagnostic = false
+    for error in lowering.errors:
+        if error.fatal and error.message.contains("no unique provider layout snapshot"):
+            has_unique_layout_diagnostic = true
+    resolved.kind == HirTypeKind.Error and has_unique_layout_diagnostic
+
+describe "Optional record nil joins preserve only proven providers":
+    it "treats a marked nil arm as neutral in either order":
+        var owners: Dict<i64, text> = {}
+        owners[1] = "Provider::A"
+        expect(optional_nil_join_result([LocalId(id: 1), LocalId(id: 2)], owners, [2], [])).to_equal("Provider::A")
+        expect(optional_nil_join_result([LocalId(id: 2), LocalId(id: 1)], owners, [2], [])).to_equal("Provider::A")
+
+    it "treats a marked None arm as neutral in either order":
+        var owners: Dict<i64, text> = {}
+        owners[1] = "Provider::A"
+        expect(optional_nil_join_result([LocalId(id: 1), LocalId(id: 2)], owners, [], [2])).to_equal("Provider::A")
+        expect(optional_nil_join_result([LocalId(id: 2), LocalId(id: 1)], owners, [], [2])).to_equal("Provider::A")
+
+    it "keeps repeated same-owner arms across nil and None":
+        var owners: Dict<i64, text> = {}
+        owners[1] = "Provider::A"
+        owners[3] = "Provider::A"
+        expect(optional_nil_join_result([LocalId(id: 1), LocalId(id: 2), LocalId(id: 3), LocalId(id: 4)], owners, [2], [4])).to_equal("Provider::A")
+
+    it "does not treat untracked nonnil arms as neutral":
+        var owners: Dict<i64, text> = {}
+        owners[1] = "Provider::A"
+        expect(optional_nil_join_result([LocalId(id: 1), LocalId(id: 2)], owners, [], [])).to_equal("")
+        expect(optional_nil_join_result([LocalId(id: 2), LocalId(id: 1)], owners, [], [])).to_equal("")
+        expect(optional_nil_join_result([LocalId(id: 2)], owners, [], [])).to_equal("<absent>")
+
+    it "rejects conflicting owners even when another arm is nil":
+        var owners: Dict<i64, text> = {}
+        owners[1] = "Provider::A"
+        owners[2] = "Provider::B"
+        expect(optional_nil_join_result([LocalId(id: 1), LocalId(id: 2), LocalId(id: 3)], owners, [3], [])).to_equal("")
+
+    it "does not rescue an explicitly empty owner with a None marker":
+        var owners: Dict<i64, text> = {}
+        owners[1] = "Provider::A"
+        owners[2] = ""
+        expect(optional_nil_join_result([LocalId(id: 1), LocalId(id: 2), LocalId(id: 3)], owners, [], [2, 3])).to_equal("")
+
+    it "requires an owner from a non-neutral arm":
+        var owners: Dict<i64, text> = {}
+        expect(optional_nil_join_result([], owners, [], [])).to_equal("<absent>")
+        expect(optional_nil_join_result([LocalId(id: 1)], owners, [1], [])).to_equal("<absent>")
+        expect(optional_nil_join_result([LocalId(id: 1)], owners, [], [1])).to_equal("<absent>")
+        expect(optional_nil_join_result([LocalId(id: 1)], owners, [], [])).to_equal("<absent>")
+        owners[1] = ""
+        expect(optional_nil_join_result([LocalId(id: 1)], owners, [], [])).to_equal("")
+
+    it "resolves the exact qualified provider after a nil join":
+        val joined = joined_provider_type([LocalId(id: 1), LocalId(id: 2)], [2], [])
+        expect(joined.0).to_equal(0)
+        expect(joined.1).to_equal(joined.2)
+
+    it "rejects unknown, conflicting, and empty owners after joining":
+        var unknown: Dict<i64, text> = {}
+        unknown[1] = "app.optional.provider.Seed"
+        expect(optional_nil_join_rejects_without_unique_layout([LocalId(id: 1), LocalId(id: 2)], unknown, [], [])).to_be(true)
+
+        var conflicting: Dict<i64, text> = {}
+        conflicting[1] = "app.optional.provider.Seed"
+        conflicting[2] = "app.optional.provider.Twin"
+        expect(optional_nil_join_rejects_without_unique_layout([LocalId(id: 1), LocalId(id: 2), LocalId(id: 3)], conflicting, [3], [])).to_be(true)
+
+        var empty: Dict<i64, text> = {}
+        empty[1] = "app.optional.provider.Seed"
+        empty[2] = ""
+        expect(optional_nil_join_rejects_without_unique_layout([LocalId(id: 1), LocalId(id: 2), LocalId(id: 3)], empty, [], [2, 3])).to_be(true)
+
+    it "still rejects multiple layout owners after a valid nil join":
+        val fixture = optional_nil_provider_fixture()
+        var lowering = fixture.lowering
+        lowering.optional_record_owners[1] = "app.optional.provider.Seed"
+        lowering.nil_locals[2] = true
+        lowering.join_optional_record_owners([LocalId(id: 1), LocalId(id: 2)], 99)
+        lowering.composite_layout_owner_counts["app.optional.provider::Seed"] = 2
+        val resolved = lowering.checked_optional_record_type(99, Span.empty())
+        expect(resolved.kind).to_equal(HirTypeKind.Error)
+        var has_unique_layout_diagnostic = false
+        for error in lowering.errors:
+            if error.fatal and error.message.contains("no unique provider layout snapshot"):
+                has_unique_layout_diagnostic = true
+        expect(has_unique_layout_diagnostic).to_be(true)

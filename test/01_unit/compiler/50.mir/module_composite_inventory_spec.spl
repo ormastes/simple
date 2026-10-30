@@ -38,7 +38,10 @@ use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.items.*
-use compiler.hir.hir_types.{SymbolTable}
+use compiler.hir.hir_types.{SymbolTable, SymbolKind, HirTypeKind, HirSymbol}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStruct}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.mir.mir.*
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
@@ -103,3 +106,90 @@ describe "module composite inventory registration":
             if function.name.ends_with(".make") or function.name == "make":
                 found_make = true
         assert_true(found_make)
+
+    # Bug llvmglobals_2026-10-25: a struct default expression carries its
+    # PROVIDER's SymbolIds. `MirStatic.visibility: Visibility = Visibility.Private`
+    # omitted at a consumer site lowered the enum id raw in the consumer table
+    # ("unregistered declaration '...SymbolId::is_valid'"). Provider struct
+    # registration must relocate defaults; EnumLit must survive relocation.
+    it "relocates a provider struct's enum field default into the consumer table":
+        val src = "enum Vis:\n    Private\n    Public\n\nstruct Holder:\n    n: i64\n    vis: Vis = Vis.Private\n"
+        val hir = composite_hir(src, "testdata/fixture_composite_inventory_enum_default.spl")
+        var holder_default: HirExpr? = nil
+        var holder: HirStruct? = nil
+        for s in hir.structs.values():
+            if s.name == "Holder":
+                holder = Some(s)
+                holder_default = Some(s.fields[1].default)
+        assert_true(holder.?)
+        var consumer = SymbolTable.new()
+        var pad = 0
+        while pad < 40:
+            consumer.define("consumer_pad_{pad}", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+            pad = pad + 1
+        var lowering = MirLowering.new_for_target(consumer, composite_ctx())
+        val relocated = lowering.relocate_provider_default(holder_default.unwrap(), hir.symbols, {})
+        var relocated_name = ""
+        match relocated.kind:
+            case HirExprKind.EnumLit(ty, variant, _):
+                expect(variant).to_equal("Private")
+                match ty.kind:
+                    case HirTypeKind.Named(symbol, _):
+                        relocated_name = lowering.symbols.symbol_name_scalar_raw(symbol.id)
+                    case _: ()
+            case _: ()
+        expect(relocated_name).to_equal("Vis")
+
+    it "overwrites the raw bare-name default row only when the consumer does not own the name":
+        val src = "enum Vis:\n    Private\n    Public\n\nstruct Holder:\n    n: i64\n    vis: Vis = Vis.Private\n"
+        val hir = composite_hir(src, "testdata/fixture_composite_inventory_enum_default_row.spl")
+        var holder: HirStruct? = nil
+        for s in hir.structs.values():
+            if s.name == "Holder":
+                holder = Some(s)
+        assert_true(holder.?)
+        val holder_def: HirStruct = holder.unwrap()
+        var consumer = SymbolTable.new()
+        var pad = 0
+        while pad < 40:
+            consumer.define("consumer_pad_{pad}", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+            pad = pad + 1
+        var lowering = MirLowering.new_for_target(consumer, composite_ctx())
+        # Raw inventory row (provider ids), then the prescan-owned layout rows.
+        lowering.register_module_composite_inventory_v1([hir])
+        lowering.struct_field_order["Holder"] = ["n", "vis"]
+        val holder_symbol: HirSymbol = hir.symbols.get_symbol_raw(holder_def.symbol.id).unwrap()
+        lowering.struct_bare_layout_owner["Holder"] = lowering.composite_layout_key(holder_symbol)
+        val raw_row: [HirExpr] = lowering.struct_field_default_expr["Holder"]
+        val raw_kind_ok = match raw_row[1].kind:
+            case HirExprKind.EnumLit(_, _, _): true
+            case _: false
+        expect(raw_kind_ok).to_equal(true)
+
+        # A consumer that declares its own `Holder` keeps its row untouched.
+        lowering.register_provider_struct(holder_def, hir.symbols, true)
+        val kept: [HirExpr] = lowering.struct_field_default_expr["Holder"]
+        var kept_name = ""
+        match kept[1].kind:
+            case HirExprKind.EnumLit(ty, _, _):
+                match ty.kind:
+                    case HirTypeKind.Named(symbol, _):
+                        kept_name = lowering.symbols.symbol_name_scalar_raw(symbol.id)
+                    case _: ()
+            case _: ()
+        expect(kept_name == "Vis").to_equal(false)
+
+        # An importing consumer gets the relocated row under the bare name.
+        lowering.register_provider_struct(holder_def, hir.symbols, false)
+        val row: [HirExpr] = lowering.struct_field_default_expr["Holder"]
+        expect(lowering.struct_field_has_default["Holder"]).to_equal([false, true])
+        var row_name = ""
+        match row[1].kind:
+            case HirExprKind.EnumLit(ty, variant, _):
+                expect(variant).to_equal("Private")
+                match ty.kind:
+                    case HirTypeKind.Named(symbol, _):
+                        row_name = lowering.symbols.symbol_name_scalar_raw(symbol.id)
+                    case _: ()
+            case _: ()
+        expect(row_name).to_equal("Vis")

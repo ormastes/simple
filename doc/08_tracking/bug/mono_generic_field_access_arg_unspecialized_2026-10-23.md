@@ -1,22 +1,31 @@
-# Stage 2 mono leaves `transient_promote<T>` unspecialized for field-access args
+# Mono leaves generic<T>(local.field) unspecialized when local = opt.unwrap()
 
-Status: OPEN (workaround in place)
+Status: FIXED in source (unverified by a rebuilt compiler; see Verification)
 
-Symptom: a Stage 2 producer native-building `src/app/cli/bootstrap_main.spl`
-(Phase 3) fails after HIR (1471/1471 ok) with
-`error[E-MONO-033]: monomorphization left 4 generic call site(s) unspecialized`
-and `E-MONO-032: call to generic transient_promote at
-src/compiler/00.common/cache/reverse_reference_facts.spl:144..147`.
+Symptom: Stage 2 Phase 3 fails with `E-MONO-033` / `E-MONO-032: call to generic
+transient_promote at reverse_reference_facts.spl` for calls like
+`transient_promote(batch.facts)` where `val batch = G.unwrap()`.
 
-Cause (observed): the calls added in ff1f69fd931 pass a class field access
-(`batch.facts`, `batch.known_families`, ...) as the generic argument. Mono does
-not infer `T` from the field-access argument type. The neighbouring call with a
-plain global (`transient_promote(_reverse_reference_module_batch_v1)`) is
-specialized.
+Repro: `build/repro/field_arg.spl` (class + `Batch?` global, `val batch =
+_g.unwrap()`, `promote(batch.facts)`). Compiled with the Stage 2 producer
+`compile --format=smf`: `[mono] ... unresolved=2`, E-MONO-032 "argument inference
+has no concrete local type". Variants `val batch: Batch = _g.unwrap()` and
+`val batch = Batch(...)` both give `unresolved=0`, so field access itself is fine.
 
-Workaround: bind each limb to an annotated local, promote the local, and mirror
-the same handle into the globals (tagged `@workaround` in
-reverse_reference_facts.spl). Removal check: rebuild Phase 3 with the original
-`transient_promote(batch.facts)` form once mono infers T from field access.
+Root cause: `MonomorphizationPass.infer_expr_type_invocation_inner_v1`
+(src/compiler/40.mono/monomorphize_integration.spl, MethodCall case) answered
+nil for every method that is not a generic-impl method, including the builtin
+`Optional.unwrap()`. The unannotated local therefore got no env type, and
+`infer_field_chain` could not type `batch.facts`.
 
-Producer: Stage 2 sha e087ff56ba69c386 (cranelift, aarch64-unknown-linux-gnu).
+Fix: the MethodCall case returns `optional_payload_type(infer_expr_type(recv))`
+for a zero-arg `unwrap` that is not a generic-impl method.
+
+Regression spec: test/01_unit/compiler/mono/mono_field_access_arg_after_unwrap_spec.spl
+(authored, not executed).
+
+Verification: a source change in 40.mono needs a rebuilt compiler; the prebuilt
+Stage 2 cannot confirm it. Removal check for the typed-local workaround in
+reverse_reference_facts.spl (tag `@workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23`):
+restore the original `transient_promote(batch.facts)` form after a Stage 2 built
+from this fix, then rebuild Phase 3.

@@ -1,0 +1,79 @@
+#!/bin/sh
+# Direct Stage 3 fanout is bounded and keeps its route distinct from the
+# legacy coordinator. Exercise the same policy sourced by production.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/lib/stage3-direct-parallel.shs"
+getconf() { printf '%s\n' "${TEST_ONLINE_CPUS:-64}"; }
+
+unset SIMPLE_STAGE3_DIRECT_THREADS SIMPLE_NATIVE_BUILD_THREADS || :
+bootstrap_stage3_resolve_parallel_policy
+[ "$bootstrap_stage3_policy_threads" = 1 ]
+[ "$bootstrap_stage3_policy_route" = direct ]
+[ "$bootstrap_stage3_policy_fallback" = none ]
+
+SIMPLE_STAGE3_DIRECT_THREADS=40
+bootstrap_stage3_resolve_parallel_policy
+[ "$bootstrap_stage3_policy_threads" = 40 ]
+[ "$bootstrap_stage3_policy_route" = direct ]
+[ "$bootstrap_stage3_policy_fallback" = none ]
+
+SIMPLE_NATIVE_BUILD_THREADS=40
+bootstrap_stage3_resolve_parallel_policy
+[ "$bootstrap_stage3_policy_threads" = 40 ]
+SIMPLE_NATIVE_BUILD_THREADS=2
+if bootstrap_stage3_resolve_parallel_policy 2>/dev/null; then exit 1; fi
+unset SIMPLE_NATIVE_BUILD_THREADS
+for invalid in 0 01 65 -1 full invalid 999999999999999999999999999999999; do
+  SIMPLE_STAGE3_DIRECT_THREADS=$invalid
+  if bootstrap_stage3_resolve_parallel_policy 2>/dev/null; then exit 1; fi
+done
+SIMPLE_STAGE3_DIRECT_THREADS=40 TEST_ONLINE_CPUS=16
+if bootstrap_stage3_resolve_parallel_policy 2>/dev/null; then exit 1; fi
+unset SIMPLE_STAGE3_DIRECT_THREADS TEST_ONLINE_CPUS
+SIMPLE_NATIVE_BUILD_THREADS=4
+bootstrap_stage3_resolve_parallel_policy
+[ "$bootstrap_stage3_policy_threads" = 4 ]
+[ "$bootstrap_stage3_policy_route" = coordinator ]
+[ "$bootstrap_stage3_policy_fallback" = direct ]
+
+# The memory gate accepts only three independently ready numeric samples with
+# enough host and cgroup headroom, plus a sufficient enforced process cap.
+evidence=$(mktemp) || exit 2
+trap 'rm -f "$evidence"' EXIT HUP INT TERM
+write_evidence() {
+  {
+    echo status="$1"
+    echo provider="$2"
+    for sample in 1 2 3; do
+      echo "sample_${sample}_provider=$2"
+      echo "sample_${sample}_status=$1"
+      echo "sample_${sample}_available_kib=$3"
+      echo "sample_${sample}_cgroup_available_kib=$4"
+    done
+  } >"$evidence"
+}
+write_evidence ready linux-proc-meminfo-cgroup-v2 60000000 60000000
+bootstrap_stage3_admit_direct_memory 2 "$evidence" 30000
+if bootstrap_stage3_admit_direct_memory 2 "$evidence" 20000 2>/dev/null; then exit 1; fi
+if bootstrap_stage3_admit_direct_memory 40 "$evidence" 51200 2>/dev/null; then exit 1; fi
+write_evidence ready linux-proc-meminfo-cgroup-v2 500000000 400000000
+bootstrap_stage3_admit_direct_memory 40 "$evidence" 400000
+write_evidence ready linux-proc-meminfo-cgroup-v2 10000000 60000000
+if bootstrap_stage3_admit_direct_memory 2 "$evidence" 30000 2>/dev/null; then exit 1; fi
+write_evidence ready linux-proc-meminfo-cgroup-v2 60000000 10000000
+if bootstrap_stage3_admit_direct_memory 2 "$evidence" 30000 2>/dev/null; then exit 1; fi
+write_evidence unknown unsupported unavailable unavailable
+if bootstrap_stage3_admit_direct_memory 2 "$evidence" 30000 2>/dev/null; then exit 1; fi
+write_evidence ready linux-proc-meminfo-cgroup-v2 60000000 60000000
+echo 'sample_2_available_kib=999999999' >>"$evidence"
+if bootstrap_stage3_admit_direct_memory 2 "$evidence" 30000 2>/dev/null; then exit 1; fi
+
+# Ensure the production wrapper forwards requested jobs, and the resolved
+# route/thread values still feed the worker and its argument hash.
+grep -Fq 'SIMPLE_STAGE3_DIRECT_THREADS=${jobs}' "$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+grep -Fq 'stage3_threads=$bootstrap_stage3_policy_threads' "$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+grep -Fq '"SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=$stage3_requested_route"' "$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+grep -Fq -- '--runtime-bundle core-c-bootstrap --threads "$stage3_threads"' "$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+grep -Fq 'bootstrap_stage3_admit_direct_memory "$stage3_threads" "$memory_admission"' "$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+echo 'PASS: direct Stage 3 fanout policy and provenance wiring'

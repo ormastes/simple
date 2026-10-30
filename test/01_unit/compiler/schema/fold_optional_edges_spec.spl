@@ -1,0 +1,131 @@
+# @req: REQ-COMPILER-SCHEMA-001
+# Optional schema edges must be unwrapped before entering typed child walkers.
+use std.spec.*
+use std.fs.{read_file}
+use app.compiler_schema.fold_gen.{dialect_hir, dialect_ast, load_dialect, emit_one_walk}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBlock, HirFunction, HirInterpolation}
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirModule, SymbolId, SymbolTable}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_expr}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.driver.hir_semantic_consumer_v1.{collect_module_representation_receipt_v1}
+
+fn optional_edge_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: Span.empty())
+
+fn optional_edge_count(node: HirWalkNode, count: i64) -> i64:
+    count + 1
+
+fn optional_edge_generated_walk(path: text, name: text) -> text:
+    var collecting = false
+    var lines: [text] = []
+    for line in read_file(path).split("\n"):
+        if line.starts_with("fn " + name + "<C>("):
+            collecting = true
+        elif collecting and line.starts_with("fn "):
+            break
+        if collecting:
+            lines.push(line)
+    lines.join("\n").trim()
+
+fn optional_edge_module(root: HirExpr) -> HirModule:
+    val span = Span.empty()
+    val symbol = SymbolId(id: 1)
+    val function = HirFunction(symbol: symbol, name: "nested_optional", type_params: [],
+        params: [], return_type: HirType(kind: HirTypeKind.Unit, span: span),
+        body: HirBlock(stmts: [], has: true, value: root, span: span), effects: [],
+        visibility: Visibility.Public, is_async: false, is_static: false, is_public: true,
+        is_method: false, is_mutable: false, is_const: false, is_extern: false,
+        func_attr: FunctionAttr.default(), has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil, has_suspension: false,
+        has_vhdl_metadata: false, vhdl_metadata: nil, has_doc_comment: false,
+        doc_comment: "", span: span)
+    HirModule(name: "optional_edges", path: "optional_edges.spl", imports: [],
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(), functions: {symbol: function},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {}, structs: {},
+        enums: {}, bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [], types: [])
+
+describe "fold optional schema edges":
+    it "emits payload matches for optional types and optional interpolation lists":
+        val dialect = dialect_hir()
+        val universe = load_dialect(".", dialect)
+        val emitted = emit_one_walk(universe, dialect, "HirExpr")
+        expect(emitted).to_contain("match b_type_:\n                case Some(opt1):\n                    acc = walk_hir_type<C>(opt1, acc, f)")
+        expect(emitted).to_contain("match b_interpolations:\n                case Some(opt1):")
+
+    it "unwraps frontend optional output expressions through the same generator":
+        val dialect = dialect_ast()
+        val universe = load_dialect(".", dialect)
+        val emitted = emit_one_walk(universe, dialect, "AsmConstraint")
+        expect(emitted).to_contain("match node.output_value:\n        case Some(opt3):\n            acc = walk_ast_expr<C>(opt3, acc, f)")
+        expect(emitted.trim()).to_equal(optional_edge_generated_walk(
+            "src/compiler/10.frontend/generated/ast_visitor.spl", "walk_ast_asm_constraint"))
+        val path = "src/compiler/10.frontend/generated/ast_visitor.spl"
+        expect(emit_one_walk(universe, dialect, "Expr").trim()).to_equal(
+            optional_edge_generated_walk(path, "walk_ast_expr"))
+        expect(emit_one_walk(universe, dialect, "Stmt").trim()).to_equal(
+            optional_edge_generated_walk(path, "walk_ast_stmt"))
+        expect(emit_one_walk(universe, dialect, "Type").trim()).to_equal(
+            optional_edge_generated_walk(path, "walk_ast_type"))
+        expect(emit_one_walk(universe, dialect, "Pattern").trim()).to_equal(
+            optional_edge_generated_walk(path, "walk_ast_pattern"))
+
+    it "keeps every changed HIR walker byte-aligned with its generator":
+        val dialect = dialect_hir()
+        val universe = load_dialect(".", dialect)
+        val path = "src/compiler/20.hir/generated/hir_visitor.spl"
+        expect(emit_one_walk(universe, dialect, "HirExpr").trim()).to_equal(
+            optional_edge_generated_walk(path, "walk_hir_expr"))
+        expect(emit_one_walk(universe, dialect, "HirPattern").trim()).to_equal(
+            optional_edge_generated_walk(path, "walk_hir_pattern"))
+        expect(emit_one_walk(universe, dialect, "HirAsmConstraint").trim()).to_equal(
+            optional_edge_generated_walk(path, "walk_hir_asm_constraint"))
+
+    it "retains all collection expressions when optional types are absent":
+        val leaf = optional_edge_expr(HirExprKind.BoolLit(true))
+        val array = optional_edge_expr(HirExprKind.ArrayLit([leaf], nil))
+        val repeated = optional_edge_expr(HirExprKind.ArrayRepeat(array, leaf, nil))
+        val root = optional_edge_expr(HirExprKind.SetLit([repeated], nil))
+        expect(walk_hir_expr(root, 40, optional_edge_count)).to_equal(45)
+
+    it "visits present optional types and their nested children exactly once":
+        val type_ = HirType(kind: HirTypeKind.Optional(
+            HirType(kind: HirTypeKind.Bool, span: Span.empty())), span: Span.empty())
+        val leaf = optional_edge_expr(HirExprKind.BoolLit(true))
+        val root = optional_edge_expr(HirExprKind.ArrayLit([leaf], Some(type_)))
+        expect(walk_hir_expr(root, 40, optional_edge_count)).to_equal(44)
+
+    it "unwraps optional lists without losing interpolation children":
+        val absent = optional_edge_expr(HirExprKind.StringLit("plain", nil))
+        expect(walk_hir_expr(absent, 40, optional_edge_count)).to_equal(41)
+        val interpolation = HirInterpolation(expr: optional_edge_expr(
+            HirExprKind.BoolLit(true)), has_format: false, format: "", span: Span.empty())
+        val present = optional_edge_expr(HirExprKind.StringLit("value", Some([interpolation])))
+        expect(walk_hir_expr(present, 40, optional_edge_count)).to_equal(42)
+
+    it "keeps safe unannotated collection bodies free of manifest diagnostics":
+        val root = optional_edge_expr(HirExprKind.ArrayLit([
+            optional_edge_expr(HirExprKind.BoolLit(true))], nil))
+        val receipt = collect_module_representation_receipt_v1("optional_edges",
+            optional_edge_module(root), AssuranceStrictness.Critical)
+        expect(receipt.messages.len()).to_equal(0)
+
+    it "still rejects an unsafe block nested behind optional collection edges":
+        val unsafe_expr = optional_edge_expr(HirExprKind.UnsafeBlock(
+            HirBlock(stmts: [], has: false, value: nil, span: Span.empty())))
+        val inner = optional_edge_expr(HirExprKind.ArrayLit([unsafe_expr], nil))
+        val root = optional_edge_expr(HirExprKind.SetLit([inner], nil))
+        val module = optional_edge_module(root)
+        val critical = collect_module_representation_receipt_v1("optional_edges",
+            module, AssuranceStrictness.Critical)
+        expect(critical.errors.len()).to_equal(1)
+        expect(critical.errors[0]).to_contain("E-MC-REP-001")
+        expect(critical.errors[0]).to_contain("nested_optional")
+        val moderate = collect_module_representation_receipt_v1("optional_edges",
+            module, AssuranceStrictness.Moderate)
+        expect(moderate.errors.len()).to_equal(0)
+        expect(moderate.warnings.len()).to_equal(1)
+        expect(moderate.warnings[0]).to_contain("E-MC-REP-001")

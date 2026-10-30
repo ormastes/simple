@@ -20,6 +20,28 @@ use compiler.backend.portable_numeric_capabilities.{portable_numeric_default_pla
 # std.io_runtime.host_os() instead, proven correct in this exact harness.
 use std.io_runtime.{host_arch, host_os, env_get_opt}
 
+fn llvm_hosted_windows_env() -> text:
+    """LLVM env for a hosted Windows triple: "gnu" or "msvc".
+
+    Same precedence as runtime_compiler.windows_link_flavor_select: an
+    ABI-qualified SIMPLE_NATIVE_BUILD_TARGET, then SIMPLE_LINKER_FLAVOR, then
+    SIMPLE_WINDOWS_ABI, else msvc. A hardcoded msvc env made the gnu lane
+    (ld.lld + llvm-mingw) emit objects referencing the MSVC CRT marker
+    `_fltused`, which mingw does not define."""
+    val target = (env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "").trim().lower()
+    if target.ends_with("-windows-msvc"):
+        return "msvc"
+    if target.ends_with("-windows-gnu") or target.ends_with("-w64-mingw32"):
+        return "gnu"
+    val flavor = (env_get_opt("SIMPLE_LINKER_FLAVOR") ?? "").trim().lower()
+    if flavor == "msvc":
+        return "msvc"
+    if flavor == "gnu" or flavor == "mingw":
+        return "gnu"
+    if (env_get_opt("SIMPLE_WINDOWS_ABI") ?? "").trim().lower() == "gnu":
+        return "gnu"
+    "msvc"
+
 fn llvm_riscv64_hard_float_requested() -> bool:
     """True when the explicit target selects the RV64GC/LP64D profile."""
     val requested = (env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "").trim().lower()
@@ -88,6 +110,56 @@ pub fn llvm_explicit_codegen_target(target_triple: text) -> Result<CodegenTarget
         return Err("invalid LLVM target triple '{target_triple}': expected arch-vendor-os[-environment]")
     llvm_codegen_target_from_explicit_arch(parts[0])
 
+
+# Single OS classification shared by object-format and hosted-triple logic.
+# Returns [object_format, os, vendor, env_kind] or [] for an unknown OS.
+# arch only disambiguates the generic OS "unknown" (wasm vs elf).
+# env_kind: "keep" (use the triple's own env), "none", "gnu", "winenv"
+# (llvm_hosted_windows_env()).
+pub fn llvm_classify_os(os: text, arch: text) -> [text]:
+    if os.starts_with("mingw"):
+        return ["coff", "windows", "w64", "gnu"]
+    if os == "windows" or os == "win32":
+        return ["coff", "windows", "pc", "winenv"]
+    if os == "cygwin":
+        return ["coff", "cygwin", "pc", "gnu"]
+    if os.starts_with("darwin") or os.starts_with("macos") or os.starts_with("ios"):
+        return ["macho", os, "apple", "none"]
+    if os.starts_with("linux"):
+        return ["elf", os, "unknown", "keep"]
+    if os.starts_with("freebsd") or os.starts_with("netbsd") or os.starts_with("openbsd"):
+        return ["elf", os, "unknown", "none"]
+    if os == "unknown":
+        if arch.starts_with("wasm"):
+            return ["wasm", os, "unknown", "none"]
+        return ["elf", os, "unknown", "none"]
+    if os.starts_with("wasi"):
+        return ["wasm", os, "unknown", "none"]
+    if os == "uefi":
+        return ["coff", os, "unknown", "none"]
+    if os == "simpleos" or os == "none" or os == "elf":
+        return ["elf", os, "unknown", "none"]
+    []
+
+# vendor/os/env of an explicit requested triple (SIMPLE_NATIVE_BUILD_TARGET).
+# Ok([]) when the request is not a 3/4-part triple (a plain selector: the host
+# is the legitimate fallback); Err for an explicit triple with an unknown OS.
+pub fn llvm_requested_triple_os_parts(requested: text) -> Result<[text], text>:
+    val parts = requested.split("-")
+    if parts.len() > 4:
+        return Err("invalid requested target triple '{requested}': expected arch-vendor-os[-environment]")
+    if parts.len() < 3:
+        return Ok([])
+    val cls = llvm_classify_os(parts[2], parts[0])
+    if cls.len() == 0:
+        return Err("unknown OS '{parts[2]}' in requested target triple '{requested}': refusing to fall back to the host")
+    val env = match cls[3]:
+        case "keep": if parts.len() == 4: parts[3] else: ""
+        case "gnu": if parts.len() == 4: parts[3] else: "gnu"
+        case "winenv": if parts.len() == 4: parts[3] else: llvm_hosted_windows_env()
+        case _: ""
+    Ok([cls[2], cls[1], env])
+
 impl LlvmTargetTriple:
     static fn from_target(target: CodegenTarget) -> LlvmTargetTriple:
         """Create target triple from codegen target (hosted mode with OS)."""
@@ -105,7 +177,7 @@ impl LlvmTargetTriple:
         - Linux: x86_64-unknown-linux-gnu
         - FreeBSD: x86_64-unknown-freebsd
         - macOS: x86_64-apple-darwin or aarch64-apple-darwin
-        - Windows: x86_64-pc-windows-msvc
+        - Windows: x86_64-pc-windows-msvc (gnu when the Windows ABI selects it)
         """
         # An explicit OS target is independent of the compiler host.  Resolve it
         # before hosted-mode detection so in-guest compilation never shells out
@@ -164,21 +236,32 @@ impl LlvmTargetTriple:
             val detected_host_os = host_os()
 
             # Map host OS to LLVM triple components (os, vendor, env)
-            val os_result = match detected_host_os:
+            var os_result = match detected_host_os:
                 case "linux": "linux"
                 case "freebsd": "freebsd"
                 case "macos": "darwin"
                 case "windows": "windows"
                 case _: "linux"
-            val vendor_result = match detected_host_os:
+            var vendor_result = match detected_host_os:
                 case "macos": "apple"
                 case "windows": "pc"
                 case _: "unknown"
-            val env_result = match detected_host_os:
-                case "freebsd": nil
-                case "macos": nil
-                case "windows": Some("msvc")
+            var env_result = match detected_host_os:
+                case "freebsd": None
+                case "macos": None
+                case "windows": Some(llvm_hosted_windows_env())
                 case _: Some("gnu")
+            # An explicit requested triple decides OS/vendor/env (and therefore
+            # the object format); the compiler host is only the fallback for
+            # an unspecified target. Without this a Windows host emitted COFF
+            # for aarch64-linux and x86_64-simpleos.
+            val requested_parts = match llvm_requested_triple_os_parts(requested_target):
+                case Ok(p): p
+                case Err(e): panic(e)
+            if requested_parts.len() == 3:
+                vendor_result = requested_parts[0]
+                os_result = requested_parts[1]
+                env_result = if requested_parts[2] == "": None else: Some(requested_parts[2])
 
             match target:
                 case X86_64:
@@ -214,8 +297,10 @@ impl LlvmTargetTriple:
         # - macOS (Mach-O): m:o
         # - Windows (COFF): m:w
         # - ELF (Linux, FreeBSD): m:e
-        val is_macho = self.os == "darwin"
-        val is_coff = self.os == "windows"
+        val os_class = llvm_classify_os(self.os, self.arch)
+        val os_format = if os_class.len() == 0: "elf" else: os_class[0]
+        val is_macho = os_format == "macho"
+        val is_coff = os_format == "coff"
         match self.arch:
             case "x86_64":
                 if is_macho:
@@ -275,8 +360,8 @@ struct LlvmTargetConfig:
     Complete LLVM target configuration including CPU model and features.
 
     The CPU model determines which instruction sets are available. For x86_64,
-    we default to x86-64-v3 (Haswell, 2015+) which includes AVX2, FMA, BMI2
-    for significantly better performance on modern CPUs.
+    we default to the x86-64 (v1) baseline so the base binary runs on any x86_64;
+    wider tiers (x86-64-v2..v4) ship as CPU-tier artifacts (cpu_tier_multibuild.md).
     """
     triple: LlvmTargetTriple
     cpu: text              # Target CPU (e.g., "x86-64-v3", "haswell", "generic")
@@ -322,7 +407,7 @@ impl LlvmTargetConfig:
                 # alias: the dlopen'd libLLVM-18 (llvm-lib backend) rejects the vN
                 # aliases with "64-bit code requested on a subtarget that doesn't
                 # support it"; "x86-64" is baseline-equivalent and universally handled.
-                val cpu = if plan.capabilities.requires_runtime_simd_probe: "x86-64" else: "x86-64-v3"
+                val cpu = "x86-64"  # v1 baseline; v2-v4 come from CPU-tier artifacts
                 LlvmTargetConfig(
                     triple: triple,
                     cpu: cpu,
@@ -355,7 +440,7 @@ impl LlvmTargetConfig:
                         abi: Some(contract.abi_text())
                     )
                 else:
-                    val cpu = if plan.capabilities.requires_runtime_simd_probe: "x86-64" else: "x86-64-v3"
+                    val cpu = "x86-64"  # v1 baseline; v2-v4 come from CPU-tier artifacts
                     LlvmTargetConfig(
                         triple: triple,
                         cpu: cpu,
@@ -402,7 +487,7 @@ impl LlvmTargetConfig:
         Create target configuration with optimal CPU selection.
 
         Defaults:
-        - x86_64: x86-64-v3 (Haswell 2015+) → AVX2, FMA, BMI2 for 2-3x SIMD speedup
+        - x86_64: x86-64 (v1 baseline); x86-64-v2..v4 come from CPU-tier artifacts
         - AArch64: cortex-a53 (common baseline) → NEON support
         - RISC-V 64: generic-rv64 with IMAFDC extensions
         - i686: i686 with SSE2 (conservative 32-bit baseline)
@@ -430,7 +515,7 @@ impl LlvmTargetConfig:
             case X86_64:
                 LlvmTargetConfig(
                     triple: triple,
-                    cpu: "x86-64-v3",
+                    cpu: "x86-64",
                     features: [],
                     abi: nil
                 )
@@ -497,7 +582,7 @@ impl LlvmTargetConfig:
             case SimpleOS_X86_64:
                 LlvmTargetConfig(
                     triple: triple,
-                    cpu: "x86-64-v3",
+                    cpu: "x86-64",
                     features: [],
                     abi: nil
                 )
@@ -524,7 +609,7 @@ impl LlvmTargetConfig:
                     # Default to x86_64
                     LlvmTargetConfig(
                         triple: triple,
-                        cpu: "x86-64-v3",
+                        cpu: "x86-64",
                         features: [],
                         abi: nil
                     )

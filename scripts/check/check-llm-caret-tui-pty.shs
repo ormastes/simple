@@ -6,7 +6,13 @@
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)
+OWNER_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)
+REPO_ROOT=${OWNER_ROOT}
+EXPLICIT_ARTIFACT=
+STAGE4_RUNTIME=
+STAGE4_PROVENANCE=
+EXPLICIT_SOURCE_ROOT=
+EXPLICIT_ARTIFACT_ROOT=
 CARET_WRAPPER="${REPO_ROOT}/bin/caret"
 ARTIFACT_ROOT="${REPO_ROOT}/build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty"
 CASE_NAME=""
@@ -17,7 +23,7 @@ FAILURES=0
 CASE_TIMEOUT_SECONDS=20
 
 usage() {
-    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|invalid-utf8-recovery|hidden|promptless|offline-claude|provider-error|raw-failure|all>"
+    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|invalid-utf8-recovery|hidden|promptless|offline-claude|provider-error|raw-failure|all> [--caret-artifact ABS --stage4-runtime ABS --stage4-provenance ABS --source-root ABS --artifact-root ABS]"
 }
 
 fail_prerequisite() {
@@ -188,6 +194,36 @@ require_sha256_value() {
     fi
 }
 
+# Explicit mode binds the native Caret producer to an admitted Stage4 CLI.
+# Keep the owner checkout's verifier; source-root supplies source authority only.
+canonical_explicit_file() {
+    case "$1" in /*) ;; *) return 1 ;; esac
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    canonical_parent=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P) || return 1
+    [ "$1" = "${canonical_parent}/$(basename -- "$1")" ]
+}
+
+prepare_explicit_binding() {
+    [ -n "${EXPLICIT_ARTIFACT}${STAGE4_RUNTIME}${STAGE4_PROVENANCE}${EXPLICIT_SOURCE_ROOT}${EXPLICIT_ARTIFACT_ROOT}" ] || return 0
+    [ -n "${EXPLICIT_ARTIFACT}" ] && [ -n "${STAGE4_RUNTIME}" ] &&
+        [ -n "${STAGE4_PROVENANCE}" ] && [ -n "${EXPLICIT_SOURCE_ROOT}" ] &&
+        [ -n "${EXPLICIT_ARTIFACT_ROOT}" ] || fail_prerequisite "explicit_binding_incomplete"
+    canonical_explicit_file "${EXPLICIT_ARTIFACT}" || fail_prerequisite "explicit_caret_path_invalid"
+    canonical_explicit_file "${EXPLICIT_ARTIFACT}.provenance" || fail_prerequisite "explicit_caret_provenance_path_invalid"
+    canonical_explicit_file "${STAGE4_RUNTIME}" || fail_prerequisite "explicit_runtime_path_invalid"
+    canonical_explicit_file "${STAGE4_PROVENANCE}" || fail_prerequisite "explicit_stage4_provenance_path_invalid"
+    [ "${STAGE4_PROVENANCE}" = "${STAGE4_RUNTIME}.provenance.env" ] || fail_prerequisite "explicit_stage4_provenance_not_adjacent"
+    [ -x "${EXPLICIT_ARTIFACT}" ] && [ -x "${STAGE4_RUNTIME}" ] || fail_prerequisite "explicit_binary_not_executable"
+    case "${EXPLICIT_SOURCE_ROOT}" in /*) ;; *) fail_prerequisite "explicit_source_root_invalid" ;; esac
+    [ "$(CDPATH= cd -- "${EXPLICIT_SOURCE_ROOT}" && pwd -P)" = "${EXPLICIT_SOURCE_ROOT}" ] || fail_prerequisite "explicit_source_root_invalid"
+    case "${EXPLICIT_ARTIFACT_ROOT}" in /*) ;; *) fail_prerequisite "explicit_artifact_root_invalid" ;; esac
+    mkdir -p "${EXPLICIT_ARTIFACT_ROOT}" || fail_prerequisite "explicit_artifact_root_invalid"
+    [ "$(CDPATH= cd -- "${EXPLICIT_ARTIFACT_ROOT}" && pwd -P)" = "${EXPLICIT_ARTIFACT_ROOT}" ] || fail_prerequisite "explicit_artifact_root_invalid"
+    REPO_ROOT=${EXPLICIT_SOURCE_ROOT}
+    ARTIFACT_ROOT=${EXPLICIT_ARTIFACT_ROOT}
+    CARET_WRAPPER=${EXPLICIT_ARTIFACT}
+}
+
 verify_cached_artifact_provenance() {
     provenance="${CACHED_ARTIFACT}.provenance"
     [ -f "${provenance}" ] ||
@@ -222,9 +258,21 @@ verify_cached_artifact_provenance() {
         fail_prerequisite "provenance_runtime_probe_not_pass"
     [ "${rust_seed_used}" = "false" ] ||
         fail_prerequisite "provenance_rust_seed_used_not_false"
-    [ "${runtime_path}" = "bin/release/${target}/simple" ] ||
-        fail_prerequisite "provenance_runtime_path_invalid"
-    verified_runtime="${REPO_ROOT}/${runtime_path}"
+    if [ -n "${EXPLICIT_ARTIFACT}" ]; then
+        case "${runtime_path}" in
+            /*) verified_runtime=${runtime_path} ;;
+            *) verified_runtime="${REPO_ROOT}/${runtime_path}" ;;
+        esac
+        canonical_explicit_file "${verified_runtime}" || fail_prerequisite "provenance_runtime_path_invalid"
+        [ "${verified_runtime}" = "${STAGE4_RUNTIME}" ] || fail_prerequisite "explicit_runtime_provenance_mismatch"
+        "${OWNER_ROOT}/scripts/check/check-post-bootstrap-stage4-sspec.shs" \
+            "${STAGE4_RUNTIME}" "${STAGE4_PROVENANCE}" "${REPO_ROOT}" ||
+            fail_prerequisite "explicit_stage4_admission_failed"
+    else
+        [ "${runtime_path}" = "bin/release/${target}/simple" ] ||
+            fail_prerequisite "provenance_runtime_path_invalid"
+        verified_runtime="${REPO_ROOT}/${runtime_path}"
+    fi
     [ -x "${verified_runtime}" ] ||
         fail_prerequisite "provenance_runtime_missing_or_not_executable"
 
@@ -280,8 +328,12 @@ prepare_prerequisites() {
         fail_prerequisite "host_target_undetermined"
     export HOST_TARGET
 
-    CACHED_ARTIFACT=$(first_cached_artifact) ||
-        fail_prerequisite "cached_caret_artifact_missing"
+    if [ -n "${EXPLICIT_ARTIFACT}" ]; then
+        CACHED_ARTIFACT=${EXPLICIT_ARTIFACT}
+    else
+        CACHED_ARTIFACT=$(first_cached_artifact) ||
+            fail_prerequisite "cached_caret_artifact_missing"
+    fi
     export CACHED_ARTIFACT
     verify_cached_artifact_provenance
 
@@ -1055,6 +1107,17 @@ while [ "$#" -gt 0 ]; do
             CASE_NAME=$2
             shift 2
             ;;
+        --caret-artifact|--stage4-runtime|--stage4-provenance|--source-root|--artifact-root)
+            [ "$#" -ge 2 ] && [ -n "$2" ] || { usage; exit 2; }
+            case "$1" in
+                --caret-artifact) [ -z "${EXPLICIT_ARTIFACT}" ] || exit 2; EXPLICIT_ARTIFACT=$2 ;;
+                --stage4-runtime) [ -z "${STAGE4_RUNTIME}" ] || exit 2; STAGE4_RUNTIME=$2 ;;
+                --stage4-provenance) [ -z "${STAGE4_PROVENANCE}" ] || exit 2; STAGE4_PROVENANCE=$2 ;;
+                --source-root) [ -z "${EXPLICIT_SOURCE_ROOT}" ] || exit 2; EXPLICIT_SOURCE_ROOT=$2 ;;
+                --artifact-root) [ -z "${EXPLICIT_ARTIFACT_ROOT}" ] || exit 2; EXPLICIT_ARTIFACT_ROOT=$2 ;;
+            esac
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -1071,6 +1134,7 @@ done
     exit 2
 }
 
+prepare_explicit_binding
 prepare_prerequisites
 printf '%s\n' "evidence_case=${CASE_NAME}"
 printf '%s\n' "artifact_root=${ARTIFACT_ROOT}"

@@ -1,0 +1,92 @@
+# @tag: unit, io, native-required
+# Run with the actual rebuilt native owner; host models/source checks are not
+# evidence that native UTF-8 decoding and array/text operations work correctly.
+use std.spec
+use std.io_runtime.{file_write, file_write_bytes, file_append_text, file_delete, file_exists}
+use std.nogc_sync_mut.io.process_ops.{_process_capture_owned_spool_checked, process_run_timeout_live}
+use std.common.string_core.{str_len}
+use std.common.text_bytes.{boxed_text_bytes_checked}
+use std.time.{time_now_unix_micros}
+
+fn capture_fixture_path(label: text) -> text:
+    "/tmp/simple_owned_capture_{label}_{time_now_unix_micros()}.txt"
+
+describe "checked private process spool capture":
+    it "preserves more than 16MiB and a final publication receipt for either channel":
+        for channel in ["stdout", "stderr"]:
+            val path = capture_fixture_path(channel)
+            val chunk = "a".repeat(1048576)
+            val receipt = "\n[native-build] Artifact published: /tmp/capture-proof.o\n"
+            expect(file_write(path, "")).to_equal(true)
+            var i = 0
+            while i < 17:
+                expect(file_append_text(path, chunk)).to_equal(true)
+                i = i + 1
+            expect(file_append_text(path, receipt)).to_equal(true)
+            val captured = _process_capture_owned_spool_checked(path).unwrap()
+            expect(str_len(captured)).to_equal(17825792 + str_len(receipt))
+            expect(captured.ends_with(receipt)).to_equal(true)
+            # Reading is separate from deletion; the process owner deletes only
+            # after successful capture of that channel.
+            expect(file_exists(path)).to_equal(true)
+            file_delete(path)
+
+    it "preserves every possible 2 3 and 4 byte scalar split at a chunk boundary":
+        for scalar in ["é", "界", "🙂"]:
+            var split = 1
+            while split < str_len(scalar):
+                val path = capture_fixture_path("scalar")
+                val content = "a".repeat(1048576 - split) + scalar + "tail"
+                expect(file_write(path, content)).to_equal(true)
+                expect(_process_capture_owned_spool_checked(path).unwrap()).to_equal(content)
+                file_delete(path)
+                split = split + 1
+
+    it "preserves CRLF BOM NUL and an empty spool without normalization":
+        val path = capture_fixture_path("lossless")
+        val bytes: [u8] = [239u8, 187u8, 191u8, 13u8, 10u8, 0u8, 65u8]
+        expect(file_write_bytes(path, bytes)).to_equal(true)
+        val text = _process_capture_owned_spool_checked(path).unwrap()
+        expect(str_len(text)).to_equal(7)
+        expect(boxed_text_bytes_checked(text).unwrap()).to_equal(bytes)
+        expect(file_write(path, "")).to_equal(true)
+        expect(_process_capture_owned_spool_checked(path).unwrap()).to_equal("")
+        file_delete(path)
+
+    it "rejects malformed interior and trailing UTF8 and retains the failed spool":
+        for bytes in [[65u8, 255u8, 66u8], [65u8, 240u8, 159u8, 153u8]]:
+            val path = capture_fixture_path("invalid")
+            expect(file_write_bytes(path, bytes)).to_equal(true)
+            expect(_process_capture_owned_spool_checked(path).is_err()).to_equal(true)
+            expect(file_exists(path)).to_equal(true)
+            file_delete(path)
+
+    it "rejects a missing spool rather than returning empty text":
+        val path = capture_fixture_path("missing")
+        expect(_process_capture_owned_spool_checked(path).is_err()).to_equal(true)
+
+    it "preserves a nonzero worker status when both captures succeed":
+        val (out, err, code) = process_run_timeout_live("/bin/sh", ["-c", "printf out; printf err >&2; exit 7"], 10000)
+        expect(out).to_equal("out")
+        expect(err).to_equal("err")
+        expect(code).to_equal(7)
+
+    it "returns a live worker zero status and more than 16MiB stderr with its final receipt":
+        # One MiB per second keeps the existing live relay's individual reads
+        # below its codec limit; this test targets the final whole capture.
+        val script = "i=0; while [ $i -lt 17 ]; do dd if=/dev/zero bs=65536 count=16 2>/dev/null | tr '\\000' a >&2; i=$((i+1)); sleep 1; done; printf '\\n[native-build] Artifact published: /tmp/live-capture-proof.o\\n' >&2; printf done"
+        val (out, err, code) = process_run_timeout_live("/bin/sh", ["-c", script], 60000)
+        val receipt = "\n[native-build] Artifact published: /tmp/live-capture-proof.o\n"
+        expect(code).to_equal(0)
+        expect(out).to_equal("done")
+        expect(str_len(err)).to_equal(17825792 + str_len(receipt))
+        expect(err.ends_with(receipt)).to_equal(true)
+
+    it "fails explicitly and retains the failed stderr spool on invalid child output":
+        val (out, err, code) = process_run_timeout_live("/bin/sh", ["-c", "printf done; printf '\\377' >&2"], 10000)
+        expect(code == 0).to_equal(false)
+        expect(err.contains("stderr capture failed:")).to_equal(true)
+        expect(err.contains("retained spool: ")).to_equal(true)
+        val retained = err.split("retained spool: ")[1].split("]")[0]
+        expect(file_exists(retained)).to_equal(true)
+        file_delete(retained)

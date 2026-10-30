@@ -1,0 +1,21 @@
+#!/bin/sh
+# Exercise the required CI checkout, including compilation of its parser gate.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/required-gates-sparse.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+
+# Read the working workflow so this catches an uncommitted checkout repair.
+awk '
+    /^          sparse-checkout: \|$/ { paths = 1; next }
+    paths && /^            [^ ]/ { sub(/^            /, ""); print; next }
+    paths { exit }
+' "$root/.github/workflows/required-gates.yml" > "$scratch/paths"
+[ -s "$scratch/paths" ] || { echo 'FAIL: required checkout paths missing'; exit 1; }
+git clone --quiet --shared --no-checkout "$root" "$scratch/checkout"
+git -C "$scratch/checkout" sparse-checkout set --cone --stdin < "$scratch/paths"
+git -C "$scratch/checkout" -c advice.detachedHead=false checkout --quiet --detach "$(git -C "$root" rev-parse HEAD)"
+
+# The real gate must compile and execute; missing sources must never be skipped.
+sh "$scratch/checkout/scripts/check/check-linux-cgroup-events-parser.shs"
+echo 'PASS: required sparse checkout executes the cgroup.events parser gate'

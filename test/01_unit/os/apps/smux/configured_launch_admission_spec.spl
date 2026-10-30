@@ -1,0 +1,91 @@
+# REQ-CMUX-004/005/008: source-authored NOT_RUN. Pure admission only.
+# Synthetic ownership fields below never enter native cleanup or spawn.
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
+use os.apps.smux.pane_configured_launch_service.{pane_configured_launch_admit}
+
+fn configured_admission_state() -> ServiceState:
+    var st = ServiceState.empty().add_session(MuxSession.create("s", "launch"))
+    st = st.add_window(MuxWindow.create("w", "s", "launch"))
+    return st.add_pane(PaneRecord.create(MuxPane.create("p", "w", "s")))
+
+describe "configured launch ownership admission":
+    it "admits an empty bounded pane without changing its identity":
+        step("Run the production pure admission helper without native effects")
+        val st = configured_admission_state()
+        expect(pane_configured_launch_admit(st, false, "s", "w", "p").unwrap()).to_equal(0)
+        expect(st.get_pane(0).child_incarnation).to_equal(0u64)
+        expect(st.get_pane(0).child_pid).to_equal(-1)
+
+    it "refuses a closing owner":
+        step("Refuse closing ownership before allocation")
+        val result = pane_configured_launch_admit(configured_admission_state(), true, "s", "w", "p")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("closing")
+
+    it "refuses missing and mismatched ancestry":
+        step("Bind all three canonical identities")
+        var st = configured_admission_state()
+        expect(pane_configured_launch_admit(st, false, "other", "w", "p").is_err()).to_equal(true)
+        st = st.add_session(MuxSession.create("other", "other"))
+        expect(pane_configured_launch_admit(st, false, "other", "w", "p").is_err()).to_equal(true)
+        expect(pane_configured_launch_admit(st, false, "s", "missing", "p").is_err()).to_equal(true)
+        expect(pane_configured_launch_admit(st, false, "s", "w", "missing").is_err()).to_equal(true)
+
+    it "refuses an existing child without replacing its incarnation":
+        step("Inspect synthetic ownership only through the pure helper")
+        var st = configured_admission_state()
+        val pane = st.get_pane(0).with_child(123)
+        st = st.replace_pane(0, pane)
+        expect(pane_configured_launch_admit(st, false, "s", "w", "p").is_err()).to_equal(true)
+        expect(st.get_pane(0).child_pid).to_equal(123)
+        expect(st.get_pane(0).child_incarnation).to_equal(1u64)
+
+    it "refuses deferred cleanup even without a child PID":
+        step("Keep synthetic pending handle ownership intact without calling it")
+        var st = configured_admission_state()
+        st = st.replace_pane(0, st.get_pane(0).with_pty(-1, 17))
+        expect(pane_configured_launch_admit(st, false, "s", "w", "p").is_err()).to_equal(true)
+        expect(st.get_pane(0).pty_fd).to_equal(17)
+        expect(st.get_pane(0).child_pid).to_equal(-1)
+
+    it "refuses zero and out of range dimensions":
+        step("Reject dimensions before narrowing to provider integers")
+        val before = configured_admission_state()
+        for cols in [0, -1, 32768]:
+            var pane = before.get_pane(0)
+            pane.pane.cols = cols
+            expect(pane_configured_launch_admit(before.replace_pane(0, pane), false, "s", "w", "p").is_err()).to_equal(true)
+        var pane = before.get_pane(0)
+        pane.pane.rows = 0
+        expect(pane_configured_launch_admit(before.replace_pane(0, pane), false, "s", "w", "p").is_err()).to_equal(true)
+
+    it "refuses a product above the retained grid bound":
+        step("Check both dimensions before their bounded multiplication")
+        val before = configured_admission_state()
+        var pane = before.get_pane(0)
+        pane.pane.cols = 1024
+        pane.pane.rows = 257
+        expect(pane_configured_launch_admit(before.replace_pane(0, pane), false, "s", "w", "p").is_err()).to_equal(true)
+
+    it "refuses exhausted child or content identities independently":
+        step("Reserve one identity in both existing owner counters")
+        val before = configured_admission_state()
+        var pane = before.get_pane(0)
+        pane.child_incarnation = 18446744073709551615u64
+        expect(pane_configured_launch_admit(before.replace_pane(0, pane), false, "s", "w", "p").is_err()).to_equal(true)
+        pane = before.get_pane(0)
+        pane.content_revision = 18446744073709551615u64
+        expect(pane_configured_launch_admit(before.replace_pane(0, pane), false, "s", "w", "p").is_err()).to_equal(true)
+
+    it "admits the last available identities without consuming them":
+        step("Admission is not a fabricated child or native success")
+        val before = configured_admission_state()
+        var pane = before.get_pane(0)
+        pane.child_incarnation = 18446744073709551614u64
+        pane.content_revision = 18446744073709551614u64
+        val st = before.replace_pane(0, pane)
+        expect(pane_configured_launch_admit(st, false, "s", "w", "p").is_ok()).to_equal(true)
+        expect(st.get_pane(0).child_incarnation).to_equal(18446744073709551614u64)
+        expect(st.get_pane(0).content_revision).to_equal(18446744073709551614u64)

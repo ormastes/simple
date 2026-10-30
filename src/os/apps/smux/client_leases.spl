@@ -1,0 +1,161 @@
+# Pure lease owner for explicitly leased interactive attachments. Legacy API
+# attachments are not entered here. The API supplies monotonic SOSIX time and a
+# checked secure owner nonce, then commits leases and attachments together.
+
+pub const SMUX_CLIENT_LEASE_CAPACITY: int = 4
+pub const SMUX_CLIENT_LEASE_TTL_MS: i64 = 15000
+pub const SMUX_CLIENT_HEARTBEAT_MS: i64 = 3000
+pub const SMUX_CLIENT_LEASE_SWEEP_MS: i64 = 1000
+const LEASE_I64_MAX: i64 = 9223372036854775807
+
+pub struct ClientLease:
+    session_id: text
+    client_id: text
+    token: text
+    generation: i64
+    deadline_ms: i64
+
+pub struct ClientLeaseState:
+    owner_nonce: text
+    next_generation: i64
+    last_now_ms: i64
+    leases: [ClientLease]
+
+pub struct ClientLeaseAdmission:
+    state: ClientLeaseState
+    lease: ClientLease
+
+pub fn client_lease_token_valid(token: text) -> bool:
+    if token.len() < 34 or token.len() > 52 or token[32:33] != ":":
+        return false
+    var i = 0
+    while i < 32:
+        if not "0123456789abcdef".contains(token[i:i + 1]):
+            return false
+        i = i + 1
+    if token[33:34] == "0":
+        return false
+    i = 33
+    while i < token.len():
+        if not "0123456789".contains(token[i:i + 1]):
+            return false
+        i = i + 1
+    return (token[33:].to_int() ?? 0) > 0
+
+pub fn smux_leases_new(owner_nonce: text) -> Result<ClientLeaseState, text>:
+    if owner_nonce.len() != 32:
+        return Err("client lease owner requires 128-bit entropy")
+    var i = 0
+    while i < owner_nonce.len():
+        if not "0123456789abcdef".contains(owner_nonce[i:i + 1]):
+            return Err("client lease owner nonce is not canonical hex")
+        i = i + 1
+    return Ok(ClientLeaseState(owner_nonce: owner_nonce, next_generation: 1,
+        last_now_ms: 0, leases: []))
+
+fn lease_clock_valid(state: ClientLeaseState, now_ms: i64) -> bool:
+    return now_ms >= 0 and now_ms >= state.last_now_ms
+
+fn lease_state(state: ClientLeaseState, entries: [ClientLease], generation: i64, now_ms: i64) -> ClientLeaseState:
+    return ClientLeaseState(owner_nonce: state.owner_nonce, next_generation: generation,
+        last_now_ms: now_ms, leases: entries)
+
+pub fn smux_lease_admit(state: ClientLeaseState, session_id: text, client_id: text, now_ms: i64) -> Result<ClientLeaseAdmission, text>:
+    if session_id == "" or client_id == "":
+        return Err("client lease target is empty")
+    if not lease_clock_valid(state, now_ms) or now_ms > LEASE_I64_MAX - SMUX_CLIENT_LEASE_TTL_MS:
+        return Err("client lease monotonic deadline invalid")
+    if state.next_generation < 1 or state.next_generation >= LEASE_I64_MAX:
+        return Err("client lease generation exhausted")
+    var retained: [ClientLease] = []
+    for lease in state.leases:
+        if lease.client_id != client_id:
+            retained.push(lease)
+    if retained.len() >= SMUX_CLIENT_LEASE_CAPACITY:
+        return Err("client lease capacity reached")
+    val admitted = ClientLease(session_id: session_id, client_id: client_id,
+        token: state.owner_nonce + ":" + state.next_generation.to_text(),
+        generation: state.next_generation, deadline_ms: now_ms + SMUX_CLIENT_LEASE_TTL_MS)
+    retained.push(admitted)
+    return Ok(ClientLeaseAdmission(state: lease_state(state, retained, state.next_generation + 1, now_ms), lease: admitted))
+
+pub fn smux_lease_heartbeat(state: ClientLeaseState, session_id: text, client_id: text, token: text, now_ms: i64) -> Result<ClientLeaseState, text>:
+    if not lease_clock_valid(state, now_ms) or now_ms > LEASE_I64_MAX - SMUX_CLIENT_LEASE_TTL_MS:
+        return Err("client lease monotonic deadline invalid")
+    var renewed: [ClientLease] = []
+    var matched = false
+    for lease in state.leases:
+        if lease.session_id == session_id and lease.client_id == client_id and lease.token == token:
+            if now_ms >= lease.deadline_ms:
+                return Err("client lease expired")
+            renewed.push(ClientLease(session_id: session_id, client_id: client_id,
+                token: token, generation: lease.generation,
+                deadline_ms: now_ms + SMUX_CLIENT_LEASE_TTL_MS))
+            matched = true
+        else:
+            renewed.push(lease)
+    if not matched:
+        return Err("client lease identity mismatch")
+    return Ok(lease_state(state, renewed, state.next_generation, now_ms))
+
+# Read-only authorization for leased polling/ACK. Unlike heartbeat, a successful
+# check never extends the deadline or changes the clock observation state.
+pub fn smux_lease_check(state: ClientLeaseState, session_id: text, client_id: text, token: text, now_ms: i64) -> Result<bool, text>:
+    if not lease_clock_valid(state, now_ms):
+        return Err("client lease monotonic clock regressed")
+    for lease in state.leases:
+        if lease.session_id == session_id and lease.client_id == client_id and lease.token == token:
+            if now_ms >= lease.deadline_ms:
+                return Err("client lease expired")
+            return Ok(true)
+    return Err("client lease identity mismatch")
+
+# This is only an expiry proposal. The API must re-check the exact token at
+# removal time; an intervening rebind must not be detached by an old sweep.
+pub fn smux_lease_expiry_candidates(state: ClientLeaseState, now_ms: i64) -> Result<[ClientLease], text>:
+    if not lease_clock_valid(state, now_ms):
+        return Err("client lease monotonic clock regressed")
+    var expired: [ClientLease] = []
+    for lease in state.leases:
+        if now_ms >= lease.deadline_ms:
+            expired.push(lease)
+    return Ok(expired)
+
+# Detach/rebind/session cleanup use exact identity. No removal rewinds tokens.
+pub fn smux_lease_remove(state: ClientLeaseState, session_id: text, client_id: text, token: text) -> ClientLeaseState:
+    var retained: [ClientLease] = []
+    for lease in state.leases:
+        if lease.session_id != session_id or lease.client_id != client_id or lease.token != token:
+            retained.push(lease)
+    return lease_state(state, retained, state.next_generation, state.last_now_ms)
+
+pub fn smux_lease_token_matches(state: ClientLeaseState, session_id: text, client_id: text, token: text) -> bool:
+    for lease in state.leases:
+        if lease.session_id == session_id and lease.client_id == client_id and lease.token == token:
+            return true
+    return false
+
+pub fn smux_lease_forget_client(state: ClientLeaseState, client_id: text) -> ClientLeaseState:
+    var retained: [ClientLease] = []
+    for lease in state.leases:
+        if lease.client_id != client_id:
+            retained.push(lease)
+    return lease_state(state, retained, state.next_generation, state.last_now_ms)
+
+pub fn smux_lease_forget_session(state: ClientLeaseState, session_id: text) -> ClientLeaseState:
+    var retained: [ClientLease] = []
+    for lease in state.leases:
+        if lease.session_id != session_id:
+            retained.push(lease)
+    return lease_state(state, retained, state.next_generation, state.last_now_ms)
+
+pub fn smux_lease_expire(state: ClientLeaseState, session_id: text, client_id: text, token: text, now_ms: i64) -> Result<ClientLeaseState, text>:
+    if not lease_clock_valid(state, now_ms):
+        return Err("client lease monotonic clock regressed")
+    for lease in state.leases:
+        if lease.session_id == session_id and lease.client_id == client_id and lease.token == token:
+            if now_ms < lease.deadline_ms:
+                return Err("client lease is still live")
+            val removed = smux_lease_remove(state, session_id, client_id, token)
+            return Ok(lease_state(removed, removed.leases, removed.next_generation, now_ms))
+    return Err("client lease identity mismatch")

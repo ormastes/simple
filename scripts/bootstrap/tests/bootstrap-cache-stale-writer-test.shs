@@ -1,19 +1,32 @@
 #!/bin/sh
-# Regression: a held writer marker is never reclaimed automatically, and the
-# refusal always names the marker and the recorded pid's liveness.
+# --selftest fixtures for the cache writer marker: a marker whose recorded owner
+# is provably gone (dead PID, or PID reused with a different start time) is
+# reclaimed with a logged "stale lock reclaimed" line; a live owner, a foreign
+# host, or an unrecorded owner is respected and never removed.
 set -u
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 . "$root/scripts/bootstrap/bootstrap-cache-lineage.shs"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/stale-writer.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $*" >&2; exit 1; }
-expect() { # <cache> <expected substring>
+held() { # <cache> <expected substring>
   out=$(bootstrap_cache_writer_acquire "$1" 2>&1) && fail "marker $1.writer was acquired over a held marker"
   case "$out" in *"bootstrap-cache-error: active or unresolved writer: $1.writer ($2"*) ;; *) fail "wrong error: $out" ;; esac
   [ -d "$1.writer" ] || fail "marker $1.writer was removed"
 }
+reclaimed() { # <cache> <expected substring>
+  out=$(bootstrap_cache_writer_acquire "$1" 2>&1) || fail "stale marker $1.writer not reclaimed: $out"
+  case "$out" in *"stale lock reclaimed: $1.writer ($2"*) ;; *) fail "no reclaim log: $out" ;; esac
+  [ "$(cat "$1.writer/pid")" = "$$" ] || fail "marker $1.writer not re-owned by this process"
+  [ -f "$1.writer/host" ] || fail "new marker lacks host record"
+  bootstrap_cache_writer_release "$1" || fail "release failed"
+}
 sh -c 'exit 0' & dead=$!; wait "$dead"
-c="$tmp/dead"; mkdir "$c.writer"; echo "$dead" > "$c.writer/pid"; expect "$c" "recorded pid $dead is not alive"
-c="$tmp/live"; mkdir "$c.writer"; echo "$$" > "$c.writer/pid"; expect "$c" "recorded pid $$ is alive"
-c="$tmp/nopid"; mkdir "$c.writer"; expect "$c" "no pid recorded"
-echo "PASS: held writer marker refused with liveness diagnostic (3 cases)"
+c="$tmp/dead"; mkdir "$c.writer"; echo "$dead" > "$c.writer/pid"; reclaimed "$c" "pid $dead not alive"
+c="$tmp/dead-samehost"; mkdir "$c.writer"; echo "$dead" > "$c.writer/pid"; bootstrap_cache_host > "$c.writer/host"; reclaimed "$c" "pid $dead not alive"
+c="$tmp/reused"; mkdir "$c.writer"; echo "$$" > "$c.writer/pid"; echo "Thu Jan  1 00:00:00 1970" > "$c.writer/birth"
+if [ -n "$(bootstrap_cache_pid_birth "$$")" ]; then reclaimed "$c" "pid $$ reused"; else rm -rf "$c.writer"; fi
+c="$tmp/live"; mkdir "$c.writer"; echo "$$" > "$c.writer/pid"; bootstrap_cache_pid_birth "$$" > "$c.writer/birth"; held "$c" "recorded pid $$ is alive"
+c="$tmp/foreign"; mkdir "$c.writer"; echo "$dead" > "$c.writer/pid"; echo other-host-xyz > "$c.writer/host"; held "$c" "recorded pid $dead is not alive, owner host differs or unprovable"
+c="$tmp/nopid"; mkdir "$c.writer"; held "$c" "no pid recorded"
+echo "PASS: writer marker selftest (dead/reused reclaimed, live/foreign/unrecorded held; 6 cases)"

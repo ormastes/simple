@@ -1,0 +1,646 @@
+# BootstrapMirStore — the flat bootstrap MIR registries (function rows,
+# static rows, function-value names, callable link dicts) as ONE owner
+# instead of twenty module-level globals.
+#
+# Design: doc/05_design/compiler/memory/build_session_memory_model_v1.md
+#   §3 I1-I3, §5, §6, §7 P3. Modelled on 20.hir's BootstrapHirStore (P2).
+#
+# Routes (see the P3 PR body for the table):
+#   * function rows + static rows + module count: STAGED. With a live build
+#     session and a RUNNING module scope, `add_function`/`add_statics`/
+#     `end_module` only record the row on the pending arrays (module-owned).
+#     Readers see committed rows followed by pending rows (read-through), so a
+#     same-module reader observes exactly what the old direct append showed.
+#     `publish_pending` (called with the scope PAUSED, where the old per-module
+#     `bootstrap_mir_registries_promote` ran) adopts every staged payload
+#     (`MirFunction`, name/payload texts) into the session, then appends to the
+#     committed outer arrays under `rt_session_alloc_begin/end` so their
+#     reallocated backing stores are session-tagged, and advances the
+#     committed counts LAST. The outer arrays are never walked.
+#   * function-value names + callable link dicts: DIRECT. They are written
+#     only by the flat/driver prepass, outside any module scope, so nothing
+#     module-owned is ever stored in them; with a session nothing needs
+#     promoting.
+# Without a session (`session_on == false`, e.g. the pre-P1 seed) every add
+# appends immediately and `promote_legacy` promotes the outer arrays exactly
+# as the old `bootstrap_mir_registries_promote` did.
+
+use compiler.mir.mir_instructions.{MirFunction}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+@unsafe(reason: "raw process termination ABI", capabilities: [ffi])
+extern fn rt_exit(code: i64)
+@unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+@unsafe(reason: "move a module-scope graph into the build session", capabilities: [ffi])
+extern fn rt_transient_heap_adopt<T>(value: T) -> bool
+@unsafe(reason: "allocate session-owned containers inside a module scope", capabilities: [ffi])
+extern fn rt_session_alloc_begin() -> bool
+@unsafe(reason: "end session-owned allocation", capabilities: [ffi])
+extern fn rt_session_alloc_end() -> bool
+@unsafe(reason: "observe the transient scope state", capabilities: [ffi])
+extern fn rt_transient_array_scope_state_v1() -> i64
+
+fn _sffi_mir_store_adopt_function(name: text, function: MirFunction) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_adopt(name) and rt_transient_heap_adopt(function)
+
+fn _sffi_mir_store_adopt_text(value: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_adopt(value)
+
+fn _sffi_mir_store_alloc_begin() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_session_alloc_begin()
+
+fn _sffi_mir_store_alloc_end() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_session_alloc_end()
+
+fn _sffi_mir_store_scope_running() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_state_v1() == 1
+
+# Generic so each owner keeps its static type (no `Any` erasure).
+@always_inline
+fn _mir_store_promote<T>(value: T) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
+
+struct MirPublishPort:
+    adopt_function: fn(text, MirFunction) -> bool
+    adopt_text: fn(text) -> bool
+    alloc_begin: fn() -> bool
+    alloc_end: fn() -> bool
+    scope_running: fn() -> bool
+
+fn mir_publish_port_runtime() -> MirPublishPort:
+    MirPublishPort(adopt_function: _sffi_mir_store_adopt_function,
+        adopt_text: _sffi_mir_store_adopt_text,
+        alloc_begin: _sffi_mir_store_alloc_begin,
+        alloc_end: _sffi_mir_store_alloc_end,
+        scope_running: _sffi_mir_store_scope_running)
+
+fn bootstrap_mir_store_fail(message: text):
+    eprint("error: bootstrap MIR store rejected update: {message}\n")
+    unsafe(capabilities: [ffi]):
+        rt_exit(1)
+    panic("rt_exit returned after bootstrap MIR store rejection")
+
+# Number of outer containers `promote_legacy` walks per call.
+val BOOTSTRAP_MIR_STORE_OUTER_COUNT: i64 = 20
+
+class BootstrapMirStore:
+    port: MirPublishPort
+    session_on: bool
+    # Committed function rows (parallel).
+    functions: [MirFunction]
+    function_names: [text]
+    function_modules: [i64]
+    function_return_type_tags: [i64]
+    function_return_unsigned: [bool]
+    function_param_starts: [i64]
+    function_param_counts: [i64]
+    function_param_type_tags: [i64]
+    module_count: i64
+    # Committed static rows (parallel).
+    static_modules: [i64]
+    static_symbol_ids: [i64]
+    static_names: [text]
+    static_type_tags: [i64]
+    static_init_kinds: [i64]
+    static_init_payloads: [text]
+    static_alignments: [i64]
+    static_visibilities: [i64]
+    static_externals: [bool]
+    # Prepass-only registries (DIRECT route).
+    function_value_names: [text]
+    callable_link_names: Dict<text, text>
+    callable_text_value_abi: Dict<text, bool>
+    # Readers index committed rows only below these; advanced LAST.
+    committed_function_count: i64
+    committed_static_count: i64
+    # Staged rows of the module whose scope is running.
+    has_pending: bool
+    pending_functions: [MirFunction]
+    pending_function_names: [text]
+    pending_function_modules: [i64]
+    pending_return_type_tags: [i64]
+    pending_return_unsigned: [bool]
+    pending_param_starts: [i64]
+    pending_param_counts: [i64]
+    pending_param_type_tags: [i64]
+    pending_module_count: i64
+    pending_static_modules: [i64]
+    pending_static_symbol_ids: [i64]
+    pending_static_names: [text]
+    pending_static_type_tags: [i64]
+    pending_static_init_kinds: [i64]
+    pending_static_init_payloads: [text]
+    pending_static_alignments: [i64]
+    pending_static_visibilities: [i64]
+    pending_static_externals: [bool]
+    # Measurement: outer containers walked by promote_legacy, rows published.
+    legacy_outer_walks: i64
+    published_modules: i64
+
+    fn staging() -> bool:
+        val scope_running = self.port.scope_running
+        self.session_on and scope_running()
+
+    # ---- read-through accessors (committed rows, then pending rows) ----
+    fn function_count() -> i64:
+        self.committed_function_count + self.pending_function_names.len()
+
+    fn function_at(index: i64) -> MirFunction:
+        if index < self.committed_function_count: return self.functions[index]
+        self.pending_functions[index - self.committed_function_count]
+
+    fn function_name_at(index: i64) -> text:
+        if index < self.committed_function_count: return self.function_names[index]
+        self.pending_function_names[index - self.committed_function_count]
+
+    fn function_module_at(index: i64) -> i64:
+        if index < self.committed_function_count: return self.function_modules[index]
+        self.pending_function_modules[index - self.committed_function_count]
+
+    fn function_return_type_tag_at(index: i64) -> i64:
+        if index < self.committed_function_count: return self.function_return_type_tags[index]
+        self.pending_return_type_tags[index - self.committed_function_count]
+
+    fn function_return_unsigned_at(index: i64) -> bool:
+        if index < self.committed_function_count: return self.function_return_unsigned[index]
+        self.pending_return_unsigned[index - self.committed_function_count]
+
+    fn function_param_count_at(index: i64) -> i64:
+        if index < self.committed_function_count: return self.function_param_counts[index]
+        self.pending_param_counts[index - self.committed_function_count]
+
+    fn function_param_start_at(index: i64) -> i64:
+        if index < self.committed_function_count: return self.function_param_starts[index]
+        self.pending_param_starts[index - self.committed_function_count]
+
+    fn param_tag_total() -> i64:
+        self.function_param_type_tags.len() + self.pending_param_type_tags.len()
+
+    fn param_type_tag_at(flat_index: i64) -> i64:
+        val committed = self.function_param_type_tags.len()
+        if flat_index < committed: return self.function_param_type_tags[flat_index]
+        self.pending_param_type_tags[flat_index - committed]
+
+    fn current_module_count() -> i64:
+        if self.has_pending and self.pending_module_count >= 0: return self.pending_module_count
+        self.module_count
+
+    fn static_count() -> i64:
+        self.committed_static_count + self.pending_static_names.len()
+
+    fn static_module_at(index: i64) -> i64:
+        if index < self.committed_static_count: return self.static_modules[index]
+        self.pending_static_modules[index - self.committed_static_count]
+
+    fn static_symbol_id_at(index: i64) -> i64:
+        if index < self.committed_static_count: return self.static_symbol_ids[index]
+        self.pending_static_symbol_ids[index - self.committed_static_count]
+
+    fn static_name_at(index: i64) -> text:
+        if index < self.committed_static_count: return self.static_names[index]
+        self.pending_static_names[index - self.committed_static_count]
+
+    fn static_type_tag_at(index: i64) -> i64:
+        if index < self.committed_static_count: return self.static_type_tags[index]
+        self.pending_static_type_tags[index - self.committed_static_count]
+
+    fn static_init_kind_at(index: i64) -> i64:
+        if index < self.committed_static_count: return self.static_init_kinds[index]
+        self.pending_static_init_kinds[index - self.committed_static_count]
+
+    fn static_init_payload_at(index: i64) -> text:
+        if index < self.committed_static_count: return self.static_init_payloads[index]
+        self.pending_static_init_payloads[index - self.committed_static_count]
+
+    fn static_alignment_at(index: i64) -> i64:
+        if index < self.committed_static_count: return self.static_alignments[index]
+        self.pending_static_alignments[index - self.committed_static_count]
+
+    fn static_visibility_at(index: i64) -> i64:
+        if index < self.committed_static_count: return self.static_visibilities[index]
+        self.pending_static_visibilities[index - self.committed_static_count]
+
+    fn static_external_at(index: i64) -> bool:
+        if index < self.committed_static_count: return self.static_externals[index]
+        self.pending_static_externals[index - self.committed_static_count]
+
+    # ---- writes ----
+    me clear_pending():
+        self.has_pending = false
+        self.pending_functions = []
+        self.pending_function_names = []
+        self.pending_function_modules = []
+        self.pending_return_type_tags = []
+        self.pending_return_unsigned = []
+        self.pending_param_starts = []
+        self.pending_param_counts = []
+        self.pending_param_type_tags = []
+        self.pending_module_count = -1
+        self.pending_static_modules = []
+        self.pending_static_symbol_ids = []
+        self.pending_static_names = []
+        self.pending_static_type_tags = []
+        self.pending_static_init_kinds = []
+        self.pending_static_init_payloads = []
+        self.pending_static_alignments = []
+        self.pending_static_visibilities = []
+        self.pending_static_externals = []
+
+    # Drop staged rows (module abort, reset). Inside a running scope with a
+    # session the fresh empty pending owners are allocated session-side so the
+    # store never keeps a pointer into the doomed scope.
+    me discard_pending():
+        if self.staging():
+            val alloc_begin = self.port.alloc_begin
+            if not alloc_begin():
+                bootstrap_mir_store_fail("session allocator refused discard")
+            self.clear_pending()
+            val alloc_end = self.port.alloc_end
+            if not alloc_end():
+                bootstrap_mir_store_fail("session allocator did not close after discard")
+            return
+        self.clear_pending()
+
+    me clear_committed():
+        self.functions = []
+        self.function_names = []
+        self.function_modules = []
+        self.function_return_type_tags = []
+        self.function_return_unsigned = []
+        self.function_param_starts = []
+        self.function_param_counts = []
+        self.function_param_type_tags = []
+        self.module_count = 0
+        self.static_modules = []
+        self.static_symbol_ids = []
+        self.static_names = []
+        self.static_type_tags = []
+        self.static_init_kinds = []
+        self.static_init_payloads = []
+        self.static_alignments = []
+        self.static_visibilities = []
+        self.static_externals = []
+        self.committed_function_count = 0
+        self.committed_static_count = 0
+
+    # `bootstrap_mir_functions_reset`. Inside a running scope with a session
+    # the fresh empty owners are allocated session-side, so no committed
+    # owner ever points at module memory.
+    me reset():
+        self.discard_pending()
+        if self.staging():
+            val alloc_begin = self.port.alloc_begin
+            if not alloc_begin():
+                bootstrap_mir_store_fail("session allocator refused reset")
+            self.clear_committed()
+            val alloc_end = self.port.alloc_end
+            if not alloc_end():
+                bootstrap_mir_store_fail("session allocator did not close after reset")
+            return
+        self.clear_committed()
+
+    me reset_function_values():
+        self.function_value_names = []
+        self.callable_link_names = {}
+        self.callable_text_value_abi = {}
+
+    me add_function_value(function_name: text):
+        self.function_value_names = self.function_value_names.push(function_name)
+
+    me set_callable(key: text, function_name: text, text_value_abi: bool):
+        self.callable_link_names[key] = function_name
+        self.callable_text_value_abi[key] = text_value_abi
+
+    me append_function_committed(name: text, fn_: MirFunction, module_index: i64, return_type_tag: i64, return_unsigned: bool, param_tags: [i64]):
+        val param_start = self.function_param_type_tags.len()
+        var tags = self.function_param_type_tags
+        for tag in param_tags:
+            tags = tags.push(tag)
+        self.function_param_type_tags = tags
+        self.function_return_type_tags = self.function_return_type_tags.push(return_type_tag)
+        self.function_return_unsigned = self.function_return_unsigned.push(return_unsigned)
+        self.function_param_starts = self.function_param_starts.push(param_start)
+        self.function_param_counts = self.function_param_counts.push(param_tags.len())
+        self.function_names = self.function_names.push(name)
+        self.functions = self.functions.push(fn_)
+        self.function_modules = self.function_modules.push(module_index)
+        if self.function_names.len() != self.committed_function_count + 1:
+            bootstrap_mir_store_fail("function owners are misaligned after append")
+        self.committed_function_count = self.committed_function_count + 1
+
+    me add_function(name: text, fn_: MirFunction, module_index: i64, return_type_tag: i64, return_unsigned: bool, param_tags: [i64]):
+        if self.staging():
+            self.has_pending = true
+            val param_start = self.param_tag_total()
+            var tags = self.pending_param_type_tags
+            for tag in param_tags:
+                tags = tags.push(tag)
+            self.pending_param_type_tags = tags
+            self.pending_return_type_tags = self.pending_return_type_tags.push(return_type_tag)
+            self.pending_return_unsigned = self.pending_return_unsigned.push(return_unsigned)
+            self.pending_param_starts = self.pending_param_starts.push(param_start)
+            self.pending_param_counts = self.pending_param_counts.push(param_tags.len())
+            self.pending_function_names = self.pending_function_names.push(name)
+            self.pending_functions = self.pending_functions.push(fn_)
+            self.pending_function_modules = self.pending_function_modules.push(module_index)
+            return
+        self.append_function_committed(name, fn_, module_index, return_type_tag, return_unsigned, param_tags)
+
+    me append_statics_committed(modules: [i64], symbol_ids: [i64], names: [text], type_tags: [i64], init_kinds: [i64], init_payloads: [text], alignments: [i64], visibilities: [i64], externals: [bool]):
+        var bs_modules = self.static_modules
+        var bs_symbol_ids = self.static_symbol_ids
+        var bs_names = self.static_names
+        var bs_type_tags = self.static_type_tags
+        var bs_init_kinds = self.static_init_kinds
+        var bs_init_payloads = self.static_init_payloads
+        var bs_alignments = self.static_alignments
+        var bs_visibilities = self.static_visibilities
+        var bs_externals = self.static_externals
+        var i = 0
+        while i < names.len():
+            bs_modules = bs_modules.push(modules[i])
+            bs_symbol_ids = bs_symbol_ids.push(symbol_ids[i])
+            bs_names = bs_names.push(names[i])
+            bs_type_tags = bs_type_tags.push(type_tags[i])
+            bs_init_kinds = bs_init_kinds.push(init_kinds[i])
+            bs_init_payloads = bs_init_payloads.push(init_payloads[i])
+            bs_alignments = bs_alignments.push(alignments[i])
+            bs_visibilities = bs_visibilities.push(visibilities[i])
+            bs_externals = bs_externals.push(externals[i])
+            i = i + 1
+        self.static_modules = bs_modules
+        self.static_symbol_ids = bs_symbol_ids
+        self.static_names = bs_names
+        self.static_type_tags = bs_type_tags
+        self.static_init_kinds = bs_init_kinds
+        self.static_init_payloads = bs_init_payloads
+        self.static_alignments = bs_alignments
+        self.static_visibilities = bs_visibilities
+        self.static_externals = bs_externals
+        if self.static_names.len() != self.committed_static_count + names.len():
+            bootstrap_mir_store_fail("static owners are misaligned after append")
+        self.committed_static_count = self.static_names.len()
+
+    # One module's statics plus the module-count advance
+    # (`bootstrap_mir_modules_add`).
+    me add_module_statics(module_index: i64, modules: [i64], symbol_ids: [i64], names: [text], type_tags: [i64], init_kinds: [i64], init_payloads: [text], alignments: [i64], visibilities: [i64], externals: [bool]):
+        if self.staging():
+            self.has_pending = true
+            var i = 0
+            var p_modules = self.pending_static_modules
+            var p_symbol_ids = self.pending_static_symbol_ids
+            var p_names = self.pending_static_names
+            var p_type_tags = self.pending_static_type_tags
+            var p_init_kinds = self.pending_static_init_kinds
+            var p_init_payloads = self.pending_static_init_payloads
+            var p_alignments = self.pending_static_alignments
+            var p_visibilities = self.pending_static_visibilities
+            var p_externals = self.pending_static_externals
+            while i < names.len():
+                p_modules = p_modules.push(modules[i])
+                p_symbol_ids = p_symbol_ids.push(symbol_ids[i])
+                p_names = p_names.push(names[i])
+                p_type_tags = p_type_tags.push(type_tags[i])
+                p_init_kinds = p_init_kinds.push(init_kinds[i])
+                p_init_payloads = p_init_payloads.push(init_payloads[i])
+                p_alignments = p_alignments.push(alignments[i])
+                p_visibilities = p_visibilities.push(visibilities[i])
+                p_externals = p_externals.push(externals[i])
+                i = i + 1
+            self.pending_static_modules = p_modules
+            self.pending_static_symbol_ids = p_symbol_ids
+            self.pending_static_names = p_names
+            self.pending_static_type_tags = p_type_tags
+            self.pending_static_init_kinds = p_init_kinds
+            self.pending_static_init_payloads = p_init_payloads
+            self.pending_static_alignments = p_alignments
+            self.pending_static_visibilities = p_visibilities
+            self.pending_static_externals = p_externals
+            self.pending_module_count = module_index + 1
+            return
+        self.append_statics_committed(modules, symbol_ids, names, type_tags, init_kinds,
+            init_payloads, alignments, visibilities, externals)
+        self.module_count = module_index + 1
+
+    # Adopt-then-append (I1-I3). Called with the module scope PAUSED. Walks
+    # only this module's staged payloads, never the committed outer arrays.
+    me publish_pending() -> bool:
+        if not self.has_pending:
+            return true
+        val adopt_function = self.port.adopt_function
+        val adopt_text = self.port.adopt_text
+        var i = 0
+        while i < self.pending_functions.len():
+            if not adopt_function(self.pending_function_names[i], self.pending_functions[i]):
+                return false
+            i = i + 1
+        var s = 0
+        while s < self.pending_static_names.len():
+            if not adopt_text(self.pending_static_names[s]): return false
+            if not adopt_text(self.pending_static_init_payloads[s]): return false
+            s = s + 1
+        val alloc_begin = self.port.alloc_begin
+        if not alloc_begin():
+            return false
+        # Committed counts stay at their old values until every owner below
+        # holds the new rows; append_* advance them last.
+        val tag_base = self.function_param_type_tags.len()
+        var f = 0
+        while f < self.pending_functions.len():
+            val start = self.pending_param_starts[f] - tag_base
+            var tags: [i64] = []
+            var t = 0
+            while t < self.pending_param_counts[f]:
+                tags = tags.push(self.pending_param_type_tags[start + t])
+                t = t + 1
+            self.append_function_committed(self.pending_function_names[f], self.pending_functions[f],
+                self.pending_function_modules[f], self.pending_return_type_tags[f],
+                self.pending_return_unsigned[f], tags)
+            f = f + 1
+        self.append_statics_committed(self.pending_static_modules, self.pending_static_symbol_ids,
+            self.pending_static_names, self.pending_static_type_tags, self.pending_static_init_kinds,
+            self.pending_static_init_payloads, self.pending_static_alignments,
+            self.pending_static_visibilities, self.pending_static_externals)
+        if self.pending_module_count >= 0:
+            self.module_count = self.pending_module_count
+        val alloc_end = self.port.alloc_end
+        if not alloc_end():
+            bootstrap_mir_store_fail("session allocator did not close after publication")
+        self.discard_pending()
+        self.published_modules = self.published_modules + 1
+        true
+
+    # No-session path only: promote every outer owner, exactly as the
+    # pre-session `bootstrap_mir_registries_promote` did.
+    me promote_legacy() -> bool:
+        self.legacy_outer_walks = self.legacy_outer_walks + BOOTSTRAP_MIR_STORE_OUTER_COUNT
+        val fns_ok = _mir_store_promote(self.functions)
+        val names_ok = _mir_store_promote(self.function_names)
+        val modules_ok = _mir_store_promote(self.function_modules)
+        val ret_tags_ok = _mir_store_promote(self.function_return_type_tags)
+        val ret_unsigned_ok = _mir_store_promote(self.function_return_unsigned)
+        val p_starts_ok = _mir_store_promote(self.function_param_starts)
+        val p_counts_ok = _mir_store_promote(self.function_param_counts)
+        val p_tags_ok = _mir_store_promote(self.function_param_type_tags)
+        val static_modules_ok = _mir_store_promote(self.static_modules)
+        val static_symbol_ids_ok = _mir_store_promote(self.static_symbol_ids)
+        val static_names_ok = _mir_store_promote(self.static_names)
+        val static_type_tags_ok = _mir_store_promote(self.static_type_tags)
+        val static_init_kinds_ok = _mir_store_promote(self.static_init_kinds)
+        val static_init_payloads_ok = _mir_store_promote(self.static_init_payloads)
+        val static_alignments_ok = _mir_store_promote(self.static_alignments)
+        val static_visibilities_ok = _mir_store_promote(self.static_visibilities)
+        val static_externals_ok = _mir_store_promote(self.static_externals)
+        val value_names_ok = _mir_store_promote(self.function_value_names)
+        val callable_links_ok = _mir_store_promote(self.callable_link_names)
+        val callable_text_abi_ok = _mir_store_promote(self.callable_text_value_abi)
+        fns_ok and names_ok and modules_ok and ret_tags_ok and ret_unsigned_ok and
+            p_starts_ok and p_counts_ok and p_tags_ok and static_modules_ok and
+            static_symbol_ids_ok and static_names_ok and static_type_tags_ok and
+            static_init_kinds_ok and static_init_payloads_ok and
+            static_alignments_ok and static_visibilities_ok and static_externals_ok and
+            value_names_ok and callable_links_ok and callable_text_abi_ok
+
+    # Module-scope publish point: session -> adopt staged rows; otherwise the
+    # legacy outer promote.
+    me publish_module() -> bool:
+        if self.session_on:
+            return self.publish_pending()
+        self.promote_legacy()
+
+fn bootstrap_mir_store_with_port(port: MirPublishPort) -> BootstrapMirStore:
+    BootstrapMirStore(port: port, session_on: false, functions: [], function_names: [],
+        function_modules: [], function_return_type_tags: [], function_return_unsigned: [],
+        function_param_starts: [], function_param_counts: [], function_param_type_tags: [],
+        module_count: 0, static_modules: [], static_symbol_ids: [], static_names: [],
+        static_type_tags: [], static_init_kinds: [], static_init_payloads: [],
+        static_alignments: [], static_visibilities: [], static_externals: [],
+        function_value_names: [], callable_link_names: {}, callable_text_value_abi: {},
+        committed_function_count: 0, committed_static_count: 0, has_pending: false,
+        pending_functions: [], pending_function_names: [], pending_function_modules: [],
+        pending_return_type_tags: [], pending_return_unsigned: [], pending_param_starts: [],
+        pending_param_counts: [], pending_param_type_tags: [], pending_module_count: -1,
+        pending_static_modules: [], pending_static_symbol_ids: [], pending_static_names: [],
+        pending_static_type_tags: [], pending_static_init_kinds: [],
+        pending_static_init_payloads: [], pending_static_alignments: [],
+        pending_static_visibilities: [], pending_static_externals: [],
+        legacy_outer_walks: 0, published_modules: 0)
+
+# The canonical store. Every flat-registry helper in bootstrap_globals.spl
+# forwards here; module_lowering publishes/discards through it.
+var _bootstrap_mir_store: BootstrapMirStore = bootstrap_mir_store_with_port(mir_publish_port_runtime())
+
+fn bootstrap_mir_store() -> BootstrapMirStore:
+    _bootstrap_mir_store
+
+fn bootstrap_mir_store_set_session(on: bool):
+    _bootstrap_mir_store.session_on = on
+
+fn bootstrap_mir_store_publish_module() -> bool:
+    _bootstrap_mir_store.publish_module()
+
+fn bootstrap_mir_store_promote_legacy() -> bool:
+    _bootstrap_mir_store.promote_legacy()
+
+fn bootstrap_mir_store_discard_pending():
+    _bootstrap_mir_store.discard_pending()
+
+# ---- forwarders (the canonical var is only mutated in this module) ----
+fn bootstrap_mir_store_reset():
+    _bootstrap_mir_store.reset()
+
+fn bootstrap_mir_store_reset_function_values():
+    _bootstrap_mir_store.reset_function_values()
+
+fn bootstrap_mir_store_set_callable(key: text, function_name: text, text_value_abi: bool):
+    _bootstrap_mir_store.set_callable(key, function_name, text_value_abi)
+
+fn bootstrap_mir_store_add_function_value(function_name: text):
+    _bootstrap_mir_store.add_function_value(function_name)
+
+fn bootstrap_mir_store_function_value_names() -> [text]:
+    _bootstrap_mir_store.function_value_names
+
+fn bootstrap_mir_store_callable_link_names() -> Dict<text, text>:
+    _bootstrap_mir_store.callable_link_names
+
+fn bootstrap_mir_store_callable_text_value_abi() -> Dict<text, bool>:
+    _bootstrap_mir_store.callable_text_value_abi
+
+fn bootstrap_mir_store_add_function(name: text, fn_: MirFunction, module_index: i64, return_type_tag: i64, return_unsigned: bool, param_tags: [i64]):
+    _bootstrap_mir_store.add_function(name, fn_, module_index, return_type_tag, return_unsigned, param_tags)
+
+fn bootstrap_mir_store_add_module_statics(module_index: i64, modules: [i64], symbol_ids: [i64], names: [text], type_tags: [i64], init_kinds: [i64], init_payloads: [text], alignments: [i64], visibilities: [i64], externals: [bool]):
+    _bootstrap_mir_store.add_module_statics(module_index, modules, symbol_ids, names, type_tags,
+        init_kinds, init_payloads, alignments, visibilities, externals)
+
+fn bootstrap_mir_store_module_count() -> i64:
+    _bootstrap_mir_store.current_module_count()
+
+fn bootstrap_mir_store_function_count() -> i64:
+    _bootstrap_mir_store.function_count()
+
+fn bootstrap_mir_store_function_at(index: i64) -> MirFunction:
+    _bootstrap_mir_store.function_at(index)
+
+fn bootstrap_mir_store_function_name_at(index: i64) -> text:
+    _bootstrap_mir_store.function_name_at(index)
+
+fn bootstrap_mir_store_function_module_at(index: i64) -> i64:
+    _bootstrap_mir_store.function_module_at(index)
+
+fn bootstrap_mir_store_function_return_type_tag_at(index: i64) -> i64:
+    _bootstrap_mir_store.function_return_type_tag_at(index)
+
+fn bootstrap_mir_store_function_return_unsigned_at(index: i64) -> bool:
+    _bootstrap_mir_store.function_return_unsigned_at(index)
+
+fn bootstrap_mir_store_function_param_count_at(index: i64) -> i64:
+    _bootstrap_mir_store.function_param_count_at(index)
+
+fn bootstrap_mir_store_function_param_type_tag_at(function_index: i64, param_index: i64) -> i64:
+    _bootstrap_mir_store.param_type_tag_at(_bootstrap_mir_store.function_param_start_at(function_index) + param_index)
+
+fn bootstrap_mir_store_param_tag_total() -> i64:
+    _bootstrap_mir_store.param_tag_total()
+
+fn bootstrap_mir_store_static_count() -> i64:
+    _bootstrap_mir_store.static_count()
+
+fn bootstrap_mir_store_static_module_at(index: i64) -> i64:
+    _bootstrap_mir_store.static_module_at(index)
+
+fn bootstrap_mir_store_static_symbol_id_at(index: i64) -> i64:
+    _bootstrap_mir_store.static_symbol_id_at(index)
+
+fn bootstrap_mir_store_static_name_at(index: i64) -> text:
+    _bootstrap_mir_store.static_name_at(index)
+
+fn bootstrap_mir_store_static_type_tag_at(index: i64) -> i64:
+    _bootstrap_mir_store.static_type_tag_at(index)
+
+fn bootstrap_mir_store_static_init_kind_at(index: i64) -> i64:
+    _bootstrap_mir_store.static_init_kind_at(index)
+
+fn bootstrap_mir_store_static_init_payload_at(index: i64) -> text:
+    _bootstrap_mir_store.static_init_payload_at(index)
+
+fn bootstrap_mir_store_static_alignment_at(index: i64) -> i64:
+    _bootstrap_mir_store.static_alignment_at(index)
+
+fn bootstrap_mir_store_static_visibility_at(index: i64) -> i64:
+    _bootstrap_mir_store.static_visibility_at(index)
+
+fn bootstrap_mir_store_static_external_at(index: i64) -> bool:
+    _bootstrap_mir_store.static_external_at(index)
+
+fn bootstrap_mir_store_lens_diag() -> text:
+    val s = _bootstrap_mir_store
+    "[acc-lens] fns={s.functions.len()} names={s.function_names.len()} modules={s.function_modules.len()} ret_tags={s.function_return_type_tags.len()} ret_unsigned={s.function_return_unsigned.len()} p_starts={s.function_param_starts.len()} p_counts={s.function_param_counts.len()} p_tags={s.function_param_type_tags.len()} statics={s.static_names.len()} pending_fns={s.pending_functions.len()} pending_statics={s.pending_static_names.len()}"

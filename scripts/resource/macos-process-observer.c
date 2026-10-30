@@ -14,42 +14,79 @@
 #include <unistd.h>
 #include <time.h>
 #include <mach/mach_time.h>
+#include "macos-observer-denial-policy.h"
+
+struct denial_context {
+    int pid;
+    unsigned long long sec, usec;
+    int result, error;
+    unsigned int probes;
+    size_t size;
+    struct kinfo_proc proof;
+};
+
+static enum observer_denial_state denial_probe(void *opaque) {
+    struct denial_context *context = opaque;
+    ++context->probes;
+    int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, context->pid };
+    memset(&context->proof, 0, sizeof(context->proof));
+    context->size = sizeof(context->proof);
+    errno = 0;
+    context->result = sysctl(mib, 4, &context->proof, &context->size, NULL, 0);
+    context->error = context->result ? errno : 0;
+    if (context->result) return OBSERVER_DENIAL_UNKNOWN;
+    if (!context->size) return OBSERVER_DENIAL_GONE;
+    if (context->size != sizeof(context->proof)) return OBSERVER_DENIAL_UNKNOWN;
+    if (context->proof.kp_proc.p_pid != context->pid ||
+        (unsigned long long)context->proof.kp_proc.p_starttime.tv_sec != context->sec ||
+        (unsigned long long)context->proof.kp_proc.p_starttime.tv_usec != context->usec)
+        return OBSERVER_DENIAL_REUSED_PID;
+    if (context->proof.kp_proc.p_stat == SZOMB)
+        return OBSERVER_DENIAL_EXPECTED_ZOMBIE;
+    return OBSERVER_DENIAL_EXPECTED_LIVE;
+}
+
+static void denial_wait(void *opaque, unsigned int retry) {
+    (void)opaque;
+    (void)retry;
+    const struct timespec delay = { 0, 10 * 1000 * 1000 };
+    (void)nanosleep(&delay, NULL);
+}
 
 static int detail_failure(const char *operation, int pid, int bytes,
                           unsigned long long sec, unsigned long long usec) {
     int error = errno;
     if (error == EPERM || error == EACCES) {
-        /* A libproc permission error is not evidence of exit. Independently
-         * check kernel PID metadata: only a missing PID or the exact expected
-         * zombie can be omitted. Live/reused/unknown state still fails closed. */
-        struct kinfo_proc proof;
-        size_t size = sizeof(proof);
-        int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
-        int result = sysctl(mib, 4, &proof, &size, NULL, 0);
-        if (!result && !size) return printf("R %d gone\n", pid) < 0;
-        if (!result && size == sizeof(proof) && proof.kp_proc.p_pid == pid &&
-            (unsigned long long)proof.kp_proc.p_starttime.tv_sec == sec &&
-            (unsigned long long)proof.kp_proc.p_starttime.tv_usec == usec &&
-            proof.kp_proc.p_stat == SZOMB) return printf("R %d gone\n", pid) < 0;
-        if (!result && size == sizeof(proof)) {
+        /* A denied detail call may race a short-lived process exit. Retry only
+         * an exact same-identity live proof, for at most three total sysctls.
+         * Persistent live denial, PID reuse, short replies and query errors
+         * remain fatal. */
+        struct denial_context context = { .pid = pid, .sec = sec, .usec = usec };
+        if (observer_denial_proves_gone(denial_probe, denial_wait, &context)) {
+            fprintf(stderr, "macos-process-observer: denial-resolution pid=%d result=gone probes=%u\n",
+                    pid, context.probes);
+            return printf("R %d gone\n", pid) < 0;
+        }
+        struct kinfo_proc *proof = &context.proof;
+        if (!context.result && context.size == sizeof(*proof)) {
             fprintf(stderr, "macos-process-observer: denial-state pid=%d observed_pid=%d state=%d expected=%llu:%llu actual=%llu:%llu\n",
-                    pid, proof.kp_proc.p_pid, proof.kp_proc.p_stat, sec, usec,
-                    (unsigned long long)proof.kp_proc.p_starttime.tv_sec,
-                    (unsigned long long)proof.kp_proc.p_starttime.tv_usec);
-            char command[sizeof(proof.kp_proc.p_comm) + 1];
+                    pid, proof->kp_proc.p_pid, proof->kp_proc.p_stat, sec, usec,
+                    (unsigned long long)proof->kp_proc.p_starttime.tv_sec,
+                    (unsigned long long)proof->kp_proc.p_starttime.tv_usec);
+            char command[sizeof(proof->kp_proc.p_comm) + 1];
             size_t i;
-            for (i = 0; i < sizeof(proof.kp_proc.p_comm) && proof.kp_proc.p_comm[i]; ++i) {
-                unsigned char c = (unsigned char)proof.kp_proc.p_comm[i];
+            for (i = 0; i < sizeof(proof->kp_proc.p_comm) && proof->kp_proc.p_comm[i]; ++i) {
+                unsigned char c = (unsigned char)proof->kp_proc.p_comm[i];
                 command[i] = c > 32 && c < 127 ? (char)c : '_';
             }
             command[i] = 0;
             pid_t sid = getsid(pid);
             fprintf(stderr, "macos-process-observer: denial-owner pid=%d ppid=%d pgid=%d sid=%d uid=%u ruid=%u command=%s\n",
-                    pid, proof.kp_eproc.e_ppid, proof.kp_eproc.e_pgid, sid,
-                    proof.kp_eproc.e_ucred.cr_uid, proof.kp_eproc.e_pcred.p_ruid, command);
+                    pid, proof->kp_eproc.e_ppid, proof->kp_eproc.e_pgid, sid,
+                    proof->kp_eproc.e_ucred.cr_uid, proof->kp_eproc.e_pcred.p_ruid, command);
         }
-        fprintf(stderr, "macos-process-observer: denial-proof pid=%d result=%d bytes=%zu errno=%d\n",
-                pid, result, size, result ? errno : 0);
+        fprintf(stderr, "macos-process-observer: denial-proof pid=%d result=%d bytes=%zu errno=%d probes=%u\n",
+                pid, context.result, context.size, context.error, context.probes);
     }
     fprintf(stderr, "macos-process-observer: %s pid=%d bytes=%d errno=%d\n",
             operation, pid, bytes, error);
@@ -96,9 +133,12 @@ static int metadata(void) {
     return puts("E") == EOF || fflush(stdout);
 }
 
-static int detail(int pid, unsigned long long sec, unsigned long long usec) {
+static int detail(int pid, unsigned long long sec, unsigned long long usec,
+                  int want_footprint) {
     struct proc_bsdinfo before, after;
     struct proc_taskinfo task;
+    struct rusage_info_v4 usage;
+    memset(&usage, 0, sizeof(usage));
     errno = 0;
     int n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &before, sizeof(before));
     if (!n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
@@ -110,6 +150,12 @@ static int detail(int pid, unsigned long long sec, unsigned long long usec) {
     n = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, sizeof(task));
     if (!n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
     if (n != sizeof(task)) return detail_failure("task", pid, n, sec, usec);
+    if (want_footprint) {
+        errno = 0;
+        n = proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&usage);
+        if (n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
+        if (n) return detail_failure("rusage-footprint", pid, n, sec, usec);
+    }
     errno = 0;
     pid_t sid = getsid(pid);
     if (sid < 0 && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
@@ -120,6 +166,15 @@ static int detail(int pid, unsigned long long sec, unsigned long long usec) {
     if (n != sizeof(after)) return detail_failure("bsd-after", pid, n, sec, usec);
     if (after.pbi_start_tvsec != sec || after.pbi_start_tvusec != usec)
         return identity_failure("identity-after", pid, sec, usec, &after);
+    if (want_footprint) {
+        /* Current charged footprint includes compressed accounting. Never use
+         * ri_lifetime_max_phys_footprint for a current process-tree sum. */
+        unsigned long long kib = usage.ri_phys_footprint / 1024 +
+                                 (usage.ri_phys_footprint % 1024 != 0);
+        return printf("R %d %llu %d %llu\n", pid,
+                      (unsigned long long)((task.pti_resident_size + 1023) / 1024),
+                      sid, kib) < 0;
+    }
     return printf("R %d %llu %d\n", pid,
                   (unsigned long long)((task.pti_resident_size + 1023) / 1024), sid) < 0;
 }
@@ -229,7 +284,9 @@ int main(int argc, char **argv) {
         if (!strcmp(line, "M\n")) {
             if (metadata()) return 89;
         } else if (sscanf(line, "R %d %llu:%llu %c", &pid, &sec, &usec, &extra) == 3 && pid > 0) {
-            if (detail(pid, sec, usec) || fflush(stdout)) return 89;
+            if (detail(pid, sec, usec, 0) || fflush(stdout)) return 89;
+        } else if (sscanf(line, "F %d %llu:%llu %c", &pid, &sec, &usec, &extra) == 3 && pid > 0) {
+            if (detail(pid, sec, usec, 1) || fflush(stdout)) return 89;
         } else return 89;
     }
     return ferror(stdin) ? 89 : 0;

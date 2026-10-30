@@ -615,6 +615,10 @@ bootstrap_stage3_verify_composed_snapshot() (
 
 bootstrap_stage3_verify_composed_sanity_input_tuple() (
     [ "$#" = 5 ] || return 1
+    if [ "$(bootstrap_stage3_manifest_value schema "$1")" = simple-bootstrap-sanity-frontend-continuation-v1 ]; then
+        bootstrap_stage3_verify_frontend_continuation_inputs "$@"
+        return $?
+    fi
     if [ "$(bootstrap_stage3_manifest_value schema "$1")" = simple-bootstrap-sanity-version-composition-v1 ]; then
         for bvc_binding in "source_snapshot_sha256:$2" "runtime_snapshot_sha256:$3" "tool_snapshot_sha256:$4"; do
             bvc_key=${bvc_binding%%:*} bvc_file=${bvc_binding#*:}
@@ -1517,6 +1521,9 @@ bootstrap_stage3_verify_sanity_evidence_receipt() (
     bootstrap_stage3_sanity_regular_authority "$bcc_file" || return 1
     bcc_schema=$(bootstrap_stage3_manifest_value schema "$bcc_file") || return 1
     case "$bcc_schema" in
+        simple-bootstrap-sanity-frontend-continuation-v1)
+            bootstrap_stage3_verify_frontend_continuation_receipt "$@"
+            ;;
         simple-bootstrap-sanity-version-composition-v1)
             bootstrap_stage3_verify_version_only_composition_v1 "$@"
             ;;
@@ -1611,4 +1618,122 @@ bootstrap_stage3_verify_version_only_composition_v1() (
     "$bvc_python" -I -S -B "$bvc_helper" verify --profile "$bvc_profile" --candidate "$bvc_candidate" --root "$bvc_root" \
         --source "$bvc_live/source" --git "$bvc_live/git" --runtime "$bvc_live/runtime" --tools "$bvc_live/tools" \
         --owner-manifest "$bvc_owner" --owner-sha "$bvc_owner_sha" --composition "$bvc_composition"
+)
+
+# Closed continuation of the actual Windows 88f3 build. These anchors are
+# reviewed policy, not expected hashes selected by an untrusted receipt.
+bootstrap_stage3_frontend_continuation_anchor() (
+    [ "$#" = 2 ] || return 1
+    case "$1" in
+      prior) expected=493f783bac43335f6244e6b78632f87d7cb2d967847a90eec17e97269942d5e5 ;;
+      source) expected=df87ceae1a2f961d3070c639f4c385e021796879867d3db3d106ae15dc73dea8 ;;
+      runtime) expected=8a8c5000ec188d4a7a71343649e67decce5c391f410a8993f77afd2cd6343a49 ;;
+      tool) expected=a1da869aaaea2715c1892265b170964d81ce48e9938903c8ca82b46c40e8b5bd ;;
+      command) expected=a44b155128f1cd3d89975cab209c8b8938a1571731f598b2b0bcbddd98938374 ;;
+      *) return 1 ;;
+    esac
+    bootstrap_stage3_sanity_safe_regular "$2" || {
+        printf 'frontend-continuation-error: phase=anchor role=%s failure=unsafe-anchor\n' "$1" >&2; return 1;
+    }
+    [ "$(bootstrap_stage3_hash_file "$2")" = "$expected" ] || {
+        printf 'frontend-continuation-error: phase=anchor role=%s failure=anchor-mismatch\n' "$1" >&2; return 1;
+    }
+)
+
+bootstrap_stage3_frontend_continuation_owner_identity() (
+    [ "$#" = 2 ] || return 1
+    bundle=$(bootstrap_stage3_helper_bundle_fingerprint) || return 1
+    runner=$(bootstrap_stage3_hash_file "$1") || return 1
+    frontend=$(bootstrap_stage3_hash_file "$2") || return 1
+    printf 'helpers=%s\nrunner=%s\nfrontend=%s\n' "$bundle" "$runner" "$frontend" |
+        bootstrap_stage3_hash_stream
+)
+
+bootstrap_stage3_verify_frontend_continuation_controls() (
+    [ "$#" = 3 ] || return 1
+    prior=$1 candidate_sha=$2 version=$3
+    [ "$candidate_sha" = 88f3c81b4a529d344cfc9459f1b3e036b6b34b49c81c1530f8d7e6af8edd8798 ] || return 1
+    bootstrap_stage3_frontend_continuation_anchor prior "$prior" || return 1
+    for binding in schema:simple-bootstrap-sanity-evidence-v1 status:fail \
+        version_status:0 version_expect_status:0 version_match_status:0 \
+        unsupported_status:1 unsupported_match_status:0 sha_stable_status:0 \
+        frontend_smoke_status:125 frontend_smoke_bootstrap0_raw_status:125 \
+        frontend_smoke_bootstrap1_ran:false frontend_smoke_bootstrap1_raw_status:not-run \
+        "version_expected:$version" "version_output:simple-bootstrap $version" \
+        "candidate_sha256_before:$candidate_sha" "candidate_sha256_after:$candidate_sha"; do
+        bootstrap_stage3_sanity_expect "${binding%%:*}" "$prior" "${binding#*:}" || return 1
+    done
+)
+
+bootstrap_stage3_verify_frontend_continuation_inputs() (
+    [ "$#" = 5 ] || return 1
+    composition=$1 source=$2 runtime=$3 tool=$4 args=$5
+    [ "$args" = 275c002e1098f522475501ed440ed705ffab499727c1e33ddab863f2c88de317 ] || return 1
+    bootstrap_stage3_sanity_expect build_args_sha256 "$composition" "$args" || return 1
+    for binding in "source:$source" "runtime:$runtime" "tool:$tool"; do
+        role=${binding%%:*} path=${binding#*:}
+        bootstrap_stage3_frontend_continuation_anchor "$role" "$path" || return 1
+        for boundary in before after; do
+            bootstrap_stage3_sanity_expect "${role}_snapshot_sha256_${boundary}" "$composition" \
+                "$(bootstrap_stage3_hash_file "$path")" || return 1
+        done
+    done
+)
+
+bootstrap_stage3_verify_frontend_continuation_receipt() (
+    [ "$#" = 5 ] || return 1
+    composition=$1 display=$2 parent=$3 candidate=$4 root=$5
+    bootstrap_stage3_sanity_safe_regular "$composition" || return 1
+    bootstrap_stage3_sanity_display_absolute "$display" || return 1
+    for binding in schema:simple-bootstrap-sanity-frontend-continuation-v1 \
+        profile:windows-msvc-88f3-frontend-continuation-v1 status:pass \
+        retained_checks:3 remaining_checks:2 checks_run:5; do
+        bootstrap_stage3_sanity_expect "${binding%%:*}" "$composition" "${binding#*:}" || return 1
+    done
+    candidate_sha=$(bootstrap_stage3_hash_file "$candidate") || return 1
+    bootstrap_stage3_verify_frontend_continuation_controls "$parent/prior-sanity.env" \
+        "$candidate_sha" "$(bootstrap_stage3_canonical_version "$root")" || return 1
+    bootstrap_stage3_frontend_continuation_anchor command "$parent/stage2-command.transcript" || return 1
+    bootstrap_stage3_sanity_expect candidate_sha256 "$composition" "$candidate_sha" || return 1
+    bootstrap_stage3_sanity_safe_regular "$parent/context-witnesses.env" || return 1
+    bootstrap_stage3_sanity_expect context_witness_sha256 "$composition" \
+        "$(bootstrap_stage3_hash_file "$parent/context-witnesses.env")" || return 1
+    bootstrap_stage3_sanity_expect context_only "$parent/context-witnesses.env" true || return 1
+    bootstrap_stage3_sanity_expect owner_sanity_sha256 "$composition" \
+        "$(bootstrap_stage3_hash_file "$bootstrap_stage3_sanity_module")" || return 1
+    owner_scripts=$(CDPATH= cd -- "$(dirname -- "$bootstrap_stage3_sanity_module")/../../.." && pwd -P) || return 1
+    bootstrap_stage3_sanity_expect owner_runner_sha256 "$composition" \
+        "$(bootstrap_stage3_hash_file "$owner_scripts/check/run-stage2-frontend-continuation.shs")" || return 1
+    bootstrap_stage3_sanity_expect owner_frontend_sha256 "$composition" \
+        "$(bootstrap_stage3_hash_file "$owner_scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs")" || return 1
+    owner_closure=$(bootstrap_stage3_frontend_continuation_owner_identity \
+        "$owner_scripts/check/run-stage2-frontend-continuation.shs" \
+        "$owner_scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs") || return 1
+    for boundary in before after; do
+        bootstrap_stage3_sanity_expect "owner_closure_sha256_$boundary" "$composition" "$owner_closure" || return 1
+    done
+    for role in prior-sanity frontend-sanity; do
+        bootstrap_stage3_sanity_safe_regular "$parent/$role.env" || return 1
+        bootstrap_stage3_sanity_expect "${role}_sha256" "$composition" \
+            "$(bootstrap_stage3_hash_file "$parent/$role.env")" || return 1
+    done
+    bootstrap_stage3_sanity_expect base_control_profile "$parent/frontend-sanity.env" \
+        windows-msvc-88f3-retained-controls-v1 || return 1
+    bootstrap_stage3_sanity_expect base_control_snapshot_sha256 "$parent/frontend-sanity.env" \
+        "$(bootstrap_stage3_hash_file "$parent/prior-sanity.env")" || return 1
+    for key in version_status version_output version_expected version_expect_status version_match_status \
+        unsupported_status unsupported_output_sha256 unsupported_match_status; do
+        bootstrap_stage3_sanity_expect "$key" "$parent/frontend-sanity.env" \
+            "$(bootstrap_stage3_manifest_value "$key" "$parent/prior-sanity.env")" || return 1
+    done
+    for boundary in before after; do
+        bootstrap_stage3_verify_frontend_continuation_inputs "$composition" \
+            "$parent/source-$boundary.txt" "$parent/runtime-$boundary.txt" "$parent/tool-$boundary.txt" \
+            275c002e1098f522475501ed440ed705ffab499727c1e33ddab863f2c88de317 || return 1
+    done
+    # Reused controls never bypass either full frontend group: this validates
+    # every collector, log, object/executable and exact program output.
+    _bootstrap_stage3_verify_sanity_evidence_receipt_legacy \
+        "$parent/frontend-sanity.env" "${display%/*}/frontend-sanity.env" \
+        "$parent" "$candidate" "$root"
 )

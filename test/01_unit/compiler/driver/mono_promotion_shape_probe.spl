@@ -1,0 +1,61 @@
+# Root ownership diagnostic only: this is NOT an issued repository or factory.
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+struct ProbeMetadata:
+    name: text
+    paths: [text]
+
+struct ProbeCarrier17:
+    authority: text
+    artifact_key: text
+    modules: Dict<text, ProbeMetadata>
+    ordered_inventory: [text]
+    declaration_order: [text]
+    emission_rows: [ProbeMetadata]
+    schedule_kind: text
+    physical_inventory: ProbeMetadata
+    current_parent: ProbeMetadata
+    verification: ProbeMetadata?
+    zero_templates: bool
+    force_all_sources: bool
+    allow_bootstrap_shortcuts: bool
+    bootstrap_mode: text
+    report_digest: text
+    collection_digest: text
+    serial: i64
+
+fn exercise(explicit_type: bool, label: text) -> i64:
+    if not transient_scope_begin(): return 1
+    var value = ProbeCarrier17(authority: "", artifact_key: "", modules: {},
+        ordered_inventory: [], declaration_order: [], emission_rows: [],
+        schedule_kind: "", physical_inventory: ProbeMetadata("parent", []),
+        current_parent: ProbeMetadata("parent", []), verification: nil,
+        zero_templates: true, force_all_sources: false, allow_bootstrap_shortcuts: false,
+        bootstrap_mode: "0", report_digest: "report", collection_digest: "", serial: 1)
+    value.authority = "authority-" + label
+    value.artifact_key = "artifact-" + label
+    value.collection_digest = "collection-" + label
+    value.schedule_kind = "schedule-" + label
+    value.emission_rows = [ProbeMetadata("row-" + label, ["path-" + label])]
+    value.modules["module"] = ProbeMetadata("module-" + label, ["source-" + label])
+    val paused = transient_scope_pause()
+    var owned = false
+    if paused:
+        if explicit_type:
+            owned = transient_promote<ProbeCarrier17>(value)
+        else:
+            owned = transient_promote(value)
+    val ended = transient_scope_end()
+    if not paused: return 2
+    if not owned: return 3
+    if not ended: return 4
+    if value.authority != "authority-" + label: return 5
+    if value.emission_rows[0].paths[0] != "path-" + label: return 6
+    if value.modules["module"].name != "module-" + label: return 7
+    0
+
+fn main() -> i64:
+    val inferred = exercise(false, "inferred")
+    val explicit_type = exercise(true, "explicit")
+    print "mono-promotion-shape inferred={inferred} explicit={explicit_type}"
+    if inferred == 0 and explicit_type == 0: 0 else: 1

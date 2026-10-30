@@ -2,6 +2,8 @@
 
 Status: prepared review lane; no protected branch updates or backports performed.
 
+Superseded 2026-10-25: the release line is now `release/1.0.0`; the 2026-10-02 `release/1.0` snapshot comparisons below are historical. No item 5 implementation backport has landed beyond `4efd8885ded`.
+
 Release worktree: C:/dev/simple-item5-release-review-20261002.
 Owner/session: Codex root / item5-release-review-20261002.
 Work branch: work/item5-release-review-20261002.

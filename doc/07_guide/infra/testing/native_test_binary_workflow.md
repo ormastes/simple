@@ -38,6 +38,13 @@ execution from parsed flags or generated compiler arguments.
 
 ## Build and run with the existing feature
 
+Implement and qualify features with an admitted Phase 2 compiler before Phase 3
+is available. Record the producer hash and actual compile/run results; a directory
+named `stage3` does not establish compiler generation. Phase 3 self-rebuild is a
+separate acceptance criterion, not a prerequisite for focused feature checks.
+Production-owner native fixtures can diagnose behavior while repairing the full
+SSpec route, but their assertions do not count as executed SSpec scenarios.
+
 Use a source-matched self-hosted full CLI or standalone test runner and pin the
 Phase 2 producer. The explicit AOT switches are `--native-backend=llvm` and
 `--native-backend=cranelift`. `--mode=native` or `--mode=binary` alone is not proof
@@ -52,7 +59,7 @@ $env:SIMPLE_NATIVE_BUILD_THREADS = '40'
 $env:SIMPLE_NO_STUB_FALLBACK = '1'
 $env:SIMPLE_NO_BOOTSTRAP_DELEGATE = '1'
 $runner = 'C:/path/to/phase2/simple_test_runner.exe'
-& $runner 'test/01_unit/compiler' --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --json
+& $runner 'test/01_unit/compiler' --native-backend=llvm --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --keep-artifacts --verbose --format text
 ```
 
 Run from the matching source root. If the producer requires an external runtime
@@ -74,6 +81,11 @@ wrapper, invokes `native-build`, runs the resulting executable directly and
 collects its result. Explicit AOT errors remain errors; they are not replaced
 with a successful interpreter run. `--keep-artifacts` retains generated test
 artifacts, and `--verbose` records their paths and exact compiler invocation.
+
+JSON test output is retired. The supported text format retains native build
+and case results; `--sdn` additionally requires the scoped-environment V4
+process owner and its capability checks. An SDN provider refusal is an
+infrastructure failure, not an executed or passing test.
 
 ## Listing and counts
 
@@ -156,6 +168,13 @@ performed read-only to qualify the preserved early evidence later. Neither
 mode creates six aggregate binaries or infers binary-owned test counts.
 
 ## Repair and evidence
+
+Applications and system scenarios should use stable `std` module imports.
+Select GC/no-GC and sync/async implementations through project/build
+configuration and composition. Explicit family imports belong in provider
+implementation boundaries and tests that intentionally target that family.
+When a selected facade omits an API or pulls in an unrelated dispatch owner,
+repair that facade so applications can keep their public imports.
 
 Continue independent files and suites after failures using the existing
 `--unstable` route. Preserve nonzero results, failed logs and compatible caches;

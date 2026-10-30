@@ -1,0 +1,119 @@
+# Explicit-state checked pane teardown. API owns the registry and pending list.
+# Failed native handles remain in the returned state; no test-only close seam.
+use os.apps.smux.service.{ServiceState}
+use os.apps.smux.child_lifecycle.{close_owned_children}
+use os.apps.smux.window_layout_service.{window_base_rects, apply_window_viewports, commit_window_geometry}
+use os.apps.smux.mux_rects.{MuxRect}
+use os.apps.smux.contract.{MuxPanePresentation}
+use os.apps.smux.pane_presentation.{pane_presentation, window_store_presentation}
+
+pub struct PaneClosePending:
+    session_id: text
+    window_id: text
+    pane_id: text
+
+pub struct PaneCloseUpdate:
+    state: ServiceState
+    pending: [PaneClosePending]
+    closed: bool
+    uncertain: bool = false
+
+pub fn pane_close_window_pending(pending: [PaneClosePending], session_id: text, window_id: text) -> bool:
+    for request in pending:
+        if request.session_id == session_id and request.window_id == window_id: return true
+    return false
+
+pub fn pane_close_poll_windows(pending: [PaneClosePending], windows: [text]) -> [text]:
+    var blocked = windows
+    for request in pending:
+        if not blocked.contains(request.window_id): blocked.push(request.window_id)
+    return blocked
+
+# Full window/session kill supersedes this intent while retaining the same
+# ServiceState handles. Its own closing marker must be installed first.
+pub fn pane_close_forget(pending: [PaneClosePending], session_id: text, window_id: text = "") -> [PaneClosePending]:
+    var kept: [PaneClosePending] = []
+    for request in pending:
+        if request.session_id != session_id or (window_id != "" and request.window_id != window_id):
+            kept.push(request)
+    return kept
+
+# Pure commit guard: owned, failed or deferred native handles cannot be erased.
+# The final pane belongs to the existing checked window/session deletion path.
+pub fn remove_closed_pane_state(st: ServiceState, session_id: text, window_id: text, pane_id: text) -> Result<ServiceState, text>:
+    val pi = st.find_pane_idx(pane_id)
+    val wi = st.find_window_idx(window_id)
+    if pi < 0 or wi < 0: return Err("unknown pane or window")
+    val target = st.get_pane(pi)
+    val window = st.get_window(wi)
+    if target.pane.session_id != session_id or target.pane.window_id != window_id or window.session_id != session_id:
+        return Err("pane does not belong to session/window")
+    if target.pty_fd >= 0 or target.child_pid > 0:
+        return Err("pane cleanup pending or failed: " + pane_id)
+    var survivor = ""
+    var first_survivor = ""
+    var i = 0
+    while i < st.pane_count:
+        val pane = st.get_pane(i).pane
+        if pane.session_id == session_id and pane.window_id == window_id and pane.id != pane_id:
+            if first_survivor == "": first_survivor = pane.id
+            if survivor == "" and not pane_presentation(window, pane.id).hidden: survivor = pane.id
+        i = i + 1
+    if first_survivor == "": return Err("final pane requires checked window deletion")
+    val reveal = survivor == ""
+    if reveal: survivor = first_survivor
+    var remaining: [MuxRect] = []
+    for rect in window_base_rects(st, session_id, window_id):
+        if rect.pane_id != pane_id: remaining.push(rect)
+    var result = st.remove_pane(pi).replace_window(wi, window.with_geometry(remaining, window.canvas_cols, window.canvas_rows))
+    if reveal:
+        val prior = pane_presentation(result.get_window(wi), survivor)
+        val shown = window_store_presentation(result.get_window(wi), MuxPanePresentation(
+            pane_id: survivor, title: prior.title, hidden: false, border: prior.border, status: prior.status))
+        if shown.is_err(): return Err(shown.unwrap_err())
+        result = result.replace_window(wi, shown.unwrap())
+    if target.focus or reveal:
+        i = 0
+        while i < result.pane_count:
+            val pane = result.get_pane(i)
+            if pane.pane.session_id == session_id and pane.pane.window_id == window_id:
+                result = result.replace_pane(i, pane.with_focus(pane.pane.id == survivor))
+            i = i + 1
+    return apply_window_viewports(result, session_id, window_id)
+
+pub fn close_pane_state(st: ServiceState, pending: [PaneClosePending], session_id: text, window_id: text, pane_id: text) -> PaneCloseUpdate:
+    val pi = st.find_pane_idx(pane_id)
+    val wi = st.find_window_idx(window_id)
+    if pi < 0 or wi < 0:
+        return PaneCloseUpdate(state: st, pending: pending, closed: false)
+    val pane = st.get_pane(pi).pane
+    if pane.session_id != session_id or pane.window_id != window_id or st.get_window(wi).session_id != session_id:
+        return PaneCloseUpdate(state: st, pending: pending, closed: false)
+    var siblings = 0
+    var i = 0
+    while i < st.pane_count:
+        val other = st.get_pane(i).pane
+        if other.session_id == session_id and other.window_id == window_id: siblings = siblings + 1
+        i = i + 1
+    if siblings < 2:
+        return PaneCloseUpdate(state: st, pending: pending, closed: false)
+    var already_pending = false
+    for request in pending:
+        if request.session_id == session_id and request.window_id == window_id:
+            if request.pane_id != pane_id:
+                return PaneCloseUpdate(state: st, pending: pending, closed: false)
+            already_pending = true
+    var requests = pending
+    if not already_pending:
+        requests.push(PaneClosePending(session_id: session_id, window_id: window_id, pane_id: pane_id))
+    val released = close_owned_children(st, session_id, window_id, pane_id)
+    val removed = remove_closed_pane_state(released, session_id, window_id, pane_id)
+    if removed.is_err():
+        return PaneCloseUpdate(state: released, pending: requests, closed: false)
+    # Restore surviving native viewports before removing metadata. If resize
+    # fails, keep the released target record and pending close for retry; all
+    # other mutations are already excluded by that exact pending intent.
+    val resized = commit_window_geometry(released, removed.unwrap(), session_id, window_id)
+    if resized.is_err():
+        return PaneCloseUpdate(state: released, pending: requests, closed: false, uncertain: resized.uncertain)
+    return PaneCloseUpdate(state: resized.state, pending: pane_close_forget(requests, session_id, window_id), closed: true)

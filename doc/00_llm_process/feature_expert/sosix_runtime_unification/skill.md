@@ -1,5 +1,9 @@
 # SOSIX runtime unification feature expert
 
+## 2026-10-29 host process handoff
+
+Use the [shared-contract/platform-owner design](../../../05_design/runtime/sosix_runtime_unification_design.md#2026-10-29-host-process-coordination-contract) and [integration/TDD guide](../../../07_guide/lib/sosix_runtime_library.md#host-process-integration-workflow--2026-10-29). Release baseline `f0d6c75f235` includes #5233/#5234 cooperative Darwin snapshot V1. Strict V4 stays unavailable on Mac; image/tree experiments are unlanded and do not change admission. Coordinate shared runtime/registry edits; each host owns its adapter and evidence. C gate/P1 diagnostic results do not qualify deployed native Simple/P2.
+
 ## 2026-10-11 variation handoff
 
 The [selected Item 5 integration](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) extends this existing expert. Earlier seed-era status below remains dated history. Before proposing a new body, identify its current semantic owner, callers and reused/moved/retired implementation. Do not duplicate a Future, schema, feature decoder, service-ID table, GPU runtime or selection ladder.
@@ -89,3 +93,12 @@ queues, QEMU serial-bytes-observed row (needs pure-Simple deploy).
   behavior examples on the `io_rw` route.
 - Still red and pre-existing, outside this lane's edits: `fs_service_vfs_backend_v1_spec`
   (seed parse error), `fs_service_adapter_v1_spec` (indexed field receiver), `fs_ipc_codec_v1_spec`.
+
+## Darwin descendant signal race (2026-10-29)
+
+A repeated group SIGKILL may return EPERM after an earlier successful SIGKILL
+and observed leader exit. Keep ownership and resample until zero live members
+or the cleanup deadline; EPERM alone never permits retirement. Initial denial
+still errors. Native and deterministic evidence is in
+`scripts/check/check-sosix-darwin-process.shs`; the executable SSpec and manual
+are `darwin_process_signal_race_spec` under the process system-test trees.

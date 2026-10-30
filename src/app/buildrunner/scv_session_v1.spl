@@ -1,0 +1,164 @@
+"""One source-only frozen session per manager run; no CURRENT or env publication."""
+use app.buildrunner.scv_cli_plan_v1.{BuildRunnerScvPlanV1, build_runner_scv_plan_read_v1, build_runner_scv_source_roots_v1}
+use app.buildrunner.scv_session_record_v1.{build_runner_scv_record_parse_v1, build_runner_scv_record_encode_v1}
+use app.buildrunner.scv_admission_v1.{BuildRunnerScvAdmissionV1, build_runner_scv_bind_v1,
+    build_runner_scv_revalidate_v1, build_runner_scv_admission_digest_v1}
+use app.buildrunner.task_context.{build_runner_context_decode_v1}
+use app.bootstrap_builder.worker.{builder_worker_environment_digest_v1}
+use app.bootstrap_builder.cli_args.{BuilderCliV1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildRunV1, builder_task_identity_v1}
+use app.compiler_entrypoint.source_authority.{CompilerSourceAuthorityV1,
+    compiler_source_authority_acquire_v1, compiler_source_authority_inventory_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_checkout_cache_root_v1}
+use std.scv.snapshot_v1_adapter.{CompileSnapshotV1Adapter, scv_snapshot_from_compile_v1}
+use std.scv.source_witness_v1.{ScvSourceWitnessV1, scv_snapshot_lookup_domain_v2,
+    scv_snapshot_directory_v2, scv_snapshot_directory_source_witness_v1}
+use std.scv.snapshot_v2.{scv_snapshot_in_scope_v2}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.io.read_only_file_view.{read_only_file_view_read_beneath_bounded_v1}
+use app.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_atomic_write}
+use app.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
+
+pub struct BuildRunnerScvSessionV1:
+    adapter: CompileSnapshotV1Adapter
+    bindings: Dict<text, BuildRunnerScvAdmissionV1>
+    record_path: text
+    record_payload: text
+
+fn build_runner_scv_environment_v1(scopes: [text]) -> Result<bool, text>:
+    for name in ["SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_COMMIT_ID",
+            "SIMPLE_SCV_TREE_ID", "SIMPLE_SCV_INVENTORY_DIGEST", "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST",
+            "SIMPLE_SCV_INVENTORY_GENERATION", "SIMPLE_SCV_SOURCE_DRIFTED", "SIMPLE_SOURCE_ROOT",
+            "SIMPLE_SOURCE_ROOTS", "SIMPLE_PATH", "SIMPLE_PACKAGE_PATH", "SIMPLE_PROJECT_ROOT",
+            "SIMPLE_HOME", "SIMPLE_MODULE_PATH", "SIMPLE_SOURCE_PATH", "SIMPLE_IMPORT_PATH"]:
+        if (env_get(name) ?? "") != "": return Err("scv-inherited-source-binding-unsupported:" + name)
+    val library = env_get("SIMPLE_LIB") ?? ""
+    if library == "": return Err("scv-explicit-library-root-required")
+    if not scopes.contains(library): return Err("scv-external-library-root-unsupported")
+    Ok(true)
+
+fn build_runner_scv_context_v1(task: BuildTaskV1, checkout: text) -> Result<text, text>:
+    val path = "task-context/" + task.id + ".sdn"
+    var expected = ""
+    for input in task.inputs:
+        if input.path == path: expected = input.digest
+    if expected == "": return Err("scv-task-context-required:" + task.id)
+    val payload = file_read_regular_no_follow_bounded(checkout + "/" + path, 2048)?
+    if sha256_text(payload) != expected: return Err("scv-task-context-digest-mismatch")
+    val context = build_runner_context_decode_v1(payload)?
+    if builder_worker_environment_digest_v1()? != context.environment_digest:
+        return Err("scv-task-environment-drift")
+    Ok(context.backend)
+
+fn build_runner_scv_bind_tasks_v1(run: BuildRunV1, checkout: text,
+        plan: BuildRunnerScvPlanV1, adapter: CompileSnapshotV1Adapter) -> Result<Dict<text, BuildRunnerScvAdmissionV1>, text>:
+    var bindings: Dict<text, BuildRunnerScvAdmissionV1> = {}
+    for task in run.tasks:
+        # Include the implicit library namespace in exact staged membership,
+        # even when --source enumerates only an application subtree.
+        val roots = build_runner_scv_source_roots_v1(task, plan.source_scopes,
+            build_runner_scv_context_v1(task, checkout)?, env_get("SIMPLE_LIB") ?? "")?
+        var witnesses: [ScvSourceWitnessV1] = []
+        for input in task.inputs:
+            if plan.roles[task.id + "|" + input.path] == "source":
+                witnesses.push(scv_snapshot_lookup_domain_v2(adapter.snapshot, input.path, "compile-inventory-v1")?)
+        for root in roots:
+            # This directory witness is admitted only when the actual task
+            # declares every frozen descendant, which the binding owner checks.
+            witnesses.push(scv_snapshot_directory_source_witness_v1(scv_snapshot_directory_v2(adapter.snapshot, root)?))
+        val binding = build_runner_scv_bind_v1(task, adapter, witnesses)?
+        var mapped: [text] = []
+        for input in binding.source_inputs: mapped.push(input.path)
+        for input in task.inputs:
+            if mapped.contains(input.path) != (plan.roles[task.id + "|" + input.path] == "source"):
+                return Err("scv-explicit-source-role-map-differs")
+        bindings[task.id] = binding
+    Ok(bindings)
+
+pub fn build_runner_scv_session_open_v1(run: BuildRunV1, config: BuilderCliV1,
+        plan_path: text, require_existing: bool) -> Result<BuildRunnerScvSessionV1?, text>:
+    val record_path = config.state + "/scv-session.sdn"
+    if plan_path == "":
+        if file_exists(record_path): return Err("scv-session-option-required-for-bound-state")
+        return Ok(nil)
+    if config.output_root == config.source_root: return Err("scv-explicit-private-output-root-required")
+    for host in run.hosts:
+        if host.transport != "local": return Err("scv-source-mode-local-hosts-only")
+    val plan = build_runner_scv_plan_read_v1(plan_path, run)?
+    build_runner_scv_environment_v1(plan.source_scopes)?
+    val cache_root = compile_source_inventory_checkout_cache_root_v1(config.source_root)
+    var authority: CompilerSourceAuthorityV1? = nil
+    var retained = ""
+    if file_exists(record_path):
+        val bytes = read_only_file_view_read_beneath_bounded_v1(config.state, "scv-session.sdn", 1048576)?
+        val record = build_runner_scv_record_parse_v1(bytes)?
+        if record.plan_sha256 != plan.source_sha256 or record.checkout_root != config.source_root:
+            return Err("scv-retained-session-subject-mismatch")
+        val snapshot = scv_compile_snapshot_open_v1(config.source_root, record.snapshot_root,
+            record.revision_id, record.commit_id, record.tree_id, record.inventory_digest)
+        if not snapshot.valid: return Err("scv-retained-snapshot-invalid:" + snapshot.reason)
+        authority = Some(CompilerSourceAuthorityV1(valid: true, reason: "ok", snapshot: snapshot,
+            source_inventory_digest: record.source_inventory_digest, inventory_generation: record.inventory_generation))
+        # Preserve exact canonical bytes for comparison after all task bindings
+        # and immutable inventory ownership have independently been rechecked.
+        retained = io_legacy_utf8(bytes)?
+    else:
+        if require_existing or file_exists(config.state + "/journal.sdn"):
+            return Err("scv-retained-session-binding-missing")
+        val captured = compiler_source_authority_acquire_v1(config.source_root, cache_root, plan.source_scopes, plan.cold_init)
+        if not captured.valid: return Err("scv-capture-refused:" + captured.reason)
+        authority = Some(captured)
+    val admitted = authority.unwrap()
+    val inventory = compiler_source_authority_inventory_v1(config.source_root, admitted)?
+    val adapter = scv_snapshot_from_compile_v1(config.source_root, admitted.snapshot, inventory, plan.source_scopes, 0)?
+    if adapter.source_inventory_digest != "sha256_" + admitted.source_inventory_digest:
+        return Err("scv-source-inventory-digest-domain-mismatch")
+    val bindings = build_runner_scv_bind_tasks_v1(run, config.source_root, plan, adapter)?
+    var identities: Dict<text, text> = {}
+    for task in run.tasks: identities[task.id] = build_runner_scv_admission_digest_v1(bindings[task.id])?
+    val payload = build_runner_scv_record_encode_v1(plan.source_sha256, config.source_root, cache_root, plan.source_scopes, adapter, admitted.source_inventory_digest, identities)
+    if retained != "":
+        if retained != payload: return Err("scv-retained-session-binding-differs")
+    elif not file_atomic_write(record_path, payload): return Err("scv-session-binding-publish-failed")
+    Ok(Some(BuildRunnerScvSessionV1(adapter: adapter, bindings: bindings, record_path: record_path, record_payload: payload)))
+
+pub fn build_runner_scv_task_error_v1(session: BuildRunnerScvSessionV1?, task: BuildTaskV1, checkout: text) -> text:
+    if session == nil: return ""
+    val owner = session.unwrap()
+    if not owner.bindings.contains_key(task.id): return "scv-task-not-bound"
+    var binding = owner.bindings[task.id]
+    if builder_task_identity_v1(task) != binding.task_identity:
+        # Only the existing scheduler may advance an attempt. Reconstruct an
+        # exact binding for that attempt after every other task field matches;
+        # do not weaken the admission owner's exact task-identity contract.
+        var canonical = task
+        canonical.attempt = binding.task.attempt
+        if builder_task_identity_v1(canonical) != binding.task_identity or task.attempt < binding.task.attempt:
+            return "scv-task-identity-drift"
+        match build_runner_scv_bind_v1(task, owner.adapter, binding.witnesses):
+            case Ok(value): binding = value
+            case Err(reason): return "scv-retry-source-binding-refused:" + reason
+    if builder_task_identity_v1(task) != binding.task_identity: return "scv-task-identity-drift"
+    val current = build_runner_scv_revalidate_v1(binding, owner.adapter.snapshot)
+    if current.is_err(): return "scv-source-witness-refused:" + current.unwrap_err()
+    if build_runner_scv_context_v1(task, checkout).is_err(): return "scv-task-context-or-environment-drift"
+    match file_read_regular_no_follow_bounded(owner.record_path, 1048576):
+        case Ok(payload):
+            if payload != owner.record_payload: return "scv-session-binding-changed"
+        case Err(_): return "scv-session-binding-unavailable"
+    ""
+
+pub fn build_runner_scv_source_root_v1(session: BuildRunnerScvSessionV1?) -> text:
+    if session == nil: "" else: session.unwrap().adapter.legacy.snapshot_root
+
+pub fn build_runner_scv_source_paths_v1(session: BuildRunnerScvSessionV1?, task: BuildTaskV1) -> [text]:
+    var paths: [text] = []
+    if val owner = session:
+        if owner.bindings.contains_key(task.id):
+            for input in owner.bindings[task.id].source_inputs: paths.push(input.path)
+    paths
+
+export BuildRunnerScvSessionV1, build_runner_scv_session_open_v1, build_runner_scv_task_error_v1
+export build_runner_scv_source_root_v1, build_runner_scv_source_paths_v1

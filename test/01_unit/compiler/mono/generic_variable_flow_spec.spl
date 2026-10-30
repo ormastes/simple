@@ -25,12 +25,12 @@ Design: doc/05_design/compiler/generics/generic_instantiation_model.md (§9).
 use std.spec
 use compiler.common.config.Logger
 use compiler.common.driver_core_types.SourceFile
-use compiler.frontend.parser_types.{Module}
+use compiler.frontend.parser_types.{ParserModule}
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.hirlowering_for_module
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
-use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
 use compiler.hir.hir_definitions.{HirFunction}
 use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
 
@@ -55,7 +55,7 @@ val prelude = "struct S:\n" +
     "    \"m\"\n" +
     "\n"
 
-fn flow(extra: text, body: text) -> text:
+fn flow(extra: text, body: text, erased_returns: [text] = []) -> text:
     """Lower `prelude + extra + fn main() { body }`, run 40.mono and render
     the verdict: sorted names of the surviving `keep`/`Box__get`/`twice`
     functions, unresolved count, and the diagnostic codes."""
@@ -63,7 +63,7 @@ fn flow(extra: text, body: text) -> text:
     val log = Logger(level: 0)
     val name = "flow_main"
     val parsed_module = parse_full_frontend(src, name + ".spl", name, log)
-    var parsed: Dict<text, Module> = {}
+    var parsed: Dict<text, ParserModule> = {}
     parsed[name] = parsed_module
     val surfaces_result = module_surfaces_from_modules(parsed, [
         SourceFile(path: name + ".spl", content: src, module_name: name)])
@@ -71,7 +71,15 @@ fn flow(extra: text, body: text) -> text:
         return "surface error: " + surfaces_result.unwrap_err()
     var hl = hirlowering_for_module(name, surfaces_result.unwrap())
     var hir: Dict<text, HirModule> = {}
-    hir[name] = hl.lower_module(parsed_module)
+    var lowered: HirModule = hl.lower_module(parsed_module)
+    # Reproduce bootstrap's physical return erasure after semantic symbol
+    # publication. Only the function ABI changes; its declaration stays typed.
+    for key in lowered.functions.keys():
+        var declaration: HirFunction = lowered.functions[key]
+        if erased_returns.contains(declaration.name):
+            declaration.return_type = HirType(kind: HirTypeKind.Int(64, true), span: declaration.span)
+            lowered.functions[key] = declaration
+    hir[name] = lowered
     if hl.errors.len() > 0:
         return "hir error: " + hl.errors[0].message
     val (mono, stats, diags) = run_monomorphization_with_diagnostics(hir)
@@ -80,6 +88,10 @@ fn flow(extra: text, body: text) -> text:
     for sym in out_module.functions.keys():
         val f: HirFunction = out_module.functions[sym]
         val fname: text = f.name
+        if erased_returns.contains(fname):
+            match f.return_type.kind:
+                case HirTypeKind.Int(64, true): ()
+                case _: return "physical ABI changed: {fname}"
         if fname.starts_with("keep") or fname.starts_with("Box__") or fname.starts_with("twice") or fname.starts_with("pick"):
             names = names.push(fname)
     names = names.sorted()
@@ -111,6 +123,34 @@ describe "40.mono variable flow: bindings":
 
     it "return value of a non-generic function":
         expect(flow("", "    keep(mk())\n")).to_equal(ok_str)
+
+    it "retains a local inherent method return through a member load":
+        val extra = "struct MethodOwner:\n    name: text\n\nimpl MethodOwner:\n    fn item(self) -> S:\n        S(name: self.name)\n\nfn method_flow(owner: MethodOwner) -> text:\n    val item = owner.item()\n    keep(item.name)\n\n"
+        expect(flow(extra, "    method_flow(MethodOwner(name: \"x\"))\n")).to_equal(ok_str)
+
+    it "retains a declared record result through an erased physical ABI":
+        val extra = "fn make_record() -> S:\n    S(name: \"x\")\n\n"
+        expect(flow(extra, "    val item = make_record()\n    keep(item.name)\n", ["make_record"])).to_equal(ok_str)
+
+    it "retains a declared optional result through an erased physical ABI":
+        val extra = "fn maybe_record() -> S?:\n    Some(S(name: \"x\"))\n\n"
+        expect(flow(extra, "    if val item = maybe_record():\n        keep(item.name)\n", ["maybe_record"])).to_equal(ok_str)
+
+    it "retains a generic result owner through an erased physical ABI":
+        val extra = "fn make_box<T>(item: T) -> Box<T>:\n    Box<T>(item: item)\n\n"
+        expect(flow(extra, "    val item = make_box(\"x\")\n    keep(item.item)\n", ["make_box"])).to_equal(ok_str)
+
+    it "infers a value returned by an unsafe block":
+        val raw = "@unsafe(reason: \"test native handle\", capabilities: [ffi])\nextern fn rt_ptr_read_i64(p: i64, offset: i64) -> i64\n" +
+            "@unsafe(reason: \"test generic extern\", capabilities: [ffi])\nextern fn rt_string_data<T>(value: T) -> i64\n" +
+            "@unsafe(reason: \"test generic extern\", capabilities: [ffi])\nextern fn rt_string_len<T>(value: T) -> i64\n\n"
+        val body = "    val handle = unsafe(capabilities: [ffi]): rt_ptr_read_i64(1, 0)\n" +
+            "    val data = unsafe(capabilities: [ffi]): rt_string_data(handle)\n" +
+            "    val size = unsafe(capabilities: [ffi]): rt_string_len(handle)\n    keep(handle)\n"
+        expect(flow(raw, body)).to_equal(ok_i64)
+
+    it "preserves text through unsafe blocks rather than guessing the erased integer ABI":
+        expect(flow("", "    val value = unsafe(capabilities: [ffi]): mk()\n    keep(value)\n")).to_equal(ok_str)
 
     it "unannotated let from a generic call, passed on":
         expect(flow("", "    val a = keep(\"x\")\n    val b = keep(a)\n")).to_equal(ok_str)
@@ -218,6 +258,9 @@ describe "40.mono variable flow: one specialization per instantiation":
         expect(flow("fn use_r(a: Result<i64, text>, b: Result<i64, text>) -> i64:\n    keep(a)\n    keep(b)\n    0\n\n", "    0\n")).to_equal("keep$unknown unresolved=0 diags=")
 
 describe "40.mono variable flow: refused, never guessed":
+    it "refuses an unsafe block whose value has no concrete type evidence":
+        expect(flow("", "    val value = unsafe(capabilities: [ffi]): nil\n    keep(value)\n")).to_equal(refused)
+
     it "a value with no local type evidence is refused with E-MONO-032":
         expect(flow("", "    keep(nil)\n")).to_equal(refused)
 

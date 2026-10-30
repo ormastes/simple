@@ -22,7 +22,8 @@
 //!     `release` (false); a bare OS or arch name; `os=`/`platform=`/
 //!     `target_os=` (OS); `arch=`/`target_arch=`/`cpu=` (arch);
 //!     `family=`/`target_family=` (`unix` | `windows`); `feature=<name>`
-//!     (always false: no features are defined). Anything else evaluates to
+//!     (true only when <name> is listed in the comma/space separated
+//!     `SIMPLE_FEATURES` env var, case-insensitive; e.g. `macho`). Anything else evaluates to
 //!     `false` and is reported as a diagnostic, never a parse error.
 //!   * OS names: windows (win), linux, macos (mac, darwin), freebsd, openbsd,
 //!     netbsd, android, simpleos, none (baremetal), unix (= the family).
@@ -284,6 +285,19 @@ impl CfgTarget {
     }
 }
 
+/// Opt-in build feature tags: `feature=<name>` is true only when <name> is
+/// listed in `SIMPLE_FEATURES` (comma/space separated, case-insensitive).
+/// Mirrors `cfg_feature_enabled` in `cfg_platform.spl`.
+fn feature_enabled(name: &str) -> bool {
+    let wanted = name.trim().to_ascii_lowercase();
+    if wanted.is_empty() {
+        return false;
+    }
+    std::env::var("SIMPLE_FEATURES")
+        .map(|v| v.split([',', ' ']).any(|p| p.trim().eq_ignore_ascii_case(&wanted)))
+        .unwrap_or(false)
+}
+
 fn strip_quotes(value: &str) -> &str {
     let t = value.trim();
     if t.len() >= 2 && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\''))) {
@@ -355,7 +369,7 @@ impl CondEval<'_> {
                 "os" | "platform" | "target_os" => return self.os_match(value),
                 "arch" | "target_arch" | "cpu" => return self.arch_match(value),
                 "family" | "target_family" => return self.family_match(value),
-                "feature" => return false,
+                "feature" => return feature_enabled(value),
                 _ => {}
             }
         }
@@ -715,7 +729,7 @@ mod tests {
             assert!(value && diags.is_empty(), "{spaced}: {diags:?}");
         }
         let (value, diags) = eval_condition("feature=\"gpu\"", "linux", "x86_64");
-        assert!(!value && diags.is_empty(), "feature= is a recognised key that is always false");
+        assert!(!value && diags.is_empty(), "feature= is a recognised key, false unless listed in SIMPLE_FEATURES");
     }
 
     #[test]

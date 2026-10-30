@@ -1,0 +1,77 @@
+#!/bin/sh
+# Cargo cache target selection and repo-common lock identity. No Cargo build.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$ROOT/scripts/bootstrap/bootstrap-authority-wiring.shs"
+PORTABLE_LOCK_ATOMIC_HELPER_PATH=$ROOT/scripts/check/lib/portable-hardlink-lock.pl
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "$ROOT/scripts/check/lib/portable-process-lock.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/cargo-cache-root-test.XXXXXX")
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+trap 'portable_lock_release_all >/dev/null 2>&1 || :; rm -rf -- "$tmp"' EXIT HUP INT TERM
+repo=$tmp/repo
+linked=$tmp/linked
+mkdir -p "$repo"
+git init -q "$repo"
+git -C "$repo" -c user.name=cache-test -c user.email=cache-test@example.invalid commit --allow-empty -qm initial
+git -C "$repo" worktree add -q -b cache-linked "$linked" HEAD
+mkdir -p "$repo/build/one" "$linked/build/two" "$linked/build/shared cache"
+
+fingerprint=$(printf '%064d' 0 | tr '0' 'a')
+config_key=$(bootstrap_authority_rust_build_config_key rustc-verbose cargo-1.2 aarch64-apple-darwin llvm llvm 23.1.1 'cc=/fixture/clang')
+[ "${#config_key}" -eq 12 ]
+legacy_one="$repo/build/one/rust-authority-$fingerprint"
+legacy_two="$linked/build/two/rust-authority-$fingerprint"
+shared_root="$linked/build/shared cache"
+default_target=$(bootstrap_authority_rust_cargo_target "$repo" macos "$fingerprint" "$legacy_one" "$config_key")
+[ "$default_target" = "$repo/build/one/rust-cargo-target-$config_key" ]
+explicit_one=$(bootstrap_authority_rust_cargo_target "$repo" macos "$fingerprint" "$legacy_one" "$config_key" "$shared_root")
+explicit_two=$(bootstrap_authority_rust_cargo_target "$linked" macos "$fingerprint" "$legacy_two" "$config_key" "$shared_root")
+[ "$explicit_one" = "$shared_root/rust-cargo-target-$config_key" ]
+[ "$explicit_two" = "$explicit_one" ]
+other_key=$(bootstrap_authority_rust_build_config_key rustc-verbose cargo-1.2 aarch64-apple-darwin llvm llvm 23.1.1 'cc=/fixture/clang;cflags=-DOTHER')
+[ "$other_key" != "$config_key" ]
+other_target=$(bootstrap_authority_rust_cargo_target "$repo" macos "$fingerprint" "$legacy_one" "$other_key" "$shared_root")
+[ "$other_target" = "$shared_root/rust-cargo-target-$other_key" ]
+[ "$other_target" != "$explicit_one" ]
+# The explicit root changes only target location, never the computed config key.
+[ "$(bootstrap_authority_rust_build_config_key rustc-verbose cargo-1.2 aarch64-apple-darwin llvm llvm 23.1.1 'cc=/fixture/clang')" = "$config_key" ]
+
+common_one=$(bootstrap_authority_rust_cargo_cache_common_dir "$repo" "$shared_root")
+common_two=$(bootstrap_authority_rust_cargo_cache_common_dir "$linked" "$shared_root")
+[ "$common_one" = "$common_two" ]
+lock_root_one=$(bootstrap_authority_rust_cargo_cache_lock_root "$repo")
+lock_root_two=$(bootstrap_authority_rust_cargo_cache_lock_root "$linked")
+[ "$lock_root_one" = "$lock_root_two" ]
+portable_lock_acquire "$lock_root_one" authority 0
+cache_handle=$PORTABLE_LOCK_HANDLE
+if ( portable_lock_acquire "$lock_root_two" authority 0 ); then
+  echo 'FAIL: sibling-worktree cache lock was not shared' >&2
+  exit 1
+fi
+portable_lock_release "$cache_handle"
+portable_lock_acquire "$lock_root_two" authority 0
+portable_lock_release "$PORTABLE_LOCK_HANDLE"
+
+expect_invalid_root() {
+  if bootstrap_authority_validate_rust_cargo_cache_root "$1" "$repo" >/dev/null 2>&1; then
+    echo "FAIL: accepted invalid cache root: $1" >&2
+    exit 1
+  fi
+}
+expect_invalid_root relative/cache
+expect_invalid_root "$repo/build/missing"
+expect_invalid_root "$repo/build/../build/one"
+external="$tmp/external-root"
+mkdir -p "$external"
+expect_invalid_root "$external"
+ln -s "$shared_root" "$linked/build/cache-symlink"
+expect_invalid_root "$linked/build/cache-symlink"
+if bootstrap_authority_rust_cargo_target "$repo" windows "$fingerprint" "$legacy_one" "$config_key" "$shared_root" >/dev/null 2>&1; then
+  echo 'FAIL: accepted the unsupported Windows cache-root override' >&2
+  exit 1
+else
+  lock_status=$?
+  [ "$lock_status" -eq 69 ]
+fi
+echo 'PASS: Rust Cargo cache target/root validation and shared-worktree lock identity'

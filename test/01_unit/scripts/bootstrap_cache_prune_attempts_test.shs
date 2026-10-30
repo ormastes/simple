@@ -1,0 +1,28 @@
+#!/bin/sh
+# Stage provenance keeps at most N attempts: older attempt archives and their
+# *.prior-<attempt> / *.working-<attempt> dirs are evicted (190 MB each).
+set -u
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+fx=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
+trap 'chmod -R u+w "$fx" 2>/dev/null; rm -rf "$fx"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+p="$fx/stage3"
+for a in attempt-20261026T010000-1 attempt-20261026T020000-2 attempt-20261026T030000-3; do
+  mkdir -p "$p/attempts/$a" "$p/stage2-runtime-authority.prior-$a/deps" "$p/stage2-home.working-$a"
+  printf x > "$p/stage2-runtime-authority.prior-$a/deps/f"
+  chmod 0500 "$p/stage2-runtime-authority.prior-$a/deps" "$p/stage2-runtime-authority.prior-$a"
+done
+mkdir -p "$p/stage2-runtime-authority"
+command -v bootstrap_cache_prune_attempts >/dev/null 2>&1 || { echo "FAIL — bootstrap_cache_prune_attempts missing"; exit 1; }
+bootstrap_cache_prune_attempts "$p" 1 || { echo "FAIL — prune returned $?"; exit 1; }
+for gone in attempts/attempt-20261026T010000-1 attempts/attempt-20261026T020000-2 \
+    stage2-runtime-authority.prior-attempt-20261026T010000-1 stage2-home.working-attempt-20261026T020000-2; do
+  [ ! -e "$p/$gone" ] || { echo "FAIL — $gone not evicted"; exit 1; }
+done
+for kept in attempts/attempt-20261026T030000-3 stage2-runtime-authority.prior-attempt-20261026T030000-3 \
+    stage2-home.working-attempt-20261026T030000-3 stage2-runtime-authority; do
+  [ -e "$p/$kept" ] || { echo "FAIL — $kept wrongly evicted"; exit 1; }
+done
+echo "PASS — 3 attempts checked, 2 oldest evicted, newest + live dir kept"

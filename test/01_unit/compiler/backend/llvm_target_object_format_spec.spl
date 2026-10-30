@@ -1,0 +1,76 @@
+"""Object format must come from the target triple, never the compiler host."""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get_opt, env_set}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.llvm_target.{LlvmTargetTriple, llvm_classify_os, llvm_requested_triple_os_parts}
+
+fn fmt_of(triple: text) -> text:
+    val parts = triple.split("-")
+    if parts.len() < 3 or parts.len() > 4:
+        return "ERR:bad triple"
+    val cls = llvm_classify_os(parts[2], parts[0])
+    if cls.len() == 0:
+        return "ERR:unknown os {parts[2]}"
+    cls[0]
+
+fn hosted_format(target: CodegenTarget, requested: text) -> text:
+    val old = env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", requested)
+    val triple = LlvmTargetTriple.from_target_with_mode(target, false)
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", old)
+    "{triple.to_text()} {fmt_of(triple.to_text())}"
+
+describe "llvm_classify_os object format":
+    it "maps windows triples to coff":
+        expect(fmt_of("x86_64-pc-windows-msvc")).to_equal("coff")
+        expect(fmt_of("i686-w64-mingw32")).to_equal("coff")
+        expect(fmt_of("armv7-w64-mingw32")).to_equal("coff")
+        expect(fmt_of("aarch64-w64-mingw32")).to_equal("coff")
+    it "maps linux and simpleos triples to elf":
+        expect(fmt_of("aarch64-unknown-linux-gnu")).to_equal("elf")
+        expect(fmt_of("riscv64-unknown-linux-gnu")).to_equal("elf")
+        expect(fmt_of("riscv32-unknown-linux-gnu")).to_equal("elf")
+        expect(fmt_of("x86_64-unknown-simpleos")).to_equal("elf")
+        expect(fmt_of("aarch64-unknown-simpleos")).to_equal("elf")
+        expect(fmt_of("riscv64-unknown-simpleos")).to_equal("elf")
+    it "maps macos to macho":
+        expect(fmt_of("aarch64-apple-darwin")).to_equal("macho")
+    it "rejects an unknown os instead of falling back to the host":
+        expect(fmt_of("x86_64-unknown-plan9").starts_with("ERR:")).to_equal(true)
+
+describe "hosted triple construction follows the requested target":
+    it "keeps linux elf for aarch64 on any host":
+        expect(hosted_format(CodegenTarget.AArch64, "aarch64-unknown-linux-gnu")).to_equal("aarch64-unknown-linux-gnu elf")
+    it "keeps simpleos elf for x86_64 and aarch64 on any host":
+        expect(hosted_format(CodegenTarget.X86_64, "x86_64-unknown-simpleos")).to_equal("x86_64-unknown-simpleos elf")
+        expect(hosted_format(CodegenTarget.AArch64, "aarch64-unknown-simpleos")).to_equal("aarch64-unknown-simpleos elf")
+    # NON-EVIDENCE for the requested-triple path: the Riscv64 branch uses its own
+    # linux contract and ignores the requested OS; kept only as a regression guard.
+    it "keeps riscv linux elf (non-evidence: riscv ignores the requested os)":
+        expect(hosted_format(CodegenTarget.Riscv64, "riscv64-unknown-linux-gnu")).to_equal("riscv64-unknown-linux-gnu elf")
+    it "gives a mingw request a windows-gnu coff triple":
+        expect(hosted_format(CodegenTarget.X86, "i686-w64-mingw32")).to_equal("i686-w64-windows-gnu coff")
+    it "maps netbsd and versioned freebsd to elf through the hosted path":
+        expect(hosted_format(CodegenTarget.X86_64, "x86_64-unknown-netbsd")).to_equal("x86_64-unknown-netbsd elf")
+        expect(hosted_format(CodegenTarget.X86_64, "x86_64-unknown-freebsd14")).to_equal("x86_64-unknown-freebsd14 elf")
+    it "maps macosx to apple macho through the hosted path":
+        expect(hosted_format(CodegenTarget.AArch64, "aarch64-apple-macosx14.0")).to_equal("aarch64-apple-macosx14.0 macho")
+    it "rejects an explicit triple with an unknown os instead of using the host":
+        match llvm_requested_triple_os_parts("x86_64-unknown-plan9"):
+            case Err(e): expect(e.contains("plan9")).to_equal(true)
+            case Ok(_): expect("Ok").to_equal("Err")
+        match llvm_requested_triple_os_parts("simpleos_x86_64"):
+            case Ok(p): expect(p.len()).to_equal(0)
+            case Err(_): expect("Err").to_equal("Ok")
+    it "uses mach-o mangling in the datalayout for macosx":
+        val triple = LlvmTargetTriple(arch: "aarch64", vendor: "apple", os: "macosx14.0", env: None)
+        expect(triple.datalayout().contains("m:o")).to_equal(true)
+    it "does not panic on the canonical wasm32-unknown-unknown-unknown name":
+        expect(hosted_format(CodegenTarget.Wasm32, "wasm32-unknown-unknown-unknown")).to_equal("wasm32-unknown-wasi wasm")
+    it "keeps an explicit gnullvm environment":
+        expect(hosted_format(CodegenTarget.X86_64, "x86_64-pc-windows-gnullvm")).to_equal("x86_64-pc-windows-gnullvm coff")
+    it "rejects a triple with five or more parts":
+        match llvm_requested_triple_os_parts("a-b-c-d-e"):
+            case Err(_): expect(true).to_equal(true)
+            case Ok(_): expect("Ok").to_equal("Err")

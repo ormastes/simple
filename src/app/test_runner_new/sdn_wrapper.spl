@@ -17,8 +17,9 @@ use std.common.process.observation_v4.{ProcessObservationEnvironmentV4, ProcessO
     ProcessObservationFailurePhaseV4, ProcessObservationFailureReasonV4, ProcessObservationStreamStateV4,
     ProcessObservationEnforcementKindV4, ProcessObservationDescendantPolicyV4,
     freeze_process_observation_receipt_v4, freeze_process_observation_cleanup_receipt_v4}
-use std.nogc_sync_mut.io.process_observation_v4.{OwnedExecutablePin, OwnedCwdPinV4,
-    ProcessObservationStartV4, process_observation_capabilities_v4, process_observation_start_pinned_v4}
+use std.nogc_sync_mut.io.process_observation_v4.{OwnedCwdPinV4,
+    ProcessObservationStartV4, process_observation_capabilities_v4}
+use std.nogc_sync_mut.sosix.memory_executable_v1.{SosixMemoryExecutableV1}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive, file_remove,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
@@ -208,7 +209,7 @@ fn _sdn_collect(started: ProcessObservationStartV4) -> SdnChildCapture:
     SdnChildCapture(exit_code: packet.exit_code, failure: failure, cleanup_safe: safe)
 
 fn _sdn_launch(binary: text, directory: text, arguments: [text], environment: [ProcessObservationEnvironmentV4], capabilities: i64) -> SdnChildCapture:
-    val executable_result = OwnedExecutablePin.pin(binary)
+    val executable_result = SosixMemoryExecutableV1.prepare(binary)
     if executable_result.is_err():
         return SdnChildCapture(exit_code: -1, failure: "SDN worker executable pin failed", cleanup_safe: true)
     var executable = executable_result.unwrap()
@@ -227,7 +228,7 @@ fn _sdn_launch(binary: text, directory: text, arguments: [text], environment: [P
         stdout_limit_bytes: SDN_DIAGNOSTIC_LIMIT, stderr_limit_bytes: SDN_DIAGNOSTIC_LIMIT,
         memory_limit_bytes: 0, enforcement_kind: ProcessObservationEnforcementKindV4.None,
         descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup, max_clock_resolution_ns: 1000000000)
-    val started = process_observation_start_pinned_v4(executable, cwd_pin, request)
+    val started = executable.start(cwd_pin, request)
     # A malformed start receipt may describe an already spawned child. Retain
     # the directory when ownership cannot be recovered; never guess no spawn.
     var capture = if started.is_ok(): _sdn_collect(started.unwrap()) else:

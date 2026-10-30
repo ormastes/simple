@@ -38,9 +38,16 @@ struct BuildTarget:
     output: text
     deps: [text]
 
+struct BuildGroup:
+    name: text
+    is_default: bool
+    members: [text]
+
 struct TargetSet:
     targets: [BuildTarget]
     errors: [text]
+    groups: [BuildGroup]
+    includes: [text]
 
 fn _strip_comment(line: text) -> text:
     """Drop a trailing `#` comment. Target files carry no `#` in paths."""
@@ -80,10 +87,22 @@ fn parse_targets_text(src: text) -> TargetSet:
     Pure text -> TargetSet. Does not touch the filesystem; entry-existence and
     dep-name/cycle validation happen in `validate_targets`. Non-`target`
     top-level sections are ignored so this can share a build.sdn with other
-    sections."""
+    sections.
+
+    Also parses two top-level directives: `include: <path>` (recorded, resolved
+    by `load_targets_file`) and `group <name>:` blocks with `default:` and
+    `members:` (inline list or indented child lines)."""
     var targets: [BuildTarget] = []
     var errors: [text] = []
+    var groups: [BuildGroup] = []
+    var includes: [text] = []
     val lines = src.split("\n")
+
+    var in_group = false
+    var grp_name = ""
+    var grp_default = false
+    var grp_members: [text] = []
+    var members_block = false
 
     var in_target = false
     var cur_name = ""
@@ -113,7 +132,31 @@ fn parse_targets_text(src: text) -> TargetSet:
             if in_target:
                 targets.push(BuildTarget(cur_name, cur_kind, cur_entry, cur_output, cur_deps))
                 in_target = false
+            if in_group:
+                groups.push(BuildGroup(grp_name, grp_default, grp_members))
+                in_group = false
             deps_block = false
+            members_block = false
+            if stripped.starts_with("include:"):
+                val inc = stripped[8:].trim()
+                if inc.len() == 0:
+                    errors.push("target-error: parse: empty include at line " + (i + 1).to_text())
+                else:
+                    includes.push(inc)
+                i = i + 1
+                continue
+            if stripped.starts_with("group "):
+                val ghead = stripped[6:].trim()
+                if not ghead.ends_with(":") or ghead.len() < 2:
+                    errors.push("target-error: parse: bad group header at line " + (i + 1).to_text())
+                    i = i + 1
+                    continue
+                in_group = true
+                grp_name = ghead[0:ghead.len() - 1].trim()
+                grp_default = false
+                grp_members = []
+                i = i + 1
+                continue
             if stripped.starts_with("target "):
                 val head = stripped[7:].trim()
                 if not head.ends_with(":"):
@@ -134,6 +177,37 @@ fn parse_targets_text(src: text) -> TargetSet:
                 cur_entry = ""
                 cur_output = ""
                 cur_deps = []
+            i = i + 1
+            continue
+
+        if in_group:
+            if members_block and not stripped.contains(":"):
+                grp_members.push(stripped)
+                i = i + 1
+                continue
+            if not stripped.contains(":"):
+                errors.push("target-error: parse: expected 'key: value' at line " + (i + 1).to_text())
+                i = i + 1
+                continue
+            val gkey = stripped.split(":")[0].trim()
+            val gval = stripped[gkey.len() + 1:].trim()
+            members_block = false
+            if gkey == "default":
+                if gval == "true":
+                    grp_default = true
+                elif gval == "false":
+                    grp_default = false
+                else:
+                    errors.push("target-error: parse: group " + grp_name + " default must be true or false")
+            elif gkey == "members":
+                val ms = _split_list(gval)
+                var m = 0
+                while m < ms.len():
+                    grp_members.push(ms[m])
+                    m = m + 1
+                members_block = ms.len() == 0
+            else:
+                errors.push("target-error: parse: unknown key '" + gkey + "' in group " + grp_name)
             i = i + 1
             continue
 
@@ -178,7 +252,7 @@ fn parse_targets_text(src: text) -> TargetSet:
             errors.push("target-error: parse: unknown key '" + key + "' in target " + cur_name)
         i = i + 1
 
-    TargetSet(targets, errors)
+    TargetSet(targets, errors, groups, includes)
 
 fn find_target(ts: TargetSet, name: text) -> i64:
     """Index of `name` in the target list, or -1."""
@@ -283,17 +357,160 @@ fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
             d = d + 1
         i = i + 1
 
+    var g = 0
+    while g < ts.groups.len():
+        val grp = ts.groups[g]
+        var h = 0
+        while h < g:
+            if ts.groups[h].name == grp.name:
+                errors.push("target-error: duplicate-group: " + grp.name)
+            h = h + 1
+        var m = 0
+        while m < grp.members.len():
+            if find_target(ts, grp.members[m]) < 0:
+                errors.push("target-error: unknown-group-member: " + grp.name + " -> " + grp.members[m])
+            m = m + 1
+        g = g + 1
+
     val cycle = find_cycle(ts)
     if cycle.len() > 0:
         errors.push("target-error: dependency-cycle: " + cycle)
     errors
 
+fn group_targets(ts: TargetSet, group: text) -> [text]:
+    """Member target names of every group named `group` (empty if none)."""
+    var out: [text] = []
+    var g = 0
+    while g < ts.groups.len():
+        if ts.groups[g].name == group:
+            var m = 0
+            while m < ts.groups[g].members.len():
+                out.push(ts.groups[g].members[m])
+                m = m + 1
+        g = g + 1
+    out
+
+fn default_group_targets(ts: TargetSet) -> [text]:
+    """Targets a default build selects: members of `default: true` groups.
+
+    A file that declares no group keeps the pre-group meaning: every target."""
+    var out: [text] = []
+    if ts.groups.len() == 0:
+        var i = 0
+        while i < ts.targets.len():
+            out.push(ts.targets[i].name)
+            i = i + 1
+        return out
+    var g = 0
+    while g < ts.groups.len():
+        if ts.groups[g].is_default:
+            var m = 0
+            while m < ts.groups[g].members.len():
+                out.push(ts.groups[g].members[m])
+                m = m + 1
+        g = g + 1
+    out
+
+fn normalize_include_path(p: text) -> text:
+    """Use `/` on every host so one config reads the same everywhere."""
+    p.replace("\\", "/")
+
+fn _dir_of(path: text) -> text:
+    val p = normalize_include_path(path)
+    var i = p.len() - 1
+    while i >= 0:
+        if p[i:i + 1] == "/":
+            return p[0:i]
+        i = i - 1
+    "."
+
+fn _canonical_path(p: text) -> text:
+    """Collapse `.` and `..` segments so one file always has one spelling."""
+    val n = normalize_include_path(p)
+    val absolute = n.starts_with("/")
+    val parts = n.split("/")
+    var out: [text] = []
+    var i = 0
+    while i < parts.len():
+        val s = parts[i]
+        if s == "" or s == ".":
+            i = i + 1
+            continue
+        if s == ".." and out.len() > 0 and out[out.len() - 1] != "..":
+            out.pop()
+        else:
+            out.push(s)
+        i = i + 1
+    var r = ""
+    var j = 0
+    while j < out.len():
+        r = if j == 0: out[j] else: r + "/" + out[j]
+        j = j + 1
+    if absolute: "/" + r else: r
+
+fn _resolve_include(including: text, inc: text) -> text:
+    val n = normalize_include_path(inc)
+    if n.starts_with("/") or (n.len() > 1 and n[1:2] == ":"):
+        return _canonical_path(n)
+    _canonical_path(_dir_of(including) + "/" + n)
+
 fn load_targets_file(path: text, repo_root: text) -> TargetSet:
-    """Read and parse a targets file. A missing file yields a parse error, not
-    an empty default — absence must never look like 'no targets declared'."""
+    """Read and parse a targets file, following `include:` directives.
+
+    A missing file yields a parse error, not an empty default — absence must
+    never look like 'no targets declared'. Includes resolve relative to the
+    including file; a cycle or a missing include is a named error."""
+    var targets: [BuildTarget] = []
+    var errors: [text] = []
+    var groups: [BuildGroup] = []
+    var includes: [text] = []
     if not file_exists(path):
-        var errs: [text] = []
-        errs.push("target-error: parse: targets file not found: " + path)
-        var none: [BuildTarget] = []
-        return TargetSet(none, errs)
-    parse_targets_text(file_read(path))
+        errors.push("target-error: parse: targets file not found: " + path)
+        return TargetSet(targets, errors, groups, includes)
+
+    # Iterative walk (arrays are value types; no recursive accumulator).
+    # Each stack entry carries its include chain for cycle reporting.
+    var stack_path: [text] = []
+    var stack_chain: [text] = []
+    # Include-once: a file reached twice by a diamond is parsed once.
+    var visited: [text] = []
+    stack_path.push(_canonical_path(path))
+    stack_chain.push("")
+    while stack_path.len() > 0:
+        val cur = stack_path[stack_path.len() - 1]
+        val chain = stack_chain[stack_chain.len() - 1]
+        stack_path.pop()
+        stack_chain.pop()
+        if visited.contains(cur):
+            continue
+        visited.push(cur)
+        val ts = parse_targets_text(file_read(cur))
+        var k = 0
+        while k < ts.targets.len():
+            targets.push(ts.targets[k])
+            k = k + 1
+        k = 0
+        while k < ts.errors.len():
+            errors.push(ts.errors[k])
+            k = k + 1
+        k = 0
+        while k < ts.groups.len():
+            groups.push(ts.groups[k])
+            k = k + 1
+        val here = if chain.len() == 0: cur else: chain + " -> " + cur
+        k = 0
+        while k < ts.includes.len():
+            val child = _resolve_include(cur, ts.includes[k])
+            if here.split(" -> ").contains(child):
+                errors.push("target-error: include-cycle: " + here + " -> " + child)
+            elif visited.contains(child):
+                k = k + 1
+                continue
+            elif not file_exists(child):
+                errors.push("target-error: include-missing: " + cur + ": " + ts.includes[k])
+            else:
+                includes.push(child)
+                stack_path.push(child)
+                stack_chain.push(here)
+            k = k + 1
+    TargetSet(targets, errors, groups, includes)

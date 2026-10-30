@@ -3,16 +3,29 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
 #if defined(_WIN32)
-#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
-#undef _WIN32_WINNT
-#define _WIN32_WINNT 0x0602
-#endif
 #include <io.h>
 #include <windows.h>
+/* FILE_ID_INFO and FileIdInfo are hidden by pre-Windows-8 SDK targets.
+ * runtime_native.c can include windows.h before this header, so changing
+ * _WIN32_WINNT here cannot expose them (and would change caller policy).
+ * Use the documented GetFileInformationByHandleEx wire ABI, preserving the
+ * full 128-bit identity. Unsupported OS/filesystems still fail the query.
+ * https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_id_info
+ */
+typedef struct rt_fd_stat_file_id_info_v1 {
+    ULONGLONG VolumeSerialNumber;
+    unsigned char Identifier[16];
+} rt_fd_stat_file_id_info_v1;
+#define RT_FD_STAT_FILE_ID_INFO_CLASS_V1 ((FILE_INFO_BY_HANDLE_CLASS)18)
+typedef char rt_fd_stat_file_id_size_v1[
+    sizeof(rt_fd_stat_file_id_info_v1) == 24 ? 1 : -1];
+typedef char rt_fd_stat_file_id_offset_v1[
+    offsetof(rt_fd_stat_file_id_info_v1, Identifier) == 8 ? 1 : -1];
 #else
 #include <sys/stat.h>
 #include <unistd.h>
@@ -27,7 +40,21 @@ enum rt_fd_stat_kind_v1 {
     RT_FD_STAT_KIND_V1_OTHER = 3
 };
 
-#if defined(_WIN32) && defined(_MSC_VER)
+#if defined(_WIN32) && defined(_UCRT) && !defined(_MSC_VER)
+/* MinGW's UCRT import library exports this API, but its stdlib.h does not
+ * declare it. Use the owning CRT's thread-local handler, never a process-wide
+ * override which could change another thread's invalid-parameter behavior. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+_CRTIMP _invalid_parameter_handler __cdecl
+_set_thread_local_invalid_parameter_handler(_invalid_parameter_handler handler);
+#ifdef __cplusplus
+}
+#endif
+#endif
+
+#if defined(_WIN32) && (defined(_MSC_VER) || defined(_UCRT))
 static void __cdecl rt_fd_stat_ignore_invalid_parameter_v1(
     const wchar_t *expression, const wchar_t *function,
     const wchar_t *file, unsigned int line, uintptr_t reserved) {
@@ -81,9 +108,8 @@ static int64_t rt_fd_stat_snapshot_v1_impl(
 
 #if defined(_WIN32)
     if (descriptor < 0 || descriptor > INT32_MAX) return -EBADF;
-#if !defined(_MSC_VER)
-    /* MinGW CRT families do not provide a uniform non-terminating invalid-fd
-     * query.  Refuse this lane until its descriptor owner supplies one. */
+#if !defined(_MSC_VER) && !defined(_UCRT)
+    /* Legacy MinGW CRTs have no supported thread-local invalid-fd handler. */
     return -ENOTSUP;
 #else
     intptr_t native;
@@ -94,13 +120,13 @@ static int64_t rt_fd_stat_snapshot_v1_impl(
     _set_thread_local_invalid_parameter_handler(prior_handler);
     if (native == -1) return -EBADF;
 
-    FILE_ID_INFO identity;
+    rt_fd_stat_file_id_info_v1 identity;
     FILE_STANDARD_INFO standard;
     FILE_BASIC_INFO basic;
     memset(&identity, 0, sizeof(identity));
     memset(&standard, 0, sizeof(standard));
     memset(&basic, 0, sizeof(basic));
-    if (!GetFileInformationByHandleEx((HANDLE)native, FileIdInfo,
+    if (!GetFileInformationByHandleEx((HANDLE)native, RT_FD_STAT_FILE_ID_INFO_CLASS_V1,
             &identity, sizeof(identity)) ||
         !GetFileInformationByHandleEx((HANDLE)native, FileStandardInfo,
             &standard, sizeof(standard)) ||
@@ -114,8 +140,8 @@ static int64_t rt_fd_stat_snapshot_v1_impl(
         standard.AllocationSize.QuadPart < 0) return -EOVERFLOW;
     uint64_t size = (uint64_t)standard.EndOfFile.QuadPart;
     snapshot[0] = (uint64_t)identity.VolumeSerialNumber;
-    memcpy(&snapshot[1], &identity.FileId.Identifier[0], sizeof(uint64_t));
-    memcpy(&snapshot[2], &identity.FileId.Identifier[8], sizeof(uint64_t));
+    memcpy(&snapshot[1], &identity.Identifier[0], sizeof(uint64_t));
+    memcpy(&snapshot[2], &identity.Identifier[8], sizeof(uint64_t));
     snapshot[3] = size;
     snapshot[4] = (uint64_t)standard.AllocationSize.QuadPart;
     snapshot[5] = (uint64_t)basic.FileAttributes;

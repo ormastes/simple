@@ -16,6 +16,7 @@ use std.io_runtime.{get_args}
 use app.spipe_docgen.common.*
 use app.spipe_docgen.parser.{parse_spipe_file, extract_metadata, validate_spec}
 use app.spipe_docgen.generator.*
+use app.spipe_docgen.semantic_links.{SemanticDocgenOptionsV1}
 
 # ============================================================================
 # MAIN ENTRY POINT
@@ -64,6 +65,8 @@ fn print_usage():
     print "Options:"
     print "  --output <dir>    Output directory (default: doc/06_spec)"
     print "  -o <dir>          Short form of --output"
+    print "  --source-file <path> --package <name> --module <path> --revision <sha256>"
+    print "                   Verify explicit semantic links for exactly one spec"
     print "  --no-index        Do not regenerate INDEX.md"
     print "  --help, -h        Show this help message"
     print ""
@@ -91,6 +94,7 @@ fn run_spipe_docgen(args: [text]) -> i64:
     var generate_index = true
     var provenance_receipt = ""
     var provenance_receipt_count = 0
+    var semantic_values: Dict<text, text> = {}
     var spec_files = []
     var had_error = false
 
@@ -105,6 +109,12 @@ fn run_spipe_docgen(args: [text]) -> i64:
                 j = j + 2
             else:
                 j = j + 1
+        elif ["--source-file", "--package", "--module", "--revision"].contains(arg):
+            if semantic_values.contains_key(arg) or j + 1 >= args.len() or args[j + 1].starts_with("-"):
+                spipe_err("semantic source authority requires one value per option")
+                return 1
+            semantic_values[arg] = args[j + 1]
+            j = j + 2
         elif arg == "--no-index":
             generate_index = false
             j = j + 1
@@ -135,6 +145,13 @@ fn run_spipe_docgen(args: [text]) -> i64:
     if provenance_receipt != "" and spec_files.len() != 1:
         spipe_err("--provenance-receipt requires exactly one spec file")
         return 1
+
+    var semantic_options = SemanticDocgenOptionsV1.empty()
+    if semantic_values.len() > 0:
+        if semantic_values.len() != 4 or spec_files.len() != 1:
+            spipe_err("semantic source authority requires --source-file, --package, --module, --revision and exactly one spec")
+            return 1
+        semantic_options = SemanticDocgenOptionsV1(package: semantic_values["--package"], module_path: semantic_values["--module"], file: semantic_values["--source-file"], revision: semantic_values["--revision"])
 
     var receipt_binary_path = ""
     var receipt_binary_sha256 = ""
@@ -204,10 +221,12 @@ fn run_spipe_docgen(args: [text]) -> i64:
                 # Generate individual doc
                 val file_name = get_file_stem(file_path)
                 var output_filename = "{file_name}.md"
-                val gen_result = generate_feature_doc(doc_with_meta, output_dir)
+                val gen_result = generate_feature_doc_semantic_v1(doc_with_meta, output_dir, semantic_options)
                 match gen_result:
                     case Err(e):
                         spipe_warn("Failed to generate doc for {file_path}: {e}")
+                        had_error = true
+                        continue
                     case Ok(path):
                         output_filename = relative_path_from_output(output_dir, path)
 
@@ -253,7 +272,7 @@ fn run_spipe_docgen(args: [text]) -> i64:
                 ))
 
     # Generate INDEX.md
-    if generate_index:
+    if generate_index and not had_error:
         val index_result = generate_index_page(entries, output_dir, stats)
         match index_result:
             case Err(e):

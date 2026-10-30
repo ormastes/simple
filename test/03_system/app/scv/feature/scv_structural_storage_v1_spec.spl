@@ -1,0 +1,54 @@
+"""
+Purpose: exercise integrated SCV raw retention, lossless structural restoration,
+and fail-closed corruption handling. Provider cursor input below is a fixture;
+it does not prove a Tree-sitter runtime executed. Runtime status is NOT_RUN
+until an admitted general-purpose self-hosted binary executes this spec.
+"""
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.io.mod (process_run, file_read, file_write, file_delete)
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
+use std.scv.core.{scv_object_path}
+use std.scv.store.{scv_init_repo, scv_write_file_object_from_bytes, scv_write_tree_object, scv_write_commit, scv_restore_commit, scv_object_field}
+use std.scv.structural_store_v1.{scv_structural_build_v1, scv_structural_decode_v1}
+
+fn structural_system_root_v1() -> text:
+    val (out, err, code) = process_run("mktemp", ["-d", "/tmp/scv-structural-system.XXXXXX"])
+    expect(code).to_equal(0)
+    expect(err).to_equal("")
+    val root = out.trim()
+    expect(scv_init_repo(root)).to_equal("initialized\n")
+    root
+
+describe "SCV structural storage v1":
+    it "restores captured binary bytes through the normal commit caller":
+        # @req REQ-SCV-STRUCTURAL-EXACT, REQ-SCV-STRUCTURAL-OPAQUE
+        step("Capture exact bytes with an unavailable parser as an opaque unit")
+        val root = structural_system_root_v1()
+        val bytes: [u8] = [239u8, 187u8, 191u8, 255u8, 0u8, 13u8, 10u8]
+        val (file_id, raw) = scv_write_file_object_from_bytes(root, "capture.bin", bytes, 0).unwrap()
+        val record = file_read(scv_object_path(root, "files", file_id))
+        val structure = scv_object_field(record, "structure")
+        expect(file_read(scv_object_path(root, "syntax", structure))).to_contain("execution: opaque\n")
+        expect(record.contains("chunks:\n")).to_equal(false)
+        step("Restore through the public commit path and compare every byte")
+        val tree = scv_write_tree_object(root, ["capture.bin|{file_id}|{raw}|7|0"])
+        val commit = scv_write_commit(root, "", tree, "private_dirty")
+        expect(scv_restore_commit(root, commit)).to_equal("restored 1\n")
+        expect(file_read_bytes("{root}/capture.bin").unwrap()).to_equal(bytes)
+        step("Remove reconstruction data and refuse restore before changing the destination")
+        expect(file_delete(scv_object_path(root, "syntax", structure))).to_equal(true)
+        expect(file_write("{root}/capture.bin", "local working bytes")).to_equal(true)
+        expect(scv_restore_commit(root, commit)).to_contain("ERROR")
+        expect(file_read("{root}/capture.bin")).to_equal("local working bytes")
+
+    it "reconstructs a host partition with trivia and repeated subtrees without any grammar":
+        # @req REQ-SCV-STRUCTURAL-SPANS
+        step("Build complete fixture cursor spans without asserting provider execution")
+        val root = structural_system_root_v1()
+        val source = "# note\r\nx x\r\n".bytes()
+        val blob = "file||0|13|0|0\ncomment||0|6|1|1\nidentifier||8|9|1|1\nidentifier||10|11|1|1\n"
+        val node = scv_structural_build_v1(root, source, blob).unwrap()
+        step("Reconstruct exact source including gaps and enforce the output budget")
+        expect(scv_structural_decode_v1(root, node, source.len()).unwrap()).to_equal(source)
+        expect(scv_structural_decode_v1(root, node, source.len() - 1).is_err()).to_equal(true)

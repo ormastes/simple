@@ -6,10 +6,10 @@
 # Pure-Simple driver. The Outlook fetch path uses the curl-backed Graph
 # adapter until the native http transport extern lands.
 
-use std.nogc_sync_mut.env.{env_get}
-use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists, file_rename}
+use std.env.{env_get}
+use std.io.file_ops.{file_exists, file_atomic_write}
 use app.io.mod.{dir_create_all}
-use std.io_runtime.{time_now_unix_micros}
+use std.io_runtime.{time_now_unix_micros, read_file_text_result, file_write as file_write_text}
 use std.common.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day, timestamp_get_hour, timestamp_get_minute, timestamp_get_second}
 use app.devhub.flags.{_has_flag}
 use app.devhub.output.{print_error, print_info, print_success}
@@ -135,7 +135,9 @@ fn load_watermark() -> text:
         path = "{base}/.config/itf/spipe_daily.sdn"
     if not file_exists(path):
         return _iso_minus_24h()
-    val content = file_read_text(path) ?? ""
+    val content = match read_file_text_result(path):
+        case Ok(value): value
+        case Err(_): return _iso_minus_24h()
     if content == "":
         return _iso_minus_24h()
     val parsed = parse_watermark(content)
@@ -144,16 +146,17 @@ fn load_watermark() -> text:
     parsed
 
 fn save_watermark_atomic(iso_now: text) -> bool:
-    """Atomic save: write to `<path>.tmp`, then rename into place."""
+    """Persist through the real provider's exclusive atomic staging path."""
     val path = watermark_path()
-    val tmp = "{path}.tmp"
-    val body = render_watermark(iso_now)
     val home = env_get("HOME")
     val base = if home != "": home else: env_get("USERPROFILE")
-    val _created = dir_create_all("{base}/.config/devhub")
-    if not file_write_text(tmp, body):
+    if not dir_create_all("{base}/.config/devhub"):
         return false
-    file_rename(tmp, path)
+    save_watermark_atomic_at(path, iso_now)
+
+
+fn save_watermark_atomic_at(path: text, iso_now: text) -> bool:
+    file_atomic_write(path, render_watermark(iso_now))
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -201,7 +204,11 @@ fn _digest_path() -> text:
     """Resolve `doc/08_tracking/debug/<YYYY-MM-DD>.md`."""
     "doc/08_tracking/debug/{_today_yyyy_mm_dd()}.md"
 
-fn _fetch_inbox(since_iso: text) -> [DailyMessage]:
+fn daily_debug_inbox_filter(since_iso: text, until_iso: text) -> text:
+    "receivedDateTime ge {since_iso} and receivedDateTime lt {until_iso}"
+
+
+fn _fetch_inbox(since_iso: text, until_iso: text, persist_cache: bool = true) -> Result<[DailyMessage], text>:
     """Fetch inbox messages received since the watermark.
     """
     val tenant = env_get("GRAPH_TENANT_ID")
@@ -209,9 +216,10 @@ fn _fetch_inbox(since_iso: text) -> [DailyMessage]:
     val client_secret = env_get("GRAPH_CLIENT_SECRET")
     val mailbox = env_get("GRAPH_MAILBOX_UPN")
     if tenant == "" or client_id == "" or client_secret == "" or mailbox == "":
-        print_info("daily-debug", "outlook skipped (set GRAPH_TENANT_ID/GRAPH_CLIENT_ID/GRAPH_CLIENT_SECRET/GRAPH_MAILBOX_UPN)")
-        return []
-    val cache_path = _graph_cache_path()
+        return Err("outlook is not configured (set GRAPH_TENANT_ID/GRAPH_CLIENT_ID/GRAPH_CLIENT_SECRET/GRAPH_MAILBOX_UPN)")
+    # An empty cache path is the Outlook owner's explicit no-cache-I/O mode.
+    # A dry run may read the inbox but must not persist a refreshed token.
+    val cache_path = if persist_cache: _graph_cache_path() else: ""
     val (ok, client) = outlook_curl_client_acquire(
         tenant,
         client_id,
@@ -220,19 +228,16 @@ fn _fetch_inbox(since_iso: text) -> [DailyMessage]:
         cache_path,
     )
     if not ok:
-        print_info("daily-debug", "outlook token acquisition failed")
-        return []
+        return Err("outlook token acquisition failed")
 
     val folder_id = _resolve_inbox_folder_id(client)
     if folder_id == "":
-        print_info("daily-debug", "Inbox folder not found")
-        return []
+        return Err("Inbox folder not found or unavailable")
 
-    val filter = "receivedDateTime ge {since_iso}"
+    val filter = daily_debug_inbox_filter(since_iso, until_iso)
     val (success, messages, raw) = outlook_curl_list_messages(client, folder_id, filter, 50)
     if not success:
-        print_info("daily-debug", "outlook fetch failed: {raw}")
-        return []
+        return Err("outlook fetch failed")
 
     var out: [DailyMessage] = []
     for m in messages:
@@ -244,7 +249,7 @@ fn _fetch_inbox(since_iso: text) -> [DailyMessage]:
             jira_keys: extract_jira_keys(combined),
             minio_urls: extract_minio_urls(combined),
         ))
-    out
+    Ok(out)
 
 
 fn _graph_cache_path() -> text:
@@ -354,13 +359,20 @@ fn run_daily_debug(args: [text]) -> i64:
 
     val quiet = _has_flag(args, "--quiet")
     val dry_run = _has_flag(args, "--dry-run")
+    # Capture the upper bound before authentication or any paginated fetch.
+    # Arrivals during this run belong to the next closed-open interval.
+    val fetch_upper_bound = _iso_now()
 
     # 1. Load watermark
     val since = load_watermark()
     print_info("daily-debug", "since={since} dry_run={dry_run} quiet={quiet}")
 
     # 2. List inbox since watermark
-    val messages = _fetch_inbox(since)
+    val messages: [DailyMessage] = match _fetch_inbox(since, fetch_upper_bound, not dry_run):
+        case Ok(value): value
+        case Err(reason):
+            print_error(reason)
+            return 1
 
     # 3+4. Already done per-message at fetch time; aggregate artifacts here.
     var all_urls: [text] = []
@@ -372,16 +384,15 @@ fn run_daily_debug(args: [text]) -> i64:
     # 5. Write daily digest (gated on dry-run)
     val digest = _render_digest(messages, artifacts)
     if not dry_run:
-        if not file_write_text(_digest_path(), digest):
+        if not dir_create_all("doc/08_tracking/debug") or not file_write_text(_digest_path(), digest):
             print_error("failed to write daily digest")
             return 1
     else:
         print_info("dry-run", "would write {_digest_path()} ({digest.len()} bytes)")
 
     # 6. Save watermark atomically (gated on dry-run)
-    val now = _iso_now()
     if not dry_run:
-        if not save_watermark_atomic(now):
+        if not save_watermark_atomic(fetch_upper_bound):
             print_error("failed to save watermark")
             return 1
 

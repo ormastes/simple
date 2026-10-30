@@ -5,6 +5,10 @@ description: Build and advance Simple compiler generations across LLVM or Cranel
 
 # Bootstrap
 
+For release compiler selection, apply the
+[phase ladder producer-selection policy](../../../doc/07_guide/infra/toolchain/phase_ladder_ci.md#release-producer-selection)
+before starting or resuming a phase build.
+
 Read the [bootstrap rules](../../../.claude/rules/bootstrap.md) and the
 [shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md).
 Use [parallel handoff](../../../doc/07_guide/app/llm/bootstrap_parallel_handoff.md)
@@ -22,6 +26,12 @@ and early manual linking, apply the shared
 - Require the exact new compiler to compile Hello World and require that output
   executable to run correctly before starting a dependent provisional phase.
   Full qualification may continue concurrently; label descendants unadmitted.
+- For a requested four-binary Hello linkage sanity, use the campaign runner
+  and verify direct source, two-object, static-library and shared-library
+  executables. Run independent jobs in parallel when requested, with distinct
+  outputs and logs and writer-safe caches. Phase 1 requires interpreter and
+  skips BuildRunner; phase 2 skips interpreter and requires BuildRunner; phase 3
+  requires both. See [parallel handoff](../../../doc/07_guide/app/llm/bootstrap_parallel_handoff.md#four-executable-hello-linkage-sanity).
 - Record user-authorized diagnostic checker bypasses and retain resource/progress
   monitoring, failed receipts and actual identities. Missing artifacts, invalid
   inputs and zero executed tests never become PASS. Restore normal gates before
@@ -40,3 +50,9 @@ For serialized crash diagnosis, host CUDA policy, RAM cache-parent staging and
 terminal consumer authority, apply [native staging and terminal evidence](../../../doc/07_guide/tooling/bootstrap_native_staging.md).
 Keep campaign Phase 3 priority and full-CLI test ownership explicit; source review
 and a linked bootstrap binary do not admit suite execution.
+
+## Current state (2026-10-25)
+
+Shard knobs, frozen-Stage-2 Stage 3, `.spab`/DigestV1 cache protocol and Lean
+cache gates: [bootstrap options](../../../doc/07_guide/tooling/bootstrap_options.md).
+Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs. Never `git stash`.

@@ -24,47 +24,91 @@ on:
         description: "all, or comma-separated platforms"
         type: string
         default: all
+      build_jobs:
+        description: "Build jobs per selected lane (1-256)"
+        type: number
+        default: 24
+      fresh:
+        description: "Rebuild phase 1 from this commit (skip handoffs of earlier runs)"
+        type: boolean
+        default: false
       publish:
         description: "Publish the reached phases as the next RC"
         type: boolean
         default: true
+      rc_tag:
+        description: "Optional exact next numbered RC tag (must equal the next available tag)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
+  actions: read
 
 # One ladder per ref at a time; a newer push waits (only the newest pending
 # run is kept) instead of cancelling a climb that is hours in.
+# A fresh dispatch gets its own queue: pushes replace the pending run of the
+# shared group every few minutes, so it would never start there.
+# A dispatch for named lanes gets its own queue too, so one lane can be retried
+# while a full climb holds the others.
 concurrency:
-  group: phase-ladder-${{ github.ref }}
+  group: phase-ladder-${{ github.ref }}${{ inputs.fresh && '-fresh' || '' }}${{ inputs.lanes && inputs.lanes != 'all' && format('-{0}', inputs.lanes) || '' }}
   cancel-in-progress: false
 
 jobs:
+  # Two chains: each rung waits for its whole previous rung, so the slow Intel
+  # macOS lane (2-3x the others per rung) climbs on its own and no longer holds
+  # every other lane back. A manual `lanes=` run uses the main chain only.
   rung1:
     uses: ./.github/workflows/phase-ladder-rung.yml
-    with: { rung: 1, lanes: "${{ inputs.lanes || 'all' }}" }
+    with: { rung: 1, lanes: "${{ (!inputs.lanes || inputs.lanes == 'all') && 'linux-x86_64,linux-riscv64,darwin-arm64,windows-x86_64,freebsd-x86_64' || inputs.lanes }}", build_jobs: "${{ fromJSON(format('{0}', github.event_name == 'workflow_dispatch' && inputs.build_jobs || 0)) }}", fresh: "${{ inputs.fresh == true }}" }
   rung2:
     needs: rung1
     if: always()
     uses: ./.github/workflows/phase-ladder-rung.yml
-    with: { rung: 2, lanes: "${{ inputs.lanes || 'all' }}" }
+    with: { rung: 2, lanes: "${{ (!inputs.lanes || inputs.lanes == 'all') && 'linux-x86_64,linux-riscv64,darwin-arm64,windows-x86_64,freebsd-x86_64' || inputs.lanes }}", build_jobs: "${{ fromJSON(format('{0}', github.event_name == 'workflow_dispatch' && inputs.build_jobs || 0)) }}", fresh: "${{ inputs.fresh == true }}" }
   rung3:
     needs: rung2
     if: always()
     uses: ./.github/workflows/phase-ladder-rung.yml
-    with: { rung: 3, lanes: "${{ inputs.lanes || 'all' }}" }
+    with: { rung: 3, lanes: "${{ (!inputs.lanes || inputs.lanes == 'all') && 'linux-x86_64,linux-riscv64,darwin-arm64,windows-x86_64,freebsd-x86_64' || inputs.lanes }}", build_jobs: "${{ fromJSON(format('{0}', github.event_name == 'workflow_dispatch' && inputs.build_jobs || 0)) }}", fresh: "${{ inputs.fresh == true }}" }
   rung4:
     needs: rung3
     if: always()
     uses: ./.github/workflows/phase-ladder-rung.yml
-    with: { rung: 4, lanes: "${{ inputs.lanes || 'all' }}" }
+    with: { rung: 4, lanes: "${{ (!inputs.lanes || inputs.lanes == 'all') && 'linux-x86_64,linux-riscv64,darwin-arm64,windows-x86_64,freebsd-x86_64' || inputs.lanes }}", build_jobs: "${{ fromJSON(format('{0}', github.event_name == 'workflow_dispatch' && inputs.build_jobs || 0)) }}", fresh: "${{ inputs.fresh == true }}" }
+
+  slow-rung1:
+    if: ${{ !inputs.lanes || inputs.lanes == 'all' }}
+    uses: ./.github/workflows/phase-ladder-rung.yml
+    with: { rung: 1, lanes: darwin-x86_64, build_jobs: "${{ fromJSON(format('{0}', github.event_name == 'workflow_dispatch' && inputs.build_jobs || 0)) }}", fresh: "${{ inputs.fresh == true }}" }
+  slow-rung2:
+    needs: slow-rung1
+    if: always() && needs.slow-rung1.result != 'skipped'
+    uses: ./.github/workflows/phase-ladder-rung.yml
+    with: { rung: 2, lanes: darwin-x86_64, build_jobs: "${{ fromJSON(format('{0}', github.event_name == 'workflow_dispatch' && inputs.build_jobs || 0)) }}", fresh: "${{ inputs.fresh == true }}" }
+  slow-rung3:
+    needs: slow-rung2
+    if: always() && needs.slow-rung2.result != 'skipped'
+    uses: ./.github/workflows/phase-ladder-rung.yml
+    with: { rung: 3, lanes: darwin-x86_64, build_jobs: "${{ fromJSON(format('{0}', github.event_name == 'workflow_dispatch' && inputs.build_jobs || 0)) }}", fresh: "${{ inputs.fresh == true }}" }
+  slow-rung4:
+    needs: slow-rung3
+    if: always() && needs.slow-rung3.result != 'skipped'
+    uses: ./.github/workflows/phase-ladder-rung.yml
+    with: { rung: 4, lanes: darwin-x86_64, build_jobs: "${{ fromJSON(format('{0}', github.event_name == 'workflow_dispatch' && inputs.build_jobs || 0)) }}", fresh: "${{ inputs.fresh == true }}" }
 
   publish:
-    needs: rung4
+    needs: [rung4, slow-rung4]
     if: always() && (github.event_name != 'workflow_dispatch' || inputs.publish)
+    concurrency:
+      group: numbered-prerelease-publish-${{ github.repository }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,37 +117,108 @@ jobs:
         with:
           pattern: ladder-*
           path: build/ladder/in
-          merge-multiple: true
-      - name: Package each lane's highest phase
-        id: pkg
-        run: |
-          version=$(cat VERSION)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "| lane | phase | essentials |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          for platform in $(ls build/ladder/in | sed 's/-p[0-9]*$//' | sort -u); do
-            for p in 4 3 2 1; do
-              dir=build/ladder/in/$platform-p$p
-              [ -d "$dir" ] && break
-            done
-            phase=$(cat "$dir/PHASE")
-            bin=$(ls "$dir"/simple "$dir"/simple.exe 2>/dev/null | head -1)
-            sh scripts/release/package-phase1-spk.shs "$version" "$platform" "$bin" "$phase" "$dir/essentials"
-            ess=$(tr '\n' ' ' < "$dir/essentials/STATUS" 2>/dev/null || echo "none recorded")
-            echo "| $platform | $phase | $ess |" >> "$GITHUB_STEP_SUMMARY"
-          done
-          ls simple-bootstrap-*.spk
-      - name: Publish next numbered RC
-        if: steps.pkg.outcome == 'success'
+          if-no-artifact-found: warn
+      - name: Download lane attempt receipts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bootstrap-ladder-receipts-*
+          path: build/ladder/receipts
+          if-no-artifact-found: warn
+      - name: Select next numbered RC
+        id: tag
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.pkg.outputs.version }}
+          VERSION_FILE: VERSION
+          REQUESTED_TAG: ${{ inputs.rc_tag }}
         run: |
-          BASE="${VERSION%%-*}"
+          BASE=$(sed 's/-.*$//' "$VERSION_FILE")
+          BASE_DOTS=$(printf '%s\n' "$BASE" | sed 's/\./\\./g')
           LAST=$(gh release list --limit 100 --json tagName --jq '.[].tagName' \
-            | sed -n "s/^rc-${BASE//./\\.}-rc\\.\\([0-9][0-9]*\\)$/\\1/p" | sort -n | tail -1)
-          TAG="rc-${BASE}-rc.$(( ${LAST:-0} + 1 ))"
+            | sed -n "s/^rc-$BASE_DOTS-rc\\.\\([0-9][0-9]*\\)$/\\1/p" | sort -n | tail -1)
+          if [ -z "$LAST" ]; then LAST=0; fi
+          TAG="rc-$BASE-rc.$((LAST + 1))"
+          if [ -n "$REQUESTED_TAG" ] && [ "$REQUESTED_TAG" != "$TAG" ]; then
+            echo "requested RC tag must be the next available immutable tag: $TAG" >&2
+            exit 1
+          fi
+          mkdir -p build/ladder
+          set +e
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>build/ladder/tag-ref.stderr
+          api_status=$?
+          set -e
+          if [ "$api_status" -eq 0 ]; then
+            echo "RC tag already exists; refusing to attach or move it: $TAG" >&2
+            exit 1
+          fi
+          if ! grep -Eq 'HTTP 404|Not Found' build/ladder/tag-ref.stderr; then
+            cat build/ladder/tag-ref.stderr >&2
+            echo "could not prove that the proposed RC tag is unused" >&2
+            exit 1
+          fi
+          VERSION=$(printf '%s\n' "$TAG" | sed 's/^rc-//')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Package each lane's highest phase
+        id: pkg
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          mkdir -p build/ladder
+          : > build/ladder/package-failures.txt
+          echo "| lane | phase | essentials |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for platform in linux-x86_64 linux-riscv64 darwin-arm64 darwin-x86_64 windows-x86_64 freebsd-x86_64; do
+            dir=
+            for p in 4 3 2 1; do
+              for rung in 4 3 2 1; do
+                candidate=build/ladder/in/ladder-$platform-r$rung/$platform-p$p
+                if [ -e "$candidate" ] || [ -L "$candidate" ]; then dir=$candidate; break 2; fi
+              done
+            done
+            [ -n "$dir" ] || continue
+            phase=$(cat "$dir/PHASE" 2>/dev/null || true)
+            bin="$dir/simple"
+            case "$platform" in windows-*) bin="$dir/simple.exe" ;; esac
+            if [ -z "$phase" ] || [ ! -s "$bin" ]; then
+              echo "$platform" >> build/ladder/package-failures.txt
+              echo "| $platform | invalid handoff | failed integrity |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            if sh scripts/release/package-phase1-spk.shs "$VERSION" "$platform" "$bin" "$phase" "$dir/essentials"; then
+              ess=$(tr '\n' ' ' < "$dir/essentials/STATUS" 2>/dev/null || echo "none recorded")
+              echo "| $platform | $phase | $ess |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "$platform" >> build/ladder/package-failures.txt
+              echo "| $platform | $phase | failed package integrity |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      - name: Qualify prerelease matrix and write manifest
+        id: policy
+        env:
+          RC_TAG: ${{ steps.tag.outputs.tag }}
+          SOURCE_REVISION: ${{ github.sha }}
+          SELECTED_LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'all' }}
+        run: |
+          sh scripts/release/phase-ladder-release-manifest.shs \
+            "$RC_TAG" "$SOURCE_REVISION" "$SELECTED_LANES" \
+            build/ladder/in build/ladder/receipts . \
+            build/ladder/package-failures.txt build/ladder/phase-ladder-release.sdn \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain prerelease matrix manifest
+        if: always() && steps.policy.outcome != 'skipped' && hashFiles('build/ladder/phase-ladder-release.sdn') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-ladder-release-manifest-${{ github.run_id }}
+          path: build/ladder/phase-ladder-release.sdn
+          retention-days: 90
+          if-no-files-found: error
+      - name: Publish next numbered RC
+        if: steps.policy.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
           gh release create "$TAG" --prerelease --target "$GITHUB_SHA" \
             --title "$TAG (phase ladder)" \
-            --notes "Phase-ladder RC from ${GITHUB_SHA}. Reached phases: see the run summary ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}." \
-            simple-bootstrap-*.spk simple-bootstrap-*.spk.sha256
+            --notes "Phase-ladder RC from $GITHUB_SHA. See the attached source-bound platform manifest and run summary $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID." \
+            simple-bootstrap-*.spk simple-bootstrap-*.spk.sha256 build/ladder/phase-ladder-release.sdn

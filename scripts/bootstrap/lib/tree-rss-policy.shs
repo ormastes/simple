@@ -108,6 +108,33 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
 esac
 BOOTSTRAP_TREE_RSS_HOST_PCT_DEFAULT=50
 BOOTSTRAP_TREE_RSS_HOST_PCT_MAX=75
+# Host-scaled default (2026-10-25). When the job-priced budget is below the
+# need (bound floor or budget; Windows 96 MiB/job pricing: 27 workers = 5.59 GiB on a 128 GB host),
+# the cap is raised to what the workers really need, (base + jobs * worker_mem)
+# with worker_mem from SIMPLE_BOOTSTRAP_WORKER_MEM_MIB > SIMPLE_HOST_WORKER_MEM_MIB
+# > host config worker_mem_mib (the same knob that sizes the job count) > 3300,
+# bounded by this share of host RAM and then by the hard ceiling. Unknown host
+# RAM keeps the floor. Any tree_rss_* knob or explicit cap bypasses it.
+BOOTSTRAP_TREE_RSS_SCALE_PCT=60
+BOOTSTRAP_TREE_RSS_WORKER_MEM_MIB_DEFAULT=3300
+
+# bootstrap_tree_rss_worker_mem_mib REPO_ROOT -> per-worker MiB (always valid).
+bootstrap_tree_rss_worker_mem_mib() {
+  btr_wm=${SIMPLE_BOOTSTRAP_WORKER_MEM_MIB:-${SIMPLE_HOST_WORKER_MEM_MIB:-}}
+  if [ -z "$btr_wm" ] && [ -n "${1:-}" ] && [ -f "$1/scripts/setup/host-env.shs" ]; then
+    btr_wm=$(sh "$1/scripts/setup/host-env.shs" --get worker_mem_mib 2>/dev/null | tail -n 1) || btr_wm=
+  fi
+  bootstrap_tree_rss_is_uint "$btr_wm" 7 || btr_wm=$BOOTSTRAP_TREE_RSS_WORKER_MEM_MIB_DEFAULT
+  printf '%s\n' "$btr_wm"
+}
+
+# bootstrap_tree_rss_workers_fit CAP_KIB WORKER_MEM_MIB [BASE_MIB] -> workers
+# the cap can hold (>= 1).
+bootstrap_tree_rss_workers_fit() {
+  btr_wf=$(( ($1 / 1024 - ${3:-$BOOTSTRAP_TREE_RSS_BASE_MIB_DEFAULT}) / $2 ))
+  [ "$btr_wf" -ge 1 ] || btr_wf=1
+  printf '%s\n' "$btr_wf"
+}
 
 # Decimal, non-zero, at most $2 digits (bounded so $(( )) cannot overflow).
 bootstrap_tree_rss_is_uint() {
@@ -368,6 +395,17 @@ bootstrap_tree_rss_resolve() {
         bootstrap_tree_rss_bound=host-fraction
       fi
     fi
+    if { [ "$bootstrap_tree_rss_bound" = floor ] || [ "$bootstrap_tree_rss_bound" = budget ]; } && [ "$btr_jobs" -gt 0 ] &&
+       [ "$bootstrap_tree_rss_source" = default ] && [ -n "$bootstrap_tree_rss_host_total_kib" ]; then
+      btr_wm=$(bootstrap_tree_rss_worker_mem_mib "$btr_root")
+      btr_scaled=$(((btr_base + btr_jobs * btr_wm) * 1024))
+      btr_scale_cap=$((bootstrap_tree_rss_host_total_kib / 100 * BOOTSTRAP_TREE_RSS_SCALE_PCT))
+      [ "$btr_scaled" -le "$btr_scale_cap" ] || btr_scaled=$btr_scale_cap
+      if [ "$btr_scaled" -gt "$btr_cap" ]; then
+        btr_cap=$btr_scaled
+        bootstrap_tree_rss_bound=host-scaled
+      fi
+    fi
     if [ "$btr_cap" -gt "$bootstrap_tree_rss_ceiling_kib" ]; then
       btr_cap=$bootstrap_tree_rss_ceiling_kib
       bootstrap_tree_rss_bound=hard-ceiling
@@ -439,6 +477,7 @@ bootstrap_tree_rss__selftest() {
     btr_st_got=$(
       unset SIMPLE_BOOTSTRAP_TREE_RSS_BASE_MIB SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT
       unset SIMPLE_HOST_TREE_RSS_BASE_MIB SIMPLE_HOST_TREE_RSS_PER_JOB_MIB SIMPLE_HOST_TREE_RSS_HOST_PCT
+      unset SIMPLE_BOOTSTRAP_WORKER_MEM_MIB SIMPLE_HOST_WORKER_MEM_MIB
       unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
       [ -z "$4" ] || SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$4
       unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
@@ -470,7 +509,15 @@ bootstrap_tree_rss__selftest() {
   # compiler's clamp turns into exactly 8 admitted HIR workers (x60% / 3000000).
   btr_st_expect eight-jobs-price-hir-workers big 8 '' 45088768:50331648:budget:default
   # Windows pricing (frontend pinned, 96 MiB codegen shard): 8 jobs keep the floor.
-  btr_st_expect eight-jobs-windows-price-keep-floor big 8 '' 5859375:50331648:floor:default BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96
+  # Windows pricing falls to the floor, which the host-scaled default lifts to
+  # (base + jobs * 3300 MiB) -- 3072 + 8 * 3300 MiB -- under 60% of host RAM.
+  btr_st_expect eight-jobs-windows-price-host-scaled big 8 '' 30179328:50331648:host-scaled:default BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96
+  # The incident host (128 GB, 80 jobs, worker_mem_mib 1200): 60% of RAM, not 5.59 GiB.
+  btr_st_expect windows-128gb-80-jobs-host-scaled big 80 '' 80456520:87031808:host-scaled:default 'BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=1200'
+  btr_st_expect windows-16gb-80-jobs-small small 80 '' 8000000:50331648:host-fraction:default 'BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=1200'
+  btr_st_expect windows-unknown-host-keeps-budget none 80 '' 11010048:50331648:budget:default 'BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=1200'
+  btr_st_expect windows-explicit-cap-bypasses-scale big 80 20000000 20000000:87031808:explicit:explicit-env 'BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96'
+  btr_st_expect windows-garbage-worker-mem-uses-default big 8 '' 30179328:50331648:host-scaled:default 'BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 SIMPLE_BOOTSTRAP_WORKER_MEM_MIB=lots'
   # Beyond that the host fraction and the hard ceiling bound the tree.
   btr_st_expect nineteen-jobs-hit-ceiling big 19 '' 50331648:50331648:hard-ceiling:default
   # The incident: 80 jobs needs more than the old 6 GB / 7 GB pair.
@@ -565,6 +612,13 @@ bootstrap_tree_rss__selftest() {
     [ "$(bootstrap_tree_rss_command_jobs simple --threads 08)" = 8 ] &&
     [ "$(bootstrap_tree_rss_command_jobs simple --threads=040)" = 40 ] || {
     echo 'selftest FAIL: command worker count' >&2
+    btr_st_fail=1
+  }
+  # workers = cap / per-worker: 128 GB host fits >= 40 (full CPU use), 16 GB stays small.
+  btr_st_n=$((btr_st_n + 1))
+  [ "$(bootstrap_tree_rss_workers_fit 80456520 1200)" -ge 40 ] &&
+    [ "$(bootstrap_tree_rss_workers_fit 9600000 1200)" -le 8 ] || {
+    echo 'selftest FAIL: workers fit by cap' >&2
     btr_st_fail=1
   }
   rm -rf "$btr_st_dir"

@@ -1,0 +1,86 @@
+"""Inline lowering of rt_typed_bytes_u{32,64}_le_at in the LLVM backend.
+
+The load used to be a runtime call per element (registry spin lock + probe,
+~89% of native XXH3 time). The backend now emits straight-line IR with no new
+basic block; invalid arrays and out-of-range indexes still produce 0.
+doc/08_tracking/bug/native_xxh3_40x_slower_than_runtime_perf_2026-10-27.md
+
+The spec drives the emitter (`emit_inline_typed_bytes_le`) and the call-site
+gate (`inline_typed_bytes_le_supported`) directly: translating a whole MirModule
+containing a Call currently throws "cannot convert object to int" under the
+seed interpreter even at baseline (llvm_call_arity_reconcile_spec fails the
+same way without this change), so a module-level spec cannot run here.
+"""
+# @req REQ-PERF-TYPED-BYTES-INLINE
+
+use std.spec
+use std.spec.step
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.llvm_ir_builder.{llvm_ir_builder_build}
+
+fn hosted() -> MirToLlvm:
+    MirToLlvm.create("typed.bytes.inline", CodegenTarget.X86_64, nil)
+
+fn freestanding() -> MirToLlvm:
+    MirToLlvm.create_baremetal("typed.bytes.inline", CodegenTarget.Riscv64, nil)
+
+fn emitted(width: i64) -> text:
+    val t = hosted()
+    t.emit_inline_typed_bytes_le("%l5", "%a", "%i", width)
+    llvm_ir_builder_build(t.builder)
+
+describe "inline typed-bytes LE loads":
+    it "gates u64/u32 _at callees to inline lowering on hosted LE targets":
+        step("gates u64/u32 _at callees to inline lowering on hosted LE targets")
+        val t = hosted()
+        expect(t.inline_typed_bytes_le_supported("@rt_typed_bytes_u64_le_at", 2)).to_equal(8)
+        expect(t.inline_typed_bytes_le_supported("@rt_bytes_u64_le_at", 2)).to_equal(8)
+        expect(t.inline_typed_bytes_le_supported("@rt_typed_bytes_u32_le_at", 2)).to_equal(4)
+        expect(t.inline_typed_bytes_le_supported("@rt_bytes_u8_at", 2)).to_equal(0)
+        expect(t.inline_typed_bytes_le_supported("@rt_typed_bytes_u64_le_at", 3)).to_equal(0)
+
+    it "keeps the runtime call on freestanding targets":
+        step("keeps the runtime call on freestanding targets")
+        val t = freestanding()
+        expect(t.inline_typed_bytes_le_supported("@rt_typed_bytes_u64_le_at", 2)).to_equal(0)
+
+    it "emits the u64 load inline with no runtime call":
+        step("emits the u64 load inline with no runtime call")
+        val ir = emitted(8)
+        expect(ir.contains("call i64 @rt_typed_bytes_u64_le_at")).to_equal(false)
+        expect(ir.contains("call i64 @rt_bytes_u64_le_at")).to_equal(false)
+        expect(ir).to_contain("inttoptr i64")
+        expect(ir).to_contain("%l5.tbpkv = load i64, ptr")
+        expect(ir).to_contain("%l5.tbs7v = load i64, ptr")
+        expect(ir).to_contain("ptr @.simple_inline_bytes_zero")
+
+    it "registers the shared zero global exactly once":
+        step("registers the shared zero global exactly once")
+        val t = hosted()
+        t.emit_inline_typed_bytes_le("%l5", "%a", "%i", 8)
+        t.emit_inline_typed_bytes_le("%l6", "%a", "%i", 4)
+        expect(t.string_globals.len()).to_equal(1)
+        expect(t.string_globals[0]).to_contain("@.simple_inline_bytes_zero = private constant [16 x i64] zeroinitializer")
+
+    it "emits the u32 load inline with a zero-extended packed arm":
+        step("emits the u32 load inline with a zero-extended packed arm")
+        val ir = emitted(4)
+        expect(ir).to_contain("%l5.tbpkv = load i32, ptr")
+        expect(ir).to_contain("zext i32")
+        expect(ir.contains("%l5.tbs4v")).to_equal(false)
+
+    it "keeps the safe path: heap tag, array kind, bounds, zero result":
+        step("keeps the safe path: heap tag, array kind, bounds, zero result")
+        val ir = emitted(8)
+        expect(ir).to_contain("icmp eq i64 %l5.tbtag, 1")
+        expect(ir).to_contain("icmp eq i8 %l5.tbkind, 2")
+        expect(ir).to_contain("icmp slt i64 %i, 0")
+        expect(ir).to_contain("sub i64 %l5.tblen, 8")
+        expect(ir).to_contain("%l5 = select i1 %l5.tbok, i64 %l5.tbsel, i64 0")
+
+    it "does not open a basic block (successor phis name the original)":
+        step("does not open a basic block (successor phis name the original)")
+        val ir = emitted(8)
+        expect(ir.contains("br ")).to_equal(false)
+        expect(ir.contains("\nbb")).to_equal(false)

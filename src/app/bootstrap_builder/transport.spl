@@ -130,7 +130,8 @@ fn builder_transport_retry_cache_v1(task: BuildTaskV1, host: BuildHostV1, run_ro
             if error != "": return error
     ""
 
-pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_root: text, run_root: text, process: BuilderProcessPortV1) -> BuilderAttemptV1:
+pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_root: text, run_root: text, process: BuilderProcessPortV1,
+        frozen_source_root: text = "", frozen_paths: [text] = [], trace_stages: bool = false) -> BuilderAttemptV1:
     val root = run_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
     val remote = host.workspace + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
     var result = BuilderAttemptV1(task_id: task.id, attempt: task.attempt,
@@ -139,6 +140,32 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
     result.error = builder_validate_task_v1(task)
     if result.error == "": result.error = builder_validate_host_v1(host)
     if result.error != "": return result
+    if (frozen_source_root == "") != (frozen_paths.len() == 0):
+        result.error = "frozen source root and paths must be supplied together"
+        return result
+    var selected: [text] = []
+    for path in frozen_paths:
+        if not builder_relative_path_valid_v1(path) or selected.contains(path):
+            result.error = "invalid or duplicate frozen source path"
+            return result
+        var found = false
+        for input in task.inputs:
+            if input.path == path: found = true
+        if not found:
+            result.error = "frozen source path is not a declared task input"
+            return result
+        selected.push(path)
+    if frozen_paths.len() > 0 and task.links.len() > 0:
+        result.error = "frozen source links are unsupported"
+        return result
+    if frozen_paths.len() > 0:
+        var frozen_task = task
+        frozen_task.inputs = []
+        for input in task.inputs:
+            if frozen_paths.contains(input.path): frozen_task.inputs.push(input)
+        if not builder_regular_input_parents_safe_v1(frozen_task, frozen_source_root):
+            result.error = "frozen source root or input parent is unsafe"
+            return result
     if host.transport != "local" and task.links.len() > 0:
         result.error = "typed links require local no-follow staging"
         return result
@@ -173,7 +200,10 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
         if file_exists(run_root + "/cancel.request"):
             result.error = "dispatch cancelled before worker launch"
             return result
-        result.error = builder_transport_copy_v1(source_root + "/" + input.path, root + "/work/" + input.path, input.digest)
+        # Parent selects an exact validated source map. Reuse the same checked
+        # staging owner; ordinary inputs/producer retain their existing root.
+        val input_root = if frozen_paths.contains(input.path): frozen_source_root else: source_root
+        result.error = builder_transport_copy_v1(input_root + "/" + input.path, root + "/work/" + input.path, input.digest)
         if result.error != "": return result
     if not builder_regular_input_parents_safe_v1(task, root + "/work"):
         result.error = "staged input parent is a symlink or reparse point"
@@ -196,14 +226,18 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
         result.error = builder_transport_retry_cache_v1(task, host, run_root, root, process)
         if result.error != "": return result
         if host_os() != "windows":
-            val executable_mode = process_run_timeout("chmod", ["500", "--", root + "/producer.exe"], 10000)
+            # BSD chmod stops option parsing at the mode operand; placing --
+            # after 500 treats it as a filename and fails every Darwin launch.
+            val executable_mode = process_run_timeout("chmod", ["--", "500", root + "/producer.exe"], 10000)
             if executable_mode.2 != 0:
                 result.error = "cannot make staged producer executable"
                 return result
         if file_exists(run_root + "/cancel.request"):
             result.error = "dispatch cancelled before worker launch"
             return result
-        match process.spawn_operation(host.worker_program, host.worker_digest, ["worker", "--request", root + "/request.sdn", "--attempt-root", root, "--host", host.id], root + "/work"):
+        var worker_args = ["worker", "--request", root + "/request.sdn", "--attempt-root", root, "--host", host.id]
+        if trace_stages: worker_args = worker_args.push("--trace-stages")
+        match process.spawn_operation(host.worker_program, host.worker_digest, worker_args, root + "/work"):
             Ok(token): result.pid = token
             Err(message):
                 result.error = message
@@ -220,7 +254,8 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
             return result
         result.error = builder_transport_retry_cache_v1(task, host, run_root, root, process)
         if result.error != "": return result
-        val command = "chmod 500 -- " + builder_transport_shell_quote_v1(remote + "/producer.exe") + " && exec " + builder_transport_shell_quote_v1(host.worker_program) + " worker --request " + builder_transport_shell_quote_v1(remote + "/request.sdn") + " --attempt-root " + builder_transport_shell_quote_v1(remote) + " --host " + builder_transport_shell_quote_v1(host.id)
+        val trace_option = if trace_stages: " --trace-stages" else: ""
+        val command = "chmod -- 500 " + builder_transport_shell_quote_v1(remote + "/producer.exe") + " && exec " + builder_transport_shell_quote_v1(host.worker_program) + " worker --request " + builder_transport_shell_quote_v1(remote + "/request.sdn") + " --attempt-root " + builder_transport_shell_quote_v1(remote) + " --host " + builder_transport_shell_quote_v1(host.id) + trace_option
         match process.spawn_operation("ssh", "", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", host.endpoint, command], root + "/work"):
             Ok(token): result.pid = token
             Err(message):
@@ -241,7 +276,14 @@ pub fn builder_transport_poll_v1(attempt: BuilderAttemptV1) -> i64:
     if attempt.pid < 0: return -1
     val code = builder_transport_wait_v1(attempt, 1)
     if code == -2 or code == -1: return code
-    if not builder_transport_terminal_v1(attempt): return -2
+    if not builder_transport_terminal_v1(attempt):
+        # A local worker cannot publish missing compiler ownership proof after
+        # its retained process handle has exited. Reporting "pending" here
+        # replays the cached exit forever. Preserve the reservation as unknown
+        # authority instead: worker exit alone never proves compiler-tree reap.
+        # An SSH client may exit while its independent remote worker continues.
+        if attempt.host.transport == "local": return -1
+        return -2
     code
 
 pub fn builder_transport_collect_v1(attempt: BuilderAttemptV1) -> Result<BuildResultV1, text>:
@@ -250,7 +292,10 @@ pub fn builder_transport_collect_v1(attempt: BuilderAttemptV1) -> Result<BuildRe
         val copied = process_run_timeout("scp", ["-q", "-o", "BatchMode=yes", "--", attempt.host.endpoint + ":" + attempt.remote_root + "/result.sdn", attempt.local_root + "/result.sdn"], 30000)
         if copied.2 != 0: return Err("remote result unavailable; execution state remains unknown")
     val result = builder_read_result_v1(attempt.local_root + "/result.sdn")?
-    if result.task_id != attempt.task_id or result.attempt != attempt.attempt or result.host_id != attempt.host.id:
+    # Bind the immutable task before transferring or inspecting any outputs.
+    # A reused task name/attempt/host does not admit another manifest's receipt.
+    if result.task_id != attempt.task_id or result.attempt != attempt.attempt or
+            result.host_id != attempt.host.id or result.identity_digest != attempt.identity_digest:
         return Err("worker result identity does not match transport")
     if attempt.host.transport == "ssh":
         for output in result.outputs:

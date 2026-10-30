@@ -1,0 +1,97 @@
+# Immutable source witnesses retain the linear selector's fail-closed contract.
+use std.spec.{describe, it, assert_equal, assert_true}
+use compiler.driver.driver_source_receipt_index_v1.{
+    driver_source_receipt_pair_key_v1, driver_source_receipt_index_v1}
+
+fn linear_receipt_witness(paths: [text], names: [text], hashes: [i64],
+        byte_length_count: i64, wanted_path: text, wanted_name: text) -> i64:
+    val count = paths.len()
+    if names.len() != count or hashes.len() != count or byte_length_count != count:
+        return -1
+    var selected: i64 = -1
+    var position: i64 = 0
+    while position < count:
+        if paths[position] == wanted_path and names[position] == wanted_name:
+            if selected >= 0 or hashes[position] == 0: return -1
+            selected = position
+        position = position + 1
+    selected
+
+describe("immutable source receipt index", fn():
+    it("keeps distinct aliases and original scalar positions", fn():
+        val indices = driver_source_receipt_index_v1(
+            ["src/a.spl", "src/a.spl", "src/b.spl"],
+            ["a", "alias.a", "b"], [11, 12, -5], 3)
+        assert_equal(indices[driver_source_receipt_pair_key_v1("src/a.spl", "a")], 0,
+            "physical source has its own witness")
+        assert_equal(indices[driver_source_receipt_pair_key_v1("src/a.spl", "alias.a")], 1,
+            "resolver alias keeps its original row")
+        assert_equal(indices[driver_source_receipt_pair_key_v1("src/b.spl", "b")], 2,
+            "existing nonzero signed hash remains valid")
+        assert_equal(indices.has(driver_source_receipt_pair_key_v1("src/missing.spl", "a")), false,
+            "missing source never borrows another row")
+    )
+
+    it("never revives a duplicate witness on its third occurrence", fn():
+        val indices = driver_source_receipt_index_v1(
+            ["src/a.spl", "src/a.spl", "src/a.spl"], ["a", "a", "a"], [11, 12, 13], 3)
+        assert_equal(indices[driver_source_receipt_pair_key_v1("src/a.spl", "a")], -1,
+            "all exact duplicates fail closed")
+    )
+
+    it("rejects zero hashes without poisoning unrelated aliases", fn():
+        val indices = driver_source_receipt_index_v1(
+            ["src/a.spl", "src/a.spl"], ["a", "alias.a"], [0, 12], 2)
+        assert_equal(indices[driver_source_receipt_pair_key_v1("src/a.spl", "a")], -1,
+            "zero hash is not authority")
+        assert_equal(indices[driver_source_receipt_pair_key_v1("src/a.spl", "alias.a")], 1,
+            "different alias remains independently valid")
+    )
+
+    it("rejects each malformed parallel-array shape", fn():
+        val short_names = driver_source_receipt_index_v1(["src/a.spl"], [], [1], 1)
+        val short_hashes = driver_source_receipt_index_v1(["src/a.spl"], ["a"], [], 1)
+        val short_lengths = driver_source_receipt_index_v1(["src/a.spl"], ["a"], [1], 0)
+        val empty = driver_source_receipt_index_v1([], [], [], 0)
+        assert_equal(short_names.len(), 0, "name mismatch refuses all witnesses")
+        assert_equal(short_hashes.len(), 0, "hash mismatch refuses all witnesses")
+        assert_equal(short_lengths.len(), 0, "byte-length mismatch refuses all witnesses")
+        assert_equal(empty.len(), 0, "empty inventory has no witnesses")
+    )
+
+    it("frames pair keys so equal concatenations remain distinct", fn():
+        val first = driver_source_receipt_pair_key_v1("ab", "c")
+        val second = driver_source_receipt_pair_key_v1("a", "bc")
+        assert_true(first != second, "path length separates ambiguous concatenations")
+        val indices = driver_source_receipt_index_v1(["ab", "a"], ["c", "bc"], [1, 2], 2)
+        assert_equal(indices[first], 0, "first exact pair preserved")
+        assert_equal(indices[second], 1, "second exact pair preserved")
+    )
+
+    it("matches the old linear selector across a larger alias and duplicate inventory", fn():
+        var paths: [text] = []
+        var names: [text] = []
+        var hashes: [i64] = []
+        var index: i64 = 0
+        while index < 96:
+            paths.push("src/source-{index / 3}.spl")
+            names.push("alias-{index}")
+            hashes.push(if index % 11 == 0: 0 else: index + 1)
+            index = index + 1
+        paths.push(paths[7])
+        names.push(names[7])
+        hashes.push(999)
+        paths.push(paths[7])
+        names.push(names[7])
+        hashes.push(1000)
+        val indices = driver_source_receipt_index_v1(paths, names, hashes, paths.len())
+        index = 0
+        while index < paths.len():
+            val key = driver_source_receipt_pair_key_v1(paths[index], names[index])
+            assert_true(indices.has(key), "each observed pair has an explicit verdict")
+            assert_equal(indices[key], linear_receipt_witness(
+                paths, names, hashes, paths.len(), paths[index], names[index]),
+                "indexed verdict matches independent original selection")
+            index = index + 1
+    )
+)

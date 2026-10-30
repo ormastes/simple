@@ -23,27 +23,30 @@ val SIGV4_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 
 # --- Byte / hex helpers (self-contained; do not couple to AES utilities) ---
 
-fn _aws_sigv4_text_to_bytes(s: text) -> list:
-    var out = []
+fn _aws_sigv4_text_to_bytes(s: text) -> [i64]:
+    # Hash UTF-8 octets, not Unicode scalar values or erased runtime words.
+    var out: [i64] = []
+    val octets = s.bytes()
     var i = 0
-    while i < s.len():
-        out.push(s.char_code_at(i))
+    while i < octets.len():
+        out.push(octets[i] as i64)
         i = i + 1
     out
 
-fn _bytes_to_hex(bytes: list) -> text:
+
+fn _bytes_to_hex(bytes: [i64]) -> text:
     val digits = "0123456789abcdef"
     var out = ""
     var i = 0
     while i < bytes.len():
-        val b = bytes.get(i)
+        val b: i64 = bytes[i]
         val hi = (b / 16) % 16
         val lo = b % 16
         out = out + digits[hi:hi + 1] + digits[lo:lo + 1]
         i = i + 1
     out
 
-fn _sha256_hex_bytes(bytes: list) -> text:
+fn _sha256_hex_bytes(bytes: [i64]) -> text:
     _bytes_to_hex(sha256_bytes(bytes))
 
 fn sigv4_sha256_hex(s: text) -> text:
@@ -89,7 +92,7 @@ fn sigv4_canonical_uri(path: text) -> text:
 
 # --- Signing key derivation ---
 
-fn sigv4_derive_signing_key(secret_key: text, date: text, region: text, service: text) -> list:
+fn sigv4_derive_signing_key(secret_key: text, date: text, region: text, service: text) -> [i64]:
     """Compute the SigV4 signing key bytes.
 
     signing_key = HMAC(HMAC(HMAC(HMAC("AWS4"+secret, date), region), service), "aws4_request")
@@ -168,9 +171,10 @@ fn sigv4_canonical_query(params: [SigV4QueryParam]) -> text:
     out
 
 
-# --- Presigned-GET URL (query-string auth) ---
+# --- Presigned URL (query-string auth), any method ---
 
-fn sigv4_presign_get_url(
+fn sigv4_presign_url(
+    method: text,
     endpoint: text,
     host: text,
     bucket: text,
@@ -182,7 +186,7 @@ fn sigv4_presign_get_url(
     amz_datetime: text,
     expires: i64
 ) -> text:
-    """Build a presigned GET URL for the given object.
+    """Build a presigned URL for the given object and HTTP method.
 
     `endpoint` is the scheme://host[:port] (no trailing slash).
     `host` is the value of the `Host` header (typically host[:port]).
@@ -211,10 +215,26 @@ fn sigv4_presign_get_url(
     val canonical_uri = path
 
     val canonical_headers = "host:{host}\n"
-    val canonical_request = "GET\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{SIGV4_UNSIGNED_PAYLOAD}"
+    val canonical_request = "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{SIGV4_UNSIGNED_PAYLOAD}"
 
     val signature = sigv4_compute_signature(secret_key, date, region, service, amz_datetime, canonical_request)
     "{endpoint}{canonical_uri}?{canonical_query}&X-Amz-Signature={signature}"
+
+
+fn sigv4_presign_get_url(
+    endpoint: text,
+    host: text,
+    bucket: text,
+    key: text,
+    access_key: text,
+    secret_key: text,
+    region: text,
+    service: text,
+    amz_datetime: text,
+    expires: i64
+) -> text:
+    """Preserve the GET convenience API over the method-aware signer."""
+    sigv4_presign_url("GET", endpoint, host, bucket, key, access_key, secret_key, region, service, amz_datetime, expires)
 
 
 # --- Header auth (used by adapter_minio for live calls) ---

@@ -1,0 +1,83 @@
+# Linker-synthesized symbols.
+#
+# lld-link defines __ImageBase (RVA 0) and absolute-zero CFG/enclave table
+# symbols (__guard_fids_table, __guard_flags, __enclave_config, ...) for every
+# image; MSVC CRT objects in msvcrt.lib reference them. The internal engine
+# failed the hosted hello world with "unresolved external COFF symbol
+# '__ImageBase'" and then "'__guard_fids_table'".
+
+use std.spec.*
+use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64}
+
+fn _cl_u16(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _cl_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result = result.push(((value >> 8) & 0xff) as u8)
+    result = result.push(((value >> 16) & 0xff) as u8)
+    result.push(((value >> 24) & 0xff) as u8)
+
+fn _cl_name(bytes: [u8], value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _ib_object(name: text) -> [u8]:
+    # `_start` (RET) plus an undefined reference to a long `name` stored in
+    # the string table at offset 4.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 61)
+    bytes = _cl_u32(bytes, 2)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xc3)
+    bytes = _cl_name(bytes, "_start")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    bytes = _cl_u32(bytes, 4 + name.len() + 1)
+    var i: i64 = 0
+    while i < name.len():
+        bytes = bytes.push(name.byte_at(i) as u8)
+        i = i + 1
+    bytes.push(0)
+
+describe "COFF synthesized symbols":
+    it "resolves an undefined __ImageBase to the synthesized image base":
+        val linked = coff_link_amd64(CoffLinkRequest(
+            objects: [_ib_object("__ImageBase")], archives: [], entry: "_start"))
+        if linked.is_err(): print("link error: {linked.unwrap_err()}")
+        expect(linked.is_ok()).to_equal(true)
+
+    it "resolves the CFG load-config table symbols to absolute zero":
+        val linked = coff_link_amd64(CoffLinkRequest(
+            objects: [_ib_object("__guard_fids_table")], archives: [], entry: "_start"))
+        if linked.is_err(): print("link error: {linked.unwrap_err()}")
+        expect(linked.is_ok()).to_equal(true)

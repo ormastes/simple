@@ -1,0 +1,50 @@
+# @req REQ-BBM-003
+# Native Windows only: exercises the compiled manager transport and worker,
+# not a fake process port. The harness supplies separately built executables.
+use std.spec.{describe, it, expect, pending, fail, step}
+use app.io.mod.{env_get, file_is_regular_no_follow, file_hash_sha256, file_read, process_run_timeout}
+use app.bootstrap_builder.codec.{builder_read_result_v1}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_host_os}
+
+describe "Windows BuildRunner through native SOSIX HAL":
+    it "executes a real producer and proves output, memory and tree cleanup":
+        if sosix_test_host_os() != "windows":
+            pending("Windows native process owner is unavailable on this host")
+            return
+        val probe = (env_get("SIMPLE_BUILDRUNNER_HAL_PROBE") ?? "").trim()
+        val worker = (env_get("SIMPLE_BUILDRUNNER_WINDOWS_WORKER") ?? "").trim()
+        val root = (env_get("SIMPLE_BUILDRUNNER_HAL_ROOT") ?? "").trim()
+        if root == "" or not file_is_regular_no_follow(probe) or not file_is_regular_no_follow(worker):
+            fail("MissingEvidence: supply an existing private root and native HAL probe and Windows worker executables")
+            return
+        step("Run the native manager adapter, worker and owned Windows child")
+        val (stdout, stderr, code) = process_run_timeout(probe, [root, worker], 90000)
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("PASS windows-buildrunner-sosix-hal")
+        expect(stdout).to_contain("evidence=")
+        expect(stderr.contains("FAIL")).to_equal(false)
+        val marker = stdout.split("evidence=")
+        if marker.len() != 2:
+            fail("native HAL probe did not provide one evidence path")
+            return
+        val evidence = marker[1].trim()
+        if not evidence.starts_with(root + "/sosix-hal-"):
+            fail("native HAL evidence escaped its private root")
+            return
+        step("Verify the real worker result, output digest and Job Object evidence")
+        val result = match builder_read_result_v1(evidence + "/result.sdn"):
+            Ok(value): value
+            Err(reason):
+                fail("native worker result unavailable: " + reason)
+                return
+        expect(result.status).to_equal("OK")
+        expect(result.exit_code).to_equal(0)
+        expect(result.outputs.len()).to_equal(1)
+        if result.outputs.len() != 1: return
+        expect(result.outputs[0].digest).to_equal(file_hash_sha256(evidence + "/work/result.o"))
+        expect(file_read(evidence + "/work/result.o")).to_contain("SOSIX_INPUT")
+        expect(file_read(evidence + "/stdout.log")).to_contain("HAL_STDOUT")
+        expect(file_read(evidence + "/stderr.log")).to_contain("HAL_STDERR")
+        expect(file_read(evidence + "/compiler.reaped")).to_contain("\nlocal")
+        expect(file_read(evidence + "/compiler.memory")).to_contain("enforcement=job-memory")
+        expect(file_read(evidence + "/capacity.settled")).to_contain("windows-job-settled")

@@ -9,7 +9,7 @@ import tempfile
 import threading
 
 ROOT = Path(__file__).resolve().parents[5]
-CLIENT = ROOT / "tools/mail-cli/bin/mail"
+CLIENT = ROOT / "tools/mail-cli/bin" / ("mail.cmd" if os.name == "nt" else "mail")
 
 
 def main():
@@ -21,6 +21,12 @@ def main():
             "-days", "1", "-subj", "/CN=127.0.0.1",
             "-addext", "subjectAltName=IP:127.0.0.1",
             "-keyout", str(key), "-out", str(cert),
+        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        unrelated_ca = work / "unrelated-ca.pem"
+        subprocess.run([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-days", "1", "-subj", "/CN=unrelated-pop3-fixture-root",
+            "-keyout", str(work / "unrelated-ca-key.pem"), "-out", str(unrelated_ca),
         ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, key)
@@ -133,9 +139,11 @@ def main():
                if not name.startswith("MAIL_") and name not in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR")}
         env.update(HOME=str(home), CURL_CA_BUNDLE=str(cert), MAIL_NONINTERACTIVE="1",
                    MAIL_CURL_MAX_RETRIES="1", NO_PROXY="127.0.0.1", PATH="/usr/bin:/bin")
+        if os.name == "nt":
+            env["PATH"] = os.environ.get("PATH", "")
         # Keep the explicit compiled configuration/credential owner executable;
         # account selection and passwords remain isolated in this fixture.
-        for helper in ("MAIL_CREDENTIAL_BIN", "MAIL_CONFIG_BIN"):
+        for helper in ("MAIL_CREDENTIAL_BIN", "MAIL_CONFIG_BIN", "MAIL_BASH"):
             if os.environ.get(helper):
                 env[helper] = os.environ[helper]
 
@@ -180,7 +188,7 @@ def main():
             assert result.returncode == 67 and commands.count("PASS") == before + 1
             assert "mail auth password" in result.stderr
             print("actual_curl_authentication_rejected_once: PASS")
-            result = run("read", "1", "--raw", overrides={"CURL_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt"})
+            result = run("read", "1", "--raw", overrides={"CURL_CA_BUNDLE": str(unrelated_ca)})
             assert result.returncode == 60, f"untrusted certificate exit {result.returncode}"
             print("actual_curl_untrusted_certificate_rejected: PASS")
             state["tls"] = "starttls"

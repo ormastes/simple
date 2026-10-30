@@ -1,0 +1,68 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: [u8] compound-assign and destructuring reads use rt_bytes_u8_at
+
+Packed byte arrays store raw octets, so rt_array_get misreads them; non-u8 arrays keep rt_array_get.
+"""
+
+# @tag: unit, compiler, mir, builtins
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn callees_of(src: text) -> [text]:
+    val file = "testdata/packed_u8_spec.spl"
+    val parsed = parse_full_frontend(src, file, "packed_u8_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    callees
+
+fn contains(lst: [text], item: text) -> bool:
+    for x in lst:
+        if x == item:
+            return true
+    false
+
+describe "packed [u8] compound assign and destructuring":
+    it "u8 compound assign uses rt_bytes_u8_at":
+        step("lower b[0] += 1u8 on a [u8] parameter")
+        val callees = callees_of("fn f(b: [u8]) -> i64\n    b[0] += 1u8\n    0\n")
+        expect(contains(callees, "rt_bytes_u8_at")).to_equal(true)
+        expect(contains(callees, "rt_array_get")).to_equal(false)
+
+    it "u8 destructuring uses rt_bytes_u8_at":
+        step("lower [a, c] = b on a [u8] parameter")
+        val callees = callees_of("fn g(b: [u8]) -> i64\n    var a = 0u8\n    var c = 0u8\n    [a, c] = b\n    0\n")
+        expect(contains(callees, "rt_bytes_u8_at")).to_equal(true)
+        expect(contains(callees, "rt_array_get")).to_equal(false)
+
+    it "i64 compound assign keeps rt_array_get":
+        step("lower b[0] += 1i64 on an [i64] parameter")
+        val callees = callees_of("fn h(b: [i64]) -> i64\n    b[0] += 1i64\n    0\n")
+        expect(contains(callees, "rt_array_get")).to_equal(true)
+        expect(contains(callees, "rt_bytes_u8_at")).to_equal(false)
+
+    it "i64 destructuring keeps rt_array_get":
+        step("lower [x, y] = b on an [i64] parameter")
+        val callees = callees_of("fn i(b: [i64]) -> i64\n    var x = 0\n    var y = 0\n    [x, y] = b\n    0\n")
+        expect(contains(callees, "rt_array_get")).to_equal(true)
+        expect(contains(callees, "rt_bytes_u8_at")).to_equal(false)

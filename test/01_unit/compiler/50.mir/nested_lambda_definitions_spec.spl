@@ -1,0 +1,40 @@
+# @req REQ-CLI-008
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+use std.spec.*
+use std.spec.step
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+describe "Nested native lambda definitions":
+    it "should retain child definitions without a declaration repository":
+        step("Parse two nested callbacks capturing a value")
+        val source = "fn invoke(block: fn()):\n    block()\n\nfn main() -> i64:\n    val captured = 7\n    invoke():\n        invoke():\n            assert(captured == 7)\n    0\n"
+        val ast = parse_full_frontend(source, "app/main.spl", "app.main", Logger(level: 0))
+        var modules: Dict<text, Module> = {}
+        modules["app.main"] = ast
+        val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+        val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+        var lowering = hirlowering_for_module("app.main", surfaces)
+        val hir = lowering.lower_module(ast)
+        var providers: Dict<text, HirModule> = {}
+        providers["app.main"] = hir
+        step("Lower with the ordinary repository-free MIR owner")
+        var mir_lowering = MirLowering.new(hir.symbols)
+        expect(mir_lowering.declaration_repository).to_be_nil()
+        mir_lowering.prescan_module_struct_names(providers, "app.main")
+        val mir = mir_lowering.lower_module(hir)
+        step("Check both lifted callbacks have emitted definitions")
+        expect(mir_lowering.errors.len()).to_equal(0)
+        var lifted = 0
+        for function in mir.functions.values():
+            if function.name.contains("__lambda_lift_"):
+                lifted = lifted + 1
+        expect(lifted).to_equal(2)

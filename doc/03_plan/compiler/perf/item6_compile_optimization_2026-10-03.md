@@ -141,3 +141,88 @@ all 44 scenarios, Phase 3/full CLI/core/MCP/LSP and Stage G measurements remain
 unverified. A new pure-Simple acceptance-entry diagnostic build timed out after
 240 seconds with no executable; its stopped cycle and cache are preserved.
 Do not retry either lane's stopped three-cycle bootstrap/build campaign.
+
+## 2026-10-25 status reconciliation (verified against `origin/release/1.0.0`)
+
+Verified by `git merge-base --is-ancestor` of each merge commit and by reading
+the current default sites. Host claims are limited to code presence; **no
+native Stage 3 run of the per-file pipeline on this source exists yet**, so no
+compile-time, memory, or first-object number below is a retained measurement.
+
+| Area | Status | Evidence (PR / merge sha) |
+|---|---|---|
+| Per-module lowering instead of whole-program MIR | DONE | #4525 `2382dd7869f`, scripts #4547 `35789f8bb55` |
+| True per-file pipeline design (contract, gaps, packages) | DONE (doc) | #4564 `8914716a114` → `doc/05_design/compiler/incremental_build/true_per_file_pipeline_v1.md` |
+| Object streaming during MIR | DONE (default batch 8) | #4566 `ae96dd0bb6e` |
+| `--file-worker` claim loop, HIR→MIR→obj per module | PARTIAL — opt-in | #4576 `106ab239fff`, #4584 `ab8be8ced3b`, #4585 `0b4822e703c`, #4588 `e0efb59638f` |
+| Module-scoped mono + COMDAT, per-file mono, relocation, dedup | PARTIAL — opt-in | #4575 `00e0ab21f0b`, #4580 `29250ecf501`, #4597 `7ec523277de`, #4598 `220b35b4b35`, #4603 `cbe361c2497` |
+| Incremental planner + object cache in file-worker pool | PARTIAL — opt-in lane | #4594 `9314979e6e6`; planner #4511 `f37c76ddaf4` |
+| Default flip readiness + overlap receipt check | PARTIAL — prepared, **not flipped** | #4592 `1c6ccfb61c4`; `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` (`src/compiler/80.driver/driver_build/native_file_worker_v1.spl:45`) |
+| TLDR specialization list + `.rr` producers (P-G2) | DONE (opt-in lane) | #4600 `73c4aef632a` |
+| HIR phase speed (admission O(n²), lazy validation blobs, cache scope publish) | DONE (code); speedups are PR-reported, not re-measured | #4557 `4ce52b4d99f`, #4562 `5e8ad7e3638`, #4565 `700a2f742a4`, #4567 `24889530ad3` |
+| Packed `.spab` parse cache | DONE — default store (`SIMPLE_FRONTEND_SPAB=0` opts out) | #4436 `387470fb5b3`, #4445 `2400d260405`, #4582 `2e958d33746`, #4589 `d1ee8738d60` |
+| Generic TLDR view / instance cache / reader instances | DONE (code) | #4389 `9de5aade86a`, #4403 `5c8390bd95c`, #4433 `eba045f665c`, #4591 `3383735e8cb` |
+| Cache limits (bytes, entry counts, usage ledger) | DONE (code) | #4396 `92a9517a17e`, #4405 `a4e59c4fc37`, #4506 `1859d0f69a8` |
+| Content-keyed Stage 2 cache lane | DONE | #4559 `b73459ca0e0` |
+| ParseContext (item 32) — prerequisite for in-process fibers | PARTIAL — stage 2 of plan | #4502 `0410c704cda`, #4568 `cb75218efa6` |
+| MIR correctness fixes on the per-module lane | DONE | #4498, #4528, #4536, #4537, #4543, #4545 |
+| Retained baselines (clean/warm/no-op/single-edit), semantic-invalidation matrix, corrupt-cache recovery, bootstrap/MCP/LSP equivalence | OPEN | none recorded on this source |
+
+Done gate (umbrella §6) is **not met**: the per-file pipeline is opt-in, its
+first-object overlap has no native receipt, and no retained end-to-end
+compile-time/memory target has been measured.
+
+### Progress 2026-10-25 (evening)
+
+PR states verified with `gh pr view` against base `release/1.0.0`.
+
+**Per-file packages merged:** P-A #4588 `e0efb59638f`, P-B #4597 `7ec523277de`,
+P-C #4589 `d1ee8738d60`, P-D #4603 `cbe361c2497`, P-E #4594 `9314979e6e6`,
+P-F #4592 `1c6ccfb61c4`, P-G1 #4591 `3383735e8cb`, P-G2 #4600 `73c4aef632a`,
+P-G3 #4598 `220b35b4b35`, P-G4 #4625 `7ec28192eb0`, P-G5 #4628 `963f32429a3`,
+P-G5b #4653 `5de3687be0b`, P-G6 #4672 `03e6d90af24`, P-H #4683 `bf4c14a31e1`
+(stage3 and plain native-build go through the file-worker pool, fail-closed).
+E-MONO-040 fails closed for imported generics: #4651 `6c257d14918`.
+
+**Open:** P-G7 #4696 (instance object producer + link wiring) is OPEN; approved by lead
+reviewer (comment), pending merge. Merge release_phase3 into
+release/1.0.0: #4704 OPEN.
+
+**Default stays off:** `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`
+(`SIMPLE_FILE_WORKERS` default "0"). Flip waits on a proof run: stage3 -> stage3'
+built with P-H, then a per-file self-rebuild that yields an overlap receipt
+(`scripts/check/check-per-file-overlap-receipt.shs`). No such receipt exists yet.
+
+**Stage evidence (in progress, not a retained measurement):** stage2 built cold
+from `d72188e68ec` (1534 modules, 0 failed, mswsock workaround dropped). The
+stage3 whole-program run is in progress with 0 MIR errors (was 3211); it is
+single-threaded and CPU-bound.
+
+**Other landings:** #4610 stale lock reclaim / orphan reaping `52ecd8b7725`;
+#4622 Mach-O as conditional build tag `a269ecaecba`; #4623 pre-push gate clear
+error for missing gate script `fc894af98af`; #4633 host-scaled tree RSS cap
+`ae3c1307476`; #4682 llvm-mingw drive-letter admission `784ac5aa304`; seed
+externs #4608 `57a129fb2b9` and #4688 `5bd6f027abb`; spec fixes #4636
+`1cfdf5876ca`, #4635 `33bfd461fbb`, #4638 `4f5e0d91b88`. Also merged since the
+morning: memory #4698 `574b8bb6e70` and #4705 `31bafe03f9e` (HIR / per-module MIR
+eviction), perf #4693 `35fe920618d` (sha256 accelerator), MIR #4706
+`a853ac75861`, stage2 #4684 `dd7cede08a3` and #4697 `7c1e83a584b`.
+
+**Still failing / under investigation:** HIR cache selfcheck (239/1495 hits);
+seed JIT fallback on `native_build_main`.
+
+**Evening update (16:06).**
+
+- Landing: the second lander force-landed after local gates (CI queued over 50
+  minutes): #4693 `35fe920618d`, #4684 `dd7cede08a3`, #4697 `7c1e83a584b`,
+  #4686 `14c1428c6c9`, #4698 `574b8bb6e70`, #4705 `31bafe03f9e`, #4706
+  `a853ac75861`, #4685 `73929c8bdc1`; P-H #4683 `bf4c14a31e1`.
+- Open: P-G7 #4696 (approved by lead reviewer comment), #4704 release_phase3
+  merge, #4708 batch MIR eviction.
+- Phase 3 at 16:06: the stage3 whole-program run is in staged codegen (batch
+  about 121 of about 187), 0 MIR errors, 28.8 GB RSS, single thread. Next: lld
+  link, sanity, MCP / caret / devhub, stage3 self-rebuild from the latest
+  release with P-H, then the per-file proof run (80 jobs) and the default flip.
+- Investigating: closure walk not following `use os.*` imports (selected 1 vs
+  5); `--parse-fibers` children exit 1; HIR cache selfcheck still failing
+  despite #4504 (239/1495 hits); seed JIT fallback; linker memory (21 GB).

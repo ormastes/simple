@@ -1,0 +1,49 @@
+#!/bin/sh
+# --selftest fixtures for the output-ownership lock: a lock whose owner PID is
+# dead (including a hard-killed owner whose orphaned children keep its process
+# group alive) is reclaimed with a logged "stale lock reclaimed" line; a lock
+# whose owner is alive is respected (acquire times out, rc 75).
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+PORTABLE_LOCK_ATOMIC_HELPER_PATH=$root/scripts/check/lib/portable-hardlink-lock.pl
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+lib=$root/scripts/check/lib/portable-process-lock.shs
+session=$root/scripts/check/lib/portable-session-exec.pl
+. "$lib"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/lock-stale.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Live owner respected: a second acquirer in a different process must time out.
+mkdir "$tmp/live"
+portable_lock_acquire "$tmp/live" own 5 || fail "initial acquire"
+sh -c '. "$1"; portable_lock_acquire "$2" own 2' sh "$lib" "$tmp/live" 2>"$tmp/live.err"
+rc=$?
+[ "$rc" -eq 75 ] || fail "live-owner lock not respected (rc=$rc)"
+portable_lock_release "$PORTABLE_LOCK_HANDLE"
+
+# Dead owner reclaimed. The owner runs as its own session leader (pid == pgid),
+# leaves an orphaned child behind and is SIGKILLed, so no trap could run.
+mkdir "$tmp/dead"
+SIMPLE_LOCK_TEST_DIR=$tmp/dead SIMPLE_LOCK_TEST_LIB=$lib \
+  perl "$session" sh -c '
+    . "$SIMPLE_LOCK_TEST_LIB"
+    portable_lock_acquire "$SIMPLE_LOCK_TEST_DIR" own 5 || exit 1
+    sleep 300 &
+    echo $$ > "$SIMPLE_LOCK_TEST_DIR/owner.pid"
+    echo ready > "$SIMPLE_LOCK_TEST_DIR/ready"
+    wait' &
+i=0
+while [ ! -f "$tmp/dead/ready" ] && [ "$i" -lt 20 ]; do sleep 1; i=$((i + 1)); done
+[ -f "$tmp/dead/ready" ] || fail "owner fixture did not start"
+owner=$(cat "$tmp/dead/owner.pid")
+kill -9 "$owner" 2>/dev/null
+i=0
+while kill -0 "$owner" 2>/dev/null && [ "$i" -lt 10 ]; do sleep 1; i=$((i + 1)); done
+portable_lock_acquire "$tmp/dead" own 30 2>"$tmp/dead.err" || {
+  cat "$tmp/dead.err" >&2; fail "dead-owner lock not reclaimed"; }
+grep -q "reaping orphaned process group" "$tmp/dead.err" || fail "orphans were not reaped"
+grep -q 'stale lock reclaimed' "$tmp/dead.err" || {
+  cat "$tmp/dead.err" >&2; fail "no 'stale lock reclaimed' log line"; }
+portable_lock_release "$PORTABLE_LOCK_HANDLE"
+echo "PASS: portable lock selftest (live owner respected, dead owner + orphans reclaimed; 2 cases)"

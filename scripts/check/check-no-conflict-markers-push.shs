@@ -496,7 +496,12 @@ if [ "$scanned" -gt 0 ]; then
     # positional arguments. CHUNK bounds the argv size instead of letting a
     # huge range risk the OS command-line limit; at or under CHUNK files this
     # is exactly ONE git process per marker kind, matching WP1's target.
+    # CHUNK_BYTES additionally bounds the summed path length: Windows caps a
+    # whole command line at 32,767 chars, and 500 long paths exceeded it
+    # ("Argument list too long", verdict ERROR) — see
+    # doc/08_tracking/bug/prepush_conflict_markers_arglist_too_long_windows_2026-10-27.md.
     CHUNK=500
+    CHUNK_BYTES=20000
 
     run_grep_chunked() { # <pattern> <outfile> -> sets G_RC (0 ok/no-match, >0 real error)
         pat=$1
@@ -505,17 +510,20 @@ if [ "$scanned" -gt 0 ]; then
         : > "$TMPD/greperr"
         G_RC=0
         n=0
+        bytes=0
         set --
         while IFS= read -r p; do
             set -- "$@" "$p"
             n=$((n + 1))
-            if [ "$n" -ge "$CHUNK" ]; then
+            bytes=$((bytes + ${#p} + 1))
+            if [ "$n" -ge "$CHUNK" ] || [ "$bytes" -ge "$CHUNK_BYTES" ]; then
                 git -c core.quotePath=false --literal-pathspecs grep -anzE "$pat" "$tip" -- "$@" \
                     >> "$outfile" 2>>"$TMPD/greperr"
                 rc=$?
                 [ "$rc" -gt 1 ] && G_RC=$rc
                 set --
                 n=0
+                bytes=0
             fi
         done < "$TMPD/remaining"
         if [ "$n" -gt 0 ]; then

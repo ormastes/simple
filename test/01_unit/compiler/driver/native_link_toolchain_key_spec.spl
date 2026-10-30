@@ -1,0 +1,47 @@
+# Linker gaps (live_object_key.sdn: linker_binary_version, system_library_content,
+# import_lib_export_sets) closed in the link-receipt key: explicit libraries are
+# resolved and keyed by CONTENT (an import library's bytes carry its export
+# set), unresolvable explicit libraries fail closed, and implicit system
+# libraries are keyed as content or `absent`.
+use std.spec
+extern fn rt_file_write_text(path: text, content: text) -> bool
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.driver.driver_build.native_link_receipt_v1.{
+    native_link_library_candidates_v1, native_link_library_rows_v1}
+
+extern fn rt_getpid() -> i64
+
+fn rows_text(rows: [text]?) -> text:
+    match rows:
+        case Some(r): r.join("|")
+        case nil: "NIL"
+
+describe "link receipt toolchain key":
+    it "names the usual library file spellings":
+        val c = native_link_library_candidates_v1("foo")
+        expect(c.contains("libfoo.a")).to_equal(true)
+        expect(c.contains("foo.lib")).to_equal(true)
+        expect(native_link_library_candidates_v1("C:/sdk/foo.lib")).to_equal(["C:/sdk/foo.lib"])
+
+    it "keys explicit and implicit libraries by content and fails closed on a missing explicit one":
+        val d = "build/.link_toolchain_spec_{rt_getpid()}"
+        dir_create_all(d)
+        rt_file_write_text(d + "/libfoo.a", "foo-v1")
+        rt_file_write_text(d + "/kernel32.lib", "exports-v1")
+        val first = rows_text(native_link_library_rows_v1(["foo"], ["kernel32", "bar"], [d]))
+        expect(first.contains("lib:foo=")).to_equal(true)
+        expect(first.contains("sys:bar=absent")).to_equal(true)
+        expect(first.contains("sys:kernel32=absent")).to_equal(false)
+        expect(rows_text(native_link_library_rows_v1(["missing"], [], [d]))).to_equal("NIL")
+        # explicit library content change
+        rt_file_write_text(d + "/libfoo.a", "foo-v2")
+        val second = rows_text(native_link_library_rows_v1(["foo"], ["kernel32", "bar"], [d]))
+        expect(second == first).to_equal(false)
+        # import library export-set change
+        rt_file_write_text(d + "/kernel32.lib", "exports-v2")
+        val third = rows_text(native_link_library_rows_v1(["foo"], ["kernel32", "bar"], [d]))
+        expect(third == second).to_equal(false)
+        # an implicit system library appearing
+        rt_file_write_text(d + "/libbar.a", "bar")
+        val fourth = rows_text(native_link_library_rows_v1(["foo"], ["kernel32", "bar"], [d]))
+        expect(fourth == third).to_equal(false)

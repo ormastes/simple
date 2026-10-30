@@ -1,0 +1,119 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/cache/reader/template_body_loader_v1.spl 0%
+"""
+# Template body loader for reader concrete instances (P-G4)
+
+**Category:** Compiler / driver
+**Design:** doc/05_design/compiler/incremental_build/true_per_file_pipeline_v1.md section 4
+
+## Purpose and Audience
+
+The file worker's body-on-demand seam resolves an E-MONO-040 template to its
+owner module and serves the owner's cached HIR body for module-scoped mono.
+Owners are searched only in F's transitive import closure. Each decision is
+cached under a process-local TemplateBodyDecisionKeyV1 (set-once; not a
+ConcreteTldrKey).
+
+## Expected Outcome
+
+An E-MONO-040 template name resolves to its owner and is served; a second
+request hits the cache; an owner content change invalidates; an unavailable
+owner body fails closed (MONO-PENDING path).
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_missing_templates_v1,
+    native_file_worker_mono_fallback_reader_v1, native_file_worker_reader_instances_available_v1,
+    native_file_worker_reader_instances_enabled_v1}
+use compiler.driver.cache.reader.template_body_loader_v1.{template_body_loader_new_v1,
+    template_body_owner_of_v1, template_body_decision_key_v1, template_body_import_closure_v1}
+
+fn closure() -> [text]:
+    ["std.list", "app.util"]
+
+fn declared() -> Dict<text, [text]>:
+    var d: Dict<text, [text]> = {}
+    d["std.list"] = ["List"]
+    d["app.util"] = ["pair", "Box"]
+    d["app.other"] = ["Box"]
+    d
+
+describe "E-MONO-040 path resolved by the loader":
+    it "resolves the owner of a qualified and a plain template name":
+        val names = native_file_worker_missing_templates_v1([
+            "E-MONO-040: template std.list.List not visible to module app.main",
+            "E-MONO-040: template pair not visible to module app.main"])
+        assert_equal(template_body_owner_of_v1(names[0], declared(), closure()), "std.list")
+        assert_equal(template_body_owner_of_v1(names[1], declared(), closure()), "app.util")
+
+    it "computes the transitive import closure":
+        var edges: Dict<text, [text]> = {}
+        edges["app.main"] = ["app.util"]
+        edges["app.util"] = ["std.list", "app.main"]
+        val c = template_body_import_closure_v1("app.main", edges)
+        assert_equal(c.len(), 2)
+        assert_true(c.contains("std.list"))
+        assert_false(c.contains("app.main"))
+
+    it "misses an owner outside the import closure even when it is the unique declarer":
+        assert_equal(template_body_owner_of_v1("Box", declared(), ["std.list"]), "")
+        assert_equal(template_body_owner_of_v1("app.other.Box", declared(), ["std.list"]), "")
+        var loader = template_body_loader_new_v1()
+        assert_equal(loader.load(template_body_owner_of_v1("Box", declared(), ["std.list"]), "Box", [], "sha256:a", true).pending_reason, "owner-unknown")
+
+    it "misses when two declarers are inside the closure":
+        assert_equal(template_body_owner_of_v1("Box", declared(), ["app.util", "app.other"]), "")
+        assert_equal(template_body_owner_of_v1("nope", declared(), closure()), "")
+
+    it "serves the body so the worker retries with the reader":
+        var loader = template_body_loader_new_v1()
+        val r = loader.load("app.util", "pair", ["i64"], "sha256:a", true)
+        assert_true(r.found)
+        assert_equal(r.source, "loaded")
+        assert_equal(native_file_worker_mono_fallback_reader_v1(
+            ["E-MONO-040: template pair not visible to module app.main"], false, 1), "reader")
+
+    it "is enabled by default and off with SIMPLE_READER_CONCRETE_INSTANCES=0":
+        assert_true(native_file_worker_reader_instances_available_v1())
+        assert_true(native_file_worker_reader_instances_enabled_v1("", native_file_worker_reader_instances_available_v1()))
+        assert_false(native_file_worker_reader_instances_enabled_v1("0", native_file_worker_reader_instances_available_v1()))
+
+describe "body-decision cache":
+    it "hits the cache on the second request":
+        var loader = template_body_loader_new_v1()
+        val first = loader.load("app.util", "pair", ["i64"], "sha256:a", true)
+        val second = loader.load("app.util", "pair", ["i64"], "sha256:a", true)
+        assert_equal(second.source, "cache")
+        assert_equal(second.decision_key, first.decision_key)
+        assert_equal(loader.loads, 1)
+        assert_equal(loader.hits, 1)
+
+    it "keys distinct type arguments separately":
+        val a = template_body_decision_key_v1("app.util", "pair", "sha256:a", ["i64"])
+        val b = template_body_decision_key_v1("app.util", "pair", "sha256:a", ["text"])
+        assert_false(a == b)
+
+    it "invalidates when the owner changes":
+        var loader = template_body_loader_new_v1()
+        val first = loader.load("app.util", "pair", ["i64"], "sha256:a", true)
+        val changed = loader.load("app.util", "pair", ["i64"], "sha256:b", true)
+        assert_equal(changed.source, "loaded")
+        assert_false(changed.decision_key == first.decision_key)
+        assert_false(loader.cached(first.decision_key))
+        assert_equal(loader.invalidations, 1)
+
+describe "fail closed":
+    it "misses when the owner body is unavailable":
+        var loader = template_body_loader_new_v1()
+        val r = loader.load("app.util", "pair", ["i64"], "sha256:a", false)
+        assert_false(r.found)
+        assert_equal(r.pending_reason, "owner-body-unavailable")
+        assert_equal(native_file_worker_mono_fallback_reader_v1(
+            ["E-MONO-040: template pair not visible to module app.main"], true, 0), "MONO-PENDING")
+
+    it "misses for an unknown owner or digest":
+        var loader = template_body_loader_new_v1()
+        assert_equal(loader.load("", "pair", [], "sha256:a", true).pending_reason, "owner-unknown")
+        assert_equal(loader.load("app.util", "pair", [], "", true).pending_reason, "owner-digest-unknown")
+        assert_equal(loader.misses, 2)

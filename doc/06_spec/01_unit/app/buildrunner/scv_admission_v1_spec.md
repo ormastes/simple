@@ -1,0 +1,21 @@
+# BuildRunner frozen SCV source admission
+
+**Execution status: not_run — Phase 3 acceptance explicitly deferred.** This is an authored companion to [the direct specification](../../../../../test/01_unit/app/buildrunner/scv_admission_v1_spec.spl), not generated execution evidence or a passing manual. Compilation, SSpec/docgen execution, scores, coverage and performance remain unverified.
+
+Owner/session: `/root/impl_snapshot_witness`. Worktree: `/tmp/simple-scv-buildrunner-admission-20261027`; branch `work/scv-buildrunner-admission-20261027`; exact base `8dcbbbf949ccc913cc69e5badee3c26ee94a3d4a`. Scope: new `app.buildrunner.scv_admission_v1` and its direct specification/companion only. Parent owns CLI, source role sidecar, immutable worker materialization, task context and integration. No scheduler change.
+
+`BuildRunnerScvAdmissionV1` binds the exact `BuildTaskV1` identity, original `CompileSnapshotV1Adapter`, requested `ScvSnapshotV2`, ordered mapped `BuildInputV1` records, source witnesses and `VerificationReceiptV1`. The versioned, length-framed SHA-256 admission digest includes those identities and source observations. Task retries retain the actual attempt in this binding; caller normalization is never implicit.
+
+`build_runner_scv_bind_v1(task, adapter, witnesses)` returns a source-only binding or refusal. Source roles come only from explicit inventory membership/declared scopes. Each task input in those roles must exist in both frozen subjects, have the exact declared byte SHA and have a positive witness. Unknown coverage, unmapped source inputs, duplicate task paths/queries, undeclared positive reads and missing positive observations refuse. Filename suffixes do not establish source roles. Ordinary inputs remain under existing parent checks; the caller must validate its exhaustive source/ordinary role table and fail unsupported source roles.
+
+Directory queries must describe the worker-visible staged tree. The gate rejects a directory witness when any frozen descendant is absent from mapped task inputs. Negative queries cannot overlap worker inputs; source/query-relevant links and outputs refuse. The CLI owner must supply complete directory witnesses for each source root the compiler enumerates and reject unsupported aliases/flags before binding the identity. Merely passing a frozen root to a transport that copies only task inputs is insufficient.
+
+`build_runner_scv_revalidate_v1(binding, requested_snapshot)` first reconstructs the original binding, then verifies observations and mapped bytes against the requested snapshot. Changed bytes, a newly present formerly absent file, unknown directory coverage or a changed query namespace refuse. Unchanged observations may receive a new receipt bound to the requested snapshot.
+
+`build_runner_scv_admission_digest_v1(binding)` reconstructs task, adapter cross-links, requested subject, source mapping, receipt and canonical digest. Tampered public fields are not trusted. The module performs no live filesystem reads. V1 proof remains relative to `compile-inventory-v1`; it is not filesystem/event/editor completeness. Existing coverage limitations remain disclosed.
+
+Every returned binding and receipt has `source_only = true`. It is an additional precondition, never full artifact/cache-hit authority. Existing producer, toolchain, environment, policy, output/result validation and compiler semantic-manifest ownership remain required.
+
+The direct cases cover these contracts with explicit logical input fixtures and expected refusals. They do not fabricate process, capture, worker or cache evidence. Canonical construction/query counts reuse the existing BuildTask input bound; reconstruction and directory checks operate on retained immutable models. No startup/latency/RSS or large-repository performance claim follows from this source. Production acceptance must measure the cost of subject reconstruction across reuse/recovery boundaries and preserve exact worker membership.
+
+Static hygiene only: staged whitespace clean; direct-env/runtime facade audit passed in working and staged modes; executable `_spec.spl` count below `doc/06_spec` was 0. These checks do not establish compilation, runtime behavior or Phase 3 acceptance.

@@ -17,6 +17,7 @@ use std.io_runtime.{get_args}
 
 use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult, TEST_OUTPUT_CAPTURE_BYTES, classify_test_run_result, test_run_outcome_exit_code, test_empty_selection_is_success, test_file_result_is_unverified}
 use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+use std.test_runner.native_compile_contract.{native_test_library_lanes_error, native_test_library_mode_error, native_test_library_resume_error}
 use std.test_runner.test_config.{TestConfig, load_test_config}
 use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use std.test_runner.mode_filter.{path_mode_matches}
@@ -24,6 +25,7 @@ use std.spec.in_development.{source_is_in_development, in_development_explicitly
 use std.spec.requires_feature.{spec_required_features, feature_env_names, disabled_required_features, feature_skip_line, feature_skip_summary_line, feature_disabled_reason}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
+use std.nogc_sync_mut.test_runner.source_route.{source_has_bdd_structure}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
 use std.test_runner.test_executor_lanes.{run_test_file_composite}
 use std.test_runner.test_runner_output.{combined_test_run_sdn, print_result, print_summary}
@@ -31,12 +33,13 @@ use std.test_runner.test_runner_config.{report_free_mem, mode_to_str, propagate_
 use app.test_runner_new.cover_admission.{cover_admitted_files, cover_append_failures}
 use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
 use app.test_runner_new.sdn_wrapper.{run_test_sdn_wrapper}
+use app.test_runner_new.test_runner_worker_admission.{test_runner_admitted_worker_count}
 use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary, schedule_flatten, schedule_session_file_paths, schedule_local_file_paths}
 # MEMORY DEBUG: groups 3-9 commented out to isolate memory usage
 # GROUP 3: Container
 # use sequential_container.{SequentialContainerConfig, sequential_container_run_all_tests}
 # use test_runner_container.container_detect_runtime
-use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, print_coverage_summary, generate_coverage_reports, check_coverage_threshold, check_cover_annotation_thresholds, get_coverage_threshold, print_coverage_delta}
+use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, print_coverage_summary, generate_coverage_reports, check_coverage_threshold, check_cover_annotation_thresholds, get_coverage_threshold, print_coverage_delta, coverage_evidence_publishable, coverage_session_should_finalize}
 # GROUP 4: Database & feature tracking -- recorded by the test-db lane child
 # (test_db_lane_main.spl) so the database modules stay out of this closure.
 use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_encode}
@@ -72,7 +75,7 @@ use std.test_runner.qemu_test_runner.{run_qemu_tests_all}
 # Session sharing: daemon client + broker
 use app.test_daemon.client.{test_daemon_ensure_responsive, test_submit_and_wait, test_daemon_status, test_daemon_stop}
 use app.test_daemon.types.{TestDaemonConfig, test_daemon_config_default, TestResult}
-use app.test_daemon.light_protocol.{unrun_verdict_line, unrun_reason, is_load_failure, ran_verdict_line, timeout_verdict_line}
+use app.test_daemon.light_protocol.{aggregate_spec_file_verdict_line}
 val TRESP_COMPLETED: i64 = 2
 val TRESP_FAILED: i64 = 3
 val TRESP_CACHED: i64 = 6
@@ -239,6 +242,26 @@ fn discover_all_requested_files(options: TestOptions, use_cache: bool) -> [text]
     print "Requested {requested.len()} target(s); {all_files.len()} distinct test file(s) to run."
     all_files
 
+fn coverage_setup_failure_result(paths: [text]) -> TestRunResult:
+    var failed_paths = paths
+    if failed_paths.len() == 0:
+        failed_paths.push("<coverage setup>")
+    var files: [TestFileResult] = []
+    for path in failed_paths:
+        files.push(TestFileResult(path: path, passed: 0, failed: 1,
+            skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0,
+            error: "ABORTED BEFORE EXECUTION — coverage setup failed; stale artifacts could not be removed",
+            timed_out: false, cached: false))
+    TestRunResult(files: files, total_passed: 0, total_failed: files.len(),
+        total_skipped: 0, total_pending: 0, total_timed_out: 0,
+        total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+
+fn coverage_setup_failed(result: TestRunResult) -> bool:
+    for file in result.files:
+        if file.path == "<coverage setup>": return true
+        if file.error.contains("coverage setup failed"): return true
+    false
+
 fn run_tests(options: TestOptions) -> TestRunResult:
     # CI mode override (config already loaded by main(), use options.ci_mode)
     # Apply CI mode overrides
@@ -274,6 +297,14 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         # Explicit, not emergent — run to the end of the test list.
         updated_options.fail_fast = false
     print ""
+
+    # Recheck the effective request after defaults/overrides, not only raw argv.
+    # A legacy checkpoint cannot certify execution under a selected profile.
+    val library_resume_error = native_test_library_resume_error(updated_options.library_mode, updated_options.resume)
+    if library_resume_error != "":
+        return summarize_test_results([TestFileResult(path: updated_options.path,
+            passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0,
+            error: library_resume_error, timed_out: false, cached: false)])
 
     # Progress carried over from a --resume checkpoint (loaded below).
     var ckpt_passed = 0
@@ -335,6 +366,11 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         print_discovery_summary(all_files, options)
         return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
+    # Start coverage only for execution requests. A listing neither consumes
+    # coverage nor clears artifacts from a previous run.
+    if options.coverage and not setup_coverage():
+        return coverage_setup_failure_result(all_files)
+
     var missing_covers: [text] = []
     # Validate # @cover annotations for system tests
     if not updated_options.no_cover_check:
@@ -365,7 +401,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     # dropped the previous progress. The memory reason no longer holds (the
     # module is live in this same function), so the filter is back, and never
     # silent: a missing checkpoint is reported.
-    if options.resume:
+    if updated_options.resume:
         val ckpt_found = checkpoint_exists()
         val ckpt = if ckpt_found: checkpoint_load() else: make_empty_checkpoint()
         print checkpoint_resume_banner(ckpt_found, ckpt)
@@ -391,9 +427,6 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     # Freeze the admitted file set. The daemon retains its existing option
     # semantics; direct worker dispatch captures its effective options below.
     val admitted_paths = files
-
-    if options.coverage:
-        setup_coverage()
 
     # Propagate env vars
     propagate_env_vars(options)
@@ -712,17 +745,9 @@ fn run_tests_parallel_mode(
     val (normal_files, qemu_files) = separate_qemu_tests(uncached_files)
 
     # Determine worker count
-    var max_workers = options.max_workers
-    if max_workers <= 0:
-        max_workers = get_cpu_count() * options.resource_limit_pct / 100
-        if max_workers < 1:
-            max_workers = 1
-        # Cap auto-detected worker count to prevent process explosion on
-        # high-core machines. Each worker spawns shell + simple binary (2
-        # processes), so 8 workers = up to 16 OS processes at peak.
-        # Use --max-workers=N to override explicitly.
-        if max_workers > 8:
-            max_workers = 8
+    val auto_workers = get_cpu_count() * options.resource_limit_pct / 100
+    val max_workers = test_runner_admitted_worker_count(options.max_workers,
+        auto_workers, env_get("SIMPLE_HOST_MAX_THREADS") ?? "")
 
     val parallel_setup_end = time_now_unix_micros()
     val parallel_setup_ms = (parallel_setup_end - parallel_setup_start) / 1000
@@ -894,6 +919,11 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
         if (monitor_timeout.to_int() ?? 0) < effective_options.timeout:
             env_set("SIMPLE_TIMEOUT_SECONDS", "{effective_options.timeout}")
 
+    val library_route_error = native_test_library_mode_error(effective_options.library_mode,
+        effective_options.native_backend, mode_to_str(effective_options.mode) == "native" and not effective_options.safe_mode)
+    if library_route_error != "":
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: 0, error: library_route_error, timed_out: false, cached: false)
     if effective_options.safe_mode and effective_options.native_backend != "":
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
             duration_ms: 0, setup_ms: 0, error: "Explicit native backend and --safe cannot be combined",
@@ -1306,16 +1336,8 @@ fn emit_spec_file_verdicts(results: [TestFileResult]):
     independent emitter is what would let the lanes drift apart again.
     """
     for r in results:
-        if r.timed_out:
-            print timeout_verdict_line(r.path, "aggregate-lane-timeout", r.duration_ms)
-        elif r.error != "" and is_load_failure(r.error):
-            # Declared examples, loaded nothing. `executed=0 dropped=1` keeps
-            # the file RED under the existing `dropped == 0` greenwash gate.
-            print unrun_verdict_line(r.path, unrun_reason(r.error))
-        else:
-            # `degraded_reason` is empty for every file that ran the way the
-            # lane intended, so this changes no existing verdict line.
-            print ran_verdict_line(r.path, r.passed, r.failed, r.in_development, r.degraded_reason)
+        print aggregate_spec_file_verdict_line(r.path, r.passed, r.failed,
+            r.in_development, r.error, r.degraded_reason, r.timed_out, r.duration_ms)
 
 fn summarize_test_results(results: [TestFileResult]) -> TestRunResult:
     var total_passed = 0
@@ -1395,6 +1417,18 @@ fn run_test_cli() -> i64:
 
     if options.spl_doctest:
         run_spl_doc = true
+        # An explicit source doctest target runs documentation alone unless
+        # the same source also declares BDD examples. Directory/whole runs keep
+        # the established combined discovery policy. Empty docs still fail.
+        if not options.run_all and options.path.ends_with(".spl"):
+            val source = file_read(options.path) ?? ""
+            if not source_has_bdd_structure(source):
+                run_spec = false
+
+    val library_lanes_error = native_test_library_lanes_error(options.library_mode, run_sdoc, run_spl_doc)
+    if library_lanes_error != "":
+        print "Error: {library_lanes_error}"
+        return 2
 
     var spec_result = TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
     var spl_doctest_result = SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
@@ -1464,19 +1498,37 @@ fn run_test_cli() -> i64:
             print_in_development_summary(result_files)
             print_feature_gate_summary(result_files)
 
-        if options.coverage:
+        val inspection_only = options.list or options.manifest_status
+        if coverage_session_should_finalize(options.coverage, inspection_only,
+                coverage_setup_failed(spec_result), spec_result.carried_from_checkpoint):
             val coverage = collect_coverage()
             if not sdn_worker:
                 print_coverage_summary(coverage)
-            generate_coverage_reports(coverage)
-            print_coverage_delta(coverage)
             val threshold = get_coverage_threshold()
-            if threshold > 0 and not check_coverage_threshold(coverage, threshold):
-                exit_code = 1
+            var threshold_passed = true
+            if threshold > 0:
+                threshold_passed = check_coverage_threshold(coverage, threshold)
             var coverage_test_files: [text] = []
             for result_file in result_files:
                 coverage_test_files.push(result_file.path)
-            if not options.no_cover_check and not check_cover_annotation_thresholds(coverage, coverage_test_files):
+            var annotation_thresholds_passed = true
+            if not options.no_cover_check:
+                annotation_thresholds_passed = check_cover_annotation_thresholds(coverage, coverage_test_files)
+            # An explicit threshold or @cover contract can require evidence even
+            # when the compiler emitted no site manifest. A branchless run with
+            # no such contract remains valid and is not treated as a runner bug.
+            val evidence_required = threshold > 0 or not annotation_thresholds_passed
+            if not coverage_evidence_publishable(coverage, evidence_required):
+                print "[Coverage] ERROR: required coverage produced no runtime decision/condition outcomes; no coverage report was published"
+                exit_code = 1
+            else:
+                if generate_coverage_reports(coverage):
+                    print_coverage_delta(coverage)
+                else:
+                    exit_code = 1
+            if not threshold_passed:
+                exit_code = 1
+            if not annotation_thresholds_passed:
                 exit_code = 1
 
         # Name every spec that produced no verdict. Absence of a result must

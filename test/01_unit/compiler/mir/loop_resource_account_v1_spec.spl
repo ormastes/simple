@@ -1,0 +1,67 @@
+use std.spec
+use compiler.mir.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1, MirLoopResourceKindV1, MirLoopResourceErrorV1}
+
+describe "Shared loop resource account":
+    it "reserves its fixed storage before construction at the exact boundary":
+        expect(MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_work: 19)).is_err()).to_equal(true)
+        expect(MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_state_fields: 19)).is_err()).to_equal(true)
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_work: 20, max_state_fields: 20)).unwrap()
+        expect(account.snapshot().work_used).to_equal(20)
+        expect(account.snapshot().state_fields).to_equal(20)
+        expect(account.remaining(MirLoopResourceKindV1.Work)).to_equal(0)
+
+    it "reserves multiple dimensions with inclusive work exactly once":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_work: 25)).unwrap()
+        account.reserve(5, blocks: 1, edges: 2, output_bytes: 2).unwrap()
+        val observed = account.snapshot()
+        expect(observed.work_used).to_equal(25)
+        expect(observed.blocks).to_equal(1)
+        expect(observed.edges).to_equal(2)
+        expect(observed.output_bytes).to_equal(2)
+        expect(account.reserve(1).is_err()).to_equal(true)
+        expect(account.snapshot()).to_equal(observed)
+
+    it "rejects a late dimension atomically without consuming earlier capacities":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_output_bytes: 1)).unwrap()
+        val before = account.snapshot()
+        expect(account.reserve(6, blocks: 1, edges: 2, output_bytes: 3).is_err()).to_equal(true)
+        expect(account.snapshot()).to_equal(before)
+
+    it "rejects invalid inclusive work and overflow-sized amounts before addition":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+        val before = account.snapshot()
+        expect(account.reserve(1, blocks: 1, edges: 1)).to_equal(Err(MirLoopResourceErrorV1.InvalidReservation))
+        expect(account.reserve(9223372036854775807, blocks: 9223372036854775807, edges: 1).is_err()).to_equal(true)
+        expect(account.reserve(-1).is_err()).to_equal(true)
+        expect(account.reserve(1, state_fields: -1).is_err()).to_equal(true)
+        expect(account.snapshot()).to_equal(before)
+
+    it "retains one account through aliases and closing any alias is terminal":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+        val alias = account
+        alias.reserve(3, instructions: 3).unwrap()
+        expect(account.snapshot().instructions).to_equal(3)
+        alias.close()
+        val closed = account.snapshot()
+        expect(account.is_closed()).to_equal(true)
+        expect(closed.closed).to_equal(true)
+        expect(account.reserve(0)).to_equal(Err(MirLoopResourceErrorV1.Closed))
+        expect(account.set_stage(2).is_err()).to_equal(true)
+        expect(account.snapshot()).to_equal(closed)
+
+    it "validates every limit without allocating a partial account":
+        expect(MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_depth: -1)).is_err()).to_equal(true)
+        expect(MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_locals: 4097)).is_err()).to_equal(true)
+        expect(MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_sites: 257)).is_err()).to_equal(true)
+        expect(MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_work: 1048577)).is_err()).to_equal(true)
+
+    it "copies fixed observations without making them live mutable aliases":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+        val first = account.snapshot()
+        account.set_stage(7).unwrap()
+        account.reserve(1, predicate_nodes: 1).unwrap()
+        expect(first.stage_id).to_equal(0)
+        expect(first.predicate_nodes).to_equal(0)
+        expect(account.snapshot().stage_id).to_equal(7)
+        expect(account.snapshot().predicate_nodes).to_equal(1)
+        expect(account.snapshot().exact).to_equal(true)

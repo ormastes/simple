@@ -1,6 +1,25 @@
 <!-- codex-design -->
 # Collection planner architecture
 
+## 2026-10-27 DataFrame, backend and layout consistency
+
+The [shared capability contract](compiler/collection_backend_capabilities.md)
+now binds Item 3 physical planning to Item 7 containers and the async resource
+architecture. A logical HashLookup does not prove its map concurrent or
+lockless. Select an eligible index backend independently from column layout,
+using one common capability description and exact operation/type/lifetime/
+progress/target guards before costs. Static-only, no-capture and unsupported
+transitions are explicit; required capabilities never silently fall back.
+
+Both `src/lib/nogc_sync_mut/df/` and `src/lib/nogc_async_mut/df/` contain
+DataFrame and typed-series implementations. Keep their exported family APIs
+and checked conversions; neither `[Series]` storage nor the async family name
+certifies generic erased columns or concurrent mutation. Reuse existing
+StorageLayoutPlanV1 and the proposed shared IndexRefFactory/ref contracts;
+do not invent DataFrame-specific pointer or resource factories. CBC-01–12 in
+the [TDD matrix](../03_plan/sys_test/collection_backend_capabilities.md) refine
+existing requirements without claiming implementation or native completion.
+
 Status: design in progress, 2026-09-27. Functional scope is REQ-001–011 in
 `doc/02_requirements/feature/collection_planner.md`; balanced performance
 targets are selected in `doc/02_requirements/nfr/collection_planner.md`. The
@@ -157,3 +176,18 @@ affected receipts. Collection diagnostics and lowering consume the same
 snapshot; neither may reload files during a hot request. Evidence must measure
 warm startup and request latency separately, retaining the five-run medians,
 cold-start measurement and peak RSS required by the selected NFR profile.
+
+## Status 2026-10-25 (verified against origin/release/1.0.0 @ 52ecd8b7725)
+
+| Area | Status | Evidence |
+|---|---|---|
+| Typed registry, checked `typed_series` adapters, guarded advisory planning | DONE (merged) | PR #2285 (`6c905c710c6`), follow-up PR #2304 (`ae932d53f79`), evidence PR #2309 (`abdebaa4360`) |
+| CLI policy/budget transport and argument validation | DONE (merged) | `93bc526ff95`, `e1c2cce4157` |
+| Builtin collection dispatch identity (`BuiltinCollection` in HIR/codec/type infer) | DONE in source | `src/compiler/20.hir/hir_types.spl`, `generated/hir_codec.spl` on release/1.0.0 |
+| MIR consumption of plans | PARTIAL — only guarded literal-membership plans | `97b13f9eb09` (`test/.../mir/collection_literal_membership_spec.spl`) |
+| Driver archive/current-body gate preservation | PARTIAL (analysis-only) | `a7b8b4cdcef`, `ba0a687f9e6` (2026-10-12); driver still publishes "analysis snapshots, never lowered/executed receipts" |
+| General filter/projection/group/aggregate/join lowering | OPEN | no lowering path beyond literal membership |
+| Five-engine semantic equivalence, NFR-001–007 measurements, per-host done gate | OPEN | no executed receipts in `doc/03_plan/evidence/seven_plans/` for item 3 except the 2026-09-29 Windows builtin-identity note |
+
+Host completion for item 3 remains NOT DONE on every host; the advisory
+selector is not completion.

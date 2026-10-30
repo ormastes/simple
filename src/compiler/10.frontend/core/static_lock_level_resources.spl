@@ -1,0 +1,68 @@
+# Resolve the explicit canonical synchronous Mutex import and immutable
+# module resource identity. No configured-family or method-basename guessing.
+use compiler.core.ast.{DECL_USE, DECL_VAL, DECL_FN, decl_get, module_get_decls, expr_get}
+use compiler.core.ast_expr.{EXPR_CALL, EXPR_IDENT, EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_rank_for}
+
+pub fn lock_level_canonical_imports() -> {text: text}:
+    var imports: {text: text} = {}
+    var unresolved_wildcard = false
+    for did in module_get_decls():
+        val d = decl_get(did)
+        if d.tag == DECL_USE:
+            if d.imports.len() == 0: unresolved_wildcard = true
+            val sync = d.name == "std.nogc_sync_mut.concurrent.mutex" or d.name == "lib.nogc_sync_mut.concurrent.mutex"
+            val facade = d.name == "std.nogc_async_mut.concurrent.mutex" or d.name == "lib.nogc_async_mut.concurrent.mutex"
+            for name in d.imports:
+                # Only exact, explicit, unaliased imports are proven by V1.
+                val parts = name.split(":")
+                val local = parts[parts.len() - 1]
+                if imports.contains_key(local):
+                    imports[local] = ""
+                elif (sync or facade) and parts.len() == 1 and (name == "mutex_new" or name == "mutex_with_lock" or (sync and name == "mutex_with_lock_keeping")):
+                    imports[local] = name
+                else:
+                    imports[local] = ""
+    for did in module_get_decls():
+        val d = decl_get(did)
+        if d.tag != DECL_USE: imports[d.name] = ""
+    if unresolved_wildcard: return {}
+    imports
+
+pub fn lock_level_resource_names() -> {text: i64}:
+    var resources: {text: i64} = {}
+    var counts: {text: i64} = {}
+    var wildcard = false
+    for did in module_get_decls():
+        val d = decl_get(did)
+        if d.tag == DECL_USE:
+            if d.imports.len() == 0: wildcard = true
+            for name in d.imports:
+                val parts = name.split(":")
+                val local = parts[parts.len() - 1]
+                counts[local] = (counts.get(local) ?? 0) + 1
+        else:
+            counts[d.name] = (counts.get(d.name) ?? 0) + 1
+    for did in module_get_decls():
+        val d = decl_get(did)
+        if d.tag == DECL_VAL and lock_level_rank_for(did) >= 0:
+            if wildcard or (counts.get(d.name) ?? 0) != 1: resources[d.name] = -1
+            else: resources[d.name] = did
+    resources
+
+pub fn lock_level_validate_resources(imports: {text: text}, resources: {text: i64}) -> text:
+    for did in module_get_decls():
+        val d = decl_get(did)
+        if d.tag == DECL_VAL and lock_level_rank_for(did) >= 0:
+            if (resources.get(d.name) ?? -1) != did or d.body_stmts.len() != 1:
+                return "[E-LOCK-LEVEL-003] ranked Mutex resource must have a unique immutable module binding"
+            val init = expr_get(d.body_stmts[0])
+            if init.tag != EXPR_CALL or init.left < 0 or init.args.len() != 1:
+                return "[E-LOCK-LEVEL-003] ranked Mutex resource requires the canonical mutex_new constructor"
+            val callee = expr_get(init.left)
+            if callee.tag != EXPR_IDENT or (imports.get(callee.s_val) ?? "") != "mutex_new":
+                return "[E-LOCK-LEVEL-003] ranked Mutex constructor identity is unresolved or shadowed"
+            val initial = expr_get(init.args[0])
+            if initial.tag != EXPR_INT_LIT and initial.tag != EXPR_FLOAT_LIT and initial.tag != EXPR_STRING_LIT and initial.tag != EXPR_BOOL_LIT:
+                return "[E-LOCK-LEVEL-003] ranked Mutex initial value must have a proven scalar literal type"
+    ""

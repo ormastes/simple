@@ -14,6 +14,7 @@ mkdir "$work/home" "$work/tmp"
 version=$(sed -n '1p' "$repo_root/VERSION")
 cat >"$work/candidate" <<EOF
 #!/bin/sh
+echo invoked >>"$work/candidate-invocations"
 case "\$1" in
   --version) echo 'simple-bootstrap $version'; exit 0 ;;
   run) echo "error: unknown command 'run'"; exit 1 ;;
@@ -33,6 +34,7 @@ check_controls() {
   [ "$CANDIDATE_FRONTEND_MAX_LOG_BYTES" = 4096 ] &&
   [ "$CANDIDATE_FRONTEND_ROOT" = "$1" ]
 }
+[ "${SIMPLE_BUILD_MEMORY_RESERVE_BYTES-25769803776}" = "$2" ] || exit 96
 check_controls "$1" || exit 98
 . "$CANDIDATE_FRONTEND_ROOT/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 check_controls "$1" || exit 97
@@ -46,12 +48,19 @@ drive() (
   . "$work/bootstrap_stage2_sanity_output_preflight.sh"
   . "$work/bootstrap_stage_sanity.sh"
   backend=llvm llvm_features=llvm os=linux
+  unset SIMPLE_BUILD_MEMORY_RESERVE_BYTES
+  expected_reserve=25769803776
+  if [ "${4-@unset}" != @unset ]; then
+    SIMPLE_BUILD_MEMORY_RESERVE_BYTES=$4
+    expected_reserve=$4
+    [ "$1" != exported ] || export SIMPLE_BUILD_MEMORY_RESERVE_BYTES
+  fi
   run_timeout() { timeout "$@"; }
   # Replace only the compiler workload. Capture, pinned smoke dispatch,
   # environment scrub and collector are the production implementations.
   candidate_frontend_smoke() {
     build_log=$CANDIDATE_FRONTEND_LOG_PATH
-    candidate_frontend_bounded_build p2_add /bin/sh "$work/child.sh" "$repo_root"
+    candidate_frontend_bounded_build p2_add /bin/sh "$work/child.sh" "$repo_root" "$expected_reserve"
   }
   COMPILER_BUILD_TIMEOUT_SECONDS=11
   COMPILER_EXEC_TIMEOUT_SECONDS=13
@@ -68,22 +77,29 @@ drive() (
   bootstrap_stage_sanity "$work/candidate" "$3" "$work/home" "$work/tmp" "$PATH"
 )
 cases=0
-for kind in exported shell-local invalid; do
+for kind in exported shell-local default invalid; do
   evidence=$work/$kind.env
   cap=4096
   [ "$kind" != invalid ] || cap=bad
   status=0
-  drive "$kind" "$cap" "$evidence" >"$work/$kind.log" 2>&1 || status=$?
+  reserve=17179869184
+  [ "$kind" != default ] || reserve=@unset
+  drive "$kind" "$cap" "$evidence" "$reserve" >"$work/$kind.log" 2>&1 || status=$?
   if [ "$status" != 1 ] || ! grep -q '^status=fail$' "$evidence"; then
     cat "$work/$kind.log" >&2
     echo "FAIL: $kind did not retain a failed gate receipt" >&2
     exit 1
   fi
   if [ "$kind" = invalid ]; then
-    grep -q 'bounded-log-error: invalid max-bytes' "$evidence.frontend-driver.log"
+    grep -Eq 'bounded-log-error: invalid max-bytes|argument --max-bytes: invalid int value' "$evidence.frontend-driver.log"
     ! grep -q controls-preserved "$evidence.frontend-driver.log"
     [ ! -e "$evidence.frontend-bootstrap-0.log.bounded.env" ]
   else
+    expected_reserve=17179869184
+    expected_source=explicit
+    if [ "$kind" = default ]; then expected_reserve=25769803776; expected_source=default; fi
+    grep -q "^build_memory_reserve_bytes=$expected_reserve$" "$evidence"
+    grep -q "^build_memory_reserve_source=$expected_source$" "$evidence"
     grep -q '^frontend_smoke_status=37$' "$evidence"
     grep -q '^frontend_smoke_bootstrap0_raw_status=37$' "$evidence"
     grep -q '^frontend_smoke_bootstrap1_ran=false$' "$evidence"
@@ -97,5 +113,18 @@ for kind in exported shell-local invalid; do
   cases=$((cases + 1))
   echo "PASS: $kind controls, child boundary and failure evidence"
 done
-[ "$cases" = 3 ]
-echo 'PASS: 3 production-boundary environment cases'
+[ "$cases" = 4 ]
+for reserve in '' 0 00 01 1 1023 -1 1.5 16GiB 9223372036854775808 99999999999999999999; do
+  evidence=$work/invalid-reserve-$cases.env
+  rm -f "$work/candidate-invocations"
+  status=0
+  drive exported 4096 "$evidence" "$reserve" >"$work/invalid-reserve-$cases.log" 2>&1 || status=$?
+  [ "$status" = 125 ] && [ ! -e "$work/candidate-invocations" ] && [ ! -e "$evidence" ] &&
+    [ ! -e "$evidence.frontend-bootstrap-0.log" ] || {
+      echo "FAIL: invalid reserve reached candidate/evidence: '$reserve'" >&2; exit 1;
+    }
+  grep -q 'invalid-build-memory-reserve' "$work/invalid-reserve-$cases.log"
+  cases=$((cases + 1))
+done
+[ "$cases" = 15 ]
+echo 'PASS: 4 production-boundary environment cases and 11 rejected reserve cases'

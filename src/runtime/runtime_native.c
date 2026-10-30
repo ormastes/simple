@@ -1,6 +1,13 @@
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
+/* Descriptor snapshots use Windows 8 FILE_ID_INFO. Select the existing
+ * runtime_fd_stat_v1.h minimum before any transitive Windows header, whose
+ * include guards would otherwise hide declarations from a later definition. */
+#if defined(_WIN32) && (!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602)
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
 #include "runtime_alloc_observer.h"
 #if defined(SIMPLE_ALLOC_OBSERVER_V1) && SIMPLE_ALLOC_OBSERVER_V1
 const volatile int rt_alloc_observer_native_owner_v1 = 1;
@@ -27,6 +34,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
+#include "platform/runtime_windows_private_atomic.h"
 #include "simple_gui_html_provider_abi_v1.h"
 #include "simple_gui_event_provider_abi_v1.h"
 
@@ -35,6 +43,9 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include <sys/stdio.h>
 #endif
 #include <stdlib.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <string.h>
 #include <limits.h>
 #include <errno.h>
@@ -69,6 +80,10 @@ typedef SSIZE_T ssize_t;
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/statvfs.h>
+#define RT_HAVE_STATVFS 1
+#endif
 #if defined(__linux__)
 #include <sys/auxv.h>
 #endif
@@ -81,6 +96,7 @@ typedef SSIZE_T ssize_t;
 #include <process.h>
 #include <malloc.h>
 #include <windows.h>
+#include <psapi.h>
 #include "platform/windows_raw_mapping.h"
 #endif
 
@@ -223,6 +239,8 @@ const char* rt_random_hex(int64_t len) {
     return encoded;
 }
 
+static int rt_dir_create_all_cpath(const char* path);
+
 /* C-string worker; the public (ptr, len) entry point is below. Named to match
  * the workers in platform/unix_common.h and platform/platform_win.h. */
 bool rt_dir_create_cpath(const char* path, bool recursive) {
@@ -235,35 +253,10 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
 #endif
     }
 
-    char* tmp = spl_strdup(path);
-    if (!tmp) return false;
-    size_t len = strlen(tmp);
-    while (len > 1 && (tmp[len - 1] == '/' || tmp[len - 1] == '\\')) {
-        tmp[--len] = '\0';
-    }
-    for (char* p = tmp + 1; *p; p++) {
-        if (*p == '/' || *p == '\\') {
-            char saved = *p;
-            *p = '\0';
-#if defined(_WIN32)
-            if (_mkdir(tmp) != 0 && errno != EEXIST) {
-#else
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-#endif
-                *p = saved;
-                free(tmp);
-                return false;
-            }
-            *p = saved;
-        }
-    }
-#if defined(_WIN32)
-    bool ok = _mkdir(tmp) == 0 || errno == EEXIST;
-#else
-    bool ok = mkdir(tmp, 0755) == 0 || errno == EEXIST;
-#endif
-    free(tmp);
-    return ok;
+    /* Keep one recursive walk: it skips Windows drive/extended-path roots
+     * rather than trying mkdir("C:"), and treats backslashes as ordinary
+     * filename bytes on POSIX. */
+    return rt_dir_create_all_cpath(path) != 0;
 }
 
 #define RT_VALUE_TAG_MASK 0x7ULL
@@ -329,6 +322,22 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
  * safe to set purely internally in rt_tuple_new. */
 #define RT_CORE_ARRAY_FLAG_TUPLE 0x01U
 #define RT_CORE_ARRAY_MAX_CAP 100000000LL
+#define RT_CORE_BYTE_ARRAY_MAX_CAP 1073741824LL
+
+/* Packed bytes have a bounded byte budget, not the tagged-slot element budget.
+ * Keep allocation, header admission, concat and growth on the same contract. */
+static int64_t rt_core_array_capacity_limit(uint8_t flags) {
+    return (flags & RT_CORE_ARRAY_FLAG_BYTES)
+        ? RT_CORE_BYTE_ARRAY_MAX_CAP : RT_CORE_ARRAY_MAX_CAP;
+}
+
+static int rt_core_array_capacity_valid(int64_t cap, uint8_t flags) {
+    size_t elem_size = (flags & RT_CORE_ARRAY_FLAG_BYTES)
+        ? sizeof(uint8_t) : sizeof(int64_t);
+    return cap >= 0 && cap <= rt_core_array_capacity_limit(flags) &&
+        cap <= INT64_MAX / (int64_t)elem_size &&
+        (uint64_t)cap <= SIZE_MAX / elem_size;
+}
 #define RT_HOST_GPU_LANE_HOST 1
 #define RT_HOST_GPU_LANE_GPU 2
 #define RT_HOST_GPU_PHASE_BEGIN 1
@@ -905,6 +914,18 @@ int64_t rt_current_task_id(void) {
  * definitions: on COFF, Rust may alias rt_par_* to rt_gpu_* COMDATs which
  * the core-C GPU trap provider replaces. Each CPU entry needs a live owner.
  * BEGIN CORE PAR ATOMICS */
+int64_t rt_par_atomic_i64_is_lock_free(int64_t* ptr) {
+    if (ptr == NULL || sizeof(_Atomic int64_t) != sizeof(int64_t) ||
+        _Alignof(_Atomic int64_t) > sizeof(int64_t) ||
+        (uintptr_t)ptr % _Alignof(_Atomic int64_t) != 0)
+        return 0;
+    return atomic_is_lock_free((const volatile _Atomic int64_t*)ptr) ? 1 : 0;
+}
+
+int64_t rt_par_atomic_load_i64(int64_t* ptr) {
+    return atomic_load_explicit((const volatile _Atomic int64_t*)ptr, memory_order_seq_cst);
+}
+
 int64_t rt_par_atomic_add_i64(int64_t* ptr, int64_t value) {
     return atomic_fetch_add_explicit((_Atomic int64_t*)ptr, value, memory_order_seq_cst);
 }
@@ -1441,6 +1462,10 @@ int64_t rt_host_gpu_queue_last_payload_text(void) {
  * that scope.  Keep this in the existing reserved word so the native string
  * layout and every data offset remain unchanged. */
 #define RT_CORE_STRING_FLAG_TRANSIENT 2u
+/* Set together with TRANSIENT on a string owned by the thread's live build
+ * session (BSM T1) rather than its module scope: a module-scope end skips it,
+ * rt_session_heap_end frees it. Same reserved word, layout unchanged (I6). */
+#define RT_CORE_STRING_FLAG_SESSION 4u
 
 typedef struct RtCoreString {
     uint32_t kind;
@@ -1506,7 +1531,12 @@ typedef struct RtCoreDict {
     int64_t len;       /* live entries */
     int64_t tombstones;
     RtCoreDictEntry* entries;
+    int64_t read_owner;
+    int64_t read_epoch;
+    int64_t read_backing;
 } RtCoreDict;
+
+static _Atomic int64_t rt_core_dict_read_owner_counter = 0;
 
 /* Heap-boxed f64 (see RT_VALUE_HEAP_FLOAT). A leaf object: the full double is
  * stored verbatim so container/Any floats round-trip exactly. Discrimination is
@@ -1565,6 +1595,18 @@ static _Thread_local RtCoreTransientRawAlloc* rt_core_transient_raw_allocs = NUL
 static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
+/* Build session heap (BSM T1, doc/05_design/compiler/memory/
+ * build_session_memory_model_v1.md §2-§4). One live session per thread; its id
+ * comes from the module-scope id space so tags never collide. Objects it owns
+ * live on their own list so rt_transient_array_scope_begin's empty-list guard
+ * is unaffected. */
+static _Thread_local uint32_t rt_core_session_heap_live_id = 0;
+static _Thread_local int32_t rt_core_session_alloc_depth = 0;
+static _Thread_local void** rt_core_session_heap_objects = NULL;
+static _Thread_local size_t rt_core_session_heap_object_len = 0;
+static _Thread_local size_t rt_core_session_heap_object_cap = 0;
+/* Nodes the last rt_transient_heap_adopt visited (I2 pruning evidence). */
+static _Thread_local uint64_t rt_core_session_adopt_visits = 0;
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 extern int32_t rt_transient_raw_scope_begin(void);
 extern int32_t rt_transient_raw_scope_pause(void);
@@ -1606,6 +1648,13 @@ static uint32_t rt_core_registered_object_kind(void* ptr) {
 }
 
 static uint32_t rt_core_transient_scope_for_new_object(void) {
+    /* A live session owns what a paused/absent module scope would have left
+     * permanent, and everything inside rt_session_alloc_begin/end (I3). */
+    if (rt_core_session_heap_live_id &&
+        (rt_core_session_alloc_depth > 0 || !rt_core_transient_array_scope_active ||
+         rt_core_transient_array_scope_paused)) {
+        return rt_core_session_heap_live_id;
+    }
     return rt_core_transient_array_scope_active && !rt_core_transient_array_scope_paused
         ? rt_core_transient_array_scope_id
         : 0;
@@ -1613,7 +1662,30 @@ static uint32_t rt_core_transient_scope_for_new_object(void) {
 
 #define RT_CORE_TRANSIENT_SCOPE_MAX_OBJECTS ((size_t)1 << 24)
 
+/* Make room for `extra` more session-list entries; 0 on failure. */
+static int core_session_reserve(size_t extra) {
+    size_t need = rt_core_session_heap_object_len + extra;
+    if (need <= rt_core_session_heap_object_cap) return 1;
+    size_t next_cap = rt_core_session_heap_object_cap ? rt_core_session_heap_object_cap : 64;
+    while (next_cap < need) {
+        if (next_cap > SIZE_MAX / 2 / sizeof(void*)) return 0;
+        next_cap *= 2;
+    }
+    void** next = (void**)rt_observed_realloc_v1(
+        rt_core_session_heap_objects, next_cap * sizeof(void*));
+    if (!next) return 0;
+    rt_core_session_heap_objects = next;
+    rt_core_session_heap_object_cap = next_cap;
+    return 1;
+}
+
 static int rt_core_track_transient_immortal(void* ptr) {
+    if (rt_core_session_heap_live_id &&
+        rt_core_transient_scope_for_new_object() == rt_core_session_heap_live_id) {
+        if (!core_session_reserve(1)) return 0;
+        rt_core_session_heap_objects[rt_core_session_heap_object_len++] = ptr;
+        return 1;
+    }
     if (rt_core_transient_heap_scope_object_len == rt_core_transient_heap_scope_object_cap) {
         size_t next_cap = rt_core_transient_heap_scope_object_cap == 0
             ? 64
@@ -1650,16 +1722,24 @@ static int rt_core_register_scoped_immortal(void* ptr, uint32_t* object_scope_id
         rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len - 1] == ptr) {
         rt_core_transient_heap_scope_object_len--;
     }
+    if (*object_scope_id && rt_core_session_heap_object_len > 0 &&
+        rt_core_session_heap_objects[rt_core_session_heap_object_len - 1] == ptr) {
+        rt_core_session_heap_object_len--;
+    }
     *object_scope_id = 0;
     return 0;
 }
 
 static int rt_core_register_string(RtCoreString* s) {
     if (!s) return 0;
-    if (rt_core_transient_scope_for_new_object() != 0) {
-        s->reserved |= RT_CORE_STRING_FLAG_TRANSIENT;
+    const uint32_t owner_scope = rt_core_transient_scope_for_new_object();
+    if (owner_scope != 0) {
+        const uint32_t flags = owner_scope == rt_core_session_heap_live_id
+            ? RT_CORE_STRING_FLAG_TRANSIENT | RT_CORE_STRING_FLAG_SESSION
+            : RT_CORE_STRING_FLAG_TRANSIENT;
+        s->reserved |= flags;
         if (!rt_core_track_transient_immortal(s)) {
-            s->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+            s->reserved &= ~flags;
             return 0;
         }
         if (rt_core_register_immortal_ptr(s)) return 1;
@@ -1667,7 +1747,11 @@ static int rt_core_register_string(RtCoreString* s) {
             rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len - 1] == s) {
             rt_core_transient_heap_scope_object_len--;
         }
-        s->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+        if (rt_core_session_heap_object_len > 0 &&
+            rt_core_session_heap_objects[rt_core_session_heap_object_len - 1] == s) {
+            rt_core_session_heap_object_len--;
+        }
+        s->reserved &= ~flags;
         return 0;
     }
     return rt_core_register_immortal_ptr(s);
@@ -1675,7 +1759,7 @@ static int rt_core_register_string(RtCoreString* s) {
 
 static int rt_core_register_persistent_string(RtCoreString* s) {
     if (!s) return 0;
-    s->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+    s->reserved &= ~(RT_CORE_STRING_FLAG_TRANSIENT | RT_CORE_STRING_FLAG_SESSION);
     return rt_core_register_immortal_ptr(s);
 }
 
@@ -2183,8 +2267,116 @@ static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
     }
 }
 
+/* Fork-child overlay (twin of HeapRegistry in
+ * src/compiler_rust/runtime/src/value/heap.rs). A copy-on-write fork child
+ * inherits the parent's whole table; writing it privatizes it page by page and
+ * its first growth allocates a fresh 2x table per child. After
+ * spl_immortal_registry_freeze_for_fork_child_v1() the inherited table is
+ * read-only: the child's objects use the (now empty) live table and an erase
+ * of an inherited pointer is recorded in the erased set. Bug:
+ * doc/08_tracking/bug/mir_fork_child_heap_registry_cow_resize_2026-10-25.md */
+static uintptr_t* rt_core_immortal_frozen = NULL;
+static size_t rt_core_immortal_frozen_cap = 0;
+static uintptr_t* rt_core_immortal_erased = NULL;
+static size_t rt_core_immortal_erased_cap = 0;
+static size_t rt_core_immortal_erased_len = 0;
+static size_t rt_core_immortal_erased_tombs = 0;
+
+static int core_ptr_table_has(const uintptr_t* table, size_t cap, uintptr_t p) {
+    if (cap == 0) return 0;
+    size_t mask = cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = table[i];
+        if (e == 0) return 0;
+        if (e == p) return 1;
+        i = (i + 1) & mask;
+    }
+}
+
+/* caller holds the lock: p is an inherited pointer that is currently live */
+static int core_immortal_frozen_live(uintptr_t p) {
+    return core_ptr_table_has(rt_core_immortal_frozen, rt_core_immortal_frozen_cap, p) &&
+        (rt_core_immortal_erased_len == 0 ||
+         !core_ptr_table_has(rt_core_immortal_erased, rt_core_immortal_erased_cap, p));
+}
+
+/* caller holds the lock; p is not in the erased set */
+static int core_immortal_erased_add(uintptr_t p) {
+    if ((rt_core_immortal_erased_len + rt_core_immortal_erased_tombs + 1) * 10
+            >= rt_core_immortal_erased_cap * 7) {
+        size_t new_cap = rt_core_immortal_erased_cap == 0 ? 64 : rt_core_immortal_erased_cap * 2;
+        if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
+        uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
+        if (!fresh) return 0;
+        for (size_t k = 0; k < rt_core_immortal_erased_cap; k++) {
+            uintptr_t e = rt_core_immortal_erased[k];
+            if (e == 0 || e == RT_CORE_IMMORTAL_TOMBSTONE) continue;
+            size_t j = rt_core_immortal_hash_ptr(e) & (new_cap - 1);
+            while (fresh[j] != 0) j = (j + 1) & (new_cap - 1);
+            fresh[j] = e;
+        }
+        free(rt_core_immortal_erased);
+        rt_core_immortal_erased = fresh;
+        rt_core_immortal_erased_cap = new_cap;
+        rt_core_immortal_erased_tombs = 0;
+    }
+    size_t mask = rt_core_immortal_erased_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    while (rt_core_immortal_erased[i] != 0 && rt_core_immortal_erased[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
+        i = (i + 1) & mask;
+    }
+    if (rt_core_immortal_erased[i] == RT_CORE_IMMORTAL_TOMBSTONE) rt_core_immortal_erased_tombs--;
+    rt_core_immortal_erased[i] = p;
+    rt_core_immortal_erased_len++;
+    return 1;
+}
+
+/* caller holds the lock; returns 1 if p was in the erased set */
+static int core_immortal_erased_drop(uintptr_t p) {
+    if (rt_core_immortal_erased_cap == 0) return 0;
+    size_t mask = rt_core_immortal_erased_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = rt_core_immortal_erased[i];
+        if (e == 0) return 0;
+        if (e == p) {
+            rt_core_immortal_erased[i] = RT_CORE_IMMORTAL_TOMBSTONE;
+            rt_core_immortal_erased_len--;
+            rt_core_immortal_erased_tombs++;
+            return 1;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+/* Called in the child right after fork() (single-threaded there). A nested
+ * fork keeps the first frozen layer and inherits the small live table. */
+void spl_immortal_registry_freeze_for_fork_child_v1(void) {
+    rt_core_immortal_registry_acquire();
+    if (!rt_core_immortal_frozen) {
+        rt_core_immortal_frozen = rt_core_immortal_registry;
+        rt_core_immortal_frozen_cap = rt_core_immortal_registry_cap;
+        rt_core_immortal_registry = NULL;
+        rt_core_immortal_registry_cap = 0;
+        rt_core_immortal_registry_len = 0;
+        rt_core_immortal_registry_tombs = 0;
+    }
+    rt_core_immortal_registry_release();
+}
+
+static int core_immortal_live_erase_raw(uintptr_t p);
+
 /* caller holds the lock; returns 1 if an entry was erased */
 static int rt_core_immortal_registry_erase_raw(uintptr_t p) {
+    if (core_immortal_live_erase_raw(p)) return 1;
+    if (!rt_core_immortal_frozen || !core_immortal_frozen_live(p)) return 0;
+    /* Out of memory for the erased set: refuse the erase (the object stays
+     * allocated) rather than report a pointer both live and freed. */
+    return core_immortal_erased_add(p);
+}
+
+static int core_immortal_live_erase_raw(uintptr_t p) {
     if (rt_core_immortal_registry_cap == 0) return 0;
     size_t mask = rt_core_immortal_registry_cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
@@ -2224,6 +2416,16 @@ static int rt_core_immortal_registry_resize(size_t new_cap) {
 static int rt_core_register_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
     rt_core_immortal_registry_acquire();
+    if (rt_core_immortal_frozen &&
+            core_ptr_table_has(rt_core_immortal_frozen, rt_core_immortal_frozen_cap,
+                (uintptr_t)ptr)) {
+        /* Inherited address: present, or re-registered after its erase. */
+        if (core_immortal_erased_drop((uintptr_t)ptr)) {
+            atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        }
+        rt_core_immortal_registry_release();
+        return 1;
+    }
     /* grow at 70% load; tombstones count as occupancy since they lengthen
      * probe chains exactly as live entries do */
     if ((rt_core_immortal_registry_len + rt_core_immortal_registry_tombs + 1) * 10
@@ -2264,6 +2466,7 @@ static int rt_core_is_registered_immortal_ptr(void* ptr) {
             i = (i + 1) & mask;
         }
     }
+    if (!found && rt_core_immortal_frozen) found = core_immortal_frozen_live((uintptr_t)ptr);
     rt_core_immortal_registry_release();
     return found;
 }
@@ -2280,6 +2483,71 @@ static int rt_core_unregister_immortal_ptr(void* ptr) {
     }
     rt_core_heap_lifecycle_release();
     return erased;
+}
+
+/* Free one tracked object if it is still registered and still owned by
+ * `scope_id` (strings: transient, unshared, and session-flagged exactly when
+ * `session`). Caller holds the heap lifecycle lock. Shared by module-scope end
+ * and rt_session_heap_end (BSM I4). */
+static void core_reclaim_tracked_object_locked(void* ptr, uint32_t scope_id, int session) {
+    if (!rt_core_is_registered_immortal_ptr(ptr)) return;
+    uint32_t kind = rt_core_registered_object_kind(ptr);
+    uint32_t* object_scope = NULL;
+    int reclaim_string = 0;
+    switch (kind) {
+        case RT_VALUE_HEAP_STRING: {
+            RtCoreString* string = (RtCoreString*)ptr;
+            reclaim_string =
+                (string->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+                (string->reserved & RT_CORE_STRING_FLAG_SHARED) == 0 &&
+                ((string->reserved & RT_CORE_STRING_FLAG_SESSION) != 0) == (session != 0);
+            break;
+        }
+        case RT_VALUE_HEAP_ARRAY:
+            object_scope = &((RtCoreArray*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_DICT:
+            object_scope = &((RtCoreDict*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_ENUM:
+            object_scope = &((RtCoreEnum*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_CLOSURE:
+            object_scope = &((RtCoreClosure*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_FLOAT:
+        case RT_VALUE_HEAP_INT:   /* identical leaf layout */
+        case RT_VALUE_HEAP_UINT:  /* identical leaf layout */
+            object_scope = &((RtCoreFloat*)ptr)->transient_scope_id;
+            break;
+        default:
+            break;
+    }
+    if (!reclaim_string && (!object_scope || *object_scope != scope_id)) return;
+    if (kind == RT_VALUE_HEAP_CLOSURE) {
+        /* Pinned by a pending consumer: the last rt_closure_release frees it. */
+        RtCoreClosurePin* pin = spl_closure_pin_find_locked(ptr);
+        if (pin) {
+            pin->orphaned = 1;
+            return;
+        }
+    }
+    rt_core_immortal_registry_acquire();
+    int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
+    rt_core_immortal_registry_release();
+    if (!erased) return;
+    atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    switch (rt_core_registered_object_kind(ptr)) {
+        case RT_VALUE_HEAP_ARRAY:
+            free(((RtCoreArray*)ptr)->data);
+            break;
+        case RT_VALUE_HEAP_DICT:
+            free(((RtCoreDict*)ptr)->entries);
+            break;
+        default:
+            break;
+    }
+    free(ptr);
 }
 
 static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
@@ -2302,63 +2570,7 @@ static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
             kept++;
             continue;
         }
-        if (!rt_core_is_registered_immortal_ptr(ptr)) continue;
-        uint32_t kind = rt_core_registered_object_kind(ptr);
-        uint32_t* object_scope = NULL;
-        int reclaim_string = 0;
-        switch (kind) {
-            case RT_VALUE_HEAP_STRING: {
-                RtCoreString* string = (RtCoreString*)ptr;
-                reclaim_string =
-                    (string->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
-                    (string->reserved & RT_CORE_STRING_FLAG_SHARED) == 0;
-                break;
-            }
-            case RT_VALUE_HEAP_ARRAY:
-                object_scope = &((RtCoreArray*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_DICT:
-                object_scope = &((RtCoreDict*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_ENUM:
-                object_scope = &((RtCoreEnum*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_CLOSURE:
-                object_scope = &((RtCoreClosure*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_FLOAT:
-            case RT_VALUE_HEAP_INT:   /* identical leaf layout */
-            case RT_VALUE_HEAP_UINT:  /* identical leaf layout */
-                object_scope = &((RtCoreFloat*)ptr)->transient_scope_id;
-                break;
-            default:
-                break;
-        }
-        if (!reclaim_string && (!object_scope || *object_scope != scope_id)) continue;
-        if (kind == RT_VALUE_HEAP_CLOSURE) {
-            /* Pinned by a pending consumer: the last rt_closure_release frees it. */
-            RtCoreClosurePin* pin = spl_closure_pin_find_locked(ptr);
-            if (pin) {
-                pin->orphaned = 1;
-                continue;
-            }
-        }
-        rt_core_immortal_registry_acquire();
-        int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
-        rt_core_immortal_registry_release();
-        if (!erased) continue;
-        atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
-        switch (rt_core_registered_object_kind(ptr)) {
-            case RT_VALUE_HEAP_ARRAY:
-                free(((RtCoreArray*)ptr)->data);
-                break;
-            case RT_VALUE_HEAP_DICT:
-                free(((RtCoreDict*)ptr)->entries);
-                break;
-            default:
-                break;
-        }
-        free(ptr);
+        core_reclaim_tracked_object_locked(ptr, scope_id, 0);
     }
     rt_core_transient_heap_scope_object_len = kept;
     /* String-heavy parses can briefly track millions of pointers. Do not pin
@@ -2712,7 +2924,8 @@ static inline RtCoreArray* rt_core_as_array(int64_t value) {
         return NULL;
     }
     if (a->kind != RT_VALUE_HEAP_ARRAY) return NULL;
-    if (a->len < 0 || a->cap < 0 || a->len > a->cap || a->cap > RT_CORE_ARRAY_MAX_CAP) return NULL;
+    if (a->len < 0 || a->len > a->cap ||
+        !rt_core_array_capacity_valid(a->cap, a->flags)) return NULL;
     return a;
 }
 
@@ -2870,6 +3083,28 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
         return 1;
     }
 #endif
+    /* @workaround bug=transient_promote_misses_raw_text_data_pointer_2026-10-25
+     * Stage-2-compiled code decodes a text read out of an array/dict to its
+     * raw char* buffer (rt_interp_cstr) and stores THAT in struct fields, so a
+     * retained ParserModule holds untagged pointers to RtCoreString data.
+     * Without this the owning transient string classified as "not heap", was
+     * skipped by promotion, and was freed at scope end (Stage 3 hello world:
+     * "unresolved name: <reused bytes>"). Membership is checked before any
+     * dereference, so an arbitrary aligned word is never read. */
+    if (!rt_core_is_heap(value) && (((uint64_t)value) & RT_VALUE_TAG_MASK) == 0 &&
+            (uint64_t)value > 0x10000 + offsetof(RtCoreString, data)) {
+        RtCoreString* raw_text = (RtCoreString*)(uintptr_t)(
+            (uint64_t)value - offsetof(RtCoreString, data));
+        if (rt_core_is_registered_immortal_ptr(raw_text) &&
+                rt_core_registered_object_kind(raw_text) == RT_VALUE_HEAP_STRING) {
+            if ((raw_text->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+                    (raw_text->reserved & RT_CORE_STRING_FLAG_SHARED) == 0) {
+                *node = (RtCoreTransientNode){raw_text, RT_CORE_TRANSIENT_STRING, 0};
+                return 1;
+            }
+            return 0;
+        }
+    }
     if (!rt_core_is_heap(value)) return 0;
     void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
     if (rt_core_is_registered_immortal_ptr(ptr)) {
@@ -3114,6 +3349,13 @@ int8_t rt_transient_heap_promote(int64_t value) {
             }
         }
     }
+    /* BSM compatibility alias (design §4): with a live session, promotion
+     * retags module-owned nodes to the SESSION instead of making them
+     * permanent. It keeps the FULL walk above (no I2 pruning) because legacy
+     * callers may still violate I1 (e8152c252ad: unowned roots holding
+     * module-owned children). With no session this block is unchanged. */
+    const uint32_t session_id = rt_core_session_heap_live_id;
+    if (ok && session_id && !core_session_reserve(plan.len)) ok = 0;
     if (ok) {
         const uint32_t scope_id = rt_core_transient_array_scope_id;
         for (size_t i = 0; i < plan.len; i++) {
@@ -3121,7 +3363,12 @@ int8_t rt_transient_heap_promote(int64_t value) {
             uint32_t* object_scope = NULL;
             switch (node.kind) {
                 case RT_CORE_TRANSIENT_STRING:
-                    ((RtCoreString*)node.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+                    if (!session_id) {
+                        ((RtCoreString*)node.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+                    } else if ((((RtCoreString*)node.ptr)->reserved & RT_CORE_STRING_FLAG_SESSION) == 0) {
+                        ((RtCoreString*)node.ptr)->reserved |= RT_CORE_STRING_FLAG_SESSION;
+                        rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+                    }
                     break;
                 case RT_CORE_TRANSIENT_ARRAY: object_scope = &((RtCoreArray*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_DICT: object_scope = &((RtCoreDict*)node.ptr)->transient_scope_id; break;
@@ -3139,9 +3386,225 @@ int8_t rt_transient_heap_promote(int64_t value) {
                     break;
                 }
             }
-            if (object_scope && *object_scope == scope_id) *object_scope = 0;
+            if (object_scope && *object_scope == scope_id) {
+                *object_scope = session_id;
+                if (session_id) {
+                    rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+                }
+            }
         }
         if (ok) core_transient_share_record(&plan);
+    }
+    free(plan.nodes);
+    free(plan.seen);
+    rt_core_heap_lifecycle_release();
+    return ok ? 1 : 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Build session heap (BSM T1) — design §3 I2-I4, §4.
+ * -------------------------------------------------------------------------- */
+
+static uint32_t core_session_next_id(void) {
+    uint32_t next_id =
+        atomic_load_explicit(&rt_core_transient_array_scope_next_id, memory_order_relaxed);
+    while (next_id != 0) {
+        uint32_t successor = next_id == UINT32_MAX ? 0 : next_id + 1;
+        if (atomic_compare_exchange_weak_explicit(
+                &rt_core_transient_array_scope_next_id, &next_id, successor,
+                memory_order_relaxed, memory_order_relaxed)) {
+            break;
+        }
+    }
+    return next_id;
+}
+
+/* 0 on failure: a session is already live on this thread, a module scope is
+ * active on this thread, or the id space is exhausted. */
+uint32_t rt_session_heap_begin(void) {
+    if (rt_core_session_heap_live_id || rt_core_transient_array_scope_active) return 0;
+    uint32_t id = core_session_next_id();
+    if (!id) return 0;
+    rt_core_session_heap_live_id = id;
+    rt_core_session_alloc_depth = 0;
+    rt_core_session_heap_object_len = 0;
+    return id;
+}
+
+/* Frees every object still tagged `s` in ONE pass over the session list (I4).
+ * Tag-0 and other-scope objects are never touched. */
+int8_t rt_session_heap_end(uint32_t s) {
+    if (!s || s != rt_core_session_heap_live_id || rt_core_transient_array_scope_active) return 0;
+    rt_core_heap_lifecycle_acquire();
+    for (size_t i = 0; i < rt_core_session_heap_object_len; i++) {
+        core_reclaim_tracked_object_locked(rt_core_session_heap_objects[i], s, 1);
+    }
+    free(rt_core_session_heap_objects);
+    rt_core_session_heap_objects = NULL;
+    rt_core_session_heap_object_len = 0;
+    rt_core_session_heap_object_cap = 0;
+    rt_core_session_heap_live_id = 0;
+    rt_core_session_alloc_depth = 0;
+    rt_core_heap_lifecycle_release();
+#if defined(__GLIBC__)
+    /* A completed build session can leave gigabytes of freed small objects
+     * resident in libc arenas while its coordinator waits for child builds.
+     * Return those unused pages at this coarse epoch boundary. Trimming does
+     * not change live object ownership; run outside the lifecycle lock. */
+    (void)malloc_trim(0);
+#endif
+    return 1;
+}
+
+/* Depth-counted: while > 0, new objects get the SESSION id even inside a
+ * running module scope (I3: session containers grow under the session). */
+int8_t rt_session_alloc_begin(void) {
+    if (!rt_core_session_heap_live_id || rt_core_session_alloc_depth == INT32_MAX) return 0;
+    rt_core_session_alloc_depth++;
+    return 1;
+}
+
+int8_t rt_session_alloc_end(void) {
+    if (!rt_core_session_heap_live_id || rt_core_session_alloc_depth <= 0) return 0;
+    rt_core_session_alloc_depth--;
+    return 1;
+}
+
+uint32_t rt_session_heap_id(void) {
+    return rt_core_session_heap_live_id;
+}
+
+/* Debug evidence for I2: nodes visited by the last rt_transient_heap_adopt. */
+uint64_t spl_session_adopt_visits_debug(void) {
+    return rt_core_session_adopt_visits;
+}
+
+/* I2: is `node` owned by the active module scope `module_id`? Anything else
+ * (session, permanent, other scope) is a prune point. */
+static int core_adopt_module_owned(const RtCoreTransientNode* node, uint32_t module_id) {
+    switch (node->kind) {
+        case RT_CORE_TRANSIENT_STRING:
+            return (((RtCoreString*)node->ptr)->reserved & RT_CORE_STRING_FLAG_SESSION) == 0;
+        case RT_CORE_TRANSIENT_ARRAY: return ((RtCoreArray*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_DICT: return ((RtCoreDict*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_ENUM: return ((RtCoreEnum*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_FLOAT: return ((RtCoreFloat*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_CLOSURE: return ((RtCoreClosure*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_RAW: {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+            return 1; /* ownership not visible here: walk (conservative) */
+#else
+            RtCoreTransientRawAlloc* raw = rt_core_transient_raw_lookup((uintptr_t)node->ptr);
+            return raw && (raw->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
+#endif
+        }
+        default:
+            return 0;
+    }
+}
+
+/* 1 = handled (pushed or pruned), -1 = invalid node / allocation failure. */
+static int core_adopt_add(RtCoreTransientPlan* plan, int64_t value, uint32_t module_id) {
+    RtCoreTransientNode node;
+    int classified = rt_core_transient_classify(value, &node);
+    if (classified < 0) return -1;
+    if (classified == 0) return 1;
+    rt_core_session_adopt_visits++;
+    if (!core_adopt_module_owned(&node, module_id)) return 1; /* I2 prune */
+    int seen = rt_core_transient_seen_insert(plan, (uintptr_t)node.ptr);
+    if (seen < 0) return -1;
+    if (!seen) return 1;
+    return rt_core_transient_plan_push(plan, node.ptr, node.kind, node.bytes) ? 1 : -1;
+}
+
+/* Move the module-owned part of v's graph to the live session: retag nodes
+ * tagged with the ACTIVE module scope id to the session id and put them on
+ * the session list; stop at any node with another tag (I2), so the cost is
+ * O(nodes the module allocated), never O(session). Root classification as in
+ * rt_transient_heap_promote: scalars and registered non-module roots are a
+ * no-op success. Raw struct blocks are promoted (made permanent) exactly as
+ * promote does — v1 sessions do not own raw blocks. 0 without a live session
+ * or a paused module scope owned by this thread. */
+int8_t rt_transient_heap_adopt(int64_t value) {
+    rt_core_session_adopt_visits = 0;
+    if (!rt_core_session_heap_live_id || !rt_core_transient_array_scope_active ||
+            !rt_core_transient_array_scope_paused ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
+    const uint32_t module_id = rt_core_transient_array_scope_id;
+    const uint32_t session_id = rt_core_session_heap_live_id;
+    rt_core_heap_lifecycle_acquire();
+    RtCoreTransientNode root;
+    int root_class = rt_core_transient_classify(value, &root);
+    if (root_class == 0) {
+        int ok_noop = !rt_core_is_heap(value) || rt_core_is_registered_immortal_ptr(
+            (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK));
+        rt_core_heap_lifecycle_release();
+        return ok_noop ? 1 : 0;
+    }
+    RtCoreTransientPlan plan = {0};
+    int ok = root_class == 1 && core_adopt_add(&plan, value, module_id) == 1;
+    for (size_t i = 0; ok && i < plan.len; i++) {
+        RtCoreTransientNode node = plan.nodes[i];
+        if (node.kind == RT_CORE_TRANSIENT_ARRAY) {
+            RtCoreArray* array = (RtCoreArray*)node.ptr;
+            if (array->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) continue;
+            for (int64_t j = 0; j < array->len && ok; j++) {
+                ok = core_adopt_add(&plan, ((int64_t*)array->data)[j], module_id) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_DICT) {
+            RtCoreDict* dict = (RtCoreDict*)node.ptr;
+            for (int64_t j = 0; j < dict->cap && ok; j++) {
+                RtCoreDictEntry* entry = &dict->entries[j];
+                if (entry->occupied != 1) continue;
+                ok = core_adopt_add(&plan, entry->key, module_id) == 1 &&
+                    core_adopt_add(&plan, entry->value, module_id) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_ENUM) {
+            ok = core_adopt_add(&plan, ((RtCoreEnum*)node.ptr)->payload, module_id) == 1;
+        } else if (node.kind == RT_CORE_TRANSIENT_CLOSURE) {
+            RtCoreClosure* closure = (RtCoreClosure*)node.ptr;
+            for (int64_t j = 0; j < closure->capture_count && ok; j++) {
+                ok = core_adopt_add(&plan, closure->captures[j], module_id) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_RAW) {
+            for (size_t offset = 0; offset + sizeof(int64_t) <= node.bytes && ok;
+                    offset += sizeof(int64_t)) {
+                int64_t child;
+                memcpy(&child, (const uint8_t*)node.ptr + offset, sizeof(child));
+                ok = core_adopt_add(&plan, child, module_id) == 1;
+            }
+        }
+    }
+    if (ok && !core_session_reserve(plan.len)) ok = 0;
+    for (size_t i = 0; ok && i < plan.len; i++) {
+        RtCoreTransientNode node = plan.nodes[i];
+        uint32_t* object_scope = NULL;
+        switch (node.kind) {
+            case RT_CORE_TRANSIENT_STRING:
+                ((RtCoreString*)node.ptr)->reserved |= RT_CORE_STRING_FLAG_SESSION;
+                rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+                break;
+            case RT_CORE_TRANSIENT_ARRAY: object_scope = &((RtCoreArray*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_DICT: object_scope = &((RtCoreDict*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_ENUM: object_scope = &((RtCoreEnum*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_FLOAT: object_scope = &((RtCoreFloat*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_CLOSURE: object_scope = &((RtCoreClosure*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_RAW: {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+                if (!rt_transient_raw_promote((uintptr_t)node.ptr)) ok = 0;
+#else
+                RtCoreTransientRawAlloc* raw =
+                    rt_core_transient_raw_lookup((uintptr_t)node.ptr);
+                if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+#endif
+                break;
+            }
+        }
+        if (object_scope && *object_scope == module_id) {
+            *object_scope = session_id;
+            rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+        }
     }
     free(plan.nodes);
     free(plan.seen);
@@ -3335,6 +3798,14 @@ __declspec(allocate(".CRT$XCU"))
 void (__cdecl *rt_win_set_binary_stdio_ptr)(void) = rt_win_set_binary_stdio_ctor;
 #endif
 #endif /* _WIN32 */
+
+/* Shared read opens use the Windows long-path helper on Windows and stdio on
+ * other platforms. Keep this selector outside the Windows-only setup block. */
+#if defined(_WIN32)
+#define RT_FOPEN_READ_SHARED(p) rt_win_fopen_read_shared(p)
+#else
+#define RT_FOPEN_READ_SHARED(p) fopen((p), "rb")
+#endif
 
 int64_t rt_stdout_write_text(const char* s) {
     if (!s) return 0;
@@ -3656,6 +4127,35 @@ int64_t rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
     fflush(stderr);
     fflush(stdout);
     exit(70);
+}
+
+/* Commit headroom (CommitLimit - CommitTotal) * PageSize via
+ * K32GetPerformanceInfo, resolved with GetProcAddress because the symbol
+ * lives in kernel32 on modern Windows. Use the SDK's typed layout: PageSize is at
+ * offset 80 on Win64; offset 88 contains HandleCount and ProcessCount.
+ * Same interpreter-first rationale as rt_host_memory_headroom_bytes_v1.
+ * Returns 0 when unavailable; callers keep the extern path as fallback. */
+int64_t rt_host_commit_headroom_bytes_v1(void) {
+#if defined(_WIN32)
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32");
+    if (!kernel32) return 0;
+    typedef BOOL (WINAPI *QueryCommitFn)(PPERFORMANCE_INFORMATION, DWORD);
+    QueryCommitFn query = (QueryCommitFn)(void (*)(void))GetProcAddress(kernel32, "K32GetPerformanceInfo");
+    if (!query) return 0;
+    PERFORMANCE_INFORMATION info;
+    memset(&info, 0, sizeof(info));
+    info.cb = (uint32_t)sizeof(info);
+    if (query(&info, (DWORD)sizeof(info)) == 0) return 0;
+    uint64_t commit_total = info.CommitTotal;
+    uint64_t commit_limit = info.CommitLimit;
+    uint64_t page_size = info.PageSize;
+    if (commit_limit < commit_total || page_size == 0) return 0;
+    uint64_t headroom_pages = commit_limit - commit_total;
+    if (headroom_pages > (uint64_t)INT64_MAX / page_size) return 0;
+    return (int64_t)(headroom_pages * page_size);
+#else
+    return 0;
+#endif
 }
 
 int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv) {
@@ -8210,8 +8710,7 @@ int64_t rt_strcmp(const char* a, const char* b) {
 
 static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_items) {
     int64_t actual_cap = cap > 4 ? cap : 4;
-    if (actual_cap < 0 || actual_cap > RT_CORE_ARRAY_MAX_CAP ||
-        actual_cap > INT64_MAX / (int64_t)sizeof(int64_t)) {
+    if (!rt_core_array_capacity_valid(actual_cap, flags)) {
         return NULL;
     }
     RtCoreArray* a = (RtCoreArray*)rt_observed_calloc_v1(1, sizeof(RtCoreArray));
@@ -8736,6 +9235,464 @@ int64_t rt_string_free(int64_t value) {
     return 1;
 }
 
+/* ============================================================================
+ * Object-graph refcount (Build Session Memory Model v1 section 2 "RC shared",
+ * section 3 I5/I6/I8, section 4 refcount surface; package P4). Rust twin:
+ * src/compiler_rust/runtime/src/value/rc_graph.rs.
+ *
+ * Ownership rule: every registered heap object is owned by exactly ONE of
+ *   {transient scope (tag = scope id), session, rc root, process (tag 0, rc 0)}.
+ * rt_rc_share(root) makes the root an rc root (rc = 1) and claims its OWNED
+ * graph: every node reachable from the root that is not itself an rc root, is
+ * not tagged with a scope other than the active one, and is not a
+ * RT_CORE_STRING_FLAG_SHARED cache string. Claimed nodes get tag 0 (strings
+ * lose RT_CORE_STRING_FLAG_TRANSIENT) so no scope end frees them.
+ * A sub-object shared between two rc roots MUST itself be an rc root retained
+ * by each parent; otherwise the first release frees it under the other.
+ * rt_rc_release reaching 0 frees the owned graph (tag 0, rc 0 nodes). An
+ * rc-root child is RELEASED once per distinct child (not freed); a child
+ * tagged with a live scope/session and a SHARED string are left alone.
+ * RC graphs are acyclic (I5): SIMPLE_RC_CYCLE_CHECK=1 makes share fail closed
+ * on a back-edge.
+ *
+ * The count lives in a pointer-keyed side table (I6: the frozen RtCore*
+ * layouts and the registry probe code are untouched); only rc roots have a
+ * row, so ordinary objects pay nothing. All rc state is guarded by
+ * rt_core_heap_lifecycle_lock, the lock scope-end reclaim holds, so share and
+ * release never interleave with a reclaim. Not covered in v1: untyped raw
+ * struct allocations (RT_CORE_TRANSIENT_RAW) are not graph nodes here.
+ * ========================================================================== */
+
+typedef struct RtCoreRcSet {
+    uintptr_t* keys; /* 0 = empty, RT_CORE_IMMORTAL_TOMBSTONE = erased */
+    uint32_t* vals;
+    size_t cap;
+    size_t len;
+    size_t tombs;
+} RtCoreRcSet;
+
+static RtCoreRcSet rt_core_rc_table = {0};
+
+static uint32_t* core_rc_set_find(RtCoreRcSet* set, uintptr_t p) {
+    if (set->cap == 0) return NULL;
+    size_t mask = set->cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = set->keys[i];
+        if (e == 0) return NULL;
+        if (e == p) return &set->vals[i];
+        i = (i + 1) & mask;
+    }
+}
+
+static int core_rc_set_grow(RtCoreRcSet* set) {
+    size_t new_cap = set->cap == 0 ? 64 : set->cap * 2;
+    if (set->cap != 0 && set->tombs > set->len) new_cap = set->cap;
+    if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
+    uintptr_t* keys = (uintptr_t*)calloc(new_cap, sizeof(uintptr_t));
+    uint32_t* vals = (uint32_t*)calloc(new_cap, sizeof(uint32_t));
+    if (!keys || !vals) {
+        free(keys);
+        free(vals);
+        return 0;
+    }
+    for (size_t k = 0; k < set->cap; k++) {
+        uintptr_t e = set->keys[k];
+        if (e == 0 || e == RT_CORE_IMMORTAL_TOMBSTONE) continue;
+        size_t j = rt_core_immortal_hash_ptr(e) & (new_cap - 1);
+        while (keys[j] != 0) j = (j + 1) & (new_cap - 1);
+        keys[j] = e;
+        vals[j] = set->vals[k];
+    }
+    free(set->keys);
+    free(set->vals);
+    set->keys = keys;
+    set->vals = vals;
+    set->cap = new_cap;
+    set->tombs = 0;
+    return 1;
+}
+
+/* p must not already be present. */
+static uint32_t* core_rc_set_insert(RtCoreRcSet* set, uintptr_t p, uint32_t v) {
+    if ((set->len + set->tombs + 1) * 10 >= set->cap * 7 && !core_rc_set_grow(set)) return NULL;
+    size_t mask = set->cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    while (set->keys[i] != 0 && set->keys[i] != RT_CORE_IMMORTAL_TOMBSTONE) i = (i + 1) & mask;
+    if (set->keys[i] == RT_CORE_IMMORTAL_TOMBSTONE) set->tombs--;
+    set->keys[i] = p;
+    set->vals[i] = v;
+    set->len++;
+    return &set->vals[i];
+}
+
+static void core_rc_set_erase(RtCoreRcSet* set, uintptr_t p) {
+    uint32_t* slot = core_rc_set_find(set, p);
+    if (!slot) return;
+    set->keys[slot - set->vals] = RT_CORE_IMMORTAL_TOMBSTONE;
+    set->len--;
+    set->tombs++;
+}
+
+static void core_rc_set_free(RtCoreRcSet* set) {
+    free(set->keys);
+    free(set->vals);
+    *set = (RtCoreRcSet){0};
+}
+
+typedef struct RtCoreRcNode {
+    void* ptr;
+    uint32_t kind;
+} RtCoreRcNode;
+
+/* 1 = registered graph node; 0 = immediate, unregistered, or unknown kind.
+ * Membership is checked before any dereference. */
+static int core_rc_node(int64_t value, RtCoreRcNode* node) {
+    if (!rt_core_is_heap(value)) return 0;
+    void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!ptr || !rt_core_is_registered_immortal_ptr(ptr)) return 0;
+    uint32_t kind = rt_core_registered_object_kind(ptr);
+    switch (kind) {
+        case RT_VALUE_HEAP_STRING:
+        case RT_VALUE_HEAP_ARRAY:
+        case RT_VALUE_HEAP_DICT:
+        case RT_VALUE_HEAP_ENUM:
+        case RT_VALUE_HEAP_CLOSURE:
+        case RT_VALUE_HEAP_FLOAT:
+        case RT_VALUE_HEAP_INT:
+        case RT_VALUE_HEAP_UINT:
+            node->ptr = ptr;
+            node->kind = kind;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static uint32_t* core_rc_scope_slot(const RtCoreRcNode* n) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_ARRAY: return &((RtCoreArray*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_DICT: return &((RtCoreDict*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_ENUM: return &((RtCoreEnum*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_CLOSURE: return &((RtCoreClosure*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_FLOAT:
+        case RT_VALUE_HEAP_INT:   /* identical leaf layout */
+        case RT_VALUE_HEAP_UINT:
+            return &((RtCoreFloat*)n->ptr)->transient_scope_id;
+        default:
+            return NULL;
+    }
+}
+
+/* Children visitor shared by share / release / graph_bytes / cycle check. */
+static int64_t core_rc_child_count(const RtCoreRcNode* n) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_ARRAY: {
+            RtCoreArray* a = (RtCoreArray*)n->ptr;
+            if (a->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) return 0;
+            return a->data ? a->len : 0;
+        }
+        case RT_VALUE_HEAP_DICT: {
+            RtCoreDict* d = (RtCoreDict*)n->ptr;
+            return d->entries ? d->cap * 2 : 0;
+        }
+        case RT_VALUE_HEAP_ENUM: return 1;
+        case RT_VALUE_HEAP_CLOSURE: return ((RtCoreClosure*)n->ptr)->capture_count;
+        default: return 0;
+    }
+}
+
+static int core_rc_child_at(const RtCoreRcNode* n, int64_t i, int64_t* out) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_ARRAY:
+            *out = ((int64_t*)((RtCoreArray*)n->ptr)->data)[i];
+            return 1;
+        case RT_VALUE_HEAP_DICT: {
+            RtCoreDictEntry* e = &((RtCoreDict*)n->ptr)->entries[i / 2];
+            if (e->occupied != 1) return 0;
+            *out = (i & 1) ? e->value : e->key;
+            return 1;
+        }
+        case RT_VALUE_HEAP_ENUM:
+            *out = ((RtCoreEnum*)n->ptr)->payload;
+            return 1;
+        case RT_VALUE_HEAP_CLOSURE:
+            *out = ((RtCoreClosure*)n->ptr)->captures[i];
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int64_t core_rc_node_bytes(const RtCoreRcNode* n) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_STRING:
+            return (int64_t)sizeof(RtCoreString) + (int64_t)((RtCoreString*)n->ptr)->len;
+        case RT_VALUE_HEAP_ARRAY: {
+            RtCoreArray* a = (RtCoreArray*)n->ptr;
+            int64_t elem = (a->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1 : (int64_t)sizeof(int64_t);
+            return (int64_t)sizeof(RtCoreArray) + (a->data ? a->cap * elem : 0);
+        }
+        case RT_VALUE_HEAP_DICT: {
+            RtCoreDict* d = (RtCoreDict*)n->ptr;
+            return (int64_t)sizeof(RtCoreDict) +
+                (d->entries ? d->cap * (int64_t)sizeof(RtCoreDictEntry) : 0);
+        }
+        case RT_VALUE_HEAP_ENUM: return (int64_t)sizeof(RtCoreEnum);
+        case RT_VALUE_HEAP_CLOSURE:
+            return (int64_t)sizeof(RtCoreClosure) +
+                ((RtCoreClosure*)n->ptr)->capture_count * (int64_t)sizeof(int64_t);
+        default: return (int64_t)sizeof(RtCoreFloat);
+    }
+}
+
+/* Claimable by an rc graph: not a SHARED cache string and not tagged with a
+ * scope other than `allowed_scope` (the active scope at share, 0 at release).
+ * A transient string carries no scope id; it is claimable only while a scope
+ * is active (it belongs to that scope). */
+static int core_rc_owned(const RtCoreRcNode* n, uint32_t allowed_scope) {
+    if (n->kind == RT_VALUE_HEAP_STRING) {
+        uint32_t flags = ((RtCoreString*)n->ptr)->reserved;
+        if (flags & RT_CORE_STRING_FLAG_SHARED) return 0;
+        if (flags & RT_CORE_STRING_FLAG_TRANSIENT) return allowed_scope != 0;
+        return 1;
+    }
+    uint32_t* tag = core_rc_scope_slot(n);
+    return !tag || *tag == 0 || *tag == allowed_scope;
+}
+
+typedef struct RtCoreRcWalk {
+    RtCoreRcNode* nodes;
+    size_t len;
+    size_t cap;
+    RtCoreRcSet seen;
+} RtCoreRcWalk;
+
+static int core_rc_walk_push(RtCoreRcWalk* w, RtCoreRcNode n) {
+    if (core_rc_set_find(&w->seen, (uintptr_t)n.ptr)) return 1;
+    if (!core_rc_set_insert(&w->seen, (uintptr_t)n.ptr, 1)) return 0;
+    if (w->len == w->cap) {
+        size_t next = w->cap == 0 ? 32 : w->cap * 2;
+        RtCoreRcNode* fresh = (RtCoreRcNode*)realloc(w->nodes, next * sizeof(RtCoreRcNode));
+        if (!fresh) return 0;
+        w->nodes = fresh;
+        w->cap = next;
+    }
+    w->nodes[w->len++] = n;
+    return 1;
+}
+
+static void core_rc_walk_free(RtCoreRcWalk* w) {
+    free(w->nodes);
+    core_rc_set_free(&w->seen);
+    *w = (RtCoreRcWalk){0};
+}
+
+/* Lifecycle lock held. Appends `root` and its owned non-rc descendants to
+ * `owned`; distinct rc-root children go to `rc_children` (not descended). */
+static int core_rc_collect(RtCoreRcNode root, uint32_t allowed_scope,
+        RtCoreRcWalk* owned, RtCoreRcWalk* rc_children) {
+    size_t start = owned->len;
+    if (core_rc_set_find(&owned->seen, (uintptr_t)root.ptr)) return 1;
+    if (!core_rc_walk_push(owned, root)) return 0;
+    for (size_t i = start; i < owned->len; i++) {
+        RtCoreRcNode n = owned->nodes[i];
+        int64_t count = core_rc_child_count(&n);
+        for (int64_t j = 0; j < count; j++) {
+            int64_t value;
+            RtCoreRcNode child;
+            if (!core_rc_child_at(&n, j, &value) || !core_rc_node(value, &child)) continue;
+            if (core_rc_set_find(&rt_core_rc_table, (uintptr_t)child.ptr)) {
+                if (rc_children && !core_rc_walk_push(rc_children, child)) return 0;
+                continue;
+            }
+            if (!core_rc_owned(&child, allowed_scope)) continue;
+            if (!core_rc_walk_push(owned, child)) return 0;
+        }
+    }
+    return 1;
+}
+
+typedef struct RtCoreRcFrame {
+    RtCoreRcNode n;
+    int64_t next;
+    int64_t count;
+} RtCoreRcFrame;
+
+/* Lifecycle lock held. 1 = back-edge reachable from root, 0 = DAG, -1 = OOM. */
+static int core_rc_has_cycle(RtCoreRcNode root) {
+    RtCoreRcSet color = {0}; /* 1 = on the DFS stack, 2 = finished */
+    size_t len = 0, cap = 32;
+    int result = 0;
+    RtCoreRcFrame* frames = (RtCoreRcFrame*)malloc(cap * sizeof(RtCoreRcFrame));
+    if (!frames || !core_rc_set_insert(&color, (uintptr_t)root.ptr, 1)) {
+        free(frames);
+        core_rc_set_free(&color);
+        return -1;
+    }
+    frames[len++] = (RtCoreRcFrame){root, 0, core_rc_child_count(&root)};
+    while (len > 0) {
+        RtCoreRcFrame* f = &frames[len - 1];
+        if (f->next >= f->count) {
+            *core_rc_set_find(&color, (uintptr_t)f->n.ptr) = 2;
+            len--;
+            continue;
+        }
+        int64_t value;
+        RtCoreRcNode child;
+        int64_t j = f->next++;
+        if (!core_rc_child_at(&f->n, j, &value) || !core_rc_node(value, &child)) continue;
+        uint32_t* c = core_rc_set_find(&color, (uintptr_t)child.ptr);
+        if (c) {
+            if (*c == 1) { result = 1; break; }
+            continue;
+        }
+        if (!core_rc_set_insert(&color, (uintptr_t)child.ptr, 1)) { result = -1; break; }
+        if (len == cap) {
+            RtCoreRcFrame* fresh =
+                (RtCoreRcFrame*)realloc(frames, cap * 2 * sizeof(RtCoreRcFrame));
+            if (!fresh) { result = -1; break; }
+            frames = fresh;
+            cap *= 2;
+        }
+        frames[len++] = (RtCoreRcFrame){child, 0, core_rc_child_count(&child)};
+    }
+    free(frames);
+    core_rc_set_free(&color);
+    return result;
+}
+
+/* Lifecycle lock held. Frees one owned node exactly like scope-end reclaim. */
+static void core_rc_free_node(RtCoreRcNode n) {
+    if (n.kind == RT_VALUE_HEAP_STRING &&
+            (((RtCoreString*)n.ptr)->reserved & RT_CORE_STRING_FLAG_SHARED)) return;
+    if (n.kind == RT_VALUE_HEAP_CLOSURE) {
+        RtCoreClosurePin* pin = spl_closure_pin_find_locked(n.ptr);
+        if (pin) { pin->orphaned = 1; return; } /* last rt_closure_release frees it */
+    }
+    rt_core_immortal_registry_acquire();
+    int erased = rt_core_immortal_registry_erase_raw((uintptr_t)n.ptr);
+    rt_core_immortal_registry_release();
+    if (!erased) return;
+    atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    core_transient_share_forget((uintptr_t)n.ptr);
+    if (n.kind == RT_VALUE_HEAP_ARRAY) free(((RtCoreArray*)n.ptr)->data);
+    else if (n.kind == RT_VALUE_HEAP_DICT) free(((RtCoreDict*)n.ptr)->entries);
+    free(n.ptr);
+}
+
+static uint32_t core_rc_active_scope(void) {
+    return rt_core_transient_array_scope_active ? rt_core_transient_array_scope_id : 0;
+}
+
+int8_t rt_rc_share(int64_t value) {
+    RtCoreRcNode root;
+    RtCoreRcWalk owned = {0};
+    int8_t ok = 0;
+    rt_core_heap_lifecycle_acquire();
+    if (!core_rc_node(value, &root)) goto out;
+    if (core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr)) { ok = 1; goto out; }
+    if (root.kind == RT_VALUE_HEAP_STRING &&
+            (((RtCoreString*)root.ptr)->reserved & RT_CORE_STRING_FLAG_SHARED)) goto out;
+    const char* check = getenv("SIMPLE_RC_CYCLE_CHECK");
+    if (check && check[0] == '1' && core_rc_has_cycle(root) != 0) goto out;
+    if (core_rc_collect(root, core_rc_active_scope(), &owned, NULL) &&
+            core_rc_set_insert(&rt_core_rc_table, (uintptr_t)root.ptr, 1)) {
+        for (size_t i = 0; i < owned.len; i++) {
+            RtCoreRcNode n = owned.nodes[i];
+            if (n.kind == RT_VALUE_HEAP_STRING) {
+                ((RtCoreString*)n.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+            } else {
+                uint32_t* tag = core_rc_scope_slot(&n);
+                if (tag) *tag = 0;
+            }
+        }
+        ok = 1;
+    }
+out:
+    core_rc_walk_free(&owned);
+    rt_core_heap_lifecycle_release();
+    return ok;
+}
+
+int8_t rt_rc_retain(int64_t value) {
+    RtCoreRcNode root;
+    int8_t ok = 0;
+    rt_core_heap_lifecycle_acquire();
+    if (core_rc_node(value, &root)) {
+        uint32_t* rc = core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr);
+        if (rc && *rc < UINT32_MAX) { (*rc)++; ok = 1; }
+    }
+    rt_core_heap_lifecycle_release();
+    return ok;
+}
+
+int8_t rt_rc_release(int64_t value) {
+    RtCoreRcNode root;
+    rt_core_heap_lifecycle_acquire();
+    uint32_t* rc = core_rc_node(value, &root)
+        ? core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr) : NULL;
+    if (!rc) { rt_core_heap_lifecycle_release(); return 0; }
+    if (--(*rc) > 0) { rt_core_heap_lifecycle_release(); return 1; }
+    /* rc hit 0: free the owned graph and cascade into rc children that reach
+     * 0. Everything is collected first and freed after, so no node is read
+     * after it is freed. On OOM the uncollected remainder leaks (never freed
+     * while reachable). */
+    RtCoreRcWalk dead = {0};
+    RtCoreRcWalk zero_roots = {0};
+    core_rc_set_erase(&rt_core_rc_table, (uintptr_t)root.ptr);
+    int ok = core_rc_walk_push(&zero_roots, root);
+    for (size_t k = 0; ok && k < zero_roots.len; k++) {
+        RtCoreRcWalk kids = {0};
+        ok = core_rc_collect(zero_roots.nodes[k], 0, &dead, &kids);
+        for (size_t i = 0; ok && i < kids.len; i++) {
+            uintptr_t kid = (uintptr_t)kids.nodes[i].ptr;
+            uint32_t* krc = core_rc_set_find(&rt_core_rc_table, kid);
+            if (krc && --(*krc) == 0) {
+                core_rc_set_erase(&rt_core_rc_table, kid);
+                ok = core_rc_walk_push(&zero_roots, kids.nodes[i]);
+            }
+        }
+        core_rc_walk_free(&kids);
+    }
+    for (size_t i = 0; i < dead.len; i++) core_rc_free_node(dead.nodes[i]);
+    core_rc_walk_free(&dead);
+    core_rc_walk_free(&zero_roots);
+    rt_core_heap_lifecycle_release();
+    return 1;
+}
+
+int64_t rt_rc_count(int64_t value) {
+    RtCoreRcNode root;
+    int64_t count = -1;
+    rt_core_heap_lifecycle_acquire();
+    if (core_rc_node(value, &root)) {
+        uint32_t* rc = core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr);
+        if (rc) count = (int64_t)*rc;
+    }
+    rt_core_heap_lifecycle_release();
+    return count;
+}
+
+/* Bytes of the owned graph: struct headers + payload buffers (array data at
+ * cap * elem, dict entries at cap * sizeof(entry), string bytes). rc-root
+ * children contribute 0. -1 for an invalid root or OOM. */
+int64_t rt_heap_graph_bytes(int64_t value) {
+    RtCoreRcNode root;
+    int64_t total = -1;
+    rt_core_heap_lifecycle_acquire();
+    if (core_rc_node(value, &root)) {
+        RtCoreRcWalk owned = {0};
+        if (core_rc_collect(root, core_rc_active_scope(), &owned, NULL)) {
+            total = 0;
+            for (size_t i = 0; i < owned.len; i++) total += core_rc_node_bytes(&owned.nodes[i]);
+        }
+        core_rc_walk_free(&owned);
+    }
+    rt_core_heap_lifecycle_release();
+    return total;
+}
+
 SplArray* rt_byte_array_new(uint64_t cap) {
     if (cap > (uint64_t)INT64_MAX) {
         return NULL;
@@ -9099,6 +10056,122 @@ int64_t rt_sha384_digest(int64_t data_value) {
         0x67332667ffc00b31ull, 0x8eb44a8768581511ull, 0xdb0c2e0d64f98fa7ull, 0x47b5481dbefa4fa4ull
     };
     return spl_sha2_512_family_digest(data_value, iv, 48u);
+}
+
+/* Native twin of value/pbkdf2_native.rs. Reuse the SHA-512 compression owner,
+ * and keep the iteration loop allocation-free rather than retaining one
+ * registered runtime array per intermediate HMAC. */
+static const uint64_t spl_pbkdf512_iv[8] = {
+    0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull,
+    0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+    0x510e527fade682d1ull, 0x9b05688c2b3e6c1full,
+    0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull
+};
+
+static void spl_pbkdf512_clear(void* memory, size_t length) {
+    volatile uint8_t* bytes = (volatile uint8_t*)memory;
+    while (length--) *bytes++ = 0;
+}
+
+/* state already includes prefix whole blocks (128 bytes for HMAC). */
+static void spl_pbkdf512_finish(uint64_t state[8], const uint8_t* data,
+                                size_t length, uint64_t prefix, uint8_t out[64]) {
+    uint8_t block[256];
+    size_t offset = 0;
+    while (length - offset >= 128u) {
+        spl_sha512_compress(state, data + offset);
+        offset += 128u;
+    }
+    size_t remaining = length - offset;
+    memset(block, 0, sizeof(block));
+    if (remaining) memcpy(block, data + offset, remaining);
+    block[remaining] = 0x80u;
+    size_t final_bytes = remaining < 112u ? 128u : 256u;
+    uint64_t total = prefix + (uint64_t)length;
+    uint64_t bits = total << 3;
+    for (unsigned i = 0; i < 8; ++i)
+        block[final_bytes - 1u - i] = (uint8_t)(bits >> (8u * i));
+    block[final_bytes - 9u] = (uint8_t)(total >> 61);
+    spl_sha512_compress(state, block);
+    if (final_bytes == 256u) spl_sha512_compress(state, block + 128u);
+    for (unsigned i = 0; i < 64; ++i)
+        out[i] = (uint8_t)(state[i / 8u] >> (56u - 8u * (i % 8u)));
+    spl_pbkdf512_clear(block, sizeof(block));
+}
+
+static void spl_pbkdf512_hmac(const uint64_t inner[8], const uint64_t outer[8],
+                             const uint8_t* data, size_t length, uint8_t out[64]) {
+    uint64_t state[8];
+    uint8_t digest[64];
+    memcpy(state, inner, sizeof(state));
+    spl_pbkdf512_finish(state, data, length, 128u, digest);
+    memcpy(state, outer, sizeof(state));
+    spl_pbkdf512_finish(state, digest, sizeof(digest), 128u, out);
+    spl_pbkdf512_clear(state, sizeof(state));
+    spl_pbkdf512_clear(digest, sizeof(digest));
+}
+
+int64_t rt_pbkdf2_hmac_sha512(int64_t password_value, int64_t salt_value,
+                             int64_t iterations, int64_t dk_len) {
+    int64_t password_len = rt_array_bytes_validate(password_value);
+    int64_t salt_len = rt_array_bytes_validate(salt_value);
+    if (password_len < 0 || salt_len < 0) return rt_core_nil();
+    /* Preserve the Rust twin's nonpositive length/round semantics. Enforce
+     * PBKDF2's four-byte block-index limit before allocating. */
+    if (dk_len <= 0) return (int64_t)(uintptr_t)rt_byte_array_new_len(0);
+    if ((uint64_t)dk_len > (uint64_t)UINT32_MAX * 64u ||
+        (uint64_t)dk_len > SIZE_MAX || (uint64_t)password_len > SIZE_MAX ||
+        (uint64_t)salt_len > SIZE_MAX - 4u) return rt_core_nil();
+    uint32_t rounds = iterations <= 0 ? 1u :
+        ((uint64_t)iterations > UINT32_MAX ? UINT32_MAX : (uint32_t)iterations);
+    uint8_t* password = (uint8_t*)malloc(password_len ? (size_t)password_len : 1u);
+    uint8_t* salt = (uint8_t*)malloc((size_t)salt_len + 4u);
+    uint8_t key_block[128] = {0}, u[64], accumulated[64];
+    uint64_t inner[8], outer[8], state[8];
+    int64_t result = rt_core_nil();
+    if (!password || !salt) goto cleanup;
+    if (rt_array_bytes_copy_checked(password_value, password, password_len) != password_len ||
+        rt_array_bytes_copy_checked(salt_value, salt, salt_len) != salt_len) goto cleanup;
+    if (password_len > 128) {
+        memcpy(state, spl_pbkdf512_iv, sizeof(state));
+        spl_pbkdf512_finish(state, password, (size_t)password_len, 0, key_block);
+    } else if (password_len) {
+        memcpy(key_block, password, (size_t)password_len);
+    }
+    for (unsigned i = 0; i < 128; ++i) key_block[i] ^= 0x36u;
+    memcpy(inner, spl_pbkdf512_iv, sizeof(inner));
+    spl_sha512_compress(inner, key_block);
+    for (unsigned i = 0; i < 128; ++i) key_block[i] ^= 0x36u ^ 0x5cu;
+    memcpy(outer, spl_pbkdf512_iv, sizeof(outer));
+    spl_sha512_compress(outer, key_block);
+    SplArray* array = rt_byte_array_new_len((uint64_t)dk_len);
+    RtCoreArray* output = rt_core_array_ptr(array);
+    if (!output || !output->data) goto cleanup;
+    for (uint64_t offset = 0, block_index = 1; offset < (uint64_t)dk_len;
+         offset += 64u, ++block_index) {
+        for (unsigned i = 0; i < 4; ++i)
+            salt[(size_t)salt_len + i] = (uint8_t)(block_index >> (24u - 8u * i));
+        spl_pbkdf512_hmac(inner, outer, salt, (size_t)salt_len + 4u, u);
+        memcpy(accumulated, u, sizeof(u));
+        for (uint32_t round = 1; round < rounds; ++round) {
+            spl_pbkdf512_hmac(inner, outer, u, sizeof(u), u);
+            for (unsigned i = 0; i < 64; ++i) accumulated[i] ^= u[i];
+        }
+        size_t count = (uint64_t)dk_len - offset < 64u ?
+            (size_t)((uint64_t)dk_len - offset) : 64u;
+        memcpy((uint8_t*)output->data + (size_t)offset, accumulated, count);
+    }
+    result = (int64_t)(uintptr_t)array;
+cleanup:
+    if (password) { spl_pbkdf512_clear(password, (size_t)password_len); free(password); }
+    if (salt) { spl_pbkdf512_clear(salt, (size_t)salt_len + 4u); free(salt); }
+    spl_pbkdf512_clear(key_block, sizeof(key_block));
+    spl_pbkdf512_clear(u, sizeof(u));
+    spl_pbkdf512_clear(accumulated, sizeof(accumulated));
+    spl_pbkdf512_clear(inner, sizeof(inner));
+    spl_pbkdf512_clear(outer, sizeof(outer));
+    spl_pbkdf512_clear(state, sizeof(state));
+    return result;
 }
 
 /* `[u8]` -> text, bytes copied verbatim (the interpreter's
@@ -9495,9 +10568,10 @@ SplArray* rt_array_concat(SplArray* a, SplArray* b) {
     if (!left || !right || left->len > INT64_MAX - right->len) return NULL;
 
     int64_t total = left->len + right->len;
-    if (total > RT_CORE_ARRAY_MAX_CAP) return NULL;
     int left_bytes = (left->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
     int right_bytes = (right->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    if (!rt_core_array_capacity_valid(total,
+            left_bytes && right_bytes ? RT_CORE_ARRAY_FLAG_BYTES : 0)) return NULL;
     int left_u64 = (left->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
     int right_u64 = (right->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
     if (left_u64 != right_u64) return NULL;
@@ -9901,12 +10975,14 @@ int8_t rt_array_set_len_known_text(int64_t header_ptr, int64_t len) {
 static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
+    if (!rt_core_array_capacity_valid(min_cap, array->flags)) return 0;
     if (array->cap >= min_cap) return 1;
     int64_t new_cap = array->cap > 0 ? array->cap : 4;
+    int64_t limit = rt_core_array_capacity_limit(array->flags);
     while (new_cap < min_cap) {
-        if (new_cap > INT64_MAX / 2) return 0;
-        new_cap *= 2;
+        new_cap = new_cap > limit / 2 ? limit : new_cap * 2;
     }
+    if (!rt_core_array_capacity_valid(new_cap, array->flags)) return 0;
     size_t elem_size = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
     void* data = rt_observed_realloc_v1(array->data, (size_t)new_cap * elem_size);
     if (!data) {
@@ -11224,6 +12300,31 @@ int64_t rt_array_remove(int64_t array_value, int64_t index) {
     return removed;
 }
 
+/* Twin of rt_array_insert: insert `value` BEFORE `index` in place
+ * (index == len appends). Non-array receiver, negative index or index > len
+ * is a no-op returning 0, matching the Rust lane and the interpreter's
+ * `insert` arm. Built on push + get/set so growth and storage layouts are
+ * handled by the existing primitives, exactly as the Rust lane does. */
+int8_t rt_array_insert(int64_t array_value, int64_t index, int64_t value) {
+    SplArray* a = (SplArray*)(uintptr_t)array_value;
+    if (!rt_core_array_ptr(a)) return 0;
+    int64_t len = rt_array_len(a);
+    if (index < 0 || index > len) return 0;
+    /* push grows the buffer (and stores the value in the packed layout);
+     * then one memmove shifts the tail and the new slot is re-set, so the
+     * cost is the inherent O(n) shift with no per-element calls. */
+    if (!rt_array_push(a, value)) return 0;
+    if (index == len) return 1;
+    RtCoreArray* array = rt_core_array_ptr(a);
+    size_t elem = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1
+                : (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? sizeof(uint64_t)
+                : sizeof(int64_t);
+    uint8_t* base = (uint8_t*)array->data;
+    memmove(base + (size_t)(index + 1) * elem, base + (size_t)index * elem,
+            (size_t)(len - index) * elem);
+    return rt_array_set(a, index, value);
+}
+
 /* pop / clear: receiver-dispatched spellings of rt_array_pop/rt_array_clear.
  *
  * These had NO C definition anywhere (only the Rust runtime's
@@ -11438,11 +12539,21 @@ static int rt_core_dict_key_eq(int64_t a, int64_t b) {
     return rt_native_eq(a, b) != 0;
 }
 
+/* Reader invalidation never prevents an ordinary dictionary mutation. Zero
+ * permanently poisons the optional reader when its bounded epoch is spent. */
+static void core_dict_read_advance(RtCoreDict* d) {
+    if (d->read_epoch > 0)
+        d->read_epoch = d->read_epoch == INT64_MAX ? 0 : d->read_epoch + 1;
+}
+
 static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
     RtCoreDictEntry* old = d->entries;
     int64_t old_cap = d->cap;
     RtCoreDictEntry* fresh = (RtCoreDictEntry*)rt_observed_calloc_v1((size_t)new_cap, sizeof(RtCoreDictEntry));
     if (!fresh) return;
+    core_dict_read_advance(d);
+    if (d->read_backing == INT64_MAX) d->read_epoch = 0;
+    else d->read_backing++;
     d->entries = fresh;
     d->cap = new_cap;
     d->len = 0;
@@ -11457,6 +12568,7 @@ static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
 
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
     if (!d || !d->entries) return 0;
+    core_dict_read_advance(d);
     /* Resize at 70% load (live + tombstones). */
     if ((d->len + d->tombstones + 1) * 10 > d->cap * 7) {
         /* A delete-heavy workload (`d[k] = v; d.remove(k)` in a loop) drives
@@ -11553,6 +12665,7 @@ static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed) {
         if (e->occupied == 0) return 0;
         if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) {
             if (removed) *removed = e->value;
+            core_dict_read_advance(d);
             e->occupied = -1;
             d->len--;
             d->tombstones++;
@@ -11584,6 +12697,13 @@ int64_t rt_dict_new(int64_t cap_hint) {
         free(d);
         return rt_core_nil();
     }
+    int64_t owner = atomic_load_explicit(&rt_core_dict_read_owner_counter, memory_order_relaxed);
+    while (owner < INT64_MAX &&
+           !atomic_compare_exchange_weak_explicit(&rt_core_dict_read_owner_counter,
+               &owner, owner + 1, memory_order_relaxed, memory_order_relaxed)) { }
+    d->read_owner = owner == INT64_MAX ? 0 : owner + 1;
+    d->read_epoch = 1;
+    d->read_backing = 1;
     return (int64_t)(((uint64_t)(uintptr_t)d) | RT_VALUE_TAG_HEAP);
 }
 
@@ -11627,10 +12747,125 @@ int8_t rt_dict_remove(int64_t dict, int64_t key) {
 int8_t rt_dict_clear(int64_t dict) {
     RtCoreDict* d = rt_core_as_dict(dict);
     if (!d || !d->entries) return 0;
+    core_dict_read_advance(d);
     for (int64_t i = 0; i < d->cap; i++) d->entries[i].occupied = 0;
     d->len = 0;
     d->tombstones = 0;
     return 1;
+}
+
+/* Allocation-free, owner-thread-only compiler scope-binding view.
+ * Included after the dictionary owner implementation; never exports a pointer
+ * or a tagged heap value. The caller must retain the dictionary and charge its
+ * read permit before each operation. Concurrent dictionary mutation is outside
+ * the dictionary's existing thread-safety contract. */
+/* One unit per registry probe plus one payload operation. The optional reader
+ * permits at most 64 probes per membership; longer collision tails fail closed
+ * instead of spending global registry capacity for every key byte. No waiting for a
+ * contended registry lock: a concurrent owner is unsupported and fails closed. */
+#define RT_DICT_SCOPE_READ_PROBE_LIMIT_V1 64
+int64_t rt_dict_scope_read_bound_v1(void) {
+    if (atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock, memory_order_acquire)) return -1;
+    size_t cap = rt_core_immortal_registry_cap;
+    rt_core_immortal_registry_release();
+    size_t probes = cap < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1 ? cap : RT_DICT_SCOPE_READ_PROBE_LIMIT_V1;
+    return (int64_t)probes * 3 + 1;
+}
+
+static void* core_dict_scope_read_heap_v1(int64_t value, uint32_t kind, int64_t* fuel) {
+    uintptr_t raw = (uintptr_t)value;
+    if (raw < 4096 || (raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
+    uintptr_t ptr = raw & ~RT_VALUE_TAG_MASK;
+    if (atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock, memory_order_acquire)) return NULL;
+    size_t cap = rt_core_immortal_registry_cap;
+    int found = 0;
+    if (cap) {
+        size_t index = rt_core_immortal_hash_ptr(ptr) & (cap - 1);
+        for (size_t probes = 0; probes < cap && probes < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1 && *fuel > 0; probes++) {
+            --*fuel;
+            uintptr_t entry = rt_core_immortal_registry[index];
+            if (!entry) break;
+            if (entry == ptr) { found = 1; break; }
+            index = (index + 1) & (cap - 1);
+        }
+    }
+    rt_core_immortal_registry_release();
+    if (!found) return NULL;
+    /* Dict kind is byte-sized; numeric and text kinds are 32-bit. */
+    if (kind == RT_VALUE_HEAP_DICT)
+        return ((RtCoreDict*)ptr)->kind == kind ? (void*)ptr : NULL;
+    return *(uint32_t*)ptr == kind ? (void*)ptr : NULL;
+}
+
+static RtCoreDict* core_dict_scope_read_checked_v1(
+    int64_t dict, int64_t owner, int64_t epoch, int64_t fuel) {
+    int64_t bound = rt_dict_scope_read_bound_v1();
+    if (bound < 0 || fuel < bound) return NULL;
+    RtCoreDict* d = core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
+    if (!d || owner <= 0 || epoch <= 0 || d->read_owner != owner ||
+        d->read_epoch != epoch || d->read_backing <= 0 || !d->entries)
+        return NULL;
+    return d;
+}
+
+int64_t rt_dict_scope_read_owner_v1(int64_t dict, int64_t fuel) {
+    int64_t bound = rt_dict_scope_read_bound_v1();
+    if (bound < 0 || fuel < bound) return -1;
+    RtCoreDict* d = core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
+    return d && d->read_owner > 0 && d->read_epoch > 0 ? d->read_owner : -1;
+}
+
+int64_t rt_dict_scope_read_epoch_v1(int64_t dict, int64_t owner, int64_t fuel) {
+    int64_t bound = rt_dict_scope_read_bound_v1();
+    if (bound < 0 || fuel < bound) return -1;
+    RtCoreDict* d = core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
+    return d && owner > 0 && d->read_owner == owner && d->read_epoch > 0
+        ? d->read_epoch : -1;
+}
+
+int64_t rt_dict_scope_read_meta_v1(int64_t dict, int64_t owner,
+    int64_t epoch, int64_t field, int64_t fuel) {
+    RtCoreDict* d = core_dict_scope_read_checked_v1(dict, owner, epoch, fuel);
+    if (!d || d->cap <= 0 || d->len < 0 || d->len > d->cap ||
+        (uint64_t)d->cap > INT64_MAX / sizeof(RtCoreDictEntry)) return -1;
+    switch (field) {
+        case 0: return 1; /* native hash-slot order, exactly rt_dict_keys */
+        case 1: return d->len;
+        case 2: case 3: return d->cap;
+        case 4: return d->read_backing;
+        case 5: return sizeof(RtCoreDict);
+        case 6: return d->cap * (int64_t)sizeof(RtCoreDictEntry);
+        default: return -1;
+    }
+}
+
+int64_t rt_dict_scope_read_slot_v1(int64_t dict, int64_t owner,
+    int64_t epoch, int64_t slot, int64_t field, int64_t byte_index, int64_t fuel) {
+    RtCoreDict* d = core_dict_scope_read_checked_v1(dict, owner, epoch, fuel);
+    if (!d || slot < 0 || slot >= d->cap) return -1;
+    RtCoreDictEntry* entry = &d->entries[slot];
+    if (field == 0) return entry->occupied == 1 ? 1 : 0;
+    if (entry->occupied != 1) return -1;
+    /* The checked owner may spend up to one registry-cap of the original
+     * allowance. Reserve that worst case before key/value validation. */
+    size_t owner_probes = rt_core_immortal_registry_cap < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1
+        ? rt_core_immortal_registry_cap : RT_DICT_SCOPE_READ_PROBE_LIMIT_V1;
+    if ((uint64_t)fuel <= owner_probes) return -1;
+    fuel -= (int64_t)owner_probes;
+    RtCoreString* key = core_dict_scope_read_heap_v1(entry->key, RT_VALUE_HEAP_STRING, &fuel);
+    if (!key || key->len > INT64_MAX) return -1;
+    RtCoreWideInt* wide = core_dict_scope_read_heap_v1(entry->value, RT_VALUE_HEAP_INT, &fuel);
+    if (!wide && !rt_core_is_int(entry->value)) return -1;
+    int64_t value = wide ? wide->value : rt_core_as_int(entry->value);
+    if (value < 0) return -1;
+    switch (field) {
+        case 1: return value;
+        case 2: return (int64_t)key->len;
+        case 3:
+            return byte_index >= 0 && (uint64_t)byte_index < key->len
+                ? (uint8_t)key->data[byte_index] : -1;
+        default: return -1;
+    }
 }
 
 int64_t rt_dict_len(int64_t dict) {
@@ -11818,6 +13053,7 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
  * worker above this point -- and every later user in this file -- can use it.
  * This file used to carry a forward-declared, separately-defined copy. */
 #include "platform/runtime_win_long_path.h"
+#include "platform/runtime_win_excl_file.h"
 #endif
 static int rt_bucket2_fsync_path(const char* path) {
     if (!path) return 0;
@@ -12135,7 +13371,7 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     if (end < (uint64_t)offset) return 0;
 #if defined(_WIN32)
     DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
-    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER file_size;
@@ -12182,6 +13418,39 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
 #endif
 }
 
+
+/* ---- file_ops.rs: rt_mmap_create ------------------------------------------ */
+/* WRITER-side twin of rt_mmap: create (or truncate) `path`, set its length to
+ * exactly `size` bytes, and return a read-write shared mapping of the whole
+ * file (0 on any failure). The caller fills the view, rt_msync + rt_munmap,
+ * then publishes with an atomic rename (temp+rename). */
+int64_t rt_mmap_create(int64_t path_value, int64_t size) {
+    if (size <= 0) return 0;
+    const uint8_t* bytes = rt_string_data(path_value);
+    int64_t len = rt_string_len(path_value);
+    char path[4096];
+    if (!bytes || len <= 0 || len >= (int64_t)sizeof(path)) return 0;
+    memcpy(path, bytes, (size_t)len);
+    path[len] = '\0';
+    if (strlen(path) != (size_t)len) return 0;
+#if defined(_WIN32)
+    HANDLE file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER want;
+    want.QuadPart = size;
+    BOOL sized = SetFilePointerEx(file, want, NULL, FILE_BEGIN) && SetEndOfFile(file);
+    CloseHandle(file);
+    if (!sized) return 0;
+#else
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return 0;
+    int sized = ftruncate(fd, (off_t)size) == 0;
+    close(fd);
+    if (!sized) return 0;
+#endif
+    return rt_mmap(path_value, size, 0, 0);
+}
 /* ---- file_ops.rs: rt_munmap / rt_msync / rt_madvise ---------------------- */
 
 bool rt_munmap(int64_t addr, int64_t size) {
@@ -12721,7 +13990,7 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
      * -8673224916767039355. Do NOT size from fseek/ftell -- procfs and sysfs
      * report 0 and would silently yield "" (the spl_file_read comment records
      * that incident). Pinned by scripts/check/check-binary-file-read-length.shs. */
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     if (!f) {
         /* DIAGNOSTIC (bug-linked: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22):
          * ungated dump of the fopen failure on the candidate's actual read path. */
@@ -12849,7 +14118,7 @@ static int rt_read_regular_no_follow_buffer(const uint8_t* path_ptr,
 #if defined(_WIN32)
     wchar_t* wide_path = rt_widen_long_path_rc(path);
     if (!wide_path) return 4;
-    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
     if (handle == INVALID_HANDLE_VALUE) return 4;
@@ -12978,7 +14247,7 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
     const int64_t rt_nil = 3;
     char* path = rt_core_string_to_cpath(path_value);
     if (!path) return rt_nil;
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_nil;
     size_t cap = 4096;
@@ -14786,7 +16055,7 @@ int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
@@ -14827,7 +16096,7 @@ int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
@@ -14924,6 +16193,14 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
         }
     }
     free(parent);
+#if defined(_WIN32)
+    if (have_mode && (mode & 0077) == 0) {
+        int ok = rt_win_private_atomic_write(path, content_string->data,
+            (size_t)content_string->len, (int)mode);
+        free(path);
+        return ok ? 1 : 0;
+    }
+#endif
     size_t path_len = strlen(path);
     char* temp_path = (char*)rt_observed_malloc_v1(path_len + 64);
     if (!temp_path) {
@@ -14975,8 +16252,9 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
 #endif
     }
 #if defined(_WIN32)
-    /* Win32 CRT permissions express exactly one bit -- read-only -- so the
-     * POSIX mode is honoured to the only extent the platform allows: the
+    /* Owner-only modes use the protected-DACL provider above. For other
+     * modes retain the pre-existing CRT mapping: permissions express exactly
+     * one bit -- read-only -- so the POSIX mode is honoured only as follows: the
      * owner-write bit maps to _S_IWRITE, everything else (group/other,
      * setuid, sticky) has no Win32 equivalent and is silently not applied.
      * Applied to the TEMP file, before the move, for the same
@@ -15711,15 +16989,16 @@ int64_t rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return (int64_t)(uintptr_t)rt_process_run_array(cmd, cmd_len, args);
 }
 
-int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    return rt_process_result_to_tuple(rt_process_run_array(cmd_c ? cmd_c : "", cmd_len, args));
+/* LLVM-lane tuple facades. Since the pure-Simple MIR registers the process
+ * owners in text_arg_indices (text_extern_abi.spl), cmd reaches every backend
+ * already split into (ptr, len) -- the same words the C owners take -- so the
+ * facades only re-pack the result into the rt_alloc'd 3-word block the LLVM
+ * Tuple destructure loads. */
+int64_t* rt_process_run_tuple(const char* cmd, uint64_t cmd_len, SplArray* args) {
+    return rt_process_result_to_tuple(rt_process_run_array(cmd, cmd_len, args));
 }
 
-int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+int64_t* rt_process_run_timeout_tuple(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
     // rt_process_run_timeout's declared return type is int64_t (RuntimeValue
     // ABI, see commit 072c6754e09 "state the RuntimeValue return type for
     // rt_process_run{,_timeout}"); it still returns an SplArray* handle
@@ -15729,7 +17008,7 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
     // compile -- which broke the LLVM native-link step of EVERY native-build,
     // for every program, including `print "x"`.
     return rt_process_result_to_tuple(
-        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
+        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd, cmd_len, args, timeout_ms));
 }
 
 /* Same (ptr, len) vs single-text-value ABI split as the facades above, for
@@ -15745,11 +17024,9 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
  * facade's only caller -- the pure-Simple LLVM backend -- still loads the raw
  * rt_alloc'd 3-word block like rt_process_result_to_tuple above. Re-pack it
  * here so both backends keep their own destructure contract. */
-int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args, int64_t timeout_ms,
-                                                    int64_t max_output_bytes) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd_c ? cmd_c : "", cmd_len, args,
+int64_t* rt_process_run_owned_observed_bounded_text(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                                    int64_t timeout_ms, int64_t max_output_bytes) {
+    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd, cmd_len, args,
                                                                   timeout_ms, max_output_bytes);
     if (!handle) return NULL;
     int64_t tuple_value = (int64_t)(uintptr_t)handle;
@@ -15762,12 +17039,20 @@ int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args,
     return block;
 }
 
-int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,
-                                      int64_t max_output_bytes) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+int64_t* rt_process_run_bounded_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                      int64_t timeout_ms, int64_t max_output_bytes) {
     return rt_process_result_to_tuple(rt_process_run_bounded(
-        cmd_c ? cmd_c : "", cmd_len, args, timeout_ms, max_output_bytes));
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
+}
+
+/* Byte-capture twin of rt_process_run_bounded_tuple: same raw 3-word block
+ * ([u8] stdout, [u8] stderr, untagged status) for the pure-Simple LLVM and
+ * Cranelift lanes, whose tuple destructure loads words 0/8/16 directly.
+ * Rust twin: env_process.rs. */
+int64_t* rt_process_run_bounded_bytes_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                            int64_t timeout_ms, int64_t max_output_bytes) {
+    return rt_process_result_to_tuple((SplArray*)(uintptr_t)rt_process_run_bounded_bytes(
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
 }
 
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
@@ -15777,7 +17062,7 @@ int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
 
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return 0;
     if (fseek(f, 0, SEEK_END) != 0) {
@@ -16083,11 +17368,6 @@ static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
  * and the AOT diagnostic lane stages per worker process; the slot makes the
  * pair safe under any caller). set_parent/make is a single logical
  * operation: make always consumes the slot, success or failure. */
-static _Thread_local char rt_secure_temp_dir_parent_slot[RT_TEXT_PATH_MAX];
-static _Thread_local int rt_secure_temp_dir_parent_ready = 0;
-static _Thread_local char rt_secure_temp_dir_prefix_slot[128];
-static _Thread_local int rt_secure_temp_dir_prefix_ready = 0;
-
 static int64_t rt_secure_temp_dir_core(const char* parent, const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char prefix[128], path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
@@ -16167,45 +17447,7 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
  * generic extern crossing every seed and both pure-Simple backends already
  * emit, so the split API needs no table row at all. See
  * doc/08_tracking/bug/tracked_seed_cranelift_split_secure_temp_dir_refuses_20261019.md */
-static int rt_secure_temp_dir_slot_from_value(int64_t value, char* slot, size_t slot_size) {
-    int64_t len = rt_string_len(value);
-    if (len <= 0) return 0;
-    return rt_text_arg_to_path(rt_string_data(value), (uint64_t)len, slot, slot_size);
-}
-
-int64_t rt_secure_temp_dir_set_parent(int64_t parent_value) {
-    if (!rt_secure_temp_dir_slot_from_value(parent_value,
-                             rt_secure_temp_dir_parent_slot,
-                             sizeof(rt_secure_temp_dir_parent_slot))) return 0;
-    rt_secure_temp_dir_parent_ready = 1;
-    return 1;
-}
-
-int64_t rt_secure_temp_dir_set_prefix(int64_t prefix_value) {
-    if (!rt_secure_temp_dir_slot_from_value(prefix_value,
-                             rt_secure_temp_dir_prefix_slot,
-                             sizeof(rt_secure_temp_dir_prefix_slot))) return 0;
-    if (rt_secure_temp_dir_prefix_slot[0] == '\0' ||
-        strchr(rt_secure_temp_dir_prefix_slot, '/') ||
-        strchr(rt_secure_temp_dir_prefix_slot, '\\')) return 0;
-    rt_secure_temp_dir_prefix_ready = 1;
-    return 1;
-}
-
-int64_t rt_secure_temp_dir_make(void) {
-    if (!rt_secure_temp_dir_parent_ready || !rt_secure_temp_dir_prefix_ready) {
-        rt_secure_temp_dir_parent_ready = 0;
-        rt_secure_temp_dir_prefix_ready = 0;
-        return rt_string_new(NULL, 0);
-    }
-    char parent[RT_TEXT_PATH_MAX];
-    snprintf(parent, sizeof(parent), "%s", rt_secure_temp_dir_parent_slot);
-    rt_secure_temp_dir_parent_ready = 0;
-    rt_secure_temp_dir_prefix_ready = 0;
-    return rt_secure_temp_dir_core(parent,
-        (const uint8_t*)rt_secure_temp_dir_prefix_slot,
-        (uint64_t)strlen(rt_secure_temp_dir_prefix_slot));
-}
+#include "runtime_secure_temp_split_private.h"
 
 #if defined(_WIN32)
 /* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
@@ -16319,13 +17561,17 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
 /* Byte-for-byte copy via stdio; truncates/creates dst (std::fs::copy). */
 int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                  const uint8_t* dst_ptr, uint64_t dst_len) {
-    char src_path[RT_TEXT_PATH_MAX];
-    char dst_path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(src_ptr, src_len, src_path, sizeof(src_path))) return 0;
-    if (!rt_text_arg_to_path(dst_ptr, dst_len, dst_path, sizeof(dst_path))) return 0;
-    FILE* in = fopen(src_path, "rb");
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(src_ptr, src_len, src, sizeof(src))) return 0;
+    if (!rt_text_arg_to_path(dst_ptr, dst_len, dst, sizeof(dst))) return 0;
+    FILE* in = fopen(src, "rb");
     if (!in) return 0;
-    FILE* out = fopen(dst_path, "wb");
+#if !defined(_WIN32)
+    struct stat source_stat;
+    if (fstat(fileno(in), &source_stat) != 0) { fclose(in); return 0; }
+#endif
+    FILE* out = fopen(dst, "wb");
     if (!out) { fclose(in); return 0; }
     uint8_t buf[65536];
     int ok = 1;
@@ -16333,16 +17579,34 @@ int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
     while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
         if (fwrite(buf, 1, got, out) != got) { ok = 0; break; }
     }
-    if (ferror(in)) ok = 0;
+    if (ferror(in) || fflush(out) != 0) ok = 0;
+#if !defined(_WIN32)
+    /* BuildRunner publishes this copy as the executable artifact. Preserve
+     * ordinary permissions from the opened source, independent of umask or
+     * an existing destination's mode; never propagate privilege bits. Apply
+     * only after the bytes are flushed, through the already-open destination. */
+    if (ok && fchmod(fileno(out), source_stat.st_mode & 0777) != 0) ok = 0;
+#endif
     if (fclose(out) != 0) ok = 0;
-    fclose(in);
+    if (fclose(in) != 0) ok = 0;
     return ok;
 }
 
 int rt_file_copy_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    if (!source || !destination || source_len <= 0 || destination_len <= 0 ||
+            memchr(source, 0, (size_t)source_len) != NULL ||
+            memchr(destination, 0, (size_t)destination_len) != NULL) return 0;
+#if defined(_WIN32)
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    return rt_win_file_copy_create_excl_no_follow(src, dst);
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else
@@ -16392,7 +17656,18 @@ int rt_file_copy_create_excl_no_follow(
 int rt_file_link_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    if (!source || !destination || source_len <= 0 || destination_len <= 0 ||
+            memchr(source, 0, (size_t)source_len) != NULL ||
+            memchr(destination, 0, (size_t)destination_len) != NULL) return 0;
+#if defined(_WIN32)
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    return rt_win_file_link_create_excl_no_follow(src, dst);
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else
@@ -16833,6 +18108,53 @@ int rt_setenv(const char* key, const char* value) {
 #else
     int result = value ? setenv(key, value, 1) : unsetenv(key);
     return result == 0 ? 1 : 0;
+#endif
+}
+
+/* io_file.rs rt_io_file_close_value twin: same close, reported as 1/0. */
+int64_t rt_io_file_close_value(int64_t fd) {
+    return rt_io_file_close(fd) ? 1 : 0;
+}
+
+/* env_process.rs rt_env_temp twin: TMPDIR, then TMP, then TEMP, then the
+ * platform default (MSYS-style "/c/Temp" on Windows, "/tmp" elsewhere). */
+int64_t rt_env_temp(void) {
+    static const char* const keys[] = {"TMPDIR", "TMP", "TEMP"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        const char* v = getenv(keys[i]);
+        if (v) return rt_string_new((const uint8_t*)v, (uint64_t)strlen(v));
+    }
+#if defined(_WIN32)
+    return rt_string_new((const uint8_t*)"/c/Temp", 7);
+#else
+    return rt_string_new((const uint8_t*)"/tmp", 4);
+#endif
+}
+
+/* cli_sffi.rs rt_exec_output twin: run the command through the platform
+ * shell, return captured stdout text; "" on bad input or spawn failure. */
+int64_t rt_exec_output(int64_t cmd_value) {
+    int64_t out = rt_shell_exec(cmd_value);
+    if (!rt_string_data(out)) return rt_string_new((const uint8_t*)"", 0);
+    return out;
+}
+
+/* directory.rs rt_set_current_dir twin: (utf-8 ptr, len) -> bool. */
+bool rt_set_current_dir(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr || path_len == 0 || path_len >= 4096) return false;
+    if (memchr(path_ptr, '\0', (size_t)path_len)) return false;
+#if defined(_WIN32)
+    wchar_t wide[4096];
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCCH)path_ptr,
+                                (int)path_len, wide, 4095);
+    if (n <= 0) return false;
+    wide[n] = L'\0';
+    return SetCurrentDirectoryW(wide) != 0;
+#else
+    char path[4096];
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = '\0';
+    return chdir(path) == 0;
 #endif
 }
 
@@ -18135,6 +19457,20 @@ int64_t rt_cpuid_tuple(int32_t leaf, int32_t subleaf) {
     return tuple;
 }
 
+/* Raw 4-word block (a, b, c, d as untagged words) for the pure-Simple native
+ * lanes, which destructure a tuple result by loading words 0/8/16/24 instead
+ * of calling rt_tuple_get. Rust twin: env_process.rs. */
+int64_t* rt_cpuid_tuple_block(int32_t leaf, int32_t subleaf) {
+    RtCpuidResult regs = rt_cpuid(leaf, subleaf);
+    int64_t* block = (int64_t*)rt_alloc(4 * (int64_t)sizeof(int64_t));
+    if (!block) return NULL;
+    block[0] = (int64_t)regs.a;
+    block[1] = (int64_t)regs.b;
+    block[2] = (int64_t)regs.c;
+    block[3] = (int64_t)regs.d;
+    return block;
+}
+
 int64_t rt_xgetbv(int32_t index) {
 #if defined(__x86_64__) || defined(_M_X64)
 #  if defined(_MSC_VER)
@@ -19111,7 +20447,21 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
     n = rt_array_len(a);
     buf = (unsigned char*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1));
     if (buf == NULL) return 0;
-    for (i = 0; i < n; i++) buf[i] = (unsigned char)(rt_array_get(a, i) & 0xFF);
+    /* rt_array_get returns the RAW byte for byte-packed arrays but a TAGGED
+     * value (n << 3 | TAG_INT) for boxed-element arrays; masking the tagged
+     * word wrote 0x53 as 0x98. Untag boxed ints, refuse non-ints (Rust twin:
+     * byte_array_bytes). */
+    {
+        int packed = rt_array_is_byte_packed(a);
+        for (i = 0; i < n; i++) {
+            int64_t v = rt_array_get(a, i);
+            if (!packed) {
+                if (!rt_core_is_int(v)) { free(buf); return 0; }
+                v = rt_core_as_int(v);
+            }
+            buf[i] = (unsigned char)(v & 0xFF);
+        }
+    }
     {
         char* cpath = rt_core_string_to_cpath(path);
         if (cpath == NULL) { free(buf); return 0; }

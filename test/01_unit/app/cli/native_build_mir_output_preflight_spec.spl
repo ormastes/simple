@@ -1,0 +1,126 @@
+# @cover src/app/cli/native_build_output_plan.spl
+# @cover src/app/cli/native_build_main.spl
+# The shared output selector is used by the authoritative worker and the
+# coordinator's scheduling preflight. No compiler build or worker is launched.
+use app.cli.native_build_output_plan.{native_build_output_format_v1,
+    native_build_mir_output_requires_full_set_v1, native_build_is_value_consuming_flag,
+    native_build_apply_failure_policy_v1}
+use compiler.common.driver_core_modes.{driver_output_format_is_both}
+use std.io_runtime.{file_read}
+use app.io.env_ops.{env_get, env_set}
+
+describe "native-build MIR output preflight":
+    it "applies ordered failure flags and preserves inherited env without flags":
+        val previous_go_to_end = env_get("SIMPLE_NATIVE_GO_TO_END") ?? ""
+        val previous_fail_fast = env_get("SIMPLE_COMPILE_FAIL_FAST") ?? ""
+        env_set("SIMPLE_NATIVE_GO_TO_END", "ambient-go-to-end")
+        env_set("SIMPLE_COMPILE_FAIL_FAST", "ambient-fail-fast")
+        native_build_apply_failure_policy_v1(["--fail-fast", "--go-to-end", "--keep-going"])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("1")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("0")
+        native_build_apply_failure_policy_v1(["--go-to-end", "--fail-fast"])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("1")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("1")
+        env_set("SIMPLE_NATIVE_GO_TO_END", "ambient-go-to-end")
+        env_set("SIMPLE_COMPILE_FAIL_FAST", "ambient-fail-fast")
+        native_build_apply_failure_policy_v1(["--output", "--go-to-end", "--entry", "--fail-fast"])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("ambient-go-to-end")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("ambient-fail-fast")
+        native_build_apply_failure_policy_v1(["--output=--go-to-end", "--entry=--fail-fast"])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("ambient-go-to-end")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("ambient-fail-fast")
+        native_build_apply_failure_policy_v1(["--output", "native.o", "--go-to-end",
+            "--entry", "entry.spl", "--fail-fast"])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("1")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("1")
+        native_build_apply_failure_policy_v1([])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("1")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("1")
+        env_set("SIMPLE_NATIVE_GO_TO_END", previous_go_to_end)
+        env_set("SIMPLE_COMPILE_FAIL_FAST", previous_fail_fast)
+
+    it "validates bootstrap native-build args before mutating failure policy":
+        val bootstrap = file_read("src/app/cli/bootstrap_main.spl")
+        val coordinator_start = bootstrap.index_of("fn run_bootstrap_native_build_coordinator(args: [text])")
+        val coordinator_end = bootstrap.index_of("fn native_build_runtime_bundle_is_removed")
+        expect(coordinator_start >= 0 and coordinator_end > coordinator_start).to_equal(true)
+        val coordinator = bootstrap.substring(coordinator_start, coordinator_end)
+        val validation = coordinator.index_of("cli_native_build_option_error(worker_args, true)")
+        val policy = coordinator.index_of("native_build_apply_failure_policy_v1(worker_args)")
+        val child_route = coordinator.index_of("bootstrap_capsule_shard_child_env(args)")
+        expect(validation >= 0 and policy > validation and child_route > policy).to_equal(true)
+        val stage3_start = bootstrap.index_of("if env_get(\"SIMPLE_BOOTSTRAP_STAGE3\") == \"1\":")
+        val stage3_end = bootstrap.index_of("if env_get(\"SIMPLE_BOOTSTRAP_STAGE4\") != \"1\":")
+        expect(stage3_start >= 0 and stage3_end > stage3_start).to_equal(true)
+        val stage3 = bootstrap.substring(stage3_start, stage3_end)
+        val focused_validation = stage3.index_of("cli_native_build_option_error(worker_args, true)")
+        val focused_policy = stage3.index_of("native_build_apply_failure_policy_v1(worker_args)")
+        val focused_prepass = stage3.index_of("bootstrap_capsule_shard_prepass_routed(args, stage3_allow_mir, stage3_allow_mir)")
+        expect(focused_validation >= 0 and focused_policy > focused_validation and
+            focused_prepass > focused_policy).to_equal(true)
+
+    it "shares the worker's default dynload and explicit one-binary format":
+        expect(driver_output_format_is_both(native_build_output_format_v1("dynload", false, false, false))).to_equal(true)
+        expect(driver_output_format_is_both(native_build_output_format_v1("one-binary", false, false, false))).to_equal(false)
+        expect(native_build_mir_output_requires_full_set_v1(["entry.spl"], false)).to_equal(true)
+        expect(native_build_mir_output_requires_full_set_v1(["--mode", "one-binary", "entry.spl"], false)).to_equal(false)
+
+    it "recognizes both mode spellings and the last parsed mode":
+        for args in [["--mode=dynload"], ["--build-mode", "dynload"], ["--build-mode=dynload"],
+                ["--mode=one-binary", "--mode", "dynload"]]:
+            expect(native_build_mir_output_requires_full_set_v1(args, false)).to_equal(true)
+        for args in [["--mode=one-binary"], ["--build-mode", "one-binary"], ["--build-mode=one-binary"],
+                ["--mode=dynload", "--build-mode=one-binary"]]:
+            expect(native_build_mir_output_requires_full_set_v1(args, false)).to_equal(false)
+
+    it "leaves explicit native artifacts to existing worker admission":
+        for flag in ["--emit-object", "--emit-entry-object", "--emit-archive", "--emit-shared"]:
+            expect(native_build_mir_output_requires_full_set_v1(["entry.spl", flag], false)).to_equal(false)
+            expect(native_build_mir_output_requires_full_set_v1([flag, "--mode=dynload"], false)).to_equal(false)
+        expect(driver_output_format_is_both(native_build_output_format_v1("dynload", false, true, false))).to_equal(false)
+
+    it "keeps the full MIR set for an explicit SMF side artifact":
+        expect(native_build_mir_output_requires_full_set_v1(["--mode=one-binary", "--emit-smf"], false)).to_equal(true)
+        expect(native_build_mir_output_requires_full_set_v1(["--emit-smf", "--mode=one-binary"], false)).to_equal(true)
+        expect(driver_output_format_is_both(native_build_output_format_v1("one-binary", true, false, false))).to_equal(true)
+
+    it "does not treat option operands as output mode flags":
+        for flag in ["-o", "--output", "--source", "--entry", "--cache-dir", "--runtime-path",
+                "--collection-profile", "--parser-prefer", "--input-manifest"]:
+            expect(native_build_is_value_consuming_flag(flag)).to_equal(true)
+            expect(native_build_mir_output_requires_full_set_v1([flag, "--emit-object"], false)).to_equal(true)
+            expect(native_build_mir_output_requires_full_set_v1([flag, "--mode=one-binary"], false)).to_equal(true)
+        expect(native_build_mir_output_requires_full_set_v1(["--output=--emit-object", "--strip"], false)).to_equal(true)
+        expect(native_build_mir_output_requires_full_set_v1(["--mode=one-binary", "--output", "--emit-smf"], false)).to_equal(false)
+
+    it "preserves selective admission for every projected output":
+        for args in [["entry.spl"], ["--mode=dynload"], ["--emit-smf"], ["--emit-entry-object"], ["--mode=one-binary"]]:
+            expect(native_build_mir_output_requires_full_set_v1(args, true)).to_equal(false)
+
+    it "leaves uncertain arguments and missing operands to the existing worker":
+        for args in [["--future-option", "--mode=one-binary"], ["--future-option=x"],
+                ["--mode"], ["--output"], ["--mode=invalid"], ["--mode="], ["--"]]:
+            expect(native_build_mir_output_requires_full_set_v1(args, false)).to_equal(false)
+
+    it "uses the worker's grouped-native override without admitting the whole lane":
+        expect(driver_output_format_is_both(native_build_output_format_v1("dynload", false, false, true))).to_equal(false)
+        expect(native_build_mir_output_requires_full_set_v1(["entry.spl"], false, true)).to_equal(false)
+        expect(native_build_mir_output_requires_full_set_v1(["--emit-smf"], false, true)).to_equal(true)
+
+    it "runs the shared preflight after selective dispatch and before worker budgeting":
+        val source = file_read("src/app/cli/native_build_main.spl")
+        val start = source.index_of("fn native_build_mir_shard_parallel(args:")
+        val end = source.index_of("fn native_build_mir_selective_parallel_v1(args:")
+        expect(start >= 0 and end > start).to_equal(true)
+        val coordinator = source.substring(start, end)
+        val selective = coordinator.index_of("return native_build_mir_selective_parallel_v1(args)")
+        val preflight = coordinator.index_of("if native_build_mir_output_requires_full_set_v1(args, selective,")
+        val budget = coordinator.index_of("val requested = native_build_shard_threads(args,")
+        expect(selective >= 0 and preflight > selective and budget > preflight).to_equal(true)
+        expect(coordinator.substring(preflight, budget)).to_contain("return 0")
+        val worker = file_read("src/app/io/_CliCompile/compile_targets.spl")
+        expect(worker).to_contain("options.output_format = native_build_output_format_v1(build_mode, true, false, native_group_requested)")
+        expect(worker).to_contain("options.output_format = native_build_output_format_v1(build_mode, false,")
+        val driver = file_read("src/compiler/80.driver/driver_aot_pipeline.spl")
+        expect(driver).to_contain("if not self.native_mir_shard_eligible_v1():")
+        expect(driver).to_contain("return \"output format re-reads MIR set\"")

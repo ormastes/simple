@@ -2,7 +2,9 @@
 #
 # Unified facade over hosted native libraries and SimpleOS SMF libraries.
 # Native libraries use the host loader; SMF keeps the kernel registry owner.
-# PE support is stubbed (returns Invalid) until WS3 lands.
+# PE (.dll) is hosted through the host loader (LoadLibraryA on Windows) with
+# the same handle validity rules as ELF/Mach-O; the SMF kernel path is
+# unchanged.
 
 use os.posix.dylib_async.{dylib_open, dylib_symbol, dylib_symbol_is_process_callable, dylib_close}
 use os.posix.host_dynlib_sffi.{host_dynlib_open, host_dynlib_symbol, host_dynlib_close}
@@ -81,23 +83,29 @@ fn dynlib_open(path: text, mode: u32) -> DynLibKind:
 
     .so  -> Elf
     .smf -> Smf
-    .dll -> Pe (returns Invalid until WS3)
+    .dll -> Pe (host loader; LoadLibraryA on Windows)
 
     Returns DynLibKind.Invalid on failure (bad path, unsupported format,
     or kernel ENOENT for unregistered paths).
     """
     val fmt = dynlib_format_for_path(path)
-    if fmt == "pe":
-        # PE loading not implemented yet (WS3)
-        return DynLibKind.Invalid
     if fmt == "unknown":
         return DynLibKind.Invalid
 
-    val is_host = fmt == "elf" or fmt == "macho"
+    # PE is hosted through the same host loader as ELF/Mach-O; the seed
+    # runtime resolves LoadLibraryA/GetProcAddress/FreeLibrary on Windows.
+    val is_host = fmt == "elf" or fmt == "macho" or fmt == "pe"
     val handle = if is_host: host_dynlib_open(path, mode as i64) else: dylib_open(path, mode)
     if not dynlib_handle_is_valid(handle):
         return DynLibKind.Invalid
 
+    if fmt == "pe":
+        return DynLibKind.Pe(state: PeLibState(
+            handle: handle,
+            path: path,
+            base: 0,
+            image_size: 0
+        ))
     if fmt == "elf" or fmt == "macho":
         return DynLibKind.Elf(state: ElfLibState(
             handle: handle,
@@ -122,7 +130,9 @@ fn dynlib_symbol(lib: DynLibKind, name: text) -> i64:
         DynLibKind.Smf(state):
             return dylib_symbol(state.handle, name)
         DynLibKind.Pe(state):
-            return dylib_symbol(state.handle, name)
+            if not dynlib_handle_is_valid(state.handle):
+                return -1
+            return host_dynlib_symbol(state.handle, name)
         DynLibKind.Invalid:
             return -1
 
@@ -136,7 +146,9 @@ fn dynlib_symbol_is_process_callable(lib: DynLibKind, name: text) -> bool:
         DynLibKind.Smf(state):
             return dylib_symbol_is_process_callable(state.handle, name)
         DynLibKind.Pe(state):
-            return dylib_symbol_is_process_callable(state.handle, name)
+            if not dynlib_handle_is_valid(state.handle):
+                return false
+            return host_dynlib_symbol(state.handle, name) > 0
         DynLibKind.Invalid:
             return false
 
@@ -150,7 +162,9 @@ fn dynlib_close(lib: DynLibKind) -> i64:
         DynLibKind.Smf(state):
             return dylib_close(state.handle)
         DynLibKind.Pe(state):
-            return dylib_close(state.handle)
+            if not dynlib_handle_is_valid(state.handle):
+                return -1
+            return host_dynlib_close(state.handle)
         DynLibKind.Invalid:
             return -1
 

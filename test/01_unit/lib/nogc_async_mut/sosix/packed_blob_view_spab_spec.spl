@@ -1,0 +1,192 @@
+"""
+## Purpose and audience
+Purpose: Prove the zero-copy `.spab` reader (packed_binary_ast_v1.md section 7/8)
+maps a blob, reads sections/elements/strings in place, resolves algorithm-tagged
+digests, and refuses torn, misaligned or foreign blobs.
+Audience: compiler cache and tooling engineers.
+## Operator workflow
+Run with the native test runner; mmap is not available to the seed interpreter.
+## Compatibility and limitations
+Fixtures are built in-spec; no checked-in binary files.
+"""
+
+use std.spec
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, dir_create_all}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{string_from_byte_array}
+use std.nogc_async_mut.sosix.packed_blob_view.*
+
+fn le(out: [u8], v: i64, width: i64) -> [u8]:
+    var o = out
+    var i = 0
+    while i < width:
+        o = o.push(((v >> (i * 8)) & 255) as u8)
+        i = i + 1
+    o
+
+fn pad_to(out: [u8], n: i64) -> [u8]:
+    var o = out
+    while o.len() < n:
+        o = o.push(0 as u8)
+    o
+
+fn hex_digit(c: text) -> i64:
+    val digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+    var i = 0
+    while i < 16:
+        if digits[i] == c:
+            return i
+        i = i + 1
+    0
+
+fn hex_bytes(out: [u8], hex: text) -> [u8]:
+    var o = out
+    var i = 0
+    while i + 1 < hex.len():
+        val hi = hex_digit(hex.substring(i, i + 1))
+        val lo = hex_digit(hex.substring(i + 1, i + 2))
+        o = o.push((hi * 16 + lo) as u8)
+        i = i + 2
+    o
+
+fn repeat(unit: text, n: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        out = out + unit
+        i = i + 1
+    out
+
+fn body_sha(bytes: [u8], start: i64) -> text:
+    sha256_text(string_from_byte_array(bytes.slice(start, bytes.len())))
+
+# Sections (64-aligned, sorted by id):
+#   0x0000 digest table: subject 3 (body) sha256 + subject 1 unknown algo 0x7FFF
+#   0x0001 nodes: 3 x 8 bytes (u32 kind, u32 name_str)
+#   0x0501 string offsets u32[3]; 0x0502 bytes "alphabe"
+# Body digest (subject 3) covers [end of digest table, blob_bytes).
+fn build_blob(digest_hex: text, corrupt_align: bool) -> [u8]:
+    val count = 4
+    val table_off = 64
+    val first = 64 + count * 32
+    val digest_off = ((first + 63) / 64) * 64
+    val digest_len = 16 + 32 + 16 + 4
+    val nodes_off = ((digest_off + digest_len + 63) / 64) * 64 + (if corrupt_align: 8 else: 0)
+    val nodes_len = 24
+    val soff_off = ((nodes_off + nodes_len + 63) / 64) * 64
+    val soff_len = 12
+    val sbytes_off = ((soff_off + soff_len + 63) / 64) * 64
+    val sbytes_len = 7
+    val total = sbytes_off + sbytes_len
+    var b: [u8] = []
+    b = le(b, SPAB_MAGIC, 8)
+    b = le(b, 1, 2)
+    b = le(b, 1, 2)
+    b = le(b, 64, 2)
+    b = le(b, 32, 2)
+    b = le(b, SPAB_FLAG_DESUGARED, 4)
+    b = le(b, count, 4)
+    b = le(b, table_off, 8)
+    b = le(b, total, 8)
+    b = le(b, 0, 16)
+    b = le(b, 0, 8)
+    for row in [(0, digest_off, digest_len), (1, nodes_off, nodes_len), (0x0501, soff_off, soff_len), (0x0502, sbytes_off, sbytes_len)]:
+        b = le(b, row.0, 4)
+        b = le(b, 0, 2)
+        b = le(b, 0, 2)
+        b = le(b, row.1, 8)
+        b = le(b, row.2, 8)
+        b = le(b, 0, 8)
+    b = pad_to(b, digest_off)
+    b = le(b, SPAB_SUBJECT_BODY, 2)
+    b = le(b, SPAB_ALGO_SHA256, 2)
+    b = le(b, 32, 2)
+    b = le(b, 0, 2)
+    b = le(b, 0, 8)
+    b = hex_bytes(b, digest_hex)
+    b = le(b, SPAB_SUBJECT_SOURCE, 2)
+    b = le(b, 0x7FFF, 2)
+    b = le(b, 4, 2)
+    b = le(b, 0, 2)
+    b = le(b, 0, 8)
+    b = le(b, 0xDEADBEEF, 4)
+    b = pad_to(b, nodes_off)
+    for k in [7, 0, 9, 1, 11, 0]:
+        b = le(b, k, 4)
+    b = pad_to(b, soff_off)
+    for o in [0, 5, 7]:
+        b = le(b, o, 4)
+    b = pad_to(b, sbytes_off)
+    for ch in [97, 108, 112, 104, 97, 98, 101]:
+        b = le(b, ch, 1)
+    b
+
+fn fixture_path(name: text) -> text:
+    val _ok = dir_create_all("build/test_tmp/spab")
+    "build/test_tmp/spab/{name}.spab"
+
+fn write_fixture(name: text, bytes: [u8]) -> text:
+    val path = fixture_path(name)
+    expect(file_write_bytes(path, bytes)).to_equal(true)
+    path
+
+describe "spab packed blob view":
+    it "maps a valid blob and reads sections, elements and strings in place":
+        val path = write_fixture("valid", build_blob(repeat("00", 32), false))
+        val v = packed_blob_map(path)
+        expect(packed_blob_view_ok(v)).to_equal(true)
+        expect(v.section_count).to_equal(4)
+        expect(v.flags).to_equal(SPAB_FLAG_DESUGARED)
+        val nodes = packed_blob_section(v, 1)
+        expect(packed_blob_section_len(nodes, 8)).to_equal(3)
+        expect(packed_blob_elem_u32(v, nodes, 8, 2, 0)).to_equal(11)
+        expect(packed_blob_elem_u32(v, nodes, 8, 1, 4)).to_equal(1)
+        expect(packed_blob_elem_u32(v, nodes, 8, 3, 0)).to_equal(-1)
+        expect(packed_blob_section(v, 0x0999).length).to_equal(-1)
+        expect(packed_blob_string_count(v)).to_equal(2)
+        expect(packed_blob_string(v, 0) ?? "<nil>").to_equal("alpha")
+        expect(packed_blob_string(v, 1) ?? "<nil>").to_equal("be")
+        expect(packed_blob_string(v, 2) == nil).to_equal(true)
+        expect(packed_blob_unmap(v)).to_equal(true)
+
+    it "treats an unknown digest algorithm as absent and finds a known one":
+        val path = write_fixture("digests", build_blob(repeat("ab", 32), false))
+        val v = packed_blob_map(path)
+        expect(spab_digest(v, SPAB_SUBJECT_BODY, [SPAB_ALGO_BLAKE3, SPAB_ALGO_SHA256])).to_equal(repeat("ab", 32))
+        expect(spab_digest(v, SPAB_SUBJECT_SOURCE, [SPAB_ALGO_SHA256])).to_equal("")
+        expect(spab_digest(v, SPAB_SUBJECT_BODY, [SPAB_ALGO_SHA3_256])).to_equal("")
+        expect(packed_blob_unmap(v)).to_equal(true)
+
+    it "refuses a torn blob":
+        val full = build_blob(repeat("00", 32), false)
+        val path = write_fixture("torn", full.slice(0, full.len() - 1))
+        val v = packed_blob_map(path)
+        expect(packed_blob_view_ok(v)).to_equal(false)
+        expect(v.error).to_contain("torn")
+
+    it "refuses a misaligned section":
+        val path = write_fixture("misaligned", build_blob(repeat("00", 32), true))
+        val v = packed_blob_map(path)
+        expect(packed_blob_view_ok(v)).to_equal(false)
+        expect(v.error).to_contain("aligned")
+
+    it "refuses a foreign magic":
+        var bytes = build_blob(repeat("00", 32), false)
+        bytes[0] = 88 as u8
+        val path = write_fixture("foreign", bytes)
+        expect(packed_blob_view_ok(packed_blob_map(path))).to_equal(false)
+
+    it "verifies the sha256 body digest and rejects a tampered body":
+        val draft = build_blob(repeat("00", 32), false)
+        val probe = packed_blob_map(write_fixture("body_probe", draft))
+        val start = spab_body_start(probe)
+        val _u = packed_blob_unmap(probe)
+        val good = build_blob(body_sha(draft, start), false)
+        val v = packed_blob_map(write_fixture("body_good", good))
+        expect(spab_verify_body_sha256(v)).to_equal(true)
+        val _u2 = packed_blob_unmap(v)
+        var tampered = good
+        tampered[tampered.len() - 1] = 122 as u8
+        val t = packed_blob_map(write_fixture("body_tampered", tampered))
+        expect(packed_blob_view_ok(t)).to_equal(true)
+        expect(spab_verify_body_sha256(t)).to_equal(false)

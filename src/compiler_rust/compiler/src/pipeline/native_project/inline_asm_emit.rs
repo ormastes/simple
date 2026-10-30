@@ -174,13 +174,22 @@ pub(crate) fn write_inline_asm_c_for_target(
         return Ok(None);
     }
 
-    let use_intel_syntax = target_uses_x86_intel_asm(target);
+    let default_intel_syntax = target_uses_x86_intel_asm(target);
+    let explicit_intel_supported = target.is_some_and(|(triple, _, _)| target_asm_arch(triple) == AsmArch::X86);
     let path = temp_dir.join("simple_asm_blocks.c");
     let mut code = String::from("/* Auto-generated Simple raw asm blocks. */\n\n");
     for block in blocks {
         if !block_matches_target(&block.instructions, target) {
             continue;
         }
+        if block.dialect == crate::hir::AsmDialect::Intel && !explicit_intel_supported {
+            return Err("E-ASM-DIALECT: explicit Intel syntax requires an x86 sidecar target".to_string());
+        }
+        let use_intel_syntax = match block.dialect {
+            crate::hir::AsmDialect::Default => default_intel_syntax,
+            crate::hir::AsmDialect::Att => false,
+            crate::hir::AsmDialect::Intel => true,
+        };
         code.push_str(&format!("__attribute__((used)) void {}(void) {{\n", block.symbol));
         code.push_str("    __asm__ volatile (\n");
         if use_intel_syntax {

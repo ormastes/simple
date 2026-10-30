@@ -1,0 +1,40 @@
+# Compile and execute with the pure-Simple producer. Nonzero exits identify
+# real store/reader failures; this is not a full Phase3 admission receipt.
+use app.io.mod.{cwd, dir_create, file_read, dir_remove_all}
+use app.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use app.scv.db.local_store.{db_store_commit, db_store_read, db_store_read_accounted}
+use app.scv.db.checkpoint_reader.{db_checkpoint_reader_limits, db_checkpoint_reader_with_limits, db_checkpoint_reader_store}
+use std.common.crypto.sha256.{sha256_text}
+
+fn main() -> i64:
+    if not dir_create("build/test-artifacts", true): return 10
+    val parent = path_final_existing(cwd() + "/build/test-artifacts").unwrap().path
+    val root = secure_temp_dir_raw(parent, "store-accounting-")
+    if root == "" or not root.starts_with(parent + "/store-accounting-"): return 11
+    if path_final_existing(root).unwrap().path != root: return 12
+    val empty = db_store_read_accounted(root, 0u64).unwrap()
+    if empty.view.code != "empty" or empty.io_bytes != 0u64: return 20
+    val written = db_store_commit(root, "", sha256_text("native-accounting"), "small state")
+    if written.code != "ok":
+        print written.code
+        return 21
+    val head_bytes = file_read(root + "/.scv/db/HEAD").len()
+    val object_bytes = file_read(root + "/.scv/db/objects/" + written.head + ".scvg").len()
+    val actual = (head_bytes + object_bytes) as u64
+    val exact = db_store_read_accounted(root, actual).unwrap()
+    if exact.view != written or exact.io_bytes != actual: return 22
+    val short = db_store_read_accounted(root, actual - 1u64)
+    if not short.is_err(): return 23
+    if short.unwrap_err() != "SCVDB_STORE_READ_QUOTA": return 24
+    if db_store_read(root) != written: return 25
+    var limits = db_checkpoint_reader_limits()
+    limits.io_bytes = actual * 2u64 - 1u64
+    val first = db_checkpoint_reader_store(db_checkpoint_reader_with_limits(root, limits).unwrap(), "semantic").unwrap()
+    if first.0.io_bytes != actual or first.0.work_bytes != actual: return 26
+    val second = db_checkpoint_reader_store(first.0, "semantic")
+    if not second.is_err(): return 27
+    if second.unwrap_err() != "SCVDB_CHECKPOINT_READ_QUOTA": return 28
+    if not dir_remove_all(root): return 29
+    print "STORE_ACCOUNTING_NATIVE: PASS"
+    0

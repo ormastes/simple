@@ -303,10 +303,16 @@ def main():
                         native = wt.DWORD()
                         require(exit_code(process.process, ct.byref(native)), "read child exit")
                         native_status = native.value
-                    reason = "child-native-exception" if native_status & 0xC0000000 == 0xC0000000 else "child-exit"
+                    # GetExitCodeProcess supplies a DWORD, not the cause of
+                    # termination. ExitProcess(-1), for example, yields
+                    # 0xFFFFFFFF without raising any exception. Preserve the
+                    # native status and familiar failure mappings without
+                    # claiming that a high-bit status proves an exception.
+                    native_failure_status = native_status & 0xC0000000 == 0xC0000000
+                    reason = "child-native-status" if native_failure_status else "child-exit"
                     raw_status = native_status if native_status <= 255 else {
                         0xC0000005: 139, 0xC000001D: 132, 0xC0000094: 136, 0xC00000FD: 139
-                    }.get(native_status, 125 if reason == "child-native-exception" else 1)
+                    }.get(native_status, 125 if native_failure_status else 1)
                     break
                 if not available.value:
                     time.sleep(0.01)

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Host component evidence: strict cgroup population decoding and V4 lifecycle.
+# This does not qualify all-descendant containment or the BuildRunner gate.
+set -eu
+if [ "$(uname -s)" != Linux ]; then
+    echo 'process-v4-group-admission: requires Linux (not a PASS)' >&2
+    exit 77
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+sh "$root/scripts/check/check-linux-cgroup-events-parser.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/process-v4-admission.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+cc=${CC:-cc}
+"$cc" -D_GNU_SOURCE -std=c11 -O1 -Wall -Wextra \
+    "$root/src/runtime/test/runtime_linux_group_owner_unavailable_selfcheck.c" \
+    -o "$scratch/group-selfcheck"
+timeout 10 "$scratch/group-selfcheck" --population-only
+"$cc" -std=c11 -O1 -pthread -ffunction-sections -fdata-sections \
+    -Wl,--gc-sections \
+    "$root/src/runtime/test/runtime_process_observation_v4_selfcheck.c" \
+    -o "$scratch/v4-selfcheck"
+timeout 30 "$scratch/v4-selfcheck"

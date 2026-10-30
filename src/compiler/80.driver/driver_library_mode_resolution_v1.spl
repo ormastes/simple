@@ -1,0 +1,80 @@
+# Configured library lookup is shared by coordinator, worker and frozen aliases.
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1,
+    library_mode_effective_family_v1, library_mode_policy_v1, library_mode_importer_context_valid_v1}
+use compiler.driver.driver_source_loading.{
+    _driver_try_numbered_entry_import_rel_checked_v1,
+    _driver_resolve_source_root_entry_import_from_v1,
+    driver_resolve_closure_import_v1, driver_closure_native_owner_v1}
+
+fn _library_mode_root_v1(root: text) -> text:
+    var normalized = root.replace("\\", "/")
+    while normalized.len() > 1 and normalized.ends_with("/"):
+        normalized = normalized.substring(0, normalized.len() - 1)
+    normalized
+
+fn _library_mode_hit_v1(selected: SourceRootResolutionV1, exact: bool) -> SourceRootResolutionV1:
+    match selected:
+        case SourceRootResolutionV1.Found(path):
+            # A stripped item name may bind a module file, never a package
+            # ancestor masquerading as a missing leaf.
+            if not exact and (path.ends_with("/__init__.spl") or path.ends_with("/mod.spl")):
+                SourceRootResolutionV1.Missing
+            else: selected
+        case _: selected
+
+pub fn driver_library_mode_selected_v1(module_path: text, source_roots: [text],
+        importer: text, library_mode: text, importer_owner: text = "") -> Result<SourceRootResolutionV1, text>:
+    val validated = library_mode_policy_v1(library_mode)?
+    if library_mode != "" and library_mode_generic_import_v1(module_path) and not library_mode_importer_context_valid_v1(importer_owner):
+        return Err("LIBRARY_MODE_IMPORT_CONTEXT_INVALID: configured import requires a retained logical owner; path=" + importer)
+    val family = library_mode_effective_family_v1(library_mode, importer_owner)
+    if family == "" or not library_mode_generic_import_v1(module_path):
+        return Ok(_driver_resolve_source_root_entry_import_from_v1(module_path, source_roots, importer))
+    var probe = module_path
+    while library_mode_generic_import_v1(probe):
+        val relative = probe.substring(4).replace(".", "/")
+        # An explicit platform/composition facade in an admitted root stays
+        # authoritative. Never search a different physical runtime family.
+        for source_root in source_roots:
+            val root = _library_mode_root_v1(source_root)
+            if root.ends_with(".spl"): continue
+            val rel = if root == "lib" or root.ends_with("/lib"):
+                relative
+            else: probe.replace(".", "/")
+            val selected = _library_mode_hit_v1(
+                _driver_try_numbered_entry_import_rel_checked_v1(root, rel), probe == module_path)
+            match selected:
+                case SourceRootResolutionV1.Missing: ()
+                case _: return Ok(selected)
+        for source_root in source_roots:
+            val root = _library_mode_root_v1(source_root)
+            if root != "lib" and not root.ends_with("/lib"): continue
+            for owner in [family, "common"]:
+                val selected = _library_mode_hit_v1(
+                    _driver_try_numbered_entry_import_rel_checked_v1(root + "/" + owner, relative), probe == module_path)
+                match selected:
+                    case SourceRootResolutionV1.Missing: ()
+                    case _: return Ok(selected)
+        val parts = probe.split(".")
+        if parts.len() <= 2: break
+        probe = parts.slice(0, parts.len() - 1).join(".")
+    Err("LIBRARY_MODE_OWNER_MISSING: import '" + module_path + "' selected '" + family +
+        "' (or shared common) for importer '" + importer + "'; another family is not a fallback")
+
+pub fn driver_library_mode_resolve_v1(module_path: text, source_roots: [text],
+        importer: text, library_mode: text, importer_owner: text = "") -> Result<SourceRootResolutionV1, text>:
+    val validated = library_mode_policy_v1(library_mode)?
+    if library_mode != "" and library_mode_generic_import_v1(module_path) and not library_mode_importer_context_valid_v1(importer_owner):
+        return Err("LIBRARY_MODE_IMPORT_CONTEXT_INVALID: configured import requires a retained logical owner; path=" + importer)
+    if library_mode_effective_family_v1(library_mode, importer_owner) == "" or
+            not library_mode_generic_import_v1(module_path):
+        return Ok(driver_resolve_closure_import_v1(module_path, source_roots, importer))
+    driver_library_mode_selected_v1(module_path, source_roots, importer, library_mode, importer_owner)
+
+pub fn driver_library_mode_native_owner_v1(path: text, module_path: text,
+        importer: text, library_mode: text, importer_owner: text = "") -> text:
+    if library_mode != "" and library_mode_generic_import_v1(module_path):
+        if library_mode_effective_family_v1(library_mode, importer_owner) == "": return ""
+        return path
+    driver_closure_native_owner_v1(path, module_path, importer)

@@ -128,6 +128,9 @@ fn normalize_backend(value: &str) -> Result<String, String> {
 }
 
 pub fn handle_native_build(args: &[String]) -> i32 {
+    // Enforce SIMPLE_MEMORY_LIMIT_MB: native compilation never polls the
+    // interpreter watchdog flag, so a runaway must be killed by the guard.
+    simple_compiler::watchdog::start_memory_guard("native-build");
     let mut source_dirs: Vec<PathBuf> = Vec::new();
     let mut output: Option<PathBuf> = None;
     let mut entry_file: Option<PathBuf> = None;

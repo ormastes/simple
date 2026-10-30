@@ -20,7 +20,7 @@ struct ElfMergeEntry:
     output_offset: i64
 
 struct ElfMergePlan:
-    data: [i64]
+    data: [u8]          # pooled bytes, packed (8x smaller than [i64])
     entries: [ElfMergeEntry]
     has_sections: bool
     align: i64
@@ -29,7 +29,7 @@ struct ElfMergePlan:
     metadata_compatible: bool
     section_entries: {text: [i64]} = {}   # "obj:sec" -> entry indices, input order
 
-fn _same_bytes(pool: [i64], at: i64, value: [i64]) -> bool:
+fn _same_bytes(pool: [u8], at: i64, value: [u8]) -> bool:
     if at < 0 or at + value.len() > pool.len():
         return false
     var i: i64 = 0
@@ -39,15 +39,15 @@ fn _same_bytes(pool: [i64], at: i64, value: [i64]) -> bool:
         i = i + 1
     true
 
-fn _fragment_hash(value: [i64], entsize: i64, strings: bool) -> i64:
+fn _fragment_hash(value: [u8], entsize: i64, strings: bool) -> i64:
     var hash: i64 = (5381 * 33 + entsize) & 0xffffffff
     if strings:
         hash = (hash * 33 + 1) & 0xffffffff
     for byte in value:
-        hash = (hash * 33 + byte) & 0xffffffff
+        hash = (hash * 33 + (byte as i64)) & 0xffffffff
     hash
 
-fn _find_fragment(pool: [i64], starts: [i64], value: [i64], alignment: i64) -> i64:
+fn _find_fragment(pool: [u8], starts: [i64], value: [u8], alignment: i64) -> i64:
     for at in starts:
         if at % alignment == 0 and _same_bytes(pool, at, value):
             return at
@@ -73,7 +73,7 @@ fn elf_merge_section(obj: ElfObject, section_idx: i64) -> bool:
 
 fn elf_merge_sections(objects: [ElfObject], live: [[bool]]) -> Result<ElfMergePlan, text>:
     """Pool identical merge entities in deterministic object/section order."""
-    var data: [i64] = []
+    var data: [u8] = []
     var buckets: {i64: [i64]} = {}
     var entries: [ElfMergeEntry] = []
     var section_entries: {text: [i64]} = {}
@@ -117,11 +117,7 @@ fn elf_merge_sections(objects: [ElfObject], live: [[bool]]) -> Result<ElfMergePl
                     else:
                         cursor - begin + 1 == entsize
                     if at_end:
-                        var value: [i64] = []
-                        var p = begin
-                        while p <= cursor:
-                            value = value.push(obj.raw[sec.sh_addr + p] as i64)
-                            p = p + 1
+                        val value: [u8] = obj.raw[sec.sh_addr + begin:sec.sh_addr + cursor + 1]
                         val hash = _fragment_hash(value, entsize, strings)
                         var candidates: [i64] = []
                         if buckets.has(hash):
@@ -130,10 +126,9 @@ fn elf_merge_sections(objects: [ElfObject], live: [[bool]]) -> Result<ElfMergePl
                         if output < 0:
                             output = _align_up(data.len(), entity_alignment)
                             while data.len() < output:
-                                data = data.push(0)
+                                data.push(0u8)
                             buckets[hash] = candidates.push(output)
-                            for byte in value:
-                                data = data.push(byte)
+                            data.extend(value)
                         val entry_key = "{oi}:{si}"
                         var listed: [i64] = []
                         if section_entries.has(entry_key): listed = section_entries[entry_key]

@@ -1,0 +1,176 @@
+# Native UTF16 stays native: untouched parent entries, including =C: drive
+# entries and unpaired code units, are copied without a text round trip.
+# Internal launch-owner records only. No pointer enters the SOSIX facade.
+use std.sys.pty_launch.{PtyEnvironmentChangeV1}
+use std.nogc_sync_mut.io.windows_pty_launch_abi.{GetEnvironmentStringsW, FreeEnvironmentStringsW, CompareStringOrdinal}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{HeapAlloc}
+use std.nogc_sync_mut.io.windows_process_owner.{_windows_process_wide_v1}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u16, volatile_write_u16}
+
+pub struct WindowsPtyEnvironmentPreparedV1:
+    block: i64 = 0
+    snapshot: i64 = 0
+    allocations: [i64] = []
+    error: text = ""
+
+struct WindowsPtyEnvironmentEntryV1:
+    address: i64
+    units: i64
+    name_units: i64
+
+# Maximum one million UTF16 units and 4096 names, before and after changes.
+# The sorted merge uses O(n log n) comparisons; each change uses binary search.
+@unsafe(reason: "scans the OS-owned double-NUL UTF16 block within the launch budget", capabilities: [raw_ptr])
+fn _windows_pty_environment_entries_v1(snapshot: i64) -> Result<[WindowsPtyEnvironmentEntryV1], text>:
+    var entries: [WindowsPtyEnvironmentEntryV1] = []
+    var offset = 0
+    while offset < 1048576:
+        if volatile_read_u16(snapshot + offset * 2) == 0:
+            if offset == 0 and volatile_read_u16(snapshot + 2) != 0:
+                return Err("invalid empty native environment block")
+            return Ok(entries)
+        if entries.len() >= 4096: return Err("native environment entry bound exceeded")
+        val begin = offset
+        var separator: i64 = -1
+        while offset < 1048576:
+            val unit = volatile_read_u16(snapshot + offset * 2)
+            if unit == 0: break
+            # A leading '=' belongs to a hidden drive key, not its delimiter.
+            if unit == 61 and offset > begin and separator < 0: separator = offset - begin
+            offset = offset + 1
+        if offset >= 1048576: return Err("native environment UTF16 bound exceeded")
+        if separator <= 0: return Err("malformed native environment assignment")
+        entries = entries.push(WindowsPtyEnvironmentEntryV1(address: snapshot + begin * 2,
+            units: offset - begin, name_units: separator))
+        offset = offset + 1
+    Err("native environment lacks bounded double terminator")
+
+@unsafe(reason: "compares live bounded native UTF16 names without locale or ASCII folding", capabilities: [ffi, raw_ptr])
+fn _windows_pty_environment_compare_v1(first: WindowsPtyEnvironmentEntryV1,
+    second: WindowsPtyEnvironmentEntryV1) -> Result<i32, text>:
+    val order = CompareStringOrdinal(first.address, first.name_units as i32,
+        second.address, second.name_units as i32, 1)
+    if order == 0: return Err("Windows environment name comparison failed")
+    Ok(order)
+
+fn _windows_pty_environment_sort_v1(entries: [WindowsPtyEnvironmentEntryV1]) -> Result<[WindowsPtyEnvironmentEntryV1], text>:
+    var source = entries
+    var width = 1
+    while width < source.len():
+        var ordered: [WindowsPtyEnvironmentEntryV1] = []
+        var base = 0
+        while base < source.len():
+            val middle = if base + width < source.len(): base + width else: source.len()
+            val end = if middle + width < source.len(): middle + width else: source.len()
+            var left = base
+            var right = middle
+            while left < middle or right < end:
+                var take_left = right >= end
+                if left < middle and right < end:
+                    take_left = _windows_pty_environment_compare_v1(source[left], source[right])? != 3
+                if take_left:
+                    ordered = ordered.push(source[left])
+                    left = left + 1
+                else:
+                    ordered = ordered.push(source[right])
+                    right = right + 1
+            base = end
+        source = ordered
+        width = width * 2
+    for index in 1..source.len():
+        if _windows_pty_environment_compare_v1(source[index - 1], source[index])? == 2:
+            return Err("duplicate case-insensitive native environment name")
+    Ok(source)
+
+fn _windows_pty_environment_change_v1(entries: [WindowsPtyEnvironmentEntryV1],
+    replacement: WindowsPtyEnvironmentEntryV1, remove: bool) -> Result<[WindowsPtyEnvironmentEntryV1], text>:
+    var low = 0
+    var high = entries.len()
+    while low < high:
+        val middle = low + (high - low) / 2
+        if _windows_pty_environment_compare_v1(entries[middle], replacement)? == 1:
+            low = middle + 1
+        else:
+            high = middle
+    var found = false
+    if low < entries.len(): found = _windows_pty_environment_compare_v1(entries[low], replacement)? == 2
+    if not remove and not found and entries.len() >= 4096:
+        return Err("merged environment entry bound exceeded")
+    var merged: [WindowsPtyEnvironmentEntryV1] = []
+    for index in 0..entries.len():
+        if index == low and not remove: merged = merged.push(replacement)
+        if index != low or not found: merged = merged.push(entries[index])
+    if low == entries.len() and not remove: merged = merged.push(replacement)
+    Ok(merged)
+
+@unsafe(reason: "counts a validated owned NUL-terminated UTF16 allocation", capabilities: [raw_ptr])
+fn _windows_pty_environment_units_v1(address: i64) -> i64:
+    var units = 0
+    while units < 1048576 and volatile_read_u16(address + units * 2) != 0: units = units + 1
+    units
+
+# Caller validates every public change before calling; this function always
+# returns every acquired allocation, including on errors, to the PTY owner.
+@unsafe(reason: "snapshots and merges private child environment without changing the parent", capabilities: [ffi, raw_ptr])
+pub fn windows_pty_environment_prepare_v1(heap: i64, changes: [PtyEnvironmentChangeV1]) -> WindowsPtyEnvironmentPreparedV1:
+    var prepared = WindowsPtyEnvironmentPreparedV1()
+    if changes.len() == 0: return prepared
+    prepared.snapshot = GetEnvironmentStringsW()
+    if prepared.snapshot == 0:
+        prepared.error = "native environment snapshot failed"
+        return prepared
+    var entries: [WindowsPtyEnvironmentEntryV1] = []
+    match _windows_pty_environment_entries_v1(prepared.snapshot):
+        case Err(reason): prepared.error = reason
+        case Ok(values):
+            match _windows_pty_environment_sort_v1(values):
+                case Err(reason): prepared.error = reason
+                case Ok(ordered): entries = ordered
+    for change in changes:
+        if prepared.error != "": break
+        var name = ""
+        var assignment = ""
+        var remove = false
+        match change:
+            case PtyEnvironmentChangeV1.Set(key, value):
+                name = key
+                assignment = key + "=" + value
+            case PtyEnvironmentChangeV1.Remove(key):
+                name = key
+                assignment = key
+                remove = true
+        val address = _windows_process_wide_v1(heap, assignment)
+        if address == 0:
+            prepared.error = "child environment assignment allocation failed"
+            break
+        prepared.allocations = prepared.allocations.push(address)
+        val units = _windows_pty_environment_units_v1(address)
+        var name_units = units
+        if not remove:
+            name_units = 0
+            while name_units < units and volatile_read_u16(address + name_units * 2) != 61:
+                name_units = name_units + 1
+        val replacement = WindowsPtyEnvironmentEntryV1(address: address, units: units, name_units: name_units)
+        match _windows_pty_environment_change_v1(entries, replacement, remove):
+            case Err(reason): prepared.error = reason
+            case Ok(merged): entries = merged
+    var total = 1
+    if entries.len() == 0: total = 2
+    for entry in entries: total = total + entry.units + 1
+    if total > 1048576 and prepared.error == "": prepared.error = "merged environment UTF16 bound exceeded"
+    if prepared.error == "":
+        prepared.block = HeapAlloc(heap, 8u32, (total * 2) as u64)
+        if prepared.block == 0:
+            prepared.error = "child environment block allocation failed"
+        else:
+            prepared.allocations = prepared.allocations.push(prepared.block)
+            var offset = 0
+            for entry in entries:
+                for index in 0..entry.units:
+                    volatile_write_u16(prepared.block + (offset + index) * 2, volatile_read_u16(entry.address + index * 2))
+                offset = offset + entry.units + 1
+    if FreeEnvironmentStringsW(prepared.snapshot) != 0:
+        prepared.snapshot = 0
+    elif prepared.error == "":
+        prepared.error = "native environment snapshot release failed"
+    prepared

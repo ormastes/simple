@@ -301,3 +301,22 @@ Board-side consequences: [os layer expert](../os/skill.md).
 The MIR-side member of the same admission family — `starts_with`/`ends_with`
 returning the wrong boolean on the native path — is written up once in
 [mir_lowering](../mir_lowering/skill.md) § 2026-09-26.
+
+### Cranelift function-handle refusals (2026-10-29)
+
+A zero import/call handle is not enough to identify the failing source module.
+Retain the bridge's declaration diagnostic, including symbol, module, requested
+signature and underlying Cranelift error. Import diagnostics distinguish stale
+declarations from missing builder/module state. Return-zero ABI and fail-closed
+build aggregation remain unchanged. The rebuilt bridge must be qualified;
+editing its source cannot change a statically linked frozen producer. See
+`doc/08_tracking/bug/buildrunner_cranelift_zero_function_ref_2026_10_29.md`.
+
+## Cranelift rejected-call publication (2026-10-30)
+
+A void call legitimately returns handle zero; do not use that value alone as an
+error test. The Rust provider retains declaration/import/direct-call failures
+per live module and refuses function completion and object/JIT publication.
+Free/reset clear owned failures. Isolated provider evidence is separate from
+new compiler qualification. See
+[refusal propagation](../../../08_tracking/bug/cranelift_rejected_call_publication_2026_10_30.md).

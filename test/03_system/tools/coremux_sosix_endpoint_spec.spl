@@ -1,0 +1,218 @@
+# REQ-CMUX-001/002/003/006/007/008/011/012. All execution NOT_RUN.
+# Requires the NEW real framed Smux server and admitted native echo child.
+# Missing fixtures fail explicitly; an unavailable endpoint is never feature PASS.
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{env_get}
+use std.sosix.process.{sosix_process_exists}
+use std.common.text_bytes.{text_to_bytes}
+use std.convert.{try_parse_int}
+use std.sosix.mux.{MuxSosixConfigV1, SosixMuxClientV1, mux_sosix_client_v1}
+use std.sosix.time.{sosix_sleep_ms}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+
+# Test-owned cleanup identities only, never provider/controller state. This file
+# runs serially in its exclusive namespace; the external guard owns server stop.
+# sosix_process_exists checks externally owned PID presence, not process identity
+# or complete resource cleanup. Provider qualification and PID-reuse-safe owner
+# evidence remain mandatory; never substitute a local child registry/HANDLE API.
+var live_sessions: [MuxObjectRefV1] = []
+var live_children: [i64] = []
+var live_uncertain: bool = false
+
+fn endpoint_config() -> Result<MuxSosixConfigV1, text>:
+    val port = try_parse_int(env_get("SIMPLE_TEST_COREMUX_PORT")) ?? 0
+    val token = env_get("SIMPLE_TEST_COREMUX_AUTH")
+    if port < 1024 or port > 65535 or token == "" or env_get("SIMPLE_TEST_COREMUX_NAMESPACE") == "":
+        return Err("TEST_BLOCKED: isolated framed endpoint and private auth configuration required")
+    Ok(MuxSosixConfigV1(host: "127.0.0.1", port: port, auth_token: token, max_frame_bytes: 4194304))
+
+fn endpoint_options(identity: text) -> MuxConnectV1:
+    MuxConnectV1(backend: MuxBackendV1.Smux, namespace: env_get("SIMPLE_TEST_COREMUX_NAMESPACE"),
+        endpoint_policy: MuxEndpointPolicyV1.ExistingOnly, client_identity: identity,
+        limits: MuxLimitsV1(max_sessions: 4, max_reply_bytes: 65536))
+
+fn endpoint_deadline() -> MuxDeadlineV1: MuxDeadlineV1(timeout_ms: 1000)
+
+fn endpoint_request(handle: MuxHandleV1, id: u64, command: MuxCommandV1) -> MuxRequestV1:
+    MuxRequestV1(handle: handle, request_id: id, deadline: endpoint_deadline(), expected_revision: nil, command: command)
+
+fn remember(mutation: MuxMutationV1):
+    for target in mutation.created:
+        if target.kind == MuxObjectKindV1.Session: live_sessions.push(target)
+    for pane in mutation.snapshot.panes:
+        match pane.child:
+            case MuxChildStateV1.Running(pid):
+                if not live_children.contains(pid): live_children.push(pid)
+            case _: ()
+
+fn require_output(client: SosixMuxClientV1, handle: MuxHandleV1, pane: MuxObjectRefV1, marker: text) -> Result<SosixMuxClientV1, text>:
+    var transport = client
+    for attempt in 0..40:
+        val captured = transport.query(handle, MuxQueryV1.Capture(MuxCaptureV1(pane: pane,
+            range: MuxCaptureRangeV1.Screen, join_wrapped: true, styled: false,
+            max_bytes: 8192, continuation: nil)), endpoint_deadline())
+        if captured.is_err(): return Err("real capture failed")
+        match captured.unwrap():
+            case MuxQueryResultV1.Captured(value):
+                val decoded = validated_utf8_bytes_to_text_linear(value.bytes)
+                if decoded.is_ok() and decoded.unwrap().contains(marker): return Ok(transport)
+            case _: return Err("capture result kind differs")
+        sosix_sleep_ms(50)
+    Err("real child output did not reach terminal capture")
+
+fn live_workflow(config: MuxSosixConfigV1) -> Result<bool, text>:
+    val child = env_get("SIMPLE_TEST_COREMUX_CHILD_EXE")
+    if child == "": return Err("TEST_BLOCKED: admitted native wire_echo_child executable required")
+    live_uncertain = true
+    var first = mux_sosix_client_v1(config).map_err(\_e: "invalid client config")?
+    val connected = first.connect(endpoint_options("coremux-live-first"), endpoint_deadline()).map_err(\_e: "real framed connect failed")?
+    if connected.snapshot.sessions.len() != 0: return Err("fixture namespace is not empty and exclusively owned")
+    val handle = connected.snapshot.handle
+    val launch = MuxLaunchV1(mode: MuxLaunchModeV1.Exec(child, []), cwd: nil, environment: [], size: MuxCellSizeV1(columns: 80, rows: 24))
+    val created = first.execute(endpoint_request(handle, 1, MuxCommandV1.CreateSession(MuxCreateSessionV1(
+        name: "coremux-live-owned", first_window_name: "first", launch: launch, background: true)))).map_err(\_e: "real session child creation failed")?
+    remember(created)
+    if live_sessions.len() != 1 or created.snapshot.panes.len() != 1: return Err("created object receipt differs")
+    val pane = created.snapshot.panes[0].identity
+    val pid = match created.snapshot.panes[0].child:
+        case MuxChildStateV1.Running(value): value
+        case _: return Err("child not reported running")
+    if not sosix_process_exists(pid): return Err("reported child PID is not present")
+    first = require_output(first, handle, pane, "COREMUX_CHILD_READY")?
+    val split = first.execute(endpoint_request(handle, 2, MuxCommandV1.SplitPane(MuxSplitPaneV1(
+        pane: pane, direction: MuxSplitDirectionV1.Horizontal, size: MuxSplitSizeV1.Equal, launch: launch)))).map_err(\_e: "real terminal split failed")?
+    remember(split)
+    if split.snapshot.panes.len() != 2 or split.snapshot.windows[0].layout.rectangles.len() != 2: return Err("split did not publish two real pane rectangles")
+    val first_rect = split.snapshot.windows[0].layout.rectangles[0].rectangle
+    val second_rect = split.snapshot.windows[0].layout.rectangles[1].rectangle
+    if first_rect.x_cells != second_rect.x_cells or first_rect.y_cells == second_rect.y_cells: return Err("horizontal split orientation lost")
+    var original_present = false
+    var new_pane: MuxPaneStateV1? = nil
+    for observed in split.snapshot.panes:
+        if observed.identity == pane:
+            if observed.child != MuxChildStateV1.Running(pid): return Err("split replaced the original child identity")
+            original_present = true
+        else:
+            if new_pane != nil: return Err("split published multiple unexpected pane identities")
+            new_pane = Some(observed)
+    if not original_present: return Err("split omitted the original pane")
+    val split_child = match new_pane:
+        case Some(value): value
+        case nil: return Err("split did not publish a distinct pane")
+    val split_pid = match split_child.child:
+        case MuxChildStateV1.Running(value): value
+        case _: return Err("second child not reported running")
+    if split_pid == pid or not sosix_process_exists(split_pid): return Err("second child lacks distinct present PID")
+    first = require_output(first, handle, split_child.identity, "COREMUX_CHILD_READY")?
+    first.execute(endpoint_request(handle, 3, MuxCommandV1.SendLiteral(split_child.identity, text_to_bytes("COREMUX_SPLIT_PING")))).map_err(\_e: "second child literal input failed")?
+    first.execute(endpoint_request(handle, 4, MuxCommandV1.SendKeys(split_child.identity, [MuxKeyV1.Named(MuxNamedKeyV1.Enter)]))).map_err(\_e: "second child named key failed")?
+    first = require_output(first, handle, split_child.identity, "COREMUX_ECHO:COREMUX_SPLIT_PING")?
+    val released = first.disconnect(MuxDisconnectRequestV1(handle: handle, request_id: 5, deadline: endpoint_deadline())).map_err(\_e: "real disconnect failed")?
+    if released.cleanup.pending: return Err("disconnect cleanup still pending")
+    if not sosix_process_exists(pid) or not sosix_process_exists(split_pid): return Err("background child PID absent after disconnect")
+    val status = first.query(handle, MuxQueryV1.RequestStatus(5), endpoint_deadline()).map_err(\_e: "retained disconnect status failed")?
+    match status:
+        case MuxQueryResultV1.RequestReceipt(receipt):
+            if receipt.request_id != 5 or receipt.operation != Some(MuxOperationV1.Disconnect): return Err("disconnect receipt correlation differs")
+        case _: return Err("status result kind differs")
+    var second = mux_sosix_client_v1(config).map_err(\_e: "invalid second config")?
+    val reconnected = second.connect(endpoint_options("coremux-live-second"), endpoint_deadline()).map_err(\_e: "real reconnect failed")?
+    if reconnected.snapshot.sessions.len() != 1 or reconnected.snapshot.panes.len() != 2: return Err("background session did not survive reconnect")
+    var first_retained = false
+    var split_retained = false
+    for observed in reconnected.snapshot.panes:
+        if observed.identity == pane and observed.child == MuxChildStateV1.Running(pid): first_retained = true
+        if observed.identity == split_child.identity and observed.child == MuxChildStateV1.Running(split_pid): split_retained = true
+    if not first_retained or not split_retained or not sosix_process_exists(pid) or not sosix_process_exists(split_pid): return Err("reconnect did not retain both present child identities")
+    val second_handle = reconnected.snapshot.handle
+    if second_handle.lease_id == handle.lease_id: return Err("reconnect revived original lease token")
+    second.execute(endpoint_request(second_handle, 1, MuxCommandV1.SendLiteral(pane, [67, 79, 82, 69, 77, 85, 88, 95, 80, 73, 78, 71]))).map_err(\_e: "literal input failed")?
+    second.execute(endpoint_request(second_handle, 2, MuxCommandV1.SendKeys(pane, [MuxKeyV1.Named(MuxNamedKeyV1.Enter)]))).map_err(\_e: "named key failed")?
+    second = require_output(second, second_handle, pane, "COREMUX_ECHO:COREMUX_PING")?
+    val second_released = second.disconnect(MuxDisconnectRequestV1(handle: second_handle, request_id: 3, deadline: endpoint_deadline())).map_err(\_e: "second disconnect failed")?
+    if second_released.cleanup.pending: return Err("second disconnect cleanup still pending")
+    live_uncertain = false
+    Ok(true)
+
+fn cleanup_owned(config: MuxSosixConfigV1) -> Result<bool, text>:
+    if live_sessions.len() == 0:
+        if live_uncertain: return Err("uncertain lease or creation requires reconciliation and external owner cleanup")
+        return Ok(true)
+    var client = mux_sosix_client_v1(config).map_err(\_e: "cleanup config failed")?
+    val connected = client.connect(endpoint_options("coremux-cleanup"), endpoint_deadline()).map_err(\_e: "cleanup real connect failed")?
+    var id: u64 = 1
+    for session in live_sessions:
+        val terminated = client.execute(endpoint_request(connected.snapshot.handle, id, MuxCommandV1.TerminateSession(session))).map_err(\_e: "owned session cleanup failed")?
+        if terminated.cleanup.pending: return Err("owned session cleanup still pending")
+        id = id + 1u64
+    val released = client.disconnect(MuxDisconnectRequestV1(handle: connected.snapshot.handle, request_id: id, deadline: endpoint_deadline())).map_err(\_e: "cleanup lease release failed")?
+    if released.cleanup.pending: return Err("final cleanup lease release still pending")
+    # PID absence is only a process-presence observation. Complete cleanup still
+    # requires the checked owner receipts and external guarded identity/resource audit.
+    for attempt in 0..40:
+        var alive = false
+        for pid in live_children:
+            if sosix_process_exists(pid): alive = true
+        if not alive:
+            if live_uncertain: return Err("owned session cleaned but uncertain lease or child evidence requires external guard")
+            return Ok(true)
+        sosix_sleep_ms(50)
+    Err("owned child PID remained present after session cleanup")
+
+describe "CoreMux real framed Sosix endpoint":
+    it "runs real background children across split disconnect reconnect and literal input":
+        step("Use the admitted framed server and real terminal echo child")
+        val config = endpoint_config().unwrap()
+        live_sessions = []
+        live_children = []
+        live_uncertain = false
+        val result = live_workflow(config)
+        step("Clean only recorded owned sessions and child processes")
+        val cleanup = cleanup_owned(config)
+        expect(cleanup.is_ok()).to_equal(true)
+        expect(result.is_ok()).to_equal(true)
+
+    it "rejects wrong authentication on an independently proven live endpoint":
+        step("Prove the actual server then refuse a wrong private token")
+        val config = endpoint_config().unwrap()
+        var valid = mux_sosix_client_v1(config).unwrap()
+        val live = valid.connect(endpoint_options("coremux-auth-guard"), endpoint_deadline()).unwrap()
+        var wrong_config = config
+        wrong_config.auth_token = "wrong-auth-token-that-is-not-the-configured-secret"
+        if wrong_config.auth_token == config.auth_token: wrong_config.auth_token = "another-wrong-private-token-for-the-test"
+        var wrong = mux_sosix_client_v1(wrong_config).unwrap()
+        val refused = wrong.connect(endpoint_options("coremux-auth-negative"), endpoint_deadline())
+        val wrong_cleanup = match wrong.recovery_handle():
+            case Some(handle):
+                match wrong.disconnect(MuxDisconnectRequestV1(handle: handle, request_id: 1, deadline: endpoint_deadline())):
+                    case Ok(released): not released.cleanup.pending
+                    case Err(_): false
+            case nil: true
+        val released = valid.disconnect(MuxDisconnectRequestV1(handle: live.snapshot.handle, request_id: 1, deadline: endpoint_deadline()))
+        expect(released.is_ok()).to_equal(true)
+        expect(released.unwrap().cleanup.pending).to_equal(false)
+        expect(wrong_cleanup).to_equal(true)
+        expect(refused.is_err()).to_equal(true)
+        val failure = refused.unwrap_err()
+        expect(failure.kind).to_equal(MuxErrorKindV1.PermissionDenied)
+        expect(failure.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+        expect(failure.detail.contains(config.auth_token)).to_equal(false)
+        expect(failure.detail.contains(wrong_config.auth_token)).to_equal(false)
+        expect(wrong.recovery_handle()).to_be_nil()
+
+    it "reports a real reserved unlistening endpoint without claiming fallback success":
+        step("Observe unavailable transport before mutation submission")
+        var config = endpoint_config().unwrap()
+        val absent = try_parse_int(env_get("SIMPLE_TEST_COREMUX_UNLISTENING_PORT")) ?? 0
+        expect(absent > 1023 and absent < 65536 and absent != config.port).to_equal(true)
+        config.port = absent
+        var client = mux_sosix_client_v1(config).unwrap()
+        val result = client.connect(endpoint_options("coremux-absent"), endpoint_deadline())
+        expect(result.is_err()).to_equal(true)
+        val failure = result.unwrap_err()
+        expect(failure.kind == MuxErrorKindV1.Unavailable or failure.kind == MuxErrorKindV1.Timeout).to_equal(true)
+        expect(failure.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+        expect(client.recovery_handle()).to_be_nil()

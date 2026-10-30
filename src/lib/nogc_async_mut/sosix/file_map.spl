@@ -26,8 +26,9 @@ runtime has no sandbox and this facade adds no policy hook; a denied mapping is
 indistinguishable from a failed one at this seam.
 """
 
-use std.nogc_sync_mut.io_runtime.{platform_name, file_exists}
-use std.nogc_sync_mut.sffi.fs.{file_mmap_raw, file_munmap_raw, file_madvise_raw}
+use std.nogc_sync_mut.io_runtime.{platform_name, file_exists, file_rename, file_delete, getpid}
+use std.nogc_sync_mut.sffi.fs.{file_mmap_raw, file_munmap_raw, file_madvise_raw, file_mmap_create_raw, file_msync_raw}
+use std.nogc_sync_mut.ptr.raw.{rt_ptr_write_u8, rt_ptr_write_i64}
 
 pub val SOSIX_FILE_MAP_ADVICE_WILLNEED: i64 = 3
 
@@ -66,3 +67,82 @@ pub fn sosix_file_map_prefetch(path: text, size: i64, offset: i64) -> bool:
 
 export SOSIX_FILE_MAP_ADVICE_WILLNEED
 export sosix_file_map, sosix_file_unmap, sosix_file_map_prefetch
+
+# ---------------------------------------------------------------------------
+# Mapped WRITER (size known up front): create a temp file of exactly `size`
+# bytes, map it read-write, let the caller fill it in place, then flush, unmap
+# and publish with one atomic rename. A reader never sees a partial file: the
+# final path either does not exist, or names a complete flushed file.
+# ---------------------------------------------------------------------------
+
+var _SOSIX_MAPPED_WRITER_SEQ: i64 = 0
+
+struct SosixMappedWriter:
+    final_path: text
+    temp_path: text
+    addr: i64
+    size: i64
+
+pub fn sosix_mapped_writer_create(final_path: text, size: i64) -> SosixMappedWriter:
+    """Create + map a temp sibling of `final_path` sized `size`; `addr == 0` on failure."""
+    _SOSIX_MAPPED_WRITER_SEQ = _SOSIX_MAPPED_WRITER_SEQ + 1
+    val temp_path = "{final_path}.tmp.{getpid()}.{_SOSIX_MAPPED_WRITER_SEQ}"
+    if final_path == "" or size <= 0:
+        return SosixMappedWriter(final_path: final_path, temp_path: temp_path, addr: 0, size: size)
+    val addr = file_mmap_create_raw(temp_path, size)
+    if addr <= 0:
+        file_delete(temp_path)
+    SosixMappedWriter(final_path: final_path, temp_path: temp_path, addr: if addr > 0: addr else: 0, size: size)
+
+pub fn sosix_mapped_writer_ok(w: SosixMappedWriter) -> bool:
+    w.addr > 0
+
+pub fn sosix_mapped_writer_put_u8(w: SosixMappedWriter, off: i64, value: i64) -> bool:
+    """Bounds-checked byte store into the mapped view."""
+    if w.addr <= 0 or off < 0 or off >= w.size:
+        return false
+    rt_ptr_write_u8(w.addr, off, value)
+    true
+
+pub fn sosix_mapped_writer_put_i64(w: SosixMappedWriter, off: i64, value: i64) -> bool:
+    """Bounds-checked little-endian 8-byte store into the mapped view."""
+    if w.addr <= 0 or off < 0 or off + 8 > w.size:
+        return false
+    rt_ptr_write_i64(w.addr, off, value)
+    true
+
+pub fn sosix_mapped_writer_put_bytes(w: SosixMappedWriter, off: i64, data: [u8]) -> bool:
+    """Bounds-checked copy of `data` into the mapped view at `off`."""
+    val n = data.len() as i64
+    if w.addr <= 0 or off < 0 or off + n > w.size:
+        return false
+    var i: i64 = 0
+    while i < n:
+        rt_ptr_write_u8(w.addr, off + i, data[i] as i64)
+        i = i + 1
+    true
+
+pub fn sosix_mapped_writer_finish(w: SosixMappedWriter) -> bool:
+    """Flush, unmap, then atomically rename temp -> final. False leaves no final file change."""
+    if w.addr <= 0:
+        return false
+    val flushed = file_msync_raw(w.addr, w.size)
+    val unmapped = file_munmap_raw(w.addr, w.size)
+    if not flushed or not unmapped:
+        file_delete(w.temp_path)
+        return false
+    if not file_rename(w.temp_path, w.final_path):
+        file_delete(w.temp_path)
+        return false
+    true
+
+pub fn sosix_mapped_writer_abort(w: SosixMappedWriter) -> bool:
+    """Unmap and delete the temp file; the final path is never touched."""
+    if w.addr > 0:
+        file_munmap_raw(w.addr, w.size)
+    file_delete(w.temp_path)
+    true
+
+export SosixMappedWriter, sosix_mapped_writer_create, sosix_mapped_writer_ok
+export sosix_mapped_writer_put_u8, sosix_mapped_writer_put_i64, sosix_mapped_writer_put_bytes
+export sosix_mapped_writer_finish, sosix_mapped_writer_abort

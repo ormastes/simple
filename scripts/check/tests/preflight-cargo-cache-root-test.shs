@@ -1,0 +1,36 @@
+#!/bin/sh
+# Disk-only preflight must measure the filesystem selected by the bootstrap cache root.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "$ROOT/build/preflight-cache-root-test.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+cache_root="$tmp/cache root"
+mkdir -p "$cache_root" "$tmp/fakebin"
+capture="$tmp/df.args"
+cat >"$tmp/fakebin/df" <<'DF'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = -Pk ] || exit 91
+printf '%s\n' "$2" >"$PREFLIGHT_DF_CAPTURE"
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\nfixture 52428800 1048576 51380224 2%% /fixture\n'
+DF
+chmod +x "$tmp/fakebin/df"
+export PREFLIGHT_DF_CAPTURE="$capture"
+PATH="$tmp/fakebin:$PATH" MIN_FREE_GB=1 \
+  SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT="$cache_root" \
+  CARGO_TARGET_DIR="$tmp/unselected-ambient-target" \
+  sh "$ROOT/scripts/check/check-bootstrap-preflight.shs" --disk-only >"$tmp/pass.log"
+grep -q '^PASS — disk-space' "$tmp/pass.log"
+[ "$(cat "$capture")" = "$cache_root" ]
+if MIN_FREE_GB=1 SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT= \
+  sh "$ROOT/scripts/check/check-bootstrap-preflight.shs" --disk-only >"$tmp/empty.log" 2>&1; then
+  echo 'FAIL: accepted an explicitly empty cache-root variable' >&2
+  exit 1
+fi
+grep -q 'cache root was set but empty' "$tmp/empty.log"
+if MIN_FREE_GB=1 SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT=relative \
+  sh "$ROOT/scripts/check/check-bootstrap-preflight.shs" --disk-only >"$tmp/relative.log" 2>&1; then
+  echo 'FAIL: accepted a relative cache root' >&2
+  exit 1
+fi
+grep -q 'cache root is invalid' "$tmp/relative.log"
+echo 'PASS: disk-only preflight follows a validated cache-root filesystem'

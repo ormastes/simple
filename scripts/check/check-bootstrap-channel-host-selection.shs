@@ -1,0 +1,70 @@
+#!/bin/sh
+# Exercise the production filesystem resolver without invoking rustup/Cargo.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/channel-host-check.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+awk '/^bootstrap_stage3_channel_toolchain_host\(\)/{copy=1} copy{print} copy && /^\)/{exit}' \
+    "$root/scripts/check/lib/bootstrap-stage3/authority.shs" >"$work/owner.sh"
+. "$work/owner.sh"
+channel=nightly-2026-09-15
+mkdir -p "$work/home/toolchains/$channel-x86_64-pc-windows-msvc"
+actual=$(bootstrap_stage3_channel_toolchain_host "$work/home" "$channel")
+[ "$actual" = x86_64-pc-windows-msvc ]
+mkdir -p "$work/home/toolchains/$channel-x86_64-pc-windows-gnullvm"
+if bootstrap_stage3_channel_toolchain_host "$work/home" "$channel"; then
+    echo 'FAIL: ambiguous unselected host accepted' >&2; exit 1
+fi
+for default in stable-x86_64-pc-windows-msvc nightly-2026-08-01-x86_64-pc-windows-msvc; do
+    actual=$(bootstrap_stage3_channel_toolchain_host "$work/home" "$channel" "$default")
+    [ "$actual" = x86_64-pc-windows-msvc ]
+done
+actual=$(bootstrap_stage3_channel_toolchain_host "$work/home" "$channel" stable-x86_64-pc-windows-gnullvm)
+[ "$actual" = x86_64-pc-windows-gnullvm ]
+for default in stable stable-aarch64-pc-windows-msvc stable-x86_64-pc-windows-msvc-extra; do
+    if bootstrap_stage3_channel_toolchain_host "$work/home" "$channel" "$default"; then
+        echo 'FAIL: missing or malformed selected host accepted' >&2; exit 1
+    fi
+done
+mkdir -p "$work/real-host"
+ln -s "$work/real-host" "$work/home/toolchains/$channel-aarch64-pc-windows-msvc"
+if bootstrap_stage3_channel_toolchain_host "$work/home" "$channel" stable-aarch64-pc-windows-msvc; then
+    echo 'FAIL: symlink host accepted' >&2; exit 1
+fi
+echo 'PASS: unique, ambiguous, selected MSVC/GNU, dated, missing and symlink host cases'
+
+# Integrate the real settings parser, installed-directory validation and result
+# rendering. Only compiler metadata execution is replaced with fixture output.
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fixture=$(CDPATH= cd -- "$work" && pwd -P)/integration
+host=x86_64-pc-windows-msvc
+toolchain="$fixture/.rustup/toolchains/$channel-$host"
+mkdir -p "$toolchain/bin" "$fixture/.cargo/bin" \
+    "$fixture/.rustup/toolchains/$channel-x86_64-pc-windows-gnullvm"
+: >"$toolchain/bin/rustc.exe"
+: >"$toolchain/bin/cargo.exe"
+bootstrap_stage3_native_metadata_probe() {
+    case "$1" in
+        rustc-sysroot) printf '%s\n' "$toolchain" ;;
+        rustc-version) printf 'host: %s\n' "$host" ;;
+        cargo-version) printf 'cargo fixture\n' ;;
+        *) return 1 ;;
+    esac
+}
+settings="$fixture/.rustup/settings.toml"
+printf 'default_toolchain = "stable-%s"\n' "$host" >"$settings"
+actual=$(bootstrap_stage3_installed_rust_toolchain \
+    "$fixture/.cargo/bin/rustc.exe" "$channel" "$PATH" "$root")
+printf '%s\n' "$actual" | grep -Fx "rust-host=$host" >/dev/null
+printf '%s\n' "$actual" | grep -Fx "rust-toolchain-name=$channel-$host" >/dev/null
+printf 'default_toolchain = "stable-%s"\n' "$host" >>"$settings"
+if bootstrap_stage3_installed_rust_toolchain \
+    "$fixture/.cargo/bin/rustc.exe" "$channel" "$PATH" "$root"; then
+    echo 'FAIL: duplicate settings accepted' >&2; exit 1
+fi
+printf 'default_toolchain = "stable"\n' >"$settings"
+if bootstrap_stage3_installed_rust_toolchain \
+    "$fixture/.cargo/bin/rustc.exe" "$channel" "$PATH" "$root"; then
+    echo 'FAIL: malformed settings accepted' >&2; exit 1
+fi
+echo 'PASS: integrated settings selection and duplicate/malformed rejection (metadata fixture)'

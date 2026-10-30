@@ -1,0 +1,77 @@
+"""
+# Native `--entry-closure`: a struct local with an erased I64 type is not int-boxed
+
+**Category:** Codegen / MIR runtime-value boxing
+**Bug:** doc/08_tracking/bug/record_local_int_boxed_as_wide_int_2026-10-25.md
+
+`val k = if real.ok(): real else: K(id: 99)` with no annotation leaves the
+merged local typed I64. `d[k] = 7` then boxed the key with
+`rt_value_int_wide`, so the struct pointer became `ptr << 3`. The annotated
+`val k: K = ...` passes the pointer straight to `rt_dict_set`. Measured on
+Stage 2 (2026-10-25): the binary SEGVs, and the disassembly of the untyped
+function shows `rt_value_int_wide(k)` before `rt_dict_set`. The typed twin
+shows no such call.
+
+This is the B6a shape from Phase 3 (`module_build lower_module:571`).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# No `{...}` interpolation in the embedded source: the spec's own lexer would
+# resolve it.
+val RECORD_BOX_SOURCE: text = ("struct K:\n" +
+    "    id: i64\n" +
+    "\n" +
+    "impl K:\n" +
+    "    fn ok() -> bool:\n" +
+    "        self.id >= 0\n" +
+    "\n" +
+    "fn pick(n: i64) -> K:\n" +
+    "    K(id: n)\n" +
+    "\n" +
+    "fn if_join_dict_key(n: i64) -> i64:\n" +
+    "    var d: Dict<K, i64> = {}\n" +
+    "    val real = pick(n)\n" +
+    "    val k = if real.ok(): real else: K(id: 99)\n" +
+    "    d[k] = 7\n" +
+    "    var got = -1\n" +
+    "    for kk in d.keys():\n" +
+    "        val c: K = kk\n" +
+    "        got = c.id\n" +
+    "    got\n" +
+    "\n" +
+    "fn main():\n" +
+    "    print(\"BEGIN\")\n" +
+    "    print(if_join_dict_key(5))\n" +
+    "    print(if_join_dict_key(-3))\n" +
+    "    print(\"END\")\n")
+
+fn native_build_and_run_record_box() -> text:
+    val dir = "build/test-artifacts/native_record_local_not_int_boxed"
+    val src = dir + "/record_box_repro.spl"
+    val bin_out = dir + "/record_box_repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, RECORD_BOX_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "an untyped struct merge is stored as a record handle, not an int (native)":
+
+    it "round-trips the struct key through a dict":
+        step("Build the fixture once and run it")
+        val out = native_build_and_run_record_box()
+
+        step("Refuse to pass on a build or run that produced nothing")
+        expect(out.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("BEGIN")
+
+        step("call-result arm (5) and constructor arm (99) both come back intact")
+        expect(out).to_contain("BEGIN\n5\n99\nEND")

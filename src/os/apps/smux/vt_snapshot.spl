@@ -1,0 +1,69 @@
+use os.apps.smux.vt_types.{VtScreen}
+use os.apps.smux.vt_history.{vt_history_capture, vt_history_bound, vt_history_trim, vt_grid_text, vt_grid_styled_text}
+use os.apps.smux.vt_capture_state.{vt_view_equal, vt_wrap_trim}
+use os.apps.smux.vt_retention.{vt_loss_trim}
+
+# Capture saved primary rows plus the visible frame, newest max_lines rows.
+# Alternate capture excludes the primary history; a synchronized frame freezes
+# both history and visible cells, even if alternate mode changes mid-update.
+pub fn vt_history_text(screen: VtScreen, max_lines: i64) -> text:
+    if screen.frozen.len() > 0:
+        return vt_history_capture(screen.frozen_history, screen.frozen, max_lines)
+    val saved = if screen.alt.on: [] else: screen.history
+    return vt_history_capture(saved, screen.cells, max_lines)
+
+pub fn vt_history_count(screen: VtScreen) -> i64:
+    if screen.frozen.len() > 0:
+        return screen.frozen_history.len()
+    if screen.alt.on:
+        return 0
+    return screen.history.len()
+
+pub fn vt_set_history_limit(screen: VtScreen, limit: i64) -> VtScreen:
+    var s = screen
+    s.history_limit = vt_history_bound(limit)
+    s.history = vt_history_trim(s.history, s.history_limit)
+    s.history_attrs = vt_history_trim(s.history_attrs, s.history_limit)
+    s.history_wrapped = vt_wrap_trim(s.history_wrapped, s.history_limit)
+    s.history_loss = vt_loss_trim(s.history_loss, s.history_limit)
+    s.capture_dirty = not vt_view_equal(screen, s)
+    # Keep a synchronized capture immutable until release. Its saved snapshot
+    # was bounded when captured and is cleared at release/resize/reset.
+    return s
+
+# Visible serialization honors the same synchronized snapshot as history.
+pub fn vt_text(screen: VtScreen) -> text:
+    val shown = if screen.frozen.len() > 0: screen.frozen else: screen.cells
+    return vt_grid_text(shown)
+
+pub fn vt_styled_text(screen: VtScreen) -> text:
+    val frozen = screen.frozen.len() > 0
+    val shown = if frozen: screen.frozen else: screen.cells
+    val styles = if frozen: screen.frozen_attrs else: screen.attrs
+    return vt_grid_styled_text(shown, styles)
+
+# Bytes the child is owed in answer to its queries (write them to the PTY).
+pub fn vt_replies(screen: VtScreen) -> text:
+    screen.modes.replies
+
+pub fn vt_clear_replies(screen: VtScreen) -> VtScreen:
+    var s = screen
+    var m = s.modes
+    m.replies = ""
+    s.modes = m
+    s
+
+# True while the child has bracketed paste (?2004) enabled: pasted text should
+# then be sent as ESC[200~ ... ESC[201~.
+pub fn vt_bracketed_paste(screen: VtScreen) -> bool:
+    screen.modes.bracketed
+
+# DECCKM input routing uses the child's current mode even while output is frozen.
+pub fn vt_application_cursor(screen: VtScreen) -> bool:
+    screen.modes.application_cursor
+
+pub fn vt_cursor_visible(screen: VtScreen) -> bool:
+    screen.modes.cursor_visible
+
+pub fn vt_alt_screen(screen: VtScreen) -> bool:
+    screen.alt.on

@@ -24,8 +24,11 @@
 # --selftest is fatal and runs before every scan (must-PASS and must-FAIL fixtures).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-MIN_FREE_GB=${MIN_FREE_GB:-20}
+# MIN_FREE_GB wins; SIMPLE_BOOTSTRAP_MIN_FREE_GB (the wrapper's knob) is honored so
+# the wrapper's own gate and this preflight never disagree on the floor.
+MIN_FREE_GB=${MIN_FREE_GB:-${SIMPLE_BOOTSTRAP_MIN_FREE_GB:-20}}
 HOST_KERNEL=$(uname -s 2>/dev/null || printf unknown)
+. "$ROOT/scripts/bootstrap/bootstrap-authority-wiring.shs"
 
 is_windows_host() {
   case "$1" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac
@@ -123,6 +126,19 @@ validated_linker_override() {
 
 CARGO_TARGET_DIR=$(select_cargo_target_dir "${CARGO_TARGET_DIR:-}" "$HOST_KERNEL" "$ROOT" "${TMPDIR:-/tmp}" /mnt/data)
 export CARGO_TARGET_DIR
+PREFLIGHT_RUST_CARGO_CACHE_ROOT=
+if [ "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT+x}" = x ]; then
+  [ -n "$SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT" ] || {
+    echo "ERROR — Rust Cargo cache root was set but empty"; exit 2;
+  }
+  if is_windows_host "$HOST_KERNEL"; then
+    echo "ERROR — SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT is not supported on Windows"; exit 2
+  fi
+  PREFLIGHT_RUST_CARGO_CACHE_ROOT=$(bootstrap_authority_validate_rust_cargo_cache_root \
+    "$SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT" "$ROOT") || {
+    echo "ERROR — Rust Cargo cache root is invalid"; exit 2;
+  }
+fi
 NO_CARGO=0
 CARGO_PROFILE=release
 CARGO_CHECK_BIN=cargo
@@ -179,10 +195,12 @@ hash_file() {
 }
 
 preflight_disk_free_gib() {
-  # Cargo may use centralized bulk storage while checkout-owned SCV snapshots
-  # remain local. Measure the target selected above, exactly as Cargo uses it.
-  mkdir -p "$CARGO_TARGET_DIR" || return 2
-  _df_output=$(df -Pk "$CARGO_TARGET_DIR") || return 2
+  # A bootstrap cache root selects the filesystem that will contain Cargo's
+  # configuration-keyed target. The preflight's own Cargo check keeps its
+  # separately selected target directory.
+  _disk_probe_path=${PREFLIGHT_RUST_CARGO_CACHE_ROOT:-$CARGO_TARGET_DIR}
+  mkdir -p "$_disk_probe_path" || return 2
+  _df_output=$(df -Pk "$_disk_probe_path") || return 2
   _free_kib=$(printf '%s\n' "$_df_output" | awk 'NR==2{print $4}') || return 2
   case "$_free_kib" in ''|*[!0-9]*) return 2 ;; esac
   echo $((_free_kib / 1024 / 1024))
@@ -192,6 +210,19 @@ manifest_value() {
   _key=$1 _manifest=$2
   [ "$(grep -c "^${_key}=" "$_manifest" || true)" -eq 1 ] || return 1
   sed -n "s/^${_key}=//p" "$_manifest"
+}
+
+preflight_receipt_cache_root_matches() {
+  _cache_root_count=$(grep -c '^rust_cargo_cache_root=' "$1" || true)
+  if [ -n "$PREFLIGHT_RUST_CARGO_CACHE_ROOT" ]; then
+    [ "$_cache_root_count" -eq 1 ] &&
+      [ "$(manifest_value rust_cargo_cache_root "$1")" = "$PREFLIGHT_RUST_CARGO_CACHE_ROOT" ]
+  elif [ "$_cache_root_count" -eq 0 ]; then
+    return 0
+  else
+    [ "$_cache_root_count" -eq 1 ] &&
+      [ "$(manifest_value rust_cargo_cache_root "$1")" = default ]
+  fi
 }
 
 run_preflight_probe() {
@@ -261,6 +292,7 @@ verify_receipt() {
   [ "$(manifest_value schema "$_receipt")" = simple-bootstrap-preflight-v1 ] || return 1
   [ "$(manifest_value status "$_receipt")" = pass ] || return 1
   [ "$(manifest_value cargo_mode "$_receipt")" = checked ] || return 1
+  preflight_receipt_cache_root_matches "$_receipt" || return 1
   [ -n "$EXPECTED_CONFIG" ] || return 1
   printf '%s' "$EXPECTED_CONFIG" >"$TMP/expected-config" || return 1
   _expected_config_hex=$(perl -e 'print unpack("H*", <STDIN>)' <"$TMP/expected-config") || return 1
@@ -520,7 +552,7 @@ selftest() {
 
 # Test the default routes in a subshell even when this run uses the opt-in
 # isolated target; the selected CARGO_TARGET_DIR above remains unchanged.
-if ! (unset SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR; selftest); then
+if ! (unset SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT; PREFLIGHT_RUST_CARGO_CACHE_ROOT=; selftest); then
   echo "ERROR — nothing was checked (selftest failed)"
   exit 2
 fi
@@ -599,6 +631,8 @@ else
   {
     printf 'cargo_executable=%s\n' "$(command -v "$CARGO_CHECK_BIN")"
     printf 'cargo_target_dir=%s\n' "$CARGO_TARGET_DIR"
+    printf 'rust_cargo_cache_root=%s\n' "${PREFLIGHT_RUST_CARGO_CACHE_ROOT:-default}"
+    printf 'disk_probe_path=%s\n' "${PREFLIGHT_RUST_CARGO_CACHE_ROOT:-$CARGO_TARGET_DIR}"
     printf 'cargo_profile=%s\n' "$CARGO_PROFILE"
     printf 'cargo_features=%s\n' "$CARGO_CHECK_FEATURES"
     printf 'cargo_build_target=%s\n' "${CARGO_BUILD_TARGET:-<host default>}"
@@ -733,6 +767,7 @@ if [ -n "$RECEIPT_PATH" ]; then
     echo cargo_profile="$CARGO_PROFILE"
     echo cargo_target="${CARGO_CHECK_TARGET:-${CARGO_BUILD_TARGET:-host}}"
     echo cargo_features="$CARGO_CHECK_FEATURES"
+    echo rust_cargo_cache_root="${PREFLIGHT_RUST_CARGO_CACHE_ROOT:-default}"
   } >"$_receipt_tmp" || exit 2
   chmod 400 "$_receipt_tmp" || exit 2
   mv "$_receipt_tmp" "$RECEIPT_PATH" || exit 2

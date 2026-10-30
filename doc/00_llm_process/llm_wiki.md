@@ -16,7 +16,49 @@ currently requires its admitted external hosted linker. The overall
 `mold_is_pure_simple_linker_complete()` receipt gate does not automatically
 change defaults or replace real execution evidence.
 
+## Phase compiler Hello sanity
+
+Use the [Hello sanity matrix](../07_guide/app/llm/bootstrap_parallel_handoff.md#hello-sanity-16-native-execution-cases-and-phase-interpreter-checks)
+with the exact Phase 1, 2, or 3 compiler. The native target is 16 separately
+evidenced cells: four forms (source, two objects, static library, shared
+library) × LLVM/Cranelift × direct/BuildRunner. Keep each cell's status and
+receipt; `UNRUN` and `UNSUPPORTED` are not passes. Current driver coverage is
+four direct cases per selected backend invocation, plus optional one-source
+BuildRunner execution with a complete qualified provider. The remaining three
+BuildRunner forms stay `UNRUN`; pending required cells prevent overall `PASS`.
+All eight P2 direct macOS attempts on 2026-10-29 hit RSS bounds; the BuildRunner
+cells remain unrun. Adapter transport tests do not qualify the phase compiler.
+Interpreter qualification is additional and phase-specific: Phase 1 requires
+the phase 1 seed in interpreter mode; Phase 2 records the configured skip;
+Phase 3 requires a full CLI qualified to its exact phase 3 producer, source, and
+runtime. Do not promote partial diagnostics to phase completion or bootstrap
+admission.
+
 ## Bootstrap failure collection
+
+### Release compiler selection and platform qualification
+
+For release work, use the highest known-success actual phase binary for the
+target platform, with the newest qualifying producer as the tie-breaker within
+that phase. Bind success to the actual binary digest, source revision/digest,
+toolchain/runtime identity, and a receipt proving Hello compilation and
+execution output/exit status. A phase directory, `PHASE` marker, or banner is
+not proof. Skip already-proven lower phases; when a qualifying Phase 3 binary
+exists, use that exact P3 to build P3, then build the Phase 4 full CLI and run
+its required tests. Keep the producer immutable and use private outputs/cache
+with default cache behavior, LLVM/LLD and 24 build jobs for P3 -> P3 and Phase
+4 native builds; preserve worker limits in receipt-bound stage resumes. If a
+candidate is missing or incompatible, record the failure and make only an
+explicit, bounded fallback to a compatible known-success candidate; do not
+silently rebuild lower phases or use the Rust seed.
+
+Prerelease/beta qualification may cover a partial platform matrix only when at
+least one platform binary is genuinely qualified and missing/failed platforms
+are explicit. Zero qualified artifacts or a security/integrity failure cannot
+PASS. Stable releases keep the full required gates. See the
+[release producer-selection policy](../07_guide/infra/toolchain/phase_ladder_ci.md#release-producer-selection)
+and [qualification guide](../07_guide/infra/release_full_bootstrap.md); these
+docs do not assert current phase admission or define tag-trigger behavior.
 
 For one-thread crash diagnosis, host CUDA policy, RAM cache-parent staging and
 owned-process finality, use [native staging and terminal evidence](../07_guide/tooling/bootstrap_native_staging.md).

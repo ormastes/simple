@@ -1,14 +1,38 @@
-use std.spec.*
-use std.io_runtime.{read_file}
+use std.spec
+use app.simple_lsp_mcp.main.{lsp_handle_message}
 
-describe "simple LSP MCP stdio dispatch":
-    it "reads and detects each incoming message inside the transport owner":
-        val helpers = read_file("src/app/simple_lsp_mcp/json_helpers.spl")
-        val main_source = read_file("src/app/simple_lsp_mcp/main.spl")
-        expect(helpers.contains("fn read_stdin_message() -> text:")).to_equal(true)
-        expect(helpers.contains("val first_line = _read_line()")).to_equal(true)
-        expect(helpers.contains("first_line.starts_with(\"Content-Length:\")")).to_equal(true)
-        expect(helpers.contains("if ch.len() == 0:")).to_equal(true)
-        expect(helpers.contains("if ch.starts_with(\"\\n\"):")).to_equal(true)
-        expect(main_source.contains("val msg = read_stdin_message()")).to_equal(true)
-        expect(main_source.contains("transport_mode_locked")).to_equal(false)
+fn lsp_dispatch_request(fields: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\"," + fields + "}"
+
+fn lsp_dispatch_ping_reply(id: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + "{" + "}" + "}"
+
+describe "Simple LSP MCP root-envelope dispatch":
+    it "does not answer a no-ID ping or borrow a nested client ID":
+        step("Classify notifications using only the root request envelope")
+        expect(lsp_handle_message(lsp_dispatch_request("\"method\":\"ping\""))).to_equal("")
+        val nested = "\"method\":\"initialize\",\"params\":" + "{" + "\"clientInfo\":" + "{" + "\"id\":9" + "}" + "}"
+        expect(lsp_handle_message(lsp_dispatch_request(nested))).to_equal("")
+
+    it "does not dispatch a nested ping in place of the root method":
+        step("Reject an unknown root method even when params contains a known method")
+        val request = lsp_dispatch_request("\"id\":17,\"method\":\"unknown/method\",\"params\":" + "{" + "\"method\":\"ping\"" + "}")
+        val response = lsp_handle_message(request)
+        expect(response.contains("\"id\":17")).to_equal(true)
+        expect(response.contains("\"code\":-32601")).to_equal(true)
+        expect(response.contains("\"result\":")).to_equal(false)
+
+    it "preserves escaped string IDs and a large integer without coercion":
+        step("Use the parser's lexical JSON ID for the actual ping response")
+        val ids = ["\"request-alpha\"", "\"a\\\"b\\\\c\"", "9007199254740993"]
+        for id in ids:
+            val request = lsp_dispatch_request("\"id\":" + id + ",\"me\\u0074hod\":\"pi\\u006eg\"")
+            expect(lsp_handle_message(request)).to_equal(lsp_dispatch_ping_reply(id))
+
+    it "distinguishes invalid request envelopes from malformed JSON":
+        step("Return protocol errors instead of treating invalid input as an unknown method")
+        val invalid = lsp_handle_message("[]")
+        expect(invalid.contains("\"id\":null")).to_equal(true)
+        expect(invalid.contains("\"code\":-32600")).to_equal(true)
+        val malformed = lsp_handle_message("{" + "\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":[1,]" + "}")
+        expect(malformed.contains("\"code\":-32700")).to_equal(true)

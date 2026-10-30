@@ -30,15 +30,17 @@ use compiler.core.types.{TYPE_VOID, TYPE_NAMED_BASE, named_type_find, named_type
 use compiler.core.types.{TYPE_ANY, named_generic_instance_register}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_parse_type_with_union}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_parse_type}
-use compiler.core.parser.{par_fixed_array_elem, par_fixed_array_size}
+use compiler.core.parser.{parser_fixed_array_elem, parser_fixed_array_size}
 use compiler.core.parser.{parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix}
 use compiler.core.parser.{par_prof_enabled}
-use compiler.frontend.core.lexer.{lex_token_start_get}
+use compiler.frontend.core.lexer.{lex_token_start_get, lex_source_slice}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.frontend.core.parser_stmts.{parse_block}
 use compiler.frontend.core.parser_stmts.{fixed_array_no_init_default_expr}
 use compiler.core.ast.{expr_int_lit, expr_nil_lit}
 use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_pending_take, lock_level_record}
+use compiler.frontend.core.lock_level_parser.{lock_level_reject_non_function}
 use compiler.core.ast.{decl_get_imports, decl_get_name, module_add_decl}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait, decl_set_type_params}
@@ -323,6 +325,7 @@ fn parse_export_decl() -> i64:
 use compiler.frontend.core.representation_declarations_v1.{representation_reject_pending_v1, representation_method_begin_v1, representation_declaration_header_v1, representation_declaration_end_v1}
 
 fn parse_val_decl() -> i64:
+    val lock_rank = lock_level_pending_take()
     representation_reject_pending_v1()
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
@@ -352,7 +355,9 @@ fn parse_val_decl() -> i64:
         # Create a placeholder DECL_VAL with no init expression
         val placeholder_expr = expr_int_lit(0, 0)
         val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
-        return decl_val_binding("__generic_" + param_name, 0, placeholder_expr, decl_span)
+        val generic_decl = decl_val_binding("__generic_" + param_name, 0, placeholder_expr, decl_span)
+        if lock_rank >= 0: parser_error("[E-LOCK-LEVEL-001] file generic declarations cannot have lock levels")
+        return generic_decl
 
     val name = par_text_get()
     parser_expect(6)
@@ -373,7 +378,9 @@ fn parse_val_decl() -> i64:
         parser_skip_newlines()
         parser_expect(TOK_DEDENT)
     val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
-    decl_val_binding(name, type_tag, init, decl_span)
+    val result = decl_val_binding(name, type_tag, init, decl_span)
+    lock_level_record(result, lock_rank)
+    result
 
 fn parse_lazy_val_decl() -> i64:
     representation_reject_pending_v1()
@@ -431,8 +438,8 @@ fn parse_var_decl() -> i64:
             parser_expect(TOK_INDENT)
             annotation_continuation = true
         type_tag = parser_parse_type_with_union()
-        fixed_array_elem = par_fixed_array_elem
-        fixed_array_size = par_fixed_array_size
+        fixed_array_elem = parser_fixed_array_elem()
+        fixed_array_size = parser_fixed_array_size()
 
     # Fixed-size array without initializer: `var g: [T; N]` at module level
     # (46+ sites in src/os/sosix, e.g. share.spl's `var sosix_dataset_active:
@@ -468,10 +475,35 @@ fn parse_var_decl() -> i64:
 
 # ===== Class/Impl Method Parsing =====
 
+fn method_name_is_implicitly_static(name: text) -> bool:
+    # `with_*` and `init` are deliberately excluded: builders (`with_fix`) and
+    # initialisers are routinely called on an instance. Builders use
+    # `self`, and the body check below is the only guard against promotion.
+    name == "new" or name == "create" or name == "default" or name.starts_with("from_")
+
+fn source_mentions_self_word(source: text) -> bool:
+    # Conservative: `self` anywhere (code, comment or string) keeps the
+    # method an instance method, exactly as before this promotion existed.
+    var pos = source.find("self")
+    while pos >= 0:
+        val before = if pos == 0: " " else: source[pos - 1:pos]
+        val after = if pos + 4 >= source.len(): " " else: source[pos + 4:pos + 5]
+        if not text_is_ident_char(before) and not text_is_ident_char(after):
+            return true
+        val next = source[pos + 4:].find("self")
+        if next < 0:
+            return false
+        pos = pos + 4 + next
+    false
+
+fn text_is_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
 fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i64:
     parse_class_body_method_typed(struct_name, is_static, is_me, -1)
 
 fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool, self_type_override: i64) -> i64:
+    val lock_rank = lock_level_pending_take()
     val representation_owner = representation_method_begin_v1()
     var _pp = parse_prof_now()
     # Advance past leading keyword (static fn / fn / me)
@@ -568,19 +600,35 @@ fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool
     representation_declaration_header_v1(representation_owner)
     _pp = parse_prof_mark("method:signature", _pp)
     var body: [i64] = []
+    var body_mentions_self = true
     if par_kind_get() == 161:
+        val body_source_start = lex_token_start_get()
         parser_advance()
         body = parse_block()
+        if method_name_is_implicitly_static(method_name):
+            body_mentions_self = source_mentions_self_word(lex_source_slice(body_source_start, lex_token_start_get()))
     _pp = parse_prof_mark("method:body", _pp)
 
     val mangled_name: text = struct_name + "__" + method_name
     # static_flag: 0=fn (immutable self), 1=static (no self), 2=me (mutable self)
     var static_flag: i64 = 0
-    if is_static:
+    # Implicitly static constructor names (doc/07_guide/language/syntax.md):
+    # `fn new(...)` in an impl with no explicit `self`/`me` and a body that
+    # never mentions `self` is a static method. Before this it got a
+    # synthesized `self` param (SymbolKind.Method), so `Type.new(...)` hit
+    # MIR's static-nominal arm, which only accepts a Function, and failed as
+    # "unresolved method call: new" -- and every builder chained on the
+    # const-0 placeholder (`.with_fix(..)`) failed with it.
+    var method_is_static = is_static
+    if not is_static and not is_me and not body_mentions_self:
+        val explicit_receiver = param_names.len() > 0 and (param_names[0] == "self" or param_names[0] == "me")
+        if not explicit_receiver:
+            method_is_static = true
+    if method_is_static:
         static_flag = 1
     if is_me:
         static_flag = 2
-    if not is_static:
+    if not method_is_static:
         var self_type = 0
         var self_type_id = named_type_find(struct_name)
         # An extension `impl Imported:` names a type declared in ANOTHER file,
@@ -649,6 +697,7 @@ fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool
             param_defaults = method_param_defaults
             param_muts = method_param_muts
     val mid = decl_fn(mangled_name, param_names, param_types, ret_type, body, static_flag, type_params, 0)
+    lock_level_record(mid, lock_rank)
     decl_set_param_defaults(mid, param_defaults)
     decl_set_param_muts(mid, param_muts)
     representation_declaration_end_v1(representation_owner, mid, method_name)
@@ -705,20 +754,16 @@ fn impl_type_arg_is_param(name: text) -> bool:
 # arguments are exactly distinct bare type-parameter names (`Pair<A, B>`), as
 # opposed to `List<Option<T>>`, `Pair<T, T>` or `Pair<i64, T>`. Only the former
 # lets a receiver's type arguments bind the impl's parameters positionally.
-var par_impl_target_applied: bool = false
-var par_impl_target_plain: bool = true
-var par_impl_target_arg_names: [text] = []
-var par_impl_target_leaf_simple: bool = false
 
 fn parse_impl_target_type(has_explicit_params: bool, collect_leaf: bool = false) -> [text]:
     var params: [text] = []
     if not collect_leaf:
-        par_impl_target_applied = false
-        par_impl_target_plain = true
-        par_impl_target_arg_names = []
+        impl_target_state.par_impl_target_applied = false
+        impl_target_state.par_impl_target_plain = true
+        impl_target_state.par_impl_target_arg_names = []
     if par_kind_get() != TOK_IDENT:
         parser_parse_type()
-        par_impl_target_leaf_simple = false
+        impl_target_state.par_impl_target_leaf_simple = false
         return params
     val name = par_text_get()
     parser_advance()
@@ -734,10 +779,10 @@ fn parse_impl_target_type(has_explicit_params: bool, collect_leaf: bool = false)
     if k != TOK_LT and k != TOK_LT_GENERIC and k != TOK_LBRACKET:
         if collect_leaf and not qualified and not has_explicit_params and impl_type_arg_is_param(name):
             params.push(name)
-        par_impl_target_leaf_simple = not qualified
+        impl_target_state.par_impl_target_leaf_simple = not qualified
         return params
     if not collect_leaf:
-        par_impl_target_applied = true
+        impl_target_state.par_impl_target_applied = true
     # These are type APPLICATION arguments, not declaration parameters.
     # parse_type_params only accepts names/constraints and stops at the '<'
     # of a nested application such as Result<T, E>.
@@ -751,9 +796,9 @@ fn parse_impl_target_type(has_explicit_params: bool, collect_leaf: bool = false)
             if not params.contains(parameter):
                 params.push(parameter)
         if not collect_leaf:
-            if not arg_is_ident or not par_impl_target_leaf_simple or not impl_type_arg_is_param(arg_name) or par_impl_target_arg_names.contains(arg_name):
-                par_impl_target_plain = false
-            par_impl_target_arg_names.push(arg_name)
+            if not arg_is_ident or not impl_target_state.par_impl_target_leaf_simple or not impl_type_arg_is_param(arg_name) or impl_target_state.par_impl_target_arg_names.contains(arg_name):
+                impl_target_state.par_impl_target_plain = false
+            impl_target_state.par_impl_target_arg_names.push(arg_name)
         if par_kind_get() != TOK_COMMA:
             break
         parser_advance()
@@ -762,7 +807,7 @@ fn parse_impl_target_type(has_explicit_params: bool, collect_leaf: bool = false)
     else:
         lex_mark_current_token_as_generic_close()
         parser_expect(TOK_GT)
-    par_impl_target_leaf_simple = false
+    impl_target_state.par_impl_target_leaf_simple = false
     params
 
 fn impl_target_binds_positionally(explicit_params: [text]) -> bool:
@@ -770,17 +815,17 @@ fn impl_target_binds_positionally(explicit_params: [text]) -> bool:
     bind the impl's type parameters in order: it applies no arguments, or its
     arguments are distinct bare parameter names that -- when the impl also
     writes `impl<...>` -- repeat that list exactly."""
-    if not par_impl_target_applied:
+    if not impl_target_state.par_impl_target_applied:
         return true
-    if not par_impl_target_plain:
+    if not impl_target_state.par_impl_target_plain:
         return false
     if explicit_params.len() == 0:
         return true
-    if explicit_params.len() != par_impl_target_arg_names.len():
+    if explicit_params.len() != impl_target_state.par_impl_target_arg_names.len():
         return false
     var i = 0
     while i < explicit_params.len():
-        if explicit_params[i] != par_impl_target_arg_names[i]:
+        if explicit_params[i] != impl_target_state.par_impl_target_arg_names[i]:
             return false
         i = i + 1
     true
@@ -836,6 +881,7 @@ fn parse_impl_decl() -> i64:
 
     while true:
         parser_skip_newlines()
+        lock_level_reject_non_function(par_kind_get())
         if par_kind_get() == 182:
             parser_advance()
             break
@@ -903,3 +949,28 @@ export parse_use_decl, parse_export_decl
 export use_kw_segment_text
 export parse_val_decl, parse_lazy_val_decl, parse_var_decl
 export parse_class_body_method, parse_impl_decl, parse_ce_decl
+
+# ===== ImplTargetState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct ImplTargetState:
+    par_impl_target_applied: bool
+    par_impl_target_plain: bool
+    par_impl_target_arg_names: [text]
+    par_impl_target_leaf_simple: bool
+
+fn impl_target_state_fresh() -> ImplTargetState:
+    ImplTargetState(par_impl_target_applied: false, par_impl_target_plain: true, par_impl_target_arg_names: [], par_impl_target_leaf_simple: false)
+
+var impl_target_state: ImplTargetState = impl_target_state_fresh()
+
+pub fn impl_target_state_take() -> ImplTargetState:
+    val s = impl_target_state
+    impl_target_state = impl_target_state_fresh()
+    s
+
+pub fn impl_target_state_install(s: ImplTargetState):
+    impl_target_state = s
+
+export ImplTargetState, impl_target_state_take, impl_target_state_install

@@ -562,6 +562,32 @@ pub fn rt_thread_is_done(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(1))
 }
 
+/// Zero-arg current-thread id backing for `spl_thread_current_id`.
+///
+/// Simple sources declare `spl_thread_current_id() -> i64` (0 args) and the C
+/// runtime implements it as `spl_thread_current_id(void)`; the interpreter
+/// registration previously aliased it to the 1-arg `rt_thread_id(handle)`,
+/// which failed every 0-arg call. Each interpreter OS thread gets a stable
+/// positive id assigned lazily from the handle counter.
+thread_local! {
+    static CURRENT_THREAD_I64: std::cell::Cell<i64> = std::cell::Cell::new(0);
+}
+
+pub fn spl_thread_current_id(_args: &[Value]) -> Result<Value, CompileError> {
+    let id = CURRENT_THREAD_I64.with(|slot| {
+        let existing = slot.get();
+        if existing > 0 {
+            return existing;
+        }
+        let mut next = NEXT_HANDLE_ID.lock().unwrap();
+        let assigned = *next;
+        *next += 1;
+        slot.set(assigned);
+        assigned
+    });
+    Ok(Value::Int(id))
+}
+
 /// Get thread ID
 pub fn rt_thread_id(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
@@ -1213,4 +1239,66 @@ mod backend_aware_spawn_tests {
         assert!(spl_mutex_lock(&[Value::Int(handle)]).is_err());
         assert!(spl_mutex_lock(&[Value::Int(0)]).is_err());
     }
+}
+
+// ---- CPU topology, thread pinning, raw-address atomics (fiber scheduler) ----
+// Thin shims over the linked runtime twins (`simple_runtime::cpu_topology`,
+// `simple_runtime::parallel`), so worker threads spawned by the interpreter
+// can be pinned and share lock-free run queues in raw memory.
+
+fn int_arg(args: &[Value], idx: usize, symbol: &str) -> Result<i64, CompileError> {
+    match args.get(idx) {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(Value::UInt { value, .. }) => Ok(*value as i64),
+        other => Err(CompileError::semantic(format!(
+            "{symbol}: argument {idx} must be an integer, got {:?}",
+            other
+        ))),
+    }
+}
+
+pub fn rt_cpu_topology_count(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::cpu_topology::rt_cpu_topology_count()))
+}
+
+pub fn rt_cpu_topology_field(args: &[Value]) -> Result<Value, CompileError> {
+    let index = int_arg(args, 0, "rt_cpu_topology_field")?;
+    let field = int_arg(args, 1, "rt_cpu_topology_field")?;
+    Ok(Value::Int(simple_runtime::cpu_topology::rt_cpu_topology_field(index, field)))
+}
+
+pub fn rt_thread_pin_current(args: &[Value]) -> Result<Value, CompileError> {
+    let index = int_arg(args, 0, "rt_thread_pin_current")?;
+    Ok(Value::Bool(simple_runtime::cpu_topology::rt_thread_pin_current(index)))
+}
+
+pub fn rt_thread_current_cpu(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::cpu_topology::rt_thread_current_cpu()))
+}
+
+fn atomic_cell(args: &[Value], symbol: &str) -> Result<*mut i64, CompileError> {
+    let addr = int_arg(args, 0, symbol)?;
+    if addr == 0 || addr % 8 != 0 {
+        return Err(CompileError::runtime(format!("{symbol}: address must be non-null and 8-byte aligned")));
+    }
+    Ok(addr as usize as *mut i64)
+}
+
+pub fn rt_par_atomic_add_i64(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = atomic_cell(args, "rt_par_atomic_add_i64")?;
+    let value = int_arg(args, 1, "rt_par_atomic_add_i64")?;
+    Ok(Value::Int(unsafe { simple_runtime::rt_par_atomic_add_i64(ptr, value) }))
+}
+
+pub fn rt_par_atomic_xchg_i64(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = atomic_cell(args, "rt_par_atomic_xchg_i64")?;
+    let value = int_arg(args, 1, "rt_par_atomic_xchg_i64")?;
+    Ok(Value::Int(unsafe { simple_runtime::rt_par_atomic_xchg_i64(ptr, value) }))
+}
+
+pub fn rt_par_atomic_cmpxchg_i64(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = atomic_cell(args, "rt_par_atomic_cmpxchg_i64")?;
+    let expected = int_arg(args, 1, "rt_par_atomic_cmpxchg_i64")?;
+    let value = int_arg(args, 2, "rt_par_atomic_cmpxchg_i64")?;
+    Ok(Value::Int(unsafe { simple_runtime::rt_par_atomic_cmpxchg_i64(ptr, expected, value) }))
 }

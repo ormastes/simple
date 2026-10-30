@@ -1,0 +1,64 @@
+"""
+WA-P3 class 7: a function declared `-> ()` with an early `return ()` and a
+statement tail tripped E-SFFI-016 under SIMPLE_BOOTSTRAP=1 because the
+bootstrap arm replaced the declared Unit return with the i64 builtin default.
+"""
+# @cover src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+# @cover src/compiler/50.mir/_MirLowering/function_lowering.spl
+
+use std.spec.*
+use std.env.variables.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+struct LoweringOutcome:
+    function_count: i64
+    messages: [text]
+
+fn lower_to_mir(source: text, name: text, bootstrap: bool) -> LoweringOutcome:
+    val filename = "unannotated_unit_" + name + ".spl"
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    if bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    var messages: [text] = []
+    for err in mir_lowering.errors:
+        messages = messages.push(err.message)
+    LoweringOutcome(function_count: hir.functions.len(), messages: messages)
+
+fn messages_matching(messages: [text], needle: text) -> [text]:
+    var hits: [text] = []
+    for m in messages:
+        if m.contains(needle):
+            hits = hits.push(m)
+    hits
+
+val UNIT_ANNOTATED_EARLY_RETURN_SOURCE = """
+fn drain(flag: bool, xs: [i64]) -> ():
+    if flag:
+        return ()
+    print xs.len()
+
+fn main():
+    drain(false, [1, 2])
+"""
+
+describe "declared -> () with an early return ()":
+    it "lowers without E-SFFI-016 in bootstrap mode":
+        val outcome = lower_to_mir(UNIT_ANNOTATED_EARLY_RETURN_SOURCE, "unit_annot_boot", true)
+        expect(outcome.function_count > 0).to_equal(true)
+        expect(messages_matching(outcome.messages, "E-SFFI-016").len()).to_equal(0)
+
+    it "lowers without E-SFFI-016 in normal mode":
+        val outcome = lower_to_mir(UNIT_ANNOTATED_EARLY_RETURN_SOURCE, "unit_annot_norm", false)
+        expect(outcome.function_count > 0).to_equal(true)
+        expect(messages_matching(outcome.messages, "E-SFFI-016").len()).to_equal(0)

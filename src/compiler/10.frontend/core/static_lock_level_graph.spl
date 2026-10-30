@@ -1,0 +1,301 @@
+# Bounded conservative call/effect graph. Each canonical Mutex callback is a
+# separate ranked node: sibling acquisitions never inherit one another's rank.
+use compiler.core.ast.{DECL_FN, DECL_VAL, DECL_VAR, DECL_LAZY_VAL, decl_count, decl_get, decl_get_param_defaults, expr_get, stmt_get}
+use compiler.core.ast_types.{CoreExpr, CoreStmt}
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_rank_for}
+
+pub struct LockLevelFunction:
+    decl_id: i64
+    name: text
+    rank: i64
+    resource_id: i64
+    span: i64
+    call_names: [text]
+    call_spans: [i64]
+    local_names: [text]
+    unknown_span: i64
+
+var ll_call_names: [text] = []
+var ll_call_spans: [i64] = []
+var ll_local_names: [text] = []
+var ll_scalar_names: [text] = []
+var ll_unknown_span: i64 = -1
+var ll_resources: {text: i64} = {}
+var ll_imports: {text: text} = {}
+var ll_callback_exprs: [i64] = []
+var ll_callback_resources: [i64] = []
+var ll_callback_parents: [i64] = []
+var ll_callback_proofs: [text] = []
+var ll_current_node: i64 = 0
+var ll_ast_work: i64 = 0
+var ll_ast_depth: i64 = 0
+var ll_graph_failure: text = ""
+var ll_in_callback: bool = false
+var ll_branch_depth: i64 = 0
+
+pub fn lock_level_graph_error() -> text:
+    ll_graph_failure
+
+fn ll_unknown(span: i64):
+    if ll_unknown_span < 0: ll_unknown_span = if span >= 0: span else: 0
+
+fn ll_budget() -> bool:
+    ll_ast_work = ll_ast_work + 1
+    if ll_ast_work > 100000 or ll_ast_depth > 256:
+        ll_graph_failure = "[E-LOCK-LEVEL-003] static lock proof exceeds AST work/depth budget"
+        return false
+    true
+
+fn ll_local(name: text):
+    val without_open = name.replace("(", "")
+    val without_parens = without_open.replace(")", "")
+    for part in without_parens.split(","):
+        val binding = part.trim()
+        if binding != "":
+            ll_local_names.push(binding)
+            var retained: [text] = []
+            for scalar in ll_scalar_names:
+                if scalar != binding: retained.push(scalar)
+            ll_scalar_names = retained
+
+fn ll_scalar(eid: i64) -> bool:
+    if eid < 0 or not ll_budget(): return false
+    val e = expr_get(eid)
+    if e.tag == EXPR_INT_LIT or e.tag == EXPR_FLOAT_LIT or e.tag == EXPR_STRING_LIT or e.tag == EXPR_BOOL_LIT: return true
+    if e.tag == EXPR_IDENT: return ll_scalar_names.contains(e.s_val)
+    if e.tag == EXPR_BINARY or e.tag == EXPR_UNARY:
+        # Only one scalar operation is classified here, so deeply nested
+        # source cannot recurse around the AST depth guard.
+        val left = expr_get(e.left)
+        val left_scalar = left.tag == EXPR_INT_LIT or left.tag == EXPR_FLOAT_LIT or left.tag == EXPR_STRING_LIT or left.tag == EXPR_BOOL_LIT or (left.tag == EXPR_IDENT and ll_scalar_names.contains(left.s_val))
+        if not left_scalar: return false
+        if e.right < 0: return true
+        val right = expr_get(e.right)
+        return right.tag == EXPR_INT_LIT or right.tag == EXPR_FLOAT_LIT or right.tag == EXPR_STRING_LIT or right.tag == EXPR_BOOL_LIT or (right.tag == EXPR_IDENT and ll_scalar_names.contains(right.s_val))
+    if e.tag == EXPR_METHOD_CALL and e.s_val == "with_lock" and e.left >= 0 and e.args.len() == 1:
+        val receiver = expr_get(e.left)
+        return receiver.tag == EXPR_IDENT and ll_resources.contains_key(receiver.s_val) and expr_get(e.args[0]).tag == EXPR_LAMBDA
+    if e.tag == EXPR_CALL and e.left >= 0:
+        val callee = expr_get(e.left)
+        if callee.tag != EXPR_IDENT: return false
+        val canonical = ll_imports.get(callee.s_val) ?? ""
+        return canonical == "mutex_with_lock" or canonical == "mutex_with_lock_keeping"
+    false
+
+fn ll_add_call(name: text, span: i64):
+    ll_call_names.push(name)
+    ll_call_spans.push(span)
+    if ll_call_names.len() > 4096:
+        ll_graph_failure = "[E-LOCK-LEVEL-003] static lock proof exceeds per-node edge budget"
+
+fn ll_acquisition(e: CoreExpr) -> bool:
+    var receiver: i64 = -1
+    var callback: i64 = -1
+    var expected_params: i64 = 1
+    var helper = ""
+    if e.tag == EXPR_METHOD_CALL and e.s_val == "with_lock":
+        if e.args.len() != 1: return false
+        receiver = e.left
+        callback = e.args[0]
+    elif e.tag == EXPR_CALL and e.left >= 0:
+        val callee = expr_get(e.left)
+        if callee.tag != EXPR_IDENT: return false
+        val canonical = ll_imports.get(callee.s_val) ?? ""
+        if canonical == "mutex_with_lock" and e.args.len() == 2:
+            receiver = e.args[0]
+            callback = e.args[1]
+        elif canonical == "mutex_with_lock_keeping" and e.args.len() == 3:
+            receiver = e.args[0]
+            # keep_value is evaluated before acquisition, in the caller.
+            ll_walk_expr(e.args[1])
+            # This API stores keep_value, independently of the callback's
+            # return. Preserve the scalar resource invariant on this exit too.
+            if not ll_scalar(e.args[1]): ll_unknown(e.span_id)
+            callback = e.args[2]
+            expected_params = 0
+        else: return false
+        helper = callee.s_val
+    else: return false
+    if receiver < 0 or callback < 0: return false
+    val resource = expr_get(receiver)
+    if resource.tag != EXPR_IDENT: return false
+    val did = ll_resources.get(resource.s_val) ?? -1
+    if did < 0: return false
+    val body = expr_get(callback)
+    if body.tag != EXPR_LAMBDA or body.args.len() != expected_params: return false
+    ll_add_call("@callback:" + callback.to_text(), e.span_id)
+    ll_callback_exprs.push(callback)
+    ll_callback_resources.push(did)
+    ll_callback_parents.push(ll_current_node)
+    ll_callback_proofs.push(resource.s_val + "|" + helper)
+    if ll_callback_exprs.len() > 4096:
+        ll_graph_failure = "[E-LOCK-LEVEL-003] static lock proof exceeds callback node budget"
+    true
+
+fn ll_walk_stmts(ids: [i64]):
+    if not ll_budget(): return
+    ll_ast_depth = ll_ast_depth + 1
+    ll_walk_stmts_inner(ids)
+    ll_ast_depth = ll_ast_depth - 1
+
+fn ll_walk_stmts_inner(ids: [i64]):
+    for sid in ids:
+        if not ll_budget(): return
+        val s: CoreStmt = stmt_get(sid)
+        val tag = s.tag
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL:
+            ll_local(s.name)
+            if tag == STMT_LAZY_VAL_DECL: ll_unknown(s.span_id)
+            ll_walk_expr(s.expr_idx)
+            if ll_branch_depth == 0 and ll_scalar(s.expr_idx): ll_scalar_names.push(s.name)
+        elif tag == STMT_EXPR or tag == STMT_RETURN:
+            if tag == STMT_RETURN and ll_in_callback and not ll_scalar(s.expr_idx): ll_unknown(s.span_id)
+            ll_walk_expr(s.expr_idx)
+        elif tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
+            # Assignment can invalidate scalar/alias facts. V1 rejects it.
+            ll_unknown(s.span_id)
+        elif tag == STMT_IF or tag == STMT_WHILE or tag == STMT_FOR or tag == STMT_BLOCK:
+            if tag == STMT_FOR:
+                ll_local(s.name)
+                ll_unknown(s.span_id)
+            ll_walk_expr(s.expr_idx)
+            ll_branch_depth = ll_branch_depth + 1
+            ll_walk_stmts(s.body)
+            ll_walk_stmts(s.else_body)
+            for cond in s.elif_conds: ll_walk_expr(cond)
+            for body in s.elif_bodies: ll_walk_stmts(body)
+            ll_branch_depth = ll_branch_depth - 1
+        elif tag != STMT_BREAK and tag != STMT_CONTINUE:
+            ll_unknown(s.span_id)
+
+fn ll_walk_expr(eid: i64):
+    if eid < 0 or not ll_budget(): return
+    ll_ast_depth = ll_ast_depth + 1
+    ll_walk_expr_inner(eid)
+    ll_ast_depth = ll_ast_depth - 1
+
+fn ll_walk_expr_inner(eid: i64):
+    val e: CoreExpr = expr_get(eid)
+    val tag = e.tag
+    if (tag == EXPR_CALL or tag == EXPR_METHOD_CALL) and ll_acquisition(e): return
+    if tag == EXPR_CALL:
+        if e.left >= 0:
+            val callee = expr_get(e.left)
+            if callee.tag == EXPR_IDENT: ll_add_call(callee.s_val, e.span_id)
+            else: ll_unknown(e.span_id)
+        else: ll_unknown(e.span_id)
+        for aid in e.args: ll_walk_expr(aid)
+        return
+    if tag == EXPR_METHOD_CALL or tag == EXPR_LAMBDA or tag == EXPR_AWAIT or tag == EXPR_YIELD or tag == EXPR_SPAWN:
+        ll_unknown(e.span_id)
+        return
+    if tag == EXPR_BLOCK or tag == EXPR_DO_BLOCK:
+        ll_walk_stmts(e.stmts)
+        ll_walk_expr(e.left)
+        return
+    if tag == EXPR_IF:
+        ll_walk_expr(e.left)
+        ll_branch_depth = ll_branch_depth + 1
+        ll_walk_expr(e.right)
+        ll_walk_expr(e.extra)
+        ll_branch_depth = ll_branch_depth - 1
+        return
+    if tag == EXPR_RETURN:
+        if ll_in_callback and not ll_scalar(e.left): ll_unknown(e.span_id)
+        ll_walk_expr(e.left)
+        return
+    if tag == EXPR_IDENT:
+        if ll_resources.contains_key(e.s_val): ll_unknown(e.span_id)
+        return
+    if tag == EXPR_INT_LIT or tag == EXPR_FLOAT_LIT or tag == EXPR_STRING_LIT or tag == EXPR_BOOL_LIT or tag == EXPR_NIL_LIT or tag == EXPR_UNIT: return
+    if tag == EXPR_BINARY or tag == EXPR_UNARY:
+        if not ll_scalar(e.left) or (e.right >= 0 and not ll_scalar(e.right)): ll_unknown(e.span_id)
+        ll_walk_expr(e.left)
+        ll_walk_expr(e.right)
+        return
+    # Aggregate/index/cast/unsafe/custom/delayed forms need resolved effects.
+    ll_unknown(e.span_id)
+
+fn ll_begin_node():
+    ll_call_names = []
+    ll_call_spans = []
+    ll_local_names = []
+    ll_scalar_names = []
+    ll_unknown_span = -1
+    ll_in_callback = false
+    ll_branch_depth = 0
+
+fn ll_finish_node(did: i64, name: text, rank: i64, resource: i64, span: i64) -> LockLevelFunction:
+    LockLevelFunction(decl_id: did, name: name, rank: rank, resource_id: resource,
+        span: span, call_names: ll_call_names, call_spans: ll_call_spans,
+        local_names: ll_local_names, unknown_span: ll_unknown_span)
+
+pub fn lock_level_collect_functions(resources: {text: i64}, imports: {text: text}) -> [LockLevelFunction]:
+    ll_graph_failure = ""
+    ll_ast_work = 0
+    ll_ast_depth = 0
+    ll_resources = resources
+    ll_imports = imports
+    ll_callback_exprs = []
+    ll_callback_resources = []
+    ll_callback_parents = []
+    ll_callback_proofs = []
+    var functions: [LockLevelFunction] = []
+    var did: i64 = 0
+    while did < decl_count():
+        if functions.len() >= 4096 or not ll_budget():
+            ll_graph_failure = "[E-LOCK-LEVEL-003] static lock proof exceeds declaration/node budget"
+            break
+        val d = decl_get(did)
+        ll_begin_node()
+        ll_current_node = functions.len()
+        if d.tag == DECL_FN:
+            var p: i64 = 0
+            for name in d.param_names:
+                ll_local_names.push(name)
+                if p < d.param_types.len():
+                    val kind = d.param_types[p]
+                    if kind == TYPE_I64 or kind == TYPE_F64 or kind == TYPE_TEXT or kind == TYPE_BOOL: ll_scalar_names.push(name)
+                p = p + 1
+            for default_expr in decl_get_param_defaults(did):
+                if default_expr >= 0: ll_unknown(d.span_id)
+            ll_walk_stmts(d.body_stmts)
+            functions.push(ll_finish_node(did, d.name, lock_level_rank_for(did), -1, d.span_id))
+        elif resources.len() > 0 and (d.tag == DECL_VAL or d.tag == DECL_VAR or d.tag == DECL_LAZY_VAL) and lock_level_rank_for(did) < 0:
+            for init in d.body_stmts: ll_walk_expr(init)
+            functions.push(ll_finish_node(did, "@initializer:" + did.to_text(), -1, -1, d.span_id))
+        did = did + 1
+    var q: i64 = 0
+    while q < ll_callback_exprs.len() and ll_graph_failure == "":
+        if functions.len() >= 4096:
+            ll_graph_failure = "[E-LOCK-LEVEL-003] static lock proof exceeds graph node budget"
+            break
+        val expr_id = ll_callback_exprs[q]
+        val resource = ll_callback_resources[q]
+        val parent = functions[ll_callback_parents[q]]
+        ll_begin_node()
+        for name in parent.local_names: ll_local_names.push(name)
+        for proof in ll_callback_proofs[q].split("|"):
+            if proof != "" and ll_local_names.contains(proof): ll_unknown(parent.span)
+        val callback = expr_get(expr_id)
+        for param in callback.args:
+            val name = expr_get(param).s_val
+            ll_local_names.push(name)
+            ll_scalar_names.push(name)
+        ll_current_node = functions.len()
+        ll_in_callback = true
+        for body in callback.stmts: ll_walk_expr(body)
+        if callback.stmts.len() == 0 or not ll_scalar(callback.stmts[callback.stmts.len() - 1]): ll_unknown(callback.span_id)
+        functions.push(ll_finish_node(-1, "@callback:" + expr_id.to_text(), lock_level_rank_for(resource), resource, callback.span_id))
+        q = q + 1
+    ll_begin_node()
+    ll_resources = {}
+    ll_imports = {}
+    ll_callback_exprs = []
+    ll_callback_resources = []
+    ll_callback_parents = []
+    ll_callback_proofs = []
+    functions

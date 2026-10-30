@@ -1,0 +1,86 @@
+# SourceReader: the one read/update contract between a compile (or the test
+# runner) and a module's two artifacts -- its full parsed AST and its TLDR
+# companion. Callers depend on the trait; FileReader is today's direct
+# file/cache implementation. A cache-daemon-backed reader (CacheReader, a
+# later step) implements the same trait, so per-file compile jobs and the
+# runner's TLDR refresh never change when the backing store does.
+#
+#   read_src(path)    the module's AST: the frontend cache boundary
+#                     (frontend.spl frontend_parse_or_restore via
+#                     parse_full_frontend) restores the cached flat-pool AST
+#                     or parses and stores it
+#   read_tldr(path)   the module's current TLDR companion text, "" when it is
+#                     absent or stale for the source on disk
+#   update_src(path)  make the cached AST current; true when the source exists
+#   update_tldr(path) make the TLDR companion current (one parse also fills the
+#                     AST cache); "" on success, else the error
+#
+# No locks: every publication is temp + rename (module_artifacts_v1), and
+# concurrent producers of the same source write identical bytes.
+use std.io_runtime.{file_exists, file_read}
+use std.async.future.{Future}
+use std.async.poll.{Poll}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.driver.cache.module_artifacts_v1.{module_artifacts_emit_v1,
+    module_artifact_module_id_v1, module_tldr_companion_path_v1,
+    module_tldr_companion_fresh_v1}
+
+trait SourceReader:
+    fn read_src(path: text) -> ParserModule?
+    fn read_tldr(path: text) -> text
+    fn update_src(path: text) -> bool
+    fn update_tldr(path: text) -> text
+
+    # Async counterparts (cache plan section 4 step 1). The defaults resolve at
+    # once with the sync result, so a reader that has no async backing keeps
+    # today's behaviour; a daemon-backed reader overrides them with a future
+    # that resolves later. A Future carries no waker: its consumer re-polls.
+    fn read_src_async(path: text) -> Future<ParserModule?>:
+        Future.from_value(self.read_src(path))
+
+    fn update_tldr_async(path: text) -> Future<text>:
+        Future.from_value(self.update_tldr(path))
+
+struct FileReader:
+    tldr_root: text
+
+impl SourceReader for FileReader:
+    fn read_src(path: text) -> ParserModule?:
+        if not file_exists(path):
+            return nil
+        Some(parse_full_frontend(file_read(path), path,
+            module_artifact_module_id_v1(path), Logger(level: 0)))
+
+    fn read_tldr(path: text) -> text:
+        if not file_exists(path):
+            return ""
+        val tldr_path = module_tldr_companion_path_v1(self.tldr_root, path)
+        if not module_tldr_companion_fresh_v1(tldr_path, file_read(path)):
+            return ""
+        file_read(tldr_path)
+
+    fn update_src(path: text) -> bool:
+        self.read_src(path) != nil
+
+    fn update_tldr(path: text) -> text:
+        module_artifacts_emit_v1(path, self.tldr_root)
+
+pub fn file_source_reader_v1(tldr_root: text) -> FileReader:
+    FileReader(tldr_root: tldr_root)
+
+val AWAIT_NOW_MAX_POLLS: i64 = 1000000
+
+fn await_now<T>(f: Future<T>) -> T:
+    """Sync-caller bridge: poll `f` until Ready. A future nobody completes is a
+    bug, so the spin is bounded and panics instead of hanging."""
+    var n = 0
+    while n < AWAIT_NOW_MAX_POLLS:
+        val p: Poll<T> = f.poll()
+        match p:
+            case Poll.Ready(v): return v
+            case Poll.Pending: n = n + 1
+    panic("await_now: future still pending after {AWAIT_NOW_MAX_POLLS} polls")
+
+export SourceReader, FileReader, file_source_reader_v1, await_now

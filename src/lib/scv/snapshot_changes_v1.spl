@@ -1,0 +1,60 @@
+# Exact pair comparison; no ancestry/event stream is treated as absence proof.
+use std.scv.snapshot_v2.{ScvSnapshotV2, scv_snapshot_valid_v2,
+    scv_snapshot_scope_complete_v2, scv_snapshot_in_scope_v2,
+    scv_snapshot_file_index_v2, scv_snapshot_sorted_v2, scv_snapshot_path_valid_v2}
+
+pub struct ScvChangeBatchV1:
+    schema: i64
+    from_snapshot_id: text
+    to_snapshot_id: text
+    namespace: text
+    scope: text
+    coverage: text
+    added_paths: [text]
+    removed_paths: [text]
+    modified_paths: [text]
+    changed_directories: [text]
+
+pub fn scv_snapshot_ancestor_directories_v1(path: text, scope: text) -> [text]:
+    var result: [text] = []
+    val parts = path.split("/")
+    var directory = ""
+    var index = 0
+    while index + 1 < parts.len():
+        directory = if directory == "": parts[index] else: directory + "/" + parts[index]
+        if scv_snapshot_in_scope_v2(directory, scope): result = result.push(directory)
+        index = index + 1
+    result
+
+pub fn scv_snapshot_diff_exact_v1(base: ScvSnapshotV2, requested: ScvSnapshotV2,
+        scope: text) -> Result<ScvChangeBatchV1, text>:
+    if not scv_snapshot_valid_v2(base) or not scv_snapshot_valid_v2(requested):
+        return Err("diff-snapshot-invalid")
+    if base.namespace != requested.namespace or base.path_policy != requested.path_policy:
+        return Err("diff-source-domain-mismatch")
+    if not scv_snapshot_path_valid_v2(scope): return Err("diff-scope-invalid")
+    if not scv_snapshot_scope_complete_v2(base, scope) or not scv_snapshot_scope_complete_v2(requested, scope):
+        return Err("diff-coverage-unknown")
+    var added: [text] = []
+    var removed: [text] = []
+    var modified: [text] = []
+    var directories: [text] = []
+    for file in base.files:
+        if not scv_snapshot_in_scope_v2(file.path, scope): continue
+        val index = scv_snapshot_file_index_v2(requested, file.path)
+        if index < 0:
+            removed = removed.push(file.path)
+        else:
+            val other = requested.files[index]
+            if file.content_id != other.content_id or file.kind != other.kind or file.mode != other.mode:
+                modified = modified.push(file.path)
+    for file in requested.files:
+        if scv_snapshot_in_scope_v2(file.path, scope) and scv_snapshot_file_index_v2(base, file.path) < 0:
+            added = added.push(file.path)
+    for path in added + removed:
+        for directory in scv_snapshot_ancestor_directories_v1(path, scope):
+            if not directories.contains(directory): directories = directories.push(directory)
+    Ok(ScvChangeBatchV1(schema: 1, from_snapshot_id: base.snapshot_id,
+        to_snapshot_id: requested.snapshot_id, namespace: requested.namespace, scope: scope,
+        coverage: "complete", added_paths: added, removed_paths: removed,
+        modified_paths: modified, changed_directories: scv_snapshot_sorted_v2(directories)))

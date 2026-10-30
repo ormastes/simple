@@ -1,0 +1,172 @@
+"""
+## Purpose and audience
+Purpose: Prove mono infers a generic call's type arguments from the call's
+expected return type when the call is in a control-flow arm (match, if,
+return, block) at tail position.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-MONO-001 — stable requirement identity for this spec.
+
+"""
+# Type-argument inference from expected return type in control-flow arms
+
+Bug `doc/08_tracking/bug/mono_generic_return_ctx_inference_2026-10-27`:
+`fn rti_err<T>(code: text, message: text) -> Result<T, RtiError>` called as
+`case X: rti_err(...)` where the enclosing function's return type fixes `T`.
+
+Mono's `rewrite_expr_with_context_invocation_inner_v1` forwards the expected
+type only for direct `Call` expressions. Control-flow expressions (If, IfChain,
+MatchCase, Block) fall through to `rewrite_expr`, which rewrites arm bodies
+with NO context.
+
+Pre-fix verdict: examples with generic return-only calls in match arms / if
+branches at tail position FAIL (`unresolved_generic_calls > 0`,
+`specializations_created < expected`). Examples with explicit type args or
+annotated let bindings PASS (they use a different code path).
+
+## Harness landmine
+The parse -> HIR pipeline is inlined in each `it` block on purpose, mirroring
+`mono_source_inference_fixed_point_spec.spl`: the same code in a module-level
+helper loses recorded lowering state.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+use compiler.verify.post_mono_verify.*
+
+fn count_named(m: HirModule, name: text) -> i64:
+    var n = 0
+    for k in m.functions.keys():
+        val f: HirFunction = m.functions[k]
+        if f.name == name:
+            n = n + 1
+    n
+
+describe "mono type-argument inference from expected return type":
+    it "infers from match arm in tail position":
+        step("Verify: match arm with return-only generic call infers T")
+        # @req: REQ-COMPILER-MONO-001
+        val src = "fn fail<T>(m: text) -> Result<T, text>:\n    Err(m)\n\nfn f(x: i64) -> Result<i64, text>:\n    match x:\n        case 0: fail(\"zero\")\n        case _: Ok(x)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_match_return.spl", "mono_match_return", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_match_return.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.unresolved_generic_calls).to_equal(0)  # oracle: 0 — match arm's call must infer T from f's return type
+        expect(stats.specializations_created).to_equal(1)  # oracle: 1 — exactly `fail$i64`
+        val om: HirModule = out["m"]
+        expect(count_named(om, "fail$i64")).to_equal(1)
+        expect(count_named(om, "fail")).to_equal(0)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)  # oracle: 0 — section 9.5 invariants clean
+
+    it "infers from return inside if":
+        step("Verify: return inside if with generic call infers T")
+        # @req: REQ-COMPILER-MONO-001
+        val src = "fn fail<T>(m: text) -> Result<T, text>:\n    Err(m)\n\nfn f(x: i64) -> Result<i64, text>:\n    if x < 0:\n        return fail(\"neg\")\n    Ok(x)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_return_if.spl", "mono_return_if", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_return_if.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.unresolved_generic_calls).to_equal(0)  # oracle: 0
+        expect(stats.specializations_created).to_equal(1)  # oracle: 1 — `fail$i64`
+        val om: HirModule = out["m"]
+        expect(count_named(om, "fail$i64")).to_equal(1)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)
+
+    it "infers from if/else in tail position":
+        step("Verify: if/else block in tail position with generic call infers T")
+        # @req: REQ-COMPILER-MONO-001
+        val src = "fn fail<T>(m: text) -> Result<T, text>:\n    Err(m)\n\nfn f(x: i64) -> Result<i64, text>:\n    if x < 0:\n        fail(\"neg\")\n    else:\n        Ok(x)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_if_else_return.spl", "mono_if_else_return", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_if_else_return.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)  # oracle: 1 — `fail$i64`
+        val om: HirModule = out["m"]
+        expect(count_named(om, "fail$i64")).to_equal(1)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)
+
+    it "infers from if/elif/else chain in tail position":
+        step("Verify: if/elif/else chain with generic call infers T")
+        # @req: REQ-COMPILER-MONO-001
+        val src = "fn fail<T>(m: text) -> Result<T, text>:\n    Err(m)\n\nfn f(x: i64) -> Result<i64, text>:\n    if x < 0:\n        fail(\"neg\")\n    elif x == 0:\n        fail(\"zero\")\n    else:\n        Ok(x)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_if_chain_return.spl", "mono_if_chain_return", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_if_chain_return.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)  # oracle: 1 — `fail$i64` (called twice but same specialization)
+        val om: HirModule = out["m"]
+        expect(count_named(om, "fail$i64")).to_equal(1)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)
+
+    it "infers from annotated let binding":
+        step("Verify: annotated let with generic call infers T")
+        # @req: REQ-COMPILER-MONO-001
+        val src = "fn fail<T>(m: text) -> Result<T, text>:\n    Err(m)\n\nfn f(x: i64) -> Result<i64, text>:\n    val r: Result<i64, text> = fail(\"x\")\n    r\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_let_annotated.spl", "mono_let_annotated", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_let_annotated.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)  # oracle: 1 — `fail$i64`
+        val om: HirModule = out["m"]
+        expect(count_named(om, "fail$i64")).to_equal(1)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)
+
+    it "infers from nested block in match arm":
+        step("Verify: nested block in match arm infers T")
+        # @req: REQ-COMPILER-MONO-001
+        val src = "fn fail<T>(m: text) -> Result<T, text>:\n    Err(m)\n\nfn f(x: i64) -> Result<i64, text>:\n    match x:\n        case 0:\n            val msg = \"zero\"\n            fail(msg)\n        case _: Ok(x)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_match_block.spl", "mono_match_block", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_match_block.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)  # oracle: 1 — `fail$i64`
+        val om: HirModule = out["m"]
+        expect(count_named(om, "fail$i64")).to_equal(1)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)
+
+    it "infers with nominal type in return position":
+        step("Verify: match arm with nominal generic type infers T correctly")
+        # @req: REQ-COMPILER-MONO-001
+        val src = "struct Shape:\n    r: f64\n\nfn fail<T>(m: text) -> Result<T, text>:\n    Err(m)\n\nfn g(x: i64) -> Result<Shape, text>:\n    match x:\n        case 0: fail(\"none\")\n        case _: Ok(Shape(r: 1.0))\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_nominal_return.spl", "mono_nominal_return", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_nominal_return.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)  # oracle: 1 — `fail$Shape`
+        val om: HirModule = out["m"]
+        # Check that fail$Shape was created (the mangled name may be different; check that generic fail was specialized)
+        val fail_specializations = count_named(om, "fail$Shape")
+        expect(fail_specializations).to_equal(1)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)

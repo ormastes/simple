@@ -1,5 +1,21 @@
 # Agent Task Plan: Simple Platform Unification
 
+## Status update 2026-10-25 (verified against `origin/release/1.0.0` @ `57a129fb2b9`)
+
+Seven-plan item 1 status, per source presence plus git log. Source presence is
+not acceptance; no host is certified by this note.
+
+| Area | Status | Evidence |
+|---|---|---|
+| Contracts (`ParserProviderV1`, `EnvironmentSnapshotV1`, `VariantDescriptorV1`, `BindingPlanV1`, `FrontendFacetV1`, `StartupPlanV1`, `ProcessLaunchSpecV1`, SimpleOS image manifest, release evidence) | DONE (source-landed) | `src/compiler/00.common/structural_contracts/environment_variant_*`, `src/lib/nogc_sync_mut/composition/environment_variants/`, `src/app/startup/contract/startup_plan_v1.spl`, `src/lib/common/contracts/execution/{process_launch_spec_v1,simpleos_image_manifest_v1}.spl` |
+| Shared parser ownership / parity across compiler, interpreter, tooling | PARTIAL | `ParserProviderV1` dispatch exists; legacy provider is still the only executable one; `FlatAstBridge` migration open (bug trail `6c70e0ecef9`, `f938c3d00a6`) |
+| Environment-optimized provider selection, ABI validation, fallback, cache invalidation | PARTIAL | contracts + selector landed; system spec `test/03_system/app/compiler/feature/environment_optimized_dynamic_libraries_spec.spl` still carries `fail(...)`/pending bodies (41 sites) |
+| Compile-mode dynload (per-module dynlibs, import library) | OPEN | `doc/08_tracking/bug/dynload_mode_emits_no_per_module_dynlibs_2026-10-24.md` (`507a75ce07a`); per-dynlib receipt record PR #4426 |
+| Immutable release candidates + per-host release/bootstrap execution | OPEN | release-evidence producer stopped after third rejected review; no admitted per-host receipts under `doc/03_plan/evidence/seven_plans/` for item 1 beyond Windows frozen-path parity (`windows/item1_frozen_path_2026-09-29.md`) |
+| Claimed SimpleOS target boot | OPEN for item 1 acceptance | umbrella scaffold `test/03_system/seven_items_pending/item01_platform_spec.spl` (last touched `0f20291900b`, 2026-10-03) remains NOT_IMPLEMENTED |
+
+Done gate (umbrella §1) is **not met**.
+
 ## Ownership
 
 - Merge owner: primary implementation session for `simple_platform_unification`.

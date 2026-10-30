@@ -2,7 +2,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use std::ffi::CString;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 unsafe extern "C" {
     fn rt_driver_create(queue_depth: i64) -> i64;
     fn rt_driver_destroy(handle: i64);
@@ -69,7 +69,7 @@ fn checked_text_span<'a>(
     Ok((text, len))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn dispatch(name: &str, args: &[Value]) -> Option<Result<Value, CompileError>> {
     match dispatch_checked(name, args) {
         Ok(Some(value)) => Some(Ok(value)),
@@ -78,7 +78,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Option<Result<Value, CompileError
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[inline]
 fn dispatch_checked(name: &str, args: &[Value]) -> Result<Option<Value>, CompileError> {
     let result = match name {
@@ -237,7 +237,7 @@ fn dispatch_checked(name: &str, args: &[Value]) -> Result<Option<Value>, Compile
     Ok(Some(result?))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn dispatch(name: &str, _args: &[Value]) -> Option<Result<Value, CompileError>> {
     if name.starts_with("rt_driver_") {
         Some(Err(CompileError::runtime(

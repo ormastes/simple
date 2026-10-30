@@ -1,6 +1,6 @@
 use std.spec.*
-use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_select_v1, runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1, runtime_owner_write_bytes_v1}
-use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_compile_owner_v1}
+use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_select_v1, runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1, runtime_owner_cede_archive_file_for_machine_v1, runtime_owner_write_bytes_v1}
+use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_compile_owner_v1, llvm_runtime_owner_coff_flavor_v1, llvm_runtime_owner_gnu_machine_v1}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 
 # Hand-built AMD64 COFF member in an ar archive (374 bytes):
@@ -53,6 +53,26 @@ use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_compile_
 use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_input_dir}
 
 describe "Runtime symbol owner switch":
+    it "uses explicit Windows target ABI instead of the ambient host driver":
+        for host in ["windows", "linux", "macos"]:
+            expect(llvm_runtime_owner_coff_flavor_v1(host, "x86_64-pc-windows-gnu", false)).to_equal("windows-gnu")
+            expect(llvm_runtime_owner_coff_flavor_v1(host, "aarch64-pc-windows-gnullvm", false)).to_equal("windows-gnu")
+            expect(llvm_runtime_owner_coff_flavor_v1(host, "x86_64-pc-windows-msvc", true)).to_equal("windows-msvc")
+            expect(llvm_runtime_owner_coff_flavor_v1(host, "x86_64-unknown-linux-gnu", true)).to_equal("")
+        expect(llvm_runtime_owner_coff_flavor_v1("windows", "host", true)).to_equal("windows-gnu")
+        expect(llvm_runtime_owner_coff_flavor_v1("windows", "", false)).to_equal("windows-msvc")
+        expect(llvm_runtime_owner_gnu_machine_v1("x86_64-pc-windows-gnu")).to_equal(34404)
+        expect(llvm_runtime_owner_gnu_machine_v1("aarch64-pc-windows-gnullvm")).to_equal(43620)
+        expect(llvm_runtime_owner_gnu_machine_v1("i686-pc-windows-gnu")).to_equal(0)
+        expect(llvm_runtime_owner_gnu_machine_v1("x86_64-pc-windows-msvc")).to_equal(0)
+
+    it "rejects a real COFF member with a different target machine before ceding":
+        val path = "build/test_tmp/runtime_owner/machine-mismatch.a"
+        expect(dir_create_all("build/test_tmp/runtime_owner")).to_equal(true)
+        expect(runtime_owner_write_bytes_v1(path, owner_fixture_bytes())).to_equal(true)
+        expect(runtime_owner_cede_archive_file_for_machine_v1(path, {"rt_x": true}, 43620).is_err()).to_equal(true)
+        expect(runtime_owner_cede_archive_file_for_machine_v1(path, {"rt_x": true}, 34404).unwrap().undefined).to_equal(1)
+
     it "defaults to c and lets the flag win over SIMPLE_RUNTIME_OWNER":
         expect(runtime_owner_select_v1("", "").unwrap()).to_equal("c")
         expect(runtime_owner_select_v1("", "rust").unwrap()).to_equal("rust")

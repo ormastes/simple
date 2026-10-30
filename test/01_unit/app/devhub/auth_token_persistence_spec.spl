@@ -1,0 +1,56 @@
+# @cover src/app/devhub/auth_token_store.spl
+use std.spec.*
+use std.spec.step
+use std.env.{env_get}
+use std.io.file_ops.{secure_temp_dir}
+use std.io.dir_ops.{dir_remove_all}
+use std.io_runtime.{read_file_text_result}
+use app.devhub.auth_token_store.{save_auth_token_to, load_auth_token_from}
+
+fn auth_store_test_root() -> text:
+    var parent = env_get("TMPDIR")
+    if parent == "": parent = env_get("TEMP")
+    if parent == "": parent = env_get("TMP")
+    if parent == "": parent = "/tmp"
+    secure_temp_dir(parent, "devhub-auth-store").unwrap()
+
+describe "DevHub private auth token persistence":
+    it "should round trip quoted Unicode tokens and preserve other providers":
+        step("Write two synthetic provider credentials to the actual private file owner")
+        val root = auth_store_test_root()
+        val path = root + "/auth.sdn"
+        val token = "héllo 日本 \"quote\" \\path\nsecond line"
+        val first = save_auth_token_to(path, "jira", token)
+        val second = save_auth_token_to(path, "confluence.primary", "synthetic-other")
+        val loaded = load_auth_token_from(path, "jira")
+        val other = load_auth_token_from(path, "confluence.primary")
+        val cleaned = dir_remove_all(root)
+        expect(first and second and cleaned).to_equal(true)
+        expect(loaded).to_equal(token)
+        expect(other).to_equal("synthetic-other")
+
+    it "should reject provider section injection without changing the file":
+        step("Attempt to insert a second section through a provider name")
+        val root = auth_store_test_root()
+        val path = root + "/auth.sdn"
+        val saved = save_auth_token_to(path, "jira", "synthetic-before")
+        val before = read_file_text_result(path).unwrap()
+        val rejected = save_auth_token_to(path, "jira:\nother", "synthetic-after")
+        val after = read_file_text_result(path).unwrap()
+        val cleaned = dir_remove_all(root)
+        expect(saved and cleaned).to_equal(true)
+        expect(rejected).to_equal(false)
+        expect(after).to_equal(before)
+
+    it "should remove one provider and fail closed for an invalid destination":
+        step("Remove a token and attempt to replace a directory with a token file")
+        val root = auth_store_test_root()
+        val path = root + "/auth.sdn"
+        val first = save_auth_token_to(path, "jira", "synthetic-delete")
+        val removed = save_auth_token_to(path, "jira", "")
+        val loaded = load_auth_token_from(path, "jira")
+        val invalid = save_auth_token_to(root, "jira", "synthetic-value")
+        val cleaned = dir_remove_all(root)
+        expect(first and removed and cleaned).to_equal(true)
+        expect(loaded).to_equal("")
+        expect(invalid).to_equal(false)

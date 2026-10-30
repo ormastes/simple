@@ -1,0 +1,160 @@
+# Static @lock_level V1: synchronous function scopes and scalar canonical
+# Mutex callback lifetimes. Unknown manual guard operations remain unproved.
+use compiler.core.ast.{DECL_FN, DECL_USE, DECL_CE, DECL_CLI, DECL_AOP_ADVICE, decl_count, decl_get, expr_get, module_get_decls}
+use compiler.core.ast_expr.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT}
+use compiler.core.types.{span_line, span_col}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_metadata_count}
+use compiler.frontend.core.static_lock_level_graph.{LockLevelFunction, lock_level_collect_functions, lock_level_graph_error}
+use compiler.frontend.core.static_lock_level_resources.{lock_level_canonical_imports, lock_level_resource_names, lock_level_validate_resources}
+
+var ll_error_line: i64 = 0
+var ll_error_col: i64 = 0
+
+fn ll_diagnostic(code: text, message: text, span: i64) -> text:
+    if span >= 0:
+        ll_error_line = span_line(span)
+        ll_error_col = span_col(span)
+    "[{code}] {message}"
+
+pub fn lock_level_error_line() -> i64:
+    ll_error_line
+
+pub fn lock_level_error_col() -> i64:
+    ll_error_col
+
+pub fn check_lock_level_order() -> text:
+    """Reject a descending or unprovable ranked synchronous call scope.
+
+    No annotated declarations means no graph allocation/walk. Each ranked
+    root visits every reachable local function at most once; recursion uses
+    a bounded-by-graph worklist rather than recursive call-chain expansion.
+    """
+    ll_error_line = 0
+    ll_error_col = 0
+    if lock_level_metadata_count() == 0: return ""
+    if lock_level_metadata_count() > 4096 or decl_count() > 100000:
+        return ll_diagnostic("E-LOCK-LEVEL-003", "static lock proof exceeds metadata/declaration budget", -1)
+    var declaration_work: i64 = decl_count()
+    var did: i64 = 0
+    while did < decl_count():
+        val declaration = decl_get(did)
+        if declaration.tag == DECL_CE or declaration.tag == DECL_CLI or declaration.tag == DECL_AOP_ADVICE:
+            return ll_diagnostic("E-LOCK-LEVEL-003", "executable CE/CLI/AOP declarations have unresolved lock effects", declaration.span_id)
+        # Attribute-style advice lowers to this synthetic val marker rather
+        # than DECL_AOP_ADVICE. Its handler can inject hidden call edges too.
+        if declaration.name.starts_with("_expr_advice_"):
+            return ll_diagnostic("E-LOCK-LEVEL-003", "attribute advice has unresolved lock effects", declaration.span_id)
+        for default_expr in declaration.field_defaults:
+            if default_expr >= 0:
+                val field = expr_get(default_expr)
+                if field.tag != EXPR_INT_LIT and field.tag != EXPR_FLOAT_LIT and field.tag != EXPR_STRING_LIT and field.tag != EXPR_BOOL_LIT and field.tag != EXPR_NIL_LIT:
+                    return ll_diagnostic("E-LOCK-LEVEL-003", "field default has unresolved lock effects", field.span_id)
+        declaration_work = declaration_work + declaration.param_names.len() + declaration.imports.len() + declaration.body_stmts.len()
+        if declaration_work > 100000:
+            return ll_diagnostic("E-LOCK-LEVEL-003", "static lock proof exceeds declaration metadata budget", declaration.span_id)
+        did = did + 1
+    val imports = lock_level_canonical_imports()
+    val resources = lock_level_resource_names()
+    val resource_error = lock_level_validate_resources(imports, resources)
+    if resource_error != "": return resource_error
+    val functions = lock_level_collect_functions(resources, imports)
+    if lock_level_graph_error() != "": return lock_level_graph_error()
+    var by_decl: {i64: i64} = {}
+    var i: i64 = 0
+    while i < functions.len():
+        if functions[i].decl_id >= 0: by_decl[functions[i].decl_id] = i
+        i = i + 1
+    var targets: {text: i64} = {}
+    i = 0
+    while i < functions.len():
+        if functions[i].resource_id >= 0: targets[functions[i].name] = i
+        i = i + 1
+    # Only direct module-level fn declarations are resolvable. Methods,
+    # imports and value bindings never become calls by basename matching.
+    for did in module_get_decls():
+        val d = decl_get(did)
+        if targets.contains_key(d.name):
+            targets[d.name] = -1
+        elif d.tag == DECL_FN and by_decl.contains_key(did):
+            targets[d.name] = by_decl[did]
+        else:
+            targets[d.name] = -1
+    # Imported names can shadow local callables. Do not resolve an ambiguous
+    # binding by whichever declaration happened to populate the map first.
+    var wildcard = false
+    for did in module_get_decls():
+        val d = decl_get(did)
+        if d.tag == DECL_USE:
+            if d.imports.len() == 0: wildcard = true
+            for imported in d.imports:
+                val parts = imported.split(":")
+                targets[parts[parts.len() - 1]] = -1
+    if wildcard:
+        for f in functions:
+            if f.resource_id < 0: targets[f.name] = -1
+    var edges: [[i64]] = []
+    var unknowns: [i64] = []
+    for f in functions:
+        var resolved: [i64] = []
+        var unknown = f.unknown_span
+        var c: i64 = 0
+        while c < f.call_names.len():
+            val name = f.call_names[c]
+            val target = targets.get(name) ?? -1
+            if target < 0 or f.local_names.contains(name):
+                resolved.push(-1)
+                if unknown < 0: unknown = if f.call_spans[c] >= 0: f.call_spans[c] else: 0
+            else:
+                resolved.push(target)
+            c = c + 1
+        edges.push(resolved)
+        unknowns.push(unknown)
+    # Resource-ranking opts the module into a closed-world proof boundary.
+    # This catches raw manual locking and resource alias escapes in helpers
+    # even when those helpers are not reachable from an annotated function.
+    if resources.len() > 0:
+        i = 0
+        for unknown in unknowns:
+            if unknown >= 0:
+                return ll_diagnostic("E-LOCK-LEVEL-003", "ranked Mutex module contains an unproved operation, alias, callback or manual acquisition", unknown)
+            i = i + 1
+    var root: i64 = 0
+    var graph_work: i64 = 0
+    while root < functions.len():
+        val ranked = functions[root]
+        if ranked.rank >= 0:
+            graph_work = graph_work + functions.len()
+            if graph_work > 200000:
+                return ll_diagnostic("E-LOCK-LEVEL-003", "static lock proof exceeds graph work budget", ranked.span)
+            var visited: [bool] = []
+            for f in functions: visited.push(false)
+            var work: [i64] = [root]
+            visited[root] = true
+            var cursor: i64 = 0
+            while cursor < work.len():
+                val current = work[cursor]
+                val f = functions[current]
+                if unknowns[current] >= 0:
+                    return ll_diagnostic("E-LOCK-LEVEL-003",
+                        "cannot prove lock effects of call, callback, suspension or operation reachable from ranked function `" + ranked.name + "`", unknowns[current])
+                var c: i64 = 0
+                while c < edges[current].len():
+                    graph_work = graph_work + 1
+                    if graph_work > 200000:
+                        return ll_diagnostic("E-LOCK-LEVEL-003", "static lock proof exceeds graph work budget", f.span)
+                    val target = edges[current][c]
+                    if target >= 0:
+                        val callee = functions[target]
+                        if callee.rank >= 0 and callee.rank < ranked.rank:
+                            return ll_diagnostic("E-LOCK-LEVEL-002",
+                                "cannot acquire lock level " + callee.rank.to_text() + " in `" + callee.name + "` while level " + ranked.rank.to_text() + " is held by `" + ranked.name + "`", f.call_spans[c])
+                        if target == root or (ranked.resource_id >= 0 and callee.resource_id == ranked.resource_id):
+                            return ll_diagnostic("E-LOCK-LEVEL-003",
+                                "recursive ranked acquisition cycle through `" + ranked.name + "`", f.call_spans[c])
+                        if not visited[target]:
+                            visited[target] = true
+                            work.push(target)
+                    c = c + 1
+                cursor = cursor + 1
+        root = root + 1
+    ""

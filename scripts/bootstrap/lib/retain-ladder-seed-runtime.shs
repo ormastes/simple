@@ -1,0 +1,90 @@
+#!/bin/sh
+# Retain actual completed GNU Cargo outputs for diagnostics/continuation.
+# No runtime selection, replacement, rebuild or compiler admission occurs here.
+set -eu
+root=${1:?repository} profile=${2:?Cargo bootstrap directory} producer=${3:?retained producer}
+root=$(CDPATH= cd -- "$root" && pwd -P)
+profile=$(CDPATH= cd -- "$profile" && pwd -P)
+producer=$(CDPATH= cd -- "$producer" && pwd -P)
+[ -f "$profile/simple.exe" ] && [ ! -L "$profile/simple.exe" ] &&
+  [ -s "$profile/simple.exe" ] && cmp -s "$profile/simple.exe" "$producer/simple.exe" || {
+  echo 'ladder-runtime-retention: retained seed differs from actual Cargo producer' >&2; exit 1;
+}
+runtime=$producer/runtime
+[ ! -e "$runtime" ] && [ ! -L "$runtime" ] || {
+  echo 'ladder-runtime-retention: refusing to replace earlier retained runtime' >&2; exit 1;
+}
+mkdir "$runtime"
+manifest=$runtime/retention.sdn
+carriage_return=$(printf '\r')
+text_field() {
+  case "$2" in *'
+'*|*"$carriage_return"*) echo 'ladder-runtime-retention: multiline identity refused' >&2; exit 1 ;; esac
+  escaped=$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  printf '%s: "%s"\n' "$1" "$escaped" >> "$manifest.tmp"
+}
+hash_file() {
+  hash_line=$(sha256sum "$1")
+  printf '%s\n' "${hash_line%% *}"
+}
+printf 'schema: phase-ladder-cargo-runtime-retention-v1\nstatus: complete\nselection: not-observed\nadmission: none\n' > "$manifest.tmp"
+text_field source_revision "$(git -C "$root" rev-parse HEAD)"
+text_field original_profile "$profile"
+text_field original_seed "$profile/simple.exe"
+text_field producer_sha256 "$(hash_file "$producer/simple.exe")"
+text_field profile bootstrap
+text_field driver_command 'cargo build --profile bootstrap -p simple-driver'
+text_field native_all_command 'cargo build --profile bootstrap -p simple-native-all --features driver-compat'
+text_field native_all_features driver-compat
+text_field runtime_selection_policy 'original seed sibling / explicit runtime roots; unchanged, link not observed'
+count=0
+retain_file() {
+  original=$1 relative=$2
+  [ -f "$original" ] && [ ! -L "$original" ] && [ -s "$original" ] || {
+    echo "ladder-runtime-retention: missing, empty or linked Cargo output: $original" >&2; exit 1;
+  }
+  [ "$count" -lt 256 ] || { echo 'ladder-runtime-retention: file bound exceeded' >&2; exit 1; }
+  before=$(hash_file "$original")
+  mkdir -p "$(dirname "$runtime/$relative")"
+  cp "$original" "$runtime/$relative"
+  [ "$before" = "$(hash_file "$original")" ] &&
+    [ "$before" = "$(hash_file "$runtime/$relative")" ] || {
+    echo 'ladder-runtime-retention: original or copied runtime changed' >&2; exit 1;
+  }
+  text_field "file_${count}_relative" "$relative"
+  text_field "file_${count}_original" "$original"
+  text_field "file_${count}_sha256" "$before"
+  count=$((count + 1))
+}
+# GNU archive name is selected by the seed's actual LinkerFlavor::Gnu path.
+# Keep optional produced companions, not substitutes from another ABI/profile.
+retain_file "$profile/libsimple_native_all.a" libsimple_native_all.a
+for leaf in libsimple_runtime.a simple_runtime.dll libsimple_runtime.dll libsimple_runtime.dll.a; do
+  if [ -e "$profile/$leaf" ] || [ -L "$profile/$leaf" ]; then retain_file "$profile/$leaf" "$leaf"; fi
+done
+for hosted in "$profile"/deps/libspl_hosted_runtime-*.rlib; do
+  if [ -e "$hosted" ] || [ -L "$hosted" ]; then retain_file "$hosted" "deps/${hosted##*/}"; fi
+done
+for source_file in Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml; do
+  retain_file "$root/src/compiler_rust/$source_file" "cargo-inputs/$source_file"
+done
+# Provider paths, binary hashes and actual version outputs make the toolchain
+# identifiable without treating a path or a receipt as runtime qualification.
+tools=$runtime/toolchain.txt
+: > "$tools"
+for tool in cargo rustc clang ld.lld llvm-ar llvm-nm; do
+  selected=$(command -v "$tool")
+  printf 'tool=%s\npath=%s\nsha256=%s\n' "$tool" "$selected" "$(hash_file "$selected")" >> "$tools"
+  # Rustup resolves rust-toolchain.toml from Cargo's actual working directory,
+  # not the repository root where this retention helper is invoked.
+  (cd "$root/src/compiler_rust" &&
+    case "$tool" in cargo|rustc) "$selected" -vV ;; *) "$selected" --version ;; esac) >> "$tools" 2>&1
+done
+for name in SIMPLE_WINDOWS_ABI SIMPLE_MINGW_ROOT CC CXX AR RUSTC RUSTFLAGS CARGO_BUILD_TARGET CARGO_TARGET_DIR CARGO_BUILD_JOBS SIMPLE_RUNTIME_PATH; do
+  value=$(printenv "$name" 2>/dev/null || :)
+  text_field "environment_$name" "$value"
+done
+text_field toolchain_sha256 "$(hash_file "$tools")"
+printf 'file_count: %s\nretention_complete: true\n' "$count" >> "$manifest.tmp"
+mv "$manifest.tmp" "$manifest"
+echo "ladder-runtime-retention: original GNU Cargo runtime bytes retained under $runtime (selection unobserved; admission none)"

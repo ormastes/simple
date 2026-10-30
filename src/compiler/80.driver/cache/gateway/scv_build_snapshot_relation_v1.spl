@@ -1,0 +1,97 @@
+# Diagnostic correspondence only. This module cannot issue a scope, validate
+# an issuer, or grant artifact reuse. Actual owner projections remain required.
+use std.scv.build_capture_v1.{BuildFrozenSnapshotV1, scv_build_snapshot_valid_v1}
+use compiler.common.cache_contract.snapshot_contract_v1.{CompileSnapshotV1, SourceBlobV1, PathSemanticsV1}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_compile_snapshot_digest_v1, canonical_source_blob_digest_v1}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+
+pub struct ScvBuildSnapshotDiagnosticV1:
+    build_snapshot_id: text
+    compiler_snapshot_digest: text
+    source_rows_match: bool
+    identity_fields_match: bool
+    matched_sources: i64
+    semantic_authorized: bool
+    missing_authorities: [text]
+
+fn _ascii_path_v1(path: text) -> bool:
+    for index in 0..path.len():
+        if path.char_code_at(index) > 127: return false
+    true
+
+pub fn scv_build_snapshot_diagnose_v1(frozen: BuildFrozenSnapshotV1,
+        actual: CompileSnapshotV1, source_blobs: [SourceBlobV1],
+        observed_environment_digest: text) -> Result<ScvBuildSnapshotDiagnosticV1, text>:
+    if not scv_build_snapshot_valid_v1(frozen): return Err("build-frozen-snapshot-invalid")
+    if not three_payload_contract_digest_valid_v1(observed_environment_digest):
+        return Err("build-observed-environment-invalid")
+    if actual.source_entries.len() > 65536 or source_blobs.len() > 65536:
+        return Err("build-compiler-source-bounds")
+    val compiler_digest = canonical_compile_snapshot_digest_v1(actual)
+    if compiler_digest == "": return Err("build-canonical-compiler-snapshot-invalid")
+    # Equality of these identities is necessary, but the observed environment
+    # argument is still a copied diagnostic value, never task-context authority.
+    val identities = (actual.configuration_digest == frozen.universe.configuration_digest and
+        actual.target_layout_digest == frozen.universe.target_digest and
+        actual.compiler_owner_digest == frozen.universe.compiler_digest and
+        actual.runtime_digest == frozen.universe.runtime_digest and
+        actual.path_policy_digest == frozen.universe.path_policy_digest and
+        observed_environment_digest == frozen.universe.environment_digest)
+    var matched = 0
+    var source_match = actual.source_entries.len() == source_blobs.len()
+    var mapped: Dict<text, bool> = {}
+    var blobs_by_digest: Dict<text, SourceBlobV1> = {}
+    for blob in source_blobs:
+        val digest = canonical_source_blob_digest_v1(blob)
+        if digest == "" or blobs_by_digest.contains_key(digest): source_match = false
+        else: blobs_by_digest[digest] = blob
+    var entries_by_path: Dict<text, i64> = {}
+    for index in 0..frozen.entries.len(): entries_by_path[frozen.entries[index].path] = index
+    for entry in actual.source_entries:
+        val path = entry.logical_path
+        if (mapped.contains_key(path.module_relative_utf8) or
+                not entries_by_path.contains_key(path.module_relative_utf8) or
+                not blobs_by_digest.contains_key(entry.source_blob_digest)):
+            source_match = false
+            continue
+        mapped[path.module_relative_utf8] = true
+        val input = frozen.entries[entries_by_path[path.module_relative_utf8]]
+        val blob = blobs_by_digest[entry.source_blob_digest]
+        # Capture has exact UTF8 paths. The compiler's NFC path policy has no
+        # owner-provided normalization witness; only ASCII correspondence is
+        # safe to diagnose. A namespace digest is checked inside its own domain,
+        # never manufactured by hashing the SCV namespace or snapshot ID.
+        if (not _ascii_path_v1(path.module_relative_utf8) or input.kind != "regular" or
+                path.path_semantics != PathSemanticsV1.CaseSensitiveNfc or
+                path.repository_namespace_digest != actual.repository_namespace_digest or
+                blob.logical_path.module_relative_utf8 != path.module_relative_utf8 or
+                blob.logical_path.repository_namespace_digest != path.repository_namespace_digest or
+                blob.logical_path.path_semantics != path.path_semantics or
+                blob.source_bytes != input.bytes):
+            source_match = false
+            continue
+        if input.origin == "generated":
+            if blob.generated_provenance == nil:
+                source_match = false
+                continue
+            if blob.generated_provenance.unwrap().producer_digest != input.producer_digest:
+                source_match = false
+                continue
+        elif blob.generated_provenance != nil:
+            source_match = false
+            continue
+        matched = matched + 1
+    # Extra regular inputs may be configuration/external data rather than
+    # compiler source. Keep them as an explicit unresolved provider obligation.
+    var regular_count = 0
+    for input in frozen.entries:
+        if input.kind == "regular": regular_count = regular_count + 1
+    if matched != regular_count: source_match = false
+    Ok(ScvBuildSnapshotDiagnosticV1(build_snapshot_id: frozen.snapshot_id,
+        compiler_snapshot_digest: compiler_digest, source_rows_match: source_match,
+        identity_fields_match: identities, matched_sources: matched,
+        semantic_authorized: false, missing_authorities: [
+            "compiler-build-namespace-owner", "compiler-build-path-policy-owner",
+            "resolver-candidate-directory-owner", "generated-input-owner",
+            "provider-toolchain-owner", "live-complete-semantic-readset"]))

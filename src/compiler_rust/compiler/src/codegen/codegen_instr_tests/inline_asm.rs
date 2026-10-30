@@ -25,6 +25,7 @@ fn codegen_inline_asm_single_instruction_collects_cli() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["cli".to_string()],
             volatile: false,
             constraints: String::new(),
@@ -51,6 +52,7 @@ fn codegen_inline_asm_multi_instruction_collects_cli_hlt() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["cli".to_string(), "hlt".to_string()],
             volatile: false,
             constraints: String::new(),
@@ -78,6 +80,7 @@ fn native_inline_asm_x86_target_uses_intel_syntax() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["mov ax, 0x28".to_string(), "ltr ax".to_string()],
             volatile: true,
             constraints: String::new(),
@@ -110,6 +113,7 @@ fn native_inline_asm_riscv_target_preserves_raw_instructions() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["wfi".to_string(), "j .".to_string()],
             volatile: true,
             constraints: String::new(),
@@ -141,6 +145,7 @@ fn native_inline_asm_skips_unresolved_simple_operands() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["mov {out}, cr3".to_string()],
             volatile: true,
             constraints: String::new(),
@@ -171,6 +176,7 @@ fn native_inline_asm_c_skips_simple_operand_directives() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec![
                 "nop".to_string(),
                 "in(reg) id".to_string(),
@@ -260,6 +266,7 @@ fn native_inline_asm_riscv_target_rejects_x86_blocks() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["in eax, dx".to_string()],
             volatile: true,
             constraints: String::new(),
@@ -267,6 +274,7 @@ fn native_inline_asm_riscv_target_rejects_x86_blocks() {
             outputs: vec![],
         });
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["mov cr3, pd".to_string()],
             volatile: true,
             constraints: String::new(),
@@ -274,6 +282,7 @@ fn native_inline_asm_riscv_target_rejects_x86_blocks() {
             outputs: vec![],
         });
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["out dx, eax".to_string()],
             volatile: true,
             constraints: String::new(),
@@ -281,6 +290,7 @@ fn native_inline_asm_riscv_target_rejects_x86_blocks() {
             outputs: vec![],
         });
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["invlpg [addr]".to_string()],
             volatile: true,
             constraints: String::new(),
@@ -290,6 +300,7 @@ fn native_inline_asm_riscv_target_rejects_x86_blocks() {
         // A genuinely riscv block must survive the same filter, so the test
         // cannot pass by emitting nothing at all.
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["csrr t0, mhartid".to_string()],
             volatile: true,
             constraints: String::new(),
@@ -327,6 +338,7 @@ fn native_inline_asm_x86_target_still_rejects_riscv_blocks() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["csrw mtvec, t0".to_string()],
             volatile: true,
             constraints: String::new(),
@@ -334,6 +346,7 @@ fn native_inline_asm_x86_target_still_rejects_riscv_blocks() {
             outputs: vec![],
         });
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec!["cli".to_string(), "hlt".to_string()],
             volatile: true,
             constraints: String::new(),
@@ -368,6 +381,7 @@ fn native_inline_asm_riscv_skips_block_form_operand_placeholders() {
         let ret = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::InlineAsm {
+            dialect: crate::hir::AsmDialect::Default,
             instructions: vec![
                 "csrr {0}, mcause".to_string(),
                 "csrc mip, {msie}".to_string(),
@@ -394,4 +408,82 @@ fn native_inline_asm_riscv_skips_block_form_operand_placeholders() {
     assert!(!c.contains("csrc mip, msie"));
     assert!(c.contains("skipped Simple asm with unresolved operands"));
     assert!(c.contains("\"wfi\\n\""), "unbound lines in the same block must survive");
+}
+
+#[test]
+fn inline_asm_dialect_defaults_and_conflicts() {
+    use crate::hir::AsmDialect;
+    assert_eq!(AsmDialect::from_options([]), Ok(AsmDialect::Default));
+    assert_eq!(AsmDialect::from_options(["nostack", "intel_syntax"]), Ok(AsmDialect::Intel));
+    assert!(AsmDialect::from_options(["att_syntax", "intel_syntax"]).is_err());
+    assert!(AsmDialect::from_options(["intel_syntax", "att_syntax"]).is_err());
+}
+
+#[test]
+fn hir_rejects_conflicting_explicit_asm_syntax() {
+    let source = "fn main() -> i64:\n    asm volatile(\"nop\", options(att_syntax, intel_syntax))\n    return 0\n";
+    let mut parser = simple_parser::Parser::new(source);
+    let ast = parser.parse().expect("parse conflict");
+    let mut lowerer = Lowerer::new();
+    let error = lowerer.lower_module(&ast).expect_err("conflicting syntax must fail");
+    assert!(error.to_string().contains("E-ASM-DIALECT"));
+}
+
+#[test]
+fn inline_asm_explicit_dialect_survives_hir_and_mir() {
+    use crate::hir::AsmDialect;
+    for (option, expected) in [("", AsmDialect::Default), (", options(intel_syntax)", AsmDialect::Intel)] {
+        let source = format!("fn main() -> i64:\n    asm volatile(\"nop\"{option})\n    return 0\n");
+        let mut parser = simple_parser::Parser::new(&source);
+        let ast = parser.parse().expect("parse dialect");
+        let mut lowerer = Lowerer::new();
+        lowerer.set_lenient_types(true);
+        let hir = lowerer.lower_module(&ast).expect("lower dialect");
+        assert!(hir.functions.iter().flat_map(|f| &f.body).any(|stmt|
+            matches!(stmt, HirStmt::InlineAsm { dialect, .. } if *dialect == expected)));
+        let mir = crate::mir::lower_to_mir(&hir).expect("MIR dialect");
+        assert!(mir.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions).any(|inst|
+            matches!(inst, MirInst::InlineAsm { dialect, .. } if *dialect == expected)));
+    }
+}
+
+#[test]
+fn sidecar_dialect_identity_and_target_admission() {
+    use crate::hir::AsmDialect;
+    use crate::codegen::inline_asm::{clear_inline_asm_blocks, register_inline_asm};
+    use crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target;
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    clear_inline_asm_blocks();
+    let instructions = vec!["nop".to_string()];
+    let default = register_inline_asm(&instructions, true, AsmDialect::Default);
+    let att = register_inline_asm(&instructions, true, AsmDialect::Att);
+    let intel = register_inline_asm(&instructions, true, AsmDialect::Intel);
+    assert_ne!(default, att);
+    assert_ne!(default, intel);
+    assert_ne!(att, intel);
+    assert_eq!(intel, register_inline_asm(&instructions, true, AsmDialect::Intel));
+    clear_inline_asm_blocks();
+    for (dialect, expects_intel) in [(AsmDialect::Default, true), (AsmDialect::Att, false), (AsmDialect::Intel, true)] {
+        clear_inline_asm_blocks();
+        register_inline_asm(&instructions, true, dialect);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_inline_asm_c_for_target(dir.path(), Some(("x86_64-unknown-none", "", "")))
+            .expect("dialect admitted").expect("sidecar");
+        let source = std::fs::read_to_string(path).expect("source");
+        assert_eq!(source.contains(".intel_syntax noprefix"), expects_intel);
+        assert_eq!(source.contains(".att_syntax prefix"), expects_intel);
+        assert!(source.contains("nop"));
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert!(write_inline_asm_c_for_target(dir.path(), Some(("aarch64-unknown-none", "", ""))).is_err());
+    assert!(!dir.path().join("simple_asm_blocks.c").exists());
+    // Preserve the existing whole-closure foreign-architecture filter. This
+    // source-generation assertion is not ARM or x86 native qualification.
+    clear_inline_asm_blocks();
+    register_inline_asm(&["out dx, al".to_string()], true, AsmDialect::Intel);
+    let foreign = tempfile::tempdir().expect("foreign tempdir");
+    let path = write_inline_asm_c_for_target(foreign.path(), Some(("aarch64-unknown-none", "", "")))
+        .expect("foreign block filtered").expect("sidecar");
+    assert!(!std::fs::read_to_string(path).expect("foreign source").contains("out dx, al"));
+    clear_inline_asm_blocks();
 }

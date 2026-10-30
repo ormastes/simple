@@ -1,6 +1,6 @@
 # @req MBH-REQ-003 MBH-REQ-004 MBH-REQ-005 MBH-REQ-006 MBH-REQ-009
 use std.spec.{describe, it, expect, step}
-use std.io.{file_write, file_read}
+use std.io.{file_write, file_read, file_exists}
 use std.io_runtime.{dir_create_all, file_hash_sha256_or_empty, file_delete}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.cache.reverse_reference_key.{
@@ -10,17 +10,20 @@ use compiler.common.cache.reverse_reference_key.{
 use compiler.common.cache.phase_compatibility_manifest.{
     PHASE_COMPATIBILITY_FRONTEND_V1, PHASE_COMPATIBILITY_NATIVE_V1,
     PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
-    PhaseCompatibilityManifestV1, PhaseCompatibilityExpectationV1,
+    PhaseCompatibilityManifestV1, PhaseCompatibilityExpectationV1, PhaseCompatibilityItemV1,
     phase_compatibility_item_v1, phase_compatibility_admit_v1,
     phase_compatibility_manifest_encode_v1, phase_compatibility_manifest_decode_v1,
     phase_compatibility_manifest_read_only_v1,
     phase_compatibility_compare_outputs_v1,
-    phase_compatibility_path_within_v1
+    phase_compatibility_path_within_v1,
+    phase_compatibility_hash_valid_v1, phase_compatibility_item_validate_v1
 }
-use compiler.frontend.frontend_parse_cache.{FRONTEND_CACHE_ENTRY_VERSION, frontend_parse_cache_key}
+use compiler.frontend.frontend_parse_cache.{FRONTEND_CACHE_ENTRY_VERSION, frontend_parse_cache_load}
+use compiler.common.cache.frontend_parse_identity_v2.{frontend_parse_key_from_digests_v2, frontend_parse_identity_frame_v2}
+use compiler.common.cache.reverse_reference_facts.{reverse_reference_fact_digest_v1}
 use compiler.driver.cache.phase_compatibility_admission.{
     driver_admit_phase2_compatibility_manifest_v1,
-    driver_import_phase2_frontend_v1
+    driver_import_phase2_frontend_v1, driver_stage_phase2_frontend_frozen_raw_v1
 }
 use compiler.driver.cache.reverse_reference_receipt.{
     REVERSE_REFERENCE_FAMILIES_V1,
@@ -232,7 +235,7 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
 
     it "should consume only the current admitted M2 frontend projection":
         step("Publish a real immutable M2 receipt and consume its exact projection")
-        val root = rt_path_absolute("build/test-artifacts/m3-phase-compatibility")
+        val root = rt_path_absolute("build/test-artifacts/m3-phase-compatibility").replace("\\", "/")
         val _clean = rt_dir_remove_all(root)
         val phase2 = root + "/phase2"
         val phase3 = root + "/phase3"
@@ -245,46 +248,92 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
         expect(dir_create_all(phase3_frontend)).to_equal(true)
         expect(file_write(source, "export fn answer() -> i64: 42\n")).to_equal(true)
         expect(file_write(cache_path, "version: 1\nentries: []\n")).to_equal(true)
-        val frontend_key = frontend_parse_cache_key(source)
-        expect(frontend_key.len()).to_equal(32)
+        val source_text = "export fn answer() -> i64: 42\n"
+        val parse_sha = sha256_text(source_text)
+        val parser_digest = sha256_text("m3-parser")
+        val policy_digest = sha256_text("m3-policy")
+        val raw_digest = sha256_text(source_text)
+        val raw_generation = sha256_text("m3-raw-generation")
+        val frontend_key = frontend_parse_key_from_digests_v2(parser_digest, policy_digest)
+        expect(frontend_key.len()).to_equal(64)
+        val binding = frontend_parse_identity_frame_v2(
+            parser_digest, policy_digest, raw_digest, raw_generation)
+        val content_identity = frontend_parse_identity_frame_v2(
+            parser_digest, policy_digest, "", "")
+        val record_header = FRONTEND_CACHE_ENTRY_VERSION + " " + FLAT_POOL_CODEC_VERSION + " phase3-scope"
+        val fixture_blob = "flat-pool-payload"
+        val source_record_content = record_header + "\n" + content_identity + "\n" + fixture_blob
         val source_record = phase2_frontend + "/" + frontend_key + ".fpc"
-        expect(file_write(source_record, "old-producer-header\nflat-pool-payload")).to_equal(true)
+        expect(file_write(source_record, source_record_content)).to_equal(true)
         val artifact_digest = file_hash_sha256_or_empty(source_record)
         val owner = sha256_text("production-owner-generation")
         val root_generation = sha256_text("production-root-generation")
-        val receipt = production_receipt(source, owner, root_generation, "current")
+        val key = ReverseReferenceKeyV1(
+            "semantic", owner, root_generation, source,
+            "frontend-parser-input-v2",
+            reverse_reference_fact_digest_v1(
+                "frontend-parser-input-v2", source, source,
+                binding + "|" + sha256_text(fixture_blob) + "|" + sha256_text(record_header)), 1)
+        val base_receipt = production_receipt(source, owner, root_generation, "current")
+        val receipt = ReverseReferenceGenerationReceiptV1(
+            1, owner, root_generation, base_receipt.projections.push(
+                ReverseReferenceProjectionV1(key: key, consumer_identity: source)))
         expect(reverse_reference_publish_generation_v1(
             cache_path, receipt)).to_equal(true)
         val receipt_digest = reverse_reference_receipt_digest_v1(receipt)
-        val key = ReverseReferenceKeyV1(
-            "semantic", owner, root_generation, source,
-            "direct-import-export", sha256_text("direct-import-export:current"), 1)
         val manifest = PhaseCompatibilityManifestV1(
             1, phase2, phase3, cache_path, receipt_digest,
             owner, root_generation, [
-            phase_compatibility_item_v1(
-                PHASE_COMPATIBILITY_FRONTEND_V1, key, source_record,
+            PhaseCompatibilityItemV1(
+                PHASE_COMPATIBILITY_FRONTEND_V1, reverse_reference_key_encode_v1(key), source_record,
                 artifact_digest, PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
                 FRONTEND_CACHE_ENTRY_VERSION + ":" + FLAT_POOL_CODEC_VERSION,
-                "target-neutral", source)
+                "target-neutral", source, 3, binding, parse_sha)
         ])
         expect(file_write(manifest_path,
             phase_compatibility_manifest_encode_v1(manifest))).to_equal(true)
+        var frozen_raw: {text: text} = {}
+        frozen_raw[source] = raw_digest
+        expect(driver_stage_phase2_frontend_frozen_raw_v1(frozen_raw)).to_equal(true)
         val source_hash_before = file_hash_sha256_or_empty(source_record)
         rt_env_set("SIMPLE_FRONTEND_CACHE", "1")
         rt_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "phase3-scope")
         rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", phase3_frontend)
         rt_env_set("SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ", manifest_path)
         rt_env_set("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", phase3)
+        val materialized_path = phase3_frontend + "/" + frontend_key + ".fpc"
+
+        step("Reject a schema-2 item: nothing is stored")
+        val schema2_manifest = PhaseCompatibilityManifestV1(
+            1, phase2, phase3, cache_path, receipt_digest,
+            owner, root_generation, [
+            PhaseCompatibilityItemV1(
+                PHASE_COMPATIBILITY_FRONTEND_V1, reverse_reference_key_encode_v1(key), source_record,
+                artifact_digest, PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
+                FRONTEND_CACHE_ENTRY_VERSION + ":" + FLAT_POOL_CODEC_VERSION,
+                "target-neutral", source, 2, binding, "")
+        ])
+        expect(file_write(manifest_path,
+            phase_compatibility_manifest_encode_v1(schema2_manifest))).to_equal(true)
+        expect(driver_import_phase2_frontend_v1()).to_equal("reused=0")
+        expect(file_exists(materialized_path)).to_equal(false)
+        expect(frontend_parse_cache_load(frontend_key, parse_sha)).to_equal("")
+        expect(file_write(manifest_path,
+            phase_compatibility_manifest_encode_v1(manifest))).to_equal(true)
+
+        step("Import a schema-3 item and store the bare blob")
         expect(driver_import_phase2_frontend_v1()).to_equal("reused=1")
         expect(file_hash_sha256_or_empty(source_record)).to_equal(source_hash_before)
-        val materialized_path = phase3_frontend + "/" + frontend_key + ".fpc"
+        expect(frontend_parse_cache_load(frontend_key, parse_sha)).to_equal(fixture_blob)
+        expect(frontend_parse_cache_load(frontend_key, sha256_text("different-parse-sha"))).to_equal("")
         val materialized = file_read(materialized_path)
-        expect(materialized).to_contain("phase3-scope\nflat-pool-payload")
+        expect(materialized).to_contain("phase3-scope\n")
+        expect(materialized).to_contain("\n" + fixture_blob)
+        expect(materialized).to_not_contain(content_identity)
         expect(file_delete(materialized_path)).to_equal(true)
         expect(file_write(source_record, "corrupt-after-publication")).to_equal(true)
         expect(driver_import_phase2_frontend_v1()).to_equal("reused=0")
-        expect(file_write(source_record, "old-producer-header\nflat-pool-payload")).to_equal(true)
+        expect(file_write(source_record, source_record_content)).to_equal(true)
 
         step("Reject manifest authority mutations and a superseded CURRENT receipt")
         var wrong_digest_manifest = manifest
@@ -319,7 +368,7 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
 
     it "should reject filesystem aliases symlinks and prefix collisions":
         step("Resolve existing Phase 2 artifacts and Phase 3 parents through the OS")
-        val root = rt_path_absolute("build/test-artifacts/m3-canonical-paths")
+        val root = rt_path_absolute("build/test-artifacts/m3-canonical-paths").replace("\\", "/")
         val phase2 = root + "/phase2"
         val phase3 = root + "/phase3"
         val outside = root + "/phase3-prefix-collision"
@@ -370,6 +419,80 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
                 "destination-parent-outside-root")
         expect(rt_dir_remove_all(root)).to_equal(true)
 
+    it "should validate schema 3 with frontend parse-source sha":
+        step("Build a valid frontend binding frame bound to the item key")
+        val root = rt_path_absolute("build/test-artifacts/m3-schema-3-validation").replace("\\", "/")
+        val _clean = rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val phase2 = root + "/phase2"
+        val phase3 = root + "/phase3"
+        val phase2_frontend = phase2 + "/frontend"
+        val phase3_frontend = phase3 + "/frontend"
+        val source = phase2 + "/compiler.module.spl"
+        val cache_path = phase2 + "/build-cache.sdn"
+        expect(dir_create_all(phase2_frontend)).to_equal(true)
+        expect(dir_create_all(phase3_frontend)).to_equal(true)
+        expect(file_write(source, "fn test() -> i64: 1\n")).to_equal(true)
+        expect(file_write(cache_path, "version: 1\nentries: []\n")).to_equal(true)
+        val key = ReverseReferenceKeyV1(
+            "semantic", "owner", "root", source,
+            "frontend-parser-input-v2", sha256_text("test:salt"), 1)
+        val artifact = phase2_frontend + "/test.fpc"
+        expect(file_write(artifact, "header\npayload")).to_equal(true)
+        val artifact_digest = file_hash_sha256_or_empty(artifact)
+        val binding = frontend_parse_identity_frame_v2(
+            sha256_text("schema3-parser"), sha256_text("schema3-policy"),
+            sha256_text("fn test() -> i64: 1\n"), sha256_text("schema3-raw-generation"))
+        expect(binding).to_not_equal("")
+        val parse_sha = sha256_text("fn test() -> i64: 1\n")
+        expect(phase_compatibility_hash_valid_v1(parse_sha)).to_equal(true)
+
+        step("Schema 2 items with a non-empty parse-sha are rejected with unexpected-parse-sha")
+        val schema2_item = PhaseCompatibilityItemV1(
+            PHASE_COMPATIBILITY_FRONTEND_V1, reverse_reference_key_encode_v1(key), artifact,
+            artifact_digest, PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
+            "frontend-v1:codec-v1", "target-neutral", source, 2, binding, parse_sha)
+        expect(phase_compatibility_item_validate_v1(schema2_item)).to_equal("unexpected-parse-sha")
+
+        step("Schema 3 items with empty sha are rejected with missing-parse-sha")
+        val empty_sha_item = PhaseCompatibilityItemV1(
+            PHASE_COMPATIBILITY_FRONTEND_V1, reverse_reference_key_encode_v1(key), artifact,
+            artifact_digest, PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
+            "frontend-v1:codec-v1", "target-neutral", source, 3, binding, "")
+        expect(phase_compatibility_item_validate_v1(empty_sha_item)).to_equal("missing-parse-sha")
+        val bad_sha_manifest = PhaseCompatibilityManifestV1(
+            1, phase2, phase3, cache_path, DIGEST_A, "owner", "root", [empty_sha_item])
+        expect(phase_compatibility_manifest_encode_v1(bad_sha_manifest)).to_equal("")
+
+        step("Schema 3 items with 63-char sha are rejected with missing-parse-sha")
+        val short_sha_item = PhaseCompatibilityItemV1(
+            PHASE_COMPATIBILITY_FRONTEND_V1, reverse_reference_key_encode_v1(key), artifact,
+            artifact_digest, PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
+            "frontend-v1:codec-v1", "target-neutral", source, 3, binding,
+            DIGEST_A.substring(0, 63))
+        expect(phase_compatibility_item_validate_v1(short_sha_item)).to_equal("missing-parse-sha")
+        val short_sha_manifest = PhaseCompatibilityManifestV1(
+            1, phase2, phase3, cache_path, DIGEST_A, "owner", "root", [short_sha_item])
+        expect(phase_compatibility_manifest_encode_v1(short_sha_manifest)).to_equal("")
+
+        step("Schema 3 items with valid 64-char hex sha preserve through round-trip")
+        val valid_item = PhaseCompatibilityItemV1(
+            PHASE_COMPATIBILITY_FRONTEND_V1, reverse_reference_key_encode_v1(key), artifact,
+            artifact_digest, PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1,
+            "frontend-v1:codec-v1", "target-neutral", source, 3, binding, parse_sha)
+        expect(phase_compatibility_item_validate_v1(valid_item)).to_equal("ok")
+        val valid_schema3_manifest = PhaseCompatibilityManifestV1(
+            1, phase2, phase3, cache_path, DIGEST_A, "owner", "root", [valid_item])
+        val encoded = phase_compatibility_manifest_encode_v1(valid_schema3_manifest)
+        expect(encoded).to_not_equal("")
+        val decoded = phase_compatibility_manifest_decode_v1(encoded)
+        expect(decoded.valid).to_equal(true)
+        val decoded_manifest = decoded.manifest.unwrap()
+        expect(decoded_manifest.items.len()).to_equal(1)
+        expect(decoded_manifest.items[0].schema_version).to_equal(3)
+        expect(decoded_manifest.items[0].frontend_parse_sha).to_equal(parse_sha)
+        expect(rt_dir_remove_all(root)).to_equal(true)
+
     it "should admit Windows separators while rejecting alternate destination names":
         step("Normalize separators without admitting Windows aliases or streams")
         if rt_path_separator() == "\\":
@@ -393,7 +516,7 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
 
     it "should reject manifest symlink and canonical aliases through the production reader":
         step("Read only a canonical no-follow regular manifest leaf")
-        val root = rt_path_absolute("build/test-artifacts/m3-manifest-admission")
+        val root = rt_path_absolute("build/test-artifacts/m3-manifest-admission").replace("\\", "/")
         val _manifest_clean = rt_dir_remove_all(root)
         expect(rt_dir_create(root, true)).to_equal(true)
         val manifest = root + "/phase2.manifest"
@@ -414,7 +537,7 @@ describe "M3 Phase 2 to Phase 3 compatibility manifest":
 
     it "should leave no final object when publication is interrupted before commit":
         step("Stage complete bytes before atomically publishing the final name")
-        val root = rt_path_absolute("build/test-artifacts/m3-atomic-publication")
+        val root = rt_path_absolute("build/test-artifacts/m3-atomic-publication").replace("\\", "/")
         val _publication_clean = rt_dir_remove_all(root)
         val phase2 = root + "/phase2"
         val phase3 = root + "/phase3"

@@ -1,0 +1,40 @@
+use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_import_ids_v1, worker_surface_ready_v1}
+
+fn main() -> i64:
+    # Frozen edges represent real use/export-source routes. The worker's
+    # production scanner must discover enough of this component for the
+    # production readiness solver to admit its entry, not a placeholder.
+    val names: [text] = ["entry", "pkg.facade", "pkg.bridge", ".leaf", "unused"]
+    val sources: [text] = ["use pkg.facade\n", "export value from pkg.bridge # route\n", "export value from leaf\n", "val value = 7\n", "val unrelated = 9\n"]
+    var built: [bool] = [true, false, false, false, false]
+    var changed = true
+    while changed:
+        changed = false
+        var source_index = 0
+        while source_index < sources.len():
+            if built[source_index]:
+                for dependency in worker_surface_import_ids_v1(sources[source_index]):
+                    var target = 0
+                    while target < names.len():
+                        if names[target] == dependency and not built[target]:
+                            built[target] = true
+                            changed = true
+                        target = target + 1
+            source_index = source_index + 1
+    val edges: [[i64]] = [[1], [2], [3], [], []]
+    val ready = worker_surface_ready_v1(built, edges)
+    if not ready[0] or not ready[1] or not ready[2] or not ready[3] or ready[4]:
+        print "FAIL export component admission"
+        return 1
+    val from_ids = worker_surface_import_ids_v1("from pkg.owner import {a, b}\nimport pkg.other\n")
+    if not from_ids.contains("pkg.owner") or not from_ids.contains("pkg.other"):
+        return 2
+    val grouped = worker_surface_import_ids_v1("use a.b.{c, d as e}\nexport use f.g.*\n")
+    if not grouped.contains("a.b") or not grouped.contains("a.b.c") or not grouped.contains("a.b.d") or not grouped.contains("f.g"):
+        return 3
+    val missing = worker_surface_ready_v1([true, true, false], [[1], [2], []])
+    if missing[0] or missing[1] or missing[2]: return 4
+    val cycle = worker_surface_ready_v1([true, true], [[1], [0]])
+    if not cycle[0] or not cycle[1]: return 5
+    print "PASS worker-surface-export-graph component missing cycle forms"
+    0

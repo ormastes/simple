@@ -1,0 +1,54 @@
+# CacheReader: daemon-cache-backed read of a module artifact blob (full AST or
+# TLDR companion) as a Future<[u8]?>. `nil` is a miss -- absent, refused, or
+# daemon admission closed -- and the caller falls back to the SourceReader's
+# FileReader / in-process parse. A cache read never decides correctness: the
+# gateway admits only verified CAS bytes (cache_gateway_adapter.spl).
+#
+# No locks. The read is a pinned direct read (begin pin -> get_verified ->
+# release); admission is the daemon lifecycle's request counter, which is
+# availability coordination only (cache_daemon_lifecycle.spl).
+#
+# Async boundary: the result is a Future so callers are written against the
+# asynchronous contract now. Today's gateway call is synchronous, so the future
+# returned is already complete; a daemon IPC transport completes it later
+# without changing any caller.
+use std.async.future.{Future}
+use compiler.common.cache_contract.cache_gateway_v1.{CacheGatewayV1, CacheLimitsV1}
+use compiler.driver.cache.gateway.cache_gateway_adapter.{CacheGatewayAdapterV1}
+use compiler.driver.cache.daemon.cache_daemon_lifecycle.{CacheDaemonLifecycle}
+
+val CACHE_READER_PIN_TTL_MS_V1: i64 = 30000
+pub val CACHE_READER_KIND_AST_V1: text = "simple.module.flat-pool-ast.v1"
+pub val CACHE_READER_KIND_TLDR_V1: text = "simple.module.tldr-companion.v4"
+
+# The narrow port the reader needs from a cache gateway.
+trait CacheBlobPortV1:
+    fn get_blob(kind: text, digest: text, max_bytes: i64) -> Result<[u8]?, text>
+
+impl CacheBlobPortV1 for CacheGatewayAdapterV1:
+    fn get_blob(kind: text, digest: text, max_bytes: i64) -> Result<[u8]?, text>:
+        val pin = match self.begin_direct_read(CACHE_READER_PIN_TTL_MS_V1):
+            case Ok(value): value
+            case Err(_): return Err("cache unavailable")
+        val looked = self.get_verified(kind, digest,
+            CacheLimitsV1(max_bytes: max_bytes, max_entries: 1), pin)
+        val _released = self.release_direct_read_pin(pin)
+        match looked:
+            case Ok(lookup):
+                if lookup.present: Ok(Some(lookup.canonical_bytes)) else: Ok(nil)
+            case Err(_): Err("cache read refused")
+
+pub fn cache_reader_read_v1<P: CacheBlobPortV1>(port: P, lifecycle: CacheDaemonLifecycle,
+        kind: text, digest: text, max_bytes: i64, now_ms: i64) -> Future<[u8]?>:
+    if max_bytes <= 0 or digest == "":
+        return Future.from_value(nil)
+    if not lifecycle.begin_request(now_ms):
+        return Future.from_value(nil)
+    val result = port.get_blob(kind, digest, max_bytes)
+    lifecycle.end_request(now_ms)
+    match result:
+        case Ok(blob): Future.from_value(blob)
+        case Err(_): Future.from_value(nil)
+
+export CacheBlobPortV1, CACHE_READER_KIND_AST_V1, CACHE_READER_KIND_TLDR_V1
+export cache_reader_read_v1

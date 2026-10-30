@@ -6,7 +6,7 @@
 # and copy-from-user helpers.
 
 use os.kernel.types.syscall_types.{
-    SyscallArgs, SyscallResult, SYSCALL13_AUTHENTICATED_RUN_ABI_V1
+    SyscallArgs, SyscallResult, SYSCALL13_AUTHENTICATED_RUN_ABI_V1, SYSCALL13_SPAWN_ARGV_ABI_V1
 }
 use os.kernel.types.task_types.{TaskId, TaskPriority, BlockReason}
 use std.common.contracts.sosix.time_v1.{
@@ -960,7 +960,21 @@ fn _handle_spawn_binary_state(args: SyscallArgs, scheduler: Scheduler, klog: Ker
     var sp_argv: [text] = []
     var sp_envp: [text] = []
     var priority_raw = args.arg2
-    if args.arg4 != 0:
+    if args.arg4 == SYSCALL13_SPAWN_ARGV_ABI_V1:
+        if args.arg3 == 0:
+            return ProcessSyscallState(result: SyscallResult(value: 0 - EINVAL as i64), scheduler: scheduler)
+        val argv_result = vmm_copyin_string_vector(
+            args.arg3,
+            MAX_EXEC_ARG_COUNT,
+            MAX_EXEC_STRING_LEN,
+            MAX_EXEC_TOTAL_STRING_BYTES
+        )
+        if not vmm_copy_string_vector_result_ok(argv_result):
+            return ProcessSyscallState(result: SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(argv_result) as i64), scheduler: scheduler)
+        sp_argv = vmm_copy_string_vector_result_values(argv_result)
+        if sp_argv.len() == 0 or sp_argv[0].len() == 0:
+            return ProcessSyscallState(result: SyscallResult(value: 0 - EINVAL as i64), scheduler: scheduler)
+    elif args.arg4 != 0:
         val argv_result = vmm_copyin_packed_string_vector(
             args.arg2,
             args.arg4,
@@ -993,19 +1007,16 @@ fn _handle_spawn_binary_state(args: SyscallArgs, scheduler: Scheduler, klog: Ker
             return ProcessSyscallState(result: SyscallResult(value: 0 - EACCES as i64), scheduler: scheduler)
         val caps = _spawn_caps_for(caller)
         var sched = scheduler
-        val before_next_task_id = g_scheduler_next_task_id
-        val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
-        val pid = if g_scheduler_next_task_id > before_next_task_id:
-            g_scheduler_next_task_id - 1
-        elif raw_pid > 0 and raw_pid < 0x40000000:
-            raw_pid
-        else:
-            0
+        # A reservation may consume an identity and still fail publication;
+        # another CPU may also advance the global identity counter. Only the
+        # child owner can report the identity it actually created.
+        val pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
         if pid == 0:
             return ProcessSyscallState(result: SyscallResult(value: -12), scheduler: sched)
 
-        val child_space = vmm_new_process_space(0, 0)
-        register_task_vmspace(pid.to_u32(), child_space)
+        # The scheduler registered the child's mapped physical address space.
+        # Replacing it with a zero-root placeholder loses the initial argv stack
+        # and makes subsequent capability-mediated copy-in use the wrong root.
         return ProcessSyscallState(result: SyscallResult(value: pid.to_i64()), scheduler: sched)
 
     var log = klog
@@ -1022,6 +1033,10 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
       arg3: envp packed-buffer base
       arg4: argv pointer-table offset
       arg5: envp pointer-table offset
+
+    When arg4 is SYSCALL13_SPAWN_ARGV_ABI_V1, arg2 retains priority and
+    arg3 is a bounded NULL-terminated u64 char** argv. The image owns copied
+    text values before a child is created; envp is empty in this form.
 
     When arg5 is SYSCALL13_AUTHENTICATED_RUN_ABI_V1, arg3 is instead the
     explicit recipe and arg4 locates a single packed argv vector. That tagged
@@ -1181,6 +1196,13 @@ pub fn dispatch_spawn_binary_direct_state(path_ptr: u64, path_len: u64, priority
         return SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
 
     SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
+
+pub fn dispatch_spawn_binary_syscall_state(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog) -> SpawnBinaryDirectState:
+    """Route the installed architecture bridges without losing argv or state."""
+    if args.arg4 == SYSCALL13_SPAWN_ARGV_ABI_V1:
+        val state = _handle_spawn_binary_state(args, scheduler, klog)
+        return SpawnBinaryDirectState(pid: state.result.value, scheduler: state.scheduler)
+    dispatch_spawn_binary_direct_state(args.arg0, args.arg1, args.arg2, scheduler, klog)
 
 fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
     """Dedicated SpawnBinary bridge that avoids the generic syscall wrapper.

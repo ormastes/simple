@@ -1,4 +1,5 @@
 use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_keep_newest_dirs, disk_bound_cap_bytes}
 use std.common.cache_host_authority_v1.{CacheRootAuthorityV1, CacheObjectAuthorityV1, CacheTempAuthorityV1,
     cache_host_open_root_v1, cache_host_root_valid_v1, cache_host_open_read_v1,
     cache_host_object_valid_v1, cache_host_size_v1, cache_host_pread_receipt_v1,
@@ -17,6 +18,9 @@ use compiler.common.diagnostics.span.{Span}
 use std.io_runtime.{dir_create, dir_list, file_copy, file_exists, hash_text,
     file_size_raw, file_delete, getpid,
     file_write_exact, file_read_nullable}
+use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_STAGE_ENV_V1,
+    generic_instance_keyed_functions_v1, generic_instance_stage_path_v1,
+    generic_instance_mir_module_of_v1, generic_instance_stage_publish_v1}
 use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
     file_read_regular_no_follow_bounded,
     file_read_regular_no_follow_bounded_bytes, file_write_bytes,
@@ -57,11 +61,12 @@ use compiler.driver.driver_backend_plugin_selection.{
     driver_cuda_plugin_request_error_v1
 }
 use compiler.backend.linker.linker_wrapper.{
-    link_to_native, link_to_shared,
+    link_to_native,
     NativeLinkConfig,
     write_elf_bytes_to_file
 }
-use compiler.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
+use compiler.backend.llvm_native_link.{NativeLinkOptions}
+use compiler.driver.driver_build.native_link_receipt_v1.{native_link_with_receipt_v1, native_shared_link_with_receipt_v1}
 use compiler.driver.smf_writer.{Target}
 use compiler.driver.smf_group_object_adapter.{smf_group_object_from_bytes_v1}
 use compiler.driver.smf.runtime_std_package_membership_v1.{
@@ -75,7 +80,7 @@ use compiler.driver.driver_build.native_full_inventory_sources.{
 use std.scv.compile_source_inventory_core.{
     compile_source_inventory_identity_cmp_v1}
 use compiler.driver.smf.runtime_std_native_sections_v1.{
-    RuntimeStdNativeMemberV1, runtime_std_mir_body_payload_v1,
+    RuntimeStdNativeMemberV1, runtime_std_mir_body_payload_v1, RuntimeStdMirBodyPayloadV1,
     runtime_std_native_directory_chain_real_v1,
     runtime_std_native_observed_output_digest_v1,
     RuntimeStdNativeMemberV2,
@@ -103,7 +108,7 @@ use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1,
 use std.nogc_sync_mut.io.sysinfo_ops.{process_peak_rss_kb}
 use compiler.mir_opt.auto_vectorize_target.{auto_vectorize_target_level}
 use compiler.driver.smf_binary_helpers.{smf_u64_to_bytes}
-use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
+use compiler.driver.driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
     FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1,
     frozen_native_capsule_batch_find_v1, native_capsule_mir_identity_v1, driver_native_parsed_module_has_no_runtime_body_v1,
     driver_native_parsed_objectless_proof_v1, driver_native_parsed_objectless_proof_valid_v1}
@@ -111,6 +116,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_record_v1}
 use compiler.common.driver_core_modes.{driver_mir_eviction_enabled}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_aot_pipeline.*  # CompilerDriver.go_to_end_finish_v1 lives in this impl block
 use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name, driver_source_matches_entry}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
 use compiler.common.config.{Logger}
@@ -128,7 +134,7 @@ use compiler.driver.cache.phase_compatibility_admission.{
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
 use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
-    cold_hir_native_objects_persist_v1
+    cold_hir_native_objects_persist_v1, ColdHirNativeObjectArtifactV1
 }
 use compiler.driver.perf.compiler_work_counters.{compiler_work_codegen_schedule_v1}
 use compiler.driver.action_graph.scc_compile_outputs.{
@@ -645,7 +651,9 @@ fn driver_materialize_phase2_native_v1(
         val decoded_key = reverse_reference_key_decode_v1(item.key_frame)
         if not decoded_key.valid:
             continue
-        val key = decoded_key.key.unwrap()
+        # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+        val decoded_key_opt: ReverseReferenceKeyV1? = decoded_key.key
+        val key = decoded_key_opt.unwrap()
         if key.subject_identity != source:
             continue
         if key.registry_kind != "native" or
@@ -1177,7 +1185,8 @@ pub fn driver_cold_hir_persist_verified_objects_v1(
     ctx.cold_hir_native_object_artifacts = []
     if ctx.cold_hir_typed_receipts.len() == 0:
         return ""
-    val persisted = cold_hir_native_objects_persist_v1(
+    # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+    val persisted: Result<[ColdHirNativeObjectArtifactV1], text> = cold_hir_native_objects_persist_v1(
         cache_root, ctx.cold_hir_typed_receipts,
         ctx.cold_hir_native_object_paths,
         ctx.cold_hir_native_capsule_identities,
@@ -1910,7 +1919,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                     return driver_native_collection_link_cleanup_error_v1(
                         direct_link_input_dir,
                         CompileResult.CodegenError("native collection direct link input changed before LLVM link"))
-                match link_llvm_native(direct_objects, output, llvm_opts):
+                match native_link_with_receipt_v1(direct_objects, output, llvm_opts):
                     case Ok(_):
                         return driver_native_success_with_launch_metadata(ctx, output,
                             direct_bindings, direct_objects, direct_link_input_dir)
@@ -1937,7 +1946,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                 return driver_native_collection_link_cleanup_error_v1(
                     direct_link_input_dir,
                     CompileResult.CodegenError("native collection direct link input changed before hosted link"))
-            match link_llvm_native(direct_objects, output, hosted_opts):
+            match native_link_with_receipt_v1(direct_objects, output, hosted_opts):
                 case Ok(_):
                     return driver_native_success_with_launch_metadata(ctx, output,
                         direct_bindings, direct_objects, direct_link_input_dir)
@@ -2087,10 +2096,19 @@ impl CompilerDriver:
             options_identity: "backend={effective_backend}|opt={driver_opt_level}|release={is_release}|symbols={symbol_mode}|storage={sha256_text(storage_identity)}|environment={environment_identity.digest}",
             provider_identity: provider_receipt_hash,
             emitter_scheme: NATIVE_CACHE_EMITTER_SCHEME_V1)
-        val (base_cache_scope_root, _) = driver_native_build_cache_scope(
+        val (base_cache_scope_root, base_cache_scope_name) = driver_native_build_cache_scope(
             effective_backend, cache_dir, native_target, native_cpu,
             driver_opt_level, symbol_mode, storage_identity,
             environment_identity.digest, provider_receipt_hash)
+        # Bounded: every compiler/option identity gets its own scope dir and
+        # nothing removed old ones. Keep the current scope plus the newest,
+        # SIMPLE_NATIVE_CACHE_SCOPES_KEEP (default 6: the default root is shared
+        # by every backend/opt/target combination) in total; scopes used in
+        # the last 6 hours (another lane) are never removed. Legacy
+        # "scope-<16hex>" dirs from the previous naming can never match again.
+        val _scopes_evicted = disk_bound_keep_newest_dirs(cache_dir, base_cache_scope_name, "s", 33,
+            disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6), 21600)
+        val _legacy_evicted = disk_bound_keep_newest_dirs(cache_dir, "", "scope-", 22, 1, 21600)
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")
@@ -2136,7 +2154,8 @@ impl CompilerDriver:
         val cache_path = driver_native_build_cache_path(cache_dir)
         val object_base = _sffi_path_join(cache_scope_root, "object")
         var build_cache: BuildCache = BuildCache.load(cache_path)
-        val phase2_compatibility_manifest =
+        # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+        val phase2_compatibility_manifest: PhaseCompatibilityManifestV1? =
             driver_load_phase2_compatibility_manifest_v1()
         var phase2_native_items_handled: {text: bool} = {}
         var phase2_native_reuse_hits: i64 = 0
@@ -2166,9 +2185,11 @@ impl CompilerDriver:
         # empty/partial .smf. See driver_mir_eviction_enabled for the full
         # reasoning (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20,
         # hazard 3).
-        # go-to-end also releases each module's MIR once its object is written.
+        # Every lane releases each module's MIR once its object is written (it was
+        # gated on low_memory/go-to-end, so normal stage3 builds held the whole
+        # closure MIR through codegen + link). SIMPLE_KEEP_MIR=1 keeps it for debugging.
         val low_memory = driver_mir_eviction_enabled(
-            ctx.options.low_memory or go_to_end_enabled_v1(), ctx.options.output_format)
+            (env_get_nullable("SIMPLE_KEEP_MIR") ?? "") != "1", ctx.options.output_format)
         val all_module_names = ctx.mir_modules.keys()
         var module_names = all_module_names
         var native_group: NativeGroupManifestV1? = nil
@@ -2276,6 +2297,7 @@ impl CompilerDriver:
 
         # Phase 1: Check cache, collect cached objects, identify uncached modules
         var uncached_names: [text] = []
+        var cache_hit_evict_names: [text] = []
         var entry_object_ready_path = ""
         var entry_object_ready_capsule = ""
         var entry_object_ready_count = 0
@@ -2379,7 +2401,8 @@ impl CompilerDriver:
                     if witness_shadow_mismatch_lines.len() < NATIVE_MODULE_CACHE_SHADOW_MISMATCH_LIMIT:
                         witness_shadow_mismatch_lines.push(
                             "module={driver_native_shadow_bounded_module(name)} reason={witness_reason}")
-                val cached_outputs = if (source_snapshot_matches and
+                # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                val cached_outputs: [text]? = if (source_snapshot_matches and
                     witness_reason == "match"):
                     build_cache.get_cached_outputs(cache_source)
                 else:
@@ -2469,7 +2492,7 @@ impl CompilerDriver:
                                 scoped_outputs[0], ctx.mir_modules[name].functions.keys().len(),
                                 ctx.mir_modules[name].statics.keys().len())
                         if low_memory:
-                            ctx.evict_mir_module(name)
+                            cache_hit_evict_names = cache_hit_evict_names.push(name)
                         used_cache = true
                     elif not all_in_scope or not outputs_exist or not capsule_matches:
                         build_cache.remove_entry(cache_source)
@@ -2480,6 +2503,7 @@ impl CompilerDriver:
                     progress_cache_scanned, total_modules, name,
                     5, 6, 0, cache_hit_count, "running")
 
+        ctx.evict_mir_modules(cache_hit_evict_names)
         log_build_progress("native_cache", "modules", total_modules,
             total_modules, "complete", 5, 6, 0, cache_hit_count, "running")
 
@@ -2621,7 +2645,7 @@ impl CompilerDriver:
                     if run_pair:
                         val failures = _driver_group_pair_execute_v1(
                             capsules, group_manifest, window[0], window[1],
-                            native_target, ctx.options.target_opt_ctx,
+                            native_target, target_opt_context_default(),
                             build_cache, module_outcomes, module_unit_id,
                             pair_start / 2 + 1)
                         module_unit_id = module_unit_id + failures
@@ -2839,8 +2863,7 @@ impl CompilerDriver:
                             BuildUnitOutcome.not_run(module_unit_id, name))
             # Evict MIR for compiled modules in low-memory mode
             if low_memory:
-                for name in uncached_names:
-                    ctx.evict_mir_module(name)
+                ctx.evict_mir_modules(uncached_names)
 
         # Save build cache. Done BEFORE the fail-closed check so the modules that
         # did build stay reusable on the retry (a failing build must not also
@@ -3091,8 +3114,12 @@ impl CompilerDriver:
         if lane_failure != "":
             return CompileResult.CodegenError(lane_failure)
 
-        val cold_object_reason = driver_cold_hir_persist_verified_objects_v1(
-            ctx, machine_cache_root())
+        # A MIR shard worker holds only its claimed modules' objects; the link
+        # child replays them from the ledger and persists the full inventory.
+        val cold_object_reason = if self.native_staged_codegen.shard_queue != "":
+            ""
+        else:
+            driver_cold_hir_persist_verified_objects_v1(ctx, machine_cache_root())
         if cold_object_reason != "":
             return CompileResult.CodegenError(
                 "cold HIR native object publication failed: {cold_object_reason}")
@@ -3220,7 +3247,7 @@ impl CompilerDriver:
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before shared link"))
-            match link_to_shared(object_files, output, shared_config):
+            match native_shared_link_with_receipt_v1(object_files, output, shared_config):
                 case Ok(_):
                     driver_log_info(log, "Native shared library written to {output}")
                     return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
@@ -3260,7 +3287,7 @@ impl CompilerDriver:
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before LLVM link"))
-            match link_llvm_native(object_files, output, llvm_opts):
+            match native_link_with_receipt_v1(object_files, output, llvm_opts):
                 case Ok(_):
                     log_build_progress("link", "objects", object_files.len(),
                         object_files.len(), output, 6, 6, 0,
@@ -3294,7 +3321,7 @@ impl CompilerDriver:
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before hosted link"))
-            match link_llvm_native(object_files, output, hosted_opts):
+            match native_link_with_receipt_v1(object_files, output, hosted_opts):
                 case Ok(_):
                     log_build_progress("link", "objects", object_files.len(),
                         object_files.len(), output, 6, 6, 0,
@@ -3566,6 +3593,35 @@ fn _driver_group_pair_eligible_v1(
         return false
     true
 
+# P-G7 producer: codegen each keyed, extractable COMDAT instance of `name`
+# alone, with the using module's backend/target/CPU/storage snapshot (same
+# COMDAT/weak linkage), and stage it under its ConcreteTldrKey (first writer
+# wins). Best effort: a failure stages nothing and the key fails closed.
+fn _stage_generic_instance_objects_v1(backend_name: text, is_release: bool, opt_level: i64,
+        name: text, mir_module: MirModule, storage_snapshot: FrozenStorageModuleSnapshotV1,
+        target_cpu: text, backend_session: BackendSessionOwnedLeaseV2?):
+    val stage = env_get_nullable(GENERIC_INSTANCE_STAGE_ENV_V1) ?? ""
+    if stage == "" or not dir_create(stage, true):
+        return
+    for pair in generic_instance_keyed_functions_v1(mir_module):
+        val (fn_name, key) = pair
+        val staged = generic_instance_stage_path_v1(stage, key)
+        if staged == "" or file_exists(staged):
+            continue
+        val only = generic_instance_mir_module_of_v1(mir_module, fn_name)
+        if only == nil:
+            print "[file-worker] instance not extractable symbol={fn_name}"
+            continue
+        val base = stage + "/build-" + sha256_text(key) + "-{getpid()}"
+        match _compile_selected_module(backend_name, is_release, opt_level, base, name,
+                only!, storage_snapshot, target_cpu, backend_session):
+            case Ok(obj):
+                if generic_instance_stage_publish_v1(stage, key, obj):
+                    print "[file-worker] instance staged symbol={fn_name}"
+                val _cleanup = file_delete(obj)
+            case Err(reason):
+                print "[file-worker] instance codegen failed symbol={fn_name}: {reason}"
+
 fn _compile_frozen_module_capsule(
     batch: FrozenNativeModuleCapsuleBatchV1, backend_name: text, target: text,
     is_release: bool, opt_level: i64, provider_receipt_hash: text,
@@ -3647,6 +3703,8 @@ fn _compile_frozen_module_capsule(
             return Err(error)
         case Ok(object_path):
             ice_boundary_module_done(name, "codegen")
+            _stage_generic_instance_objects_v1(backend_name, is_release, opt_level, name,
+                capsule.mir_module, capsule.storage_snapshot, capsule.target_cpu, backend_session)
             if group_member_id != "":
                 log_phase("native_group:codegen:done member={group_member_id} backend={backend_name}")
             if not capsule.identity_valid():
@@ -4106,7 +4164,8 @@ fn _runtime_std_compile_native_members_v2(
     while index < selected.len():
         val selected_member = selected[index]
         val kind = kinds[index]
-        var body = runtime_std_mir_body_payload_v1(
+        # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+        var body: Result<RuntimeStdMirBodyPayloadV1, text> = runtime_std_mir_body_payload_v1(
             ctx.mir_modules[names[index]], selected_member.source_identity,
             selected_member.source_digest)
         if body.is_err(): return Err(body.unwrap_err())
@@ -4124,7 +4183,8 @@ fn _runtime_std_compile_native_members_v2(
             val compiled_member = compiled_code[code_index]
             body = Ok(compiled_member.mir_body)
             capsule = Some(compiled_member.capsule)
-            val bytes = file_read_regular_no_follow_bounded_bytes(
+            # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+            val bytes: Result<[u8], text> = file_read_regular_no_follow_bounded_bytes(
                 compiled_member.capsule.object_path, 128 * 1024 * 1024)
             if bytes.is_err() or bytes.unwrap().len() < 4:
                 return Err("runtime/std native v2 object readback unavailable")

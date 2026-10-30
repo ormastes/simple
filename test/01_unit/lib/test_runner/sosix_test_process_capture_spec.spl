@@ -1,0 +1,45 @@
+"""Exercise hosted TestRunner child capture with shell-significant argv."""
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{
+    file_write, file_delete, file_read_regular_no_follow_bounded
+}
+use std.test_runner.test_executor_parsing.{find_simple_binary}
+use std.test_runner.test_runner_async.{create_temp_files, cleanup_temp_files}
+use std.test_runner.runner_lifecycle.{spawn_tracked_test_process, wait_tracked_process}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_owned_capture}
+
+describe "SOSIX TestRunner process capture":
+    it "captures stdout and stderr separately and preserves special argv":
+        val (stdout_path, stderr_path) = create_temp_files("sosix_argv_capture",
+            initialize: not sosix_test_owned_capture())
+        val quote = "한글 \"quoted\" C:\\trailing\\ & $ < >"
+        var program = "/bin/sh"
+        var args = ["-c", "printf '%s' \"$1\"; printf '%s' \"$2\" >&2", "sh", quote, "STDERR-MARKER"]
+        var expected_stdout = quote
+        var spec_path = ""
+        if sosix_test_owned_capture():
+            # Windows owns redirected files and accepts argv directly; use a
+            # Simple child script there, while the shared plan spec pins its
+            # no-shell argument preservation contract on every host.
+            spec_path = stdout_path + "_argv_spec.spl"
+            val source = "print \"WINDOWS-CAPTURE-MARKER\"\neprint(\"STDERR-MARKER\")\n"
+            expect(file_write(spec_path, source)).to_equal(true)
+            program = find_simple_binary()
+            args = ["run", spec_path]
+            expected_stdout = "WINDOWS-CAPTURE-MARKER"
+        val token = spawn_tracked_test_process(program, args,
+            stdout_path, stderr_path, 15000)
+        expect(token > 0).to_equal(true)
+        val exit_code = wait_tracked_process(token, 15000)
+        val stdout = file_read_regular_no_follow_bounded(stdout_path, 4096)
+        val stderr = file_read_regular_no_follow_bounded(stderr_path, 4096)
+
+        cleanup_temp_files(stdout_path, stderr_path)
+        if spec_path != "": file_delete(spec_path)
+        expect(exit_code).to_equal(0)
+        match stdout:
+            case Ok(value): expect(value).to_contain(expected_stdout)
+            case Err(reason): expect(reason).to_equal("")
+        match stderr:
+            case Ok(value): expect(value).to_contain("STDERR-MARKER")
+            case Err(reason): expect(reason).to_equal("")

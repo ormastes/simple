@@ -36,17 +36,19 @@ gh workflow run phase-ladder.yml --ref release/1.0.0 -f lanes=linux-x86_64,windo
 gh workflow run component-build.yml --ref release/1.0.0 -f components=simd-x86_64-avx512
 ```
 
-## 3. Progress (2026-10-23, 15:41 UTC; ladder run 39962905298)
+## 3. Progress (2026-10-24, 04:14 UTC; ladder run 40057877101)
 
 | Lane | Phase 1 | Phase 2 | Phase 3–4 | State |
 |---|---|---|---|---|
-| linux-x86_64 | ⏳ rung 1 (seed build) | ❌ naming probe | — | #4225 moved stage 2 past p2_add/scv_prime/mir_retention; `stage2_module_path_naming` SEGVs (walk_hir_type, representation-manifest pass), open bug |
-| linux-riscv64 | ✅ cross-built | — | — | climbs one rung behind linux-x86_64 |
-| darwin-arm64 | ⏳ rung 1 (seed build) | ❌ link | — | `_simple_note_user_threads_started` weak ref fails on ld64; fix proposed on #4225, not pushed |
-| darwin-x86_64 | ❌ hello SEGV | — | — | phase 1 builds but SEGVs (exit 139) compiling the hello sanity at native_compile; seed's LLVM also missing on Intel macOS |
-| windows-x86_64 | ❌ | — | — | rung still on MSVC: clang-cl LNK1120 and a `simple-term-io` build-script failure; MinGW rung setup is unlanded |
-| freebsd-x86_64 | ✅ hello passes | — | — | phase 1 built from the seed in the VM; the essentials step then died (`ssh exited with code 2`), handoff lost (upload now runs on failure) |
+| linux-x86_64 | ✅ from the Rust seed | ⏳ ladder | — | stage 2 admitted on release/1.0.0 (#4260); rung 2 now builds phase 2 (#4254) |
+| linux-riscv64 | ✅ cross-built | ⏳ ladder | — | handoff exec bit restored (#4254); climbs one rung behind linux-x86_64 |
+| darwin-arm64 | ✅ from the Rust seed | ⏳ ladder | — | absolute compiler path for phase 2 (#4254) |
+| darwin-x86_64 | ❌ hello SEGV | — | — | phase 1 builds but SEGVs (exit 139) compiling the hello sanity |
+| windows-x86_64 | ❌ | — | — | rung still on MSVC (clang-cl LNK1120); MinGW rung setup unlanded |
+| freebsd-x86_64 | ✅ from the Rust seed | ⏳ ladder | — | handoff now survives a failed step (#4251); essentials $name fix (#4267) |
 | freebsd-riscv64 | ✅ hello runs | ⏳ guest | — | local VM down after container restart; needs a runtime rebuild with #4151/#4225 |
+
+Essentials (`simple_cli`, `simple_test_runner`, `simple_build_runner`) build from phase 3 on (#4291). Compile errors found on phase 1 and fixed: #4247, #4248, #4250, #4270 (owner).
 
 ### Landed today
 - #4142 version line restored to `1.0.0-rc.1`; #4143, #4147 `release_phase3` ⇄ `release/1.0.0` synced (fast-forward, no force push).
@@ -57,6 +59,8 @@ gh workflow run component-build.yml --ref release/1.0.0 -f components=simd-x86_6
 - #4149 (owner) pinned LLVM discovery for clang-cl/lld-link.
 
 ### Landed in this round
+- #4247, #4248, #4250 pure-Simple compile errors in the essentials closures (undeclared reverse-reference mirrors, undeclared rt_* calls, missing ValidationViolation, generic-enum match on self, untyped transient_promote).
+- #4251, #4254, #4267, #4291 ladder: FreeBSD handoff survives a failed step, rung 2 SCV cold init + absolute compiler path + exec bit, FreeBSD sh assignment order, essentials from phase 3.
 - #4225 transient promote walks unowned roots that hold scope-owned children (stage-2 publish SEGV); stage 2 now passes p2_add, scv_prime and mir_retention on CI.
 - #4234 phase ladder builds phase 1 from the Rust seed when no RC qualifies (every native lane had failed rung 1); records the naming-probe walk_hir_type site.
 - #4144 `release/1.0.0` → `main` (owner admin merge, 09:17 UTC).

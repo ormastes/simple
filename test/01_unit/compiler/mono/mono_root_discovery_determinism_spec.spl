@@ -30,6 +30,7 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.{HirFunction}
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.mono.monomorphize_integration.{MonomorphizationPass, mono_last_phase_profile_v1}
+use std.env.variables.{env_get, env_set}
 
 struct DiscoveryLowered:
     modules: Dict<text, HirModule>
@@ -58,11 +59,19 @@ fn discovery_lower(src: text) -> DiscoveryLowered:
     DiscoveryLowered(modules: hir, errors: errors)
 
 fn discovery_run(src: text, discovery: bool) -> DiscoveryRun:
+    discovery_run_env(src, discovery, if discovery: "1" else: "0")
+
+# Discovery is ON by default (env unset), so the full-walk baseline must pin
+# SIMPLE_MONO_ROOT_DISCOVERY=0 or it silently compares discovery to itself.
+fn discovery_run_env(src: text, discovery: bool, env_value: text) -> DiscoveryRun:
     # Lower afresh per run: the two passes must not share one input value.
     val low = discovery_lower(src)
+    val previous = env_get("SIMPLE_MONO_ROOT_DISCOVERY")
+    env_set("SIMPLE_MONO_ROOT_DISCOVERY", env_value)
     var pass_ = MonomorphizationPass.create()
     pass_.root_discovery = discovery
     val out = pass_.process_modules(low.modules)
+    env_set("SIMPLE_MONO_ROOT_DISCOVERY", previous)
     DiscoveryRun(modules: out, pass_: pass_)
 
 fn discovery_fingerprint(run: DiscoveryRun) -> text:
@@ -184,3 +193,9 @@ describe "40.mono root discovery is output-identical to the full root walk":
         val disc_rewritten = discovery_roots_rewritten(disc)
         expect(full_rewritten > disc_rewritten).to_equal(true)
         expect(disc_rewritten > 0).to_equal(true)
+
+    it "is on by default when the env var is unset":
+        val full = discovery_run(discovery_src, false)
+        val dflt = discovery_run_env(discovery_src, false, "")
+        expect(discovery_roots_rewritten(full) > discovery_roots_rewritten(dflt)).to_equal(true)
+        expect(discovery_fingerprint(dflt)).to_equal(discovery_fingerprint(full))

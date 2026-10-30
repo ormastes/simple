@@ -454,7 +454,13 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
         Value::UInt { value, .. } => {
             simple_runtime::value::rt_transient_heap_promote(simple_runtime::value::RuntimeValue::from_raw(*value))
         }
-        Value::Nil => false,
+        // A nil optional owns no transient heap state: promotion is a no-op
+        // success, exactly as in the C and Rust runtimes
+        // (value/collections.rs rt_transient_heap_promote). Returning false
+        // here made every seed retained parse of a file without an
+        // @representation block panic "transient retained parser ownership
+        // failed (declaration=false)".
+        Value::Nil => true,
         // Interpreter composites are Arc/owned Rust values, not allocations in
         // the runtime transient scope, so they are already retained. The
         // protocol still matches the C and Rust runtimes: promotion succeeds
@@ -481,6 +487,73 @@ pub fn rt_transient_heap_promote_share_end(args: &[Value]) -> Result<Value, Comp
         ));
     }
     Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_end()))
+}
+
+fn require_no_args(name: &str, args: &[Value]) -> Result<(), CompileError> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        Err(CompileError::runtime(format!("{} requires 0 arguments", name)))
+    }
+}
+
+/// Build session heap (BSM T1, runtime value/collections.rs).
+pub fn rt_session_heap_begin(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_heap_begin", args)?;
+    Ok(Value::Int(simple_runtime::value::rt_session_heap_begin() as i64))
+}
+
+pub fn rt_session_heap_end(args: &[Value]) -> Result<Value, CompileError> {
+    let session = match args {
+        [Value::Int(id)] => u32::try_from(*id).ok(),
+        [Value::UInt { value, .. }] => u32::try_from(*value).ok(),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_session_heap_end requires 1 argument (session id)",
+            ))
+        }
+    };
+    Ok(Value::Bool(session.is_some_and(|id| simple_runtime::value::rt_session_heap_end(id))))
+}
+
+pub fn rt_session_alloc_begin(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_alloc_begin", args)?;
+    Ok(Value::Bool(simple_runtime::value::rt_session_alloc_begin()))
+}
+
+pub fn rt_session_alloc_end(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_alloc_end", args)?;
+    Ok(Value::Bool(simple_runtime::value::rt_session_alloc_end()))
+}
+
+pub fn rt_session_heap_id(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_heap_id", args)?;
+    Ok(Value::Int(simple_runtime::value::rt_session_heap_id() as i64))
+}
+
+/// Same carrier rules as `rt_transient_heap_promote`: raw handles adopt in the
+/// runtime; nil is a no-op success; interpreter composites own no runtime
+/// transient state, so they succeed exactly when adoption is possible at all.
+pub fn rt_transient_heap_adopt(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_transient_heap_adopt requires 1 argument (value)",
+        ));
+    }
+    let adopted = match &args[0] {
+        Value::Int(raw) => {
+            simple_runtime::value::rt_transient_heap_adopt(simple_runtime::value::RuntimeValue::from_raw(*raw as u64))
+        }
+        Value::UInt { value, .. } => {
+            simple_runtime::value::rt_transient_heap_adopt(simple_runtime::value::RuntimeValue::from_raw(*value))
+        }
+        Value::Nil => true,
+        _ => {
+            simple_runtime::value::rt_session_heap_id() != 0
+                && simple_runtime::value::transient_heap_scope_paused()
+        }
+    };
+    Ok(Value::Bool(adopted))
 }
 
 /// Observe this thread's transient parser-array scope without mutating it:
@@ -2354,7 +2427,7 @@ mod tests {
         assert_eq!(promote(&composite), Value::Bool(false), "scope open but not paused");
         assert_eq!(rt_transient_array_scope_pause(&[]).unwrap(), Value::Bool(true));
         assert_eq!(promote(&composite), Value::Bool(true), "paused scope");
-        assert_eq!(promote(&Value::Nil), Value::Bool(false), "nil never promotes");
+        assert_eq!(promote(&Value::Nil), Value::Bool(true), "nil owns nothing: no-op success, as in the runtimes");
         assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
         assert_eq!(promote(&composite), Value::Bool(false), "scope ended");
     }
@@ -2457,15 +2530,28 @@ mod tests {
         assert!(matches!(rt_transient_array_scope_pause(&[]), Ok(Value::Bool(true))));
         assert!(matches!(rt_transient_heap_promote(&[graph]), Ok(Value::Bool(true))));
         assert!(matches!(rt_transient_array_scope_end(&[]), Ok(Value::Bool(true))));
+        // Integer carriers go straight to the runtime twin, which (since the
+        // 2026-10-22 scalar exemption in value/collections.rs) treats a
+        // non-heap scalar as a no-op success, outside any scope too.
         assert!(matches!(
             rt_transient_heap_promote(&[Value::Int(0)]),
-            Ok(Value::Bool(false))
+            Ok(Value::Bool(true))
         ));
         assert!(matches!(
             rt_transient_heap_promote(&[Value::UInt { value: 0, width: 64 }]),
-            Ok(Value::Bool(false))
+            Ok(Value::Bool(true))
         ));
         assert!(rt_transient_heap_promote(&[]).is_err());
+    }
+
+    #[test]
+    fn transient_heap_promote_nil_is_noop_success_in_any_scope_state() {
+        // Mirrors value/collections.rs: nil owns no transient state.
+        assert!(matches!(rt_transient_heap_promote(&[Value::Nil]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_array_scope_begin(&[]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_array_scope_pause(&[]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_heap_promote(&[Value::Nil]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_array_scope_end(&[]), Ok(Value::Bool(true))));
     }
 
     #[test]
@@ -2777,4 +2863,44 @@ mod tests {
         rt_volatile_write_u32(&[Value::Int(address), Value::Int(0x7654_3210)]).unwrap();
         assert_eq!(value, 0x7654_3210);
     }
+}
+
+/// Raw runtime handle carried by an interpreter value, or None for interpreter
+/// composites (Arc/owned Rust values that the runtime rc table never owns).
+fn rc_runtime_handle(name: &str, args: &[Value]) -> Result<Option<simple_runtime::value::RuntimeValue>, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(format!("{name} requires 1 argument (value)")));
+    }
+    Ok(match &args[0] {
+        Value::Int(raw) => Some(simple_runtime::value::RuntimeValue::from_raw(*raw as u64)),
+        Value::UInt { value, .. } => Some(simple_runtime::value::RuntimeValue::from_raw(*value)),
+        _ => None,
+    })
+}
+
+/// Object-graph refcount (BSM P4): interpreter composites are not rc roots,
+/// so share/retain/release answer false and count/graph_bytes answer -1.
+pub fn rt_rc_share(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_share", args)?;
+    Ok(Value::Bool(handle.is_some_and(|v| simple_runtime::value::rt_rc_share(v))))
+}
+
+pub fn rt_rc_retain(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_retain", args)?;
+    Ok(Value::Bool(handle.is_some_and(|v| simple_runtime::value::rt_rc_retain(v))))
+}
+
+pub fn rt_rc_release(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_release", args)?;
+    Ok(Value::Bool(handle.is_some_and(|v| simple_runtime::value::rt_rc_release(v))))
+}
+
+pub fn rt_rc_count(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_count", args)?;
+    Ok(Value::Int(handle.map_or(-1, |v| simple_runtime::value::rt_rc_count(v))))
+}
+
+pub fn rt_heap_graph_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_heap_graph_bytes", args)?;
+    Ok(Value::Int(handle.map_or(-1, |v| simple_runtime::value::rt_heap_graph_bytes(v))))
 }

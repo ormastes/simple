@@ -1,0 +1,241 @@
+use std.spec.*
+use compiler.driver.cache.reverse_reference_receipt.{
+    REVERSE_REFERENCE_FAMILIES_V1, REVERSE_REFERENCE_FAMILIES_V2,
+    ReverseReferenceProjectionV1, ReverseReferenceGenerationReceiptV1,
+    ReverseReferenceReceiptReadV1,
+    reverse_reference_receipt_encode_v1, reverse_reference_receipt_decode_v1,
+    reverse_reference_receipt_migrate_v1_to_v2, reverse_reference_consumers_v1,
+    reverse_reference_read_current_v1
+}
+use compiler.driver.cache.reverse_reference_projection_v2.{
+    SealedForwardManifestV2, ProposedSemanticEditV2,
+    reverse_reference_project_generation_v2,
+    reverse_reference_publish_projection_v2,
+    reverse_reference_read_or_replay_v2, reverse_reference_replay_needed_v2,
+    reverse_reference_subject_for_key_v2,
+    preview_semantic_change
+}
+use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1, SemanticReadKindV1,
+    semantic_query_kind_known_v1, semantic_read_facet_v1,
+    semantic_read_kind_of_facet_v1, semantic_read_facet_name_v1,
+    semantic_query_read_manifest_encode_v1, semantic_query_read_manifest_decode_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+fn d(seed: text) -> text:
+    sha256_text(seed)
+
+fn qkey(kind: text, entity: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: kind, stable_entity_id: entity,
+        semantic_profile_digest: d("profile"), parameter_digest: d("param:" + entity))
+
+fn qread(producer: SemanticQueryKeyV1, consumer: SemanticQueryKeyV1,
+        facet: text, ordinal: i64) -> SemanticQueryReadV1:
+    SemanticQueryReadV1(producer: producer, consumer: consumer, facet: facet,
+        ordinal: ordinal, consumed_fingerprint: d("fp:" + facet),
+        witness_digest: d("w:" + facet), partition_id: "p0",
+        completeness: SemanticCoverageV1.Complete)
+
+fn macro_def() -> SemanticQueryKeyV1:
+    qkey("macro.def", "pkg/mod/double")
+
+fn user_a() -> SemanticQueryKeyV1:
+    qkey("macro.expand", "pkg/a.spl#inv1")
+
+fn user_b() -> SemanticQueryKeyV1:
+    qkey("macro.expand", "pkg/b.spl#inv1")
+
+fn manifest_for(consumer: SemanticQueryKeyV1, reads: [SemanticQueryReadV1]) -> SemanticQueryReadManifestV1:
+    SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: reads)
+
+fn sealed(consumer: SemanticQueryKeyV1, producer: SemanticQueryKeyV1, facet: text) -> SealedForwardManifestV2:
+    SealedForwardManifestV2(consumer_identity: reverse_reference_subject_for_key_v2(consumer),
+        sealed: true, manifest: Some(manifest_for(consumer, [qread(producer, consumer, facet, 0)])))
+
+fn failed(consumer: SemanticQueryKeyV1) -> SealedForwardManifestV2:
+    SealedForwardManifestV2(consumer_identity: reverse_reference_subject_for_key_v2(consumer),
+        sealed: false, manifest: nil)
+
+fn fixture_cache() -> text:
+    val root = "build/test/rr-v2-{rt_getpid()}"
+    rt_dir_remove_all(root)
+    root + "/cache.bin"
+
+fn macro_subject() -> text:
+    reverse_reference_subject_for_key_v2(macro_def())
+
+describe "P2 semantic query read manifest kinds and read classes":
+    it "admits the new query kinds":
+        for kind in ["tldr.symbolic", "tldr.concrete", "generic.body", "aop.directory_facts",
+                "aop.match", "aop.weave", "macro.def", "macro.resolve", "macro.expand",
+                "obj.emit", "obj.link"]:
+            expect(semantic_query_kind_known_v1(kind)).to_equal(true)
+        expect(semantic_query_kind_known_v1("macro.bogus")).to_equal(false)
+
+    it "distinguishes positive, absence and membership reads on the wire":
+        val absence = semantic_read_facet_v1(SemanticReadKindV1.Absence, "name:double")
+        val membership = semantic_read_facet_v1(SemanticReadKindV1.Membership, "dir:src/a")
+        expect(semantic_read_kind_of_facet_v1("body") == SemanticReadKindV1.Positive).to_equal(true)
+        expect(semantic_read_kind_of_facet_v1(absence) == SemanticReadKindV1.Absence).to_equal(true)
+        expect(semantic_read_kind_of_facet_v1(membership) == SemanticReadKindV1.Membership).to_equal(true)
+        expect(semantic_read_facet_name_v1(absence)).to_equal("name:double")
+        val resolve = qkey("macro.resolve", "pkg/scope#double")
+        val bytes = semantic_query_read_manifest_encode_v1(manifest_for(user_a(), [qread(resolve, user_a(), absence, 0)]))
+        val decoded = semantic_query_read_manifest_decode_v1(bytes)
+        expect(decoded.ok).to_equal(true)
+        expect(semantic_read_kind_of_facet_v1(decoded.value!.ordered_reads[0].facet) == SemanticReadKindV1.Absence).to_equal(true)
+
+describe "P2 reverse-reference family schema migration":
+    it "keeps every v1 mandatory family and adds the new families":
+        expect(REVERSE_REFERENCE_FAMILIES_V1.len()).to_equal(10)
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            expect(REVERSE_REFERENCE_FAMILIES_V2.contains(family)).to_equal(true)
+        for family in ["macro-definition-consumer", "macro-name-resolution", "macro-name-absence",
+                "aop-match-membership", "directory-scope"]:
+            expect(REVERSE_REFERENCE_FAMILIES_V2.contains(family)).to_equal(true)
+
+    it "migrates a v1 receipt so new families answer conservatively, never empty-exact":
+        val build = reverse_reference_project_generation_v2("g1", "r1",
+            [sealed(user_a(), macro_def(), "body")], ReverseReferenceReceiptReadV1(false, "missing-generation", nil))
+        expect(build.ok).to_equal(true)
+        var v1_projections: [ReverseReferenceProjectionV1] = []
+        for p in build.receipt!.projections:
+            if REVERSE_REFERENCE_FAMILIES_V1.contains(p.key.projection_kind):
+                v1_projections.push(p)
+        val v1 = ReverseReferenceGenerationReceiptV1(1, "g1", "r1", v1_projections)
+        val v1_read = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(v1))
+        expect(v1_read.valid).to_equal(true)
+        val migrated = reverse_reference_receipt_migrate_v1_to_v2(v1_read.receipt!)
+        expect(migrated.schema_version).to_equal(2)
+        val m_read = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(migrated))
+        expect(m_read.valid).to_equal(true)
+        val users = reverse_reference_consumers_v1(m_read, macro_subject(), "macro-definition-consumer")
+        expect(users.exact).to_equal(false)
+
+describe "P2 .rr projection lifecycle (X-01)":
+    it "answers missing .rr conservatively, never with zero dependents":
+        val read = ReverseReferenceReceiptReadV1(false, "missing-generation", nil)
+        val users = reverse_reference_consumers_v1(read, macro_subject(), "macro-definition-consumer")
+        expect(users.exact).to_equal(false)
+        expect(reverse_reference_replay_needed_v2(read, "g1", "r1")).to_equal(true)
+        val preview = preview_semantic_change(read,
+            ProposedSemanticEditV2(base_snapshot: "g1", changed_subjects: [macro_subject()],
+                changed_name_scopes: [], unknown_effects: false), "project")
+        expect(preview.complete).to_equal(false)
+        expect(preview.affected_consumers).to_equal(["@scope:project"])
+
+    it "treats a torn receipt as conservative and rebuilds it by replay":
+        val none = ReverseReferenceReceiptReadV1(false, "missing-generation", nil)
+        val manifests = [sealed(user_a(), macro_def(), "body")]
+        val encoded = reverse_reference_receipt_encode_v1(
+            reverse_reference_project_generation_v2("g1", "r1", manifests, none).receipt!)
+        val torn = reverse_reference_receipt_decode_v1(encoded.substring(0, encoded.len() - 7))
+        expect(torn.valid).to_equal(false)
+        expect(reverse_reference_consumers_v1(torn, macro_subject(), "macro-definition-consumer").exact).to_equal(false)
+        expect(reverse_reference_replay_needed_v2(torn, "g1", "r1")).to_equal(true)
+        val rebuilt = reverse_reference_project_generation_v2("g1", "r1", manifests, torn)
+        val read = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(rebuilt.receipt!))
+        expect(reverse_reference_replay_needed_v2(read, "g1", "r1")).to_equal(false)
+        val users = reverse_reference_consumers_v1(read, macro_subject(), "macro-definition-consumer")
+        expect(users.exact).to_equal(true)
+        expect(users.consumers).to_equal([reverse_reference_subject_for_key_v2(user_a())])
+
+    it "adds and removes consumer edges per generation":
+        val none = ReverseReferenceReceiptReadV1(false, "missing-generation", nil)
+        val g1 = reverse_reference_project_generation_v2("g1", "r1",
+            [sealed(user_a(), macro_def(), "body")], none)
+        val r1 = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(g1.receipt!))
+        expect(reverse_reference_replay_needed_v2(r1, "g2", "r1")).to_equal(true)
+        val g2 = reverse_reference_project_generation_v2("g2", "r1",
+            [sealed(user_b(), macro_def(), "body")], r1)
+        val r2 = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(g2.receipt!))
+        expect(r2.receipt!.owner_generation).to_equal("g2")
+        val users = reverse_reference_consumers_v1(r2, macro_subject(), "macro-definition-consumer")
+        expect(users.consumers).to_equal([reverse_reference_subject_for_key_v2(user_b())])
+
+    it "invalidates previously-absent name users when a new macro appears":
+        val none = ReverseReferenceReceiptReadV1(false, "missing-generation", nil)
+        val resolve = qkey("macro.resolve", "pkg/scope#triple")
+        val consumer = user_a()
+        val m = SealedForwardManifestV2(consumer_identity: reverse_reference_subject_for_key_v2(consumer), sealed: true,
+            manifest: Some(manifest_for(consumer, [
+                qread(resolve, consumer, semantic_read_facet_v1(SemanticReadKindV1.Absence, "name:triple"), 0)])))
+        val r = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(
+            reverse_reference_project_generation_v2("g1", "r1", [m], none).receipt!))
+        val preview = preview_semantic_change(r,
+            ProposedSemanticEditV2(base_snapshot: "g1", changed_subjects: [],
+                changed_name_scopes: [reverse_reference_subject_for_key_v2(resolve)], unknown_effects: false), "project")
+        expect(preview.complete).to_equal(true)
+        expect(preview.affected_macro_users).to_equal([reverse_reference_subject_for_key_v2(consumer)])
+
+    it "retains old outgoing edges for a consumer whose rebuild failed":
+        val none = ReverseReferenceReceiptReadV1(false, "missing-generation", nil)
+        val g1 = reverse_reference_project_generation_v2("g1", "r1",
+            [sealed(user_a(), macro_def(), "body"), sealed(user_b(), macro_def(), "body")], none)
+        val r1 = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(g1.receipt!))
+        val g2 = reverse_reference_project_generation_v2("g2", "r1",
+            [failed(user_a()), sealed(user_b(), macro_def(), "body")], r1)
+        expect(g2.ok).to_equal(true)
+        expect(g2.retained_consumers).to_equal([reverse_reference_subject_for_key_v2(user_a())])
+        val r2 = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(g2.receipt!))
+        val users = reverse_reference_consumers_v1(r2, macro_subject(), "macro-definition-consumer")
+        expect(users.consumers.len()).to_equal(2)
+
+    it "refuses to publish when a consumer failed with no prior generation":
+        val none = ReverseReferenceReceiptReadV1(false, "missing-generation", nil)
+        val g = reverse_reference_project_generation_v2("g1", "r1", [failed(user_a())], none)
+        expect(g.ok).to_equal(false)
+
+    it "records absence and membership reads in their own families":
+        val none = ReverseReferenceReceiptReadV1(false, "missing-generation", nil)
+        val resolve = qkey("macro.resolve", "pkg/scope#triple")
+        val dir = qkey("aop.directory_facts", "src/a")
+        val consumer = user_a()
+        val m = SealedForwardManifestV2(consumer_identity: reverse_reference_subject_for_key_v2(consumer), sealed: true,
+            manifest: Some(manifest_for(consumer, [
+                qread(resolve, consumer, semantic_read_facet_v1(SemanticReadKindV1.Absence, "name:triple"), 0),
+                qread(dir, consumer, semantic_read_facet_v1(SemanticReadKindV1.Membership, "dir:src/a"), 1)])))
+        val g = reverse_reference_project_generation_v2("g1", "r1", [m], none)
+        val r = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(g.receipt!))
+        expect(r.valid).to_equal(true)
+        val absent = reverse_reference_consumers_v1(r, reverse_reference_subject_for_key_v2(resolve), "macro-name-absence")
+        expect(absent.consumers.len()).to_equal(1)
+        val scoped = reverse_reference_consumers_v1(r, reverse_reference_subject_for_key_v2(dir), "directory-scope")
+        expect(scoped.consumers.len()).to_equal(1)
+
+describe "P2 preview_semantic_change":
+    it "lists exact old users before an edit, transitively":
+        val none = ReverseReferenceReceiptReadV1(false, "missing-generation", nil)
+        val obj = qkey("obj.emit", "pkg/a.o")
+        val g = reverse_reference_project_generation_v2("g1", "r1",
+            [sealed(user_a(), macro_def(), "body"), sealed(obj, user_a(), "expansion")], none)
+        val r = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(g.receipt!))
+        val preview = preview_semantic_change(r,
+            ProposedSemanticEditV2(base_snapshot: "g1", changed_subjects: [macro_subject()],
+                changed_name_scopes: [], unknown_effects: false), "project")
+        expect(preview.complete).to_equal(true)
+        expect(preview.affected_consumers.len()).to_equal(2)
+        expect(preview.affected_object_actions).to_equal([reverse_reference_subject_for_key_v2(obj)])
+
+    it "is conservative on base snapshot mismatch or unknown effects":
+        val none = ReverseReferenceReceiptReadV1(false, "missing-generation", nil)
+        val g = reverse_reference_project_generation_v2("g1", "r1", [sealed(user_a(), macro_def(), "body")], none)
+        val r = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(g.receipt!))
+        val stale = preview_semantic_change(r,
+            ProposedSemanticEditV2(base_snapshot: "g0", changed_subjects: [macro_subject()],
+                changed_name_scopes: [], unknown_effects: false), "project")
+        expect(stale.complete).to_equal(false)
+        expect(stale.fallback_reason).to_equal("base-snapshot-mismatch")
+        val effects = preview_semantic_change(r,
+            ProposedSemanticEditV2(base_snapshot: "g1", changed_subjects: [macro_subject()],
+                changed_name_scopes: [], unknown_effects: true), "project")
+        expect(effects.complete).to_equal(false)
+        expect(effects.affected_consumers.contains(reverse_reference_subject_for_key_v2(user_a()))).to_equal(true)

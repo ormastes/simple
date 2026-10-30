@@ -1,0 +1,39 @@
+# Shared top-level/member attribute consumer. The lexer grammar is unchanged.
+use compiler.core.parser.{par_kind_get, par_text_get, parser_advance, parser_error}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_annotation_value, lock_level_pending_get, lock_level_pending_set, lock_level_pending_take}
+
+pub fn lock_level_is_exception_attribute(name: text) -> bool:
+    name == "lock_level_exception" or name == "lock_order_exception" or name == "lock_order_exempt"
+
+pub fn lock_level_parse_attribute(name: text):
+    if lock_level_is_exception_attribute(name):
+        parser_error("[E-LOCK-LEVEL-004] source-only lock-order exceptions have no reviewed authority")
+    elif lock_level_pending_get() >= 0:
+        parser_error("[E-LOCK-LEVEL-001] duplicate @lock_level annotation")
+    var rank: i64 = -1
+    var valid = par_kind_get() == 140
+    if valid:
+        parser_advance()
+        valid = par_kind_get() == 1
+        if valid:
+            rank = lock_level_annotation_value(par_text_get())
+            valid = rank >= 0
+            parser_advance()
+        valid = valid and par_kind_get() == 141
+        # Consume malformed lists with balanced parentheses, bounded by EOF.
+        var depth: i64 = 1
+        while depth > 0 and par_kind_get() != 190:
+            if par_kind_get() == 140: depth = depth + 1
+            elif par_kind_get() == 141: depth = depth - 1
+            parser_advance()
+    if not valid and name == "lock_level":
+        parser_error("[E-LOCK-LEVEL-001] @lock_level requires one nonnegative decimal i64 literal")
+    if name == "lock_level" and valid:
+        lock_level_pending_set(rank)
+
+pub fn lock_level_reject_non_function(kind: i64):
+    # @ attributes may stack; visibility is consumed before this guard.
+    if lock_level_pending_get() < 0: return
+    if kind == 20 or kind == 21 or kind == 34 or kind == 30 or kind == 53 or kind == 171: return
+    val unused = lock_level_pending_take()
+    parser_error("[E-LOCK-LEVEL-001] @lock_level requires a named synchronous function or immutable module Mutex val")

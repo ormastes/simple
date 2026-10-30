@@ -1,0 +1,161 @@
+# CPU tier classification spec (PR3).
+#
+# Verifies tier_unit_kind_of_attrs, tier_unit_kind_of_module, and
+# tier_unit_kind_text classify units correctly for CPU tier tracking.
+# Plan: doc/05_design/compiler/simd/cpu_tier_multibuild.md § 2 (PR3)
+
+use compiler.mir_opt.tier_unit_kind.{
+    TierUnitKind,
+    tier_unit_kind_of_attrs,
+    tier_unit_kind_of_module,
+    tier_unit_kind_text
+}
+
+describe "tier_unit_kind_of_attrs: attribute classification":
+    it """correctly identifies a plain function as neutral
+
+    A function with no @simd or @must(simd) attributes
+    is tier-neutral and executable on all targets.
+    """:
+        # @manual_section("Attribute Tests")
+        val attrs: [text] = []
+        val atoms: [text] = []
+        val kind = tier_unit_kind_of_attrs(attrs, atoms)
+        expect(kind).to_equal(TierUnitKind.Neutral)
+
+    it """detects @simd attribute as tier-specific
+
+    A function marked @simd is CPU tier-specific because
+    SIMD lanes vary by CPU feature set.
+    """:
+        # @manual_section("Attribute Tests")
+        val attrs = ["simd"]
+        val atoms: [text] = []
+        val kind = tier_unit_kind_of_attrs(attrs, atoms)
+        expect(kind).to_equal(TierUnitKind.TierSpecific)
+
+    it """detects @must(simd) attribute as tier-specific
+
+    A function marked @must(simd) is CPU tier-specific because
+    it requires SIMD optimization.
+    """:
+        # @manual_section("Attribute Tests")
+        val attrs = ["must(simd)"]
+        val atoms: [text] = []
+        val kind = tier_unit_kind_of_attrs(attrs, atoms)
+        expect(kind).to_equal(TierUnitKind.TierSpecific)
+        expect(tier_unit_kind_of_attrs(["must(inline)"], atoms)).to_equal(TierUnitKind.Neutral)
+
+    it """ignores unrelated attributes in the attr list
+
+    Only @simd and @must(simd) matter for tier specificity.
+    Other attributes like @export do not affect the classification.
+    """:
+        # @manual_section("Attribute Tests")
+        val attrs = ["export", "volatile", "inline"]
+        val atoms: [text] = []
+        val kind = tier_unit_kind_of_attrs(attrs, atoms)
+        expect(kind).to_equal(TierUnitKind.Neutral)
+
+describe "tier_unit_kind_of_attrs: cfg atom classification":
+    it """detects cfg(target_feature) atom as tier-specific
+
+    A function with a cfg(target_feature="...") condition
+    is tier-specific because it targets a specific CPU tier.
+    """:
+        # @manual_section("Cfg Atom Tests")
+        val attrs: [text] = []
+        val atoms = ["target_feature=\"avx2\""]
+        val kind = tier_unit_kind_of_attrs(attrs, atoms)
+        expect(kind).to_equal(TierUnitKind.TierSpecific)
+
+    it """detects cfg(feature) atom as tier-specific
+
+    A function with a cfg(feature="...") condition
+    is tier-specific because it targets specific CPU features.
+    """:
+        # @manual_section("Cfg Atom Tests")
+        val attrs: [text] = []
+        val atoms = ["feature=\"avx2\""]
+        val kind = tier_unit_kind_of_attrs(attrs, atoms)
+        expect(kind).to_equal(TierUnitKind.TierSpecific)
+
+    it """ignores cfg atoms with non-feature keys
+
+    cfg(os), cfg(arch), and other non-feature configuration atoms
+    do not affect tier specificity.
+    """:
+        # @manual_section("Cfg Atom Tests")
+        val attrs: [text] = []
+        val atoms = ["os=\"linux\"", "arch=\"x86_64\""]
+        val kind = tier_unit_kind_of_attrs(attrs, atoms)
+        expect(kind).to_equal(TierUnitKind.Neutral)
+
+    it """ignores cfg atoms with misleading key names
+
+    Keys like os="target_features_x" contain the word "target_feature"
+    but are not feature keys, so they do not trigger tier specificity.
+    """:
+        # @manual_section("Cfg Atom Tests")
+        val attrs: [text] = []
+        val atoms = ["os=\"target_features_x\""]
+        val kind = tier_unit_kind_of_attrs(attrs, atoms)
+        expect(kind).to_equal(TierUnitKind.Neutral)
+
+    it """combines attribute and atom checks
+
+    Both @simd attribute and cfg(feature="...") atoms
+    are recognized as indicators of tier specificity.
+    """:
+        # @manual_section("Cfg Atom Tests")
+        val attrs = ["simd"]
+        val atoms = ["feature=\"sse4.2\""]
+        val kind = tier_unit_kind_of_attrs(attrs, atoms)
+        expect(kind).to_equal(TierUnitKind.TierSpecific)
+
+describe "tier_unit_kind_of_module: module aggregation":
+    it """module with all neutral units is neutral
+
+    A module containing only tier-neutral functions
+    is itself tier-neutral.
+    """:
+        # @manual_section("Module Tests")
+        val kinds = [TierUnitKind.Neutral, TierUnitKind.Neutral]
+        val result = tier_unit_kind_of_module(kinds)
+        expect(result).to_equal(TierUnitKind.Neutral)
+
+    it """module with one tier-specific unit is tier-specific
+
+    A module containing any tier-specific function
+    is marked tier-specific.
+    """:
+        # @manual_section("Module Tests")
+        val kinds = [TierUnitKind.Neutral, TierUnitKind.TierSpecific]
+        val result = tier_unit_kind_of_module(kinds)
+        expect(result).to_equal(TierUnitKind.TierSpecific)
+
+    it """empty unit list is neutral
+
+    A module with no units is tier-neutral by default.
+    """:
+        # @manual_section("Module Tests")
+        val kinds: [TierUnitKind] = []
+        val result = tier_unit_kind_of_module(kinds)
+        expect(result).to_equal(TierUnitKind.Neutral)
+
+describe "tier_unit_kind_text: witness field rendering":
+    it """renders Neutral as 'neutral'
+
+    The witness text form of Neutral is 'neutral'.
+    """:
+        # @manual_section("Text Rendering")
+        val text_form = tier_unit_kind_text(TierUnitKind.Neutral)
+        expect(text_form).to_equal("neutral")
+
+    it """renders TierSpecific as 'tier'
+
+    The witness text form of TierSpecific is 'tier'.
+    """:
+        # @manual_section("Text Rendering")
+        val text_form = tier_unit_kind_text(TierUnitKind.TierSpecific)
+        expect(text_form).to_equal("tier")

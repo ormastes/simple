@@ -448,12 +448,19 @@ impl Lowerer {
             self.preregister_imported_type_placeholder(item);
         }
 
+        let declared_aliases = Self::declared_type_aliases(items);
         // Intra-file Pass 1: Full registration of imported symbols with field resolution
         for item in items {
             match item {
                 Node::Class(class_def) => {
                     if self.should_import_symbol(&class_def.name, target) {
-                        let class_type_id = self.register_class(class_def)?;
+                        let class_type_id = if declared_aliases.is_empty() {
+                            self.register_class(class_def)?
+                        } else {
+                            let mut scoped = class_def.clone();
+                            Self::expand_field_aliases(&mut scoped.fields, &declared_aliases);
+                            self.register_class(&scoped)?
+                        };
                         self.globals.insert(class_def.name.clone(), class_type_id);
                         self.record_imported_method_defaults(&class_def.name, &class_def.methods);
                         imported_count += 1;
@@ -501,7 +508,13 @@ impl Lowerer {
                 }
                 Node::Struct(struct_def) => {
                     if self.should_import_symbol(&struct_def.name, target) {
-                        let struct_type_id = self.register_struct(struct_def)?;
+                        let struct_type_id = if declared_aliases.is_empty() {
+                            self.register_struct(struct_def)?
+                        } else {
+                            let mut scoped = struct_def.clone();
+                            Self::expand_field_aliases(&mut scoped.fields, &declared_aliases);
+                            self.register_struct(&scoped)?
+                        };
                         self.globals.insert(struct_def.name.clone(), struct_type_id);
                         self.record_imported_method_defaults(&struct_def.name, &struct_def.methods);
                         imported_count += 1;
@@ -1255,6 +1268,76 @@ impl Lowerer {
 
     /// Check if a symbol should be imported based on the import target.
     #[allow(clippy::only_used_in_recursion)] // reason: parameter threaded for consistency with sibling function signatures
+    /// Non-refined type aliases declared in `items`, keyed by name. Used to
+    /// resolve an imported class/struct's field types in the DECLARING
+    /// module's alias scope: a selective import (`use m.{Holder}`) does not
+    /// bring in a private `type Alias = {text: T}`, so resolving the field in
+    /// the importer erased it to `Any`, and dict calls on it (`.contains_key`)
+    /// were bound by bare name to unrelated user methods.
+    /// doc/08_tracking/bug/stage2_lower_trait_alias_dict_dispatch_segv_2026-10-24.md
+    fn declared_type_aliases(items: &[Node]) -> std::collections::HashMap<String, simple_parser::ast::Type> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Node::TypeAlias(ta) if ta.where_clause.is_none() => Some((ta.name.clone(), ta.ty.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Expand declaring-module aliases inside a field type. Depth-bounded so a
+    /// self-referential alias cannot recurse forever.
+    fn expand_declared_aliases(
+        ty: &simple_parser::ast::Type,
+        aliases: &std::collections::HashMap<String, simple_parser::ast::Type>,
+        depth: usize,
+    ) -> simple_parser::ast::Type {
+        use simple_parser::ast::Type;
+        if depth > 16 {
+            return ty.clone();
+        }
+        let rec = |t: &Type| Self::expand_declared_aliases(t, aliases, depth + 1);
+        match ty {
+            Type::Simple(name) => match aliases.get(name) {
+                Some(target) => rec(target),
+                None => ty.clone(),
+            },
+            Type::Generic { name, args } => Type::Generic {
+                name: name.clone(),
+                args: args.iter().map(rec).collect(),
+            },
+            Type::Optional(inner) => Type::Optional(Box::new(rec(inner))),
+            Type::Array { element, size } => Type::Array {
+                element: Box::new(rec(element)),
+                size: size.clone(),
+            },
+            Type::Tuple(elems) => Type::Tuple(elems.iter().map(rec).collect()),
+            Type::Union(elems) => Type::Union(elems.iter().map(rec).collect()),
+            Type::Pointer { kind, inner } => Type::Pointer {
+                kind: *kind,
+                inner: Box::new(rec(inner)),
+            },
+            Type::Capability { capability, inner } => Type::Capability {
+                capability: capability.clone(),
+                inner: Box::new(rec(inner)),
+            },
+            Type::Function { params, ret } => Type::Function {
+                params: params.iter().map(rec).collect(),
+                ret: ret.as_ref().map(|r| Box::new(rec(r))),
+            },
+            _ => ty.clone(),
+        }
+    }
+
+    fn expand_field_aliases(
+        fields: &mut [simple_parser::ast::Field],
+        aliases: &std::collections::HashMap<String, simple_parser::ast::Type>,
+    ) {
+        for field in fields {
+            field.ty = Self::expand_declared_aliases(&field.ty, aliases, 0);
+        }
+    }
+
     fn should_import_symbol(&self, name: &str, target: &ImportTarget) -> bool {
         match target {
             ImportTarget::Glob => !name.starts_with('_'),
@@ -2036,4 +2119,142 @@ mod imported_module_ast_memo_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+
+}
+
+#[cfg(test)]
+mod private_alias_dict_tests {
+    use crate::hir::lower::lowerer::Lowerer;
+    use crate::module_resolver::ModuleResolver;
+    use crate::test_helpers::create_test_project;
+    use simple_parser::Parser;
+    use std::fs;
+
+    /// Cross-module private dict alias: `type TraitsByName = {text: i64}` is
+    /// private to the declaring module, a class field typed with it is read
+    /// from an importing module, and an unrelated imported class declares a
+    /// same-named `contains_key`. The membership call must lower to the
+    /// tag-dispatched dict builtin (`rt_contains`), never to the user method.
+    /// doc/08_tracking/bug/stage2_lower_trait_alias_dict_dispatch_segv_2026-10-24.md
+    fn lower_private_alias_dict_probe(main_src: &str) -> (crate::hir::HirModule, crate::mir::MirModule) {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let owner = src.join("owner");
+        fs::create_dir_all(&owner).unwrap();
+        fs::write(
+            owner.join("types.spl"),
+            "type TraitsByName = {text: i64}\n\nclass Holder:\n    traits: TraitsByName\n    plain: {text: i64}\n",
+        )
+        .unwrap();
+        fs::write(
+            owner.join("adaptive.spl"),
+            "class AdaptiveMap:\n    profile: i64\n\nimpl AdaptiveMap:\n    fn contains_key(key: text) -> bool:\n        self.profile > 0\n",
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(&main_path, main_src).unwrap();
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
+        let ast = Parser::new(&source).parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let hir = Lowerer::with_module_resolver(resolver, main_path)
+            .lower_module(&ast)
+            .expect("private alias consumer lowers");
+        let mir = crate::mir::lower_to_mir(&hir).expect("private alias consumer lowers to MIR");
+        (hir, mir)
+    }
+
+    fn assert_dict_membership_not_user_method(mir: &crate::mir::MirModule, func: &str) {
+        let f = mir
+            .functions
+            .iter()
+            .find(|f| f.name == func || f.name.ends_with(&format!(".{func}")))
+            .unwrap_or_else(|| panic!("{func} MIR function"));
+        let insts: Vec<_> = f.blocks.iter().flat_map(|b| &b.instructions).collect();
+        let dump = format!("{insts:?}");
+        assert!(
+            insts.iter().all(|i| !matches!(i, crate::mir::MirInst::MethodCallStatic { func_name, .. }
+                if func_name.contains('.') && func_name.ends_with("contains_key"))),
+            "dict membership through a private alias must not bind a nominal contains_key: {dump}"
+        );
+        assert!(
+            dump.contains("rt_contains"),
+            "dict membership must reach the tag-dispatched builtin rt_contains: {dump}"
+        );
+    }
+
+    #[test]
+    fn private_alias_dict_field_membership_in_free_function() {
+        let (_hir, mir) = lower_private_alias_dict_probe(
+            "use owner.types.{Holder}\nuse owner.adaptive.{AdaptiveMap}\n\nfn probe(h: Holder) -> bool:\n    h.traits.contains_key(\"x\")\n",
+        );
+        assert_dict_membership_not_user_method(&mir, "probe");
+    }
+
+    #[test]
+    fn private_alias_dict_field_resolves_to_dict_in_importer() {
+        let (hir, _mir) = lower_private_alias_dict_probe(
+            "use owner.types.{Holder}\n\nfn probe(h: Holder) -> bool:\n    h.traits.contains_key(\"x\")\n",
+        );
+        let holder = hir.types.lookup("Holder").expect("Holder registered");
+        let Some(crate::hir::HirType::Struct { fields, .. }) = hir.types.get(holder) else {
+            panic!("Holder must be a struct type: {:?}", hir.types.get(holder));
+        };
+        let (_, traits_ty) = fields.iter().find(|(n, _)| n == "traits").expect("traits field");
+        assert!(
+            matches!(hir.types.get(*traits_ty), Some(crate::hir::HirType::Dict { .. })),
+            "private alias field must resolve to its Dict target in the importer, got {:?}",
+            hir.types.get(*traits_ty)
+        );
+    }
+
+    #[test]
+    fn private_alias_dict_field_membership_in_imported_class_method() {
+        let (_hir, mir) = lower_private_alias_dict_probe(
+            "use owner.types.{Holder}\nuse owner.adaptive.{AdaptiveMap}\n\nimpl Holder:\n    fn has_trait(name: text) -> bool:\n        self.traits.contains_key(name)\n",
+        );
+        assert_dict_membership_not_user_method(&mir, "has_trait");
+    }
+
+    /// Alias re-imported by the declaring module from a THIRD module: the
+    /// declaring-scope expansion does not see it, so the field stays erased.
+    /// MIR must still emit the bare builtin name, never `void.contains_key`.
+    #[test]
+    fn transitively_imported_alias_field_membership_stays_builtin() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let owner = src.join("owner");
+        fs::create_dir_all(&owner).unwrap();
+        fs::write(owner.join("aliases.spl"), "type TraitsByName = {text: i64}\n").unwrap();
+        fs::write(
+            owner.join("types.spl"),
+            "use owner.aliases.{TraitsByName}\n\nclass Holder:\n    traits: TraitsByName\n",
+        )
+        .unwrap();
+        fs::write(
+            owner.join("adaptive.spl"),
+            "class AdaptiveMap:\n    profile: i64\n\nimpl AdaptiveMap:\n    fn contains_key(key: text) -> bool:\n        self.profile > 0\n",
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            "use owner.types.{Holder}\nuse owner.adaptive.{AdaptiveMap}\n\nfn probe(h: Holder) -> bool:\n    h.traits.contains_key(\"x\")\n",
+        )
+        .unwrap();
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
+        let ast = Parser::new(&source).parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let hir = Lowerer::with_module_resolver(resolver, main_path)
+            .lower_module(&ast)
+            .expect("transitive alias consumer lowers");
+        let mir = crate::mir::lower_to_mir(&hir).expect("transitive alias consumer lowers to MIR");
+        let f = mir.functions.iter().find(|f| f.name == "probe").expect("probe");
+        let insts: Vec<_> = f.blocks.iter().flat_map(|b| &b.instructions).collect();
+        let dump = format!("{insts:?}");
+        assert!(
+            insts.iter().all(|i| !matches!(i, crate::mir::MirInst::MethodCallStatic { func_name, .. }
+                if func_name.contains('.') && func_name.ends_with("contains_key"))),
+            "erased receiver must not carry a nominal contains_key qualifier: {dump}"
+        );
+    }
 }

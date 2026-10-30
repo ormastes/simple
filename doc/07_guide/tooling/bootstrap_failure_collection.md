@@ -209,6 +209,25 @@ there is no independent tool-source closure authority. Rebuild and admit a
 candidate containing the manager changes, then prepare all eight manager
 images from that same authority. Do not rewrite an older admission receipt.
 
+### Direct Phase 4 tool build
+
+For one isolated CLI artifact, the grouped entry point accepts
+`--phase-only=phase4 --executor=direct --direct-product=<id> --direct-backend=<llvm|cranelift>`.
+The product ID is one of `bootstrap`, `full-cli`, `interpreter`, `mcp`, `lsp`,
+or `test-runner`. This route still replays Stage 2 producer admission, source,
+runtime and tool authority checks, but it does not require BuildRunner images
+or start module groups and suites. It runs through `scripts/build/run-build.shs`
+under the process-tree watchdog, with a private per-product cache and output
+root.
+
+The output is a single native executable plus `direct-build.env` with
+`evidence_state=BUILD_ONLY` and its watchdog receipt. It never writes a managed
+Phase 4 completion receipt. In particular, building the `test-runner` executable
+does not execute tests; test execution remains owned by a separately validated
+CLI/runner pair and suite manifest. This route builds each selected tool’s entry
+closure independently and does not claim a shared library artifact is built
+once and reused by multiple tools.
+
 ## Module diagnostics after a tool binary fails
 
 The full phase verification profile runs `run_module_compile_inventory` after
@@ -515,6 +534,61 @@ actual platform execution and unavailable providers; Linux PASS cannot stand
 for another host. The [POSIX/host interface index](../app/llm/simpleos_posix_host_interface_index.md)
 and LLM wiki's SOSIX/QEMU matrix route to the canonical owners and platform checks.
 
+### Phase 3 manual continuation recipe (measured 2026-10-25)
+
+Run-27e (Stage 2 `p2shard-17` copy as producer, `--go-to-end`) built 1,459
+objects and left 7 modules objectless. With fewer than 30 go-to-end failures the
+policy is to finish by hand (manual compile and link), not to rebuild Stage 2:
+source workarounds and compiler fixes are separate commits, and compiler fixes
+only take effect when the working Phase 3 compiler rebuilds itself.
+
+1. **Per-module tiny-entry compile.** Reproduce one failed module with a tiny
+   entry that imports only it, using the run's env, `--threads 4`, and a memory
+   cap (`systemd-run --user --scope -p MemoryMax=10G -p MemorySwapMax=0`).
+   Check `free -g` first (>= 25G available). Keep the `.o`, delete the temp
+   cache.
+2. **`fixed_objs.txt`.** Append-only ledger of `<module> <abs .o>` lines.
+   Duplicates resolve last-line-wins (the relink awk keeps the final path per
+   module), so a later fix replaces an earlier one without editing the file.
+   Fixers only append; one relink owner links.
+3. **Relink from the object ledger.** Start from the run's object map, drop the
+   ledger object of every module that has a fixed object, add the fixed objects.
+   Pass 1 links to a probe to collect `undefined symbol` names; generate a C
+   file of trap stubs (abort with `STAGE3 TRAP: <sym>`, no-op for
+   `__simple_global_initialize_*`) for modules still missing (32 symbols over 7
+   modules in run-27e); pass 2 links with the stubs. Link inputs: the **backfill
+   archive (`libsimple_compiler_backfill.a`) only, never
+   `libsimple_native_all.a`** (it links a second, value-incompatible Rust
+   runtime), two `--defsym` aliases (`env_get`, `SdnBackendImpl.process_module`),
+   and a generated `main` shim that re-execs under a 1 GiB stack and runs the
+   `__module_init` calls. A runtime-object override list (one
+   `<basename.o> <abs .o>` per line) lets a patched `runtime_native.o` replace the
+   capsule's. Record the sha256 of every relinked binary (pu3 `49df0a2f`, pu5
+   `5072c3e9`, pu6 `45944812`, p3b6y `402b63c9`); never claim a fix without it.
+4. **In-process bypass.** The worker child (`simple.<tag> run
+   src/app/cli/native_build_worker.spl ...`) hides crashes. The positional form
+   `native-build <file>.spl --target ... --backend cranelift --runtime-bundle
+   core-c-bootstrap --threads 1 --cache-dir D --mode one-binary --runtime-path RT
+   -o OUT` with **no `--entry` and no `--source`** is routed by
+   `bootstrap_main.spl` (~line 336) straight into the in-process
+   `CompilerDriver`. Use it to walk a hello-world past each blocker (B1..B11 on
+   the 2026-10-25 board).
+5. **Debugging exec'd workers.** Preload a small `LD_PRELOAD` shim that installs a
+   SIGSEGV handler, walks the frame-pointer chain, and records the worker's
+   argv/env, then replay the exact argv under gdb. Hardware watchpoints on a
+   freed header found the transient-string free (B5).
+6. **Reading the error when `bootstrap_main` crashes printing it.** The error
+   list loop SEGVs in `spl_str_concat`/`strlen` because each text is an
+   int-boxed `RtCoreString` handle shifted left by 3. Break at the crash, then
+   `x/s ($x0>>3)` in frame 1 to print the real message.
+7. **Silent-pass check.** Treat an object that exists only because a failed
+   module was published PASS as a failure (see the go-to-end class in
+   [Stage 2 native miscompile classes](../compiler/robustness/stage2_native_miscompile_classes.md)).
+
+Phase 3 acceptance is hello-world through the exact new binary, then the
+self-host rebuild (`phase3s3`: the Stage 3 as compiler, same env plus
+`--source src/os`, 20 workers, 110G cap).
+
 ## Native staging and terminal consumers
 
 Use [native staging and terminal evidence](bootstrap_native_staging.md) for the
@@ -567,3 +641,30 @@ remain required independently of the shell/protocol controls.
 ## Native tool aliases and receipt artifacts
 
 PATH-selected native tools are resolved to executable physical regular-file targets before hashing (for example Debian llvm-config aliases). Receipt-named compiler artifacts retain strict rejection of symlink leaves. Dangling/cyclic/nonexecutable tool targets fail closed. The focused harness is `sh scripts/check/check-bootstrap-native-command-alias.shs`; it does not qualify Windows execution or a bootstrap stage.
+
+## Rust authority host selection
+
+When the pinned Rust channel differs from rustup's fully qualified default
+toolchain, the authority resolver selects the installed pinned-channel directory
+with that default's host suffix. Multiple installed Windows ABIs therefore do
+not require deleting toolchains or changing the repository's pinned channel.
+Missing or ambiguous matching hosts fail closed. Ambient `RUSTUP_TOOLCHAIN`
+does not override this fingerprint selection. The focused regression is
+`scripts/check/check-bootstrap-channel-host-selection.shs`; on MSYS, run with
+Unix tools on PATH and `MSYS=winsymlinks:nativestrict` for real symlink fixtures.
+
+## Narrow hosted runtime owners
+
+Bootstrap callers needing CPU queries, hosted text or refcount operations use
+`std.nogc_sync_mut.sffi.cpu`, `.host_text` and `.rc_graph` respectively. The
+broad `.host` facade retains compatibility exports, but retaining its object
+can introduce unrelated privileged hardware, rendering and TLS dependencies.
+
+The focused fixture is `test/fixtures/bootstrap_builder/host_owner_closure_probe.spl`.
+Use the exact bootstrap runtime authority and no-stub lane for diagnostics;
+feed BOM-free `owner-probe` plus LF through a raw pipe. A PowerShell
+`StandardInput.BaseStream` byte buffer alone does not prove BOM-free child input.
+The fixture checks CPU queries, signed text, stdin and refcount operations;
+its PASS does not qualify the full compiler or runner. Retained evidence and
+limitations are recorded in
+`doc/08_tracking/bug/windows_stage2_broad_host_closure_2026-10-29.md`.

@@ -1,0 +1,79 @@
+use std.spec
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.mir_opt.var_reassign_ssa.{ssa_reassigned_locals_for_blocks, _ssa_written_local_id}
+use compiler.mir_opt.var_reassign_analysis.{local_count_increment}
+
+fn count_write(id: i64) -> MirInst:
+    MirInst(kind: MirInstKind.Const(LocalId(id: id), MirConstValue.Int(17), MirType.i64()), span: nil)
+
+fn count_block(id: i64, instructions: [MirInst]) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: Some("count-probe"), instructions: instructions,
+        terminator: MirTerminator.Ret(nil))
+
+# Independent old counting algorithm, retained here only as an ordering oracle.
+fn old_reassigned_locals(blocks: [MirBlock]) -> [i64]:
+    var ids: [i64] = []
+    var counts: [i64] = []
+    for block in blocks:
+        for inst in block.instructions:
+            val id = _ssa_written_local_id(inst)
+            if id >= 0:
+                val step = local_count_increment(ids, counts, id)
+                ids = step[0]
+                counts = step[1]
+    var result: [i64] = []
+    var index = 0
+    while index < ids.len():
+        if counts[index] > 1: result = result.push(ids[index])
+        index = index + 1
+    result
+
+fn count_order_probe() -> [MirBlock]:
+    [count_block(4, [count_write(2), count_write(1)]),
+        count_block(8, [count_write(1), count_write(2)])]
+
+describe "indexed SSA write counting preserves graph and slot order":
+    it "keeps first-definition order rather than second-write order":
+        val blocks = count_order_probe()
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal([2, 1])
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal(old_reassigned_locals(blocks))
+
+    it "preserves zero and sparse ids across interleaved blocks":
+        val blocks = [count_block(0, [count_write(0), count_write(900001), count_write(-7)]),
+            count_block(9, [count_write(900001), count_write(0), count_write(900001)])]
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal([0, 900001])
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal(old_reassigned_locals(blocks))
+
+    it "does not slot locals that are written only once":
+        val blocks = [count_block(0, [count_write(0), count_write(2), count_write(900001)])]
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal([])
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal(old_reassigned_locals(blocks))
+
+    it "emits one entry for more than two writes":
+        val blocks = [count_block(0, [count_write(6), count_write(6)]),
+            count_block(1, [count_write(6), count_write(6)])]
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal([6])
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal(old_reassigned_locals(blocks))
+
+    it "excludes negative destinations and instructions without a destination":
+        val operand = MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))
+        val store = MirInst(kind: MirInstKind.Store(operand, operand), span: nil)
+        val blocks = [count_block(0, [count_write(-1), count_write(-1), store, store])]
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal([])
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal(old_reassigned_locals(blocks))
+
+    it "matches the old result for many distinct writes without an output append":
+        var instructions: [MirInst] = []
+        for id in 0..512:
+            instructions = instructions.push(count_write(id * 17))
+        val blocks = [count_block(0, instructions)]
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal([])
+        expect(ssa_reassigned_locals_for_blocks(blocks)).to_equal(old_reassigned_locals(blocks))
+
+    it "leaves the original MIR blocks instructions labels and terminators unchanged":
+        val blocks = count_order_probe()
+        val independently_constructed = count_order_probe()
+        val result = ssa_reassigned_locals_for_blocks(blocks)
+        expect(result).to_equal([2, 1])
+        expect(blocks).to_equal(independently_constructed)

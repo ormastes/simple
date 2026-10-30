@@ -2,6 +2,8 @@
 use std.spec.{describe, context, it, expect, step}
 use app.llm_process_gen.main.{check_process_document_links_v1, GeneratedFile, generate_record}
 use app.cli.doc_links.{doc_links_command_v1}
+use app.io.cli_lint_commands.{run_lint_command, lint_option_error}
+use compiler.tools.lint.main.{apply_semantic_markdown_lint_fix_v1}
 use app.doc.semantic_link_lint.{SemanticMarkdownSourceV1, SemanticMarkdownDiagnosticV1, SemanticMarkdownPlanV1, semantic_markdown_process_failures_v1, plan_semantic_markdown_links_v1, apply_semantic_markdown_links_v1}
 use compiler.semantics.symbol_id.semantic_link_source.{open_semantic_link_document_v1, semantic_link_document_uri_v1}
 use std.common.crypto.sha256.{sha256_text}
@@ -235,3 +237,76 @@ describe "semantic Markdown source link lint and fix":
                     expect(error.message.contains("{first_prefix.len()}:{first_prefix.len() + good.len()} " + good)).to_equal(false)
                 case Ok(_): panic("invalid later Markdown target must refuse planning")
             expect(file_delete(file)).to_equal(true)
+
+        it "should check semantic Markdown through the actual root lint command":
+            step("Check semantic Markdown through root lint")
+            val root = secure_temp_dir(get_temp_dir(), "semantic-root-lint-").unwrap()
+            val file = root + "/source.spl"
+            val markdown_file = root + "/guide.md"
+            val source = "fn value() -> i64:\n    1\n"
+            val markdown = "[value](src/sample.spl#L2)"
+            expect(file_write(file, source)).to_equal(true)
+            expect(file_write(markdown_file, markdown)).to_equal(true)
+            val authority = ["--source-file", file, "--source-link", "src/sample.spl", "--package", "pkg", "--module", "sample", "--revision", sha256_text(source)]
+            expect(lint_option_error(["lint", markdown_file] + authority)).to_equal("")
+            expect(run_lint_command(["lint", markdown_file, "--profile=critical"])).to_equal(1)
+            expect(run_lint_command(["lint", markdown_file] + authority)).to_equal(0)
+            expect(run_lint_command(["lint", markdown_file, "--fix-dry-run"] + authority)).to_equal(0)
+            expect(file_read(markdown_file)).to_equal(markdown)
+            expect(run_lint_command(["lint", markdown_file, "--fix"] + authority)).to_equal(0)
+            expect(file_read(markdown_file)).to_start_with("[value](spl:fn@sample.value~")
+            expect(run_lint_command(["lint", markdown_file] + authority)).to_equal(0)
+            step("Reject stale and duplicate authority without changing the document")
+            expect(file_write(markdown_file, markdown)).to_equal(true)
+            expect(run_lint_command(["lint", markdown_file, "--fix"] + authority + ["--revision", sha256_text(source)])).to_equal(2)
+            expect(file_read(markdown_file)).to_equal(markdown)
+            expect(file_write(file, source + "# changed\n")).to_equal(true)
+            expect(run_lint_command(["lint", markdown_file, "--fix"] + authority)).to_equal(1)
+            expect(file_read(markdown_file)).to_equal(markdown)
+            expect(file_write(markdown_file, "[bad](spl:fn@sample.value~bad)")).to_equal(true)
+            expect(run_lint_command(["lint", markdown_file])).to_equal(1)
+            expect(file_read(markdown_file)).to_equal("[bad](spl:fn@sample.value~bad)")
+            expect(dir_remove(root, true)).to_equal(true)
+
+        it "should apply the existing root lint severity configuration to semantic diagnostics":
+            step("Check semantic Markdown through root lint")
+            val root = secure_temp_dir(get_temp_dir(), "semantic-root-config-").unwrap()
+            val markdown_file = root + "/guide.md"
+            val manifest = root + "/simple.sdn"
+            expect(file_write(markdown_file, "[value](src/sample.spl:2)")).to_equal(true)
+            expect(file_write(manifest, "lints:\n  semantic_markdown_links: deny\n")).to_equal(true)
+            expect(run_lint_command(["lint", markdown_file])).to_equal(1)
+            expect(file_write(manifest, "lints:\n  semantic_markdown_links: allow\n")).to_equal(true)
+            expect(run_lint_command(["lint", markdown_file, "--fix"])).to_equal(0)
+            expect(file_read(markdown_file)).to_equal("[value](src/sample.spl:2)")
+            expect(file_write(manifest, "lints:\n  semantic_markdown_links: warn\n")).to_equal(true)
+            expect(run_lint_command(["lint", markdown_file])).to_equal(0)
+            expect(dir_remove(root, true)).to_equal(true)
+
+        it "should preserve Markdown when a shared root fix receives duplicate source owners":
+            step("Check semantic Markdown through root lint")
+            val source = "fn value() -> i64:\n    1\n"
+            val file = robust_06_semantic_docs_setup(source)
+            val document = open_semantic_link_document_v1("pkg", "sample", file, sha256_text(source)).unwrap()
+            val binding = SemanticMarkdownSourceV1(local_file: "src/sample.spl", remote_file: "", document: document)
+            val markdown = "[value](src/sample.spl:2)"
+            val markdown_file = get_temp_dir() + "/semantic-duplicate-{getpid()}-{time_now_unix_micros()}.md"
+            expect(file_write(markdown_file, markdown)).to_equal(true)
+            robust_06_semantic_docs_assert_refusal(apply_semantic_markdown_lint_fix_v1(markdown_file, markdown, [binding, binding], false))
+            expect(file_read(markdown_file)).to_equal(markdown)
+            expect(file_delete(markdown_file)).to_equal(true)
+            expect(file_delete(file)).to_equal(true)
+
+        it "should reject mixed generic and semantic fix publication before either edit":
+            step("Check semantic Markdown through root lint")
+            val root = secure_temp_dir(get_temp_dir(), "semantic-mixed-fix-").unwrap()
+            val file = root + "/source.spl"
+            val markdown_file = root + "/guide.md"
+            val source = "fn value() -> i64:\n    1\n"
+            val markdown = "[value](src/sample.spl:2)\nif let value = item:\n"
+            expect(file_write(file, source)).to_equal(true)
+            expect(file_write(markdown_file, markdown)).to_equal(true)
+            val authority = ["--source-file", file, "--source-link", "src/sample.spl", "--package", "pkg", "--module", "sample", "--revision", sha256_text(source)]
+            expect(run_lint_command(["lint", markdown_file, "--fix"] + authority)).to_equal(1)
+            expect(file_read(markdown_file)).to_equal(markdown)
+            expect(dir_remove(root, true)).to_equal(true)

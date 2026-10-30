@@ -1,0 +1,113 @@
+# REQ-014 oracles use the production coordinator and actual disposable bare Git.
+# This reference-size fixture does not admit protected production publication.
+use std.spec.*
+use app.io.mod.{file_write, process_run_timeout, dir_remove_all, cwd, file_hash_sha256, dir_create, getpid}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use app.scv.db.settlement_queue.*
+use app.scv.db.settlement_queue_codec.*
+use app.scv.db.settlement_resume_local.*
+use app.scv.db.settlement_remote_snapshot.{db_settlement_remote_snapshot_local}
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_policy_codec.{db_policy_encode}
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.scv.db_settlement_queue_fixture.*
+use test.system.qualified_pure_simple_runtime.{admit_source_matched_pure_simple_runtime}
+
+struct Item2CausalRuntime:
+    binary: text
+    binary_digest: text
+    provenance_digest: text
+
+fn setup_item2_causal_runtime() -> Item2CausalRuntime:
+    val binary = admit_source_matched_pure_simple_runtime()
+    if binary == "":
+        return Item2CausalRuntime(binary: "", binary_digest: "", provenance_digest: "")
+    Item2CausalRuntime(binary: binary, binary_digest: file_hash_sha256(binary),
+        provenance_digest: file_hash_sha256(binary + ".provenance.env"))
+
+fn check_item2_causal_runtime(runtime: Item2CausalRuntime) -> bool:
+    if runtime.binary == "" or runtime.binary_digest.len() != 64 or
+            runtime.provenance_digest.len() != 64:
+        fail("MissingEvidence: causal suite has no pinned source-matched Stage4 runtime")
+        return false
+    if file_hash_sha256(runtime.binary) != runtime.binary_digest or
+            file_hash_sha256(runtime.binary + ".provenance.env") != runtime.provenance_digest:
+        fail("MissingEvidence: causal runtime or provenance changed during the suite")
+        return false
+    true
+
+fn check_item2_causal_reopen(runtime: Item2CausalRuntime, fixture: Item2SettlementQueueFixture, view: DbSettlementQueueView):
+    if not check_item2_causal_runtime(runtime): return
+    expect(file_write(fixture.source + "/causal-policy.scv", db_policy_encode(fixture.config.policy).unwrap())).to_be(true)
+    val digest = sha256_text(db_settlement_queue_encode(view.queue).unwrap())
+    val (out, err, code) = process_run_timeout(runtime.binary, ["run",
+        "test/fixtures/scv/queue_reopen_probe.spl", "--root=" + fixture.source,
+        "--policy=" + fixture.config.policy.revision, "--head=" + view.head,
+        "--digest=" + digest], 120000)
+    if not check_item2_causal_runtime(runtime): return
+    expect(dir_create("build/test-artifacts", true)).to_be(true)
+    val evidence = "build/test-artifacts/item2-causality-{getpid()}-{view.head}.txt"
+    expect(file_write(evidence, "runtime={runtime.binary}\nruntime_sha256={runtime.binary_digest}\n" +
+        "provenance_sha256={runtime.provenance_digest}\nhead={view.head}\nqueue_sha256={digest}\n" +
+        "exit={code}\nstdout:\n{out}\nstderr:\n{err}\n")).to_be(true)
+    expect(code).to_equal(0)
+    expect(out + err).to_contain("queue-reopen: verified " + view.head + " " + digest)
+    expect(db_settlement_queue_open(fixture.source, fixture.config.policy.admission).unwrap()).to_equal(view)
+
+fn check_item2_causal_cleanup(fixture: Item2SettlementQueueFixture):
+    val root = path_final_existing(fixture.root).unwrap().path
+    expect(root).to_equal(fixture.root)
+    expect(root.starts_with(path_final_existing(cwd()).unwrap().path + "/scv-queue-spec-")).to_be(true)
+    expect(dir_remove_all(root)).to_be(true)
+
+fn check_item2_causal_drain(runtime: Item2CausalRuntime, fixture: Item2SettlementQueueFixture, arrival: [i64]) -> [text]:
+    if not check_item2_causal_runtime(runtime): return []
+    var head = ""
+    for index in arrival:
+        val queued = db_settlement_enqueue(fixture.source, head, fixture.patches[index], fixture.config.policy.admission).unwrap()
+        head = queued.head
+        check_item2_causal_reopen(runtime, fixture, queued)
+    var order: [text] = []
+    var previous = fixture.config.bootstrap_receipt.accepted_head
+    for ordinal in 0..fixture.patches.len():
+        val prepared = db_settlement_resume_local(fixture.source, head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(prepared.code).to_equal("prepared")
+        order.push(prepared.batch_id)
+        check_item2_causal_reopen(runtime, fixture, prepared.view)
+        val sent = db_settlement_resume_local(fixture.source, prepared.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(sent.code).to_equal("awaiting-index")
+        check_item2_causal_reopen(runtime, fixture, sent.view)
+        val indexed = db_settlement_resume_local(fixture.source, sent.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(indexed.code).to_equal("local-index-observed")
+        check_item2_causal_reopen(runtime, fixture, indexed.view)
+        var matched = false
+        for work in indexed.view.queue.items:
+            for patch in fixture.patches:
+                if work.patch.batch_id == patch.batch_id:
+                    expect(db_patch_encode(work.patch).unwrap()).to_equal(db_patch_encode(patch).unwrap())
+            if work.patch.batch_id == indexed.batch_id:
+                matched = true
+                val receipt = work.journal.unwrap().receipt
+                expect(receipt.previous_head).to_equal(previous)
+                val snapshot = db_settlement_remote_snapshot_local(fixture.source, fixture.config.scratch_parent, receipt, fixture.config.authority).unwrap()
+                expect(snapshot.state.accepted.len()).to_equal(ordinal + 1)
+                expect(snapshot.identities.bindings.len()).to_equal(ordinal + 1)
+                expect(snapshot.identities.high_water[0].sequence).to_equal((ordinal + 1) as u64)
+                previous = receipt.accepted_head
+        expect(matched).to_be(true)
+        head = indexed.view.head
+    expect(db_settlement_resume_local(fixture.source, head, fixture.config, setup_item2_queue_sign).unwrap().code).to_equal("idle")
+    order
+
+# Independent expected topological order for Q -> P and concurrent R. Batch
+# identity breaks ties only among nodes whose dependency has already settled.
+fn setup_item2_causal_order(fixture: Item2SettlementQueueFixture) -> [text]:
+    val q = fixture.patches[0].batch_id
+    val p = fixture.patches[1].batch_id
+    val r = fixture.patches[2].batch_id
+    if r < q: return [r, q, p]
+    if p < r: return [q, p, r]
+    [q, r, p]
+
+export check_item2_causal_reopen, check_item2_causal_cleanup, check_item2_causal_drain, setup_item2_causal_order
+export Item2CausalRuntime, setup_item2_causal_runtime

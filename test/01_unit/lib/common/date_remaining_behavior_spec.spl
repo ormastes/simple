@@ -1,0 +1,139 @@
+use std.spec
+use std.common.date.types.*
+use std.common.date.calculate.*
+use std.common.date.parse.*
+
+fn exact_date(value: Date, year: i64, month: i64, day: i64) -> bool:
+    value[0] == year and value[1] == month and value[2] == day
+
+fn optional_date(value: Date?, year: i64, month: i64, day: i64) -> bool:
+    match value:
+        case Some(actual): exact_date(actual, year, month, day)
+        case _: false
+
+fn missing_date(value: Date?) -> bool:
+    match value:
+        case nil: true
+        case _: false
+
+fn single_range() -> bool:
+    val dates: [Date] = date_range((2025, 2, 3), (2025, 2, 3))
+    if dates.len() != 1: return false
+    exact_date(dates[0], 2025, 2, 3)
+
+fn crossing_range() -> bool:
+    val dates: [Date] = date_range((2025, 1, 30), (2025, 2, 1))
+    if dates.len() != 3: return false
+    exact_date(dates[0], 2025, 1, 30) and exact_date(dates[1], 2025, 1, 31) and exact_date(dates[2], 2025, 2, 1)
+
+describe "concrete date arithmetic parsing and ranges":
+    it "weekday accessor":
+        expect(day_of_week((2025, 1, 15)) == 3).to_equal(true)
+
+    it "leap day ordinal":
+        expect(day_of_year((2024, 3, 1)) == 61).to_equal(true)
+
+    it "week ordinal":
+        expect(week_of_year((2025, 1, 15)) == 3).to_equal(true)
+
+    it "weekend predicates":
+        expect(is_weekend((2025, 1, 18)) and not is_weekday((2025, 1, 18))).to_equal(true)
+
+    it "quarter accessor":
+        expect(quarter((2025, 4, 1)) == 2).to_equal(true)
+
+    it "day difference":
+        expect(difference_in_days((2025, 1, 2), (2025, 1, 1)) == 1).to_equal(true)
+
+    it "month clamp":
+        expect(exact_date(add_months((2025, 1, 31), 1), 2025, 2, 28)).to_equal(true)
+
+    it "year clamp":
+        expect(exact_date(add_years((2024, 2, 29), 1), 2025, 2, 28)).to_equal(true)
+
+    it "add days forward":
+        expect(optional_date(add_days((2025, 1, 31), 1), 2025, 2, 1)).to_equal(true)
+
+    it "subtract days underflow":
+        expect(missing_date(subtract_days((1, 1, 1), 1))).to_equal(true)
+
+    it "nth weekday present":
+        expect(optional_date(nth_day_of_month((2025, 1, 1), 2, FRIDAY), 2025, 1, 10)).to_equal(true)
+
+    it "nth weekday absent":
+        expect(missing_date(nth_day_of_month((2025, 2, 1), 5, MONDAY))).to_equal(true)
+
+    it "previous weekday underflow":
+        expect(missing_date(prev_day_of_week((1, 1, 1), MONDAY))).to_equal(true)
+
+    it "next weekday":
+        expect(optional_date(next_day_of_week((2025, 1, 1), MONDAY), 2025, 1, 6)).to_equal(true)
+
+    it "last weekday":
+        expect(optional_date(last_day_of_week_in_month((2025, 5, 1), MONDAY), 2025, 5, 26)).to_equal(true)
+
+    it "single actual range":
+        expect(single_range()).to_equal(true)
+
+    it "crossing actual range":
+        expect(crossing_range()).to_equal(true)
+
+    it "weekday weekend counts":
+        expect(weekdays_between((2025, 1, 6), (2025, 1, 12)) == 5 and weekends_between((2025, 1, 6), (2025, 1, 12)) == 2).to_equal(true)
+
+    it "weekday occurrence count":
+        expect(count_day_of_week((2025, 1, 1), (2025, 1, 31), MONDAY) == 4).to_equal(true)
+
+    it "Good Friday":
+        expect(optional_date(good_friday(2025), 2025, 4, 18)).to_equal(true)
+
+    it "Ash Wednesday":
+        expect(optional_date(ash_wednesday(2025), 2025, 3, 5)).to_equal(true)
+
+    it "Pentecost":
+        expect(optional_date(pentecost(2025), 2025, 6, 8)).to_equal(true)
+
+    it "holiday unsupported year nil":
+        expect(missing_date(good_friday(1582)) and missing_date(ash_wednesday(1582)) and missing_date(pentecost(1582))).to_equal(true)
+
+    it "Thanksgiving":
+        expect(optional_date(thanksgiving_us(2025), 2025, 11, 27)).to_equal(true)
+
+    it "Labor Day":
+        expect(optional_date(labor_day_us(2025), 2025, 9, 1)).to_equal(true)
+
+    it "Memorial Day":
+        expect(optional_date(memorial_day_us(2025), 2025, 5, 26)).to_equal(true)
+
+    it "valid ISO leap date":
+        expect(optional_date(parse_iso8601("2024-02-29"), 2024, 2, 29)).to_equal(true)
+
+    it "invalid ISO calendar":
+        expect(missing_date(parse_iso8601("2025-02-29"))).to_equal(true)
+
+    it "invalid ISO digit":
+        expect(missing_date(parse_iso8601("20x5-01-01"))).to_equal(true)
+
+    it "invalid ISO overflow":
+        expect(missing_date(parse_iso8601("9223372036854775808-01-01"))).to_equal(true)
+
+    it "invalid ISO field count":
+        expect(missing_date(parse_iso8601("2025-01"))).to_equal(true)
+
+    it "invalid ISO empty field":
+        expect(missing_date(parse_iso8601("2025--01"))).to_equal(true)
+
+    it "actual text helper slices":
+        expect(text_substring("abc", 1, 2) == "b" and text_length("abc") == 3 and text_split("a-b", "-").len() == 2).to_equal(true)
+
+    it "month year inverse":
+        expect(exact_date(subtract_months((2025, 3, 31), 1), 2025, 2, 28) and exact_date(subtract_years((2025, 2, 28), 1), 2024, 2, 28)).to_equal(true)
+
+    it "age and comparison":
+        expect(age_in_years((2000, 6, 15), (2025, 6, 14)) == 24 and before((2025, 1, 1), (2025, 1, 2)) and after_or_equal((2025, 1, 2), (2025, 1, 2))).to_equal(true)
+
+    it "month and quarter boundaries":
+        expect(exact_date(first_day_of_quarter((2025, 5, 12)), 2025, 4, 1) and exact_date(last_day_of_quarter((2025, 5, 12)), 2025, 6, 30)).to_equal(true)
+
+    it "calendar comparison equality":
+        expect(equal((2025, 1, 1), (2025, 1, 1)) and compare((2025, 1, 1), (2025, 1, 2)) == -1).to_equal(true)

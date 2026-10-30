@@ -1,0 +1,52 @@
+# Purpose: cross-module macro resolution from imported modules' TLDR macro
+# sections (macro-def + macro-key); missing/stale companions keep negative
+# lookups conservative (plan 2026-10-24 §6.2).
+# @req M-02
+
+use std.spec.*
+use std.io_runtime.{file_write, file_exists}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_use_status_tag_v1,
+    macro_use_cacheable_v1}
+use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{macro_module_source_from_parse_v1}
+use compiler.frontend.cache_artifact.macro_reference_projector.{project_macro_module_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_artifacts_emit_v1,
+    module_tldr_imported_macro_projections_v1, macro_projection_mark_imports_incomplete_v1}
+
+val DIR = "build/test_tmp/macro_imports_v1"
+val ROOT = "build/test_tmp/macro_imports_v1/tldr"
+val A_SRC = "macro double(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\n"
+val B_SRC = "fn user() -> i64:\n    double!(21) + triple!(1)\n"
+
+fn project_b(imports: [text]) -> (text, text, bool):
+    val _m = parse_full_frontend(B_SRC, DIR + "/b.spl", "b", Logger(level: 0))
+    val src = macro_module_source_from_parse_v1("", "b", DIR + "/b.spl")
+    val (imported, complete) = module_tldr_imported_macro_projections_v1(imports, ROOT)
+    var p = project_macro_module_v1(src, imported)
+    if not complete: p = macro_projection_mark_imports_incomplete_v1(p)
+    (macro_use_status_tag_v1(p.use_table.uses[0].status),
+        macro_use_status_tag_v1(p.use_table.uses[1].status) + "/" + p.use_table.uses[1].coverage,
+        complete)
+
+describe "imported macro resolution":
+    it "resolves a macro defined in an imported module's fresh companion":
+        expect(dir_create_all(DIR)).to_equal(true)
+        expect(file_write(DIR + "/a.spl", A_SRC)).to_equal(true)
+        expect(module_artifacts_emit_v1(DIR + "/a.spl", ROOT)).to_equal("")
+        val (double_status, triple_status, complete) = project_b([DIR + "/a.spl"])
+        expect(complete).to_equal(true)
+        expect(double_status).to_equal("resolved")
+        expect(triple_status).to_equal("unresolved/complete")
+
+    it "a stale import companion keeps negative lookups conservative":
+        expect(file_write(DIR + "/a.spl", A_SRC + "\n# edited\n")).to_equal(true)
+        val (double_status, triple_status, complete) = project_b([DIR + "/a.spl"])
+        expect(complete).to_equal(false)
+        expect(double_status).to_equal("unresolved")
+        expect(triple_status).to_equal("unresolved/conservative")
+
+    it "a missing import companion is incomplete, not empty":
+        val (_d, _t, complete) = project_b([DIR + "/nope.spl"])
+        expect(complete).to_equal(false)

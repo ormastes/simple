@@ -1,0 +1,83 @@
+# BSM P3 micro-benchmark: N modules x F functions through BootstrapMirStore.
+#   BSM_P3_MODE=<session|legacy> BSM_P3_MODULES=N BSM_P3_FUNCTIONS=F bin/simple run test/05_perf/compiler/bootstrap_mir_store_publish_bench.spl
+# session: fake publish port (counts adopted nodes; no runtime session needed),
+#          rows staged under a real running scope and published while paused.
+# legacy:  no session; every module promotes the 20 outer owners (old path).
+# Prints outer-container walks, adopted-node count and published rows.
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.mir._MirLowering.bootstrap_mir_store.{BootstrapMirStore, MirPublishPort, bootstrap_mir_store_with_port}
+use std.env.{env_get}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+var _bench_nodes_adopted: i64 = 0
+var _bench_scope_running: bool = false
+
+fn bench_adopt_function(name: text, function: MirFunction) -> bool:
+    _bench_nodes_adopted = _bench_nodes_adopted + 2
+    true
+
+fn bench_adopt_text(value: text) -> bool:
+    _bench_nodes_adopted = _bench_nodes_adopted + 1
+    true
+
+fn bench_true() -> bool:
+    true
+
+fn bench_scope_running() -> bool:
+    _bench_scope_running
+
+fn set_bench_scope_running(value: bool):
+    _bench_scope_running = value
+
+fn store_test_function(name: text, param_count: i64) -> MirFunction:
+    var params: [MirType] = []
+    var i = 0
+    while i < param_count:
+        params = params.push(MirType.i64())
+        i = i + 1
+    MirFunction(
+        symbol: SymbolId(id: 0), name: name,
+        signature: MirSignature(params: params, return_type: MirType.unit(), is_variadic: false),
+        locals: [], blocks: [], entry_block: BlockId(id: 0), span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, gpu_target: "",
+        gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: [], version: "", abi: ""),
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false, unroll_factor: 0, pipeline_ii: 0, memory_banks: 0,
+        verification_contract: nil)
+
+fn main():
+    val mode = env_get("BSM_P3_MODE") ?? "session"
+    val modules = (env_get("BSM_P3_MODULES") ?? "1000").to_int() ?? 1000
+    val per_module = (env_get("BSM_P3_FUNCTIONS") ?? "50").to_int() ?? 50
+    var store = bootstrap_mir_store_with_port(MirPublishPort(
+        adopt_function: bench_adopt_function, adopt_text: bench_adopt_text,
+        alloc_begin: bench_true, alloc_end: bench_true, scope_running: bench_scope_running))
+    store.session_on = mode == "session"
+    var ok = true
+    var m = 0
+    while m < modules:
+        val began = rt_transient_array_scope_begin()
+        set_bench_scope_running(true)
+        var f = 0
+        while f < per_module:
+            store.add_function("m{m}_f{f}", store_test_function("m{m}_f{f}", 2), m, 1, false, [1, 7])
+            f = f + 1
+        store.add_module_statics(m, [m], [m], ["s{m}"], [1], [1], ["{m}"], [8], [0], [false])
+        val paused = rt_transient_array_scope_pause()
+        set_bench_scope_running(false)
+        val published = store.publish_module()
+        val ended = rt_transient_array_scope_end()
+        ok = ok and began and paused and published and ended
+        m = m + 1
+    print "mode={mode} modules={modules} per_module={per_module} ok={ok} rows={store.function_count()} outer_walks={store.legacy_outer_walks} outer_walk_calls={store.legacy_outer_walks / 20} nodes_adopted={_bench_nodes_adopted} published_modules={store.published_modules}"
+
+main()

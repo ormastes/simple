@@ -5,6 +5,8 @@
 # are confined to the caller-provided SCV cache root.
 
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
 @allow(star_import) # reason: public compatibility facade over the pure inventory core
 export use std.scv.compile_source_inventory_core.*
 use std.nogc_sync_mut.io_runtime.{dir_list}
@@ -81,8 +83,44 @@ fn compile_source_inventory_apply_and_publish_v1(
     if digest == "":
         return CompileSourceInventoryReadV1(
             false, "inventory-publication-failed:" + publish_reason, "", nil)
-    compile_source_inventory_publication_readback_v1(
-        cache_root, digest, expected_pointer_digest)
+    compile_source_inventory_publication_readback_owned_v1(
+        cache_root, digest, expected_pointer_digest, inventory)
+
+# Only the successful local publisher supplies this owner. Its canonical
+# encoding validated every row and produced published_digest in this call;
+# fresh matching immutable bytes need no second decode. Never retain this
+# authority across requests or expose it as a general reader parameter.
+fn compile_source_inventory_publication_readback_owned_v1(
+    cache_root: text, published_digest: text, expected_pointer_digest: text,
+    inventory: CompileSourceInventoryV1
+) -> CompileSourceInventoryReadV1:
+    val root = compile_source_inventory_storage_v1(cache_root)
+    # Match the ordinary reader's captured-pointer semantics. Immutable bytes
+    # matching the locally published SHA need no additional lock or wait.
+    val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    val separator = pointer_content.index_of("\n")
+    val pointer = if separator < 0: pointer_content else: pointer_content[:separator]
+    var admitted = CompileSourceInventoryReadV1(false, "inventory-generation-invalid", "", nil)
+    if compile_source_inventory_digest_valid_v1(pointer) and pointer == published_digest:
+        if compile_source_inventory_publication_bytes_match_v1(root, published_digest):
+            admitted = CompileSourceInventoryReadV1(true, "ok", published_digest, Some(inventory))
+    else:
+        # Preserve full admission and first-error diagnostics for a different
+        # or malformed captured pointer; never adopt another writer's owner.
+        admitted = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
+    compile_source_inventory_publication_readback_result_v1(
+        admitted, pointer_content, published_digest, expected_pointer_digest)
+
+# The raw immutable blob and SHA scratch never escape this scalar predicate.
+# A refused nested begin leaves the caller's active/paused scope untouched.
+fn compile_source_inventory_publication_bytes_match_v1(root: text, digest: text) -> bool:
+    val owns_scratch = transient_scope_begin()
+    val content = compile_source_inventory_read_text_v1(
+        "{root}/generations/{digest}.inventory") ?? ""
+    val matches = content != "" and sha256_text(content) == digest
+    if owns_scratch and not transient_scope_end():
+        return false
+    matches
 
 fn compile_source_inventory_publication_readback_v1(
     cache_root: text, published_digest: text, expected_pointer_digest: text
@@ -95,6 +133,13 @@ fn compile_source_inventory_publication_readback_v1(
     """
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     val admitted = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
+    compile_source_inventory_publication_readback_result_v1(
+        admitted, pointer_content, published_digest, expected_pointer_digest)
+
+fn compile_source_inventory_publication_readback_result_v1(
+    admitted: CompileSourceInventoryReadV1, pointer_content: text,
+    published_digest: text, expected_pointer_digest: text
+) -> CompileSourceInventoryReadV1:
     if not admitted.valid:
         return CompileSourceInventoryReadV1(false,
             "inventory-publication-readback-invalid:{admitted.reason}" +
@@ -372,6 +417,27 @@ fn compile_source_inventory_read_text_v1(path: text) -> text?:
         return nil
     rt_file_read_regular_no_follow_bounded(path, size)
 
+# OPEN: doc/08_tracking/bug/native_inventory_decimal_optional_2026_10_26.md
+# The retained native to_i64 provider returns a raw i64, while ?? tests Option
+# presence (including reserved small words). Parse the wire grammar directly;
+# an explicit validity bit keeps every nonnegative i64 distinct from failure.
+# @workaround bug=native_raw_integer_optional_presence_2026_10_26
+fn compile_source_inventory_decimal_v1(value: text) -> (bool, i64):
+    if value == "" or (value.len() > 1 and value.byte_at(0) == 48):
+        return (false, 0)
+    var result: i64 = 0
+    var index = 0
+    while index < value.len():
+        val code = value.byte_at(index)
+        if code < 48 or code > 57: return (false, 0)
+        val digit = code - 48
+        if result > 922337203685477580 or
+                (result == 922337203685477580 and digit > 7):
+            return (false, 0)
+        result = result * 10 + digit
+        index = index + 1
+    (true, result)
+
 fn compile_source_inventory_decode_v1(content: text) -> CompileSourceInventoryReadV1:
     compile_source_inventory_decode_content_v1(content, "")
 
@@ -386,22 +452,38 @@ fn compile_source_inventory_decode_content_v1(
             not lines[1].starts_with("generation=") or
             not lines[2].starts_with("count="):
         return CompileSourceInventoryReadV1(false, "inventory-header-invalid", "", nil)
-    val generation = lines[1].substring(11).to_i64() ?? -1
-    val count = lines[2].substring(6).to_i64() ?? -1
-    if generation < 0 or count < 0 or lines.len() != count + 3:
+    val (generation_valid, generation) = compile_source_inventory_decimal_v1(lines[1].substring(11))
+    val (count_valid, count) = compile_source_inventory_decimal_v1(lines[2].substring(6))
+    if not generation_valid or not count_valid or count != lines.len() - 3:
         return CompileSourceInventoryReadV1(false, "inventory-count-invalid", "", nil)
     var entries: [CompileSourceInventoryEntryV1] = []
+    var previous = ""
+    var canonical = true
     var index = 3
     while index < lines.len():
         val fields = lines[index].split("|")
         if fields.len() != 7:
             return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
-        entries = entries.push(CompileSourceInventoryEntryV1(
-            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5],
-            fields[6].to_i64() ?? -1))
+        val (size_valid, size) = compile_source_inventory_decimal_v1(fields[6])
+        if not size_valid:
+            return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
+        val entry = CompileSourceInventoryEntryV1(
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], size)
+        # The wire header and decimal parser already enforce their canonical
+        # spellings. Validate the remaining encoder invariants directly:
+        # valid fields and strictly increasing byte-ordered unique identities.
+        # Re-encoding every admitted generation duplicates all row strings and
+        # the entire inventory inside a caller-owned transient scope.
+        if not compile_source_inventory_entry_valid_v1(entry) or
+                compile_source_inventory_identity_cmp_v1(previous, entry.source_identity) >= 0:
+            canonical = false
+        previous = entry.source_identity
+        entries = entries.push(entry)
         index = index + 1
     val inventory = CompileSourceInventoryV1(1, generation, entries)
-    if compile_source_inventory_encode_v1(inventory) != content:
+    # Preserve malformed-row precedence over canonicality, as in the original
+    # decode-then-encode validator, even when an earlier row is noncanonical.
+    if not canonical:
         return CompileSourceInventoryReadV1(false, "inventory-noncanonical", "", nil)
     val digest = if verified_digest == "": sha256_text(content) else: verified_digest
     CompileSourceInventoryReadV1(true, "ok", digest, Some(inventory))
@@ -619,7 +701,38 @@ fn compile_source_inventory_revalidate_pointer_v1(
 fn compile_source_inventory_read_at_pointer_v1(
     cache_root: text, pointer_content: text
 ) -> CompileSourceInventoryReadV1:
-    """Read one immutable inventory generation selected by a captured CURRENT record."""
+    """Read one authenticated generation, retaining only the complete result graph."""
+    # Active and paused scopes belong to the caller. Refused begin preserves
+    # the original reader, including when a foreign owner holds the C scope.
+    if transient_array_scope_state_v1() != 0:
+        return compile_source_inventory_read_at_pointer_unscoped_v1(cache_root, pointer_content)
+    if not transient_scope_begin():
+        return compile_source_inventory_read_at_pointer_unscoped_v1(cache_root, pointer_content)
+    val result = compile_source_inventory_read_at_pointer_unscoped_v1(cache_root, pointer_content)
+    # Entry validation ends only scopes it opened. No per-file scratch owner
+    # or mutable caller trace/cost object is inside this reader boundary.
+    val scope_state = transient_array_scope_state_v1()
+    if scope_state != 1:
+        if scope_state == 2:
+            val ended = transient_scope_end()
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-state-invalid", "", nil)
+    if not transient_scope_pause():
+        val ended = transient_scope_end()
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-pause-failed", "", nil)
+    val retained = transient_promote(result)
+    val ended = transient_scope_end()
+    # Never access result after a failed promote/end. Construct failure values
+    # after retirement; an end failure is not retried or reported as restored.
+    if not retained:
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-promote-failed", "", nil)
+    if not ended:
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-end-failed", "", nil)
+    result
+
+fn compile_source_inventory_read_at_pointer_unscoped_v1(
+    cache_root: text, pointer_content: text
+) -> CompileSourceInventoryReadV1:
+    """Original immutable-generation admission, with scratch owned by its caller."""
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
         return CompileSourceInventoryReadV1(false, "inventory-cache-root-invalid", "", nil)
     val root = compile_source_inventory_storage_v1(cache_root)

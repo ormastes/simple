@@ -524,7 +524,8 @@ bootstrap_stage2_darwin_env=
 case "$platform" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
 # Windows twin of the Darwin block: bootstrap-from-scratch.sh hashes
 # bootstrap_windows_{abi,cc,include,lib,libpath}_env between the Darwin tool
-# vector and SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE. Without them every
+# vector and SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE, followed by
+# bootstrap_windows_os_env (OS=..., always carried on Windows). Without them every
 # Windows Stage 3 resume refused with `bootstrap-stage3-admission-mismatch:
 # build_args_sha256`. CC is carried exactly when the engine recorded it (always
 # on MSVC, only for an explicit MinGW driver on GNU).
@@ -577,6 +578,7 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   ${bootstrap_stage2_msvc_env:+"INCLUDE=$(stage2_env_value INCLUDE)"} \
   ${bootstrap_stage2_msvc_env:+"LIB=$(stage2_env_value LIB)"} \
   ${bootstrap_stage2_msvc_env:+"LIBPATH=$(stage2_env_value LIBPATH)"} \
+  ${bootstrap_stage2_windows_env:+"OS=$(stage2_env_value OS)"} \
   "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
   "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
@@ -870,19 +872,38 @@ esac
 # into both the args hash and the real invocation so they cannot diverge; empty
 # unless an allowlisted print-only probe var is set to exactly 1.
 stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
-# Opt-in parallelism / per-file timeout for the Stage 3 recompile.  Unset
-# reproduces the pinned `--threads 1` argv byte-for-byte.  Baked into both the
-# args hash and the transcribed invocation (the child runs under `env -i`, so
-# an outer variable would never reach it).  `full` = online CPUs.
-stage3_threads=${SIMPLE_NATIVE_BUILD_THREADS:-1}
-[ "$stage3_threads" != full ] ||
-  stage3_threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
-case "$stage3_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
-stage3_requested_route=direct
-stage3_fallback_route=none
-if [ "$stage3_threads" -gt 1 ]; then
-  stage3_requested_route=coordinator
-  stage3_fallback_route=direct
+# Direct fanout is explicit and bounded. The legacy thread environment still
+# selects its coordinator route. The resolved thread count and route are bound
+# into both the argument hash and the transcribed worker invocation below.
+. "$root/scripts/bootstrap/lib/stage3-direct-parallel.shs"
+bootstrap_stage3_resolve_parallel_policy || exit 1
+stage3_threads=$bootstrap_stage3_policy_threads
+stage3_requested_route=$bootstrap_stage3_policy_route
+stage3_fallback_route=$bootstrap_stage3_policy_fallback
+if [ -n "${SIMPLE_STAGE3_DIRECT_THREADS:-}" ] && [ "$stage3_threads" -gt 1 ]; then
+  [ "$stage3_rss_cap_mode" = enforce ] ||
+    bootstrap_stage3_error 'parallel direct Stage 3 requires enforced memory containment'
+  [ -z "${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE:-}${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM:-}" ] ||
+    bootstrap_stage3_error 'parallel direct Stage 3 refuses memory probe overrides'
+  bootstrap_stage3_admit_direct_memory "$stage3_threads" "$memory_admission" "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" ||
+    bootstrap_stage3_error 'parallel direct Stage 3 memory admission refused'
+  # The nested compiler watchdog has a separate tree cap. Admit its actual
+  # policy, not just the outer process limit, before allowing fanout.
+  case "$platform" in
+    *-apple-darwin*) : "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:=6835937}"; export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB ;;
+  esac
+  . "$root/scripts/bootstrap/lib/tree-rss-policy.shs"
+  bootstrap_tree_rss_resolve "$stage3_threads" "$root" ||
+    bootstrap_stage3_error "$bootstrap_tree_rss_refusal"
+  [ "$bootstrap_tree_rss_cap_kib" -ge "$bootstrap_stage3_direct_group_need_kib" ] ||
+    bootstrap_stage3_error 'parallel direct Stage 3 tree RSS cap is below the worker budget'
+  {
+    echo "direct_parallel_threads=$stage3_threads"
+    echo "direct_parallel_worker_budget_mib=9000"
+    echo "direct_parallel_process_required_mib=$bootstrap_stage3_direct_process_need"
+    echo "direct_parallel_host_required_kib=$bootstrap_stage3_direct_host_need_kib"
+    echo "direct_parallel_tree_rss_cap_kib=$bootstrap_tree_rss_cap_kib"
+  } >>"$memory_admission" || bootstrap_stage3_error 'cannot record direct Stage 3 memory admission'
 fi
 stage3_timeout_args=
 case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
@@ -919,6 +940,34 @@ esac
 # the value is validated to be exactly `1` and is baked into BOTH the args
 # hash and the transcribed invocation, so unset reproduces the pinned argv
 # byte-for-byte and an existing admission receipt is unaffected.
+# Lowering lane (2026-10-25). Per-file src->obj is the default: the compiler
+# lowers each module to its own object (per-module object cache) and links
+# them. SIMPLE_BOOTSTRAP is passed EMPTY on that lane -- with
+# SIMPLE_BOOTSTRAP=1 the HIR shard workers fail ("HIR cache identity
+# unavailable for shard") and single-process HIR leaves cross-module imports
+# unresolved. SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 opts back into the
+# single-instance whole-program bootstrap_fixed lane (SIMPLE_BOOTSTRAP=1).
+# Both values are baked into the args hash and the worker invocation.
+stage3_lowering_lane=per-file stage3_bootstrap_flag= stage3_whole_program_env=
+case "${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM:-}" in
+  '') ;;
+  1) stage3_lowering_lane=whole-program stage3_bootstrap_flag=1
+     stage3_whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
+  *) echo "error: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM must be unset or exactly 1" >&2; exit 1 ;;
+esac
+# Per-file pipeline knob (P-F): SIMPLE_FILE_WORKERS. Unset => compiler default
+# (NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 in native_file_worker_v1.spl). When
+# set (exactly 0 or 1) it is passed to the Stage 3 child AND hashed into
+# the args receipt; unset adds nothing, so existing receipts stay resumable. The
+# worker receives them as a lane suffix (per-file:fw=0|1).
+stage3_per_file_env= stage3_per_file_lane=
+case "${SIMPLE_FILE_WORKERS:-}" in
+  '') ;;
+  0|1) stage3_per_file_env="SIMPLE_FILE_WORKERS=$SIMPLE_FILE_WORKERS"
+       stage3_per_file_lane=":fw=$SIMPLE_FILE_WORKERS" ;;
+  *) echo "error: SIMPLE_FILE_WORKERS must be unset, 0 or 1" >&2; exit 1 ;;
+esac
+case "$stage3_lowering_lane" in per-file) stage3_lowering_lane="per-file$stage3_per_file_lane" ;; esac
 stage3_cold_init_env=
 case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
   '') ;;
@@ -939,7 +988,7 @@ if [ -n "$stage3_compiler_ceiling_env" ]; then
 fi
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
-  "SIMPLE_BOOTSTRAP=1" \
+  "SIMPLE_BOOTSTRAP=$stage3_bootstrap_flag" ${stage3_whole_program_env} ${stage3_per_file_env} \
   "SIMPLE_ABI_POLICY=$resume_abi_policy" \
   "SIMPLE_ABI_ADMISSION_RECEIPT=$stage2_admission" \
   "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
@@ -991,7 +1040,7 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" "$stage3_rss_cap_mode" --stage3-source-policy-v1 "$@" &
 elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
   systemd-run --user --quiet --wait --collect --unit="$stage3_guard_unit" \
     --property=KillMode=control-group \
@@ -1004,7 +1053,7 @@ elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" "$stage3_rss_cap_mode" --stage3-source-policy-v1 "$@" &
 elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
   # The watchdog must honor a Stage 3 process cap configured below the tree
@@ -1032,7 +1081,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" "$stage3_rss_cap_mode" --stage3-source-policy-v1 "$@" &
 else
   "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
@@ -1041,7 +1090,7 @@ else
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" "$stage3_rss_cap_mode" --stage3-source-policy-v1 "$@" &
 fi
 stage3_guard_pid=$!
 stage3_guard_tripped=0
@@ -1267,9 +1316,24 @@ SIMPLE_RT_OBJ_CACHE_DIR="$stage3_cache/rt-obj" \
 bootstrap_stage3_source_snapshot "$source_after" "$root"
 bootstrap_stage3_git_state "$root" "$git_after"
 bootstrap_stage3_tool_authority_snapshot "$tool_after" "$path" "$root"
-cmp -s "$source_before" "$source_after"
-cmp -s "$git_before" "$git_after"
-cmp -s "$tool_before" "$tool_after"
+if cmp -s "$source_before" "$source_after"; then :; else
+  source_cmp_status=$?
+  printf 'error: Stage 3 postbuild source snapshot comparison failed: %s differs from or cannot be compared with %s; Stage 3 was not admitted\n' \
+    "$source_before" "$source_after" >&2
+  exit "$source_cmp_status"
+fi
+if cmp -s "$git_before" "$git_after"; then :; else
+  git_cmp_status=$?
+  printf 'error: Stage 3 postbuild git state comparison failed: %s differs from or cannot be compared with %s; Stage 3 was not admitted\n' \
+    "$git_before" "$git_after" >&2
+  exit "$git_cmp_status"
+fi
+if cmp -s "$tool_before" "$tool_after"; then :; else
+  tool_cmp_status=$?
+  printf 'error: Stage 3 postbuild tool authority comparison failed: %s differs from or cannot be compared with %s; Stage 3 was not admitted\n' \
+    "$tool_before" "$tool_after" >&2
+  exit "$tool_cmp_status"
+fi
 
 BSTAGE3_ROOT=$root BSTAGE3_MANIFEST=$manifest BSTAGE3_PLATFORM=$platform
 BSTAGE3_BACKEND=$stage2_backend BSTAGE3_MODE=dynload BSTAGE3_SEED=$seed

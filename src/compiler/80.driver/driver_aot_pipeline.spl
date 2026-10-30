@@ -16,8 +16,7 @@ use compiler.driver.cache.cache_validator.{source_to_cache_path}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
 use compiler.driver.bootstrap_k1_selected.{
-    bootstrap_compile_to_native_local,
-    bootstrap_compile_context_to_native_local
+    bootstrap_compile_to_native_local
 }
 use compiler.common.driver_core_types.{
     CompileResult,
@@ -34,7 +33,11 @@ use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenState
 use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1,
     native_mir_shard_spec_v1, native_mir_shard_queue_v1, native_mir_shard_owner_v1,
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
-    native_mir_shard_link_inputs_v1}
+    native_mir_shard_link_inputs_v1, native_mir_shard_module_passed_v1}
+use compiler.driver.driver_aot_native_output.{driver_cold_hir_record_verified_object_v1, driver_cold_hir_record_objectless_v1}
+use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_RETIRE_ENV_V1,
+    GENERIC_INSTANCE_LINK_ENV_V1, generic_instance_retire_in_module_v1, generic_instance_list_read_v1}
+use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_arm_v1, native_mir_fork_disarm_v1, native_mir_fork_exit_v1}
 use compiler.driver.driver_build.native_mir_shard_export_v1.{
     native_mir_shard_export_enabled_v1, native_mir_shard_export_write_dir_v1}
 use compiler.driver.driver_mir_shard_export_v1.{driver_mir_shard_export_write_v1,
@@ -51,6 +54,8 @@ use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1, go_to_end_writ
     go_to_end_blocked_modules_v1,
     GO_TO_END_UNATTRIBUTED_V1}
 use std.io_runtime.{exit}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mir_done_publish_v1}
+use std.io_runtime.{time_now_monotonic_ms}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
 
 fn native_build_cache_dir() -> text:
@@ -108,6 +113,15 @@ impl CompilerDriver:
         if native_mir_shard_link_ledger_v1() != "":
             return self.aot_link_mir_shards_v1()
 
+        match self.stage_lower_mir():
+            case Some(stop): return stop
+            case None: pass
+        self.stage_emit_object()
+
+    # PR2a stage: lower monomorphized HIR to MIR. The target is chosen here
+    # (driver_mir_target_context from options); HIR stays target-neutral.
+    # Some(result) stops the compilation, None continues to stage_emit_object.
+    me stage_lower_mir() -> Option<CompileResult>:
         # Step 4->5 receipts. `log_phase` is env-gated and off by default, so
         # the whole post-MIR pass chain (borrow_check / process_async /
         # optimize_mir / weave_aop) was invisible in `[build]` receipts -- the
@@ -117,10 +131,18 @@ impl CompilerDriver:
         log_phase("aot:lower_to_mir:start")
         val staged_batch = native_staged_codegen_batch_size_v1()
         if staged_batch < 0:
-            return CompileResult.CodegenError(
-                "{NATIVE_STAGED_CODEGEN_BATCH_ENV_V1} must be a non-negative decimal module count (0 disables staged native codegen)")
+            return Some(CompileResult.CodegenError(
+                "{NATIVE_STAGED_CODEGEN_BATCH_ENV_V1} must be a non-negative decimal module count (0 disables staged native codegen)"))
+        # A requested batch that this lane refuses used to fall back silently
+        # to whole-program MIR; name the reason so a bootstrap default that
+        # did not take effect is visible in the stage log.
+        val staged_reason = self.native_staged_codegen_eligible_reason_v1()
+        if staged_batch > 0 and staged_reason != "" and
+                (env_get_opt(NATIVE_STAGED_CODEGEN_BATCH_ENV_V1) ?? "") != "":
+            print "[staged-codegen] refused batch={staged_batch} reason={staged_reason}; MIR is held whole-program"
+            stdout_flush()
         self.native_staged_codegen = NativeStagedCodegenStateV1.begin(
-            if self.native_staged_codegen_eligible_v1(): staged_batch else: 0)
+            if staged_reason == "": staged_batch else: 0)
         val mir_ok = self.lower_to_mir()
         if not mir_ok:
             for err in self.ctx.errors:
@@ -128,7 +150,7 @@ impl CompilerDriver:
             # A staged batch ran the borrow checker before the tail finished
             # lowering; report it as the unstaged lane would.
             if self.native_staged_codegen.borrow_failed:
-                return CompileResult.BorrowError(self.ctx.errors)
+                return Some(CompileResult.BorrowError(self.ctx.errors))
             # Bug (2026-08-06): builtin `Array.first()` has no MIR method
             # symbol under native codegen (same gap class as `push`/`map`/
             # `filter`/`fold` -- see Bug #149's comment a few files over in
@@ -157,19 +179,28 @@ impl CompilerDriver:
                 # Could not continue past MIR (early stop, verify failure, or
                 # nothing lowered): still name every failure, never link.
                 self.go_to_end_absorb_errors_v1("mir")
-                return self.go_to_end_finish_v1(0, [])
-            return CompileResult.CodegenError(msg)
+                return Some(self.go_to_end_finish_v1(0, []))
+            return Some(CompileResult.CodegenError(msg))
         log_phase("aot:lower_to_mir:done")
-        # @workaround bug=mir_phase_rss_retention_2026_10_24 reason=flat HIR store (second copy of every module row) outlived the only readers, MIR lowering
+        # The flat HIR store is scoped to MIR lowering: its only readers are done here.
         bootstrap_hir_modules_reset()
         log_build_progress("mir", "modules", self.ctx.mir_modules.len(),
             self.ctx.mir_modules.len(), "lower_to_mir", 4, 6, 0, 0, "running")
 
-        if self.ctx.options.low_memory and self.ctx.options.backend != "vhdl":
-            log_debug("low-memory: evicting HIR modules")
+        None
+
+    # PR2a stage: run the post-MIR passes and emit objects / link the output.
+    me stage_emit_object() -> CompileResult:
+        # HIR is dead after MIR lowering for every AOT backend except vhdl and the
+        # SIMPLE_BOOTSTRAP_DIRECT_IR dispatch (bootstrap_compile_to_native_local
+        # re-reads ctx.hir_modules). Retaining it held the whole-closure HIR
+        # through every MIR pass and codegen. evict_hir() saves AOP advices first.
+        val hir_needed_after_mir = self.ctx.options.backend == "vhdl" or (env_get_opt("SIMPLE_BOOTSTRAP_DIRECT_IR") ?? "") == "1"
+        if not hir_needed_after_mir:
+            log_debug("evicting HIR modules after MIR lowering")
             self.ctx.evict_hir()
 
-        val bootstrap_flat_aot = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
+        val bootstrap_flat_aot = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
         if bootstrap_flat_aot:
             log_phase("aot:flat_mir_passes:skipped")
             log_bootstrap_flat_warning("aot:flat_mir_passes:skipped")
@@ -303,8 +334,9 @@ impl CompilerDriver:
         log_phase("aot:format:start")
         val format = self.ctx.options.output_format
         log_phase("aot:format:done")
-        # bootstrap_compile_context_to_native_local emits exactly ONE object,
-        # hardcoded as `<output>.app.cli.bootstrap_main.o`, and links only that.
+        # This Stage-3 fixed-entry route has a validated closure in
+        # `ctx.mir_modules`; use the normal per-module native output path so
+        # every admitted provider is emitted and linked.
         # It is the "compile the bootstrap CLI" path, so SIMPLE_BOOTSTRAP=1 is
         # not on its own enough to route here: the Stage-2 admission probe sets
         # that variable while building hello_world.spl, and the resulting link
@@ -320,9 +352,9 @@ impl CompilerDriver:
             if self.ctx.sources[aot_bootstrap_entry_idx].module_name == "app.cli.bootstrap_main":
                 aot_bootstrap_entry_requested = true
             aot_bootstrap_entry_idx = aot_bootstrap_entry_idx + 1
-        if aot_bootstrap_entry_requested and (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        if aot_bootstrap_entry_requested and (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             log_phase("aot:bootstrap_native_context_dispatch")
-            return bootstrap_compile_context_to_native_local(self.ctx, backend_name, output)
+            return self.compile_to_native(output)
         if driver_output_format_is_smf(format):
             return self.compile_to_smf(output)
         if driver_output_format_is_self_contained(format):
@@ -452,6 +484,7 @@ impl CompilerDriver:
         # Bootstrap-flat skips the MIR pass chain and may dispatch to the
         # fixed-entry context compiler, which reads the entry MIR itself.
         if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+                (env_get_opt("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1" and
                 (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             return "bootstrap-flat lane (SIMPLE_BOOTSTRAP=1 without STAGE4)"
         # SMF / self-contained / both re-iterate ctx.mir_modules after codegen.
@@ -485,8 +518,10 @@ impl CompilerDriver:
         emit their objects into the native cache via compile_to_native in
         flushing mode, then release their MIR. Gates keep the unstaged
         order: nothing is verified after a lowering failure, nothing is
-        borrow-checked after a verify failure, and no object is emitted once
-        any error is recorded (the batch is still released; the build fails).
+        borrow-checked after a verify failure, and no object is emitted for a
+        batch that recorded an error of its own (the batch is still released;
+        later batches keep emitting and the build fails at the end, naming
+        every failed batch via failed_batches).
         Returns false only for a whole-build failure (cache/session setup)."""
         var batch_names: [text] = []
         for held_name in self.ctx.mir_modules.keys():
@@ -495,20 +530,42 @@ impl CompilerDriver:
             self.native_staged_codegen.lowering_failed = true
         val batch_index = self.native_staged_codegen.batches_flushed + 1
         log_phase("aot:staged_codegen:batch:start index={batch_index} modules={batch_names.len()}")
+        val go_to_end = go_to_end_enabled_v1()
+        # go-to-end: the lowering loop recorded each failed module's errors
+        # against its name and kept its MIR out of ctx.mir_modules
+        # (go_to_end_record_mir_failure_v1), but the context still holds the
+        # error text. Absorb it (has_message skips what is already recorded)
+        # or the `error_count_value == 0` gates below would withhold every
+        # object of a batch that merely CONTAINS a failed module.
+        if go_to_end and self.ctx.error_count_value > 0:
+            self.go_to_end_absorb_errors_v1("mir")
+        # Batch-local gate: an error recorded by an EARLIER batch must not
+        # withhold this batch's objects (it used to: one failed batch left a
+        # 1495-module build with ~224 objects). The global count still fails
+        # the build after the last batch, so the link stays blocked.
+        val errors_at_batch_start = self.ctx.error_count_value
         if not self.native_staged_codegen.lowering_failed:
             if not self.verify_lowered_mir_v1():
                 self.native_staged_codegen.verify_failed = true
+                if go_to_end:
+                    self.go_to_end_withhold_staged_batch_v1(batch_names, batch_index)
         if not self.native_staged_codegen.lowering_failed and
                 not self.native_staged_codegen.verify_failed:
             if not self.borrow_check():
                 self.native_staged_codegen.borrow_failed = true
-        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed:
+        # `verify_failed` is part of both gates: under go-to-end the verify
+        # errors were absorbed above, so the error count alone no longer
+        # proves the batch is valid.
+        if self.ctx.error_count_value == errors_at_batch_start and not self.native_staged_codegen.lowering_failed and
+                not self.native_staged_codegen.verify_failed:
             val _async_state_machines = self.process_async()
             if (env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? "") != "1":
                 self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
             self.weave_aop()
             self.apply_debug_trace()
-        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed:
+        var batch_failed = self.ctx.error_count_value != errors_at_batch_start
+        if not batch_failed and not self.native_staged_codegen.lowering_failed and
+                not self.native_staged_codegen.verify_failed:
             if self.ctx.freeze_storage_registry_for_schedule(
                     self.native_staged_codegen.scheduled_names) == "invalid":
                 self.ctx.add_error("staged native codegen: typed storage registry is malformed before batch {batch_index}")
@@ -522,9 +579,17 @@ impl CompilerDriver:
                     case CompileResult.CodegenError(message): message
                     case _: "staged native codegen batch {batch_index} failed"
                 self.ctx.add_error(batch_error)
-                return false
-        for released_name in batch_names:
-            self.ctx.evict_mir_module(released_name)
+                batch_failed = true
+        if batch_failed:
+            val failed_units = batch_names.join(",")
+            self.native_staged_codegen.failed_batches = self.native_staged_codegen.failed_batches.push(
+                "batch-{batch_index}: {failed_units}")
+            print "[staged-codegen] batch {batch_index} failed; continuing codegen for later batches (build will fail at end)"
+        self.ctx.evict_mir_modules(batch_names)
+        if go_to_end:
+            # The verify verdict is per batch under go-to-end (the batch was
+            # recorded and withheld above); a later batch must not inherit it.
+            self.native_staged_codegen.verify_failed = false
         self.native_staged_codegen.batches_flushed = batch_index
         log_build_progress("native_staged", "modules",
             self.native_staged_codegen.modules_flushed,
@@ -534,9 +599,21 @@ impl CompilerDriver:
         log_phase("aot:staged_codegen:batch:done index={batch_index} released={batch_names.len()}")
         true
 
-    me mir_shard_drop_cold_receipts_v1():
-        # workaround(mir-shard-cold-receipts): see native_mir_shard_eligible_v1.
-        self.ctx.cold_hir_typed_receipts = []
+    me go_to_end_withhold_staged_batch_v1(batch_names: [text], batch_index: i64):
+        """go-to-end after a MIR verify failure inside a staged batch. The
+        verifier reports fatal findings through ctx.add_error without a
+        per-module channel, so the granularity here is the BATCH: every module
+        of the batch is recorded (stage mir) and excluded, the verify errors
+        become `(unattributed)` rows, and nothing of this batch reaches a
+        backend (RB-19A: invalid MIR never reaches codegen). Later batches
+        still lower and emit; the build still fails with the manifest."""
+        self.go_to_end_absorb_errors_v1("mir")
+        for withheld_name in batch_names:
+            self.go_to_end.record("mir", withheld_name,
+                "withheld: MIR verify failed in staged batch {batch_index} (see the unattributed rows)")
+            self.go_to_end.exclude(withheld_name)
+        print "[go-to-end] MIR verify: staged batch {batch_index} withheld ({batch_names.len()} module(s)); continuing with the next batch"
+        stdout_flush()
 
     fn native_mir_shard_eligible_v1() -> bool:
         """Shards publish per-module objects only; lanes whose final step needs
@@ -547,16 +624,9 @@ impl CompilerDriver:
             driver_mir_selective_explicit_native_eligible_v1(self)
         else:
             self.native_staged_codegen_eligible_v1()
-        # workaround(mir-shard-cold-receipts): the bootstrap CLI always captures cold-HIR
-        # typed receipts (package-index markers are never published), which made every
-        # shard worker/link child refuse. Receipts only feed cold object persistence,
-        # which the shard worker/link child drops (see mir_shard_drop_cold_receipts_v1).
-        # Bug: doc/08_tracking/bug/mir_shard_worker_refuses_cold_receipts_2026-10-24.md
-        val shard_child = native_mir_shard_queue_v1() != "" or native_mir_shard_link_ledger_v1() != ""
-        val receipts_clear = shard_child or self.ctx.cold_hir_typed_receipts.len() == 0
         val no_budget = self.ctx.options.collection_memory_budget_bytes < 0
         val not_clean = (env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
-        val eligible = lane_ok and receipts_clear and no_budget and not_clean
+        val eligible = lane_ok and no_budget and not_clean
         if not eligible:
             val lane_reason = if selective: "selective-explicit-native"
                 else: self.native_staged_codegen_eligible_reason_v1()
@@ -573,28 +643,40 @@ impl CompilerDriver:
         print "[mir-shard] worker source entry queue={env_get_opt(\"SIMPLE_MIR_SHARD_QUEUE\") ?? \"\"}"
         stdout_flush()
         val queue = native_mir_shard_queue_v1()
-        val owner = native_mir_shard_owner_v1()
+        val root_owner = native_mir_shard_owner_v1()
         if queue == "":
             return CompileResult.CodegenError("MIR shard worker has no ledger ({NATIVE_MIR_SHARD_QUEUE_ENV_V1} unset)")
         if not self.native_mir_shard_eligible_v1():
             val _blocked = hir_shard_recovery_block(queue, "MIR sharding is unsupported for this build lane")
-            val _sealed = hir_shard_recovery_seal(queue, owner, "FAILED")
-            val _completed = hir_shard_recovery_complete(queue, owner)
+            val _sealed = hir_shard_recovery_seal(queue, root_owner, "FAILED")
+            val _completed = hir_shard_recovery_complete(queue, root_owner)
             return CompileResult.CodegenError("MIR sharding is unsupported for this build lane")
-        self.mir_shard_drop_cold_receipts_v1()
+        # EXPERIMENTAL SIMPLE_MIR_FORK_WORKERS=N (driver_build/native_mir_fork_v1.spl):
+        # arm the fork for this worker's lower_to_mir. The fork itself happens
+        # inside lower_to_mir_with_target_context right before the per-module
+        # claim loop, after the shared MIR setup and the ledger inventory
+        # publication, so the root runs that setup once and N copy-on-write
+        # children inherit it. A child returns from the fork with its own spec
+        # and owner installed and continues as an ordinary shard worker; the
+        # root only reaps, seals, re-forks and exits there. Never for selective.
+        if not driver_mir_selective_enabled_v1():
+            native_mir_fork_arm_v1(queue, root_owner)
+        # Cold-HIR receipts stay: the worker records capsule identities for the
+        # modules it claims and publishes them in the ledger; only the link child
+        # persists (driver_cold_hir_persist is skipped while shard_queue is set).
         var shard_state = NativeStagedCodegenStateV1.begin(0)
         shard_state.active = true
         shard_state.shard_queue = queue
         self.native_staged_codegen = shard_state
-        log_phase("aot:mir_shard:start owner={owner}")
+        log_phase("aot:mir_shard:start owner={root_owner}")
         # Export summaries (opt-in): admission only. Lowering still reads the
         # full post-mono HIR; a refusal is reported and changes nothing.
         if native_mir_shard_export_enabled_v1() and not driver_mir_selective_enabled_v1():
             val export_admitted = driver_mir_shard_export_admit_v1(self)
             if export_admitted.is_ok():
-                print "[mir-shard] export summaries admitted owner={owner} records={export_admitted.unwrap()} lowering=full-hir"
+                print "[mir-shard] export summaries admitted owner={root_owner} records={export_admitted.unwrap()} lowering=full-hir"
             else:
-                print "[mir-shard] export summaries refused owner={owner} fallback=full-hir reason={export_admitted.unwrap_err()}"
+                print "[mir-shard] export summaries refused owner={root_owner} fallback=full-hir reason={export_admitted.unwrap_err()}"
         var codegen_ok = false
         var module_functions: {text: i64} = {}
         var module_statics: {text: i64} = {}
@@ -603,6 +685,19 @@ impl CompilerDriver:
             self.lower_selective_to_mir_v1()
         else:
             self.lower_to_mir()
+        # A forked child installed its own owner inside lower_to_mir; read it
+        # only now so the seal/complete below are the child's, never the root's.
+        val owner = native_mir_shard_owner_v1()
+        # File-worker receipts: MIR-done is observable only here (lowering and
+        # object emission share this child); the worker copies the stamp.
+        if shard_lowered and (env_get_opt("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "") != "":
+            val _mir_done = native_file_worker_mir_done_publish_v1(queue, owner, time_now_monotonic_ms())
+        if native_mir_fork_disarm_v1():
+            # The fork point (the claim loop) was never reached: an early
+            # return or a lowering failure. Nothing forked; this process stays
+            # the ordinary 0/1 worker it was spawned as.
+            print "[mir-fork] fork point not reached owner={owner} lowered={shard_lowered}; no child forked"
+            stdout_flush()
         val skip_post_chain = driver_mir_selective_enabled_v1() and driver_mir_selective_skip_post_chain_v1()
         if shard_lowered and not skip_post_chain and not self.borrow_check():
             shard_borrow_failed = true
@@ -617,12 +712,28 @@ impl CompilerDriver:
                 log_phase("aot:flat_mir_passes:skipped")
                 log_bootstrap_flat_warning("aot:flat_mir_passes:skipped")
             if self.ctx.error_count_value == 0:
+                # P-G7: retire COMDAT copies whose instance object the link
+                # step links (coordinator-verified snapshot; empty = keep all).
+                val retire = generic_instance_list_read_v1(env_get_opt(GENERIC_INSTANCE_RETIRE_ENV_V1) ?? "")
+                if retire.len() > 0:
+                    for retire_name in self.ctx.mir_modules.keys():
+                        val (retired_module, retired_keys) = generic_instance_retire_in_module_v1(
+                            self.ctx.mir_modules[retire_name], retire)
+                        if retired_keys.len() > 0:
+                            self.ctx.mir_modules[retire_name] = retired_module
+                            print "[file-worker] instances retired module={retire_name} copies={retired_keys.len()}"
                 for held_name in self.ctx.mir_modules.keys():
                     module_functions[held_name] = self.ctx.mir_modules[held_name].functions.keys().len()
                     module_statics[held_name] = self.ctx.mir_modules[held_name].statics.keys().len()
                 if self.ctx.freeze_storage_registry_for_schedule(
                         self.native_staged_codegen.scheduled_names) == "invalid":
                     self.ctx.add_error("MIR shard: typed storage registry is malformed")
+                elif self.native_staged_codegen.shard_claimed_names.len() == 0 and self.ctx.mir_modules.len() == 0:
+                    # More workers than remaining modules legitimately leaves an
+                    # idle worker. Complete its ledger receipt without asking
+                    # native emission to compile an empty input. Claimed work
+                    # still goes through the normal empty-MIR failure guard.
+                    codegen_ok = true
                 else:
                     val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
                     self.native_staged_codegen.flushing = true
@@ -650,11 +761,19 @@ impl CompilerDriver:
                     self.native_staged_codegen.module_objects[name]
                 else:
                     ""
-                val module_passed = (outcome_label == "OK" and has_object) or (outcome_label == "" and not has_object)
+                # A go-to-end MIR failure has no outcome and no object, the
+                # same shape as an objectless facade: the ledger is the only
+                # thing that tells them apart. Left unchecked it published
+                # PASS and the coordinator never counted it (run-27e).
+                val go_to_end_failed = go_to_end_enabled_v1() and self.go_to_end.is_excluded(name)
+                if go_to_end_failed:
+                    print "[mir-shard] go-to-end failed module={name} owner={owner}: sealed FAILED, not published"
+                val module_passed = native_mir_shard_module_passed_v1(outcome_label, has_object, go_to_end_failed)
                 val functions = if module_functions.contains_key(name): module_functions[name] else: 0
                 val statics = if module_statics.contains_key(name): module_statics[name] else: 0
+                val capsule_identity = if self.ctx.cold_hir_native_capsule_identities.has(name): self.ctx.cold_hir_native_capsule_identities[name] else: ""
                 if module_passed and native_mir_shard_publish_pass_v1(queue, name, object_path,
-                        functions, statics):
+                        functions, statics, capsule_identity):
                     passed = passed + 1
         val sealed = hir_shard_recovery_seal(queue, owner, "FAILED")
         val completed = hir_shard_recovery_complete(queue, owner)
@@ -670,8 +789,7 @@ impl CompilerDriver:
         # Like the HIR shard child: everything after this point (verdict,
         # link, output publication) is the final worker's job, and exiting
         # here is what returns this worker's MIR to the OS.
-        stdout_flush()
-        exit(if shard_failed: 1 else: 0)
+        native_mir_fork_exit_v1(if shard_failed: 1 else: 0)
         CompileResult.Success(None)
 
     me aot_write_mir_shard_exports_v1() -> CompileResult:
@@ -696,7 +814,6 @@ impl CompilerDriver:
         and run the ordinary compile_to_native verdict + link over them."""
         if not self.native_mir_shard_eligible_v1():
             return CompileResult.CodegenError("MIR shard link is unsupported for this build lane")
-        self.mir_shard_drop_cold_receipts_v1()
         val admitted = if driver_mir_selective_enabled_v1():
             driver_mir_selective_admit_link_v1(self, native_mir_shard_link_ledger_v1())
         else:
@@ -706,7 +823,13 @@ impl CompilerDriver:
         val inputs = admitted.unwrap()
         var link_state = NativeStagedCodegenStateV1.begin(0)
         link_state.active = true
-        link_state.object_files = inputs.object_files
+        # P-G7: generic instance objects (one per ConcreteTldrKey, COMDAT/weak)
+        # the coordinator verified; linked once, after the module objects.
+        var link_objects = inputs.object_files
+        val instance_objects = generic_instance_list_read_v1(env_get_opt(GENERIC_INSTANCE_LINK_ENV_V1) ?? "")
+        for instance_object in instance_objects:
+            link_objects = link_objects.push(instance_object)
+        link_state.object_files = link_objects
         link_state.modules_flushed = inputs.modules.len()
         link_state.lane_functions = inputs.functions
         link_state.lane_statics = inputs.statics
@@ -716,8 +839,22 @@ impl CompilerDriver:
             outcome_unit = outcome_unit + 1
             link_state.module_outcomes.record(BuildUnitOutcome.ok(outcome_unit, object_module, 0, 0))
         link_state.module_unit_id = outcome_unit
+        # Replay the workers' verified objects into the cold-HIR receipt maps so the
+        # ordinary persistence step publishes the package index for sharded builds.
+        var replay_index = 0
+        for replay_module in inputs.object_modules:
+            val replay_reason = driver_cold_hir_record_verified_object_v1(
+                self.ctx, replay_module, inputs.object_files[replay_index],
+                inputs.capsule_identities[replay_index])
+            if replay_reason != "":
+                return CompileResult.CodegenError(replay_reason)
+            replay_index = replay_index + 1
+        for objectless_module in inputs.objectless_modules:
+            val objectless_reason = driver_cold_hir_record_objectless_v1(self.ctx, objectless_module)
+            if objectless_reason != "":
+                return CompileResult.CodegenError(objectless_reason)
         self.native_staged_codegen = link_state
-        print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} objectless={inputs.objectless}"
+        print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} instance_objects={instance_objects.len()} objectless={inputs.objectless}"
         val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
         self.compile_to_native(output)
 use compiler.common.diagnostics.span.{Span}

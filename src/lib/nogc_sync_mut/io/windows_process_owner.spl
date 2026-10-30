@@ -2,9 +2,10 @@
 # Ownership is represented by a nonreused slot, not an OS PID. Copied leases
 # refer to the same slot, so collecting one invalidates every copy before handles
 # can be recycled. This owner is single-threaded and bounded to 100000 starts.
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemoryStatusEx, HeapAlloc, HeapFree, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemoryStatusEx, HeapAlloc, HeapFree, rt_host_memory_headroom_bytes_v1, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider, BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
+use std.nogc_sync_mut.io.windows_process_text.{windows_process_wide_linear_v1, windows_process_quote_arg_linear_v1}
 
 struct WindowsProcessInputV1:
     path: text
@@ -62,6 +63,14 @@ var _windows_process_slots_v1: [WindowsProcessStateV1] = []
 # distinct. JobObject memory limits account committed bytes.
 @unsafe(reason: "reads a bounded native host memory snapshot and releases its buffer", capabilities: [ffi, raw_ptr])
 fn windows_available_memory_headroom_v1() -> Result<i64, text>:
+    # Interpreter-first: the runtime-C wrapper resolves under the bootstrap
+    # seed's pure interpreter, where the raw kernel32 heap externs below have
+    # no implementation (the probe errored and the build/preflight memory
+    # admission degraded to "available: 0 via unknown", refusing native-builds
+    # including devhub/caret entry-closure builds, 2026-10-24). 0 = snapshot
+    # unavailable: fall through to the extern path for full AOT fidelity.
+    val headroom = rt_host_memory_headroom_bytes_v1()
+    if headroom > 0: return Ok(headroom)
     val heap = GetProcessHeap()
     if heap == 0: return Err("Windows process heap unavailable for memory check")
     val status = HeapAlloc(heap, 8u32, 64u64)
@@ -109,31 +118,7 @@ fn _windows_upper_ascii_v1(value: text) -> text:
 # Microsoft CRT argv decoding: quote each argument, double a run of backslashes
 # before a quote, and double trailing backslashes before the closing quote.
 fn windows_process_quote_arg_v1(argument: text) -> text:
-    var quoted = "\""
-    var slashes = 0
-    var ordinal = 0
-    var offset = 0
-    while offset < argument.len():
-        val width = _windows_scalar_utf8_width_v1(argument.char_code_at(ordinal))
-        val character = argument[offset:offset + width]
-        if character == "\\":
-            slashes = slashes + 1
-        else:
-            var copies = slashes
-            if character == "\"": copies = slashes * 2 + 1
-            var index = 0
-            while index < copies:
-                quoted = quoted + "\\"
-                index = index + 1
-            quoted = quoted + character
-            slashes = 0
-        ordinal = ordinal + 1
-        offset = offset + width
-    var index = 0
-    while index < slashes * 2:
-        quoted = quoted + "\\"
-        index = index + 1
-    quoted + "\""
+    windows_process_quote_arg_linear_v1(argument)
 
 fn windows_process_path_valid_v1(path: text) -> bool:
     if path.len() < 4 or path[1:2] != ":" or (path[2:3] != "/" and path[2:3] != "\\") or path.contains("\0"):
@@ -159,13 +144,16 @@ fn windows_process_request_valid_v1(request: WindowsProcessRequestV1) -> text:
     var names: [text] = []
     for assignment in request.environment:
         if assignment.contains("\0"): return "NUL in environment"
-        val parts = assignment.split("=")
-        if parts.len() < 2 or parts[0] == "": return "invalid environment assignment"
+        var separator = 0
+        while separator < assignment.len() and assignment.char_code_at(separator) != 61:
+            separator = separator + 1
+        if separator == 0 or separator >= assignment.len(): return "invalid environment assignment"
+        val key = assignment[0:separator]
         var key_index = 0
-        while key_index < parts[0].len():
-            if parts[0].char_code_at(key_index) > 127: return "Windows environment names currently require ASCII"
+        while key_index < key.len():
+            if key.char_code_at(key_index) > 127: return "Windows environment names currently require ASCII"
             key_index = key_index + 1
-        val name = _windows_upper_ascii_v1(parts[0])
+        val name = _windows_upper_ascii_v1(key)
         if names.contains(name): return "duplicate Windows environment name"
         names = names.push(name)
     for input in request.inputs:
@@ -175,28 +163,7 @@ fn windows_process_request_valid_v1(request: WindowsProcessRequestV1) -> text:
 
 @unsafe(reason: "bounds checked UTF16 writes into a zeroed owned allocation", capabilities: [ffi, raw_ptr])
 fn _windows_process_wide_v1(heap: i64, value: text) -> i64:
-    # UTF8 byte length bounds UTF16 code units, including supplementary scalars.
-    val buffer = HeapAlloc(heap, 8u32, ((value.len() + 1) * 2) as u64)
-    if buffer == 0: return 0
-    var offset = 0
-    var ordinal = 0
-    var byte_offset = 0
-    while byte_offset < value.len():
-        val scalar = value.char_code_at(ordinal)
-        if scalar < 0 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343):
-            val _free = HeapFree(heap, 0u32, buffer)
-            return 0
-        if scalar < 65536:
-            volatile_write_u16(buffer + offset * 2, scalar)
-            offset = offset + 1
-        else:
-            val supplementary = scalar - 65536
-            volatile_write_u16(buffer + offset * 2, 55296 + (supplementary >> 10))
-            volatile_write_u16(buffer + (offset + 1) * 2, 56320 + (supplementary & 1023))
-            offset = offset + 2
-        ordinal = ordinal + 1
-        byte_offset = byte_offset + _windows_scalar_utf8_width_v1(scalar)
-    buffer
+    windows_process_wide_linear_v1(heap, value)
 
 @unsafe(reason: "caller owns file handle and temporary UTF16 storage", capabilities: [ffi, raw_ptr])
 fn _windows_process_file_v1(heap: i64, path: text, access: u32, sharing: u32, security: i64, disposition: u32) -> i64:

@@ -1,0 +1,63 @@
+# Twin of src/verification/build_cache/src/PrelowerKeyV1.lean over the REAL
+# pre-lowering key code (cache/native_prelower_object_key.spl): the interface
+# extractor keeps every declaration line and drops only fn bodies; a module
+# whose bodies can be copied (generic, inline, trait/mixin, macro, comptime)
+# contributes its full source; and the module set is part of every key.
+# Closes the cross_module_impl_set / inline_const_body / resolution_new_probe
+# rows for the prelower cache.
+use std.spec
+use compiler.driver.cache.native_prelower_object_key.{
+    NativePrelowerKeyInputsV1, native_prelower_source_body_opaque_v1,
+    native_prelower_dependency_digest_v1, native_prelower_object_key_v1}
+
+val BASE: text = "pub struct P:\n    x: i64\n    y: i64\n\nval LIMIT: i64 = 4\n\npub fn area(p: P, scale: i64 = 1) -> i64:\n    p.x * p.y * scale\n"
+
+fn dep(src: text) -> text:
+    native_prelower_dependency_digest_v1(src)
+
+fn key(module_name: text, deps: [text]) -> text:
+    val (k, _reason) = native_prelower_object_key_v1(NativePrelowerKeyInputsV1(
+        module_name: module_name, source_digest: "sha256-of-own-source",
+        dependency_digests: deps, mono_instances: [],
+        producer_identity: "producer", cache_lane: "default"))
+    k
+
+describe "prelower key: body-opaque interface digest":
+    it "treats a plain module as body-opaque and ignores a body-only edit":
+        expect(native_prelower_source_body_opaque_v1(BASE)).to_equal(true)
+        val edited = BASE.replace("p.x * p.y * scale", "scale * p.y * p.x")
+        expect(dep(edited)).to_equal(dep(BASE))
+
+    it "changes on every declaration-line edit (impl set, layout, consts, signatures, defaults, advice)":
+        var checked = 0
+        for edited in [
+                BASE + "\nimpl P:\n    fn twice() -> i64:\n        2\n",
+                BASE.replace("    x: i64\n    y: i64", "    y: i64\n    x: i64"),
+                BASE.replace("    y: i64", "    y: i32"),
+                BASE.replace("val LIMIT: i64 = 4", "val LIMIT: i64 = 5"),
+                BASE.replace("scale: i64 = 1", "scale: i64 = 2"),
+                BASE.replace("pub fn area(p: P, scale: i64 = 1) -> i64:", "pub fn area(p: P, scale: i32 = 1) -> i64:"),
+                BASE + "\non pc{{execution(* area(..))}} use log_call before\n"]:
+            expect(dep(edited) == dep(BASE)).to_equal(false)
+            checked = checked + 1
+        expect(checked).to_equal(7)
+
+    it "uses the full source for modules whose bodies can be copied":
+        var checked = 0
+        for copyable in [
+                "@inline\nfn f() -> i64:\n    1\n",
+                "fn first<T>(xs: [T]) -> T:\n    xs[0]\n",
+                "trait Shape:\n    fn area() -> i64:\n        0\n",
+                "pub trait Shape:\n    fn area() -> i64:\n        0\n",
+                "comptime fn k() -> i64:\n    1\n"]:
+            expect(native_prelower_source_body_opaque_v1(copyable)).to_equal(false)
+            val body_edit = copyable.replace("1\n", "2\n").replace("xs[0]", "xs[1]").replace("        0\n", "        9\n")
+            expect(dep(body_edit) == dep(copyable)).to_equal(false)
+            checked = checked + 1
+        expect(checked).to_equal(5)
+
+    it "changes every key when a module joins the build (new shadowing file)":
+        val before = key("app", ["lib=" + dep(BASE)])
+        val after = key("app", ["lib=" + dep(BASE), "shadow=" + dep("pub fn area() -> i64:\n    0\n")])
+        expect(before == "").to_equal(false)
+        expect(before == after).to_equal(false)

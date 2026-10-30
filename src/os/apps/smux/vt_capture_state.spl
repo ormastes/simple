@@ -1,0 +1,97 @@
+# Pure capture metadata helpers. No I/O, owner state, or screen/parser imports.
+use os.apps.smux.vt_types.{VtScreen}
+use os.apps.smux.vt_retention.{vt_loss_equal}
+
+pub fn vt_rows_copy(rows: [[text]]) -> [[text]]:
+    var out: [[text]] = []
+    for row in rows:
+        var copy: [text] = []
+        for cell in row: copy.push(cell)
+        out.push(copy)
+    out
+
+pub fn vt_wrap_copy(values: [bool]) -> [bool]:
+    var out: [bool] = []
+    for value in values: out.push(value)
+    out
+
+pub fn vt_wrap_new(count: i64) -> [bool]:
+    var out: [bool] = []
+    for i in 0..count:
+        out.push(false)
+    out
+
+pub fn vt_wrap_trim(values: [bool], count: i64) -> [bool]:
+    if count <= 0: return []
+    if values.len() > count: return values[values.len() - count:]
+    values
+
+pub fn vt_wrap_append(values: [bool], value: bool, count: i64) -> [bool]:
+    if count <= 0: return []
+    var out = vt_wrap_trim(values, count - 1)
+    out.push(value)
+    out
+
+pub fn vt_wrap_shift(values: [bool], bottom: i64, at: i64, count: i64, down: bool) -> [bool]:
+    var out = values
+    for k in 0..count:
+        if down:
+            var r = bottom
+            while r > at:
+                out[r] = out[r - 1]
+                r = r - 1
+            out[at] = false
+        else:
+            var r = at
+            while r < bottom:
+                out[r] = out[r + 1]
+                r = r + 1
+            out[bottom] = false
+    out
+
+pub fn vt_mark_dirty(screen: VtScreen, changed: bool) -> VtScreen:
+    var out = screen
+    if changed and out.frozen.len() == 0:
+        out.capture_dirty = true
+    out
+
+pub fn vt_row_equal(a: [text], b: [text]) -> bool:
+    if a.len() != b.len(): return false
+    for i in 0..a.len():
+        if a[i] != b[i]: return false
+    true
+
+pub fn vt_rows_equal(a: [[text]], b: [[text]]) -> bool:
+    if a.len() != b.len(): return false
+    for i in 0..a.len():
+        if not vt_row_equal(a[i], b[i]): return false
+    true
+
+fn same_wraps(a: [bool], b: [bool]) -> bool:
+    if a.len() != b.len(): return false
+    for i in 0..a.len():
+        if a[i] != b[i]: return false
+    true
+
+# Used only at synchronization release, resize, and alternate-screen switch.
+# Ordinary printable feeds compare the touched cells in the parser itself.
+pub fn vt_view_equal(a: VtScreen, b: VtScreen) -> bool:
+    val af = a.frozen.len() > 0
+    val bf = b.frozen.len() > 0
+    val ac = if af: a.frozen else: a.cells
+    val bc = if bf: b.frozen else: b.cells
+    val aa = if af: a.frozen_attrs else: a.attrs
+    val ba = if bf: b.frozen_attrs else: b.attrs
+    val aw = if af: a.frozen_wrapped else: a.wrapped
+    val bw = if bf: b.frozen_wrapped else: b.wrapped
+    val ah = if af: a.frozen_history else: (if a.alt.on: [] else: a.history)
+    val bh = if bf: b.frozen_history else: (if b.alt.on: [] else: b.history)
+    val aha = if af: a.frozen_history_attrs else: (if a.alt.on: [] else: a.history_attrs)
+    val bha = if bf: b.frozen_history_attrs else: (if b.alt.on: [] else: b.history_attrs)
+    val ahw = if af: a.frozen_history_wrapped else: (if a.alt.on: [] else: a.history_wrapped)
+    val bhw = if bf: b.frozen_history_wrapped else: (if b.alt.on: [] else: b.history_wrapped)
+    val al = if af: a.frozen_loss else: a.cell_loss
+    val bl = if bf: b.frozen_loss else: b.cell_loss
+    val ahl = if af: a.frozen_history_loss else: (if a.alt.on: [] else: a.history_loss)
+    val bhl = if bf: b.frozen_history_loss else: (if b.alt.on: [] else: b.history_loss)
+    vt_rows_equal(ac, bc) and vt_rows_equal(aa, ba) and same_wraps(aw, bw) and vt_rows_equal(ah, bh) and vt_rows_equal(aha, bha) and same_wraps(ahw, bhw) and vt_loss_equal(al, bl) and vt_loss_equal(ahl, bhl)

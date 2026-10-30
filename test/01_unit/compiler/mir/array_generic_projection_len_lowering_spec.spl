@@ -1,0 +1,42 @@
+"""Pin builtin insert dispatch and guarded MIR generation; native qualification remains separate."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "array_insert_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + serialize_mir_function(function)
+    result
+
+describe "Generic nullable projection array receiver typing":
+    it "retains an explicit array annotation on a generic SFFI projection":
+        val source = """
+extern fn rt_tuple_get<T>(tuple_: i64, index: i64) -> T?
+fn _sffi_tuple_get<T>(tuple_: i64, index: i64) -> T?:
+    rt_tuple_get(tuple_, index)
+fn projected_len(payload: i64) -> i64:
+    val values: [i64] = _sffi_tuple_get<[i64]>(payload, 2)
+    val count: i64 = values.len()
+    count
+"""
+        val mir = lower_function(source, "projected_len")
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("rt_array_len")
+

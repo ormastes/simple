@@ -62,7 +62,10 @@ fn _context_json_escape(value: text) -> text:
 fn _context_sql_literal(value: text) -> text:
     "'" + value.split("'").join("''") + "'"
 
-fn _context_sql_like_literal(value: text) -> text:
+fn _context_sql_like_candidate(value: text) -> text:
+    # LIKE's percent/underscore wildcards are a coarse candidate selector.
+    # Exact literal substring semantics are enforced after rows are fetched;
+    # the bundled pure-SQL backend does not implement LIKE ... ESCAPE.
     _context_sql_literal("%" + value + "%")
 
 fn _context_token_estimate(content: text) -> i64:
@@ -278,21 +281,26 @@ fn _context_sql_schema() -> text:
 
 fn _context_sql_render_rows_filtered(rows, query: text, source_filter: text, format: text) -> text:
     val trimmed_filter = source_filter.trim()
+    val trimmed_query = query.trim()
     var match_count: i64 = 0
     var status = "ready"
     var body_parts: [text] = []
 
     for row in rows:
         val source = sqlite_row_get(row, "source")
-        if trimmed_filter == "" or source == trimmed_filter or source.ends_with("/" + trimmed_filter):
+        val target = sqlite_row_get(row, "target")
+        val content = sqlite_row_get(row, "content")
+        val query_matches = trimmed_query == "" or source.contains(trimmed_query) or
+            target.contains(trimmed_query) or content.contains(trimmed_query)
+        if query_matches and (trimmed_filter == "" or source == trimmed_filter or source.ends_with("/" + trimmed_filter)):
             match_count = match_count + 1
             body_parts.push("source: " + source)
-            body_parts.push("target: " + sqlite_row_get(row, "target"))
+            body_parts.push("target: " + target)
             body_parts.push("status: " + sqlite_row_get(row, "status"))
             body_parts.push("lines: " + sqlite_row_get(row, "lines"))
             body_parts.push("token_estimate: " + sqlite_row_get(row, "token_estimate"))
             body_parts.push("content:")
-            body_parts.push(sqlite_row_get(row, "content"))
+            body_parts.push(content)
             body_parts.push("---")
 
     if match_count == 0:
@@ -438,7 +446,7 @@ fn context_sql_query_packs_by_source(paths: [text], target: text, query: text, s
                     [path, normalized_target, "ready", str(_context_line_count(content)), str(_context_token_estimate(content)), content],
                 )
 
-    val pattern = _context_sql_like_literal(trimmed_query)
+    val pattern = _context_sql_like_candidate(trimmed_query)
     val sql = "SELECT source, target, status, lines, token_estimate, content FROM context_packs WHERE source LIKE " + pattern + " OR target LIKE " + pattern + " OR content LIKE " + pattern + " ORDER BY id"
     val rows = sqlite_query_all(db, sql)
     val rendered = _context_sql_render_rows_filtered(rows, trimmed_query, source_filter, format)

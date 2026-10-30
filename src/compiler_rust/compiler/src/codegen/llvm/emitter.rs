@@ -795,7 +795,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         Ok(())
     }
 
-    fn emit_inline_asm(&mut self, instructions: &[String], volatile: bool) -> Result<(), String> {
+    fn emit_inline_asm(&mut self, instructions: &[String], volatile: bool, dialect: crate::hir::AsmDialect) -> Result<(), String> {
         let fn_type = self.backend.context_ref().void_type().fn_type(&[], false);
         let asm = self.backend.context_ref().create_inline_asm(
             fn_type,
@@ -803,7 +803,10 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             "~{memory}".to_string(),
             volatile,
             false,
-            Some(InlineAsmDialect::ATT),
+            Some(match dialect {
+                crate::hir::AsmDialect::Default | crate::hir::AsmDialect::Att => InlineAsmDialect::ATT,
+                crate::hir::AsmDialect::Intel => InlineAsmDialect::Intel,
+            }),
             false,
         );
         self.builder

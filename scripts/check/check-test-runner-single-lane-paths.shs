@@ -130,6 +130,44 @@ if [ "$rc_format" -ne 0 ]; then
     OFFENDERS="$OFFENDERS format-value-misclassified(rc=$rc_format)"
 fi
 
+# Case 5 (numeric value arity): the public worker memory option is consumed by
+# the shared runner parser and its value must not be counted as another spec.
+( cd "$ROOT" && timeout "$TIMEOUT" "$SIMPLE" src/app/test_runner_new/test_runner_client.spl "$GOOD_SPEC" --no-session-daemon --worker-memory-mb 128 --assert-ran ) > "$OUT" 2>/dev/null
+rc_worker_memory=$?
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ "$rc_worker_memory" -ne 0 ]; then
+    OFFENDERS="$OFFENDERS worker-memory-value-misclassified(rc=$rc_worker_memory)"
+fi
+
+# Case 6 (path-shaped value): a directory-valued option is still a value, even
+# though it looks like a positional target to a scanner that misses the flag.
+( cd "$ROOT" && timeout "$TIMEOUT" "$SIMPLE" src/app/test_runner_new/test_runner_client.spl "$GOOD_SPEC" --no-session-daemon --fuzz-corpus test/fixtures --assert-ran ) > "$OUT" 2>/dev/null
+rc_fuzz_corpus=$?
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ "$rc_fuzz_corpus" -ne 0 ]; then
+    OFFENDERS="$OFFENDERS fuzz-corpus-value-misclassified(rc=$rc_fuzz_corpus)"
+fi
+
+# Case 7 (signed decimal value): the shared validator permits a negative CPU
+# threshold, so its leading '-' must not be mistaken for another option.
+( cd "$ROOT" && timeout "$TIMEOUT" "$SIMPLE" src/app/test_runner_new/test_runner_client.spl "$GOOD_SPEC" --no-session-daemon --cpu-threshold -1.5 --assert-ran ) > "$OUT" 2>/dev/null
+rc_negative_threshold=$?
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ "$rc_negative_threshold" -ne 0 ]; then
+    OFFENDERS="$OFFENDERS signed-threshold-value-misclassified(rc=$rc_negative_threshold)"
+fi
+
+# Case 8 (value boundary): `--` is not a value for --timeout and must not be
+# swallowed as though the option had an argument.
+( cd "$ROOT" && timeout "$TIMEOUT" "$SIMPLE" src/app/test_runner_new/test_runner_client.spl "$GOOD_SPEC" --no-session-daemon --timeout -- --assert-ran ) > "$OUT" 2>&1
+rc_missing_timeout=$?
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ "$rc_missing_timeout" -eq 0 ]; then
+    OFFENDERS="$OFFENDERS separator-swallowed-as-value(rc=0)"
+elif ! grep -q "missing value for --timeout" "$OUT"; then
+    OFFENDERS="$OFFENDERS separator-rejected-for-wrong-reason"
+fi
+
 rm -f "$OUT"
 
 [ "$EV_CHECKED" -gt 0 ] || error_verdict "0 invocations executed"

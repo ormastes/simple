@@ -11,20 +11,18 @@
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
 use app.io.args_ops.{get_args}
 use app.io.env_ops.{env_get, env_set}
+use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
 use app.cli.environment_variant_policy_handoff_owner_v1.{
     environment_variant_policy_handoff_extract_v1
 }
 use compiler.driver.driver_parse_shard_entry.{
-    driver_run_parse_shard_with_environment_variant_policy_v1}
-use compiler.driver.driver_source_loading.{driver_entry_scan_cache_reset}
+    driver_run_parse_shard_with_environment_variant_policy_v1,
+    driver_run_parse_fibers_with_environment_variant_policy_v1}
+use compiler.driver.driver_entry_closure_core.{driver_entry_scan_cache_reset}
 use std.io_runtime.{getpid}
-use app.io.file_ops.{path_absolute}
-use app.io.cli_ops.{cli_kernel_executable_path}
-use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
-use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
-use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
-use compiler.driver.driver_build.native_entry_closure_owner.{
-    NativeEntryClosureRequestV1, native_entry_closure_request_read_v1}
+use app.io._CliCompile.native_build_closure_request_admit.{
+    native_build_closure_request_present_v1, native_build_closure_request_admit_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1}
 
 fn parse_shard_entry_args() -> [text]:
     val raw_args = get_args()
@@ -45,7 +43,7 @@ fn parse_shard_entry_args() -> [text]:
 # Flags that consume the next token in cli_native_build; the slim parser must
 # skip their values so one is never mistaken for the positional entry.
 fn parse_shard_value_flag(a: text) -> bool:
-    a == "--backend" or a == "--backend-plugin" or a == "--runtime-bundle" or a == "--runtime-path" or
+    a == "--library-mode" or a == "--backend" or a == "--backend-plugin" or a == "--runtime-bundle" or a == "--runtime-path" or
         a == "--linker-script" or a == "-o" or a == "--output" or a == "--mode" or
         a == "--build-mode" or a == "--cache-dir" or a == "--target" or a == "--cpu" or
         a == "--opt-level" or a == "--threads" or a == "--jobs" or a == "-j" or a == "--timeout" or
@@ -54,7 +52,7 @@ fn parse_shard_value_flag(a: text) -> bool:
         a == "--frontend-offload-fallback"
 
 fn parse_shard_inline_policy_flag(a: text) -> bool:
-    a.starts_with("--parser-impl=") or a.starts_with("--parser-prefer=") or
+    a.starts_with("--library-mode=") or a.starts_with("--parser-impl=") or a.starts_with("--parser-prefer=") or
         a.starts_with("--parser-require=") or a.starts_with("--host-cpu-max=") or
         a.starts_with("--frontend-offload=") or
         a.starts_with("--frontend-offload-fallback=")
@@ -75,11 +73,17 @@ pub fn run_parse_shard(args: [text]) -> i64:
             print "error: parse shard rejected its internal policy handoff"
             return 1
     val user_args = opened.user_args
+    val library_policy = match library_mode_parse_args_v1(user_args):
+        case Ok(value): value
+        case Err(reason):
+            eprint reason
+            return 2
     var entry_point = ""
     var source_dirs: [text] = []
     var entry_closure = false
     var low_memory = false
     var parse_shard = ""
+    var parse_fibers = false
     var j = 0
     while j < user_args.len():
         val a = user_args[j]
@@ -91,6 +95,10 @@ pub fn run_parse_shard(args: [text]) -> i64:
             low_memory = true
         elif a.starts_with("--parse-shard="):
             parse_shard = a.substring(14)
+        elif a.starts_with("--parse-fibers="):
+            # Same claim-queue split; each claimed file runs as a FileFiber.
+            parse_shard = a.substring(15)
+            parse_fibers = true
         elif a == "--entry":
             if j + 1 < user_args.len():
                 j = j + 1
@@ -114,45 +122,24 @@ pub fn run_parse_shard(args: [text]) -> i64:
             entry_point = a
         j = j + 1
     if entry_point == "" or parse_shard == "":
-        print "error: parse shard needs an entry and --parse-shard=i/n"
+        print "error: parse shard needs an entry and --parse-shard=i/n or --parse-fibers=i/n"
         return 1
     driver_entry_scan_cache_reset()
     var preclosed: NativeEntryClosureRequestV1? = nil
-    val request_path = env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? ""
-    if request_path != "":
+    if native_build_closure_request_present_v1():
         if not entry_closure:
             print "error: parse closure request incompatible with bulk inputs"
             return 1
-        val source_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
-        val entry_absolute = compile_source_inventory_plain_checkout_v1(path_absolute(entry_point))
-        if not entry_absolute.starts_with(source_root + "/"):
-            print "error: parse closure entry outside source owner"
-            return 1
-        val identity = entry_absolute.substring(source_root.len() + 1)
-        var roots = native_build_snapshot_source_roots_v1(identity, source_dirs)
-        if not roots.contains(identity): roots = roots.push(identity)
-        val request = native_entry_closure_request_read_v1(request_path,
-            env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "", source_root, identity, roots,
-            file_hash_sha256(cli_kernel_executable_path()))
+        val request = native_build_closure_request_admit_v1(entry_point, source_dirs)
         if request.is_err():
-            print "error: parse closure request rejected: " + request.unwrap_err()
+            print "error: parse " + request.unwrap_err()
             return 1
-        val admitted_request = request.unwrap()
-        if admitted_request.snapshot.snapshot_root != (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") or
-                admitted_request.snapshot.revision_id != (env_get("SIMPLE_SCV_REVISION_ID") ?? "") or
-                admitted_request.snapshot.commit_id != (env_get("SIMPLE_SCV_COMMIT_ID") ?? "") or
-                admitted_request.snapshot.tree_id != (env_get("SIMPLE_SCV_TREE_ID") ?? "") or
-                admitted_request.snapshot.inventory_digest != (env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "") or
-                admitted_request.source_digest != (env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "") or
-                admitted_request.generation != ((env_get("SIMPLE_SCV_INVENTORY_GENERATION") ?? "").to_i64() ?? -1):
-            print "error: parse closure request differs from inherited source authority"
-            return 1
-        preclosed = Some(admitted_request)
+        preclosed = Some(request.unwrap())
     var inputs: [text] = []
     if preclosed != nil:
         inputs = [entry_point]
     elif entry_closure:
-        for cf in _native_build_entry_closure(entry_point, source_dirs):
+        for cf in _native_build_entry_closure(entry_point, source_dirs, library_policy.mode):
             inputs = inputs.push(cf)
     else:
         for source_dir in source_dirs:
@@ -164,11 +151,19 @@ pub fn run_parse_shard(args: [text]) -> i64:
     env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
     env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_point)
     env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
-    if driver_run_parse_shard_with_environment_variant_policy_v1(
-            inputs, low_memory, opened.handoff.collection, preclosed):
-        0
+    val ok = if parse_fibers:
+        driver_run_parse_fibers_with_environment_variant_policy_v1(
+            inputs, low_memory, opened.handoff.collection, preclosed,
+            library_policy.gc_off, library_policy.allowed_families, library_policy.mode)
     else:
-        1
+        driver_run_parse_shard_with_environment_variant_policy_v1(
+            inputs, low_memory, opened.handoff.collection, preclosed,
+            library_policy.gc_off, library_policy.allowed_families, library_policy.mode)
+    if ok:
+        return 0
+    val split_mode = if parse_fibers: "--parse-fibers" else: "--parse-shard"
+    eprint "error: parse child {split_mode}={parse_shard} failed"
+    1
 
 fn main() -> i64:
     run_parse_shard(parse_shard_entry_args())

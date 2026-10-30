@@ -1,0 +1,103 @@
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+"""
+# Step-3 lazy restore on the retained route (packed_binary_ast_v1.md step 3)
+
+An opted-in HIR shard worker parses every module's SKELETON in phase 2 (only
+surfaces are needed) and re-parses the FULL source of each module it claims
+before lowering. These examples pin the three properties that make that safe:
+
+- the phase-2 text is the skeleton only inside an opted-in worker;
+- the claimed module's HIR is identical whether the closure's surfaces came
+  from full parses (parent) or from skeleton parses (worker);
+- the worker's HIR cache key for the claimed module equals the parent's.
+"""
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules, ModuleSurfacesByName}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.generated.hir_hash.{hir_hash_block, hir_hash_param, hir_hash_type}
+use compiler.driver.driver_hir_cache.{hir_cache_closure_digest, hir_cache_key}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1}
+
+val NAMES: [text] = ["geo", "app"]
+val GEO: text = "pub struct Vec2:\n    x: i64\n    y: i64\n\nimpl Vec2:\n    fn sum() -> i64:\n        val t = self.x + self.y\n        t\n\npub fn scale(v: Vec2, k: i64) -> Vec2:\n    val nx = v.x * k\n    Vec2(x: nx, y: v.y * k)\n\nfn pick<T>(a: T, b: T) -> T:\n    a\n"
+val APP: text = "use geo.{Vec2, scale}\n\nfn run() -> i64:\n    val v = scale(Vec2(x: 1, y: 2), 3)\n    v.sum()\n"
+# A real file: hir_cache_key hashes the source bytes on disk.
+val KEY_PATH: text = "src/compiler/80.driver/driver_hir_worker_surface_v1.spl"
+
+fn sources() -> [text]:
+    [GEO, APP]
+
+fn files() -> [SourceFile]:
+    var out: [SourceFile] = []
+    var i = 0
+    while i < NAMES.len():
+        out.push(SourceFile(path: NAMES[i] + ".spl", content: sources()[i], module_name: NAMES[i]))
+        i = i + 1
+    out
+
+# Phase-2 modules as a parent (worker spec "") or an opted-in worker sees them.
+fn phase2_modules(worker_spec: text) -> Dict<text, Module>:
+    var modules: Dict<text, Module> = {}
+    var i = 0
+    while i < NAMES.len():
+        val text = driver_surface_parse_text_v1(sources()[i], worker_spec, "1")
+        modules[NAMES[i]] = parse_full_frontend(text, NAMES[i] + ".spl", NAMES[i], Logger(level: 0))
+        i = i + 1
+    modules
+
+fn surfaces(worker_spec: text) -> ModuleSurfacesByName:
+    module_surfaces_from_modules(phase2_modules(worker_spec), files()).unwrap()
+
+# Lower the claimed module `app` from a FULL parse against the given surfaces.
+fn lower_app(s: ModuleSurfacesByName) -> HirModule:
+    val full = parse_full_frontend(APP, "app.spl", "app", Logger(level: 0))
+    var lowering = hirlowering_for_module("app", s)
+    lowering.lower_module(full)
+
+# Every lowered function: name, parameter and return types, and body (hashed).
+fn hir_fingerprint(m: HirModule) -> [text]:
+    var rows: [text] = []
+    for f in m.functions.values():
+        var row = f.name + " ret=" + "{hir_hash_type(f.return_type)}" + " body=" + "{hir_hash_block(f.body)}"
+        for p in f.params:
+            row = row + " p=" + "{hir_hash_param(p)}"
+        rows.push(row)
+    var i = 1
+    while i < rows.len():
+        var j = i
+        while j > 0 and rows[j] < rows[j - 1]:
+            val t = rows[j]
+            rows[j] = rows[j - 1]
+            rows[j - 1] = t
+            j = j - 1
+        i = i + 1
+    rows
+
+describe "HIR worker skeleton on the retained route":
+    it "parses skeletons in phase 2 only inside an opted-in worker":
+        expect(driver_surface_parse_text_v1(GEO, "", "1")).to_equal(GEO)
+        expect(driver_surface_parse_text_v1(GEO, "0/2", "0")).to_equal(GEO)
+        val skel = driver_surface_parse_text_v1(GEO, "0/2", "1")
+        expect(skel.contains("val t = self.x + self.y")).to_equal(false)
+        expect(skel.contains("\n    a\n")).to_equal(true)
+        expect(skel.split("\n").len()).to_equal(GEO.split("\n").len())
+
+    it "lowers a claimed module to the identical HIR from skeleton surfaces":
+        val parent = lower_app(surfaces(""))
+        val worker = lower_app(surfaces("1/2"))
+        expect(parent.functions.len() > 0).to_equal(true)
+        expect(hir_fingerprint(worker)).to_equal(hir_fingerprint(parent))
+
+    it "computes the parent's HIR cache key in the worker":
+        val parent_digest = hir_cache_closure_digest(surfaces(""))
+        val worker_digest = hir_cache_closure_digest(surfaces("1/2"))
+        expect(worker_digest).to_equal(parent_digest)
+        expect(hir_cache_key(KEY_PATH, worker_digest, false)).to_equal(hir_cache_key(KEY_PATH, parent_digest, false))

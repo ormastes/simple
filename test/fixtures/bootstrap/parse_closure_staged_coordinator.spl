@@ -1,0 +1,165 @@
+# Deterministic domain fixtures for the unchanged production coordinator owner.
+# The generator supplies that owner's full functions and real scratch helper.
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_transient_array_scope_state_v1() -> i64
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_get(key: text) -> text
+extern fn rt_exit(code: i64)
+
+struct ScvCompileSnapshotV1:
+    snapshot_root: text
+    revision_id: text
+    commit_id: text
+    tree_id: text
+    inventory_digest: text
+struct CompilerSourceAuthorityV1:
+    valid: bool
+    reason: text
+    snapshot: ScvCompileSnapshotV1
+    source_inventory_digest: text
+    inventory_generation: i64
+struct NativeEntryClosureBindingV1:
+    revision: text
+    commit: text
+    tree: text
+    inventory_digest: text
+    entry: text
+    source_roots: [text]
+    policy_digest: text
+    producer_digest: text
+struct NativeEntryClosureSelectionV1:
+    identities: [text]
+struct NativeEntryClosureRequestV1:
+    source_root: text
+    snapshot: ScvCompileSnapshotV1
+    source_digest: text
+    generation: i64
+    binding: NativeEntryClosureBindingV1
+    receipt_path: text
+    receipt_digest: text
+
+var probe_before: i64 = 0
+var probe_peak: i64 = 0
+var probe_phase: i64 = 0
+var probe_invalid: bool = false
+var probe_reject_final: bool = false
+var probe_cache: [text] = []
+var probe_snapshot: text = ""
+
+fn env_set(key: text, value: text) -> bool:
+    rt_env_set(key, value)
+fn env_get(key: text) -> text?:
+    Some(rt_env_get(key))
+fn transient_array_scope_state_v1() -> i64:
+    rt_transient_array_scope_state_v1()
+fn driver_admitted_epoch_active_v1() -> bool:
+    false
+fn driver_entry_scan_cache_release():
+    probe_cache = []
+fn native_build_closure_release_snapshot_memo_v1():
+    probe_snapshot = ""
+fn host_path_release_cached_platform_v1():
+    probe_cache = []
+fn library_mode_closure_digest_v1(policy: text, mode: text) -> text:
+    "{policy}-{mode}"
+fn file_hash_sha256(path: text) -> text:
+    "producer-{path}"
+fn dir_create_all(path: text) -> bool:
+    true
+fn getpid() -> i64:
+    123
+fn time_now_monotonic_ms() -> i64:
+    456
+
+fn probe_inventory_work(expected: i64):
+    if probe_phase + 1 != expected or rt_transient_array_scope_state_v1() != 1:
+        probe_invalid = true
+    probe_phase = expected
+    var row = 0
+    while row < 128:
+        val scratch = ["inventory-{expected}-{row}".split("-")]
+        row = row + 1
+    val live = rt_heap_registry_count() - probe_before
+    if live > probe_peak: probe_peak = live
+
+fn compiler_source_authority_open_published_v1(root: text) -> CompilerSourceAuthorityV1:
+    probe_inventory_work(1)
+    val snapshot = ScvCompileSnapshotV1("frozen".replace("f", "/f"),
+        "revision-{1}", "commit-{2}", "tree-{3}", "manifest-{4}")
+    CompilerSourceAuthorityV1(true, "", snapshot, "inventory-{5}", 128)
+fn native_build_closure_roots_v1(root: text, frozen: text, roots: [text]) -> Result<[text], text>:
+    if frozen != "/frozen": probe_invalid = true
+    Ok(["{frozen}/src"])
+fn _native_build_entry_closure(entry: text, roots: [text], mode: text) -> [text]:
+    probe_inventory_work(2)
+    probe_snapshot = "frozen".replace("f", "/f")
+    probe_cache = ["cached-{2}"]
+    ["{probe_snapshot}/src/main.spl"]
+fn native_build_closure_source_roots_v1(entry: text, roots: [text]) -> Result<[text], text>:
+    Ok(["{probe_snapshot}/src"])
+fn native_build_closure_snapshot_root_v1() -> text:
+    probe_snapshot
+fn compiler_entry_closure_prepare_v1(root: text, authority: CompilerSourceAuthorityV1,
+        binding: NativeEntryClosureBindingV1, paths: [text]) -> Result<NativeEntryClosureSelectionV1, text>:
+    probe_inventory_work(3)
+    if authority.snapshot.revision_id != "revision-1" or
+            binding.source_roots[0] != "/frozen/src" or paths[0] != "/frozen/src/main.spl":
+        return Err("adopted-walk-invalid")
+    Ok(NativeEntryClosureSelectionV1(["selected-{3}"]))
+fn native_entry_closure_admit_v1(root: text, snapshot: ScvCompileSnapshotV1,
+        digest: text, generation: i64, binding: NativeEntryClosureBindingV1,
+        records: NativeEntryClosureSelectionV1) -> Result<NativeEntryClosureSelectionV1, text>:
+    probe_inventory_work(4)
+    if probe_reject_final: return Err("fixture-final-reauthentication-rejected")
+    if snapshot.snapshot_root != "/frozen" or digest != "inventory-5" or generation != 128 or
+            binding.commit != "commit-2" or records.identities[0] != "selected-3":
+        return Err("adopted-selection-invalid")
+    Ok(records)
+fn native_entry_closure_publish_records_v1(path: text, records: NativeEntryClosureSelectionV1) -> Result<text, text>:
+    Ok("selection-digest-{records.identities.len()}")
+fn compiler_entry_closure_publish_v1(root: text, authority: CompilerSourceAuthorityV1,
+        binding: NativeEntryClosureBindingV1, paths: [text], path: text) -> Result<text, text>:
+    val prepared = compiler_entry_closure_prepare_v1(root, authority, binding, paths)
+    if prepared.is_err(): return Err(prepared.unwrap_err())
+    val admitted = native_entry_closure_admit_v1(root, authority.snapshot,
+        authority.source_inventory_digest, authority.inventory_generation, binding, prepared.unwrap())
+    if admitted.is_err(): return Err(admitted.unwrap_err())
+    native_entry_closure_publish_records_v1(path, admitted.unwrap())
+fn native_entry_closure_request_publish_v1(path: text, request: NativeEntryClosureRequestV1) -> Result<text, text>:
+    if request.snapshot.tree_id != "tree-3" or request.binding.source_roots[0] != "/frozen/src":
+        return Err("adopted-request-invalid")
+    Ok("request-digest-{request.generation}")
+
+fn main() -> i64:
+    probe_before = rt_heap_registry_count()
+    val ok = native_build_publish_parse_closure_v1("/source", ["src"], "src/main.spl", "policy", "producer", "/cache", "slim")
+    print "production-owner-ok={ok} peak_objects={probe_peak} phases={probe_phase} invalid={probe_invalid}"
+    if not ok or probe_phase != 4 or probe_invalid: return 1
+    if probe_peak <= 0 or probe_peak >= 2000: return 2
+    if rt_session_heap_id() != 0u32 or rt_transient_array_scope_state_v1() != 0: return 3
+    if rt_env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") != "request-digest-128": return 4
+    if probe_cache.len() != 0: return 5
+    probe_cache = probe_cache.push("after-retirement")
+    if probe_cache[0] != "after-retirement": return 6
+    # A caller-owned session must be refused before altering the cache owner.
+    val session = native_build_parse_closure_session_open_v1()
+    if native_build_publish_parse_closure_v1("/source", ["src"], "src/main.spl", "policy", "producer", "/cache", "slim"): return 7
+    if rt_session_heap_id() != session.id or probe_cache[0] != "after-retirement": return 8
+    if not native_build_parse_closure_session_end_v1(session): return 9
+    # A failed final physical admission must leave no publication authority.
+    probe_phase = 0
+    probe_reject_final = true
+    if native_build_publish_parse_closure_v1("/source", ["src"], "src/main.spl", "policy", "producer", "/cache", "slim"): return 10
+    if probe_phase != 4 or rt_env_get("SIMPLE_PARSE_CLOSURE_REQUEST") != "": return 11
+    if rt_session_heap_id() != 0u32 or rt_transient_array_scope_state_v1() != 0: return 12
+    probe_cache = probe_cache.push("after-error")
+    if probe_cache[0] != "after-error": return 13
+    print "production-owner-publication-refusal-and-error-cleanup=pass"
+    0
+
+# P1 diagnostic shim, and a fail-closed unused Darwin weak thread hook.
+fn __module_init() -> i64:
+    NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1 = "SIMPLE_PARSE_CLOSURE_CONSUMER"
+    0
+fn simple_note_user_threads_started():
+    rt_exit(97)

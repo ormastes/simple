@@ -38,6 +38,43 @@ static int64_t* owned_tuple3_value(int64_t stdout_value, int64_t stderr_value, S
 #define RT_OWNED_FREE_VALUE(v) rt_free_deep(v)
 #endif
 
+#if defined(__APPLE__) && !defined(__unix__) && !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#ifndef RT_OWNED_HOST_MALLOC
+#define RT_OWNED_HOST_MALLOC malloc
+#define RT_OWNED_HOST_CALLOC calloc
+#define RT_OWNED_HOST_FREE free
+#endif
+#ifndef RT_OWNED_TOKEN_FILL
+#define RT_OWNED_TOKEN_FILL(dst, len) (arc4random_buf((dst), (len)), (ssize_t)(len))
+#endif
+#define POV4_DIGEST_BYTES 32
+#define POV4_MAX_TEXT_BYTES (1024U * 1024U)
+#define POV4_CWD_PINS 16
+#include "runtime_process_owned_sha256_private.h"
+static SplArray* owned_adapter_bytes(const char* bytes, uint64_t count) {
+    if (count > INT64_MAX) return NULL;
+    SplArray* result = rt_array_new((int64_t)count);
+    if (!result) return NULL;
+    for (uint64_t i = 0; i < count; i++) {
+        if (!rt_array_push(result, rt_value_int((unsigned char)bytes[i]))) {
+            rt_array_free(result);
+            return NULL;
+        }
+    }
+    return result;
+}
+#include "runtime_process_owned_cwd_private.h"
+#endif
+
 #if !defined(_WIN32) && defined(__unix__)
 
 #include <errno.h>
@@ -139,6 +176,8 @@ typedef struct RtOwnedCapturedByte {
 #ifndef RT_OWNED_TOKEN_FILL
 #if defined(__linux__) && defined(SYS_getrandom)
 #define RT_OWNED_TOKEN_FILL(dst, len) syscall(SYS_getrandom, (dst), (len), 0)
+#elif defined(__APPLE__)
+#define RT_OWNED_TOKEN_FILL(dst, len) (arc4random_buf((dst), (len)), (ssize_t)(len))
 #endif
 #endif
 #ifndef RT_OWNED_SIGNAL_GROUP
@@ -222,33 +261,7 @@ typedef struct RtOwnedSlot {
     pthread_mutex_t* state_lock;
 } RtOwnedSlot;
 
-static uint32_t owned_sha256_rotr(uint32_t v, unsigned s) { return (v >> s) | (v << (32 - s)); }
-static void owned_sha256_block(uint32_t st[8], const uint8_t b[64]) {
-    static const uint32_t k[64] = {
-        0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
-        0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
-        0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
-        0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,
-        0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,
-        0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
-        0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,
-        0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u };
-    uint32_t w[64];
-    for (int i=0;i<16;i++) w[i]=((uint32_t)b[i*4]<<24)|((uint32_t)b[i*4+1]<<16)|((uint32_t)b[i*4+2]<<8)|b[i*4+3];
-    for (int i=16;i<64;i++) { uint32_t a=owned_sha256_rotr(w[i-15],7)^owned_sha256_rotr(w[i-15],18)^(w[i-15]>>3); uint32_t z=owned_sha256_rotr(w[i-2],17)^owned_sha256_rotr(w[i-2],19)^(w[i-2]>>10); w[i]=w[i-16]+a+w[i-7]+z; }
-    uint32_t a=st[0],bb=st[1],c=st[2],d=st[3],e=st[4],f=st[5],g=st[6],h=st[7];
-    for (int i=0;i<64;i++) { uint32_t s1=owned_sha256_rotr(e,6)^owned_sha256_rotr(e,11)^owned_sha256_rotr(e,25); uint32_t t1=h+s1+((e&f)^((~e)&g))+k[i]+w[i]; uint32_t s0=owned_sha256_rotr(a,2)^owned_sha256_rotr(a,13)^owned_sha256_rotr(a,22); uint32_t t2=s0+((a&bb)^(a&c)^(bb&c)); h=g;g=f;f=e;e=d+t1;d=c;c=bb;bb=a;a=t1+t2; }
-    st[0]+=a;st[1]+=bb;st[2]+=c;st[3]+=d;st[4]+=e;st[5]+=f;st[6]+=g;st[7]+=h;
-}
-static void owned_sha256(const uint8_t* msg, size_t len, uint8_t out[32]) {
-    uint32_t st[8]={0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u}; size_t i=0;
-    for (;i+64<=len;i+=64) owned_sha256_block(st,msg+i);
-    uint8_t tail[128]={0}; size_t rem=len-i; if(rem) memcpy(tail,msg+i,rem); tail[rem]=0x80; size_t total=rem+9<=64?64:128; uint64_t bits=(uint64_t)len*8u;
-    for(int j=0;j<8;j++) tail[total-1-j]=(uint8_t)(bits>>(8*j));
-    owned_sha256_block(st,tail);
-    if(total==128) owned_sha256_block(st,tail+64);
-    for(int j=0;j<8;j++){out[j*4]=(uint8_t)(st[j]>>24);out[j*4+1]=(uint8_t)(st[j]>>16);out[j*4+2]=(uint8_t)(st[j]>>8);out[j*4+3]=(uint8_t)st[j];}
-}
+#include "runtime_process_owned_sha256_private.h"
 
 typedef struct RtOwnedCleanup {
     uint32_t slot;
@@ -2480,158 +2493,7 @@ typedef struct Pov4Cursor {
     uint64_t offset;
 } Pov4Cursor;
 
-static int pov4_canonical_directory(const char* value);
-
-typedef struct Pov4CwdPin {
-    uint64_t handle;
-    int fd;
-    char* canonical_path;
-    uint8_t digest[POV4_DIGEST_BYTES];
-} Pov4CwdPin;
-
-static Pov4CwdPin pov4_cwd_pins[POV4_CWD_PINS];
-static pthread_mutex_t pov4_cwd_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static void pov4_store_u64_le(uint8_t* out, uint64_t value) {
-    for (unsigned i = 0; i < 8; i++) out[i] = (uint8_t)(value >> (8 * i));
-}
-
-static int pov4_directory_digest(int fd, uint8_t digest[POV4_DIGEST_BYTES]) {
-    struct stat info;
-    if (fstat(fd, &info) != 0 || !S_ISDIR(info.st_mode)) {
-        if (errno == 0) errno = ENOTDIR;
-        return 0;
-    }
-    uint8_t identity[32] = {'P','O','V','4','C','W','D',0};
-    pov4_store_u64_le(identity + 8, (uint64_t)info.st_dev);
-    pov4_store_u64_le(identity + 16, (uint64_t)info.st_ino);
-    pov4_store_u64_le(identity + 24, (uint64_t)info.st_mode);
-    owned_sha256(identity, sizeof(identity), digest);
-    return 1;
-}
-
-static int pov4_mint_positive(uint64_t* value) {
-#if defined(__linux__) && defined(SYS_getrandom)
-    for (int attempt = 0; attempt < 32; attempt++) {
-        uint64_t candidate = 0;
-        ssize_t got = RT_OWNED_TOKEN_FILL(&candidate, sizeof(candidate));
-        candidate &= (uint64_t)INT64_MAX;
-        if (got == (ssize_t)sizeof(candidate) && candidate != 0) {
-            *value = candidate;
-            return 1;
-        }
-    }
-    errno = EAGAIN;
-    return 0;
-#else
-    (void)value;
-    errno = ENOTSUP;
-    return 0;
-#endif
-}
-
-int64_t rt_process_observation_v4_pin_cwd_value(const char* path_data,
-                                                 uint64_t path_len) {
-#ifndef __linux__
-    (void)path_data; (void)path_len; errno = ENOTSUP; return 0;
-#else
-    if (!path_data || path_len == 0 || path_len > POV4_MAX_TEXT_BYTES ||
-        path_len > SIZE_MAX - 1) { errno = EINVAL; return 0; }
-    char* path = (char*)RT_OWNED_HOST_MALLOC((size_t)path_len + 1);
-    if (!path) { errno = ENOMEM; return 0; }
-    memcpy(path, path_data, (size_t)path_len); path[path_len] = '\0';
-    if (memchr(path, '\0', (size_t)path_len) || !pov4_canonical_directory(path)) {
-        RT_OWNED_HOST_FREE(path); errno = EINVAL; return 0;
-    }
-    char resolved[PATH_MAX];
-    if (!realpath(path, resolved) || strcmp(path, resolved) != 0) {
-        int saved = errno ? errno : EINVAL;
-        RT_OWNED_HOST_FREE(path); errno = saved; return 0;
-    }
-    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    uint8_t digest[POV4_DIGEST_BYTES];
-    if (fd < 0 || !pov4_directory_digest(fd, digest)) {
-        int saved = errno ? errno : EIO;
-        if (fd >= 0) close(fd);
-        RT_OWNED_HOST_FREE(path); errno = saved; return 0;
-    }
-    if (pthread_mutex_lock(&pov4_cwd_lock) != 0) {
-        close(fd); RT_OWNED_HOST_FREE(path); errno = EBUSY; return 0;
-    }
-    int free_index = -1;
-    for (int i = 0; i < POV4_CWD_PINS; i++)
-        if (pov4_cwd_pins[i].handle == 0) { free_index = i; break; }
-    uint64_t handle = 0;
-    if (free_index >= 0) {
-        for (int attempt = 0; attempt < 32 && handle == 0; attempt++) {
-            uint64_t candidate = 0;
-            if (!pov4_mint_positive(&candidate)) break;
-            int duplicate = 0;
-            for (int i = 0; i < POV4_CWD_PINS; i++)
-                if (pov4_cwd_pins[i].handle == candidate) duplicate = 1;
-            if (!duplicate) handle = candidate;
-        }
-    }
-    if (free_index < 0 || handle == 0) {
-        pthread_mutex_unlock(&pov4_cwd_lock);
-        close(fd); RT_OWNED_HOST_FREE(path);
-        errno = free_index < 0 ? EAGAIN : (errno ? errno : EAGAIN); return 0;
-    }
-    Pov4CwdPin* pin = &pov4_cwd_pins[free_index];
-    pin->handle = handle; pin->fd = fd; pin->canonical_path = path;
-    memcpy(pin->digest, digest, sizeof(pin->digest));
-    pthread_mutex_unlock(&pov4_cwd_lock);
-    return (int64_t)handle;
-#endif
-}
-
-static int pov4_acquire_cwd(uint64_t handle, const char* canonical_path,
-                            const uint8_t digest[POV4_DIGEST_BYTES]) {
-    if (handle == 0 || pthread_mutex_lock(&pov4_cwd_lock) != 0) {
-        errno = handle == 0 ? ESTALE : EBUSY; return -1;
-    }
-    int duplicate = -1;
-    for (int i = 0; i < POV4_CWD_PINS; i++) {
-        Pov4CwdPin* pin = &pov4_cwd_pins[i];
-        if (pin->handle == handle && canonical_path &&
-            strcmp(pin->canonical_path, canonical_path) == 0 &&
-            memcmp(pin->digest, digest, POV4_DIGEST_BYTES) == 0) {
-            duplicate = fcntl(pin->fd, F_DUPFD_CLOEXEC, 3);
-            break;
-        }
-    }
-    pthread_mutex_unlock(&pov4_cwd_lock);
-    if (duplicate < 0) { if (errno == 0) errno = ESTALE; return -1; }
-    uint8_t current[POV4_DIGEST_BYTES];
-    if (!pov4_directory_digest(duplicate, current) ||
-        memcmp(current, digest, POV4_DIGEST_BYTES) != 0) {
-        int saved = errno ? errno : ESTALE; close(duplicate); errno = saved; return -1;
-    }
-    return duplicate;
-}
-
-SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle) {
-    uint8_t digest[POV4_DIGEST_BYTES]; int found = 0;
-    if (handle > 0 && pthread_mutex_lock(&pov4_cwd_lock) == 0) {
-        for (int i = 0; i < POV4_CWD_PINS; i++) if (pov4_cwd_pins[i].handle == (uint64_t)handle) {
-            memcpy(digest, pov4_cwd_pins[i].digest, sizeof(digest)); found = 1; break;
-        }
-        pthread_mutex_unlock(&pov4_cwd_lock);
-    }
-    return owned_adapter_bytes((const char*)digest, found ? sizeof(digest) : 0);
-}
-
-int rt_process_observation_v4_close_cwd_value(int64_t handle) {
-    int fd = -1; char* path = NULL;
-    if (handle <= 0 || pthread_mutex_lock(&pov4_cwd_lock) != 0) return 0;
-    for (int i = 0; i < POV4_CWD_PINS; i++) if (pov4_cwd_pins[i].handle == (uint64_t)handle) {
-        fd = pov4_cwd_pins[i].fd; path = pov4_cwd_pins[i].canonical_path;
-        memset(&pov4_cwd_pins[i], 0, sizeof(pov4_cwd_pins[i])); break;
-    }
-    pthread_mutex_unlock(&pov4_cwd_lock);
-    if (fd < 0) return 0;
-    close(fd); RT_OWNED_HOST_FREE(path); return 1;
-}
+#include "runtime_process_owned_cwd_private.h"
 
 static int pov4_read_u64(Pov4Cursor* cursor, uint64_t* value) {
     if (!cursor || !value || cursor->offset > cursor->length ||
@@ -2680,19 +2542,6 @@ static int pov4_read_text(Pov4Cursor* cursor, char** value, uint64_t* length_out
     copy[length] = '\0'; cursor->offset += length;
     *value = copy;
     if (length_out) *length_out = length;
-    return 1;
-}
-
-static int pov4_canonical_directory(const char* value) {
-    size_t length;
-    if (!value || value[0] != '/' || (length = strlen(value)) <= 1 ||
-        value[length - 1] == '/') return 0;
-    for (size_t i = 0; i < length; i++) {
-        if (value[i] == '/' && i + 1 < length && value[i + 1] == '/') return 0;
-        if (value[i] == '/' && i + 2 < length && value[i + 1] == '.' &&
-            (value[i + 2] == '/' || (value[i + 2] == '.' &&
-             (i + 3 == length || value[i + 3] == '/')))) return 0;
-    }
     return 1;
 }
 
@@ -4428,9 +4277,9 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
 
 #else
 
-/* --- Win32 real implementation of the SYNCHRONOUS bounded family ------
- * Everything this branch does NOT implement (the async token-lease family,
- * the v3 opaque-handle surface, the observation-v4 family) is deliberately
+/* --- Win32 synchronous bounded and asynchronous V2 owned families ------
+ * Everything this branch does NOT implement (the V3 atomic-input family,
+ * the V3 opaque-handle surface, the observation-v4 family) is deliberately
  * left to the shared fallback stubs below, so a future family added there is
  * automatically covered on Windows too. Only the definitions Win32 really
  * implements are fenced out of that fallback, via
@@ -4448,12 +4297,12 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
  * calls rt_process_run_owned_observed_bounded_value, which could never run a
  * child at all.
  *
- * Scope, stated plainly: this branch implements the SYNCHRONOUS bounded family
+ * This branch implements the SYNCHRONOUS bounded family
  * (`rt_process_run_owned_bounded`, `..._observed_bounded`, and the two
  * `*_value` ABI wrappers) — the family the failing specs actually reach. The
- * asynchronous token-lease family (`rt_process_owned_start_v2/v3`, `poll_v2`,
- * `cancel_v2`, `result_v2`, and the `rt_process_owned_v3_*` opaque-handle
- * surface) is NOT implemented here and keeps its honest ENOTSUP answer below.
+ * asynchronous V2 token leases are implemented in the private include below.
+ * The opaque V3 facade, sealed pins and observation V4 retain ENOTSUP until their
+ * stronger contracts have a Windows provider.
  *
  * Bounded semantics are provided by a job object rather than a process group:
  * JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE means the whole child tree dies with the
@@ -5101,11 +4950,13 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
 #endif /* RT_PROCESS_OWNED_CORE_ONLY */
 
 #define RT_OWNED_WIN32_SYNC_IMPLEMENTED 1
+#include "runtime_process_owned_windows_async_private.h"
 #endif /* _WIN32 */
 
 #include <errno.h>
 #include <string.h>
 
+#ifndef RT_OWNED_WIN32_ASYNC_IMPLEMENTED
 bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
                                int64_t timeout_ms, int64_t term_grace_ms,
                                uint64_t max_output_bytes,
@@ -5117,7 +4968,9 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
     receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION; receipt->runtime_error = ENOTSUP;
     return false;
 }
+#endif
 
+#ifndef RT_OWNED_WIN32_INPUT_IMPLEMENTED
 bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
                                const uint8_t* input, uint64_t input_len,
                                int64_t timeout_ms, int64_t term_grace_ms,
@@ -5131,6 +4984,8 @@ bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
     receipt->version = RT_OWNED_PROCESS_INPUT_VERSION; receipt->runtime_error = ENOTSUP;
     return false;
 }
+
+#endif
 
 bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
                                       const char* const* argv,
@@ -5147,6 +5002,7 @@ bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
     return false;
 }
 
+#ifndef RT_OWNED_WIN32_INPUT_IMPLEMENTED
 bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
                                        RtOwnedProcessInputReceiptV3* receipt) {
     (void)token;
@@ -5155,6 +5011,8 @@ bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
     receipt->runtime_error = ENOTSUP;
     return false;
 }
+
+#endif
 
 /* Win32 implements this for real above; only the non-unix fallback needs the
  * ENOTSUP answer. */
@@ -5173,6 +5031,7 @@ bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* a
 }
 #endif
 
+#ifndef RT_OWNED_WIN32_ASYNC_IMPLEMENTED
 bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
                               char* out, uint64_t out_cap, char* err,
                               uint64_t err_cap,
@@ -5216,6 +5075,7 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
                                  RtOwnedProcessResultV2* result) {
     return rt_process_owned_result_v2(token, result);
 }
+#endif
 
 #ifndef RT_OWNED_WIN32_SYNC_IMPLEMENTED
 bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
@@ -5467,6 +5327,7 @@ SplArray* rt_process_observation_v4_capabilities_value(void) {
     }
     return values;
 }
+#if !defined(__APPLE__) || defined(__unix__)
 int64_t rt_process_observation_v4_pin_cwd_value(const char* path_data, uint64_t path_len) {
     (void)path_data; (void)path_len; return 0;
 }
@@ -5474,6 +5335,7 @@ SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle) {
     (void)handle; return rt_array_new(0);
 }
 int rt_process_observation_v4_close_cwd_value(int64_t handle) { (void)handle; return 0; }
+#endif
 SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
     (void)binding; return pov4_unavailable_tuple();
 }
@@ -5518,4 +5380,8 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray
  * cgroup/pidfd implementation as the existing owned-process ABI. */
 #if defined(__linux__) && !defined(RT_PROCESS_OWNED_CORE_ONLY)
 #include "runtime_linux_group_owner_impl.h"
+#endif
+
+#if !defined(RT_PROCESS_OWNED_CORE_ONLY)
+#include "runtime_sosix_darwin_snapshot_v1_impl.h"
 #endif

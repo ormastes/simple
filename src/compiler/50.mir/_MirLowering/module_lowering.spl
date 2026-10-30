@@ -6,6 +6,7 @@ use compiler.mir._MirLoweringExpr.function_signature_owner.*
 use compiler.hir.hir_operators.{HirBinOp}
 use compiler.hir.hir_codec.{hir_fn_scalars_at_v1, hir_fn_scalars_at_key_v1,
     hir_module_function_keys_in_v1, hir_fn_scalars_with_keys_in_v1}
+use compiler.hir.return_type_interface_v1.{rti_rows_from_hir_v1}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
@@ -67,7 +68,12 @@ use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_module_publish_v1, reverse_reference_module_abort_v1
 }
 
+use compiler.mir._MirLowering.bootstrap_mir_store.{bootstrap_mir_store_discard_pending}
+
 fn mir_abort_reverse_reference_scope_v1(token: i64) -> bool:
+    # Staged bootstrap MIR rows point into the doomed module scope: drop them
+    # before the scope frees that memory (BSM P3; no-op without a session).
+    bootstrap_mir_store_discard_pending()
     val aborted = reverse_reference_module_abort_v1(token)
     val ended = transient_array_scope_end_v1()
     aborted and ended
@@ -594,8 +600,11 @@ impl MirLowering:
             runtime_value_local_ids: [],
             tagged_text_locals: {},
             exists_collection_locals: {},
+            option_none_locals: {},
+            empty_array_lit_locals: {},
             option_value_locals: {},
             nil_locals: {},
+            untyped_result_ctor_locals: {},
             enum_variant_index: {},
             enum_variant_discriminants: {},
             enum_variant_owners: {},
@@ -702,6 +711,40 @@ impl MirLowering:
         if self.struct_identity_layout_key.has(identity):
             return self.struct_identity_layout_key[identity]
         shape
+
+    me struct_value_layout_key(symbol: HirSymbol) -> text:
+        """Keep construction and value provenance on the same declaration.
+
+        Legacy bare layouts remain usable only when their name is unambiguous.
+        """
+        if symbol.kind == SymbolKind.Class:
+            return mir_class_identity(symbol)
+        if symbol.kind != SymbolKind.Struct:
+            return symbol.name
+        val qualified = self.declared_struct_layout_key(self.composite_layout_key(symbol))
+        if self.struct_field_order_conflict_warned.contains(qualified):
+            self.error_fatal("conflicting struct declaration layout '{qualified}'", Some(symbol.span))
+            return ""
+        if self.struct_field_order.has(qualified):
+            return qualified
+        if not self.struct_field_order_conflict_warned.contains(symbol.name):
+            return symbol.name
+        self.error_fatal("ambiguous struct/class value owner '{symbol.name}': no module-qualified layout matched", Some(symbol.span))
+        ""
+
+    me register_struct_default_layout_v1(key: text, fields: [text], flags: [bool], defaults: [HirExpr]):
+        # Default expressions must belong to the same declaration/order as the
+        # selected layout; never recover qualified defaults from a bare alias.
+        if self.struct_field_order_conflict_warned.contains(key): return
+        if not self.struct_field_order.has(key): return
+        val registered = self.struct_field_order[key]
+        if registered.len() != fields.len(): return
+        var index = 0
+        while index < fields.len():
+            if registered[index] != fields[index]: return
+            index = index + 1
+        self.struct_field_has_default[key] = flags
+        self.struct_field_default_expr[key] = defaults
 
     me struct_owner_method_key(owner: text, method: text) -> text:
         """`{owner}::{method}` dispatch-row key for a receiver's recorded owner.
@@ -1263,16 +1306,21 @@ impl MirLowering:
                 if composite_struct == nil:
                     composite_struct_i = composite_struct_i + 1
                     continue
+                var struct_has_default: [bool] = []
+                var struct_default_expr: [HirExpr] = []
+                var composite_field_names: [text] = []
+                var composite_field_i = 0
+                while composite_field_i < composite_struct.fields.len():
+                    composite_field_names.push(composite_struct.fields[composite_field_i].name)
+                    struct_has_default.push(composite_struct.fields[composite_field_i].has_default)
+                    struct_default_expr.push(composite_struct.fields[composite_field_i].default)
+                    composite_field_i = composite_field_i + 1
                 if not self.struct_field_has_default.has(composite_struct.name):
-                    var struct_has_default: [bool] = []
-                    var struct_default_expr: [HirExpr] = []
-                    var composite_field_i = 0
-                    while composite_field_i < composite_struct.fields.len():
-                        struct_has_default.push(composite_struct.fields[composite_field_i].has_default)
-                        struct_default_expr.push(composite_struct.fields[composite_field_i].default)
-                        composite_field_i = composite_field_i + 1
                     self.struct_field_has_default[composite_struct.name] = struct_has_default
                     self.struct_field_default_expr[composite_struct.name] = struct_default_expr
+                if val owner = composite_module.symbols.get_symbol_raw(composite_struct.symbol.id):
+                    val exact_key = self.declared_struct_layout_key(self.composite_layout_key(owner))
+                    self.register_struct_default_layout_v1(exact_key, composite_field_names, struct_has_default, struct_default_expr)
                 composite_struct_i = composite_struct_i + 1
             val composite_class_keys: [SymbolId] = composite_module.classes.keys()
             var composite_class_i = 0
@@ -1893,6 +1941,31 @@ impl MirLowering:
                 prescan_scalars[3], prescan_scalars[4], prescan_scalars[5],
                 prescan_scalars[6], prescan_scalars[7], prescan_scalars[8])
             psi = psi + 1
+        # Trait method signatures (not functions): same registry and key as
+        # prescan_declaration_callables_v1.
+        # Indexed reads, not a by-value for-in rebind (cycle-100 class).
+        if modules.has(module_key):
+            val prescan_module_value: HirModule = modules[module_key]
+            # Register RTI rows for closure module functions
+            match rti_rows_from_hir_v1(prescan_module_value):
+                case Ok(result):
+                    if result.rows.len() > 0:
+                        match self.rti.register_rows(result.rows):
+                            case Ok(_): ()
+                            case Err(err): self.error_fatal(err.message, nil)
+                case Err(err): self.error_fatal(err.message, nil)
+            val prescan_traits: [HirTrait] = prescan_module_value.traits.values()
+            var pti = 0
+            while pti < prescan_traits.len():
+                val trait_raw: i64 = prescan_traits[pti].symbol.id
+                val trait_methods: [HirFunction] = prescan_traits[pti].methods
+                var pmi = 0
+                while pmi < trait_methods.len():
+                    val trait_ret_key = mir_trait_method_ret_key_v1(module_symbols, trait_raw, trait_methods[pmi].name)
+                    if trait_ret_key != "":
+                        bootstrap_fn_ret_hir_type_register(trait_ret_key, trait_methods[pmi].return_type)
+                    pmi = pmi + 1
+                pti = pti + 1
 
     # Cycle-102: per-function prescan body; prescan_fn is the by-value
     # param (no caller-side named bind of the for-in element).
@@ -2388,17 +2461,18 @@ impl MirLowering:
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 2))
             return Err("transient MIR scope pause failed for {module.name}")
         scope_decisions = scope_decisions | 2
+        # The returned module and owner builder share the same MIR graph.
+        # Share committed nodes across both promotions, including the owner's
+        # overlapping field roots. No retained graph is written in this window;
+        # the section profiler only updates its own scalar sink state.
+        val _owner_share_opened = transient_heap_promote_share_begin_v1()
         if not transient_heap_promote_v1(lowered):
+            val _module_share_closed = transient_heap_promote_share_end_v1()
             val _ended_module = mir_abort_reverse_reference_scope_v1(reverse_token)
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 3))
             return Err("MIR module ownership promotion failed for {module.name}")
         scope_decisions = scope_decisions | 4
         mir_section_profile_mark("s2_promote_mir", module.name)
-        # The owner's field roots overlap heavily (builder.*, symbols.*). One
-        # share window over the straight-line promote sequence walks the
-        # common graph once instead of once per root; it only promotes and
-        # releases temporary carriers, which is the window's contract.
-        val _owner_share_opened = transient_heap_promote_share_begin_v1()
         val owner_promoted = self.promote_transient_owner()
         val _owner_share_closed = transient_heap_promote_share_end_v1()
         if not owner_promoted:
@@ -2465,6 +2539,14 @@ impl MirLowering:
     me lower_module(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true,
             archive_function_symbols: [i64]? = nil, archive_primary_globals: MirModule? = nil,
             archive_trait_thunks: [MirFunction] = []) -> MirModule:
+        """Lower HIR module to MIR, after dropping decls whose @cfg guard is off for this target."""
+        val guarded_module = self.apply_decl_cfg_guards(module)
+        self.lower_module_guarded_v1(guarded_module, providers, is_entry_module,
+            archive_function_symbols, archive_primary_globals, archive_trait_thunks)
+
+    me lower_module_guarded_v1(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true,
+            archive_function_symbols: [i64]? = nil, archive_primary_globals: MirModule? = nil,
+            archive_trait_thunks: [MirFunction] = []) -> MirModule:
         """Lower HIR module to MIR."""
         # A lowering instance can serve strict and legacy modules in sequence.
         # Assign both true and false so policy never leaks between consumers.
@@ -2517,14 +2599,21 @@ impl MirLowering:
         self.register_native_trait_declarations(module)
         for raw_trait_provider in providers:
             val trait_provider: HirModule = raw_trait_provider
-            if trait_provider.name != module.name:
+            # Exact no-op gate: register_native_trait_declarations only
+            # iterates module.traits. This loop runs over the whole closure
+            # for EVERY consumer, so skip the cross-module call and its
+            # traits.values() allocation for trait-free providers
+            # (mir_in_process_per_consumer_provider_rebuild_quadratic_2026-10-20.md).
+            if trait_provider.name != module.name and trait_provider.traits.len() > 0:
                 self.register_native_trait_declarations(trait_provider)
         if self.declaration_repository != nil:
             self.register_declaration_provider_traits_v1(module, false)
         self.register_native_trait_implementations(module)
         for raw_trait_provider in providers:
             val trait_provider: HirModule = raw_trait_provider
-            if trait_provider.name != module.name:
+            # Same exact no-op gate: with no impl blocks the has_trait_ scan
+            # iterates zero times and returns before touching anything.
+            if trait_provider.name != module.name and trait_provider.impls.len() > 0:
                 self.register_native_trait_implementations(trait_provider)
         if self.declaration_repository != nil:
             self.register_declaration_provider_traits_v1(module, true)
@@ -2533,14 +2622,24 @@ impl MirLowering:
         self.adapted_file_write_bytes_externs = {}
         # E-MIR-TYPE-Error rate limit is per module (see lower_type).
         self.mir_type_error_reports = {}
+        self.module_fn_declared_returns = {}
         val function_keys_37_values: [HirFunction] = module.functions.values()
         for raw_declaration in function_keys_37_values:
             val declaration: HirFunction = raw_declaration
+            self.module_fn_declared_returns[declaration.symbol.id] = declaration.return_type
             self.record_adapted_file_write_bytes_extern_v1(
                 self.current_module_id, declaration, declaration.symbol
             )
             self.record_exact_extern_declaration_v1(declaration)
-        self.record_imported_exact_extern_modules_v1(module.name, providers)
+        # Register RTI rows for this module's functions
+        match rti_rows_from_hir_v1(module):
+            case Ok(result):
+                if result.rows.len() > 0:
+                    match self.rti.register_rows(result.rows):
+                        case Ok(_): ()
+                        case Err(err): self.error_fatal(err.message, nil)
+            case Err(err): self.error_fatal(err.message, nil)
+        self.record_imported_exact_extern_modules_with_context_v1(module.name, module.path, providers)
         mir_section_profile_mark("p2_exact_externs", module.name)
         self.lowering_entry_module = is_entry_module
         var function_names: [text] = []
@@ -2674,15 +2773,6 @@ impl MirLowering:
             if provider_session_valid and self.provider_session_links_ready[provider_index]:
                 provider_links = self.provider_session_links[provider_index]
                 provider_links_built = true
-            if provider_module.name != module.name and not layout_demand:
-                val provider_struct_keys: [SymbolId] = provider_module.structs.keys()
-                for dk_35 in provider_struct_keys:
-                    # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
-                    val provider_struct_def: HirStruct = provider_module.structs[dk_35]
-                    if provider_struct_def == nil:
-                        continue
-                    self.register_provider_struct(provider_struct_def, provider_module.symbols,
-                        consumer_composite_names.has(provider_struct_def.name))
             # Struct-only providers also own receiver methods (for example
             # CoreLexer); their absence of classes/enums must not hide them.
             # So do impl-only providers: `impl Imported:` extension modules
@@ -2705,6 +2795,17 @@ impl MirLowering:
                             provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
                         provider_funcs.push(provider_func)
                     provider_links_built = true
+                if not layout_demand:
+                    # After the link table: relocated struct defaults may name
+                    # provider callables (`AspectParamsV1.defaults()`).
+                    val provider_struct_keys: [SymbolId] = provider_module.structs.keys()
+                    for dk_35 in provider_struct_keys:
+                        # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
+                        val provider_struct_def: HirStruct = provider_module.structs[dk_35]
+                        if provider_struct_def == nil:
+                            continue
+                        self.register_provider_struct(provider_struct_def, provider_module.symbols,
+                            consumer_composite_names.has(provider_struct_def.name), provider_links)
                 if not layout_demand:
                     val provider_class_keys: [SymbolId] = provider_module.classes.keys()
                     for dk_33 in provider_class_keys:
@@ -2866,6 +2967,17 @@ impl MirLowering:
                 self.lower_static(bs_static_const)
                 bs_ci = bs_ci + 1
             bootstrap_mir_functions_reset()
+            # `lower_static` deliberately defers every dict-literal global
+            # (`var D: Dict<K, V> = {}`) to the runtime initializer, which is
+            # the only producer of its static + `global_statics_by_id` mirror.
+            # This branch never ran that initializer, so each `D = x` in a
+            # function body missed `find_global_static` and aborted with
+            # "assignment target has no local binding" (~113 sites in the
+            # stage3 whole-program MIR run, all dict globals). Run it here,
+            # after the accumulator reset so its init function is kept, and
+            # before any body is lowered -- same order as the non-bootstrap
+            # path. Bug mir_bootstrap_dict_global_no_binding_2026-10-25.
+            self.lower_runtime_module_initializers(module, bs_const_vals, 0)
             val bootstrap_function_values: [HirFunction] = module.functions.values()
             val bootstrap_function_indices = hir_function_symbol_order(bootstrap_function_values)
             val bootstrap_function_count = bootstrap_function_indices.len()
@@ -2961,6 +3073,9 @@ impl MirLowering:
             # `Point(x:3,y:4)` paren-constructor Call into aggregate construction
             # by looking up the callee name here (structs only, not classes).
             self.struct_field_order[struct_def.name] = field_names
+            if val owner = module.symbols.get_symbol_raw(struct_def.symbol.id):
+                val exact_key = self.declared_struct_layout_key(self.composite_layout_key(owner))
+                self.register_struct_default_layout_v1(exact_key, field_names, field_has_default, field_default_expr)
             si = si + 1
 
         # Build enum variant registry. Explicit values win; omitted variants

@@ -3,7 +3,7 @@
 # @cover src/app/scv/db/local_apply.spl 80%
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-030 boundary, REQ-032 local honesty and REQ-035 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-014 causality, REQ-030 boundary, REQ-032 local honesty and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -34,11 +34,16 @@ use app.scv.db.settlement_queue.{db_settlement_enqueue, db_settlement_queue_open
 use app.scv.db.settlement_resume_local.{db_settlement_resume_local}
 use app.scv.db.restricted_evidence.*
 use test.fixtures.scv.db_settlement_queue_fixture.*
+use test.fixtures.scv.db_causality_fixture.*
+use std.common.crypto.sha256.{sha256_text}
+
 use test.fixtures.scv.db_restricted_fixture.*
 use std.scv.db_alias_cell.*
 use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
 use app.scv.db.paged_store.{db_paged_initialize, db_paged_apply, db_paged_open, db_paged_current_row}
 use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_root, setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create, setup_item2_paged_ref}
+
+var item2_causal_runtime = Item2CausalRuntime(binary: "", binary_digest: "", provenance_digest: "")
 
 fn setup_item2_compact_alias() -> (text, text, text, SettledAlias, DbAliasContext):
     val root = setup_item2_paged_root()
@@ -499,20 +504,63 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
             expect(reopened.image.catalog.records.len()).to_equal(0)
 
     describe "REQ-014: Causality":
+        before_all:
+            item2_causal_runtime = setup_item2_causal_runtime()
+
         it "should prove that it orders causal dependencies before deterministic batch-ID ties":
-            step("Settle compact identifiers")
-            step("Drive accepted state and inspect its receipt")
-            check_settlement_contract("REQ-014", "drive accepted causality state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            # @req REQ-014
+            step("Create offline semantic changes")
+            val initial = setup_item2_queue_fixture(3u64)
+            val fixture = setup_item2_queue_dependencies(initial, 1, [initial.patches[0].batch_id])
+            step("Settle child-first arrivals and reopen every transition in a fresh process")
+            val order = check_item2_causal_drain(item2_causal_runtime, fixture, [1, 2, 0])
+            step("Inspect actual receipt ancestry and allocator-backed deterministic order")
+            expect(order).to_equal(setup_item2_causal_order(fixture))
+            check_item2_causal_cleanup(fixture)
 
         it "should prove that it preserves concurrency when remote settlement order differs":
-            step("Settle compact identifiers")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_settlement_contract("REQ-014", "drive boundary causality state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            # @req REQ-014
+            step("Create the same dependency graph at two isolated disposable authorities")
+            val first = setup_item2_queue_fixture(3u64)
+            val left = setup_item2_queue_dependencies(first, 1, [first.patches[0].batch_id])
+            val second = setup_item2_queue_fixture(3u64)
+            val right = setup_item2_queue_dependencies(second, 1, [second.patches[0].batch_id])
+            step("Settle child-first and predecessor-first arrival orders")
+            val left_order = check_item2_causal_drain(item2_causal_runtime, left, [1, 2, 0])
+            val right_order = check_item2_causal_drain(item2_causal_runtime, right, [0, 1, 2])
+            expect(left_order).to_equal(setup_item2_causal_order(left))
+            expect(right_order).to_equal(setup_item2_causal_order(right))
+            expect(left_order).to_equal(right_order)
+            step("Verify settlement order added no causal edges to concurrent signed work")
+            for fixture in [left, right]:
+                val reopened = db_settlement_queue_open(fixture.source, fixture.config.policy.admission).unwrap()
+                for work in reopened.queue.items:
+                    if work.patch.batch_id == fixture.patches[1].batch_id:
+                        expect(work.patch.causal_dependencies).to_equal([fixture.patches[0].batch_id])
+                    else:
+                        expect(work.patch.causal_dependencies.len()).to_equal(0)
+                check_item2_causal_cleanup(fixture)
 
         it "should prove that it rejects missing causal bases instead of inventing order":
-            step("Settle compact identifiers")
-            step("Inject the failure and inspect fail-closed state")
-            check_settlement_contract("REQ-014", "inject unsafe causality state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            # @req REQ-014
+            step("Persist signed work whose external predecessor has not arrived")
+            val fixture = setup_item2_queue_dependencies(setup_item2_queue_fixture(), 1,
+                [sha256_text("unreceived external predecessor")])
+            val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[1], fixture.config.policy.admission).unwrap()
+            check_item2_causal_reopen(item2_causal_runtime, fixture, queued)
+            val remote = fixture.config.authority.remote
+            val before_refs = check_item2_queue_git(remote, ["show-ref"])
+            step("Refuse invented dependency order and inspect unchanged durable authority")
+            expect(db_settlement_resume_local(fixture.source, queued.head, fixture.config,
+                setup_item2_queue_sign)).to_equal(Err("SCVDB_QUEUE_DEPENDENCY_BLOCKED"))
+            val reopened = db_settlement_queue_open(fixture.source, fixture.config.policy.admission).unwrap()
+            expect(reopened).to_equal(queued)
+            expect(reopened.queue.items[0].phase).to_equal("queued")
+            expect(reopened.queue.items[0].attempts).to_equal(0u64)
+            expect(reopened.queue.items[0].journal).to_be_nil()
+            expect(check_item2_queue_git(remote, ["show-ref"])).to_equal(before_refs)
+            check_item2_causal_reopen(item2_causal_runtime, fixture, reopened)
+            check_item2_causal_cleanup(fixture)
 
     describe "REQ-015: Replay and compatibility":
         it "should prove that it replays an accepted batch as an idempotent no-op":

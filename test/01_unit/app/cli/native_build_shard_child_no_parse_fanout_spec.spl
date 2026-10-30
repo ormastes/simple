@@ -1,0 +1,31 @@
+use std.spec
+use app.cli.native_build_main.{native_build_shard_child_env_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+# A shard/unit child is ONE process. native_build_parse_shard_count only
+# recognised SIMPLE_PARSE_SHARD, so every HIR/MIR unit child fanned out its own
+# parse shards (phase 3: 21 workers each "[shard] threads=14", 69.5 GB, 0 objects).
+describe "shard/unit children never fan out parse shards":
+    it "treats every shard role as a child":
+        expect(native_build_shard_child_env_v1("1/8", "", "")).to_equal(true)
+        expect(native_build_shard_child_env_v1("", "3/21", "")).to_equal(true)
+        expect(native_build_shard_child_env_v1("", "", "0/4")).to_equal(true)
+
+    it "leaves the top-level coordinator free to shard":
+        expect(native_build_shard_child_env_v1("", "", "")).to_equal(false)
+
+    it "gates the parse shard count on the full child check":
+        val source = file_read("src/app/cli/native_build_main.spl")
+        val at = source.index_of("fn native_build_parse_shard_count(args: [text]) -> i64:")
+        val guard = source.index_of("if native_build_shard_child_env_v1(env_get(\"SIMPLE_PARSE_SHARD\")", at)
+        expect(at > 0).to_equal(true)
+        expect(guard > at).to_equal(true)
+        expect(guard - at < 800).to_equal(true)
+
+    it "gates the HIR shard count on the full child check (MIR unit children)":
+        val source = file_read("src/app/cli/native_build_main.spl")
+        val at = source.index_of("fn native_build_hir_shard_count(args: [text]) -> i64:")
+        val guard = source.index_of("if native_build_shard_child_env_v1(env_get(\"SIMPLE_PARSE_SHARD\")", at)
+        expect(at > 0).to_equal(true)
+        expect(guard > at).to_equal(true)
+        expect(guard - at < 200).to_equal(true)

@@ -29,11 +29,161 @@ thread_local! {
     /// Kept outside `TRANSIENT_HEAP_SCOPE` so a heap free can erase from it
     /// without re-borrowing the scope.
     static TRANSIENT_PROMOTE_SHARE: RefCell<Option<TransientPromoteShare>> = const { RefCell::new(None) };
+    /// Build session heap (BSM T1): one live session per thread, twin of the
+    /// C runtime's `rt_core_session_heap_*` state (runtime_native.c).
+    static SESSION_HEAP: RefCell<Option<SessionHeap>> = const { RefCell::new(None) };
+    /// Nodes the last `rt_transient_heap_adopt` visited (I2 pruning evidence).
+    static SESSION_ADOPT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+static SESSION_HEAP_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// Objects owned by a build session (doc/05_design/compiler/memory/
+/// build_session_memory_model_v1.md §2-§4). Rust objects carry no scope tag,
+/// so ownership is membership: `owned` holds header addresses for O(1) checks.
+struct SessionHeap {
+    id: u32,
+    alloc_depth: i32,
+    objects: Vec<RuntimeValue>,
+    owned: super::heap::HeapPtrSet<usize>,
+}
+
+impl SessionHeap {
+    fn adopt(&mut self, value: RuntimeValue) {
+        if value.is_heap() && self.owned.insert(value.as_heap_ptr() as usize) {
+            self.objects.push(value);
+        }
+    }
+
+    /// Drop every session-owned object whose exact value bits are in
+    /// `reachable` (it became an rc root's graph). Entries are tombstoned to
+    /// NIL, as the module scope does, so `free_transient_objects` skips them.
+    /// O(objects) per call; shares are rare (dataset puts), adopts are not.
+    fn release_reachable(&mut self, reachable: &super::heap::HeapPtrSet<u64>) {
+        let mut removed = false;
+        for bits in reachable.iter() {
+            let value = RuntimeValue(*bits);
+            if value.is_heap() && self.owned.remove(&(value.as_heap_ptr() as usize)) {
+                removed = true;
+            }
+        }
+        if !removed {
+            return;
+        }
+        for object in self.objects.iter_mut() {
+            if object.is_heap() && reachable.contains(&object.0) {
+                *object = RuntimeValue::NIL;
+            }
+        }
+    }
+}
+
+/// Nodes visited by this thread's last `rt_transient_heap_adopt`.
+pub fn session_adopt_visits_debug() -> u64 {
+    SESSION_ADOPT_VISITS.with(|visits| visits.get())
+}
+
+/// True when the session (if any) owns header address `ptr`.
+pub fn session_heap_owns(value: RuntimeValue) -> bool {
+    value.is_heap()
+        && SESSION_HEAP.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|session| session.owned.contains(&(value.as_heap_ptr() as usize)))
+        })
 }
 
 struct TransientHeapScope {
     paused: bool,
     objects: Vec<RuntimeValue>,
+    /// Lazily built header-address -> `objects` position index, so promotion
+    /// answers ownership and removal in O(reachable) instead of rescanning
+    /// every object the scope ever tracked. Tracking only appends while the
+    /// scope is running and promotion only runs while it is paused, so the
+    /// index is synced (extended over `objects[indexed..]`) at promote time.
+    /// Profiled 2026-10-24 (Windows stage2 parse of the parser closure): the
+    /// two full rescans were ~50% of parse-phase samples.
+    by_ptr: std::collections::HashMap<usize, usize, std::hash::BuildHasherDefault<ahash::AHasher>>,
+    indexed: usize,
+    /// Two tracked objects share a header address; fall back to the exact
+    /// original linear scans for this scope.
+    index_ambiguous: bool,
+    /// Exact value bits promoted while the index is ambiguous. Compaction of
+    /// `objects` is deferred to ONE filter at scope end instead of a
+    /// per-promote `retain` (O(objects) per call -> O(N^2) for N promotes;
+    /// doc/05_design/compiler/memory/build_session_memory_model_v1.md §6, BSM P0).
+    promoted: super::heap::HeapPtrSet<u64>,
+}
+
+impl TransientHeapScope {
+    fn sync_index(&mut self) {
+        while self.indexed < self.objects.len() {
+            let object = self.objects[self.indexed];
+            if object.is_heap() {
+                let ptr = object.as_heap_ptr() as usize;
+                if self.by_ptr.insert(ptr, self.indexed).is_some() {
+                    self.index_ambiguous = true;
+                }
+            }
+            self.indexed += 1;
+        }
+    }
+
+    fn owns_heap_ptr(&mut self, root_ptr: *mut super::heap::HeapHeader) -> bool {
+        self.sync_index();
+        if self.index_ambiguous {
+            return self.objects.iter().any(|object| {
+                object.is_heap() && object.as_heap_ptr() == root_ptr && !self.promoted.contains(&object.0)
+            });
+        }
+        self.by_ptr.contains_key(&(root_ptr as usize))
+    }
+
+    /// Drop every tracked object whose exact value bits are in `reachable`.
+    /// With `released`, also report each object that left the scope (BSM:
+    /// it moves to the live session instead of becoming permanent).
+    fn release_reachable(
+        &mut self,
+        reachable: &super::heap::HeapPtrSet<u64>,
+        mut released: Option<&mut Vec<RuntimeValue>>,
+    ) {
+        self.sync_index();
+        if self.index_ambiguous {
+            // Deferred: rt_transient_array_scope_end filters once.
+            // Only tracked addresses are recorded, so the set stays bounded
+            // by `objects` however much persistent graph a promote walks.
+            for bits in reachable.iter().copied() {
+                let value = RuntimeValue(bits);
+                if value.is_heap()
+                    && self.by_ptr.contains_key(&(value.as_heap_ptr() as usize))
+                    && self.promoted.insert(bits)
+                {
+                    if let Some(out) = released.as_deref_mut() {
+                        out.push(value);
+                    }
+                }
+            }
+            return;
+        }
+        for bits in reachable.iter() {
+            let value = RuntimeValue(*bits);
+            if !value.is_heap() {
+                continue;
+            }
+            let ptr = value.as_heap_ptr() as usize;
+            if let Some(&position) = self.by_ptr.get(&ptr) {
+                if self.objects[position].0 == *bits {
+                    // Tombstone: NIL is not heap, so scope end skips it and
+                    // the free order of the survivors is unchanged.
+                    self.objects[position] = RuntimeValue::NIL;
+                    self.by_ptr.remove(&ptr);
+                    if let Some(out) = released.as_deref_mut() {
+                        out.push(value);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Nodes whose promotion fully committed earlier in the open share window:
@@ -63,6 +213,24 @@ pub fn transient_heap_scope_paused() -> bool {
 }
 
 pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
+    // A live session owns what a paused/absent module scope would have left
+    // permanent, and everything inside rt_session_alloc_begin/end (I3).
+    let to_session = SESSION_HEAP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(session) = slot.as_mut() else {
+            return false;
+        };
+        let module_running =
+            TRANSIENT_HEAP_SCOPE.with(|scope| scope.borrow().as_ref().is_some_and(|scope| !scope.paused));
+        if session.alloc_depth > 0 || !module_running {
+            session.adopt(value);
+            return true;
+        }
+        false
+    });
+    if to_session {
+        return value;
+    }
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         if let Some(scope) = slot.borrow_mut().as_mut() {
             if !scope.paused {
@@ -2522,6 +2690,46 @@ pub extern "C" fn rt_array_remove(array: RuntimeValue, index: i64) -> RuntimeVal
     }
 }
 
+/// Insert `value` BEFORE `index` IN PLACE (`index == len` appends). Returns
+/// true when inserted. A non-array receiver, a negative index or
+/// `index > len` is a NO-OP returning false — matching the interpreter's
+/// `insert` arm (interpreter_method/collections.rs), which leaves the array
+/// unchanged for `idx > len`. Never panics (extern "C").
+///
+/// Built on `rt_array_push` + `rt_array_get`/`rt_array_set` so growth and all
+/// three storage layouts (tagged, byte-packed, u64-packed) are handled by the
+/// existing primitives. The C lane twin in runtime_native.c is identical.
+#[no_mangle]
+pub extern "C" fn rt_array_insert(array: RuntimeValue, index: i64, value: RuntimeValue) -> bool {
+    let len = rt_array_len(array);
+    if len < 0 || index < 0 || index > len {
+        return false;
+    }
+    if !rt_array_push(array, value) {
+        return false;
+    }
+    if index == len {
+        return true;
+    }
+    // One overlapping copy shifts the tail (inherent O(n), no per-element
+    // calls); the new slot is then written through rt_array_set so packed
+    // layouts store the value exactly as push did.
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let elem = if (*arr).is_byte_packed() {
+            1usize
+        } else if (*arr).is_u64_packed() {
+            std::mem::size_of::<u64>()
+        } else {
+            std::mem::size_of::<RuntimeValue>()
+        };
+        let base = (*arr).data as *mut u8;
+        let idx = index as usize;
+        std::ptr::copy(base.add(idx * elem), base.add((idx + 1) * elem), (len as usize - idx) * elem);
+    }
+    rt_array_set(array, index, value)
+}
+
 /// `remove`: receiver-dispatched, so a bare `.remove(k)` is safe on an untyped
 /// receiver.
 ///
@@ -2687,9 +2895,24 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
         *slot = Some(TransientHeapScope {
             paused: false,
             objects: Vec::new(),
+            by_ptr: Default::default(),
+            indexed: 0,
+            index_ambiguous: false,
+            promoted: Default::default(),
         });
         true
     })
+}
+
+/// Test hook: force the ambiguous-index fallback on this thread's scope.
+#[cfg(test)]
+pub(crate) fn transient_scope_force_index_ambiguous() {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            scope.sync_index();
+            scope.index_ambiguous = true;
+        }
+    });
 }
 
 /// Read this thread's actual scope; no mutation, allocation or lease grant.
@@ -2856,33 +3079,24 @@ fn free_transient_heap(value: RuntimeValue) {
 /// Keep transient heap objects reachable from a retained graph when the scope ends.
 #[no_mangle]
 pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
-    // Rust twin of the C fix 3d407765f1e (runtime_native.c
-    // rt_transient_heap_promote): a registered heap object that is NOT owned
-    // by the current transient scope is already persistent, so promotion is
-    // a no-op success, not a failure. Without this, the stage-2 candidate's
-    // retained parse promotes the process-immortal parse-metadata arrays
-    // (UNSAFE_ANNOTATIONS / ENUM_ATTRIBUTES / ENUM_OPEN_REGIONS) and aborts
-    // the whole parse with "transient retained parser ownership failed"
-    // (0xC0000409 fail-fast). Implemented against the Rust heap registry:
-    // the C immortal registry is not linkable from this crate
-    // (runtime_native.c is not compiled into the Rust runtime).
-    // Only a root the current scope does NOT own may take this exit (the C
-    // twin gates it on rt_core_transient_classify == 0). Every heap object is
-    // registered, scope-owned ones included, so without the ownership check
-    // a scope-owned root (the retained parse Result<ParserModule>) skipped
-    // promotion, was freed at scope end with its raw payload, and stage 2
-    // crashed reading the dangling module in surface_build.
-    if value.is_heap() {
+    // Only persistent leaves can skip traversal. Persistent containers may
+    // acquire current-scope children without a write barrier. In particular,
+    // MIR builds its temporary owner-root arrays AFTER pausing the scope;
+    // skipping those roots frees their transient MirError records and turns a
+    // nonfatal warning into a corrupted fatal diagnostic (f07 Result/?).
+    // Keep the no-op contract for already-persistent immutable leaves, but
+    // always walk registered arrays/dicts/objects/enums/closures below.
+    if matches!(
+        value.heap_type(),
+        Some(HeapObjectType::String | HeapObjectType::Float | HeapObjectType::Int | HeapObjectType::UInt)
+    ) {
         let root_ptr = value.as_heap_ptr();
         // Scope-owned registered roots are walked, never treated as persistent:
         // doc/08_tracking/bug/stage2_hir_worker_layer_eq_registry_segv_2026-10-23.md
         let scope_owned = TRANSIENT_HEAP_SCOPE.with(|slot| {
-            slot.borrow().as_ref().is_some_and(|scope| {
-                scope
-                    .objects
-                    .iter()
-                    .any(|object| object.is_heap() && object.as_heap_ptr() == root_ptr)
-            })
+            slot.borrow_mut()
+                .as_mut()
+                .is_some_and(|scope| scope.owns_heap_ptr(root_ptr))
         });
         if !scope_owned && super::heap::is_registered_heap_ptr(root_ptr) {
             // An unowned root can still hold scope-owned children: allocations
@@ -2969,7 +3183,24 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 return false;
             }
         }
-        scope.objects.retain(|object| !reachable_heap.contains(&object.0));
+        // BSM compatibility alias (design §4): with a live session, the
+        // module-owned nodes move to the SESSION instead of becoming
+        // permanent. The walk above stays FULL (no I2 pruning): legacy
+        // callers may still violate I1 (e8152c252ad unowned roots holding
+        // module-owned children). With no session this is unchanged.
+        if SESSION_HEAP.with(|slot| slot.borrow().is_some()) {
+            let mut released = Vec::new();
+            scope.release_reachable(&reachable_heap, Some(&mut released));
+            SESSION_HEAP.with(|slot| {
+                if let Some(session) = slot.borrow_mut().as_mut() {
+                    for value in released {
+                        session.adopt(value);
+                    }
+                }
+            });
+        } else {
+            scope.release_reachable(&reachable_heap, None);
+        }
         // Fully committed: record it for later calls in an open share window.
         TRANSIENT_PROMOTE_SHARE.with(|share| {
             if let Some(share) = share.borrow_mut().as_mut() {
@@ -3026,13 +3257,302 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
     // A promotion share window never outlives its scope.
     TRANSIENT_PROMOTE_SHARE.with(|share| share.borrow_mut().take());
     let scope = TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow_mut().take());
-    let Some(scope) = scope else {
+    let Some(mut scope) = scope else {
         return false;
     };
-    for object in scope.objects {
-        free_transient_heap(object);
+    // The ONE deferred compaction (BSM P0): drop objects promoted while the
+    // index was ambiguous. The common path already tombstoned them to NIL.
+    if !scope.promoted.is_empty() {
+        let promoted = std::mem::take(&mut scope.promoted);
+        scope.objects.retain(|object| !promoted.contains(&object.0));
     }
-    unsafe { rt_transient_raw_scope_end() != 0 }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let live_before = super::heap::rt_heap_live_bytes()
+        .saturating_add(super::heap::rt_heap_aux_live_bytes());
+    free_transient_objects(&scope.objects);
+    // Retire the scope's Vec/HashSets and the C raw scratch owner before
+    // returning unused allocator pages. Promoted/session roots remain live.
+    drop(scope);
+    let ended = unsafe { rt_transient_raw_scope_end() != 0 };
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if ended {
+        let live_after = super::heap::rt_heap_live_bytes()
+            .saturating_add(super::heap::rt_heap_aux_live_bytes());
+        // A coarse reclamation threshold avoids a process-wide libc sweep
+        // for tiny scratch scopes. These approximate process counters affect
+        // only this advisory optimization, never ownership or admission.
+        if live_before.saturating_sub(live_after) >= 16 * 1024 * 1024 {
+            unsafe { libc::malloc_trim(0); }
+        }
+    }
+    ended
+}
+
+/// Free every still-registered object in `objects` (module-scope end and
+/// `rt_session_heap_end`, BSM I4 — one sweep).
+fn free_transient_objects(objects: &[RuntimeValue]) {
+    // One shard lock per 64K of that shard's objects (see `unregister_heap_ptrs_batch`):
+    // the old per-object `free_transient_heap` took the registry mutex twice
+    // per object, and each erase bumped the free epoch, so the next object's
+    // validation always missed its cache and probed the process-wide set cold.
+    // Exactly the objects `free_transient_heap` would free are erased here;
+    // shared strings stay registered, as `rt_string_free` leaves them, and
+    // closures take the per-object path below so a pinned one is orphaned
+    // (`closure_pin_defer_free`) rather than freed.
+    let mut erased = Vec::with_capacity(objects.len());
+    let mut closures = Vec::new();
+    super::heap::unregister_heap_ptrs_batch(
+        objects,
+        |value, ptr| unsafe {
+            match (*ptr).object_type {
+                HeapObjectType::String => (*ptr).reserved & RT_STRING_FLAG_SHARED == 0,
+                HeapObjectType::Array | HeapObjectType::Tuple | HeapObjectType::Dict => true,
+                HeapObjectType::Object
+                | HeapObjectType::Enum
+                | HeapObjectType::Float
+                | HeapObjectType::UInt
+                | HeapObjectType::Int => std::alloc::Layout::from_size_align((*ptr).size as usize, 8).is_ok(),
+                HeapObjectType::Closure => {
+                    closures.push(value);
+                    false
+                }
+                _ => false,
+            }
+        },
+        &mut erased,
+    );
+    // Every erase is complete (all chunks) before the first free below.
+    for (ptr, kind) in erased {
+        unsafe { dealloc_erased_transient(ptr, kind) };
+    }
+    for closure in closures {
+        free_transient_heap(closure);
+    }
+}
+
+// ============================================================================
+// Build session heap (BSM T1) — design §3 I2-I4, §4. Twin of runtime_native.c.
+// ============================================================================
+
+fn module_scope_state() -> Option<bool> {
+    TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().map(|scope| scope.paused))
+}
+
+/// 0 on failure: a session is already live on this thread, a module scope is
+/// active on this thread, or the id space is exhausted.
+#[no_mangle]
+pub extern "C" fn rt_session_heap_begin() -> u32 {
+    if module_scope_state().is_some() {
+        return 0;
+    }
+    SESSION_HEAP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return 0;
+        }
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut id = SESSION_HEAP_NEXT_ID.load(Relaxed);
+        while id != 0 {
+            match SESSION_HEAP_NEXT_ID.compare_exchange_weak(id, id.wrapping_add(1), Relaxed, Relaxed) {
+                Ok(_) => break,
+                Err(current) => id = current,
+            }
+        }
+        if id == 0 {
+            return 0;
+        }
+        *slot = Some(SessionHeap { id, alloc_depth: 0, objects: Vec::new(), owned: Default::default() });
+        id
+    })
+}
+
+/// Frees every object the session still owns in ONE sweep (I4). Refused
+/// while a module scope is active on this thread or for a non-live id.
+#[no_mangle]
+pub extern "C" fn rt_session_heap_end(session: u32) -> bool {
+    if session == 0 || module_scope_state().is_some() {
+        return false;
+    }
+    let taken = SESSION_HEAP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|live| live.id == session) {
+            slot.take()
+        } else {
+            None
+        }
+    });
+    let Some(heap) = taken else {
+        return false;
+    };
+    free_transient_objects(&heap.objects);
+    // Release the session's own Vec/HashSet allocations before asking libc to
+    // return unused arena pages. The TLS borrow and object registry locks are
+    // already released; no live object ownership changes at this boundary.
+    drop(heap);
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        // The native-all runtime uses Rust's system allocator. Other global
+        // allocators may not use glibc; trimming then remains harmless/advisory.
+        libc::malloc_trim(0);
+    }
+    true
+}
+
+/// Depth-counted: while > 0, new objects belong to the session even inside a
+/// running module scope (I3: session containers grow under the session).
+#[no_mangle]
+pub extern "C" fn rt_session_alloc_begin() -> bool {
+    SESSION_HEAP.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(session) if session.alloc_depth < i32::MAX => {
+            session.alloc_depth += 1;
+            true
+        }
+        _ => false,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_session_alloc_end() -> bool {
+    SESSION_HEAP.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(session) if session.alloc_depth > 0 => {
+            session.alloc_depth -= 1;
+            true
+        }
+        _ => false,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_session_heap_id() -> u32 {
+    SESSION_HEAP.with(|slot| slot.borrow().as_ref().map_or(0, |session| session.id))
+}
+
+/// Move the module-owned part of `value`'s graph to the live session: nodes
+/// the ACTIVE paused module scope owns leave its list and join the session;
+/// the walk stops at any node the module scope does not own (I2), so the cost
+/// is O(nodes the module allocated), never O(session). Root rules as in
+/// `rt_transient_heap_promote`: scalars and registered non-module roots are a
+/// no-op success. Raw struct blocks are always walked (their ownership is not
+/// visible here) and promoted to permanent, as promote does — v1 sessions do
+/// not own raw blocks. False without a live session or a paused module scope.
+#[no_mangle]
+pub extern "C" fn rt_transient_heap_adopt(value: RuntimeValue) -> bool {
+    SESSION_ADOPT_VISITS.with(|visits| visits.set(0));
+    if rt_session_heap_id() == 0 || module_scope_state() != Some(true) {
+        return false;
+    }
+    let mut root_words = std::ptr::null();
+    let mut root_ptr = 0usize;
+    let root_raw = unsafe { rt_transient_raw_words(value.0 as i64, &mut root_words, &mut root_ptr) >= 0 };
+    if !root_raw && !value.is_heap() {
+        return true;
+    }
+    if !root_raw && value.heap_type().is_none() {
+        return false;
+    }
+    let mut visits = 0u64;
+    let mut moved = super::heap::HeapPtrSet::<u64>::default();
+    let mut reachable_raw = super::heap::HeapPtrSet::<usize>::default();
+    let ok = TRANSIENT_HEAP_SCOPE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(scope) = slot.as_mut() else {
+            return false;
+        };
+        let mut pending = vec![value];
+        while let Some(current) = pending.pop() {
+            let mut words = std::ptr::null();
+            let mut canonical_ptr = 0usize;
+            let word_count = unsafe { rt_transient_raw_words(current.0 as i64, &mut words, &mut canonical_ptr) };
+            if word_count >= 0 {
+                visits += 1;
+                if !reachable_raw.insert(canonical_ptr) {
+                    continue;
+                }
+                if word_count > 0 {
+                    if words.is_null() {
+                        return false;
+                    }
+                    let raw_words = unsafe { std::slice::from_raw_parts(words, word_count as usize) };
+                    pending.extend(raw_words.iter().map(|word| RuntimeValue(*word as u64)));
+                }
+                continue;
+            }
+            if !current.is_heap() || current.heap_type().is_none() {
+                continue;
+            }
+            visits += 1;
+            if !scope.owns_heap_ptr(current.as_heap_ptr()) {
+                continue; // I2 prune: session-owned, permanent or foreign
+            }
+            if !moved.insert(current.0) {
+                continue;
+            }
+            if let Some(children) = transient_heap_children(current) {
+                pending.extend(children);
+            }
+        }
+        for ptr in reachable_raw.iter() {
+            if unsafe { rt_transient_raw_promote(*ptr) } == 0 {
+                return false;
+            }
+        }
+        let mut released = Vec::with_capacity(moved.len());
+        scope.release_reachable(&moved, Some(&mut released));
+        SESSION_HEAP.with(|slot| {
+            if let Some(session) = slot.borrow_mut().as_mut() {
+                for value in released {
+                    session.adopt(value);
+                }
+            }
+        });
+        true
+    });
+    SESSION_ADOPT_VISITS.with(|cell| cell.set(visits));
+    ok
+}
+
+/// Release the memory of a heap object this thread just erased from the
+/// registry. Mirrors the deallocation half of `rt_string_free`,
+/// `rt_array_free`, `rt_tuple_free`, `rt_dict_free` and the generic arm of
+/// `free_transient_heap`; keep them in step.
+unsafe fn dealloc_erased_transient(ptr: *mut HeapHeader, kind: HeapObjectType) {
+    match kind {
+        HeapObjectType::String => {
+            let len = (*(ptr as *mut RuntimeString)).len;
+            let size = std::mem::size_of::<RuntimeString>() + len as usize;
+            std::alloc::dealloc(ptr as *mut u8, std::alloc::Layout::from_size_align(size, 8).unwrap());
+        }
+        HeapObjectType::Array => {
+            let array = ptr as *mut RuntimeArray;
+            if !(*array).data.is_null() {
+                let data_layout = if (*array).is_byte_packed() {
+                    byte_array_data_layout((*array).capacity)
+                } else {
+                    array_data_layout((*array).capacity)
+                };
+                note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
+                std::alloc::dealloc((*array).data as *mut u8, data_layout);
+            }
+            let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+        HeapObjectType::Tuple => {
+            let len = (*(ptr as *mut RuntimeTuple)).len;
+            let size = std::mem::size_of::<RuntimeTuple>() + len as usize * std::mem::size_of::<RuntimeValue>();
+            std::alloc::dealloc(ptr as *mut u8, std::alloc::Layout::from_size_align(size, 8).unwrap());
+        }
+        HeapObjectType::Dict => {
+            let dict = ptr as *mut RuntimeDict;
+            super::dict::dict_free_slots((*dict).data, (*dict).capacity);
+            let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeDict>(), 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+        _ => {
+            // Object/Enum/Float/UInt/Int: layout validity was checked before erasing.
+            let layout = std::alloc::Layout::from_size_align((*ptr).size as usize, 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
 }
 
 /// Create an array from a slice of RuntimeValues
@@ -8161,6 +8681,213 @@ mod string_free_contract_tests {
     }
 
     #[test]
+    fn persistent_container_root_rewalks_new_transient_children() {
+        let _g = GUARD.lock().unwrap();
+        let owner = rt_array_new(2);
+        for round in 0..2 {
+            assert!(rt_transient_array_scope_begin());
+            let bytes = format!("new child appended to persistent owner, round {round}");
+            let child = mkstr(&bytes);
+            assert!(rt_array_push(owner, child));
+            assert!(rt_transient_array_scope_pause());
+            assert!(rt_transient_heap_promote(owner));
+            assert!(rt_transient_array_scope_end());
+            assert_eq!(rt_string_len(child), bytes.len() as i64);
+        }
+        for index in 0..2 {
+            assert_eq!(rt_string_free(super::rt_array_get(owner, index)), 1);
+        }
+        rt_array_free(owner);
+    }
+
+    #[test]
+    fn persistent_dict_cycle_retains_new_children_across_scopes() {
+        let _g = GUARD.lock().unwrap();
+        let owner = rt_array_new(1);
+        let dict = rt_dict_new(8);
+        let back_key = mkstr("persistent cycle back edge");
+        assert!(rt_array_push(owner, dict));
+        assert!(rt_dict_set(dict, back_key, owner));
+        let mut retained = Vec::new();
+        for round in 0..2 {
+            assert!(rt_transient_array_scope_begin());
+            let key = mkstr(&format!("persistent cycle key {round}"));
+            let value_bytes = format!("persistent cycle value {round}");
+            let value = mkstr(&value_bytes);
+            let discarded = mkstr("unreachable scope sibling");
+            assert!(rt_dict_set(dict, key, value));
+            assert!(rt_transient_array_scope_pause());
+            assert!(rt_transient_heap_promote(owner));
+            assert!(rt_transient_array_scope_end());
+            assert_eq!(rt_string_len(value), value_bytes.len() as i64);
+            assert_eq!(rt_dict_get(dict, key), value);
+            assert_eq!(rt_dict_get(dict, back_key), owner);
+            assert_eq!(rt_dict_len(dict), round + 2);
+            assert_eq!(rt_string_len(discarded), -1);
+            retained.push((key, value));
+        }
+        for (key, value) in retained {
+            assert_eq!(rt_dict_get(dict, key), value);
+            assert_eq!(rt_string_free(key), 1);
+            assert_eq!(rt_string_free(value), 1);
+        }
+        rt_array_free(owner);
+        crate::value::dict::rt_dict_free(dict);
+        assert_eq!(rt_string_free(back_key), 1);
+    }
+
+    #[test]
+    fn persistent_root_does_not_retain_children_when_scope_aborts_without_promotion() {
+        let _g = GUARD.lock().unwrap();
+        let owner = rt_array_new(1);
+        assert!(rt_transient_array_scope_begin());
+        let child = mkstr("unpromoted child of a persistent root");
+        assert!(rt_array_push(owner, child));
+        assert!(!rt_transient_heap_promote(owner), "promotion requires a paused scope");
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(rt_string_len(child), -1, "abort reclaims the unpromoted child");
+        assert_eq!(rt_array_len(owner), 1, "the pre-scope owner itself remains live");
+        // Do not dereference the stale element. Array free is shallow.
+        rt_array_free(owner);
+        assert!(!rt_transient_array_scope_end(), "the aborted scope is closed");
+    }
+
+    #[test]
+    fn persistent_root_growth_reports_bounded_promotion_work() {
+        let _g = GUARD.lock().unwrap();
+        // A measurement, not a timing threshold or a linear-growth claim.
+        // With no write barrier, the retained graph must be rewalked each round.
+        for rounds in [8usize, 16, 32] {
+            let owner = rt_array_new(32);
+            let mut children = Vec::new();
+            let mut promotion_time = std::time::Duration::ZERO;
+            for round in 0..rounds {
+                assert!(rt_transient_array_scope_begin());
+                for item in 0..32 {
+                    let bytes = format!("growth rounds={rounds} round={round} item={item}");
+                    let child = mkstr(&bytes);
+                    assert!(rt_array_push(owner, child));
+                    children.push((child, bytes.len() as i64));
+                }
+                assert!(rt_transient_array_scope_pause());
+                let started = std::time::Instant::now();
+                assert!(rt_transient_heap_promote(owner));
+                promotion_time += started.elapsed();
+                assert!(rt_transient_array_scope_end());
+                assert_eq!(rt_array_len(owner), ((round + 1) * 32) as i64);
+            }
+            for (child, expected_len) in children {
+                assert_eq!(rt_string_len(child), expected_len);
+                assert_eq!(rt_string_free(child), 1);
+            }
+            rt_array_free(owner);
+            eprintln!(
+                "persistent_root_growth rounds={rounds} batch=32 final_children={} expected_rewalk_slots={} promotion_ns={}",
+                rounds * 32, 32 * rounds * (rounds + 1) / 2, promotion_time.as_nanos()
+            );
+        }
+    }
+
+    #[test]
+    fn paused_container_root_retains_mir_error_message_span_and_severity() {
+        unsafe extern "C" {
+            fn rt_alloc(size: i64) -> *mut u8;
+            fn rt_free(ptr: *mut u8);
+        }
+
+        let _g = GUARD.lock().unwrap();
+        // Reproduce MirLowering.errors: persistent array, transient raw
+        // MirError(message, optional span, fatal), post-pause wrapper array.
+        for fatal in [0u64, 1] {
+            let errors = rt_array_new(1);
+            assert!(rt_transient_array_scope_begin());
+            let message_bytes = if fatal == 0 {
+                "non-exhaustive enum match on 'Result': Arms cover: Ok, Err."
+            } else {
+                "enum match: missing declaration owner"
+            };
+            let message = mkstr(message_bytes);
+            let file_bytes = "src/app/_cg/f07/main.spl";
+            let file = mkstr(file_bytes);
+            let span = unsafe { rt_alloc(24) } as *mut u64;
+            let error = unsafe { rt_alloc(24) } as *mut u64;
+            assert!(!span.is_null() && !error.is_null());
+            let span_value = crate::value::RuntimeValue((span as u64) | crate::value::tags::TAG_HEAP);
+            let error_value = crate::value::RuntimeValue((error as u64) | crate::value::tags::TAG_HEAP);
+            unsafe {
+                span.write(file.0);
+                span.add(1).write(8);
+                span.add(2).write(5);
+                error.write(message.0);
+                error.add(1).write(span_value.0);
+                error.add(2).write(fatal);
+            }
+            assert!(rt_array_push(errors, error_value));
+            assert!(rt_transient_array_scope_pause());
+            let roots = rt_array_new(1);
+            assert!(rt_array_push(roots, errors));
+            assert!(super::rt_transient_heap_promote_share_begin());
+            assert!(rt_transient_heap_promote(roots));
+            rt_array_free(roots);
+            assert!(super::rt_transient_heap_promote_share_end());
+            assert!(rt_transient_array_scope_end());
+            // Check managed children before dereferencing raw records: the
+            // pre-fix failure is a safe assertion, never a use-after-free.
+            assert_eq!(rt_string_len(message), message_bytes.len() as i64);
+            assert_eq!(rt_string_len(file), file_bytes.len() as i64);
+            assert_eq!(super::rt_array_get(errors, 0), error_value);
+            unsafe {
+                assert_eq!(error.read(), message.0);
+                assert_eq!(error.add(1).read(), span_value.0);
+                assert_eq!(error.add(2).read(), fatal);
+                assert_eq!(span.read(), file.0);
+                assert_eq!(span.add(1).read(), 8);
+                assert_eq!(span.add(2).read(), 5);
+                rt_free(error as *mut u8);
+                rt_free(span as *mut u8);
+            }
+            assert_eq!(rt_string_free(message), 1);
+            assert_eq!(rt_string_free(file), 1);
+            rt_array_free(errors);
+        }
+    }
+
+    #[test]
+    #[ignore = "bounded accumulated-graph time/RSS measurement; run explicitly"]
+    fn persistent_root_accumulated_graph_benchmark() {
+        let _g = GUARD.lock().unwrap();
+        for rounds in [64usize, 128, 256] {
+            let owner = rt_array_new(64);
+            let mut children = Vec::new();
+            let mut promotion_time = std::time::Duration::ZERO;
+            for round in 0..rounds {
+                assert!(rt_transient_array_scope_begin());
+                for item in 0..64 {
+                    let bytes = format!("accumulated rounds={rounds} round={round} item={item}");
+                    let child = mkstr(&bytes);
+                    assert!(rt_array_push(owner, child));
+                    children.push((child, bytes.len() as i64));
+                }
+                assert!(rt_transient_array_scope_pause());
+                let started = std::time::Instant::now();
+                assert!(rt_transient_heap_promote(owner));
+                promotion_time += started.elapsed();
+                assert!(rt_transient_array_scope_end());
+            }
+            assert_eq!(rt_array_len(owner), (rounds * 64) as i64);
+            for (child, expected_len) in children {
+                assert_eq!(rt_string_len(child), expected_len);
+                assert_eq!(rt_string_free(child), 1);
+            }
+            rt_array_free(owner);
+            eprintln!(
+                "persistent_root_accumulated rounds={rounds} batch=64 final_children={} expected_rewalk_slots={} promotion_ns={}",
+                rounds * 64, 64 * rounds * (rounds + 1) / 2, promotion_time.as_nanos()
+            );
+        }
+    }
+
+    #[test]
     fn persistent_native_struct_root_promotes_transient_children() {
         unsafe extern "C" {
             fn rt_struct_alloc(size: i64) -> *mut u8;
@@ -8502,4 +9229,50 @@ mod lazy_string_hash_tests {
         assert_eq!(hash_of(e), 0);
         assert_eq!(FNV1A_HASH_CALLS.load(Ordering::Relaxed) - before, 0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Object-graph refcount hooks (BSM P4, see rc_graph.rs). New entry points
+// over the private transient-scope machinery above; they change none of it.
+// ---------------------------------------------------------------------------
+
+/// Children of one heap node, exactly as transient promotion walks them.
+pub(crate) fn rc_graph_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
+    transient_heap_children(value)
+}
+
+/// Free one heap node through the same per-kind path as scope end.
+pub(crate) fn rc_graph_free(value: RuntimeValue) {
+    free_transient_heap(value)
+}
+
+/// True when this thread's live transient scope still owns `value`.
+pub(crate) fn rc_graph_scope_owns(value: RuntimeValue) -> bool {
+    if !value.is_heap() {
+        return false;
+    }
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
+        slot.try_borrow_mut()
+            .ok()
+            .is_some_and(|mut slot| slot.as_mut().is_some_and(|scope| scope.owns_heap_ptr(value.as_heap_ptr())))
+    })
+}
+
+/// Move `reachable` out of this thread's transient scope AND out of the live
+/// build session (no-op without either). An rc root is owned by its count, not
+/// by a scope: `None` here because the nodes must not be adopted into the
+/// session, and the session eviction is what keeps `rt_session_heap_end` from
+/// freeing a graph that `rt_rc_share` took over (BSM P1 x P4; the C twin is
+/// safe by construction because its reclaim keys on the tag share zeroes).
+pub(crate) fn rc_graph_scope_release(reachable: &super::heap::HeapPtrSet<u64>) {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            scope.release_reachable(reachable, None);
+        }
+    });
+    SESSION_HEAP.with(|slot| {
+        if let Some(session) = slot.borrow_mut().as_mut() {
+            session.release_reachable(reachable);
+        }
+    });
 }

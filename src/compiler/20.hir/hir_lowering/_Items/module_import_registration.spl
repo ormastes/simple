@@ -1,3 +1,4 @@
+use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1, library_mode_import_key_v1}
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
 use compiler.hir.hir_lowering._Items.module_lowering.{HirReexportSource, HirReexportWalkState}
@@ -659,6 +660,12 @@ impl HirLowering:
             # qualified identity or dependency closure. Package prebinding can
             # create the short symbol before an explicit/re-export import.
             self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
+            # bug=module_static_unresolved_initializer_2026-10-24: the import
+            # surface carries the declaration's type parameters, so an
+            # imported non-generic record settles `var g = Imported(...)` /
+            # `Imported(f: v)` exactly like a local one (lowered_const_value_type).
+            if composite.type_params.len() == 0:
+                self.nongeneric_record_owners[imported_type.id] = true
             # This field projection precedes method registration. Resolve the
             # owner's constraints/defaults here, not later in the method path.
             if not self.materialize_imported_owner_parameter_dependencies(
@@ -948,6 +955,8 @@ impl HirLowering:
             if not existing_id.is_valid() and local_name != imported_name:
                 self.symbols.rename_symbol(imported_fn_sym, imported_name)
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
+            val imported_callable: ModuleSurfaceCallable = imported_mod.callable_values[callable_position]
+            self.symbols.mark_generic_callable(imported_fn_sym, imported_callable.type_params.len())
             if self.reference_origins_v1.enabled:
                 self.reference_origins_v1.record_imported_callable(
                     imported_fn_sym.id, imported_mod.module_name, imported_name,
@@ -1188,6 +1197,10 @@ impl HirLowering:
         package facade's ".__init__" as that segment, which is the behaviour a
         single dot needs — lib.a.easy_fix.__init__ + ".types" resolves to
         lib.a.easy_fix.types, so a facade needs no special case."""
+        if self.library_mode != "" and library_mode_generic_import_v1(name):
+            val key = library_mode_import_key_v1(name, self.library_mode, ctx_name)
+            if key != "" and self.surface_index_for_name(key) >= 0: return key
+            return ""
         if not name.starts_with("."):
             return self.resolve_module_key(name)
         # Callers with a logical context already retain its surface/path.

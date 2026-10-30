@@ -1,0 +1,724 @@
+# Opt-in scalar construction storage. No MirModule/MirFunction/HirExpr input.
+use compiler.mir.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.mir.loop_module_shape_types_v1.{
+    MirLoopShapeTagV1, MirLoopShapeErrorV1, MirLoopShapeObservationV1,
+    mir_loop_shape_boolean_slot_v1, mir_loop_shape_schema_v1, mir_loop_shape_type_v1, mir_loop_shape_hir_type_v1, mir_loop_shape_effect_v1, mir_loop_shape_predicate_v1, mir_loop_shape_child_v1
+}
+
+class MirLoopShapeRowV1:
+    tag: MirLoopShapeTagV1
+    revision: i64
+    scalars: [i64]
+    present: [bool]
+    texts: [i64]
+    text_present: [bool]
+    children: [i64]
+    span: i64
+    finished: bool
+    real_value: f64
+    has_real: bool
+
+class MirLoopTextCellV1:
+    value: text
+
+pub class MirLoopShapeOwnerV1:
+    account_: MirLoopResourceAccountV1
+    rows: [MirLoopShapeRowV1]
+    texts: [MirLoopTextCellV1]
+    functions: [i64]
+    function_revisions: [i64]
+    declarations: [i64]
+    declaration_revisions: [i64]
+    aggregates: [i64]
+    layouts: [i64]
+    enum_declarations: [i64]
+    remap_from: [i64]
+    remap_to: [i64]
+    namespace: i64
+    pending_texts: i64
+    state: i64
+    error: MirLoopShapeErrorV1
+
+    pub static fn create(account: MirLoopResourceAccountV1) -> Result<MirLoopShapeOwnerV1, MirLoopShapeErrorV1>:
+        if account == nil: return Err(MirLoopShapeErrorV1.InvalidState)
+        # Fifteen fixed fields plus empty-owner construction/close bookkeeping.
+        match account.reserve(32, state_fields: 32):
+            case Err(_): return Err(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): ()
+        return Ok(MirLoopShapeOwnerV1(account_: account, rows: [], texts: [],
+            functions: [], function_revisions: [], declarations: [], declaration_revisions: [],
+            aggregates: [], layouts: [], enum_declarations: [], remap_from: [], remap_to: [], namespace: -1,
+            pending_texts: 0, state: 0, error: MirLoopShapeErrorV1.InvalidState))
+
+    pub me fail(code: MirLoopShapeErrorV1):
+        if self.state == 0:
+            self.state = 2
+            self.error = code
+
+    # Construction mutation failures are fatal and retain the first cause.
+    # A stale mutation after seal/close cannot invalidate an admitted view.
+    me reject(code: MirLoopShapeErrorV1) -> MirLoopShapeErrorV1:
+        self.fail(code)
+        if self.state == 2: return self.error
+        code
+
+    fn constructing() -> Result<(), MirLoopShapeErrorV1>:
+        if self.state == 2: return Err(self.error)
+        if self.state != 0 or self.account_.is_closed(): return Err(MirLoopShapeErrorV1.InvalidState)
+        Ok(())
+
+    me cells(amount: i64) -> Result<(), MirLoopShapeErrorV1>:
+        match self.account_.reserve(amount, state_fields: amount):
+            case Ok(_): Ok(())
+            case Err(_):
+                self.fail(MirLoopShapeErrorV1.Capacity)
+                Err(MirLoopShapeErrorV1.Capacity)
+
+    fn valid_node(node: i64) -> bool:
+        node >= 0 and node < self.rows.len()
+
+    fn valid_text(identity: i64) -> bool:
+        identity >= 0 and identity < self.texts.len()
+
+    pub fn observation() -> MirLoopShapeObservationV1:
+        MirLoopShapeObservationV1(nodes: self.rows.len(), texts: self.texts.len(),
+            functions: self.functions.len(), declarations: self.declarations.len(), state: self.state)
+
+    pub me inspect() -> Result<MirLoopConstructionViewV1, MirLoopShapeErrorV1>:
+        self.constructing()?
+        self.cells(3)?
+        Ok(MirLoopConstructionViewV1(reader_: MirLoopReadViewV1(owner: self, phase: 0)))
+
+    pub me begin(tag: MirLoopShapeTagV1) -> Result<MirLoopNodeWriterV1, MirLoopShapeErrorV1>:
+        self.constructing()?
+        val shape = mir_loop_shape_schema_v1(tag)
+        # Each values/presence pair conservatively reserves all push-prefix cells.
+        val scalar_cells = shape.scalars * (shape.scalars + 1)
+        val text_cells = shape.texts * (shape.texts + 1)
+        self.cells(16 + self.rows.len() + 1 + scalar_cells + text_cells)?
+        var values: [i64] = []
+        var present: [bool] = []
+        var texts: [i64] = []
+        var text_present: [bool] = []
+        var index = 0
+        while index < shape.scalars:
+            values.push(0)
+            present.push(false)
+            index = index + 1
+        index = 0
+        while index < shape.texts:
+            texts.push(-1)
+            text_present.push(false)
+            index = index + 1
+        val identity = self.rows.len()
+        self.rows.push(MirLoopShapeRowV1(tag: tag, revision: 0, scalars: values,
+            present: present, texts: texts, text_present: text_present, children: [], span: -1, finished: false, real_value: 0.0, has_real: false))
+        return Ok(MirLoopNodeWriterV1(owner: self, node: identity, version: 0, consumed: false))
+
+    pub me revise(node: i64, expected_revision: i64, clear_children: bool) -> Result<MirLoopNodeWriterV1, MirLoopShapeErrorV1>:
+        self.constructing()?
+        if not self.valid_node(node): return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        val row = self.rows[node]
+        if not row.finished or row.revision != expected_revision:
+            return Err(self.reject(MirLoopShapeErrorV1.StaleRevision))
+        if row.revision >= 1048576: return Err(self.reject(MirLoopShapeErrorV1.Capacity))
+        # Existing scalar-only row is edited under one writer; no rich copy.
+        self.cells(4)?
+        row.revision = row.revision + 1
+        row.finished = false
+        if clear_children: row.children = []
+        return Ok(MirLoopNodeWriterV1(owner: self, node: node, version: row.revision, consumed: false))
+
+    me writable(node: i64, version: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.constructing()?
+        if not self.valid_node(node): return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        val row = self.rows[node]
+        if row.finished or row.revision != version: return Err(self.reject(MirLoopShapeErrorV1.StaleRevision))
+        Ok(())
+
+    me put_real(node: i64, version: i64, value: f64) -> Result<(), MirLoopShapeErrorV1>:
+        self.writable(node, version)?
+        if self.rows[node].tag != MirLoopShapeTagV1.ConstFloat: return Err(self.reject(MirLoopShapeErrorV1.InvalidTag))
+        self.account_work(1)?
+        self.rows[node].real_value = value
+        self.rows[node].has_real = true
+        Ok(())
+
+    me put_scalar(node: i64, version: i64, ordinal: i64, value: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.writable(node, version)?
+        val row = self.rows[node]
+        if ordinal < 0 or ordinal >= row.scalars.len(): return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        if mir_loop_shape_boolean_slot_v1(row.tag, ordinal) and value != 0 and value != 1:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        self.account_work(1)?
+        row.scalars[ordinal] = value
+        row.present[ordinal] = true
+        Ok(())
+
+    me put_text(node: i64, version: i64, ordinal: i64, value: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.writable(node, version)?
+        val row = self.rows[node]
+        if ordinal < 0 or ordinal >= row.texts.len(): return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        val optional_name = (row.tag == MirLoopShapeTagV1.Local or row.tag == MirLoopShapeTagV1.Block or row.tag == MirLoopShapeTagV1.PredicateInt or row.tag == MirLoopShapeTagV1.PredicateVar)
+        if not self.valid_text(value) and not (optional_name and value == -1):
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        self.account_work(1)?
+        row.texts[ordinal] = value
+        row.text_present[ordinal] = true
+        Ok(())
+
+    me account_work(amount: i64) -> Result<(), MirLoopShapeErrorV1>:
+        match self.account_.reserve(amount):
+            case Ok(_): Ok(())
+            case Err(_):
+                self.fail(MirLoopShapeErrorV1.Capacity)
+                Err(MirLoopShapeErrorV1.Capacity)
+
+    me put_child(node: i64, version: i64, child: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.writable(node, version)?
+        val row = self.rows[node]
+        val optional_source = (mir_loop_shape_predicate_v1(row.tag) and row.children.len() == 0) or row.tag == MirLoopShapeTagV1.SourceRange or ((row.tag == MirLoopShapeTagV1.EnumArm or row.tag == MirLoopShapeTagV1.InstAggregate) and row.children.len() == 0)
+        if child == -1:
+            if not optional_source: return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        elif not self.valid_node(child) or not self.rows[child].finished:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        if child == node: return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        if row.children.len() >= mir_loop_shape_schema_v1(row.tag).maximum_children:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        self.cells(row.children.len() + 1)?
+        row.children.push(child)
+        Ok(())
+
+    me put_span(node: i64, version: i64, span: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.writable(node, version)?
+        if not self.valid_node(span) or self.rows[span].tag != MirLoopShapeTagV1.Span or not self.rows[span].finished:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        self.account_work(1)?
+        self.rows[node].span = span
+        Ok(())
+
+    me finish_node(node: i64, version: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.writable(node, version)?
+        val row = self.rows[node]
+        var index = 0
+        while index < row.present.len():
+            self.account_work(1)?
+            if not row.present[index]:
+                return Err(self.reject(MirLoopShapeErrorV1.Incomplete))
+            index = index + 1
+        index = 0
+        while index < row.text_present.len():
+            self.account_work(1)?
+            if not row.text_present[index]:
+                return Err(self.reject(MirLoopShapeErrorV1.Incomplete))
+            index = index + 1
+        val shape = mir_loop_shape_schema_v1(row.tag)
+        if row.children.len() < shape.minimum_children or row.children.len() > shape.maximum_children:
+            return Err(self.reject(MirLoopShapeErrorV1.Incomplete))
+        if row.tag == MirLoopShapeTagV1.ConstFloat and not row.has_real:
+            return Err(self.reject(MirLoopShapeErrorV1.Incomplete))
+        if row.tag == MirLoopShapeTagV1.AggregateSite and row.span < 0:
+            return Err(self.reject(MirLoopShapeErrorV1.Incomplete))
+        if row.tag == MirLoopShapeTagV1.PredicateInt or row.tag == MirLoopShapeTagV1.PredicateVar:
+            if (row.scalars[1] != 0 and row.scalars[1] != 1) or ((row.scalars[1] == 0) != (row.texts[0] == -1)):
+                return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        if row.tag == MirLoopShapeTagV1.InstAggregate:
+            if row.scalars[1] < 0 or row.scalars[1] > 3 or ((row.scalars[1] != 0) != (row.children[0] == -1)):
+                return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        if row.tag == MirLoopShapeTagV1.Signature:
+            if row.scalars[2] < 0 or row.scalars[2] > row.children.len() - 1:
+                return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        if row.tag == MirLoopShapeTagV1.HirFunction:
+            if row.scalars[0] < 0 or row.scalars[0] > row.children.len() - 1:
+                return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+            var position = 0
+            while position < row.children.len():
+                val actual = self.rows[row.children[position]].tag
+                val valid = if position <= row.scalars[0]: mir_loop_shape_hir_type_v1(actual) else: mir_loop_shape_effect_v1(actual)
+                if not valid:
+                    return Err(self.reject(MirLoopShapeErrorV1.InvalidTag))
+                self.account_work(1)?
+                position = position + 1
+        if row.tag == MirLoopShapeTagV1.EnumArm:
+            if (row.scalars[5] == 0) != (row.children[0] == -1):
+                return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        # Presence is distinct from a valid zero-valued scalar/source expression.
+        if mir_loop_shape_predicate_v1(row.tag):
+            val has_type = row.scalars[row.scalars.len() - 1]
+            if (has_type != 0 and has_type != 1) or ((has_type == 0) != (row.children[0] == -1)):
+                return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        if row.tag == MirLoopShapeTagV1.SourceRange:
+            var source_slot = 0
+            while source_slot < 4:
+                val flag_slot = if source_slot < 3: source_slot else: 4
+                val flag = row.scalars[flag_slot]
+                if (flag != 0 and flag != 1) or ((flag == 0) != (row.children[source_slot] == -1)):
+                    return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+                source_slot = source_slot + 1
+        if row.tag == MirLoopShapeTagV1.TypeArray and row.scalars[0] < 0:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        index = 0
+        while index < row.children.len():
+            self.account_work(1)?
+            val child = row.children[index]
+            if child >= 0 and not mir_loop_shape_child_v1(row.tag, index, row.children.len(), self.rows[child].tag):
+                return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+            index = index + 1
+        row.finished = true
+        Ok(node)
+
+    pub me reserve_text(byte_count: i64) -> Result<MirLoopTextPermitV1, MirLoopShapeErrorV1>:
+        self.constructing()?
+        if byte_count < 0 or byte_count > 1048576 / 4: return Err(self.reject(MirLoopShapeErrorV1.Capacity))
+        # Four byte-copy reservations: incoming expression/argument, stored text,
+        # and returned owner accessor transport. No unreserved text getter exists.
+        val bytes = byte_count * 4
+        val fields = 6 + self.texts.len() + self.pending_texts + 1
+        match self.account_.reserve(bytes + fields, state_fields: fields, output_bytes: bytes):
+            case Err(_):
+                return Err(self.reject(MirLoopShapeErrorV1.Capacity))
+            case Ok(_): ()
+        self.pending_texts = self.pending_texts + 1
+        Ok(MirLoopTextPermitV1(owner: self, expected: byte_count, consumed: false))
+
+    me finish_text(expected: i64, value: text) -> Result<i64, MirLoopShapeErrorV1>:
+        self.constructing()?
+        if value.len() != expected or self.pending_texts <= 0:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        val identity = self.texts.len()
+        self.texts.push(MirLoopTextCellV1(value: value))
+        self.pending_texts = self.pending_texts - 1
+        Ok(identity)
+
+    pub me publish_namespace(text_id: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.constructing()?
+        if self.namespace != -1: return Err(self.reject(MirLoopShapeErrorV1.Duplicate))
+        if not self.valid_text(text_id): return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        self.account_work(1)?
+        self.namespace = text_id
+        Ok(())
+
+    pub me publish_function(node: i64, previous_revision: i64?) -> Result<(), MirLoopShapeErrorV1>:
+        self.constructing()?
+        if not self.valid_node(node) or not self.rows[node].finished or self.rows[node].tag != MirLoopShapeTagV1.Function:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        var index = 0
+        while index < self.functions.len():
+            self.account_work(1)?
+            val old = self.functions[index]
+            if self.rows[old].scalars[0] == self.rows[node].scalars[0]:
+                if old != node or previous_revision == nil or previous_revision.unwrap() != self.function_revisions[index]:
+                    return Err(self.reject(MirLoopShapeErrorV1.Duplicate))
+                if self.rows[node].revision <= self.function_revisions[index]: return Err(self.reject(MirLoopShapeErrorV1.StaleRevision))
+                self.function_revisions[index] = self.rows[node].revision
+                return Ok(())
+            index = index + 1
+        if previous_revision != nil: return Err(self.reject(MirLoopShapeErrorV1.StaleRevision))
+        self.cells(2 * (self.functions.len() + 1))?
+        self.functions.push(node)
+        self.function_revisions.push(self.rows[node].revision)
+        Ok(())
+
+    pub me publish_declaration(node: i64, previous_revision: i64?) -> Result<(), MirLoopShapeErrorV1>:
+        self.constructing()?
+        if not self.valid_node(node) or not self.rows[node].finished: return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        val tag = self.rows[node].tag
+        if tag != MirLoopShapeTagV1.DeclStruct and tag != MirLoopShapeTagV1.DeclEnum and tag != MirLoopShapeTagV1.DeclUnion:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidTag))
+        var index = 0
+        while index < self.declarations.len():
+            self.account_work(1)?
+            val old = self.declarations[index]
+            if self.rows[old].scalars[0] == self.rows[node].scalars[0]:
+                if old != node or previous_revision == nil or previous_revision.unwrap() != self.declaration_revisions[index]:
+                    return Err(self.reject(MirLoopShapeErrorV1.Duplicate))
+                if self.rows[node].revision <= self.declaration_revisions[index]: return Err(self.reject(MirLoopShapeErrorV1.StaleRevision))
+                self.declaration_revisions[index] = self.rows[node].revision
+                return Ok(())
+            index = index + 1
+        if previous_revision != nil: return Err(self.reject(MirLoopShapeErrorV1.StaleRevision))
+        self.cells(2 * (self.declarations.len() + 1))?
+        self.declarations.push(node)
+        self.declaration_revisions.push(self.rows[node].revision)
+        Ok(())
+
+    pub me publish_aggregate_site(node: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.constructing()?
+        if not self.valid_node(node) or not self.rows[node].finished or self.rows[node].tag != MirLoopShapeTagV1.AggregateSite:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        self.cells(self.aggregates.len() + 1)?
+        self.aggregates.push(node)
+        Ok(())
+
+    pub me publish_external_layout(node: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.constructing()?
+        if not self.valid_node(node) or not self.rows[node].finished or self.rows[node].tag != MirLoopShapeTagV1.ExternalLayout:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        self.cells(self.layouts.len() + 1)?
+        self.layouts.push(node)
+        Ok(())
+
+    pub me publish_enum_declaration_identity(node: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.constructing()?
+        if not self.valid_node(node) or not self.rows[node].finished or self.rows[node].tag != MirLoopShapeTagV1.EnumDeclarationIdentity:
+            return Err(self.reject(MirLoopShapeErrorV1.InvalidCursor))
+        var index = 0
+        while index < self.enum_declarations.len():
+            self.account_work(1)?
+            if self.rows[self.enum_declarations[index]].scalars[0] == self.rows[node].scalars[0]:
+                return Err(self.reject(MirLoopShapeErrorV1.Duplicate))
+            index = index + 1
+        self.cells(self.enum_declarations.len() + 1)?
+        self.enum_declarations.push(node)
+        Ok(())
+
+    pub me remap_nominal(source_symbol: i64, canonical_symbol: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.constructing()?
+        if source_symbol < 0 or canonical_symbol < 0: return Err(self.reject(MirLoopShapeErrorV1.InvalidField))
+        var index = 0
+        while index < self.remap_from.len():
+            self.account_work(1)?
+            if self.remap_from[index] == source_symbol:
+                if self.remap_to[index] == canonical_symbol: return Ok(())
+                return Err(self.reject(MirLoopShapeErrorV1.Duplicate))
+            index = index + 1
+        self.cells(2 * (self.remap_from.len() + 1))?
+        self.remap_from.push(source_symbol)
+        self.remap_to.push(canonical_symbol)
+        Ok(())
+
+    fn canonical_symbol(source_symbol: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        if self.state == 2: return Err(self.error)
+        if self.state == 3 or self.account_.is_closed(): return Err(MirLoopShapeErrorV1.InvalidState)
+        var value = source_symbol
+        var depth = 0
+        while depth <= self.remap_from.len():
+            var found = false
+            var index = 0
+            while index < self.remap_from.len():
+                self.account_work(1)?
+                if self.remap_from[index] == value and self.remap_to[index] != value:
+                    value = self.remap_to[index]
+                    found = true
+                    break
+                index = index + 1
+            if not found: return Ok(value)
+            depth = depth + 1
+        return Err(MirLoopShapeErrorV1.InvalidField)
+
+    me validate_acyclic() -> Result<(), MirLoopShapeErrorV1>:
+        # Scalar DFS, each row/edge visited once; prefix growth charged before push.
+        var colors: [i64] = []
+        var index = 0
+        while index < self.rows.len():
+            self.cells(colors.len() + 1)?
+            colors.push(0)
+            index = index + 1
+        var nodes: [i64] = []
+        var cursors: [i64] = []
+        index = 0
+        while index < self.rows.len():
+            self.account_work(1)?
+            if colors[index] == 0:
+                self.cells(2)?
+                nodes.push(index)
+                cursors.push(0)
+                colors[index] = 1
+                while nodes.len() > 0:
+                    self.account_work(1)?
+                    val top = nodes.len() - 1
+                    val node = nodes[top]
+                    val cursor = cursors[top]
+                    if cursor >= self.rows[node].children.len():
+                        colors[node] = 2
+                        val _ = nodes.pop()
+                        val _ = cursors.pop()
+                    else:
+                        cursors[top] = cursor + 1
+                        val child = self.rows[node].children[cursor]
+                        if child >= 0:
+                            if not self.valid_node(child) or colors[child] == 1:
+                                self.fail(MirLoopShapeErrorV1.InvalidField)
+                                return Err(MirLoopShapeErrorV1.InvalidField)
+                            if colors[child] == 0:
+                                if nodes.len() >= self.account_.limits().max_depth:
+                                    self.fail(MirLoopShapeErrorV1.Capacity)
+                                    return Err(MirLoopShapeErrorV1.Capacity)
+                                self.cells(2 * (nodes.len() + 1))?
+                                nodes.push(child)
+                                cursors.push(0)
+                                colors[child] = 1
+            index = index + 1
+        Ok(())
+
+    pub me seal() -> Result<MirLoopSealedViewV1, MirLoopShapeErrorV1>:
+        self.constructing()?
+        if self.namespace < 0 or self.pending_texts != 0: return Err(self.reject(MirLoopShapeErrorV1.Incomplete))
+        var index = 0
+        while index < self.rows.len():
+            self.account_work(1)?
+            if not self.rows[index].finished: return Err(self.reject(MirLoopShapeErrorV1.Incomplete))
+            index = index + 1
+        index = 0
+        while index < self.functions.len():
+            self.account_work(1)?
+            if self.rows[self.functions[index]].revision != self.function_revisions[index]: return Err(self.reject(MirLoopShapeErrorV1.StaleRevision))
+            index = index + 1
+        index = 0
+        while index < self.declarations.len():
+            self.account_work(1)?
+            if self.rows[self.declarations[index]].revision != self.declaration_revisions[index]: return Err(self.reject(MirLoopShapeErrorV1.StaleRevision))
+            index = index + 1
+        index = 0
+        while index < self.remap_from.len():
+            match self.canonical_symbol(self.remap_from[index]):
+                case Err(error): return Err(self.reject(error))
+                case Ok(_): ()
+            index = index + 1
+        self.validate_acyclic()?
+        self.cells(3)?
+        self.state = 1
+        Ok(MirLoopSealedViewV1(reader_: MirLoopReadViewV1(owner: self, phase: 1)))
+
+    pub me close():
+        self.state = 3
+        self.account_.close()
+
+pub class MirLoopNodeWriterV1:
+    owner: MirLoopShapeOwnerV1
+    node: i64
+    version: i64
+    consumed: bool
+
+    pub fn cursor() -> i64: self.node
+    pub fn revision() -> i64: self.version
+    pub me real(value: f64) -> Result<(), MirLoopShapeErrorV1>:
+        if self.consumed: return Err(self.owner.reject(MirLoopShapeErrorV1.StaleRevision))
+        self.owner.put_real(self.node, self.version, value)
+
+    pub me scalar(ordinal: i64, value: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if self.consumed: return Err(self.owner.reject(MirLoopShapeErrorV1.InvalidState))
+        self.owner.put_scalar(self.node, self.version, ordinal, value)
+    pub me text_id(ordinal: i64, value: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if self.consumed: return Err(self.owner.reject(MirLoopShapeErrorV1.InvalidState))
+        self.owner.put_text(self.node, self.version, ordinal, value)
+    pub me child(node: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if self.consumed: return Err(self.owner.reject(MirLoopShapeErrorV1.InvalidState))
+        self.owner.put_child(self.node, self.version, node)
+    pub me span(node: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if self.consumed: return Err(self.owner.reject(MirLoopShapeErrorV1.InvalidState))
+        self.owner.put_span(self.node, self.version, node)
+    pub me finish() -> Result<i64, MirLoopShapeErrorV1>:
+        if self.consumed: return Err(self.owner.reject(MirLoopShapeErrorV1.InvalidState))
+        self.consumed = true
+        self.owner.finish_node(self.node, self.version)
+
+pub class MirLoopTextPermitV1:
+    owner: MirLoopShapeOwnerV1
+    expected: i64
+    consumed: bool
+
+    pub me publish(value: text) -> Result<i64, MirLoopShapeErrorV1>:
+        if self.consumed:
+            return Err(self.owner.reject(MirLoopShapeErrorV1.Duplicate))
+        self.consumed = true
+        self.owner.finish_text(self.expected, value)
+
+pub class MirLoopReadViewV1:
+    owner: MirLoopShapeOwnerV1
+    phase: i64
+
+    fn ready() -> Result<(), MirLoopShapeErrorV1>:
+        if self.owner.state != self.phase or self.owner.account_.is_closed(): return Err(MirLoopShapeErrorV1.InvalidState)
+        self.owner.account_work(1)
+    fn checked(node: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.ready()?
+        if not self.owner.valid_node(node): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        Ok(())
+    pub fn finished(node: i64) -> Result<bool, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        Ok(self.owner.rows[node].finished)
+    pub fn account() -> MirLoopResourceAccountV1: self.owner.account_
+    pub me close(): self.owner.close()
+    pub fn namespace_text_id() -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        Ok(self.owner.namespace)
+    pub fn real(node: i64) -> Result<f64, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        if self.owner.rows[node].tag != MirLoopShapeTagV1.ConstFloat or not self.owner.rows[node].has_real:
+            return Err(MirLoopShapeErrorV1.InvalidField)
+        Ok(self.owner.rows[node].real_value)
+
+    pub fn tag(node: i64) -> Result<MirLoopShapeTagV1, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        Ok(self.owner.rows[node].tag)
+    pub fn revision(node: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        Ok(self.owner.rows[node].revision)
+    pub fn scalar_count(node: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        Ok(self.owner.rows[node].scalars.len())
+    pub fn scalar(node: i64, ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        if ordinal < 0 or ordinal >= self.owner.rows[node].scalars.len(): return Err(MirLoopShapeErrorV1.InvalidField)
+        if not self.owner.rows[node].present[ordinal]: return Err(MirLoopShapeErrorV1.Incomplete)
+        Ok(self.owner.rows[node].scalars[ordinal])
+    pub fn text_count(node: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        Ok(self.owner.rows[node].texts.len())
+    pub fn text_id(node: i64, ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        if ordinal < 0 or ordinal >= self.owner.rows[node].texts.len(): return Err(MirLoopShapeErrorV1.InvalidField)
+        if not self.owner.rows[node].text_present[ordinal]: return Err(MirLoopShapeErrorV1.Incomplete)
+        Ok(self.owner.rows[node].texts[ordinal])
+    pub fn child_count(node: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        Ok(self.owner.rows[node].children.len())
+    pub fn child(node: i64, ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        if ordinal < 0 or ordinal >= self.owner.rows[node].children.len(): return Err(MirLoopShapeErrorV1.InvalidField)
+        Ok(self.owner.rows[node].children[ordinal])
+    pub fn span(node: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.checked(node)?
+        Ok(self.owner.rows[node].span)
+    pub fn text_length(identity: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        if not self.owner.valid_text(identity): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        Ok(self.owner.texts[identity].value.len())
+    pub fn text_byte(identity: i64, offset: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        if not self.owner.valid_text(identity): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        if offset < 0 or offset >= self.owner.texts[identity].value.len(): return Err(MirLoopShapeErrorV1.InvalidField)
+        Ok(self.owner.texts[identity].value.byte_at(offset).to_i64())
+    pub fn function_count() -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        Ok(self.owner.functions.len())
+    pub fn function_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        if ordinal < 0 or ordinal >= self.owner.functions.len(): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        Ok(self.owner.functions[ordinal])
+    pub fn declaration_count() -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        Ok(self.owner.declarations.len())
+    pub fn declaration_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        if ordinal < 0 or ordinal >= self.owner.declarations.len(): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        Ok(self.owner.declarations[ordinal])
+    pub fn aggregate_site_count() -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        Ok(self.owner.aggregates.len())
+    pub fn aggregate_site_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        if ordinal < 0 or ordinal >= self.owner.aggregates.len(): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        Ok(self.owner.aggregates[ordinal])
+    pub fn external_layout_count() -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        Ok(self.owner.layouts.len())
+    pub fn external_layout_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        if ordinal < 0 or ordinal >= self.owner.layouts.len(): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        Ok(self.owner.layouts[ordinal])
+
+    pub fn enum_declaration_count() -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        Ok(self.owner.enum_declarations.len())
+    pub fn enum_declaration_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        if ordinal < 0 or ordinal >= self.owner.enum_declarations.len(): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        Ok(self.owner.enum_declarations[ordinal])
+
+    pub fn canonical_nominal(source_symbol: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.ready()?
+        self.owner.canonical_symbol(source_symbol)
+
+pub class MirLoopSealedViewV1:
+    reader_: MirLoopReadViewV1
+
+    pub fn read() -> Result<MirLoopReadViewV1, MirLoopShapeErrorV1>:
+        self.reader_.ready()?
+        Ok(self.reader_)
+    pub fn finished(node: i64) -> Result<bool, MirLoopShapeErrorV1>: self.reader_.finished(node)
+    pub fn account() -> MirLoopResourceAccountV1: self.reader_.account()
+    pub me close(): self.reader_.close()
+    pub fn namespace_text_id() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.namespace_text_id()
+    pub fn real(node: i64) -> Result<f64, MirLoopShapeErrorV1>: self.reader_.real(node)
+    pub fn tag(node: i64) -> Result<MirLoopShapeTagV1, MirLoopShapeErrorV1>: self.reader_.tag(node)
+    pub fn revision(node: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.revision(node)
+    pub fn scalar_count(node: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.scalar_count(node)
+    pub fn scalar(node: i64, ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.scalar(node, ordinal)
+    pub fn text_count(node: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.text_count(node)
+    pub fn text_id(node: i64, ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.text_id(node, ordinal)
+    pub fn child_count(node: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.child_count(node)
+    pub fn child(node: i64, ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.child(node, ordinal)
+    pub fn span(node: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.span(node)
+    pub fn text_length(identity: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.text_length(identity)
+    pub fn text_byte(identity: i64, offset: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.text_byte(identity, offset)
+    pub fn function_count() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.function_count()
+    pub fn function_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.function_at(ordinal)
+    pub fn declaration_count() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.declaration_count()
+    pub fn declaration_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.declaration_at(ordinal)
+    pub fn aggregate_site_count() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.aggregate_site_count()
+    pub fn aggregate_site_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.aggregate_site_at(ordinal)
+    pub fn external_layout_count() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.external_layout_count()
+    pub fn external_layout_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.external_layout_at(ordinal)
+    pub fn enum_declaration_count() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.enum_declaration_count()
+    pub fn enum_declaration_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.enum_declaration_at(ordinal)
+    pub fn canonical_nominal(source_symbol: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.canonical_nominal(source_symbol)
+
+    pub fn reserve_text_export(identity: i64) -> Result<MirLoopTextExportPermitV1, MirLoopShapeErrorV1>:
+        val length = self.reader_.text_length(identity)?
+        # Stored field projection -> Ok payload -> return -> unwrap -> caller binding.
+        # Reserve all five text transports before exposing the first rich value.
+        val bytes = length + length + length + length + length
+        match self.reader_.account().reserve(bytes + 3, state_fields: 3, output_bytes: bytes):
+            case Err(_): return Err(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): ()
+        Ok(MirLoopTextExportPermitV1(reader: self.reader_, identity: identity, consumed: false))
+
+pub class MirLoopConstructionViewV1:
+    reader_: MirLoopReadViewV1
+
+    pub fn read() -> Result<MirLoopReadViewV1, MirLoopShapeErrorV1>:
+        self.reader_.ready()?
+        Ok(self.reader_)
+    pub fn finished(node: i64) -> Result<bool, MirLoopShapeErrorV1>: self.reader_.finished(node)
+    pub fn account() -> MirLoopResourceAccountV1: self.reader_.account()
+    pub me close(): self.reader_.close()
+    pub fn namespace_text_id() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.namespace_text_id()
+    pub fn real(node: i64) -> Result<f64, MirLoopShapeErrorV1>: self.reader_.real(node)
+    pub fn tag(node: i64) -> Result<MirLoopShapeTagV1, MirLoopShapeErrorV1>: self.reader_.tag(node)
+    pub fn revision(node: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.revision(node)
+    pub fn scalar_count(node: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.scalar_count(node)
+    pub fn scalar(node: i64, ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.scalar(node, ordinal)
+    pub fn text_count(node: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.text_count(node)
+    pub fn text_id(node: i64, ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.text_id(node, ordinal)
+    pub fn child_count(node: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.child_count(node)
+    pub fn child(node: i64, ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.child(node, ordinal)
+    pub fn span(node: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.span(node)
+    pub fn text_length(identity: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.text_length(identity)
+    pub fn text_byte(identity: i64, offset: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.text_byte(identity, offset)
+    pub fn function_count() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.function_count()
+    pub fn function_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.function_at(ordinal)
+    pub fn declaration_count() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.declaration_count()
+    pub fn declaration_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.declaration_at(ordinal)
+    pub fn aggregate_site_count() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.aggregate_site_count()
+    pub fn aggregate_site_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.aggregate_site_at(ordinal)
+    pub fn external_layout_count() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.external_layout_count()
+    pub fn external_layout_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.external_layout_at(ordinal)
+    pub fn enum_declaration_count() -> Result<i64, MirLoopShapeErrorV1>: self.reader_.enum_declaration_count()
+    pub fn enum_declaration_at(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.enum_declaration_at(ordinal)
+    pub fn canonical_nominal(source_symbol: i64) -> Result<i64, MirLoopShapeErrorV1>: self.reader_.canonical_nominal(source_symbol)
+
+pub class MirLoopTextExportPermitV1:
+    reader: MirLoopReadViewV1
+    identity: i64
+    consumed: bool
+
+    pub me copy_text() -> Result<text, MirLoopShapeErrorV1>:
+        if self.consumed: return Err(MirLoopShapeErrorV1.InvalidState)
+        self.consumed = true
+        self.reader.ready()?
+        if self.reader.phase != 1: return Err(MirLoopShapeErrorV1.InvalidState)
+        return Ok(self.reader.owner.texts[self.identity].value)
+
+export MirLoopTextExportPermitV1, MirLoopReadViewV1, MirLoopShapeOwnerV1, MirLoopNodeWriterV1, MirLoopTextPermitV1, MirLoopSealedViewV1, MirLoopConstructionViewV1

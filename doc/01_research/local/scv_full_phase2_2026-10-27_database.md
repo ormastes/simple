@@ -1,0 +1,44 @@
+> Retained smaller-model audit, reviewed as input to the integrated plan. Current refresh: `d8ead19f9ff8820d1acfe7e2a9b01e59827bc465`. Earlier `71e996` findings/missing-plan notes below are historical and superseded by the refresh. No runtime tests executed.
+
+# SCV database audit — lane B (Astra guidance)
+
+**Revision:** `71e9962598fc2143cff94a3524faee04a44feef2` (`/tmp/simple-scv-phase2-plan-design-20261027`). Read-only; no tests run.
+
+## Scope and plan linkage
+
+The requested `doc/03_plan/app/tools/scv_sdn_solver_gateway_master_plan_2026-10-26.md` is absent from this worktree (exact path lookup failed; bounded `rg --files doc | rg 'scv.*(master|solver|gateway)|solver.*scv'` found no substitute). Therefore sections 9–13,21 and their SCVN D/V/I/P labels could not be inspected or mapped reliably. This is a source audit only; do not treat the observations below as a substitute for those planned task IDs.
+
+## Source findings
+
+- **Identity map is real, pure candidate logic:** `src/lib/scv/distributed_identity.spl:9-21,83-100` defines validated `EntityUid`, `SettledAlias`, and exclusive provisional/settled `EntityRef`. `src/lib/scv/distributed_identity_map.spl:1-3,92-144` implements per-kind high-water allocation, idempotent/tombstoned UID handling, and reverse lookup. Its header explicitly says settlement owner must persist returned state atomically and this module has no authority, I/O, or durability proof.
+- **Reducer/schema are existing primitives:** `src/lib/scv/db_patch.spl:41-60` has Create/Update/Tombstone/set/append operations, but no `ColumnUid` operation/type surfaced in bounded `src/lib/scv` searches. `src/lib/scv/db_schema.spl:4-11` has kind/key/unique/reference constraints; `src/lib/scv/db_reducer.spl:15-69,155-194,196-250,278-414` has text-named field merge rules, conflict checks, and pure local reduction / planning. This is not evidence of typed schema alteration or authoritative database settlement.
+- **Allocation planning exists and is distinct from persistence:** `src/lib/scv/db_allocation.spl:1-3,10-13,16-68,77-100` authenticates/plans, advances a candidate `IdentityMap`, tombstones removed identities, and projects settled aliases into rows/references. It returns a `DbAllocationPlan`; no storage operation occurs there.
+- **An actual settlement owner consumes the candidate:** `src/app/scv/db/settlement_resume_local.spl:95-123` reads the canonical remote snapshot, calls `db_plan_allocation`, serializes proposed semantic state plus identities, and prepares candidate Git files. Lines 134 onward create/sign a settlement receipt and verify objects; publication/index observation happens in later coordinator transitions. This is operational code evidence, but source presence alone does not prove it ran successfully. Separately, `src/lib/scv/db_paged_txn.spl:188-205` returns a Merkle page `DbPagedCommitPlan`; planning is not itself publication.
+
+## Evidence status
+
+- **Source:** observations above are from the checked-out revision.
+- **Unit/integration:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl:66-105` has concrete pure identity-map assertions for tombstone/high-water/replay/foreign namespace. These are prerequisite assertions, explicitly not durable REQ-004 proof.
+- **Operational/system acceptance:** the same spec defines `check_replica_contract` and `check_settlement_contract` as unconditional `fail("UNIMPLEMENTED ...")` at lines 111-116; REQ-004 and settlement acceptance/boundary/fault-injection cases call them at lines 234-248 and 254-291. Those cases are placeholders, not passing evidence. Existing tests were **not run**; no test results were reported or independently verified.
+
+## Astra review cue
+
+Keep existing pure identity map, reducer, and allocation candidate logic as reusable implementation. Treat typed `ColumnUid` schema operations and real authoritative settlement as separate planned work until plan sections/task labels and executable non-placeholder evidence are supplied. D/V/I/P mapping remains unresolved because the source plan is missing.
+
+## Refresh at `d8ead19f9ff8820d1acfe7e2a9b01e59827bc465`
+
+**Refresh procedure:** compared only the initially audited database source set (`distributed_identity*`, `db_patch*`, `db_reducer*`, `db_schema*`, `db_allocation*`, `db_admission*`, `db_conflict*`), plus `db_paged_txn.spl`, `src/app/scv/db/settlement_resume_local.spl`, and the SCV feature SSpec, from baseline `71e9962598fc2143cff94a3524faee04a44feef2` to this revision. `git diff --stat` and `--name-only` for those explicit paths were empty: **no audited-file deltas**. Existing source observations and test placeholders therefore remain applicable. The consolidated plan now exists; its §21.1 explicitly says all 65 proposed task rows are unmarked/uncompleted, and requires source, unit, integration, and operational evidence to remain distinct.
+
+### SCVN task mapping (plan §21, P/D/V/I workstream tables; design §§9–13)
+
+- **P01–P05 (plan §21, provider-host workstream):** Current typed merge/admission/conflict pieces are reusable inputs, not a provider-host completion. `db_patch`/`db_reducer`/`db_admission` supply pure operations, preview and signature/scope planning; conflict model/catalog/resolution code exists (`src/lib/scv/db_conflict_model.spl:7-38`, `db_conflict_catalog.spl:10-73`, `db_conflict_resolution.spl:10-57`). No evidence in audited paths of the new parser/model/solver/validator/publisher host (P01), sandbox/ABI/provider lifecycle (P02), deterministic routing/composition/cache (P03), independent check manifests (P04), or context-guarded reuse acceptance (P05). Existing conflict record/catalog is not proof of full P05 persistence/reuse.
+- **D01–D04 (plan §21, database-schema workstream; §9):** Not present in audited database types: operations remain row/value edits with text field names (`db_patch.spl:27-49`); schema holds field merge rules and kind/key/unique/reference constraints (`db_reducer.spl:15-35`, `db_schema.spl:4-11`). Bounded `src/lib/scv` search found no `ColumnUid`, `TableUid`, `CreateTable`, `AddColumn`, `RenameColumn`, `DropColumn`, typed migration operation, or schema SDN binding API. Thus existing reducer/schema constraints do not establish D01–D04. §9 explicitly says not to pretend current `AddColumn` exists.
+- **V01–V05 (plan §21, database-values workstream; §§10,13):** V01 has source prerequisites (typed reducer, admission gate, conflict values); but not their new host adapter. Row field rules already cover scalar conflicts, list conflicts, sets and authority wins; observed/causal sets are typed (`db_reducer.spl:15-22`, `db_patch.spl:5-25`). No counter operation appears in `DbOperation`, and `DbValue` has `Absent` but no explicit `Null`/`Tombstoned` value tag: V02 remains broader than current operations. Reducer/paged paths validate references/unique constraints, but this audit found no basis to mark incremental transaction-predicate/write-skew closure, combined source+schema+data envelope, or frontier-aware replica retirement (V03–V05) complete.
+- **I01–I04 (plan §21, identity/settlement workstream; §11):** Existing `ActorIncarnation`/`EntityUid` validation and actor-reservation flows partially support I01 (`distributed_identity.spl:6-13,78-92`; operational caller tests at SSpec lines 130–160). `identity_map_allocate` plus `db_plan_allocation` implement pure candidate identity allocation and typed settled projections (I02 foundation), and `settlement_resume_local` consumes it to create signed candidate files/receipt (lines 95–135). This path is explicitly a local bare-remote coordinator; header says no production authority grant/remote deployment admission (`settlement_resume_local.spl:1-2`). Candidate preparation/receipt construction is not by itself I03's acknowledged settlement: acceptance requires deployment authority plus accepted-ref read-back; coordinator source includes later publish/reconcile/read-back states, but no execution result was run or supplied here. Sparse/offline completeness and frontier retirement in I04/V05 are not established by the audited pure map assertions.
+
+### Evidence classification after refresh
+
+- **Source evidence:** unchanged between audited revisions; cited code and caller existence only.
+- **Unit evidence:** unchanged SSpec pure identity tests at lines 66–105 exercise allocation, tombstone, replay, and namespace rejection only.
+- **Integration evidence:** the feature SSpec contains calls into application owners elsewhere, but this read-only audit did not execute them. REQ-004/durable settlement rows still invoke unconditional `fail("UNIMPLEMENTED...")` helpers at lines 111–116 and cases at 234–291.
+- **Operational evidence / reported results:** none supplied or generated by this audit. Tests were not run. No SCVN task should be marked done from this lane's evidence.

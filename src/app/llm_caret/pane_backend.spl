@@ -15,7 +15,7 @@
 
 use std.nogc_async_mut.sosix.{sosix_platform, sosix_run, sosix_which}
 use os.apps.smux.api.{smux_create_session, smux_list_sessions,
-    smux_list_windows, smux_list_panes, smux_split_pane, smux_focus_pane,
+    smux_list_windows, smux_list_panes, smux_split_pane, smux_focus_pane, smux_toggle_zoom, smux_zoomed_pane,
     smux_focused_pane, smux_close_pane, smux_pane_close_pty, smux_pane_spawn_pty, smux_pane_alive, smux_resize,
     smux_send_text, smux_capture, smux_capture_styled,
     smux_paste_text}
@@ -262,7 +262,7 @@ fn _smux_list(session: text) -> [Pane]:
         if alive.is_ok() and alive.unwrap():
             out = out + [Pane(pane_id: p.id, title: _smux_title(p.id),
                 pid: _smux_pid(p.id), active: p.id == focused_id,
-                zoomed: p.id == _smux_zoomed)]
+                zoomed: p.id == smux_zoomed_pane(scope.session_id, scope.window_id))]
     out
 
 # smux panes carry no title or pid field; the backend remembers both.
@@ -273,7 +273,6 @@ struct SmuxPaneInfo:
     launcher_dir: text
 
 var _smux_info: [SmuxPaneInfo] = []
-var _smux_zoomed: text = ""
 
 fn _smux_title(pane_id: text) -> text:
     for info in _smux_info:
@@ -367,14 +366,8 @@ fn pane_zoom(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
     if not _use_tmux():
-        var known = false
-        for p in _smux_list(session):
-            if p.pane_id == pane_id:
-                known = true
-        if not known:
-            return false
-        _smux_zoomed = if _smux_zoomed == pane_id: "" else: pane_id
-        return true
+        val scope = _smux_scope(session)
+        return smux_toggle_zoom(scope.session_id, scope.window_id, pane_id).is_ok()
     _tmux_ok(pane_zoom_argv(pane_id))
 
 fn pane_kill(session: text, pane_id: text) -> bool:

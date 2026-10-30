@@ -1,0 +1,92 @@
+use std.spec.*
+use app.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io_runtime.{file_write, file_hash_sha256}
+use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_c_gnu_archive_v1}
+
+fn _gnu_archive_run_checked_v1(tool: text, args: [text]) -> text:
+    val (out, err, code) = process_run_timeout(tool, args, 120000)
+    expect(code).to_equal(0)
+    assert code == 0
+    out + "\n" + err
+
+fn _gnu_archive_fixture_v1() -> text:
+    val cc = env_get("CC") ?? ""
+    expect(cc != "").to_equal(true)
+    assert cc != ""
+    val normalized_cc = cc.replace("\\", "/")
+    val parts = normalized_cc.split("/")
+    expect(parts.len() > 1).to_equal(true)
+    assert parts.len() > 1
+    val tool_dir = normalized_cc[0:normalized_cc.len() - parts[parts.len() - 1].len()]
+    val suffix = if normalized_cc.lower().ends_with(".exe"): ".exe" else: ""
+    val ar = tool_dir + "llvm-ar" + suffix
+    val root = secure_temp_dir("build", "gnu-runtime-owner-index").unwrap()
+
+    expect(file_write(root + "/old.c",
+        "extern int missing_compiler_api(void);\nint owned(void) { return missing_compiler_api(); }\n")).to_equal(true)
+    expect(file_write(root + "/kept.c", "int kept(void) { return 11; }\n")).to_equal(true)
+    expect(file_write(root + "/owner.c",
+        "__attribute__((weak)) int owned(void) { return 7; }\n")).to_equal(true)
+    expect(file_write(root + "/main.c",
+        "int owned(void); int main(void) { return owned() == 7 ? 0 : 1; }\n")).to_equal(true)
+
+    val target = ["--target=x86_64-w64-windows-gnu", "-ffunction-sections", "-c"]
+    _gnu_archive_run_checked_v1(cc, target + [root + "/old.c", "-o", root + "/old.o"])
+    _gnu_archive_run_checked_v1(cc, target + [root + "/kept.c", "-o", root + "/kept.o"])
+    _gnu_archive_run_checked_v1(cc, target + [root + "/owner.c", "-o", root + "/owner.o"])
+    _gnu_archive_run_checked_v1(ar, ["rcsD", root + "/source.a", root + "/old.o", root + "/kept.o"])
+    root
+
+describe "GNU runtime-owner archive index rebuilding":
+    it "removes ceded symbols from the real index and accepts only the exact warm projection":
+        val root = _gnu_archive_fixture_v1()
+        val cc = env_get("CC") ?? ""
+        val normalized_cc = cc.replace("\\", "/")
+        val parts = normalized_cc.split("/")
+        val tool_dir = normalized_cc[0:normalized_cc.len() - parts[parts.len() - 1].len()]
+        val suffix = if normalized_cc.lower().ends_with(".exe"): ".exe" else: ""
+        val nm = tool_dir + "llvm-nm" + suffix
+        val target = "x86_64-pc-windows-gnu"
+        val source = root + "/source.a"
+        val owner = root + "/owner.o"
+        val source_hash = file_hash_sha256(source)
+
+        val before_index = _gnu_archive_run_checked_v1(nm, ["--print-armap", source])
+        expect(before_index.contains("owned in ")).to_equal(true)
+        expect(before_index.contains("kept in ")).to_equal(true)
+        val (old_out, old_err, old_code) = process_run_timeout(cc,
+            ["--target=x86_64-w64-windows-gnu", "-fuse-ld=lld", "--rtlib=compiler-rt",
+                "--unwindlib=libunwind", "-Wl,--gc-sections",
+                root + "/main.c", source, owner, "-o", root + "/old-link.exe"], 120000)
+        expect(old_code == 0).to_equal(false)
+        expect(old_out + "\n" + old_err).to_contain("missing_compiler_api")
+
+        val derived = llvm_runtime_owner_c_gnu_archive_v1(source, [owner], root + "/cache", target).unwrap()
+        expect(file_hash_sha256(source)).to_equal(source_hash)
+        val derived_index = _gnu_archive_run_checked_v1(nm, ["--print-armap", derived])
+        expect(derived_index.contains("owned in ")).to_equal(false)
+        expect(derived_index.contains("kept in ")).to_equal(true)
+
+        val (_, _, link_code) = process_run_timeout(cc,
+            ["--target=x86_64-w64-windows-gnu", "-fuse-ld=lld", "--rtlib=compiler-rt",
+                "--unwindlib=libunwind", "-Wl,--gc-sections",
+                root + "/main.c", owner, derived, "-o", root + "/new-link.exe"], 120000)
+        expect(link_code).to_equal(0)
+        val (_, _, run_code) = process_run_timeout(root + "/new-link.exe", [], 30000)
+        expect(run_code).to_equal(0)
+
+        val first_hash = file_hash_sha256(derived)
+        val warm = llvm_runtime_owner_c_gnu_archive_v1(source, [owner], root + "/cache", target).unwrap()
+        expect(warm).to_equal(derived)
+        expect(file_hash_sha256(warm)).to_equal(first_hash)
+
+        expect(file_write(root + "/owner-changed.c",
+            "__attribute__((weak)) int owned(void) { return 8; }\n")).to_equal(true)
+        _gnu_archive_run_checked_v1(cc,
+            ["--target=x86_64-w64-windows-gnu", "-ffunction-sections", "-c",
+                root + "/owner-changed.c", "-o", root + "/owner-changed.o"])
+        val changed = llvm_runtime_owner_c_gnu_archive_v1(source,
+            [root + "/owner-changed.o"], root + "/cache", target).unwrap()
+        expect(changed == derived).to_equal(false)

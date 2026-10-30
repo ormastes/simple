@@ -1,0 +1,65 @@
+"""Bootstrap HIR/MIR regression for declared float return preservation.
+
+Bug: cranelift_float_return_erased_to_i64_2026-10-24. In bootstrap mode the
+definition's declared `-> f64` / `-> f32` was replaced by the builtin i64
+default while the body (and every caller) kept the float, so Cranelift
+rejected `return vN: result 0 has type f64, must match function signature of
+i64`. Twin of bootstrap_declared_bool_return_spec.spl.
+
+Status: written, not executed. The only producer available to the repair
+session (p2shard-10 Stage 2) predates the fix and cannot run it.
+"""
+
+use std.spec.{describe, expect, it, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_definitions.{HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{MirTypeKind}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+fn bootstrap_float_return_preserved(source: text, fn_name: text, want_f32: bool) -> bool:
+    """True when lowering is clean and both the HIR return and the MIR
+    signature return carry the declared float width. Single-bool result on
+    purpose: tuple returns are unreliable on some lanes (fn_tuple_returns)."""
+    val prior_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP")
+    rt_env_set("SIMPLE_BOOTSTRAP", "1")
+    val parsed = parse_full_frontend(source, "{fn_name}.spl", fn_name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("{fn_name}.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var ok = false
+    for function_ in hir.functions.values():
+        if function_.name == fn_name:
+            var hir_float = false
+            match function_.return_type.kind:
+                case HirTypeKind.Float(_): hir_float = true
+                case _: hir_float = false
+            var mir_lowering = MirLowering.new(hir.symbols)
+            val mir_function = mir_lowering.lower_function(function_)
+            val want_kind = if want_f32: MirTypeKind.F32 else: MirTypeKind.F64
+            val mir_float = mir_function.signature.return_type.kind == want_kind
+            ok = hir_float and mir_float and mir_lowering.errors.len() == 0 and hir_lowering.errors.len() == 0
+    if val prior_value = prior_bootstrap:
+        rt_env_set("SIMPLE_BOOTSTRAP", prior_value)
+    else:
+        rt_env_remove("SIMPLE_BOOTSTRAP")
+    ok
+
+describe "bootstrap declared float return type":
+    it "preserves a declared f64 from HIR through the MIR function signature":
+        step("Lower `fn fr_lerp(a: f64, b: f64, t: f64) -> f64` in bootstrap mode")
+        val ok = bootstrap_float_return_preserved(
+            "fn fr_lerp(a: f64, b: f64, t: f64) -> f64:\n    a + t * (b - a)\n", "fr_lerp", false)
+        step("Require F64 at both lowering boundaries")
+        expect(ok).to_equal(true)
+
+    it "preserves a declared f64 when the body is a literal and params are i64":
+        expect(bootstrap_float_return_preserved("fn fr_lit(x: i64) -> f64:\n    1.5\n", "fr_lit", false)).to_equal(true)
+
+    it "preserves a declared f32":
+        expect(bootstrap_float_return_preserved("fn fr_half(x: f32) -> f32:\n    x\n", "fr_half", true)).to_equal(true)

@@ -266,6 +266,11 @@ bool     rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len);
 bool     rt_dir_remove_all_cpath(const char* path);
 int64_t  rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
                             const uint8_t* prefix_ptr, uint64_t prefix_len);
+/* Split ABI: each setter accepts ONE boxed text value; make consumes both
+ * thread-local slots and returns boxed text (empty text on refusal). */
+int64_t  rt_secure_temp_dir_set_parent(int64_t parent_value);
+int64_t  rt_secure_temp_dir_set_prefix(int64_t prefix_value);
+int64_t  rt_secure_temp_dir_make(void);
 /* 1=published, 0=destination exists, -1=operational failure. */
 int64_t  rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len,
                                    const uint8_t* destination_ptr, uint64_t destination_len);
@@ -491,6 +496,35 @@ int8_t rt_transient_heap_promote(int64_t value);
  * whether a window was open. Promotion results are identical either way. */
 int8_t rt_transient_heap_promote_share_begin(void);
 int8_t rt_transient_heap_promote_share_end(void);
+/* Object-graph refcount (Build Session Memory Model v1 section 4, P4). An
+ * object is owned by exactly one of {transient scope, session, rc root,
+ * process (tag 0, rc 0)}; a sub-object shared by two rc roots must itself be an
+ * rc root retained by each parent. share: rc = 1 and the owned graph leaves
+ * scopes (idempotent; 0 for non-heap or, with SIMPLE_RC_CYCLE_CHECK=1, a
+ * cyclic graph). release at 0 frees the owned graph and releases rc-root
+ * children. count: -1 when not an rc root. graph_bytes: owned-graph bytes,
+ * rc-root children excluded; -1 on an invalid root. */
+int8_t rt_rc_share(int64_t value);
+int8_t rt_rc_retain(int64_t value);
+int8_t rt_rc_release(int64_t value);
+int64_t rt_rc_count(int64_t value);
+int64_t rt_heap_graph_bytes(int64_t value);
+/* Build session heap (BSM T1, doc/05_design/compiler/memory/
+ * build_session_memory_model_v1.md §4). One live session per thread; begin
+ * returns its id (0 on failure / while a module scope is active), end frees
+ * every object still tagged with it in one sweep (refused while a module scope
+ * is active or for a non-live id). alloc_begin/end are depth-counted: inside,
+ * new objects belong to the session even in a running module scope. adopt
+ * retags the ACTIVE paused module scope's part of v's graph to the session,
+ * pruning at any node with another tag. While a session is live, promote
+ * retags module nodes to the session (full walk) instead of making them
+ * permanent. */
+uint32_t rt_session_heap_begin(void);
+int8_t   rt_session_heap_end(uint32_t session);
+int8_t   rt_session_alloc_begin(void);
+int8_t   rt_session_alloc_end(void);
+int8_t   rt_transient_heap_adopt(int64_t value);
+uint32_t rt_session_heap_id(void);
 /* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
  * registry; an alternate rt_alloc provider must register through this API. */
 int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);
@@ -527,6 +561,10 @@ int64_t  rt_string_free(int64_t value);
 int64_t  rt_string_new_literal(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
+/* min(available physical, pagefile) bytes for admission; 0 if unavailable. */
+int64_t rt_host_memory_headroom_bytes_v1(void);
+/* Caller-available disk bytes for a boxed UTF-8 path; 0 if unavailable. */
+int64_t rt_host_disk_headroom_bytes_v1(int64_t path);
 const char* rt_interp_cstr(int64_t value);
 int64_t  rt_string_bytes(int64_t string);
 int64_t  rt_string_chars(int64_t string);
@@ -622,6 +660,7 @@ double    rt_random_random(void);
 SplArray* rt_bytes_alloc(int64_t len);
 int64_t  rt_tls13_sha256(int64_t data);
 int64_t  rt_sha512_digest(int64_t data);
+int64_t  rt_pbkdf2_hmac_sha512(int64_t password, int64_t salt, int64_t iterations, int64_t dk_len);
 int64_t  rt_sha384_digest(int64_t data);
 int64_t  rt_array_len(SplArray* array);
 int64_t  rt_array_len_safe(int64_t value);
@@ -966,9 +1005,16 @@ void     rt_gui_end_session(void);
  * receiver or an out-of-range index; a negative index is out of range here,
  * it does NOT count from the end. */
 int64_t  rt_array_remove(int64_t array_value, int64_t index);
+int8_t   rt_array_insert(int64_t array_value, int64_t index, int64_t value);
 /* Tagged array index or dictionary key; returns the removed element/value. */
 int64_t  rt_collection_remove(int64_t receiver, int64_t key);
 int64_t  rt_dict_new(int64_t cap_hint);
+/* Borrowed scope Dict<text, nonnegative i64>; scalar errors are -1. */
+int64_t rt_dict_scope_read_bound_v1(void);
+int64_t rt_dict_scope_read_owner_v1(int64_t dict, int64_t fuel);
+int64_t rt_dict_scope_read_epoch_v1(int64_t dict, int64_t owner, int64_t fuel);
+int64_t rt_dict_scope_read_meta_v1(int64_t dict, int64_t owner, int64_t epoch, int64_t field, int64_t fuel);
+int64_t rt_dict_scope_read_slot_v1(int64_t dict, int64_t owner, int64_t epoch, int64_t slot, int64_t field, int64_t byte_index, int64_t fuel);
 int64_t  rt_dict_get(int64_t dict, int64_t key);
 int8_t   rt_dict_set(int64_t dict, int64_t key, int64_t value);
 int8_t   rt_dict_contains(int64_t dict, int64_t key);
@@ -1095,6 +1141,9 @@ typedef struct RtOwnedProcessCancelReceipt {
 /* Async identity-owned process lease.  The random token is authority; the
  * diagnostic PID fields returned after start/termination are not. */
 #define RT_OWNED_PROCESS_ASYNC_VERSION 2
+/* UCRT has no ESTALE. Windows lease receipts use this stable stale-authority
+ * error value; it is independent of native GetLastError values. */
+#define RT_OWNED_PROCESS_WINDOWS_STALE_ERROR 116
 #define RT_OWNED_PROCESS_INPUT_VERSION 3
 #define RT_OWNED_PROCESS_OPAQUE_V3_VERSION 1
 #define RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION 1
@@ -1243,6 +1292,9 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
 
 /* ===== Process Async ===== */
 
+/* Darwin async children inherit only open, non-CLOEXEC stdin/out/err.
+ * Descriptors above stderr are closed; this API has no extra-fd handoff.
+ * Other platforms retain their existing descriptor inheritance policy. */
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
 #ifdef _WIN32
 /* Core-C PID/handle ownership shared with rt_process_wait. */
@@ -1344,6 +1396,14 @@ int       rt_process_owned_v3_release_value(int64_t handle);
  * executable and cwd handles are opaque, separately supplied capabilities and
  * must match the canonical binding. Every operation result is
  * [stdout_bytes, stderr_bytes, binding_digest, receipt_words]. */
+/* Cooperative Darwin snapshots use a separate ABI and never advertise V4. */
+SplArray* rt_sosix_darwin_snapshot_v1_capabilities_value(void);
+SplArray* rt_sosix_darwin_snapshot_v1_start_value(int64_t profile, SplArray* invocation, SplArray* environment, SplArray* limits);
+SplArray* rt_sosix_darwin_bound_image_v1_start_value(int64_t expected_sha256, SplArray* invocation, SplArray* environment, SplArray* limits);
+SplArray* rt_sosix_darwin_snapshot_v1_poll_value(int64_t handle, int64_t wait_ns);
+SplArray* rt_sosix_darwin_snapshot_v1_cancel_value(int64_t handle);
+SplArray* rt_sosix_darwin_snapshot_v1_output_value(int64_t handle, int64_t stream);
+int64_t rt_sosix_darwin_snapshot_v1_ack_value(int64_t handle);
 SplArray* rt_process_observation_v4_capabilities_value(void);
 int64_t   rt_process_observation_v4_pin_cwd_value(const char* path_data,
                                                    uint64_t path_len);
@@ -1481,8 +1541,13 @@ char*    spl_strdup(const char* s);
 
 /* ===== Atomic Handles ===== */
 
-/* CPU parallel raw-pointer atomics: valid aligned i64 storage, SeqCst,
- * previous-value returns (also on compare-exchange failure). */
+/* CPU parallel raw-pointer atomics: valid aligned i64 storage and SeqCst.
+ * RMW operations return the previous value (also on failed compare-exchange);
+ * load returns the observed scalar value. */
+/* Capability query accepts a live caller-owned atomic i64 cell. Returns 1
+ * only when the target's raw 8-byte cell layout is supported lock-free. */
+int64_t  rt_par_atomic_i64_is_lock_free(int64_t* ptr);
+int64_t  rt_par_atomic_load_i64(int64_t* ptr);
 int64_t  rt_par_atomic_add_i64(int64_t* ptr, int64_t value);
 int64_t  rt_par_atomic_sub_i64(int64_t* ptr, int64_t value);
 int64_t  rt_par_atomic_xchg_i64(int64_t* ptr, int64_t value);

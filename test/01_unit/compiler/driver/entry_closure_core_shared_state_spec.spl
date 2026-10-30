@@ -1,0 +1,54 @@
+# Both public owners must share the one source-scan cache and resolver behavior.
+use std.spec
+use std.spec.step
+use compiler.driver.driver_source_loading.{
+    driver_entry_scan_cache_reset as old_reset,
+    driver_entry_scan_cache_read_count as old_reads,
+    driver_entry_scan_cache_scan_count as old_scans,
+    driver_entry_scan_cache_hit_count as old_hits,
+    _driver_cached_entry_source_scan as old_scan,
+    _driver_entry_import_module_paths as old_imports,
+    driver_composition_overlay_module_name_v1 as old_overlay}
+use compiler.driver.driver_entry_closure_core.{
+    driver_entry_scan_cache_reset as core_reset,
+    driver_entry_scan_cache_read_count as core_reads,
+    driver_entry_scan_cache_scan_count as core_scans,
+    driver_entry_scan_cache_hit_count as core_hits,
+    _driver_cached_entry_source_scan as core_scan,
+    _driver_entry_import_module_paths as core_imports,
+    driver_composition_overlay_module_name_v1 as core_overlay}
+
+describe "shared entry closure core":
+    it "shares cache reads hits and reset through both public module owners":
+        step("reads once through old facade then hits through core and resets from core")
+        old_reset()
+        val path = "src/compiler/00.common/source_root_resolution.spl"
+        val (first_content, _, _, first_hit) = old_scan(path)
+        val (second_content, _, _, second_hit) = core_scan(path)
+        expect(first_content.len()).to_be_greater_than(0)
+        expect(second_content).to_equal(first_content)
+        expect(first_hit).to_equal(false)
+        expect(second_hit).to_equal(true)
+        expect(old_reads()).to_equal(1)
+        expect(core_reads()).to_equal(1)
+        expect(old_scans()).to_equal(1)
+        expect(core_scans()).to_equal(1)
+        expect(old_hits()).to_equal(1)
+        expect(core_hits()).to_equal(1)
+        core_reset()
+        expect(old_reads()).to_equal(0)
+        expect(old_scans()).to_equal(0)
+        expect(old_hits()).to_equal(0)
+
+    it "preserves ordered import scanning through either owner":
+        step("compares actual import order while ignoring comments and lazy imports")
+        val source = "use alpha.one\n# use ignored.comment\nuse lazy ignored.lazy\nexport use beta.two.{{Value}}\n"
+        expect(core_imports(source)).to_equal(["alpha.one", "beta.two"])
+        expect(old_imports(source)).to_equal(core_imports(source))
+
+    it "retains the current release composition overlay naming behavior":
+        step("uses the current release overlay provider name through both owners")
+        val overlay = "compositions.cuda_static.plugins.backend_registry.selected_cuda_backend"
+        expect(core_overlay(overlay)).to_equal("plugins.backend_registry.selected_cuda_backend")
+        expect(old_overlay(overlay)).to_equal(core_overlay(overlay))
+        expect(core_overlay("compositions.cuda_static")).to_equal("")

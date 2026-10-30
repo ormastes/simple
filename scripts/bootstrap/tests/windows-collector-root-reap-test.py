@@ -5,6 +5,7 @@ import importlib.util
 import os
 import py_compile
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -149,6 +150,63 @@ class WindowsReceiptTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "complete")
         self.assertEqual(receipt["reason"], "timeout")
         self.assertEqual(receipt["cleanup_status"], "reaped")
+
+    def test_explicit_negative_exit_is_not_evidence_of_an_exception(self):
+        result, _, receipt = self.run_collector(
+            "import ctypes;ctypes.windll.kernel32.ExitProcess(0xffffffff)")
+        self.assertEqual(result.returncode, 125)
+        self.assertEqual(receipt["status"], "complete")
+        self.assertEqual(receipt["reason"], "child-native-status")
+        self.assertEqual(receipt["native_exit_status"], "4294967295")
+        self.assertEqual(receipt["cleanup_status"], "not-needed")
+
+    def test_unhandled_access_violation_keeps_native_and_normalized_status(self):
+        # A new OS thread executes an invalid address outside ctypes' calling
+        # thread exception handler, so this is a real unhandled native fault.
+        child = """import ctypes
+k = ctypes.WinDLL('kernel32', use_last_error=True)
+k.SetErrorMode(3)
+k.CreateThread.restype = ctypes.c_void_p
+h = k.CreateThread(None, 0, ctypes.c_void_p(1), None, 0, None)
+if not h: raise ctypes.WinError(ctypes.get_last_error())
+k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+k.WaitForSingleObject(h, 0xffffffff)
+"""
+        result, _, receipt = self.run_collector(child)
+        self.assertEqual(result.returncode, 139)
+        self.assertEqual(receipt["status"], "complete")
+        self.assertEqual(receipt["reason"], "child-native-status")
+        self.assertEqual(receipt["native_exit_status"], str(0xC0000005))
+        self.assertEqual(receipt["cleanup_status"], "not-needed")
+
+    def test_frontend_gate_preserves_neutral_native_failure_receipt(self):
+        git = Path(shutil.which("git")).resolve()
+        bash = git.parent.parent / "bin/bash.exe"
+        self.assertTrue(bash.is_file(), "Git Bash must accompany Git")
+        gate = HELPER.parents[1] / "check/cert/redeploy_gate/candidate_frontend_admission.shs"
+        with tempfile.TemporaryDirectory(prefix="collector-frontend-status-") as scope:
+            script = """. "$1"
+CANDIDATE_FRONTEND_CAPTURE_KIND=windows-job
+CANDIDATE_FRONTEND_CAPTURE_PARENT=$2
+build_log=$2/probe.log
+BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR=$3
+BOOTSTRAP_STAGE3_WINDOWS_PYTHON=$4
+BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA=$5
+CANDIDATE_FRONTEND_MAX_LOG_BYTES=4096
+COMPILER_CHECK_KILL_GRACE_SECONDS=1
+COMPILER_BUILD_TIMEOUT_SECONDS=5
+candidate_frontend_bounded_build p2_add "$4" -c 'import ctypes;ctypes.windll.kernel32.ExitProcess(0xffffffff)'
+"""
+            result = subprocess.run([str(bash), "-c", script, "collector-gate-test",
+                gate.as_posix(), Path(scope).as_posix(), HELPER.as_posix(),
+                Path(sys.executable).as_posix(), hashlib.sha256(HELPER.read_bytes()).hexdigest()],
+                capture_output=True, timeout=20)
+            # 126 would mean the receipt parser rejected the new reason.
+            self.assertEqual(result.returncode, 125, result.stderr.decode(errors="replace"))
+            receipt = dict(line.split("=", 1) for line in
+                (Path(scope) / "probe.log.bounded.env").read_text().splitlines())
+            self.assertEqual(receipt["reason"], "child-native-status")
+            self.assertEqual(receipt["native_exit_status"], "4294967295")
 
     def test_actual_overflow_preserved(self):
         result, log, receipt = self.run_collector("import os,time;os.write(1,b'x'*8192);time.sleep(30)", 1024)

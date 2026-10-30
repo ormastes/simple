@@ -10,6 +10,7 @@ This narrows the accepted SIMD bootstrap requirements to the first isolated AVX-
 - **REQ-AVX512-004:** Floating reductions retain ordered lane evaluation so rounding and NaN behavior match the interpreter.
 - **REQ-AVX512-005:** Scatter retains ascending-lane writes when index uniqueness is not proven, so duplicate indices deterministically leave the highest-lane value.
 - **REQ-AVX512-006:** Unsupported capability and malformed encoding inputs fail closed.
+- **REQ-AVX512-007:** A multi-level runtime vector provider admits its x86-64-v4 kernels only when CPUID reports AVX-512 F/BW/CD/DQ/VL and XCR0 enables XMM/YMM/opmask/ZMM state (`0xe6`; on macOS the `hw.optional.avx512*` sysctls, because ZMM state is enabled lazily), admits v3 only on the complete v3 feature set plus XCR0 XMM/YMM, reports the executed level separately from the artifact digest, and never labels a lower level as a higher one or a scalar path as SIMD (scalar is level 0 and refuses).
 
 ## Acceptance
 

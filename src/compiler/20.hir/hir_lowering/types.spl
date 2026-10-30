@@ -9,6 +9,7 @@ use compiler.common.config.{TypeInferenceConfig, TypeDefault}
 use compiler.common.visibility.{effective_visibility}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.frontend.core.types.{primitive_integer_bit_width_from_name}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.hir.archive.tldr_function_header_v1.{AdmittedTldrFunctionImportV1}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_declares_item}
@@ -81,6 +82,8 @@ class HirLowering:
     loop_depth: i64
     type_inference_config: TypeInferenceConfig?
     module_filename: text          # Filename/path for visibility matching and defining_module population
+    # Explicit library policy, never inferred from an importer directory.
+    library_mode: text = ""
     allow_ambient_bootstrap_policy: bool
     reference_origins_v1: HirReferenceOriginSinkV1
     # 3a guard-count invariant (match_desugaring.spl build_match_expr): guards
@@ -95,9 +98,9 @@ class HirLowering:
     # lower to the legacy Ref / Ptr / Infer so default-mode HIR is unchanged.
     nogc_strict: bool
     # Source-written `Any` policy, set by the driver:
-    #   script (interpreter)          -> allowed
-    #   compiled, below robust        -> allowed
-    #   compiled, robust / critical   -> allowed only inside `unsafe:` / `danger:`
+    #   HIR lowering below robust    -> warning outside type_erasure
+    #   robust / critical lowering  -> error outside type_erasure
+    #   any lowering inside an authorized type_erasure block -> allowed
     # Resolver-internal erasure (`list`, `fn`, unresolved `Self`, the flat
     # parser's `__any` fallback) is not written `Any` and is not affected.
     forbid_written_any: bool
@@ -126,6 +129,12 @@ class HirLowering:
     # become canonical parameters before their scope is popped.
     prescan_type_parameters: {i64: HirType}
     lowered_impl_functions: {i64: HirFunction}
+    # "Owner::method" for every method textually written in ANY impl block of
+    # this module. Trait-default injection must not synthesize a body whose
+    # owner-qualified symbol another impl block (e.g. an inherent override
+    # written after the trait impl) already defines. Plain rows, not a Dict:
+    # class-field Dict reads are unreliable under Stage-2 native codegen.
+    impl_textual_method_keys: [text]
     lowered_traits: HirTraitsByName   # Traits lowered in this module (by name), for injecting defaults into impls
     lowered_trait_count_value: i64    # Scalar mirror; diagnostic probes must not materialize Dict.keys().
     imported_traits: {text: ParserTrait}
@@ -192,11 +201,11 @@ class HirLowering:
     # layer's struct_value_syms/struct_field_type_name propagation, one layer
     # up, since the actual Field-expr type_ consumer lives in a file this lane
     # may not edit (see doc/... nestedfield lane notes).
-    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=alias_typed_receiver_misdispatch
     # Declared LITERAL (not HirFieldTypesByName alias): the stage-2 seed
     # misresolves method calls on alias-typed class-field receivers
     # (`.has` on this field dispatched to EnumContractTable.has, SIGSEGV —
     # doc/08_tracking/bug/stage2_sanity_module_path_naming_probe_segv_2026_10_22.md).
+    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=alias_typed_receiver_misdispatch
     struct_field_types_by_name: {text: {text: HirType}}
     local_struct_types: {i64: text}
     # Declared field NAME order per struct (parallels MIR's own
@@ -230,6 +239,7 @@ class HirLowering:
     enum_variant_names: {text: bool}
     # Nullary pattern names indexed by the consumer's enum symbol identity.
     enum_unit_pattern_names: {text: bool}
+    accessor_warned_keys: [text]   # W-HIR-FIELD-001 dedupe, owned by this lowering run
     generic_enum_constructor_owners: {i64: bool}
     # Local struct/class/bitfield symbol ids declared WITHOUT type
     # parameters (declare_module_symbols). An unannotated module global built
@@ -304,24 +314,20 @@ class HirLowering:
     # fallback. Observable mechanism counter for the memo above; a spec
     # pins that repeated identical queries do not raise it.
     field_package_dep_scan_count: i64
-    # PKGIDX (2026-08-21): inverted index over the FROZEN registry, declaration
-    # name -> owning surface indices. Replaces the per-item full sweeps in
-    # try_register_bootstrap_global_symbol (called lazily from BODY lowering for
-    # every unbound name -- see BGS1 in _Items/module_import_registration.spl)
-    # and in materialize_imported_field_package_dependency. Built once per
+    # PKGIDX (2026-08-21): scalar pair/hash index over the FROZEN registry.
+    # Replaces per-item full sweeps in try_register_bootstrap_global_symbol
+    # and materialize_imported_field_package_dependency. Built once per
     # lowerer; the registry cannot change while it is frozen.
-    surface_decl_owners: {text: [i64]}
     surface_decl_index_built: bool
     # Times the index above was actually built. A spec pins this at 1 across
     # many queries, which is the mechanism the wall clock only hints at.
     surface_decl_index_build_count: i64
     # BOOT-20 (2026-09-17): scalar pair mirror, the read authority for
     # surface_decl_owner_indices. One pair per (decl name, surface), built
-    # from the FROZEN name arrays. The class-field surface_decl_owners Dict
-    # contains_key false-negatives under Stage-2 native codegen, turning a
-    # genuine single-owner answer into [] and failing the ambient
-    # unique-owner probe ("unresolved name: error" et al in the stage-3
-    # closure); a linear scan over these arrays cannot misreport membership.
+    # from the FROZEN name arrays. A class-field Dict's contains_key had
+    # false-negatives under Stage-2 native codegen, turning a genuine
+    # single-owner answer into [] and failing the ambient unique-owner probe
+    # ("unresolved name: error" et al in the stage-3 closure).
     surface_decl_pair_names: [text]
     surface_decl_pair_surfaces: [i64]
     # BOOT-20 perf (2026-09-17): open-addressing hash chains (buckets + next)
@@ -646,7 +652,6 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_glob_expand_memo: {text: i64} = {}
     val empty_field_package_dep_memo: {text: i64} = {}
     val empty_surface_package_name_memo: {text: text} = {}
-    val empty_surface_decl_owners: {text: [i64]} = {}
     val empty_package_sibling_names: {text: [text]} = {}
     val empty_package_sibling_canons: {text: [text]} = {}
     val empty_surface_index_by_name: {text: i64} = {}
@@ -703,6 +708,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         type_alias_argument_types: [],
         type_alias_current_owner: "",
         lowered_impl_functions: empty_impl_functions,
+        impl_textual_method_keys: [],
         lowered_traits: empty_traits,
         lowered_trait_count_value: 0,
         imported_traits: empty_imported_traits,
@@ -721,6 +727,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         local_tuple_types: empty_local_tuple_types,
         enum_variant_names: empty_enum_variant_names,
         enum_unit_pattern_names: empty_enum_unit_pattern_names,
+        accessor_warned_keys: [],
         generic_enum_constructor_owners: {},
         nongeneric_record_owners: {},
         registering_import_symbols: false,
@@ -740,7 +747,6 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         surface_package_name_memo_hash_next: [],
         surface_package_name_memo_hash_mask: 0,
         field_package_dep_scan_count: 0,
-        surface_decl_owners: empty_surface_decl_owners,
         surface_decl_index_built: false,
         surface_decl_index_build_count: 0,
         surface_decl_pair_names: [],
@@ -888,15 +894,21 @@ impl HirLowering:
         self.diagnostic_messages = self.diagnostic_messages.push(rendered)
         self.diagnostic_recovered = self.diagnostic_recovered.push(false)
 
-    me recovered(message: text, span: Span):
+    me record_recovered_diagnostic(message: text, span: Span, label: text):
         self.errors = self.errors.push(LoweringError(
             message: message,
             span: span,
             kind: LoweringErrorKind.Recovered
         ))
-        val rendered = "HIR lowering error in {self.module_filename}: {message}"
+        val rendered = "HIR lowering {label} in {self.module_filename}: {message}"
         self.diagnostic_messages = self.diagnostic_messages.push(rendered)
         self.diagnostic_recovered = self.diagnostic_recovered.push(true)
+
+    me recovered(message: text, span: Span):
+        self.record_recovered_diagnostic(message, span, "error")
+
+    me warning(message: text, span: Span):
+        self.record_recovered_diagnostic(message, span, "warning")
 
     me promote_diagnostics_transient_owner() -> bool:
         # These parallel owners form one diagnostic record stream. Promote all
@@ -935,8 +947,8 @@ impl HirLowering:
 
     me promote_phase_memo_transient_owners() -> bool:
         # Phase memos survive module boundaries. A fresh native promotion walk
-        # visits persistent containers too; walking 49 owners separately repeats
-        # shared key/value graphs after every module. Batch exactly those owners
+        # visits persistent containers too; promoting each owner separately
+        # repeats shared key/value graphs after every module. Batch these roots
         # so the provider's one seen set deduplicates their reachable children.
         # Do not include the lowerer itself: module-local scratch must still die.
         val roots: [HirPhaseMemoRoot] = [
@@ -946,7 +958,6 @@ impl HirLowering:
             HirPhaseMemoRoot.Texts(self.surface_package_name_memo_values),
             HirPhaseMemoRoot.Ints(self.surface_package_name_memo_hash_buckets),
             HirPhaseMemoRoot.Ints(self.surface_package_name_memo_hash_next),
-            HirPhaseMemoRoot.IndexLists(self.surface_decl_owners),
             HirPhaseMemoRoot.Texts(self.surface_decl_pair_names),
             HirPhaseMemoRoot.Ints(self.surface_decl_pair_surfaces),
             HirPhaseMemoRoot.Ints(self.surface_decl_pair_hash_buckets),
@@ -1333,11 +1344,14 @@ impl HirLowering:
             case "unit" | "void": HirTypeKind.Unit
             case "char": HirTypeKind.Char
             # Flat-parser fallback (see _FlatAstBridge/convert_nodes.spl), never
-            # source-written: erased, but not subject to the compile-mode ban.
+            # parser-internal fallback, not source-written `Any`.
             case "__any": HirTypeKind.Any
             case "Any" | "any":
+                # NEVER disable this diagnostic for a workaround, bootstrap, cache reuse, or execution mode.
                 if self.forbid_written_any and self.written_any_unsafe_depth == 0:
-                    self.error("[E-ANY-COMPILE-001] `Any` is not allowed in robust/critical compiled code outside an `unsafe:` / `danger:` block; use a generic `<T>`, a concrete type, or a closed enum", span)
+                    self.error("[E-ANY-COMPILE-001] `Any` is not allowed outside `unsafe(capabilities: [type_erasure])`; use a generic `<T>`, a concrete type, or a closed enum", span)
+                elif self.written_any_unsafe_depth == 0:
+                    self.warning("[W-ANY-COMPILE-001] `Any` is not allowed in safe code; use a generic `<T>`, a concrete type, or an explicit `unsafe(capabilities: [type_erasure])` boundary", span)
                 HirTypeKind.Any
             case "text" | "str" | "String": HirTypeKind.Str
             case "list": HirTypeKind.Array(HirType(kind: HirTypeKind.Any, span: span), None)
@@ -1382,6 +1396,13 @@ impl HirLowering:
                     self.error("Dict type expects 2 type arguments", span)
                     HirTypeKind.Error
             case _:
+                # Non-standard integer widths (u7, i3, ...): the parser keeps the
+                # written name (it used to collapse them to i64); preserve the
+                # declared width here. MIR still lowers non-8/16/32 widths to
+                # the 64-bit lane of the same signedness.
+                val odd_bits = primitive_integer_bit_width_from_name(name)
+                if odd_bits > 0 and hir_args.len() == 0:
+                    return HirTypeKind.Int(odd_bits, name.starts_with("i"))
                 var symbol_id = SymbolId(id: -1)
                 if name.contains("."):
                     # `use owner as local` publishes exact `local.Member`

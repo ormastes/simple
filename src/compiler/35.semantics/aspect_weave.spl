@@ -163,6 +163,42 @@ pub fn weave_forward_advice_claim_in_module_v1(module_key: text, original: HirMo
         woven = woven + 1
     (module, woven)
 
+# P4 incremental weave (generic_aop_macro_semantic_cache_plan_2026-10-24 §5.2):
+# the immutable pre-advice BASE body of each join point, keyed by its
+# join-point body digest (cache_contract/aspect_match_shard_v1
+# JoinPointFactV1.base_body_digest). A pointcut/advice change reweaves from
+# this base instead of re-lowering or stacking advice on an already-woven body.
+# Persistent value: record returns a new store; first recorded body wins.
+struct AspectWeaveBaseBodiesV1:
+    bodies: Dict<text, HirBlock>
+
+pub fn aspect_weave_base_bodies_new_v1() -> AspectWeaveBaseBodiesV1:
+    AspectWeaveBaseBodiesV1(bodies: {})
+
+pub fn aspect_weave_base_record_v1(store: AspectWeaveBaseBodiesV1, body_digest: text,
+        base: HirBlock) -> AspectWeaveBaseBodiesV1:
+    if store.bodies.contains_key(body_digest): return store
+    var bodies: Dict<text, HirBlock> = {}
+    for k in store.bodies.keys():
+        bodies[k] = store.bodies[k]
+    bodies[body_digest] = base
+    AspectWeaveBaseBodiesV1(bodies: bodies)
+
+# Rebuild `func` as BASE body + ordered advice. The live-forwarder precondition
+# is checked on the base function exactly as the claim weaver does; a missing
+# base or a non-forwarder base returns `func` unchanged (existing path owns it).
+pub fn aspect_weave_from_base_v1(store: AspectWeaveBaseBodiesV1, body_digest: text,
+        func: HirFunction, ordered_advice_fns: [text]) -> HirFunction:
+    if not store.bodies.contains_key(body_digest): return func
+    val base_func = HirFunction(..func, body: store.bodies[body_digest])
+    if not join_point_is_forwarder(base_func): return func
+    var body = base_func.body
+    var i = ordered_advice_fns.len() - 1
+    while i >= 0:
+        body = _weave_body(body, ordered_advice_fns[i])
+        i = i - 1
+    HirFunction(..func, body: body)
+
 fn weave_forward_advice(modules: Dict<text, HirModule>) -> i64:
     var woven: i64 = 0
     if aspect_registry_claim_keys().len() == 0: return woven
@@ -193,4 +229,6 @@ export weave_forward_advice
 export AspectForwardWeaveClaimV1, aspect_forward_weave_claims_v1
 export weave_forward_advice_claim_in_module_v1
 export aspect_forward_weave_contract_claims_v1
+export AspectWeaveBaseBodiesV1, aspect_weave_base_bodies_new_v1
+export aspect_weave_base_record_v1, aspect_weave_from_base_v1
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

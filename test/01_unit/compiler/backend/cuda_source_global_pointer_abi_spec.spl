@@ -95,3 +95,24 @@ describe "source CUDA global-pointer ABI":
         expect(ptx).to_not_contain("rt_array_get")
         expect(ptx).to_not_contain("rt_array_len")
         expect(ptx).to_not_contain("rt_array_set")
+
+    it "preserves narrow source buffer element widths without guessed layout warnings":
+        step("preserves u16 CUDA buffer memory width")
+        val source = "@gpu(\"cuda\")\n" +
+            "fn copy(input: [u16], mut output: [u16], n: u32) -> ():\n" +
+            "    val i = gpu_global_id(0)\n" +
+            "    if i < n:\n" +
+            "        output[i] = input[i]\n"
+        val parsed = parse_full_frontend(source, "cuda_narrow_layout.spl", "cuda_narrow_layout", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("cuda_narrow_layout.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        val result = CudaBackend.create((8, 6)).compile(mir)
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("ld.global.u16")
+        expect(ptx).to_contain("st.global.u16")
+        expect(ptx.contains("WARN:")).to_equal(false)

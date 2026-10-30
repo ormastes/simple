@@ -22,6 +22,12 @@
 # §4.2). Data only; consumed by `expand_text_args` in
 # `_MirLoweringExpr/switch_operators_calls.spl`.
 #
+# Lockstep is now checked, not hand-kept: test/01_unit/compiler/mir/
+# text_extern_abi_seed_parity_spec.spl reads the seed tables from calls.rs and
+# requires every seed row here with equal indices. This side is a SUPERSET:
+# it also lists C-lane owners (runtime_native.c, runtime_cache_host_*.c, ...)
+# that seed-built binaries never meet because they link the Rust runtime.
+#
 # The Rust file's separate `text_cstr_arg_indices` table is now EMPTY (its
 # last occupants, the rt_db_* family, moved here), so nothing is missing from
 # this twin on that account.
@@ -102,6 +108,22 @@ fn text_arg_indices(func_name: text) -> [i64]?:
         # rt_process_run_with_limits: cmd is (ptr, len) -- env_process.rs:1269.
         case "rt_process_run_with_limits" | "rt_process_run_bounded_bytes":
             return Some([0])
+        # Process-run owners whose C ABI is (cmd_ptr, cmd_len, SplArray* args,
+        # ...): runtime_native.c rt_process_run / rt_process_run_inherit,
+        # runtime_process.c rt_process_run_timeout / rt_process_run_bounded,
+        # runtime_process_owned.c rt_process_run_owned_{,observed_}bounded_value
+        # and rt_process_owned_v3_start_value. Twin of the seed's
+        # process_c_runtime_arg_indices (calls.rs), which expands cmd to
+        # (ptr, len) for exactly these. Missing here, the extern pointer bridge
+        # passed ONE word (rt_interp_cstr(cmd)) to the five-word
+        # rt_process_run_bounded: cmd_len got the args handle, args got
+        # timeout_ms, and every Stage-2-built child spawn returned status 4
+        # without forking (SCV-E-ADMISSION: git-event-source-unavailable).
+        # NOT listed: rt_process_spawn{,_async,_guarded} and
+        # rt_process_execute -- their C owners take (char*, char**, count) and
+        # native callers reach them through the *_value facades instead.
+        case "rt_process_run" | "rt_process_run_inherit" | "rt_process_run_timeout" | "rt_process_run_bounded" | "rt_process_run_owned_bounded_value" | "rt_process_run_owned_observed_bounded_value" | "rt_process_owned_v3_start_value":
+            return Some([0])
         case "rt_file_open":
             return Some([0])
         # FileHandle providers consume (path_ptr, path_len[, mode]), matching
@@ -131,10 +153,26 @@ fn text_arg_indices(func_name: text) -> [i64]?:
             return Some([1])
         case "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_walk" | "rt_set_current_dir" | "rt_dir_exists" | "rt_dir_is_real_no_follow":
             return Some([0])
-        # rt_dir_glob is (dir, pattern): its ONLY implementation
-        # (runtime/src/value/sffi/file_io/directory.rs:199) takes four words.
+        # rt_dir_glob is (dir, pattern) in the Rust runtime
+        # (runtime/src/value/sffi/file_io/directory.rs:199, four words) but
+        # (pattern_ptr, pattern_len) in runtime_native.c, and both arities are
+        # declared in .spl. Out-of-range indices are skipped (seed semantics),
+        # so the one-text facade splits index 0 only.
         case "rt_dir_glob":
             return Some([0, 1])
+        # C-lane (ptr, len) owners the seed never lists (it links the Rust
+        # providers): runtime_shared_parse_cell_private.h,
+        # runtime_native.c rt_host_dynlib_*, runtime_cache_host_authority_v1.c,
+        # runtime_process{,_owned}.c pin owners. Unlisted, the pointer bridge
+        # passed one word and every later argument shifted by one register.
+        case "rt_shared_parse_cell_read_v1" | "rt_host_dynlib_open" | "rt_cache_host_open_root_v1" | "rt_process_observation_v4_pin_cwd_value" | "rt_process_pin_executable_owned_value":
+            return Some([0])
+        case "rt_host_dynlib_symbol" | "rt_cache_host_open_read_v1" | "rt_cache_host_open_child_v1" | "rt_cache_host_open_cas_kind_v1" | "rt_cache_host_open_cas_shard_v1" | "rt_cache_host_open_cas_leaf_v1" | "rt_cache_host_publish_noreplace_v1" | "rt_cache_host_publish_retained_noreplace_v2":
+            return Some([1])
+        case "rt_cache_host_open_pinned_cas_v1":
+            return Some([1, 2])
+        case "rt_cache_host_quarantine_v1":
+            return Some([2])
         case "rt_dir_create" | "rt_dir_create_all" | "rt_dir_remove":
             return Some([0])
         case "rt_file_find":
@@ -204,6 +242,17 @@ fn text_extern_semantic_arity(func_name: text) -> i64?:
             Some(2)
         case "rt_file_write_bytes":
             Some(2)
+        # Process owners: the semantic facade arity. A different-arity
+        # declaration (e.g. the wasm backend's `rt_process_run(cmd) -> i64`
+        # import) is not this C owner and is left unsplit.
+        case "rt_process_run" | "rt_process_run_inherit":
+            Some(2)
+        case "rt_process_run_timeout":
+            Some(3)
+        case "rt_process_run_bounded" | "rt_process_run_owned_bounded_value" | "rt_process_run_owned_observed_bounded_value":
+            Some(4)
+        case "rt_process_owned_v3_start_value":
+            Some(6)
         case "rt_io_file_open":
             Some(2)
         case "rt_io_file_exists" | "rt_io_file_delete":
@@ -276,4 +325,48 @@ fn file_write_bytes_array_alias_target(func_name: text, signature: MirSignature,
         return "rt_file_write_bytes_array"
     nil
 
+# Externs whose `text` argument(s) are consumed as a complete tagged
+# RuntimeValue and must cross the boundary UNCHANGED: no rt_interp_cstr
+# pointer bridge, no (ptr, len) split, no re-box. rt_stderr_write /
+# rt_stdout_write (runtime_native.c, `int64_t (int64_t value)`, and the Rust
+# twin io_print.rs) decode the value with rt_core_as_string; handed the bare
+# char* the bridge produced, the decode failed and the pointer was printed as
+# an integer. The seed lists neither name in any table, so it already passes
+# the value through. Only `text`-typed parameters are bridged, so the
+# `[u8]` / `i64` declarations of the same names are unaffected.
+#
+# Parity rule (audit 2026-10-25): the seed passes every UNLISTED `text`
+# argument as the tagged value, while this compiler's default is the char*
+# bridge. Every C-lane owner whose text parameter is an `int64_t` decoded as a
+# runtime value is therefore listed here. Strict decoders (rt_core_as_string,
+# rt_core_string_to_cpath, rt_core_string_bytes, simd_as_string,
+# rt_eprint_value) returned nil/0/""/-1 for the bridged char*, or printed it
+# as an integer (rt_print_err -> empty `panic:` + pointer-like numbers).
+# Raw-tolerant owners (rt_string_data/len, rt_interp_cstr, promote_raw)
+# are listed too: tagged is exactly what they accept, and it keeps the
+# length. True `const char*` owners (rt_print, rt_println, rt_eprintln,
+# rt_dir_delete, rt_process_spawn*, ...) stay on the bridge.
+fn tagged_text_value_arg_indices(func_name: text) -> [i64]?:
+    match func_name:
+        case "rt_stderr_write" | "rt_stdout_write": return Some([0])
+        # Strict tagged decoders (runtime_native.c, runtime_simd_utf8.c).
+        case "rt_file_read_text_at_checked" | "rt_file_mode" | "rt_file_exists_str" | "rt_file_hash" | "rt_file_list_dir" | "rt_file_read_text_rv" | "rt_fs_read_text": return Some([0])
+        case "rt_hash_text" | "rt_xxh3_128_text" | "rt_path_filename" | "rt_path_extension" | "rt_shell_exec" | "rt_shell_exec_tuple": return Some([0])
+        case "rt_print_err" | "rt_println_value" | "print_raw" | "rt_heap_ref_wellformed": return Some([0])
+        case "rt_string_bytes" | "rt_string_char_at" | "rt_string_to_int" | "rt_string_free": return Some([0])
+        case "rt_string_find" | "rt_string_rfind" | "rt_string_contains" | "rt_string_starts_with" | "rt_string_ends_with": return Some([0, 1])
+        case "rt_string_replace": return Some([0, 1, 2])
+        case "rt_text_is_ascii" | "rt_text_to_lower_ascii" | "rt_text_to_upper_ascii" | "rt_text_validate_utf8" | "rt_text_count_codepoints" | "rt_text_count_codepoints_cached": return Some([0])
+        case "rt_simd_str_search": return Some([0, 1])
+        # Raw-tolerant decoders: tagged matches the seed and keeps the length.
+        case "rt_string_data" | "rt_string_len" | "rt_string_byte_at" | "rt_string_char_code_at" | "rt_string_substr_from" | "rt_string_trim" | "rt_string_to_byte_array": return Some([0])
+        case "rt_file_modified" | "rt_file_modified_time" | "rt_mmap" | "rt_path_normalize" | "rt_process_output" | "rt_process_spawn_async_value": return Some([0])
+        case "rt_secure_temp_dir_set_parent" | "rt_secure_temp_dir_set_prefix" | "rt_sysctlbyname_i32" | "rt_shell" | "rt_shell_output" | "rt_term_write": return Some([0])
+        case "rt_timestamp_from_iso" | "rt_timestamp_parse" | "spl_dlopen" | "spl_dlopen_checked" | "spl_dlsym_process_checked" | "spl_dynlib_snapshot_linux" | "spl_collection_capture_begin": return Some([0])
+        case "rt_time_format" | "spl_dlsym" | "spl_dlsym_checked": return Some([1])
+        case "rt_list_dir_recursive" | "rt_file_view_open_beneath_no_follow_v1" | "rt_pinned_archive_open_beneath_v1": return Some([0, 1])
+        case "spl_collection_capture_note_size" | "spl_collection_capture_note_lookup" | "spl_collection_capture_note_materialization" | "spl_collection_capture_note_hash_probe" | "spl_collection_capture_note_filter" | "spl_collection_capture_note_loop": return Some([0, 1])
+        case _: return nil
+
 export file_write_bytes_array_alias_target
+export tagged_text_value_arg_indices

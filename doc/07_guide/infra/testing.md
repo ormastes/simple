@@ -18,6 +18,7 @@ Complete guide to testing in Simple: the SPipe BDD framework, matchers, mocking,
 10. [Mocking](#mocking)
 11. [Test Helpers](#test-helpers)
 12. [Test Policy and Levels](#test-policy-and-levels)
+    - [HAL and Runtime Tests through Simple](#hal-and-runtime-tests-through-simple)
 13. [Test Database](#test-database)
 14. [Platform Organization](#platform-organization)
 15. [Runner and CLI](#runner-and-cli)
@@ -141,6 +142,10 @@ branches.
 
 Optional metadata fields `**Artifacts:**`, `**Screenshots:**`, `**TUI Captures:**`, and `**Logs:**` let a spec publish evidence links into the generated markdown. List multiple items inline with `;` or `,`, or place them on bullet lines directly below the field.
 UI-facing specs must capture visible state when practical: GUI screenshots or rendered-image captures go under `doc/06_spec/image/<spec-relative-path>/`; TUI text/ANSI captures, logs, JSON summaries, and other non-image artifacts go under `build/test-artifacts/<spec-relative-path>/`.
+The Rust diagnostic driver's scenario directories retain short readable names.
+Long names use a bounded readable prefix plus a digest; consult the manifest
+for complete group and scenario names. A warning that artifact writing failed
+does not explain or replace the recorded test assertion outcomes.
 Interactive GUI specs must also use actual GUI access when available. Prefer `ui_access_snapshot`, `ui_access_surface`, `ui_access_find`, `ui_access_act`, `ui_access_history`, `ui_access_observe`, `ui_access_state`, or adapter wrappers such as `simple play wm-text-*` and `play_wm_text_*` to locate a real surface, perform the action, and assert the resulting state. Screenshots prove visual evidence; they do not replace interaction coverage.
 SGTTI evidence is test/debug-only. Production entrypoints must not import `std.ui_test.sgtti`, `SgttiTestDriver`, or SGTTI capture builders unless the feature is explicitly a debug/test surface. When SGTTI is compile-time disabled or absent, the normal product path must have no snapshot construction, polling, capture allocation, or dispatch overhead. Add an import-boundary system spec beside any new SGTTI-backed UI evidence.
 After adding or moving a UI-facing app feature spec, run `test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl`. That audit verifies the critical UI SSPEC lane has executable specs, mirrored generated manuals under `doc/06_spec/03_system/app/...`, and concrete UI evidence markers.
@@ -690,6 +695,76 @@ testing.assert_called_with(spy, ["arg1", "arg2"])
 | **Integration** | HAL-only mocks | Public function touch | 100% |
 | **System** | No mocks | Public class/struct touch | 100% |
 | **Environment** | HAL/External/Lib mocks | Branch, Condition | 100% |
+
+### HAL and Runtime Tests through Simple
+
+Write HAL behavior tests in Simple wherever the contract is reachable, using
+modern SSpec (`use std.spec.*`, outcome-named `it`, `step`, direct `expect`
+assertions, and scenario documentation). Run the focused `*_spec.spl` through
+the selected self-hosted `simple test` runner. A HAL implementation written in
+C does not by itself require a C test harness.
+
+Choose the boundary according to what the scenario proves:
+
+| Contract under test | Preferred Simple boundary |
+|---------------------|---------------------------|
+| Application-visible host behavior | Import the production SOSIX/HAL facade used by its callers. |
+| Runtime ABI, provider error, or low-level operation absent from the facade | Import the existing FFI owner, or declare the exact backed `extern fn rt_*` in the focused test. |
+| Private C state, unsafe fault injection, or target behavior unavailable through Simple | Use a bounded supporting C/target harness for that gap, with its limitation recorded. |
+
+For a facade example, inspect
+[`time_spec.spl`](../../../test/01_unit/lib/nogc_async_mut/sosix/time_spec.spl):
+it calls production SOSIX time operations and asserts clock ordering and
+deadline values. For provider selection, inspect
+[`io_uring_file_driver_spec.spl`](../../../test/01_unit/lib/nogc_async_mut/sosix/io_uring_file_driver_spec.spl):
+it requires Linux and the selected `io_uring` backend before checking native
+I/O. These are source examples, not claims that those tests passed on the
+current machine. Hosted `std.*.sosix` modules and SimpleOS-internal
+`src/os/sosix/**` are different execution environments; select the one the
+production caller actually uses.
+
+**Direct runtime FFI is available from Simple.** For example, the existing
+runtime integration spec declares
+`extern fn rt_file_copy_create_excl_no_follow(source: text, destination: text) -> bool`.
+Before using any `rt_*`, inspect its authoritative declaration and provider,
+including integer widths, text/byte representation, ownership and cleanup.
+Confirm that the exact selected runtime exports/links it in native mode or
+registers it in interpreter mode; a declaration alone does not provide an
+implementation. Keep this exception inside the focused test/FFI owner; it does
+not relax the product-code facade rule. Assert observable results such as
+returned errors, bytes, handle lifetime, and effects; importing a symbol or
+matching its source text does not prove the HAL behavior.
+
+**Make host and mode requirements explicit.** Select native execution for a
+native-provider claim (for a runner supporting it, `<runtime> test <spec>
+--mode=native`). Confirm the actual backend and linked provider rather than
+inferring them from the flag. Interpreter emulation can supply diagnostic or
+interpreter-contract evidence, but cannot qualify a native HAL implementation.
+Put host/capability admission before the affected operations. An unavailable
+host is an explicit `UNRUN`/`UNSUPPORTED` matrix row; a required row remains
+incomplete. If a selected supported-host acceptance cannot obtain its required
+provider, fail that acceptance. Never return early, print `SKIP`, substitute a
+fallback provider, or assert a constant while allowing the enclosing example
+to count as a native PASS. A printed skip message does not update runner counts.
+
+**Retain execution evidence.** Record the source revision, command, host/target,
+mode/provider, resolved compiler and runtime capsule/library paths and hashes,
+and exit status with the final executed/passed/failed/skipped counts. Check
+artifact identity before and after the run. Require the intended examples to
+execute, with nonzero counts and no hidden matcher failure; file loading,
+compilation, or exit zero alone is insufficient. Missing externs, runner
+crashes, absent summaries, or identity drift leave the lane unverified. When
+the spec launches another compiler, honor `SIMPLE_SPEC_COMPILER` and
+`SIMPLE_SPEC_RUNTIME_PATH`; record the artifact actually launched. Diagnose
+with the existing qualified runtime and bounded probes; this procedure does
+not require a bootstrap rebuild.
+
+Keep C-harness receipts separate from Simple example counts. Document the
+specific inaccessible contract, retain the harness command/artifact/result,
+and leave any required Simple integration coverage unverified until it runs.
+A wrapper that merely shells out to a C probe is supporting evidence, not
+proof that Simple called the HAL correctly. When the boundary becomes
+reachable, add the behavioral assertion to the Simple scenario.
 
 ### Coverage Data Strategy
 

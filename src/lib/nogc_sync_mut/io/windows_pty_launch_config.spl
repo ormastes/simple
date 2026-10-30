@@ -1,0 +1,163 @@
+# Native launch preparation. Returned pointers stay inside the Windows owners;
+# the PTY owner must release every allocation even when error is nonempty.
+use std.sys.pty_launch.{PtyLaunchV1, PtyLaunchModeV1, PtyEnvironmentChangeV1}
+use std.nogc_sync_mut.io.windows_process_owner.{_windows_process_wide_v1}
+use std.nogc_sync_mut.io.windows_process_text.{windows_process_utf16_units_v1, windows_process_utf16_units_bytes_v1, windows_process_text_bytes_v1, windows_process_quote_arg_bytes_v1}
+use std.common.text_bytes.{bytes_to_text, text_byte_extraction_checked}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{HeapAlloc}
+use std.nogc_sync_mut.io.windows_pty_launch_abi.{GetSystemDirectoryW}
+use std.nogc_sync_mut.io.windows_pty_environment_owner.{windows_pty_environment_prepare_v1}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16}
+
+pub struct WindowsPtyLaunchPreparedV1:
+    application: i64 = 0
+    command: i64 = 0
+    directory: i64 = 0
+    environment: i64 = 0
+    snapshot: i64 = 0
+    allocations: [i64] = []
+    error: text = ""
+
+# Reject malformed UTF8/NUL before native launch storage or any process API.
+# Byte length is not the CreateProcessW UTF16 command-line limit.
+pub fn windows_pty_launch_utf16_units_v1(value: text) -> i64:
+    windows_process_utf16_units_v1(value, false)
+
+pub fn windows_pty_launch_command_checked_v1(mode: PtyLaunchModeV1) -> Result<text, text>:
+    var parts: [[u8]] = []
+    var separated = false
+    match mode:
+        case PtyLaunchModeV1.Exec(executable, argv):
+            if argv.len() > 256: return Err("Windows argument count bound exceeded")
+            parts = parts.push(windows_process_quote_arg_bytes_v1(executable)?)
+            for argument in argv: parts = parts.push(windows_process_quote_arg_bytes_v1(argument)?)
+            separated = true
+        case PtyLaunchModeV1.Shell(command):
+            # cmd /S strips exactly these enclosing quotes. Caller text is raw
+            # shell syntax; CRT argv escaping would change its meaning.
+            parts = [windows_process_text_bytes_v1("\"cmd.exe\" /D /S /C \"")?,
+                windows_process_text_bytes_v1(command)?, [34u8]]
+    var size = if separated: parts.len() - 1 else: 0
+    for part in parts:
+        # Expansion ceiling cannot exclude a valid 32766-unit command: even
+        # four UTF8 bytes per UTF16 unit are far below this temporary bound.
+        if part.len() > 2097152 - size: return Err("Windows command line UTF16 bound exceeded")
+        size = size + part.len()
+    var joined: [u8] = [0u8; size]
+    if text_byte_extraction_checked(size, joined).is_err(): return Err("Windows command line allocation failed")
+    var offset = 0
+    for index in 0..parts.len():
+        if separated and index > 0:
+            joined[offset] = 32u8
+            offset = offset + 1
+        for byte in parts[index]:
+            joined[offset] = byte
+            offset = offset + 1
+    val units = windows_process_utf16_units_bytes_v1(joined, false)
+    if units < 0: return Err("invalid Windows command line UTF8")
+    if units > 32766: return Err("Windows command line UTF16 bound exceeded")
+    val command = bytes_to_text(joined)
+    if command.len() != size: return Err("Windows command line text allocation failed")
+    Ok(command)
+
+# Existing pure-value convenience; production admission uses the checked form.
+pub fn windows_pty_launch_command_v1(mode: PtyLaunchModeV1) -> text:
+    match windows_pty_launch_command_checked_v1(mode):
+        case Ok(command): command
+        case Err(reason): panic(reason)
+
+pub fn windows_pty_launch_validate_v1(launch: PtyLaunchV1) -> text:
+    var budget = 0
+    match launch.mode:
+        case PtyLaunchModeV1.Exec(executable, argv):
+            if executable.len() > 131064: return "invalid Windows executable"
+            val units = windows_pty_launch_utf16_units_v1(executable)
+            if executable == "" or executable.contains("\"") or units < 0 or units > 32766:
+                return "invalid Windows executable"
+            if argv.len() > 256: return "Windows argument count bound exceeded"
+            budget = executable.len()
+            for argument in argv:
+                if argument.len() > 131064 or windows_pty_launch_utf16_units_v1(argument) < 0:
+                    return "invalid Windows argument"
+                budget = budget + argument.len()
+                if budget > 1048576: return "Windows launch text bound exceeded"
+        case PtyLaunchModeV1.Shell(command):
+            if command == "" or command.len() > 131064 or windows_pty_launch_utf16_units_v1(command) < 0:
+                return "invalid Windows shell command"
+            budget = command.len()
+    if launch.cwd != nil:
+        val directory = launch.cwd ?? ""
+        if directory.len() > 131064: return "invalid Windows working directory"
+        val units = windows_pty_launch_utf16_units_v1(directory)
+        if units <= 0 or units > 32766: return "invalid Windows working directory"
+        budget = budget + directory.len()
+    if launch.environment.len() > 256: return "Windows environment change count bound exceeded"
+    for change in launch.environment:
+        var name = ""
+        var value = ""
+        match change:
+            case PtyEnvironmentChangeV1.Set(key, content):
+                name = key
+                value = content
+            case PtyEnvironmentChangeV1.Remove(key): name = key
+        # Public callers cannot create/remove hidden '=C:' drive entries.
+        if name == "" or name.contains("=") or name.len() > 131064:
+            return "invalid Windows environment name"
+        if windows_pty_launch_utf16_units_v1(name) < 0 or value.len() > 1048576 or windows_pty_launch_utf16_units_v1(value) < 0:
+            return "invalid Windows environment value"
+        budget = budget + name.len() + value.len()
+        if budget > 1048576: return "Windows launch text bound exceeded"
+    match windows_pty_launch_command_checked_v1(launch.mode):
+        case Err(reason): return reason
+        case Ok(_command): return ""
+
+# A fixed maximum buffer prevents repeated OS queries and unbounded retries.
+# The return is owned even when the system-directory query fails.
+@unsafe(reason: "resolves cmd through the trusted Windows system directory within one bounded allocation", capabilities: [ffi, raw_ptr])
+fn _windows_pty_system_cmd_v1(heap: i64) -> (i64, text):
+    val path = HeapAlloc(heap, 8u32, 65536u64)
+    if path == 0: return (0, "system command path allocation failed")
+    val units = GetSystemDirectoryW(path, 32768u32) as i64
+    if units <= 0 or units + 8 >= 32768:
+        return (path, "trusted Windows system directory unavailable or oversized")
+    val suffix = [92, 99, 109, 100, 46, 101, 120, 101]
+    for index in 0..suffix.len(): volatile_write_u16(path + (units + index) * 2, suffix[index])
+    volatile_write_u16(path + (units + suffix.len()) * 2, 0)
+    (path, "")
+
+@unsafe(reason: "allocates validated CreateProcessW arguments and transfers all cleanup authority to the PTY owner", capabilities: [ffi, raw_ptr])
+pub fn windows_pty_launch_prepare_v1(heap: i64, launch: PtyLaunchV1) -> WindowsPtyLaunchPreparedV1:
+    var prepared = WindowsPtyLaunchPreparedV1()
+    prepared.error = windows_pty_launch_validate_v1(launch)
+    if prepared.error != "": return prepared
+    match launch.mode:
+        case PtyLaunchModeV1.Exec(executable, _argv):
+            prepared.application = _windows_process_wide_v1(heap, executable)
+            if prepared.application == 0: prepared.error = "Windows executable allocation failed"
+        case PtyLaunchModeV1.Shell(_command):
+            val (application, error) = _windows_pty_system_cmd_v1(heap)
+            prepared.application = application
+            prepared.error = error
+    if prepared.application != 0: prepared.allocations = prepared.allocations.push(prepared.application)
+    if prepared.error != "": return prepared
+    val command = windows_pty_launch_command_checked_v1(launch.mode)
+    if command.is_err():
+        prepared.error = command.unwrap_err()
+        return prepared
+    prepared.command = _windows_process_wide_v1(heap, command.unwrap())
+    if prepared.command == 0:
+        prepared.error = "Windows command line allocation failed"
+        return prepared
+    prepared.allocations = prepared.allocations.push(prepared.command)
+    if launch.cwd != nil:
+        prepared.directory = _windows_process_wide_v1(heap, launch.cwd ?? "")
+        if prepared.directory == 0:
+            prepared.error = "Windows working directory allocation failed"
+            return prepared
+        prepared.allocations = prepared.allocations.push(prepared.directory)
+    val environment = windows_pty_environment_prepare_v1(heap, launch.environment)
+    prepared.environment = environment.block
+    prepared.snapshot = environment.snapshot
+    prepared.error = environment.error
+    for allocation in environment.allocations: prepared.allocations = prepared.allocations.push(allocation)
+    prepared

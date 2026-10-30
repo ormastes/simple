@@ -1,0 +1,136 @@
+# Pure xterm-profile encoding only. No owner/PTY authority or protocol negotiation.
+# Unsupported modifiers remain CoreMux qualification gaps; see policy research.
+use std.common.contracts.mux.core_v1.{MuxErrorV1, MuxErrorKindV1, MuxCommitStateV1}
+use std.common.contracts.mux.execution_v1.{MuxKeyV1, MuxNamedKeyV1}
+use std.common.text_bytes.{text_byte_extraction_checked}
+
+fn smux_key_error(kind: MuxErrorKindV1, detail: text) -> MuxErrorV1:
+    MuxErrorV1(kind: kind, detail: detail, request_id: 0,
+        commit_state: MuxCommitStateV1.NotApplied, observed_revision: nil,
+        affected: [], cleanup_pending: false)
+
+pub fn core_mux_key_bytes_checked_v1(expected_length: i64, bytes: [u8]) -> Result<[u8], MuxErrorV1>:
+    """Check one encoded key allocation against its independent format length.
+
+    Production admission seam for deterministic mismatch tests, not an OOM
+    simulator. No supported key has an empty representation; the largest has
+    seven bytes. A null, shortened or oversized carrier is Unavailable.
+    """
+    if expected_length < 1 or expected_length > 7:
+        return Err(smux_key_error(MuxErrorKindV1.Unavailable, "invalid encoded key length"))
+    if text_byte_extraction_checked(expected_length, bytes).is_err():
+        return Err(smux_key_error(MuxErrorKindV1.Unavailable, "key byte allocation mismatch"))
+    Ok(bytes)
+
+fn smux_named_key_bytes(key: MuxNamedKeyV1, application_cursor: bool) -> Result<[u8], MuxErrorV1>:
+    val cursor_prefix = if application_cursor: 79u8 else: 91u8
+    match key:
+        case MuxNamedKeyV1.Enter: core_mux_key_bytes_checked_v1(1, [13u8])
+        case MuxNamedKeyV1.Escape: core_mux_key_bytes_checked_v1(1, [27u8])
+        case MuxNamedKeyV1.Tab: core_mux_key_bytes_checked_v1(1, [9u8])
+        case MuxNamedKeyV1.Backspace: core_mux_key_bytes_checked_v1(1, [127u8])
+        case MuxNamedKeyV1.Delete: core_mux_key_bytes_checked_v1(4, [27u8, 91u8, 51u8, 126u8])
+        case MuxNamedKeyV1.Up: core_mux_key_bytes_checked_v1(3, [27u8, cursor_prefix, 65u8])
+        case MuxNamedKeyV1.Down: core_mux_key_bytes_checked_v1(3, [27u8, cursor_prefix, 66u8])
+        case MuxNamedKeyV1.Left: core_mux_key_bytes_checked_v1(3, [27u8, cursor_prefix, 68u8])
+        case MuxNamedKeyV1.Right: core_mux_key_bytes_checked_v1(3, [27u8, cursor_prefix, 67u8])
+        case MuxNamedKeyV1.Home: core_mux_key_bytes_checked_v1(3, [27u8, cursor_prefix, 72u8])
+        case MuxNamedKeyV1.End: core_mux_key_bytes_checked_v1(3, [27u8, cursor_prefix, 70u8])
+        case MuxNamedKeyV1.PageUp: core_mux_key_bytes_checked_v1(4, [27u8, 91u8, 53u8, 126u8])
+        case MuxNamedKeyV1.PageDown: core_mux_key_bytes_checked_v1(4, [27u8, 91u8, 54u8, 126u8])
+
+fn smux_function_key_bytes(number: i64) -> Result<[u8], MuxErrorV1>:
+    if number < 1 or number > 24:
+        return Err(smux_key_error(MuxErrorKindV1.InvalidRequest, "function key outside 1 through 24"))
+    # xterm+24fkeys: F13..24 are terminal capabilities for shifted F1..12.
+    val base = if number > 12: number - 12 else: number
+    if base <= 4:
+        val last = (79 + base) as u8
+        if number <= 12: return core_mux_key_bytes_checked_v1(3, [27u8, 79u8, last])
+        return core_mux_key_bytes_checked_v1(6, [27u8, 91u8, 49u8, 59u8, 50u8, last])
+    val sequence_number = match base:
+        case 5: 15
+        case 6: 17
+        case 7: 18
+        case 8: 19
+        case 9: 20
+        case 10: 21
+        case 11: 23
+        case _: 24
+    val tens = (48 + sequence_number / 10) as u8
+    val ones = (48 + sequence_number % 10) as u8
+    if number <= 12: return core_mux_key_bytes_checked_v1(5, [27u8, 91u8, tens, ones, 126u8])
+    core_mux_key_bytes_checked_v1(7, [27u8, 91u8, tens, ones, 59u8, 50u8, 126u8])
+
+fn smux_control_scalar_bytes(codepoint: u32) -> Result<[u8], MuxErrorV1>:
+    if (codepoint >= 64 and codepoint <= 95) or (codepoint >= 96 and codepoint <= 126):
+        return core_mux_key_bytes_checked_v1(1, [(codepoint & 31) as u8])
+    if codepoint == 32 or codepoint == 50: return core_mux_key_bytes_checked_v1(1, [0u8])
+    if codepoint >= 51 and codepoint <= 55: return core_mux_key_bytes_checked_v1(1, [(codepoint - 24) as u8])
+    if codepoint == 47 or codepoint == 45: return core_mux_key_bytes_checked_v1(1, [31u8])
+    if codepoint == 56 or codepoint == 63: return core_mux_key_bytes_checked_v1(1, [127u8])
+    Err(smux_key_error(MuxErrorKindV1.Unsupported, "scalar Control combination has no preserving legacy encoding"))
+
+fn smux_scalar_base_bytes(codepoint: u32, control: bool, shift: bool) -> Result<[u8], MuxErrorV1>:
+    if codepoint > 1114111 or (codepoint >= 55296 and codepoint <= 57343):
+        return Err(smux_key_error(MuxErrorKindV1.InvalidRequest, "invalid Unicode scalar key"))
+    if shift:
+        if not control and codepoint == 9: return core_mux_key_bytes_checked_v1(3, [27u8, 91u8, 90u8])
+        return Err(smux_key_error(MuxErrorKindV1.Unsupported, "scalar Shift combination requires negotiated keyboard support"))
+    if control: return smux_control_scalar_bytes(codepoint)
+    if codepoint < 128: return core_mux_key_bytes_checked_v1(1, [codepoint as u8])
+    if codepoint < 2048:
+        return core_mux_key_bytes_checked_v1(2, [(192 + (codepoint >> 6)) as u8, (128 + (codepoint & 63)) as u8])
+    if codepoint < 65536:
+        return core_mux_key_bytes_checked_v1(3, [(224 + (codepoint >> 12)) as u8,
+            (128 + ((codepoint >> 6) & 63)) as u8, (128 + (codepoint & 63)) as u8])
+    core_mux_key_bytes_checked_v1(4, [(240 + (codepoint >> 18)) as u8, (128 + ((codepoint >> 12) & 63)) as u8,
+        (128 + ((codepoint >> 6) & 63)) as u8, (128 + (codepoint & 63)) as u8])
+
+fn smux_one_key_bytes(key: MuxKeyV1, application_cursor: bool) -> Result<[u8], MuxErrorV1>:
+    match key:
+        case MuxKeyV1.Named(named): smux_named_key_bytes(named, application_cursor)
+        case MuxKeyV1.Function(number): smux_function_key_bytes(number)
+        case MuxKeyV1.Scalar(codepoint, control, alt, shift):
+            val base = smux_scalar_base_bytes(codepoint, control, shift)?
+            if not alt: return Ok(base)
+            val size = base.len() + 1
+            var prefixed: [u8] = [0u8; size]
+            core_mux_key_bytes_checked_v1(size, prefixed)?
+            prefixed[0] = 27u8
+            for index in 0..base.len(): prefixed[index + 1] = base[index]
+            Ok(prefixed)
+
+pub fn core_mux_keys_bytes_v1(keys: [MuxKeyV1], application_cursor: bool, max_bytes: i64) -> Result<[u8], MuxErrorV1>:
+    """Encode a whole key request without enqueueing or changing terminal state.
+
+    Bounds are 1..256 keys and 0..65536 byte capacity. Too-small capacity uses
+    InvalidRequest: the frozen error enum has no TooLarge and no queue is read.
+    Errors carry request_id=0 for the owner to correlate before dispatch.
+    Example: Named(Enter) encodes [13]; Alt-Ctrl-A encodes [27, 1].
+    Unsupported Shift/Control combinations never emit a successful prefix.
+    """
+    if keys.len() < 1 or keys.len() > 256:
+        return Err(smux_key_error(MuxErrorKindV1.InvalidRequest, "key count outside 1 through 256"))
+    if max_bytes < 0 or max_bytes > 65536:
+        return Err(smux_key_error(MuxErrorKindV1.InvalidRequest, "invalid key byte capacity"))
+    var size = 0
+    # Bounded two-pass encoding keeps an exact-size output without mutable
+    # nested-array storage. At most 256 keys, at most seven bytes per key.
+    for key in keys:
+        val encoded = smux_one_key_bytes(key, application_cursor)?
+        if encoded.len() > max_bytes - size:
+            return Err(smux_key_error(MuxErrorKindV1.InvalidRequest, "encoded keys exceed byte capacity"))
+        size = size + encoded.len()
+    var output: [u8] = [0u8; size]
+    if text_byte_extraction_checked(size, output).is_err():
+        return Err(smux_key_error(MuxErrorKindV1.Unavailable, "key byte allocation failed"))
+    var offset = 0
+    for key in keys:
+        val encoded = smux_one_key_bytes(key, application_cursor)?
+        for byte in encoded:
+            output[offset] = byte
+            offset = offset + 1
+    if offset != size:
+        return Err(smux_key_error(MuxErrorKindV1.Unavailable, "encoded key output length mismatch"))
+    Ok(output)

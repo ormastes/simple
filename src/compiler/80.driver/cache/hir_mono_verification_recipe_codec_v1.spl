@@ -1,3 +1,4 @@
+use compiler.common.library_mode_policy_v1.{library_mode_policy_v1}
 use compiler.mono.mono_archive_nominal_v2.{MonoArchiveNominalDeclV2, mono_archive_nominal_rows_put_v2, mono_archive_nominal_rows_get_v2}
 # Body-free, versioned replay metadata. All decoders require full consumption
 # and exact stable re-encoding of the existing legacy flat-pool byte contract.
@@ -69,10 +70,20 @@ fn mono_verification_module_encode_v1(recipe: MonoVerificationModuleRecipeV1) ->
     if val body = recipe.body_input: logical = body.logical_name != ""
     if not logical and recipe.shared_symbols.len() != 0: return ""
     val nominal = recipe.symbol_projection != ""
-    writer.put_text(if nominal: "mono-verification-module-recipe-v4" else: if logical: "mono-verification-module-recipe-v3" else: if recipe.body_input != nil: "mono-verification-module-recipe-v2" else: "mono-verification-module-recipe-v1")
-    if nominal:
+    val configured = recipe.archive.input.library_mode != ""
+    if library_mode_policy_v1(recipe.archive.input.library_mode).is_err(): return ""
+    if configured:
+        writer.put_text("mono-verification-module-recipe-v5")
+        writer.put_bool(nominal)
         writer.put_bool(recipe.body_input != nil)
         writer.put_bool(logical)
+        writer.put_text(recipe.archive.input.library_mode)
+    else:
+        # Preserve the exact v1-v4 representation for all legacy requests.
+        writer.put_text(if nominal: "mono-verification-module-recipe-v4" else: if logical: "mono-verification-module-recipe-v3" else: if recipe.body_input != nil: "mono-verification-module-recipe-v2" else: "mono-verification-module-recipe-v1")
+        if nominal:
+            writer.put_bool(recipe.body_input != nil)
+            writer.put_bool(logical)
     val input = recipe.archive.input
     writer.put_text(input.source_path)
     writer.put_text(input.closure_digest)
@@ -126,10 +137,14 @@ fn mono_verification_module_encode_v1(recipe: MonoVerificationModuleRecipeV1) ->
 fn mono_verification_module_decode_v1(blob: text) -> Result<MonoVerificationModuleRecipeV1, text>:
     var reader = FlatPoolReader.new(blob)
     val stage = reader.decode_text(reader.next())
-    if stage != "mono-verification-module-recipe-v1" and stage != "mono-verification-module-recipe-v2" and stage != "mono-verification-module-recipe-v3" and stage != "mono-verification-module-recipe-v4": return Err("mono recipe stage differs")
-    val nominal = stage == "mono-verification-module-recipe-v4"
-    val current = if nominal: reader.next_i64() == 1 else: stage == "mono-verification-module-recipe-v2" or stage == "mono-verification-module-recipe-v3"
-    val logical = if nominal: reader.next_i64() == 1 else: stage == "mono-verification-module-recipe-v3"
+    if stage != "mono-verification-module-recipe-v1" and stage != "mono-verification-module-recipe-v2" and stage != "mono-verification-module-recipe-v3" and stage != "mono-verification-module-recipe-v4" and stage != "mono-verification-module-recipe-v5": return Err("mono recipe stage differs")
+    val configured = stage == "mono-verification-module-recipe-v5"
+    val nominal = if configured: reader.next_i64() == 1 else: stage == "mono-verification-module-recipe-v4"
+    val current = if configured or nominal: reader.next_i64() == 1 else: stage == "mono-verification-module-recipe-v2" or stage == "mono-verification-module-recipe-v3"
+    val logical = if configured or nominal: reader.next_i64() == 1 else: stage == "mono-verification-module-recipe-v3"
+    val library_mode = if configured: reader.decode_text(reader.next()) else: ""
+    if configured and (library_mode == "" or library_mode_policy_v1(library_mode).is_err()):
+        return Err("mono recipe library mode invalid")
     if logical and not current: return Err("nominal logical recipe missing current parent")
     val source_path = reader.decode_text(reader.next())
     val closure = reader.decode_text(reader.next())
@@ -138,7 +153,8 @@ fn mono_verification_module_decode_v1(blob: text) -> Result<MonoVerificationModu
         module_name: reader.decode_text(reader.next()), runtime_provider_receipt_path: reader.decode_text(reader.next()),
         runtime_provider_digest: reader.decode_text(reader.next()), producer_header: reader.decode_text(reader.next()),
         stage: reader.decode_text(reader.next()), provider_selection_digest: reader.decode_text(reader.next()),
-        source_content_digest: reader.decode_text(reader.next()), source_authored_path: reader.decode_text(reader.next()))
+        source_content_digest: reader.decode_text(reader.next()), source_authored_path: reader.decode_text(reader.next()),
+        library_mode: library_mode)
     val archive = HirBodyArchiveV1(input: input, source_key: reader.decode_text(reader.next()),
         archive_key: reader.decode_text(reader.next()), body_digest: reader.decode_text(reader.next()),
         lowering_warnings_digest: reader.decode_text(reader.next()))

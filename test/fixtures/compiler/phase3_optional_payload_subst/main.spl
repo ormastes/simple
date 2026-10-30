@@ -1,0 +1,56 @@
+# Native diagnostic for the real HIR substitution owner, not a copied walker.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.monomorphize.type_subst.{typesubstitution_from_params}
+use compiler.monomorphize.hir_subst.body_subst.{subst_hir_body_with_report}
+
+fn main() -> i64:
+    val span = Span.empty()
+    val t = HirType(kind: HirTypeKind.TypeParam("T", []), span: span)
+    val integer = HirType(kind: HirTypeKind.Int(64, true), span: span)
+    val owner = HirType(kind: HirTypeKind.Optional(t), span: span)
+    val parameter = HirTypeParam(symbol: SymbolId(id: 0), name: "T", bounds: [],
+        has_default: false, default: nil, span: span)
+    val subst = typesubstitution_from_params([parameter], [integer])
+    val value = HirExpr(kind: HirExprKind.Var(SymbolId(id: 1)), has_type_: true,
+        type_: t, span: span)
+    val payloads: [HirEnumPayload?] = [HirEnumPayload.Tuple([value]),
+        Some(HirEnumPayload.Tuple([value])), HirEnumPayload.Struct([("value", value)]),
+        Some(HirEnumPayload.Struct([("value", value)])), nil]
+    var checked = 0
+    for candidate in payloads:
+        val payload: HirEnumPayload? = candidate
+        val expression = HirExpr(kind: HirExprKind.EnumLit(owner, "Some", payload),
+            has_type_: true, type_: owner, span: span)
+        var body = HirBlock(stmts: [], has: true, value: expression, span: span)
+        var round = 0
+        while round < 2:
+            val report = subst_hir_body_with_report(body, subst)
+            assert(report.diagnostics.len() == 0)
+            body = report.body
+            match body.value.kind:
+                case HirExprKind.EnumLit(_, _, result):
+                    if val concrete = result:
+                        var item: HirExpr = value
+                        match concrete:
+                            case HirEnumPayload.Tuple(items):
+                                assert(items.len() == 1)
+                                item = items[0]
+                            case HirEnumPayload.Struct(fields):
+                                assert(fields.len() == 1)
+                                val pair: (text, HirExpr) = fields[0]
+                                assert(pair.0 == "value")
+                                item = pair.1
+                        match item.type_.kind:
+                            case HirTypeKind.Int(bits, signed):
+                                assert(bits == 64 and signed)
+                            case _: assert(false)
+                    else:
+                        assert(payload == nil)
+                case _: assert(false)
+            round = round + 1
+        checked = checked + 1
+    assert(checked == 5)
+    print "optional payload substitution: 5 cases, 2 passes each"
+    0

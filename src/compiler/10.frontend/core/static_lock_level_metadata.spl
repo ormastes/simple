@@ -1,0 +1,81 @@
+# Declaration-identity metadata for the synchronous ranked-function contract.
+# No environment mirrors or runtime locking overhead. -1 means unannotated.
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_enc_i64, flat_pool_enc_scalar_i64, flat_pool_dec_i64, flat_pool_dec_scalar_i64}
+use compiler.core.ast.{DECL_FN, DECL_VAL, decl_count, decl_get_tag}
+
+var lock_level_decl_ids: [i64] = []
+var lock_level_ranks: [i64] = []
+var lock_level_pending: i64 = -1
+var lock_level_rank_index: {i64: i64} = {}
+
+pub fn lock_level_metadata_reset():
+    lock_level_decl_ids = []
+    lock_level_ranks = []
+    lock_level_pending = -1
+    lock_level_rank_index = {}
+
+pub fn lock_level_annotation_value(raw: text) -> i64:
+    # Validate before arithmetic; an overflowing literal never wraps into a rank.
+    if raw == "": return -1
+    var result: i64 = 0
+    var pos: i64 = 0
+    while pos < raw.len():
+        val ch = raw[pos:pos + 1]
+        val digit = "0123456789".index_of(ch)
+        if ch.len() != 1 or digit < 0: return -1
+        if result > 922337203685477580: return -1
+        if result == 922337203685477580 and digit > 7: return -1
+        result = result * 10 + digit
+        pos = pos + 1
+    result
+
+pub fn lock_level_pending_get() -> i64:
+    lock_level_pending
+
+pub fn lock_level_pending_set(rank: i64):
+    lock_level_pending = rank
+
+pub fn lock_level_pending_take() -> i64:
+    val rank = lock_level_pending
+    lock_level_pending = -1
+    rank
+
+pub fn lock_level_record(decl_id: i64, rank: i64):
+    if rank >= 0:
+        lock_level_decl_ids.push(decl_id)
+        lock_level_ranks.push(rank)
+        lock_level_rank_index[decl_id] = rank
+
+pub fn lock_level_metadata_count() -> i64:
+    lock_level_decl_ids.len()
+
+pub fn lock_level_rank_for(decl_id: i64) -> i64:
+    lock_level_rank_index.get(decl_id) ?? -1
+
+pub fn flat_lock_level_pools_dump() -> text:
+    flat_pool_enc_i64(lock_level_decl_ids) + flat_pool_enc_i64(lock_level_ranks) + flat_pool_enc_scalar_i64(lock_level_pending)
+
+pub fn flat_lock_level_pools_restore(r: FlatPoolReader) -> bool:
+    lock_level_decl_ids = flat_pool_dec_i64(r)
+    lock_level_ranks = flat_pool_dec_i64(r)
+    lock_level_pending = flat_pool_dec_scalar_i64(r)
+    if not r.ok or lock_level_decl_ids.len() != lock_level_ranks.len(): return false
+    if lock_level_decl_ids.len() > 4096: return false
+    if lock_level_pending != -1: return false
+    lock_level_rank_index = {}
+    var i: i64 = 0
+    for rank in lock_level_ranks:
+        if rank < 0: return false
+        val did = lock_level_decl_ids[i]
+        if did < 0 or did >= decl_count(): return false
+        if lock_level_rank_index.contains_key(did): return false
+        val tag = decl_get_tag(did)
+        if tag != DECL_FN and tag != DECL_VAL: return false
+        lock_level_rank_index[did] = rank
+        i = i + 1
+    true
+
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+
+pub fn lock_level_metadata_promote() -> bool:
+    rt_transient_heap_promote(lock_level_decl_ids) and rt_transient_heap_promote(lock_level_ranks) and rt_transient_heap_promote(lock_level_rank_index)

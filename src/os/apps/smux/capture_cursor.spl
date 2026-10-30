@@ -1,0 +1,152 @@
+# Explicit owner-held capture continuation descriptors. Shape validation here
+# does NOT authenticate leases or authorize pane access: the server must do so.
+# No globals, no process/PTY I/O, no copied registry and no cached capture bytes.
+use os.apps.smux.service.{PaneRecord}
+use os.apps.smux.vt_capture.{vt_capture_page}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.request_validation_v1.{mux_validate_capture_v1}
+
+pub struct CaptureFailure:
+    kind: MuxErrorKindV1
+    detail: text
+
+pub struct CaptureCursor:
+    token: text
+    lease: MuxHandleV1
+    pane: MuxObjectRefV1
+    child_incarnation: u64
+    content_revision: u64
+    range: MuxCaptureRangeV1
+    join_wrapped: bool
+    styled: bool
+    max_bytes: i64
+    offset: i64
+    expires_ms: i64
+
+pub struct CaptureCursorOwner:
+    cursors: [CaptureCursor]
+    next_serial: u64
+    last_now_ms: i64
+
+pub struct CaptureCursorUpdate:
+    owner: CaptureCursorOwner
+    result: Result<MuxCapturedV1, CaptureFailure>
+
+pub fn capture_cursor_new() -> CaptureCursorOwner:
+    CaptureCursorOwner(cursors: [], next_serial: 1, last_now_ms: 0)
+
+fn failed(owner: CaptureCursorOwner, kind: MuxErrorKindV1, detail: text) -> CaptureCursorUpdate:
+    CaptureCursorUpdate(owner: owner, result: Err(CaptureFailure(kind: kind, detail: detail)))
+
+fn same_lease(a: MuxHandleV1, b: MuxHandleV1) -> bool:
+    a.owner_id == b.owner_id and a.owner_generation == b.owner_generation and a.lease_id == b.lease_id
+
+fn same_pane(a: MuxObjectRefV1, b: MuxObjectRefV1) -> bool:
+    a.owner_id == b.owner_id and a.owner_generation == b.owner_generation and a.kind == b.kind and a.object_id == b.object_id
+
+fn same_range(a: MuxCaptureRangeV1, b: MuxCaptureRangeV1) -> bool:
+    match a:
+        case MuxCaptureRangeV1.Screen:
+            match b:
+                case MuxCaptureRangeV1.Screen: return true
+                case _: return false
+        case MuxCaptureRangeV1.AllHistory:
+            match b:
+                case MuxCaptureRangeV1.AllHistory: return true
+                case _: return false
+        case MuxCaptureRangeV1.Lines(first, last):
+            match b:
+                case MuxCaptureRangeV1.Lines(other_first, other_last):
+                    return first == other_first and last == other_last
+                case _: return false
+
+# Called by the same owner that publishes the pane and its two revisions.
+# now_ms is the owner's monotonic time. A descriptor expires 30 seconds after
+# issue; paging does not extend that deadline. Serial tokens are NOT secrets.
+pub fn capture_cursor_apply(owner: CaptureCursorOwner, lease: MuxHandleV1,
+    pane_ref: MuxObjectRefV1, record: PaneRecord, request: MuxCaptureV1,
+    observed_revision: u64, ingestion: MuxIngestionV1, now_ms: i64) -> CaptureCursorUpdate:
+    if now_ms < owner.last_now_ms or now_ms < 0 or now_ms > 9223372036854745807:
+        return failed(owner, MuxErrorKindV1.Unavailable, "invalid owner monotonic time")
+    var state = owner
+    state.last_now_ms = now_ms
+    var retained: [CaptureCursor] = []
+    for cursor in owner.cursors:
+        if cursor.expires_ms > now_ms: retained.push(cursor)
+    state.cursors = retained
+    val validated = mux_validate_capture_v1(lease, request)
+    if validated.is_err():
+        return failed(state, MuxErrorKindV1.InvalidRequest, validated.unwrap_err().detail)
+    if not same_pane(pane_ref, request.pane):
+        return failed(state, MuxErrorKindV1.InvalidTarget, "capture target differs from resolved pane")
+    if request.max_bytes > 1048576:
+        return failed(state, MuxErrorKindV1.InvalidRequest, "capture payload limit exceeds owner bound")
+    if record.content_revision == 18446744073709551615u64:
+        return failed(state, MuxErrorKindV1.Unavailable, "pane content revision exhausted")
+    var offset = 0
+    var prior_index = -1
+    var expires = now_ms + 30000
+    match request.continuation:
+        case Some(token):
+            for i in 0..state.cursors.len():
+                if state.cursors[i].token == token: prior_index = i
+            if prior_index < 0:
+                return failed(state, MuxErrorKindV1.StaleRevision, "capture continuation expired or unknown")
+            val prior = state.cursors[prior_index]
+            if not same_lease(prior.lease, lease):
+                return failed(state, MuxErrorKindV1.PermissionDenied, "capture continuation belongs to another lease")
+            if not same_pane(prior.pane, pane_ref) or prior.child_incarnation != record.child_incarnation or prior.content_revision != record.content_revision:
+                return failed(state, MuxErrorKindV1.StaleRevision, "capture continuation pane or content changed")
+            if not same_range(prior.range, request.range) or prior.join_wrapped != request.join_wrapped or prior.styled != request.styled or prior.max_bytes != request.max_bytes:
+                return failed(state, MuxErrorKindV1.InvalidRequest, "capture continuation options changed")
+            offset = prior.offset
+            expires = prior.expires_ms
+        case nil: ()
+    val page = vt_capture_page(record.screen, request.range, request.join_wrapped,
+        request.styled, offset, request.max_bytes)
+    if page.content_lost:
+        return failed(state, MuxErrorKindV1.Unavailable, "selected capture contains a cell that exceeded its 256-byte retention limit")
+    if page.more and prior_index < 0 and state.cursors.len() >= 16:
+        return failed(state, MuxErrorKindV1.Busy, "capture continuation capacity reached")
+    if page.more and state.next_serial == 18446744073709551615u64:
+        return failed(state, MuxErrorKindV1.Unavailable, "capture cursor serial exhausted")
+    # Only a successful page consumes the previous descriptor. Each next page
+    # gets a distinct token, so replay cannot advance someone else's offset.
+    var survivors: [CaptureCursor] = []
+    for i in 0..state.cursors.len():
+        if i != prior_index: survivors.push(state.cursors[i])
+    var continuation: text? = nil
+    if page.more:
+        val token = "capture-" + state.next_serial.to_text()
+        state.next_serial = state.next_serial + 1
+        survivors.push(CaptureCursor(token: token, lease: lease, pane: pane_ref,
+            child_incarnation: record.child_incarnation, content_revision: record.content_revision,
+            range: request.range, join_wrapped: request.join_wrapped, styled: request.styled,
+            max_bytes: request.max_bytes, offset: page.next_offset, expires_ms: expires))
+        continuation = Some(token)
+    state.cursors = survivors
+    CaptureCursorUpdate(owner: state, result: Ok(MuxCapturedV1(pane: pane_ref,
+        observed_revision: observed_revision, content_revision: record.content_revision,
+        ingestion: ingestion, bytes: page.bytes, byte_extent: page.bytes.len(),
+        truncated: page.more, continuation: continuation)))
+
+# Lease revocation/disconnect frees this lease's descriptors immediately.
+pub fn capture_cursor_forget_lease(owner: CaptureCursorOwner, lease: MuxHandleV1) -> CaptureCursorOwner:
+    var out = owner
+    var retained: [CaptureCursor] = []
+    for cursor in owner.cursors:
+        if not same_lease(cursor.lease, lease): retained.push(cursor)
+    out.cursors = retained
+    out
+
+# Bounded owner diagnostic; page.truncated remains exclusively pagination.
+# Retention loss/eviction does not promise continuation into discarded history.
+pub fn capture_retention_status(record: PaneRecord) -> text:
+    val screen = record.screen
+    var affected = 0
+    val cells = if screen.frozen.len() > 0: screen.frozen_loss else: screen.cell_loss
+    val saved = if screen.frozen.len() > 0: screen.frozen_history_loss else: (if screen.alt.on: [] else: screen.history_loss)
+    for row in cells: affected = affected + row.len()
+    for row in saved: affected = affected + row.len()
+    "tail_truncated: " + (if record.tail_truncated: "true" else: "false") + "\ndiscarded_controls: " + screen.discarded_controls.to_text() + "\nlost_cells: " + affected.to_text()

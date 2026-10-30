@@ -136,3 +136,38 @@ describe "native-build Darwin action identity production path":
         expect(file_read(cache + "/native_runtime_provider_manifest.failure")).to_contain(
             "reason=provider-artifact-architecture-mismatch:" + provider
         )
+
+    slow_it "admits real Native object output without executable runtime receipts":
+        step("Run the production object success funnel rather than a manual link bypass")
+        val root = "build/tmp/macos_native_object_identity_{getpid()}"
+        val cache = root + "/cache"
+        val source = root + "/main.spl"
+        val output = root + "/main.o"
+        expect(dir_create_all(root)).to_be(true)
+        expect(file_write(source, "fn main(): 0\n")).to_be(true)
+        val old_deployment = env_get("MACOSX_DEPLOYMENT_TARGET") ?? ""
+        expect((env_get("SDKROOT") ?? "") == "").to_equal(false)
+        env_set("MACOSX_DEPLOYMENT_TARGET", "13.0")
+        val status = cli_native_build([
+            "native-build", "--backend=native", "--entry-closure", "--emit-object",
+            "--target=aarch64-apple-darwin", "--cache-dir=" + cache,
+            "--entry=" + source, "--output=" + output
+        ])
+        env_set("MACOSX_DEPLOYMENT_TARGET", old_deployment)
+        expect(status).to_equal(0)
+        expect(file_exists(output)).to_be(true)
+        val produced = parse_native_action_input_receipt_v1(
+            file_read(cache + "/inputs/current.receipt"))
+        expect(produced.errors.len()).to_equal(0)
+        expect(produced.linker_policy).to_equal("darwin-relocatable-object-v1")
+        expect(produced.linker_tool_identity).to_equal("")
+        expect(produced.runtime_artifact_digest).to_equal("")
+        expect(produced.runtime_provider_receipt.len()).to_equal(64)
+        expect(file_exists(cache + "/native_runtime_provider_manifest.receipt")).to_be(false)
+        val admitted = load_current_native_action_input_v1(
+            cwd(), cache, produced.target, "native", produced.backend,
+            produced.entry, "object", produced.tool_artifact_digest,
+            produced.target_triple, produced.architecture, produced.deployment_target,
+            produced.sdk_identity, produced.runtime_provider_receipt,
+            "", env_get("SDKROOT") ?? "", env_get("SIMPLE_NATIVE_CPU") ?? "")
+        expect(admitted.errors.len()).to_equal(0)

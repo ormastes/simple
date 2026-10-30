@@ -1,0 +1,167 @@
+"""
+REQ-CMUX-004/005/008/010: real Windows ConPTY presentation and sized split.
+Source-authored NOT_RUN. Requires admitted producer and linked native owners.
+No substitute successful branch exists for unavailable launch or resize.
+# @manual: primary
+# @capture: text
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.mux.execution_v1.{MuxBorderV1, MuxBorderStatusV1, MuxSplitSizeV1}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
+    smux_list_panes, smux_pane_spawn_pty, smux_send_command, smux_capture,
+    smux_capture_frame, smux_kill_session, smux_split_pane_sized,
+    smux_set_pane_title, smux_set_pane_border, smux_set_pane_border_status,
+    smux_hide_pane, smux_show_pane, smux_rebalance_window, smux_window_rects}
+use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
+use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+use std.sosix.process.{sosix_process_exists}
+use std.sosix.pty.{sosix_pty_cleanup_pending}
+
+fn presentation_native_output(session: text, window: text, pane: text, marker: text) -> text:
+    val deadline = sosix_time_now_monotonic_ms() + 5000
+    var output = ""
+    var attempts = 0
+    while attempts < 200 and sosix_time_now_monotonic_ms() < deadline and not output.contains(marker):
+        val captured = smux_capture(session, window, pane, 60)
+        if captured.is_ok(): output = captured.unwrap().content
+        if not output.contains(marker): sosix_sleep_ms(25)
+        attempts = attempts + 1
+    return output
+
+# Expected dimensions are absent from input, so command echo is not an oracle.
+fn presentation_native_probe(session: text, window: text, pane: text, marker: text, dimensions: text) -> bool:
+    val command = "powershell.exe -NoProfile -Command \"Write-Output ('" + marker + "_' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)\""
+    val sent = smux_send_command(session, window, pane, command)
+    val captured = presentation_native_output(session, window, pane, marker + "_" + dimensions)
+    return sent.is_ok() and captured.contains(marker + "_" + dimensions)
+
+fn presentation_native_cleanup(session: text) -> bool:
+    val deadline = sosix_time_now_monotonic_ms() + 5000
+    var result = smux_kill_session(session)
+    var attempts = 0
+    while result.is_err() and attempts < 200 and sosix_time_now_monotonic_ms() < deadline:
+        sosix_sleep_ms(25)
+        result = smux_kill_session(session)
+        attempts = attempts + 1
+    return result.is_ok()
+
+describe "native pane presentation and sized geometry":
+    it "renders persistent titles and borders with child-observed viewport changes":
+        step("Create a real 20-cell split and launch independent ConPTY children")
+        smux_reset_for_test()
+        val session = smux_create_session("presentation-native")
+        val window = smux_list_windows(session.id)[0]
+        val first = smux_list_panes(session.id, window.id)[0]
+        val split = smux_split_pane_sized(session.id, window.id, first.id, "vertical", MuxSplitSizeV1.Cells(20))
+        if split.is_err():
+            val cleaned = presentation_native_cleanup(session.id)
+            expect(cleaned).to_equal(true)
+            expect(split.is_ok()).to_equal(true)
+            return
+        val second = split.unwrap()
+        val first_spawn = smux_pane_spawn_pty(session.id, window.id, first.id, "cmd.exe /d /q")
+        val second_spawn = smux_pane_spawn_pty(session.id, window.id, second.id, "cmd.exe /d /q")
+        val first_pid = if first_spawn.is_ok(): first_spawn.unwrap() else: -1
+        val second_pid = if second_spawn.is_ok(): second_spawn.unwrap() else: -1
+        val base_first = presentation_native_probe(session.id, window.id, first.id, "PRES_BASE_A", "59x24")
+        val base_second = presentation_native_probe(session.id, window.id, second.id, "PRES_BASE_B", "20x24")
+        step("Reserve single-border and top-status cells in the real child viewport")
+        val title = smux_set_pane_title(session.id, window.id, first.id, "Native Agent \u{4e2d}")
+        val single = smux_set_pane_border(session.id, window.id, first.id, MuxBorderV1.Single)
+        val top = smux_set_pane_border_status(session.id, window.id, first.id, MuxBorderStatusV1.Top)
+        val decorated_size = presentation_native_probe(session.id, window.id, first.id, "PRES_DECORATED", "57x21")
+        val top_frame = smux_capture_frame(session.id, window.id, first.id)
+        val content_rects = smux_window_rects(session.id, window.id)
+        step("Hide a live child, continue explicit input/output, and reject stale interactive input")
+        val hidden = smux_hide_pane(session.id, window.id, first.id)
+        val last_visible = smux_hide_pane(session.id, window.id, second.id)
+        val hidden_probe = presentation_native_probe(session.id, window.id, first.id, "PRES_HIDDEN", "57x21")
+        val hidden_frame = smux_capture_frame(session.id, window.id)
+        val stale_input = smux_interactive_dispatch("input " + session.id + " " + window.id + " " + first.id + " 41")
+        val first_alive = first_pid > 0 and sosix_process_exists(first_pid)
+        val second_alive = second_pid > 0 and sosix_process_exists(second_pid)
+        step("Show the same child and change double-border and bottom-status presentation")
+        val shown = smux_show_pane(session.id, window.id, first.id)
+        val double = smux_set_pane_border(session.id, window.id, first.id, MuxBorderV1.Double)
+        val bottom = smux_set_pane_border_status(session.id, window.id, first.id, MuxBorderStatusV1.Bottom)
+        val bottom_size = presentation_native_probe(session.id, window.id, first.id, "PRES_BOTTOM", "57x21")
+        val bottom_frame = smux_capture_frame(session.id, window.id)
+        val status_hidden = smux_set_pane_border_status(session.id, window.id, first.id, MuxBorderStatusV1.Hidden)
+        val border_hidden = smux_set_pane_border(session.id, window.id, first.id, MuxBorderV1.Hidden)
+        val restored_size = presentation_native_probe(session.id, window.id, first.id, "PRES_RESTORE", "59x24")
+        step("Rebalance the same children and verify their independently measured dimensions")
+        val rebalance = smux_rebalance_window(session.id, window.id)
+        val balanced_first = presentation_native_probe(session.id, window.id, first.id, "PRES_BALANCED_A", "40x24")
+        val balanced_second = presentation_native_probe(session.id, window.id, second.id, "PRES_BALANCED_B", "40x24")
+        step("Complete checked cleanup before asserting the observations")
+        val cleaned = presentation_native_cleanup(session.id)
+        val first_remains = first_pid > 0 and sosix_process_exists(first_pid)
+        val second_remains = second_pid > 0 and sosix_process_exists(second_pid)
+        expect(cleaned).to_equal(true)
+        expect(first_spawn.is_ok()).to_equal(true)
+        expect(second_spawn.is_ok()).to_equal(true)
+        expect(base_first).to_equal(true)
+        expect(base_second).to_equal(true)
+        expect(title.is_ok()).to_equal(true)
+        expect(single.is_ok()).to_equal(true)
+        expect(top.is_ok()).to_equal(true)
+        expect(decorated_size).to_equal(true)
+        expect(top_frame.is_ok()).to_equal(true)
+        expect(top_frame.unwrap()).to_contain("\u{250c}")
+        expect(top_frame.unwrap()).to_contain("Native Agent \u{4e2d}")
+        expect(content_rects[0].cols).to_equal(57)
+        expect(content_rects[0].rows).to_equal(21)
+        expect(hidden.is_ok()).to_equal(true)
+        expect(last_visible.is_err()).to_equal(true)
+        expect(hidden_probe).to_equal(true)
+        expect(hidden_frame.is_ok()).to_equal(true)
+        expect(hidden_frame.unwrap().contains("Native Agent")).to_equal(false)
+        expect(stale_input).to_contain("hidden")
+        expect(first_alive).to_equal(true)
+        expect(second_alive).to_equal(true)
+        expect(shown.is_ok()).to_equal(true)
+        expect(double.is_ok()).to_equal(true)
+        expect(bottom.is_ok()).to_equal(true)
+        expect(bottom_size).to_equal(true)
+        expect(bottom_frame.is_ok()).to_equal(true)
+        expect(bottom_frame.unwrap()).to_contain("\u{2554}")
+        expect(bottom_frame.unwrap()).to_contain("Native Agent \u{4e2d}")
+        expect(status_hidden.is_ok()).to_equal(true)
+        expect(border_hidden.is_ok()).to_equal(true)
+        expect(restored_size).to_equal(true)
+        expect(rebalance.is_ok()).to_equal(true)
+        expect(balanced_first).to_equal(true)
+        expect(balanced_second).to_equal(true)
+        expect(first_remains).to_equal(false)
+        expect(second_remains).to_equal(false)
+        expect(sosix_pty_cleanup_pending()).to_equal(0)
+
+    it "applies Percent to a real child and rejects a nonfitting nested split":
+        step("Request twenty-five percent of the available post-separator content")
+        smux_reset_for_test()
+        val session = smux_create_session("presentation-percent-native")
+        val window = smux_list_windows(session.id)[0]
+        val first = smux_list_panes(session.id, window.id)[0]
+        val split = smux_split_pane_sized(session.id, window.id, first.id, "horizontal", MuxSplitSizeV1.Percent(25))
+        if split.is_err():
+            val cleaned = presentation_native_cleanup(session.id)
+            expect(cleaned).to_equal(true)
+            expect(split.is_ok()).to_equal(true)
+            return
+        val second = split.unwrap()
+        val spawned = smux_pane_spawn_pty(session.id, window.id, second.id, "cmd.exe /d /q")
+        val pid = if spawned.is_ok(): spawned.unwrap() else: -1
+        val measured = presentation_native_probe(session.id, window.id, second.id, "PRES_PERCENT", "80x5")
+        val rejected = smux_split_pane_sized(session.id, window.id, second.id, "horizontal", MuxSplitSizeV1.Cells(5))
+        val retained = presentation_native_probe(session.id, window.id, second.id, "PRES_REJECTED", "80x5")
+        val panes = smux_list_panes(session.id, window.id)
+        val cleaned = presentation_native_cleanup(session.id)
+        expect(cleaned).to_equal(true)
+        expect(spawned.is_ok()).to_equal(true)
+        expect(measured).to_equal(true)
+        expect(rejected.is_err()).to_equal(true)
+        expect(retained).to_equal(true)
+        expect(panes.len()).to_equal(2)
+        expect(pid > 0 and sosix_process_exists(pid)).to_equal(false)
+        expect(sosix_pty_cleanup_pending()).to_equal(0)

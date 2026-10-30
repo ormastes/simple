@@ -386,7 +386,7 @@ bool rt_file_unlock(int64_t handle) {
 const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size) {
     if (!path || size <= 0 || offset < 0) return "";
 
-    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return "";
 

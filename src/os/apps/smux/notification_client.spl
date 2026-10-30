@@ -1,0 +1,37 @@
+# Notice wire validation and terminal-cell-aware display; no queue consumption.
+use std.common.text_bytes.{text_to_bytes}
+use os.apps.smux.client_notifications.{ClientNotification}
+use os.apps.smux.interactive_protocol.{smux_input_hex_decode}
+use os.apps.smux.client_view.{client_clip_line}
+
+pub fn notification_reply_ok(reply: text) -> bool:
+    if reply == "smux: notification none": return true
+    val parts = reply.split(" ")
+    if parts.len() != 4 or parts[0] != "smux:" or parts[1] != "notification":
+        return false
+    if parts[2] == "queued" or parts[2] == "acknowledged":
+        val id = parts[3].to_i64() ?? 0
+        return id > 0 and id.to_text() == parts[3]
+    return notification_reply_decode(reply).is_ok()
+
+pub fn notification_reply_decode(reply: text) -> Result<ClientNotification, text>:
+    if reply == "smux: notification none":
+        return Ok(ClientNotification(id: 0, session_id: "", client_id: "", body: ""))
+    val parts = reply.split(" ")
+    if parts.len() != 4 or parts[0] != "smux:" or parts[1] != "notification":
+        return Err("invalid notification reply")
+    val id = parts[2].to_i64() ?? 0
+    if id <= 0 or id.to_text() != parts[2]:
+        return Err("invalid notification id")
+    val decoded = smux_input_hex_decode(parts[3])
+    if decoded.is_err(): return Err("invalid notification payload")
+    val body = decoded.unwrap()
+    val bytes = text_to_bytes(body).len()
+    if bytes < 1 or bytes > 1024: return Err("invalid notification payload size")
+    return Ok(ClientNotification(id: id, session_id: "", client_id: "", body: body))
+
+pub fn notification_overlay(body: text, cols: i64, rows: i64) -> text:
+    if body == "" or cols < 1 or rows < 1 or cols > 512 or rows > 256:
+        return ""
+    val line = client_clip_line("notice: " + body, cols)
+    return "\x1b[s\x1b[" + rows.to_text() + ";1H\x1b[0m\x1b[2K" + line + "\x1b[u"

@@ -1,0 +1,107 @@
+# Exercise the dot-field dispatch route, not only the indirect-call helper.
+# runner_callback_field_owner_2026_10_11 remains OPEN until native consumers pass.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.mir.mir.*
+use compiler.mir._MirLoweringExpr.function_field_call.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+fn field_authority_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn field_authority_receiver() -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(SymbolId(id: -500)), has_type_: false,
+        type_: field_authority_type(HirTypeKind.Error), span: Span.empty())
+
+fn field_authority_lowering(signature: HirType, proof: text) -> MirLowering:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 90), "probe", MirSignature(params: [],
+        return_type: MirType.unit(), is_variadic: false), Span.empty())
+    val receiver = builder.new_temp(MirType.i64())
+    lowering.builder = builder
+    lowering.struct_value_syms[receiver.id] = "Port"
+    lowering.struct_field_order["Port"] = ["callback"]
+    lowering.struct_field_hir_type["Port"] = [signature]
+    lowering.struct_field_type_ownership_key["Port"] = [proof]
+    lowering.local_map[-500] = receiver
+    lowering
+
+fn field_authority_receiver_local(lowering: MirLowering) -> LocalId:
+    lowering.local_map[-500]
+
+fn field_authority_indirect_count(lowering: MirLowering) -> i64:
+    var builder = lowering.builder
+    val function = builder.end_function()
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.CallIndirect(_, _, _, _): count = count + 1
+                case _: ()
+    count
+
+describe "function field declaration authority":
+    # The retained seed interpreter cannot project the constructed IntLit's
+    # discriminant (diagnostic owner02: 4 executed, 3 passed, 1 failed).
+    # Preserve argument lowering as a compiled gate instead of replacing it
+    # with a zero-argument surrogate. No compiled/native PASS is claimed.
+    it "retains narrow parameters and boolean results through dot-field dispatch", tag: ["only-compiled"]:
+        val int_type = field_authority_type(HirTypeKind.Int(32, true))
+        val signature = field_authority_type(HirTypeKind.Function(
+            [int_type], field_authority_type(HirTypeKind.Bool), []))
+        var lowering = field_authority_lowering(signature, "function-signature-v1\n")
+        val value = HirExpr(kind: HirExprKind.IntLit(7), has_type_: true,
+            type_: int_type, span: Span.empty())
+        val argument = HirCallArg(has_name: false, name: "", value: value, span: Span.empty())
+        val result = lowering.try_lower_function_field_call(field_authority_receiver(),
+            field_authority_receiver_local(lowering), "callback", [argument])
+        expect(result.?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        if val local = result:
+            val retained = lowering.find_local_hir_type(local.id)
+            expect(retained.?).to_equal(true)
+            if val type_ = retained:
+                expect(type_.kind).to_equal(HirTypeKind.Bool)
+        var builder = lowering.builder
+        val function = builder.end_function()
+        var calls = 0
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.CallIndirect(_, _, arguments, declared):
+                        calls = calls + 1
+                        expect(declared.return_type.kind).to_equal(MirTypeKind.Bool)
+                        expect(declared.params.len()).to_equal(arguments.len())
+                        expect(declared.params[declared.params.len() - 1].kind).to_equal(MirTypeKind.I32)
+                    case _: ()
+        expect(calls).to_equal(2)
+
+    it "rejects a nested unresolved result before indirect emission":
+        val signature = field_authority_type(HirTypeKind.Function([],
+            field_authority_type(HirTypeKind.Optional(field_authority_type(HirTypeKind.Error))), []))
+        var lowering = field_authority_lowering(signature, "function-signature-v1\n")
+        lowering.try_lower_function_field_call(field_authority_receiver(),
+            field_authority_receiver_local(lowering), "callback", [])
+        expect(lowering.errors.len()).to_equal(1)
+        expect(field_authority_indirect_count(lowering)).to_equal(0)
+
+    it "rejects missing declaration proof before indirect emission":
+        val signature = field_authority_type(HirTypeKind.Function([],
+            field_authority_type(HirTypeKind.Bool), []))
+        var lowering = field_authority_lowering(signature, "")
+        lowering.try_lower_function_field_call(field_authority_receiver(),
+            field_authority_receiver_local(lowering), "callback", [])
+        expect(lowering.errors.len()).to_equal(1)
+        expect(field_authority_indirect_count(lowering)).to_equal(0)
+
+    it "rejects dot-field arity mismatch before indirect emission":
+        val signature = field_authority_type(HirTypeKind.Function(
+            [field_authority_type(HirTypeKind.Int(32, true))], field_authority_type(HirTypeKind.Bool), []))
+        var lowering = field_authority_lowering(signature, "function-signature-v1\n")
+        lowering.try_lower_function_field_call(field_authority_receiver(),
+            field_authority_receiver_local(lowering), "callback", [])
+        expect(lowering.errors.len()).to_equal(1)
+        expect(field_authority_indirect_count(lowering)).to_equal(0)

@@ -1,0 +1,175 @@
+# Runtime assertions plus real frontend -> HIR -> MIR -> LLVM regression.
+# Runtime qualification is pending an admitted self-hosted compiler.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+struct TakeEntry:
+    value: i64
+
+var take_evaluation_order: [i64] = []
+
+fn make_ordered_take_receiver() -> [i64]:
+    take_evaluation_order.push(1)
+    [10, 20, 30]
+
+fn take_zero_count() -> i64:
+    take_evaluation_order.push(2)
+    0
+
+fn take_negative_count() -> i64:
+    take_evaluation_order.push(2)
+    -1
+
+fn take_oversized_count() -> i64:
+    take_evaluation_order.push(2)
+    9223372036854775807
+
+fn make_take_entries() -> [TakeEntry]:
+    [TakeEntry(value: 7), TakeEntry(value: 8), TakeEntry(value: 9)]
+
+fn take_artifacts(source: text, target: text) -> (text, text):
+    val filename = "array_take_" + target + ".spl"
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var serialized = ""
+    for error in hir_lowering.errors:
+        serialized = serialized + "HIR_ERROR:" + error.message + "\n"
+    for error in lowering.errors:
+        serialized = serialized + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with("." + target):
+            serialized = serialized + serialize_mir_function(function)
+    if hir_lowering.errors.len() != 0 or lowering.errors.len() != 0:
+        return (serialized, "")
+    var translator = MirToLlvm.create(filename, CodegenTarget.X86_64, nil)
+    (serialized, translator.translate_module(mir))
+
+describe "Native array take values", tag: ["only-compiled"]:
+    it "clamps counts and preserves exact ordered prefixes":
+        val empty: [i64] = []
+        val values: [i64] = [10, 20, 30]
+        expect(empty.take(0)).to_equal([])
+        expect(values.take(0)).to_equal([])
+        expect(values.take(-1)).to_equal([])
+        expect(values.take(-9223372036854775808)).to_equal([])
+        expect(values.take(2)).to_equal([10, 20])
+        expect(values.take(3)).to_equal([10, 20, 30])
+        expect(values.take(9223372036854775807)).to_equal([10, 20, 30])
+        val small_count: u8 = 2u8
+        val medium_count: u32 = 2u32
+        val wide_count: u64 = 18446744073709551615u64
+        expect(values.take(small_count)).to_equal([10, 20])
+        expect(values.take(medium_count)).to_equal([10, 20])
+        expect(values.take(wide_count)).to_equal([10, 20, 30])
+
+    it "evaluates receiver and zero negative and oversized count once in order":
+        take_evaluation_order = []
+        expect(make_ordered_take_receiver().take(take_zero_count())).to_equal([])
+        expect(take_evaluation_order).to_equal([1, 2])
+        take_evaluation_order = []
+        expect(make_ordered_take_receiver().take(take_negative_count())).to_equal([])
+        expect(take_evaluation_order).to_equal([1, 2])
+        take_evaluation_order = []
+        expect(make_ordered_take_receiver().take(take_oversized_count())).to_equal([10, 20, 30])
+        expect(take_evaluation_order).to_equal([1, 2])
+
+    it "preserves element representations and copies the container":
+        val words: [text] = ["a", "b", "c"]
+        expect(words.take(2)).to_equal(["a", "b"])
+        val bytes: [u8] = [0u8, 128u8, 255u8]
+        expect(bytes.take(3)).to_equal([0u8, 128u8, 255u8])
+        val packed: [u64] = [1u64, 18446744073709551615u64]
+        expect(packed.take(2)).to_equal([1u64, 18446744073709551615u64])
+        val source: [i64] = [1, 2, 3]
+        var partial = source.take(2)
+        partial[0] = 99
+        partial.push(4)
+        expect(source).to_equal([1, 2, 3])
+        expect(partial).to_equal([99, 2, 4])
+        var full = source.take(3)
+        full[0] = 88
+        expect(source).to_equal([1, 2, 3])
+        expect(full).to_equal([88, 2, 3])
+        var empty_copy = source.take(0)
+        empty_copy.push(7)
+        expect(source).to_equal([1, 2, 3])
+        expect(empty_copy).to_equal([7])
+
+    it "retains nominal element fields and nested receiver authority":
+        val records = make_take_entries().take(2)
+        expect(records[0].value).to_equal(7)
+        expect(records[1].value).to_equal(8)
+        expect(make_take_entries().take(3).take(1)[0].value).to_equal(7)
+        val matrix: [[i64]] = [[1, 2], [3, 4]]
+        expect(matrix[1].take(1)).to_equal([3])
+
+describe "Native array take lowering", tag: ["only-compiled"]:
+    it "lowers direct, nested, field, and indexed runtime array receivers":
+        val direct = take_artifacts("fn pick(xs: [i64], n: i64) -> [i64]:\n    xs.take(n)\n", "pick")
+        val nested = take_artifacts("fn make() -> [i64]:\n    [1, 2, 3]\nfn pick() -> [i64]:\n    make().take(2).take(1)\n", "pick")
+        val field = take_artifacts("struct Holder:\n    values: [i64]\nfn pick(holder: Holder) -> [i64]:\n    holder.values.take(1)\n", "pick")
+        val indexed = take_artifacts("fn pick(matrix: [[i64]]) -> [i64]:\n    matrix[1].take(1)\n", "pick")
+        for artifacts in [direct, nested, field, indexed]:
+            expect(artifacts.0.contains("HIR_ERROR:")).to_equal(false)
+            expect(artifacts.0.contains("MIR_ERROR:")).to_equal(false)
+            expect(artifacts.0).to_contain("rt_slice")
+            expect(artifacts.1).to_contain("call i64 @rt_slice(i64 ")
+        expect(direct.0.split("rt_slice").len() - 1).to_equal(1)
+        expect(nested.0.split("rt_slice").len() - 1).to_equal(2)
+        expect(field.0.split("rt_slice").len() - 1).to_equal(1)
+        expect(indexed.0.split("rt_slice").len() - 1).to_equal(1)
+
+    it "evaluates receiver and zero negative and oversized counts once in source order":
+        for count in ["0", "-1", "9223372036854775807"]:
+            val artifacts = take_artifacts(
+                "fn make_once() -> [i64]:\n    [1, 2, 3]\n" +
+                "fn count_once() -> i64:\n    " + count + "\n" +
+                "fn pick() -> [i64]:\n    make_once().take(count_once())\n", "pick")
+            expect(artifacts.0.contains("MIR_ERROR:")).to_equal(false)
+            expect(artifacts.0.split("make_once").len() - 1).to_equal(1)
+            expect(artifacts.0.split("count_once").len() - 1).to_equal(1)
+            expect(artifacts.0.split("rt_slice").len() - 1).to_equal(1)
+            expect(artifacts.0.find("make_once") < artifacts.0.find("count_once")).to_equal(true)
+
+    it "keeps the four-word slice ABI and recognizes unsigned upper clamps":
+        val signed = take_artifacts("fn pick(xs: [i64], n: i64) -> [i64]:\n    xs.take(n)\n", "pick")
+        val narrow = take_artifacts("fn pick(xs: [i64], n: u8) -> [i64]:\n    xs.take(n)\n", "pick")
+        val wide = take_artifacts("fn pick(xs: [i64], n: u64) -> [i64]:\n    xs.take(n)\n", "pick")
+        for artifacts in [signed, narrow, wide]:
+            expect(artifacts.0.contains("HIR_ERROR:")).to_equal(false)
+            expect(artifacts.0.contains("MIR_ERROR:")).to_equal(false)
+            expect(artifacts.1).to_contain("declare i64 @rt_slice(i64, i64, i64, i64)")
+            expect(artifacts.1).to_contain("call i64 @rt_slice(i64 ")
+        expect(narrow.1).to_contain("icmp ugt i64")
+        expect(wide.1).to_contain("icmp ugt i64")
+        expect(wide.1.find("icmp ugt i64") < wide.1.find("call i64 @rt_slice")).to_equal(true)
+        expect(signed.1).to_contain("icmp slt i64")
+
+    it "rejects invalid counts and preserves text and custom take methods":
+        for invalid in ["1.5", "true", "\"bad\""]:
+            val artifacts = take_artifacts("fn pick(xs: [i64]) -> [i64]:\n    xs.take(" + invalid + ")\n", "pick")
+            expect(artifacts.0).to_contain("MIR_ERROR:array take count must be an integer")
+            expect(artifacts.0.contains("rt_slice")).to_equal(false)
+            expect(artifacts.0).to_contain("rt_panic")
+        for invocation in ["xs.take()", "xs.take(1, 2)"]:
+            val arity = take_artifacts("fn pick(xs: [i64]) -> [i64]:\n    " + invocation + "\n", "pick")
+            expect(arity.0).to_contain("MIR_ERROR:array take requires one integer count")
+            expect(arity.0.contains("rt_slice")).to_equal(false)
+        val text_case = take_artifacts("fn pick(xs: text) -> text:\n    xs.take(2)\n", "pick")
+        expect(text_case.0.contains("MIR_ERROR:")).to_equal(false)
+        expect(text_case.0.contains("rt_slice")).to_equal(false)
+        val custom = take_artifacts("struct Window:\n    value: i64\n" +
+            "    fn take(n: i64) -> i64:\n        self.value + n\n" +
+            "fn pick(window: Window) -> i64:\n    window.take(2)\n", "pick")
+        expect(custom.0.contains("MIR_ERROR:")).to_equal(false)
+        expect(custom.0.contains("rt_slice")).to_equal(false)

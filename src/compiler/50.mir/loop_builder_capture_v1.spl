@@ -1,0 +1,303 @@
+# Opt-in producer bookkeeping. No rich MIR/HIR argument or retained payload.
+use compiler.mir.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.mir.loop_module_shape_owner_v1.{MirLoopShapeOwnerV1, MirLoopNodeWriterV1, MirLoopConstructionViewV1}
+use compiler.mir.loop_module_shape_types_v1.{MirLoopShapeTagV1, MirLoopShapeErrorV1}
+
+class MirLoopBuilderBlockV1:
+    node: i64
+    writer: MirLoopNodeWriterV1?
+    pending: [i64]
+    committed: [i64]
+    terminator: i64
+
+pub class MirLoopBuilderCaptureV1:
+    owner_: MirLoopShapeOwnerV1
+    view_: MirLoopConstructionViewV1
+    function_: MirLoopNodeWriterV1?
+    function_id: i64
+    blocks_: [MirLoopBuilderBlockV1]
+    locals_: [i64]
+    current_block: i64
+    instruction_event: i64
+    terminator_event: i64
+    sentinel_credit: bool
+    emergency_credit: bool
+
+    pub static fn create(owner: MirLoopShapeOwnerV1) -> Result<MirLoopBuilderCaptureV1, MirLoopShapeErrorV1>:
+        val view = owner.inspect()?
+        # Fixed capture fields and first empty-function compatibility DAG.
+        # 512 cells conservatively cover the fixed record, empty containers,
+        # default nested attributes and two return/assignment copies. No input
+        # strings, locals, blocks, types or metadata enter that sentinel.
+        match view.account().reserve(544, state_fields: 544):
+            case Err(_):
+                owner.fail(MirLoopShapeErrorV1.Capacity)
+                return Err(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): ()
+        Ok(MirLoopBuilderCaptureV1(owner_: owner, view_: view, function_: nil,
+            function_id: -1, blocks_: [], locals_: [], current_block: -1,
+            instruction_event: -1, terminator_event: -1, sentinel_credit: false, emergency_credit: true))
+
+    pub fn owner() -> MirLoopShapeOwnerV1: self.owner_
+    pub fn account() -> MirLoopResourceAccountV1: self.view_.account()
+    pub fn function_cursor() -> i64: self.function_id
+    pub fn block_count() -> i64: self.blocks_.len()
+    pub fn local_count() -> i64: self.locals_.len()
+
+    pub me fail(code: MirLoopShapeErrorV1):
+        # Preserve the first actual refusal, including provider capacity errors.
+        if self.owner_.observation().state == 0: self.owner_.fail(code)
+
+    pub fn is_active() -> bool:
+        self.owner_.observation().state == 0 and not self.account().is_closed()
+
+    pub me reserve_function_return():
+        if self.sentinel_credit: return
+        match self.reserve(512):
+            case Ok(_): self.sentinel_credit = true
+            case Err(error): self.fail(error)
+
+    pub me reserve(cells: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if not self.is_active(): return Err(MirLoopShapeErrorV1.InvalidState)
+        match self.account().reserve(cells, state_fields: cells):
+            case Ok(_): Ok(())
+            case Err(_):
+                self.fail(MirLoopShapeErrorV1.Capacity)
+                Err(MirLoopShapeErrorV1.Capacity)
+
+    pub me begin_function(symbol: i64, name_text: i64, signature: i64, span: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if self.function_ != nil: return Err(MirLoopShapeErrorV1.Incomplete)
+        if not self.sentinel_credit: return Err(MirLoopShapeErrorV1.Capacity)
+        self.reserve(4)?
+        self.blocks_ = []
+        self.locals_ = []
+        self.instruction_event = -1
+        self.terminator_event = -1
+        self.current_block = -1
+        val writer = self.owner_.begin(MirLoopShapeTagV1.Function)?
+        writer.scalar(0, symbol)?
+        writer.scalar(1, 0)?
+        writer.text_id(0, name_text)?
+        writer.child(signature)?
+        if span >= 0: writer.span(span)?
+        self.function_id = writer.cursor()
+        self.function_ = Some(writer)
+        Ok(())
+
+    pub me append_function_child(node: i64) -> Result<(), MirLoopShapeErrorV1>:
+        match self.function_:
+            case Some(writer): writer.child(node)
+            case None: Err(MirLoopShapeErrorV1.InvalidState)
+
+    pub fn signature_type_cursor(ordinal: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        val signature = self.view_.child(self.function_id, 0)?
+        self.view_.child(signature, ordinal)
+
+    pub fn block_cursor(id: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        if id < 0 or id >= self.blocks_.len(): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        Ok(self.blocks_[id].node)
+
+    pub fn local_cursor(id: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        if id < 0 or id >= self.locals_.len(): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        Ok(self.locals_[id])
+
+    pub fn local_type_cursor(id: i64) -> Result<i64, MirLoopShapeErrorV1>:
+        self.view_.child(self.local_cursor(id)?, 0)
+
+    pub me new_local(id: i64, name_text: i64, type_node: i64, kind: i64, ordinal: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if id != self.locals_.len(): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        if id >= self.account().limits().max_locals: return Err(MirLoopShapeErrorV1.Capacity)
+        self.reserve(self.locals_.len() + 1)?
+        val writer = self.owner_.begin(MirLoopShapeTagV1.Local)?
+        writer.scalar(0, id)?
+        writer.scalar(1, kind)?
+        writer.scalar(2, ordinal)?
+        writer.scalar(3, 0)?
+        writer.scalar(4, 0)?
+        writer.scalar(5, 0)?
+        writer.text_id(0, name_text)?
+        writer.child(type_node)?
+        val node = writer.finish()?
+        self.locals_.push(node)
+        self.append_function_child(node)
+
+    pub me bind_source_symbol(id: i64, symbol: i64) -> Result<(), MirLoopShapeErrorV1>:
+        val node = self.local_cursor(id)?
+        val writer = self.owner_.revise(node, self.view_.revision(node)?, false)?
+        writer.scalar(4, 1)?
+        writer.scalar(5, symbol)?
+        writer.finish()?
+        Ok(())
+
+    pub me rename_local(id: i64, name_text: i64) -> Result<(), MirLoopShapeErrorV1>:
+        val node = self.local_cursor(id)?
+        val writer = self.owner_.revise(node, self.view_.revision(node)?, false)?
+        writer.text_id(0, name_text)?
+        writer.finish()?
+        Ok(())
+
+    pub me retype_local(id: i64, type_node: i64) -> Result<(), MirLoopShapeErrorV1>:
+        val node = self.local_cursor(id)?
+        val writer = self.owner_.revise(node, self.view_.revision(node)?, true)?
+        writer.child(type_node)?
+        writer.finish()?
+        Ok(())
+
+    pub me new_block(id: i64, label_text: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if id != self.blocks_.len(): return Err(MirLoopShapeErrorV1.InvalidCursor)
+        match self.account().reserve(1, blocks: 1):
+            case Err(_): return Err(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): ()
+        self.reserve(self.blocks_.len() + 9)?
+        val writer = self.owner_.begin(MirLoopShapeTagV1.Block)?
+        writer.scalar(0, id)?
+        writer.text_id(0, label_text)?
+        self.blocks_.push(MirLoopBuilderBlockV1(node: writer.cursor(), writer: Some(writer),
+            pending: [], committed: [], terminator: -1))
+        if self.current_block < 0: self.current_block = id
+        Ok(())
+
+    pub me switch_to_block(id: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.block_cursor(id)?
+        if self.instruction_event >= 0 or self.terminator_event >= 0: return Err(MirLoopShapeErrorV1.Incomplete)
+        self.current_block = id
+        Ok(())
+
+    pub me instruction(tag: MirLoopShapeTagV1) -> Result<MirLoopNodeWriterV1, MirLoopShapeErrorV1>:
+        # Invoked before the scalar row and before the actual rich constructor.
+        match self.account().reserve(1, instructions: 1):
+            case Err(_):
+                self.fail(MirLoopShapeErrorV1.Capacity)
+                return Err(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): ()
+        self.owner_.begin(tag)
+
+    pub me prepare_instruction(node: i64, span: i64 = -1) -> Result<(), MirLoopShapeErrorV1>:
+        self.block_cursor(self.current_block)?
+        if self.instruction_event >= 0: return Err(MirLoopShapeErrorV1.Incomplete)
+        if span >= 0:
+            val writer = self.owner_.revise(node, self.view_.revision(node)?, false)?
+            writer.span(span)?
+            writer.finish()?
+        self.instruction_event = node
+        Ok(())
+
+    pub me consume_instruction(block_id: i64, pending_count: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if block_id != self.current_block or self.instruction_event < 0: return Err(MirLoopShapeErrorV1.Incomplete)
+        self.block_cursor(block_id)?
+        val block = self.blocks_[block_id]
+        if block.pending.len() != pending_count: return Err(MirLoopShapeErrorV1.Incomplete)
+        self.reserve(block.pending.len() + 1)?
+        block.pending.push(self.instruction_event)
+        self.instruction_event = -1
+        Ok(())
+
+    pub me flush(block_id: i64, pending_count: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.block_cursor(block_id)?
+        val block = self.blocks_[block_id]
+        if pending_count != block.pending.len(): return Err(MirLoopShapeErrorV1.Incomplete)
+        if pending_count == 0: return Ok(())
+        self.reserve(pending_count * 2 + 1)?
+        block.committed = block.pending
+        block.pending = []
+        if block.terminator >= 0: self.write_block(block_id)?
+        Ok(())
+
+    pub me prepare_terminator(node: i64) -> Result<(), MirLoopShapeErrorV1>:
+        self.block_cursor(self.current_block)?
+        if self.terminator_event >= 0: return Err(MirLoopShapeErrorV1.Incomplete)
+        self.terminator_event = node
+        Ok(())
+
+    pub me consume_terminator(block_id: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if block_id != self.current_block or self.terminator_event < 0: return Err(MirLoopShapeErrorV1.Incomplete)
+        self.block_cursor(block_id)?
+        self.blocks_[block_id].terminator = self.terminator_event
+        self.terminator_event = -1
+        self.write_block(block_id)
+
+    me write_block(id: i64) -> Result<(), MirLoopShapeErrorV1>:
+        val block = self.blocks_[id]
+        if block.terminator < 0: return Err(MirLoopShapeErrorV1.Incomplete)
+        val writer = match block.writer:
+            case Some(active): active
+            case None: self.owner_.revise(block.node, self.view_.revision(block.node)?, true)?
+        for node in block.committed: writer.child(node)?
+        writer.child(block.terminator)?
+        writer.finish()?
+        block.writer = nil
+        Ok(())
+
+    pub me finish_function(block_count: i64, local_count: i64) -> Result<(), MirLoopShapeErrorV1>:
+        if block_count != self.blocks_.len() or local_count != self.locals_.len(): return Err(MirLoopShapeErrorV1.Incomplete)
+        if self.instruction_event >= 0 or self.terminator_event >= 0: return Err(MirLoopShapeErrorV1.Incomplete)
+        val writer = match self.function_:
+            case Some(value): value
+            case None: return Err(MirLoopShapeErrorV1.InvalidState)
+        for block in self.blocks_:
+            if block.writer != nil or block.terminator < 0 or block.pending.len() != 0:
+                return Err(MirLoopShapeErrorV1.Incomplete)
+            writer.child(block.node)?
+        val node = writer.finish()?
+        self.owner_.publish_function(node, nil)?
+        self.function_ = nil
+        Ok(())
+
+    pub me consume_sentinel_credit() -> bool:
+        if self.sentinel_credit:
+            self.sentinel_credit = false
+            return true
+        val available = self.emergency_credit
+        self.emergency_credit = false
+        if not available: self.fail(MirLoopShapeErrorV1.Incomplete)
+        available
+
+    # Fixed-result adapters let existing non-Result builder APIs poison the
+    # owner without creating rich error strings or new rich-self wrappers.
+    pub me accept(result: Result<(), MirLoopShapeErrorV1>):
+        match result:
+            case Ok(_): ()
+            case Err(error): self.fail(error)
+
+    pub me node(result: Result<i64, MirLoopShapeErrorV1>) -> i64:
+        match result:
+            case Ok(value): value
+            case Err(error):
+                self.fail(error)
+                -1
+
+    pub me start(tag: MirLoopShapeTagV1) -> MirLoopNodeWriterV1?:
+        match self.owner_.begin(tag):
+            case Ok(writer): Some(writer)
+            case Err(error):
+                self.fail(error)
+                nil
+
+    pub me start_instruction(tag: MirLoopShapeTagV1) -> MirLoopNodeWriterV1?:
+        match self.instruction(tag):
+            case Ok(writer): Some(writer)
+            case Err(error):
+                self.fail(error)
+                nil
+
+    pub me leaf(tag: MirLoopShapeTagV1) -> i64:
+        if val writer = self.start(tag): return self.node(writer.finish())
+        -1
+
+    pub me scalar_leaf(tag: MirLoopShapeTagV1, value: i64) -> i64:
+        if val writer = self.start(tag):
+            self.accept(writer.scalar(0, value))
+            return self.node(writer.finish())
+        -1
+
+    pub me constant_operand(value_node: i64, type_node: i64) -> i64:
+        if val writer = self.start(MirLoopShapeTagV1.OperandConst):
+            self.accept(writer.child(value_node))
+            self.accept(writer.child(type_node))
+            return self.node(writer.finish())
+        -1
+
+    pub me charge_edges(count: i64):
+        match self.account().reserve(count, edges: count):
+            case Ok(_): ()
+            case Err(_): self.fail(MirLoopShapeErrorV1.Capacity)

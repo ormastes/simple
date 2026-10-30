@@ -60,9 +60,10 @@ fn _pad2(value: i64) -> text:
 fn _valid_date(raw: text) -> bool:
     if raw.len() != 10 or raw[4:5] != "-" or raw[7:8] != "-":
         return false
-    val year = raw[0:4].parse_i64()
-    val month = raw[5:7].parse_i64()
-    val day = raw[8:10].parse_i64()
+    # parse_int is the checked optional integer parser used for date components.
+    val year = raw[0:4].parse_int()
+    val month = raw[5:7].parse_int()
+    val day = raw[8:10].parse_int()
     if not year.? or not month.? or not day.?:
         return false
     year! >= 1970 and month! >= 1 and month! <= 12 and
@@ -120,7 +121,7 @@ fn main() -> i64:
         print_help()
         return 1
 
-    val line_num = if line_str != "": line_str.parse_i64() ?? 0 else: 0
+    val line_num = if line_str != "": line_str.parse_int() ?? 0 else: 0
     val repro_val = if repro != "": repro else: "N/A"
     val file_val = if file != "": file else: "unknown"
     val severity = _parse_cli_severity(severity_str)
@@ -138,9 +139,16 @@ fn main() -> i64:
                 return 1
 
     val db_opt = load_bug_database(BUG_DB_PATH)
+    var create_database_exclusively = false
     var db = match db_opt:
         case Some(value): value
-        case nil: create_bug_database(BUG_DB_PATH)
+        case nil:
+            # A nil load may mean absence or unreadable existing contents.
+            # Build the new row in memory, then use the canonical create-only
+            # database writer. Its no-replace publish refuses existing paths,
+            # including dangling symlinks, without a check-then-write race.
+            create_database_exclusively = true
+            create_bug_database(BUG_DB_PATH)
 
     val bug = Bug(
         id: id,
@@ -162,8 +170,12 @@ fn main() -> i64:
         print "Error: failed to add bug (id may already exist)"
         return 1
 
-    if not db.save():
-        print "Error: failed to save bug database"
+    val saved = if create_database_exclusively: db.save_exclusive() else: db.save()
+    if not saved:
+        if create_database_exclusively:
+            print "Error: failed to create bug database without replacing an existing path"
+        else:
+            print "Error: failed to save bug database"
         return 1
 
     if log_opts.progress != "summary":

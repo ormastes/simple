@@ -1,0 +1,60 @@
+#!/bin/sh
+# Execute the product policy against real transcript owner and compiler budgets.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$root/scripts/bootstrap/lib/product-frontend-policy.shs"
+unset SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB SIMPLE_SHARD_MEM_CLAMP SIMPLE_PARSE_SHARD_MAX
+unset SIMPLE_PARSE_SHARD_WORKER_KB SIMPLE_HIR_SHARD_WORKER_KB SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB
+bootstrap_product_frontend_fanout_host() { return 0; }
+bootstrap_product_frontend_linux_host() { return 0; }
+rows=$(bootstrap_product_frontend_policy qualified 50331648 enforce 50331648)
+field() { printf '%s\n' "$rows" | awk -F= -v key="$1" '$1==key {print $2; n++} END {if(n!=1) exit 1}'; }
+compiler_budget() { awk -v key="$1" '$3==key ":" {print $6; n++} END {if(n!=1) exit 1}' "$root/src/app/cli/shard_mem_clamp.spl"; }
+linux_parse=$(field SIMPLE_PARSE_SHARD_WORKER_KB)
+[ "$(field SIMPLE_HIR_SHARD_WORKER_KB)" = "$(compiler_budget SHARD_HIR_WORKER_KB_V1)" ]
+[ "$(field SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB)" = 50331648 ]
+if printf '%s\n' "$rows" | grep -q '^SIMPLE_PARSE_SHARD_MAX='; then exit 1; fi
+if printf '%s\n' "$rows" | grep -q '^SIMPLE_NATIVE_BUILD_THREADS='; then exit 1; fi
+# The measured Linux child sample is regression evidence, not a claimed
+# per-process peak. The conservative Linux estimate prices one parse cache
+# warmer under a 48 GiB cap; policy rows do not rewrite build thread requests.
+evidence="$root/scripts/bootstrap/tests/fixtures/phase2_cli_parse_rss_sample_2026-10-29.sdn"
+evidence_field() { awk -F': ' -v key="$1" '$1==key {print $2; n++} END {if(n!=1) exit 1}' "$evidence"; }
+sample_kib=$(evidence_field sampled_parse_child_rss_kib)
+cap_kib=$(evidence_field enforced_tree_cap_kib)
+old_parse_kib=$(evidence_field previous_parse_worker_estimate_kib)
+[ "$linux_parse" = 25165824 ]
+[ "$old_parse_kib" = "$(compiler_budget SHARD_PARSE_WORKER_KB_V1)" ]
+[ "$old_parse_kib" -lt "$sample_kib" ]
+[ "$sample_kib" -lt "$linux_parse" ]
+share_kib=$((cap_kib * 60 / 100))
+[ "$((share_kib / old_parse_kib))" -eq 7 ]
+[ "$((share_kib / linux_parse))" -eq 1 ]
+# HIR remains independently priced at 9 GiB: three HIR workers at this cap.
+hir=$(field SIMPLE_HIR_SHARD_WORKER_KB)
+[ "$((cap_kib * 60 / 100 / hir))" -eq 3 ]
+if SIMPLE_HIR_SHARD_WORKER_KB=3000000 bootstrap_product_frontend_policy qualified 50331648 enforce 50331648 >/dev/null; then
+    echo 'stale inherited HIR estimate accepted' >&2; exit 1
+fi
+[ -z "${SIMPLE_PARSE_SHARD_WORKER_KB:-}" ]
+if SIMPLE_PARSE_SHARD_WORKER_KB=3800000 bootstrap_product_frontend_policy qualified 50331648 enforce 50331648 >/dev/null; then
+    echo 'underpriced inherited Linux parse estimate accepted' >&2; exit 1
+fi
+rows=$(SIMPLE_PARSE_SHARD_WORKER_KB=25165824 SIMPLE_HIR_SHARD_WORKER_KB=9000000 bootstrap_product_frontend_policy qualified 50331648 enforce 50331648)
+[ "$(field SIMPLE_PARSE_SHARD_WORKER_KB)" = 25165824 ]
+[ "$(field SIMPLE_HIR_SHARD_WORKER_KB)" = 9000000 ]
+rows=$(SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=8388608 bootstrap_product_frontend_policy qualified 50331648 enforce 50331648)
+[ "$(field SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB)" = 8388608 ]
+# Other non-Windows platforms retain the prior parse estimate without Linux
+# process-level measurements; Windows policy below remains untouched.
+bootstrap_product_frontend_linux_host() { return 1; }
+rows=$(bootstrap_product_frontend_policy qualified 50331648 enforce 50331648)
+[ "$(field SIMPLE_PARSE_SHARD_WORKER_KB)" = "$(compiler_budget SHARD_PARSE_WORKER_KB_V1)" ]
+# Historical Windows owner still pins one parse frontend and a 3 GB share.
+bootstrap_product_frontend_fanout_host() { return 1; }
+rows=$(bootstrap_product_frontend_policy qualified 8388608 enforce)
+[ "$(field SIMPLE_PARSE_SHARD_MAX)" = 1 ]
+[ "$(field SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB)" = 3000000 ]
+[ "$(field SIMPLE_HIR_SHARD_WORKER_KB)" = 3000000 ]
+echo 'PASS: measured product worker estimates, unchanged caps, and Windows owner'

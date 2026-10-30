@@ -7,6 +7,7 @@
 # reparses. No target object, mutable index, or host-private cache state lives
 # under this root.
 
+use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 use compiler.frontend.frontend_cache_root_admission_v1.{frontend_cache_root_admission_v1}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_dir}
@@ -156,8 +157,10 @@ fn _shared_parse_source_authorized_v1(source_sha: text,
             not _shared_parse_authority_ready_for_v1(authority_path,
                 authority_digest):
         return false
-    val row = _shared_parse_authority_rows_v1.get_or(
-        _shared_parse_path_hex_v1(logical_path), "")
+    # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+    val authority_rows: Dict<text, text> = _shared_parse_authority_rows_v1
+    val authority_row_key = _shared_parse_path_hex_v1(logical_path)
+    val row = if authority_rows.contains_key(authority_row_key): authority_rows[authority_row_key] else: ""
     val length = logical_path.bytes().len()
     if row != "{length}:0:{source_sha}" and
             row != "{length}:1:{source_sha}":
@@ -285,6 +288,7 @@ pub fn frontend_shared_parse_store_v1(source_sha: text, parse_source: text,
     val nonce = sha256_text(key + "|" + getpid().to_text() + "|" +
         time_now_unix_micros().to_text())
     val temp = dir + "/." + nonce + ".tmp"
+    if not disk_publish_admitted(dir, cell.len()): return false
     if not file_create_exclusive(temp, cell): return false
     val published = file_publish_noreplace(temp, destination)
     val unique_publisher = match published:

@@ -10,6 +10,7 @@ use app.spipe_docgen.parser.{
     scenario_at_is_unconditional_pending_with_facts
 }
 use compiler.frontend.core.source_facts.{simple_string_continuation_lines}
+use app.spipe_docgen.semantic_links.{SemanticDocgenOptionsV1, prepare_semantic_docgen_links_v1, publish_semantic_docgen_v1}
 use app.spipe_docgen.evidence_loader.{load_evidence_fragment}
 use std.common.spec.evidence.model.{EvidenceAudience}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
@@ -701,8 +702,12 @@ fn _sdn_dep_in(arr: [text], item: text) -> bool:
     false
 
 fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
+    generate_feature_doc_semantic_v1(doc, output_dir, SemanticDocgenOptionsV1.empty())
+
+fn generate_feature_doc_semantic_v1(doc: SspecDoc, output_dir: text, options: SemanticDocgenOptionsV1) -> Result<text, text>:
     if not spec_path_is_safe(doc.file_path):
         return Err("Spec path escapes the documentation root: {doc.file_path}")
+    val semantic_links = prepare_semantic_docgen_links_v1(doc, options)?
     val file_name = output_file_stem(doc)
     val has_docstring = doc.doc_blocks.len() > 0
 
@@ -849,15 +854,12 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
     card_parts.push("\n</details>\n")
 
     # Write to file
-    val md = redact_secret_like_tokens(strip_trailing_line_whitespace(card_parts.join("")))
+    val md = redact_secret_like_tokens(strip_trailing_line_whitespace(card_parts.join(""))) + semantic_links
     val rel_dir = output_relative_dir(doc)
     if rel_dir != "":
         native_fs_create_dir(output_dir + "/" + rel_dir)
     val output_path = output_path_for_doc(doc, output_dir)
-    val ok = native_fs_write_string(output_path, md)
-    if not ok:
-        return Err("Failed to write {output_path}")
-    return Ok(output_path)
+    publish_semantic_docgen_v1(md, output_path, options)
 
 # ============================================================================
 # INDEX MODULE

@@ -104,3 +104,11 @@ for target dispatch and managed-admission restrictions. Retained scope and
 gates are in the
 [MDSOC++ linker plan](../../03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md)
 and [design](../../05_design/compiler/linker/mold_mdsocpp_linker_design.md).
+
+## Note 2026-10-25
+
+Windows hosted (external clang/lld) links now add `mswsock` wherever `ws2_32`
+is a default lib (PR #4507) and select LLVM runtimes for llvm-mingw clang
+(PR #4487). Defaults are unchanged: the internal Simple linker is still opt-in
+(`SIMPLE_LINKER=internal`); its only full-product execution evidence is the
+Linux x64 CLI link in `59126e2c285`.

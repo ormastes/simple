@@ -1,0 +1,35 @@
+use std.spec.*
+use compiler.driver.driver_cache_scope_policy_v1.{
+    driver_frontend_cache_scope_publish_allowed_v1, hir_cache_identity_scope_v1,
+    hir_cache_digest_allowed_v1, hir_cache_policy_closure_digest_v1}
+
+describe "frontend cache scope publication gate":
+    it "decides on cli_mode_text when present":
+        expect(driver_frontend_cache_scope_publish_allowed_v1("", "aot")).to_equal(true)
+        expect(driver_frontend_cache_scope_publish_allowed_v1("interpret", "aot")).to_equal(true)
+    it "falls back to the enum mode text":
+        expect(driver_frontend_cache_scope_publish_allowed_v1("interpret", "")).to_equal(false)
+        expect(driver_frontend_cache_scope_publish_allowed_v1("aot", "")).to_equal(true)
+        expect(driver_frontend_cache_scope_publish_allowed_v1("", "")).to_equal(true)
+
+describe "HIR cache identity scope":
+    it "prefers the frontend scope when non-empty":
+        expect(hir_cache_identity_scope_v1("fe", "pub", "0")).to_equal("fe")
+        expect(hir_cache_identity_scope_v1("fe", "pub", "1")).to_equal("fe")
+    it "uses the published scope when the frontend cache is off":
+        expect(hir_cache_identity_scope_v1("", "pub", "0")).to_equal("pub")
+    it "is empty when nothing is published":
+        expect(hir_cache_identity_scope_v1("", "", "0")).to_equal("")
+        expect(hir_cache_identity_scope_v1("", "pub", "")).to_equal("")
+
+describe "HIR closure digest admission":
+    it "admits full builds and tldr builds with imports":
+        expect(hir_cache_digest_allowed_v1(false, 0, true)).to_equal(true)
+        expect(hir_cache_digest_allowed_v1(true, 3, true)).to_equal(true)
+    it "refuses entry-only tldr without imports or a disabled cache":
+        expect(hir_cache_digest_allowed_v1(true, 0, true)).to_equal(false)
+        expect(hir_cache_digest_allowed_v1(false, 0, false)).to_equal(false)
+    it "folds explicit semantic policy without moving default-lane digests":
+        expect(hir_cache_policy_closure_digest_v1("d", false)).to_equal("d")
+        expect(hir_cache_policy_closure_digest_v1("d", true)).to_equal("d|compiler_explicit_semantic_policy=1")
+        expect(hir_cache_policy_closure_digest_v1("", true)).to_equal("")

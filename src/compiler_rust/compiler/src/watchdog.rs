@@ -89,9 +89,86 @@ pub fn read_rss_bytes() -> u64 {
     (info.pti_resident_size / 1024) * 1024
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Read current working set via K32GetProcessMemoryInfo (Windows).
+#[cfg(windows)]
+pub fn read_rss_bytes() -> u64 {
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn K32GetProcessMemoryInfo(process: isize, counters: *mut ProcessMemoryCounters, cb: u32) -> i32;
+    }
+    // SAFETY: zeroed POD struct; cb set to its exact size as the API requires.
+    let mut pmc: ProcessMemoryCounters = unsafe { std::mem::zeroed() };
+    let cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+    pmc.cb = cb;
+    if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, cb) } != 0 {
+        pmc.working_set_size as u64
+    } else {
+        0
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn read_rss_bytes() -> u64 {
     0
+}
+
+/// Start a memory-only guard for non-interpreter paths (native-build).
+///
+/// Native compilation never polls `check_timeout!()`, so the interpreter
+/// watchdog's flag would be ignored. This guard instead terminates the
+/// process with a clear message (exit 137) once RSS exceeds
+/// `SIMPLE_MEMORY_LIMIT_MB`. Returns false when no limit is configured.
+pub fn start_memory_guard(label: &'static str) -> bool {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let mem_limit = memory_limit_bytes();
+    if mem_limit == 0 || STARTED.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    if read_rss_bytes() == 0 {
+        eprintln!(
+            "[watchdog] warning: SIMPLE_MEMORY_LIMIT_MB set but RSS is unreadable on {}; limit not enforced",
+            std::env::consts::OS
+        );
+        return false;
+    }
+    thread::Builder::new()
+        .name("simple-memory-guard".to_string())
+        .spawn(move || loop {
+            let rss = read_rss_bytes();
+            if let Some(msg) = memory_limit_message(label, rss, mem_limit) {
+                eprintln!("{}", msg);
+                write_watchdog_crash_log(&msg);
+                std::process::exit(137);
+            }
+            thread::sleep(Duration::from_millis(200));
+        })
+        .is_ok()
+}
+
+fn memory_limit_message(label: &str, rss: u64, limit: u64) -> Option<String> {
+    if limit == 0 || rss <= limit {
+        return None;
+    }
+    Some(format!(
+        "error: {} aborted: RSS {}MB exceeds SIMPLE_MEMORY_LIMIT_MB={}MB",
+        label,
+        rss / (1024 * 1024),
+        limit / (1024 * 1024),
+    ))
 }
 
 /// Start the watchdog thread with the given timeout in seconds.
@@ -207,6 +284,23 @@ mod tests {
         WATCHDOG_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn test_memory_limit_message_names_limit() {
+        let mb = 1024 * 1024;
+        assert!(memory_limit_message("native-build", 100 * mb, 0).is_none());
+        assert!(memory_limit_message("native-build", 100 * mb, 200 * mb).is_none());
+        let msg = memory_limit_message("native-build", 300 * mb, 200 * mb).unwrap();
+        assert!(msg.contains("native-build aborted"), "{}", msg);
+        assert!(msg.contains("RSS 300MB"), "{}", msg);
+        assert!(msg.contains("SIMPLE_MEMORY_LIMIT_MB=200MB"), "{}", msg);
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn test_read_rss_bytes_nonzero() {
+        assert!(read_rss_bytes() > 0);
     }
 
     /// The in-process macOS reader must agree with `ps -o rss=` (the reader it

@@ -64,6 +64,25 @@ registry hunk presence. After any expr_dispatch refactor, re-verify:
 - [src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl)
   (construct/read/write codegen).
 
+### Declaration-level cfg guards (2026-10-27)
+
+**Pattern:** `lower_module` first calls `apply_decl_cfg_guards(module)` (asm_and_targets.spl), which drops
+guarded decls that are off for `self.target_context` and returns the module untouched (no allocation) when
+nothing is guarded. Grouped arms (`cfg_group != 0`) are decided once per group by `cfg_group_winners`
+(arms ordered by `cfg_arm`, else = `-1` last, cond = cfg joined with " and ", `mir_cfg_select_arm`; -1 drops the
+group, -2 or a numbered arm without cfg is `error_fatal`). Group 0 items use
+`mir_cfg_item_enabled(cfg, target, features)`. A dropped class/struct/enum also drops its impls; a dropped
+impl or class drops its methods from `module.functions`. The bootstrap flat-store lane calls
+`cfg_group_winners_for_functions` + `decl_cfg_keep` per function (`bootstrap_globals.spl`), as does the JIT path.
+
+**File refs:**
+- [src/compiler/50.mir/_MirLowering/asm_and_targets.spl](../../../../src/compiler/50.mir/_MirLowering/asm_and_targets.spl)
+  (apply_decl_cfg_guards, cfg_group_winners, decl_cfg_keep).
+- [src/compiler/50.mir/mir_cfg_select.spl](../../../../src/compiler/50.mir/mir_cfg_select.spl)
+  (mir_cfg_item_enabled).
+
+**TODO (decl-level @cfg):** Dropping a type drops its impls by type name, but specialization records and trait impls declared in other modules are not covered yet. Follow up in step 3 or 5.
+
 ## Gotchas
 
 1. **Arrays are value types:** passed by copy, so `.push()` / `.pop()` /
@@ -500,3 +519,95 @@ programs never change layout. Rules to keep when editing:
 - Known, NOT fixed: sorting a TAGGED array that holds wide (heap-boxed) ints is
   wrong (`primitive_sort`/array_sort provider ignore the boxes); packed arrays sort
   correctly. Bug record: `doc/08_tracking/bug/jit_array_store_wide_i64_leak_2026-10-20.md`.
+
+## 2026-10-25 — diverging arms and nil-tested dict reads (Phase 3 run-27e)
+
+- `panic(...)` returns a **Unit** temp from a fresh `after_panic` block, so
+  `current_block_has_explicit_terminator()` is FALSE after it. Any value merge
+  (match arm, if arm, default) must also skip a Unit-typed arm result
+  (`local_is_unit`), or the first-wins type inference retypes the shared result
+  to Unit and every later arm's value reads as `iconst 0`. `lower_if` had this
+  guard; all 8 match merge sites in `switch_operators_calls.spl` now do too.
+  Bug: `doc/08_tracking/bug/match_expr_panic_first_arm_drops_result_2026-10-25.md`.
+- The `??` left operand goes through `lower_optional_probe_operand`. A `d[k]`
+  read there returns the UNDECODED `rt_dict_get` word (`nil_probe` ->
+  `raw_probe`), so `rt_is_some` sees the miss word 3, and the `??` present
+  branch is the single decode. Do NOT reuse the `as_option` (`d.get`) lane for
+  this: it decodes and then marks the result as a runtime value, so `??`
+  decodes an i64 hit a second time (5 -> 0; still open for `d.get(k) ?? x`).
+  `d[k].?`, `if val x = d[k]` and `match d[k]` remain open.
+  Bug: `doc/08_tracking/bug/dict_index_coalesce_decodes_before_nil_test_2026-10-25.md`.
+- **BSM P3 bootstrap MIR store:** the flat `_bootstrap_mir_*` / function-value / callable registries live on `BootstrapMirStore` (`_MirLowering/bootstrap_mir_store.spl`); never add a module-level registry var back — add a store field + forwarder, keep reads read-through (committed then pending), and publish only at `bootstrap_mir_registries_promote` (scope paused).
+
+## 2026-10-26 - HirCfgSelect lowering picks the arm (target-neutral HIR step 2)
+
+- `HirExprKind.CfgSelect(conds, arms, else_)` reaches MIR via `lower_cfg_select`
+  (`_MirLowering/asm_and_targets.spl`). It calls `mir_cfg_select_arm` with
+  `self.target_context` and `cfg_enabled_features()`; the else arm is appended
+  as condition `""`. `-2` = `error_fatal` (never a silent false); `-1` with no
+  else lowers to a unit temp (arm dropped). No env is read: the same HIR lowers
+  per target. Plan: `doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md`.
+
+## 2026-10-27 - cfg-select source path (SIMPLE_HIR_CFG_SELECT=1, default off)
+
+- Parser path for `HirExprKind.CfgSelect`: in flag mode `_pp_preprocess_conditionals`
+  (`10.frontend/core/parser_preprocessor.spl`) does NOT strip an indented (function-body)
+  `@when/@elif/@else/@end`; it rewrites it, line-count stable, to `if/elif/else` whose
+  conditions are the marker call `__cfg_when__("<cond>")` (arm bodies indented one level
+  per open marker). Top-level `@when` and target-receipt mode keep stripping.
+- No lexer/parser/AST change: `expression_core.spl` (`If`/`IfChain` cases) recognizes the
+  marker via `_Expressions/cfg_when_marker.spl` and `lower_cfg_when_chain` builds one
+  `CfgSelect(conds, arms, else_)`; MIR picks the arm per target. Empty `@when()` becomes an
+  unknown atom so MIR reports the fatal malformed-@cfg error. Per-declaration `@cfg` is out of
+  scope (needs a module-level node). The interpreter shares the preprocessor: do not set the flag
+  for interpreted runs. Spec: `test/01_unit/compiler/20.hir/hir_cfg_select_source_spec.spl`.
+- Marker mode is statement-only: a chain whose arm declares a `val`/`var`/`let` at the chain indent, has `{`/`}` in a condition, or has an empty/comment-only arm keeps flat-strip semantics (binding-declaring chains keep flat-strip semantics until a non-scoping CfgSelect design lands). Marker lowering is also gated on the flag and requires every arm to be a string-literal marker.
+
+## 2026-10-27 - @cfg build-profile and ARM sub-arch atoms (plan step 5)
+- `MirTargetContext` gained `build_profile` ("debug"/"release", default "debug"; the driver sets it
+  from `CompileOptions.release` in `driver_mir_target.spl`) and `subarch` (first triple component when
+  it starts with `armv`/`thumbv`, else ""; set by `mir_target_context_from`).
+- `mir_cfg_select.spl`: `debug`/`release` evaluate from the context and never return -2. `thumb` matches
+  `thumbv*`; `armv7`/`armv6` match by subarch prefix (empty subarch falls back to arch `arm` for
+  hand-built contexts); `subarch = "thumbv7em"` is an exact match; `arm` still matches all 32-bit ARM.
+- WA: the parser preprocessor `_pp_eval_atom` still hardcodes debug=true / release=false, so the two
+  lanes differ for release builds until the parser reads the profile.
+- `target_presets.spl` names these triples `thumbv7em`/`thumbv8m.main`/`thumbv6m` (arch field).
+  Spec: `test/01_unit/compiler/50.mir/mir_cfg_select_cross_target_spec.spl` (10 examples).
+- **Imported trait method returns:** a consumer's table holds an imported
+  trait SYMBOL but no method symbols, so `lookup_trait_method` misses and a
+  bare `Ok`/`Err` arm on `recv.method()` was "ambiguous" (stage3
+  `SIMPLE_BOOTSTRAP=1`, e.g. `self.codegen.compile_module(...)`). Both
+  prescans (`prescan_declaration_callables_v1`, `prescan_module_functions_v1`)
+  now register each trait method signature in the name-keyed
+  `bootstrap_fn_ret_hir_type_*` registry under
+  `mir_trait_method_ret_key_v1` = `trait-ret:{canonical module}.{Trait}::{method}`;
+  `enum_match_expr_type` falls back to it. Symbol-free returns only (the
+  registry rejects `Named` payloads, which are table-local ids).
+  Spec: `test/01_unit/compiler/mir/imported_trait_method_declared_return_spec.spl`.
+
+- HIR cache key neutral rule (plan step 4): with `SIMPLE_HIR_CFG_SELECT=1`, `hir_cache_key`
+  (`80.driver/driver_hir_cache.spl`) replaces the target fold with the constant
+  `hir-target-neutral-v1` only when the source made ZERO preprocessor strip decisions AND every
+  surface in its closure did (`hir_closure_all_neutral`, set by `hir_cache_closure_digest_from_rows`).
+  Target-dependent code therefore must stay in MIR/object keys; a file with a top-level `@cfg`
+  or binding-declaring `@when` stays target-keyed and also folds its strip-decision digest.
+  Decisions come from `pp_last_strip_decision_count()` / the memo `pp_recorded_strip_*` in
+  `parser_preprocessor.spl`. Spec: `test/01_unit/compiler/80.driver/hir_cache_key_neutral_spec.spl`.
+  Neutrality is read ONLY from a marker-mode memo entry keyed by (content hash, cfg identity,
+  native target, mode), and only while the driver declared marker mode (`pp_declare_parse_scope`).
+  A target-receipted parse (flat-strips chains) or an unknown entry is never neutral; the key path
+  never re-runs the preprocessor in another mode to manufacture a neutral answer.
+
+## Panic call ABI (2026-10-30)
+
+Generated one-message panic calls must split the evaluated text into raw bytes
+and byte length at MirBuilder.emit_call. Keep Abort and explicit two-argument
+calls intact. A successful native build can still contain logged rejected
+declarations; inspect those diagnostics before qualification. See
+[panic ABI evidence](../../../08_tracking/bug/cranelift_panic_call_abi_conflict_2026_10_30.md).
+
+The a52 producer's four native panic controls passed with clean compiler
+diagnostics, including runtime-concatenated text evaluated once and the cast's
+intended panic. Its separate full CLI matrix exceeded the enforced RSS cap;
+native SSpec/docgen and complete BuildRunner admission are not implied.

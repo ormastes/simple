@@ -5,7 +5,8 @@
 # level table without an import cycle.
 #
 # SIMPLE_MIR_VERIFY_LEVELS="MIRV-002=error,MIRV-005e=off,*=warning"
-#   levels: error (fatal, aborts before codegen) | warning | off (not reported)
+#   configurable levels: error (fatal, aborts before codegen) | warning | off
+#   MIRV-001n is a structural missing-carrier error and always remains fatal.
 #   `*`    : level for every id not named explicitly (MIRV rules AND the two
 #            lowering advisories).
 # The spec is parsed ONCE per run (`mir_verify_levels_from_env`), never per
@@ -23,12 +24,14 @@ struct MirVerifyRule:
     promotion_candidate: bool    # zero hits so far; eligible for "error" after a full-closure zero-hit run
 
 # Keep in sync with config/compiler/mir_verify_rules.sdn (pinned by spec).
-# WARN-FIRST LANDING (review of 0df5354dfca): every rule starts at `warning`.
+# Configurable rules retain their warn-first lifecycle. MIRV-001n is a
+# mandatory structural error: missing type carriers cannot reach codegen.
 # Promotion to `error` happens per rule, in the registry, only after a
 # phase-3 + phase-4 full-closure run shows zero hits for that rule.
 fn mir_verify_rules() -> [MirVerifyRule]:
     [
         MirVerifyRule(id: "MIRV-001", family: "unresolved_type", lifecycle: "warning", promotion_candidate: true),
+        MirVerifyRule(id: "MIRV-001n", family: "missing_type_declaration", lifecycle: "error", promotion_candidate: false),
         MirVerifyRule(id: "MIRV-002", family: "illegal_cast", lifecycle: "warning", promotion_candidate: false),
         MirVerifyRule(id: "MIRV-002b", family: "bitcast_width", lifecycle: "warning", promotion_candidate: true),
         MirVerifyRule(id: "MIRV-003", family: "unit_static", lifecycle: "warning", promotion_candidate: true),
@@ -69,13 +72,19 @@ fn mir_verify_warning_cap() -> i64:
 struct MirVerifyLevels:
     levels: Dict<text, text>   # every registered rule id + advisory id -> level
     config_error: text         # "" = spec accepted
-    verifier_off: bool         # every MIRV rule is `off`: the walk is skipped
+    verifier_off: bool         # false while a mandatory structural rule is registered
 
 impl MirVerifyLevels:
     fn level_of(id: text) -> text:
         """Resolved level. An unregistered id is a programming error in the
         caller and reports loudly as `error`."""
+        if mir_verify_rule_is_mandatory_v1(id): return "error"
         self.levels[id] ?? "error"
+
+fn mir_verify_rule_is_mandatory_v1(id: text) -> bool:
+    # A missing type carrier cannot be inspected safely by a backend. This is
+    # structural integrity, not the warn-first unresolved-type policy.
+    id == "MIRV-001n"
 
 fn mir_verify_levels_from_spec(spec: text) -> MirVerifyLevels:
     var ids: [text] = []
@@ -120,6 +129,8 @@ fn mir_verify_levels_from_spec(spec: text) -> MirVerifyLevels:
         while n < named_keys.len():
             levels[named_keys[n]] = named_values[n]
             n = n + 1
+    # Even `*=off` must walk modules to find missing type carriers.
+    levels["MIRV-001n"] = "error"
     var verifier_off = true
     var r = 0
     while r < rule_count:
@@ -145,3 +156,4 @@ export MirVerifyRule, MirVerifyLevels
 export mir_verify_rules, mir_verify_rule_lifecycle, mir_lowering_advisory_ids, mir_verify_warning_cap
 export mir_verify_levels_from_spec, mir_verify_levels_from_env
 export mir_verify_rule_level_from_spec, mir_verify_rule_level
+export mir_verify_rule_is_mandatory_v1

@@ -1,0 +1,275 @@
+# @no_gc
+# AsyncRefI64 is the SimpleRing V1 adapter over an immutable shared outcome.
+# It does not create an executor or auto-wake parked work: the owning scheduler
+# drains the bounded cursor and calls async_ref_deliver_wake_i64.
+# A RingToken belongs to one live AsyncRef subscription. cancel_interest only
+# withdraws this AsyncRef wake interest; the ring owner must also cancel and
+# terminally drain the corresponding ring reservation. The admitted producer
+# must execute publication without cancellation until it returns. If a producer
+# stops after reserving an outcome but before publication, abandon the whole
+# map scope; supervisor retry/recovery is not supported by this profile.
+
+use std.common.contracts.execution.simple_ring_async_v1.{
+    RingGeneration, RingToken, TaskPollResult, ring_token_validate
+}
+use std.nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError}
+use std.nogc_async_mut.concurrent.lockless_i64_core.{
+    core_valid_scope_i64, core_valid_ref_i64, core_try_start_i64,
+    core_outcome_i64, core_outcome_kind_i64, core_outcome_value_i64,
+    core_publish_i64, core_subscribe_i64, core_waiter_head_i64,
+    core_waiter_next_i64, core_waiter_ring_id_i64, core_waiter_slot_i64,
+    core_waiter_generation_i64, core_waiter_active_i64,
+    core_valid_waiter_i64, core_waiter_owner_i64,
+    core_waiter_cancelled_i64, core_waiter_ack_i64, core_cancel_i64,
+    core_waiter_state_i64
+}
+
+const _REF_OUTCOME_SUCCESS: i64 = 1
+const _REF_OUTCOME_FAILURE: i64 = 2
+const _REF_PUBLISH_INVALID_REF: i64 = -1
+const _REF_PUBLISH_NOT_STARTED: i64 = -2
+const _REF_PUBLISH_OUTCOME_FULL: i64 = -3
+const _REF_SUBSCRIBE_INVALID: i64 = -1
+const _REF_SUBSCRIBE_WAITER_FULL: i64 = -2
+const _REF_WAITER_CANCELLED: i64 = 2
+const _REF_WAITER_ACKED: i64 = 4
+
+pub enum AsyncRefError:
+    Failed(i64)
+    WaiterFull
+    InvalidToken
+    CancelledInterest
+    OutcomeFull
+    NotStarted
+    InvalidSubscription
+
+pub enum AsyncRefStateI64:
+    Pending
+    Ready(i64)
+    Failed(i64)
+
+pub struct AsyncRefI64:
+    _scope: i64
+    _entry: i64
+
+pub struct AsyncSubscriptionI64:
+    reference: AsyncRefI64
+    _subscriber: i64
+
+pub struct AsyncWakeCursorI64:
+    reference: AsyncRefI64
+    _next: i64
+
+pub struct AsyncWakeI64:
+    subscription: AsyncSubscriptionI64
+    token: RingToken
+    next: AsyncWakeCursorI64
+
+pub enum AsyncWakeScanI64:
+    Wake(AsyncWakeI64)
+    More(AsyncWakeCursorI64)
+    Done
+    Invalid
+
+@unsafe(reason: "constructs a copyable AsyncRef from raw scope and entry indices", capabilities: [ffi])
+pub fn async_ref_from_core_i64(scope: i64, entry: i64) -> AsyncRefI64:
+    AsyncRefI64(_scope: scope, _entry: entry)
+
+impl AsyncRefI64:
+    pub fn same_reference(other: AsyncRefI64) -> bool:
+        self._scope == other._scope and self._entry == other._entry
+
+    pub fn identity() -> text:
+        self._scope.to_text() + ":" + self._entry.to_text()
+
+    # Call only from an executor-admitted producer task. This claims execution,
+    # not queue ownership; requesters may submit idempotent task notifications.
+    # The caller receiving true is the sole completion authority for this attempt.
+    @unsafe(reason: "AsyncRef fields are forgeable until privacy enforcement is qualified", capabilities: [ffi])
+    pub fn try_start() -> bool:
+        core_try_start_i64(self._scope, self._entry)
+
+    @unsafe(reason: "AsyncRef fields are forgeable until privacy enforcement is qualified", capabilities: [ffi])
+    pub fn try_ready() -> AsyncRefStateI64:
+        if not core_valid_ref_i64(self._scope, self._entry):
+            return AsyncRefStateI64.Pending
+        val outcome = core_outcome_i64(self._scope, self._entry)
+        if outcome == 0:
+            return AsyncRefStateI64.Pending
+        val kind = core_outcome_kind_i64(self._scope, outcome)
+        val value = core_outcome_value_i64(self._scope, outcome)
+        if kind == _REF_OUTCOME_SUCCESS:
+            AsyncRefStateI64.Ready(value)
+        else:
+            AsyncRefStateI64.Failed(value)
+
+    @unsafe(reason: "requires a valid producer reference and exclusive completion authority", capabilities: [ffi])
+    pub fn complete(value: i64) -> Result<bool, AsyncRefError>:
+        self._publish(_REF_OUTCOME_SUCCESS, value)
+
+    @unsafe(reason: "requires a valid producer reference and exclusive completion authority", capabilities: [ffi])
+    pub fn fail(code: i64) -> Result<bool, AsyncRefError>:
+        self._publish(_REF_OUTCOME_FAILURE, code)
+
+    @unsafe(reason: "uses a forgeable raw AsyncRef and requires exclusive producer completion authority", capabilities: [ffi])
+    fn _publish(kind: i64, value: i64) -> Result<bool, AsyncRefError>:
+        val result = core_publish_i64(self._scope, self._entry, kind, value)
+        if result == 1:
+            return Ok(true)
+        if result == 0:
+            return Ok(false)
+        if result == _REF_PUBLISH_OUTCOME_FULL:
+            return Err(AsyncRefError.OutcomeFull)
+        if result == _REF_PUBLISH_NOT_STARTED:
+            return Err(AsyncRefError.NotStarted)
+        Err(AsyncRefError.NotStarted)
+
+    # Valid RingTokens uniquely identify live ring reservations. Repeating the
+    # same token on this result is idempotent, including after cancellation.
+    @unsafe(reason: "AsyncRef fields are forgeable until privacy enforcement is qualified", capabilities: [ffi])
+    pub fn subscribe(token: RingToken) -> Result<AsyncSubscriptionI64, AsyncRefError>:
+        # Precondition: token is reserved for this reference only and remains
+        # owned by its ring until terminal completion or owner cancellation.
+        if not ring_token_validate(token).ok:
+            return Err(AsyncRefError.InvalidToken)
+        val subscriber = core_subscribe_i64(
+            self._scope, self._entry, token.ring_id, token.slot, token.generation.value)
+        if subscriber == _REF_SUBSCRIBE_INVALID:
+            return Err(AsyncRefError.NotStarted)
+        if subscriber == _REF_SUBSCRIBE_WAITER_FULL:
+            return Err(AsyncRefError.WaiterFull)
+        Ok(AsyncSubscriptionI64(reference: self, _subscriber: subscriber))
+
+    @unsafe(reason: "AsyncRef fields are forgeable until privacy enforcement is qualified", capabilities: [ffi])
+    pub fn wake_cursor() -> AsyncWakeCursorI64?:
+        if not core_valid_ref_i64(self._scope, self._entry):
+            return nil
+        val outcome = core_outcome_i64(self._scope, self._entry)
+        if outcome == 0:
+            return nil
+        val head = core_waiter_head_i64(self._scope, self._entry)
+        if head == 0: nil else: AsyncWakeCursorI64(reference: self, _next: head)
+
+impl AsyncSubscriptionI64:
+    @unsafe(reason: "subscription and embedded AsyncRef fields are forgeable until privacy enforcement is qualified", capabilities: [ffi])
+    pub fn poll() -> TaskPollResult<Result<i64, AsyncRefError>>:
+        if self._subscriber < 0:
+            return TaskPollResult.Ready(Err(AsyncRefError.InvalidSubscription))
+        if self._subscriber > 0 and
+           (not core_valid_waiter_i64(self.reference._scope, self._subscriber) or
+            core_waiter_owner_i64(self.reference._scope, self._subscriber) != self.reference._entry):
+            return TaskPollResult.Ready(Err(AsyncRefError.InvalidSubscription))
+        if self._subscriber > 0 and core_waiter_cancelled_i64(self.reference._scope, self._subscriber):
+            return TaskPollResult.Ready(Err(AsyncRefError.CancelledInterest))
+        val state = self.reference.try_ready()
+        match state:
+            case AsyncRefStateI64.Ready(value): TaskPollResult.Ready(Ok(value))
+            case AsyncRefStateI64.Failed(code): TaskPollResult.Ready(Err(AsyncRefError.Failed(code)))
+            case AsyncRefStateI64.Pending:
+                if self._subscriber == 0:
+                    return TaskPollResult.Ready(Err(AsyncRefError.CancelledInterest))
+                TaskPollResult.Pending(RingToken(
+                    ring_id: core_waiter_ring_id_i64(self.reference._scope, self._subscriber),
+                    slot: core_waiter_slot_i64(self.reference._scope, self._subscriber),
+                    generation: RingGeneration(value: core_waiter_generation_i64(self.reference._scope, self._subscriber))))
+
+    @unsafe(reason: "subscription and embedded AsyncRef fields are forgeable until privacy enforcement is qualified", capabilities: [ffi])
+    pub fn cancel_interest() -> Result<bool, AsyncRefError>:
+        # This releases only the AsyncRef interest; it cannot cancel the ring
+        # provider's in-flight reservation.
+        if self._subscriber == 0:
+            return Ok(false)
+        if self._subscriber < 0 or
+           not core_valid_waiter_i64(self.reference._scope, self._subscriber) or
+           core_waiter_owner_i64(self.reference._scope, self._subscriber) != self.reference._entry:
+            return Err(AsyncRefError.InvalidSubscription)
+        Ok(core_cancel_i64(self.reference._scope, self._subscriber))
+
+impl AsyncWakeCursorI64:
+    @unsafe(reason: "cursor and embedded AsyncRef fields are forgeable until privacy enforcement is qualified", capabilities: [ffi])
+    pub fn next_pending(max_scan: i64) -> AsyncWakeScanI64:
+        if max_scan <= 0:
+            return AsyncWakeScanI64.More(self)
+        if not core_valid_ref_i64(self.reference._scope, self.reference._entry):
+            return AsyncWakeScanI64.Invalid
+        var waiter = self._next
+        if waiter < 0 or (waiter > 0 and not core_valid_waiter_i64(self.reference._scope, waiter)):
+            return AsyncWakeScanI64.Invalid
+        var scanned = 0
+        while waiter > 0 and scanned < max_scan:
+            if not core_valid_waiter_i64(self.reference._scope, waiter) or
+               core_waiter_owner_i64(self.reference._scope, waiter) != self.reference._entry:
+                return AsyncWakeScanI64.Invalid
+            val following = core_waiter_next_i64(self.reference._scope, waiter)
+            if following != 0 and not core_valid_waiter_i64(self.reference._scope, following):
+                return AsyncWakeScanI64.Invalid
+            if core_waiter_active_i64(self.reference._scope, waiter):
+                val subscription = AsyncSubscriptionI64(reference: self.reference, _subscriber: waiter)
+                val next = AsyncWakeCursorI64(reference: self.reference, _next: following)
+                return AsyncWakeScanI64.Wake(AsyncWakeI64(
+                    subscription: subscription,
+                    token: RingToken(
+                        ring_id: core_waiter_ring_id_i64(self.reference._scope, waiter),
+                        slot: core_waiter_slot_i64(self.reference._scope, waiter),
+                        generation: RingGeneration(value: core_waiter_generation_i64(self.reference._scope, waiter))),
+                    next: next))
+            waiter = following
+            scanned = scanned + 1
+        if waiter == 0:
+            AsyncWakeScanI64.Done
+        else:
+            AsyncWakeScanI64.More(AsyncWakeCursorI64(reference: self.reference, _next: waiter))
+
+@unsafe(reason: "wake handles and embedded raw scope fields are forgeable until privacy enforcement is qualified", capabilities: [ffi])
+pub fn async_ref_deliver_wake_i64<Op>(
+    ring: SimpleRing<Op, i64>,
+    wake: AsyncWakeI64
+) -> Result<AsyncWakeCursorI64, SimpleRingError>:
+    val reference = wake.subscription.reference
+    val next_reference = wake.next.reference
+    val subscriber = wake.subscription._subscriber
+    if reference._scope != next_reference._scope or reference._entry != next_reference._entry or
+       subscriber <= 0 or not core_valid_ref_i64(reference._scope, reference._entry):
+        return Err(SimpleRingError.InvalidTransition)
+    if not core_valid_scope_i64(reference._scope):
+        return Err(SimpleRingError.InvalidTransition)
+    if not core_valid_waiter_i64(reference._scope, subscriber) or
+       core_waiter_owner_i64(reference._scope, subscriber) != reference._entry:
+        return Err(SimpleRingError.InvalidTransition)
+    val expected_next = core_waiter_next_i64(reference._scope, subscriber)
+    if wake.next._next != expected_next:
+        return Err(SimpleRingError.InvalidTransition)
+    if wake.next._next != 0 and
+       (not core_valid_waiter_i64(reference._scope, wake.next._next) or
+        core_waiter_owner_i64(reference._scope, wake.next._next) != reference._entry):
+        return Err(SimpleRingError.InvalidTransition)
+    if core_waiter_ring_id_i64(reference._scope, subscriber) != wake.token.ring_id or
+       core_waiter_slot_i64(reference._scope, subscriber) != wake.token.slot or
+       core_waiter_generation_i64(reference._scope, subscriber) != wake.token.generation.value:
+        return Err(SimpleRingError.InvalidTransition)
+    val delivery_state = core_waiter_state_i64(reference._scope, subscriber)
+    if delivery_state == _REF_WAITER_CANCELLED or delivery_state == _REF_WAITER_ACKED:
+        return Ok(wake.next)
+    if delivery_state != 1:
+        return Err(SimpleRingError.InvalidTransition)
+    match reference.try_ready():
+        case AsyncRefStateI64.Pending:
+            Err(SimpleRingError.InvalidTransition)
+        case AsyncRefStateI64.Ready(value):
+            match ring.complete_success(wake.token, value):
+                case Ok(_):
+                    core_waiter_ack_i64(reference._scope, subscriber)
+                    Ok(wake.next)
+                case Err(error):
+                    Err(error)
+        case AsyncRefStateI64.Failed(code):
+            match ring.complete_failure(wake.token, code.to_text()):
+                case Ok(_):
+                    core_waiter_ack_i64(reference._scope, subscriber)
+                    Ok(wake.next)
+                case Err(error):
+                    Err(error)
+
+export AsyncRefError, AsyncRefStateI64, AsyncRefI64, AsyncSubscriptionI64
+export AsyncWakeCursorI64, AsyncWakeI64, AsyncWakeScanI64
+export async_ref_from_core_i64, async_ref_deliver_wake_i64

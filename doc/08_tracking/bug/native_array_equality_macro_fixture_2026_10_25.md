@@ -1,0 +1,11 @@
+# Native array comparison differs from interpreter in macro fixture
+
+Status: OPEN compiler limitation; fixture workaround only.
+
+The fixed P2 producer `0d6f2e4720845195c9f91de292056fac4c57cabef81390507c78d95e51133a28` compiled the 92-module macro fixture closure at source `03b365380f0ae792fd2ede52fefc68132938ff2d`. Manual linking of all 78 emitted user objects, 39 retained C runtime objects, and the canonical entry shim succeeded. The arm64 executable exited 2, after the scalar insertion-boundary checks passed and before the sorted-name checks completed. The existing-seed interpreter had passed the original fixture.
+
+The native disassembly immediately after `macro_def_generated_public_names` at `0x1000015b0` loads the expected array handle and emits `cmp x0,x8; b.ne failure` at `0x1000015b8/15bc`, without an element comparison. The projector/effects/input-array comparisons have the same handle-compare shape. This proves that aggregate `!=` is unsuitable for this native semantic oracle; it does not prove the sorting implementation failed or fix the compiler's array equality behavior.
+
+The fixture now checks length and every text element, preserving the exact expected values and input-immutability assertion. Distinct exits identify registry output (11), projected names (12), definition count (13), declared effects (14), input preservation (15), or empty output (16). The boolean wrapper remains available to SSpec. The changed fixture passed once through the existing gen13 diagnostic interpreter (raw exit 0, `macro array insertion: PASS`) under a 3 GiB guard; source/seed hashes were unchanged. Receipt: `/Users/ormastes/wt/release-phase2-review/build/verify/macro-scalar-interpreter-20261025-01/`. Native verification of the changed fixture is pending.
+
+Local retained evidence: `/Users/ormastes/wt/release-phase2-review/build/verify/macro-manual-system-link-20261025-01/`, including `result.env`, `sorted-names.disassembly.txt`, original object manifests and canonical entry template. Original executable SHA256: `f2dd5192370a59e646d082c387b14e93fc9a3171dbd3f77e10d00a835e6eb2f9`. All inputs and producer/runtime bytes were unchanged; no P2 or runtime rebuild occurred. This was a manual system-link diagnostic, not a Simple linker qualification.

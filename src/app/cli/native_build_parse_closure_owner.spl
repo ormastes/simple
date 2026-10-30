@@ -1,11 +1,16 @@
 # Parent-only parse-selection transaction. The worker consumes durable files;
 # no inventory, source text, or source-scan container crosses this boundary.
-use app.io.env_ops.{env_set}
-use std.io_runtime.{dir_create_all, getpid}
+use app.io.env_ops.{env_set, env_get}
+use compiler.common.library_mode_policy_v1.{library_mode_closure_digest_v1}
+use std.io_runtime.{dir_create_all, getpid, time_now_monotonic_ms}
 use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
 use std.nogc_sync_mut.fs.host_path.{host_path_release_cached_platform_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
-    transient_scope_pause, transient_scope_end, transient_promote}
+    transient_scope_pause, transient_scope_end}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use app.cli.native_build_parse_closure_scratch.{NativeBuildParseClosureSessionV1,
+    native_build_parse_closure_session_open_v1,
+    native_build_parse_closure_stage_end_v1, native_build_parse_closure_session_end_v1}
 use compiler.driver.driver_source_loading.{driver_entry_scan_cache_release}
 use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1}
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure,
@@ -13,10 +18,16 @@ use app.io._CliCompile.native_build_closure.{_native_build_entry_closure,
     native_build_closure_snapshot_root_v1, native_build_closure_source_roots_v1}
 use app.cli.native_build_closure_roots.{native_build_closure_roots_v1}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_open_published_v1}
-use app.compiler_entrypoint.entry_closure_selection.{compiler_entry_closure_publish_v1}
-use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
+use app.compiler_entrypoint.entry_closure_selection.{compiler_entry_closure_prepare_v1}
+use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1,
+    NativeEntryClosureSelectionV1, native_entry_closure_publish_records_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1,
-    native_entry_closure_request_publish_v1}
+    native_entry_closure_request_publish_v1, native_entry_closure_admit_v1}
+
+# Set by the publishing coordinator; every descendant (parse/HIR/MIR shard,
+# --file-worker and their children) inherits it and is a consumer only. The
+# SIMPLE_*_SHARD vars are set inside the child (compile_targets), too late.
+pub val NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1 = "SIMPLE_PARSE_CLOSURE_CONSUMER"
 
 struct NativeBuildParseClosurePublicationV1:
     path: text
@@ -24,20 +35,72 @@ struct NativeBuildParseClosurePublicationV1:
     count: i64
     error: text
 
+struct NativeBuildParseClosureWalkV1:
+    paths: [text]
+    roots: [text]
+
+struct NativeBuildParseClosureSelectionV1:
+    binding: NativeEntryClosureBindingV1
+    records: NativeEntryClosureSelectionV1
+
+# Only the small next-stage root crosses this boundary. All global scratch
+# handles must be detached while paused, before their old contents are freed.
+fn native_build_parse_closure_checkpoint_v1<T>(mut value: T) -> bool:
+    val paused = transient_scope_pause()
+    driver_entry_scan_cache_release()
+    native_build_closure_release_snapshot_memo_v1()
+    host_path_release_cached_platform_v1()
+    if paused:
+        return native_build_parse_closure_stage_end_v1(value)
+    val ended = transient_scope_end()
+    driver_entry_scan_cache_release()
+    native_build_closure_release_snapshot_memo_v1()
+    host_path_release_cached_platform_v1()
+    false
+
+fn native_build_parse_closure_finish_session_v1(session: NativeBuildParseClosureSessionV1) -> bool:
+    val owned = session.owned
+    val closed = native_build_parse_closure_session_end_v1(session)
+    if owned and closed:
+        # Paused allocations belong to the live session. Replace those empty
+        # cache containers again AFTER session retirement, without inspecting
+        # their previous contents. The new containers now have persistent life.
+        driver_entry_scan_cache_release()
+        native_build_closure_release_snapshot_memo_v1()
+        host_path_release_cached_platform_v1()
+    closed
+
+# compare instead of `!=` on [text]. Delete once array Eq/NotEq lowers through
+# rt_native_eq in the compiler that builds this module.
+# @workaround bug=array_eq_lowered_as_identity_compare_2026-10-25 reason=element-wise
+fn _parse_closure_text_list_eq_v1(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
 fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
         entry_identity: text, policy_digest: text, producer: text,
-        frontend_cache_dir: text) -> NativeBuildParseClosurePublicationV1:
+        frontend_cache_dir: text, library_mode: text) -> NativeBuildParseClosurePublicationV1:
     val authority = compiler_source_authority_open_published_v1(source_root)
     if not authority.valid:
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure authority rejected: " + authority.reason)
+    if not native_build_parse_closure_checkpoint_v1(authority) or
+            not transient_scope_begin():
+        return NativeBuildParseClosurePublicationV1("", "", 0,
+            "parse-shard closure authority scratch retirement failed")
     val canonical = native_build_closure_roots_v1(source_root,
         authority.snapshot.snapshot_root, roots)
     if canonical.is_err():
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure roots rejected: " + canonical.unwrap_err())
     val entry_path = source_root + "/" + entry_identity
-    val paths = _native_build_entry_closure(entry_path, roots)
+    val paths = _native_build_entry_closure(entry_path, roots, library_mode)
     # Reuse the walker's admitted mapping, never a separate cwd-based receipt
     # spelling. A fallback/live walk cannot publish a frozen closure request.
     val mapped = native_build_closure_source_roots_v1(entry_path, roots)
@@ -46,50 +109,112 @@ fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure snapshot roots mismatch")
     val selected_roots = mapped.unwrap()
-    if selected_roots != canonical.unwrap():
+    # Stage-2 codegen lowers `[text] != [text]` as a raw word compare, so the
+    # Stage 3 compiler reported a mismatch for equal selector lists.
+    # @workaround bug=array_eq_lowered_as_identity_compare_2026-10-25 reason=codegen-lowers-identity
+    if not _parse_closure_text_list_eq_v1(selected_roots, canonical.unwrap()):
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure selector mapping mismatch")
+    val walk = NativeBuildParseClosureWalkV1(paths, selected_roots)
+    if not native_build_parse_closure_checkpoint_v1(walk) or
+            not transient_scope_begin():
+        return NativeBuildParseClosurePublicationV1("", "", 0,
+            "parse-shard closure walk scratch retirement failed")
     val binding = NativeEntryClosureBindingV1(authority.snapshot.revision_id,
         authority.snapshot.commit_id, authority.snapshot.tree_id,
-        authority.snapshot.inventory_digest, entry_identity, selected_roots,
-        policy_digest, file_hash_sha256(producer))
-    val request_root = frontend_cache_dir + "/closure-request-" + getpid().to_text()
+        authority.snapshot.inventory_digest, entry_identity, walk.roots,
+        library_mode_closure_digest_v1(policy_digest, library_mode), file_hash_sha256(producer))
+    val prepared = compiler_entry_closure_prepare_v1(source_root, authority,
+        binding, walk.paths)
+    if prepared.is_err():
+        return NativeBuildParseClosurePublicationV1("", "", 0,
+            "parse-shard closure publication rejected: " + prepared.unwrap_err())
+    val selection = NativeBuildParseClosureSelectionV1(binding, prepared.unwrap())
+    if not native_build_parse_closure_checkpoint_v1(selection) or
+            not transient_scope_begin():
+        return NativeBuildParseClosurePublicationV1("", "", 0,
+            "parse-shard closure selection scratch retirement failed")
+    # pid + start time: file_create_exclusive below must not collide with a
+    # dead coordinator's leftover request under a reused pid.
+    val request_root = frontend_cache_dir + "/closure-request-" + getpid().to_text() +
+        "-" + time_now_monotonic_ms().to_text()
     if frontend_cache_dir == "" or not dir_create_all(request_root):
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure request requires private frontend cache")
     val selection_path = request_root + "/selection.v1"
-    val published = compiler_entry_closure_publish_v1(source_root, authority,
-        binding, paths, selection_path)
+    # Keep the independent final byte/generation/manifest authentication. Its
+    # inventory no longer overlaps the earlier authority, walker or selection
+    # scratch. No cached proof replaces a fresh physical admission.
+    val admitted = native_entry_closure_admit_v1(source_root, authority.snapshot,
+        authority.source_inventory_digest, authority.inventory_generation,
+        selection.binding, selection.records)
+    if admitted.is_err():
+        return NativeBuildParseClosurePublicationV1("", "", 0,
+            "parse-shard closure publication rejected: " + admitted.unwrap_err())
+    val published = native_entry_closure_publish_records_v1(selection_path, admitted.unwrap())
     if published.is_err():
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure publication rejected: " + published.unwrap_err())
     val request = NativeEntryClosureRequestV1(source_root, authority.snapshot,
         authority.source_inventory_digest, authority.inventory_generation,
-        binding, selection_path, published.unwrap())
+        selection.binding, selection_path, published.unwrap())
     val request_path = request_root + "/request.v1"
     val request_digest = native_entry_closure_request_publish_v1(request_path, request)
     if request_digest.is_err():
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure request publication failed: " + request_digest.unwrap_err())
-    NativeBuildParseClosurePublicationV1(request_path, request_digest.unwrap(), paths.len(), "")
+    NativeBuildParseClosurePublicationV1(request_path, request_digest.unwrap(), walk.paths.len(), "")
+
+# Publish-once decision for an inherited closure request (true-per-file PR1).
+# Ok(true): a shard/file-worker child reuses the coordinator's request, zero
+# walks. Ok(false): a coordinator publishes its own (exactly once). Err: a
+# child whose request is missing or failed admission (digest/identity
+# mismatch) fails loudly; it never silently re-walks the closure.
+# admit_error is "" when native_build_closure_request_admit_v1 admitted the
+# request (digest + native_entry_closure_request_identity_matches_v1).
+# publication_expected: this build runs --entry-closure with a frontend cache,
+# so the coordinator is the ONLY publisher. A child never becomes a second
+# publisher (the race behind entry-closure-publication-conflict).
+pub fn native_build_parse_closure_reuse_decision_v1(shard_child: bool,
+        publication_expected: bool, inherited_path: text, inherited_digest: text,
+        admit_error: text) -> Result<bool, text>:
+    if not shard_child or not publication_expected:
+        return Ok(false)
+    if inherited_path == "" or inherited_digest == "":
+        return Err("parse-closure request missing in shard child; refusing to re-walk the closure")
+    if admit_error != "":
+        return Err("parse-closure request mismatch: " + admit_error)
+    Ok(true)
 
 fn native_build_parse_closure_clear_v1() -> bool:
     # Evaluate both setters even when the first fails. An absent request path
     # is the permission marker; no child is launched after any failed setter.
     val path_cleared = env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
     val digest_cleared = env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
-    path_cleared and digest_cleared
+    val consumer_cleared = env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "")
+    path_cleared and digest_cleared and consumer_cleared
 
 pub fn native_build_publish_parse_closure_v1(source_root: text, roots: [text],
         entry_identity: text, policy_digest: text, producer: text,
-        frontend_cache_dir: text) -> bool:
+        frontend_cache_dir: text, library_mode: text = "") -> bool:
     if not native_build_parse_closure_clear_v1(): return false
     # A parent coordinator has no active compiler epoch. Refuse reuse from a
     # worker instead of clearing its semantic owner or promoting its full graph.
     if driver_admitted_epoch_active_v1():
         eprint "error: parse-closure scratch owner cannot replace an active compiler epoch"
         return false
+    if transient_array_scope_state_v1() != 0:
+        eprint "error: parse-closure scratch scope unavailable"
+        return false
+    val session = native_build_parse_closure_session_open_v1()
+    if session.id == 0u32 or not session.owned:
+        # Parent publication needs an independent lifetime for its global
+        # cache resets. Never leave global containers in a borrowed session
+        # that an unrelated caller may retire later.
+        eprint "error: parse-closure scratch session unavailable"
+        return false
     if not transient_scope_begin():
+        val closed = native_build_parse_closure_session_end_v1(session)
         eprint "error: parse-closure scratch scope unavailable"
         return false
     # No heap-global mutation before successful acquisition: a refused nested
@@ -97,32 +222,44 @@ pub fn native_build_publish_parse_closure_v1(source_root: text, roots: [text],
     driver_entry_scan_cache_release()
     native_build_closure_release_snapshot_memo_v1()
     val publication = native_build_parse_closure_write_v1(source_root, roots,
-        entry_identity, policy_digest, producer, frontend_cache_dir)
+        entry_identity, policy_digest, producer, frontend_cache_dir, library_mode)
+    if transient_array_scope_state_v1() != 1:
+        # A checkpoint already tried to end its scope. Never retry a failed
+        # retirement or mistake an inactive owner for a new scope we can end.
+        val closed = native_build_parse_closure_finish_session_v1(session)
+        eprint "error: parse-closure stage ownership/reclamation failed"
+        return false
+    # Publish by copying into the OS environment while publication is alive.
+    # Promotion with a live session is session adoption, not permanent escape;
+    # no field of publication may be read after either owner is retired.
+    val selected_count = publication.count
+    var published = false
+    if publication.error != "":
+        eprint "error: " + publication.error
+    else:
+        published = env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", publication.digest) and
+            env_set("SIMPLE_PARSE_CLOSURE_REQUEST", publication.path) and
+            env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "1")
+        if not published:
+            val cleared = native_build_parse_closure_clear_v1()
+            eprint "error: parse-shard closure request publication failed"
     val paused = transient_scope_pause()
-    # Detach globals BEFORE reclaiming. Replacement containers are persistent
-    # only after a successful pause; on pause failure they are detached again
-    # after end without dereferencing their old contents.
+    # Detach before scope reclamation, then finish_session replaces the
+    # session-owned reset containers once more after session reclamation.
     driver_entry_scan_cache_release()
     native_build_closure_release_snapshot_memo_v1()
     host_path_release_cached_platform_v1()
-    val retained = paused and transient_promote(publication)
     val ended = transient_scope_end()
     if not paused:
         driver_entry_scan_cache_release()
         native_build_closure_release_snapshot_memo_v1()
         host_path_release_cached_platform_v1()
-    if not paused or not retained or not ended:
+    val session_closed = native_build_parse_closure_finish_session_v1(session)
+    if not paused or not ended or not session_closed:
+        val cleared = native_build_parse_closure_clear_v1()
         eprint "error: parse-closure scratch ownership/reclamation failed"
         return false
-    if publication.error != "":
-        eprint "error: " + publication.error
-        return false
-    # OS environment setters copy strings. Only these two small retained
-    # values survive; selection/request bytes retain all original validation.
-    if not env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", publication.digest) or
-            not env_set("SIMPLE_PARSE_CLOSURE_REQUEST", publication.path):
-        val _cleared = native_build_parse_closure_clear_v1()
-        eprint "error: parse-shard closure request publication failed"
-        return false
-    print "[parse-closure] parent_walks=1 selected={publication.count} request={publication.digest} scratch=reclaimed"
+    if not published: return false
+    val published_digest = env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? ""
+    print "[parse-closure] parent_walks=1 selected={selected_count} request={published_digest} scratch=reclaimed"
     true

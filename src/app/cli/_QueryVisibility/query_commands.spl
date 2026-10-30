@@ -1,6 +1,7 @@
 # Query visibility — LSP query command entrypoints
 use app.cli._QueryVisibility.symbol_resolution.*
 use app.cli._QueryVisibility.feature_visibility.*
+use app.cli.query_forwarding.{forwarding_resolve_at}
 # Query CLI - LSP visibility JSON adapters
 #
 # Wraps the existing text-oriented query commands and enriches them with
@@ -106,16 +107,25 @@ fn query_visibility_hover(file: text, line_num: i64, col: i64, requester_file: t
     if clean_file == "":
         print "null"
         return 1
-    val symbol = extract_symbol_at(file: clean_file, line_num: line_num, col: col)
+    val fwd = forwarding_resolve_at(file: clean_file, line_num: line_num, col: col)
+    var symbol = extract_symbol_at(file: clean_file, line_num: line_num, col: col)
+    if fwd.name != "":
+        symbol = fwd.name
     if symbol == "":
         print "null"
         return 1
-    val resolved = resolve_symbol_file(current_file: clean_file, symbol: symbol)
-    val hover = declaration_line(symbol: symbol, owner_file: resolved)
+    var resolved = resolve_symbol_file(current_file: clean_file, symbol: symbol)
+    if fwd.name != "":
+        resolved = clean_file
+    var hover = declaration_line(symbol: symbol, owner_file: resolved)
+    if fwd.name != "":
+        hover = fwd.decl
     val vis = visibility_json(symbol: symbol, owner_file: resolved, requester_file: sanitize_path(requester_file_part(requester_file)))
     var lines: [text] = []
     if hover != "":
         lines = lines.push(hover)
+    if fwd.name != "" and fwd.via != "":
+        lines = lines.push("Forwarded: " + fwd.owner + "." + fwd.name + " via " + fwd.via)
     lines = lines.push("")
     lines = lines.push("Visibility: **" + visibility_display(symbol: symbol, owner_file: resolved) + "**")
     val boundary = boundary_module(owner_file: resolved)

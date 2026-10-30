@@ -9,8 +9,8 @@
 #
 # KEY. What lowering reads besides the module's own source is the FROZEN
 # MODULE SURFACES -- and not only its imports': module_lowering.spl builds a
-# decl-owner index over EVERY surface (`surface_decl_owners`, the whole-closure
-# loop at module_lowering.spl:358) and re-export materialization walks package
+# scalar decl-owner index over EVERY surface (built from the frozen declaration
+# name arrays in module_lowering.spl) and re-export materialization walks package
 # siblings that are not import edges. So the key folds a digest of ALL frozen
 # surfaces, not the import closure alone; a per-import key would serve a stale
 # module after an edit to a non-imported sibling that adds a same-named
@@ -50,60 +50,84 @@
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_reason, hir_module_decode, hir_module_decode_stable, hir_codec_header}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_reason, hir_module_decode, hir_module_decode_reason, hir_module_decode_stable, hir_codec_header}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape}
 use compiler.common.cache_contract.hir_cache_envelope_reader_v1.{hir_cache_envelope_parse, hir_cache_parser_record_valid_v1}
 use compiler.common.module_path_naming.{module_source_relative_path}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
+use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_identity_scope_v1}
 use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write, file_create_exclusive, file_publish_noreplace}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
+use compiler.driver.cache.gc.disk_cache_bound_v1.{disk_cache_admit_v1, disk_cache_source_record_v1}
+use compiler.driver.cache.metadata.cache_limits.{cache_retention_limits_load_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_claim_allowed_v1, worker_surface_counters_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_complete, hir_shard_recovery_block, hir_shard_recovery_blocked}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_complete, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_claim_reason_v1, HIR_SHARD_CLAIM_LEDGER_BLOCKED_V1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_inventory_mismatch_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_hir_records_publish_v1, mono_module_scoped_selected_v1}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_hash_text(content: text) -> i64
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 extern fn rt_file_move(src: text, dst: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 
-# v3: body checksum line after the header (see INTEGRITY above). A v2 entry
-# fails the header test and is a counted `header` rejection, not a decode.
-val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v3"
+# v4: keeps v3's body checksum and adds Any-warning diagnostics to cached HIR
+# semantics. A v3 entry can lack that warning, so reject it before replay.
+val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v4"
 val HIR_CACHE_CHECKSUM_PREFIX: text = "C "
 # Rejection classes, in summary order. Every load that returns nil for an
 # EXISTING key increments exactly one of them.
-val HIR_CACHE_REJECT_REASONS: [text] = ["absent", "header", "checksum", "framing", "decode"]
+val HIR_CACHE_REJECT_REASONS: [text] = ["absent", "header", "checksum", "framing", "decode", "rebase"]
 
 # Diagnostic counters, same shape as the front-end cache's.
 var _hir_cache_hits: i64 = 0
 var _hir_cache_misses: i64 = 0
 use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.core.cfg_platform.{cfg_guard_context_identity_v1}
+use compiler.frontend.core.parser_preprocessor.{pp_declared_target, pp_declared_marker_mode, pp_marker_strip_count, pp_marker_strip_log, pp_ensure_marker_strip_decisions}
 
 var _hir_cache_stores: i64 = 0
+# Running byte total of hir_cache_dir() for storage-cap admission (-1 = unmeasured).
+var _hir_cache_disk_total: i64 = -1
 # Store-side refusals (codec refused the module, or the write-time self-check
 # failed) and I/O failures (write/rename). `reason` keeps the LAST refusal so
 # the summary can name it without a per-entry log line.
 var _hir_cache_refused: i64 = 0
 var _hir_cache_last_reason: text = "-"
 # Index-aligned with HIR_CACHE_REJECT_REASONS.
-var _hir_cache_rejected: [i64] = [0, 0, 0, 0, 0]
+var _hir_cache_rejected: [i64] = [0, 0, 0, 0, 0, 0]
 # Recovered (warning-level) lowering diagnostics of the last loaded entry, so
 # a hit replays exactly what the in-process lowering would have reported.
 var _hir_cache_last_warnings: [text] = []
+var _hir_cache_failed_diagnostic_attempted_v1: bool = false
+val HIR_CACHE_FAILED_DIAGNOSTIC_MAX_BYTES_V1: i64 = 1048576
+val HIR_CACHE_FAILED_DIAGNOSTIC_METADATA_RESERVE_V1: i64 = 4096
+val HIR_CACHE_FAILED_DIAGNOSTIC_FIELD_MAX_BYTES_V1: i64 = 512
 
 fn hir_cache_enabled() -> bool:
     if (sosix_env_get_nullable("SIMPLE_HIR_CACHE") ?? "") == "0":
         return false
     # Requires the front-end cache scope: that is the compiler identity the
     # header is checked against. No scope, no identity, no cache.
-    frontend_parse_cache_scope() != ""
+    _hir_cache_identity_scope() != ""
+
+# Identity the HIR header folds. Equals frontend_parse_cache_scope() whenever
+# the frontend cache is on; with SIMPLE_FRONTEND_CACHE=0 it falls back to the
+# published SIMPLE_FRONTEND_CACHE_SCOPE so the HIR cache keeps working.
+fn _hir_cache_identity_scope() -> text:
+    hir_cache_identity_scope_v1(frontend_parse_cache_scope(),
+        sosix_env_get_nullable("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "",
+        sosix_env_get_nullable("SIMPLE_FRONTEND_CACHE") ?? "")
 
 fn hir_cache_dir() -> text:
     val root = sosix_env_get_nullable("SIMPLE_HIR_CACHE_DIR") ?? ""
@@ -117,27 +141,113 @@ fn hir_cache_dir() -> text:
 # that identify a surface's content: its canonical path and content hash plus
 # the names it is registered under (an alias change moves what a sibling
 # resolves to without changing any file hash).
+# Per-surface neutrality token folded into the closure digest. Empty with
+# SIMPLE_HIR_CFG_SELECT off (digest unchanged). "N" = the preprocess run that
+# consumed this content made zero strip decisions; "D:<sha>" = it made some
+# (the digest of the ordered (kind, condition, kept/stripped) log, so a
+# non-neutral member moves the closure digest with its decisions); "U" = no
+# run recorded (fails closed: never neutral).
+fn hir_cache_surface_neutral_token(content_hash: i64) -> text:
+    if not _hir_cache_cfg_select_on():
+        return ""
+    val n = pp_marker_strip_count(content_hash, pp_declared_target())
+    if n < 0:
+        return "U"
+    if n == 0:
+        return "N"
+    "D:" + sha256_text(pp_marker_strip_log(content_hash, pp_declared_target()))
+
+fn _hir_cache_cfg_select_on() -> bool:
+    (sosix_env_get_nullable("SIMPLE_HIR_CFG_SELECT") ?? "") == "1"
+
+# closure digest -> every member surface neutral. Set only by
+# hir_cache_closure_digest_from_rows in the process that built the closure; an
+# unknown digest is non-neutral.
+var hir_closure_all_neutral: Dict<text, bool> = {}
+
+# rows: per-surface identity lines; tokens: hir_cache_surface_neutral_token per row.
+fn hir_cache_closure_digest_from_rows(rows: [text], tokens: [text]) -> text:
+    var parts: [text] = ["{rows.len()}\n"]
+    var all_neutral = rows.len() > 0
+    var i = 0
+    while i < rows.len():
+        val tok = tokens[i]
+        parts = parts.push(rows[i] + (if tok == "": "" else: "|" + tok) + "\n")
+        if tok != "N":
+            all_neutral = false
+        i = i + 1
+    val digest = sha256_text(parts.join(""))
+    hir_closure_all_neutral[digest] = all_neutral
+    digest
+
 fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
-    var parts: [text] = ["{surfaces.surfaces.len()}\n"]
+    var rows: [text] = []
+    var tokens: [text] = []
     var i = 0
     while i < surfaces.surfaces.len():
         val s = surfaces.surfaces[i]
         # Repo-relative: the sharded route reads an absolute SCV snapshot, the
         # direct route the checkout; the same closure must digest equally.
-        parts = parts.push(module_source_relative_path(s.canonical_path) + "|" + "{s.content_hash}" + "|" + "{s.content_length}" + "|" + s.module_name + "|" + s.logical_name + "\n")
+        rows = rows.push(module_source_relative_path(s.canonical_path) + "|" + "{s.content_hash}" + "|" + "{s.content_length}" + "|" + s.module_name + "|" + s.logical_name)
+        tokens = tokens.push(hir_cache_surface_neutral_token(s.content_hash))
         i = i + 1
-    sha256_text(parts.join(""))
+    hir_cache_closure_digest_from_rows(rows, tokens)
 
 fn _hir_cache_env_switches() -> text:
     # Every environment switch module_build.spl / the driver consult when
     # deciding WHAT to lower (bootstrap constants recovery, flat rows, stub
     # HIR). Folding them keeps one directory safe across modes.
     var out = ""
-    for name in ["SIMPLE_BOOTSTRAP", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "SIMPLE_BOOTSTRAP_STAGE4", "SIMPLE_STUB_HIR", "SIMPLE_STAGE3_STREAMING_SURFACES"]:
+    for name in ["SIMPLE_BOOTSTRAP", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "SIMPLE_BOOTSTRAP_STAGE4", "SIMPLE_STUB_HIR", "SIMPLE_STAGE3_STREAMING_SURFACES", "SIMPLE_HIR_CFG_SELECT"]:
         out = out + name + "=" + (sosix_env_get_nullable(name) ?? "") + "\n"
     out
 
-fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> text:
+# WA(hir-target-neutral): interim until HIR keeps all cfg arms (doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md).
+# With SIMPLE_HIR_CFG_SELECT=1 this fold covers the NON-NEUTRAL files only: a
+# source and its whole closure with zero strip decisions use "hir-target-neutral-v1"
+# instead (see _hir_cache_key_target_part).
+# The parser preprocessor strips @when/@cfg arms per target, so cached HIR is
+# target-specific. native_target is ctx.native_target (set without exporting
+# SIMPLE_NATIVE_BUILD_TARGET, so one process may build many targets). The env
+# part uses the same cfg_detect_os/arch/cpu/features resolution the
+# preprocessor consults, so key and arm selection cannot disagree.
+fn _hir_cache_target_context(native_target: text) -> text:
+    "hir-target-v2:" + cfg_guard_context_identity_v1() + ";native-target={native_target.len()}:{native_target}"
+
+# Target part of the key. Flag off: unchanged target fold. Flag on: a source
+# whose own preprocess made zero strip decisions AND whose closure is all
+# neutral (hir_closure_all_neutral) drops the target for a constant; any other
+# source keeps the target fold plus its strip-decision digest.
+# source_digest (sha256 of the file) -> rt_hash_text of its content, so a path
+# is read and hashed once per distinct content per process, not per key call.
+var hir_source_text_hash_cache: Dict<text, i64> = {}
+
+fn _hir_cache_key_target_part(source_path: text, source_digest: text, closure_digest: text, native_target: text) -> text:
+    val fold = _hir_cache_target_context(native_target)
+    if not _hir_cache_cfg_select_on():
+        return fold
+    # Outside a declared marker-mode parse no file can be neutral; skip the
+    # per-call source re-read/hash (the answer is always the target fold).
+    if not pp_declared_marker_mode():
+        return fold + ";strip-digest=" + sha256_text("")
+    var h = hir_source_text_hash_cache[source_digest] ?? 0
+    var n = -1
+    if h != 0:
+        n = pp_marker_strip_count(h, native_target)
+    if n < 0:
+        # Unknown here. Recompute only in the mode the current build's parse
+        # declared (marker); pp_ensure_* is a no-op for any other mode, leaving
+        # the answer unknown (non-neutral, target fold kept).
+        val text_now = file_read_nullable(source_path) ?? ""
+        h = rt_hash_text(text_now)
+        hir_source_text_hash_cache[source_digest] = h
+        pp_ensure_marker_strip_decisions(text_now, native_target)
+        n = pp_marker_strip_count(h, native_target)
+    if n == 0 and (hir_closure_all_neutral[closure_digest] ?? false):
+        return "hir-target-neutral-v1"
+    fold + ";strip-digest=" + sha256_text(pp_marker_strip_log(h, native_target))
+
+fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool, library_mode: text = "", native_target: text = "") -> text:
     if closure_digest == "" or not file_exists(source_path):
         return ""
     val source_digest = rt_file_hash_sha256(source_path)
@@ -152,13 +262,16 @@ fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> tex
     # Logical aliases share the one physical surface lowering; their registry
     # identities already participate in the closure digest above.
     val source_path_digest = sha256_text(module_source_relative_path(source_path))
-    sha256_text("hir-source-key-v2\n" + source_path_digest + "\n" + source_digest + "\n" + closure_digest + "\n" + entry_flag + "\n" + _hir_cache_env_switches() + hir_codec_header() + "\n")
+    val legacy = sha256_text("hir-source-key-v2\n" + source_path_digest + "\n" + source_digest + "\n" + closure_digest + "\n" + entry_flag + "\n" + _hir_cache_env_switches() + _hir_cache_key_target_part(source_path, source_digest, closure_digest, native_target) + "\n" + hir_codec_header() + "\n")
+    if library_mode == "": return legacy
+    sha256_text("hir-library-mode-key-v1\n" + legacy + "\n" + sha256_text(library_mode))
 
 fn hir_cache_path(key: text, parser_selected: bool = false) -> text:
     hir_cache_dir() + "/" + key + (if parser_selected: ".parser-v4.hir" else: ".hir")
 
-fn hir_cache_header() -> text:
-    HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + frontend_parse_cache_scope()
+fn hir_cache_header(library_mode: text = "") -> text:
+    val legacy = HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + _hir_cache_identity_scope()
+    if library_mode == "": legacy else: legacy + " library-mode-v1=" + sha256_text(library_mode)
 
 # `has` MUST apply the same validity test `hir_cache_load` does. The KEY folds
 # source + closure digests, but the HEADER additionally folds
@@ -181,7 +294,7 @@ fn hir_cache_header() -> text:
 #   [hir-cache] hits=0 misses=102 stores=102                    (real build)
 # Reproduced identically in the 02:03 build of the same target. On disk, 114 of
 # 216 entries carried a header from a superseded compiler identity.
-fn hir_cache_has(key: text, parser_binding: text = "") -> bool:
+fn hir_cache_has(key: text, parser_binding: text = "", library_mode: text = "") -> bool:
     if key == "" or not hir_cache_enabled():
         return false
     val path = hir_cache_path(key, parser_binding != "")
@@ -193,7 +306,7 @@ fn hir_cache_has(key: text, parser_binding: text = "") -> bool:
     val previous_parser_objectless = _hir_cache_last_parser_objectless
     if not transient_scope_begin():
         return false
-    val valid = hir_cache_load_in_owned_scope(key, parser_binding) != nil
+    val valid = hir_cache_load_in_owned_scope(key, parser_binding, "", library_mode) != nil
     _hir_cache_last_warnings = previous_warnings
     _hir_cache_last_parser_objectless = previous_parser_objectless
     val ended = transient_scope_end()
@@ -205,26 +318,71 @@ fn hir_cache_has(key: text, parser_binding: text = "") -> bool:
 var _hir_cache_last_parser_objectless: bool = false
 fn hir_cache_last_parser_objectless() -> bool: _hir_cache_last_parser_objectless
 
-fn hir_cache_load_parsed_v1(key: text, parser_binding: text, source_path: text = "") -> HirModule?:
+# Hits stored under another SCV snapshot root and rebased onto the consuming
+# root before decode, so module.path, every Span.file and the replayed
+# warnings name the consuming snapshot instead of the storing one.
+var _hir_cache_rebased_hits: i64 = 0
+fn hir_cache_rebased_hits_v1() -> i64: _hir_cache_rebased_hits
+
+# Bug post_hir_rt_criticality_census_reencode_2026_10_25 (snapshot-root
+# section): entries are keyed
+# repo-relative, but the blob embeds the STORING run's absolute snapshot root
+# (build/scv/snapshots/scv-revision-v1-<id>/) in module.path and every
+# Span.file, and every build freezes a new revision. Returns [old_root,
+# new_root] when the stored module.path (third blob line: codec header, name,
+# path) and `source_path` are the same repo-relative file under two different
+# non-empty roots, else []. The codec is line-oriented with one escaped scalar
+# per line, so replacing "\n" + old_root with "\n" + new_root rewrites exactly
+# the text fields that start with the old root -- the decode of the result is
+# the module as lowered under the new root, and the result is its canonical
+# encoding. Backslash-bearing roots are refused (their escaped form differs).
+fn _hir_cache_rebase_root_ok_v1(root: text) -> bool:
+    root.starts_with("/") and root != "/" and root.ends_with("/")
+
+fn hir_cache_snapshot_root_rebind_v1(blob: text, source_path: text) -> [text]:
+    if source_path == "" or source_path.contains("\\"): return []
+    val header_end = blob.index_of("\n")
+    if header_end < 0: return []
+    val name_end = blob.index_of("\n", header_end + 1)
+    if name_end < 0: return []
+    val path_end = blob.index_of("\n", name_end + 1)
+    if path_end < 0: return []
+    val stored = blob.substring(name_end + 1, path_end)
+    if stored == source_path or stored.contains("\\"): return []
+    val rel = module_source_relative_path(source_path)
+    if rel == "" or module_source_relative_path(stored) != rel: return []
+    if not stored.ends_with(rel) or not source_path.ends_with(rel): return []
+    val old_root = stored.substring(0, stored.len() - rel.len())
+    val new_root = source_path.substring(0, source_path.len() - rel.len())
+    # An empty old root would match every line; a relative one (`../x/`) or
+    # `/` could prefix ordinary text values. Only absolute, non-root snapshot
+    # roots rebase; re-joining proves the split.
+    if not _hir_cache_rebase_root_ok_v1(old_root) or old_root + rel != stored: return []
+    if new_root != "" and not _hir_cache_rebase_root_ok_v1(new_root): return []
+    if new_root + rel != source_path: return []
+    [old_root, new_root]
+
+fn hir_cache_load_parsed_v1(key: text, parser_binding: text, source_path: text = "", library_mode: text = "") -> HirModule?:
     if parser_binding.len() != 64: return nil
-    val loaded = hir_cache_load(key, parser_binding)
+    val loaded = hir_cache_load(key, parser_binding, source_path, library_mode)
     if source_path == "" or loaded == nil: return loaded
-    # The entry may come from the other route's spelling of this file.
+    # The entry may come from the other route's spelling of this file. A
+    # snapshot-root move was already rebased inside the load.
     var module = loaded.unwrap()
     module.path = source_path
     Some(module)
 
-fn hir_cache_parser_binding_v1(key: text, module_name: text, path: text, source_identity: text) -> text:
+fn hir_cache_parser_binding_v1(key: text, module_name: text, path: text, source_identity: text, library_mode: text = "") -> text:
     if key.len() != 64 or module_name == "" or path == "" or source_identity.len() != 64: return ""
-    sha256_text("parser-classification-v1\n" + key + "\n" + module_name + "\n" + sha256_text(module_source_relative_path(path)) + "\n" + source_identity + "\n" + hir_cache_header())
+    sha256_text("parser-classification-v1\n" + key + "\n" + module_name + "\n" + sha256_text(module_source_relative_path(path)) + "\n" + source_identity + "\n" + hir_cache_header(library_mode))
 
-fn hir_cache_load(key: text, parser_binding: text = "") -> HirModule?:
+fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "", library_mode: text = "") -> HirModule?:
     # Initialize the persistent frontend identity before entering scratch.
     if key == "" or not hir_cache_enabled():
         return nil
     if not transient_scope_begin():
         return nil
-    val decoded = hir_cache_load_in_owned_scope(key, parser_binding)
+    val decoded = hir_cache_load_in_owned_scope(key, parser_binding, source_path, library_mode)
     val paused = transient_scope_pause()
     # A miss has no graph to promote: the runtime correctly rejects nil roots.
     # The owned loader only replaces the persistent warning root on a hit.
@@ -249,7 +407,7 @@ fn hir_cache_load(key: text, parser_binding: text = "") -> HirModule?:
 
 # HIR shard transactions already own the decode's scratch lifetime. They retain
 # only their small diagnostics/receipts, so no full HIR root is promoted here.
-fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "") -> HirModule?:
+fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "", source_path: text = "", library_mode: text = "") -> HirModule?:
     if key == "" or not hir_cache_enabled():
         return nil
     val path = hir_cache_path(key, parser_binding != "")
@@ -257,29 +415,50 @@ fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "") -> HirMod
         _hir_cache_reject("absent")
         return nil
     val raw = file_read_nullable(path) ?? ""
-    val expected_header = if parser_binding != "": "spl-hircache-v4-parser " + hir_cache_header() else: hir_cache_header()
+    val expected_header = if parser_binding != "": "spl-hircache-v4-parser " + hir_cache_header(library_mode) else: hir_cache_header(library_mode)
     val entry = hir_cache_entry_parse(raw, expected_header, parser_binding)
     if entry.reason != "":
         _hir_cache_reject(entry.reason)
         return nil
     # A hit decodes ONCE. The stability gate (decode + full re-encode + compare)
     # already ran on the STORE side for every published entry
-    # (hir_cache_store_in_owned_scope refuses an unstable frame), and the
+    # (hir_cache_store_in_owned_scope refuses an unstable frame, or admits its
+    # re-encode fixed point under SIMPLE_HIR_CACHE_ADMIT_REENCODE=1), and the
     # checksum above pins the bytes, so re-encoding here re-proved a property
     # the entry could not have lost. Measured 2026-10-19 (Phase 4 full CLI,
     # 2702 hits, 940 MB of entries): ~196 ms per hit, ~9 min serial, with the
     # main build's `[hir-cache] hits=2702 misses=0` reading as a stall.
     # SIMPLE_HIR_CACHE_SELFCHECK=1 / SIMPLE_HIR_CODEC_ROUNDTRIP=1 ("all")
     # keep the load-side roundtrip as an explicit diagnostic.
+    # The checksum above covered the stored bytes; a snapshot-root rebase is
+    # applied after it, before the single decode (hir_cache_snapshot_root_rebind_v1).
+    var blob = entry.blob
+    var warnings = entry.warnings
+    val rebind = hir_cache_snapshot_root_rebind_v1(blob, source_path)
+    if rebind.len() == 2:
+        blob = blob.replace("\n" + rebind[0], "\n" + rebind[1])
+        var rebased_warnings: [text] = []
+        for warning in warnings:
+            rebased_warnings.push(warning.replace(rebind[0], rebind[1]))
+        warnings = rebased_warnings
     val decoded = if hir_cache_load_reencodes_v1(hir_cache_selfcheck_mode()):
-        hir_module_decode_stable(entry.blob)
+        hir_module_decode_stable(blob)
     else:
-        hir_module_decode(entry.blob)
+        hir_module_decode(blob)
     if decoded == nil:
         _hir_cache_reject("decode")
+        if not _hir_cache_decode_refusal_noted:
+            val note_path = if source_path != "": source_path else: "key:" + key
+            _hir_cache_note_first_refusal("decode", note_path, hir_module_decode_reason(blob))
         return nil
+    if rebind.len() == 2:
+        # Fail closed: a rebase that did not land the consuming path is a miss.
+        if decoded.unwrap().path != source_path:
+            _hir_cache_reject("rebase")
+            return nil
+        _hir_cache_rebased_hits = _hir_cache_rebased_hits + 1
     _hir_cache_last_parser_objectless = entry.parser_classification.starts_with("objectless:")
-    _hir_cache_last_warnings = entry.warnings
+    _hir_cache_last_warnings = warnings
     _hir_cache_hits = _hir_cache_hits + 1
     decoded
 
@@ -383,10 +562,10 @@ fn hir_cache_rejected_summary() -> text:
 # existence -> read -> parse sequence in this file: hir_cache_file_exists_facade_contract_spec
 # pins that ordering by source position, and it is a real contract, not an
 # accident of layout.
-fn _hir_cache_entry_header_valid(path: text) -> bool:
+fn _hir_cache_entry_header_valid(path: text, library_mode: text = "") -> bool:
     val raw = file_read_nullable(path) ?? ""
     var reader: FlatPoolReader = FlatPoolReader.new_canonical(raw)
-    reader.ok and reader.next() == hir_cache_header()
+    reader.ok and reader.next() == hir_cache_header(library_mode)
 
 fn hir_cache_last_warnings() -> [text]:
     _hir_cache_last_warnings
@@ -401,7 +580,7 @@ fn hir_cache_clear_last_warnings():
 fn hir_cache_promote_diagnostic_owner_v1() -> bool:
     transient_promote(_hir_cache_last_reason)
 
-fn hir_cache_store(key: text, module: HirModule, warnings: [text], parser_classification: text = "") -> bool:
+fn hir_cache_store(key: text, module: HirModule, warnings: [text], parser_classification: text = "", library_mode: text = "") -> bool:
     if key == "" or not hir_cache_enabled():
         return false
     # Eligibility initializes the immutable frontend scope memo before scratch
@@ -409,7 +588,7 @@ fn hir_cache_store(key: text, module: HirModule, warnings: [text], parser_classi
     # only the scalar store counter escapes. Do not borrow an enclosing scope.
     if not transient_scope_begin():
         return false
-    val stored = hir_cache_store_in_owned_scope(key, module, warnings, parser_classification)
+    val stored = hir_cache_store_in_owned_scope(key, module, warnings, parser_classification, library_mode)
     # Always close, including codec refusal and failed writes/renames. A
     # short-circuit expression here would leak precisely the failure cases.
     val ended = transient_scope_end()
@@ -437,11 +616,11 @@ fn hir_module_encode_retained_v1(module: HirModule) -> text:
         panic("HIR validation blob encode scope ownership failed")
     blob
 
-fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text], parser_classification: text = "") -> bool:
+fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text], parser_classification: text = "", library_mode: text = "") -> bool:
     _hir_cache_note_store_attempt()
     if parser_classification != "" and
             not hir_cache_parser_record_valid_v1(parser_classification): return false
-    val blob = hir_module_encode(module)
+    var blob = hir_module_encode(module)
     if blob == "":
         _hir_cache_refuse("codec")
         # Name the refused payload once: a bare `codec` count hid that every
@@ -462,42 +641,185 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
             # A STORE-side refusal: counted as refused + selfcheck_failed,
             # never as a miss (misses count loads).
             eprint("[hir-cache] SELFCHECK FAILED module={module.name} path={module.path} {verdict}; entry not stored")
+            _hir_cache_capture_failed_diagnostic_v1(module, verdict, blob)
             _hir_cache_refuse("selfcheck")
             _hir_cache_selfcheck_failed = _hir_cache_selfcheck_failed + 1
             return false
-    elif hir_module_decode_stable(blob) == nil:
-        # Same fail-closed gate without the named diagnostic when the knob is
-        # not due: an unstable frame is never published, silently counted.
-        _hir_cache_refuse("unstable")
-        _hir_cache_note_first_refusal("unstable", module.path)
+    elif (sosix_env_get_nullable("SIMPLE_HIR_CACHE_ADMIT_REENCODE") ?? "") == "1":
+        # Explicit opt-in SIMPLE_HIR_CACHE_ADMIT_REENCODE=1: the stable check
+        # separates a blob the decoder refuses from a decodable blob whose
+        # re-encode differs byte-for-byte (encoder non-determinism); the second
+        # is published as the re-encode fixed point
+        # (see _hir_cache_admit_reencode_blob_v1).
+        if hir_module_decode_stable(blob) == nil:
+            if hir_module_decode(blob) == nil:
+                _hir_cache_refuse("decode")
+                if not _hir_cache_decode_refusal_noted:
+                    _hir_cache_note_first_refusal("decode", module.path)
+                return false
+            val admitted = _hir_cache_admit_reencode_blob_v1(module.path, blob)
+            if admitted == "":
+                _hir_cache_refuse("reencode")
+                if not _hir_cache_reencode_refusal_noted:
+                    _hir_cache_note_first_refusal("reencode", module.path)
+                return false
+            blob = admitted
+    elif hir_module_decode(blob) == nil:
+        # Not due for the full self-check: one decode, no re-encode. A blob the
+        # decoder refuses can never be cached (a hit could not decode), so this
+        # stays fail-closed. Before 2026-10-25 this branch ran
+        # hir_module_decode_stable (decode + full re-encode) on EVERY store,
+        # so "sampled" mode sampled nothing and each store paid encode twice
+        # (stage3_hir_phase_cost_breakdown_2026-10-25.md, store ~374 ms/module).
+        # Re-encode drift is still caught by the due self-check (every store
+        # with SIMPLE_HIR_CACHE_SELFCHECK=1, every 8th in bootstrap lanes).
+        _hir_cache_refuse("decode")
+        if not _hir_cache_decode_refusal_noted:
+            _hir_cache_note_first_refusal("decode", module.path, hir_module_decode_reason(blob))
         return false
     val dir = hir_cache_dir()
     val _made = rt_dir_create_all(dir)
     val final_path = hir_cache_path(key, parser_classification != "")
     val tmp = final_path + ".{rt_getpid()}.tmp"
-    val header = if parser_classification != "": "spl-hircache-v4-parser " + hir_cache_header() else: hir_cache_header()
-    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=name_dead_store_content_limb
+    val header = if parser_classification != "": "spl-hircache-v4-parser " + hir_cache_header(library_mode) else: hir_cache_header(library_mode)
     # The store write fails (rt_core_string_bytes NULL -> -1) when any limb
     # of the concatenated content is a dead transient handle. Bind each part
     # with wellformed checks so the env-gated trace names the dead limb.
+    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=name_dead_store_content_limb
     val body_text: text = hir_cache_entry_encode_body(warnings, blob, parser_classification)
     val content_text: text = header + "\n" + body_text
     if (sosix_env_get_nullable("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1":
         eprint("[hir-cache-store] wf_content={rt_heap_ref_wellformed(content_text)} wf_header={rt_heap_ref_wellformed(header)} wf_body={rt_heap_ref_wellformed(body_text)} wf_warnings={rt_heap_ref_wellformed(warnings)} wf_blob={rt_heap_ref_wellformed(blob)}")
         if rt_heap_ref_wellformed(content_text): eprint("[hir-cache-store] content_len={content_text.len()}")
         if rt_heap_ref_wellformed(body_text): eprint("[hir-cache-store] body_len={body_text.len()}")
+    val hir_limits = cache_retention_limits_load_v1()
+    # Re-measure periodically: parallel compiler processes share the dir and
+    # per-source eviction frees bytes this running total does not see.
+    if _hir_cache_stores % 256 == 255:
+        _hir_cache_disk_total = -1
+    val hir_admit = disk_cache_admit_v1(dir, text_byte_len(content_text), _hir_cache_disk_total, hir_limits)
+    _hir_cache_disk_total = hir_admit.total
+    if not hir_admit.admitted or not disk_publish_admitted(dir, text_byte_len(content_text)):
+        _hir_cache_note_store_failure("admission", "over-storage-cap", final_path)
+        return false
     if not rt_file_write_text(tmp, content_text):
         # A failed write can leave a partial temp (disk full is the measured
         # case, P-INFRA-3); it was never unlinked and never reported.
         val _partial = rt_file_delete(tmp)
+        _hir_cache_disk_total = -1
         _hir_cache_note_store_failure("write", "io-write", tmp)
         return false
     if rt_file_move(tmp, final_path):
         _hir_cache_stores = _hir_cache_stores + 1
+        val final_name = final_path.substring(dir.len() + 1)
+        val _evicted = disk_cache_source_record_v1(dir,
+            sha256_text(module_source_relative_path(module.path)).substring(0, 16),
+            final_name, hir_limits)
         return true
     val _cleaned = rt_file_delete(tmp)
+    _hir_cache_disk_total = -1
     _hir_cache_note_store_failure("rename", "io-rename", final_path)
     false
+
+# Failure-only, explicitly opt-in evidence capture. The payload and manifest
+# live in a directory that the HIR cache loader never scans. The manifest is
+# published last; an absent manifest means a partial capture is not evidence.
+# Capture failures do not affect the refusal, cache counters, or build result.
+fn _hir_cache_capture_failed_diagnostic_v1(module: HirModule, verdict: text, blob: text):
+    if _hir_cache_failed_diagnostic_attempted_v1: return
+    _hir_cache_failed_diagnostic_attempted_v1 = true
+    val configured_root = sosix_env_get_nullable("SIMPLE_HIR_CACHE_FAILED_DIAGNOSTIC_DIR") ?? ""
+    if configured_root == "": return
+    val artifact = _hir_cache_write_failed_diagnostic_v1(
+        configured_root, module.name, module.path, verdict, blob)
+    if artifact == "":
+        eprint("[hir-cache] failed-selfcheck diagnostic capture unavailable")
+        return
+    eprint("[hir-cache] failed-selfcheck diagnostic captured artifact={artifact}")
+
+# Directory-parameterized writer is separate from the process-once/env wrapper
+# so tests can exercise real payload, bounds, and no-replace behavior directly.
+fn _hir_cache_write_failed_diagnostic_v1(root: text, module_name: text, module_path: text,
+        verdict: text, blob: text) -> text:
+    if root == "": return ""
+    val dir = root + "/hir-selfcheck-quarantine-v1"
+    if not rt_dir_create_all(dir):
+        return ""
+
+    val artifact_id = "hir-selfcheck-{rt_getpid()}-{sha256_text(module_path)}"
+    val payload_name = artifact_id + ".blob"
+    val manifest_path = dir + "/" + artifact_id + ".sdn"
+    val payload_path = dir + "/" + payload_name
+    val payload_bytes = text_byte_len(blob)
+    val payload_limit = HIR_CACHE_FAILED_DIAGNOSTIC_MAX_BYTES_V1 - HIR_CACHE_FAILED_DIAGNOSTIC_METADATA_RESERVE_V1
+    var payload_present = false
+    var omitted_reason = "size_limit"
+    if payload_bytes <= payload_limit:
+        if _hir_cache_publish_diagnostic_file_v1(payload_path, blob):
+            payload_present = true
+            omitted_reason = ""
+        else:
+            omitted_reason = "payload_write_failed"
+
+    val payload_file = if payload_present: _hir_cache_sdn_quote_bounded_v1(payload_name) else: "null"
+    val payload_digest = if payload_present: "\"{sha256_text(blob)}\"" else: "null"
+    val omitted_value = if payload_present: "false" else: "true"
+    val metadata = "schema: simple-hir-cache-selfcheck-quarantine-v1\n" +
+        "module_name: {_hir_cache_sdn_quote_bounded_v1(module_name)}\n" +
+        "module_path: {_hir_cache_sdn_quote_bounded_v1(module_path)}\n" +
+        "verdict: {_hir_cache_sdn_quote_bounded_v1(verdict)}\n" +
+        "module_name_sha256: \"{sha256_text(module_name)}\"\n" +
+        "module_path_sha256: \"{sha256_text(module_path)}\"\n" +
+        "verdict_sha256: \"{sha256_text(verdict)}\"\n" +
+        "payload_bytes: {payload_bytes}\n" +
+        "payload_file: {payload_file}\n" +
+        "payload_sha256: {payload_digest}\n" +
+        "payload_omitted: {omitted_value}\n" +
+        "payload_omitted_reason: \"{omitted_reason}\"\n"
+    if text_byte_len(metadata) > HIR_CACHE_FAILED_DIAGNOSTIC_METADATA_RESERVE_V1 or
+            not _hir_cache_publish_diagnostic_file_v1(manifest_path, metadata):
+        if payload_present:
+            val _discarded_payload = rt_file_delete(payload_path)
+        return ""
+    manifest_path
+
+fn _hir_cache_publish_diagnostic_file_v1(path: text, content: text) -> bool:
+    val tmp_path = path + ".tmp"
+    if not file_create_exclusive(tmp_path, content): return false
+    val published = match file_publish_noreplace(tmp_path, path):
+        case Ok(created): created
+        case Err(_): false
+    if not published:
+        val _discarded = rt_file_delete(tmp_path)
+    published
+
+# Build an SDN quoted scalar only after checking a small UTF-8 byte bound. If
+# context is too long or contains unsupported control bytes, retain null plus
+# its SHA-256 field instead of allocating an unbounded escaped value.
+fn _hir_cache_sdn_quote_bounded_v1(value: text) -> text:
+    if text_byte_len(value) > HIR_CACHE_FAILED_DIAGNOSTIC_FIELD_MAX_BYTES_V1:
+        return "null"
+    var parts: [text] = ["\""]
+    for character in value:
+        if character == "\\":
+            parts.push("\\\\")
+        elif character == "\"":
+            parts.push("\\\"")
+        elif character == "\n":
+            parts.push("\\n")
+        elif character == "\r":
+            parts.push("\\r")
+        elif character == "\t":
+            parts.push("\\t")
+        elif character < " ":
+            return "null"
+        else:
+            parts.push(character)
+    parts.push("\"")
+    val quoted = parts.join("")
+    if text_byte_len(quoted) > HIR_CACHE_FAILED_DIAGNOSTIC_FIELD_MAX_BYTES_V1 * 2 + 2:
+        return "null"
+    quoted
 
 # A cache that cannot store is a slow build, not a wrong one, so a failed store
 # stays non-fatal -- but it is counted, shown in the summary (both as
@@ -520,7 +842,7 @@ fn hir_cache_store_failures() -> i64:
 
 # True when the LAST store refusal was an I/O write/rename failure (disk-full
 # class: the cache genuinely cannot serve this build). Codec refusals
-# (encode reject, selfcheck, unstable roundtrip) are fail-closed EVIDENCE
+# (encode reject, selfcheck, decode/reencode roundtrip refusal) are fail-closed EVIDENCE
 # gates, not I/O failures: the module is still correct in memory and the
 # main build lowers it on the cache miss. Shard lanes use this to treat a
 # codec refusal as "not stored" (UNCACHED) instead of a worker failure --
@@ -544,7 +866,9 @@ fn _hir_cache_refuse(reason: text):
 val HIR_CACHE_STORE_RATE_EVERY: i64 = 64
 var _hir_cache_store_attempts: i64 = 0
 var _hir_cache_codec_refusal_noted: bool = false
-var _hir_cache_unstable_refusal_noted: bool = false
+var _hir_cache_decode_refusal_noted: bool = false
+var _hir_cache_reencode_refusal_noted: bool = false
+var _hir_cache_admission_noted: bool = false
 
 # Prints BEFORE counting the new attempt, so every printed attempt has
 # finished and attempts - stored - refused - io_failed is exact.
@@ -562,11 +886,41 @@ fn _hir_cache_note_first_refusal(reason: text, path: text, detail: text = ""):
     if reason == "codec":
         if _hir_cache_codec_refusal_noted: return
         _hir_cache_codec_refusal_noted = true
-    elif reason == "unstable":
-        if _hir_cache_unstable_refusal_noted: return
-        _hir_cache_unstable_refusal_noted = true
+    elif reason == "decode":
+        if _hir_cache_decode_refusal_noted: return
+        _hir_cache_decode_refusal_noted = true
+    elif reason == "reencode":
+        if _hir_cache_reencode_refusal_noted: return
+        _hir_cache_reencode_refusal_noted = true
     val detail_part = if detail != "": " detail={detail}" else: ""
     eprint("[hir-cache-store] refused reason={reason}{detail_part} module={path}; entry not stored (further {reason} refusals are only counted)")
+
+# Opt-in admission for a decodable-but-not-byte-stable frame (the store
+# refusal formerly reported only as reason=unstable once its decode step is
+# proven OK). What is published is the re-encode fixed point
+# blob2 = encode(decode(blob)) with encode(decode(blob2)) == blob2 verified,
+# so a cache hit decodes a self-consistent frame and every downstream
+# re-encode of the hit (validation twins, shard receipts) reproduces the
+# stored bytes instead of a fresh permutation. Off by default: the fixed-
+# point check proves consistency, not that decode is lossless, so caching
+# these frames stays an explicit operator decision
+# (SIMPLE_HIR_CACHE_ADMIT_REENCODE=1). Returns "" when not admitted or when
+# no fixed point exists; else the blob to publish.
+fn _hir_cache_admit_reencode_blob_v1(path: text, blob: text) -> text:
+    if (sosix_env_get_nullable("SIMPLE_HIR_CACHE_ADMIT_REENCODE") ?? "") != "1":
+        return ""
+    val decoded = hir_module_decode(blob)
+    if decoded == nil:
+        return ""
+    val fixed = hir_module_encode(decoded.unwrap())
+    if fixed == "":
+        return ""
+    if hir_module_decode_stable(fixed) == nil:
+        return ""
+    if not _hir_cache_admission_noted:
+        _hir_cache_admission_noted = true
+        eprint("[hir-cache-store] admitted reason=reencode module={path}; published re-encode fixed point (SIMPLE_HIR_CACHE_ADMIT_REENCODE=1; further admissions are only counted in stores=)")
+    fixed
 
 # Write-time round-trip self-check knob -> mode "all" | "sampled" | "off".
 # SIMPLE_HIR_CACHE_SELFCHECK=1 checks every store, =0 never; the host-config
@@ -635,7 +989,7 @@ fn hir_cache_selfcheck_failed() -> i64:
 fn hir_cache_selfcheck_blob(blob: text) -> text:
     val decoded = hir_module_decode(blob)
     if decoded == nil:
-        return "reason=decode bytes={blob.len()}"
+        return "reason=decode bytes={blob.len()} cause={hir_module_decode_reason(blob)}"
     val again = hir_module_encode(decoded.unwrap())
     if again == blob:
         return ""
@@ -739,10 +1093,18 @@ fn hir_shard_owner() -> text:
     sosix_env_get_nullable("SIMPLE_HIR_SHARD_OWNER") ?? hir_shard_spec()
 
 fn hir_shard_begin(path: text, key: text) -> i64:
+    # P5: a worker whose surfaces cover only its seeds' import closure never
+    # claims a module outside it (driver_worker_surface_closure_v1.spl).
+    if not worker_surface_claim_allowed_v1(path): return 0
     val queue = _hir_shard_queue_dir()
     if queue == "":
         return if hir_shard_owns(path): 1 else: 0
-    if hir_shard_recovery_blocked(queue): return -1
+    if hir_shard_recovery_blocked(queue): return HIR_SHARD_CLAIM_LEDGER_BLOCKED_V1
+    # File-worker HIR child (driver_build/native_file_worker_v1.spl): stop
+    # claiming after SIMPLE_HIR_SHARD_CLAIM_LIMIT modules; the rest stay
+    # unclaimed for the next round or another worker. Unset/<=0 = no limit.
+    val claim_limit = (sosix_env_get_nullable("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? "").to_i64() ?? 0
+    if claim_limit > 0 and _hir_shard_claimed >= claim_limit: return 0
     val claimed = hir_shard_recovery_claim(queue, hir_shard_owner(), path, key)
     if claimed > 0:
         _hir_shard_claimed = _hir_shard_claimed + 1
@@ -752,15 +1114,48 @@ fn hir_shard_finish(path: text, state: text, cache_stored: bool) -> bool:
     if not hir_shard_active() or _hir_shard_queue_dir() == "": return true
     hir_shard_recovery_terminal(_hir_shard_queue_dir(), hir_shard_owner(), path, state, cache_stored)
 
+# File-worker P4: deps records are written only when a file worker drives
+# this HIR child (its hir ledger env is set), unless SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1.
+fn hir_shard_deps_wanted_v1() -> bool:
+    hir_shard_active() and _hir_shard_queue_dir() != "" and
+        mono_module_scoped_selected_v1(sosix_env_get_nullable("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
+            (sosix_env_get_nullable("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "") != "")
+
+# Publishes the module's deps record (own path first) and its HIR cache key
+# (P-G5b: lets a MIR child load the body by content identity). "" = ok,
+# otherwise the fail-closed reason. Shared by the streaming and legacy paths.
+fn hir_shard_publish_records_v1(path: text, key: text, dep_paths: [text]) -> text:
+    native_file_worker_hir_records_publish_v1(_hir_shard_queue_dir(), path, key, dep_paths)
+
+# Direct import edges of a surface as in-range SOURCE indices (frozen surface
+# import_target_indices -> target surface's source_index). Shared by both paths.
+fn hir_shard_dep_source_indices_v1(surfaces: ModuleSurfacesByName, surface_index: i64, sources_len: i64) -> [i64]:
+    var out: [i64] = []
+    if surface_index < 0 or surface_index >= surfaces.surfaces.len():
+        return out
+    for dep_surface_index in surfaces.surfaces[surface_index].import_target_indices:
+        if dep_surface_index >= 0 and dep_surface_index < surfaces.surfaces.len():
+            val dep_source_index = surfaces.surfaces[dep_surface_index].source_index
+            if dep_source_index >= 0 and dep_source_index < sources_len:
+                out = out.push(dep_source_index)
+    out
+
 fn hir_shard_complete() -> bool:
     if _hir_shard_queue_dir() == "": return true
     hir_shard_recovery_complete(_hir_shard_queue_dir(), hir_shard_owner())
 
 fn hir_shard_inventory(identity: text, paths: [text]) -> bool:
     if not hir_shard_active() or _hir_shard_queue_dir() == "": return true
-    hir_shard_recovery_inventory(_hir_shard_queue_dir(), identity, paths)
+    if hir_shard_recovery_inventory(_hir_shard_queue_dir(), identity, paths): return true
+    val stored = file_read_nullable("{_hir_shard_queue_dir()}/inventory") ?? ""
+    eprint("[hir-shard] owner={hir_shard_owner()} inventory publication failed: {hir_shard_recovery_inventory_mismatch_v1(stored, identity, paths)}")
+    false
 
 fn hir_shard_guard_block(reason: text):
+    if hir_shard_active():
+        # A failing worker never reaches the "done" receipt; name its surface
+        # work here so a failed run still shows what the worker built.
+        eprint("[hir-shard] failed shard={hir_shard_spec()} claimed={_hir_shard_claimed} reason={reason} {worker_surface_counters_v1()}")
     if hir_shard_active() and _hir_shard_queue_dir() != "":
         val _blocked = hir_shard_recovery_block(_hir_shard_queue_dir(), reason)
 
@@ -775,6 +1170,11 @@ fn hir_shard_active() -> bool:
 
 fn hir_shard_claimed() -> i64:
     _hir_shard_claimed
+
+# Names a failed claim (or a missing cache key) with its cause and module path.
+fn hir_shard_claim_failure_reason_v1(claim: i64, path: text) -> text:
+    val why = if claim < 0: hir_shard_claim_reason_v1(claim) else: "cache-identity-unavailable (empty HIR cache key)"
+    "HIR claim failed: {why} path={path}"
 
 fn _hir_shard_queue_dir() -> text:
     if _hir_shard_queue_memo != "@@unset@@":
@@ -910,13 +1310,15 @@ fn hir_shard_level_count(levels: [i64]) -> i64:
     top + 1
 
 fn hir_shard_summary(levels: i64, lowered: i64) -> text:
-    "[hir-shard] done shard={hir_shard_spec()} lowered={lowered} claimed={_hir_shard_claimed} levels={levels}"
+    "[hir-shard] done shard={hir_shard_spec()} lowered={lowered} claimed={_hir_shard_claimed} levels={levels} {worker_surface_counters_v1()}"
 
 export HIR_CACHE_ENTRY_VERSION, HIR_CACHE_CHECKSUM_PREFIX, HIR_CACHE_REJECT_REASONS
 export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key
+export hir_cache_closure_digest_from_rows, hir_cache_surface_neutral_token
 export hir_cache_path
 export hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_last_warnings
 export hir_module_encode_retained_v1
+export hir_cache_rebased_hits_v1, hir_cache_snapshot_root_rebind_v1
 export hir_cache_load_in_owned_scope
 export hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1
 export hir_cache_hits, hir_cache_misses, hir_cache_stores, hir_cache_summary
@@ -929,9 +1331,11 @@ export hir_cache_selfchecked, hir_cache_selfcheck_failed, HIR_CACHE_SELFCHECK_SA
 export hir_cache_load_reencodes_v1, hir_cache_adoption_receipt_v1
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
-export hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block
+export hir_shard_deps_wanted_v1, hir_shard_publish_records_v1, hir_shard_dep_source_indices_v1
+export hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_claim_failure_reason_v1
 export hir_shard_inventory
 
 export hir_cache_parser_binding_v1, hir_cache_last_parser_objectless
 export hir_cache_load_parsed_v1
 export hir_cache_path
+export _hir_cache_write_failed_diagnostic_v1, HIR_CACHE_FAILED_DIAGNOSTIC_MAX_BYTES_V1

@@ -30,6 +30,87 @@ pub fn shard_mem_available_kb() -> i64:
         case Ok(bytes): bytes / 1024
         case Err(_): 0
 @else:
+@when(os="macos"):
+# Darwin has no /proc/meminfo and no MemAvailable analogue. `vm_stat` reports
+# page counts (suffixed with '.') and the page size only inside its header
+# line. Headroom is free + inactive pages: inactive is the reclaimable cache
+# pool (file-backed pages purgeable under pressure), while active/wired/
+# speculative/compressed are not real headroom. Same subprocess mechanism as
+# the Linux probe below (see the NOTE there): `process_run_timeout`, never
+# `file_read`, which fatally recursed in the run20-class seed.
+pub fn shard_mem_available_kb() -> i64:
+    val (out, _err, code) = process_run_timeout("vm_stat", [], 2000)
+    if code != 0:
+        return 0
+    shard_macos_available_kb_from_vm_stat(out)
+
+# Page count on one "Pages <kind>: <n>." vm_stat line; -1 when the prefix
+# does not match or the count is not plain digits (a garbage count makes the
+# whole probe "unknown", same as a missing line -- never a silent 0-pages).
+fn shard_macos_page_count_from_line(line: text, prefix: text) -> i64:
+    if not line.starts_with(prefix):
+        return -1
+    var field = line.substring(prefix.len()).trim()
+    if field.ends_with("."):
+        field = field.substring(0, field.len() - 1)
+    if field == "":
+        return -1
+    var i = 0
+    while i < field.len():
+        val b = field.byte_at(i)
+        if b < 48 or b > 57:
+            return -1
+        i = i + 1
+    shard_mem_available_kb_from_field(field)
+
+# Pure vm_stat parser, split out so the unit spec can pin it without a host
+# probe: free + inactive pages times the header page size, in kB. 0 when the
+# page size or either count is missing/unparseable -- unknown memory permits
+# only the sequential path, same contract as the Linux probe.
+pub fn shard_macos_available_kb_from_vm_stat(output: text) -> i64:
+    var page_size: i64 = 0
+    var free_pages: i64 = 0
+    var inactive_pages: i64 = 0
+    var saw_free = false
+    var saw_inactive = false
+    for raw_line in output.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        if line.contains("page size of"):
+            # "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
+            val start = line.index_of("page size of") + "page size of".len()
+            val rest = line.substring(start).trim()
+            var digits = ""
+            var i = 0
+            while i < rest.len():
+                val b = rest.byte_at(i)
+                if b >= 48 and b <= 57:
+                    digits = digits + rest.substring(i, i + 1)
+                else:
+                    break
+                i = i + 1
+            page_size = shard_mem_available_kb_from_field(digits)
+            continue
+        val free_count = shard_macos_page_count_from_line(line, "Pages free:")
+        if free_count >= 0:
+            free_pages = free_count
+            saw_free = true
+            continue
+        val inactive_count = shard_macos_page_count_from_line(line, "Pages inactive:")
+        if inactive_count >= 0:
+            inactive_pages = inactive_count
+            saw_inactive = true
+    if page_size <= 0 or not saw_free or not saw_inactive:
+        return 0
+    val pages = free_pages + inactive_pages
+    if pages <= 0:
+        return 0
+    # bytes = pages * page_size, kB = bytes / 1024; guard i64 overflow first.
+    if pages > 9223372036854775807 / page_size:
+        return 0
+    (pages * page_size) / 1024
+@else:
 # MemAvailable (kB) from /proc/meminfo; 0 when unavailable. Unknown memory
 # permits only the existing sequential path, never CPU-count fanout.
 # NOTE: deliberately NOT std.io_runtime.file_read. In the run20-class seed
@@ -45,6 +126,7 @@ pub fn shard_mem_available_kb() -> i64:
     if code != 0:
         return 0
     shard_mem_available_kb_from_field(out.trim())
+@end
 @end
 
 # Split out so a spec can feed a fixture without a /proc dependency.
@@ -73,18 +155,41 @@ pub fn shard_mem_available_kb_from_field(field: text) -> i64:
     n
 
 
-# Per-worker memory budget in kB. Parse shards run the slim parse-lane entry
-# (~1.5 GB, pinned by scripts/check/check-parse-shard-rss-budget.shs); HIR
-# shards still spawn the full worker closure (measured 2.4-2.7 GB RSS), so they
-# carry a larger budget and are clamped harder. Precedence: the per-phase
+# Default per-worker admission estimates (kB), set from measured peaks of the
+# largest workload (doc/08_tracking/bug/stage2_compiler_tests_frontend_shard_rss_2026-10-25.md).
+# 2937-module full CLI, 20 threads: parse workers 3.1-3.6 GiB, HIR workers
+# 5.3-6.3 GiB. The old 1650000/3000000 were about half of that, so admission
+# let in more workers than the tree cap could hold. A 1062-module closure
+# measured parse 1.45-1.86 GiB and HIR 3.6-4.0 GiB, so these constants
+# over-reserve on smaller closures; a phase override lowers them deliberately.
+pub const SHARD_PARSE_WORKER_KB_V1: i64 = 3800000
+# 2026-10-27 re-measure (stage2 4e8230125c6, Windows, --threads 2): the pool's
+# `native_build_worker.spl` per-file worker (HIR+MIR in one process) peaked at
+# 5.04-5.65 GiB on mir_lowering_stmts.spl (lower bound: run killed at an 8 GB
+# tree cap); --hir-shard / --parse-shard children 2.53 GiB; coordinator
+# 1.32 GiB. Pool admission uses min(HIR, MIR) budgets for the same worker, so
+# both = 5.65 GiB x ~1.5 = 9.0 GB. Not separately observed: MIR-only peak. The
+# pool also raises its live estimate to any observed peak
+# (shard_commit_estimate_kib_v1); fewer than 2 admitted workers skips the
+# pool and falls through to the capsule-shard two-pass path (pre-existing). Old 6700000 (HIR) / 16000000 (MIR).
+pub const SHARD_HIR_WORKER_KB_V1: i64 = 9000000
+pub const SHARD_MIR_WORKER_KB_V1: i64 = 9000000
+
+# Per-worker memory budget in kB. Parse shards run the slim parse-lane entry;
+# HIR shards spawn the full worker closure, so they carry a larger budget and
+# are clamped harder (measured defaults: SHARD_PARSE/HIR_WORKER_KB_V1 above). Precedence: the per-phase
 # variable (a deliberate override, may go lower), then the host config key
 # worker_mem_mib (environment layer SIMPLE_HOST_WORKER_MEM_MIB), then the
 # default. The host key is a machine-wide hint shared by every phase, so it may
 # only make a phase MORE conservative: a value below the phase default (e.g.
 # below the measured HIR RSS behind the 3 GB HIR default) is ignored, with a
-# warning, rather than silently loosening the clamp. HIR may supply its parent
-# peak as an additional default floor; a valid phase override still wins.
-pub fn shard_worker_budget_kb(var_name: text, default_kb: i64, parent_peak_kb: i64 = 0) -> i64:
+# warning, rather than silently loosening the clamp.
+#
+# The coordinator's peak is never a worker budget (a floor at the supervisor's
+# own front-end peak collapsed admission to one SIGBUS-killed worker, 41 deaths,
+# 2026-10-24); the tree reserve in shard_threads_parent_cap_for protects the
+# supervisor. A valid phase override still wins over everything.
+pub fn shard_worker_budget_kb(var_name: text, default_kb: i64) -> i64:
     val raw = env_get(var_name) ?? ""
     if raw != "":
         val parsed = shard_mem_available_kb_from_field(raw)
@@ -95,7 +200,7 @@ pub fn shard_worker_budget_kb(var_name: text, default_kb: i64, parent_peak_kb: i
     if host_kb > 0 and chosen != host_kb:
         val host_mib = host_kb / 1024
         print "[shard] ignoring worker_mem_mib={host_mib} MiB below the {var_name} default {default_kb} kB; set {var_name} to lower it deliberately"
-    shard_host_budget_floor_kb(parent_peak_kb, chosen)
+    chosen
 
 # worker_mem_mib in kB; 0 (use the default) when absent, invalid or so large
 # that the KiB value would overflow i64.
@@ -174,6 +279,95 @@ pub fn shard_threads_tree_cap_for(requested: i64, budget_kb: i64,
 # Keep the existing 40% tree reserve, or the measured parent peak if larger.
 # A known tree that cannot fit one estimate admits no HIR child, including N=1.
 # The final compiler worker is outside this pool calculation and remains guarded.
+# ===== measured commit admission ============================================
+#
+# The start-time cap above divides headroom by a FIXED per-worker estimate.
+# s3-wa (2026-10-25) admitted 5 HIR workers at 6 GB each; their real commit
+# was far higher, the host commit limit (RAM + pagefile) ran out, and all five
+# died together on failed allocations. The slot pool therefore also gates each
+# further spawn on LIVE system commit headroom against the measured footprint:
+#   est  = max(static estimate, largest private KiB any worker has reached)
+#   need = est for the new worker + (est - current) for every live worker
+#          that has not yet grown to est
+# A worker is always admitted when none is live (no deadlock, serial floor),
+# and an unknown headroom (-1, probe unavailable) keeps the static cap.
+# Per-live-worker commit: the commit the pool consumed since it started
+# (base - now), split evenly over `live` workers. Unknown headroom (-1) or no
+# live worker yields [] so admission keeps the static cap.
+pub fn shard_commit_live_footprint_v1(base_headroom_kib: i64, now_headroom_kib: i64, live: i64) -> [i64]:
+    var out: [i64] = []
+    if base_headroom_kib < 0 or now_headroom_kib < 0 or live <= 0: return out
+    val used = if base_headroom_kib > now_headroom_kib: base_headroom_kib - now_headroom_kib else: 0
+    var i = 0
+    while i < live:
+        out = out.push(used / live)
+        i = i + 1
+    out
+
+pub fn shard_commit_estimate_kib_v1(static_kib: i64, observed_peak_kib: i64) -> i64:
+    if observed_peak_kib > static_kib: observed_peak_kib else: static_kib
+
+# 2026-10-27 phase 3 (stage2 6b0ba5f3): with no recorded peak the pool priced
+# 8 HIR workers at the static 6 GB and admitted all of them at warmup (live
+# footprint 0), they each grew to ~11 GB commit, the host commit limit ran out
+# and every worker died in Rust's alloc-error abort. Until a peak is measured
+# for this producer, price a worker at twice the static estimate; an explicit
+# SIMPLE_*_SHARD_WORKER_KB override (override_kib > 0) is honored as-is.
+pub fn shard_commit_unmeasured_estimate_kib_v1(static_kib: i64, recorded_peak_kib: i64, override_kib: i64 = 0) -> i64:
+    if override_kib > 0: return shard_commit_estimate_kib_v1(override_kib, recorded_peak_kib)
+    if recorded_peak_kib > 0: shard_commit_estimate_kib_v1(static_kib, recorded_peak_kib) else: static_kib * 2
+
+# 0xC0000409 (-1073740791 / 3221226505) is the Windows fast-fail that Rust's
+# `handle_alloc_error` abort raises after "memory allocation of N bytes failed".
+pub fn shard_worker_exit_hint_v1(code: i64, label: text) -> text:
+    if code != -1073740791 and code != 3221226505: return ""
+    # file-worker pools are priced from the HIR knob (run_ledger_shards).
+    val knob = if label == "mir-shard": "SIMPLE_MIR_SHARD_WORKER_KB" elif label == "file-worker": "SIMPLE_HIR_SHARD_WORKER_KB (file-worker pool)" else: "SIMPLE_HIR_SHARD_WORKER_KB"
+    " (allocation-failure abort 0xC0000409: host commit limit exhausted; set {knob} to at least the measured worker peak commit)"
+
+pub fn shard_commit_spawn_admit_v1(headroom_kib: i64, reserve_kib: i64, est_kib: i64, live_private_kib: [i64]) -> bool:
+    if headroom_kib < 0: return true
+    if live_private_kib.len() == 0: return true
+    var need = est_kib
+    for current in live_private_kib:
+        if current < 0:
+            need = need + est_kib
+        elif current < est_kib:
+            need = need + (est_kib - current)
+    headroom_kib - reserve_kib >= need
+
+# ===== per-worker estimate and tree-budget clamp (phase 4) ===================
+#
+# 2026-10-27 phase 3 (stage2 e4746b05): 21 per-file workers peaked at 72.2 GB
+# (~3.4 GB mean, >= 5.6 GB max) while admission priced them at 2.5 GB, and the
+# declared 90 GB tree budget exceeded the 64 GB cap. The coordinator's peak is
+# never a worker estimate. Precedence: a deliberate override, else
+# max(default SHARD_*_WORKER_KB_V1, max recorded worker peak): measurement can
+# only raise the estimate, never lower it (a light-lane record must not
+# loosen the next heavy run).
+pub fn shard_worker_estimate_kib_v1(default_kb: i64, worker_peaks_kib: [i64], override_kb: i64 = 0) -> i64:
+    if override_kb > 0: return override_kb
+    var best: i64 = 0
+    for p in worker_peaks_kib:
+        if p > best: best = p
+    if best > default_kb: best else: default_kb
+
+pub const SHARD_TREE_HEADROOM_KB_V1: i64 = 25165824
+
+# min(declared, cap_or_free - 24 GB). cap_or_free is the enforced tree RSS cap
+# when set, else free commit. Unknown declared (<= 0) takes the clamp; unknown
+# cap and free (both <= 0) leave the declared budget. 0 = nothing admissible.
+pub fn shard_effective_tree_budget_kb_v1(declared_kb: i64, cap_kb: i64, free_kb: i64) -> i64:
+    val base = if cap_kb > 0: cap_kb else: free_kb
+    if base <= 0: return declared_kb
+    if base <= SHARD_TREE_HEADROOM_KB_V1: return 0
+    val clamped = base - SHARD_TREE_HEADROOM_KB_V1
+    if declared_kb > 0 and declared_kb < clamped: declared_kb else: clamped
+
+pub fn shard_pool_workers_v1(effective_kb: i64, estimate_kb: i64) -> i64:
+    if effective_kb <= 0 or estimate_kb <= 0: return 0
+    effective_kb / estimate_kb
+
 pub fn shard_threads_parent_cap_for(requested: i64, budget_kb: i64,
         avail_kb: i64, tree_kb: i64, host_clamp: bool, parent_peak_kb: i64) -> i64:
     if requested <= 0: return 0
@@ -283,12 +477,49 @@ pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64
         env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
     val cgroup_kb = shard_cgroup_memory_max_kb()
     val tree_kb = shard_tree_budget_kb_for(declared_kb, cgroup_kb)
-    val cap = if parent_peak_kb >= 0:
+    val cap0 = if parent_peak_kb >= 0:
         shard_threads_parent_cap_for(bounded, budget_kb, avail_kb, tree_kb, host_clamp, parent_peak_kb)
     else:
         shard_threads_tree_cap_for(bounded, budget_kb, avail_kb, tree_kb, host_clamp)
+    var cap = cap0
     if parent_peak_kb >= 0:
-        print "[hir-shard] admission estimate={budget_kb} kB historical parent peak={parent_peak_kb} kB; warmup pool only, RSS guard authoritative"
+        val rss_cap = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
+        val cap_kb = if rss_cap > 0 and (cgroup_kb <= 0 or rss_cap < cgroup_kb): rss_cap else: cgroup_kb
+        val effective = shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb)
+        val clamp_workers = shard_pool_workers_v1(effective, budget_kb)
+        if effective != tree_kb:
+            print "[hir-shard] tree budget clamped: declared {tree_kb} kB, cap {cap_kb} kB, free {avail_kb} kB, headroom {SHARD_TREE_HEADROOM_KB_V1} kB -> effective {effective} kB"
+        if cap_kb > 0 or avail_kb > 0 or tree_kb > 0:
+            if clamp_workers < cap: cap = clamp_workers
+        print "[hir-shard] admission worker estimate={budget_kb} kB (coordinator peak {parent_peak_kb} kB reserved for the coordinator only); warmup pool only, RSS guard authoritative"
     if cap < requested:
         print "[shard] threads={cap} (requested {requested}, host max_threads bound={bounded}, available={avail_kb} kB, tree budget={tree_kb} kB (declared {declared_kb} kB, cgroup memory.max {cgroup_kb} kB), worker budget={budget_kb} kB, parent peak={parent_peak_kb} kB)"
     cap
+
+# Diagnosis only (refusal text): workers the tree-budget clamp alone admits for
+# `estimate_kb`; -1 when no budget, cap or free-memory figure is known.
+pub fn shard_pool_clamp_workers(estimate_kb: i64) -> i64:
+    val avail_kb = if (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") != "0": shard_mem_available_kb() else: 0
+    val declared_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
+    val cgroup_kb = shard_cgroup_memory_max_kb()
+    val tree_kb = shard_tree_budget_kb_for(declared_kb, cgroup_kb)
+    val rss_cap = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
+    val cap_kb = if rss_cap > 0 and (cgroup_kb <= 0 or rss_cap < cgroup_kb): rss_cap else: cgroup_kb
+    if cap_kb <= 0 and avail_kb <= 0 and tree_kb <= 0: return -1
+    shard_pool_workers_v1(shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb), estimate_kb)
+
+# Host memory reserve a build must leave free (RAM and commit, whichever is
+# smaller on Windows): SIMPLE_BUILD_MEMORY_RESERVE_BYTES, default 24 GiB.
+# Also the floor the worker pool keeps when admitting more workers.
+pub fn build_memory_reserve_kib() -> i64:
+    val parsed = shard_mem_available_kb_from_field(env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? "")
+    if parsed > 0: parsed / 1024 else: 25165824
+
+# "" admits; otherwise the refusal message. Headroom <= 0 means it could not
+# be measured, which admits (same rule as disk admission).
+pub fn build_memory_start_refusal_v1(available_kib: i64, reserve_kib: i64) -> text:
+    if available_kib <= 0 or available_kib >= reserve_kib:
+        return ""
+    "error: build refused: {available_kib / 1024} MiB of RAM/commit headroom free, below the " +
+        "{reserve_kib / 1024} MiB reserve (SIMPLE_BUILD_MEMORY_RESERVE_BYTES); wait for other builds " +
+        "to finish or lower the reserve"

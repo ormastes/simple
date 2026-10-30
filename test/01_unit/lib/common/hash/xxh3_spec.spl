@@ -1,0 +1,209 @@
+"""## Purpose and audience
+XXH3-64/128 (xxHash 0.8) one-shot and streaming hashing in `std.common.hash.xxh3`,
+for stdlib authors who need a fast non-cryptographic hash with exact reference output.
+Category: Stdlib.
+## Operator workflow
+bin/simple test test/01_unit/lib/common/hash/xxh3_spec.spl
+## Compatibility and limitations
+Non-cryptographic. Expected values come from the official xxHash sanity buffer
+hashed by the independent Rust crate xxhash-rust 0.8.15 (not by this module).
+## Verification guidance and troubleshooting
+A RED known-answer row names the length and seed; the streaming rows name the split point.
+"""
+# @manual_section: primary
+# @cover src/lib/common/hash/xxh3.spl 80%
+
+use std.spec.*
+use std.common.hash.xxh3.{xxh3_64, xxh3_64_seeded, xxh3_128, xxh3_128_seeded, Xxh3Hash128, xxh3_state_new}
+
+fn sanity_buf(n: i64) -> [u8]:
+    var out: [u8] = [0u8; n]
+    var g: u64 = 2654435761u64
+    var i = 0
+    while i < n:
+        out[i] = (g >> 56u64).to_u8()
+        g = g * 11400714785074694797u64
+        i = i + 1
+    out
+
+fn prefix(buf: [u8], n: i64) -> [u8]:
+    var out: [u8] = [0u8; n]
+    var i = 0
+    while i < n:
+        out[i] = buf[i]
+        i = i + 1
+    out
+
+fn slice(buf: [u8], a: i64, b: i64) -> [u8]:
+    var out: [u8] = [0u8; b - a]
+    var i = a
+    while i < b:
+        out[i - a] = buf[i]
+        i = i + 1
+    out
+
+# rows: [len, seed, xxh3_64, xxh3_128 low, xxh3_128 high]
+fn rows() -> [[u64]]:
+    [
+        [0, 0x0000000000000000u64, 0x2d06800538d394c2u64, 0x6001c324468d497fu64, 0x99aa06d3014798d8u64],
+        [0, 0x9e3779b185ebca8du64, 0xa8a6b918b2f0364au64, 0xa986dfc5d7605bfeu64, 0x00feaa732a3ce25eu64],
+        [1, 0x0000000000000000u64, 0xc44bdff4074eecdbu64, 0xc44bdff4074eecdbu64, 0xa6cd5e9392000f6au64],
+        [1, 0x9e3779b185ebca8du64, 0x032be332dd766ef8u64, 0x032be332dd766ef8u64, 0x20e49abcc53b3842u64],
+        [2, 0x0000000000000000u64, 0x7a9978044cb8a8bbu64, 0x7a9978044cb8a8bbu64, 0x76750c3c7bf95668u64],
+        [2, 0x9e3779b185ebca8du64, 0x764b35c90519ad88u64, 0x764b35c90519ad88u64, 0x7b96e6a600dae67du64],
+        [3, 0x0000000000000000u64, 0x54247382a8d6b94du64, 0x54247382a8d6b94du64, 0x20efc49ff02422eau64],
+        [3, 0x9e3779b185ebca8du64, 0x634b8990b4976373u64, 0x634b8990b4976373u64, 0x1c7ecf6a308cf00eu64],
+        [4, 0x0000000000000000u64, 0xe5dc74bc51848a51u64, 0x2e7d8d6876a39fe9u64, 0x970d585ac632bf8eu64],
+        [4, 0x9e3779b185ebca8du64, 0xaa2e7eccb0c8f747u64, 0xbfaf51f1e67e0b0fu64, 0x3d53e5dfd837d927u64],
+        [5, 0x0000000000000000u64, 0xe4243f00720306bbu64, 0x057c7ed2c01fa1d1u64, 0x62ed587687606b4eu64],
+        [5, 0x9e3779b185ebca8du64, 0x5a67c87e50ed80edu64, 0x67a0c170d32090d7u64, 0xfac738e8fec37715u64],
+        [8, 0x0000000000000000u64, 0x24ccc9acaa9f65e4u64, 0x64c69cab4bb21dc5u64, 0x47a7f080d82bb456u64],
+        [8, 0x9e3779b185ebca8du64, 0x8f973410999b8f6bu64, 0x7b29471dc729b5ffu64, 0xf50cec145bcd5c5au64],
+        [9, 0x0000000000000000u64, 0x14d5001c15dd3f2bu64, 0xed7ccbc501eb7501u64, 0x564ef6078950d457u64],
+        [9, 0x9e3779b185ebca8du64, 0xb3ae7333d9013f60u64, 0xaef5dfc0ac9f9044u64, 0x6b380b43ffa61042u64],
+        [12, 0x0000000000000000u64, 0xa713daf0dfbb77e7u64, 0x061a192713f69ad9u64, 0x6e3efd8fc7802b18u64],
+        [12, 0x9e3779b185ebca8du64, 0xe7303e1b2336de0eu64, 0x5d92b5d7190b12d1u64, 0xff0d60acd02ed401u64],
+        [16, 0x0000000000000000u64, 0x981b17d36c7498c9u64, 0x562980258a998629u64, 0xc68c368ecf8a9c05u64],
+        [16, 0x9e3779b185ebca8du64, 0x663f29333b4db6b1u64, 0x0346d13a7a5498c7u64, 0x6ffcb80cd33085c8u64],
+        [17, 0x0000000000000000u64, 0x796f5acd3a60f862u64, 0xabbc12d11973d7dbu64, 0x955fa78643ed3669u64],
+        [17, 0x9e3779b185ebca8du64, 0xf3ec5067f4306db3u64, 0x980a14119985a7dfu64, 0xd77681219e464828u64],
+        [32, 0x0000000000000000u64, 0x9feaddbdbf57eed3u64, 0x278410a17595e3f9u64, 0x98fc6458710dc2e8u64],
+        [32, 0x9e3779b185ebca8du64, 0x2199fab1534893d9u64, 0x0054e82631cef166u64, 0xcc587e4fcdb86bc5u64],
+        [33, 0x0000000000000000u64, 0xabfb2d081b400a10u64, 0xe593bc4e5914c9d1u64, 0x3103c192ceaa2dedu64],
+        [33, 0x9e3779b185ebca8du64, 0xad56348da574bb6du64, 0xc361d36cea597c31u64, 0x21273c8190c645cdu64],
+        [64, 0x0000000000000000u64, 0x9cb48487720ec49du64, 0xefdb6a44690721a9u64, 0x6d90e81a9b0fd622u64],
+        [64, 0x9e3779b185ebca8du64, 0x4fe8895db9b8c077u64, 0x9405ba2affa95cebu64, 0x37b738968d40bda5u64],
+        [97, 0x0000000000000000u64, 0xca4ca268fd3c3a6cu64, 0x7c87228ae9671ba7u64, 0x09dff37faa6b284cu64],
+        [97, 0x9e3779b185ebca8du64, 0xee461d3add7ee6c9u64, 0x49ea87f2afe44f66u64, 0x14e68f850b481adau64],
+        [128, 0x0000000000000000u64, 0xfcff24126754d861u64, 0xebb15e34a7fb5ab1u64, 0x39992220e045260au64],
+        [128, 0x9e3779b185ebca8du64, 0x73fde75280646649u64, 0x8394f5c51f1d8246u64, 0xa0f7ccb68ee02addu64],
+        [129, 0x0000000000000000u64, 0x98f1b0a679a2ca29u64, 0x86c9e3bc8f0a3b5cu64, 0x03815fc91f1b30b6u64],
+        [129, 0x9e3779b185ebca8du64, 0x21fffdbca099c844u64, 0xd4aae26fcec7dc03u64, 0xad559266067c0bf3u64],
+        [200, 0x0000000000000000u64, 0xbddca58935d7c038u64, 0xeb060f1bb3126f5au64, 0xe76ff4780fe18439u64],
+        [200, 0x9e3779b185ebca8du64, 0x5b899e984b88db8du64, 0x2236d1b483e8d9ebu64, 0xcf0349dd7cc2b545u64],
+        [240, 0x0000000000000000u64, 0x81c3c2b67f568ccfu64, 0x5c9aae94c8ebe5a0u64, 0xaa4202daa2769dc8u64],
+        [240, 0x9e3779b185ebca8du64, 0xcc0f58c27ef3d8eeu64, 0x604e98db085c1864u64, 0x29d2133d6ea58c5bu64],
+        [241, 0x0000000000000000u64, 0xc5a639ecd2030e5eu64, 0xc5a639ecd2030e5eu64, 0x99a80ecf0ecfc647u64],
+        [241, 0x9e3779b185ebca8du64, 0xdda9b0a161d4829au64, 0xdda9b0a161d4829au64, 0xec64afae6a137582u64],
+        [255, 0x0000000000000000u64, 0xe98f979f4ed8a197u64, 0xe98f979f4ed8a197u64, 0x961375c87e09efbcu64],
+        [255, 0x9e3779b185ebca8du64, 0x2aca7901d9538c75u64, 0x2aca7901d9538c75u64, 0xe72ec0137d62df44u64],
+        [256, 0x0000000000000000u64, 0x55de574ad89d0ac5u64, 0x55de574ad89d0ac5u64, 0x8b1c66091423d288u64],
+        [256, 0x9e3779b185ebca8du64, 0x4d30234b7a3aa61cu64, 0x4d30234b7a3aa61cu64, 0xaaa57235b92d5e7cu64],
+        [257, 0x0000000000000000u64, 0xb17fd5a8ae75bb0bu64, 0xb17fd5a8ae75bb0bu64, 0xf15fee7f9f457599u64],
+        [257, 0x9e3779b185ebca8du64, 0x802a6fbf3cacd97cu64, 0x802a6fbf3cacd97cu64, 0x15c1f9c667c815bau64],
+        [512, 0x0000000000000000u64, 0x617e49599013cb6bu64, 0x617e49599013cb6bu64, 0x18d2d110dcc9bca1u64],
+        [512, 0x9e3779b185ebca8du64, 0x3ce457de14c27708u64, 0x3ce457de14c27708u64, 0x925d06b8ec5b8040u64],
+        [1024, 0x0000000000000000u64, 0xdd85c9b5c1109c5cu64, 0xdd85c9b5c1109c5cu64, 0x0d30d24071c64c57u64],
+        [1024, 0x9e3779b185ebca8du64, 0xef368a8a2ebabaefu64, 0xef368a8a2ebabaefu64, 0x17600efe2b493a18u64],
+        [1025, 0x0000000000000000u64, 0xd870c0fa13211c6au64, 0xd870c0fa13211c6au64, 0xfd3ee4fe7f2954c6u64],
+        [1025, 0x9e3779b185ebca8du64, 0x96792bcf9af88519u64, 0x96792bcf9af88519u64, 0x2c383949f57bf7e1u64],
+        [2048, 0x0000000000000000u64, 0xdd59e2c3a5f038e0u64, 0xdd59e2c3a5f038e0u64, 0xf736557fd47073a5u64],
+        [2048, 0x9e3779b185ebca8du64, 0x66f81670669ababcu64, 0x66f81670669ababcu64, 0x23cc3a2e75ebaaeau64],
+        [2367, 0x0000000000000000u64, 0xcb37aeb9e5d361edu64, 0xcb37aeb9e5d361edu64, 0xe89c0f6ff369b427u64],
+        [2367, 0x9e3779b185ebca8du64, 0xd2db3415b942b42au64, 0xd2db3415b942b42au64, 0xccb7a94cca1a6496u64],
+        [4096, 0x0000000000000000u64, 0xe91206429d1f48f9u64, 0xe91206429d1f48f9u64, 0xb9cfaea2ca5626a4u64],
+        [4096, 0x9e3779b185ebca8du64, 0x2a3bbb20a5439dcdu64, 0x2a3bbb20a5439dcdu64, 0x8fbc8fd4d526d1bdu64],
+        [4097, 0x0000000000000000u64, 0xdac80d543e339451u64, 0xdac80d543e339451u64, 0x0c6a7a5f1d0bbb1au64],
+        [4097, 0x9e3779b185ebca8du64, 0xa78887a19a340214u64, 0xa78887a19a340214u64, 0xc94c98bcf2d279fcu64],
+        [8192, 0x0000000000000000u64, 0xd63690a28889a350u64, 0xd63690a28889a350u64, 0x8a3f76fa124fdefeu64],
+        [8192, 0x9e3779b185ebca8du64, 0xde6b0d2d66c4ad11u64, 0xde6b0d2d66c4ad11u64, 0x0987f74b9f5680b4u64],
+    ]
+
+describe "xxh3 known answers":
+    # @manual scenario evidence
+    it "matches the reference 64-bit digest for every length class and seed":
+        # @req REQ-XXH3-064
+        step("Generate the official sanity buffer")
+        val buf = sanity_buf(8192)
+        step("Hash each prefix and compare against the reference table")
+        var bad = 0
+        for r in rows():
+            val d = prefix(buf, r[0].to_i64())
+            if xxh3_64_seeded(d, r[1]) != r[2]:
+                bad = bad + 1
+        expect(bad).to_equal(0)
+
+    it "matches the reference 128-bit digest for every length class and seed":
+        # @req REQ-XXH3-128
+        val buf = sanity_buf(8192)
+        var bad = 0
+        for r in rows():
+            val d = prefix(buf, r[0].to_i64())
+            val h = xxh3_128_seeded(d, r[1])
+            if h.low != r[3] or h.high != r[4]:
+                bad = bad + 1
+        expect(bad).to_equal(0)
+
+    it "matches the published empty-input digests":
+        # @req REQ-XXH3-064
+        expect(xxh3_64([]) == 0x2d06800538d394c2u64).to_equal(true)
+        val h = xxh3_128([])
+        expect(h.low == 0x6001c324468d497fu64).to_equal(true)
+        expect(h.high == 0x99aa06d3014798d8u64).to_equal(true)
+
+    it "unseeded entry points equal seed zero":
+        # @req REQ-XXH3-064
+        val d = sanity_buf(1024)
+        expect(xxh3_64(d) == xxh3_64_seeded(d, 0u64)).to_equal(true)
+        expect(xxh3_128(d).low == xxh3_128_seeded(d, 0u64).low).to_equal(true)
+
+describe "xxh3 streaming":
+    # @manual scenario evidence
+    it "equals the one-shot digest for every split point":
+        # @req REQ-XXH3-STREAM
+        val buf = sanity_buf(1025)
+        var bad = 0
+        for n in [0, 1, 17, 129, 240, 241, 1025]:
+            val d = prefix(buf, n)
+            val e64 = xxh3_64(d)
+            val e128 = xxh3_128(d)
+            val s64 = xxh3_64_seeded(d, 0x9E3779B185EBCA8Du64)
+            val s128 = xxh3_128_seeded(d, 0x9E3779B185EBCA8Du64)
+            var k = 0
+            while k <= n:
+                var st = xxh3_state_new(0u64)
+                st.update(slice(d, 0, k))
+                st.update(slice(d, k, n))
+                val g = st.digest128()
+                if st.digest64() != e64 or g.low != e128.low or g.high != e128.high:
+                    bad = bad + 1
+                var ss = xxh3_state_new(0x9E3779B185EBCA8Du64)
+                ss.update(slice(d, 0, k))
+                ss.update(slice(d, k, n))
+                val sg = ss.digest128()
+                if ss.digest64() != s64 or sg.low != s128.low or sg.high != s128.high:
+                    bad = bad + 1
+                k = k + 1
+        expect(bad).to_equal(0)
+
+    it "handles byte-wise feeding, digest mid-stream and reset":
+        # @req REQ-XXH3-STREAM
+        val buf = sanity_buf(700)
+        var st = xxh3_state_new(0u64)
+        var i = 0
+        while i < 700:
+            st.update([buf[i]])
+            i = i + 1
+        expect(st.digest64() == xxh3_64(buf)).to_equal(true)
+        expect(st.digest64() == xxh3_64(buf)).to_equal(true)
+        st.reset()
+        st.update(prefix(buf, 300))
+        expect(st.digest64() == xxh3_64(prefix(buf, 300))).to_equal(true)
+        val h = st.digest128()
+        val e = xxh3_128(prefix(buf, 300))
+        expect(h.low == e.low and h.high == e.high).to_equal(true)
+
+    it "can digest mid-stream and keep absorbing":
+        # @req REQ-XXH3-STREAM
+        val buf = sanity_buf(1500)
+        var bad = 0
+        for cut in [0, 100, 240, 241, 256, 300, 700, 1024]:
+            var st = xxh3_state_new(0u64)
+            st.update(prefix(buf, cut))
+            val mid = st.digest64()
+            st.update(slice(buf, cut, 1500))
+            val g = st.digest128()
+            val e = xxh3_128(buf)
+            if mid != xxh3_64(prefix(buf, cut)) or st.digest64() != xxh3_64(buf) or g.low != e.low or g.high != e.high:
+                bad = bad + 1
+        expect(bad).to_equal(0)

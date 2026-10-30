@@ -1,0 +1,279 @@
+#!/bin/sh
+# check-cache-formal-source-binding.shs — text-only binding between the cache
+# formal model (src/verification/cache_protocol, F1/F2) and the Simple code that
+# composes the LIVE cache key.
+#
+# Plan: doc/05_design/compiler/incremental_build/cache_invalidation_formal_verification_2026-10-24.md
+# §4.3.2 / §4.4. Each line of the binding file pins sha256 of one top-level
+# declaration (fn / struct / class / enum / val) of a Simple source file. When
+# the code moves without the binding (i.e. the model review) being updated, this
+# gate FAILs. It needs no Lean and no compiler: only git, awk and sha256sum.
+#
+# Binding file: src/verification/cache_protocol/source_bindings.txt
+#   <sha256>  <path>#<symbol>  <model reference>
+# A declaration body is its header line plus every following line up to (not
+# including) the next line that starts in column 0 with a non-blank,
+# non-comment character. Trailing blank lines are dropped.
+#
+# Usage:
+#   sh scripts/check/check-cache-formal-source-binding.shs            # working tree
+#   sh scripts/check/check-cache-formal-source-binding.shs --rev <sha> # committed content
+#   sh scripts/check/check-cache-formal-source-binding.shs --update   # reviewed re-pin only
+#   sh scripts/check/check-cache-formal-source-binding.shs --selftest
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> binding(s) checked ...       exit 0
+#   FAIL — ...                              exit 1
+#   ERROR — nothing was checked (<reason>)  exit 2
+# --selftest runs before every scan and is fatal.
+
+set -u
+
+BINDINGS=src/verification/cache_protocol/source_bindings.txt
+
+err() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+
+command -v sha256sum >/dev/null 2>&1 || err "sha256sum not found"
+
+# extract_decl FILE SYMBOL -> declaration text on stdout; rc 1 when absent.
+extract_decl() {
+    awk -v sym="$2" '
+        function is_top(l) { return l ~ /^[^ \t#\r]/ }
+        !inb {
+            l = $0; sub(/\r$/, "", l)
+            if (l ~ /^(pub |export )?(fn|struct|class|enum|val|var) /) {
+                h = l; sub(/^(pub |export )?(fn|struct|class|enum|val|var) /, "", h)
+                n = h; sub(/[^A-Za-z0-9_].*$/, "", n)
+                if (n == sym) { inb = 1; found = 1; buf = l; nb = 0; next }
+            }
+            next
+        }
+        inb {
+            l = $0; sub(/\r$/, "", l)
+            if (is_top(l)) { inb = 0; exit }
+            if (l ~ /^[ \t]*$/) { nb++; next }
+            while (nb > 0) { buf = buf "\n"; nb-- }
+            buf = buf "\n" l
+        }
+        END { if (!found) exit 1; print buf }
+    ' "$1"
+}
+
+# read_src PATH REV OUT -> materialise PATH (worktree or REV) into OUT.
+read_src() {
+    if [ -n "$2" ]; then
+        git show "$2:$1" > "$3" 2>/dev/null
+    else
+        [ -f "$1" ] && cat "$1" > "$3"
+    fi
+}
+
+# scan BINDINGS_FILE REV -> sets CHECKED / BAD / MISSING
+scan() {
+    CHECKED=0; BAD=""; MISSING=""
+    _tmp=$(mktemp) || err "mktemp failed"
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in ''|'#'*) continue ;; esac
+        _want=$(printf '%s\n' "$_line" | awk '{print $1}')
+        _ref=$(printf '%s\n' "$_line" | awk '{print $2}')
+        _path=${_ref%%#*}; _sym=${_ref#*#}
+        CHECKED=$((CHECKED + 1))
+        if ! read_src "$_path" "$2" "$_tmp"; then MISSING="$MISSING $_ref"; continue; fi
+        _decl=$(extract_decl "$_tmp" "$_sym") || { MISSING="$MISSING $_ref"; continue; }
+        _got=$(printf '%s\n' "$_decl" | sha256sum | awk '{print $1}')
+        [ "$_got" = "$_want" ] || BAD="$BAD $_ref"
+    done < "$1"
+    rm -f "$_tmp"
+}
+
+# predates_binding REV BASE -> sets PB_VERDICT (pass|fail|error) and PB_MSG.
+# Used when the bindings file is absent at REV: the branch predates the
+# binding (#4411). The merge result is base + branch, so the branch can only
+# break a pin by editing a bound source itself: compare merge-base(BASE,REV)..REV
+# over every bound path listed in BASE's binding file.
+predates_binding() {
+    PB_VERDICT=error; PB_MSG=""
+    _pb_list=$(git show "$2:$BINDINGS" 2>/dev/null) || { PB_MSG="no $BINDINGS at $1 nor at base $2"; return; }
+    _pb_mb=$(git merge-base "$2" "$1" 2>/dev/null) || { PB_MSG="no merge-base between $1 and base $2 (shallow history?)"; return; }
+    _pb_paths=$(printf '%s\n' "$_pb_list" | awk '!/^#/ && NF >= 2 { sub(/#.*/, "", $2); print $2 }' | sort -u)
+    [ -n "$_pb_paths" ] || { PB_MSG="0 bindings in $BINDINGS at base $2"; return; }
+    _pb_n=$(printf '%s\n' "$_pb_paths" | grep -c .)
+    # shellcheck disable=SC2086
+    _pb_changed=$(git diff --name-only "$_pb_mb" "$1" -- $_pb_paths 2>/dev/null) || { PB_MSG="git diff failed for $_pb_mb..$1"; return; }
+    if [ -n "$_pb_changed" ]; then
+        PB_VERDICT=fail
+        PB_MSG="binding file not present at $1 (branch predates it) and the branch changed bound source(s): $(printf '%s' "$_pb_changed" | tr '\n' ' ')— rebase onto base and re-pin with --update after a model review"
+    else
+        PB_VERDICT=pass
+        PB_MSG="binding file not present on branch; no bound sources changed ($_pb_n bound file(s) unchanged in $_pb_mb..$1; pins at base $2 stand for the merge result)"
+    fi
+}
+
+selftest() {
+    _d=$(mktemp -d) || err "mktemp failed"
+    mkdir -p "$_d/src"
+    printf 'fn keep() -> i64:\n    1\n\nfn bound(a: i64) -> i64:\n    # body\n    a + 1\n\nval OTHER = 2\n' > "$_d/src/a.spl"
+    _h=$( (cd "$_d" && extract_decl src/a.spl bound) | sha256sum | awk '{print $1}')
+    printf '%s  src/a.spl#bound  fixture\n' "$_h" > "$_d/b.txt"
+    ( cd "$_d" && scan b.txt "" && [ "$CHECKED" = 1 ] && [ -z "$BAD$MISSING" ] ) \
+        || { echo "FAIL — selftest: clean fixture did not pass"; exit 1; }
+    # editing an UNBOUND declaration must not trip the binding
+    sed 's/^    1$/    7/' "$_d/src/a.spl" > "$_d/x" && mv "$_d/x" "$_d/src/a.spl"
+    ( cd "$_d" && scan b.txt "" && [ -z "$BAD$MISSING" ] ) \
+        || { echo "FAIL — selftest: unbound edit tripped the binding"; exit 1; }
+    # editing the BOUND body must FAIL
+    sed 's/a + 1/a + 2/' "$_d/src/a.spl" > "$_d/x" && mv "$_d/x" "$_d/src/a.spl"
+    ( cd "$_d" && scan b.txt "" && [ -n "$BAD" ] ) \
+        || { echo "FAIL — selftest: bound body edit was not detected"; exit 1; }
+    # removing the bound symbol must FAIL (missing), never pass
+    printf 'fn keep() -> i64:\n    1\n' > "$_d/src/a.spl"
+    ( cd "$_d" && scan b.txt "" && [ -n "$MISSING" ] ) \
+        || { echo "FAIL — selftest: removed bound symbol was not detected"; exit 1; }
+    rm -rf "$_d"
+    selftest_predates
+    selftest_link_guard
+}
+
+# Fixtures 5-7: a branch that predates the binding file (CI run 40095859587).
+# Latent linker gaps guard. live_object_key.sdn counts linker_binary_version,
+# system_library_content and import_lib_export_sets as gaps that are LATENT:
+# no link output is ever reused, so they cannot cause a stale hit. The moment
+# link-output reuse appears in the link/driver layers while any of those gaps
+# is still counted, this FAILs: close the gaps (key the linker binary, system
+# libraries and import libraries) first. Markers are identifiers a link-output
+# cache would need; a deliberate implementation can also declare itself with
+# a `link-output-reuse:` comment. The object-hash link receipt (#4356:
+# native_link_with_receipt / `.link-receipt`, "relink skipped") is such reuse.
+LIVE_SCHEMA=src/compiler/80.driver/cache/schema/live_object_key.sdn
+LINK_GAPS="linker_binary_version system_library_content import_lib_export_sets"
+LINK_REUSE_RE='link_output_cache|link_cache|cached_link|reuse_link|skip_relink|relink_skip|link_reuse|link-output-reuse:|cached_binary|binary_cache|cached_executable|native_link_with_receipt|native_shared_link_with_receipt|relink skipped|[.]link-receipt'
+LINK_REUSE_PATHS='src/compiler/70.backend/linker src/compiler/80.driver src/app/build src/app/cli'
+
+# link_reuse_guard REV -> prints a status phrase; rc 1 = violation.
+link_reuse_guard() {
+    if [ -n "$1" ]; then
+        _lg_schema=$(git show "$1:$LIVE_SCHEMA" 2>/dev/null) || _lg_schema=""
+        # shellcheck disable=SC2086
+        _lg_hits=$(git grep -n -i -E "$LINK_REUSE_RE" "$1" -- $LINK_REUSE_PATHS 2>/dev/null | grep '\.spl:' | head -3)
+    else
+        _lg_schema=$(cat "$LIVE_SCHEMA" 2>/dev/null) || _lg_schema=""
+        # shellcheck disable=SC2086
+        _lg_hits=$(grep -rn -i -E "$LINK_REUSE_RE" $LINK_REUSE_PATHS --include='*.spl' 2>/dev/null | head -3)
+    fi
+    _lg_open=""
+    for _g in $LINK_GAPS; do
+        printf '%s\n' "$_lg_schema" | grep -q "{ id: $_g," && _lg_open="$_lg_open $_g"
+    done
+    if [ -n "$_lg_hits" ] && [ -n "$_lg_open" ]; then
+        echo "link-output reuse appeared while latent linker gaps are still counted ($_lg_open ): $(printf '%s' "$_lg_hits" | tr '\n' ' ')— close those gaps in $LIVE_SCHEMA first"
+        return 1
+    fi
+    if [ -n "$_lg_hits" ]; then echo "link-output reuse present, linker gaps closed"; else echo "no link-output reuse (linker gaps stay latent:$_lg_open )"; fi
+    return 0
+}
+
+selftest_link_guard() {
+    _lg_d=$(mktemp -d) || err "mktemp failed"
+    (
+        cd "$_lg_d" || exit 1
+        mkdir -p src/compiler/80.driver/cache/schema src/compiler/80.driver
+        printf '  known_gaps:\n    - { id: linker_binary_version, row: "x" }\n' > "$LIVE_SCHEMA"
+        printf 'fn build():\n    0\n' > src/compiler/80.driver/a.spl
+        link_reuse_guard "" >/dev/null || { echo "fixture 8: clean tree failed"; exit 1; }
+        printf 'fn build():\n    val hit = link_output_cache_lookup()\n' > src/compiler/80.driver/a.spl
+        link_reuse_guard "" >/dev/null && { echo "fixture 9: reuse with open gap passed"; exit 1; }
+        printf '  known_gaps:\n' > "$LIVE_SCHEMA"
+        link_reuse_guard "" >/dev/null || { echo "fixture 10: reuse with closed gaps failed"; exit 1; }
+        exit 0
+    ) || { rm -rf "$_lg_d"; echo "FAIL — selftest: link-reuse guard"; exit 1; }
+    rm -rf "$_lg_d"
+}
+
+selftest_predates() {
+    _r=$(mktemp -d) || err "mktemp failed"
+    (
+        cd "$_r" || exit 1
+        git init -q . && git config user.email t@t && git config user.name t
+        mkdir -p src src/verification/cache_protocol
+        printf 'fn bound(a: i64) -> i64:\n    a + 1\n' > src/a.spl
+        printf 'x\n' > src/other.spl
+        git add -A && git commit -qm A
+        _a=$(git rev-parse HEAD)
+        printf '%s  src/a.spl#bound  fixture\n' 0000 > "$BINDINGS"
+        git add -A && git commit -qm B-binding
+        _b=$(git rev-parse HEAD)
+        git checkout -q -b br "$_a"
+        printf 'y\n' > src/other.spl && git commit -qam C-unrelated
+        predates_binding "$(git rev-parse HEAD)" "$_b"
+        [ "$PB_VERDICT" = pass ] || { echo "fixture 5: unrelated branch edit gave $PB_VERDICT ($PB_MSG)"; exit 1; }
+        printf 'fn bound(a: i64) -> i64:\n    a + 2\n' > src/a.spl && git commit -qam C-bound
+        predates_binding "$(git rev-parse HEAD)" "$_b"
+        [ "$PB_VERDICT" = fail ] || { echo "fixture 6: bound edit on predating branch gave $PB_VERDICT"; exit 1; }
+        predates_binding "$(git rev-parse HEAD)" "$_a"
+        [ "$PB_VERDICT" = error ] || { echo "fixture 7: base without bindings gave $PB_VERDICT"; exit 1; }
+    ) >/dev/null 2>"$_r.err" || { _e=$(cat "$_r.err"); rm -rf "$_r" "$_r.err"; echo "FAIL — selftest: predating-branch fixtures: $_e"; exit 1; }
+    rm -rf "$_r" "$_r.err"
+}
+
+REV=""; MODE=check; BASE_REV="${BASE_SHA:-}"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest; echo "PASS — selftest: 10 fixture(s)"; exit 0 ;;
+        --rev) [ -n "${2:-}" ] || err "--rev needs a revision"; REV=$2; shift 2 ;;
+        --base) [ -n "${2:-}" ] || err "--base needs a revision"; BASE_REV=$2; shift 2 ;;
+        --update) MODE=update; shift ;;
+        *) err "unknown argument $1" ;;
+    esac
+done
+
+selftest
+
+if [ -n "$REV" ]; then
+    git rev-parse --verify --quiet "$REV^{commit}" >/dev/null || err "unknown revision $REV"
+    if ! git cat-file -e "$REV:$BINDINGS" 2>/dev/null; then
+        # Branch predates the binding: judge the merge result (base + branch).
+        # BASE comes from --base, or the BASE_SHA the required fast-gates step
+        # exports; without one there is nothing to compare against.
+        [ -n "$BASE_REV" ] || err "no $BINDINGS at $REV and no --base/BASE_SHA to judge the merge result"
+        git rev-parse --verify --quiet "$BASE_REV^{commit}" >/dev/null || err "unknown base revision $BASE_REV"
+        predates_binding "$REV" "$BASE_REV"
+        case "$PB_VERDICT" in
+            pass) echo "PASS — $PB_MSG"; exit 0 ;;
+            fail) echo "FAIL — $PB_MSG"; exit 1 ;;
+            *) err "$PB_MSG" ;;
+        esac
+    fi
+    _bf=$(mktemp) || err "mktemp failed"
+    git show "$REV:$BINDINGS" > "$_bf" 2>/dev/null || { rm -f "$_bf"; err "no $BINDINGS at $REV"; }
+else
+    [ -f "$BINDINGS" ] || err "no $BINDINGS under cwd $(pwd)"
+    _bf=$BINDINGS
+fi
+
+if [ "$MODE" = update ]; then
+    _out=$(mktemp) || err "mktemp failed"
+    _n=0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in ''|'#'*) printf '%s\n' "$_line" >> "$_out"; continue ;; esac
+        _ref=$(printf '%s\n' "$_line" | awk '{print $2}')
+        _rest=$(printf '%s\n' "$_line" | awk '{$1="";$2="";sub(/^  */,"");print}')
+        _decl=$(extract_decl "${_ref%%#*}" "${_ref#*#}") || { rm -f "$_out"; echo "FAIL — cannot re-pin missing $_ref"; exit 1; }
+        _h=$(printf '%s\n' "$_decl" | sha256sum | awk '{print $1}')
+        printf '%s  %s  %s\n' "$_h" "$_ref" "$_rest" >> "$_out"
+        _n=$((_n + 1))
+    done < "$BINDINGS"
+    mv "$_out" "$BINDINGS"
+    echo "PASS — $_n binding(s) re-pinned; review the model before committing"
+    exit 0
+fi
+
+scan "$_bf" "$REV"
+[ -n "$REV" ] && rm -f "$_bf"
+[ "$CHECKED" -gt 0 ] || err "0 bindings in $BINDINGS"
+if [ -n "$MISSING$BAD" ]; then
+    echo "FAIL — $CHECKED binding(s) checked; bound cache-key code changed without a model review:${BAD:+ changed:$BAD}${MISSING:+ missing:$MISSING} (update src/verification/cache_protocol and re-pin with --update)"
+    exit 1
+fi
+LINK_GUARD=$(link_reuse_guard "$REV") || { echo "FAIL — $LINK_GUARD"; exit 1; }
+echo "PASS — $CHECKED binding(s) checked, cache-key source matches the reviewed formal model binding${REV:+ at $REV}; $LINK_GUARD"
+exit 0

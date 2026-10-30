@@ -51,3 +51,5 @@ text` — each carries the full generation double-check inline; callers
 needing pairing re-read the generation after (the atlas producer does).
 The double-read staleness guarantee is preserved per projection, not per
 pair. See `doc/07_guide/compiler/backends/freestanding_safe_channels.md`.
+
+- 2026-10-25: persisted digests are algorithm-tagged `DigestV1` (unknown tag = miss); live key declarations are pinned by `scripts/check/check-cache-formal-source-binding.shs`. See `doc/07_guide/tooling/bootstrap_options.md`.

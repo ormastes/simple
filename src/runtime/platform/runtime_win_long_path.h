@@ -119,6 +119,45 @@ static inline int rt_win_profile_path_parents_are_real(wchar_t* path) {
  * (`rt_widen_long_path_rc(...)`) keeps working without a rename pass. */
 #define rt_widen_long_path_rc(path) rt_win_long_path_widen(path)
 
+/* POSIX-semantics replace (Windows 10 1809+, NTFS): a destination that a
+ * reader holds open with FILE_SHARE_DELETE is unlinked from the namespace and
+ * the reader keeps its old bytes, exactly like rename(2). Plain MoveFileExW
+ * answers ERROR_ACCESS_DENIED in that case. Layout spelled out locally:
+ * FileRenameInfoEx / FILE_RENAME_FLAG_* are missing from older MinGW headers. */
+typedef struct RtWinFileRenameInfoEx {
+    DWORD Flags;
+    HANDLE RootDirectory;
+    DWORD FileNameLength;
+    WCHAR FileName[1];
+} RtWinFileRenameInfoEx;
+#define RT_WIN_FILE_RENAME_INFO_EX_CLASS 22
+#define RT_WIN_FILE_RENAME_FLAG_REPLACE_IF_EXISTS 0x1
+#define RT_WIN_FILE_RENAME_FLAG_POSIX_SEMANTICS 0x2
+
+static inline int rt_win_rename_posix_replace(const wchar_t* wide_old, const wchar_t* wide_new) {
+    HANDLE source = CreateFileW(wide_old, DELETE | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (source == INVALID_HANDLE_VALUE) return 0;
+    size_t name_bytes = wcslen(wide_new) * sizeof(wchar_t);
+    size_t total = sizeof(RtWinFileRenameInfoEx) + name_bytes;
+    RtWinFileRenameInfoEx* info = (RtWinFileRenameInfoEx*)calloc(1, total);
+    int ok = 0;
+    if (info) {
+        info->Flags = RT_WIN_FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
+            RT_WIN_FILE_RENAME_FLAG_POSIX_SEMANTICS;
+        info->RootDirectory = NULL;
+        info->FileNameLength = (DWORD)name_bytes;
+        memcpy(info->FileName, wide_new, name_bytes);
+        ok = SetFileInformationByHandle(source,
+            (FILE_INFO_BY_HANDLE_CLASS)RT_WIN_FILE_RENAME_INFO_EX_CLASS,
+            info, (DWORD)total) != 0;
+        free(info);
+    }
+    CloseHandle(source);
+    return ok;
+}
+
 /*
  * Shared rename/move: MoveFileExW(MOVEFILE_REPLACE_EXISTING) for a FILE
  * destination, matching the POSIX rename(2) / Rust std::fs::rename contract
@@ -138,11 +177,39 @@ static inline int rt_win_long_path_rename(const char* old_path, const char* new_
         DWORD flags = (attrs != INVALID_FILE_ATTRIBUTES &&
                        (attrs & FILE_ATTRIBUTE_DIRECTORY)) ? 0 : MOVEFILE_REPLACE_EXISTING;
         BOOL ok = MoveFileExW(wide_old, wide_new, flags);
+        if (!ok && flags != 0 && GetLastError() == ERROR_ACCESS_DENIED) {
+            ok = rt_win_rename_posix_replace(wide_old, wide_new);
+        }
         free(wide_old); free(wide_new);
         return ok != 0;
     }
     free(wide_old); free(wide_new);
     return rename(old_path, new_path) == 0;
+}
+
+/* Read-only fopen replacement that opens with FILE_SHARE_DELETE.
+ *
+ * CRT fopen()/_wfopen() share READ|WRITE but not DELETE, so while any reader
+ * holds a cache file open, a producer's MoveFileExW(REPLACE_EXISTING) over it
+ * fails with a sharing violation and the refresh is silently lost (review
+ * cache_build_review_and_portability_2026-10-24 P1). With FILE_SHARE_DELETE
+ * the rename succeeds and this reader keeps reading the old bytes to EOF --
+ * the POSIX rename(2) contract every caller assumes. Long-path aware. */
+#include <io.h>
+#include <fcntl.h>
+static inline FILE* rt_win_fopen_read_shared(const char* path) {
+    wchar_t* wide = rt_win_long_path_widen(path);
+    if (!wide) return fopen(path, "rb");
+    HANDLE handle = CreateFileW(wide, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) return NULL;
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) { CloseHandle(handle); return NULL; }
+    FILE* file = _fdopen(fd, "rb");
+    if (!file) _close(fd);
+    return file;
 }
 
 #endif /* _WIN32 */

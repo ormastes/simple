@@ -1,0 +1,25 @@
+# @manual_section: Linux cgroup host effects, separate from Simple ABI and runner admission.
+use std.spec.{describe, it, expect, pending}
+use std.spec.step
+use app.io.env_ops.{host_os}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+describe "Linux BuildRunner cgroup containment":
+    it "retires an escaped-session descendant and proves a kernel memory-limit kill":
+        """
+        Run on a Linux host whose isolated cgroup-v2 root already delegates
+        memory. The test does not enable host controllers. Missing delegation
+        fails on Linux; other platforms report pending.
+        """
+        if host_os() == "linux":
+            step("Compile and run the production owner's live kernel fixtures")
+            val (out, err, code) = process_run_bounded("/bin/sh",
+                ["scripts/check/check-linux-capacity-containment.shs"], 60000, 65536)
+            expect(code).to_equal(0)
+            step("Verify that setsid cannot outlive the original leader's owned cgroup")
+            expect(out).to_contain("PASS: setsid descendant retired after leader exit; pidfd exit and reap; cleanup")
+            step("Require a real kernel OOM counter and terminal cleanup")
+            expect(out).to_contain("PASS: real child memory limit caused kernel oom_kill; exit137; tree empty; cleanup")
+            expect(out).to_contain("STATUS: PASS (2 live cgroup scenarios; no Simple ABI or BuildRunner admission)")
+        else:
+            pending("Live cgroup containment evidence requires Linux")

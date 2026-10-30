@@ -1,0 +1,43 @@
+#!/bin/sh
+# Selftest: the Windows GNU phase must admit the llvm-mingw clang in every
+# spelling the bootstrap hands it. The phase verifier runs under a native
+# (Windows) perl watchdog, and MSYS converts a POSIX CC (`/c/.../bin/clang`)
+# into the drive-letter form (`C:/.../bin/clang`) on that exec, which the
+# canonical-path helper rejected: "Windows GNU phase requires CC to be
+# llvm-mingw clang" -> "cannot bind target C source/profile/tool inputs".
+# A stock LLVM clang (default target *-pc-windows-msvc) must still refuse.
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *)
+  echo 'note: not a Windows MSYS host; Windows GNU CC spelling selftest skipped'; exit 0 ;;
+esac
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/bootstrap/bootstrap-windows-cl-mode.shs"
+. "$root/scripts/bootstrap/bootstrap-phase-toolchain.shs"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+mingw=${BOOTSTRAP_TEST_LLVM_MINGW_CLANG:-}
+if [ -z "$mingw" ]; then
+  for d in "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin; do
+    [ -f "$d/clang.exe" ] && mingw="$d/clang.exe"
+  done
+fi
+[ -n "$mingw" ] && [ -f "$mingw" ] || {
+  echo 'note: no llvm-mingw clang found (set BOOTSTRAP_TEST_LLVM_MINGW_CLANG); selftest skipped'; exit 0; }
+mingw=$(cygpath -u "$mingw")
+want=$(cygpath -am "$mingw")
+base=${mingw%.exe}
+SIMPLE_WINDOWS_ABI=gnu
+export SIMPLE_WINDOWS_ABI
+checked=0
+for spelling in "$mingw" "$base" "$(cygpath -m "$mingw")" "$(cygpath -m "$mingw" | sed 's/\.exe$//')"; do
+  got=$(CC=$spelling bootstrap_phase_c_compiler_path 2>/dev/null) || fail "rejected llvm-mingw spelling: $spelling"
+  [ "$got" = "$want" ] || fail "spelling $spelling resolved to $got, want $want"
+  checked=$((checked + 1))
+done
+for stock in "/c/Program Files/LLVM/bin/clang.exe" "${BOOTSTRAP_TEST_STOCK_CLANG:-}"; do
+  [ -n "$stock" ] && [ -f "$stock" ] || continue
+  "$stock" --version 2>/dev/null | grep -q '^Target: .*-windows-msvc' || continue
+  CC=$stock bootstrap_phase_c_compiler_path >/dev/null 2>&1 && fail "stock msvc-target clang admitted: $stock"
+  checked=$((checked + 1))
+done
+echo "PASS: $checked Windows GNU CC spelling(s) checked; drive-letter and extensionless llvm-mingw clang admitted"

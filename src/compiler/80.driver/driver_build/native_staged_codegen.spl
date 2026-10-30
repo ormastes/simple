@@ -25,13 +25,13 @@ use compiler.driver.driver_build.build_outcome.{BuildOutcomeSet}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 
 pub const NATIVE_STAGED_CODEGEN_BATCH_ENV_V1: text = "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH"
-# Default OFF. Evicting a promoted MirModule only drops a reference: the
-# native runtime has no collector, so in-process staging reorders work but
-# does not lower peak RSS (driver_types.spl evict_mir_module comment, probe
-# P0: 0 of 2001 allocations reclaimed). Process-level MIR sharding
-# (SIMPLE_MIR_SHARDING) is the memory fix; this knob stays as an explicit
-# opt-in for diagnosis.
-pub const NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1: i64 = 0
+# Default 8: objects stream out during MIR lowering (per-file src -> obj
+# default, bootstrap_options.md) instead of all at the end. Staging does not
+# lower peak RSS -- evicting a promoted MirModule only drops a reference and
+# the native runtime has no collector (probe P0: 0 of 2001 allocations
+# reclaimed); process-level MIR sharding (SIMPLE_MIR_SHARDING) is the memory
+# fix. `0` restores the unstaged whole-batch order.
+pub const NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1: i64 = 8
 
 pub class NativeStagedCodegenStateV1:
     active: bool
@@ -44,6 +44,9 @@ pub class NativeStagedCodegenStateV1:
     lowering_failed: bool
     verify_failed: bool
     borrow_failed: bool
+    # Batches that failed on their own (gate or codegen). Later batches keep
+    # emitting; the build still fails at the end naming every entry.
+    failed_batches: [text]
     object_files: [text]
     collection_bindings: [text]
     module_outcomes: BuildOutcomeSet
@@ -74,7 +77,7 @@ impl NativeStagedCodegenStateV1:
             batch_size: batch_size, flushing: false, scheduled_names: [],
             batches_flushed: 0, modules_flushed: 0,
             lowering_failed: false, verify_failed: false, borrow_failed: false,
-            object_files: [], collection_bindings: [],
+            failed_batches: [], object_files: [], collection_bindings: [],
             module_outcomes: BuildOutcomeSet.empty(), module_unit_id: 0,
             lane_functions: 0, lane_statics: 0, lane_objectless: 0,
             cache_hit_count: 0, cache_miss_count: 0,

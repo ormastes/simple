@@ -1,0 +1,79 @@
+# @cover src/lib/nogc_sync_mut/io/env_ops.spl
+# Exercise the configured public owner, including the runtime/native tuple ABI.
+use std.spec.*
+use std.spec.step
+use std.env.{env_get, env_has, env_set, env_unset}
+use std.io.env_ops.{env_vars}
+use std.io_runtime.{env_get_opt}
+
+fn snapshot_pair_count(snapshot: [(text, text)]?, key: text, value: text) -> i64:
+    val pairs: [(text, text)] = snapshot ?? []
+    var count: i64 = 0
+    for (entry_key, entry_value) in pairs:
+        if entry_key == key and entry_value == value:
+            count = count + 1
+    count
+
+fn restore_snapshot_fixture(key: text, existed: bool, previous: text):
+    if existed:
+        env_set(key, previous)
+    else:
+        env_unset(key)
+
+describe "Configured environment snapshot values":
+    it "should preserve both text fields of a non-ASCII environment pair":
+        step("Set a synthetic value through the configured environment owner")
+        val key = "SIMPLE_SPEC_ENV_SNAPSHOT_UTF8"
+        val existed = env_get_opt(key) != nil
+        val previous = env_get(key)
+        val written = env_set(key, "fixture-héllo-✓")
+        val scalar = env_get(key)
+        step("Read the same value through the production tuple-array snapshot")
+        val snapshot = env_vars()
+        val matches = snapshot_pair_count(snapshot, key, "fixture-héllo-✓")
+        restore_snapshot_fixture(key, existed, previous)
+        expect(written).to_equal(true)
+        expect(scalar).to_equal("fixture-héllo-✓")
+        expect(snapshot != nil).to_equal(true)
+        expect(matches).to_equal(1)
+
+    it "should retain an explicitly empty variable as a present pair":
+        step("Distinguish an empty environment value from an absent variable")
+        val key = "SIMPLE_SPEC_ENV_SNAPSHOT_EMPTY"
+        val existed = env_get_opt(key) != nil
+        val previous = env_get(key)
+        val written = env_set(key, "")
+        val present = env_has(key)
+        val snapshot = env_vars()
+        val matches = snapshot_pair_count(snapshot, key, "")
+        restore_snapshot_fixture(key, existed, previous)
+        expect(written).to_equal(true)
+        expect(present).to_equal(true)
+        expect(snapshot != nil).to_equal(true)
+        expect(matches).to_equal(1)
+
+    it "should keep earlier snapshot values after replacement and removal":
+        step("Capture two snapshots around a variable replacement")
+        val key = "SIMPLE_SPEC_ENV_SNAPSHOT_LIFETIME"
+        val existed = env_get_opt(key) != nil
+        val previous = env_get(key)
+        val first_written = env_set(key, "first-fixture")
+        val first = env_vars()
+        val second_written = env_set(key, "second-fixture")
+        val second = env_vars()
+        step("Remove the variable and inspect retained snapshots afterward")
+        val removed = env_unset(key)
+        val absent = not env_has(key)
+        val third = env_vars()
+        val first_matches = snapshot_pair_count(first, key, "first-fixture")
+        val second_matches = snapshot_pair_count(second, key, "second-fixture")
+        val stale_first = snapshot_pair_count(second, key, "first-fixture")
+        val removed_matches = snapshot_pair_count(third, key, "second-fixture")
+        restore_snapshot_fixture(key, existed, previous)
+        expect(first_written and second_written and removed).to_equal(true)
+        expect(absent).to_equal(true)
+        expect(first != nil and second != nil and third != nil).to_equal(true)
+        expect(first_matches).to_equal(1)
+        expect(second_matches).to_equal(1)
+        expect(stale_first).to_equal(0)
+        expect(removed_matches).to_equal(0)

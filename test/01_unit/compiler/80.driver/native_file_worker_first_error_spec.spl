@@ -1,0 +1,38 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_file_worker_v1.spl 0%
+"""
+# File-worker first-error reason surfacing
+
+A failing per-file worker writes its reason beside the ledger; the coordinator
+reads it and prints `[file-worker] first-error owner=<o> <reason>` so a
+BLOCKED run is no longer silent about why.
+"""
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    native_file_worker_error_reason_publish_v1, native_file_worker_error_reason_read_v1,
+    native_file_worker_first_error_line_v1}
+use std.io_runtime.{dir_create_all, dir_remove_all}
+
+fn fresh_queue(name: text) -> text:
+    val dir = "build/spec_{name}"
+    val _removed = dir_remove_all(dir)
+    val _made = dir_create_all(dir)
+    dir
+
+describe "file worker first-error reason":
+    it "round-trips a reason per owner":
+        val queue = fresh_queue("first_error_a")
+        assert_true(native_file_worker_error_reason_publish_v1(queue, "0/8", "module=x has no deps record"))
+        assert_equal(native_file_worker_error_reason_read_v1(queue, "0/8"), "module=x has no deps record")
+        assert_equal(native_file_worker_error_reason_read_v1(queue, "1/8"), "")
+
+    it "keeps the first reason when a worker fails twice":
+        val queue = fresh_queue("first_error_b")
+        assert_true(native_file_worker_error_reason_publish_v1(queue, "2/8", "first"))
+        assert_true(native_file_worker_error_reason_publish_v1(queue, "2/8", "second"))
+        assert_equal(native_file_worker_error_reason_read_v1(queue, "2/8"), "first")
+
+    it "formats the summary line, empty when no reason exists":
+        assert_equal(native_file_worker_first_error_line_v1("file-worker", "0/8", "boom"), "[file-worker] first-error owner=0/8 boom")
+        assert_equal(native_file_worker_first_error_line_v1("file-worker", "0/8", ""), "")

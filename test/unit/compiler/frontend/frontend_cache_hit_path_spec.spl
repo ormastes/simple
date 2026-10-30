@@ -1,0 +1,74 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text, sha256_text_native_or_empty}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take,
+    flat_pool_capture_take_trace, parse_and_build_module_scoped, build_module_from_packed_view_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{flat_packed_encode_v1, flat_packed_open_v1,
+    flat_packed_close_v1, flat_packed_store_v1, flat_packed_admit_view_v1, SpabDigestV1,
+    SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_entry_blob, frontend_parse_cache_entry_encode,
+    frontend_cache_native_digest_unavailable}
+use compiler.frontend.frontend_spab_cache_v1.{frontend_spab_default_decision_v1}
+
+# frontend_cache_hit_slower_than_parse_2026-10-25.md: the packed .spab entry is
+# the default hit format, hit integrity is native-digest only (unavailable =
+# MISS, never the pure-Simple fallback), and a packed round trip rebuilds the
+# same module a parse does.
+val SMALL_PATH: text = "build/frontend_cache_hit_spec/small.spl"
+val SMALL_SOURCE: text = "fn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn twice(x: i64) -> i64:\n    add(x, x)\n"
+val ABC_SHA256: text = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+fn ids(source: text) -> [SpabDigestV1]:
+    [SpabDigestV1(subject: 1, algo: 16, hex: xxh3_128_text(source)),
+     SpabDigestV1(subject: 2, algo: 1, hex: sha256_text("spec-compiler"))]
+
+describe "frontend cache hit path":
+    it "uses the packed .spab format by default and .fpc only on SIMPLE_FRONTEND_SPAB=0":
+        expect(frontend_spab_default_decision_v1("")).to_equal(true)
+        expect(frontend_spab_default_decision_v1("1")).to_equal(true)
+        expect(frontend_spab_default_decision_v1("0")).to_equal(false)
+
+    it "native digest is either the exact SHA-256 or unavailable, never a fallback value":
+        val d = sha256_text_native_or_empty("abc")
+        expect(d == "" or d == ABC_SHA256).to_equal(true)
+
+    it "treats a line-cache entry as a MISS when the native digest is unavailable":
+        val blob = "flat-pool-blob-sample"
+        val entry = frontend_parse_cache_entry_encode("hdr", blob)
+        val after_header = entry.substring(entry.index_of("\n") + 1, entry.len())
+        val before = frontend_cache_native_digest_unavailable()
+        val got = frontend_parse_cache_entry_blob(after_header)
+        if sha256_text_native_or_empty(blob) == "":
+            expect(got).to_equal("")
+            expect(frontend_cache_native_digest_unavailable()).to_equal(before + 1)
+        else:
+            expect(got).to_equal(blob)
+            expect(frontend_cache_native_digest_unavailable()).to_equal(before)
+
+    it "round-trips a small module through the packed writer and in-place reader":
+        flat_pool_capture_arm()
+        val fresh = parse_and_build_module_scoped(SMALL_SOURCE, SMALL_PATH, false)
+        val blob = flat_pool_capture_take()
+        val trace = flat_pool_capture_take_trace()
+        val packed = flat_packed_encode_v1(blob, trace, ids(SMALL_SOURCE), xxh3_128_text(SMALL_PATH))
+        expect(packed.len() > 0).to_equal(true)
+        dir_create_all("build/frontend_cache_hit_spec")
+        val path = "build/frontend_cache_hit_spec/small.spab"
+        expect(flat_packed_store_v1(path, packed)).to_equal(true)
+        val view = flat_packed_open_v1(path)
+        if not view.valid:
+            # The only acceptable refusal on a freshly written entry is the
+            # native-digest MISS; anything else is a real defect.
+            expect(view.reason).to_equal(SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1)
+            val _c = flat_packed_close_v1(view)
+            return
+        expect(flat_packed_admit_view_v1(view, ids(SMALL_SOURCE))).to_equal("")
+        val restored = build_module_from_packed_view_v1(view, SMALL_SOURCE, SMALL_PATH)
+        val _closed = flat_packed_close_v1(view)
+        expect(restored != nil).to_equal(true)
+        val m = restored.unwrap()
+        expect(m.imports.len()).to_equal(fresh.imports.len())
+        expect(m.functions.keys().len()).to_equal(fresh.functions.keys().len())
+        expect(m.functions.contains_key("add")).to_equal(true)
+        expect(m.functions.contains_key("twice")).to_equal(true)

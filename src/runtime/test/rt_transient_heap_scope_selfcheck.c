@@ -156,6 +156,38 @@ static void check_raw_table_release_after_oversized_scope(void) {
     if (kept != NULL) rt_free(kept);
 }
 
+/* A raw aggregate field that holds a text's UNTAGGED data pointer (what
+ * rt_interp_cstr returns, and what Stage-2-compiled code stores for a text
+ * read out of an array) must keep the owning transient string alive across
+ * promotion. Before the fix the word classified as "not heap", promotion
+ * skipped it, and scope end freed the string under a live AST.
+ * doc/08_tracking/bug/transient_promote_misses_raw_text_data_pointer_2026-10-25.md */
+static void check_raw_text_data_pointer_promotes(void) {
+    check(rt_transient_array_scope_begin() == 1, "raw-text scope begins");
+    const char* name = "print";
+    int64_t text = rt_string_new((const uint8_t*)name, strlen(name));
+    int64_t* holder = (int64_t*)rt_alloc((int64_t)(2 * sizeof(int64_t)));
+    int64_t* other = (int64_t*)rt_alloc((int64_t)(4 * sizeof(int64_t)));
+    check(text != 0 && holder != NULL && other != NULL, "raw-text graph allocates");
+    if (holder == NULL || other == NULL || text == 0) return;
+    memset(other, 0, 4 * sizeof(int64_t));
+    holder[0] = (int64_t)(uintptr_t)rt_interp_cstr(text);
+    /* An aligned interior word that is not a string's data pointer must not
+     * be classified as one (its w-16 is a raw block, never a string). This
+     * only proves the walk tolerates it (no crash, promote still 1); it does
+     * not observe whether `other` was promoted. */
+    holder[1] = (int64_t)(uintptr_t)(other + 2);
+    check((holder[0] & 7) == 0 && holder[0] != text, "data pointer is an untagged word");
+    check(rt_transient_array_scope_pause() == 1, "raw-text scope pauses");
+    check(rt_transient_heap_promote((int64_t)((uintptr_t)holder | 1)) == 1,
+          "raw holder with an untagged text data pointer promotes");
+    check(rt_transient_array_scope_end() == 1, "raw-text scope ends");
+    check(rt_heap_ref_registered_c(text) == 1, "text reached only by its data pointer survives");
+    check(memcmp((const char*)(uintptr_t)holder[0], name, strlen(name) + 1) == 0,
+          "surviving text keeps its bytes");
+    rt_free(holder);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--retained-text-array-only") == 0) {
         check_retained_text_array();
@@ -419,6 +451,7 @@ int main(int argc, char **argv) {
           "scope-end cost stays bounded after 20000 persistent arrays");
 
     check_raw_table_release_after_oversized_scope();
+    check_raw_text_data_pointer_promotes();
 
     printf("%s (%d failure%s)\n", failures ? "SELFCHECK FAILED" : "SELFCHECK PASSED",
            failures, failures == 1 ? "" : "s");

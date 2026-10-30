@@ -1,4 +1,4 @@
-use std.common.crypto.xxh3.{xxh3_128_hex}
+use std.common.hash.xxh3.{xxh3_128_hex}
 use std.common.text_bytes.{text_to_utf8_bytes}
 
 # SFFI - Runtime Operations
@@ -151,7 +151,7 @@ fn xxh3_128_text_fallback_used() -> bool:
 
 # XXH3-128 of the text's UTF-8 bytes as 32 lowercase hex (canonical: high64
 # then low64), through the C/Rust runtime accelerator. Anything but a full
-# 32-hex answer falls back to the pure-Simple std.common.crypto.xxh3, which is
+# 32-hex answer falls back to the pure-Simple std.common.hash.xxh3 (kernels in std.common.crypto.xxh3), which is
 # the oracle. NOT collision-resistant: local cache indexing only.
 fn xxh3_128_text(data: text) -> text:
     val hex = unsafe(capabilities: [ffi]):
@@ -159,4 +159,22 @@ fn xxh3_128_text(data: text) -> text:
     if hex.len() == 32:
         return hex
     _xxh3_128_text_fallback_used = true
-    xxh3_128_hex(text_to_utf8_bytes(data))
+    val fallback = xxh3_128_hex(text_to_utf8_bytes(data))
+    # An all-zero digest is a broken formatter, not a hash (real probability
+    # 2^-128): a native miscompile once made every key "000...0" (see
+    # doc/08_tracking/bug/xxh3_128_hex_all_zeros_native_2026-10-27.md). Report
+    # the same "" failure sentinel as xxh3_128_text_runtime_only; callers such as
+    # digest_v1_new reject "" (nil) instead of sharing one key across all inputs.
+    if fallback == "00000000000000000000000000000000":
+        return ""
+    fallback
+
+# Raw runtime digest for THIS call only: the 32-hex answer, or "" when the
+# runtime is unavailable. No pure-Simple fallback and no process-global latch,
+# so shadow/dual-run checks can tell runtime output from fallback per call.
+fn xxh3_128_text_runtime_only(data: text) -> text:
+    val hex = unsafe(capabilities: [ffi]):
+        rt_xxh3_128_text(data)
+    if hex.len() == 32:
+        return hex
+    ""

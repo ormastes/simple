@@ -1,0 +1,185 @@
+# Purpose and audience: executable evidence for LSP/MCP tooling engineers that the
+# lsp_visibility tool reports consistent layerPublic / featurePublic sets per cell pair.
+# @req REQ-LSP-MATRIX-001
+# requirements: doc/02_requirements/compiler/mdsoc_matrix_visibility_requirements.md
+# design: doc/05_design/app/mcp/mdsoc_visibility_requester_design.md ; plan: doc/03_plan/test/language_primitive_mdsoc_visibility_test_plan.md
+"""
+LSP counterpart of test/01_unit/compiler/mdsoc/feature_layer_matrix_spec.spl.
+
+Calls the real `handle_tool_call` for `lsp_visibility` with target = a cell file and
+requester = another cell file, over the fixture tree test/fixtures/mdsoc_matrix
+(features a, b x layers 10.core, 20.app; a10 has a nested layer boundary).
+
+Each call spawns the deployed binary (`find_simple_binary`, bin/simple.exe on Windows),
+so the 16 requester/target pairs are fetched ONCE into PAIR_JSON and every example reads
+from that cache.  The subprocess ignores SIMPLE_JIT_STRICT: this spec has no strict-lane twin.
+
+Run: `bin/simple test test/01_unit/app/lsp/lsp_feature_layer_matrix_spec.spl`
+"""
+
+use std.spec
+use std.spec.step
+use app.simple_lsp_mcp.tools.{handle_tool_call}
+use app.simple_lsp_mcp.session_state.{lsp_reset_location}
+use app.io.env_ops.{cwd}
+
+val ROOT = "test/fixtures/mdsoc_matrix"
+val CELLS = ["a10", "a20", "b10", "b20"]
+
+fn cell_feature(c: text) -> text:
+    c.substring(0, 1)
+
+fn cell_layer_name(c: text) -> text:
+    if c.ends_with("10"): "core" else: "app"
+
+fn cell_file(c: text) -> text:
+    val dir = if c.ends_with("10"): "10.core" else: "20.app"
+    ROOT + "/feature_" + cell_feature(c) + "/" + dir + "/" + cell_layer_name(c) + ".spl"
+
+fn sym(c: text, kind: text) -> text:
+    cell_feature(c) + "_" + cell_layer_name(c) + "_" + kind
+
+fn call_vis(file: text, requester_arg: text) -> text:
+    lsp_reset_location()
+    handle_tool_call("1", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"lsp_visibility\",\"arguments\":{\"file\":\"" + file + "\"" + requester_arg + "}}}")
+
+fn build_pairs() -> [text]:
+    var out: [text] = []
+    for owner in CELLS:
+        for req in CELLS:
+            out = out.push(call_vis(cell_file(owner), ",\"requester\":\"" + cell_file(req) + ":1\""))
+    out
+
+val PAIR_JSON = build_pairs()
+
+fn index_of_cell(c: text) -> i64:
+    var i = 0
+    for x in CELLS:
+        if x == c:
+            return i
+        i = i + 1
+    -1
+
+fn pair(owner: text, req: text) -> text:
+    PAIR_JSON[index_of_cell(owner) * 4 + index_of_cell(req)]
+
+# Text from `set_key` up to `until_key` (or the end when absent).
+fn set_section(json: text, set_key: text, until_key: text) -> text:
+    val start = json.index_of(set_key)
+    if start < 0:
+        return ""
+    val rest = json.substring(start, json.len())
+    val stop = rest.index_of(until_key)
+    if stop < 0:
+        return rest
+    rest.substring(0, stop)
+
+fn layer_set(json: text) -> text:
+    set_section(json, "layerPublic", "featurePublic")
+
+fn feature_set(json: text) -> text:
+    set_section(json, "featurePublic", "zzz_no_such_key")
+
+# Oracle: a10 owns a nested layer boundary exporting only a_core_inner.
+fn layer_display(kind: text, owner: text) -> text:
+    if kind == "secret":
+        return "private"
+    if owner == "a10":
+        return if kind == "inner": "public" else: "boundary"
+    if kind == "api": "public" else: "boundary"
+
+fn layer_boundary_of(c: text) -> text:
+    if c == "a10": "a-core" else: cell_feature(c)
+
+fn layer_listed(kind: text, req: text, owner: text) -> bool:
+    val display = layer_display(kind, owner)
+    if display == "private":
+        return false
+    if req == owner or display == "public":
+        return true
+    layer_boundary_of(req) == layer_boundary_of(owner)
+
+describe "lsp_visibility feature x layer matrix":
+    it "reports the exact owning feature id for every target cell":
+        # @req REQ-LSP-MATRIX-001
+        step("every target cell echoes its capsule id as the feature field, not an absolute-path-derived one")
+        for owner in CELLS:
+            val r = pair(owner, "a10")
+            expect(r).to_contain("\\\"feature\\\":\\\"test.fixtures.mdsoc_matrix.feature_" + cell_feature(owner) + "\\\"")
+            expect(r).to_contain("featurePublic")
+            expect(r).to_contain("layerPublic")
+
+    it "lists the exported api symbol in featurePublic with an export-line reason from every requester":
+        # @req REQ-LSP-MATRIX-001
+        step("16 requester/target pairs; api is feature-public regardless of requester")
+        var bad: [text] = []
+        for owner in CELLS:
+            for req in CELLS:
+                val feat = feature_set(pair(owner, req))
+                if not feat.contains(sym(owner, "api")):
+                    bad = bad.push(req + "->" + owner + " api missing from featurePublic")
+                if not feat.contains("named in an export line"):
+                    bad = bad.push(req + "->" + owner + " export-line why missing")
+        expect(bad).to_equal([])
+
+    it "lists unexported pub symbols in featurePublic only for same-feature requesters, with the same-capsule why":
+        # @req REQ-LSP-MATRIX-001
+        step("inner is feature-public for same-feature requesters (why: same feature capsule as requester) or when a nested manifest exports it (a10); secret never appears")
+        var bad: [text] = []
+        for owner in CELLS:
+            for req in CELLS:
+                val feat = feature_set(pair(owner, req))
+                val same = cell_feature(owner) == cell_feature(req)
+                val listed = same or owner == "a10"
+                if feat.contains(sym(owner, "inner")) != listed:
+                    bad = bad.push(req + "->" + owner + " inner in featurePublic should be " + str(listed))
+                if same and owner != "a10" and not feat.contains("same feature capsule as requester"):
+                    bad = bad.push(req + "->" + owner + " same-capsule why missing")
+                if feat.contains(sym(owner, "secret")):
+                    bad = bad.push(req + "->" + owner + " secret leaked into featurePublic")
+        expect(bad).to_equal([])
+
+    it "lists symbols in layerPublic per the nearest layer boundary and never private ones":
+        # @req REQ-LSP-MATRIX-001
+        step("a10 judged by its nested manifest: api not layer-listed for outsiders, inner listed for all")
+        var bad: [text] = []
+        for owner in CELLS:
+            for req in CELLS:
+                val layer = layer_set(pair(owner, req))
+                for kind in ["api", "inner", "secret"]:
+                    if layer.contains(sym(owner, kind)) != layer_listed(kind, req, owner):
+                        bad = bad.push(req + "->" + owner + " " + kind + " layerPublic should be " + str(layer_listed(kind, req, owner)))
+        expect(bad).to_equal([])
+
+    it "keeps layerPublic and featurePublic different on the nested-boundary cell":
+        # @req REQ-LSP-MATRIX-001
+        step("requester a20 into a10: api is feature-public but not layer-public; nested-exported inner is both")
+        val r = pair("a10", "a20")
+        expect(feature_set(r).contains("a_core_api")).to_equal(true)
+        expect(layer_set(r).contains("a_core_api")).to_equal(false)
+        expect(layer_set(r).contains("a_core_inner")).to_equal(true)
+        expect(feature_set(r).contains("a_core_inner")).to_equal(true)  # nested export counts for the feature axis too
+
+    it "lists only public-display symbols when no requester is given":
+        # @req REQ-LSP-MATRIX-001
+        step("no requester: note present, layerPublic holds display==public symbols only")
+        var bad: [text] = []
+        for owner in CELLS:
+            val r = call_vis(cell_file(owner), "")
+            if not r.contains("no requester"):
+                bad = bad.push(owner + " no-requester note missing")
+            val layer = layer_set(r)
+            for kind in ["api", "inner", "secret"]:
+                val want = layer_display(kind, owner) == "public"
+                if layer.contains(sym(owner, kind)) != want:
+                    bad = bad.push(owner + " " + kind + " no-requester layerPublic should be " + str(want))
+        expect(bad).to_equal([])
+
+    it "derives the same feature id from an absolute path as from the repo-relative path":
+        # @req REQ-LSP-MATRIX-002
+        step("absolute target/requester must not leak the drive or checkout location into ids")
+        val root = cwd().replace("\\", "/")
+        val abs_target = root + "/" + cell_file("a10")
+        val abs_req = root + "/" + cell_file("a10")
+        val r = call_vis(abs_target, ",\"requester\":\"" + abs_req + ":1\"")
+        expect(r).to_contain("\\\"feature\\\":\\\"test.fixtures.mdsoc_matrix.feature_a\\\"")

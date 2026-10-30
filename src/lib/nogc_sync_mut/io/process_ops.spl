@@ -3,6 +3,7 @@
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host}
+use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native, process_capture_unbounded_native}
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
 use std.common.process.observation_v1.{
     ProcessObservationProviderV1, ObservedProcessStartStatusV1,
@@ -39,6 +40,10 @@ extern fn rt_stderr_write(s: text)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 @unsafe(reason: "raw bounded process capture; exit_code -1 is the failure sentinel and output is contract-bounded", capabilities: [ffi])
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+@unsafe(reason: "select boxed interpreter capture or native pointer-and-length capture ABI", capabilities: [ffi])
+extern fn rt_is_interpreter_runtime() -> bool
+@unsafe(reason: "seed JIT retains the boxed process adapter even when native AOT uses the pointer-and-length ABI", capabilities: [ffi])
+extern fn rt_is_jit_runtime() -> bool
 @unsafe(reason: "raw bounded process bytes are admitted by the caller's explicit text codec", capabilities: [ffi])
 extern fn rt_process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64)
 
@@ -808,7 +813,11 @@ fn _process_observation_result_error_v1(
             pinned: lease.pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
         failure_reason: reason)
-use std.io_runtime.{env_get, env_get_nullable, read_file_text_result}
+use std.io_runtime.{env_get, env_get_nullable, read_file_text_result, file_size_signed}
+use std.common.string_core.{str_len}
+use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
+use std.nogc_sync_mut.io.file_text_session.{file_default_text_codec, file_session_decode}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_error_message}
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
 @unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
@@ -921,7 +930,18 @@ pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
     (sh, sh_args)
 
 fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
-    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    val tool: (text, [text]) = _resolve_posix_tool(cmd, args)
+    val native_command: text = host_path_native(tool.0 + "")
+    val native_arguments: [text] = tool.1
+    # @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=The deployed P2 marshals the legacy process tuple call without its command byte length; use the existing explicit native capture ABI
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if not interpreted and not jit:
+        # Preserve the Windows CreateProcess/exit-status repair below. Its
+        # bounded provider accepts -1 for unlimited output; POSIX does not.
+        if _is_windows_platform():
+            return process_capture_bounded_native(native_command, native_arguments, 0, -1)
+        return process_capture_unbounded_native(native_command, native_arguments)
     # On Windows the C rt_process_run popen()s a POSIX single-quoted command
     # line through cmd.exe and decodes _pclose's raw code with `>> 8`, so every
     # command -- including one that cannot start -- reported exit 0
@@ -930,14 +950,21 @@ fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
     # means none and -1 means unlimited output, the same as rt_process_run.
     if _is_windows_platform():
         unsafe(capabilities: [ffi]):
-            return rt_process_run_bounded(host_path_native(rcmd), rargs, 0, -1)
+            return rt_process_run_bounded(native_command, native_arguments, 0, -1)
     unsafe(capabilities: [ffi]):
-        rt_process_run(host_path_native(rcmd), rargs)
+        rt_process_run(native_command, native_arguments)
 
 fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
-    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    val tool: (text, [text]) = _resolve_posix_tool(cmd, args)
+    val native_command: text = host_path_native(tool.0 + "")
+    val native_arguments: [text] = tool.1
+    # @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=Keep the command pointer and UTF8 byte extent explicit for native process capture until the deployed P2 ABI is qualified
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if not interpreted and not jit:
+        return process_capture_bounded_native(native_command, native_arguments, timeout_ms, max_output_bytes)
     unsafe(capabilities: [ffi]):
-        rt_process_run_bounded(host_path_native(rcmd), rargs, timeout_ms, max_output_bytes)
+        rt_process_run_bounded(native_command, native_arguments, timeout_ms, max_output_bytes)
 
 fn _process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
@@ -1431,6 +1458,25 @@ pub fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_
     proc_slot_release()
     (stdout, stderr, exit_code)
 
+pub fn process_run_bounded_native(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    """Native tuple compatibility entry with positive timeout/capture limits.
+
+    The ordinary interpreter-capable process API remains separate. Resolution,
+    command path conversion and process-governor slots keep their real owners.
+    """
+    if timeout_ms <= 0 or max_output_bytes <= 0:
+        return ("", "native bounded capture requires positive timeout and output limits", -1)
+    val resolved_command: text = _resolve_process_cmd(cmd + "")
+    val tool: (text, [text]) = _resolve_posix_tool(resolved_command, args)
+    val native_command: text = host_path_native(tool.0 + "")
+    val native_arguments: [text] = tool.1
+    if native_command == "":
+        return ("", "native bounded capture command resolution returned empty text", -1)
+    proc_slot_acquire()
+    val result: (text, text, i64) = process_capture_bounded_native(native_command, native_arguments, timeout_ms, max_output_bytes)
+    proc_slot_release()
+    result
+
 pub fn process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64):
     proc_slot_acquire()
     val result = unsafe(capabilities: [ffi]):
@@ -1627,6 +1673,63 @@ fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text,
     else:
         process_run_timeout_unix(cmd, args, timeout_ms)
 
+# Private post-exit process spools retain the full-output API contract. The
+# snapshot bounds this operation; each strict UTF-8 decode stays within the
+# shared text-session budget. Size stability is not an immutability guarantee.
+fn _process_capture_owned_spool_checked(path: text) -> Result<text, text>:
+    val expected = file_size_signed(path)
+    if expected < 0:
+        return Err("capture size unavailable: {path}")
+    val codec = match file_default_text_codec():
+        case Ok(item): item
+        case Err(error): return Err(io_text_error_message(error))
+    if expected == 0:
+        val probe = match external_file_read_bytes_at(path, 0, 1):
+            case Ok(item): item
+            case Err(error): return Err(io_text_error_message(error))
+        if probe.len() != 0 or file_size_signed(path) != 0:
+            return Err("capture changed during empty read: {path}")
+        return Ok("")
+    var chunks: [text] = []
+    var offset: i64 = 0
+    while offset < expected:
+        val remaining = expected - offset
+        var count = if remaining > 1048576: 1048576 else: remaining
+        var decoded = false
+        var attempt = 0
+        while attempt < 4 and count > 0:
+            # offset + count <= expected, so positional arithmetic cannot wrap.
+            val bytes = match external_file_read_bytes_at(path, offset, count):
+                case Ok(item): item
+                case Err(error): return Err(io_text_error_message(error))
+            if bytes.len() != count:
+                return Err("capture returned a short byte extent: {path}")
+            match file_session_decode(bytes, codec, offset):
+                case Ok(chunk):
+                    if str_len(chunk) != count:
+                        return Err("capture decoded byte extent changed: {path}")
+                    chunks.push(chunk)
+                    offset = offset + count
+                    decoded = true
+                    break
+                case Err(error):
+                    match error:
+                        case TextIoError.Codec(_):
+                            # At most three trailing bytes can belong to the
+                            # next UTF-8 scalar. Every trimmed byte is revisited.
+                            if attempt == 3 or count == 1:
+                                return Err(io_text_error_message(error))
+                            count = count - 1
+                            attempt = attempt + 1
+                        case _:
+                            return Err(io_text_error_message(error))
+        if not decoded:
+            return Err("capture made no decoding progress: {path}")
+    val content = chunks.join("")
+    if offset != expected or str_len(content) != expected or file_size_signed(path) != expected:
+        return Err("capture byte extent changed during read: {path}")
+    Ok(content)
+
 fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """
     Same contract and same timeout/kill semantics as process_run_timeout_unix,
@@ -1784,12 +1887,27 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
 
     var stdout = ""
     var stderr = ""
-    if file_exists(stdout_file):
-        stdout = file_read_text(stdout_file)
-        file_delete(stdout_file)
-    if file_exists(stderr_file):
-        stderr = file_read_text(stderr_file)
-        file_delete(stderr_file)
+    var capture_error = ""
+    match _process_capture_owned_spool_checked(stdout_file):
+        case Ok(content):
+            stdout = content
+            file_delete(stdout_file)
+        case Err(message):
+            capture_error = "stdout capture failed: {message}; retained spool: {stdout_file}"
+    match _process_capture_owned_spool_checked(stderr_file):
+        case Ok(content):
+            stderr = content
+            file_delete(stderr_file)
+        case Err(message):
+            capture_error = capture_error + "\nstderr capture failed: {message}; retained spool: {stderr_file}"
+
+    if capture_error != "":
+        if relay_error != "":
+            stderr = stderr + "\n[ERROR: {relay_error}]"
+        if timed_out:
+            val timeout_secs = (effective_timeout + 999) / 1000
+            stderr = stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]"
+        return (stdout, stderr + "\n[ERROR: {capture_error}]", -1)
 
     if relay_error != "":
         (stdout, stderr + "\n[ERROR: {relay_error}]", -1)

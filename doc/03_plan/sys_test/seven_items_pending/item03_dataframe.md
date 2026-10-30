@@ -6,6 +6,14 @@ Executable skeleton: [item03_dataframe_spec.spl](../../../../test/03_system/seve
 
 ## Sources and existing coverage
 
+2026-10-27 refinement: [CBC-01–12](../collection_backend_capabilities.md)
+extend AC02/03/06–11 for common backend capability selection, static/no-capture
+states, layout/index lifetime, strict lockless admission and async resource
+reuse. These are planned tests, not new executable bodies or qualification.
+At source `f0a39c2ee3d`, `collection_planner_spec.spl` does exist in the system
+directory named below; the older DEV-tree absence observation is historical.
+Presence alone does not establish executed coverage.
+
 Canonical umbrella: [seven-item host completion plan](../../seven_plans_host_completion_2026-09-29.md), item 3. References: [selected functional requirements](../../../02_requirements/feature/collection_planner.md), [balanced NFRs](../../../02_requirements/nfr/collection_planner.md), [collection plan research](../../../01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md), [detailed system plan](../collection_planner.md).
 
 The detailed system plan lists narrower DataFrame merge/group_by/value_counts/scalar-broadcast specs and registry/extraction/selection unit specs. They do not prove production end-to-end lowering. Its declared `test/03_system/app/compiler/feature/collection_planner_spec.spl` is absent in the inspected authoritative DEV tree. These new umbrella scenarios connect prerequisite gates through emitted-plan execution and host/performance evidence; they do not replace existing narrower assertions. AC01 covers the research P0 gate, AC02–03 typed/index substrate, AC04–08 registry/extraction/lowering/adaptation, and AC09–11 explanation/performance/host completion.

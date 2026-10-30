@@ -29,9 +29,27 @@ fn env_remove(key: text) -> bool:
 @unsafe(reason: "raw nullable environment snapshot and owned tuple-array ABI", capabilities: [ffi])
 extern fn rt_env_vars() -> [(text, text)]?
 
-@always_inline
+# These getters are private to the runtime-produced snapshot. A runtime tuple
+# is not the inline native tuple layout used by ordinary Simple expressions.
+# Both hosted and native runtime providers validate the tuple before reading.
+@unsafe(reason: "validate the runtime-owned environment pair before slot access", capabilities: [ffi])
+extern fn rt_tuple_len(pair: (text, text)) -> i64
+@unsafe(reason: "read a validated environment pair slot; runtime owns both text values", capabilities: [ffi])
+extern fn rt_tuple_get(pair: (text, text), index: i64) -> text?
+
 fn env_vars_nilable() -> [(text, text)]?:
-    unsafe(capabilities: [ffi]):
-        rt_env_vars()
+    val snapshot = unsafe(capabilities: [ffi]): rt_env_vars()
+    if snapshot == nil: return nil
+    var result: [(text, text)] = []
+    for pair in snapshot ?? []:
+        val arity = unsafe(capabilities: [ffi]): rt_tuple_len(pair)
+        if arity != 2: return nil
+        val key = unsafe(capabilities: [ffi]): rt_tuple_get(pair, 0)
+        val value = unsafe(capabilities: [ffi]): rt_tuple_get(pair, 1)
+        if key == nil or value == nil: return nil
+        # Construct a language tuple rather than exposing a runtime header to
+        # native .0/.1 projection. Empty values remain present and unchanged.
+        result = result.push((key ?? "", value ?? ""))
+    result
 
 export env_get, env_get_i64, env_remove, env_vars_nilable

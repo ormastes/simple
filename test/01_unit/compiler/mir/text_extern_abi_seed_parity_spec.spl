@@ -1,0 +1,122 @@
+# Seed <-> pure-Simple text-extern ABI parity.
+#
+# The Rust seed (src/compiler_rust/compiler/src/codegen/instr/calls.rs) and
+# this compiler (src/compiler/50.mir/text_extern_abi.spl) each decide how a
+# `text` extern argument crosses into the runtime. Every silent miscompile in
+# this class (process-run cmd, rt_stderr_write, rt_file_read_text_at_checked)
+# was a row present in one table and missing from the other. This spec reads
+# the seed tables as SOURCE and requires every seed row to exist here with the
+# same indices. The pure-Simple side may list MORE: C-lane providers the seed
+# never meets because seed-built binaries link the Rust runtime.
+use std.spec.*
+use compiler.mir.text_extern_abi.{boxed_text_arg_indices, tagged_text_value_arg_indices, text_arg_indices}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val SEED_CALLS = "src/compiler_rust/compiler/src/codegen/instr/calls.rs"
+
+# Seed rows deliberately NOT mirrored. Their C-lane owners take
+# (char*, char**, count); native callers use the *_value facades instead.
+fn parity_exempt(name: text) -> bool:
+    name == "rt_process_spawn" or name == "rt_process_spawn_async" or
+        name == "rt_process_spawn_guarded" or name == "rt_process_execute"
+
+fn seed_table_rows(src: text, fn_name: text) -> [text]:
+    """Rows `name:i,j` of one seed `match func_name` table."""
+    val start = src.find("fn " + fn_name + "(func_name: &str)")
+    if start < 0:
+        return []
+    var body = src.substring(start)
+    val stop = body.find("_ => None")
+    if stop < 0:
+        return []
+    body = body.substring(0, stop)
+    var rows: [text] = []
+    var pending: [text] = []
+    for raw in body.split("\n"):
+        var line = raw
+        val comment = line.find("//")
+        if comment >= 0:
+            line = line.substring(0, comment)
+        var parts = line.split("\"")
+        var k = 1
+        while k < parts.len():
+            pending = pending.push(parts[k])
+            k = k + 2
+        val some_at = line.find("Some(")
+        if some_at >= 0:
+            val rest = line.substring(some_at)
+            val open = rest.find("[")
+            val close = rest.find("]")
+            if open >= 0 and close > open:
+                val idx = rest.substring(open + 1, close).replace(" ", "")
+                for name in pending:
+                    rows = rows.push(name + ":" + idx)
+            pending = []
+    rows
+
+fn idx_text(maybe: [i64]?) -> text:
+    if not maybe.?:
+        return "<none>"
+    var out = ""
+    for i in maybe ?? []:
+        if out != "":
+            out = out + ","
+        out = out + "{i}"
+    out
+
+fn row_name(row: text) -> text:
+    row.substring(0, row.find(":"))
+
+fn row_idx(row: text) -> text:
+    row.substring(row.find(":") + 1)
+
+describe "text extern ABI seed parity":
+    it "parses every seed table non-vacuously":
+        val src = rt_file_read_text(SEED_CALLS)
+        expect(seed_table_rows(src, "text_arg_indices").len() > 100).to_equal(true)
+        expect(seed_table_rows(src, "boxed_text_arg_indices").len() >= 3).to_equal(true)
+        expect(seed_table_rows(src, "process_c_runtime_arg_indices").len() >= 10).to_equal(true)
+
+    it "mirrors every seed (ptr, len) row with the same indices":
+        val src = rt_file_read_text(SEED_CALLS)
+        var drift = ""
+        for row in seed_table_rows(src, "text_arg_indices") + seed_table_rows(src, "process_c_runtime_arg_indices"):
+            val name = row_name(row)
+            if parity_exempt(name):
+                continue
+            val ours = idx_text(text_arg_indices(name))
+            if ours != row_idx(row):
+                drift = drift + name + " seed=" + row_idx(row) + " spl=" + ours + "\n"
+        expect(drift).to_equal("")
+
+    it "mirrors every seed boxed-text row":
+        val src = rt_file_read_text(SEED_CALLS)
+        var drift = ""
+        for row in seed_table_rows(src, "boxed_text_arg_indices"):
+            val ours = idx_text(boxed_text_arg_indices(row_name(row)))
+            if ours != row_idx(row):
+                drift = drift + row_name(row) + " seed=" + row_idx(row) + " spl=" + ours + "\n"
+        expect(drift).to_equal("")
+
+    it "never lists a name as both a pair split and a tagged passthrough":
+        val src = rt_file_read_text(SEED_CALLS)
+        var clash = ""
+        for row in seed_table_rows(src, "text_arg_indices"):
+            if tagged_text_value_arg_indices(row_name(row)).?:
+                clash = clash + row_name(row) + "\n"
+        expect(clash).to_equal("")
+
+    it "keeps the C-lane rows the seed does not carry":
+        # runtime_native.c strict tagged decoders (2026-10-25 parity audit).
+        expect(tagged_text_value_arg_indices("rt_file_read_text_at_checked").unwrap()).to_equal([0])
+        expect(tagged_text_value_arg_indices("rt_print_err").unwrap()).to_equal([0])
+        expect(tagged_text_value_arg_indices("rt_println_value").unwrap()).to_equal([0])
+        expect(tagged_text_value_arg_indices("rt_string_replace").unwrap()).to_equal([0, 1, 2])
+        # C-lane (ptr, len) owners.
+        expect(text_arg_indices("rt_shared_parse_cell_read_v1").unwrap()).to_equal([0])
+        expect(text_arg_indices("rt_host_dynlib_symbol").unwrap()).to_equal([1])
+        expect(text_arg_indices("rt_cache_host_open_root_v1").unwrap()).to_equal([0])
+        # True const char* owners stay on the bridge.
+        expect(tagged_text_value_arg_indices("rt_print")).to_be_nil()
+        expect(text_arg_indices("rt_print")).to_be_nil()

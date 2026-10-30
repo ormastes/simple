@@ -1,0 +1,76 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: unsafe Any index reads go through rt_index_get
+
+An Any value may hold a byte-packed [u8] (raw octets), so a raw GEP+load or
+rt_array_get misreads it. Reads whose base is an Any runtime-value local lower
+to the flag-aware, tagged rt_index_get. Typed arrays keep their own getters.
+"""
+
+# @tag: unit, compiler, mir, builtins
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.mir_opt.collection_opt.{create_collection_opt_pass, collection_opt_run_on_function}
+
+struct ReadShape:
+    callees: [text]
+    has_load: bool
+
+fn contains(lst: [text], item: text) -> bool:
+    for x in lst:
+        if x == item:
+            return true
+    false
+
+fn shape_of(src: text, target: text) -> ReadShape:
+    val file = "testdata/any_index_read_spec.spl"
+    val parsed = parse_full_frontend(src, file, "any_index_read_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    var has_load = false
+    for function in mir.functions.values():
+        if not (function.name == target or function.name.ends_with("." + target)):
+            continue
+        var optimizer = create_collection_opt_pass()
+        val optimized = collection_opt_run_on_function(optimizer, function)
+        for block in optimized.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case MirInstKind.Load(_, _): has_load = true
+                    case _: pass
+    ReadShape(callees: callees, has_load: has_load)
+
+describe "Any index read inside unsafe":
+    it "lowers x[3] on an Any receiver to rt_index_get":
+        step("lower an unsafe fn reading x[3] from an Any holding a [u8]")
+        val shape = shape_of("fn f(x: Any) -> i64\n    unsafe:\n        val v = x[3]\n    0\n", "f")
+        expect(contains(shape.callees, "rt_index_get")).to_equal(true)
+        expect(contains(shape.callees, "rt_array_get")).to_equal(false)
+        expect(shape.has_load).to_equal(false)
+
+    it "keeps rt_bytes_u8_at for a typed [u8] read":
+        step("lower a typed [u8] read")
+        val shape = shape_of("fn g(b: [u8]) -> i64\n    val v = b[3]\n    0\n", "g")
+        expect(contains(shape.callees, "rt_bytes_u8_at")).to_equal(true)
+        expect(contains(shape.callees, "rt_index_get")).to_equal(false)
+
+    it "keeps rt_array_get for a typed [i64] read":
+        step("lower a typed [i64] read")
+        val shape = shape_of("fn h(b: [i64]) -> i64\n    val v = b[3]\n    0\n", "h")
+        expect(contains(shape.callees, "rt_array_get")).to_equal(true)
+        expect(contains(shape.callees, "rt_index_get")).to_equal(false)

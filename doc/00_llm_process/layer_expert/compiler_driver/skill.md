@@ -37,6 +37,8 @@ Mission-critical V2 bootstrap/admission status is owned by
 failure is `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
 
 ## Role
+- BSM P2: `CompilerDriver.compile()` opens a `BuildSession` (`ctx.session`, log `build-session: id=<S>`) before source loading; HIR lowering publishes flat HIR rows via `driver_publish_flat_hir_row_v1` (adopt-then-append with a session, legacy promote without).
+- BSM P6: `compile()` = begin -> `compile_in_session_v1()` -> `session.end(session_kept_values_v1(result))`. Callers reading `driver.ctx` products after compile (generate_headers, collection-plan explain, cold full-index) set `ctx.config["build-session-retain-products"]="1"`; any other post-compile ctx read points into freed session memory.
 
 Own source discovery, import closure, phase orchestration, execution-mode
 selection, and compiler-driver performance under `src/compiler/80.driver/`.
@@ -273,3 +275,30 @@ Generic archive signatures retain declaration linkage metadata in digest v2.
 Driver archive transport must preserve this field through specialization;
 caller display qualifiers cannot establish the native callee owner. The
 source-reviewed repair requires a fresh generation for native qualification.
+
+## MIR shard PASS must consult the go-to-end ledger (2026-10-25)
+
+`aot_compile_mir_shard_v1` publishes PASS per claimed module. "No outcome,
+no object" means an objectless facade only when the child's go-to-end ledger
+did not exclude the module (`native_mir_shard_module_passed_v1`). The ledger
+is in-process and dies with the child, so cross-process failure detail goes
+through the ledger terminals (FAILED) and the ICE receipt part rows
+(`mir_lower`). Bug:
+`doc/08_tracking/bug/mir_shard_go_to_end_failure_published_as_pass_2026-10-25.md`.
+
+## TRACE32 physical owners (2026-10-25)
+
+Windows may materialize app symlinks as ordinary target-text files. Exact import
+fallback now covers `app.mcp_t32` and `app.cmm_lsp` alongside `app.t32_cli`, after
+ordinary resolution with existing prefix boundaries. Preserve requested-name
+closure aliases instead of rewriting HIR names. Source regressions are UNRUN;
+actual T32 consumers need a rebuilt producer and real Hello compile/run sanity.
+See [matrix](../../../08_tracking/bug/tooling_phase3_matrix_2026_10_25.md).
+
+## FileFiber admission overflow (2026-10-28)
+
+The scheduler latches reservation overflow without consuming the pending head.
+FileFiber drains runnable and external IO/host work before reporting that error
+and terminalizing unfinished fibers. Queued fills and ready async results count
+as external work. Focused Phase 1 specs passed; native qualification is pending.
+See `doc/08_tracking/bug/fiber_scheduler_reservation_overflow_2026_10_28.md`.

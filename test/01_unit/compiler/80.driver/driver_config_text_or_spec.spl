@@ -1,0 +1,38 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/dict_index_coalesce_text_decoded_before_nil_test_2026-10-25.md
+
+use std.spec.step
+
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+
+# `ctx.config[k] ?? ""` returned raw 0 (not "") for a missing key in the
+# Stage-2-compiled driver, so the in-process native-build route saw a
+# phantom explicit entry and failed with "compiler entry '' collected zero
+# source files". The phase-gate readers go through a contains_key guard.
+val PHASE_GATES = "src/compiler/80.driver/driver_phase_gates.spl"
+
+fn coalesce_index_count(src: text) -> i64:
+    var count = 0
+    for line in src.split("\n"):
+        if line.trim().starts_with("#"):
+            continue
+        if line.contains("ctx.config[") and line.contains("] ??"):
+            count = count + 1
+    count
+
+describe "driver_phase_gates config reads":
+    it "never coalesces a Dict<text, text> index directly":
+        val src = file_read(PHASE_GATES)
+        expect(src.len()).to_be_greater_than(0)
+        expect(coalesce_index_count(src)).to_equal(0)
+        expect(src.contains("fn driver_config_text_or(")).to_equal(true)
+
+    it "a missing key takes the default, a present key its value":
+        var config: Dict<text, text> = {}
+        config["present"] = "v"
+        val missing = if config.contains_key("absent"): config["absent"] else: "dflt"
+        val present = if config.contains_key("present"): config["present"] else: "dflt"
+        expect(missing).to_equal("dflt")
+        expect(present).to_equal("v")

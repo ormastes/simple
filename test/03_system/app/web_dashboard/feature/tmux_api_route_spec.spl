@@ -1,0 +1,431 @@
+# REQ-CMUX-001/003/005/008/010. NOT_RUN: admitted Phase3/full CLI required.
+# Protocol cases execute production routing. The final case needs a real
+# compiled dashboard web_entry, isolated tmux server and live child shell.
+use std.spec.{describe, it, expect, step, pending}
+use app.web_dashboard.server.{DashboardServer, http_response}
+use app.web_dashboard.tmux_api.{handle_tmux_api}
+use app.io.mod.{env_get, process_is_alive}
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.http.url.{url_encode as form_encode}
+use std.nogc_sync_mut.sosix.process.{sosix_process_spawn_piped, sosix_process_close_piped, sosix_process_is_piped_alive}
+use std.nogc_sync_mut.sosix.time.{sosix_sleep_ms, sosix_time_now_unix_micros, sosix_time_now_monotonic_ms}
+use std.nogc_sync_mut.sosix.host.{sosix_getpid}
+use std.nogc_sync_mut.tmux.mod.{tmux_probe_checked, tmux_kill_session_checked, tmux_run_checked, tmux_list_sessions_checked, tmux_list_windows_checked, tmux_list_panes_checked, tmux_encode_argument_v1, tmux_parse_sessions_checked, TmuxSession}
+use std.common.text_advanced.{escape_json}
+use std.common.text_bytes.{text_to_bytes}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get, json_value_as_array, json_value_as_i64, json_value_as_text}
+use std.convert.{try_parse_int}
+
+# One native scenario owns this bounded cleanup ledger. Module ownership avoids
+# losing newly acquired resources when a value-semantic helper returns Err.
+var fixture_sessions: [text] = []
+var fixture_children: [i64] = []
+var fixture_processes: [i64] = []
+var fixture_closed_processes: [i64] = []
+var fixture_cleanup_errors: [text] = []
+var fixture_guard_name: text = ""
+var fixture_guard_pid: i64 = 0
+
+fn record_child(pid: i64):
+    if pid > 0 and not fixture_children.contains(pid): fixture_children.push(pid)
+
+fn record_session_children(name: text) -> Result<bool, text>:
+    val windows = tmux_list_windows_checked(name)?
+    if windows.len() == 0: return Err("owned session has no child inventory")
+    for window in windows:
+        val panes = tmux_list_panes_checked(name, window.index)?
+        if panes.len() == 0: return Err("owned window has no child inventory")
+        for pane in panes:
+            record_child(pane.pid)
+    Ok(true)
+
+fn guarded_inventory() -> Result<[TmuxSession], text>:
+    if fixture_guard_pid <= 0 or not process_is_alive(fixture_guard_pid):
+        return Err("guard child identity is not live")
+    val sessions = tmux_list_sessions_checked()?
+    for session in sessions:
+        if session.name == fixture_guard_name: return Ok(sessions)
+    Err("successful inventory omitted the owned guard session")
+
+fn require_session_absent(name: text) -> Result<bool, text>:
+    val sessions = guarded_inventory()?
+    for session in sessions:
+        if session.name == name: return Err("successful inventory still contains owned session")
+    Ok(true)
+
+fn wait_children_gone(pids: [i64]) -> bool:
+    for attempt in 0..40:
+        var alive = false
+        for pid in pids:
+            if process_is_alive(pid): alive = true
+        if not alive: return true
+        sosix_sleep_ms(50)
+    false
+
+fn close_fixture_process(pid: i64) -> bool:
+    if fixture_closed_processes.contains(pid): return true
+    if not sosix_process_close_piped(pid): return false
+    fixture_closed_processes.push(pid)
+    true
+
+fn create_guard(name: text) -> Result<bool, text>:
+    fixture_guard_name = name
+    val created = tmux_run_checked(["new-session", "-d", "-s", name, "-P", "-F", "#" + "{pane_pid}"])
+    if created.is_err(): return Err("guard creation uncertain: " + created.unwrap_err())
+    val pid = try_parse_int(created.unwrap().trim()) ?? 0
+    if pid <= 0:
+        val recovered = record_session_children(name)
+        return Err("guard creation did not return a valid child PID")
+    fixture_guard_pid = pid
+    record_child(pid)
+    guarded_inventory()?
+    Ok(true)
+
+fn create_fixture_split(target: text, flag: text, session: text) -> Result<bool, text>:
+    val created = tmux_run_checked(["split-window", flag, "-t", target, "-P", "-F", "#" + "{pane_pid}"])
+    if created.is_err():
+        val recovered = record_session_children(session)
+        if recovered.is_err(): fixture_cleanup_errors.push("split child identity uncertain: " + recovered.unwrap_err())
+        return Err(created.unwrap_err())
+    val pid = try_parse_int(created.unwrap().trim()) ?? 0
+    if pid <= 0:
+        val recovered = record_session_children(session)
+        fixture_cleanup_errors.push("split creation did not return a valid child PID")
+        return Err("split child identity uncertain")
+    record_child(pid)
+    Ok(true)
+
+# Always called once by the outer scenario, before any outcome assertion.
+# Query failures are errors, never permission to classify a session as absent.
+fn cleanup_fixture():
+    for pid in fixture_processes:
+        if not close_fixture_process(pid): fixture_cleanup_errors.push("owned piped-process close failed")
+    for name in fixture_sessions:
+        val inventory = guarded_inventory()
+        var present = true
+        if inventory.is_err():
+            fixture_cleanup_errors.push("cleanup inventory failed: " + inventory.unwrap_err())
+        else:
+            present = false
+            for session in inventory.unwrap():
+                if session.name == name: present = true
+        if present:
+            val recorded = record_session_children(name)
+            if recorded.is_err(): fixture_cleanup_errors.push("cleanup child inventory uncertain: " + recorded.unwrap_err())
+            val killed = tmux_kill_session_checked(name)
+            if killed.is_err(): fixture_cleanup_errors.push("owned session kill failed: " + killed.unwrap_err())
+        val absent = require_session_absent(name)
+        if absent.is_err(): fixture_cleanup_errors.push("owned session absence unproven: " + absent.unwrap_err())
+    var target_children: [i64] = []
+    for pid in fixture_children:
+        if pid != fixture_guard_pid: target_children.push(pid)
+    if not wait_children_gone(target_children): fixture_cleanup_errors.push("owned target child still live")
+    # Removing the final guard is proved by its successful kill receipt plus
+    # the PID retained from creation, not by interpreting a dead server as an
+    # empty inventory. The coordinator still owns the private server/job fence.
+    if fixture_guard_name != "":
+        val killed = tmux_kill_session_checked(fixture_guard_name)
+        if killed.is_err(): fixture_cleanup_errors.push("guard kill receipt failed: " + killed.unwrap_err())
+        if fixture_guard_pid <= 0:
+            fixture_cleanup_errors.push("guard terminal identity unknown")
+        elif not wait_children_gone([fixture_guard_pid]):
+            fixture_cleanup_errors.push("guard child still live")
+    if not wait_children_gone(fixture_processes): fixture_cleanup_errors.push("owned piped process still live")
+
+fn dashboard_route(method: text, path: text, body: text) -> text:
+    # Protocol-only controls use the production handler directly. They do not
+    # manufacture an authenticated operator to bypass the network boundary.
+    val reply = handle_tmux_api(method, path, body)
+    http_response(reply.0, reply.1, reply.2)
+
+fn read_http(stream: TcpStream, request: text) -> Result<text, text>:
+    if stream.set_read_timeout(Some(30000)).is_err() or stream.set_write_timeout(Some(5000)).is_err():
+        return Err("HTTP timeout setup failed")
+    if stream.write_text(request).is_err(): return Err("HTTP write failed")
+    val status = stream.read_line_bounded(8192)
+    if status.is_err(): return Err("HTTP status read failed")
+    var length: i64 = -1
+    var headers = status.unwrap()
+    var complete = false
+    for index in 0..128:
+        val line = stream.read_line_bounded(8192)
+        if line.is_err(): return Err("HTTP header read failed")
+        val header = line.unwrap()
+        headers = headers + header
+        if header.trim() == "":
+            complete = true
+            break
+        if header.lower().starts_with("content-length:"):
+            length = try_parse_int(header[15:].trim()) ?? -1
+    if not complete or length < 0 or length > 2097152: return Err("invalid HTTP body framing")
+    val body = stream.read_bytes(length as i32)
+    if body.is_err(): return Err("HTTP body read failed")
+    Ok(headers + body.unwrap())
+
+fn live_http(address: text, method: text, path: text, body: text, cookie: text = "") -> Result<text, text>:
+    val opened = TcpStream.connect_timeout(address, 250)
+    if opened.is_err(): return Err("dashboard not accepting HTTP")
+    val stream = opened.unwrap()
+    val credential = if cookie == "": "" else: "Cookie: " + cookie + "\r\n"
+    val content_type = if path == "/login": "application/x-www-form-urlencoded" else: "application/json"
+    val request = method + " " + path + " HTTP/1.1\r\nHost: " + address + "\r\nOrigin: http://" + address + "\r\n" + credential + "Content-Type: " + content_type + "\r\nContent-Length: " + str(text_to_bytes(body).len()) + "\r\nConnection: close\r\n\r\n" + body
+    val result = read_http(stream, request)
+    val _ = stream.close()
+    result
+
+fn response_json(response: text) -> Result<JsonValue, text>:
+    val at = response.find("\r\n\r\n")
+    if at < 0: return Err("HTTP body separator missing")
+    json_parse_value_strict(response[at + 4:])
+
+fn response_ok(response: text, code: text) -> Result<JsonValue, text>:
+    if not response.starts_with("HTTP/1.1 " + code + " "): return Err(response)
+    response_json(response)
+
+fn first_index(value: JsonValue) -> Result<i64, text>:
+    val items = json_value_as_array(value)
+    if items == nil: return Err("expected metadata array")
+    if items.unwrap().len() < 1: return Err("missing live metadata row")
+    val index_value = json_value_get(items.unwrap()[0], "index")
+    if index_value == nil: return Err("missing index")
+    val index = json_value_as_i64(index_value.unwrap())
+    if index == nil: return Err("invalid index")
+    Ok(index.unwrap())
+
+# Run all assertions as checked outcomes; the caller cleans up before asserting.
+fn require_capture_line(address: text, suffix: text, cookie: text, expected: text) -> Result<bool, text>:
+    val deadline = sosix_time_now_monotonic_ms() + 5000
+    for attempt in 0..20:
+        val capture = response_ok(live_http(address, "GET", "/api/tmux/capture?" + suffix, "", cookie)?, "200")?
+        if val content = json_value_get(capture, "content"):
+            if val text = json_value_as_text(content):
+                if text.split("\n").contains(expected): return Ok(true)
+        if sosix_time_now_monotonic_ms() >= deadline: break
+        sosix_sleep_ms(50)
+    Err("real child output line was not captured: " + expected)
+
+fn require_two_attached_clients(address: text, name: text, cookie: text) -> Result<bool, text>:
+    # Actual control-mode clients attach to this test's uniquely named session.
+    # The process owner retains their stdin until explicit close below.
+    val args = ["-C", "attach-session", "-t", tmux_encode_argument_v1("=" + name)]
+    val first = sosix_process_spawn_piped("tmux", args)
+    if first <= 0: return Err("first real tmux client did not start")
+    fixture_processes.push(first)
+    val second = sosix_process_spawn_piped("tmux", args)
+    if second <= 0:
+        val _ = close_fixture_process(first)
+        return Err("second real tmux client did not start")
+    fixture_processes.push(second)
+    var observed = false
+    for attempt in 0..20:
+        val count = tmux_run_checked(["display-message", "-t", "=" + name, "-p", "#" + "{session_attached}"])
+        if count.is_ok():
+            if (try_parse_int(count.unwrap().trim()) ?? -1) >= 2:
+                observed = true
+                break
+        if not sosix_process_is_piped_alive(first) or not sosix_process_is_piped_alive(second): break
+        sosix_sleep_ms(50)
+    var valid = false
+    if observed:
+        val response = live_http(address, "GET", "/api/tmux/sessions", "", cookie)
+        if response.is_ok():
+            val parsed = response_ok(response.unwrap(), "200")
+            if parsed.is_ok():
+                if val items = json_value_as_array(parsed.unwrap()):
+                    for item in items:
+                        val session_name = json_value_get(item, "name")
+                        val attached = json_value_get(item, "attached")
+                        if session_name != nil and attached != nil:
+                            if json_value_as_text(session_name.unwrap()) == Some(name) and attached.unwrap() == JsonValue.Bool(true): valid = true
+    # Never assert before both owned clients have received teardown.
+    val first_closed = close_fixture_process(first)
+    val second_closed = close_fixture_process(second)
+    if not first_closed or not second_closed: return Err("tmux control client cleanup failed")
+    if not observed or not valid: return Err("two attached clients did not survive checked HTTP session parsing")
+    Ok(true)
+
+fn exercise_live_dashboard(address: text, name: text, cookie: text) -> Result<text, text>:
+    fixture_sessions.push(name)
+    val creation = live_http(address, "POST", "/api/tmux/sessions", "{\"name\":\"" + escape_json(name) + "\"}", cookie)
+    val recorded = record_session_children(name)
+    if recorded.is_err(): fixture_cleanup_errors.push("initial child identity uncertain: " + recorded.unwrap_err())
+    response_ok(creation?, "201")?
+    recorded?
+    val sessions = response_ok(live_http(address, "GET", "/api/tmux/sessions", "", cookie)?, "200")?
+    val list = json_value_as_array(sessions)
+    if list == nil: return Err("session list is not JSON array")
+    var found = false
+    for item in list.unwrap():
+        if val value = json_value_get(item, "name"):
+            if json_value_as_text(value) == Some(name): found = true
+    if not found: return Err("HTTP-created session absent from real listing")
+    require_two_attached_clients(address, name, cookie)?
+    val window = first_index(response_ok(live_http(address, "GET", "/api/tmux/windows?session=" + form_encode(name), "", cookie)?, "200")?)?
+    val suffix = "session=" + form_encode(name) + "&window=" + str(window)
+    val pane = first_index(response_ok(live_http(address, "GET", "/api/tmux/panes?" + suffix, "", cookie)?, "200")?)?
+    val target_body = "\"session\":\"" + escape_json(name) + "\",\"window\":" + str(window) + ",\"pane\":" + str(pane)
+    response_ok(live_http(address, "POST", "/api/tmux/send-command", "{" + target_body + ",\"command\":\"printf 'DASHBOARD_HTTP_CHILD_OK_한😀\\n'\"}", cookie)?, "200")?
+    val capture_suffix = suffix + "&pane=" + str(pane)
+    require_capture_line(address, capture_suffix, cookie, "DASHBOARD_HTTP_CHILD_OK_한😀")?
+    # The shell's read -r consumes literal bytes and prints a distinct oracle
+    # line; terminal echo alone cannot satisfy this assertion.
+    val payloads = [";", "hello;", "text\\;", "text\\\\;", "trail\\", "한😀;"]
+    for index in 0..payloads.len():
+        val prefix = "DASHBOARD_LITERAL_" + str(index)
+        val reader = "IFS= read -r line; printf '" + prefix + "<%s>\\n' \"$line\""
+        response_ok(live_http(address, "POST", "/api/tmux/send-command", "{" + target_body + ",\"command\":\"" + escape_json(reader) + "\"}", cookie)?, "200")?
+        response_ok(live_http(address, "POST", "/api/tmux/send", "{" + target_body + ",\"text\":\"" + escape_json(payloads[index]) + "\"}", cookie)?, "200")?
+        response_ok(live_http(address, "POST", "/api/tmux/send", "{" + target_body + ",\"keys\":\"Enter\"}", cookie)?, "200")?
+        require_capture_line(address, capture_suffix, cookie, prefix + "<" + payloads[index] + ">")?
+    # Fixture geometry gives the selected pane neighbours on both axes so
+    # resize has room to produce a measurable 70x20 result.
+    val target = "={name}:{window}.{pane}"
+    tmux_run_checked(["resize-window", "-t", "={name}:{window}", "-x", "100", "-y", "40"])?
+    create_fixture_split(target, "-h", name)?
+    create_fixture_split(target, "-v", name)?
+    response_ok(live_http(address, "POST", "/api/tmux/resize", "{" + target_body + ",\"width\":70,\"height\":20}", cookie)?, "200")?
+    val child_panes = tmux_list_panes_checked(name, window)?
+    if child_panes.len() < 1: return Err("no real child before cleanup")
+    var resized = false
+    var child_pids: [i64] = []
+    for child in child_panes:
+        child_pids.push(child.pid)
+        if child.pane_index == pane and child.width == 70 and child.height == 20: resized = true
+    if not resized: return Err("resize did not produce actual 70x20 pane geometry")
+    response_ok(live_http(address, "DELETE", "/api/tmux/sessions", "{\"name\":\"" + escape_json(name) + "\"}", cookie)?, "200")?
+    require_session_absent(name)?
+    if not wait_children_gone(child_pids): return Err("owned tmux child still alive after DELETE")
+    Ok("DASHBOARD_HTTP_TMUX_LIVE_PASS")
+
+describe "Dashboard tmux HTTP route":
+    it "encodes tmux command separators while preserving existing backslashes":
+        step("Encode one command's literal argv values")
+        for value in ["", "plain", "a;b", "trail\\", "trail\\\\"]:
+            expect(tmux_encode_argument_v1(value)).to_equal(value)
+        for pair in [(";", "\\;"), ("hello;", "hello\\;"), ("text\\;", "text\\\\;"), ("text\\\\;", "text\\\\\\;"), ("한😀;", "한😀\\;")]:
+            expect(tmux_encode_argument_v1(pair.0)).to_equal(pair.1)
+
+    it "parses attached session client counts without pretending they are boolean wire values":
+        step("Decode actual tmux session row format")
+        val sessions = tmux_parse_sessions_checked("zero\t1\t0\t1\none\t1\t1\t1\ntwo\t1\t2\t1\n").unwrap()
+        expect(sessions.len()).to_equal(3)
+        expect(sessions[0].attached).to_equal(false)
+        expect(sessions[1].attached).to_equal(true)
+        expect(sessions[2].attached).to_equal(true)
+        expect(tmux_parse_sessions_checked("bad\t1\t-1\t1\n").is_err()).to_equal(true)
+        expect(tmux_parse_sessions_checked("bad\t1\tnot-a-count\t1\n").is_err()).to_equal(true)
+    it "keeps authentication ahead of any backend work":
+        step("Request mux metadata without a dashboard session")
+        val reply = DashboardServer.new(0).route_http("GET", "/api/tmux/sessions", "", nil)
+        expect(reply).to_start_with("HTTP/1.1 403 Forbidden")
+        expect(DashboardServer.new(0).route_http("GET", "/api/tmux/sessions", "", "local-dev")).to_start_with("HTTP/1.1 403 Forbidden")
+
+    it "rejects unknown endpoints and lookalike prefixes in the production handler":
+        step("Open an unsupported dashboard mux URL")
+        for path in ["/api/tmux/unknown", "/api/tmuxevil", "/api/tmux/sessions/extra"]:
+            expect(dashboard_route("GET", path, "")).to_start_with("HTTP/1.1 404 Not Found")
+
+    it "rejects incorrect methods before checking backend availability":
+        step("Submit unsupported methods")
+        for path in ["/api/tmux", "/api/tmux/windows", "/api/tmux/panes", "/api/tmux/capture"]:
+            expect(dashboard_route("POST", path, "")).to_start_with("HTTP/1.1 405 Method Not Allowed")
+        for path in ["/api/tmux/send", "/api/tmux/send-command", "/api/tmux/resize"]:
+            expect(dashboard_route("GET", path, "")).to_start_with("HTTP/1.1 405 Method Not Allowed")
+
+    it "rejects malformed duplicate or nested JSON instead of selecting a default pane":
+        step("Submit invalid request data")
+        for body in ["{", "[]", "{\"session\":\"a\",\"session\":\"b\"}", "{\"session\":{}}", "{\"session\":\"a\",\"pane\":\"bad\"}", "{\"session\":\"a\",\"width\":0}", "{\"session\":\"a\",\"height\":4097}"]:
+            expect(dashboard_route("POST", "/api/tmux/resize", body)).to_start_with("HTTP/1.1 400 Bad Request")
+
+    it "rejects malformed percent escapes duplicate fields NUL and C1 targets":
+        step("Submit invalid URL parameters")
+        for query in ["session=%", "session=%GG", "session=%FF", "session=a&session=b", "session=a%00b", "session=a%C2%85b", "session=a&window=-1"]:
+            expect(dashboard_route("GET", "/api/tmux/panes?" + query, "")).to_start_with("HTTP/1.1 400 Bad Request")
+
+    it "preserves request distinctions instead of executing ambiguous input":
+        step("Submit both literal text and named keys")
+        val both = "{\"session\":\"a\",\"keys\":\"Enter\",\"text\":\"literal\"}"
+        expect(dashboard_route("POST", "/api/tmux/send", both)).to_start_with("HTTP/1.1 400 Bad Request")
+        expect(dashboard_route("POST", "/api/tmux/send-command", "{\"session\":\"a\"}")).to_start_with("HTTP/1.1 400 Bad Request")
+
+    it "bounds request bodies without calling the backend":
+        step("Submit an oversized JSON body")
+        expect(dashboard_route("POST", "/api/tmux/sessions", "x".repeat(65537))).to_start_with("HTTP/1.1 400 Bad Request")
+
+    it "rejects cross-origin and missing-origin mutation requests before auth or backend work":
+        step("Attempt host control from an unrelated web origin")
+        val server = DashboardServer.new(3300)
+        for headers in ["Host: attacker.invalid\nOrigin: http://attacker.invalid", "Host: 127.0.0.1:3300\nOrigin: http://attacker.invalid", "Host: 127.0.0.1:3300", "Host: 127.0.0.1:3300\nHost: localhost:3300\nOrigin: http://127.0.0.1:3300"]:
+            val reply = server.dash_route_request("POST", "/api/tmux/send-command", "{}", headers)
+            expect(reply).to_start_with("HTTP/1.1 403 Forbidden")
+            expect(reply).to_contain("Same-origin operator request required")
+
+    it "rejects the old static cookie even on the correct loopback origin":
+        step("Present the obsolete development cookie")
+        val reply = DashboardServer.new(3300).dash_route_request("GET", "/api/tmux/sessions", "", "Host: 127.0.0.1:3300\nCookie: llm_dashboard_session=local")
+        expect(reply).to_start_with("HTTP/1.1 403 Forbidden")
+
+    it "launches the real dashboard and manages a real tmux child through HTTP":
+        val executable = env_get("SIMPLE_TEST_WEB_DASHBOARD_EXE")
+        val port = try_parse_int(env_get("SIMPLE_TEST_WEB_DASHBOARD_PORT")) ?? 0
+        val isolated_root = env_get("SIMPLE_TEST_TMUX_ROOT")
+        val username = env_get("SIMPLE_TEST_DASHBOARD_USERNAME")
+        val password = env_get("SIMPLE_TEST_DASHBOARD_PASSWORD")
+        if executable == "" or port < 1024 or port > 65535 or isolated_root == "" or env_get("DASH_AUTH_FILE") == "" or username == "" or password == "":
+            pending("BLOCKED: admitted product, private tmux fixture and real operator credentials required")
+            return
+        if env_get("TMUX_TMPDIR") != isolated_root or env_get("TMUX") != "" or env_get("SIMPLE_TEST_TMUX_SHELL") != "posix":
+            pending("BLOCKED: isolated TMUX_TMPDIR, unset TMUX and POSIX child shell required")
+            return
+        if tmux_probe_checked().is_err():
+            pending("BLOCKED: real tmux unavailable; this is not a backend PASS")
+            return
+        val address = "127.0.0.1:" + str(port)
+        val existing = TcpStream.connect_timeout(address, 100)
+        if existing.is_ok():
+            val _ = existing.unwrap().close()
+            expect("port already occupied").to_equal("private unused port")
+            return
+        step("Launch the admitted dashboard product server")
+        fixture_sessions = []
+        fixture_children = []
+        fixture_processes = []
+        fixture_closed_processes = []
+        fixture_cleanup_errors = []
+        fixture_guard_name = ""
+        fixture_guard_pid = 0
+        val pid = sosix_process_spawn_piped(executable, ["serve", "--port", str(port)])
+        expect(pid).to_be_greater_than(0)
+        fixture_processes.push(pid)
+        var ready = false
+        for attempt in 0..40:
+            val reply = live_http(address, "GET", "/login", "")
+            if reply.is_ok():
+                ready = reply.unwrap().starts_with("HTTP/1.1 200 OK")
+                if ready: break
+            if not sosix_process_is_piped_alive(pid): break
+            sosix_sleep_ms(50)
+        val base_name = "dashboard_http_" + str(sosix_getpid()) + "_" + str(sosix_time_now_unix_micros())
+        step("Authenticate through the real HTTP login flow")
+        var cookie = ""
+        if ready:
+            val login = live_http(address, "POST", "/login", "username=" + form_encode(username) + "&password=" + form_encode(password))
+            if login.is_ok() and login.unwrap().starts_with("HTTP/1.1 302 "):
+                for line in login.unwrap().split("\n"):
+                    if line.lower().starts_with("set-cookie: llm_dashboard_session="):
+                        cookie = line[11:].trim().split(";")[0]
+        step("Create list send capture resize and delete through the HTTP surface")
+        var result: Result<text, text> = Err("dashboard startup or real operator login failed")
+        val names = [base_name + ";", base_name + "\\;"]
+        if ready and cookie != "":
+            val guard = create_guard(base_name + "_guard")
+            if guard.is_err():
+                result = Err(guard.unwrap_err())
+            else:
+                for name in names:
+                    result = exercise_live_dashboard(address, name, cookie)
+                    if result.is_err(): break
+        step("Clean only the fixture's owned session and dashboard process")
+        cleanup_fixture()
+        expect(fixture_cleanup_errors).to_equal([])
+        expect(result.unwrap()).to_equal("DASHBOARD_HTTP_TMUX_LIVE_PASS")

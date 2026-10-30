@@ -1,0 +1,99 @@
+# @req PERF-INLINE-ATTRIBUTE
+"""
+@inline drives `alwaysinline` through the real pipeline: parse -> HIR -> MIR -> LLVM text.
+
+A body with >= 10 MIR instructions is not "small", so `alwaysinline` can only come from
+the attribute. The function is call-free and binop-free (translating a MirModule with a Call throws under
+the seed interpreter, see inline_typed_bytes_load_spec; BinOp and Int consts throw the same way,
+so the body is a bool-const + Copy chain, which still lowers to >= 10 MIR instructions).
+"""
+# @tag: unit, compiler, backend, mir
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+val BODY = "    val a = true\n    val b = a\n    val c = b\n    val d = c\n    val e = d\n    val f = e\n    val g = f\n    val h = g\n    val i = h\n    val j = i\n    val k = j\n    pass\n"
+
+fn mir_for_named(attr: text, name: text) -> MirModule:
+    val src = attr + "fn " + name + "():\n" + BODY
+    val file = "testdata/fixture_inline_attr.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_inline_attr", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir)
+
+fn fn_of(mir: MirModule, name: text) -> Option<MirFunction>:
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return Some(function)
+    None
+
+fn inst_count(function: MirFunction) -> i64:
+    var n = 0
+    for block in function.blocks:
+        n = n + block.instructions.len()
+    n
+
+fn define_line_of(mir: MirModule, name: text, symbol: text) -> text:
+    val fn_option = fn_of(mir, name)
+    if fn_option.is_none():
+        return ""
+    val fn_ = fn_option.unwrap()
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    val slim = MirModule(name: "inline.attr.fixture", functions: functions, statics: {}, constants: {}, types: {})
+    val ir = MirToLlvm.create("inline.attr.fixture", CodegenTarget.X86_64, nil).translate_module(slim)
+    for line in ir.split("\n"):
+        if line.starts_with("define") and line.contains(symbol + "("):
+            return line
+    ""
+
+fn mir_for(attr: text) -> MirModule:
+    mir_for_named(attr, "mix")
+
+fn mix_of(mir: MirModule) -> MirFunction:
+    fn_of(mir, "mix").unwrap()
+
+fn define_line(mir: MirModule) -> text:
+    define_line_of(mir, "mix", ".mix")
+
+describe "@inline through the real pipeline":
+    it "MIR: is_inline is true with @inline and the body is not small":
+        step("MIR is_inline true")
+        val f = mix_of(mir_for("@inline\n"))
+        expect(f.is_inline).to_equal(true)
+        expect(inst_count(f) >= 10).to_equal(true)
+
+    it "MIR: is_inline is false without @inline":
+        step("MIR is_inline false")
+        val f = mix_of(mir_for(""))
+        expect(f.is_inline).to_equal(false)
+        expect(inst_count(f) >= 10).to_equal(true)
+
+    it "LLVM: @inline function define line carries alwaysinline":
+        step("define has alwaysinline")
+        val line = define_line(mir_for("@inline\n"))
+        expect(line.len() > 0).to_equal(true)
+        expect(line).to_contain("alwaysinline")
+
+    it "LLVM: same body without @inline has no alwaysinline":
+        step("define has no alwaysinline")
+        expect(define_line(mir_for(""))).to_not_contain("alwaysinline")
+
+    it "LLVM: @inline on `main` still gets alwaysinline although its emitted symbol is mangled":
+        step("define of the mangled symbol has alwaysinline")
+        val mir = mir_for_named("@inline\n", "main")
+        expect(fn_of(mir, "main").unwrap().is_inline).to_equal(true)
+        val line = define_line_of(mir, "main", "__simple_main")
+        expect(line.len() > 0).to_equal(true)
+        expect(line).to_contain("alwaysinline")

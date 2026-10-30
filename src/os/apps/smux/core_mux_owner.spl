@@ -1,0 +1,132 @@
+# Persistent server metadata foundations, not a CoreMux provider implementation.
+# No ServiceState or native resource is stored here. The API remains sole owner.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.{MuxOperationV1}
+use std.common.contracts.mux.observation_v1.{MuxLeaseTermsV1, MuxOperationCapabilityV1, MuxRequestReceiptV1}
+use std.common.contracts.mux.validation_v1.{mux_validate_namespace_v1, mux_make_connect_v1}
+use std.common.contracts.mux.request_validation_v1.{mux_require_core_capabilities_v1}
+use os.apps.smux.service_revision.{ServiceRevisionState, service_revision_writable}
+use os.apps.smux.core_mux_leases.*
+use os.apps.smux.core_mux_requests.*
+
+pub struct CoreMuxOwner:
+    namespace: text
+    active: bool
+    leases: CoreMuxLeases
+    requests: CoreMuxRequestLedger
+
+pub struct CoreMuxOwnerAdmission:
+    owner: CoreMuxOwner
+    handle: MuxHandleV1
+
+pub struct CoreMuxOwnerMaintenance:
+    owner: CoreMuxOwner
+    retired_tokens: [text]
+    forgotten_tokens: [text]
+
+pub struct CoreMuxOwnerReservation:
+    owner: CoreMuxOwner
+    index: int
+    replay: bool
+
+fn error(kind: MuxErrorKindV1, detail: text, id: u64 = 0, commit: MuxCommitStateV1 = MuxCommitStateV1.NotApplied) -> MuxErrorV1:
+    return MuxErrorV1(kind: kind, detail: detail, request_id: id, commit_state: commit,
+        observed_revision: nil, affected: [], cleanup_pending: false)
+
+fn rebuild(st: CoreMuxOwner, leases: CoreMuxLeases, requests: CoreMuxRequestLedger, active: bool) -> CoreMuxOwner:
+    return CoreMuxOwner(namespace: st.namespace, active: active, leases: leases, requests: requests)
+
+# Only configured server composition supplies checked entropy and commits this
+# state. No namespace adoption, endpoint launch or fallback takes place here.
+pub fn core_mux_owner_new(namespace: text, incarnation: text, generation: u64,
+    clock: ServiceRevisionState, terms: MuxLeaseTermsV1) -> Result<CoreMuxOwner, MuxErrorV1>:
+    mux_validate_namespace_v1(namespace)?
+    if not service_revision_writable(clock): return Err(error(MuxErrorKindV1.Unavailable, "service revision authority unavailable"))
+    val leases = core_mux_leases_new(incarnation, generation, clock.epoch, terms)?
+    val ledger = core_mux_requests_new(terms.max_retained_receipts)?
+    return Ok(CoreMuxOwner(namespace: namespace, active: true, leases: leases, requests: ledger))
+
+# Persist this result even when the following request is refused. The caller
+# releases only actual attachment/capture resources associated with these tokens;
+# this metadata sweep never claims child cleanup or kills a background session.
+pub fn core_mux_owner_maintenance(st: CoreMuxOwner, clock: ServiceRevisionState, now_ms: i64) -> Result<CoreMuxOwnerMaintenance, MuxErrorV1>:
+    var swept = core_mux_lease_sweep(st.leases, now_ms)?
+    var leases = swept.leases
+    var retired = swept.retired_tokens
+    val active = st.active and clock.valid and clock.epoch == leases.service_epoch
+    if not active:
+        for item in leases.entries:
+            if not item.retired:
+                val handle = MuxHandleV1(owner_id: leases.owner_id, owner_generation: leases.owner_generation, lease_id: item.token)
+                leases = core_mux_lease_revoke(leases, handle, now_ms)?
+                retired.push(item.token)
+    var ledger = st.requests
+    for token in retired: ledger = core_mux_requests_retire(ledger, token)
+    for token in swept.forgotten_tokens: ledger = core_mux_requests_forget(ledger, token)?
+    return Ok(CoreMuxOwnerMaintenance(owner: rebuild(st, leases, ledger, active),
+        retired_tokens: retired, forgotten_tokens: swept.forgotten_tokens))
+
+# Full mechanism descriptors must come from installed dispatch owners, never
+# caller-supplied wire values. NotRun evidence is allowed for first qualification;
+# an unavailable mandatory mechanism blocks admission before lease publication.
+# Adapter still must validate/size its actual Connection snapshot before commit.
+pub fn core_mux_owner_admit(st: CoreMuxOwner, options: MuxConnectV1,
+    installed: [MuxOperationCapabilityV1], nonce: text, clock: ServiceRevisionState, now_ms: i64) -> Result<CoreMuxOwnerAdmission, MuxErrorV1>:
+    mux_make_connect_v1(options.backend, options.namespace, options.endpoint_policy, options.client_identity, options.limits)?
+    if not st.active or clock.epoch != st.leases.service_epoch or not service_revision_writable(clock):
+        return Err(error(MuxErrorKindV1.Unavailable, "configured owner authority unavailable"))
+    if options.backend != MuxBackendV1.Smux or options.namespace != st.namespace:
+        return Err(error(MuxErrorKindV1.PermissionDenied, "configured backend or namespace mismatch"))
+    if options.endpoint_policy != MuxEndpointPolicyV1.ExistingOnly:
+        return Err(error(MuxErrorKindV1.Unsupported, "configured server accepts ExistingOnly"))
+    # Shape-only value for owner/generation capability matching, never issued.
+    val scope = MuxHandleV1(owner_id: st.leases.owner_id, owner_generation: st.leases.owner_generation, lease_id: "capability-preflight")
+    mux_require_core_capabilities_v1(scope, MuxBackendV1.Smux, installed)?
+    val admitted = core_mux_lease_admit(st.leases, options.client_identity, nonce, now_ms)?
+    return Ok(CoreMuxOwnerAdmission(owner: rebuild(st, admitted.leases, st.requests, st.active), handle: admitted.handle))
+
+pub fn core_mux_owner_reserve(st: CoreMuxOwner, handle: MuxHandleV1, id: u64,
+    operation: MuxOperationV1, canonical_payload: [u8], timeout_ms: i64,
+    expected_revision: u64?, clock: ServiceRevisionState, now_ms: i64, reply_budget: i64) -> Result<CoreMuxOwnerReservation, MuxErrorV1>:
+    val control = operation == MuxOperationV1.Disconnect
+    val found = core_mux_lease_index(st.leases, handle, now_ms, control)
+    if found.is_err(): return Err(error(found.unwrap_err().kind, found.unwrap_err().detail, id, MuxCommitStateV1.Unknown))
+    val lease_idx = found.unwrap()
+    val lease = st.leases.entries[lease_idx]
+    val retired = lease.retired or now_ms >= lease.deadline_ms
+    val prior = core_mux_request_index(st.requests, handle, id)
+    if retired and (not control or prior < 0):
+        return Err(error(MuxErrorKindV1.Unavailable, "revoked authority permits retained disconnect replay only", id, MuxCommitStateV1.Unknown))
+    if not control and (not st.active or clock.epoch != st.leases.service_epoch or not service_revision_writable(clock)):
+        return Err(error(MuxErrorKindV1.Unavailable, "service revision authority unavailable", id))
+    if prior < 0:
+        match expected_revision:
+            case Some(revision):
+                if revision != clock.value: return Err(error(MuxErrorKindV1.StaleRevision, "configuration revision changed", id))
+            case nil: ()
+    if timeout_ms < 1 or timeout_ms > 30000 or now_ms > 9223372036854775807 - timeout_ms:
+        return Err(error(MuxErrorKindV1.InvalidRequest, "request timeout invalid", id))
+    val requested = now_ms + timeout_ms
+    val deadline = if requested < lease.deadline_ms: requested else: lease.deadline_ms
+    val reserved = core_mux_request_reserve(st.requests, handle, id, operation, canonical_payload, deadline, now_ms, reply_budget)?
+    return Ok(CoreMuxOwnerReservation(owner: rebuild(st, st.leases, reserved.ledger, st.active), index: reserved.index, replay: reserved.replay))
+
+pub fn core_mux_owner_finish(st: CoreMuxOwner, handle: MuxHandleV1, id: u64,
+    receipt: MuxRequestReceiptV1, response: [u8]) -> Result<CoreMuxOwner, MuxErrorV1>:
+    val ledger = core_mux_request_finish(st.requests, handle, id, receipt, response)?
+    return Ok(rebuild(st, st.leases, ledger, st.active))
+
+pub fn core_mux_owner_revoke(st: CoreMuxOwner, handle: MuxHandleV1, now_ms: i64) -> Result<CoreMuxOwner, MuxErrorV1>:
+    val leases = core_mux_lease_revoke(st.leases, handle, now_ms)?
+    return Ok(rebuild(st, leases, core_mux_requests_retire(st.requests, handle.lease_id), st.active))
+
+pub fn core_mux_owner_status(st: CoreMuxOwner, handle: MuxHandleV1, id: u64, now_ms: i64) -> Result<MuxRequestReceiptV1, MuxErrorV1>:
+    val found = core_mux_lease_index(st.leases, handle, now_ms, true)
+    if found.is_err(): return Err(error(found.unwrap_err().kind, found.unwrap_err().detail, id, MuxCommitStateV1.Unknown))
+    return core_mux_request_status(st.requests, handle, id)
+
+pub fn core_mux_owner_renew(st: CoreMuxOwner, handle: MuxHandleV1, clock: ServiceRevisionState, now_ms: i64) -> Result<CoreMuxOwner, MuxErrorV1>:
+    if not st.active or not clock.valid or clock.epoch != st.leases.service_epoch:
+        return Err(error(MuxErrorKindV1.Unavailable, "owner incarnation unavailable"))
+    val leases = core_mux_lease_renew(st.leases, handle, now_ms)?
+    return Ok(rebuild(st, leases, st.requests, st.active))

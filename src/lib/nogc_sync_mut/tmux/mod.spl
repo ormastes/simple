@@ -5,6 +5,8 @@
 
 use std.io_runtime.{shell, shell_output_trimmed, shell_bool}
 use std.convert.{try_parse_int}
+use std.nogc_sync_mut.sosix.process.{sosix_process_run_bounded}
+use std.common.text_bytes.{text_to_bytes, bytes_to_text}
 
 # Parse `s` as an integer, returning `default` when it is not one.
 # `std.text` has no `to_int_or`; `try_parse_int` is the fail-closed parser.
@@ -306,3 +308,139 @@ fn tmux_run_in_new_pane(session: text, window_index: i64, command: text) -> Resu
         Ok(to_int_or(idx, 0))
     else:
         Err("Failed to run command in new pane: {result.stderr}")
+
+# Checked HTTP-facing owner. Legacy list/capture signatures above cannot
+# distinguish command failure from empty output and remain compatibility-only.
+# New callers must use these Result APIs. No shell interprets any argument.
+pub fn tmux_encode_argument_v1(value: text) -> text:
+    # tmux cmd_parse_from_arguments interprets a terminal ';' even when argv
+    # was passed directly. It removes exactly the immediately preceding '\\'.
+    # Insert one extra backslash, preserving every original byte (including
+    # any existing run of backslashes). Other arguments must stay unchanged.
+    # Owner contract: one invocation is one command, never a command list.
+    if not value.ends_with(";"): return value
+    val bytes = text_to_bytes(value)
+    var encoded: [u8] = []
+    for index in 0..(bytes.len() - 1):
+        encoded.push(bytes[index])
+    encoded.push(92)
+    encoded.push(59)
+    bytes_to_text(encoded)
+
+pub fn tmux_run_checked(args: [text]) -> Result<text, text>:
+    var encoded: [text] = []
+    for arg in args:
+        encoded.push(tmux_encode_argument_v1(arg))
+    val result = sosix_process_run_bounded("tmux", encoded, 10000, 1048576)
+    # The existing text capture ABI has no separate truncation bit. Reject at
+    # its byte ceiling (including exact ceiling) and its diagnostic marker;
+    # never parse a prefix/tail capture as a complete successful snapshot.
+    if text_to_bytes(result.0).len() >= 1048576 or text_to_bytes(result.1).len() >= 1048576 or result.0.contains("[output truncated:") or result.1.contains("[output truncated:"):
+        return Err("tmux output limit reached; completion may be unknown")
+    if result.2 != 0:
+        return Err("tmux exit {result.2}: " + result.1)
+    Ok(result.0)
+
+pub fn tmux_probe_checked() -> Result<text, text>:
+    tmux_run_checked(["-V"])
+
+pub fn tmux_list_sessions_checked() -> Result<[TmuxSession], text>:
+    val format = "#" + "{session_name}\t#" + "{session_windows}\t#" + "{session_attached}\t#" + "{session_created}"
+    val output = tmux_run_checked(["list-sessions", "-F", format])?
+    tmux_parse_sessions_checked(output)
+
+# Pure wire parser used by the checked owner, not a substitute provider.
+pub fn tmux_parse_sessions_checked(output: text) -> Result<[TmuxSession], text>:
+    var result: [TmuxSession] = []
+    for line in output.split("\n"):
+        if line == "": continue
+        val fields = line.split("\t")
+        if fields.len() != 4: return Err("malformed tmux session row")
+        val windows = try_parse_int(fields[1])
+        val attached_clients = try_parse_int(fields[2])
+        if windows == nil or attached_clients == nil or fields[0] == "":
+            return Err("malformed tmux session fields")
+        if windows.unwrap() < 0 or attached_clients.unwrap() < 0: return Err("negative tmux session count")
+        result.push(TmuxSession(name: fields[0], windows: windows.unwrap(), attached: attached_clients.unwrap() > 0, created: fields[3]))
+    Ok(result)
+
+pub fn tmux_list_windows_checked(session: text) -> Result<[TmuxWindow], text>:
+    val format = "#" + "{window_index}\t#" + "{window_name}\t#" + "{window_active}\t#" + "{window_panes}"
+    val output = tmux_run_checked(["list-windows", "-t", "=" + session, "-F", format])?
+    var result: [TmuxWindow] = []
+    for line in output.split("\n"):
+        if line == "": continue
+        val fields = line.split("\t")
+        if fields.len() != 4: return Err("malformed tmux window row")
+        val index = try_parse_int(fields[0])
+        val panes = try_parse_int(fields[3])
+        if index == nil or panes == nil or (fields[2] != "0" and fields[2] != "1"):
+            return Err("malformed tmux window fields")
+        if index.unwrap() < 0 or panes.unwrap() < 1: return Err("invalid tmux window counts")
+        result.push(TmuxWindow(session: session, index: index.unwrap(), name: fields[1], active: fields[2] == "1", panes: panes.unwrap()))
+    Ok(result)
+
+pub fn tmux_list_panes_checked(session: text, window_index: i64) -> Result<[TmuxPane], text>:
+    val format = "#" + "{pane_index}\t#" + "{pane_active}\t#" + "{pane_width}\t#" + "{pane_height}\t#" + "{pane_current_command}\t#" + "{pane_pid}"
+    val output = tmux_run_checked(["list-panes", "-t", "={session}:{window_index}", "-F", format])?
+    var result: [TmuxPane] = []
+    for line in output.split("\n"):
+        if line == "": continue
+        val fields = line.split("\t")
+        if fields.len() != 6: return Err("malformed tmux pane row")
+        val index = try_parse_int(fields[0])
+        val width = try_parse_int(fields[2])
+        val height = try_parse_int(fields[3])
+        val pid = try_parse_int(fields[5])
+        if index == nil or width == nil or height == nil or pid == nil or (fields[1] != "0" and fields[1] != "1"):
+            return Err("malformed tmux pane fields")
+        if index.unwrap() < 0 or width.unwrap() < 1 or height.unwrap() < 1 or pid.unwrap() < 1:
+            return Err("invalid tmux pane dimensions or PID")
+        result.push(TmuxPane(session: session, window_index: window_index, pane_index: index.unwrap(), active: fields[1] == "1", width: width.unwrap(), height: height.unwrap(), current_command: fields[4], pid: pid.unwrap()))
+    Ok(result)
+
+pub fn tmux_capture_checked(session: text, window_index: i64, pane_index: i64, history: i64?) -> Result<TmuxCaptureResult, text>:
+    val target = "={session}:{window_index}.{pane_index}"
+    var args = ["capture-pane", "-t", target, "-p", "-e"]
+    if val lines = history:
+        args.push("-S")
+        args.push(str(0 - lines))
+    val content = tmux_run_checked(args)?
+    val rows_text = tmux_run_checked(["display-message", "-t", target, "-p", "#" + "{pane_height}"])?
+    val rows = try_parse_int(rows_text.trim())
+    if rows == nil: return Err("malformed tmux pane height")
+    if rows.unwrap() < 1: return Err("invalid tmux pane height")
+    Ok(TmuxCaptureResult(content: content, pane_id: "{session}:{window_index}.{pane_index}", rows: rows.unwrap()))
+
+pub fn tmux_new_session_checked(name: text) -> Result<text, text>:
+    tmux_run_checked(["new-session", "-d", "-s", name])?
+    Ok(name)
+
+pub fn tmux_kill_session_checked(name: text) -> Result<text, text>:
+    # Preserve the existing LLM/MCP protection, but fail closed if inspection
+    # fails. A failed query must not become permission to terminate a session.
+    val commands = tmux_run_checked(["list-panes", "-s", "-t", "=" + name, "-F", "#" + "{pane_current_command}"])?
+    for line in commands.split("\n"):
+        val command = line.lower()
+        if command.contains("claude") or command.contains("codex") or command.contains("simple_mcp") or command.contains("simple_lsp"):
+            return Err("Refused: session has active LLM/MCP process")
+    tmux_run_checked(["kill-session", "-t", "=" + name])?
+    Ok("Session killed")
+
+pub fn tmux_send_checked(session: text, window_index: i64, pane_index: i64, value: text, literal: bool) -> Result<text, text>:
+    var args = ["send-keys", "-t", "={session}:{window_index}.{pane_index}"]
+    if literal: args.push("-l")
+    args.push("--")
+    args.push(value)
+    tmux_run_checked(args)?
+    Ok("Input sent")
+
+pub fn tmux_send_command_checked(session: text, window_index: i64, pane_index: i64, command: text) -> Result<text, text>:
+    tmux_send_checked(session, window_index, pane_index, command, true)?
+    val enter = tmux_send_checked(session, window_index, pane_index, "Enter", false)
+    if enter.is_err(): return Err("partial input: literal text sent; Enter failed: " + enter.unwrap_err())
+    Ok("Command sent")
+
+pub fn tmux_resize_checked(session: text, window_index: i64, pane_index: i64, width: i64, height: i64) -> Result<text, text>:
+    tmux_run_checked(["resize-pane", "-t", "={session}:{window_index}.{pane_index}", "-x", str(width), "-y", str(height)])?
+    Ok("Pane resized")

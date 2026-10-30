@@ -14,7 +14,7 @@ use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
     build_bootstrap_tools_sqlite_runtime, stage_sqlite_runtime_dll,
-    build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
+    build_core_c_runtime_supplement_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
     external_tool_path, find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, missing_llvm_tool_error,
@@ -1208,6 +1208,7 @@ impl NativeProjectBuilder {
         let cc = generated_c_source_compiler(target);
         let is_msvc = uses_msvc_flags(target.linker_flavor());
 
+        // @workaround bug=BUG-GNU-PHASE2-HOST-ALIAS-LINK-20261027 reason=gnu-coff-entry-and-init-must-not-resolve-to-zero-weak-fallbacks
         let stub_code = if is_msvc {
             r#"
 #include <wchar.h>
@@ -1267,11 +1268,18 @@ extern "C" {
 #ifdef __cplusplus
 extern "C" {
 #endif
+    // COFF weak fallbacks can satisfy archive roots with an absolute zero.
+    // These two definitions are guaranteed by the entry and generated caller.
+#if defined(_WIN32)
+    int spl_main(void);
+    void __simple_call_module_inits(void);
+#else
     int __attribute__((weak)) spl_main(void);
+    void __attribute__((weak)) __simple_call_module_inits(void);
+#endif
     void rt_set_args(int argc, char** argv);
     void __attribute__((weak)) __simple_runtime_init(void);
     void __attribute__((weak)) __simple_runtime_shutdown(void);
-    void __attribute__((weak)) __simple_call_module_inits(void);
 #ifdef __cplusplus
 }
 #endif
@@ -1407,6 +1415,17 @@ int main(int argc, char** argv) {
                      void {}(void) {{}}\n",
                     name, stub, stub
                 ));
+            }
+            code.push_str("void __simple_call_module_inits(void) {\n");
+            for name in &init_names {
+                code.push_str(&format!("    {}();\n", name));
+            }
+            code.push_str("}\n");
+        } else if cross_target.os == simple_common::target::TargetOS::Windows {
+            // Every name was scanned from a real definition. Strong references
+            // let GNU COFF lazily extract those members without zero weak aliases.
+            for name in &init_names {
+                code.push_str(&format!("    void {}(void);\n", name));
             }
             code.push_str("void __simple_call_module_inits(void) {\n");
             for name in &init_names {
@@ -1583,7 +1602,7 @@ int main(int argc, char** argv) {
             // when supplying the C-only bootstrap runtime exports.
             && cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "freebsd", target_os = "macos"))
         {
-            let core = build_core_c_runtime_library(&temp_dir.join("bootstrap_mutex_core_c_runtime"))
+            let core = build_core_c_runtime_supplement_library(&temp_dir.join("bootstrap_mutex_core_c_runtime"))
                 .ok_or_else(|| "failed to build the bootstrap mutex core-C authority".to_string())?;
             Some(build_bootstrap_mutex_runtime_capsule_archive(
                 &core,
@@ -1596,7 +1615,7 @@ int main(int argc, char** argv) {
         let host_gpu_lane = self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpu;
         let host_gpu_core_runtime = if host_gpu_lane {
             Some(
-                build_core_c_runtime_library(&temp_dir.join("host_gpu_core_c_runtime"))
+                build_core_c_runtime_supplement_library(&temp_dir.join("host_gpu_core_c_runtime"))
                     .ok_or_else(|| "failed to build the host-gpu core-C runtime supplement".to_string())?,
             )
         } else {
@@ -2004,7 +2023,14 @@ int main(int argc, char** argv) {
                             msvc_link_args.push(format!("/INCLUDE:{name}"));
                         }
                         msvc_link_args.push(clang_cl_whole_archive_arg(&archive_path));
+                    } else if cross_target.os == simple_common::target::TargetOS::Windows {
+                        // Entry/init callers use strong GNU COFF references.
+                        // Pull only members needed by those and actual calls;
+                        // forcing optional host wrappers imports other platforms.
+                        cmd.arg(external_tool_path(&archive_path));
                     } else {
+                        // This cfg is the Windows host, not necessarily its
+                        // target. Preserve other cross-target retention policy.
                         cmd.arg("-Wl,--whole-archive")
                             .arg(external_tool_path(&archive_path))
                             .arg("-Wl,--no-whole-archive");
@@ -2141,7 +2167,7 @@ int main(int argc, char** argv) {
                     // from inside the runtime. That is why this needs no
                     // `--allow-multiple-definition`, unlike the Windows
                     // native_all + core-C layering below.
-                    let core_c = build_core_c_runtime_library(&temp_dir.join("dynamic_runtime_core_c_supplement"))
+                    let core_c = build_core_c_runtime_supplement_library(&temp_dir.join("dynamic_runtime_core_c_supplement"))
                         .ok_or_else(|| {
                             "failed to build the core-C supplement for the dynamic-runtime lane".to_string()
                         })?;
@@ -2281,7 +2307,7 @@ int main(int argc, char** argv) {
                         //     detection for the WHOLE link, permanently masking
                         //     the ~475-symbol collision class instead of
                         //     surfacing it.
-                        //   * any platform: build_core_c_runtime_library
+                        //   * any platform: build_core_c_runtime_supplement_library
                         //     returning None now aborts a previously-working
                         //     build.
                         // The Windows lane needs this supplement because
@@ -2317,7 +2343,7 @@ int main(int argc, char** argv) {
                         // build" attempt failed with 475 collisions: compiling
                         // it INTO the crate gives the linker no such choice.
                         let core_c_runtime =
-                            build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
+                            build_core_c_runtime_supplement_library(&temp_dir.join("core_c_bootstrap_supplement"))
                                 .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
                         cmd.arg(external_tool_path(core_c_runtime));
                         // TODO: [driver][P2] Establish which runtime actually wins a hosted link: native_all and the core-C supplement both define the ~514 overlapping rt_* symbols counted below and archive order alone decides, but no nm dump over a produced link artifact has ever been inspected -- that dump is the missing evidence, and until it exists the precedence claimed here is asserted, not measured

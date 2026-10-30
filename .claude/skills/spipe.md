@@ -19,6 +19,9 @@ Keep tagged workarounds separate from permanent fixes; create a reproducing
 scenario and similar prevention scenarios, with authored tests clearly marked
 unexecuted until the real runner executes them.
 
+Stage 2 native miscompile classes seen in Phase 3 (symptoms, workarounds, status):
+[catalog](../../doc/07_guide/compiler/robustness/stage2_native_miscompile_classes.md).
+
 For bootstrap build/test sweeps, continue independent scenarios after failures
 and collect terminal results. A usable artifact plus minimum sanity permits
 diagnostic continuation; failed qualification still prevents admission and
@@ -157,6 +160,24 @@ The SPipe dev entrypoint lives at:
 Codex routes SPipe development work through `$sp_dev`:
 
 **[.codex/skills/sp_dev/SKILL.md](../../.codex/skills/sp_dev/SKILL.md)**
+
+### HAL tests through Simple
+
+Implement HAL/runtime behavior tests as modern SSpec `*_spec.spl` scenarios
+run through `simple test` wherever Simple can reach the contract. Prefer the
+production SOSIX/HAL facade; for a low-level ABI or provider contract, Simple
+can call backed `rt_*` symbols via explicit `extern fn` declarations. Verify
+the actual signature, linking/registration, and execution mode first. This is
+a focused test-boundary exception, not permission for product code to bypass
+its facade. C harnesses support only the portions Simple cannot exercise;
+record the limitation and keep reachable assertions in Simple.
+
+Native HAL acceptance requires the selected real provider on the required
+host, executed examples, and the exact compiler/runtime identity. Interpreter
+emulation, unsupported-host branches, missing externs, and zero executed
+examples cannot qualify it. Read the
+[HAL testing procedure](../../doc/07_guide/infra/testing.md#hal-and-runtime-tests-through-simple)
+for facade/FFI selection, host guards, and evidence accounting.
 
 ### MC/DC and RT/HAL evidence lane
 
@@ -2961,6 +2982,31 @@ identity, hashes, logs, sanity, and markers are returned.
 Cap each live failure lane at three distinct fix/verify cycles. Do not repeat an
 identical failed command or promote executable existence, static checks, or
 frontier review to a false PASS.
+
+### Bootstrap Hello execution evidence
+
+The native Hello acceptance target has 16 individual cases: source, two-object,
+static-library, and shared-library forms, each built with LLVM and Cranelift
+and run by both the direct compiler path and BuildRunner. Keep one evidence
+row per `(form, backend, path)` with command, exact compiler identity, artifact
+hash, exit status, and observed `Hello, World!` output. Use `PASS`, `FAIL`,
+`UNRUN`, or `UNSUPPORTED`; missing evidence is `UNRUN`, and neither
+`UNSUPPORTED` nor a successful compile-only step is a pass.
+
+Current `scripts/bootstrap/hello-sanity-matrix.py` coverage is four direct
+cases for the selected backend per invocation. Optional one-source BuildRunner
+execution requires a qualified manager, manifest writer, worker template, and
+target, plus verified output and enforced-memory receipts. The other three
+BuildRunner forms remain `UNRUN`; without providers all four remain `UNRUN`.
+Pending required BuildRunner cells prevent overall `PASS`. Do not imply that
+one report proves the second backend or all BuildRunner cases. See
+[`bootstrap_parallel_handoff.md`](../../doc/07_guide/app/llm/bootstrap_parallel_handoff.md#hello-sanity-16-native-execution-cases-and-phase-interpreter-checks)
+for the full matrix and receipts. Track interpreter evidence separately:
+Phase 1 requires its own seed in interpreter mode; Phase 2 records
+`SKIPPED` because the minimal compiler has no `run`; Phase 3 requires a full
+CLI bound to that exact phase 3 producer, source, and runtime. An ambient CLI
+cannot qualify a phase. Do not call the phase gate complete while any required
+matrix or interpreter case is `UNRUN`, `UNSUPPORTED`, or `FAIL`.
 
 ## Host storage precondition (added 2026-08-11)
 

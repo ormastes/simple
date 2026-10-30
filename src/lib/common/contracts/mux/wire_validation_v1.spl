@@ -1,0 +1,289 @@
+# Closed-shape semantics shared by wire producers/consumers. These checks do
+# not authenticate an endpoint, lease, receipt ledger or actual capability.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.validation_v1.*
+use std.common.contracts.mux.request_validation_v1.*
+use std.common.contracts.mux.wire_types_v1.*
+use std.common.contracts.mux.wire_primitives_v1.*
+use std.common.text_bytes.{text_to_bytes}
+
+fn bad() -> MuxWireErrorV1: mux_wire_error_v1("invalid_typed_payload")
+
+pub fn mux_wire_bounded_text_v1(value: text, limit: i64, empty: bool) -> Result<(), MuxWireErrorV1>:
+    mux_wire_size_text_v1(value)?
+    val bytes = text_to_bytes(value)
+    if bytes.len() > limit or (not empty and bytes.len() == 0): return Err(bad())
+    for byte in bytes:
+        if byte < 32 or byte == 127: return Err(bad())
+    Ok(())
+
+pub fn mux_wire_same_handle_v1(left: MuxHandleV1, right: MuxHandleV1) -> bool:
+    left.owner_id == right.owner_id and left.owner_generation == right.owner_generation and left.lease_id == right.lease_id
+
+pub fn mux_wire_ref_v1(owner: text, generation: u64, target: MuxObjectRefV1, kind: MuxObjectKindV1) -> Result<(), MuxWireErrorV1>:
+    if mux_make_object_ref_v1(target.owner_id, target.owner_generation, target.kind, target.object_id).is_err(): return Err(bad())
+    if target.owner_id != owner or target.owner_generation != generation or target.kind != kind: return Err(bad())
+    Ok(())
+
+pub fn mux_wire_context_v1(handle: MuxHandleV1, context: MuxContextV1) -> Result<(), MuxWireErrorV1>:
+    match context.client:
+        case Some(target): mux_wire_ref_v1(handle.owner_id, handle.owner_generation, target, MuxObjectKindV1.Client)?
+        case nil: ()
+    match context.session:
+        case Some(target): mux_wire_ref_v1(handle.owner_id, handle.owner_generation, target, MuxObjectKindV1.Session)?
+        case nil: ()
+    match context.window:
+        case Some(target): mux_wire_ref_v1(handle.owner_id, handle.owner_generation, target, MuxObjectKindV1.Window)?
+        case nil: ()
+    match context.pane:
+        case Some(target): mux_wire_ref_v1(handle.owner_id, handle.owner_generation, target, MuxObjectKindV1.Pane)?
+        case nil: ()
+    Ok(())
+
+pub fn mux_wire_validate_call_v1(call: MuxWireCallV1, frame_limit: i64) -> Result<(), MuxWireErrorV1>:
+    match call:
+        case MuxWireCallV1.Connect(options, deadline):
+            if mux_make_connect_v1(options.backend, options.namespace, options.endpoint_policy, options.client_identity, options.limits).is_err() or mux_validate_deadline_v1(deadline).is_err(): return Err(bad())
+        case MuxWireCallV1.Query(handle, query, deadline):
+            if mux_validate_query_v1(handle, query, deadline).is_err(): return Err(bad())
+            match query:
+                case MuxQueryV1.Capture(request):
+                    # Reserve envelope/reference/continuation metadata plus hex expansion.
+                    if request.max_bytes > (frame_limit - 2048) / 2: return Err(mux_wire_error_v1("capture_frame_budget"))
+                case _: ()
+        case MuxWireCallV1.Execute(request):
+            if mux_validate_request_v1(request).is_err(): return Err(bad())
+        case MuxWireCallV1.PollEvents(handle, _, limits, deadline):
+            if mux_validate_handle_v1(handle).is_err() or mux_validate_event_limits_v1(limits).is_err() or mux_validate_deadline_v1(deadline).is_err(): return Err(bad())
+            # max_bytes is the complete encoded event-result budget, not raw text.
+            if limits.max_bytes > frame_limit - 128: return Err(mux_wire_error_v1("events_frame_budget"))
+        case MuxWireCallV1.Disconnect(request):
+            if mux_validate_disconnect_v1(request).is_err(): return Err(bad())
+    Ok(())
+
+pub fn mux_wire_capabilities_v1(handle: MuxHandleV1, backend: MuxBackendV1, capabilities: [MuxOperationCapabilityV1]) -> Result<(), MuxWireErrorV1>:
+    if capabilities.len() > 39: return Err(bad())
+    var seen: [MuxOperationV1] = []
+    for capability in capabilities:
+        if capability.owner_id != handle.owner_id or capability.owner_generation != handle.owner_generation or capability.backend != backend or seen.contains(capability.operation): return Err(bad())
+        seen.push(capability.operation)
+        if mux_validate_core_limits_v1(capability.limits).is_err(): return Err(bad())
+        mux_wire_bounded_text_v1(capability.backend_version, 256, false)?
+        if capability.constraints.len() > 16: return Err(bad())
+        for constraint in capability.constraints: mux_wire_bounded_text_v1(constraint, 1024, false)?
+        match capability.evidence:
+            case MuxEvidenceV1.NotRun: ()
+            case MuxEvidenceV1.Blocked(reason): mux_wire_bounded_text_v1(reason, 1024, false)?
+            case MuxEvidenceV1.Qualified(receipt): mux_wire_bounded_text_v1(receipt, 1024, false)?
+    Ok(())
+
+fn check_child(child: MuxChildStateV1) -> Result<(), MuxWireErrorV1>:
+    match child:
+        case MuxChildStateV1.Running(pid):
+            if pid <= 0: return Err(bad())
+        case MuxChildStateV1.Exited(pid, _, signal):
+            if pid <= 0: return Err(bad())
+            match signal:
+                case Some(name): mux_wire_bounded_text_v1(name, 256, false)?
+                case nil: ()
+        case MuxChildStateV1.Unknown(last_pid, reason):
+            match last_pid:
+                case Some(pid):
+                    if pid <= 0: return Err(bad())
+                case nil: ()
+            mux_wire_bounded_text_v1(reason, 1024, false)?
+    Ok(())
+
+fn check_layout(handle: MuxHandleV1, layout: MuxLayoutStateV1) -> Result<(), MuxWireErrorV1>:
+    if mux_validate_size_v1(layout.canvas).is_err() or layout.rectangles.len() > 16384: return Err(bad())
+    var seen: Dict<text, bool> = {}
+    for item in layout.rectangles:
+        mux_wire_ref_v1(handle.owner_id, handle.owner_generation, item.pane, MuxObjectKindV1.Pane)?
+        if seen.contains_key(item.pane.object_id) or mux_validate_rect_v1(item.rectangle).is_err(): return Err(bad())
+        seen[item.pane.object_id] = true
+        if item.rectangle.x_cells > layout.canvas.columns - item.rectangle.width_cells or item.rectangle.y_cells > layout.canvas.rows - item.rectangle.height_cells: return Err(bad())
+    Ok(())
+
+pub fn mux_wire_validate_snapshot_v1(snapshot: MuxSnapshotV1) -> Result<(), MuxWireErrorV1>:
+    val handle = snapshot.handle
+    if mux_validate_handle_v1(handle).is_err() or mux_validate_namespace_v1(snapshot.namespace).is_err() or mux_validate_core_limits_v1(snapshot.limits).is_err(): return Err(bad())
+    if snapshot.sessions.len() > snapshot.limits.discovery.max_sessions or snapshot.windows.len() > snapshot.limits.max_windows or snapshot.panes.len() > snapshot.limits.max_panes or snapshot.clients.len() > snapshot.limits.max_clients: return Err(bad())
+    mux_wire_capabilities_v1(handle, snapshot.backend, snapshot.capabilities)?
+    var sessions: Dict<text, bool> = {}
+    var windows: Dict<text, text> = {}
+    var panes: Dict<text, text> = {}
+    var clients: Dict<text, bool> = {}
+    for session in snapshot.sessions:
+        mux_wire_ref_v1(handle.owner_id, handle.owner_generation, session.identity, MuxObjectKindV1.Session)?
+        mux_wire_bounded_text_v1(session.name, 256, false)?
+        if sessions.contains_key(session.identity.object_id): return Err(bad())
+        sessions[session.identity.object_id] = true
+    for window in snapshot.windows:
+        mux_wire_ref_v1(handle.owner_id, handle.owner_generation, window.identity, MuxObjectKindV1.Window)?
+        mux_wire_ref_v1(handle.owner_id, handle.owner_generation, window.session, MuxObjectKindV1.Session)?
+        mux_wire_bounded_text_v1(window.name, 256, false)?
+        if window.index < 0 or windows.contains_key(window.identity.object_id) or not sessions.contains_key(window.session.object_id): return Err(bad())
+        windows[window.identity.object_id] = window.session.object_id
+        check_layout(handle, window.layout)?
+        match window.restore_layout:
+            case Some(layout):
+                check_layout(handle, layout)?
+                if window.zoomed_pane == nil: return Err(bad())
+            case nil:
+                if window.zoomed_pane != nil: return Err(bad())
+    for pane in snapshot.panes:
+        mux_wire_ref_v1(handle.owner_id, handle.owner_generation, pane.identity, MuxObjectKindV1.Pane)?
+        mux_wire_ref_v1(handle.owner_id, handle.owner_generation, pane.session, MuxObjectKindV1.Session)?
+        mux_wire_ref_v1(handle.owner_id, handle.owner_generation, pane.window, MuxObjectKindV1.Window)?
+        if pane.index < 0 or panes.contains_key(pane.identity.object_id) or not windows.contains_key(pane.window.object_id): return Err(bad())
+        if windows[pane.window.object_id] != pane.session.object_id or mux_validate_rect_v1(pane.rectangle).is_err(): return Err(bad())
+        panes[pane.identity.object_id] = pane.window.object_id
+        check_child(pane.child)?
+        mux_wire_bounded_text_v1(pane.title, 256, true)?
+        mux_wire_bounded_text_v1(pane.legacy_id, 128, false)?
+        mux_wire_bounded_text_v1(pane.current_command, 4096, true)?
+    for session in snapshot.sessions:
+        match session.current_window:
+            case Some(target):
+                mux_wire_ref_v1(handle.owner_id, handle.owner_generation, target, MuxObjectKindV1.Window)?
+                if not windows.contains_key(target.object_id): return Err(bad())
+                if windows[target.object_id] != session.identity.object_id: return Err(bad())
+            case nil: ()
+    for window in snapshot.windows:
+        for target in [window.active_pane, window.zoomed_pane]:
+            match target:
+                case Some(pane):
+                    mux_wire_ref_v1(handle.owner_id, handle.owner_generation, pane, MuxObjectKindV1.Pane)?
+                    if not panes.contains_key(pane.object_id): return Err(bad())
+                    if panes[pane.object_id] != window.identity.object_id: return Err(bad())
+                case nil: ()
+        for item in window.layout.rectangles:
+            if not panes.contains_key(item.pane.object_id): return Err(bad())
+            if panes[item.pane.object_id] != window.identity.object_id: return Err(bad())
+        match window.restore_layout:
+            case Some(layout):
+                for item in layout.rectangles:
+                    if not panes.contains_key(item.pane.object_id): return Err(bad())
+                    if panes[item.pane.object_id] != window.identity.object_id: return Err(bad())
+            case nil: ()
+    for client in snapshot.clients:
+        mux_wire_ref_v1(handle.owner_id, handle.owner_generation, client.identity, MuxObjectKindV1.Client)?
+        if clients.contains_key(client.identity.object_id) or mux_validate_size_v1(client.viewport).is_err(): return Err(bad())
+        clients[client.identity.object_id] = true
+        mux_wire_context_v1(handle, client.context)?
+        match client.context.client:
+            case Some(target):
+                if target.object_id != client.identity.object_id: return Err(bad())
+            case nil: ()
+        match client.context.session:
+            case Some(target):
+                if not sessions.contains_key(target.object_id): return Err(bad())
+            case nil: ()
+        match client.context.window:
+            case Some(target):
+                if not windows.contains_key(target.object_id): return Err(bad())
+                match client.context.session:
+                    case Some(session):
+                        if windows[target.object_id] != session.object_id: return Err(bad())
+                    case nil: ()
+            case nil: ()
+        match client.context.pane:
+            case Some(target):
+                if not panes.contains_key(target.object_id): return Err(bad())
+                match client.context.window:
+                    case Some(window):
+                        if panes[target.object_id] != window.object_id: return Err(bad())
+                    case nil: ()
+                match client.context.session:
+                    case Some(session):
+                        if windows[panes[target.object_id]] != session.object_id: return Err(bad())
+                    case nil: ()
+            case nil: ()
+    Ok(())
+
+pub fn mux_wire_validate_error_v1(failure: MuxErrorV1) -> Result<(), MuxWireErrorV1>:
+    mux_wire_bounded_text_v1(failure.detail, 1024, true)?
+    if failure.affected.len() > 16384: return Err(bad())
+    for target in failure.affected:
+        if mux_make_object_ref_v1(target.owner_id, target.owner_generation, target.kind, target.object_id).is_err(): return Err(bad())
+    if failure.kind == MuxErrorKindV1.Unsupported and (failure.commit_state != MuxCommitStateV1.NotApplied or failure.affected.len() != 0 or failure.cleanup_pending): return Err(bad())
+    Ok(())
+
+fn check_cleanup(handle: MuxHandleV1, cleanup: MuxCleanupV1) -> Result<(), MuxWireErrorV1>:
+    mux_wire_bounded_text_v1(cleanup.detail, 1024, true)?
+    if cleanup.remaining.len() > 16384 or (not cleanup.pending and cleanup.remaining.len() != 0): return Err(bad())
+    for target in cleanup.remaining: mux_wire_ref_v1(handle.owner_id, handle.owner_generation, target, target.kind)?
+    Ok(())
+
+fn check_notification(owner: text, generation: u64, notification: MuxNotificationReceiptV1) -> Result<(), MuxWireErrorV1>:
+    mux_wire_bounded_text_v1(notification.notification_id, 128, false)?
+    match notification.state:
+        case MuxNotificationStateV1.Rendered(clients):
+            if clients.len() > 4096: return Err(bad())
+            for target in clients: mux_wire_ref_v1(owner, generation, target, MuxObjectKindV1.Client)?
+        case _: ()
+    Ok(())
+
+pub fn mux_wire_validate_events_v1(batch: MuxEventBatchV1) -> Result<(), MuxWireErrorV1>:
+    if mux_validate_handle_v1(MuxHandleV1(owner_id: batch.owner_id, owner_generation: batch.owner_generation, lease_id: "shape-check-only")).is_err(): return Err(bad())
+    if batch.from_cursor > batch.to_cursor or batch.events.len() > 1024: return Err(bad())
+    var cursor = batch.from_cursor
+    for event in batch.events:
+        if event.cursor <= cursor or event.cursor > batch.to_cursor: return Err(bad())
+        cursor = event.cursor
+        match event.causal_request_id:
+            case Some(id):
+                if id == 0: return Err(bad())
+            case nil: ()
+        match event.kind:
+            case MuxEventKindV1.ObjectCreated(target): mux_wire_ref_v1(batch.owner_id, batch.owner_generation, target, target.kind)?
+            case MuxEventKindV1.ObjectChanged(target): mux_wire_ref_v1(batch.owner_id, batch.owner_generation, target, target.kind)?
+            case MuxEventKindV1.ObjectTerminated(target): mux_wire_ref_v1(batch.owner_id, batch.owner_generation, target, target.kind)?
+            case MuxEventKindV1.ChildExited(pane, child):
+                mux_wire_ref_v1(batch.owner_id, batch.owner_generation, pane, MuxObjectKindV1.Pane)?
+                check_child(child)?
+            case MuxEventKindV1.ContentAvailable(pane, _): mux_wire_ref_v1(batch.owner_id, batch.owner_generation, pane, MuxObjectKindV1.Pane)?
+            case MuxEventKindV1.LayoutChanged(window): mux_wire_ref_v1(batch.owner_id, batch.owner_generation, window, MuxObjectKindV1.Window)?
+            case MuxEventKindV1.Notification(notification): check_notification(batch.owner_id, batch.owner_generation, notification)?
+            case MuxEventKindV1.LeaseRevoked: ()
+    Ok(())
+
+pub fn mux_wire_validate_result_v1(result: MuxWireResultV1) -> Result<(), MuxWireErrorV1>:
+    match result:
+        case MuxWireResultV1.Connection(connection):
+            mux_wire_validate_snapshot_v1(connection.snapshot)?
+            if mux_validate_lease_terms_v1(connection.lease_terms).is_err(): return Err(bad())
+        case MuxWireResultV1.Query(query):
+            match query:
+                case MuxQueryResultV1.Snapshot(snapshot): mux_wire_validate_snapshot_v1(snapshot)?
+                case MuxQueryResultV1.ResolvedTarget(target):
+                    if mux_make_object_ref_v1(target.owner_id, target.owner_generation, target.kind, target.object_id).is_err(): return Err(bad())
+                case MuxQueryResultV1.Captured(capture):
+                    if capture.byte_extent != capture.bytes.len() or capture.bytes.len() > 1048576 or capture.truncated != (capture.continuation != nil): return Err(bad())
+                    if mux_make_object_ref_v1(capture.pane.owner_id, capture.pane.owner_generation, capture.pane.kind, capture.pane.object_id).is_err() or capture.pane.kind != MuxObjectKindV1.Pane: return Err(bad())
+                    match capture.continuation:
+                        case Some(token): mux_wire_bounded_text_v1(token, 1024, false)?
+                        case nil: ()
+                case MuxQueryResultV1.Context(_): () # bound against request handle by client/server
+                case MuxQueryResultV1.RequestReceipt(receipt):
+                    if mux_validate_receipt_v1(receipt).is_err(): return Err(bad())
+                case MuxQueryResultV1.Capabilities(capabilities):
+                    if capabilities.len() > 39: return Err(bad()) # owner-bound at response correlation
+        case MuxWireResultV1.Mutation(mutation):
+            if mux_validate_receipt_v1(mutation.receipt).is_err(): return Err(bad())
+            mux_wire_validate_snapshot_v1(mutation.snapshot)?
+            if not mux_wire_same_handle_v1(mutation.receipt.handle, mutation.snapshot.handle) or mutation.revision != mutation.snapshot.revision or mutation.receipt.observed_revision != Some(mutation.revision) or mutation.cleanup.pending != mutation.receipt.cleanup_pending: return Err(bad())
+            for target in mutation.created: mux_wire_ref_v1(mutation.snapshot.handle.owner_id, mutation.snapshot.handle.owner_generation, target, target.kind)?
+            for target in mutation.changed: mux_wire_ref_v1(mutation.snapshot.handle.owner_id, mutation.snapshot.handle.owner_generation, target, target.kind)?
+            check_cleanup(mutation.snapshot.handle, mutation.cleanup)?
+            match mutation.notification:
+                case Some(notification): check_notification(mutation.snapshot.handle.owner_id, mutation.snapshot.handle.owner_generation, notification)?
+                case nil: ()
+        case MuxWireResultV1.Events(events): mux_wire_validate_events_v1(events)?
+        case MuxWireResultV1.Disconnect(disconnect):
+            if mux_validate_receipt_v1(disconnect.receipt).is_err() or disconnect.receipt.operation != Some(MuxOperationV1.Disconnect) or disconnect.receipt.observed_revision != Some(disconnect.revision) or disconnect.cleanup.pending != disconnect.receipt.cleanup_pending: return Err(bad())
+            check_cleanup(disconnect.receipt.handle, disconnect.cleanup)?
+            for target in disconnect.released_clients: mux_wire_ref_v1(disconnect.receipt.handle.owner_id, disconnect.receipt.handle.owner_generation, target, MuxObjectKindV1.Client)?
+    Ok(())

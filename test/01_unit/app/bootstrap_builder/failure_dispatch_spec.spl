@@ -1,7 +1,8 @@
-# Executes the production manager loop with a counting process port. No OS
-# child is created; these are dispatch-policy tests, not containment evidence.
+# Executes the production manager loop with a counting worker process port.
+# Unix staging runs chmod; compiler/worker launch is simulated. These are
+# dispatch-policy tests, not containment evidence.
 use std.spec.{describe, it, expect}
-use app.bootstrap_builder.main.{builder_cli_run_locked_v1}
+use app.buildrunner.cli.{builder_cli_run_locked_v1}
 use app.bootstrap_builder.cli_args.{BuilderCliV1}
 use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildRunV1, BuildResultV1,
     builder_task_identity_v1}
@@ -9,6 +10,7 @@ use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_encode
     builder_manager_decode_v1}
 use app.bootstrap_builder.codec.{builder_write_result_v1}
 use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_poll_v1}
 use app.io.file_ops.{file_atomic_write, file_read, file_hash_sha256}
 use app.io.dir_ops.{dir_create_all}
 use app.io.env_ops.{cwd}
@@ -33,7 +35,7 @@ fn failure_dispatch_spawn(program: text, digest: text, args: [text], directory: 
 
 fn failure_dispatch_wait(token: i64, timeout_ms: i64) -> Result<i64, text>:
     failure_dispatch_waits = failure_dispatch_waits.push(str(token) + ":" + str(timeout_ms))
-    if failure_dispatch_mode == "collect-error": return Ok(1)
+    if failure_dispatch_mode == "collect-error" or failure_dispatch_mode == "exit-without-proof": return Ok(1)
     Err("injected observation failure")
 
 fn failure_dispatch_terminate(token: i64) -> Result<bool, text>:
@@ -56,7 +58,7 @@ fn failure_dispatch_fixture(name: text, retained_status: text, slots: i64 = 1) -
     for id in ["first", "independent", "last"]:
         tasks = tasks.push(BuildTaskV1(id: id, attempt: 1, phase: "module",
             producer_digest: digest, source_digest: digest, toolchain_digest: digest,
-            dependencies: [], program: image, args: [], inputs: [], outputs: ["out.bin"],
+            dependencies: [], program: image, args: [], inputs: [], outputs: [id + ".bin"],
             cache_key: digest, timeout_ms: 1000, memory_limit_bytes: 1048576, links: []))
     val run = BuildRunV1(tasks: tasks, hosts: [BuildHostV1(id: "local", transport: "local",
         endpoint: "", workspace: root, worker_program: image, worker_digest: digest, slots: slots)],
@@ -94,11 +96,37 @@ fn failure_dispatch_reset(mode: text):
     failure_dispatch_roots = []
 
 describe "manager does not dispatch after unknown authority":
+    it "quarantines a reaped local worker whose compiler ownership proof is missing":
+        val (run, config) = failure_dispatch_fixture("exit-without-proof", "")
+        failure_dispatch_reset("exit-without-proof")
+        val task = run.tasks[0]
+        val probe = BuilderAttemptV1(task_id: task.id, attempt: task.attempt,
+            host: run.hosts[0], pid: 78,
+            local_root: config.state + "/probe", remote_root: "",
+            error: "", identity_digest: builder_task_identity_v1(task),
+            process: failure_dispatch_port())
+        # Fail before entering the manager loop on the old implementation,
+        # which mislabeled the cached worker exit as pending forever.
+        expect(builder_transport_poll_v1(probe)).to_equal(-1)
+        expect(builder_transport_poll_v1(probe)).to_equal(-1)
+        expect(failure_dispatch_waits.len()).to_equal(1)
+        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port(), nil)).to_equal(2)
+        expect(failure_dispatch_spawns).to_equal(1)
+        expect(failure_dispatch_waits.len()).to_equal(2)
+        match builder_manager_decode_v1(run, file_read(config.state + "/journal.sdn")):
+            Ok(restored):
+                expect(restored.statuses[0]).to_equal("RUNNING")
+                expect(restored.tasks[0].attempt).to_equal(1)
+                expect(restored.host_ids[0]).to_equal("local")
+                expect(restored.statuses[1]).to_equal("PENDING")
+                expect(restored.statuses[2]).to_equal("PENDING")
+            Err(reason): expect(reason).to_equal("valid unresolved ownership journal")
+
     it "rejects missing, crashed and unproven retained failure before independent dispatch":
         for status in ["missing", "CRASHED", "ERROR"]:
             val (run, config) = failure_dispatch_fixture(status, status)
             failure_dispatch_reset("unknown")
-            expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port())).to_equal(2)
+            expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port(), nil)).to_equal(2)
             expect(failure_dispatch_spawns).to_equal(0)
             match builder_manager_decode_v1(run, file_read(config.state + "/journal.sdn")):
                 Ok(restored): expect(restored.statuses[1]).to_equal("PENDING")
@@ -107,7 +135,7 @@ describe "manager does not dispatch after unknown authority":
     it "keeps the uncertain first attempt owned and never dispatches the second":
         val (run, config) = failure_dispatch_fixture("poll", "")
         failure_dispatch_reset("unknown")
-        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port())).to_equal(2)
+        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port(), nil)).to_equal(2)
         expect(failure_dispatch_spawns).to_equal(1)
         match builder_manager_decode_v1(run, file_read(config.state + "/journal.sdn")):
             Ok(restored):
@@ -121,7 +149,7 @@ describe "manager does not dispatch after unknown authority":
         failure_dispatch_reset("unknown")
         # The newly launched independent child is intentionally uncertain;
         # exit2 comes from that child, after the retained ERROR1 was admitted.
-        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port())).to_equal(2)
+        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port(), nil)).to_equal(2)
         expect(failure_dispatch_spawns).to_equal(1)
         expect(failure_dispatch_roots[0]).to_contain("/independent/1/local")
         expect(failure_dispatch_waits.contains("78:1")).to_equal(true)
@@ -131,21 +159,23 @@ describe "manager does not dispatch after unknown authority":
         val (run, config) = failure_dispatch_fixture("collect-error", "")
         failure_dispatch_reset("collect-error")
         failure_dispatch_identity = builder_task_identity_v1(run.tasks[0])
-        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port())).to_equal(2)
+        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port(), nil)).to_equal(2)
         expect(failure_dispatch_spawns).to_equal(1)
         expect(failure_dispatch_waits.contains("78:1")).to_equal(true)
-        expect(failure_dispatch_waits.contains("78:30000")).to_equal(true)
+        # The completed wait is cached even when result collection fails;
+        # cleanup must not wait on the already consumed process token again.
+        expect(failure_dispatch_waits.contains("78:30000")).to_equal(false)
         expect(file_read(failure_dispatch_roots[0] + "/cancel.request")).to_equal("cancel\n")
         match builder_manager_decode_v1(run, file_read(config.state + "/journal.sdn")):
             Ok(restored):
-                expect(restored.statuses[0]).to_equal("UNRESOLVED")
+                expect(restored.statuses[0]).to_equal("RUNNING")
                 expect(restored.statuses[1]).to_equal("PENDING")
             Err(reason): expect(reason).to_equal("valid unresolved collection journal")
 
     it "requests bounded cleanup for every owned uncertain attempt before any third dispatch":
         val (run, config) = failure_dispatch_fixture("two-owned", "", 2)
         failure_dispatch_reset("unknown")
-        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port())).to_equal(2)
+        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port(), nil)).to_equal(2)
         expect(failure_dispatch_spawns).to_equal(2)
         for token in [78, 79]:
             expect(failure_dispatch_waits.contains(str(token) + ":30000")).to_equal(true)

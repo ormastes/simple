@@ -1,0 +1,137 @@
+# Bounded representation validation only. Live ownership, authentication and
+# request effects remain the responsibility of the registered provider.
+use std.common.contracts.mux.core_v1.*
+use std.common.text_bytes.{text_to_bytes}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+fn invalid_value(detail: text) -> MuxErrorV1:
+    MuxErrorV1(kind: MuxErrorKindV1.InvalidRequest, detail: detail,
+        request_id: 0, commit_state: MuxCommitStateV1.NotApplied,
+        observed_revision: nil, affected: [], cleanup_pending: false)
+
+fn bounded_text(value: text, maximum: i64) -> bool:
+    # The first check bounds conversion even if a configured text length is
+    # scalar-based; the byte-array check then enforces the actual UTF8 budget.
+    if value.len() == 0 or value.len() > maximum: return false
+    val bytes = text_to_bytes(value)
+    if bytes.len() > maximum: return false
+    if validated_utf8_bytes_to_text_linear(bytes).is_err(): return false
+    for byte in bytes:
+        if byte < 32 or byte == 127: return false
+    # After UTF8 validation, C2 80..9F encodes exactly the C1 scalars
+    # U+0080..U+009F. Do not reject continuation bytes in other valid scalars.
+    for index in 0..bytes.len():
+        if bytes[index] == 194 and index + 1 < bytes.len():
+            if bytes[index + 1] >= 128 and bytes[index + 1] <= 159:
+                return false
+    true
+
+fn opaque_id(value: text) -> bool:
+    if not bounded_text(value, MUX_ID_MAX_BYTES_V1): return false
+    # IDs are opaque ASCII tokens, not shell fragments, paths or display names.
+    for byte in text_to_bytes(value):
+        if byte <= 32 or byte >= 127: return false
+    true
+
+pub fn mux_validate_namespace_v1(namespace: text) -> Result<text, MuxErrorV1>:
+    """Validate a bounded namespace value without opening or creating an endpoint."""
+    if not bounded_text(namespace, MUX_NAMESPACE_MAX_BYTES_V1):
+        return Err(invalid_value("invalid namespace text"))
+    if namespace == "." or namespace == ".." or namespace.contains("/") or namespace.contains("\\") or namespace.contains(":"):
+        return Err(invalid_value("namespace must not be a path"))
+    if namespace.ends_with(".") or namespace.ends_with(" "):
+        return Err(invalid_value("namespace must not have a platform path alias suffix"))
+    # This is still a logical name. Endpoint owners must encode/map it safely,
+    # never use an untrusted namespace as an unchecked filesystem component.
+    Ok(namespace)
+
+pub fn mux_validate_limits_v1(limits: MuxLimitsV1) -> Result<MuxLimitsV1, MuxErrorV1>:
+    """Validate declared discovery budgets; this does not negotiate provider limits."""
+    if limits.max_sessions < 1 or limits.max_sessions > MUX_SESSIONS_MAX_V1:
+        return Err(invalid_value("invalid session limit"))
+    if limits.max_reply_bytes < 1 or limits.max_reply_bytes > 1048576:
+        return Err(invalid_value("invalid reply byte limit"))
+    Ok(limits)
+
+pub fn mux_make_connect_v1(backend: MuxBackendV1, namespace: text,
+        policy: MuxEndpointPolicyV1, client_identity: text,
+        limits: MuxLimitsV1) -> Result<MuxConnectV1, MuxErrorV1>:
+    """Create a request value, not a connection. Both backends accept either policy."""
+    mux_validate_namespace_v1(namespace)?
+    mux_validate_limits_v1(limits)?
+    if not bounded_text(client_identity, MUX_NAME_MAX_BYTES_V1):
+        return Err(invalid_value("invalid client identity"))
+    Ok(MuxConnectV1(backend: backend, namespace: namespace,
+        endpoint_policy: policy, client_identity: client_identity, limits: limits))
+
+pub fn mux_validate_handle_v1(handle: MuxHandleV1) -> Result<MuxHandleV1, MuxErrorV1>:
+    """Check token shape only; a syntactically valid handle may be stale or forged."""
+    if not opaque_id(handle.owner_id) or not opaque_id(handle.lease_id) or handle.owner_generation == 0:
+        return Err(invalid_value("invalid owner handle"))
+    Ok(handle)
+
+pub fn mux_make_object_ref_v1(owner_id: text, owner_generation: u64,
+        kind: MuxObjectKindV1, object_id: text) -> Result<MuxObjectRefV1, MuxErrorV1>:
+    """Create an object reference value; it does not prove object existence."""
+    if not opaque_id(owner_id) or owner_generation == 0 or not opaque_id(object_id):
+        return Err(invalid_value("invalid object reference"))
+    Ok(MuxObjectRefV1(owner_id: owner_id, owner_generation: owner_generation,
+        kind: kind, object_id: object_id))
+
+pub fn mux_validate_capability_v1(capability: MuxCapabilityV1) -> Result<MuxCapabilityV1, MuxErrorV1>:
+    """Validate descriptor representation, never certify its support or receipt."""
+    if not opaque_id(capability.owner_id) or capability.owner_generation == 0:
+        return Err(invalid_value("invalid capability owner"))
+    if not bounded_text(capability.backend_version, MUX_NAME_MAX_BYTES_V1):
+        return Err(invalid_value("invalid backend version"))
+    mux_validate_limits_v1(capability.limits)?
+    if capability.constraints.len() > 16:
+        return Err(invalid_value("too many capability constraints"))
+    for constraint in capability.constraints:
+        if not bounded_text(constraint, MUX_DETAIL_MAX_BYTES_V1):
+            return Err(invalid_value("invalid capability constraint"))
+    match capability.evidence:
+        case MuxEvidenceV1.NotRun: ()
+        case MuxEvidenceV1.Blocked(reason):
+            if not bounded_text(reason, MUX_DETAIL_MAX_BYTES_V1):
+                return Err(invalid_value("missing blocked evidence reason"))
+        case MuxEvidenceV1.Qualified(receipt):
+            if not bounded_text(receipt, MUX_DETAIL_MAX_BYTES_V1):
+                return Err(invalid_value("missing qualification receipt reference"))
+    Ok(capability)
+
+pub fn mux_validate_discovery_v1(value: MuxDiscoveryV1) -> Result<MuxDiscoveryV1, MuxErrorV1>:
+    """Check an immutable metadata reply's consistency, not the remote owner's truth."""
+    mux_validate_namespace_v1(value.namespace)?
+    mux_validate_handle_v1(value.handle)?
+    if value.sessions.len() > MUX_SESSIONS_MAX_V1:
+        return Err(invalid_value("too many sessions"))
+    if value.capabilities.len() > 3:
+        return Err(invalid_value("too many discovery capabilities"))
+    var ids: [text] = []
+    for session in value.sessions:
+        val identity = session.identity
+        mux_make_object_ref_v1(identity.owner_id, identity.owner_generation,
+            identity.kind, identity.object_id)?
+        if identity.kind != MuxObjectKindV1.Session:
+            return Err(invalid_value("session has wrong object kind"))
+        if identity.owner_id != value.handle.owner_id or identity.owner_generation != value.handle.owner_generation:
+            return Err(invalid_value("session belongs to another owner generation"))
+        if not bounded_text(session.name, MUX_NAME_MAX_BYTES_V1):
+            return Err(invalid_value("invalid session name"))
+        if ids.contains(identity.object_id):
+            return Err(invalid_value("duplicate session identity"))
+        ids.push(identity.object_id)
+    var operations: [MuxDiscoveryOperationV1] = []
+    for capability in value.capabilities:
+        mux_validate_capability_v1(capability)?
+        if capability.owner_id != value.handle.owner_id or capability.owner_generation != value.handle.owner_generation or capability.backend != value.backend:
+            return Err(invalid_value("capability belongs to another backend or owner"))
+        if operations.contains(capability.operation):
+            return Err(invalid_value("duplicate discovery capability"))
+        if value.sessions.len() > capability.limits.max_sessions:
+            return Err(invalid_value("session count exceeds advertised limit"))
+        operations.push(capability.operation)
+    # Empty capabilities are a truthful unqualified observation, not a claim
+    # that mandatory CoreMux operations exist. Provider admission checks that.
+    Ok(value)

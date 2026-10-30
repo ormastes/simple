@@ -1,0 +1,93 @@
+# Lock-free per-worker run queue (Chase–Lev work-stealing deque) in raw
+# shared memory. Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §3.
+#
+# The queue holds FIBER IDS ONLY (i64 > 0), never fiber state: worker threads
+# do not share a heap, so a thief can take only a fiber that has not started
+# (its whole state is created by whoever starts it). A started fiber stays on
+# its owner, which also keeps its parse -> HIR -> MIR -> obj chain on one
+# socket. Owner: push/pop at the bottom (LIFO). Thieves: steal at the top
+# (FIFO) with one CAS. Every access goes through the sequentially consistent
+# `rt_par_atomic_*` primitives, so the protocol is correct on weakly ordered
+# CPUs too. No locks anywhere.
+#
+# Layout at `addr` (8-byte cells): [0] top, [1] bottom, [2] capacity,
+# [3 .. 3+capacity) slots. Fixed capacity: `push` returns false when full and
+# the caller keeps the fiber in its admission list (backpressure).
+
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free}
+
+extern fn rt_par_atomic_add_i64(addr: i64, value: i64) -> i64
+extern fn rt_par_atomic_xchg_i64(addr: i64, value: i64) -> i64
+extern fn rt_par_atomic_cmpxchg_i64(addr: i64, expected: i64, value: i64) -> i64
+
+val WORK_QUEUE_EMPTY: i64 = 0
+val WORK_QUEUE_RETRY: i64 = -1
+
+fn _wq_load(cell: i64) -> i64:
+    rt_par_atomic_add_i64(cell, 0)
+
+fn _wq_store(cell: i64, value: i64):
+    rt_par_atomic_xchg_i64(cell, value)
+
+fn _wq_top(q: i64) -> i64: q
+fn _wq_bottom(q: i64) -> i64: q + 8
+fn _wq_slot(q: i64, index: i64) -> i64:
+    val cap = _wq_load(q + 16)
+    q + 24 + (index % cap) * 8
+
+fn work_queue_new(capacity: i64) -> i64:
+    """Allocate an empty queue; returns its address (0 on failure)."""
+    if capacity <= 0: return 0
+    val q = rt_alloc((3 + capacity) * 8)
+    if q == 0: return 0
+    _wq_store(_wq_top(q), 0)
+    _wq_store(_wq_bottom(q), 0)
+    _wq_store(q + 16, capacity)
+    q
+
+fn work_queue_free(q: i64):
+    if q != 0: rt_free(q)
+
+fn work_queue_len(q: i64) -> i64:
+    val n = _wq_load(_wq_bottom(q)) - _wq_load(_wq_top(q))
+    if n > 0: n else: 0
+
+fn work_queue_push(q: i64, fiber: i64) -> bool:
+    """Owner only. False when full or `fiber <= 0`."""
+    if fiber <= 0: return false
+    val b = _wq_load(_wq_bottom(q))
+    val t = _wq_load(_wq_top(q))
+    if b - t >= _wq_load(q + 16): return false
+    _wq_store(_wq_slot(q, b), fiber)
+    _wq_store(_wq_bottom(q), b + 1)
+    true
+
+fn work_queue_pop(q: i64) -> i64:
+    """Owner only. Newest fiber id, or WORK_QUEUE_EMPTY."""
+    val b = _wq_load(_wq_bottom(q)) - 1
+    _wq_store(_wq_bottom(q), b)
+    val t = _wq_load(_wq_top(q))
+    if t > b:
+        _wq_store(_wq_bottom(q), b + 1)
+        return WORK_QUEUE_EMPTY
+    var fiber = _wq_load(_wq_slot(q, b))
+    if t == b:
+        # last element: race the thieves for it
+        if rt_par_atomic_cmpxchg_i64(_wq_top(q), t, t + 1) != t:
+            fiber = WORK_QUEUE_EMPTY
+        _wq_store(_wq_bottom(q), b + 1)
+    fiber
+
+fn work_queue_steal(q: i64) -> i64:
+    """Any thread. Oldest fiber id, WORK_QUEUE_EMPTY, or WORK_QUEUE_RETRY
+    when another thread won the race (caller may retry or move on)."""
+    val t = _wq_load(_wq_top(q))
+    val b = _wq_load(_wq_bottom(q))
+    if t >= b: return WORK_QUEUE_EMPTY
+    val fiber = _wq_load(_wq_slot(q, t))
+    if rt_par_atomic_cmpxchg_i64(_wq_top(q), t, t + 1) != t:
+        return WORK_QUEUE_RETRY
+    fiber
+
+export WORK_QUEUE_EMPTY, WORK_QUEUE_RETRY
+export work_queue_new, work_queue_free, work_queue_len, work_queue_push, work_queue_pop, work_queue_steal

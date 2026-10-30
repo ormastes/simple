@@ -1,0 +1,37 @@
+# Pure, import-free predicates deciding who may publish/use the frontend
+# cache scope (SIMPLE_FRONTEND_CACHE_SCOPE) and which identity the HIR cache
+# folds. Leaf module so specs and the CLI orchestrator can call it without
+# pulling the driver back half.
+# See doc/08_tracking/bug/hir_cache_scope_never_published_shards_disabled_2026-10-25.md.
+
+# A compiled stage2 can lose the CompileMode enum across the options struct
+# transport (bootstrap_main.spl documents mode.to_text() coming back as none
+# of aot/jit/interpret), so cli_mode_text decides when present. Only an
+# interpret run is refused.
+pub fn driver_frontend_cache_scope_publish_allowed_v1(mode_text: text, cli_mode_text: text) -> bool:
+    if cli_mode_text != "":
+        return cli_mode_text != "interpret"
+    mode_text != "interpret"
+
+# The HIR cache identity. With both caches on this is exactly the frontend
+# scope (headers unchanged). With SIMPLE_FRONTEND_CACHE=0 the frontend scope
+# reads "" by design, so the published scope is used directly.
+pub fn hir_cache_identity_scope_v1(frontend_scope: text, published_scope: text, frontend_cache_env: text) -> text:
+    if frontend_scope != "":
+        return frontend_scope
+    if frontend_cache_env == "0":
+        return published_scope
+    ""
+
+# Whether a HIR closure digest (and therefore cache keys / shard identity) may
+# be computed. The explicit-semantic-policy lane is admitted: its policy is
+# folded into the digest by hir_cache_policy_closure_digest_v1 instead.
+pub fn hir_cache_digest_allowed_v1(tldr_entry_only: bool, tldr_import_count: i64, cache_enabled: bool) -> bool:
+    (not tldr_entry_only or tldr_import_count > 0) and cache_enabled
+
+# Keeps explicit-semantic-policy entries disjoint from default-lane entries.
+# The default lane's digest is returned unchanged so existing entries stay valid.
+pub fn hir_cache_policy_closure_digest_v1(closure_digest: text, explicit_semantic_policy: bool) -> text:
+    if closure_digest == "" or not explicit_semantic_policy:
+        return closure_digest
+    closure_digest + "|compiler_explicit_semantic_policy=1"

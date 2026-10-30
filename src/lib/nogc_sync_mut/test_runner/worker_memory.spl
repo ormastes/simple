@@ -3,8 +3,9 @@
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{host_os}
 use std.common.convert.{try_parse_in_range}
+use std.common.task_runner.memory_admission.{task_memory_charge_v1, task_memory_add_v1, task_memory_fits_v1}
 
-val WORKER_MEMORY_SAMPLE_INTERVAL_US = 500000
+pub val WORKER_MEMORY_SAMPLE_INTERVAL_US = 500000
 val WORKER_MEMORY_PS_LIMIT = 1048576
 
 # ps columns are unsigned decimal tokens. Conversion methods may return zero
@@ -58,10 +59,15 @@ fn worker_memory_charges(snapshot: text, roots: [i64], reservation_kib: i64) -> 
             cursor = parents[cursor.to_text()]
         val owner = if owners.contains_key(cursor.to_text()): owners[cursor.to_text()] else: -1
         for member in chain: owners[member.to_text()] = owner
+        # Parsed rows <=16384 and each RSS <=2^40, so this sum is <=2^54.
+        # Reservation floors below have no such bound and use checked totals.
         if owner >= 0: charges[owner] = charges[owner] + kib
     index = 0
+    var total_charge: i64 = 0
     while index < charges.len():
-        if charges[index] < reservation_kib: charges[index] = reservation_kib
+        charges[index] = task_memory_charge_v1(reservation_kib, charges[index])
+        total_charge = task_memory_add_v1(total_charge, charges[index])
+        if total_charge < 0: return []
         index = index + 1
     charges
 
@@ -79,4 +85,4 @@ fn sample_worker_memory(roots: [i64], reservation_kib: i64) -> [i64]:
     worker_memory_charges(output, roots, reservation_kib)
 
 fn worker_memory_can_spawn(budget_kib: i64, charged_kib: i64, reserve_kib: i64) -> bool:
-    budget_kib > 0 and charged_kib >= 0 and reserve_kib > 0 and reserve_kib <= budget_kib and charged_kib <= budget_kib - reserve_kib
+    task_memory_fits_v1(budget_kib, charged_kib, reserve_kib)

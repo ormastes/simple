@@ -68,11 +68,13 @@ pub mod coverage;
 pub mod cache_daemon_host_authority_v1;
 pub mod cache_daemon_process_v1;
 pub mod cache_host_authority_v1;
+pub mod fork_shared_heap_v1;
 pub mod cuda_runtime;
 pub mod process_observation_v4_twins;
 pub mod debug;
 pub mod directx_submission_twins;
 pub mod executor;
+pub mod cpu_topology;
 pub mod fiber_identity;
 pub mod gemm_runtime;
 pub mod gpu_provider_twins;
@@ -463,6 +465,20 @@ fn runtime_symbol_table_contains_bootstrap_directory_provider() {
     assert!(RUNTIME_SYMBOL_ENTRIES
         .iter()
         .any(|entry| entry.name == "rt_dir_is_real_no_follow" && !entry.ptr.is_null()));
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
+fn runtime_symbol_table_contains_scope_read_provider() {
+    for name in [
+        "rt_dict_scope_read_bound_v1",
+        "rt_dict_scope_read_owner_v1",
+        "rt_dict_scope_read_epoch_v1",
+        "rt_dict_scope_read_meta_v1",
+        "rt_dict_scope_read_slot_v1",
+    ] {
+        assert_eq!(RUNTIME_SYMBOL_ENTRIES.iter().filter(|entry| entry.name == name && !entry.ptr.is_null()).count(), 1, "{name}");
+    }
 }
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
@@ -979,6 +995,11 @@ pub use value::{
     rt_dict_new,
     rt_dict_set,
     rt_dict_set_i64_raw,
+    rt_dict_scope_read_bound_v1,
+    rt_dict_scope_read_owner_v1,
+    rt_dict_scope_read_epoch_v1,
+    rt_dict_scope_read_meta_v1,
+    rt_dict_scope_read_slot_v1,
     // Enum operations
     rt_enum_check_discriminant,
     rt_enum_check_variant,
@@ -1274,6 +1295,8 @@ pub use parallel::{
     // Atomic operations
     rt_par_atomic_add_i64,
     rt_par_atomic_cmpxchg_i64,
+    rt_par_atomic_i64_is_lock_free,
+    rt_par_atomic_load_i64,
     rt_par_atomic_max_i64,
     rt_par_atomic_min_i64,
     rt_par_atomic_sub_i64,

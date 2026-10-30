@@ -1,0 +1,56 @@
+# SCV compile snapshots are bounded: publishing past the cap evicts the oldest.
+use std.spec.*
+use std.scv.compile_snapshot.{scv_compile_snapshot_provenance_v1,
+    scv_compile_snapshot_receipt_v1, scv_compile_snapshot_retain_newest_v1}
+use app.io.mod.{dir_create}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{file_write, dir_exists}
+
+extern fn rt_getpid() -> i64
+
+fn retention_fixture(label: text, names: [text]) -> text:
+    val cache = path_absolute("build/test-artifacts/scv-retention-{rt_getpid()}-{label}").replace("\\", "/")
+    expect(dir_create(cache + "/receipts", true)).to_equal(true)
+    for name in names:
+        expect(dir_create(cache + "/snapshots/" + name, true)).to_equal(true)
+        val provenance = scv_compile_snapshot_provenance_v1(name, "c", "t", "d", 1)
+        file_write(cache + "/snapshots/" + name + "/SCV_COMPILE_SNAPSHOT", provenance)
+        file_write(cache + "/receipts/" + name + ".receipt",
+            scv_compile_snapshot_receipt_v1(provenance, name))
+    cache
+
+describe "SCV compile snapshot retention":
+    it "evicts the oldest snapshots beyond the cap and never the kept one":
+        val cache = retention_fixture("cap", ["rev-a", "rev-b", "rev-c", "rev-d"])
+        val removed = scv_compile_snapshot_retain_newest_v1(cache, "rev-a", 2, 0)
+        expect(removed).to_equal(2)
+        expect(dir_exists(cache + "/snapshots/rev-a")).to_equal(true)
+        expect(dir_exists(cache + "/snapshots/rev-b")).to_equal(false)
+        expect(dir_exists(cache + "/snapshots/rev-c")).to_equal(false)
+        expect(dir_exists(cache + "/snapshots/rev-d")).to_equal(true)
+
+    it "removes nothing at or under the cap":
+        val cache = retention_fixture("under", ["rev-a", "rev-b"])
+        expect(scv_compile_snapshot_retain_newest_v1(cache, "rev-a", 2, 0)).to_equal(0)
+        expect(dir_exists(cache + "/snapshots/rev-b")).to_equal(true)
+
+    it "still enforces the cap when an unremovable orphan sorts oldest":
+        val cache = retention_fixture("orphan", ["rev-b", "rev-c", "rev-d"])
+        expect(dir_create(cache + "/snapshots/rev-0-orphan", true)).to_equal(true)
+        val removed = scv_compile_snapshot_retain_newest_v1(cache, "rev-d", 2, 0)
+        expect(removed).to_equal(2)
+        expect(dir_exists(cache + "/snapshots/rev-b")).to_equal(false)
+        expect(dir_exists(cache + "/snapshots/rev-c")).to_equal(false)
+        expect(dir_exists(cache + "/snapshots/rev-0-orphan")).to_equal(true)
+
+    it "orders by last use, not first publish":
+        val cache = retention_fixture("lru", ["rev-a", "rev-b", "rev-c"])
+        file_write(cache + "/receipts/rev-a.used", "9999999999")
+        expect(scv_compile_snapshot_retain_newest_v1(cache, "rev-c", 2, 0)).to_equal(1)
+        expect(dir_exists(cache + "/snapshots/rev-a")).to_equal(true)
+        expect(dir_exists(cache + "/snapshots/rev-b")).to_equal(false)
+
+    it "never evicts a snapshot used within the minimum age":
+        val cache = retention_fixture("age", ["rev-a", "rev-b", "rev-c"])
+        expect(scv_compile_snapshot_retain_newest_v1(cache, "rev-c", 1, 3600)).to_equal(0)
+        expect(dir_exists(cache + "/snapshots/rev-a")).to_equal(true)

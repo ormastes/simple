@@ -5,8 +5,13 @@
 # copyable preparation data, never execution authority; only the loader owner
 # or scheduler owner may allocate/publish an address space from it.
 
-use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.fs_driver.mount_table.{MountTable}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.loader.anonymous_executable_image_v1.{anonymous_executable_image_provider_ready_v1}
+use os.kernel.loader.executable_sealed_source_v1.{
+    executable_sealed_source_max_bytes_v1, executable_source_read_exact_v1,
+    executable_sealed_source_acquire_v1
+}
 use std.common.contracts.execution.simpleos_executable_admission_v1.{
     ExecutableImageHandleV1
 }
@@ -41,31 +46,13 @@ pub struct ExecutablePreparedImageV1:
     mapping: ExecutableLoadConsumerV1
 
 pub fn executable_prepare_max_source_bytes_v1() -> u64:
-    67108864u64
+    executable_sealed_source_max_bytes_v1()
 
 pub(package) fn executable_prepare_read_exact_v1(
     mut table: MountTable,
     handle: ExecutableImageHandleV1
 ) -> [u8]?:
-    if handle.size_bytes == 0u64 or
-        handle.size_bytes > executable_prepare_max_source_bytes_v1():
-        return nil
-    var bytes: [u8] = []
-    var offset = 0u64
-    while offset < handle.size_bytes:
-        val remaining = handle.size_bytes - offset
-        val chunk_len = if remaining > 16777216u64: 16777216u64 else: remaining
-        val chunk = table.positioned_read_bytes(
-            handle.open_handle_id, PositionedDriverKind.Auto, offset, chunk_len)
-        if chunk.is_err():
-            return nil
-        val chunk_bytes = chunk.unwrap()
-        if chunk_bytes.len() != chunk_len as i64:
-            return nil
-        for byte in chunk_bytes:
-            bytes.push(byte)
-        offset = offset + chunk_len
-    Some(bytes)
+    executable_source_read_exact_v1(table, handle)
 
 fn _prepare_process_image_matches(
     image: UserProcessImage,
@@ -104,12 +91,21 @@ fn _executable_prepare_image_v1(
     val planned = executable_load_consumer_plan_v1(consumer, handle, entry_point)
     if planned.failure != ExecutableLoadConsumerErrorV1.None:
         return Err(planned.failure)
-    val source = executable_prepare_read_exact_v1(table, handle)
-    if not source.?:
-        return Err(ExecutableLoadConsumerErrorV1.SourceReadFailed)
-    val bytes = source.unwrap()
-    if sha256_u8_hex(bytes) != handle.image_hash:
-        return Err(ExecutableLoadConsumerErrorV1.DigestMismatch)
+    # This is internal authenticated file-source staging, not a new public
+    # memory launch capability. Keep the existing owned file read on targets
+    # whose runtime lacks a real storage lock; never install the registry over
+    # constant-success ARM64 or nil-returning x86_64 mutex stubs.
+    var bytes: [u8] = []
+    if anonymous_executable_image_provider_ready_v1():
+        val source = executable_sealed_source_acquire_v1(table, handle)
+        if source.is_err(): return Err(source.unwrap_err())
+        bytes = source.unwrap()
+    else:
+        val source = executable_prepare_read_exact_v1(table, handle)
+        if not source.?: return Err(ExecutableLoadConsumerErrorV1.SourceReadFailed)
+        bytes = source.unwrap()
+        if sha256_u8_hex(bytes) != handle.image_hash:
+            return Err(ExecutableLoadConsumerErrorV1.DigestMismatch)
     if elf_admit_executable(bytes, arch).is_err():
         return Err(ExecutableLoadConsumerErrorV1.ElfRejected)
     val built = build_user_process_image(image_path, bytes, arch, argv, envp)

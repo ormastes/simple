@@ -1,0 +1,164 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.snapshot_v2.{ScvSnapshotV2, ScvFrozenFileV2, ScvOverlayFileV2,
+    scv_snapshot_file_v2, scv_snapshot_freeze_v2, scv_snapshot_read_v2,
+    scv_snapshot_overlay_v2, scv_snapshot_valid_v2}
+use std.scv.source_witness_v1.{scv_snapshot_lookup_v2, scv_snapshot_lookup_domain_v2,
+    scv_snapshot_directory_v2, scv_snapshot_directory_source_witness_v1,
+    scv_verify_source_witnesses_v1}
+use std.scv.snapshot_changes_v1.{scv_snapshot_diff_exact_v1}
+
+fn source_fixture(files: [ScvFrozenFileV2], generation: i64 = 1,
+        coverage: text = "complete") -> ScvSnapshotV2:
+    scv_snapshot_freeze_v2("declared-source-files-v2", files, ["src"], generation,
+        generation, coverage, ["configuration", "external-inputs"]).unwrap()
+
+describe "SCV frozen source model and witness bridge (REQ-003/009/010/014)":
+    it "preserves NUL, invalid UTF-8, BOM and CRLF without decoding":
+        val raw: [u8] = [239u8, 187u8, 191u8, 0u8, 255u8, 13u8, 10u8]
+        val snapshot = source_fixture([scv_snapshot_file_v2("src/raw.spl", raw)])
+        expect(scv_snapshot_read_v2(snapshot, "src/raw.spl").unwrap()).to_equal(raw)
+        expect(scv_snapshot_valid_v2(snapshot)).to_equal(true)
+
+    it "owns payloads independently of caller arrays and returned reads":
+        var original: [u8] = [1u8, 2u8]
+        val file = scv_snapshot_file_v2("src/a.spl", original)
+        val snapshot = source_fixture([file])
+        original[0] = 9u8
+        var first_read = scv_snapshot_read_v2(snapshot, "src/a.spl").unwrap()
+        first_read[1] = 8u8
+        expect(scv_snapshot_read_v2(snapshot, "src/a.spl").unwrap()).to_equal([1u8, 2u8])
+
+    it "rejects a supplied digest that does not describe actual bytes":
+        val file = ScvFrozenFileV2(path: "src/a.spl", kind: "regular",
+            mode: "materialized-bytes-v1", content_id: "sha256_" + sha256_text("other"), bytes: [1u8])
+        val frozen = scv_snapshot_freeze_v2("declared-source-files-v2", [file], ["src"], 1, 1, "complete", [])
+        expect(frozen).to_equal(Err("snapshot-file-digest-mismatch"))
+
+    it "rejects unsupported physical kind or executable mode claims":
+        var file = scv_snapshot_file_v2("src/a.spl", [])
+        file.kind = "symlink"
+        expect(scv_snapshot_freeze_v2("declared-source-files-v2", [file], ["src"], 1, 1, "complete", [])).to_equal(Err("snapshot-file-kind-or-mode-unsupported"))
+        file.kind = "regular"
+        file.mode = "executable"
+        expect(scv_snapshot_freeze_v2("declared-source-files-v2", [file], ["src"], 1, 1, "complete", [])).to_equal(Err("snapshot-file-kind-or-mode-unsupported"))
+
+    it "rejects duplicate paths and a file used as an ancestor directory":
+        val file = scv_snapshot_file_v2("src/a", [])
+        expect(scv_snapshot_freeze_v2("declared-source-files-v2", [file, file], ["src"], 1, 1, "complete", [])).to_equal(Err("snapshot-path-invalid-or-duplicate"))
+        val sibling = scv_snapshot_file_v2("src/a-b", [])
+        val descendant = scv_snapshot_file_v2("src/a/x.spl", [])
+        expect(scv_snapshot_freeze_v2("declared-source-files-v2", [descendant, sibling, file], ["src"], 1, 1, "complete", [])).to_equal(Err("snapshot-file-directory-conflict"))
+
+    it "rejects traversal, aliases and fabricated complete empty root":
+        for path in ["src/../escape", "src/./a", "src//a", "/src/a", "src/a\\b", "C:/src/a", "src/a\0b"]:
+            expect(scv_snapshot_freeze_v2("declared-source-files-v2", [scv_snapshot_file_v2(path, [])], ["src"], 1, 1, "complete", [])).to_equal(Err("snapshot-path-invalid-or-duplicate"))
+        expect(scv_snapshot_freeze_v2("declared-source-files-v2", [], [], 1, 1, "complete", [])).to_equal(Err("snapshot-complete-scope-missing"))
+        expect(scv_snapshot_freeze_v2("declared-source-files-v2", [], ["src", "src"], 1, 1, "complete", [])).to_equal(Err("snapshot-scope-invalid"))
+        expect(scv_snapshot_freeze_v2("declared-source-files-v2", [], ["src/a", "src/a-b", "src/a/x"], 1, 1, "complete", [])).to_equal(Err("snapshot-scope-overlap"))
+
+    it "canonicalizes inventory order while binding generation and coverage":
+        val a = scv_snapshot_file_v2("src/a.spl", [1u8])
+        val b = scv_snapshot_file_v2("src/b.spl", [2u8])
+        val first = source_fixture([b, a])
+        expect(first.snapshot_id).to_equal(source_fixture([a, b]).snapshot_id)
+        expect(first.snapshot_id == source_fixture([a, b], 2).snapshot_id).to_equal(false)
+        expect(first.snapshot_id == source_fixture([a, b], 1, "unknown").snapshot_id).to_equal(false)
+        expect(first.files[0].path).to_equal("src/a.spl")
+
+    it "requires the capture generation to include its acknowledged generation":
+        expect(scv_snapshot_freeze_v2("declared-source-files-v2", [], ["src"], 1, 2, "complete", [])).to_equal(Err("snapshot-capture-before-acknowledged-generation"))
+
+    it "applies acknowledged exact overlay bytes without changing the prior snapshot":
+        val base = source_fixture([scv_snapshot_file_v2("src/a.spl", [1u8])])
+        val overlay = ScvOverlayFileV2(path: "src/a.spl", generation: 2, deleted: false, bytes: [0u8, 255u8])
+        val frozen = scv_snapshot_overlay_v2(base, [overlay], 2, 2).unwrap()
+        expect(scv_snapshot_read_v2(frozen, "src/a.spl").unwrap()).to_equal([0u8, 255u8])
+        expect(scv_snapshot_read_v2(base, "src/a.spl").unwrap()).to_equal([1u8])
+        expect(frozen.capture_generation).to_equal(2)
+        expect(frozen.acknowledged_generation).to_equal(2)
+
+    it "refuses stale, future, duplicate and regressing overlay generations":
+        val base = source_fixture([])
+        val stale = ScvOverlayFileV2(path: "src/a.spl", generation: 1, deleted: false, bytes: [])
+        val future = ScvOverlayFileV2(path: "src/a.spl", generation: 3, deleted: false, bytes: [])
+        val current = ScvOverlayFileV2(path: "src/a.spl", generation: 2, deleted: false, bytes: [])
+        expect(scv_snapshot_overlay_v2(base, [stale], 2, 2)).to_equal(Err("snapshot-overlay-generation-outside-barrier"))
+        expect(scv_snapshot_overlay_v2(base, [future], 2, 2)).to_equal(Err("snapshot-overlay-generation-outside-barrier"))
+        expect(scv_snapshot_overlay_v2(base, [current, current], 2, 2)).to_equal(Err("snapshot-overlay-path-invalid-or-duplicate"))
+        expect(scv_snapshot_overlay_v2(base, [], 0, 0)).to_equal(Err("snapshot-generation-regressed"))
+
+    it "turns a formerly absent import into a mismatching negative witness":
+        val base = source_fixture([])
+        val missing = scv_snapshot_lookup_v2(base, "src/new.spl").unwrap()
+        expect(missing.present).to_equal(false)
+        val overlay = ScvOverlayFileV2(path: "src/new.spl", generation: 2, deleted: false, bytes: [7u8])
+        val frozen = scv_snapshot_overlay_v2(base, [overlay], 2, 2).unwrap()
+        expect(scv_verify_source_witnesses_v1(frozen, sha256_text("action"), [missing])).to_equal(Err("verify-source-observation-changed:src/new.spl"))
+
+    it "never derives absence from unknown coverage or an undeclared scope":
+        val unknown = source_fixture([scv_snapshot_file_v2("src/present.spl", [])], 1, "unknown")
+        expect(scv_snapshot_lookup_v2(unknown, "src/missing.spl")).to_equal(Err("lookup-coverage-unknown"))
+        expect(scv_snapshot_lookup_v2(unknown, "src/present.spl").unwrap().present).to_equal(true)
+        expect(scv_snapshot_directory_v2(unknown, "src")).to_equal(Err("directory-coverage-unknown"))
+        expect(scv_snapshot_read_v2(unknown, "src/missing.spl")).to_equal(Err("snapshot-file-unknown"))
+        expect(scv_snapshot_lookup_v2(source_fixture([]), "external/missing.spl")).to_equal(Err("lookup-coverage-unknown"))
+
+    it "refuses a filesystem query against the compile-inventory namespace":
+        val model = scv_snapshot_freeze_v2("compile-inventory-v1", [], ["src"], 1, 0, "complete", ["filesystem-event-coverage"]).unwrap()
+        expect(scv_snapshot_lookup_domain_v2(model, "src/new.spl", "filesystem-v1")).to_equal(Err("lookup-source-domain-unknown"))
+        expect(scv_snapshot_lookup_domain_v2(model, "src/new.spl", "compile-inventory-v1").unwrap().present).to_equal(false)
+
+    it "preserves directory membership on body changes but breaks it on addition":
+        val base = source_fixture([scv_snapshot_file_v2("src/a.spl", [1u8])])
+        val directory = scv_snapshot_directory_v2(base, "src").unwrap()
+        val body = source_fixture([scv_snapshot_file_v2("src/a.spl", [2u8])], 2)
+        expect(scv_snapshot_directory_v2(body, "src").unwrap().membership_digest).to_equal(directory.membership_digest)
+        val witness = scv_snapshot_directory_source_witness_v1(directory)
+        expect(scv_verify_source_witnesses_v1(body, sha256_text("action"), [witness]).unwrap().source_only).to_equal(true)
+        val added = source_fixture([scv_snapshot_file_v2("src/a.spl", [2u8]), scv_snapshot_file_v2("src/b.spl", [])], 3)
+        expect(scv_verify_source_witnesses_v1(added, sha256_text("action"), [witness])).to_equal(Err("verify-directory-membership-changed:src"))
+
+    it "rejects changed or deleted positive reads while maintaining delete deltas":
+        val base = source_fixture([scv_snapshot_file_v2("src/a.spl", [1u8])])
+        val read = scv_snapshot_lookup_v2(base, "src/a.spl").unwrap()
+        val changed = source_fixture([scv_snapshot_file_v2("src/a.spl", [2u8])], 2)
+        expect(scv_verify_source_witnesses_v1(changed, sha256_text("action"), [read])).to_equal(Err("verify-source-observation-changed:src/a.spl"))
+        val deleted = scv_snapshot_overlay_v2(base, [ScvOverlayFileV2(path: "src/a.spl", generation: 2, deleted: true, bytes: [])], 2, 2).unwrap()
+        expect(scv_verify_source_witnesses_v1(deleted, sha256_text("action"), [read])).to_equal(Err("verify-source-observation-changed:src/a.spl"))
+        val delta = scv_snapshot_diff_exact_v1(base, deleted, "src").unwrap()
+        expect(delta.removed_paths).to_equal(["src/a.spl"])
+        expect(delta.changed_directories).to_equal(["src"])
+
+    it "compares unrelated snapshot pairs exactly without ancestry assumptions":
+        val base = source_fixture([scv_snapshot_file_v2("src/old/a.spl", [1u8]), scv_snapshot_file_v2("src/kept.spl", [2u8])], 9)
+        val requested = source_fixture([scv_snapshot_file_v2("src/new/a.spl", [1u8]), scv_snapshot_file_v2("src/kept.spl", [3u8])], 2)
+        val delta = scv_snapshot_diff_exact_v1(base, requested, "src").unwrap()
+        expect(delta.added_paths).to_equal(["src/new/a.spl"])
+        expect(delta.removed_paths).to_equal(["src/old/a.spl"])
+        expect(delta.modified_paths).to_equal(["src/kept.spl"])
+        expect(delta.changed_directories).to_equal(["src", "src/new", "src/old"])
+        expect(scv_snapshot_diff_exact_v1(base, source_fixture([], 3, "unknown"), "src")).to_equal(Err("diff-coverage-unknown"))
+
+    it "binds a new receipt to the requested snapshot without changing source observations":
+        val file = scv_snapshot_file_v2("src/a.spl", [1u8])
+        val base = source_fixture([file])
+        val requested = source_fixture([file], 2)
+        val read = scv_snapshot_lookup_v2(base, file.path).unwrap()
+        val prior = scv_verify_source_witnesses_v1(base, sha256_text("action"), [read]).unwrap()
+        val next = scv_verify_source_witnesses_v1(requested, sha256_text("action"), [read]).unwrap()
+        expect(next.requested_snapshot_id).to_equal(requested.snapshot_id)
+        expect(prior.source_witness_digest).to_equal(next.source_witness_digest)
+        expect(prior.receipt_id == next.receipt_id).to_equal(false)
+        expect(next.source_only).to_equal(true)
+        expect(next.unsupported_inputs).to_equal(["configuration", "external-inputs"])
+        expect(scv_verify_source_witnesses_v1(requested, sha256_text("action"), [])).to_equal(Err("verify-source-read-set-empty"))
+
+    it "refuses unknown query kinds and tampered snapshot bodies":
+        val base = source_fixture([scv_snapshot_file_v2("src/a.spl", [1u8])])
+        var read = scv_snapshot_lookup_v2(base, "src/a.spl").unwrap()
+        read.query_kind = "compiler-semantic-interface"
+        expect(scv_verify_source_witnesses_v1(base, sha256_text("action"), [read])).to_equal(Err("verify-source-query-kind-unsupported"))
+        var tampered = base
+        tampered.snapshot_id = "scv-snapshot-v2-sha256-" + sha256_text("different-root")
+        expect(scv_verify_source_witnesses_v1(tampered, sha256_text("action"), [read])).to_equal(Err("verify-snapshot-invalid"))

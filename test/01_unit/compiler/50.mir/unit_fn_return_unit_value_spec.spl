@@ -1,0 +1,68 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# `return ()` in a Unit-signature function lowers to a bare Ret
+
+Phase-3 codegen of `compiler.mir._MirLoweringExpr.expr_dispatch` failed the
+Cranelift verifier with `inst70 (return v53): arguments of return must match
+function signature`: `me emit_pending_finally_for_transfer() -> ():` held
+`return ()`, which lowered to `Ret(Some(unit_temp))` while the MIR signature
+(and so the Cranelift signature) had no result. An explicit value return in a
+Unit-signature function must terminate exactly like a bare `return`.
+Bug: doc/08_tracking/bug/cranelift_unit_fn_return_unit_value_2026-10-24.md
+
+UNEXECUTED when written (memory-constrained host, no probes allowed).
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn ret_shapes_of(source: text, fn_name: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    for entry in mir.functions.values():
+        if entry.name == fn_name or entry.name.ends_with("." + fn_name):
+            for block in entry.blocks:
+                match block.terminator:
+                    case MirTerminator.Ret(value):
+                        if value.?:
+                            out = out + "ret-value\n"
+                        else:
+                            out = out + "ret-void\n"
+                    case _:
+                        ()
+    out
+
+describe "explicit return in a Unit-signature function":
+    it "`return ()` in `-> ()` lowers to a bare Ret, never Ret(Some)":
+        val src = "fn side(flag: bool) -> ():\n    if flag:\n        return ()\n    print \"x\"\n\nfn main() -> i64:\n    side(true)\n    0\n"
+        val shapes = ret_shapes_of(src, "side")
+        expect(shapes.contains("ret-void")).to_equal(true)
+        expect(shapes.contains("ret-value")).to_equal(false)
+
+    it "a value-returning function still carries its Ret value":
+        val src = "fn pick(flag: bool) -> i64:\n    if flag:\n        return 1\n    2\n\nfn main() -> i64:\n    pick(true)\n"
+        val shapes = ret_shapes_of(src, "pick")
+        expect(shapes.contains("ret-value")).to_equal(true)

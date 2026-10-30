@@ -1,0 +1,180 @@
+#!/bin/sh
+# measure-peak-rss.shs — wall time + peak resident memory of one command.
+#
+#   sh scripts/perf/measure-peak-rss.shs [--label X] -- <cmd...>
+#   sh scripts/perf/measure-peak-rss.shs --selftest
+#
+# The command's own stdout/stderr pass through unchanged. The LAST stdout line
+# is always the verdict:
+#   peak-rss: label=<X> wall_ms=<n> peak_kib=<n> exit=<rc> method=<m>
+# method: gnu-time   Linux /usr/bin/time -v (Maximum resident set size)
+#         proc-sample Linux/other /proc/<pid>/status VmHWM sampled every 50 ms
+#         ps-sample   Windows Git Bash: PowerShell runs the command and reads
+#                     PeakWorkingSet from its process handle after exit
+#                     (GetProcessMemoryInfo; exact, no sampling gap);
+#                     macOS: `ps -o rss` sampled every 50 ms
+# Fail CLOSED: if no positive peak was observed, prints
+#   peak-rss: ERROR — nothing was measured
+# and exits 2. Otherwise exits with the command's exit status.
+# Added by Build Session Memory Model P0
+# (doc/05_design/compiler/memory/build_session_memory_model_v1.md §8).
+
+set -u
+
+now_ms() {
+    n=$(date +%s%N 2>/dev/null)
+    case "$n" in
+        *N|'') echo $(( $(date +%s) * 1000 )) ;;
+        *) echo $(( n / 1000000 )) ;;
+    esac
+}
+
+fail_closed() {
+    [ -n "${1:-}" ] && echo "measure-peak-rss: $1" >&2
+    echo "peak-rss: ERROR — nothing was measured"
+    exit 2
+}
+
+PEAK_KIB=0
+RC=0
+METHOD=""
+
+run_gnu_time() {
+    out=$(mktemp) || fail_closed "mktemp failed"
+    /usr/bin/time -v -o "$out" "$@"
+    RC=$?
+    PEAK_KIB=$(sed -n 's/.*Maximum resident set size (kbytes): *\([0-9][0-9]*\).*/\1/p' "$out" | tail -n 1)
+    rm -f "$out"
+    # time(1) itself exits 127/126 when the command cannot be run; that is a
+    # command failure and is reported as such.
+    METHOD=gnu-time
+}
+
+run_proc_sample() {
+    "$@" &
+    pid=$!
+    max=0
+    while kill -0 "$pid" 2>/dev/null; do
+        v=$(sed -n 's/^VmHWM:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "/proc/$pid/status" 2>/dev/null)
+        [ -n "$v" ] && [ "$v" -gt "$max" ] && max=$v
+        sleep 0.05
+    done
+    wait "$pid"
+    RC=$?
+    PEAK_KIB=$max
+    METHOD=proc-sample
+}
+
+run_ps_sample_mac() {
+    "$@" &
+    pid=$!
+    max=0
+    while kill -0 "$pid" 2>/dev/null; do
+        v=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -n "$v" ] && [ "$v" -gt "$max" ] && max=$v
+        sleep 0.05
+    done
+    wait "$pid"
+    RC=$?
+    PEAK_KIB=$max
+    METHOD=ps-sample
+}
+
+run_windows() {
+    exe=$(command -v "$1" 2>/dev/null) || fail_closed "command not found: $1"
+    # Relative or POSIX paths become absolute Windows paths; a bare name
+    # (shell builtin such as `true`) is left to the Windows PATH lookup.
+    case "$exe" in
+        */*) exe=$(cygpath -wa "$exe") ;;
+    esac
+    shift
+    args=""
+    for a in "$@"; do
+        esc=$(printf '%s' "$a" | sed 's/"/\\"/g')
+        args="$args \"$esc\""
+    done
+    out=$(mktemp) || fail_closed "mktemp failed"
+    PRSS_EXE="$exe" PRSS_ARGS="$args" PRSS_OUT="$(cygpath -w "$out")" powershell -NoProfile -NonInteractive -Command '
+$ErrorActionPreference = "Stop"
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class PrssMem {
+  [StructLayout(LayoutKind.Sequential)] public struct PMC {
+    public uint cb; public uint PageFaultCount; public UIntPtr PeakWorkingSetSize; public UIntPtr WorkingSetSize;
+    public UIntPtr QuotaPeakPagedPoolUsage; public UIntPtr QuotaPagedPoolUsage; public UIntPtr QuotaPeakNonPagedPoolUsage;
+    public UIntPtr QuotaNonPagedPoolUsage; public UIntPtr PagefileUsage; public UIntPtr PeakPagefileUsage; }
+  [DllImport("psapi.dll", SetLastError=true)] public static extern bool GetProcessMemoryInfo(IntPtr h, out PMC c, uint cb);
+  public static ulong Peak(IntPtr h) { PMC c; c.cb = (uint)Marshal.SizeOf(typeof(PMC));
+    if (!GetProcessMemoryInfo(h, out c, c.cb)) return 0; return (ulong)c.PeakWorkingSetSize; }
+}
+"@
+$si = New-Object System.Diagnostics.ProcessStartInfo
+$si.FileName = $env:PRSS_EXE
+$si.Arguments = $env:PRSS_ARGS
+$si.UseShellExecute = $false
+$p = [System.Diagnostics.Process]::Start($si)
+$h = $p.Handle
+$p.WaitForExit()
+$peak = [PrssMem]::Peak($h)
+Set-Content -Path $env:PRSS_OUT -Value ("{0} {1}" -f $p.ExitCode, [math]::Floor($peak / 1024))
+' || { rm -f "$out"; fail_closed "powershell launcher failed"; }
+    read -r RC PEAK_KIB <<EOF
+$(tr -d '\r' < "$out")
+EOF
+    rm -f "$out"
+    METHOD=ps-sample
+}
+
+measure() {
+    label=$1
+    shift
+    [ "$#" -gt 0 ] || fail_closed "no command given"
+    start=$(now_ms)
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) run_windows "$@" ;;
+        Darwin*) run_ps_sample_mac "$@" ;;
+        *)
+            if [ -x /usr/bin/time ] && /usr/bin/time -v true >/dev/null 2>&1; then
+                run_gnu_time "$@"
+            elif [ -d /proc/self ]; then
+                run_proc_sample "$@"
+            else
+                run_ps_sample_mac "$@"
+            fi
+            ;;
+    esac
+    end=$(now_ms)
+    case "${PEAK_KIB:-}" in
+        ''|*[!0-9]*) fail_closed "no peak value read ($METHOD)" ;;
+    esac
+    [ "$PEAK_KIB" -gt 0 ] || fail_closed "peak was 0 ($METHOD)"
+    echo "peak-rss: label=$label wall_ms=$((end - start)) peak_kib=$PEAK_KIB exit=$RC method=$METHOD"
+    return "$RC"
+}
+
+selftest() {
+    line=$(sh "$0" --label selftest -- true | tail -n 1)
+    rc=$?
+    echo "$line"
+    kib=$(printf '%s\n' "$line" | sed -n 's/.* peak_kib=\([0-9][0-9]*\) .*/\1/p')
+    case "$line" in
+        "peak-rss: label=selftest "*" exit=0 method="*) ;;
+        *) echo "selftest: FAIL — unexpected verdict line"; exit 1 ;;
+    esac
+    if [ "$rc" -ne 0 ] || [ -z "$kib" ] || [ "$kib" -le 0 ]; then
+        echo "selftest: FAIL — peak_kib not positive"
+        exit 1
+    fi
+    echo "selftest: PASS — measured true, peak_kib=$kib"
+}
+
+LABEL=cmd
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest; exit $? ;;
+        --label) [ "$#" -ge 2 ] || fail_closed "--label needs a value"; LABEL=$2; shift 2 ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+measure "$LABEL" "$@"

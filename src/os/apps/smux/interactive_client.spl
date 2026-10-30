@@ -1,18 +1,21 @@
 # One hosted client, one local view. Transport requests remain disposable;
 # leaving this terminal never sends stop-server or closes the owner's children.
-use std.nogc_sync_mut.sosix.terminal_console.{sosix_console_open as console_open,
+use std.sosix.terminal_console.{sosix_console_open as console_open,
     sosix_console_read as console_read, sosix_console_size as console_size,
     sosix_console_write as console_write, sosix_console_close as console_close,
     sosix_console_cleanup as console_cleanup,
     sosix_console_clipboard_write as console_clipboard_write}
-use std.nogc_sync_mut.sosix.time.{sosix_sleep_ms as thread_sleep_ms,
+use std.sosix.time.{sosix_sleep_ms as thread_sleep_ms,
     sosix_time_now_monotonic_ms as time_now_monotonic_ms}
-use std.nogc_sync_mut.sosix.stdio.{sosix_println}
+use std.sosix.stdio.{sosix_println}
 use os.apps.smux.server.{smux_server_request}
 use os.apps.smux.smux_remote.{smux_remote_reply_ok}
 use os.apps.smux.client_input.{ClientInputState, ClientInputAction,
     client_input_new, client_input_feed}
 use os.apps.smux.client_copy_input.{ClientCopyInput, client_copy_new, client_copy_feed}
+use os.apps.smux.notification_client.{notification_reply_decode, notification_overlay}
+use os.apps.smux.client_leases.{client_lease_token_valid, SMUX_CLIENT_HEARTBEAT_MS}
+use os.apps.smux.lifecycle_reply.{smux_missing_window_reply, smux_missing_session_reply}
 use os.apps.smux.client_view.{client_input_hex, client_reply_ids,
     client_frame_body, client_next_id, client_copy_frame}
 
@@ -21,6 +24,7 @@ class TerminalClient:
     token: text
     session: text
     client_id: text
+    lease: text
     window: text
     pane: text
     cols: i64
@@ -33,8 +37,21 @@ class TerminalClient:
     copy_input: ClientCopyInput
     copy_deadline: i64
 
+# Only exact owner visibility refusals may trigger selection recovery. The
+# discarded input is never retried, and auth/transport failures stay failures.
+pub fn client_hidden_reply(reply: text, pane: text) -> bool:
+    if pane == "": return false
+    return reply == "smux: frame failed: cursor pane is hidden by window zoom: " + pane or
+        reply == "smux: input pane is hidden by window zoom: " + pane or
+        reply == "smux: frame failed: cursor pane is missing or explicitly hidden: " + pane or
+        reply == "smux: input pane is explicitly hidden: " + pane
+
 fn request(client: TerminalClient, command: text) -> Result<text, text>:
-    val response = smux_server_request(client.address, client.token, command)
+    # Bind every post-admission read and mutation to this owner incarnation,
+    # not just heartbeats. A stale client must not type into reused pane IDs
+    # during the interval before its next heartbeat.
+    val scoped = if client.lease == "": command else: "client-request " + client.session + " " + client.client_id + " " + client.lease + " " + command
+    val response = smux_server_request(client.address, client.token, scoped)
     if response.is_err():
         return Err(response.unwrap_err())
     if not smux_remote_reply_ok(response.unwrap()):
@@ -66,6 +83,32 @@ fn arrange(client: TerminalClient) -> Result<bool, text>:
         selected + " " + client.cols.to_text() + " " + client.rows.to_text())
     if reply.is_err(): return Err(reply.unwrap_err())
     return Ok(true)
+
+# Recover view metadata only. Never replay the input/action which addressed a
+# removed window against a different child. Every request retains its lease.
+fn recover_window_view(client: TerminalClient, removed: bool) -> Result<TerminalClient, text>:
+    var next = client
+    if removed:
+        val ids = windows(client)
+        if ids.is_err(): return Err(ids.unwrap_err())
+        if ids.unwrap().len() == 0: return Err("session has no windows")
+        next.window = ids.unwrap()[0]
+    val selected = select_pane(next)
+    if selected.is_err(): return Err(selected.unwrap_err())
+    next = selected.unwrap()
+    val frame = request(next, "frame " + next.session + " " + next.window + " " + next.pane)
+    if frame.is_err(): return Err(frame.unwrap_err())
+    val validated = client_frame_body(frame.unwrap(), next.cols, next.rows)
+    if validated.is_err(): return Err(validated.unwrap_err())
+    # Commit replacement local selection only after a current frame validates.
+    next.copy = false
+    next.history = []
+    next.offset = 0
+    next.mark = -1
+    next.copy_input = client_copy_new()
+    next.copy_deadline = 0
+    next.layout = -1
+    return Ok(next)
 
 fn copy_move(client: TerminalClient, delta: i64) -> TerminalClient:
     var next = client
@@ -130,6 +173,12 @@ fn apply_action(client: TerminalClient, action: ClientInputAction, terminal: i64
         if ids.is_err(): return Err(ids.unwrap_err())
         next.pane = client_next_id(ids.unwrap(), client.pane)
         next.copy = false
+    elif action.kind == "toggle-zoom":
+        val reply = request(client, "client-zoom " + client.session + " " + client.window + " " + client.pane)
+        if reply.is_err(): return Err(reply.unwrap_err())
+        # Keep the current pane after restore, and discard only stale copy UI.
+        next.copy = false
+        next.layout = -1
     elif action.kind == "new-window":
         val created = request(client, "new-window " + client.session + " window")
         if created.is_err(): return Err(created.unwrap_err())
@@ -196,14 +245,25 @@ pub fn smux_interactive_attach(address: text, token: text, session: text, client
         return 1
     val terminal = opened.unwrap()
     var client = TerminalClient(address: address, token: token, session: session,
-        client_id: client_id, window: "", pane: "", cols: 80, rows: 24,
+        client_id: client_id, lease: "", window: "", pane: "", cols: 80, rows: 24,
         layout: -1, copy: false, history: [], offset: 0, mark: -1,
         copy_input: client_copy_new(), copy_deadline: 0)
     var error = ""
     var attached = false
-    val admission = request(client, "attach " + session + " " + client_id)
+    val admission = request(client, "client-attach " + session + " " + client_id + " 80 24")
     if admission.is_err(): error = admission.unwrap_err()
-    else: attached = true
+    else:
+        val fields = admission.unwrap().split(" ")
+        if fields.len() != 4 or fields[0] != "smux:" or fields[1] != "leased":
+            error = "invalid client lease reply"
+        elif not client_lease_token_valid(fields[2]):
+            error = "invalid client lease token"
+        else:
+            client.lease = fields[2]
+            # Bind subsequent requests to the owner's stable session ID so
+            # renaming a live session does not disconnect this client.
+            client.session = fields[3]
+            attached = true
     if error == "":
         val ids = windows(client)
         if ids.is_err(): error = ids.unwrap_err()
@@ -220,6 +280,11 @@ pub fn smux_interactive_attach(address: text, token: text, session: text, client
     var last_header = ""
     var last_copy = false
     var sized = false
+    var notification_body = ""
+    var notification_deadline: i64 = 0
+    var notification_poll: i64 = 0
+    var notification_ack: i64 = 0
+    var heartbeat_deadline = time_now_monotonic_ms() + SMUX_CLIENT_HEARTBEAT_MS
     if error == "": error = console_error(console_write(terminal, "\x1b[?1049h\x1b[?25l"))
     while error == "" and not done:
         val dimensions = console_size(terminal)
@@ -236,7 +301,7 @@ pub fn smux_interactive_attach(address: text, token: text, session: text, client
             elif not sized or client.cols != size[0] or client.rows != size[1]:
                 client.cols = size[0]
                 client.rows = size[1]
-                val registered = request(client, "client-size " + client.session + " " + client.client_id + " " +
+                val registered = request(client, "client-size-leased " + client.session + " " + client.client_id + " " + client.lease + " " +
                     client.cols.to_text() + " " + client.rows.to_text())
                 if registered.is_err(): error = registered.unwrap_err()
                 else:
@@ -263,6 +328,25 @@ pub fn smux_interactive_attach(address: text, token: text, session: text, client
                             else: client = changed.unwrap()
                 refresh = 0
         val now = time_now_monotonic_ms()
+        if error == "" and not done and now >= heartbeat_deadline:
+            val renewed = request(client, "client-heartbeat " + client.session + " " + client.client_id + " " + client.lease)
+            if renewed.is_err(): error = renewed.unwrap_err()
+            heartbeat_deadline = now + SMUX_CLIENT_HEARTBEAT_MS
+        if notification_body != "" and now >= notification_deadline:
+            notification_body = ""
+            refresh = 0
+        if error == "" and not done and notification_body == "" and now >= notification_poll:
+            val reply = request(client, "notifications-leased " + client.session + " " + client.client_id + " " + client.lease)
+            notification_poll = now + 250
+            if reply.is_err(): error = reply.unwrap_err()
+            else:
+                val message = notification_reply_decode(reply.unwrap())
+                if message.is_err(): error = message.unwrap_err()
+                elif message.unwrap().id > 0:
+                    notification_body = message.unwrap().body
+                    notification_ack = message.unwrap().id
+                    notification_deadline = now + 3000
+                    refresh = 0
         if error == "" and not done and now >= refresh:
             var frame = ""
             if client.copy:
@@ -281,17 +365,47 @@ pub fn smux_interactive_attach(address: text, token: text, session: text, client
             if client.copy != last_copy:
                 last_frame = ""
                 last_copy = client.copy
-            if error == "" and frame != last_frame:
+            if notification_body != "":
+                frame = frame + notification_overlay(notification_body, client.cols, client.rows)
+            if error == "" and (frame != last_frame or notification_ack > 0):
                 # Clear padding after a shared canvas shrinks or copy mode
                 # ends; ordinary full-frame updates need no extra clear.
                 val clear = if last_frame == "": "\x1b[H\x1b[2J" else: ""
                 error = console_error(console_write(terminal, clear + frame))
-                last_frame = frame
+                if error == "":
+                    last_frame = frame
+                    # Delivery is acknowledged only after the real console
+                    # accepted the rendered notification. A failed ACK may
+                    # cause redelivery; no exactly-once guarantee is made.
+                    if notification_ack > 0:
+                        val acknowledged = request(client, "ack-notification-leased " + client.session + " " + client.client_id + " " + client.lease + " " + notification_ack.to_text())
+                        if acknowledged.is_err(): error = acknowledged.unwrap_err()
+                        else: notification_ack = 0
             refresh = now + 50
+        val removed_window = error == smux_missing_window_reply(client.window)
+        val hidden_pane = client_hidden_reply(error, client.pane)
+        if removed_window or hidden_pane:
+            # The refused action is never replayed into the replacement pane.
+            val recovered = recover_window_view(client, removed_window)
+            if recovered.is_err(): error = recovered.unwrap_err()
+            else:
+                client = recovered.unwrap()
+                input_state = client_input_new()
+                error = ""
+                last_frame = ""
+                last_header = ""
+                refresh = 0
+        # This exact reply comes from the authenticated owner for the stable
+        # session ID, before lease validation. Other lease/transport errors
+        # remain errors. A removed session has already cleared its attachment.
+        if error == smux_missing_session_reply(client.session):
+            error = ""
+            attached = false
+            done = true
         if error == "" and not done:
             thread_sleep_ms(10)
     if attached:
-        val detached = request(client, "detach " + client.session + " " + client.client_id)
+        val detached = request(client, "client-detach " + client.session + " " + client.client_id + " " + client.lease)
         if detached.is_err() and error == "": error = detached.unwrap_err()
     # The console owner retains failed restoration/release resources against
     # the same close token. Retry only this lease, with a finite polling budget.

@@ -1,10 +1,11 @@
 # Compiled stdin/stdout bridge for the existing Simple credential format.
 # Secrets never arrive through argv. Install as simple-mail-credentials.
 use std.cli.cli_util.{get_cli_args}
-use std.nogc_sync_mut.io.pipe.{stdin_read_line}
-use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
-use std.nogc_sync_mut.terminal.credential.store.{credential_key_exists, credential_key_generate, credential_encrypt, credential_decrypt}
-use std.nogc_async_mut.sosix.host_facade.{sosix_eprint, sosix_file_read}
+use std.io.pipe.{stdin_read_line}
+use std.io.crypto_sffi.{random_hex}
+use std.terminal.credential.store.{credential_key_exists, credential_key_generate, credential_encrypt, credential_decrypt}
+use std.sffi.diag.{eprintln}
+use std.io_runtime.{read_file_text_result}
 use app.devhub.email_config_sdn.{parse_email_sdn_json}
 use std.common.json.value.{json_value_serialize}
 
@@ -28,24 +29,29 @@ fn mail_credential_transform(operation: text, value: text) -> text:
 fn main() -> i32:
     val args = get_cli_args()
     if args.len() == 2 and args[0] == "config-json":
-        match parse_email_sdn_json(sosix_file_read(args[1])):
+        val content = match read_file_text_result(args[1]):
+            case Ok(value): value
+            case Err(_):
+                eprintln("MAIL_CONFIG_READ")
+                return 2
+        match parse_email_sdn_json(content):
             case Ok(root):
                 print json_value_serialize(root)
                 return 0
             case Err(code):
-                sosix_eprint(code)
+                eprintln(code)
                 return 2
     if args.len() != 1:
-        sosix_eprint("Usage: simple-mail-credentials encrypt|decrypt (one line on stdin)")
+        eprintln("Usage: simple-mail-credentials encrypt|decrypt (one line on stdin)")
         return 2
     val operation = args[0]
     if operation != "encrypt" and operation != "decrypt":
-        sosix_eprint("Unknown credential operation")
+        eprintln("Unknown credential operation")
         return 2
     val value = stdin_read_line() ?? ""
     val result = mail_credential_transform(operation, value)
     if result == "":
-        sosix_eprint("Credential operation failed; no secret was saved")
+        eprintln("Credential operation failed; no secret was saved")
         return 1
     print result
     0

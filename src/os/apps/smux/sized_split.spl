@@ -1,0 +1,42 @@
+# Pure sized split arithmetic. The NEW pane starts border/status Hidden.
+# Existing pane keeps its decorations. One separator is reserved independently.
+# Percent uses total content available after separator and existing decoration
+# costs; integer remainder stays with the existing pane. Equal puts the odd
+# content cell in the new pane, preserving the legacy undecorated split result.
+use os.apps.smux.layout.{MuxSplitPlan}
+use os.apps.smux.contract.{MuxPanePresentation}
+use os.apps.smux.pane_presentation.{pane_border_cells, pane_status_cells}
+use std.common.contracts.mux.execution_v1.{MuxSplitSizeV1}
+
+pub fn smux_plan_sized_split(cols: int, rows: int, direction: text, size: MuxSplitSizeV1, old_style: MuxPanePresentation) -> Result<MuxSplitPlan, text>:
+    if cols < 1 or rows < 1 or cols > 32767 or rows > 32767:
+        return Err("invalid split dimensions")
+    if cols * rows > 262144: return Err("split dimensions exceed service limit")
+    val horizontal = direction == "horizontal" or direction == "h"
+    if not horizontal and direction != "vertical" and direction != "v":
+        return Err("invalid split direction: " + direction)
+    val border_cost = 2 * pane_border_cells(old_style)
+    val row_cost = border_cost + pane_status_cells(old_style)
+    if (cols as i64) <= border_cost or (rows as i64) <= row_cost:
+        return Err("existing pane has no content viewport")
+    val extent = if horizontal: rows as i64 else: cols as i64
+    val cost = if horizontal: row_cost else: border_cost
+    val available = extent - 1 - cost
+    if available < 2: return Err("pane too small for split and decorations")
+    var new_extent: i64 = 0
+    match size:
+        case MuxSplitSizeV1.Equal:
+            new_extent = available - available / 2
+        case MuxSplitSizeV1.Cells(count):
+            new_extent = count
+        case MuxSplitSizeV1.Percent(percent):
+            if percent < 1 or percent > 99: return Err("split percentage must be between 1 and 99")
+            new_extent = available * percent / 100
+    if new_extent < 1 or new_extent >= available:
+        return Err("split size cannot fit both child viewports")
+    val old_extent = extent - 1 - new_extent
+    return Ok(MuxSplitPlan(
+        old_cols: if horizontal: cols as i32 else: old_extent as i32,
+        old_rows: if horizontal: old_extent as i32 else: rows as i32,
+        new_cols: if horizontal: cols as i32 else: new_extent as i32,
+        new_rows: if horizontal: new_extent as i32 else: rows as i32))

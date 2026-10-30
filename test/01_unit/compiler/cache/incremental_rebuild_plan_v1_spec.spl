@@ -1,0 +1,83 @@
+"""Incremental rebuild plan: changed src + TLDR iface + AOP pointcut set; object-equal link skip."""
+
+use std.spec.*
+use compiler.driver.cache.incremental_rebuild_plan_v1.{IncrementalModuleV1, PointcutDirChangeV1,
+    IncrementalObjectV1, incremental_rebuild_plan_v1, pointcut_affected_files_v1,
+    incremental_link_decision_v1}
+use compiler.common.cache_contract.guard_id_v1.{GuardEvalV1, guard_id_v1, active_guard_root_v1}
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1,
+    DirectoryJoinPointFactsV1, directory_join_point_facts_guarded_v1,
+    pointcut_selector_parse_v1, pointcut_match_shard_compute_v1}
+
+fn m(path: text, src_old: text, src_new: text, imports: [text], iface_old: text,
+        iface_new: text) -> IncrementalModuleV1:
+    IncrementalModuleV1(path: path, old_source_digest: src_old, new_source_digest: src_new,
+        imports: imports, old_iface_digest: iface_old, new_iface_digest: iface_new)
+
+fn jp(file: text, sym: text, attrs: [text]) -> JoinPointFactV1:
+    JoinPointFactV1(id: file + "::" + sym, kind: "forward", symbol: sym, attrs: attrs,
+        owner_file: file, base_body_digest: "b")
+
+fn facts(points: [JoinPointFactV1], guard_on: bool) -> DirectoryJoinPointFactsV1:
+    directory_join_point_facts_guarded_v1("a", ["a/x.spl", "a/y.spl"], points, [], true,
+        active_guard_root_v1("p", [GuardEvalV1(guard: guard_id_v1("when", "f"), evaluable: true,
+            active: guard_on)]))
+
+fn change(old_points: [JoinPointFactV1], new_points: [JoinPointFactV1], old_guard: bool,
+        new_guard: bool) -> PointcutDirChangeV1:
+    val sel = pointcut_selector_parse_v1("attr(logged)")
+    val of = facts(old_points, old_guard)
+    val nf = facts(new_points, new_guard)
+    PointcutDirChangeV1(old_facts: of, new_facts: nf,
+        old_shard: pointcut_match_shard_compute_v1(sel, of),
+        new_shard: pointcut_match_shard_compute_v1(sel, nf), old_apply: {}, new_apply: {})
+
+describe "incremental rebuild plan":
+    it "recompiles only changed sources and importers of a changed TLDR interface":
+        val mods = [m("a.spl", "s1", "s2", [], "i1", "i2"),
+            m("b.spl", "s1", "s1", ["a.spl"], "j", "j"),
+            m("c.spl", "s1", "s1", ["b.spl"], "k", "k"),
+            m("d.spl", "s1", "s1", [], "l", "l")]
+        val plan = incremental_rebuild_plan_v1(mods, [])
+        expect(plan.recompile).to_equal(["a.spl", "b.spl"])
+
+    it "stops the cascade when a changed source keeps its interface digest":
+        val mods = [m("a.spl", "s1", "s2", [], "i1", "i1"), m("b.spl", "s1", "s1", ["a.spl"], "j", "j")]
+        expect(incremental_rebuild_plan_v1(mods, []).recompile).to_equal(["a.spl"])
+
+    it "widens on an unknown import or unknown interface digest":
+        val mods = [m("b.spl", "s1", "s1", ["gone.spl"], "j", "j"),
+            m("c.spl", "s1", "s1", ["e.spl"], "k", "k"), m("e.spl", "s1", "s1", [], "", "")]
+        expect(incremental_rebuild_plan_v1(mods, []).recompile).to_equal(["b.spl", "c.spl"])
+
+    it "adds the owner files of newly matched pointcut join points":
+        val old_pts = [jp("a/x.spl", "foo", []), jp("a/y.spl", "bar", [])]
+        val new_pts = [jp("a/x.spl", "foo", ["logged"]), jp("a/y.spl", "bar", [])]
+        val mods = [m("a/x.spl", "s1", "s1", [], "i", "i"), m("a/y.spl", "s1", "s1", [], "j", "j")]
+        val plan = incremental_rebuild_plan_v1(mods, [change(old_pts, new_pts, true, true)])
+        expect(plan.pointcut_affected).to_equal(["a/x.spl"])
+        expect(plan.recompile).to_equal(["a/x.spl"])
+
+    it "an unchanged directory contributes nothing":
+        val pts = [jp("a/x.spl", "foo", ["logged"])]
+        expect(pointcut_affected_files_v1([change(pts, pts, true, true)])).to_equal([])
+
+    it "a GuardIdV1 guard flip invalidates every member file of the directory":
+        val pts = [jp("a/x.spl", "foo", ["logged"])]
+        expect(pointcut_affected_files_v1([change(pts, pts, true, false)])).to_equal(["a/x.spl", "a/y.spl"])
+
+describe "incremental link decision":
+    it "places the cached output when every object hash is unchanged":
+        val objs = [IncrementalObjectV1(path: "a.o", old_object_digest: "h1", new_object_digest: "h1")]
+        val d = incremental_link_decision_v1(objs, true)
+        expect(d.relink).to_equal(false)
+        expect(d.place_cached).to_equal(true)
+
+    it "relinks when an object changed or the cached output is missing":
+        val same = [IncrementalObjectV1(path: "a.o", old_object_digest: "h1", new_object_digest: "h1")]
+        expect(incremental_link_decision_v1(same, false).relink).to_equal(true)
+        val diff = [IncrementalObjectV1(path: "a.o", old_object_digest: "h1", new_object_digest: "h2"),
+            IncrementalObjectV1(path: "b.o", old_object_digest: "", new_object_digest: "h3")]
+        val d = incremental_link_decision_v1(diff, true)
+        expect(d.relink).to_equal(true)
+        expect(d.changed_objects).to_equal(["a.o", "b.o"])

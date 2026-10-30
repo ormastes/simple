@@ -72,6 +72,7 @@ int64_t rt_simple_abi_version_deferred(void) {
  * fsync, publish) reuses the same include. This file used to carry its own
  * byte-identical copy defined further down. */
 #include "platform/runtime_win_long_path.h"
+#include "platform/runtime_win_excl_file.h"
 #endif
 
 #include <stdio.h>
@@ -1817,7 +1818,7 @@ static HANDLE g_prefetch_thread = NULL;
 
 static DWORD WINAPI spl_prefetch_thread_func(LPVOID param) {
     const char* path = (const char*)param;
-    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                                OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         /* Read through the file to populate OS file cache */
@@ -1960,7 +1961,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded(
 #if defined(_WIN32)
     wchar_t* wide_path = rt_widen_long_path_rc(path);
     if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
-    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
     if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
@@ -2067,33 +2068,36 @@ int         rt_file_append(const char* path, const char* content) {
  * dst_len); runtime_sffi.rs:1868 declares &[I64, I64, I64, I64]. The old
  * two-parameter form read BOTH paths past their ends. */
 SPL_RUNTIME_NATIVE_TWIN int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
-                         const uint8_t* dst_ptr, uint64_t dst_len) {
+                 const uint8_t* dst_ptr, uint64_t dst_len) {
     char src[RT_TEXT_PATH_MAX];
     char dst[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(src_ptr, src_len, src, sizeof(src))) return 0;
     if (!rt_text_arg_to_path(dst_ptr, dst_len, dst, sizeof(dst))) return 0;
     FILE* in = fopen(src, "rb");
     if (!in) return 0;
-    
+#if !defined(_WIN32)
+    struct stat source_stat;
+    if (fstat(fileno(in), &source_stat) != 0) { fclose(in); return 0; }
+#endif
     FILE* out = fopen(dst, "wb");
-    if (!out) {
-        fclose(in);
-        return 0;
+    if (!out) { fclose(in); return 0; }
+    uint8_t buf[65536];
+    int ok = 1;
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, got, out) != got) { ok = 0; break; }
     }
-    
-    char buf[8192];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
-            fclose(in);
-            fclose(out);
-            return 0;
-        }
-    }
-    
-    fclose(in);
-    fclose(out);
-    return 1;
+    if (ferror(in) || fflush(out) != 0) ok = 0;
+#if !defined(_WIN32)
+    /* BuildRunner publishes this copy as the executable artifact. Preserve
+     * ordinary permissions from the opened source, independent of umask or
+     * an existing destination's mode; never propagate privilege bits. Apply
+     * only after the bytes are flushed, through the already-open destination. */
+    if (ok && fchmod(fileno(out), source_stat.st_mode & 0777) != 0) ok = 0;
+#endif
+    if (fclose(out) != 0) ok = 0;
+    if (fclose(in) != 0) ok = 0;
+    return ok;
 }
 SPL_RUNTIME_NATIVE_TWIN int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
@@ -2233,7 +2237,13 @@ static char* rt_m3_owned_path(const char* path, int64_t path_len) {
 SPL_RUNTIME_NATIVE_TWIN int rt_file_copy_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+#if defined(_WIN32)
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    int ok = src && dst && rt_win_file_copy_create_excl_no_follow(src, dst);
+    free(src); free(dst);
+    return ok;
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else
@@ -2283,7 +2293,13 @@ SPL_RUNTIME_NATIVE_TWIN int rt_file_copy_create_excl_no_follow(
 SPL_RUNTIME_NATIVE_TWIN int rt_file_link_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+#if defined(_WIN32)
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    int ok = src && dst && rt_win_file_link_create_excl_no_follow(src, dst);
+    free(src); free(dst);
+    return ok;
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else

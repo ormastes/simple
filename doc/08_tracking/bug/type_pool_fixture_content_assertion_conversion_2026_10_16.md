@@ -20,3 +20,13 @@ for both union and named generic argument pools after both scopes. This retains
 the original content assertion and guards indexing by exact length. Native
 qualification remains NOT_RUN until the frozen standalone entry is built and
 executed. No inventory retry or broader equality change is included.
+
+## Gzip header prerequisite probe — 2026-10-20
+
+The admitted pure-Simple producer645e62a8 exhibits the same fixture-authoring
+hazard: direct typed-byte-array `!=` rejects an absent gzip header even though
+native length/index diagnostics show exactly31,139,8,0,0,0,0,0,0,3. The corrected
+wire oracle checks scalar bytes and the native probe passes absent, empty and
+UTF-8 filename vectors. This does not establish a new direct-array equality
+language contract. Exact compile/run/source receipts are recorded in
+`doc/03_plan/evidence/seven_plans/items247_gzip_and_suffixed_patterns_2026-10-20.md`.

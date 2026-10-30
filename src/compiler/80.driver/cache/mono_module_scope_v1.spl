@@ -1,0 +1,94 @@
+# Module-scoped monomorphization plan (fiber per-file pipeline, P3 follow-up).
+#
+# Today every MIR shard worker re-runs mono over the WHOLE program and only
+# lowers the modules it claims (80.driver/driver_build/native_mir_shard.spl),
+# and a specialization is owned by its TEMPLATE's module, referenced from
+# other modules through a process-global SymbolId (>= MONO_SYMBOL_BASE).
+# Neither survives a per-file pipeline: the owner's fiber may have finished
+# before a requester appears, and SymbolIds are not stable across processes.
+#
+# Module-scoped rule (design: doc/05_design/compiler/incremental_build/
+# build_runner_fiber_scheduler_v1.md §8):
+#   - A module plans exactly the instances ITS OWN code requests. Imported
+#     templates are read as concrete TLDR views (acquire_concrete_tldr);
+#     only Concrete views are codegen input.
+#   - Instance identity is the ConcreteTldrKey (DigestV1) and the existing
+#     MonoSemanticKey; the symbol is a deterministic link name derived from
+#     the semantic key, never a SymbolId.
+#   - Requester-produces: the first requester that wins the instance cache's
+#     single-flight produces the instance; an instance already published is
+#     reused; a requester that joins an in-flight production awaits it. Every
+#     requester's object references the instance by link name, and the
+#     instance is emitted as a linkonce/COMDAT definition, so the result is
+#     correct under any fiber interleaving (identical keys produce identical
+#     bytes; divergence is quarantined by the cache).
+#
+# This module is the pure planning step; wiring it into MonomorphizationPass
+# and MIR lowering is the next step (needs a binary that can run HIR
+# lowering; the Rust seed cannot).
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.generic_tldr_view_v1.{ConcreteTldrAstViewV1,
+    GENERIC_CLOSURE_CONCRETE}
+use compiler.monomorphize.mono_key.{mono_semantic_key_canonical_text}
+use compiler.driver.cache.generic_instance_cache_v1.{GenericInstanceCacheV1,
+    generic_instance_key_v1, generic_instance_semantic_key_v1, generic_digest_admitted_v1}
+
+pub val MONO_PLAN_PRODUCE_V1 = "produce"   # this module instantiates it
+pub val MONO_PLAN_REUSE_V1 = "reuse"       # already published: reference only
+pub val MONO_PLAN_AWAIT_V1 = "await"       # another fiber is producing it
+
+pub struct MonoInstanceRequestV1:
+    instance_key: text      # ConcreteTldrKey (DigestV1 text)
+    semantic_text: text     # MonoSemanticKey canonical text
+    template_symbol: text
+    link_name: text
+    action: text            # MONO_PLAN_*_V1
+
+pub struct MonoModulePlanV1:
+    module_id: text
+    requests: [MonoInstanceRequestV1]   # unique per instance key, request order
+    rejected: [text]                    # "<symbol>: <reason>" — never codegen input
+
+# Deterministic, collision-resistant instance symbol: the full sha256 of the
+# MonoSemanticKey canonical text (no truncation), prefixed for readability.
+pub fn mono_instance_link_name_v1(semantic_text: text) -> text:
+    "__spl_inst$" + sha256_text("mono-instance-link/v1\u0000" + semantic_text)
+
+fn _has_key_v1(requests: [MonoInstanceRequestV1], key: text) -> bool:
+    for r in requests:
+        if r.instance_key == key:
+            return true
+    false
+
+pub fn mono_module_plan_v1(cache: GenericInstanceCacheV1, module_id: text,
+        views: [ConcreteTldrAstViewV1], now_ms: i64) -> MonoModulePlanV1:
+    var requests: [MonoInstanceRequestV1] = []
+    var rejected: [text] = []
+    for v in views:
+        val view: ConcreteTldrAstViewV1 = v
+        val symbol = view.template.symbol_id
+        if view.closure_status != GENERIC_CLOSURE_CONCRETE:
+            rejected.push(symbol + ": not Concrete (" + view.closure_status + ")")
+            continue
+        val key = generic_instance_key_v1(view)
+        val sems = generic_instance_semantic_key_v1(view)
+        if not generic_digest_admitted_v1(key) or sems.len() != 1:
+            rejected.push(symbol + ": instance identity not admitted")
+            continue
+        if _has_key_v1(requests, key):
+            continue
+        val semantic_text = mono_semantic_key_canonical_text(sems[0])
+        var action = MONO_PLAN_AWAIT_V1
+        if cache.get_mir(key, sems[0]).len() == 1:
+            action = MONO_PLAN_REUSE_V1
+        elif cache.begin_produce(key, module_id, now_ms):
+            action = MONO_PLAN_PRODUCE_V1
+        requests.push(MonoInstanceRequestV1(instance_key: key, semantic_text: semantic_text,
+            template_symbol: symbol, link_name: mono_instance_link_name_v1(semantic_text),
+            action: action))
+    MonoModulePlanV1(module_id: module_id, requests: requests, rejected: rejected)
+
+export MONO_PLAN_PRODUCE_V1, MONO_PLAN_REUSE_V1, MONO_PLAN_AWAIT_V1
+export MonoInstanceRequestV1, MonoModulePlanV1
+export mono_instance_link_name_v1, mono_module_plan_v1

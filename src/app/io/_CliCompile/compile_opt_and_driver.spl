@@ -17,7 +17,6 @@ use compiler.driver.driver_types (CompileOptions, CompileMode, CompileResult, Ou
 use compiler.common.driver_core_types (driver_core_compile_options_default, compileoptions_normalize_mir_optimization)
 use app.io.aspect_params_env.{aspect_params_from_env}
 use compiler.mir_opt.mir_opt_integration (mir_optimization_inventory_lines)
-use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use std.common.convert.{try_parse_int}
 use app.io._CliCompile.compile_llvm_ir_facade.{
     cli_compile_source_llvm_artifacts
@@ -98,7 +97,7 @@ fn cli_print_shared_optimization_inventory(command: text):
         print "  - Release MIR/self-hosted builds normalize to standard unless --opt-level overrides it."
 
 # Pure Simple compiler implementation (no Rust SFFI dependency)
-fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, target_opt_ctx: TargetOptContext, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64) -> i64:
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64) -> i64:
     var out = output_file
     if out == "":
         # Default output based on format
@@ -150,7 +149,6 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
         options.opt_level = opt_level
     if backend != "" and backend != "auto":
         options.backend = backend
-    options.target_opt_ctx = target_opt_ctx
     if debug_trace_level != "":
         options.debug_trace_level = debug_trace_level
     options.coverage_enabled = coverage_enabled
@@ -188,7 +186,7 @@ fn cli_compile_dynamic_driver_library(source_file: text, output_file: text, back
         source_file.replace(".spl", ".lsm")
     val smf_out = out + ".smf.tmp"
 
-    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2, if release: "prod" else: "dev", target_opt_context_default(), "", false, "", 0, 0)
+    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2, if release: "prod" else: "dev", "", false, "", 0, 0)
     if compile_status != 0:
         return compile_status
 
@@ -250,7 +248,6 @@ fn cli_compile(args: [text]) -> i64:
     # (e.g. the test runner's `compile <spec> -o <x>.smf`) to the seed's
     # rt_cli_handle_compile, which the self-hosted CLI does not link.
 
-    val _compile_target_opt_ctx = target_opt_context_default()
 
     var source_file: text = ""
     var output_file: text = ""
@@ -612,7 +609,7 @@ fn cli_compile(args: [text]) -> i64:
             vulkan_output = output_file
         if vulkan_output == "":
             vulkan_output = source_file.replace(".spl", ".spvasm")
-        return cli_compile_pure_simple(source_file, vulkan_output, "vulkan", "vulkan", verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
+        return cli_compile_pure_simple(source_file, vulkan_output, "vulkan", "vulkan", verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
 
     if backend == "c" or backend == "cpp" or backend == "ccodegen" or emit_c:
         if mcdc_route_requested:
@@ -631,7 +628,7 @@ fn cli_compile(args: [text]) -> i64:
         # Use Pure Simple compiler driver for all LLVM backends
         if (backend == "llvm-lib" or backend == "llvmlib" or coverage_enabled or mcdc_mode_text != "" or
             mcdc_owner_bytes > 0 or mcdc_global_bytes > 0):
-            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
+            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
         return compile_native(source_file, out, verbose, "", false, backend, release, opt_level, use_lto, march_target)
 
     if target.starts_with("baremetal-"):
@@ -661,7 +658,7 @@ fn cli_compile(args: [text]) -> i64:
         var wout = output_file
         if wout == "":
             wout = source_file.replace(".spl", ".wat")
-        return cli_compile_pure_simple(source_file, wout, output_format, "wasm", verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
+        return cli_compile_pure_simple(source_file, wout, output_format, "wasm", verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
 
     if target != "" and not target.starts_with("baremetal-"):
         if mcdc_route_requested:
@@ -676,7 +673,7 @@ fn cli_compile(args: [text]) -> i64:
         if not env_set("SIMPLE_NATIVE_BUILD_TARGET", target):
             _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_TARGET={target}")
             return 1
-        val target_status = cli_compile_pure_simple(source_file, output_file, if output_format == "": "smf" else: output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
+        val target_status = cli_compile_pure_simple(source_file, output_file, if output_format == "": "smf" else: output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
         env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
         return target_status
 
@@ -684,7 +681,7 @@ fn cli_compile(args: [text]) -> i64:
     # or --format, `compile` emits an SMF module (the seed CLI's contract).
     if output_format == "":
         output_format = "smf"
-    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     if verbose:

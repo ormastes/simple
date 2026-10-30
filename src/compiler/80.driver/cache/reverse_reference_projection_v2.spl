@@ -1,0 +1,288 @@
+# `.rr` reverse projection built from sealed forward semantic read manifests.
+#
+# The reverse projection is DERIVED data: it is rebuilt per generation from the
+# sealed forward manifests and is never an identity input to a forward query.
+# Publication is lock-free: the receipt is an immutable content-addressed file
+# (create-exclusive, identical-content races are benign) and the CURRENT pointer
+# moves by temp-file + rename. A missing or torn `.rr` never means "zero
+# dependents": lookups answer conservatively until a replay republishes it.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadManifestV1,
+    SemanticQueryReadV1, SemanticReadKindV1, semantic_query_key_canonical_v1,
+    semantic_query_read_manifest_valid_v1, semantic_read_kind_of_facet_v1
+}
+use compiler.driver.cache.reverse_reference_receipt.{
+    REVERSE_REFERENCE_FAMILIES_V2, REVERSE_REFERENCE_RECEIPT_SCHEMA_V2,
+    ReverseReferenceGenerationReceiptV1, ReverseReferenceProjectionV1,
+    ReverseReferenceReceiptReadV1, reverse_reference_consumers_v1,
+    reverse_reference_publish_generation_v1, reverse_reference_read_current_v1
+}
+
+struct SealedForwardManifestV2:
+    consumer_identity: text
+    sealed: bool
+    manifest: SemanticQueryReadManifestV1?
+
+struct ReverseReferenceProjectionBuildV2:
+    ok: bool
+    reason: text
+    receipt: ReverseReferenceGenerationReceiptV1?
+    retained_consumers: [text]
+
+struct ProposedSemanticEditV2:
+    base_snapshot: text
+    changed_subjects: [text]
+    changed_name_scopes: [text]
+    unknown_effects: bool
+
+struct ChangeImpactPreviewV2:
+    old_generation: text
+    candidate_new_fingerprint: text
+    changed_subjects: [text]
+    changed_name_scopes: [text]
+    affected_consumers: [text]
+    affected_macro_users: [text]
+    affected_tldr_modules: [text]
+    affected_generic_views: [text]
+    affected_pointcut_directories: [text]
+    affected_object_actions: [text]
+    complete: bool
+    fallback_reason: text
+
+fn reverse_reference_subject_for_key_v2(key: SemanticQueryKeyV1) -> text:
+    semantic_query_key_canonical_v1(key)
+
+# Query kind carried by a canonical key identity ("<n>:<kind>...").
+fn reverse_reference_identity_kind_v2(identity: text) -> text:
+    val colon = identity.index_of(":")
+    if colon <= 0:
+        return ""
+    val parsed = identity.substring(0, colon).to_i64()
+    if parsed == nil or colon + 1 + parsed! > identity.len():
+        return ""
+    identity.substring(colon + 1, colon + 1 + parsed!)
+
+fn reverse_reference_family_for_read_v2(read: SemanticQueryReadV1) -> text:
+    val kind = read.producer.kind
+    val read_kind = semantic_read_kind_of_facet_v1(read.facet)
+    if kind == "macro.def": return "macro-definition-consumer"
+    if kind == "macro.resolve":
+        if read_kind == SemanticReadKindV1.Absence: return "macro-name-absence"
+        return "macro-name-resolution"
+    if kind == "macro.expand": return "macro-definition-consumer"
+    if kind == "aop.directory_facts": return "directory-scope"
+    if kind == "aop.match": return "aop-match-membership"
+    if kind == "aop.weave": return "aop-consumer"
+    if kind == "tldr.concrete" or kind == "generic.body": return "generic-specialization"
+    if kind == "tldr.symbolic": return "direct-import-export"
+    if kind == "obj.emit" or kind == "obj.link": return "emitted-symbol-relocation"
+    ""
+
+fn reverse_reference_projection_v2(owner: text, root: text, subject: text,
+        family: text, digest: text, consumer: text) -> ReverseReferenceProjectionV1:
+    ReverseReferenceProjectionV1(
+        key: ReverseReferenceKeyV1(registry_kind: "semantic",
+            owner_generation: owner, root_generation: root,
+            subject_identity: subject, projection_kind: family,
+            projection_digest: digest, schema_version: 1),
+        consumer_identity: consumer)
+
+fn reverse_reference_build_fail_v2(reason: text) -> ReverseReferenceProjectionBuildV2:
+    ReverseReferenceProjectionBuildV2(ok: false, reason: reason, receipt: nil,
+        retained_consumers: [])
+
+fn reverse_reference_project_generation_v2(owner: text, root: text,
+        manifests: [SealedForwardManifestV2],
+        previous: ReverseReferenceReceiptReadV1) -> ReverseReferenceProjectionBuildV2:
+    var projections: [ReverseReferenceProjectionV1] = []
+    var seen: [text] = []
+    var retained: [text] = []
+    var incomplete_families: [text] = []
+    for entry in manifests:
+        if not entry.sealed or entry.manifest == nil:
+            # Failed/cancelled rebuild: keep this consumer's old outgoing edges.
+            if not previous.valid or previous.receipt == nil:
+                return reverse_reference_build_fail_v2(
+                    "failed-consumer-without-prior-generation:{entry.consumer_identity}")
+            for old in previous.receipt!.projections:
+                if old.consumer_identity == entry.consumer_identity and
+                        not old.key.subject_identity.starts_with("@"):
+                    val tag = "{old.key.subject_identity}|{old.key.projection_kind}|{old.key.projection_digest}|{old.consumer_identity}"
+                    if not seen.contains(tag):
+                        seen.push(tag)
+                        projections.push(reverse_reference_projection_v2(owner, root,
+                            old.key.subject_identity, old.key.projection_kind,
+                            old.key.projection_digest, old.consumer_identity))
+            if not retained.contains(entry.consumer_identity):
+                retained.push(entry.consumer_identity)
+            continue
+        val manifest = entry.manifest!
+        if not semantic_query_read_manifest_valid_v1(manifest):
+            return reverse_reference_build_fail_v2("invalid-forward-manifest:{entry.consumer_identity}")
+        if reverse_reference_subject_for_key_v2(manifest.consumer) != entry.consumer_identity:
+            return reverse_reference_build_fail_v2("consumer-identity-mismatch:{entry.consumer_identity}")
+        for read in manifest.ordered_reads:
+            val family = reverse_reference_family_for_read_v2(read)
+            if family == "":
+                return reverse_reference_build_fail_v2("unmapped-read-kind:{read.producer.kind}")
+            if read.completeness != SemanticCoverageV1.Complete and
+                    not incomplete_families.contains(family):
+                incomplete_families.push(family)
+            val subject = reverse_reference_subject_for_key_v2(read.producer)
+            val digest = sha256_text("{read.facet}|{read.consumed_fingerprint}|{read.witness_digest}")
+            val tag = "{subject}|{family}|{digest}|{entry.consumer_identity}"
+            if not seen.contains(tag):
+                seen.push(tag)
+                projections.push(reverse_reference_projection_v2(owner, root,
+                    subject, family, digest, entry.consumer_identity))
+    # Every family carries an explicit coverage marker so the decoder can tell
+    # "complete and empty" apart from "not projected" (which stays conservative).
+    for family in REVERSE_REFERENCE_FAMILIES_V2:
+        if incomplete_families.contains(family):
+            projections.push(reverse_reference_projection_v2(owner, root,
+                "@unknown-family", family, sha256_text("incomplete:" + family), "@generation"))
+        else:
+            projections.push(reverse_reference_projection_v2(owner, root,
+                "@family-complete", family, sha256_text("complete:" + family), "@generation"))
+    ReverseReferenceProjectionBuildV2(ok: true, reason: "ok",
+        receipt: Some(ReverseReferenceGenerationReceiptV1(
+            REVERSE_REFERENCE_RECEIPT_SCHEMA_V2, owner, root, projections)),
+        retained_consumers: retained)
+
+fn reverse_reference_publish_projection_v2(cache_path: text,
+        build: ReverseReferenceProjectionBuildV2) -> bool:
+    if not build.ok or build.receipt == nil:
+        return false
+    reverse_reference_publish_generation_v1(cache_path, build.receipt!)
+
+# Read the current `.rr`; when it is missing, torn or from another generation,
+# rebuild it by replaying the sealed forward manifests and republish. On any
+# failure the returned read is invalid, so callers stay conservative.
+fn reverse_reference_replay_needed_v2(current: ReverseReferenceReceiptReadV1,
+        owner: text, root: text) -> bool:
+    not (current.valid and current.receipt != nil and
+        current.receipt!.owner_generation == owner and
+        current.receipt!.root_generation == root)
+
+fn reverse_reference_read_or_replay_v2(cache_path: text, owner: text, root: text,
+        manifests: [SealedForwardManifestV2]) -> ReverseReferenceReceiptReadV1:
+    val current = reverse_reference_read_current_v1(cache_path)
+    if not reverse_reference_replay_needed_v2(current, owner, root):
+        return current
+    val build = reverse_reference_project_generation_v2(owner, root, manifests, current)
+    if not build.ok:
+        return ReverseReferenceReceiptReadV1(false, "replay-build:" + build.reason, nil)
+    if not reverse_reference_publish_projection_v2(cache_path, build):
+        return ReverseReferenceReceiptReadV1(false, "replay-publish-failed", nil)
+    reverse_reference_read_current_v1(cache_path)
+
+fn reverse_reference_sorted_unique_v2(values: [text]) -> [text]:
+    var result: [text] = []
+    for value in values:
+        if not result.contains(value):
+            result.push(value)
+    var index = 1
+    while index < result.len():
+        val value = result[index]
+        var insertion = index
+        while insertion > 0 and value < result[insertion - 1]:
+            result[insertion] = result[insertion - 1]
+            insertion = insertion - 1
+        result[insertion] = value
+        index = index + 1
+    result
+
+fn change_impact_conservative_v2(base: ReverseReferenceReceiptReadV1,
+        edit: ProposedSemanticEditV2, scope: text, reason: text) -> ChangeImpactPreviewV2:
+    val old_generation = if base.valid and base.receipt != nil: base.receipt!.owner_generation else: ""
+    ChangeImpactPreviewV2(old_generation: old_generation,
+        candidate_new_fingerprint: "",
+        changed_subjects: edit.changed_subjects,
+        changed_name_scopes: edit.changed_name_scopes,
+        affected_consumers: ["@scope:" + scope], affected_macro_users: [],
+        affected_tldr_modules: [], affected_generic_views: [],
+        affected_pointcut_directories: [], affected_object_actions: [],
+        complete: false, fallback_reason: reason)
+
+# Advisory pre-edit impact query over the pinned base `.rr` generation. It never
+# authorizes compiling against future bytes; complete=false means the caller
+# must widen to `scope`.
+fn preview_semantic_change(base_snapshot: ReverseReferenceReceiptReadV1,
+        proposed_edit: ProposedSemanticEditV2, scope: text) -> ChangeImpactPreviewV2:
+    if not base_snapshot.valid or base_snapshot.receipt == nil:
+        return change_impact_conservative_v2(base_snapshot, proposed_edit, scope,
+            "reverse-projection-unavailable:" + base_snapshot.reason)
+    val receipt = base_snapshot.receipt!
+    if receipt.owner_generation != proposed_edit.base_snapshot:
+        return change_impact_conservative_v2(base_snapshot, proposed_edit, scope,
+            "base-snapshot-mismatch")
+    var complete = true
+    var reason = ""
+    var worklist: [text] = []
+    for subject in proposed_edit.changed_subjects:
+        worklist.push(subject)
+    for name_scope in proposed_edit.changed_name_scopes:
+        worklist.push(name_scope)
+    var visited: [text] = []
+    var affected: [text] = []
+    var cursor: i64 = 0
+    while cursor < worklist.len():
+        val subject = worklist[cursor]
+        cursor = cursor + 1
+        if visited.contains(subject):
+            continue
+        visited.push(subject)
+        for family in REVERSE_REFERENCE_FAMILIES_V2:
+            val consumers = reverse_reference_consumers_v1(base_snapshot, subject, family)
+            if not consumers.exact:
+                if complete:
+                    reason = consumers.fallback_reason
+                complete = false
+                continue
+            for consumer in consumers.consumers:
+                if not affected.contains(consumer):
+                    affected.push(consumer)
+                    worklist.push(consumer)
+    if proposed_edit.unknown_effects:
+        if complete:
+            reason = "unknown-effects"
+        complete = false
+    var macro_users: [text] = []
+    var tldr_modules: [text] = []
+    var generic_views: [text] = []
+    var pointcut_dirs: [text] = []
+    var objects: [text] = []
+    for consumer in affected:
+        val kind = reverse_reference_identity_kind_v2(consumer)
+        if kind == "macro.expand" or kind == "macro.resolve": macro_users.push(consumer)
+        if kind == "tldr.symbolic" or kind == "tldr.concrete": tldr_modules.push(consumer)
+        if kind == "tldr.concrete" or kind == "generic.body": generic_views.push(consumer)
+        if kind.starts_with("aop."): pointcut_dirs.push(consumer)
+        if kind == "obj.emit" or kind == "obj.link": objects.push(consumer)
+    val subjects_sorted = reverse_reference_sorted_unique_v2(proposed_edit.changed_subjects)
+    val scopes_sorted = reverse_reference_sorted_unique_v2(proposed_edit.changed_name_scopes)
+    val fingerprint = sha256_text("{receipt.owner_generation}|{subjects_sorted.join(\",\")}|{scopes_sorted.join(\",\")}")
+    var final_affected = reverse_reference_sorted_unique_v2(affected)
+    if not complete:
+        final_affected.push("@scope:" + scope)
+    ChangeImpactPreviewV2(old_generation: receipt.owner_generation,
+        candidate_new_fingerprint: fingerprint,
+        changed_subjects: subjects_sorted, changed_name_scopes: scopes_sorted,
+        affected_consumers: final_affected,
+        affected_macro_users: reverse_reference_sorted_unique_v2(macro_users),
+        affected_tldr_modules: reverse_reference_sorted_unique_v2(tldr_modules),
+        affected_generic_views: reverse_reference_sorted_unique_v2(generic_views),
+        affected_pointcut_directories: reverse_reference_sorted_unique_v2(pointcut_dirs),
+        affected_object_actions: reverse_reference_sorted_unique_v2(objects),
+        complete: complete, fallback_reason: reason)
+
+export SealedForwardManifestV2, ReverseReferenceProjectionBuildV2
+export ProposedSemanticEditV2, ChangeImpactPreviewV2
+export reverse_reference_subject_for_key_v2, reverse_reference_identity_kind_v2
+export reverse_reference_family_for_read_v2
+export reverse_reference_project_generation_v2, reverse_reference_publish_projection_v2
+export reverse_reference_read_or_replay_v2, reverse_reference_replay_needed_v2
+export preview_semantic_change

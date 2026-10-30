@@ -1,0 +1,333 @@
+"""
+REQ-CMUX-002/004/005/008/010: persistent owner foundations.
+Source-authored NOT_RUN. These execute pure state machines and the real local
+API, not a substitute CoreMux provider, TCP owner or native child workflow.
+# @manual: primary
+# @capture: text
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.{MuxOperationV1}
+use std.common.contracts.mux.observation_v1.{MuxLeaseTermsV1, MuxRequestReceiptV1, MuxRequestKnowledgeV1}
+use os.apps.smux.core_mux_leases.*
+use os.apps.smux.core_mux_requests.*
+use os.apps.smux.core_mux_owner.*
+use os.apps.smux.service_revision.*
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxPane}
+use os.apps.smux.input_queue.{pane_input_enqueue}
+use os.apps.smux.client_leases.{ClientLease, ClientLeaseState}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
+    smux_list_panes, smux_split_pane, smux_toggle_zoom, smux_configuration_revision,
+    smux_poll_output, smux_kill_session, smux_hide_pane, smux_show_pane,
+    smux_set_pane_title, smux_owner_snapshot, smux_attach, smux_attach_leased,
+    smux_client_resize_leased, smux_client_check_lease, smux_rollback_split}
+use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
+use os.apps.smux.interactive_client.{client_hidden_reply}
+
+fn owner_terms() -> MuxLeaseTermsV1:
+    return MuxLeaseTermsV1(lifetime_ms: 1000, renew_after_ms: 200,
+        retained_receipt_ms: 2000, max_retained_receipts: 4096)
+
+fn owner_leases() -> CoreMuxLeases:
+    return core_mux_leases_new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 1, owner_terms()).unwrap()
+
+fn owner_admitted() -> CoreMuxLeaseAdmission:
+    return core_mux_lease_admit(owner_leases(), "fixture", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 100).unwrap()
+
+fn owner_receipt(handle: MuxHandleV1, id: u64, operation: MuxOperationV1) -> MuxRequestReceiptV1:
+    return MuxRequestReceiptV1(handle: handle, request_id: id, operation: Some(operation),
+        knowledge: MuxRequestKnowledgeV1.Retained, commit_state: MuxCommitStateV1.Partial,
+        prior_revision: Some(3u64), observed_revision: Some(4u64),
+        affected: [MuxObjectRefV1(owner_id: handle.owner_id, owner_generation: handle.owner_generation, kind: MuxObjectKindV1.Pane, object_id: "id7")],
+        error_kind: Some(MuxErrorKindV1.PartialFailure), detail: "checked cleanup remains pending", cleanup_pending: true)
+
+fn owner_small_ledger() -> CoreMuxRequestLedger:
+    return core_mux_requests_new(3, 20, 1048576, 2).unwrap()
+
+describe "CoreMux authority and revision foundations":
+    it "versions attachment generation changes while ignoring heartbeat deadlines":
+        val lease = ClientLease(session_id: "s", client_id: "c", token: "opaque", generation: 1, deadline_ms: 100)
+        val leases = ClientLeaseState(owner_nonce: "owner", next_generation: 2, last_now_ms: 0, leases: [lease])
+        val renewed = ClientLeaseState(owner_nonce: "owner", next_generation: 2, last_now_ms: 10,
+            leases: [ClientLease(session_id: "s", client_id: "c", token: "opaque", generation: 1, deadline_ms: 200)])
+        val empty = ServiceState.empty()
+        val first = service_revision_publish(service_revision_new(), empty, empty, [], [], [], "owner", service_attachment_identities(leases))
+        val heartbeat = service_revision_publish(first, empty, empty, [], [], [], "owner", service_attachment_identities(renewed))
+        expect(heartbeat.value).to_equal(first.value)
+        val rebound = service_revision_publish(heartbeat, empty, empty, [], [], [], "owner",
+            [AttachmentRevisionIdentity(session_id: "s", client_id: "c", generation: 2)])
+        expect(rebound.value).to_equal(first.value + 1)
+
+    it "preserves two leased client slots through renewal resize and reattachment":
+        smux_reset_for_test()
+        val session = smux_create_session("owner-leased-order")
+        val token_a = smux_attach_leased(session.id, "a", 80, 24).unwrap()
+        val token_b = smux_attach_leased(session.id, "b", 80, 24).unwrap()
+        val before = smux_configuration_revision().value
+        expect(smux_client_resize_leased(session.id, "a", token_a, 80, 24).is_ok()).to_equal(true)
+        expect(smux_configuration_revision().value).to_equal(before)
+        expect(smux_owner_snapshot().get_client(0).client_id).to_equal("a")
+        expect(smux_owner_snapshot().get_client(1).client_id).to_equal("b")
+        expect(smux_client_check_lease(session.id, "a", token_a).is_ok()).to_equal(true)
+        expect(smux_client_resize_leased(session.id, "a", token_a, 90, 24).is_ok()).to_equal(true)
+        expect(smux_configuration_revision().value).to_equal(before + 1)
+        expect(smux_owner_snapshot().get_client(0).cols).to_equal(90)
+        expect(smux_owner_snapshot().get_client(1).client_id).to_equal("b")
+        val replacement = smux_attach_leased(session.id, "a", 90, 24).unwrap()
+        expect(replacement == token_a).to_equal(false)
+        expect(smux_configuration_revision().value).to_equal(before + 2)
+        expect(smux_owner_snapshot().get_client(0).client_id).to_equal("a")
+        expect(smux_owner_snapshot().get_client(1).client_id).to_equal("b")
+        expect(smux_client_check_lease(session.id, "a", token_a).is_err()).to_equal(true)
+        expect(smux_client_check_lease(session.id, "b", token_b).is_ok()).to_equal(true)
+        expect(smux_kill_session(session.id).is_ok()).to_equal(true)
+
+    it "preserves two unmanaged client slots on no-op and changed reattachment":
+        smux_reset_for_test()
+        val session = smux_create_session("owner-unmanaged-order")
+        expect(smux_attach(session.id, "a", 80, 24).attached).to_equal(true)
+        expect(smux_attach(session.id, "b", 80, 24).attached).to_equal(true)
+        val before = smux_configuration_revision().value
+        expect(smux_attach(session.id, "a", 80, 24).attached).to_equal(true)
+        expect(smux_configuration_revision().value).to_equal(before)
+        expect(smux_owner_snapshot().get_client(0).client_id).to_equal("a")
+        expect(smux_owner_snapshot().get_client(1).client_id).to_equal("b")
+        expect(smux_attach(session.id, "a", 90, 24).attached).to_equal(true)
+        expect(smux_configuration_revision().value).to_equal(before + 1)
+        expect(smux_owner_snapshot().get_client(0).cols).to_equal(90)
+        expect(smux_owner_snapshot().get_client(1).client_id).to_equal("b")
+        expect(smux_kill_session(session.id).is_ok()).to_equal(true)
+
+    it "counts real legacy zoom ABA publications without counting an empty poll":
+        smux_reset_for_test()
+        val session = smux_create_session("owner-aba")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+        expect(smux_split_pane(session.id, window.id, pane.id, "vertical").is_ok()).to_equal(true)
+        val before = smux_configuration_revision().value
+        expect(smux_toggle_zoom(session.id, window.id, pane.id).is_ok()).to_equal(true)
+        val middle = smux_configuration_revision().value
+        expect(smux_toggle_zoom(session.id, window.id, pane.id).is_ok()).to_equal(true)
+        val after = smux_configuration_revision().value
+        expect(middle).to_equal(before + 1)
+        expect(after).to_equal(middle + 1)
+        val _polled = smux_poll_output()
+        expect(smux_configuration_revision().value).to_equal(after)
+        expect(smux_kill_session(session.id).is_ok()).to_equal(true)
+
+    it "excludes real content and input progress but includes new child incarnation":
+        var before = ServiceState.empty()
+        before = before.add_pane(PaneRecord.create(MuxPane.create("p", "w", "s")))
+        val pane = before.get_pane(0)
+        val fed = before.replace_pane(0, pane.feed_screen("output"))
+        expect(fed.get_pane(0).content_revision).to_be_greater_than(pane.content_revision)
+        expect(service_configuration_equal(before, fed)).to_equal(true)
+        val queued = pane_input_enqueue(pane.input, "literal").unwrap()
+        expect(service_configuration_equal(before, before.replace_pane(0, pane.with_input(queued)))).to_equal(true)
+        # Synthetic identity control only: never passes this PID to a host owner.
+        val owned = before.replace_pane(0, pane.with_child(123))
+        expect(service_configuration_equal(before, owned)).to_equal(false)
+        expect(owned.get_pane(0).child_incarnation).to_be_greater_than(pane.child_incarnation)
+
+    it "publishes presentation changes and guards independently hidden interactive input":
+        smux_reset_for_test()
+        val session = smux_create_session("owner-presentation")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+        val sibling = smux_split_pane(session.id, window.id, pane.id, "vertical").unwrap()
+        val before = smux_configuration_revision().value
+        expect(smux_set_pane_title(session.id, window.id, pane.id, "title").is_ok()).to_equal(true)
+        expect(smux_hide_pane(session.id, window.id, sibling.id).is_ok()).to_equal(true)
+        expect(smux_configuration_revision().value).to_equal(before + 2)
+        val scope = session.id + " " + window.id
+        expect(smux_interactive_dispatch("client-panes " + scope).contains(sibling.id + " ")).to_equal(false)
+        expect(smux_interactive_dispatch("input " + scope + " " + sibling.id + " 41")).to_equal("smux: input pane is explicitly hidden: " + sibling.id)
+        expect(smux_show_pane(session.id, window.id, sibling.id).is_ok()).to_equal(true)
+        expect(smux_interactive_dispatch("client-panes " + scope)).to_contain(sibling.id + " ")
+        expect(smux_kill_session(session.id).is_ok()).to_equal(true)
+
+    it "accepts only exact hidden replies for non-replaying recovery":
+        for reply in ["smux: input pane is explicitly hidden: id7",
+            "smux: frame failed: cursor pane is missing or explicitly hidden: id7",
+            "smux: input pane is hidden by window zoom: id7",
+            "smux: frame failed: cursor pane is hidden by window zoom: id7"]:
+            expect(client_hidden_reply(reply, "id7")).to_equal(true)
+            expect(client_hidden_reply(reply, "id8")).to_equal(false)
+        expect(client_hidden_reply("smux: unauthorized", "id7")).to_equal(false)
+        expect(client_hidden_reply("smux: frame failed: transport", "id7")).to_equal(false)
+        expect(client_hidden_reply("smux: input pane is explicitly hidden: id7 extra", "id7")).to_equal(false)
+
+    it "versions cleanup quarantine and retires exhausted revision authority without wrapping":
+        val empty = ServiceState.empty()
+        val before = service_revision_new()
+        val closing = service_revision_publish(before, empty, empty, [], ["w"], [])
+        expect(closing.value).to_equal(before.value + 1)
+        expect(service_revision_publish(closing, empty, empty, [], ["w"], []).value).to_equal(closing.value)
+        val last = ServiceRevisionState(value: SERVICE_REVISION_MAX - 1, epoch: 1, valid: true,
+            closing_sessions: [], closing_windows: [], closing_panes: [])
+        expect(service_revision_writable(last)).to_equal(false)
+        val cleanup = service_revision_publish(last, empty, empty, ["s"], [], [])
+        expect(cleanup.value).to_equal(SERVICE_REVISION_MAX)
+        expect(cleanup.valid).to_equal(false)
+        expect(service_revision_reset(before).epoch).to_equal(before.epoch + 1)
+
+    it "publishes actual checked split compensation through the reserved cleanup tick":
+        smux_reset_for_test()
+        val session = smux_create_session("owner-reserved-rollback")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+        val before = smux_owner_snapshot()
+        val added = smux_split_pane(session.id, window.id, pane.id, "vertical").unwrap()
+        val split = smux_owner_snapshot()
+        expect(smux_rollback_split(session.id, window.id, added.id).is_ok()).to_equal(true)
+        val restored = smux_owner_snapshot()
+        expect(restored.find_pane_idx(added.id)).to_equal(-1)
+        expect(restored.get_pane(restored.find_pane_idx(pane.id)).pane.cols).to_equal(before.get_pane(before.find_pane_idx(pane.id)).pane.cols)
+        expect(smux_rollback_split(session.id, window.id, added.id).is_err()).to_equal(true)
+        expect(smux_kill_session(session.id).is_ok()).to_equal(true)
+        # Replay real API snapshots through the production publication seam.
+        # This does not inject a fabricated revision into the global API owner.
+        val near = ServiceRevisionState(value: SERVICE_REVISION_MAX - 2, epoch: 1, valid: true,
+            closing_sessions: [], closing_windows: [], closing_panes: [])
+        expect(service_revision_writable(near)).to_equal(true)
+        expect(service_revision_rollback_allowed(near, true, false)).to_equal(true)
+        val committed = service_revision_publish(near, before, split, [], [], [])
+        expect(committed.value).to_equal(SERVICE_REVISION_MAX - 1)
+        expect(service_revision_writable(committed)).to_equal(false)
+        expect(service_revision_rollback_allowed(committed, true, false)).to_equal(true)
+        expect(service_revision_rollback_allowed(committed, false, false)).to_equal(false)
+        expect(service_revision_rollback_allowed(committed, true, true)).to_equal(false)
+        val compensated = service_revision_publish(committed, split, restored, [], [], [])
+        expect(compensated.value).to_equal(SERVICE_REVISION_MAX)
+        expect(compensated.valid).to_equal(false)
+        expect(service_revision_writable(compensated)).to_equal(false)
+        expect(service_revision_rollback_allowed(compensated, true, false)).to_equal(true)
+        val exhausted = service_revision_publish(compensated, restored, split, [], [], [])
+        expect(exhausted.value).to_equal(SERVICE_REVISION_MAX)
+        expect(exhausted.valid).to_equal(false)
+
+    it "never revives expired leases or extends fixed receipt retention by reads":
+        val admitted = owner_admitted()
+        val renewed = core_mux_lease_renew(admitted.leases, admitted.handle, 200).unwrap()
+        expect(renewed.entries[0].deadline_ms).to_equal(1200)
+        expect(core_mux_lease_renew(renewed, admitted.handle, 1200).is_err()).to_equal(true)
+        val swept = core_mux_lease_sweep(renewed, 1300).unwrap()
+        expect(swept.leases.entries[0].retain_until_ms).to_equal(3200)
+        expect(core_mux_lease_index(swept.leases, admitted.handle, 1400, true).is_ok()).to_equal(true)
+        expect(core_mux_lease_index(swept.leases, admitted.handle, 3200, true).is_err()).to_equal(true)
+        expect(swept.leases.entries[0].retain_until_ms).to_equal(3200)
+        expect(core_mux_lease_sweep(swept.leases, 3200).unwrap().forgotten_tokens.len()).to_equal(1)
+
+    it "rejects clock regression and wrong owner generation without aliasing authority":
+        val admitted = owner_admitted()
+        expect(core_mux_lease_index(admitted.leases, admitted.handle, 99).is_err()).to_equal(true)
+        val foreign = MuxHandleV1(owner_id: admitted.handle.owner_id, owner_generation: 2, lease_id: admitted.handle.lease_id)
+        expect(core_mux_lease_index(admitted.leases, foreign, 101).is_err()).to_equal(true)
+        val second = core_mux_lease_admit(admitted.leases, "fixture", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 101).unwrap()
+        expect(second.handle.lease_id == admitted.handle.lease_id).to_equal(false)
+
+    it "refuses incomplete mandatory mechanisms before publishing a connection lease":
+        val owner = core_mux_owner_new("configured", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, service_revision_new(), owner_terms()).unwrap()
+        val options = MuxConnectV1(backend: MuxBackendV1.Smux, namespace: "configured",
+            endpoint_policy: MuxEndpointPolicyV1.ExistingOnly, client_identity: "client",
+            limits: MuxLimitsV1(max_sessions: 8, max_reply_bytes: 65536))
+        val result = core_mux_owner_admit(owner, options, [], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", service_revision_new(), 100)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().kind).to_equal(MuxErrorKindV1.Unsupported)
+        expect(owner.leases.entries.len()).to_equal(0)
+
+    it "reserves arbitrary IDs once and rejects a same-ID payload collision":
+        val admitted = owner_admitted()
+        val first = core_mux_request_reserve(owner_small_ledger(), admitted.handle, 99, MuxOperationV1.SendLiteral, [65u8], 500, 100, 4096).unwrap()
+        expect(first.replay).to_equal(false)
+        val again = core_mux_request_reserve(first.ledger, admitted.handle, 99, MuxOperationV1.SendLiteral, [65u8], 600, 200, 4096).unwrap()
+        expect(again.replay).to_equal(true)
+        expect(again.ledger.entries.len()).to_equal(1)
+        expect(again.ledger.entries[0].deadline_ms).to_equal(500)
+        expect(core_mux_request_reserve(first.ledger, admitted.handle, 99, MuxOperationV1.SendLiteral, [66u8], 500, 100, 4096).is_err()).to_equal(true)
+        expect(core_mux_request_reserve(first.ledger, admitted.handle, 1, MuxOperationV1.SendLiteral, [67u8], 500, 100, 4096).is_ok()).to_equal(true)
+
+    it "retains every status field while releasing retired normal payload and result bytes":
+        val handle = owner_admitted().handle
+        val reserved = core_mux_request_reserve(owner_small_ledger(), handle, 9, MuxOperationV1.TerminatePane, [65u8, 66u8], 500, 100, 4096).unwrap()
+        val receipt = owner_receipt(handle, 9, MuxOperationV1.TerminatePane)
+        val in_flight = core_mux_requests_retire(reserved.ledger, handle.lease_id)
+        expect(in_flight.entries[0].payload.len()).to_equal(2)
+        val late = core_mux_request_finish(in_flight, handle, 9, receipt, []).unwrap()
+        expect(late.entries[0].payload.len()).to_equal(0)
+        expect(core_mux_request_status(late, handle, 9).unwrap().cleanup_pending).to_equal(true)
+        val finished = core_mux_request_finish(reserved.ledger, handle, 9, receipt, [79u8, 75u8]).unwrap()
+        val retired = core_mux_requests_retire(finished, handle.lease_id)
+        val observed = core_mux_request_status(retired, handle, 9).unwrap()
+        expect(observed.handle.lease_id).to_equal(handle.lease_id)
+        expect(observed.handle.owner_id).to_equal(handle.owner_id)
+        expect(observed.handle.owner_generation).to_equal(handle.owner_generation)
+        expect(observed.request_id).to_equal(9u64)
+        expect(observed.operation).to_equal(receipt.operation)
+        expect(observed.knowledge).to_equal(receipt.knowledge)
+        expect(observed.commit_state).to_equal(receipt.commit_state)
+        expect(observed.prior_revision).to_equal(receipt.prior_revision)
+        expect(observed.observed_revision).to_equal(receipt.observed_revision)
+        expect(observed.affected.len()).to_equal(receipt.affected.len())
+        expect(observed.affected[0].object_id).to_equal("id7")
+        expect(observed.affected[0].kind).to_equal(MuxObjectKindV1.Pane)
+        expect(observed.error_kind).to_equal(receipt.error_kind)
+        expect(observed.detail).to_equal(receipt.detail)
+        expect(observed.cleanup_pending).to_equal(true)
+        expect(retired.entries[0].payload.len() + retired.entries[0].response.len()).to_equal(0)
+        expect(retired.used_bytes).to_be_less_than(finished.used_bytes)
+        expect(core_mux_requests_forget(finished, handle.lease_id).is_err()).to_equal(true)
+
+    it "refuses normal byte pressure before effects while preserving disconnect bytes":
+        val handle = owner_admitted().handle
+        val ledger = core_mux_requests_new(3, 20, 350000, 2).unwrap()
+        val payload: [u8] = [65u8; 60000]
+        val refused = core_mux_request_reserve(ledger, handle, 2, MuxOperationV1.SendLiteral, payload, 500, 100, 4096)
+        expect(refused.unwrap_err().kind).to_equal(MuxErrorKindV1.Busy)
+        expect(refused.unwrap_err().commit_state).to_equal(MuxCommitStateV1.NotApplied)
+        expect(ledger.entries.len()).to_equal(0)
+        expect(core_mux_request_reserve(ledger, handle, 1, MuxOperationV1.Disconnect, [68u8], 500, 100, 4096).is_ok()).to_equal(true)
+
+    it "keeps reserved disconnect capacity and progresses through an explicit fresh lease":
+        step("Fill the live normal-command quota without evicting any request identity")
+        val admitted = owner_admitted()
+        val first = core_mux_request_reserve(owner_small_ledger(), admitted.handle, 7, MuxOperationV1.SendLiteral, [65u8], 500, 100, 4096).unwrap()
+        val second = core_mux_request_reserve(first.ledger, admitted.handle, 3, MuxOperationV1.SendLiteral, [66u8], 500, 100, 4096).unwrap()
+        val full = core_mux_request_reserve(second.ledger, admitted.handle, 4, MuxOperationV1.SendLiteral, [67u8], 500, 100, 4096)
+        expect(full.unwrap_err().kind).to_equal(MuxErrorKindV1.Busy)
+        expect(full.unwrap_err().commit_state).to_equal(MuxCommitStateV1.NotApplied)
+        val disconnect = core_mux_request_reserve(second.ledger, admitted.handle, 1, MuxOperationV1.Disconnect, [68u8], 500, 100, 4096).unwrap()
+        val completed = core_mux_request_finish(disconnect.ledger, admitted.handle, 1,
+            owner_receipt(admitted.handle, 1, MuxOperationV1.Disconnect), [79u8]).unwrap()
+        val revoked = core_mux_lease_revoke(admitted.leases, admitted.handle, 200).unwrap()
+        val retired = core_mux_requests_retire(completed, admitted.handle.lease_id)
+        val replay = core_mux_request_reserve(retired, admitted.handle, 1, MuxOperationV1.Disconnect, [68u8], 500, 300, 4096).unwrap()
+        expect(replay.replay).to_equal(true)
+        expect(replay.ledger.entries[replay.index].response[0]).to_equal(79u8)
+        step("Admit a distinct lease and retain the original lease's status until fixed expiry")
+        val fresh = core_mux_lease_admit(revoked, "fixture", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 201).unwrap()
+        expect(core_mux_request_reserve(retired, fresh.handle, 7, MuxOperationV1.SendLiteral, [70u8], 500, 201, 4096).is_ok()).to_equal(true)
+        expect(core_mux_request_status(retired, admitted.handle, 7).is_ok()).to_equal(true)
+        expect(core_mux_request_status(retired, fresh.handle, 7).unwrap_err().commit_state).to_equal(MuxCommitStateV1.Unknown)
+        val swept = core_mux_lease_sweep(fresh.leases, 2200).unwrap()
+        expect(swept.forgotten_tokens.contains(admitted.handle.lease_id)).to_equal(true)
+        expect(core_mux_requests_forget(retired, admitted.handle.lease_id).unwrap().entries.len()).to_equal(0)
+
+    it "reports lost request bindings as Unknown without inventing an operation":
+        val handle = owner_admitted().handle
+        val absent = core_mux_request_status(owner_small_ledger(), handle, 123)
+        expect(absent.is_err()).to_equal(true)
+        expect(absent.unwrap_err().commit_state).to_equal(MuxCommitStateV1.Unknown)
+        expect(absent.unwrap_err().affected.len()).to_equal(0)
+
+    it "retires old connection authority after an API reset while retaining receipt-only recovery":
+        val clock = service_revision_new()
+        val leases = owner_admitted()
+        val owner = CoreMuxOwner(namespace: "configured", active: true, leases: leases.leases, requests: owner_small_ledger())
+        val retired = core_mux_owner_maintenance(owner, service_revision_reset(clock), 200).unwrap()
+        expect(retired.owner.active).to_equal(false)
+        expect(retired.retired_tokens.len()).to_equal(1)
+        expect(core_mux_owner_renew(retired.owner, leases.handle, service_revision_reset(clock), 201).is_err()).to_equal(true)
+        expect(core_mux_owner_status(retired.owner, leases.handle, 123, 201).unwrap_err().commit_state).to_equal(MuxCommitStateV1.Unknown)

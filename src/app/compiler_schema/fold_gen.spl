@@ -436,7 +436,7 @@ fn emit_ast_semantic_file(u: DeclUniverse) -> text:
     out = out + "use std.nogc_sync_mut.io_runtime.{{exit}}\n\n"
     out = out + "class AstSemanticHash:\n    var stream: Sha256StreamV1\n    scratch: [u8]\n    units: i64\n    cacheable: bool\n\n"
     out = out + "fn ast_semantic_hash_seed() -> AstSemanticHash:\n    AstSemanticHash(sha256_stream_v1_new(), [0u8; 8], 0, true)\n\n"
-    out = out + "fn _ast_semantic_mix_i64(input: AstSemanticHash, value: i64) -> AstSemanticHash:\n    var state = input\n    var shift = 0\n    while shift < 64:\n        state.scratch[shift / 8] = ((value >> shift) & 255) as u8\n        shift = shift + 8\n    # @workaround bug=native_method_result_overwrites_receiver_slot_2026_10_21 reason=old_producer_field_writeback_uses_bool_result\n    val stream: Sha256StreamV1 = state.stream\n    if not stream.update(state.scratch): state.cacheable = false\n    state.units = state.units + 1\n    state\n\n"
+    out = out + "fn _ast_semantic_mix_i64(input: AstSemanticHash, value: i64) -> AstSemanticHash:\n    var state = input\n    var shift = 0\n    while shift < 64:\n        state.scratch[shift / 8] = ((value >> shift) & 255) as u8\n        shift = shift + 8\n    # The update MUST be written back: on the seed interpreter a class read\n    # from a field into a local is a copy, so updating only the local left\n    # every AstSemanticHash at the empty-input digest (all type/expr digests\n    # equal; module_surface_projection_blind_to_primitive_param_types_2026-10-24).\n    # @workaround bug=native_method_result_overwrites_receiver_slot_2026_10_21 reason=old_producer_field_writeback_uses_bool_result\n    val stream: Sha256StreamV1 = state.stream\n    val updated = stream.update(state.scratch)\n    state.stream = stream\n    if not updated: state.cacheable = false\n    state.units = state.units + 1\n    state\n\n"
     out = out + "fn _ast_semantic_mix_text(state: AstSemanticHash, value: text) -> AstSemanticHash:\n    val byte_len = value.len()\n    var result = _ast_semantic_mix_i64(state, byte_len)\n    var i = 0\n    while i < byte_len:\n        result = _ast_semantic_mix_i64(result, value.byte_at(i) as i64)\n        i = i + 1\n    result\n\n"
     out = out + "fn _ast_semantic_mix_tag(state: AstSemanticHash, tag: text) -> AstSemanticHash:\n    _ast_semantic_mix_text(state, tag)\n\n"
     out = out + "fn _ast_semantic_mix_scalar_i64(state: AstSemanticHash, width_tag: text, value: i64) -> AstSemanticHash:\n    var result = _ast_semantic_mix_tag(state, width_tag)\n    _ast_semantic_mix_i64(result, value)\n\n"
@@ -488,22 +488,22 @@ fn _one_fold_call(d: Dialect, type_name: text, v: text) -> text:
 fn _fold_lines(u: DeclUniverse, d: Dialect, type_text: text, v: text, indent: text, idx: i64) -> text:
     """Recursion into ONE field value `v`, folding `acc` through every child."""
     val c = u.classify(type_text)
-    if c.cat == "node" and type_text.trim().ends_with("?"):
-        # An OPTIONAL node payload (e.g. `ArrayLit(elements, type_: HirType?)`)
-        # holds a `Some` box, not the node: unwrap it like visitor_gen does.
-        # Passing it straight to the walk fn made native Stage 2 read the box
-        # header as a HirType and SIGSEGV on every `[]` literal.
+    # Optional edges contain an Option payload, not a nullable node pointer.
+    # Unwrap at the schema edge before calling a nonoptional child walker;
+    # its nil guard cannot decode a Some wrapper (including native tag 1).
+    if type_text.trim().ends_with("?") and (c.cat == "node" or c.cat == "list" or c.cat == "pair"):
+        val trimmed = type_text.trim()
+        val bare = trimmed.substring(0, trimmed.len() - 1).trim()
         var out = indent + "match " + v + ":\n"
         out = out + indent + "    case Some(opt{idx}):\n"
-        out = out + indent + "        " + _one_fold_call(d, c.a, "opt{idx}") + "\n"
+        out = out + _fold_lines(u, d, bare, "opt{idx}", indent + "        ", idx)
         out = out + indent + "    case nil: pass\n"
         return out
     if c.cat == "node":
         return indent + _one_fold_call(d, c.a, v) + "\n"
     if c.cat == "list":
-        # The nil guard is load-bearing: an OPTIONAL list payload (e.g.
-        # `StringLit(value, interpolations: [HirInterpolation]?)`) is nil far
-        # more often than empty, and iterating nil is a hard semantic error.
+        # Preserve the existing nullable collection compatibility guard;
+        # schema-declared optionals are explicitly unwrapped above.
         var out = indent + "if " + v + " != nil:\n"
         out = out + indent + "    for it{idx} in " + v + ":\n"
         out = out + indent + "        " + _one_fold_call(d, c.a, "it{idx}") + "\n"

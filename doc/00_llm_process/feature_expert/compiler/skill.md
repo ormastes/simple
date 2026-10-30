@@ -43,3 +43,53 @@ identity-map integrity, and truthful container constructor explanations.
 The identity map is not a settlement authority. Typed container lowering and
 the collision-profile regression remain open. Do not repeat unchanged green
 checks or reset exhausted three-cycle allowances by renaming a task.
+
+## Target-neutral HIR cfg select (2026-10-26)
+
+`HirExprKind.CfgSelect` + MIR arm selection landed (step 2 slice); parser/
+preprocessor emission and declaration-level arms remain. Codec specs need a
+runtime registering `rt_tuple_len`. See the plan
+`doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md` and the
+mir_lowering / compiler layer-expert notes.
+
+## Declaration-level cfg guard (2026-10-27 - Step 1)
+
+HirFunction now carries cfg, cfg_group, cfg_arm fields (Option B, design
+hir_cfg_decl_select_design.md). Fields are optional (empty/0/-1 default),
+included in codec and hash, and passed through mono preflight. Test:
+`test/01_unit/compiler/20.hir/hir_function_cfg_guard_spec.spl`.
+
+## Declaration-level cfg guard (2026-10-27 - Step 2)
+
+cfg, cfg_group, cfg_arm now exist on HirStruct, HirClass, HirEnum, HirTrait, HirImpl and HirConst
+(HirFunction had them from step 1). Codec regenerated (v13-decl-cfg-guard); mono_preflight mirrors updated.
+Selection is `MirLowering.apply_decl_cfg_guards` (called first by `lower_module`) driven by
+`cfg_group_winners` (one `mir_cfg_select_arm` call per group, else arm = `cfg_arm == -1` last, numbered arm
+with empty cfg is fatal); group 0 uses `mir_cfg_item_enabled(cfg, target, features)`. The bootstrap flat-store
+lane (`bootstrap_globals.spl`) and `jit_interpreter.spl` apply the same winners per function.
+Specs: `test/01_unit/compiler/50.mir/mir_decl_cfg_guard_lowering_spec.spl`, `mir_cfg_item_enabled_spec.spl`.
+Follow-up: the design-required cfg fields in `hir_declaration_summary_v1` are not added yet.
+## 2026-10-27 - cfg-select source path (SIMPLE_HIR_CFG_SELECT=1, default off)
+
+- Parser path for `HirExprKind.CfgSelect`: in flag mode `_pp_preprocess_conditionals`
+  (`10.frontend/core/parser_preprocessor.spl`) does NOT strip an indented (function-body)
+  `@when/@elif/@else/@end`; it rewrites it, line-count stable, to `if/elif/else` whose
+  conditions are the marker call `__cfg_when__("<cond>")` (arm bodies indented one level
+  per open marker). Top-level `@when` and target-receipt mode keep stripping.
+- No lexer/parser/AST change: `expression_core.spl` (`If`/`IfChain` cases) recognizes the
+  marker via `_Expressions/cfg_when_marker.spl` and `lower_cfg_when_chain` builds one
+  `CfgSelect(conds, arms, else_)`; MIR picks the arm per target. Empty `@when()` becomes an
+  unknown atom so MIR reports the fatal malformed-@cfg error. Per-declaration `@cfg` is out of
+  scope (needs a module-level node). The interpreter shares the preprocessor: do not set the flag
+  for interpreted runs. Spec: `test/01_unit/compiler/20.hir/hir_cfg_select_source_spec.spl`.
+- Marker mode is statement-only: a chain whose arm declares a `val`/`var`/`let` at the chain indent, has `{`/`}` in a condition, or has an empty/comment-only arm keeps flat-strip semantics (binding-declaring chains keep flat-strip semantics until a non-scoping CfgSelect design lands). Marker lowering is also gated on the flag and requires every arm to be a string-literal marker.
+- HIR cache key is target-neutral per file (flag on): the preprocessor logs every arm it keeps or
+  strips by target evaluation (`@when`/`@elif`/`@else` non-marker, `@cfg`) unconditionally; zero
+  decisions == neutral. Each closure surface contributes `N` / `D:<sha of ordered decisions>` / `U`
+  (unknown, never neutral) to `hir_cache_closure_digest`; a neutral source with an all-neutral
+  closure keys as `hir-target-neutral-v1`, anything else keeps the target fold (`WA(hir-target-neutral)`)
+  plus its strip-decision digest. Flag off is unchanged. Spec: `hir_cache_key_neutral_spec.spl`.
+  The strip-decision memo is keyed (content, cfg identity, native target, mode); neutral is read
+  only from a marker-mode entry while the driver declared marker mode, else fail closed (`U`).
+- Step 3 (2026-10-27): `src/compiler/30.types/cfg_decl_check.spl` `cfg_decl_check_module` proves guarded same-name items exclusive over the os x arch (+feature) matrix and emits E-CFG-OVERLAP / NONEXHAUSTIVE / SIG-DIVERGE / IMPL-OVERLAP; wired in `80.driver/hir_typecheck_consumer_v1.spl` as errors. Spec: `test/01_unit/compiler/30.types/cfg_decl_check_spec.spl`.
+- TODO (cfg_decl_check): MethodCall callers are not walked; @cfg on methods inside impl/class is not collected; move `mir_cfg_eval_for_target` to core next to `cfg_platform` (30.types currently imports 50.mir, a layering inversion). Deferred from design row 3: checker.spl coherence integration and SymbolTable canonical group-id indexes.

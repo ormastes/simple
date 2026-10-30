@@ -1,0 +1,110 @@
+# Authored, unexecuted: user deferred Phase 3 execution. No fake owner grants.
+use std.spec.*
+use compiler.common.cache_contract.scv_semantic_validation_v1.*
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.*
+use compiler.driver.cache.gateway.scv_semantic_validation_adapter_v1.{scv_semantic_readset_equal_v1}
+use test.fixtures.scv.semantic_validation_bridge_v1_fixture.*
+use std.scv.snapshot_v2.{scv_snapshot_freeze_v2, scv_snapshot_file_v2}
+use std.scv.source_witness_v1.{scv_snapshot_lookup_v2, scv_verify_source_witnesses_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+describe "SCV semantic validation bridges source facts to real owner authority":
+    it "cannot turn a caller-labelled complete manifest and real source receipt into a semantic hit":
+        step("setup")
+        val request = setup_scv_semantic_bridge_request_v1()
+        val provider = setup_scv_semantic_bridge_adapter_v1()
+        expect(request.source_receipt.source_only).to_equal(true)
+        expect(scv_semantic_request_reason_v1(request)).to_equal("")
+        step("exercise")
+        val result = scv_semantic_validation_v1(request, provider)
+        step("assert")
+        expect(result.status).to_equal(ScvSemanticValidationStatusV1.Unavailable)
+        expect(result.reason).to_equal("semantic-owner-context-unavailable")
+        expect(result.checked_reads).to_equal(0)
+        expect(result.full_artifact_authorized).to_equal(false)
+        expect(result.requested_snapshot_id).to_equal(request.requested_snapshot.snapshot_id)
+        expect(result.action_digest).to_equal(request.action_digest)
+        expect(result.recorded_manifest_digest).to_equal(request.recorded_manifest_digest)
+        expect(result.semantic_generation_digest).to_equal(request.semantic_generation_digest)
+
+    it "refuses conservative unknown empty malformed and unsupported recorded readsets":
+        step("setup")
+        for control in ["conservative", "unknown", "empty", "ordinal", "kind", "profile"]:
+            var request = setup_scv_semantic_bridge_request_v1()
+            if control == "conservative": request.recorded_manifest.ordered_reads[0].completeness = SemanticCoverageV1.Conservative
+            elif control == "unknown": request.recorded_manifest.ordered_reads[0].completeness = SemanticCoverageV1.Unknown
+            elif control == "empty": request.recorded_manifest.ordered_reads = []
+            elif control == "ordinal": request.recorded_manifest.ordered_reads[0].ordinal = 2
+            elif control == "kind": request.recorded_manifest.ordered_reads[0].producer.kind = "external.unknown"
+            else: request.recorded_manifest.ordered_reads[0].producer.semantic_profile_digest = sha256_text("different-profile")
+            request = refresh_scv_semantic_manifest_digest_v1(request)
+            step("exercise")
+            val result = scv_semantic_validation_v1(request, setup_scv_semantic_bridge_adapter_v1())
+            step("assert")
+            expect(result.status).to_equal(ScvSemanticValidationStatusV1.Unavailable)
+            expect(result.reason == "semantic-owner-context-unavailable").to_equal(false)
+            expect(result.checked_reads).to_equal(0)
+
+    it "does not accept a stale action receipt or a tampered source receipt":
+        step("setup")
+        for control in ["action", "receipt", "claim"]:
+            var request = setup_scv_semantic_bridge_request_v1()
+            if control == "action": request.action_digest = sha256_text("other-action")
+            elif control == "receipt": request.source_receipt.receipt_id = "fabricated-receipt"
+            else: request.source_receipt.source_only = false
+            step("assert")
+            val result = scv_semantic_validation_v1(request, setup_scv_semantic_bridge_adapter_v1())
+            expect(result.status).to_equal(ScvSemanticValidationStatusV1.Unavailable)
+            expect(result.reason).to_equal("source-receipt-mismatch")
+            expect(result.full_artifact_authorized).to_equal(false)
+
+    it "refuses changed bytes instead of using a source-only receipt as semantic evidence":
+        step("setup")
+        var request = setup_scv_semantic_bridge_request_v1()
+        request.requested_snapshot = scv_snapshot_freeze_v2("declared-source-files-v2",
+            [scv_snapshot_file_v2("src/a.spl", [120u8])], ["src"], 2, 2, "complete", []).unwrap()
+        step("assert")
+        val result = scv_semantic_validation_v1(request, setup_scv_semantic_bridge_adapter_v1())
+        expect(result.status).to_equal(ScvSemanticValidationStatusV1.Unavailable)
+        expect(result.reason).to_equal("source-witness-changed-or-unavailable")
+
+    it "retains configuration and external-input absence as an explicit miss":
+        step("setup")
+        var request = setup_scv_semantic_bridge_request_v1()
+        request.requested_snapshot = scv_snapshot_freeze_v2("compile-inventory-v1",
+            request.requested_snapshot.files, ["src"], 1, 0, "complete", ["configuration", "external-inputs"]).unwrap()
+        request.source_witnesses = [scv_snapshot_lookup_v2(request.requested_snapshot, "src/a.spl").unwrap()]
+        request.source_receipt = scv_verify_source_witnesses_v1(request.requested_snapshot, request.action_digest, request.source_witnesses).unwrap()
+        step("assert")
+        val result = scv_semantic_validation_v1(request, setup_scv_semantic_bridge_adapter_v1())
+        expect(result.status).to_equal(ScvSemanticValidationStatusV1.Unavailable)
+        expect(result.reason).to_equal("source-inputs-unsupported")
+
+    it "bounds bytes metadata and read cardinality before hash or canonical work":
+        step("setup")
+        for control in ["zero", "metadata", "count"]:
+            var request = setup_scv_semantic_bridge_request_v1()
+            if control == "zero": request.max_bytes = 0
+            elif control == "metadata": request.recorded_manifest.ordered_reads[0].partition_id = "p".repeat(4097)
+            else: request.max_reads = 0
+            step("assert")
+            val result = scv_semantic_validation_v1(request, setup_scv_semantic_bridge_adapter_v1())
+            expect(result.status).to_equal(ScvSemanticValidationStatusV1.Unavailable)
+            expect(result.reason).to_equal("semantic-request-bounds")
+
+    it "compares absence membership fingerprints witnesses order and partition without granting authority":
+        step("setup")
+        val original = setup_scv_semantic_bridge_request_v1().recorded_manifest
+        expect(scv_semantic_readset_equal_v1(original, original)).to_equal(true)
+        for control in ["fingerprint", "witness", "absence", "membership", "partition", "producer", "consumer", "coverage"]:
+            var changed = original
+            if control == "fingerprint": changed.ordered_reads[0].consumed_fingerprint = sha256_text("changed-fingerprint")
+            elif control == "witness": changed.ordered_reads[0].witness_digest = sha256_text("changed-witness")
+            elif control == "absence": changed.ordered_reads[0].facet = "absence:template-summary"
+            elif control == "membership": changed.ordered_reads[0].facet = "membership:template-summary"
+            elif control == "partition": changed.ordered_reads[0].partition_id = "src/b.spl"
+            elif control == "producer": changed.ordered_reads[0].producer.parameter_digest = sha256_text("new-producer")
+            elif control == "consumer": changed.consumer.parameter_digest = sha256_text("new-consumer")
+            else: changed.ordered_reads[0].completeness = SemanticCoverageV1.Conservative
+            step("assert")
+            expect(scv_semantic_readset_equal_v1(original, changed)).to_equal(false)

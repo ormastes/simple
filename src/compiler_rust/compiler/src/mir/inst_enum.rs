@@ -126,6 +126,7 @@ pub enum MirInst {
     /// declared type of the bound place); `inputs` are the vregs it reads.
     /// A raw block has empty operands and an empty constraint string.
     InlineAsm {
+        dialect: crate::hir::AsmDialect,
         instructions: Vec<String>,
         volatile: bool,
         constraints: String,

@@ -17,7 +17,7 @@ struct Completion {
     data: Vec<u8>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[repr(C)]
 struct CCompletion {
     id: i64,
@@ -29,18 +29,21 @@ struct CCompletion {
 
 // Instances are stored and consumed only while the global driver mutex is
 // held. The owned C payload is released in that critical section.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 unsafe impl Send for CCompletion {}
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[repr(C)]
 struct CSplDriver {
     _private: [u8; 0],
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 unsafe extern "C" {
+    #[cfg(target_os = "linux")]
     fn spl_driver_create_uring(queue_depth: i64) -> *mut CSplDriver;
+    #[cfg(windows)]
+    fn spl_driver_create_iocp(queue_depth: i64) -> *mut CSplDriver;
     fn spl_driver_destroy(driver: *mut CSplDriver);
     fn spl_driver_submit_accept(driver: *mut CSplDriver, listen_fd: i64) -> i64;
     fn spl_driver_submit_connect(driver: *mut CSplDriver, fd: i64, addr: *const i8, port: i64) -> i64;
@@ -135,15 +138,16 @@ enum Operation {
 
 enum Backend {
     Software,
-    #[cfg(target_os = "linux")]
-    LinuxUring(usize),
+    #[cfg(any(target_os = "linux", windows))]
+    NativeC(usize),
 }
 
 impl Drop for Backend {
     fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
-        if let Backend::LinuxUring(raw) = self {
-            // Every LinuxUring value is created by spl_driver_create_uring and
+        #[cfg(any(target_os = "linux", windows))]
+        if let Backend::NativeC(raw) = self {
+            // Every NativeC value is created by spl_driver_create_uring (Linux)
+            // or spl_driver_create_iocp (Windows) and
             // owns exactly one C driver.  Store the pointer as usize so the
             // enclosing driver remains movable through the mutex table.
             unsafe { spl_driver_destroy(*raw as *mut CSplDriver) };
@@ -157,7 +161,7 @@ struct Driver {
     queue: Vec<Operation>,
     completions: Vec<Completion>,
     poll_snapshot: Vec<Completion>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     raw_poll: Vec<CCompletion>,
 }
 
@@ -170,15 +174,15 @@ impl Driver {
             queue: Vec::with_capacity(capacity),
             completions: Vec::with_capacity(capacity.min(1024)),
             poll_snapshot: Vec::with_capacity(capacity.min(1024)),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             raw_poll: Vec::new(),
         }
     }
 
-    #[cfg(target_os = "linux")]
-    fn from_linux_uring(raw: *mut CSplDriver) -> Self {
+    #[cfg(any(target_os = "linux", windows))]
+    fn from_native_c(raw: *mut CSplDriver) -> Self {
         Self {
-            backend: Backend::LinuxUring(raw as usize),
+            backend: Backend::NativeC(raw as usize),
             next_id: 1,
             queue: Vec::new(),
             completions: Vec::new(),
@@ -200,8 +204,8 @@ impl Driver {
     }
 
     fn submit_accept(&mut self, listen_fd: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_submit_accept(driver, listen_fd) };
         }
         let id = self.alloc_id();
@@ -209,8 +213,8 @@ impl Driver {
     }
 
     fn submit_connect(&mut self, fd: i64, addr: *const i8, addr_len: i64, port: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             let Some(bytes) = (unsafe { bytes_from_raw(addr.cast(), addr_len) }) else { return -1; };
             let Ok(c_addr) = std::ffi::CString::new(bytes) else { return NEG_EINVAL; };
             return unsafe { spl_driver_submit_connect(driver, fd, c_addr.as_ptr().cast(), port) };
@@ -220,8 +224,8 @@ impl Driver {
     }
 
     fn submit_recv(&mut self, fd: i64, size: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_submit_recv(driver, fd, size) };
         }
         let id = self.alloc_id();
@@ -229,8 +233,8 @@ impl Driver {
     }
 
     fn submit_send(&mut self, fd: i64, data: *const i8, len: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_submit_send(driver, fd, data, len) };
         }
         let Some(bytes) = (unsafe { bytes_from_raw(data.cast(), len) }) else { return -1; };
@@ -239,8 +243,8 @@ impl Driver {
     }
 
     fn submit_sendfile(&mut self, sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_submit_sendfile(driver, sock_fd, file_fd, offset, len) };
         }
         let id = self.alloc_id();
@@ -248,8 +252,8 @@ impl Driver {
     }
 
     fn submit_read(&mut self, fd: i64, size: i64, offset: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_submit_read(driver, fd, size, offset) };
         }
         let id = self.alloc_id();
@@ -257,8 +261,8 @@ impl Driver {
     }
 
     fn submit_write(&mut self, fd: i64, data: *const i8, len: i64, offset: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_submit_write(driver, fd, data, len, offset) };
         }
         let Some(bytes) = (unsafe { bytes_from_raw(data.cast(), len) }) else { return -1; };
@@ -268,8 +272,8 @@ impl Driver {
 
     fn submit_open(&mut self, path: *const i8, path_len: i64, flags: i64, mode: i64) -> i64 {
         let Some(bytes) = (unsafe { bytes_from_raw(path.cast(), path_len) }) else { return -1; };
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             let Ok(c_path) = std::ffi::CString::new(bytes) else { return NEG_EINVAL; };
             return unsafe { spl_driver_submit_open(driver, c_path.as_ptr().cast(), flags, mode) };
         }
@@ -279,8 +283,8 @@ impl Driver {
     }
 
     fn submit_close(&mut self, fd: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_submit_close(driver, fd) };
         }
         let id = self.alloc_id();
@@ -288,8 +292,8 @@ impl Driver {
     }
 
     fn submit_fsync(&mut self, fd: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_submit_fsync(driver, fd) };
         }
         let id = self.alloc_id();
@@ -297,8 +301,8 @@ impl Driver {
     }
 
     fn submit_timeout(&mut self, timeout_ms: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_submit_timeout(driver, timeout_ms) };
         }
         let id = self.alloc_id();
@@ -306,8 +310,8 @@ impl Driver {
     }
 
     fn flush(&mut self) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_flush(driver) };
         }
         let queued: Vec<_> = self.queue.drain(..).collect();
@@ -316,7 +320,7 @@ impl Driver {
         count
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn poll_linux_uring(&mut self, driver: *mut CSplDriver, max: i64, timeout_ms: i64) -> i64 {
         let limit = max.clamp(0, 4096) as usize;
         if limit == 0 {
@@ -361,8 +365,8 @@ impl Driver {
     }
 
     fn poll(&mut self, max: i64, timeout_ms: i64) -> i64 {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return self.poll_linux_uring(driver, max, timeout_ms);
         }
         let limit = max.clamp(0, 4096) as usize;
@@ -383,33 +387,37 @@ impl Driver {
     }
 
     fn cancel(&mut self, op_id: i64) -> bool {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_cancel(driver, op_id) };
         }
         false
     }
 
     fn backend_name(&self) -> &'static str {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             let name = unsafe { std::ffi::CStr::from_ptr(spl_driver_backend_name(driver).cast()) };
-            return if name.to_bytes() == b"io_uring" { "io_uring" } else { "native" };
+            return match name.to_bytes() {
+                b"io_uring" => "io_uring",
+                b"iocp" => "iocp",
+                _ => "native",
+            };
         }
         "rust-syscall"
     }
 
     fn supports_sendfile(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_supports_sendfile(driver) };
         }
         cfg!(target_os = "linux")
     }
 
     fn supports_zero_copy(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        if let Some(driver) = linux_uring_ptr(self) {
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(driver) = native_c_ptr(self) {
             return unsafe { spl_driver_supports_zero_copy(driver) };
         }
         cfg!(target_os = "linux")
@@ -436,10 +444,10 @@ fn drivers() -> &'static Mutex<Vec<Option<Arc<Mutex<Driver>>>>> {
     DRIVERS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-#[cfg(target_os = "linux")]
-fn linux_uring_ptr(driver: &Driver) -> Option<*mut CSplDriver> {
+#[cfg(any(target_os = "linux", windows))]
+fn native_c_ptr(driver: &Driver) -> Option<*mut CSplDriver> {
     match &driver.backend {
-        Backend::LinuxUring(raw) => Some(*raw as *mut CSplDriver),
+        Backend::NativeC(raw) => Some(*raw as *mut CSplDriver),
         Backend::Software => None,
     }
 }
@@ -464,7 +472,14 @@ fn create_driver(queue_depth: i64) -> Result<Driver, i64> {
             {
                 let raw = unsafe { spl_driver_create_uring(queue_depth) };
                 if !raw.is_null() {
-                    return Ok(Driver::from_linux_uring(raw));
+                    return Ok(Driver::from_native_c(raw));
+                }
+            }
+            #[cfg(windows)]
+            {
+                let raw = unsafe { spl_driver_create_iocp(queue_depth) };
+                if !raw.is_null() {
+                    return Ok(Driver::from_native_c(raw));
                 }
             }
             Ok(Driver::new(queue_depth))
@@ -478,16 +493,28 @@ fn create_driver(queue_depth: i64) -> Result<Driver, i64> {
                     // silently downgrade it to the reference implementation.
                     return Err(NEG_ENOSYS);
                 }
-                return Ok(Driver::from_linux_uring(raw));
+                return Ok(Driver::from_native_c(raw));
             }
             #[cfg(not(target_os = "linux"))]
             {
                 Err(NEG_ENOSYS)
             }
         }
-        "reference" | "rust-syscall" | "fallback" | "epoll" | "kqueue" | "iocp" => {
-            Ok(Driver::new(queue_depth))
+        "iocp" => {
+            #[cfg(windows)]
+            {
+                let raw = unsafe { spl_driver_create_iocp(queue_depth) };
+                if raw.is_null() {
+                    return Err(NEG_ENOSYS);
+                }
+                return Ok(Driver::from_native_c(raw));
+            }
+            #[cfg(not(windows))]
+            {
+                Ok(Driver::new(queue_depth))
+            }
         }
+        "reference" | "rust-syscall" | "fallback" | "epoll" | "kqueue" => Ok(Driver::new(queue_depth)),
         _ => Err(NEG_EINVAL),
     }
 }
@@ -634,8 +661,41 @@ fn execute_operation(operation: Operation) -> Completion {
     }
 }
 
+/// Windows file table for the reference driver: driver fds are positive ids
+/// owned here (not CRT descriptors). Positioned I/O uses `seek_read` /
+/// `seek_write` (OVERLAPPED offset), so reads never share a file cursor.
+#[cfg(windows)]
+fn windows_files() -> &'static Mutex<std::collections::HashMap<i64, std::fs::File>> {
+    static FILES: OnceLock<Mutex<std::collections::HashMap<i64, std::fs::File>>> = OnceLock::new();
+    FILES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(windows)]
+fn windows_io_error(error: &io::Error) -> i64 {
+    match error.kind() {
+        io::ErrorKind::NotFound => -2,
+        io::ErrorKind::PermissionDenied => -13,
+        io::ErrorKind::AlreadyExists => -17,
+        io::ErrorKind::InvalidInput => -22,
+        _ => -5,
+    }
+}
+
+#[cfg(windows)]
+fn windows_file_op(id: i64, fd: i64, f: impl FnOnce(&std::fs::File) -> Completion) -> Completion {
+    let Ok(files) = windows_files().lock() else {
+        return completion(id, -5);
+    };
+    match files.get(&fd) {
+        Some(file) => f(file),
+        None => completion(id, -9),
+    }
+}
+
 #[cfg(windows)]
 fn execute_operation(operation: Operation) -> Completion {
+    use std::os::windows::fs::FileExt;
+    static NEXT_FD: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(3);
     match operation {
         Operation::Timeout { id, timeout_ms } => {
             if timeout_ms > 0 {
@@ -643,15 +703,59 @@ fn execute_operation(operation: Operation) -> Completion {
             }
             completion(id, 0)
         }
+        Operation::Open { id, path, flags, .. } => {
+            // POSIX O_ACCMODE / O_CREAT (0o100) / O_TRUNC (0o1000) bits.
+            let access = flags & 3;
+            let mut options = std::fs::OpenOptions::new();
+            options.read(access != 1).write(access != 0);
+            if flags & 0o100 != 0 {
+                options.create(true);
+            }
+            if flags & 0o1000 != 0 {
+                options.truncate(true);
+            }
+            match options.open(&path) {
+                Ok(file) => {
+                    let fd = NEXT_FD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    match windows_files().lock() {
+                        Ok(mut files) => {
+                            files.insert(fd, file);
+                            completion(id, fd)
+                        }
+                        Err(_) => completion(id, -5),
+                    }
+                }
+                Err(error) => completion(id, windows_io_error(&error)),
+            }
+        }
+        Operation::Read { id, fd, size, offset } => windows_file_op(id, fd, |file| {
+            let mut data = vec![0_u8; size.max(0) as usize];
+            match file.seek_read(&mut data, offset.max(0) as u64) {
+                Ok(n) => {
+                    data.truncate(n);
+                    data_completion(id, n as i64, data)
+                }
+                Err(error) => completion(id, windows_io_error(&error)),
+            }
+        }),
+        Operation::Write { id, fd, data, offset } => windows_file_op(id, fd, |file| {
+            match file.seek_write(&data, offset.max(0) as u64) {
+                Ok(n) => completion(id, n as i64),
+                Err(error) => completion(id, windows_io_error(&error)),
+            }
+        }),
+        Operation::Fsync { id, fd } => windows_file_op(id, fd, |file| match file.sync_all() {
+            Ok(()) => completion(id, 0),
+            Err(error) => completion(id, windows_io_error(&error)),
+        }),
+        Operation::Close { id, fd } => match windows_files().lock() {
+            Ok(mut files) => completion(id, if files.remove(&fd).is_some() { 0 } else { -9 }),
+            Err(_) => completion(id, -5),
+        },
         Operation::Accept { id, .. }
         | Operation::Recv { id, .. }
         | Operation::Send { id, .. }
-        | Operation::Sendfile { id, .. }
-        | Operation::Read { id, .. }
-        | Operation::Write { id, .. }
-        | Operation::Open { id, .. }
-        | Operation::Close { id, .. }
-        | Operation::Fsync { id, .. } => completion(id, NEG_ENOSYS),
+        | Operation::Sendfile { id, .. } => completion(id, NEG_ENOSYS),
     }
 }
 
@@ -856,10 +960,14 @@ pub extern "C" fn rt_driver_backend_name(handle: i64) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_driver_backend_name_ptr(handle: i64) -> *const u8 {
     static IO_URING: &[u8] = b"io_uring\0";
+    static IOCP: &[u8] = b"iocp\0";
+    static NATIVE: &[u8] = b"native\0";
     static RUST_SYSCALL: &[u8] = b"rust-syscall\0";
     static NONE: &[u8] = b"none\0";
     match with_driver_mut(handle, |driver| driver.backend_name()).unwrap_or("none") {
         "io_uring" => IO_URING.as_ptr(),
+        "iocp" => IOCP.as_ptr(),
+        "native" => NATIVE.as_ptr(),
         "rust-syscall" => RUST_SYSCALL.as_ptr(),
         _ => NONE.as_ptr(),
     }

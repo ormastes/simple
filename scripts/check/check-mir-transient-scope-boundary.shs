@@ -510,6 +510,25 @@ EOF
     sed 's/rt_transient_array_scope_pause()/rt_transient_array_scope_end()/' \
         "${_tmp}/fixed/${SFFI_REL}" > "${_tmp}/broken_sffi/${SFFI_REL}"
 
+    # Regression: newly added declaration maps, optional builder captures and
+    # scalar flags must all join the same exhaustive ownership inventory.
+    _mk "${_tmp}/new_carriers"
+    cp "${_tmp}/fixed/${DRIVER_REL}" "${_tmp}/new_carriers/${DRIVER_REL}"
+    cp "${_tmp}/fixed/${LOWER_REL}" "${_tmp}/new_carriers/${LOWER_REL}"
+    printf '    module_fn_declared_returns: Dict<i64, HirType> = {}\n    nogc_strict: bool = false\n' >> "${_tmp}/new_carriers/${TYPES_REL}"
+    printf '    loop_view_capture_v1: MirLoopBuilderCaptureV1? = nil\n' >> "${_tmp}/new_carriers/${BUILDER_REL}"
+    sed '/^        ok$/i\
+        ok = promote_and_release_transient_owner_roots([self.module_fn_declared_returns]) and ok\
+        ok = promote_and_release_transient_owner_roots([self.nogc_strict]) and ok\
+        ok = promote_and_release_transient_owner_roots([self.builder.loop_view_capture_v1]) and ok
+' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/new_carriers/${OWNER_REL}"
+    for _shape in missing_map missing_optional missing_scalar; do
+        cp -R "${_tmp}/new_carriers" "${_tmp}/${_shape}"
+    done
+    sed '/roots(\[self.module_fn_declared_returns\])/d' "${_tmp}/new_carriers/${OWNER_REL}" > "${_tmp}/missing_map/${OWNER_REL}"
+    sed '/roots(\[self.builder.loop_view_capture_v1\])/d' "${_tmp}/new_carriers/${OWNER_REL}" > "${_tmp}/missing_optional/${OWNER_REL}"
+    sed '/roots(\[self.nogc_strict\])/d' "${_tmp}/new_carriers/${OWNER_REL}" > "${_tmp}/missing_scalar/${OWNER_REL}"
+
     # Current production call arities, concrete HIR binding, abort helper,
     # diagnostic lines, and a publication error after successful scope end.
     _mk "${_tmp}/modern"
@@ -606,6 +625,10 @@ EOF
         _expect "${_shape}" fail
     done
     _expect modern pass
+    _expect new_carriers pass
+    for _shape in missing_map missing_optional missing_scalar; do
+        _expect "${_shape}" fail
+    done
     for _shape in modern_unpaired broken_abort multiarg_direct multiarg_fallback newheap sibling_cleanup; do
         _expect "${_shape}" fail
     done
@@ -630,7 +653,7 @@ done
 # Selftest is unconditional and fatal, exactly like the sibling guards.
 selftest
 if [ "${SELFTEST_ONLY}" = "1" ]; then
-    echo "PASS — 22 selftest fixture(s) checked, scanner rejects unscoped lowering, invalid cleanup/SFFI forwarding, and incomplete owner inventories"
+    echo "PASS — 26 selftest fixture(s) checked, scanner rejects unscoped lowering, invalid cleanup/SFFI forwarding, and incomplete owner inventories"
     exit 0
 fi
 

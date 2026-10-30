@@ -16,10 +16,12 @@
 # verification is out of scope for P-04 and is NOT claimed.
 
 use app.io.mod (file_exists, file_read, dir_create)
-use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
 use std.scv.core.{scv_meta_dir, scv_parsers_dir}
 use std.scv.core.{scv_line_set_contains}
 use std.scv.store.{scv_repo_exists, scv_content_id_for_file, scv_write_text}
+use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_content_id}
+use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 use std.scv.parser_registry.{scv_wasm_magic_ok, scv_parser_field_safe}
 
 fn scv_parser_lock2_path(root: text) -> text:
@@ -71,7 +73,7 @@ fn scv_parser_lock2_entry_error(root: text, trimmed: text) -> text:
     val raw = file_read_bytes(artifact) ?? []
     if not scv_wasm_magic_ok(raw):
         return "ERROR parser artifact is not wasm: {parts[1]} {parts[2]}"
-    if scv_content_id_for_file(artifact) != parts[8]:
+    if scv_content_id_for_file(artifact) != Ok(parts[8]):
         return "ERROR parser artifact hash mismatch: {parts[1]} {parts[2]}"
     ""
 
@@ -100,7 +102,8 @@ fn scv_parser_lock2_resolve(root: text, language: text, grammar: text) -> text:
 
 fn scv_parser_index_generation_bump(root: text) -> i64:
     val next = scv_parser_index_generation(root) + 1
-    scv_write_text(scv_parser_index_generation_path(root), "{next}\n")
+    if not scv_write_text(scv_parser_index_generation_path(root), "{next}\n"):
+        return -1
     next
 
 fn scv_parser_lock2_install(root: text, language: text, grammar: text, source: text, version: text, runtime: text, ts_abi: text, protocol: text, artifact_path: text, signature: text) -> text:
@@ -119,14 +122,18 @@ fn scv_parser_lock2_install(root: text, language: text, grammar: text, source: t
     # source field is provenance metadata only and is never dereferenced.
     if not file_exists(artifact_path):
         return "ERROR missing local parser artifact: {artifact_path} (no implicit downloads)\n"
-    val raw = file_read_bytes(artifact_path) ?? []
+    val buffer = scv_file_buffer_read(artifact_path)
+    val hash = match scv_file_buffer_content_id(buffer):
+        Ok(id): id
+        Err(error): return error
+    val raw = buffer.bytes
     if not scv_wasm_magic_ok(raw):
         return "ERROR parser artifact is not wasm\n"
-    val hash = scv_content_id_for_file(artifact_path)
     val existing = scv_parser_lock2_find(root, language, grammar)
     val line = "parser2|{language}|{grammar}|{source}|{version}|{runtime}|{ts_abi}|{protocol}|{hash}|{signature}\n"
     dir_create(scv_parsers_dir(root), true)
-    file_write_bytes(scv_parser_lock2_artifact_path(root, hash), raw)
+    if not atomic_write_bytes(scv_parser_lock2_artifact_path(root, hash), raw):
+        return "ERROR cannot publish parser artifact\n"
     # Rewrite the lock, replacing any entry for this language+grammar.
     val lock_path = scv_parser_lock2_path(root)
     val current = if file_exists(lock_path): file_read(lock_path) else: ""
@@ -145,12 +152,15 @@ fn scv_parser_lock2_install(root: text, language: text, grammar: text, source: t
             next = next + trimmed + "\n"
     if not replaced:
         next = next + line
-    scv_write_text(lock_path, next)
+    if not scv_write_text(lock_path, next):
+        return "ERROR cannot publish parser lock\n"
     # An UPGRADE (pinned entry changed) opens a new index generation; a
     # first install or an identical reinstall does not.
     var generation = scv_parser_index_generation(root)
     if existing != "" and existing != line.trim():
         generation = scv_parser_index_generation_bump(root)
+        if generation < 0:
+            return "ERROR cannot publish parser index generation\n"
     "parser-lock2 {language} {grammar} {version} runtime={runtime} abi={ts_abi} protocol={protocol} sha256={hash} signature={signature} generation={generation}\n"
 
 fn scv_parser_lock2_verify(root: text) -> text:

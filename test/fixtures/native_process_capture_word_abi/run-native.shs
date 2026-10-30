@@ -1,0 +1,22 @@
+#!/bin/sh
+# Run the prebuilt native probe independently of the test runner it qualifies.
+set -eu
+if [ "$#" -ne 2 ] || [ "$1" != --binary ] || [ ! -x "$2" ]; then
+  echo 'usage: run-native.shs --binary <native-probe>' >&2
+  exit 2
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+output=$(mktemp "${TMPDIR:-/tmp}/process-capture-word-abi.XXXXXX") || exit 2
+trap 'rm -f "$output"' EXIT HUP INT TERM
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1048576 \
+  sh "$root/scripts/bootstrap/run-process-group-timeout.shs" 40 2 "$2" >"$output" 2>&1 || {
+    tail -n 20 "$output" >&2
+    echo 'FAIL native process capture word ABI: probe failed' >&2
+    exit 1
+  }
+grep -Fxq 'PASS native-process-capture-word-abi' "$output" || {
+  tail -n 20 "$output" >&2
+  echo 'FAIL native process capture word ABI: missing pass marker' >&2
+  exit 1
+}
+echo 'PASS native process capture word ABI'

@@ -1,0 +1,86 @@
+# Content-bound SDN receipt projection. Canonical decoding authenticates the
+# bytes and exact subject only; it does not authenticate a compiler producer.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+
+pub struct ScvBuildValidationReceiptV1:
+    requested_snapshot_id: text
+    action_digest: text
+    read_manifest_digest: text
+    semantic_generation_digest: text
+    compiler_digest: text
+    target_digest: text
+    runtime_digest: text
+    configuration_digest: text
+    environment_digest: text
+    provider_lock_digest: text
+    receipt_id: text
+    coverage: text
+
+fn _receipt_fields_v1(receipt: ScvBuildValidationReceiptV1) -> [text]:
+    [receipt.requested_snapshot_id, receipt.action_digest, receipt.read_manifest_digest,
+        receipt.semantic_generation_digest, receipt.compiler_digest, receipt.target_digest,
+        receipt.runtime_digest, receipt.configuration_digest, receipt.environment_digest,
+        receipt.provider_lock_digest]
+
+fn _receipt_body_v1(receipt: ScvBuildValidationReceiptV1) -> Result<text, text>:
+    val fields = _receipt_fields_v1(receipt)
+    val snapshot_prefix = "scv-build-snapshot-v1-sha256-"
+    if (not receipt.requested_snapshot_id.starts_with(snapshot_prefix) or
+            not three_payload_contract_digest_valid_v1(receipt.requested_snapshot_id.substring(snapshot_prefix.len()))):
+        return Err("build-receipt-snapshot-invalid")
+    for index in 1..fields.len():
+        if not three_payload_contract_digest_valid_v1(fields[index]): return Err("build-receipt-digest-invalid")
+    if receipt.coverage != "semantic-complete-v1": return Err("build-receipt-coverage-incomplete")
+    val keys = ["requested_snapshot_id", "action_digest", "read_manifest_digest",
+        "semantic_generation_digest", "compiler_digest", "target_digest", "runtime_digest",
+        "configuration_digest", "environment_digest", "provider_lock_digest"]
+    var lines = ["schema = 1"]
+    for index in 0..keys.len(): lines.push(keys[index] + " = \"" + fields[index] + "\"")
+    lines.push("coverage = \"semantic-complete-v1\"")
+    Ok(lines.join("\n") + "\n")
+
+pub fn scv_build_validation_receipt_seal_v1(receipt: ScvBuildValidationReceiptV1) -> Result<ScvBuildValidationReceiptV1, text>:
+    val body = _receipt_body_v1(receipt)?
+    val digest = sha256_text("simple.scv.build-validation-receipt.v1\u0000" + body)
+    if receipt.receipt_id != "" and receipt.receipt_id != digest: return Err("build-receipt-id-mismatch")
+    var sealed = receipt
+    sealed.receipt_id = digest
+    Ok(sealed)
+
+pub fn scv_build_validation_receipt_encode_v1(receipt: ScvBuildValidationReceiptV1) -> Result<text, text>:
+    val sealed = scv_build_validation_receipt_seal_v1(receipt)?
+    if sealed.receipt_id != receipt.receipt_id: return Err("build-receipt-unsealed")
+    Ok(_receipt_body_v1(sealed)? + "receipt_id = \"" + sealed.receipt_id + "\"\n")
+
+fn _receipt_value_v1(line: text, key: text) -> Result<text, text>:
+    val prefix = key + " = \""
+    if not line.starts_with(prefix) or not line.ends_with("\""): return Err("build-receipt-noncanonical")
+    Ok(line.substring(prefix.len(), line.len() - 1))
+
+pub fn scv_build_validation_receipt_decode_v1(encoded: text) -> Result<ScvBuildValidationReceiptV1, text>:
+    if encoded.len() > 8192 or encoded.len() == 0: return Err("build-receipt-bounds")
+    val lines = encoded.split("\n")
+    if lines.len() != 14 or lines[0] != "schema = 1" or lines[13] != "": return Err("build-receipt-shape")
+    val value = ScvBuildValidationReceiptV1(
+        requested_snapshot_id: _receipt_value_v1(lines[1], "requested_snapshot_id")?,
+        action_digest: _receipt_value_v1(lines[2], "action_digest")?,
+        read_manifest_digest: _receipt_value_v1(lines[3], "read_manifest_digest")?,
+        semantic_generation_digest: _receipt_value_v1(lines[4], "semantic_generation_digest")?,
+        compiler_digest: _receipt_value_v1(lines[5], "compiler_digest")?,
+        target_digest: _receipt_value_v1(lines[6], "target_digest")?,
+        runtime_digest: _receipt_value_v1(lines[7], "runtime_digest")?,
+        configuration_digest: _receipt_value_v1(lines[8], "configuration_digest")?,
+        environment_digest: _receipt_value_v1(lines[9], "environment_digest")?,
+        provider_lock_digest: _receipt_value_v1(lines[10], "provider_lock_digest")?,
+        coverage: _receipt_value_v1(lines[11], "coverage")?,
+        receipt_id: _receipt_value_v1(lines[12], "receipt_id")?)
+    if scv_build_validation_receipt_encode_v1(value)? != encoded: return Err("build-receipt-noncanonical")
+    Ok(value)
+
+pub fn scv_build_validation_receipt_matches_v1(receipt: ScvBuildValidationReceiptV1,
+        expected: ScvBuildValidationReceiptV1) -> bool:
+    val left = scv_build_validation_receipt_encode_v1(receipt)
+    val right = scv_build_validation_receipt_encode_v1(expected)
+    if left.is_err() or right.is_err(): return false
+    left.unwrap() == right.unwrap()

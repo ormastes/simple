@@ -1,0 +1,56 @@
+# In-memory owner queue. Authentication belongs to the existing server token.
+# No caller-supplied sender identity is recorded or claimed.
+use std.common.text_bytes.{text_to_bytes}
+
+pub struct ClientNotification:
+    id: i64
+    session_id: text
+    client_id: text
+    body: text
+
+var _notifications: [ClientNotification] = []
+var _next_notification_id: i64 = 1
+
+pub fn smux_notifications_enqueue(session_id: text, client_id: text, body: text) -> Result<i64, text>:
+    if session_id == "" or client_id == "":
+        return Err("notification recipient is empty")
+    val size = text_to_bytes(body).len()
+    if size < 1 or size > 1024:
+        return Err("notification payload must contain 1 to 1024 UTF-8 bytes")
+    if _notifications.len() >= 32:
+        return Err("notification queue is full")
+    if _next_notification_id >= 9223372036854775807:
+        return Err("notification id space exhausted")
+    val id = _next_notification_id
+    _notifications = _notifications.push(ClientNotification(id: id,
+        session_id: session_id, client_id: client_id, body: body))
+    _next_notification_id = id + 1
+    return Ok(id)
+
+pub fn smux_notifications_peek(session_id: text, client_id: text) -> ClientNotification:
+    for message in _notifications:
+        if message.session_id == session_id and message.client_id == client_id:
+            return message
+    return ClientNotification(id: 0, session_id: session_id, client_id: client_id, body: "")
+
+pub fn smux_notifications_ack(session_id: text, client_id: text, id: i64) -> bool:
+    val oldest = smux_notifications_peek(session_id, client_id)
+    if id <= 0 or oldest.id != id:
+        return false
+    var retained: [ClientNotification] = []
+    for message in _notifications:
+        if message.id != id:
+            retained = retained.push(message)
+    _notifications = retained
+    return true
+
+pub fn smux_notifications_clear_recipient(session_id: text, client_id: text):
+    var retained: [ClientNotification] = []
+    for message in _notifications:
+        if message.session_id != session_id or message.client_id != client_id:
+            retained = retained.push(message)
+    _notifications = retained
+
+pub fn smux_notifications_clear_all():
+    _notifications = []
+    # IDs survive resets so a delayed acknowledgement cannot consume a new item.

@@ -5,10 +5,15 @@
 # Returns (success: bool, parsed: T, raw_text: text) per ITF adapter pattern.
 
 use std.common.crypto.types.{rotr32}
-use std.nogc_sync_mut.env.{env_get}
-use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_exists}
-use std.nogc_sync_mut.io.http_client_core.{rt_http_request, rt_http_download}
-use std.nogc_sync_mut.aws_sigv4.{
+use std.env.{env_get}
+use std.io.file_ops.{file_exists, file_read_regular_no_follow_bounded_bytes}
+use std.io_runtime.{read_file_text_result}
+use std.io.http_client_core.{rt_http_request, rt_http_download, http_request_v2_raw}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.http_curl.{curl_request_bytes}
+use std.io_runtime.{host_os}
+use std.common.text_bytes.{bytes_to_text}
+use std.aws_sigv4.{
     SIGV4_EMPTY_SHA256, SIGV4_UNSIGNED_PAYLOAD,
     SigV4Header, SigV4QueryParam,
     sigv4_sha256_hex, sigv4_uri_encode, sigv4_canonical_query,
@@ -85,9 +90,9 @@ fn load_minio_config() -> MinioConfig:
     val path = auth_read_path()
     if not file_exists(path):
         return MinioConfig.default()
-    val content = file_read_text(path)
-    if content == nil:
-        return MinioConfig.default()
+    val content: text = match read_file_text_result(path):
+        case Ok(value): value
+        case Err(_): return MinioConfig.default()
     # NOTE: tls_skip_verify enforcement lives at the command boundary
     # (cmd_minio._require_transport), not here — this loader stays a pure
     # parser so config-parsing specs can assert on it directly. Memory note:
@@ -648,12 +653,9 @@ fn minio_delete_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, text
 # ---------------------------------------------------------------------------
 # PutObject
 #
-# IMPORTANT LIMITATION (recorded per issue #10 follow-up):
-#   `rt_http_request` takes `body: text`, which is UTF-8. Binary PUTs (e.g. FW
-#   images) cannot round-trip through `text` losslessly. We therefore expose
-#   `minio_put_text` for text/JSON/XML bodies (≤64 MiB) and reject binary PUTs
-#   with a clear error. Multipart upload + binary streaming PUT require a new
-#   `rt_http_request_bytes`/`rt_http_upload_raw` SFFI — see TODO below.
+# Legacy text requests remain available. Binary uploads use the already-owned
+# v2 HTTP byte-array API, preserving NUL and non-UTF-8 octets without conversion.
+# Both single-request APIs are limited to 64 MiB; multipart is a separate feature.
 # ---------------------------------------------------------------------------
 
 fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content_type: text) -> (bool, text, text):
@@ -799,18 +801,90 @@ fn minio_delete_bucket(cfg: MinioConfig, bucket: text) -> (bool, text):
     (true, "")
 
 
-fn minio_put_object(cfg: MinioConfig, bucket: text, key: text, local_path: text) -> (bool, text, text):
-    """PUT a local file as an object.
+# @workaround bug=phase2_u8_accelerated_sha256_ffi_carrier_2026_10_27 reason=Copy indexed octets into the admitted i64 SHA256 carrier until the deployed P2 byte accelerator ABI is qualified
+fn _minio_binary_payload_hash(body: [u8]) -> text:
+    # Keep the public byte contract. Copy each octet into the established
+    # typed SHA-256 engine carrier instead of crossing the old [u8] digest FFI.
+    var words: [i64] = []
+    var index = 0
+    while index < body.len():
+        words.push(body[index] as i64)
+        index = index + 1
+    val digest: [i64] = sha256_bytes(words)
+    val digits = "0123456789abcdef"
+    var encoded = ""
+    index = 0
+    while index < digest.len():
+        val octet: i64 = digest[index]
+        val high = octet / 16
+        val low = octet % 16
+        encoded = encoded + digits[high:high + 1] + digits[low:low + 1]
+        index = index + 1
+    encoded
 
-    BLOCKER (issue #10 follow-up): the existing `rt_http_request`/`rt_http_upload`
-    SFFI does not support raw-bytes PUT bodies — `rt_http_request` body is `text`
-    (UTF-8) and `rt_http_upload` is multipart/form-data. Until a `rt_http_put_file`
-    or `rt_http_request_bytes` SFFI lands, this returns a clear error rather than
-    silently corrupting binary uploads. Small text files can use `minio_put_text`.
+fn minio_put_bytes(cfg: MinioConfig, bucket: text, key: text, body: [u8], content_type: text) -> (bool, text, text):
+    """Lossless bounded binary PUT through native HTTP or the real curl transport."""
+    if body.len() > MINIO_MULTIPART_THRESHOLD:
+        return (false, "", "minio_put_bytes: body exceeds {MINIO_MULTIPART_THRESHOLD} bytes; multipart upload required")
+    val canonical_uri = _build_object_path(bucket, key)
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val payload_hash = _minio_binary_payload_hash(body)
+    val ct = if content_type == "": "application/octet-stream" else: content_type
+    val sig_headers: [SigV4Header] = [
+        SigV4Header(name: "content-length", value: "{body.len()}"),
+        SigV4Header(name: "content-type", value: ct),
+        SigV4Header(name: "host", value: host),
+        SigV4Header(name: "x-amz-content-sha256", value: payload_hash),
+        SigV4Header(name: "x-amz-date", value: amz_dt)
+    ]
+    val auth = sigv4_authorization_header("PUT", canonical_uri, "", sig_headers,
+        payload_hash, cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt)
+    val headers: [text] = ["Host: {host}", "Content-Type: {ct}",
+        "Content-Length: {body.len()}", "x-amz-content-sha256: {payload_hash}",
+        "x-amz-date: {amz_dt}", "Authorization: {auth}"]
+    var attempt = 0
+    var status = 0
+    var response_body = ""
+    var transport_error = ""
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        # @workaround bug=windows_core_http_client_unavailable_2026_10_27 reason=Use the bounded private-file curl transport while the selected Windows core HTTP provider is unavailable
+        if host_os() == "windows":
+            # The core Windows runtime explicitly has no native HTTP v2
+            # provider. The real bounded compatibility transport keeps binary
+            # octets and Authorization out of shell/argv interpolation.
+            val response: (i64, text, text) = curl_request_bytes(
+                "PUT", "{cfg.url}{canonical_uri}", headers, body)
+            status = response.0
+            response_body = response.1
+            transport_error = response.2
+        else:
+            val response: (i64, text, text, [u8], text) = http_request_v2_raw(
+                "PUT", "{cfg.url}{canonical_uri}", headers, body, 30000)
+            status = response.0
+            val response_bytes: [u8] = response.3
+            response_body = bytes_to_text(response_bytes)
+            transport_error = response.4
+        attempt = attempt + 1
+        if not itf_should_retry(status, transport_error) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            break
+        itf_retry_wait(attempt - 1, "")
+    val mapped = map_s3_error(status, response_body, transport_error)
+    if mapped.kind != "ok":
+        return (false, "", mapped.message)
+    (true, "", response_body)
+
+fn minio_put_object(cfg: MinioConfig, bucket: text, key: text, local_path: text) -> (bool, text, text):
+    """PUT raw file bytes without interpreting or re-encoding them as UTF-8.
+
+    The admitted read refuses symlinks, nonregular files and bodies over the
+    current single-request limit. Empty files are successful zero-byte bodies.
     """
-    if not file_exists(local_path):
-        return (false, "", "local file not found: {local_path}")
-    (false, "", "minio_put_object: binary PUT not yet implemented — needs raw-bytes HTTP SFFI (issue #10 follow-up). Workaround: `itf minio presign-put {bucket} {key}` then PUT the file's raw bytes to that URL with curl/any HTTP client. Use minio_put_text for ≤64 MiB text bodies instead.")
+    val body: [u8] = match file_read_regular_no_follow_bounded_bytes(local_path, MINIO_MULTIPART_THRESHOLD):
+        case Ok(value): value
+        case Err(reason): return (false, "", reason)
+    minio_put_bytes(cfg, bucket, key, body, "application/octet-stream")
+
 
 
 # ---------------------------------------------------------------------------

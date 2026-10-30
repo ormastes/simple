@@ -669,6 +669,7 @@ struct FunctionAttr:
     is_entry: bool          # @entry - bare-metal entry point
     is_naked: bool          # @naked - no prologue/epilogue
     is_noreturn: bool       # @noreturn - function never returns
+    is_inline: bool         # @inline/@always_inline - force inlining
     section: text?          # @section("X") - ELF section placement
     is_interrupt: bool      # @interrupt - interrupt handler
     is_boot: bool           # @boot - init-phase function (runs before scheduler)
@@ -704,6 +705,10 @@ struct FunctionAttr:
     align: i64              # @align(n) — instruction alignment; 0 = target default
     is_global: bool         # @global — export unmangled name with external linkage
     placement_error: text   # E-ALIGN-RANGE / E-GLOBAL-MANGLE text, "" when clean
+    # Module-scoped mono instance (per-file lane, default): emitted
+    # `linkonce_odr` in its own comdat so identical copies dedupe at link.
+    # Trailing + defaulted: never set by source attributes.
+    is_comdat_instance: bool = false
 
 impl FunctionAttr:
     static fn default() -> FunctionAttr:
@@ -712,6 +717,7 @@ impl FunctionAttr:
             is_entry: false,
             is_naked: false,
             is_noreturn: false,
+            is_inline: false,
             section: nil,
             is_interrupt: false,
             is_boot: false,
@@ -745,6 +751,7 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
     var is_entry = false
     var is_naked = false
     var is_noreturn = false
+    var is_inline = false
     var has_section = false
     var section_value = ""
     var is_interrupt = false
@@ -777,6 +784,8 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
             is_entry = true
         elif attr.name == "naked":
             is_naked = true
+        elif attr.name == "inline" or attr.name == "always_inline":
+            is_inline = true
         elif attr.name == "align":
             # Design A.2: power of two in 1..4096, else E-ALIGN-RANGE.
             val align_arg = if attr.args.len() > 0: extract_int_arg(attr.args[0]) else: nil
@@ -873,6 +882,7 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
         is_entry: is_entry,
         is_naked: is_naked,
         is_noreturn: is_noreturn,
+        is_inline: is_inline,
         section: if has_section: Some(section_value) else: nil,
         is_interrupt: is_interrupt,
         is_boot: is_boot,

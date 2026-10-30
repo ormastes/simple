@@ -25,6 +25,7 @@ use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_
 use compiler.core.types.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+use compiler.hir.hir_lowering._Items.bootstrap_hir_store.{BootstrapHirStore, bootstrap_hir_store_with_port, hir_publish_port_runtime, bootstrap_hir_store_fail}
 
 pub fn imported_symbol_local_name(imported_name: text, has_alias: bool, alias: text) -> text:
     """Select the lexical name of an explicit import, preserving its alias."""
@@ -36,8 +37,6 @@ pub fn imported_symbol_local_name(imported_name: text, has_alias: bool, alias: t
 extern fn rt_env_get(key: text) -> text?
 @unsafe(reason: "raw process termination ABI", capabilities: [ffi])
 extern fn rt_exit(code: i64)
-@unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
-extern fn rt_transient_heap_promote<T>(value: T) -> bool
 
 @always_inline
 fn _sffi_env_get(key: text) -> text?:
@@ -49,92 +48,31 @@ fn _sffi_exit(code: i64):
     unsafe(capabilities: [ffi]):
         rt_exit(code)
 
-@always_inline
-fn _sffi_transient_heap_promote<T>(value: T) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_transient_heap_promote(value)
+# The flat bootstrap HIR rows live in ONE owner (BSM P2; see
+# _Items/bootstrap_hir_store.spl for the publish protocol). Every helper below
+# is a thin forwarder so the 50.mir / 70.backend / 80.driver readers keep their
+# names and the bootstrap ABI: readers observe only fully published rows, and
+# committed_count is advanced last.
+var _bootstrap_hir_store: BootstrapHirStore = bootstrap_hir_store_with_port(hir_publish_port_runtime())
 
-var _bootstrap_hir_functions: [HirFunction] = []
-var _bootstrap_hir_module_names: [text] = []
-var _bootstrap_hir_module_symbols: [[HirSymbol]] = []
-var _bootstrap_hir_module_functions: [[HirFunction]] = []
-var _bootstrap_hir_module_constants: [[HirConst]] = []
-# The --entry-closure flat lowering path builds MIR from this reduced per-module
-# store (not a full HirModule), so it also needs each module's own enum/struct
-# TYPE DEFS to populate enum_variant_index / struct_field_order — without them a
-# bare `E.V` lowers as a field-load on an undefined base (llc "use of undefined
-# value") and `S(..)` emits a call to an undefined `@S` ctor (link failure).
-# Captured alongside functions/constants below and registered in the flat MIR
-# path (bootstrap_lower_flat_hir_module_to_mir). See bug
-# native_enum_variant_flat_undefined_2026-07-24.
-var _bootstrap_hir_module_enums: [[HirEnum]] = []
-var _bootstrap_hir_module_structs: [[HirStruct]] = []
-# Classes: the flat path needs these to register class field layout so `C(..)`
-# reclassifies to an inline aggregate instead of a call to an undefined `@C` ctor.
-var _bootstrap_hir_module_classes: [[HirClass]] = []
-var _bootstrap_hir_entry_index: i64 = -1
-# Readers observe only fully published rows.  The parallel arrays above are a
-# bootstrap ABI constraint; this scalar is advanced only after every owner has
-# accepted the new row, so a partially appended row is never addressable.
-var _bootstrap_hir_module_committed_count: i64 = 0
-val _BOOTSTRAP_HIR_MODULE_LIMIT: i64 = 4096
-val _BOOTSTRAP_HIR_ITEMS_PER_MODULE_LIMIT: i64 = 131072
+fn bootstrap_hir_store() -> BootstrapHirStore:
+    _bootstrap_hir_store
 
-fn bootstrap_hir_store_fail(message: text):
-    eprint("error: bootstrap HIR store rejected update: {message}\n")
-    _sffi_exit(1)
-    panic("rt_exit returned after bootstrap HIR store rejection")
+# Test seam: swap the whole store (e.g. one built with a fake session port).
+fn bootstrap_hir_store_install(store: BootstrapHirStore):
+    _bootstrap_hir_store = store
+
+fn bootstrap_hir_store_set_session(on: bool):
+    _bootstrap_hir_store.session_on = on
 
 fn bootstrap_hir_store_aligned(expected: i64) -> bool:
-    _bootstrap_hir_module_names.len() == expected and
-    _bootstrap_hir_module_symbols.len() == expected and
-    _bootstrap_hir_module_functions.len() == expected and
-    _bootstrap_hir_module_constants.len() == expected and
-    _bootstrap_hir_module_enums.len() == expected and
-    _bootstrap_hir_module_structs.len() == expected and
-    _bootstrap_hir_module_classes.len() == expected
-
-fn bootstrap_hir_item_count_allowed(count: i64) -> bool:
-    count >= 0 and count <= _BOOTSTRAP_HIR_ITEMS_PER_MODULE_LIMIT
+    _bootstrap_hir_store.aligned(expected)
 
 fn bootstrap_hir_modules_reset():
-    _bootstrap_hir_module_committed_count = 0
-    _bootstrap_hir_entry_index = -1
-    _bootstrap_hir_module_names = []
-    _bootstrap_hir_module_symbols = []
-    _bootstrap_hir_module_functions = []
-    _bootstrap_hir_module_constants = []
-    _bootstrap_hir_module_enums = []
-    _bootstrap_hir_module_structs = []
-    _bootstrap_hir_module_classes = []
+    _bootstrap_hir_store.reset()
 
 fn bootstrap_hir_modules_add(name: text, is_entry: bool, symbols: [HirSymbol], functions: [HirFunction], constants: [HirConst], enums: [HirEnum], structs: [HirStruct], classes: [HirClass]):
-    val module_index = _bootstrap_hir_module_committed_count
-    if module_index >= _BOOTSTRAP_HIR_MODULE_LIMIT:
-        bootstrap_hir_store_fail("module limit exceeded")
-    if not bootstrap_hir_store_aligned(module_index):
-        bootstrap_hir_store_fail("parallel owners are misaligned before publication")
-    if (not bootstrap_hir_item_count_allowed(symbols.len()) or
-        not bootstrap_hir_item_count_allowed(functions.len()) or
-        not bootstrap_hir_item_count_allowed(constants.len()) or
-        not bootstrap_hir_item_count_allowed(enums.len()) or
-        not bootstrap_hir_item_count_allowed(structs.len()) or
-        not bootstrap_hir_item_count_allowed(classes.len())):
-        bootstrap_hir_store_fail("per-module item limit exceeded")
-    if is_entry and _bootstrap_hir_entry_index >= 0:
-        bootstrap_hir_store_fail("multiple entry modules")
-    _bootstrap_hir_module_names = _bootstrap_hir_module_names.push(name)
-    _bootstrap_hir_module_symbols = _bootstrap_hir_module_symbols.push(symbols)
-    _bootstrap_hir_module_functions = _bootstrap_hir_module_functions.push(functions)
-    _bootstrap_hir_module_constants = _bootstrap_hir_module_constants.push(constants)
-    _bootstrap_hir_module_enums = _bootstrap_hir_module_enums.push(enums)
-    _bootstrap_hir_module_structs = _bootstrap_hir_module_structs.push(structs)
-    _bootstrap_hir_module_classes = _bootstrap_hir_module_classes.push(classes)
-    if not bootstrap_hir_store_aligned(module_index + 1):
-        bootstrap_hir_store_fail("parallel owners are misaligned after append")
-    _bootstrap_hir_module_committed_count = module_index + 1
-    if is_entry:
-        _bootstrap_hir_entry_index = module_index
+    _bootstrap_hir_store.add(name, is_entry, symbols, functions, constants, enums, structs, classes)
 
 # HIR-cache replay of module_build.spl's bootstrap_flat_mode block: a cache
 # hit skips lowering, so the flat rows the bootstrap MIR bridge reads must be
@@ -198,146 +136,115 @@ fn bootstrap_hir_modules_add_from_module(module: HirModule, registry_module_name
         class_i = class_i + 1
     bootstrap_hir_modules_add(registry_module_name, is_entry, flat_symbols, flat_functions, flat_constants, flat_enums, flat_structs, flat_classes)
 
-fn bootstrap_hir_modules_promote_last() -> bool:
-    val committed = _bootstrap_hir_module_committed_count
-    if committed <= 0 or not bootstrap_hir_store_aligned(committed):
-        return false
-    val last = committed - 1
-    # The flat-MIR bridge owns these parallel globals independently of the
-    # returned HirModule. Promote both the seven outer owners and the exact
-    # newly committed row so ending the per-file scope cannot leave a dangling
-    # global owner. Do not expose the raw arrays to the driver.
-    val name_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_names[last])
-    val symbols_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_symbols[last])
-    val functions_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_functions[last])
-    val constants_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_constants[last])
-    val enums_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_enums[last])
-    val structs_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_structs[last])
-    val classes_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_classes[last])
-    val names_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_names)
-    val symbols_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_symbols)
-    val functions_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_functions)
-    val constants_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_constants)
-    val enums_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_enums)
-    val structs_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_structs)
-    val classes_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_classes)
-    name_ok and symbols_ok and functions_ok and constants_ok and enums_ok and
-        structs_ok and classes_ok and names_outer_ok and symbols_outer_ok and
-        functions_outer_ok and constants_outer_ok and enums_outer_ok and
-        structs_outer_ok and classes_outer_ok
+fn bootstrap_hir_modules_has_pending() -> bool:
+    _bootstrap_hir_store.has_pending
+
+# Session path: adopt the staged row, then append under the session allocator.
+fn bootstrap_hir_modules_publish_pending() -> bool:
+    _bootstrap_hir_store.publish_pending()
+
+fn bootstrap_hir_modules_discard_pending():
+    _bootstrap_hir_store.discard_pending()
+
+# No-session path only (pre-P1 runtime or SIMPLE_BUILD_SESSION=0).
+fn bootstrap_hir_modules_promote_last_legacy() -> bool:
+    _bootstrap_hir_store.promote_last_legacy()
 
 fn bootstrap_hir_modules_rollback_last(expected_count: i64) -> bool:
-    val committed = _bootstrap_hir_module_committed_count
-    if expected_count < 0 or committed != expected_count + 1:
-        return false
-    if not bootstrap_hir_store_aligned(committed):
-        return false
-    val removed_index = committed - 1
-    # push/pop mutate the canonical outer owners in place. Rebuilding with a
-    # slice here would allocate replacement globals in the doomed scope.
-    _bootstrap_hir_module_names.pop()
-    _bootstrap_hir_module_symbols.pop()
-    _bootstrap_hir_module_functions.pop()
-    _bootstrap_hir_module_constants.pop()
-    _bootstrap_hir_module_enums.pop()
-    _bootstrap_hir_module_structs.pop()
-    _bootstrap_hir_module_classes.pop()
-    if _bootstrap_hir_entry_index == removed_index:
-        _bootstrap_hir_entry_index = -1
-    _bootstrap_hir_module_committed_count = expected_count
-    bootstrap_hir_store_aligned(expected_count)
+    _bootstrap_hir_store.rollback_last(expected_count)
 
 fn bootstrap_hir_entry_index() -> i64:
-    if _bootstrap_hir_entry_index < 0 or _bootstrap_hir_entry_index >= _bootstrap_hir_module_committed_count:
+    val store = _bootstrap_hir_store
+    if store.entry_index < 0 or store.entry_index >= store.committed_count:
         return -1
-    _bootstrap_hir_entry_index
+    store.entry_index
 
 fn bootstrap_hir_module_count() -> i64:
-    _bootstrap_hir_module_committed_count
+    _bootstrap_hir_store.committed_count
 
 fn bootstrap_hir_module_index_valid(index: i64) -> bool:
-    index >= 0 and index < _bootstrap_hir_module_committed_count
+    _bootstrap_hir_store.index_valid(index)
 
-fn bootstrap_hir_module_names_outer_len() -> i64: _bootstrap_hir_module_names.len()
-fn bootstrap_hir_module_symbols_outer_len() -> i64: _bootstrap_hir_module_symbols.len()
-fn bootstrap_hir_module_functions_outer_len() -> i64: _bootstrap_hir_module_functions.len()
-fn bootstrap_hir_module_constants_outer_len() -> i64: _bootstrap_hir_module_constants.len()
-fn bootstrap_hir_module_enums_outer_len() -> i64: _bootstrap_hir_module_enums.len()
-fn bootstrap_hir_module_structs_outer_len() -> i64: _bootstrap_hir_module_structs.len()
-fn bootstrap_hir_module_classes_outer_len() -> i64: _bootstrap_hir_module_classes.len()
+fn bootstrap_hir_module_names_outer_len() -> i64: _bootstrap_hir_store.names.len()
+fn bootstrap_hir_module_symbols_outer_len() -> i64: _bootstrap_hir_store.module_symbols.len()
+fn bootstrap_hir_module_functions_outer_len() -> i64: _bootstrap_hir_store.module_functions.len()
+fn bootstrap_hir_module_constants_outer_len() -> i64: _bootstrap_hir_store.module_constants.len()
+fn bootstrap_hir_module_enums_outer_len() -> i64: _bootstrap_hir_store.module_enums.len()
+fn bootstrap_hir_module_structs_outer_len() -> i64: _bootstrap_hir_store.module_structs.len()
+fn bootstrap_hir_module_classes_outer_len() -> i64: _bootstrap_hir_store.module_classes.len()
 
 fn bootstrap_hir_module_name_at(index: i64) -> text:
     if not bootstrap_hir_module_index_valid(index): return ""
-    _bootstrap_hir_module_names[index]
+    _bootstrap_hir_store.names[index]
 
 # Scalar projections keep the hot flat-MIR bridge from copying an entire
 # nested aggregate merely to inspect one element.
 fn bootstrap_hir_module_symbol_count(index: i64) -> i64:
     if not bootstrap_hir_module_index_valid(index): return 0
-    _bootstrap_hir_module_symbols[index].len()
+    _bootstrap_hir_store.module_symbols[index].len()
 
 fn bootstrap_hir_module_symbol_at(module_index: i64, item_index: i64) -> HirSymbol:
-    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_symbols[module_index].len():
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_store.module_symbols[module_index].len():
         bootstrap_hir_store_fail("symbol index out of range")
-    _bootstrap_hir_module_symbols[module_index][item_index]
+    _bootstrap_hir_store.module_symbols[module_index][item_index]
 
 fn bootstrap_hir_module_function_count(index: i64) -> i64:
     if not bootstrap_hir_module_index_valid(index): return 0
-    _bootstrap_hir_module_functions[index].len()
+    _bootstrap_hir_store.module_functions[index].len()
 
 fn bootstrap_hir_module_function_at(module_index: i64, item_index: i64) -> HirFunction:
-    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_functions[module_index].len():
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_store.module_functions[module_index].len():
         bootstrap_hir_store_fail("function index out of range")
-    _bootstrap_hir_module_functions[module_index][item_index]
+    _bootstrap_hir_store.module_functions[module_index][item_index]
 
 fn bootstrap_hir_module_constant_count(index: i64) -> i64:
     if not bootstrap_hir_module_index_valid(index): return 0
-    _bootstrap_hir_module_constants[index].len()
+    _bootstrap_hir_store.module_constants[index].len()
 
 fn bootstrap_hir_module_constant_at(module_index: i64, item_index: i64) -> HirConst:
-    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_constants[module_index].len():
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_store.module_constants[module_index].len():
         bootstrap_hir_store_fail("constant index out of range")
-    _bootstrap_hir_module_constants[module_index][item_index]
+    _bootstrap_hir_store.module_constants[module_index][item_index]
 
 fn bootstrap_hir_module_enum_count(index: i64) -> i64:
     if not bootstrap_hir_module_index_valid(index): return 0
-    _bootstrap_hir_module_enums[index].len()
+    _bootstrap_hir_store.module_enums[index].len()
 
 fn bootstrap_hir_module_enum_at(module_index: i64, item_index: i64) -> HirEnum:
-    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_enums[module_index].len():
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_store.module_enums[module_index].len():
         bootstrap_hir_store_fail("enum index out of range")
-    _bootstrap_hir_module_enums[module_index][item_index]
+    _bootstrap_hir_store.module_enums[module_index][item_index]
 
 fn bootstrap_hir_module_struct_count(index: i64) -> i64:
     if not bootstrap_hir_module_index_valid(index): return 0
-    _bootstrap_hir_module_structs[index].len()
+    _bootstrap_hir_store.module_structs[index].len()
 
 fn bootstrap_hir_module_struct_at(module_index: i64, item_index: i64) -> HirStruct:
-    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_structs[module_index].len():
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_store.module_structs[module_index].len():
         bootstrap_hir_store_fail("struct index out of range")
-    _bootstrap_hir_module_structs[module_index][item_index]
+    _bootstrap_hir_store.module_structs[module_index][item_index]
 
 fn bootstrap_hir_module_class_count(index: i64) -> i64:
     if not bootstrap_hir_module_index_valid(index): return 0
-    _bootstrap_hir_module_classes[index].len()
+    _bootstrap_hir_store.module_classes[index].len()
 
 fn bootstrap_hir_module_class_at(module_index: i64, item_index: i64) -> HirClass:
-    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_classes[module_index].len():
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_store.module_classes[module_index].len():
         bootstrap_hir_store_fail("class index out of range")
-    _bootstrap_hir_module_classes[module_index][item_index]
+    _bootstrap_hir_store.module_classes[module_index][item_index]
 
 fn bootstrap_hir_functions_reset():
-    _bootstrap_hir_functions = []
+    _bootstrap_hir_store.functions = []
 
 fn bootstrap_hir_functions_add(fn_: HirFunction):
-    _bootstrap_hir_functions = _bootstrap_hir_functions.push(fn_)
+    _bootstrap_hir_store.functions = _bootstrap_hir_store.functions.push(fn_)
 
 fn bootstrap_hir_function_count() -> i64:
-    _bootstrap_hir_functions.len()
+    _bootstrap_hir_store.functions.len()
 
 fn bootstrap_hir_function_at(index: i64) -> HirFunction:
-    if index >= 0 and index < _bootstrap_hir_functions.len():
-        return _bootstrap_hir_functions[index]
+    if index >= 0 and index < _bootstrap_hir_store.functions.len():
+        return _bootstrap_hir_store.functions[index]
     if index >= 0 and index < flat_bootstrap_function_count() and (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         val fn_: ParserFunction = flat_bootstrap_function_at(index)
         var lowering = HirLowering.new()

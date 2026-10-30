@@ -1,0 +1,62 @@
+# T-HA1 twin of src/verification/build_cache/src/HashAgilityV1.lean over the
+# real registry: unknown algorithms are absent, never a match; a set match
+# implies a shared known algorithm with equal bytes (collision resistant when
+# identity is required). Exhaustive over single-digest sets drawn from the 6
+# registered algorithms + 1 unknown id, equal/unequal bytes, both identity modes.
+use std.spec.{describe, it, expect}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{
+    DigestV1, HashAlgorithmV1, hash_algorithm_registry_v1, hash_algorithm_by_id_v1,
+    digest_v1_new, digest_v1_parse, digest_v1_equal, digest_v1_identity_ok,
+    digest_set_match_v1, DIGEST_SET_MATCH_V1, DIGEST_SET_NO_COMMON_V1}
+
+fn hex_of(bytes: i64, nibble: text) -> text:
+    var out = ""
+    var i = 0
+    while i < bytes * 2:
+        out = out + nibble
+        i = i + 1
+    out
+
+fn ids() -> [i64]:
+    [1, 2, 3, 16, 17, 18, 99]
+
+fn dig(id: i64, nibble: text) -> DigestV1:
+    val width = match hash_algorithm_by_id_v1(id):
+        case Some(a): a.output_bytes
+        case nil: 32
+    DigestV1(algo_id: id, hex: hex_of(width, nibble))
+
+describe "T-HA1 twin: hash agility":
+    it "has unique ids and names and rejects unknown algorithms":
+        var names: [text] = []
+        var seen_ids: [i64] = []
+        for a in hash_algorithm_registry_v1():
+            expect(names.contains(a.name)).to_equal(false)
+            expect(seen_ids.contains(a.id)).to_equal(false)
+            names.push(a.name)
+            seen_ids.push(a.id)
+        expect(digest_v1_new(99, hex_of(32, "a")) == nil).to_equal(true)
+        expect(digest_v1_parse("md5:" + hex_of(16, "a")) == nil).to_equal(true)
+        expect(digest_v1_parse("sha256:" + hex_of(32, "a")) == nil).to_equal(false)
+        expect(digest_v1_equal(dig(99, "a"), dig(99, "a"))).to_equal(false)
+
+    it "matches only on a shared known algorithm with equal bytes":
+        var checked = 0
+        for x in ids():
+            for y in ids():
+                for same in [true, false]:
+                    for need in [true, false]:
+                        val h = dig(x, "a")
+                        val w = dig(y, if same: "a" else: "b")
+                        val r = digest_set_match_v1([h], [w], need)
+                        val shared = x == y and hash_algorithm_by_id_v1(x) != nil
+                        if r == DIGEST_SET_MATCH_V1:
+                            expect(shared and same).to_equal(true)
+                            if need:
+                                expect(digest_v1_identity_ok(w)).to_equal(true)
+                        if not shared:
+                            expect(r).to_equal(DIGEST_SET_NO_COMMON_V1)
+                        if x != y:
+                            expect(digest_v1_equal(h, w)).to_equal(false)
+                        checked = checked + 1
+        expect(checked).to_equal(196)

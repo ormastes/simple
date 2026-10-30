@@ -1,0 +1,230 @@
+"""
+## Purpose
+Session targeting and bounded client notices through real smux owners.
+## Evidence boundary
+State/protocol cases allocate actual service records, not fake transports.
+The final case requires a real Windows ConPTY child; it never skips on another
+host. Source authored only until an admitted Phase 3 native runner executes it.
+# @manual: primary
+# @capture: text
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
+    smux_list_panes, smux_new_window, smux_focus_window, smux_active_window,
+    smux_attach, smux_detach_from, smux_pane_spawn_pty, smux_capture}
+use os.apps.smux.smux_remote.{smux_remote_dispatch, smux_remote_reply_ok}
+use os.apps.smux.server.{smux_server_dispatch}
+use os.apps.smux.client_notifications.{smux_notifications_enqueue,
+    smux_notifications_peek, smux_notifications_ack}
+use os.apps.smux.notification_client.{notification_reply_decode, notification_reply_ok, notification_overlay}
+use os.apps.smux.client_view.{client_input_hex}
+use std.nogc_sync_mut.sosix.process.{sosix_platform, sosix_sleep_ms}
+
+# @inline
+fn messaging_session(name: text) -> [text]:
+    val session = smux_create_session(name)
+    val windows = smux_list_windows(session.id)
+    val panes = smux_list_panes(session.id, windows[0].id)
+    return [session.id, windows[0].id, panes[0].id]
+
+# @inline
+fn messaging_peek(session: text, client: text) -> i64:
+    val decoded = notification_reply_decode(smux_remote_dispatch("notifications " + session + " " + client))
+    expect(decoded.is_ok()).to_equal(true)
+    return decoded.unwrap().id
+
+describe "smux sessions send pane input and attached-client notices":
+    it "lists actual session ids and names without replacing the existing count reply":
+        smux_reset_for_test()
+        val first = messaging_session("first")
+        val second = messaging_session("second")
+        step("Discover stable session targets using production list-sessions")
+        val listed = smux_remote_dispatch("list-sessions")
+        expect(listed).to_contain(first[0] + " first\n")
+        expect(listed).to_contain(second[0] + " second\n")
+        expect(smux_remote_dispatch("list")).to_equal("smux: sessions=2")
+
+    it "gives stable ids precedence and refuses ambiguous session names":
+        smux_reset_for_test()
+        val first = messaging_session("duplicate")
+        val second = messaging_session("duplicate")
+        val collision = messaging_session(first[0])
+        step("Resolve the same public session selector used by pane and notice commands")
+        expect(smux_remote_dispatch("windows duplicate").contains("unknown")).to_equal(true)
+        val exact = smux_remote_dispatch("windows " + first[0])
+        expect(exact).to_contain(first[1])
+        expect(exact.contains(collision[1] + " ")).to_equal(false)
+        expect(second[0] != first[0]).to_equal(true)
+
+    it "routes notices only to the attached session and client pair":
+        smux_reset_for_test()
+        val alpha = messaging_session("alpha")
+        val beta = messaging_session("beta")
+        expect(smux_attach(alpha[0], "alice", 80, 24).attached).to_equal(true)
+        expect(smux_attach(beta[0], "bob", 80, 24).attached).to_equal(true)
+        step("Queue a Unicode notice through the actual authenticated request dispatcher")
+        val queued = smux_server_dispatch("token notify " + beta[0] + " bob " + client_input_hex("ready 한😀"), "token")
+        expect(smux_remote_reply_ok(queued)).to_equal(true)
+        expect(messaging_peek(alpha[0], "alice")).to_equal(0)
+        val reply = notification_reply_decode(smux_remote_dispatch("notifications " + beta[0] + " bob"))
+        expect(reply.is_ok()).to_equal(true)
+        expect(reply.unwrap().body).to_equal("ready 한😀")
+        expect(reply.unwrap().id).to_be_greater_than(0)
+        expect(smux_remote_reply_ok(smux_remote_dispatch("notifications " + alpha[0] + " bob"))).to_equal(false)
+
+    it "requires the shared owner token and accepts no claimed sender field":
+        smux_reset_for_test()
+        val target = messaging_session("target")
+        expect(smux_attach(target[0], "receiver", 80, 24).attached).to_equal(true)
+        step("Reject wrong-token and extra-sender-field requests without enqueueing")
+        expect(smux_server_dispatch("wrong notify target receiver 6869", "secret")).to_equal("smux: unauthorized")
+        expect(smux_remote_reply_ok(smux_server_dispatch("secret notify target receiver 6869 forged", "secret"))).to_equal(false)
+        expect(messaging_peek(target[0], "receiver")).to_equal(0)
+
+    it "peeks without consuming and acknowledges only the oldest recipient message":
+        smux_reset_for_test()
+        val target = messaging_session("target")
+        expect(smux_attach(target[0], "receiver", 80, 24).attached).to_equal(true)
+        val first = smux_notifications_enqueue(target[0], "receiver", "one").unwrap()
+        val second = smux_notifications_enqueue(target[0], "receiver", "two").unwrap()
+        step("Retry a read and refuse out-of-order or cross-recipient acknowledgements")
+        expect(messaging_peek(target[0], "receiver")).to_equal(first)
+        expect(messaging_peek(target[0], "receiver")).to_equal(first)
+        expect(smux_notifications_ack(target[0], "receiver", second)).to_equal(false)
+        expect(smux_notifications_ack(target[0], "other", first)).to_equal(false)
+        expect(smux_remote_reply_ok(smux_remote_dispatch("ack-notification target receiver " + first.to_text()))).to_equal(true)
+        expect(messaging_peek(target[0], "receiver")).to_equal(second)
+        expect(smux_notifications_ack(target[0], "receiver", first)).to_equal(false)
+
+    it "bounds queue memory and preserves the oldest item on overflow":
+        smux_reset_for_test()
+        val target = messaging_session("target")
+        expect(smux_attach(target[0], "receiver", 80, 24).attached).to_equal(true)
+        var first: i64 = 0
+        step("Fill all thirty-two production queue entries then refuse a thirty-third")
+        var index = 0
+        while index < 32:
+            val queued = smux_notifications_enqueue(target[0], "receiver", "message " + index.to_text())
+            expect(queued.is_ok()).to_equal(true)
+            if index == 0: first = queued.unwrap()
+            index = index + 1
+        expect(smux_notifications_enqueue(target[0], "receiver", "overflow").is_err()).to_equal(true)
+        expect(messaging_peek(target[0], "receiver")).to_equal(first)
+        expect(smux_notifications_ack(target[0], "receiver", first)).to_equal(true)
+        expect(smux_notifications_enqueue(target[0], "receiver", "after acknowledgement").is_ok()).to_equal(true)
+
+    it "enforces UTF-8 byte bounds and malformed input without consuming queue capacity":
+        smux_reset_for_test()
+        val target = messaging_session("target")
+        expect(smux_attach(target[0], "receiver", 80, 24).attached).to_equal(true)
+        var maximum = ""
+        var index = 0
+        while index < 256:
+            maximum = maximum + "😀"
+            index = index + 1
+        step("Accept exactly 1024 UTF-8 bytes and refuse oversize or invalid scalar encodings")
+        expect(smux_notifications_enqueue(target[0], "receiver", maximum).is_ok()).to_equal(true)
+        expect(smux_notifications_enqueue(target[0], "receiver", maximum + "x").is_err()).to_equal(true)
+        expect(smux_notifications_enqueue(target[0], "receiver", "").is_err()).to_equal(true)
+        for malformed in ["c0af", "eda080", "f09f", "zz", "0"]:
+            expect(smux_remote_reply_ok(smux_remote_dispatch("notify target receiver " + malformed))).to_equal(false)
+
+    it "clears detached recipients but preserves sibling notices and same-session resize":
+        smux_reset_for_test()
+        val target = messaging_session("target")
+        expect(smux_attach(target[0], "alice", 80, 24).attached).to_equal(true)
+        expect(smux_attach(target[0], "bob", 80, 24).attached).to_equal(true)
+        val alice = smux_notifications_enqueue(target[0], "alice", "old alice").unwrap()
+        val bob = smux_notifications_enqueue(target[0], "bob", "keep bob").unwrap()
+        step("Resize keeps the same recipient while actual detach clears only that identity")
+        expect(smux_attach(target[0], "alice", 100, 30).attached).to_equal(true)
+        expect(messaging_peek(target[0], "alice")).to_equal(alice)
+        expect(smux_detach_from(target[0], "alice")).to_equal(true)
+        expect(smux_attach(target[0], "alice", 80, 24).attached).to_equal(true)
+        expect(messaging_peek(target[0], "alice")).to_equal(0)
+        expect(messaging_peek(target[0], "bob")).to_equal(bob)
+
+    it "clears cross-session rebind and reset without reusing old acknowledgement ids":
+        smux_reset_for_test()
+        val first = messaging_session("first")
+        val second = messaging_session("second")
+        expect(smux_attach(first[0], "client", 80, 24).attached).to_equal(true)
+        val old = smux_notifications_enqueue(first[0], "client", "old").unwrap()
+        step("Move the actual attachment and then reset all service state")
+        expect(smux_attach(second[0], "client", 80, 24).attached).to_equal(true)
+        expect(smux_notifications_peek(first[0], "client").id).to_equal(0)
+        smux_reset_for_test()
+        val reused = messaging_session("first")
+        expect(smux_attach(reused[0], "client", 80, 24).attached).to_equal(true)
+        expect(messaging_peek(reused[0], "client")).to_equal(0)
+        val fresh = smux_notifications_enqueue(reused[0], "client", "fresh").unwrap()
+        expect(fresh).to_be_greater_than(old)
+        expect(smux_notifications_ack(reused[0], "client", old)).to_equal(false)
+
+    it "renders untrusted text as clipped cells rather than terminal control sequences":
+        step("Decode the real reply and filter cursor movement, newlines and C1 controls")
+        val body = "\x1b[2J\r\n\u{85}한😀"
+        val decoded = notification_reply_decode("smux: notification 7 " + client_input_hex(body))
+        expect(decoded.is_ok()).to_equal(true)
+        expect(notification_overlay(decoded.unwrap().body, 80, 24)).to_equal(
+            "\x1b[s\x1b[24;1H\x1b[0m\x1b[2Knotice: [2J한😀\x1b[u")
+        expect(notification_overlay("한😀", 10, 2)).to_equal(
+            "\x1b[s\x1b[2;1H\x1b[0m\x1b[2Knotice: 한\x1b[u")
+        expect(notification_overlay("한😀", 9, 2)).to_equal(
+            "\x1b[s\x1b[2;1H\x1b[0m\x1b[2Knotice: \x1b[u")
+        expect(notification_reply_decode("smux: notification -1 61").is_err()).to_equal(true)
+        expect(notification_reply_decode("smux: notification 1 c0af").is_err()).to_equal(true)
+        expect(notification_overlay("body", 0, 24)).to_equal("")
+
+    it "refuses pane-target ownership violations without changing session focus":
+        smux_reset_for_test()
+        val first = messaging_session("first")
+        val second = messaging_session("second")
+        step("Address another session's window and pane without selecting them")
+        expect(smux_remote_reply_ok(smux_remote_dispatch("send-pane " + first[0] + " " + second[1] + " " + second[2] + " echo wrong"))).to_equal(false)
+        expect(smux_active_window(first[0]).unwrap().id).to_equal(first[1])
+        expect(smux_active_window(second[0]).unwrap().id).to_equal(second[1])
+
+    it "classifies only structurally valid notification success replies":
+        step("Accept real delivery states and reject errors or forged success prefixes")
+        for reply in ["smux: notification none", "smux: notification queued 7",
+                "smux: notification acknowledged 7", "smux: notification 7 6869"]:
+            expect(notification_reply_ok(reply)).to_equal(true)
+        for reply in ["smux: notification acknowledgement refused", "smux: notification queued nope",
+                "smux: notification queued 0", "smux: notification queued 7 trailing",
+                "smux: notification acknowledged -1", "smux: notification 7 c0af",
+                "smux: notification 7 0", "smux: notification none trailing"]:
+            expect(notification_reply_ok(reply)).to_equal(false)
+
+    it "sends a command to an inactive detached Windows shell without moving another session":
+        smux_reset_for_test()
+        expect(sosix_platform()).to_equal("windows")
+        val sender = messaging_session("sender")
+        val target = messaging_session("target")
+        step("Spawn a real ConPTY shell and detach its actual attachment")
+        val spawned = smux_pane_spawn_pty(target[0], target[1], target[2], "cmd.exe /Q")
+        val attached = smux_attach(target[0], "receiver", 80, 24).attached
+        val detached = smux_detach_from(target[0], "receiver")
+        val other = smux_new_window(target[0], "other")
+        val focused = smux_focus_window(target[0], other.id)
+        step("Use explicit send-pane targeting and require a child-computed result")
+        val configured = smux_remote_dispatch("send-pane " + target[0] + " " + target[1] + " " + target[2] + " set SMUX_MESSAGE_OPERAND=3141")
+        val sent = smux_remote_dispatch("send-pane " + target[0] + " " + target[1] + " " + target[2] + " set /a %SMUX_MESSAGE_OPERAND%+2718")
+        var observed = ""
+        var tries = 0
+        while tries < 200 and not observed.contains("5859"):
+            val captured = smux_capture(target[0], target[1], target[2], 40)
+            if captured.is_ok(): observed = captured.unwrap().content
+            sosix_sleep_ms(25)
+            tries = tries + 1
+        val source_focus = smux_active_window(sender[0]).unwrap().id
+        val target_focus = smux_active_window(target[0]).unwrap().id
+        smux_reset_for_test()
+        expect(spawned.is_ok()).to_equal(true)
+        expect(attached and detached and focused).to_equal(true)
+        expect(smux_remote_reply_ok(configured)).to_equal(true)
+        expect(smux_remote_reply_ok(sent)).to_equal(true)
+        expect(observed).to_contain("5859")
+        expect(source_focus).to_equal(sender[1])
+        expect(target_focus).to_equal(other.id)

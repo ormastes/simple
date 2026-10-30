@@ -1,23 +1,29 @@
 # SCV append-only operation/event journal + WAL for mutable head/meta writes.
 # Design: doc/01_research/app/tools/scv/scv_v2_final_report_2026-08-25.md §16.1,
 # migration stabilization doc §7. Events are one line-framed record per repo
-# mutation; the WAL brackets the mutable HEAD_OP/workspace publication with
-# BEGIN/COMMIT so an incomplete trailing transaction is rolled back (or rolled
-# forward when the head was already published) on the next open — old or new,
-# never half.
+# mutation; the WAL records the intended HEAD_OP/workspace publication with
+# BEGIN/COMMIT. Pending recovery remains read-only unless exact publication
+# ownership is recorded; the current WAL format cannot establish that binding.
+# This journal lock serializes journal writers; it does not make an unrelated
+# mutable HEAD publisher atomic, and the legacy recovery heuristic is not a
+# proof against concurrent non-SCV writers.
 
-use app.io.mod (file_exists, file_read, file_delete, dir_create, dir_list)
+use app.io.mod (file_exists, file_read, file_delete, dir_create, dir_list, is_dir, file_is_regular_no_follow)
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write, file_create_exclusive, file_publish_noreplace, secure_temp_dir, file_fsync, directory_fsync, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional}
+use std.common.crypto.sha256.{sha256_text}
+use std.path.{dirname, basename}
 use std.scv.core.{scv_repo_dir, scv_head_path, scv_workspace_path, scv_status_index_path, scv_object_path}
 use std.scv.store.{scv_repo_exists, scv_write_text, scv_fault_exit, scv_object_field, scv_commit_tree}
 use std.scv.maintenance.{scv_rebuild_object_index}
+use std.scv.wal_format.{scv_wal_line_value, scv_wal_parse}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 fn scv_journal_dir(root: text) -> text:
     "{scv_repo_dir(root)}/journal"
-
 fn scv_journal_events_path(root: text) -> text:
     "{scv_journal_dir(root)}/events.log"
-
 fn scv_journal_wal_path(root: text) -> text:
     "{scv_journal_dir(root)}/wal.log"
 
@@ -32,102 +38,232 @@ fn scv_journal_decode(value: text) -> text:
         return ""
     value.split("%0A").join("\n").split("%20").join(" ").split("%25").join("%")
 
-fn scv_journal_append(path: text, line: text) -> bool:
-    val old = if file_exists(path): file_read(path) else: ""
-    scv_write_text(path, "{old}{line}\n")
+fn scv_journal_lock_path(root: text) -> text:
+    "{scv_journal_dir(root)}/events.lock"
+
+# SCV mutation roots must be host-controlled private directories. The current
+# portable path facade does not provide a retained directory descriptor, so
+# these checks reject symlinked directory leaves but cannot close a hostile
+# ancestor swap race.
+fn scv_journal_dirs_ready(root: text) -> bool:
+    val repo = scv_repo_dir(root)
+    val journal = scv_journal_dir(root)
+    val batches = scv_event_batches_dir(root)
+    if not is_dir(root) or not dir_is_real_no_follow(root): return false
+    if not is_dir(repo) or not dir_is_real_no_follow(repo): return false
+    if not is_dir(journal):
+        if not dir_create(journal, false) and not is_dir(journal): return false
+    if not dir_is_real_no_follow(journal): return false
+    if not is_dir(batches):
+        if not dir_create(batches, false) and not is_dir(batches): return false
+    if not dir_is_real_no_follow(journal) or not dir_is_real_no_follow(batches): return false
+    directory_fsync(root) and directory_fsync(repo) and directory_fsync(journal) and directory_fsync(batches)
+
+fn scv_journal_lock(root: text) -> i64:
+    if not scv_journal_dirs_ready(root): return -1
+    val lock_path = scv_journal_lock_path(root)
+    if not file_is_regular_no_follow(lock_path):
+        if not file_create_exclusive(lock_path, ""):
+            if not file_is_regular_no_follow(lock_path): return -1
+        elif not file_fsync(lock_path) or not directory_fsync(scv_journal_dir(root)):
+            return -1
+    val handle = file_lock(lock_path, 5)
+    if handle < 0: return -1
+    if not file_is_regular_no_follow(lock_path) or not directory_fsync(scv_journal_dir(root)):
+        file_unlock(handle)
+        return -1
+    handle
+
+fn scv_journal_safe_read(path: text) -> Result<text, text>:
+    if not file_is_regular_no_follow(path): return Err("journal path is not a regular no-follow file: {path}")
+    file_read_regular_no_follow_bounded(path, 268435456)
+fn scv_journal_optional_read_locked(root: text, path: text) -> Result<text, text>:
+    if file_is_regular_no_follow(path): return scv_journal_safe_read(path)
+    val entries = dir_list_optional(dirname(path))
+    if entries == nil: return Err("cannot list journal parent: {path}")
+    for name in entries!:
+        if name == basename(path):
+            return Err("journal entry exists but is not a regular no-follow file: {path}")
+    Ok("")
+fn scv_journal_read_or_create_empty_locked(root: text, path: text) -> Result<text, text>:
+    if file_is_regular_no_follow(path): return scv_journal_safe_read(path)
+    if file_create_exclusive(path, ""):
+        if not file_fsync(path) or not directory_fsync(dirname(path)):
+            return Err("journal file creation durability failed: {path}")
+        val created = scv_journal_safe_read(path)?
+        if created != "": return Err("journal file creation readback differed: {path}")
+        return Ok(created)
+    if file_is_regular_no_follow(path): return scv_journal_safe_read(path)
+    Err("journal entry exists but is not a regular no-follow file: {path}")
+fn scv_journal_verify_durable_file(path: text, expected: text) -> bool:
+    if not file_is_regular_no_follow(path): return false
+    val before = match scv_journal_safe_read(path):
+        Ok(content): content
+        Err(error): return false
+    if before != expected: return false
+    if not file_fsync(path) or not directory_fsync(dirname(path)): return false
+    match scv_journal_safe_read(path):
+        Ok(actual): actual == expected
+        Err(error): false
+fn scv_journal_durable_replace_locked(root: text, path: text, content: text) -> bool:
+    if content.bytes().len() > 268435456: return false
+    if not file_is_regular_no_follow(path) or not dir_is_real_no_follow(dirname(path)): return false
+    if not file_atomic_write(path, content): return false
+    scv_journal_verify_durable_file(path, content)
+fn scv_journal_append_locked(root: text, path: text, line: text) -> bool:
+    val old = match scv_journal_read_or_create_empty_locked(root, path):
+        Ok(content): content
+        Err(error): return false
+    if old != "" and not old.ends_with("\n"): return false
+    scv_journal_durable_replace_locked(root, path, "{old}{line}\n")
+fn scv_journal_append(root: text, path: text, line: text) -> bool:
+    val lock = scv_journal_lock(root)
+    if lock < 0: return false
+    val written = scv_journal_append_locked(root, path, line)
+    val released = file_unlock(lock)
+    written and released
+fn scv_journal_has_control(value: text) -> bool:
+    for byte in value.bytes():
+        val code = byte as i64
+        if code < 32 or code == 127: return true
+    false
+
+fn scv_journal_field_safe(value: text) -> bool:
+    value != "" and not scv_journal_has_control(value) and
+        not value.contains(" ") and not value.contains("=")
+fn scv_journal_direct_event_id(op_id: text, kind: text, refs: text, sha: text) -> text:
+    val digest = sha256_text("simple-scv-direct-event-v1\n{op_id}\n{kind}\n{refs}\n{sha}")
+    "direct-{digest}"
+fn scv_event_batch_id_safe(batch_id: text) -> bool:
+    scv_journal_field_safe(batch_id) and not batch_id.contains("/") and
+        not batch_id.contains("\\") and batch_id != "." and batch_id != ".."
 
 # Append-only event record: one line per repository mutation.
 fn scv_journal_record_event(root: text, op_id: text, kind: text, refs: text, sha: text) -> bool:
-    dir_create(scv_journal_dir(root), true)
-    val line = "op={op_id} kind={kind} refs={refs} sha={sha} utc={current_time_ms()}"
-    scv_journal_append(scv_journal_events_path(root), line)
+    if (not scv_journal_field_safe(op_id) or not scv_journal_field_safe(kind) or kind.contains(",") or
+            not scv_journal_field_safe(refs) or not scv_journal_field_safe(sha)):
+        return false
+    val lock = scv_journal_lock(root)
+    if lock < 0: return false
+    val event_id = scv_journal_direct_event_id(op_id, kind, refs, sha)
+    val line = "op={op_id} kind={kind} refs={refs} sha={sha} utc={current_time_ms()} tx={op_id} event_id={event_id}"
+    val path = scv_journal_events_path(root)
+    val existing = scv_journal_read_or_create_empty_locked(root, path)
+    var matches = 0
+    var same = false
+    var truncated = false
+    match existing:
+        Ok(content):
+            if content != "" and not content.ends_with("\n"): truncated = true
+            for old_line in content.split("\n"):
+                if scv_wal_line_value(old_line, "event_id") == event_id:
+                    matches = matches + 1
+                    same = (scv_wal_line_value(old_line, "op") == op_id and
+                        scv_wal_line_value(old_line, "kind") == kind and
+                        scv_wal_line_value(old_line, "refs") == refs and
+                        scv_wal_line_value(old_line, "sha") == sha and
+                        scv_wal_line_value(old_line, "tx") == op_id)
+        Err(error):
+            file_unlock(lock)
+            return false
+    val written = if truncated or matches > 1:
+        false
+    elif matches == 1:
+        same and scv_journal_verify_durable_file(path, existing.unwrap())
+    else:
+        scv_journal_append_locked(root, path, line)
+    val released = file_unlock(lock)
+    written and released
 
-fn scv_journal_read_file(path: text) -> text:
-    if file_exists(path): file_read(path) else: "-"
+fn scv_journal_read_file(root: text, path: text) -> Result<text, text>:
+    if file_is_regular_no_follow(path): return scv_journal_safe_read(path)
+    val entries = dir_list_optional(dirname(path))
+    if entries == nil: return Err("cannot list journal parent: {path}")
+    for name in entries!:
+        if name == basename(path): return Err("path is not a regular no-follow file: {path}")
+    Ok("-")
 
 # WAL transaction open: record the pre-publication head/workspace state and the
 # commit about to be published, then the fault point "wal" (simulated crash
 # before any mutable write happened -> recovery rolls back to old).
-fn scv_wal_begin(root: text, tx_id: text, new_commit: text) -> bool:
+fn scv_wal_begin_locked(root: text, tx_id: text, new_commit: text) -> bool:
     dir_create(scv_journal_dir(root), true)
     val wal = scv_journal_wal_path(root)
-    val head_old = scv_journal_encode(scv_journal_read_file(scv_head_path(root)))
-    val ws_old = scv_journal_encode(scv_journal_read_file(scv_workspace_path(root)))
-    scv_journal_append(wal, "BEGIN op={tx_id} utc={current_time_ms()}")
-    scv_journal_append(wal, "SET path=HEAD_OP old={head_old}")
-    scv_journal_append(wal, "SET path=meta/workspaces.sdn old={ws_old}")
-    scv_journal_append(wal, "NEW commit={new_commit}")
+    val head_content = match scv_journal_read_file(root, scv_head_path(root)):
+        Ok(content): content
+        Err(error): return false
+    val ws_content = match scv_journal_read_file(root, scv_workspace_path(root)):
+        Ok(content): content
+        Err(error): return false
+    val head_old = scv_journal_encode(head_content)
+    val ws_old = scv_journal_encode(ws_content)
+    # Publish the complete recovery record before touching mutable roots. A
+    # failed component append must never be acknowledged as an open WAL.
+    val record = "BEGIN op={tx_id} utc={current_time_ms()}\nSET path=HEAD_OP old={head_old}\nSET path=meta/workspaces.sdn old={ws_old}\nNEW commit={new_commit}"
+    if not scv_journal_append_locked(root, wal, record):
+        return false
     scv_fault_exit("wal")
     true
 
+fn scv_wal_begin(root: text, tx_id: text, new_commit: text) -> bool:
+    val lock = scv_journal_lock(root)
+    if lock < 0: return false
+    val begun = scv_wal_begin_locked(root, tx_id, new_commit)
+    val released = file_unlock(lock)
+    begun and released
+
 fn scv_wal_commit(root: text, tx_id: text) -> bool:
-    scv_journal_append(scv_journal_wal_path(root), "COMMIT op={tx_id}")
+    scv_journal_append(root, scv_journal_wal_path(root), "COMMIT op={tx_id}")
 
 # Close a transaction whose guarded write failed WITHOUT crashing, so the next
 # open does not report a spurious recovery.
 fn scv_wal_abort(root: text, tx_id: text) -> bool:
-    scv_journal_append(scv_journal_wal_path(root), "ABORT op={tx_id}")
+    scv_journal_append(root, scv_journal_wal_path(root), "ABORT op={tx_id}")
 
-fn scv_wal_line_value(line: text, key: text) -> text:
-    for part in line.split(" "):
-        if part.starts_with("{key}="):
-            return part["{key}=".len():]
-    ""
-
-fn scv_wal_restore(root: text, rel: text, encoded: text):
-    val path = if rel == "HEAD_OP": scv_head_path(root) else: scv_workspace_path(root)
-    if encoded == "-":
-        if file_exists(path):
-            file_delete(path)
-    else:
-        scv_write_text(path, scv_journal_decode(encoded))
-
-# On-open recovery: if the trailing transaction has a BEGIN without a matching
-# COMMIT/ABORT, decide by the single publication point (HEAD_OP). Head already
-# advanced -> roll FORWARD (publish the recorded workspace pointer); head
-# unchanged -> roll BACK the mutable files to their recorded old state.
-fn scv_wal_recover(root: text) -> text:
+# On-open recovery: the WAL has no immutable expected operation id, and the
+# journal lock does not own the publisher. Preserve every pending transaction
+# and fail closed; neither matching nor changed HEAD_OP proves ownership.
+fn scv_wal_recover_locked(root: text) -> text:
     val wal = scv_journal_wal_path(root)
-    if not file_exists(wal):
+    val wal_content = match scv_journal_optional_read_locked(root, wal):
+        Ok(content):
+            if content == "": return "wal clean\n"
+            content
+        Err(error): return "ERROR cannot read WAL: {error}\n"
+    val parsed = scv_wal_parse(wal_content)
+    if parsed[0] == "clean":
         return "wal clean\n"
-    var tx_id = ""
-    var head_old = ""
-    var ws_old = ""
-    var new_commit = ""
-    var open_tx = false
-    for line in file_read(wal).split("\n"):
-        val trimmed = line.trim()
-        if trimmed.starts_with("BEGIN "):
-            tx_id = scv_wal_line_value(trimmed, "op")
-            head_old = ""
-            ws_old = ""
-            new_commit = ""
-            open_tx = true
-        elif trimmed.starts_with("SET "):
-            if scv_wal_line_value(trimmed, "path") == "HEAD_OP":
-                head_old = scv_wal_line_value(trimmed, "old")
-            else:
-                ws_old = scv_wal_line_value(trimmed, "old")
-        elif trimmed.starts_with("NEW "):
-            new_commit = scv_wal_line_value(trimmed, "commit")
-        elif trimmed.starts_with("COMMIT ") or trimmed.starts_with("ABORT "):
-            if scv_wal_line_value(trimmed, "op") == tx_id:
-                open_tx = false
-    if not open_tx:
-        return "wal clean\n"
-    val head_now = scv_journal_read_file(scv_head_path(root))
+    if parsed[0].starts_with("ERROR"):
+        return parsed[0] + "\n"
+    if parsed.len() != 5 or parsed[0] != "pending":
+        return "ERROR WAL parser returned an invalid state; state preserved\n"
+    val tx_id = parsed[1]
+    val head_old = parsed[2]
+    val ws_old = parsed[3]
+    val head_now = match scv_journal_read_file(root, scv_head_path(root)):
+        Ok(content): content
+        Err(error): return "ERROR cannot read operation head for recovery: {error}\n"
     val head_was = if head_old == "-": "-" else: scv_journal_decode(head_old)
     if head_now != head_was:
-        # Head was published: complete the transaction (roll forward).
-        if new_commit != "":
-            scv_write_text(scv_workspace_path(root), "default: {new_commit}\n")
-        scv_journal_append(wal, "COMMIT op={tx_id} recovered=forward")
-        "wal recovered op={tx_id} forward\n"
-    else:
-        scv_wal_restore(root, "HEAD_OP", head_old)
-        scv_wal_restore(root, "meta/workspaces.sdn", ws_old)
-        scv_journal_append(wal, "ABORT op={tx_id} recovered=rollback")
-        "wal recovered op={tx_id} rollback\n"
+        return "ERROR unresolved WAL: operation head differs from recorded pre-state and has no exact candidate binding; state preserved\n"
+    val ws_now = match scv_journal_read_file(root, scv_workspace_path(root)):
+        Ok(content): content
+        Err(error): return "ERROR cannot read workspace for recovery: {error}\n"
+    val ws_was = if ws_old == "-": "-" else: scv_journal_decode(ws_old)
+    if ws_now != ws_was:
+        return "ERROR unresolved WAL: workspace differs from recorded pre-state; state preserved\n"
+    # The journal lock does not own the publisher: scv_wal_begin releases it
+    # before scv_write_operation. Matching pre-state therefore cannot prove
+    # that the writer has retired; preserve this pending WAL without mutation.
+    "ERROR unresolved WAL: recorded pre-state remains but publication ownership is unbound; state preserved\n"
+
+fn scv_wal_recover(root: text) -> text:
+    val lock = scv_journal_lock(root)
+    if lock < 0: return "ERROR journal lock unavailable\n"
+    val recovered = scv_wal_recover_locked(root)
+    val released = file_unlock(lock)
+    if not released: return "ERROR journal unlock failed\n"
+    recovered
 
 # --- rebuild-db (MIG-11) -----------------------------------------------------
 
@@ -153,6 +289,8 @@ fn scv_rebuild_db(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR — nothing was checked (repository not initialized)\n"
     var out = scv_wal_recover(root)
+    if out.starts_with("ERROR"):
+        return out
     val commit = scv_journal_head_commit(root)
     if commit == "":
         return "ERROR — nothing was checked (no published head commit)\n"
@@ -184,67 +322,446 @@ fn scv_rebuild_db(root: text) -> text:
 
 fn scv_event_batches_dir(root: text) -> text:
     "{scv_journal_dir(root)}/event_batches"
-
 fn scv_event_batch_pending_path(root: text, batch_id: text) -> text:
     "{scv_event_batches_dir(root)}/{batch_id}.pending"
 
+struct ScvEventBatchEntry:
+    kind: text
+    path: text
+    related: text
 fn scv_event_batch_committed_path(root: text, batch_id: text) -> text:
     "{scv_event_batches_dir(root)}/{batch_id}.committed"
 
+fn scv_event_batch_sealed_path(root: text, batch_id: text) -> text:
+    "{scv_event_batches_dir(root)}/{batch_id}.sealed"
+
+fn scv_event_batch_header(seal: text) -> text:
+    val lines = seal.split("\n")
+    if lines.len() > 0: lines[0] else: ""
+
+fn scv_event_batch_payload_hash(pending: text) -> text:
+    sha256_text("simple-scv-event-batch-v1\n" + pending)
+
+fn scv_event_batch_tx_id(batch_id: text) -> text:
+    val digest = sha256_text("simple-scv-event-transaction-v1\n{batch_id}")
+    "batch-{digest}"
+
+fn scv_event_batch_rows(seal: text) -> [text]:
+    val lines = seal.split("\n")
+    var rows: [text] = []
+    if lines.len() <= 1: return rows
+    for index in 1..lines.len():
+        if lines[index] != "": rows.push(lines[index])
+    rows
+
+fn scv_event_batch_reconstruct_pending(batch_id: text, seal: text) -> Result<text, text>:
+    val header = scv_event_batch_header(seal)
+    val count = scv_wal_line_value(header, "count").to_i64()
+    val utc = scv_wal_line_value(header, "utc")
+    val payload = scv_wal_line_value(header, "payload")
+    val tx_id = scv_event_batch_tx_id(batch_id)
+    val rows = scv_event_batch_rows(seal)
+    if count == nil or count! <= 0 or rows.len() != count!:
+        return Err("invalid event batch seal count")
+    var pending = ""
+    var ordinal = 0
+    for row in rows:
+        if (scv_wal_line_value(row, "op") != batch_id or
+                scv_wal_line_value(row, "kind") != "fsevent" or
+                scv_wal_line_value(row, "sha") != "-" or
+                scv_wal_line_value(row, "utc") != utc or
+                scv_wal_line_value(row, "tx") != tx_id or
+                scv_wal_line_value(row, "event_id") != "{tx_id}.e{ordinal}" or
+                scv_wal_line_value(row, "payload") != payload):
+            return Err("event batch seal row identity mismatch")
+        val refs = scv_wal_line_value(row, "refs")
+        val fields = refs.split(",")
+        if fields.len() != 3 or not fields[0].starts_with("kind=") or
+                not fields[1].starts_with("path=") or not fields[2].starts_with("related="):
+            return Err("event batch seal row references are not canonical")
+        val kind = fields[0]["kind=".len():]
+        val path = fields[1]["path=".len():]
+        val related = fields[2]["related=".len():]
+        pending = pending + "kind={kind} path={path} related={related}\n"
+        ordinal = ordinal + 1
+    if not scv_event_batch_seal_valid(batch_id, pending, seal):
+        return Err("event batch seal does not match reconstructed payload")
+    Ok(pending)
+
+fn scv_event_batch_rows_match(events: text, expected_rows: [text]) -> bool:
+    val lines = events.split("\n")
+    for expected in expected_rows:
+        val event_id = scv_wal_line_value(expected, "event_id")
+        if event_id == "": return false
+        var matches = 0
+        for line in lines:
+            if scv_wal_line_value(line, "event_id") == event_id:
+                if line != expected: return false
+                matches = matches + 1
+        if matches != 1: return false
+    true
+
+fn scv_event_batch_commit_valid_locked(root: text, batch_id: text) -> bool:
+    val marker_path = scv_event_batch_committed_path(root, batch_id)
+    val seal_path = scv_event_batch_sealed_path(root, batch_id)
+    val pending_path = scv_event_batch_pending_path(root, batch_id)
+    val marker = match scv_journal_optional_read_locked(root, marker_path):
+        Ok(content): content
+        Err(error): return false
+    if marker == "": return false
+    if marker.starts_with("committed utc="): return false
+    val seal = match scv_journal_optional_read_locked(root, seal_path):
+        Ok(content): content
+        Err(error): return false
+    if seal == "": return false
+    val header = scv_event_batch_header(seal)
+    val count_text = scv_wal_line_value(header, "count")
+    if marker != "committed op={batch_id} seal={sha256_text(seal)} count={count_text}\n": return false
+    if (not header.starts_with("SCV-EVENT-BATCH-V1 ") or
+            scv_wal_line_value(header, "op") != batch_id or
+            count_text.to_i64() == nil):
+        return false
+    val rows = scv_event_batch_rows(seal)
+    val header_count = count_text.to_i64()
+    if header_count == nil or rows.len() != header_count!: return false
+    val pending_entry = scv_journal_optional_read_locked(root, pending_path)
+    if pending_entry.is_err(): return false
+    if file_is_regular_no_follow(pending_path):
+        val pending = match scv_journal_safe_read(pending_path):
+            Ok(content): content
+            Err(error): return false
+        if not scv_event_batch_seal_valid(batch_id, pending, seal): return false
+    else:
+        if pending_entry.unwrap() != "": return false
+        match scv_event_batch_reconstruct_pending(batch_id, seal):
+            Ok(pending): ()
+            Err(error): return false
+    val events = match scv_journal_safe_read(scv_journal_events_path(root)):
+        Ok(content): content
+        Err(error): return false
+    var transaction_rows = 0
+    for line in events.split("\n"):
+        if scv_wal_line_value(line, "tx") == scv_event_batch_tx_id(batch_id):
+            transaction_rows = transaction_rows + 1
+    if transaction_rows != rows.len(): return false
+    if not scv_event_batch_rows_match(events, rows): return false
+    scv_journal_verify_durable_file(seal_path, seal) and
+        scv_journal_verify_durable_file(scv_journal_events_path(root), events) and
+        scv_journal_verify_durable_file(marker_path, marker)
+
+fn scv_event_batch_is_committed_locked(root: text, batch_id: text) -> bool:
+    scv_event_batch_commit_valid_locked(root, batch_id)
+
 fn scv_event_batch_is_committed(root: text, batch_id: text) -> bool:
-    file_exists(scv_event_batch_committed_path(root, batch_id))
+    if not scv_event_batch_id_safe(batch_id): return false
+    val lock = scv_journal_lock(root)
+    if lock < 0: return false
+    val committed = scv_event_batch_is_committed_locked(root, batch_id)
+    val released = file_unlock(lock)
+    committed and released
+
+fn scv_event_batch_pending_valid(pending: text) -> bool:
+    if pending == "" or not pending.ends_with("\n"): return false
+    val lines = pending.split("\n")
+    var valid_rows = 0
+    var index = 0
+    for line in pending.split("\n"):
+        if index == lines.len() - 1:
+            if line != "": return false
+            index = index + 1
+            continue
+        if line == "": return false
+        if line != line.trim(): return false
+        val fields = line.split(" ")
+        if fields.len() != 3 or not fields[0].starts_with("kind=") or
+                not fields[1].starts_with("path=") or not fields[2].starts_with("related="):
+            return false
+        val kind = fields[0]["kind=".len():]
+        val encoded_path = fields[1]["path=".len():]
+        val encoded_related = fields[2]["related=".len():]
+        val path = scv_journal_decode(encoded_path)
+        val related = scv_journal_decode(encoded_related)
+        if (not scv_journal_field_safe(kind) or kind.contains(",") or path == "" or
+                scv_journal_has_control(path) or scv_journal_has_control(related) or
+                path.contains(",") or related.contains(",") or
+                scv_journal_encode(path) != encoded_path or
+                scv_journal_encode(related) != encoded_related):
+            return false
+        valid_rows = valid_rows + 1
+        index = index + 1
+    valid_rows > 0
+
+fn scv_event_batch_record_locked(root: text, batch_id: text, kind: text, path: text, related: text) -> bool:
+    if (not scv_event_batch_id_safe(batch_id) or not scv_journal_field_safe(kind) or kind.contains(",") or
+            path == "" or scv_journal_has_control(path) or scv_journal_has_control(related) or
+            path.contains(",") or related.contains(",")):
+        return false
+    val marker = scv_journal_optional_read_locked(root, scv_event_batch_committed_path(root, batch_id))
+    val seal = scv_journal_optional_read_locked(root, scv_event_batch_sealed_path(root, batch_id))
+    if marker.is_err() or seal.is_err() or marker.unwrap() != "" or seal.unwrap() != "":
+        return false
+    val pending_path = scv_event_batch_pending_path(root, batch_id)
+    val old = match scv_journal_optional_read_locked(root, pending_path):
+        Ok(content): content
+        Err(error): return false
+    if old != "" and not old.ends_with("\n"): return false
+    if old != "" and not scv_event_batch_pending_valid(old): return false
+    val line = "kind={kind} path={scv_journal_encode(path)} related={scv_journal_encode(related)}"
+    val next = "{old}{line}\n"
+    if old == "":
+        if not scv_event_batch_durable_exclusive_locked(root, pending_path, next): return false
+    else:
+        if not scv_journal_durable_replace_locked(root, pending_path, next): return false
+    scv_fault_exit("event_batch_pending")
+    true
 
 # Record one event into a pending (uncommitted) batch.
 fn scv_event_batch_record(root: text, batch_id: text, kind: text, path: text, related: text) -> bool:
-    dir_create(scv_event_batches_dir(root), true)
-    val line = "kind={kind} path={scv_journal_encode(path)} related={scv_journal_encode(related)}"
-    scv_journal_append(scv_event_batch_pending_path(root, batch_id), line)
+    val lock = scv_journal_lock(root)
+    if lock < 0: return false
+    val recorded = scv_event_batch_record_locked(root, batch_id, kind, path, related)
+    val released = file_unlock(lock)
+    recorded and released
 
-# Commit a pending batch: append its events to events.log, write the durable
-# committed marker, remove the pending file. Idempotent — a batch that already
-# carries a committed marker only has its stray pending file cleared.
-fn scv_event_batch_commit(root: text, batch_id: text) -> bool:
-    val pending = scv_event_batch_pending_path(root, batch_id)
-    if scv_event_batch_is_committed(root, batch_id):
-        if file_exists(pending):
-            file_delete(pending)
-        return true
-    if not file_exists(pending):
-        return false
-    for line in file_read(pending).split("\n"):
+fn scv_event_batch_record_all_locked(root: text, batch_id: text, entries: [ScvEventBatchEntry]) -> bool:
+    if not scv_event_batch_id_safe(batch_id) or entries.len() == 0: return false
+    var pending = ""
+    for entry in entries:
+        if (not scv_journal_field_safe(entry.kind) or entry.kind.contains(",") or
+                entry.path == "" or scv_journal_has_control(entry.path) or
+                scv_journal_has_control(entry.related) or entry.path.contains(",") or entry.related.contains(",")):
+            return false
+        pending = pending + "kind={entry.kind} path={scv_journal_encode(entry.path)} related={scv_journal_encode(entry.related)}\n"
+    val sealed_path = scv_event_batch_sealed_path(root, batch_id)
+    val marker = scv_journal_optional_read_locked(root, scv_event_batch_committed_path(root, batch_id))
+    val seal_value = scv_journal_optional_read_locked(root, sealed_path)
+    if marker.is_err() or seal_value.is_err(): return false
+    if seal_value.unwrap() != "" or marker.unwrap() != "":
+        val seal = match seal_value:
+            Ok(content): content
+            Err(error): return false
+        if not scv_event_batch_seal_valid(batch_id, pending, seal): return false
+        if not scv_journal_verify_durable_file(sealed_path, seal): return false
+        if marker.unwrap() != "":
+            return scv_event_batch_commit_valid_locked(root, batch_id)
+        true
+    else:
+        val pending_path = scv_event_batch_pending_path(root, batch_id)
+        val existing = match scv_journal_optional_read_locked(root, pending_path):
+            Ok(content): content
+            Err(error): return false
+        if existing != "" and existing != pending: return false
+        if existing == pending and existing != "":
+            return scv_journal_verify_durable_file(pending_path, pending)
+        if existing == "":
+            if not scv_event_batch_durable_exclusive_locked(root, pending_path, pending): return false
+        elif not scv_journal_durable_replace_locked(root, pending_path, pending):
+            return false
+        scv_fault_exit("event_batch_pending")
+        true
+
+fn scv_event_batch_record_all(root: text, batch_id: text, entries: [ScvEventBatchEntry]) -> bool:
+    val lock = scv_journal_lock(root)
+    if lock < 0: return false
+    val recorded = scv_event_batch_record_all_locked(root, batch_id, entries)
+    val released = file_unlock(lock)
+    recorded and released
+
+fn scv_event_batch_seal_text(batch_id: text, pending: text) -> text:
+    scv_event_batch_seal_text_at(batch_id, pending, current_time_ms())
+
+fn scv_event_batch_seal_text_at(batch_id: text, pending: text, utc: i64) -> text:
+    val payload = scv_event_batch_payload_hash(pending)
+    var rows: [text] = []
+    for line in pending.split("\n"):
         val trimmed = line.trim()
-        if trimmed != "":
-            scv_journal_record_event(root, batch_id, "fsevent", trimmed.split(" ").join(","), "-")
-    scv_write_text(scv_event_batch_committed_path(root, batch_id), "committed utc={current_time_ms()}\n")
-    file_delete(pending)
+        if trimmed == "": continue
+        val ordinal = rows.len()
+        val refs = trimmed.split(" ").join(",")
+        val tx_id = scv_event_batch_tx_id(batch_id)
+        rows.push("op={batch_id} kind=fsevent refs={refs} sha=- utc={utc} tx={tx_id} event_id={tx_id}.e{ordinal} payload={payload}")
+    "SCV-EVENT-BATCH-V1 op={batch_id} payload={payload} count={rows.len()} utc={utc}\n{rows.join("\n")}{if rows.len() > 0: "\n" else: ""}"
+
+fn scv_event_batch_seal_valid(batch_id: text, pending: text, seal: text) -> bool:
+    val header = scv_event_batch_header(seal)
+    val utc = scv_wal_line_value(header, "utc").to_i64()
+    val count = scv_wal_line_value(header, "count").to_i64()
+    if (not scv_event_batch_pending_valid(pending) or
+            not header.starts_with("SCV-EVENT-BATCH-V1 ") or
+            scv_wal_line_value(header, "op") != batch_id or
+            scv_wal_line_value(header, "payload") != scv_event_batch_payload_hash(pending) or
+            count == nil or utc == nil):
+        return false
+    scv_event_batch_rows(seal).len() == count! and
+        seal == scv_event_batch_seal_text_at(batch_id, pending, utc!)
+
+fn scv_event_batch_durable_exclusive_locked(root: text, path: text, content: text) -> bool:
+    if content.bytes().len() > 268435456: return false
+    if file_is_regular_no_follow(path):
+        return scv_journal_verify_durable_file(path, content)
+    val parent = dirname(path)
+    if not dir_is_real_no_follow(parent): return false
+    val stage_dir = match secure_temp_dir(parent, "scv-journal-stage"):
+        Ok(created): created
+        Err(error): return false
+    val staged = "{stage_dir}/payload"
+    var published = false
+    if file_create_exclusive(staged, content) and file_fsync(staged) and directory_fsync(stage_dir):
+        match scv_journal_safe_read(staged):
+            Ok(actual):
+                if actual == content:
+                    match file_publish_noreplace(staged, path):
+                        Ok(created):
+                            if created:
+                                published = true
+                        Err(error): ()
+            Err(error): ()
+    val durable = if published:
+        scv_journal_verify_durable_file(path, content)
+    elif file_is_regular_no_follow(path):
+        scv_journal_verify_durable_file(path, content)
+    else:
+        false
+    var cleaned = true
+    if file_is_regular_no_follow(staged) and not file_delete(staged): cleaned = false
+    if not dir_remove(stage_dir, false): cleaned = false
+    directory_fsync(parent) and durable and cleaned
+
+fn scv_event_batch_publish_rows_locked(root: text, seal: text) -> bool:
+    val expected_rows = scv_event_batch_rows(seal)
+    val events_path = scv_journal_events_path(root)
+    val existing = match scv_journal_read_or_create_empty_locked(root, events_path):
+        Ok(content): content
+        Err(error): return false
+    if existing != "" and not existing.ends_with("\n"): return false
+    val event_lines = existing.split("\n")
+    var next = existing
+    var changed = false
+    for line in event_lines:
+        if (scv_wal_line_value(line, "op") == scv_wal_line_value(scv_event_batch_header(seal), "op") and
+                scv_wal_line_value(line, "kind") == "fsevent" and
+                scv_wal_line_value(line, "event_id") == ""):
+            return false
+    for expected in expected_rows:
+        val event_id = scv_wal_line_value(expected, "event_id")
+        if event_id == "": return false
+        var matches = 0
+        for line in event_lines:
+            if scv_wal_line_value(line, "event_id") == event_id:
+                if line != expected: return false
+                matches = matches + 1
+        if matches > 1: return false
+        if matches == 0:
+            if next != "" and not next.ends_with("\n"): next = next + "\n"
+            next = next + expected + "\n"
+            changed = true
+    if changed and not scv_journal_durable_replace_locked(root, events_path, next): return false
+    if not scv_event_batch_rows_match(next, expected_rows): return false
+    if not scv_journal_verify_durable_file(events_path, next): return false
+    scv_fault_exit("event_batch_event")
     true
+
+fn scv_event_batch_commit_locked(root: text, batch_id: text) -> bool:
+    val pending_path = scv_event_batch_pending_path(root, batch_id)
+    val sealed_path = scv_event_batch_sealed_path(root, batch_id)
+    val marker_path = scv_event_batch_committed_path(root, batch_id)
+    val has_pending = file_is_regular_no_follow(pending_path)
+    val has_seal = file_is_regular_no_follow(sealed_path)
+    val has_marker = file_is_regular_no_follow(marker_path)
+    if has_marker:
+        if not scv_event_batch_commit_valid_locked(root, batch_id): return false
+        if has_pending:
+            if not file_delete(pending_path) or not directory_fsync(scv_event_batches_dir(root)): return false
+        return true
+    if not has_pending: return false
+    var pending = ""
+    if has_pending:
+        pending = match scv_journal_safe_read(pending_path):
+            Ok(content): content
+            Err(error): return false
+        if pending == "" or not scv_event_batch_pending_valid(pending): return false
+    var seal = ""
+    if has_seal:
+        seal = match scv_journal_safe_read(sealed_path):
+            Ok(content): content
+            Err(error): return false
+        if not scv_event_batch_seal_valid(batch_id, pending, seal): return false
+    else:
+        if not has_pending: return false
+        seal = scv_event_batch_seal_text(batch_id, pending)
+        if not scv_event_batch_durable_exclusive_locked(root, sealed_path, seal): return false
+    scv_fault_exit("event_batch_sealed")
+    if not scv_event_batch_publish_rows_locked(root, seal): return false
+    val header = scv_event_batch_header(seal)
+    val count_text = scv_wal_line_value(header, "count")
+    val marker = "committed op={batch_id} seal={sha256_text(seal)} count={count_text}\n"
+    if not scv_event_batch_durable_exclusive_locked(root, marker_path, marker): return false
+    scv_fault_exit("event_batch_marker")
+    if not scv_event_batch_commit_valid_locked(root, batch_id): return false
+    if file_exists(pending_path):
+        if not file_delete(pending_path) or not directory_fsync(scv_event_batches_dir(root)): return false
+    true
+
+# Commit a sealed, identity-bound batch. Event rows publish as one atomic log
+# replacement. The terminal marker is verified before pending input is removed.
+fn scv_event_batch_commit(root: text, batch_id: text) -> bool:
+    if not scv_event_batch_id_safe(batch_id): return false
+    val lock = scv_journal_lock(root)
+    if lock < 0: return false
+    val committed = scv_event_batch_commit_locked(root, batch_id)
+    val released = file_unlock(lock)
+    committed and released
 
 # Replay: commit every pending batch found on disk. Returns how many batches
 # were newly committed; a second replay over the same state returns 0 and
 # leaves events.log byte-identical (idempotent).
-fn scv_event_batch_replay(root: text) -> i64:
+fn scv_event_batch_replay_checked(root: text) -> Result<i64, text>:
+    val lock = scv_journal_lock(root)
+    if lock < 0: return Err("journal lock unavailable")
     val dirp = scv_event_batches_dir(root)
+    val names = dir_list_optional(dirp)
+    if names == nil:
+        file_unlock(lock)
+        return Err("cannot list pending event batches")
     var committed = 0
-    for name in dir_list(dirp):
+    for name in names!:
         val trimmed = name.trim()
         if trimmed.ends_with(".pending"):
             val batch_id = trimmed[:trimmed.len() - ".pending".len()]
-            if not scv_event_batch_is_committed(root, batch_id):
-                if scv_event_batch_commit(root, batch_id):
-                    committed = committed + 1
-            else:
-                scv_event_batch_commit(root, batch_id)
-    committed
+            if not scv_event_batch_id_safe(batch_id):
+                file_unlock(lock)
+                return Err("pending event batch has an invalid identity")
+            val already_committed = scv_event_batch_is_committed_locked(root, batch_id)
+            if not scv_event_batch_commit_locked(root, batch_id):
+                file_unlock(lock)
+                return Err("cannot recover pending event batch {batch_id}")
+            if not already_committed:
+                committed = committed + 1
+    val released = file_unlock(lock)
+    if not released: return Err("journal unlock failed")
+    Ok(committed)
+
+fn scv_event_batch_replay(root: text) -> i64:
+    match scv_event_batch_replay_checked(root):
+        Ok(count): count
+        Err(error): -1
 
 # Committed fs-event view of the journal (CLI `scv events`).
 fn scv_event_log(root: text) -> text:
+    val lock = scv_journal_lock(root)
+    if lock < 0: return "ERROR journal lock unavailable\n"
     val events = scv_journal_events_path(root)
-    if not file_exists(events):
-        return "no events\n"
+    val contents = match scv_journal_optional_read_locked(root, events):
+        Ok(content): content
+        Err(error):
+            file_unlock(lock)
+            return "ERROR cannot read event journal\n"
     var out = ""
-    for line in file_read(events).split("\n"):
+    for line in contents.split("\n"):
         if line.contains(" kind=fsevent "):
             out = out + line + "\n"
+    val released = file_unlock(lock)
+    if not released: return "ERROR journal unlock failed\n"
     if out == "":
         return "no events\n"
     out

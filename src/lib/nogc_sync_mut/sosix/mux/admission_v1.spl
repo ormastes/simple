@@ -1,0 +1,37 @@
+# Pure admission disposition for an already correlated, structurally decoded
+# reply. Not a peer-authentication function and never a new authority issuer.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.validation_v1.*
+use std.common.contracts.mux.request_validation_v1.*
+use std.common.contracts.mux.wire_envelope_v1.{mux_wire_validate_limit_v1}
+use std.common.contracts.mux.wire_validation_v1.{mux_wire_validate_snapshot_v1}
+use std.nogc_sync_mut.sosix.mux.config_v1.*
+
+pub struct MuxSosixAdmissionV1:
+    connection: MuxConnectionV1
+    normal_admitted: bool
+    lease_expires_ms: i64
+    recovery_expires_ms: i64
+    recovery_reply_limit: i64
+    rejection: MuxErrorV1?
+
+pub fn mux_sosix_connect_disposition_v1(options: MuxConnectV1, deadline: MuxDeadlineV1,
+        connection: MuxConnectionV1, config_limit: i64, started_ms: i64,
+        completed_ms: i64) -> Result<MuxSosixAdmissionV1, MuxErrorV1>:
+    # Only the validated original request/config supplies recovery transport bounds.
+    if options.backend != MuxBackendV1.Smux or options.endpoint_policy != MuxEndpointPolicyV1.ExistingOnly or mux_make_connect_v1(options.backend, options.namespace, options.endpoint_policy, options.client_identity, options.limits).is_err() or mux_validate_deadline_v1(deadline).is_err() or mux_wire_validate_limit_v1(config_limit).is_err() or mux_wire_validate_limit_v1(options.limits.max_reply_bytes).is_err() or options.limits.max_reply_bytes > config_limit:
+        return Err(mux_sosix_error_v1(MuxErrorKindV1.InvalidRequest, "invalid original connect request", 0, MuxCommitStateV1.NotApplied, false))
+    if connection.snapshot.backend != options.backend or connection.snapshot.namespace != options.namespace or mux_wire_validate_snapshot_v1(connection.snapshot).is_err() or mux_validate_lease_terms_v1(connection.lease_terms).is_err():
+        return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "untrusted connection recovery identity", 0, MuxCommitStateV1.Unknown, true))
+    val expires = mux_sosix_lease_deadline_v1(started_ms, connection.lease_terms.lifetime_ms)?
+    val recovery_expires = mux_sosix_lease_deadline_v1(expires, connection.lease_terms.retained_receipt_ms)?
+    var rejection: MuxErrorV1? = nil
+    if completed_ms < started_ms or completed_ms - started_ms >= deadline.timeout_ms or completed_ms >= expires:
+        rejection = Some(mux_sosix_error_v1(MuxErrorKindV1.Timeout, "issued lease reply exceeded admission deadline", 0, MuxCommitStateV1.Unknown, true))
+    elif connection.snapshot.limits.discovery.max_reply_bytes < 4096 or connection.snapshot.limits.discovery.max_reply_bytes > options.limits.max_reply_bytes or connection.snapshot.limits.discovery.max_sessions > options.limits.max_sessions or mux_require_core_capabilities_v1(connection.snapshot.handle, MuxBackendV1.Smux, connection.snapshot.capabilities).is_err():
+        rejection = Some(mux_sosix_error_v1(MuxErrorKindV1.PartialFailure, "issued lease failed full capability or limit admission", 0, MuxCommitStateV1.Unknown, true))
+    Ok(MuxSosixAdmissionV1(connection: connection, normal_admitted: rejection == nil,
+        lease_expires_ms: expires, recovery_expires_ms: recovery_expires,
+        recovery_reply_limit: options.limits.max_reply_bytes, rejection: rejection))

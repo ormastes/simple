@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect}
-use compiler.linker._LinkerWrapper.native_all_support.{native_all_gnu_support_args, native_all_msvc_support_libraries}
+use compiler.linker._LinkerWrapper.native_all_support.{native_all_gnu_support_args, native_all_msvc_support_libraries, native_mingw_clang_link_args}
 
 describe "Windows aggregate runtime SDK dependencies":
     it "links the Windows APIs imported by the aggregate runtime sysinfo objects":
@@ -16,3 +16,22 @@ describe "Windows aggregate runtime SDK dependencies":
     it "does not add aggregate SDK dependencies to a core-only link":
         expect(native_all_msvc_support_libraries(["runtime.obj"])).to_equal([])
         expect(native_all_gnu_support_args(["runtime.o"], "windows-mingw", "")).to_equal([])
+
+    it "selects LLVM runtimes for the clang-only Windows link without GCC libraries":
+        val arguments = native_mingw_clang_link_args(["C:/runtime/libsimple_native_all.a"])
+        expect(arguments[0]).to_equal("--rtlib=compiler-rt")
+        expect(arguments[1]).to_equal("--unwindlib=libunwind")
+        expect(arguments.contains("-lgcc")).to_equal(false)
+        expect(arguments.contains("-lgcc_eh")).to_equal(false)
+        for argument in ["-u", "rt_vulkan_provider_is_available", "-lpdh", "-lws2_32", "-lmsvcrt", "-lmingwex", "-lmingw32"]:
+            expect(arguments).to_contain(argument)
+
+    it "selects LLVM runtimes for core-only clang links without aggregate libraries":
+        expect(native_mingw_clang_link_args(["runtime.o"])).to_equal([
+            "--rtlib=compiler-rt", "--unwindlib=libunwind"])
+
+    it "preserves GCC runtime dependencies for generic GNU consumers":
+        val arguments = native_all_gnu_support_args(["libsimple_native_all.a"], "windows-mingw", "")
+        expect(arguments).to_contain("-lgcc")
+        expect(arguments).to_contain("-lgcc_eh")
+        expect(arguments.contains("--rtlib=compiler-rt")).to_equal(false)
