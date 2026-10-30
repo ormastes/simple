@@ -1,0 +1,34 @@
+# This receipt detects incomplete normal execution, not hostile code sharing
+# the child process. The parent owns the fresh invocation path and artifact.
+use std.nogc_sync_mut.sffi.cli_args.{cli_get_args}
+use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute, host_path_is_absolute_for}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.common.text.{escape_json}
+
+pub fn native_execution_evidence_path_v1() -> text:
+    native_execution_evidence_path_from_args_v1(cli_get_args())
+
+pub fn native_execution_evidence_path_from_args_v1(args: [text], platform: text = "") -> text:
+    val prefix = "--simple-native-evidence="
+    var found = ""
+    var seen = false
+    for arg in args:
+        if arg.starts_with(prefix):
+            if seen: return ""
+            seen = true
+            found = arg.substring(prefix.len())
+    val absolute = if platform == "": host_path_is_absolute(found) else: host_path_is_absolute_for(found, platform)
+    if not absolute or found.contains("\n") or found.contains("\r"): return ""
+    found
+
+pub fn native_execution_completion_v1(path: text, kind: text, status: i64) -> text:
+    # Fixed SDN schema; shared string escaping preserves Windows paths/quotes.
+    "{schema: \"simple-native-completion-v1\", kind: \"" + kind +
+        "\", invocation_path: \"" + escape_json(path) + "\", exit_status: " + status.to_text() + "}\n"
+
+pub fn native_execution_finish_v1(path: text, kind: text, status: i64) -> bool:
+    if path == "" or (kind != "spec" and kind != "plain"): return false
+    file_create_exclusive(path + ".complete", native_execution_completion_v1(path, kind, status))
+
+export native_execution_evidence_path_v1, native_execution_evidence_path_from_args_v1
+export native_execution_completion_v1, native_execution_finish_v1
