@@ -1,0 +1,152 @@
+"""Bounded async resource pool with affine leases.
+
+## Purpose and audience
+
+Pins the AsyncResourcePool contract: a fixed set of i64 resources is handed
+out under an AsyncSemaphore, each lease is released exactly once, and a stale
+or foreign lease is refused with an exact reason instead of touching a slot
+that now belongs to someone else. Audience: async library maintainers who
+build bounded compile workers and cache leases on top of this pool.
+
+## Operator workflow
+
+bin/simple test test/01_unit/lib/nogc_async_mut/async_resource_pool_spec.spl
+
+## Compatibility and limitations
+
+Single-carrier cooperative model, the same as AsyncSemaphore. acquire() is
+poll-once: a Pending future is a snapshot that is never woken, so a waiter
+calls acquire() again after a release. Runs on every host's interpreter; no
+native concurrency is exercised here.
+
+## Verification guidance and troubleshooting
+
+A failure in a stale or foreign lease scenario means the generation or pool
+identity check regressed. A failure in the outstanding-lease close scenario
+means resources could be reclaimed while a lease is still live.
+"""
+# Lifecycle: doc/05_design/language/concurrency/nogc_async_immut_library_design.md
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.async.resource_pool.{AsyncResourcePool, AsyncResourceLease}
+
+describe "AsyncResourcePool":
+    it "hands out each resource once":
+        # @req REQ-ARP-001
+        step("Create a pool over two resources")
+        var pool = AsyncResourcePool.with_resources([10, 20]).unwrap()
+        step("Acquire the first resource")
+        val first = pool.try_acquire()
+        step("Acquire the second resource")
+        val second = pool.try_acquire()
+        step("Refuse a third acquire while both resources are leased")
+        val third = pool.try_acquire()
+        assert_true(third == nil)
+        step("Both leases resolve to different resources from the set")
+        val first_value = pool.resource(first.unwrap()).unwrap()
+        val second_value = pool.resource(second.unwrap()).unwrap()
+        assert_true(first_value != second_value)
+        expect(first_value + second_value).to_equal(30)
+        step("Report that no capacity is left")
+        expect(pool.available()).to_equal(0)
+
+    it "AsyncResourcePool requires at least one resource":
+        # @req REQ-ARP-002
+        step("Ask for a pool over an empty resource set")
+        val empty = AsyncResourcePool.with_resources([])
+        step("Refuse with the exact reason")
+        match empty:
+            case Ok(_): fail("an empty resource set must not produce a pool")
+            case Err(reason): expect(reason).to_equal("AsyncResourcePool requires at least one resource")
+        step("Positive control: a single resource is accepted")
+        val single = AsyncResourcePool.with_resources([7])
+        match single:
+            case Ok(p): expect(p.capacity()).to_equal(1)
+            case Err(reason): fail("one resource must be accepted, got: {reason}")
+
+    it "release returns the slot and refuses a double release":
+        # @req REQ-ARP-003
+        var pool = AsyncResourcePool.with_resources([3]).unwrap()
+        val lease = pool.try_acquire().unwrap()
+        step("Release the lease once and get the slot back")
+        val released = pool.release(lease)
+        assert_true(released)
+        expect(pool.available()).to_equal(1)
+        step("Refuse a second release of the same lease")
+        val again = pool.release(lease)
+        assert_false(again)
+        step("Positive control: the slot can be leased again")
+        val next = pool.try_acquire().unwrap()
+        expect(pool.resource(next).unwrap()).to_equal(3)
+
+    it "stale resource lease":
+        # @req REQ-ARP-004
+        var pool = AsyncResourcePool.with_resources([3]).unwrap()
+        val lease = pool.try_acquire().unwrap()
+        val released = pool.release(lease)
+        assert_true(released)
+        step("Report the stale reason for the released lease")
+        expect(pool.lease_error(lease)).to_equal("stale resource lease")
+        step("Refuse to read a resource through the stale lease")
+        assert_true(pool.resource(lease) == nil)
+        step("Refuse to release the stale lease once its slot is leased again")
+        val fresh = pool.try_acquire().unwrap()
+        assert_false(pool.release(lease))
+        expect(pool.available()).to_equal(0)
+        step("Positive control: the fresh lease is valid and reads its resource")
+        expect(pool.lease_error(fresh)).to_equal("")
+        expect(pool.resource(fresh).unwrap()).to_equal(3)
+
+    it "foreign resource lease":
+        # @req REQ-ARP-005
+        var pool_a = AsyncResourcePool.with_resources([1]).unwrap()
+        var pool_b = AsyncResourcePool.with_resources([2]).unwrap()
+        val lease_a = pool_a.try_acquire().unwrap()
+        step("Report the foreign reason when another pool is asked to release it")
+        expect(pool_b.lease_error(lease_a)).to_equal("foreign resource lease")
+        step("Refuse the release and leave the other pool's slot untouched")
+        assert_false(pool_b.release(lease_a))
+        expect(pool_b.available()).to_equal(1)
+        step("Positive control: the owning pool releases its own lease")
+        expect(pool_a.lease_error(lease_a)).to_equal("")
+        assert_true(pool_a.release(lease_a))
+        expect(pool_a.available()).to_equal(1)
+
+    it "acquire future completes when a resource is released":
+        # @req REQ-ARP-006
+        var pool = AsyncResourcePool.with_resources([5]).unwrap()
+        val held = pool.try_acquire().unwrap()
+        step("Acquire on the exhausted pool returns a future that is not ready")
+        val waiting = pool.acquire()
+        assert_false(waiting.is_ready())
+        expect(pool.available()).to_equal(0)
+        step("Release the held lease")
+        assert_true(pool.release(held))
+        step("Acquire again: the future is ready and carries the resource")
+        val ready = pool.acquire()
+        assert_true(ready.is_ready())
+        val lease = ready.poll().unwrap()
+        expect(pool.resource(lease).unwrap()).to_equal(5)
+
+    it "close refuses while leases are outstanding and succeeds when idle":
+        # @req REQ-ARP-007
+        var pool = AsyncResourcePool.with_resources([9]).unwrap()
+        val lease = pool.try_acquire().unwrap()
+        step("Refuse to close while a lease is outstanding")
+        assert_false(pool.close())
+        step("Release the lease")
+        assert_true(pool.release(lease))
+        step("Close the idle pool")
+        assert_true(pool.close())
+
+    it "acquire after close returns nil":
+        # @req REQ-ARP-008
+        var pool = AsyncResourcePool.with_resources([4]).unwrap()
+        assert_true(pool.close())
+        step("Refuse try_acquire after close with nil")
+        assert_true(pool.try_acquire() == nil)
+        step("Refuse acquire after close: the future never becomes ready")
+        val refused = pool.acquire()
+        assert_false(refused.is_ready())
