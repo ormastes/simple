@@ -62,6 +62,9 @@ extern fn rt_linux_group_collect_v1(token: i64) -> [i64]
 extern fn rt_linux_group_available_capacity_v1(path: text) -> [i64]
 @unsafe(reason: "explicit fresh empty cgroup parent acquisition", capabilities: [ffi])
 extern fn rt_linux_group_parent_acquire_v1(attempt: text, identity: text) -> [i64]
+@unsafe(reason: "explicit current-delegation cgroup parent acquisition", capabilities: [ffi])
+extern fn rt_linux_group_parent_acquire_at_v2(delegated_path: text, attempt: text,
+    identity: text) -> [i64]
 @unsafe(reason: "removes only the pinned owned empty cgroup parent", capabilities: [ffi])
 extern fn rt_linux_group_parent_release_v1(token: i64) -> i64
 
@@ -85,6 +88,40 @@ fn linux_cgroup_parent_admit_v1(attempt: text, identity: text) -> LinuxCgroupPar
     if fields[1] <= 0 or fields[2] < 0 or fields[3] <= 0:
         return LinuxCgroupParentAdmissionV1.Unknown("Linux parent acquisition receipt invalid; cleanup unproven")
     val parent = LinuxCgroupParentV1(fields[1], "/sys/fs/cgroup/simple-parent-" + identity, fields[2], fields[3])
+    if fields[0] != 0: return LinuxCgroupParentAdmissionV1.CleanupPending(parent, reason)
+    LinuxCgroupParentAdmissionV1.Acquired(parent)
+
+fn linux_cgroup_parent_acquire_at_v2(delegated_path: text, attempt: text,
+        identity: text) -> Result<LinuxCgroupParentV1, text>:
+    match linux_cgroup_parent_admit_at_v2(delegated_path, attempt, identity):
+        LinuxCgroupParentAdmissionV1.Acquired(parent): Ok(parent)
+        LinuxCgroupParentAdmissionV1.Rejected(reason): Err(reason)
+        LinuxCgroupParentAdmissionV1.CleanupPending(parent, reason):
+            val _released = linux_cgroup_parent_release_v1(parent)?
+            Err(reason)
+        LinuxCgroupParentAdmissionV1.Unknown(reason): Err(reason)
+
+fn linux_cgroup_parent_admit_at_v2(delegated_path: text, attempt: text,
+        identity: text) -> LinuxCgroupParentAdmissionV1:
+    if not linux_process_absolute_v1(delegated_path) or
+            not linux_process_absolute_v1(attempt) or not builder_digest_valid_v1(identity):
+        return LinuxCgroupParentAdmissionV1.Rejected("invalid Linux delegated parent acquisition request")
+    val fields = unsafe(capabilities: [ffi]):
+        rt_linux_group_parent_acquire_at_v2(delegated_path, attempt, identity)
+    linux_cgroup_parent_decode_at_v2(fields, delegated_path, identity)
+
+fn linux_cgroup_parent_decode_at_v2(fields: [i64], delegated_path: text,
+        identity: text) -> LinuxCgroupParentAdmissionV1:
+    if fields.len() != 4: return LinuxCgroupParentAdmissionV1.Unknown("Linux delegated parent receipt layout differs")
+    if fields[1] < 0:
+        return LinuxCgroupParentAdmissionV1.Unknown("Linux delegated parent ownership could not be proven")
+    val reason = "Linux delegated parent acquisition rejected: " + str(fields[0])
+    if fields[0] != 0 and fields[1] == 0:
+        return LinuxCgroupParentAdmissionV1.Rejected(reason)
+    if fields[1] <= 0 or fields[2] < 0 or fields[3] <= 0:
+        return LinuxCgroupParentAdmissionV1.Unknown("Linux delegated parent ownership could not be proven")
+    val parent = LinuxCgroupParentV1(fields[1], delegated_path + "/simple-parent-" + identity,
+        fields[2], fields[3])
     if fields[0] != 0: return LinuxCgroupParentAdmissionV1.CleanupPending(parent, reason)
     LinuxCgroupParentAdmissionV1.Acquired(parent)
 
@@ -206,3 +243,5 @@ export linux_available_capacity_v1, linux_process_request_valid_v1
 export linux_process_launch_broker_v1
 export LinuxCgroupParentV1, linux_cgroup_parent_acquire_v1, linux_cgroup_parent_release_v1
 export LinuxCgroupParentAdmissionV1, linux_cgroup_parent_admit_v1
+export linux_cgroup_parent_acquire_at_v2, linux_cgroup_parent_admit_at_v2
+export linux_cgroup_parent_decode_at_v2
