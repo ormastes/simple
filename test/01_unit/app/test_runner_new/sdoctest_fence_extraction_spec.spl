@@ -1,0 +1,146 @@
+use std.spec.*
+use std.test_runner.sdoctest.types.{SdoctestBlock}
+use std.test_runner.sdoctest.extractor.{extract_blocks_from_content, parse_fence_line}
+
+fn md(parts: [text]) -> text:
+    parts.join("\n")
+
+fn extract(parts: [text]) -> [SdoctestBlock]:
+    extract_blocks_from_content(md(parts), "doc.md")
+
+describe "sdoctest fence extraction: which fences are code blocks":
+    it "extracts a simple fence":
+        val bs = extract(["```simple", "val x = 1", "```"])
+        expect(bs.len()).to_equal(1)
+        expect(bs[0].code).to_equal("val x = 1")
+        expect(bs[0].language).to_equal("simple")
+
+    it "extracts a spl fence":
+        val bs = extract(["```spl", "val x = 1", "```"])
+        expect(bs.len()).to_equal(1)
+        expect(bs[0].language).to_equal("spl")
+
+    it "extracts a prompt-free sdoctest fence as executable source":
+        val bs = extract(["```sdoctest", "val x = 1", "```"])
+        expect(bs.len()).to_equal(1)
+        expect(bs[0].language).to_equal("sdoctest")
+        expect(bs[0].code).to_equal("val x = 1")
+
+    it "ignores a python fence":
+        val bs = extract(["```python", "print(1)", "```"])
+        expect(bs.len()).to_equal(0)
+
+    it "ignores a bash fence":
+        expect(extract(["```bash", "ls", "```"]).len()).to_equal(0)
+
+    it "ignores an untagged fence":
+        expect(extract(["```", "val x = 1", "```"]).len()).to_equal(0)
+
+    it "ignores a text fence":
+        expect(extract(["```text", "val x = 1", "```"]).len()).to_equal(0)
+
+    it "ignores prose with no fence":
+        expect(extract(["# Title", "", "just words"]).len()).to_equal(0)
+
+    it "returns nothing for empty content":
+        expect(extract([""]).len()).to_equal(0)
+
+    it "drops an empty simple fence":
+        expect(extract(["```simple", "```"]).len()).to_equal(0)
+
+describe "sdoctest fence extraction: several blocks":
+    it "extracts two consecutive blocks in order":
+        val bs = extract(["```simple", "val a = 1", "```", "```simple", "val b = 2", "```"])
+        expect(bs.len()).to_equal(2)
+        expect(bs[0].code).to_equal("val a = 1")
+        expect(bs[1].code).to_equal("val b = 2")
+
+    it "extracts blocks separated by prose":
+        val bs = extract(["intro", "```simple", "val a = 1", "```", "middle", "```simple", "val b = 2", "```", "outro"])
+        expect(bs.len()).to_equal(2)
+
+    it "keeps only the simple blocks of a mixed-language file":
+        val bs = extract(["```python", "x", "```", "```simple", "val a = 1", "```", "```bash", "y", "```", "```spl", "val b = 2", "```"])
+        expect(bs.len()).to_equal(2)
+        expect(bs[0].language).to_equal("simple")
+        expect(bs[1].language).to_equal("spl")
+
+    it "joins a multi-line body with newlines":
+        val bs = extract(["```simple", "val a = 1", "val b = 2", "print a + b", "```"])
+        expect(bs[0].code).to_equal("val a = 1\nval b = 2\nprint a + b")
+
+    it "keeps blank lines inside a body":
+        val bs = extract(["```simple", "val a = 1", "", "val b = 2", "```"])
+        expect(bs[0].code).to_equal("val a = 1\n\nval b = 2")
+
+    it "records the source file on each block":
+        val bs = extract_blocks_from_content("```simple\nval a = 1\n```", "some/where.md")
+        expect(bs[0].source_file).to_equal("some/where.md")
+
+describe "sdoctest fence extraction: indented and nested fences":
+    it "recognises an indented opening and closing fence":
+        val bs = extract(["- item", "  ```simple", "  val a = 1", "  ```"])
+        expect(bs.len()).to_equal(1)
+
+    it "keeps the body indentation of an indented fence verbatim":
+        val bs = extract(["  ```simple", "  val a = 1", "  ```"])
+        expect(bs[0].code).to_equal("  val a = 1")
+
+    it "recognises a tab-indented fence":
+        val bs = extract(["\t```simple", "\tval a = 1", "\t```"])
+        expect(bs.len()).to_equal(1)
+
+    it "does not start a block from a simple fence quoted inside a python fence":
+        val bs = extract(["```python", "```simple", "val a = 1", "```", "```"])
+        expect(bs.len()).to_equal(0)
+
+    it "closes a simple block at the first bare fence":
+        val bs = extract(["```simple", "val a = 1", "```", "val not_code = 2", "```"])
+        expect(bs.len()).to_equal(1)
+        expect(bs[0].code).to_equal("val a = 1")
+
+    it "does not close a simple block on a longer-info fence line":
+        val bs = extract(["```simple", "val a = 1", "```text", "val b = 2", "```"])
+        expect(bs.len()).to_equal(1)
+        expect(bs[0].code).to_equal("val a = 1\n```text\nval b = 2")
+
+    it "ignores a simple fence nested in a four-backtick outer fence":
+        val bs = extract(["````markdown", "```simple", "val a = 1", "```", "````"])
+        expect(bs.len()).to_equal(0)
+
+describe "sdoctest fence extraction: unterminated fences":
+    it "drops a simple fence that never closes":
+        val bs = extract(["```simple", "val a = 1"])
+        expect(bs.len()).to_equal(0)
+
+    it "still returns the blocks closed before an unterminated one":
+        val bs = extract(["```simple", "val a = 1", "```", "```simple", "val b = 2"])
+        expect(bs.len()).to_equal(1)
+        expect(bs[0].code).to_equal("val a = 1")
+
+    it "drops an unterminated fence followed by a trailing newline":
+        val bs = extract(["```simple", "val a = 1", ""])
+        expect(bs.len()).to_equal(0)
+
+describe "sdoctest fence line parsing":
+    it "parses a bare language":
+        val info = parse_fence_line("```simple")
+        expect(info.0).to_equal("simple")
+        expect(info.1.len()).to_equal(0)
+
+    it "parses a language with one modifier":
+        val info = parse_fence_line("```simple:skip")
+        expect(info.0).to_equal("simple")
+        expect(info.1.len()).to_equal(1)
+
+    it "parses several comma-separated modifiers":
+        val info = parse_fence_line("```simple:should_fail,tag=integration")
+        expect(info.1.len()).to_equal(2)
+
+    it "ignores unknown modifiers":
+        val info = parse_fence_line("```simple:nonsense")
+        expect(info.1.len()).to_equal(0)
+
+    it "trims trailing spaces from a bare language":
+        val info = parse_fence_line("```simple  ")
+        expect(info.0).to_equal("simple")
