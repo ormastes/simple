@@ -48,6 +48,10 @@ use std.io_runtime.{hash_text}
 use std.io_runtime.{dir_list}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{mkdir_p}
+use app.io.process_ops.{process_run_bounded}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.test_executor_parsing.{parse_test_output}
+use app.test_daemon.native_profile.{NATIVE_SESSION_PROFILE_V1, native_session_binding_error, native_session_worker_args, native_session_transport_output, native_session_completed}
 # ============================================================================
 # Test Daemon
 # ============================================================================
@@ -152,6 +156,11 @@ impl TestDaemon:
             resp.fields["retry_after_ms"] = "{self.config.resource_policy.idle_poll_ms}"
             return resp
 
+        # A profile request never reads or writes the legacy path-only cache
+        # and never joins a legacy in-flight request with a different producer.
+        if req.fields.contains_key("native_profile"):
+            return self.execute_native_test(req)
+
         # Dedup check
         val dedup_key = hash_text(test_path)
         val existing = self.active_requests["{dedup_key}"]
@@ -237,6 +246,8 @@ impl TestDaemon:
     # --- Clean run (bypass cache) ---
 
     fn handle_clean_run(req: DaemonRequest) -> DaemonResponse:
+        if req.fields.contains_key("native_profile"):
+            return self.handle_run_single(req)
         val test_path = req.fields["test_path"] ?? ""
         if test_path == "":
             var resp = daemon_response_new(req.id, TRESP_ERROR)
@@ -252,6 +263,7 @@ impl TestDaemon:
     fn handle_status(req: DaemonRequest) -> DaemonResponse:
         val state = self.runner.get_state()
         var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["native_profile"] = NATIVE_SESSION_PROFILE_V1
         resp.fields["daemon_status"] = state.status_text()
         resp.fields["items_processed"] = "{state.items_processed}"
         resp.fields["errors_count"] = "{state.errors_count}"
@@ -428,6 +440,37 @@ impl TestDaemon:
         daemon_response_new(req.id, if ok: TRESP_COMPLETED else: TRESP_FAILED)
 
     # --- Execute a test ---
+
+    fn execute_native_test(req: DaemonRequest) -> DaemonResponse:
+        val test_path = req.fields["test_path"] ?? ""
+        var resp = daemon_response_new(req.id, TRESP_FAILED)
+        resp.fields["test_path"] = test_path
+        resp.fields["passed"] = "0"
+        resp.fields["failed"] = "1"
+        resp.fields["cached"] = "false"
+        val binding_error = native_session_binding_error(req)
+        if binding_error != "":
+            resp.fields["output"] = binding_error
+            return resp
+        val timeout_ms = ((req.fields["timeout_seconds"] ?? "").to_i64() ?? 0) * 1000
+        val start = time_now_unix_micros()
+        val (out, err, code) = process_run_bounded(req.fields["worker"] ?? "",
+            native_session_worker_args(req), timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+        val output = out + err
+        val (passed, failed, skipped, pending) = parse_test_output(output)
+        val verified = native_session_completed(code, passed, failed, pending)
+        resp.status = if verified: TRESP_COMPLETED else: TRESP_FAILED
+        resp.fields["passed"] = if verified: "{passed}" else: "0"
+        resp.fields["failed"] = if verified: "0" else: if failed > 0: "{failed}" else: "1"
+        resp.fields["skipped"] = "{skipped}"
+        resp.fields["duration_ms"] = "{(time_now_unix_micros() - start) / 1000}"
+        resp.fields["output"] = native_session_transport_output(output)
+        resp.fields["native_profile"] = NATIVE_SESSION_PROFILE_V1
+        resp.fields["worker_sha256"] = req.fields["worker_sha256"] ?? ""
+        resp.fields["producer_sha256"] = req.fields["producer_sha256"] ?? ""
+        resp.fields["runtime_sha256"] = req.fields["runtime_sha256"] ?? ""
+        resp.fields["environment_sha256"] = req.fields["environment_sha256"] ?? ""
+        resp
 
     fn execute_test(test_path: text, req_fields: {text: text}) -> DaemonResponse:
         # Shell out to the local child runner; the daemon owns scheduling.
