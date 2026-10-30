@@ -30,6 +30,10 @@ pub fn handle_int_methods(
         "is_odd" => Value::Bool(n % 2 != 0),
         "to_float" | "to_f64" => Value::Float(n as f64),
         "to_f32" => Value::Float32(n as f32),
+        // `to_u64` keeps the unsigned view so comparisons, division, shifts
+        // and display treat bit 63 as magnitude, not sign (mirrors the MIR
+        // lowering, which types the result as U64).
+        "to_u64" => Value::UInt { value: n as u64, width: 64 },
         "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
             // Strip "to_" prefix -> numeric type name. Reuse the same cast
             // rules as `expr as <T>` so behavior is consistent.
