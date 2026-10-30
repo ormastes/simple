@@ -50,3 +50,19 @@ The three-attempt limit is exhausted; no further retry was started. A producer
 fix or newly authorized finite investigation is needed before that probe.
 
 Evidence: `doc/09_report/verification/devhub_key_resolution_diagnostics_20261030.md`.
+
+## Resumed evidence (2026-10-31)
+
+Still OPEN on Phase 2. `fresh_secured_db`, built by the pinned producer
+(`13d73267...`) with `src/runtime/runtime_process_tree.c` linked as an extra
+object, still fails: `DIAGNOSTIC direct key session: SQLCIPHER4_MISSING_SECRET`.
+The error detail printed as a raw integer (`2205408678273`), so the failing branch
+is still unknown; `{detail}` on a pattern-bound enum payload is a separate defect
+to isolate. A diagnostic must not depend on interpolating that payload.
+
+Phase 1 had a different cause, now fixed: `env_get` shadowing made
+`secret_ref_resolve` see a wrapped or nil value. See
+`env_get_cocompiled_signature_collision_2026_10_31.md`. Moving `secret_ref` to
+`env_get_opt` did not clear Phase 2, so do not treat that collision as its cause.
+On Phase 1 the fixture passed direct codec and storage rows and reached
+Messenger verbs; it has no final verdict yet.
