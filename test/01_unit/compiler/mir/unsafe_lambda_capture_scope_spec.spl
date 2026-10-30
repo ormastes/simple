@@ -1,0 +1,83 @@
+# @req REQ-SSPEC-COMPILER
+# Bug: native_lambda_unsafe_capture_scan_2026-10-31
+# Execution/docgen: TEST_BLOCKED pending direct walker execution; end-to-end lowering requires a rebuilt producer.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+fn unsafe_scope_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+fn unsafe_scope_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: unsafe_scope_type(), span: Span.empty())
+
+fn unsafe_scope_var(symbol: i64) -> HirExpr:
+    unsafe_scope_expr(HirExprKind.Var(SymbolId(id: symbol)))
+
+fn unsafe_scope_block_expr(stmts: [HirStmt], has_value: bool, value: HirExpr) -> HirExpr:
+    val block = HirBlock(stmts: stmts, has: has_value, value: value, span: Span.empty(), unsafe_caps: ["ffi"])
+    unsafe_scope_expr(HirExprKind.UnsafeBlock(block))
+
+fn unsafe_scope_expr_block(value: HirExpr) -> HirBlock:
+    HirBlock(stmts: [], has: true, value: value, span: Span.empty())
+
+describe "unsafe lambda capture scope":
+    it "does not capture an unsafe literal body":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val body = unsafe_scope_block_expr([], true, unsafe_scope_expr(HirExprKind.IntLit(7, nil)))
+        expect(lowering.collect_free_var_syms(body, [], [])).to_equal([])
+        expect(lowering.lambda_body_captures(body, [])).to_equal(false)
+        expect(lowering.lambda_capture_scan_supported(body)).to_equal(true)
+
+    it "does not capture an unsafe read of a bound lambda parameter":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val body = unsafe_scope_block_expr([], true, unsafe_scope_var(11))
+        expect(lowering.collect_free_var_syms(body, [11], [])).to_equal([])
+        expect(lowering.lambda_body_captures(body, [11])).to_equal(false)
+        expect(lowering.lambda_capture_scan_supported(body)).to_equal(true)
+
+    it "collects an outer read inside an unsafe block":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val body = unsafe_scope_block_expr([], true, unsafe_scope_var(11))
+        expect(lowering.collect_free_var_syms(body, [], [])).to_equal([11])
+        expect(lowering.lambda_body_captures(body, [])).to_equal(true)
+        expect(lowering.lambda_capture_scan_supported(body)).to_equal(true)
+
+    it "captures a variable written only by an unsafe assignment":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val assignment = HirStmt(kind: HirStmtKind.Assign(unsafe_scope_var(12), nil,
+            unsafe_scope_expr(HirExprKind.IntLit(5, nil))), span: Span.empty())
+        val body = unsafe_scope_block_expr([assignment], false, unsafe_scope_expr(HirExprKind.UnitLit))
+        expect(lowering.collect_free_var_syms(body, [], [])).to_equal([12])
+        expect(lowering.lambda_body_captures(body, [])).to_equal(true)
+        expect(lowering.lambda_capture_scan_supported(body)).to_equal(true)
+
+    it "keeps unsafe locals out of captures while finding nested unsafe initializer reads":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val local = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 21), unsafe_scope_type(), unsafe_scope_var(13)), span: Span.empty())
+        val nested = unsafe_scope_block_expr([], true, unsafe_scope_var(21))
+        val body = unsafe_scope_block_expr([local], true, nested)
+        expect(lowering.collect_free_var_syms(body, [], [])).to_equal([13])
+        expect(lowering.lambda_body_captures(body, [])).to_equal(true)
+        expect(lowering.lambda_capture_scan_supported(body)).to_equal(true)
+
+    it "scans unsafe blocks under branches and loops":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val branch = unsafe_scope_expr(HirExprKind.If(unsafe_scope_var(31),
+            unsafe_scope_expr_block(unsafe_scope_block_expr([], true, unsafe_scope_var(32))),
+            Some(unsafe_scope_expr_block(unsafe_scope_block_expr([], true, unsafe_scope_var(33))))))
+        val loop = unsafe_scope_expr(HirExprKind.While(unsafe_scope_var(34),
+            unsafe_scope_expr_block(unsafe_scope_block_expr([], true, unsafe_scope_var(35))), nil))
+        expect(lowering.collect_free_var_syms(branch, [], [])).to_equal([31, 32, 33])
+        expect(lowering.collect_free_var_syms(loop, [], [])).to_equal([34, 35])
+        expect(lowering.lambda_capture_scan_supported(branch)).to_equal(true)
+        expect(lowering.lambda_capture_scan_supported(loop)).to_equal(true)
+
+    it "still refuses an unsupported expression nested inside unsafe":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val body = unsafe_scope_block_expr([], true, unsafe_scope_expr(HirExprKind.Await(unsafe_scope_var(41))))
+        expect(lowering.lambda_body_captures(body, [])).to_equal(true)
+        expect(lowering.lambda_capture_scan_supported(body)).to_equal(false)
