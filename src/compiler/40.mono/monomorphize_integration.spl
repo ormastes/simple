@@ -454,8 +454,12 @@ impl MonomorphizationPass:
             case Some(value): value
             case _: return Err("E-MONO-INVOCATION: signature attachment requires isolated policy")
         val signature = mono_function_signature_v1(function, budget)?
+        # Placement keys may be aliases of one admitted physical module.
+        # New declarations use the same source owner as its original rows.
+        val module_path = self.module_paths.get(module_name) ?? ""
+        val declaration_owner = if module_path != "": module_path else: module_name
         if symbols.get_symbol_raw(function.symbol.id) != nil:
-            mono_validate_function_signature_v1(module_name, symbols, function, budget, require_owned_row: true)?
+            mono_validate_function_signature_v1(module_name, symbols, function, budget, module_path: module_path, require_owned_row: true)?
             return Ok(symbols)
         if not budget.charge_v1(1): return Err(budget.failure)
         var output = symbols
@@ -463,9 +467,9 @@ impl MonomorphizationPass:
             id: function.symbol, name: function.name, kind: SymbolKind.Function,
             type_: signature, scope: ScopeId(id: 0), span: function.span,
             visibility: Visibility.Private, is_public: false,
-            is_mutable: false, defining_module: module_name,
+            is_mutable: false, defining_module: declaration_owner,
             builtin_method_tag: BUILTIN_METHOD_NONE, generic_param_count: 0))
-        mono_validate_function_signature_v1(module_name, output, function, budget, require_owned_row: true)?
+        mono_validate_function_signature_v1(module_name, output, function, budget, module_path: module_path, require_owned_row: true)?
         Ok(output)
 
     # ========================================================================
@@ -684,7 +688,7 @@ impl MonomorphizationPass:
                         id: spec.symbol, name: spec.name, kind: SymbolKind.Function,
                         type_: nil, scope: ScopeId(id: 0), span: spec.span,
                         visibility: Visibility.Private, is_public: false,
-                        is_mutable: false, defining_module: name,
+                        is_mutable: false, defining_module: if module.path != "": module.path else: name,
                         builtin_method_tag: BUILTIN_METHOD_NONE, generic_param_count: 0))
                 owns_specialization = true
             # Rule 3 at MONO_SYMBOL_BASE: an owner also CALLS specializations
@@ -826,7 +830,7 @@ impl MonomorphizationPass:
                 id: spec.symbol, name: spec.name, kind: SymbolKind.Function,
                 type_: nil, scope: ScopeId(id: 0), span: spec.span,
                 visibility: Visibility.Private, is_public: false,
-                is_mutable: false, defining_module: module_name,
+                is_mutable: false, defining_module: if module.path != "": module.path else: module_name,
                 builtin_method_tag: BUILTIN_METHOD_NONE, generic_param_count: 0))
         if out.symbols.next_symbol_id < reloc_next:
             out.symbols.next_symbol_id = reloc_next
@@ -1782,7 +1786,10 @@ impl MonomorphizationPass:
             return spec_name
         # The provider emits under its canonical logical module, so a
         # source-path or tiered owner record must not leak into the call name.
-        val canonical_owner = hir_symbol_owner_module(owner)
+        # The placement key may be a historical import alias. Bind native
+        # linkage to the admitted provider path, just like declaration rows.
+        val owner_path = self.module_paths.get(owner) ?? ""
+        val canonical_owner = hir_symbol_owner_module(if owner_path != "": owner_path else: owner)
         if canonical_owner == "":
             return "{owner}.{spec_name}"
         "{canonical_owner}.{spec_name}"

@@ -7709,6 +7709,20 @@ impl MirLowering:
                 # the lifted body under an empty module id and loses the
                 # self-owner filter in external layout resolution.
                 lw.current_module_id = self.current_module_id
+                # A lift reads the same admitted declaration interface as its
+                # parent. Keep its builder/local state fresh, but do not erase
+                # return-only authority for calls with untyped parameters.
+                lw.rti = self.rti
+                # Full-HIR and declaration-backed parents both register trait
+                # dispatch authority before lowering bodies. The return type
+                # alone cannot select a scalar method: preserve the exact
+                # admitted implementations, ambiguity markers and closure flag.
+                # Do not copy builder, locals, errors or inference scratch here.
+                lw.trait_impl_owners = self.trait_impl_owners
+                lw.trait_impl_methods = self.trait_impl_methods
+                lw.trait_impl_closure_complete = self.trait_impl_closure_complete
+                # Preserve cumulative evidence for the parent's archive gate.
+                lw.devirtualized_calls = self.devirtualized_calls
                 lw.current_function_names = self.current_function_names
                 lw.current_function_symbols = self.current_function_symbols
                 lw.exact_extern_signatures = self.exact_extern_signatures
@@ -7723,6 +7737,13 @@ impl MirLowering:
                 lw.struct_field_type_name = self.struct_field_type_name
                 lw.struct_field_type_ownership_key = self.struct_field_type_ownership_key
                 lw.struct_field_hir_type = self.struct_field_hir_type
+                # Array/Optional/Result record checks need the same admitted
+                # provider snapshots as the enclosing body in both lanes.
+                # The copied materialized-leaf set prevents rebuilding them;
+                # retain conflicting digests and semantic types unchanged.
+                lw.composite_layout_digests = self.composite_layout_digests
+                lw.composite_layout_owner_counts = self.composite_layout_owner_counts
+                lw.result_err_layout_types = self.result_err_layout_types
                 lw.struct_field_repr_name = self.struct_field_repr_name
                 lw.struct_field_array_element_type_name = self.struct_field_array_element_type_name
                 lw.struct_field_array_elem_type = self.struct_field_array_elem_type
@@ -7810,12 +7831,6 @@ impl MirLowering:
                     lw.native_trait_layouts = self.native_trait_layouts
                     lw.native_trait_implementations = self.native_trait_implementations
                     lw.native_trait_thunks = self.native_trait_thunks
-                    lw.trait_impl_owners = self.trait_impl_owners
-                    lw.trait_impl_methods = self.trait_impl_methods
-                    lw.trait_impl_closure_complete = self.trait_impl_closure_complete
-                    lw.devirtualized_calls = self.devirtualized_calls
-                    lw.composite_layout_digests = self.composite_layout_digests
-                    lw.composite_layout_owner_counts = self.composite_layout_owner_counts
                     lw.class_type_names = self.class_type_names
                     lw.struct_field_hir_type = self.struct_field_hir_type
                     lw.struct_field_type_ownership_key = self.struct_field_type_ownership_key
@@ -7894,7 +7909,10 @@ impl MirLowering:
                     lw.lower_expr_for_slot(body, typed_return)
                 else:
                     lw.lower_expr(body)
-                if self.declaration_repository != nil and lw.errors.len() > 0:
+                # A child error is fatal in both full-HIR and declaration
+                # repository lanes. Never admit a runtime-panic placeholder
+                # merely because this parent has no compact repository.
+                if lw.errors.len() > 0:
                     for raw_error in lw.errors:
                         val error: MirError = raw_error
                         self.errors.push(error)
@@ -7907,7 +7925,7 @@ impl MirLowering:
                         case _: ()
                 elif runtime_any_abi:
                     result = lw.box_runtime_value(result)
-                if self.declaration_repository != nil and lw.errors.len() > 0:
+                if lw.errors.len() > 0:
                     for raw_error in lw.errors:
                         val error: MirError = raw_error
                         self.errors.push(error)
@@ -7916,6 +7934,9 @@ impl MirLowering:
                 self.canonical_type_symbol_names = lw.canonical_type_symbol_names
                 self.canonical_type_reverse_scan_rows = lw.canonical_type_reverse_scan_rows
                 self.next_canonical_type_symbol = lw.next_canonical_type_symbol
+                # A successful nested lift contributes its actual dispatches
+                # in both lanes; failed lifts have already returned above.
+                self.devirtualized_calls = lw.devirtualized_calls
                 if self.provider_method_modules.len() > 0:
                     # Rows the lifted body materialized relocated provider
                     # symbols into lw's table; adopt that table and the rows
@@ -7935,7 +7956,6 @@ impl MirLowering:
                     self.global_constants_by_id = lw.global_constants_by_id
                     self.imported_global_initializers = lw.imported_global_initializers
                     self.native_trait_thunks = lw.native_trait_thunks
-                    self.devirtualized_calls = lw.devirtualized_calls
                 var b2 = lw.builder
                 if not b2.current_block_has_explicit_terminator():
                     if return_type.kind == MirTypeKind.Unit:
