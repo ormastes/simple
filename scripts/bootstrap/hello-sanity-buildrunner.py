@@ -62,13 +62,23 @@ def unpack_verified_lane(bundle, destination, expected):
                     item.filename in {".", ".."} or item.is_dir() or
                     (stat.S_IFMT(mode) and not stat.S_ISREG(mode))):
                 raise ValueError("unsafe worker bundle member")
+        def member(name):
+            try:
+                return archive.read(name)
+            except KeyError as error:
+                raise ValueError("worker bundle member missing") from error
         def record(name):
             fields = {}
-            for line in archive.read(name).decode().splitlines():
+            for line in member(name).decode().splitlines():
+                if ": " not in line:
+                    raise ValueError("malformed worker evidence record")
                 key, value = line.split(": ", 1)
                 if key in fields:
                     raise ValueError("duplicate worker evidence field")
-                fields[key] = value if value in {"true", "false"} else ast.literal_eval(value)
+                try:
+                    fields[key] = value if value in {"true", "false"} else ast.literal_eval(value)
+                except (SyntaxError, TypeError, MemoryError, RecursionError) as error:
+                    raise ValueError("malformed worker evidence record") from error
             return fields
         identity = record("managed-lane.sdn")
         if identity != expected:
@@ -80,7 +90,7 @@ def unpack_verified_lane(bundle, destination, expected):
             raise ValueError("managed lane did not pass with exact producer")
         executable = "hello.exe" if os.name == "nt" else "hello"
         import hashlib
-        if hashlib.sha256(archive.read(executable)).hexdigest() != result.get("executable_sha256"):
+        if hashlib.sha256(member(executable)).hexdigest() != result.get("executable_sha256"):
             raise ValueError("worker executable identity mismatch")
         destination.mkdir()
         archive.extractall(destination)
