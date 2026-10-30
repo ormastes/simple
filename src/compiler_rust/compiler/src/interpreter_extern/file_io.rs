@@ -875,27 +875,16 @@ fn snapshot_token(value: &str) -> String {
     out
 }
 
-fn process_status_kib(key: &str) -> i64 {
-    fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status
-                .lines()
-                .find(|line| line.starts_with(key))
-                .and_then(|line| line[key.len()..].split_whitespace().next())
-                .and_then(|value| value.parse::<i64>().ok())
-        })
-        .unwrap_or(-1)
-}
-
 /// Return current resident memory in KiB, or -1 when host status is unavailable.
 pub fn rt_process_rss_kib(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(process_status_kib("VmRSS:")))
+    Ok(Value::Int(simple_runtime::mem_snapshot::rt_process_rss_kib()))
 }
 
 /// Return peak resident memory in KiB, or -1 when host status is unavailable.
 pub fn rt_process_hwm_kib(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(process_status_kib("VmHWM:")))
+    // Delegate to the runtime twin: it covers Linux /proc, macOS/FreeBSD
+    // getrusage and Windows, where /proc/self/status alone returned -1.
+    Ok(Value::Int(simple_runtime::mem_snapshot::rt_process_hwm_kib()))
 }
 
 fn snapshot_monotonic_ms() -> i64 {
@@ -942,7 +931,7 @@ pub fn rt_mem_snapshot_record(args: &[Value]) -> Result<Value, CompileError> {
         std::process::id(), snapshot_monotonic_ms(),
         if path.is_empty() { "none" } else { "recorded" }, if path.is_empty() { "-" } else { &path },
         counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8], counts[9], counts[10],
-        process_status_kib("VmRSS:"), process_status_kib("VmHWM:"));
+        simple_runtime::mem_snapshot::rt_process_rss_kib(), simple_runtime::mem_snapshot::rt_process_hwm_kib());
     let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
     let ok = files
         .1

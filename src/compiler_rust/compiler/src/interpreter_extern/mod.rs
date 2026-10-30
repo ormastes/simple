@@ -2466,6 +2466,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cpu_topology_field", concurrency::rt_cpu_topology_field);
     insert_simple!("rt_thread_pin_current", concurrency::rt_thread_pin_current);
     insert_simple!("rt_thread_current_cpu", concurrency::rt_thread_current_cpu);
+    insert_simple!("rt_par_atomic_i64_is_lock_free", concurrency::rt_par_atomic_i64_is_lock_free);
+    insert_simple!("rt_par_atomic_load_i64", concurrency::rt_par_atomic_load_i64);
     insert_simple!("rt_par_atomic_add_i64", concurrency::rt_par_atomic_add_i64);
     insert_simple!("rt_par_atomic_xchg_i64", concurrency::rt_par_atomic_xchg_i64);
     insert_simple!("rt_par_atomic_cmpxchg_i64", concurrency::rt_par_atomic_cmpxchg_i64);
@@ -3270,8 +3272,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
             )
         }) as ExternHandler,
     );
+    // Legacy numbered spelling (src/lib/nogc_sync_mut/sffi/concurrent.spl); same ABI as _with_args.
     m.insert(
-        "rt_thread_spawn_isolated_with_args",
+        "rt_thread_spawn_isolated2",
         (|evaluated, env, functions, classes, enums, impl_methods| {
             concurrency::rt_thread_spawn_isolated_with_args_context(
                 evaluated,
