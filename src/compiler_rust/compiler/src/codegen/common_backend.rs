@@ -3430,7 +3430,7 @@ mod tests {
         let object_bytes = backend.module.finish().emit().expect("emit object");
         let object = object::File::parse(object_bytes.as_slice()).expect("parse object");
         assert!(object.symbols().any(|symbol| {
-            symbol.name().ok() == Some("lib__nogc_sync_mut__src__hash__rt_hash_text") && symbol.is_definition()
+            symbol.name().ok().map(|name| name.strip_prefix('_').unwrap_or(name)) == Some("lib__nogc_sync_mut__src__hash__rt_hash_text") && symbol.is_definition()
         }), "the local qualified rt_hash_text bridge must be emitted");
     }
 
@@ -3480,10 +3480,10 @@ mod tests {
         let object_bytes = backend.module.finish().emit().expect("emit object");
         let object = object::File::parse(object_bytes.as_slice()).expect("parse object");
         assert!(object.symbols().any(|symbol| {
-            symbol.name().ok() == Some("local_text__rt_string_trim") && symbol.is_definition()
+            symbol.name().ok().map(|name| name.strip_prefix('_').unwrap_or(name)) == Some("local_text__rt_string_trim") && symbol.is_definition()
         }), "the local qualified rt_string_trim bridge must be emitted");
         assert!(object.symbols().any(|symbol| {
-            symbol.name().ok() == Some("rt_string_trim") && symbol.is_undefined()
+            symbol.name().ok().map(|name| name.strip_prefix('_').unwrap_or(name)) == Some("rt_string_trim") && symbol.is_undefined()
         }), "the direct builtin call must retain its raw runtime import");
     }
 
