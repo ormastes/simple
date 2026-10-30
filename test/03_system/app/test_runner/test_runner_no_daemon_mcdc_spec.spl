@@ -1,0 +1,65 @@
+# @req REQ-MC-012
+# @cover src/app/test_runner_new/test_runner_single.spl
+"""
+# `--no-session-daemon` keeps MC/DC enforcement
+
+An operator runs `simple test --no-session-daemon <spec>`. The flag only means
+"do not use the session daemon": with the default normal profile the spec
+still goes through the MC/DC execution path and the output names the MC/DC
+outcome (evidence, or an explicit DEGRADED line -- never silence). Turning
+MC/DC off without the four waiver variables is refused; with them it is
+honoured.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val FIXTURE = "test/fixtures/test_runner_mcdc/quick_fixture.spl"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY") ?? ""
+    if b != "":
+        return b
+    "bin/simple"
+
+fn run_lane(extra_env: [text]) -> (text, i64):
+    var argv: [text] = ["-u", "SIMPLE_MCDC_MODE", "-u", "SIMPLE_MCDC_MODE_ERROR",
+        "-u", "SIMPLE_MCDC_OFF_WAIVER_REASON", "-u", "SIMPLE_MCDC_OFF_WAIVER_REVIEWER",
+        "-u", "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID", "-u", "SIMPLE_MCDC_OFF_WAIVER_VERSION"]
+    for e in extra_env:
+        argv.push(e)
+    argv.push(real_binary())
+    argv.push("test")
+    argv.push("--no-session-daemon")
+    argv.push(FIXTURE)
+    val (out, err, code) = process_run_bounded("env", argv, 600000, 4194304)
+    (out + err, code)
+
+describe "simple test --no-session-daemon under MC/DC":
+    # @capture(exec)
+    it "applies MC/DC with the default normal profile":
+        step("Run the quick fixture with no MC/DC env")
+        val (report, code) = run_lane([])
+        expect(report).to_contain("MC/DC: mode=on")
+        expect(report).to_contain("SPEC FILE VERDICT: " + FIXTURE)
+        expect(code).to_equal(0)
+
+    # @capture(exec)
+    it "refuses MC/DC off without a waiver":
+        step("Request SIMPLE_MCDC_MODE=off with no waiver")
+        val (report, code) = run_lane(["SIMPLE_MCDC_MODE=off"])
+        expect(code).to_equal(2)
+        expect(report).to_contain("SIMPLE_MCDC_MODE=off is refused")
+        expect(report.contains("PASS " + FIXTURE)).to_equal(false)
+
+    # @capture(exec)
+    it "honours MC/DC off with all four waiver variables":
+        step("Request SIMPLE_MCDC_MODE=off with a complete waiver")
+        val (report, code) = run_lane(["SIMPLE_MCDC_MODE=off",
+            "SIMPLE_MCDC_OFF_WAIVER_REASON=fixture", "SIMPLE_MCDC_OFF_WAIVER_REVIEWER=qa",
+            "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID=R-1", "SIMPLE_MCDC_OFF_WAIVER_VERSION=1"])
+        expect(code).to_equal(0)
+        expect(report.contains("MC/DC: mode=")).to_equal(false)
+        expect(report).to_contain("PASS " + FIXTURE)
