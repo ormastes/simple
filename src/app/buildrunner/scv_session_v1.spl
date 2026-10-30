@@ -1,6 +1,9 @@
 """One source-only frozen session per manager run; no CURRENT or env publication."""
 use app.buildrunner.scv_cli_plan_v1.{BuildRunnerScvPlanV1, build_runner_scv_plan_read_v1, build_runner_scv_source_roots_v1}
 use app.buildrunner.scv_session_record_v1.{build_runner_scv_record_parse_v1, build_runner_scv_record_encode_v1}
+use app.buildrunner.scv_retention_v2.{BuildRunnerScvRetentionV2, build_runner_scv_retired_path_v2,
+    build_runner_scv_retention_subject_v2, build_runner_scv_retention_begin_v2,
+    build_runner_scv_retention_admit_v2, build_runner_scv_retention_release_v2}
 use app.buildrunner.scv_admission_v1.{BuildRunnerScvAdmissionV1, build_runner_scv_bind_v1,
     build_runner_scv_revalidate_v1, build_runner_scv_admission_digest_v1}
 use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_decode_v1}
@@ -20,7 +23,7 @@ use std.scv.source_witness_v1.{ScvSourceWitnessV1, scv_snapshot_lookup_domain_v2
 use std.scv.snapshot_v2.{scv_snapshot_in_scope_v2}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.io.read_only_file_view.{read_only_file_view_read_beneath_bounded_v1}
-use app.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_atomic_write}
+use app.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_atomic_write, path_absolute}
 use app.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 
@@ -30,6 +33,7 @@ pub struct BuildRunnerScvSessionV1:
     record_path: text
     record_payload: text
     managed: BuildRunnerScvManagedSetV1
+    retention: BuildRunnerScvRetentionV2
 
 fn build_runner_scv_environment_v1(scopes: [text]) -> Result<bool, text>:
     for name in ["SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_COMMIT_ID",
@@ -85,18 +89,27 @@ fn build_runner_scv_bind_tasks_v1(run: BuildRunV1, checkout: text,
         bindings[task.id] = binding
     Ok(bindings)
 
-pub fn build_runner_scv_session_open_v1(run: BuildRunV1, config: BuilderCliV1,
+pub fn build_runner_scv_session_open_v1(run: BuildRunV1, requested: BuilderCliV1,
         plan_path: text, require_existing: bool) -> Result<BuildRunnerScvSessionV1?, text>:
+    # Retirement applies even when a caller omits the SCV option.
+    if file_exists(build_runner_scv_retired_path_v2(requested.state)): return Err("scv-session-retired")
+    var config = requested
     val record_path = config.state + "/scv-session.sdn"
     if plan_path == "":
         if file_exists(record_path): return Err("scv-session-option-required-for-bound-state")
         return Ok(nil)
+    config.state = path_absolute(config.state).replace("\\", "/")
+    config.source_root = path_absolute(config.source_root).replace("\\", "/")
     if config.output_root == config.source_root: return Err("scv-explicit-private-output-root-required")
     for host in run.hosts:
         if host.transport != "local": return Err("scv-source-mode-local-hosts-only")
     val plan = build_runner_scv_plan_read_v1(plan_path, run)?
     build_runner_scv_environment_v1(plan.source_scopes)?
     val cache_root = compile_source_inventory_checkout_cache_root_v1(config.source_root)
+    val retention = build_runner_scv_retention_subject_v2(config, plan.source_sha256)?
+    # Publish before retained snapshot open or compiler acquisition/reuse reads.
+    # Failures retain the reservation; no timeout or error handler clears it.
+    build_runner_scv_retention_begin_v2(retention, not file_exists(record_path))?
     var authority: CompilerSourceAuthorityV1? = nil
     var retained = ""
     if file_exists(record_path):
@@ -119,6 +132,9 @@ pub fn build_runner_scv_session_open_v1(run: BuildRunV1, config: BuilderCliV1,
         if not captured.valid: return Err("scv-capture-refused:" + captured.reason)
         authority = Some(captured)
     val admitted = authority.unwrap()
+    # Exact physical source protection precedes inventory, adapters and staging,
+    # including source-only contexts without managed target/configuration data.
+    val source_retention = build_runner_scv_retention_admit_v2(retention, admitted.snapshot)?
     val inventory = compiler_source_authority_inventory_v1(config.source_root, admitted)?
     val adapter = scv_snapshot_from_compile_v1(config.source_root, admitted.snapshot, inventory, plan.source_scopes, 0)?
     if adapter.source_inventory_digest != "sha256_" + admitted.source_inventory_digest:
@@ -149,11 +165,16 @@ pub fn build_runner_scv_session_open_v1(run: BuildRunV1, config: BuilderCliV1,
     val managed = build_runner_scv_managed_retain_v1(payload, managed_tasks, unavailable,
         config.state, require_existing or file_exists(config.state + "/journal.sdn"))?
     Ok(Some(BuildRunnerScvSessionV1(adapter: adapter, bindings: bindings,
-        record_path: record_path, record_payload: payload, managed: managed)))
+        record_path: record_path, record_payload: payload, managed: managed, retention: source_retention)))
+
+pub fn build_runner_scv_session_release_v2(session: BuildRunnerScvSessionV1?) -> Result<bool, text>:
+    if val owner = session: build_runner_scv_retention_release_v2(owner.retention)?
+    Ok(true)
 
 pub fn build_runner_scv_task_error_v1(session: BuildRunnerScvSessionV1?, task: BuildTaskV1, checkout: text) -> text:
     if session == nil: return ""
     val owner = session.unwrap()
+    if file_exists(build_runner_scv_retired_path_v2(owner.retention.state_root)): return "scv-session-retired"
     if not owner.bindings.contains_key(task.id): return "scv-task-not-bound"
     var binding = owner.bindings[task.id]
     if builder_task_identity_v1(task) != binding.task_identity:
@@ -197,4 +218,5 @@ pub fn build_runner_scv_source_paths_v1(session: BuildRunnerScvSessionV1?, task:
     paths
 
 export BuildRunnerScvSessionV1, build_runner_scv_session_open_v1, build_runner_scv_task_error_v1
+export build_runner_scv_session_release_v2
 export build_runner_scv_source_root_v1, build_runner_scv_source_paths_v1, build_runner_scv_task_root_v1

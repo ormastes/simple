@@ -1,0 +1,167 @@
+"""Explicit retirement from real settled journal and every retained attempt."""
+use app.bootstrap_builder.cli_args.{BuilderCliV1}
+use app.bootstrap_builder.contracts.{BuildRunV1, BuildTaskV1, BuildResultV1,
+    builder_task_identity_v1, builder_validate_result_v1}
+use app.bootstrap_builder.codec.{builder_read_result_v1, builder_encode_result_v1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_reaped_v1,
+    builder_transport_collect_v1}
+use app.bootstrap_builder.failure_policy.{builder_failure_class_v1}
+use app.buildrunner.runner.{build_runner_decode_v1}
+use app.buildrunner.cli_files_v1.{builder_cli_resolve_roots_v1}
+use app.buildrunner.scv_cli_plan_v1.{build_runner_scv_plan_read_v1}
+use app.buildrunner.scv_session_record_v1.{build_runner_scv_record_parse_v1}
+use app.buildrunner.scv_retention_v2.{BuildRunnerScvRetentionV2,
+    build_runner_scv_retention_subject_v2, build_runner_scv_retention_limits_v2,
+    build_runner_scv_retired_path_v2}
+use std.scv.build_retention_store_v1.{build_retention_store_session_retire_v2}
+use app.io.file_ops.{file_exists, file_read_regular_no_follow_bounded,
+    file_atomic_write, file_lock, file_unlock, path_absolute}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+
+fn build_runner_scv_retire_list_v2(path: text, limit: i64) -> Result<[text], text>:
+    if not dir_is_real_no_follow(path): return Err("scv-retire-directory-unsafe")
+    val listed = dir_list_optional(path)
+    if listed == nil: return Err("scv-retire-directory-inventory-unavailable")
+    val names = listed.unwrap()
+    if names.len() > limit: return Err("scv-retire-directory-inventory-budget")
+    Ok(names)
+
+fn build_runner_scv_attempt_settled_v2(task: BuildTaskV1, root: text,
+        run: BuildRunV1, process: BuilderProcessPortV1,
+        current: bool, expected: BuildResultV1) -> Result<bool, text>:
+    val children = build_runner_scv_retire_list_v2(root, run.hosts.len())?
+    if children.len() == 0 or children.len() > run.hosts.len(): return Err("scv-retire-attempt-host-inventory-invalid")
+    var checked: [text] = []
+    var current_found = false
+    for name in children:
+        var known = false
+        for host in run.hosts:
+            if host.id != name: continue
+            if host.transport != "local": return Err("scv-retire-local-proof-required")
+            known = true
+            val slot = root + "/" + name
+            if not dir_is_real_no_follow(slot): return Err("scv-retire-host-directory-unsafe")
+            if file_exists(slot + "/cancel.request"): return Err("scv-retire-cancelled-attempt")
+            val attempt = BuilderAttemptV1(task_id: task.id, attempt: task.attempt, host: host,
+                pid: 0, local_root: slot, remote_root: "", error: "",
+                identity_digest: builder_task_identity_v1(task), process: process)
+            if not builder_transport_reaped_v1(attempt): return Err("scv-retire-exact-reap-proof-required")
+            val collected = builder_transport_collect_v1(attempt)?
+            if builder_validate_result_v1(task, collected) != "": return Err("scv-retire-attempt-result-invalid")
+            if builder_failure_class_v1(collected.status, collected.exit_code, true) == "infrastructure-abort":
+                return Err("scv-retire-attempt-not-ordinary-terminal")
+            if current and host.id == expected.host_id:
+                if builder_encode_result_v1(collected) != builder_encode_result_v1(expected):
+                    return Err("scv-retire-current-receipt-differs")
+                current_found = true
+        if not known or checked.contains(name): return Err("scv-retire-attempt-host-unknown")
+        checked.push(name)
+    if current and not current_found: return Err("scv-retire-current-attempt-missing")
+    Ok(true)
+
+# Shared reader leases are released only when the whole retained execution
+# proves settled. A successful source/output verification alone cannot erase
+# an unresolved execution owner using the same session token.
+pub fn build_runner_scv_settled_proof_v2(run: BuildRunV1, config: BuilderCliV1,
+        process: BuilderProcessPortV1) -> Result<text, text>:
+    if file_exists(config.state + "/cancel.request"): return Err("scv-retire-cancel-request-present")
+    val journal_path = config.state + "/journal.sdn"
+    val journal = file_read_regular_no_follow_bounded(journal_path, 16777216)?
+    val state = build_runner_decode_v1(run, journal)?
+    val rows = journal.split("\n")
+    val attempts_root = config.state + "/attempts"
+    val task_names = build_runner_scv_retire_list_v2(attempts_root, run.tasks.len())?
+    if task_names.len() > run.tasks.len(): return Err("scv-retire-untracked-task-attempts")
+    var known_tasks: [text] = []
+    for task in run.tasks: known_tasks.push(task.id)
+    for name in task_names:
+        if not known_tasks.contains(name): return Err("scv-retire-untracked-task-attempts")
+    for index in 0..state.tasks.len():
+        val task = state.tasks[index]
+        val recorded = rows[index + 1].split("\t")[2]
+        if recorded == "BLOCKED": return Err("scv-retire-blocked-no-independent-dispatch-proof")
+        if recorded != "SUCCEEDED" and recorded != "FAILED": return Err("scv-retire-work-not-settled")
+        val receipt = builder_read_result_v1(config.state + "/receipts/" + task.id + ".sdn")?
+        if (builder_validate_result_v1(task, receipt) != "" or receipt.host_id != state.host_ids[index]):
+            return Err("scv-retire-current-receipt-invalid")
+        if (recorded == "SUCCEEDED") != (receipt.status == "OK"): return Err("scv-retire-journal-result-differs")
+        val task_root = attempts_root + "/" + task.id
+        val attempt_names = build_runner_scv_retire_list_v2(task_root, run.max_attempts)?
+        var permitted: [text] = []
+        for number in run.tasks[index].attempt..task.attempt + 1: permitted.push(str(number))
+        if attempt_names.len() != permitted.len(): return Err("scv-retire-attempt-inventory-incomplete")
+        for name in attempt_names:
+            if not permitted.contains(name): return Err("scv-retire-untracked-attempt")
+        for number in run.tasks[index].attempt..task.attempt + 1:
+            var subject = task
+            subject.attempt = number
+            build_runner_scv_attempt_settled_v2(subject, task_root + "/" + str(number),
+                run, process, number == task.attempt, receipt)?
+    if file_read_regular_no_follow_bounded(journal_path, 16777216)? != journal:
+        return Err("scv-retire-journal-changed")
+    if file_exists(config.state + "/cancel.request"): return Err("scv-retire-cancel-request-present")
+    Ok(journal)
+
+fn build_runner_scv_retirement_payload_v2(owner: BuildRunnerScvRetentionV2,
+        source_record: text, journal: text) -> text:
+    sdn_encode_canonical(SdnValue.Dict({"schema_version": SdnValue.Int(2),
+        "session_id": SdnValue.String(owner.session_id), "revision_id": SdnValue.String(owner.revision_id),
+        "source_record_sha256": SdnValue.String(sha256_text(source_record)),
+        "settled_journal_sha256": SdnValue.String(sha256_text(journal)),
+        "retired": SdnValue.Bool(true)})) + "\n"
+
+fn build_runner_scv_retire_locked_v2(run: BuildRunV1, config: BuilderCliV1,
+        process: BuilderProcessPortV1, plan_path: text) -> Result<text, text>:
+    if plan_path == "": return Err("scv-retire-session-option-required")
+    val plan = build_runner_scv_plan_read_v1(plan_path, run)?
+    # Retirement never acquires or stages a snapshot and never resets capture.
+    val record_path = config.state + "/scv-session.sdn"
+    val source_record = file_read_regular_no_follow_bounded(record_path, 1048576)?
+    val record = build_runner_scv_record_parse_v1(source_record.bytes())?
+    if (record.plan_sha256 != plan.source_sha256 or
+            record.checkout_root != path_absolute(config.source_root).replace("\\", "/")):
+        return Err("scv-retire-source-subject-differs")
+    val owner = build_runner_scv_retention_subject_v2(config, plan.source_sha256, record.revision_id)?
+    val journal = build_runner_scv_settled_proof_v2(run, config, process)?
+    if file_read_regular_no_follow_bounded(record_path, 1048576)? != source_record:
+        return Err("scv-retire-source-record-changed")
+    val marker = build_runner_scv_retired_path_v2(config.state)
+    val payload = build_runner_scv_retirement_payload_v2(owner, source_record, journal)
+    if file_exists(marker):
+        if file_read_regular_no_follow_bounded(marker, 4096)? != payload:
+            return Err("scv-retirement-subject-differs")
+    elif not file_atomic_write(marker, payload): return Err("scv-retirement-marker-publish-failed")
+    if file_read_regular_no_follow_bounded(marker, 4096)? != payload:
+        return Err("scv-retirement-marker-readback-failed")
+    # The store retirement transaction removes this owner's active and durable
+    # protection together. Calling reader_release first would reject an exact
+    # replay after the durable pin had already been removed by a prior retire.
+    build_retention_store_session_retire_v2(owner.cache_root, owner.session_id, owner.revision_id,
+        build_runner_scv_retention_limits_v2())
+
+pub fn build_runner_scv_retire_v2(run: BuildRunV1, requested: BuilderCliV1,
+        process: BuilderProcessPortV1, plan_path: text) -> i64:
+    val config = match builder_cli_resolve_roots_v1(requested, process):
+        case Ok(value): value
+        case Err(reason):
+            print "buildrunner: retirement refused: {reason}"
+            return 2
+    val lock = file_lock(config.state + "/manager.lock", 1)
+    if lock < 0: return 2
+    val result = build_runner_scv_retire_locked_v2(run, config, process, plan_path)
+    val unlocked = file_unlock(lock)
+    match result:
+        case Ok(root):
+            if not unlocked: return 2
+            print "buildrunner: source session retired retention_root={root}"
+            0
+        case Err(reason):
+            print "buildrunner: retirement refused: {reason}"
+            2
+
+export build_runner_scv_settled_proof_v2, build_runner_scv_retire_v2

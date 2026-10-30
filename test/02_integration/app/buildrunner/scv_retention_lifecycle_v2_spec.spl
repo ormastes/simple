@@ -1,0 +1,164 @@
+"""Actual production manager/worker retention lifecycle; execution NOT_RUN.
+
+Requires admitted BUILDRUNNER_RETENTION_TEST_RUNNER, _WORKER and _PROCESS
+executables, _MEMORY_PROVIDER=cgroup-v2, and SIMPLE_LIB=src. _PROCESS is built
+from test/fixtures/buildrunner/scv_retention_process_v2.spl. Its output is known
+fixture data, not a compiled product. Process/reap/capacity proofs are authored
+only by the actual worker, never by this spec. Missing providers stay pending
+in ordinary assurance and fail closed in critical assurance.
+"""
+use std.spec.{describe, it, expect, step, fail, pending}
+use std.spec.skip_governance.{validate_bare_pending}
+use app.io.env_ops.{env_get}
+use app.io.file_ops.{secure_temp_dir_raw, file_copy, file_atomic_write, file_read,
+    file_exists, file_remove, file_hash_sha256, file_lock, file_unlock, file_is_regular_no_follow}
+use app.io.dir_ops.{dir_create_all}
+use app.io.process_ops.{process_run_timeout, process_spawn_async, process_wait}
+use app.io.time_ops.{current_time_ms, sleep_ms}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
+use std.common.crypto.sha256.{sha256_text}
+use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1}
+use app.bootstrap_builder.worker.{builder_worker_environment_digest_v1}
+use app.bootstrap_builder.contracts.{BuildRunV1, BuildHostV1, BuildInputV1}
+use app.bootstrap_builder.codec.{builder_write_run_v1}
+use std.scv.build_retention_store_v1.{build_retention_store_load_v1}
+use test.fixtures.buildrunner.scv_cli_fixture_v1.{setup_scv_cli_task_v1, setup_scv_cli_plan_v1}
+
+fn retention_lifecycle_provider_v2(name: text) -> text:
+    env_get("BUILDRUNNER_RETENTION_TEST_" + name) ?? ""
+
+fn retention_lifecycle_missing_v2() -> text:
+    for name in ["RUNNER", "WORKER", "PROCESS"]:
+        val path = retention_lifecycle_provider_v2(name)
+        if path == "" or not file_is_regular_no_follow(path): return "admitted executable required: " + name
+    if retention_lifecycle_provider_v2("MEMORY_PROVIDER") != "cgroup-v2":
+        return "the real Linux cgroup-v2 worker provider is required"
+    if (env_get("SIMPLE_LIB") ?? "") != "src": return "SIMPLE_LIB=src is required"
+    ""
+
+fn retention_lifecycle_setup_v2(mode: text) -> (text, text, text, [text]):
+    val root = secure_temp_dir_raw("/tmp", "buildrunner-retention-lifecycle-")
+    expect(root.len()).to_be_greater_than(0)
+    val checkout = root + "/checkout"
+    for path in ["checkout/src", "checkout/tools", "checkout/task-context", "state", "output"]:
+        expect(dir_create_all(root + "/" + path)).to_equal(true)
+    val source = "fn main(): 0\n# fixture-mode: " + mode + "\n"
+    expect(file_atomic_write(checkout + "/src/main.spl", source)).to_equal(true)
+    expect(file_copy(retention_lifecycle_provider_v2("PROCESS"), checkout + "/tools/compiler")).to_equal(true)
+    expect(set_permissions(checkout + "/tools/compiler", 0o755)).to_equal(true)
+    for args in [["init", "-q"], ["add", "src"], ["-c", "user.name=SCV lifecycle fixture", "-c", "user.email=scv@example.invalid", "commit", "-qm", "source fixture"]]:
+        expect(process_run_timeout("git", ["-C", checkout] + args, 15000).2).to_equal(0)
+    val digest = sha256_text("lifecycle-fixture-v2")
+    val context = build_runner_context_encode_v1(BuildRunnerTaskContextV1(backend: "llvm",
+        runtime_digest: digest, policy_digest: digest,
+        environment_digest: builder_worker_environment_digest_v1().unwrap())).unwrap()
+    expect(file_atomic_write(checkout + "/task-context/compile.sdn", context)).to_equal(true)
+    var task = setup_scv_cli_task_v1()
+    task.producer_digest = file_hash_sha256(checkout + "/tools/compiler")
+    task.source_digest = sha256_text(source)
+    task.cache_key = sha256_text(mode + "|" + task.producer_digest + "|" + context)
+    task.timeout_ms = 90000
+    task.memory_limit_bytes = 1073741824
+    task.inputs = [BuildInputV1(path: "src/main.spl", digest: sha256_text(source)),
+        BuildInputV1(path: "task-context/compile.sdn", digest: sha256_text(context))]
+    val worker = retention_lifecycle_provider_v2("WORKER")
+    val run = BuildRunV1(tasks: [task], hosts: [BuildHostV1(id: "local", transport: "local",
+        endpoint: "", workspace: root + "/worker", worker_program: worker,
+        worker_digest: file_hash_sha256(worker), slots: 1)], keep_going: true, max_attempts: 2)
+    val manifest = root + "/run.sdn"
+    val plan = root + "/plan.sdn"
+    expect(builder_write_run_v1(manifest, run)).to_equal(true)
+    expect(file_atomic_write(plan, setup_scv_cli_plan_v1())).to_equal(true)
+    val options = ["--manifest", manifest, "--state", root + "/state", "--source-root", checkout,
+        "--output-root", root + "/output", "--scv-session", plan]
+    (root, checkout + "/build/scv", root + "/state", options)
+
+fn retention_lifecycle_command_v2(command: text, options: [text]) -> i32:
+    process_run_timeout(retention_lifecycle_provider_v2("RUNNER"), [command] + options, 180000).2
+
+describe "BuildRunner retention through actual worker lifecycle":
+    val missing = retention_lifecycle_missing_v2()
+    if missing != "":
+        if not validate_bare_pending(env_get("SIMPLE_SAFETY_PROFILE") ?? "").ok:
+            it "fails closed without the admitted real lifecycle providers":
+                fail("BuildRunner retention lifecycle unavailable: " + missing)
+        else:
+            it "records missing real worker coverage as pending":
+                pending("BuildRunner retention lifecycle unavailable: " + missing)
+    else:
+        it "releases only active readers after a real retry and durably retires with busy-store replay":
+            step("setup: launch the actual manager and worker with a signal-once fixture child")
+            val (root, cache, state_root, options) = retention_lifecycle_setup_v2("retry")
+            expect(retention_lifecycle_command_v2("run", options)).to_equal(0)
+            expect(file_read(root + "/output/out/main.o")).to_equal("retention-lifecycle-fixture-output-v2\n")
+            expect(file_exists(state_root + "/attempts/compile/1/local/compiler.reaped")).to_equal(true)
+            expect(file_exists(state_root + "/attempts/compile/2/local/compiler.reaped")).to_equal(true)
+            val complete = build_retention_store_load_v1(cache).unwrap()
+            expect(complete.capture_owners.len()).to_equal(0)
+            expect(complete.leases.len()).to_equal(0)
+            expect(complete.pins.len()).to_equal(1)
+            expect(complete.pins[0].ref.starts_with("snapshot_dependents/")).to_equal(true)
+            step("verify: reopen the actual retained snapshot and reprove both worker attempts")
+            expect(retention_lifecycle_command_v2("verify", options)).to_equal(0)
+            expect(build_retention_store_load_v1(cache).unwrap().pins).to_equal(complete.pins)
+            step("refuse: remove the actual prior retry reap proof while the current journal stays terminal")
+            val prior_reap = state_root + "/attempts/compile/1/local/compiler.reaped"
+            val actual_reap = file_read(prior_reap)
+            expect(file_remove(prior_reap)).to_equal(true)
+            expect(retention_lifecycle_command_v2("verify", options)).to_equal(2)
+            expect(retention_lifecycle_command_v2("retire", options)).to_equal(2)
+            expect(file_exists(state_root + "/scv-retired.sdn")).to_equal(false)
+            val unreaped = build_retention_store_load_v1(cache).unwrap()
+            expect(unreaped.pins.len()).to_equal(2)
+            expect(unreaped.leases.len()).to_equal(1)
+            step("recover: restore the exact saved worker proof and reverify before releasing readers")
+            expect(file_atomic_write(prior_reap, actual_reap)).to_equal(true)
+            expect(retention_lifecycle_command_v2("verify", options)).to_equal(0)
+            step("exercise: hold the actual store lock so retirement stops after publishing its marker")
+            val lock = file_lock(cache + "/.build-retention-v1.lock", 1)
+            expect(lock >= 0).to_equal(true)
+            val busy = retention_lifecycle_command_v2("retire", options)
+            val marker = file_read(state_root + "/scv-retired.sdn")
+            val protected = build_retention_store_load_v1(cache).unwrap()
+            expect(file_unlock(lock)).to_equal(true)
+            expect(busy).to_equal(2)
+            expect(marker).to_contain("retired: true")
+            expect(protected.pins).to_equal(complete.pins)
+            expect(retention_lifecycle_command_v2("verify", options)).to_equal(2)
+            step("assert: exact retirement retries finish unpinning and remain idempotent after success")
+            expect(retention_lifecycle_command_v2("retire", options)).to_equal(0)
+            expect(retention_lifecycle_command_v2("retire", options)).to_equal(0)
+            expect(file_read(state_root + "/scv-retired.sdn")).to_equal(marker)
+            val retired = build_retention_store_load_v1(cache).unwrap()
+            expect(retired.pins.len()).to_equal(0)
+            expect(retired.leases.len()).to_equal(0)
+            expect(retired.capture_owners.len()).to_equal(0)
+            expect(retention_lifecycle_command_v2("run", options)).to_equal(2)
+            expect(dir_remove_all(root)).to_equal(true)
+
+        it "preserves real cancelled worker reader protection and refuses retirement after cancel removal":
+            step("setup: start the actual worker and wait for its child-created physical marker")
+            val (root, cache, state_root, options) = retention_lifecycle_setup_v2("cancel")
+            val pid = process_spawn_async(retention_lifecycle_provider_v2("RUNNER"), ["run"] + options)
+            expect(pid > 0).to_equal(true)
+            val started_path = state_root + "/attempts/compile/1/local/work/fixture.started"
+            val deadline = current_time_ms() + 30000
+            while not file_exists(started_path) and current_time_ms() < deadline: sleep_ms(100)
+            val started = file_exists(started_path)
+            step("exercise: request cancellation through the production manager and reap its process")
+            expect(file_atomic_write(state_root + "/cancel.request", "cancel\n")).to_equal(true)
+            val code = process_wait(pid, 60000)
+            expect(started).to_equal(true)
+            expect(code).to_equal(130)
+            expect(file_exists(state_root + "/attempts/compile/1/local/compiler.reaped")).to_equal(true)
+            val retained = build_retention_store_load_v1(cache).unwrap()
+            expect(retained.pins.len()).to_equal(2)
+            expect(retained.leases.len()).to_equal(1)
+            step("assert: cancellation is never silently upgraded to settled retirement")
+            expect(retention_lifecycle_command_v2("retire", options)).to_equal(2)
+            expect(file_remove(state_root + "/cancel.request")).to_equal(true)
+            expect(retention_lifecycle_command_v2("retire", options)).to_equal(2)
+            expect(file_exists(state_root + "/scv-retired.sdn")).to_equal(false)
+            expect(build_retention_store_load_v1(cache).unwrap().leases).to_equal(retained.leases)
+            expect(dir_remove_all(root)).to_equal(true)

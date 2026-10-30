@@ -4,16 +4,29 @@ Requires SIMPLE_LIB=src and no inherited SIMPLE_SCV/source overrides. Git create
 an isolated miniature checkout; no compiler, native builder or worker executes.
 """
 use std.spec.{describe, it, expect, step}
-use app.buildrunner.scv_session_v1.{build_runner_scv_session_open_v1, build_runner_scv_task_error_v1}
+use app.buildrunner.scv_session_v1.{build_runner_scv_session_open_v1, build_runner_scv_task_error_v1,
+    build_runner_scv_session_release_v2}
+use app.buildrunner.scv_retention_v2.{build_runner_scv_retention_subject_v2, build_runner_scv_retired_path_v2}
+use app.buildrunner.scv_retire_v2.{build_runner_scv_retire_v2}
+use app.buildrunner.scv_abort_v2.{build_runner_scv_abort_capture_v2}
+use app.buildrunner.cli.{builder_cli_run_locked_v1}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use std.scv.build_retention_store_v1.{build_retention_store_load_v1,
+    build_retention_store_commit_v1, build_retention_store_capture_begin_v2}
+use std.scv.build_retention_v1.{BuildRetentionStateV1, BuildRetentionNodeV1}
+use app.buildrunner.scv_retention_v2.{build_runner_scv_retention_limits_v2}
 use app.buildrunner.scv_managed_session_v1.{build_runner_scv_managed_unknown_v1, build_runner_scv_managed_record_v1}
 use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1}
 use app.bootstrap_builder.worker.{builder_worker_environment_digest_v1}
 use app.bootstrap_builder.cli_args.{BuilderCliV1}
 use app.bootstrap_builder.contracts.{BuildRunV1, BuildInputV1, BuildHostV1}
-use app.io.file_ops.{secure_temp_dir_raw, file_atomic_write, file_read, file_hash_sha256, file_exists, file_remove}
+use app.io.file_ops.{secure_temp_dir_raw, file_atomic_write, file_read, file_hash_sha256, file_exists,
+    file_remove, file_lock, file_unlock}
 use app.io.dir_ops.{dir_create_all}
 use app.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
 use std.nogc_async_mut.sosix.host_facade.{sosix_run}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{compile_source_inventory_apply_and_publish_v1, compile_source_inventory_git_event_v1, compile_source_inventory_read_current_v1}
@@ -52,6 +65,188 @@ fn setup_scv_source_session_fixture(managed: bool = false) -> (text, BuildRunV1,
     (root, run, config, plan)
 
 describe "BuildRunner captures one actual frozen source session":
+    it "explicitly aborts a pressure-rejected unattached reservation without deleting independent authority":
+        step("setup: persist five authoritative metadata roots to exceed the initial retention count budget")
+        val (root, run, config, plan) = setup_scv_source_session_fixture()
+        val owner = build_runner_scv_retention_subject_v2(config, sha256_text(setup_scv_cli_plan_v1())).unwrap()
+        expect(dir_create_all(owner.cache_root)).to_equal(true)
+        var nodes: [BuildRetentionNodeV1] = []
+        for number in 0..5:
+            nodes.push(BuildRetentionNodeV1(namespace: "artifact", id: "independent-" + str(number),
+                dependencies: [], authoritative: true, rebuildable: false, bytes: 1, last_used: 0))
+        val original = BuildRetentionStateV1(generation: 1, nodes: nodes, pins: [], leases: [])
+        expect(build_retention_store_commit_v1(owner.cache_root, 0, "", original,
+            build_runner_scv_retention_limits_v2()).is_ok()).to_equal(true)
+        step("exercise: actual production preflight refuses growth and retains its global reservation")
+        val refused = build_runner_scv_session_open_v1(run, config, plan, false)
+        expect(refused.unwrap_err()).to_equal("scv-retention-capture-pressure:protected_over_budget")
+        expect(file_exists(config.state + "/scv-session.sdn")).to_equal(false)
+        expect(file_exists(config.state + "/journal.sdn")).to_equal(false)
+        val other = sha256_text("independent-capture-owner")
+        expect(build_retention_store_capture_begin_v2(owner.cache_root, other,
+            build_runner_scv_retention_limits_v2()).is_ok()).to_equal(true)
+        step("assert: active manager ownership blocks abort before the explicit command can release anything")
+        val lock = file_lock(config.state + "/manager.lock", 1)
+        expect(lock >= 0).to_equal(true)
+        val blocked = build_runner_scv_abort_capture_v2(run, config, builder_process_portable_v1(), plan)
+        expect(file_unlock(lock)).to_equal(true)
+        expect(blocked).to_equal(2)
+        expect(build_retention_store_load_v1(owner.cache_root).unwrap().capture_owners.len()).to_equal(2)
+        step("assert: explicit abort removes only its own unattached reservation and is idempotent")
+        expect(build_runner_scv_abort_capture_v2(run, config, builder_process_portable_v1(), plan)).to_equal(0)
+        expect(build_runner_scv_abort_capture_v2(run, config, builder_process_portable_v1(), plan)).to_equal(0)
+        val aborted = build_retention_store_load_v1(owner.cache_root).unwrap()
+        expect(aborted.capture_owners).to_equal([other])
+        expect(aborted.nodes).to_equal(nodes)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "refuses explicit abort when initialized source records or independently retained reader leases exist":
+        step("setup: admit an actual source-only reader and its durable session dependent pin")
+        val (root, run, config, plan) = setup_scv_source_session_fixture()
+        val session = build_runner_scv_session_open_v1(run, config, plan, false).unwrap().unwrap()
+        val before = build_retention_store_load_v1(session.retention.cache_root).unwrap()
+        expect(build_runner_scv_abort_capture_v2(run, config, builder_process_portable_v1(), plan)).to_equal(2)
+        step("exercise: remove the app records to test the store's independent attached-reader refusal")
+        expect(file_remove(session.record_path)).to_equal(true)
+        expect(file_remove(session.managed.record_path)).to_equal(true)
+        expect(build_runner_scv_abort_capture_v2(run, config, builder_process_portable_v1(), plan)).to_equal(2)
+        val after = build_retention_store_load_v1(session.retention.cache_root).unwrap()
+        expect(after.pins).to_equal(before.pins)
+        expect(after.leases).to_equal(before.leases)
+        expect(after.generation).to_equal(before.generation)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "retains attached protection when source binding fails before any source record exists":
+        step("setup: keep real source bytes but request a different declared source digest")
+        val (root, run, config, plan) = setup_scv_source_session_fixture()
+        var changed = run
+        changed.tasks[0].inputs[0].digest = sha256_text("not-the-captured-source")
+        step("exercise: exact snapshot admission succeeds before the real binding rejects the input")
+        expect(build_runner_scv_session_open_v1(changed, config, plan, false).is_err()).to_equal(true)
+        expect(file_exists(config.state + "/scv-session.sdn")).to_equal(false)
+        expect(file_exists(config.state + "/journal.sdn")).to_equal(false)
+        val owner = build_runner_scv_retention_subject_v2(config, sha256_text(setup_scv_cli_plan_v1())).unwrap()
+        val attached = build_retention_store_load_v1(owner.cache_root).unwrap()
+        expect(attached.capture_owners.len()).to_equal(0)
+        expect(attached.pins.len()).to_equal(2)
+        expect(attached.leases.len()).to_equal(1)
+        step("assert: neither unattached abort nor settled retirement invents missing initialization proof")
+        expect(build_runner_scv_abort_capture_v2(run, config, builder_process_portable_v1(), plan)).to_equal(2)
+        expect(build_runner_scv_retire_v2(run, config, builder_process_portable_v1(), plan)).to_equal(2)
+        expect(build_retention_store_load_v1(owner.cache_root).unwrap().pins).to_equal(attached.pins)
+        step("recover: the exact original source subject can finish initialization")
+        val recovered = build_runner_scv_session_open_v1(run, config, plan, false).unwrap().unwrap()
+        expect(recovered.retention.session_id).to_equal(owner.session_id)
+        expect(recovered.retention.revision_id).to_equal(attached.leases[0].root.split("/")[1])
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "refuses unknown and unavailable manager-state inventories instead of treating them as empty":
+        step("setup: retain a reservation after a real fresh source capture failure")
+        val (root, run, config, plan) = setup_scv_source_session_fixture()
+        expect(dir_remove_all(config.source_root + "/src")).to_equal(true)
+        expect(build_runner_scv_session_open_v1(run, config, plan, false).is_err()).to_equal(true)
+        val owner = build_runner_scv_retention_subject_v2(config, sha256_text(setup_scv_cli_plan_v1())).unwrap()
+        val before = build_retention_store_load_v1(owner.cache_root).unwrap()
+        step("assert: any unknown state entry refuses the empty-state abort profile")
+        expect(file_atomic_write(config.state + "/unknown-evidence", "must-preserve\n")).to_equal(true)
+        expect(build_runner_scv_abort_capture_v2(run, config, builder_process_portable_v1(), plan)).to_equal(2)
+        expect(file_remove(config.state + "/unknown-evidence")).to_equal(true)
+        step("assert: a searchable but unreadable state inventory is an error, never an empty directory")
+        expect(set_permissions(config.state, 0o111)).to_equal(true)
+        val unavailable = dir_list_optional(config.state)
+        val inaccessible_abort = build_runner_scv_abort_capture_v2(run, config, builder_process_portable_v1(), plan)
+        expect(set_permissions(config.state, 0o700)).to_equal(true)
+        expect(unavailable == nil).to_equal(true)
+        expect(inaccessible_abort).to_equal(2)
+        step("assert: a missing physical state directory cannot authorize release")
+        expect(dir_remove_all(config.state)).to_equal(true)
+        expect(build_runner_scv_abort_capture_v2(run, config, builder_process_portable_v1(), plan)).to_equal(2)
+        val after = build_retention_store_load_v1(owner.cache_root).unwrap()
+        expect(after.capture_owners).to_equal(before.capture_owners)
+        expect(after.generation).to_equal(before.generation)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "reserves before a fresh capture fails and leaves the durable reservation for recovery":
+        step("setup: remove the declared physical source before compiler authority capture")
+        val (root, run, config, plan) = setup_scv_source_session_fixture()
+        expect(dir_remove_all(config.source_root + "/src")).to_equal(true)
+        step("exercise: actual acquisition refuses the missing source scope")
+        expect(build_runner_scv_session_open_v1(run, config, plan, false).is_err()).to_equal(true)
+        val owner = build_runner_scv_retention_subject_v2(config, sha256_text(setup_scv_cli_plan_v1())).unwrap()
+        val state = build_retention_store_load_v1(owner.cache_root).unwrap()
+        step("assert: the reservation is durable even without a returned session value")
+        expect(state.capture_owners).to_equal([owner.session_id])
+        expect(state.pins.len()).to_equal(0)
+        expect(file_exists(config.state + "/scv-session.sdn")).to_equal(false)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "pins source-only sessions and preserves the durable dependent pin after explicit reader release":
+        step("setup: capture without optional managed target and configuration subjects")
+        val (root, run, config, plan) = setup_scv_source_session_fixture()
+        val first = build_runner_scv_session_open_v1(run, config, plan, false).unwrap().unwrap()
+        val owner = first.retention
+        val key = "snapshot/" + first.adapter.legacy.revision_id
+        val active = build_retention_store_load_v1(owner.cache_root).unwrap()
+        expect(active.capture_owners.len()).to_equal(0)
+        expect(active.pins.len()).to_equal(2)
+        expect(active.leases.len()).to_equal(1)
+        expect(active.leases[0].owner).to_equal(owner.session_id)
+        expect(active.leases[0].root).to_equal(key)
+        step("exercise: retry and reopen retain the same exact session subject")
+        val reopened = build_runner_scv_session_open_v1(run, config, plan, true).unwrap().unwrap()
+        var retry = run.tasks[0]
+        retry.attempt = 2
+        expect(reopened.retention.session_id).to_equal(owner.session_id)
+        expect(build_runner_scv_task_error_v1(Some(reopened), retry, config.source_root)).to_equal("")
+        expect(build_retention_store_load_v1(owner.cache_root).unwrap().leases.len()).to_equal(1)
+        step("assert: explicit reader release preserves the durable session dependent root")
+        expect(build_runner_scv_session_release_v2(Some(reopened)).is_ok()).to_equal(true)
+        val released = build_retention_store_load_v1(owner.cache_root).unwrap()
+        expect(released.leases.len()).to_equal(0)
+        expect(released.pins.len()).to_equal(1)
+        expect(released.pins[0].ref).to_equal("snapshot_dependents/" + owner.session_id)
+        expect(released.pins[0].root).to_equal(key)
+        expect(file_exists(first.adapter.legacy.snapshot_root + "/src/main.spl")).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "retains reader protection when real manager cancellation occurs before dispatch":
+        step("setup: capture a real session and request cancellation before any worker starts")
+        val (root, run, config, plan) = setup_scv_source_session_fixture()
+        val session = build_runner_scv_session_open_v1(run, config, plan, false).unwrap().unwrap()
+        expect(file_atomic_write(config.state + "/cancel.request", "cancel\n")).to_equal(true)
+        val lock = file_lock(config.state + "/manager.lock", 1)
+        expect(lock >= 0).to_equal(true)
+        step("exercise: the actual scheduler returns cancellation and publishes its recovery journal")
+        expect(builder_cli_run_locked_v1(run, config, builder_process_portable_v1(), nil, Some(session))).to_equal(130)
+        expect(file_unlock(lock)).to_equal(true)
+        step("assert: cancellation and pending ownership cannot authorize retirement")
+        expect(build_runner_scv_retire_v2(run, config, builder_process_portable_v1(), plan)).to_equal(2)
+        expect(file_exists(build_runner_scv_retired_path_v2(config.state))).to_equal(false)
+        val retained = build_retention_store_load_v1(session.retention.cache_root).unwrap()
+        expect(retained.pins.len()).to_equal(2)
+        expect(retained.leases[0].owner).to_equal(session.retention.session_id)
+        expect(file_remove(config.state + "/cancel.request")).to_equal(true)
+        expect(build_runner_scv_retire_v2(run, config, builder_process_portable_v1(), plan)).to_equal(2)
+        expect(build_retention_store_load_v1(session.retention.cache_root).unwrap().leases.len()).to_equal(1)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "reserves before retained snapshot validation fails and rejects a retired state without opt-in":
+        step("setup: capture real source then corrupt its retained physical bytes")
+        val (root, run, config, plan) = setup_scv_source_session_fixture()
+        val session = build_runner_scv_session_open_v1(run, config, plan, false).unwrap().unwrap()
+        expect(file_atomic_write(session.adapter.legacy.snapshot_root + "/src/main.spl", "corrupt\n")).to_equal(true)
+        step("assert: failed reopen leaves its reservation alongside the preexisting reader roots")
+        expect(build_runner_scv_session_open_v1(run, config, plan, true).is_err()).to_equal(true)
+        val protected = build_retention_store_load_v1(session.retention.cache_root).unwrap()
+        expect(protected.capture_owners).to_equal([session.retention.session_id])
+        expect(protected.pins.len()).to_equal(2)
+        expect(protected.leases.len()).to_equal(1)
+        step("assert: an existing retirement marker blocks opt-in and legacy reopen before source reads")
+        expect(file_atomic_write(build_runner_scv_retired_path_v2(config.state), "deliberately invalid marker\n")).to_equal(true)
+        expect(build_runner_scv_session_open_v1(run, config, plan, true).unwrap_err()).to_equal("scv-session-retired")
+        expect(build_runner_scv_session_open_v1(run, config, "", false).unwrap_err()).to_equal("scv-session-retired")
+        expect(dir_remove_all(root)).to_equal(true)
+
     it "replays pinned initialization intent after actual managed compiler admission fails":
         step("setup: prepare a managed task and substitute its physical compiler image")
         val (root, run, config, plan) = setup_scv_source_session_fixture(true)

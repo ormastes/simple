@@ -1,0 +1,59 @@
+"""Explicit abandonment of an unattached, never-dispatched capture reservation."""
+use app.bootstrap_builder.cli_args.{BuilderCliV1}
+use app.bootstrap_builder.contracts.{BuildRunV1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.buildrunner.cli_files_v1.{builder_cli_resolve_roots_v1}
+use app.buildrunner.scv_cli_plan_v1.{build_runner_scv_plan_read_v1}
+use app.buildrunner.scv_retention_v2.{build_runner_scv_retention_subject_v2,
+    build_runner_scv_retention_limits_v2}
+use std.scv.build_retention_store_v1.{build_retention_store_capture_abort_unattached_v2}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use app.io.file_ops.{file_lock, file_unlock, file_is_regular_no_follow, path_absolute}
+
+fn build_runner_scv_abort_unattached_locked_v2(run: BuildRunV1, config: BuilderCliV1,
+        plan_path: text) -> Result<text, text>:
+    if plan_path == "": return Err("scv-abort-session-option-required")
+    if not dir_is_real_no_follow(config.state): return Err("scv-abort-state-directory-unsafe")
+    # An error or unreadable directory is not an empty manager state. The only
+    # admitted entry is the stable manager lock acquired by this command.
+    val listed = dir_list_optional(config.state)
+    if listed == nil: return Err("scv-abort-state-inventory-unavailable")
+    val names = listed.unwrap()
+    if names.len() != 1 or names[0] != "manager.lock": return Err("scv-abort-state-not-unattached")
+    if not file_is_regular_no_follow(config.state + "/manager.lock"):
+        return Err("scv-abort-manager-lock-unsafe")
+    val plan = build_runner_scv_plan_read_v1(plan_path, run)?
+    val owner = build_runner_scv_retention_subject_v2(config, plan.source_sha256)?
+    # All snapshot readers during capture run synchronously in the manager.
+    # No dispatch/staging/journal exists in the admitted empty-state profile.
+    # The store independently rejects ANY matching pin or lease; the manager's
+    # absence proof alone never authorizes an attached session release.
+    build_retention_store_capture_abort_unattached_v2(owner.cache_root, owner.session_id,
+        build_runner_scv_retention_limits_v2())
+
+pub fn build_runner_scv_abort_capture_v2(run: BuildRunV1, requested: BuilderCliV1,
+        process: BuilderProcessPortV1, plan_path: text) -> i64:
+    val config = match builder_cli_resolve_roots_v1(requested, process):
+        case Ok(value): value
+        case Err(reason):
+            print "buildrunner: capture abort refused: {reason}"
+            return 2
+    if (not dir_is_real_no_follow(config.state) or
+            path_absolute(config.state).replace("\\", "/") != config.state):
+        print "buildrunner: capture abort requires the exact canonical state directory"
+        return 2
+    val lock = file_lock(config.state + "/manager.lock", 1)
+    if lock < 0: return 2
+    val result = build_runner_scv_abort_unattached_locked_v2(run, config, plan_path)
+    val unlocked = file_unlock(lock)
+    match result:
+        case Ok(root):
+            if not unlocked: return 2
+            print "buildrunner: unattached capture aborted retention_root={root}"
+            0
+        case Err(reason):
+            print "buildrunner: capture abort refused: {reason}"
+            2
+
+export build_runner_scv_abort_capture_v2

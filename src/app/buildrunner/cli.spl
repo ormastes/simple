@@ -1,7 +1,9 @@
 use app.buildrunner.stage_trace_v1.{build_runner_stage_trace_v1}
 use app.buildrunner.scv_cli_options_v1.{build_runner_scv_options_v1}
 use app.buildrunner.scv_session_v1.{BuildRunnerScvSessionV1, build_runner_scv_session_open_v1,
-    build_runner_scv_task_root_v1, build_runner_scv_source_paths_v1}
+    build_runner_scv_task_root_v1, build_runner_scv_source_paths_v1, build_runner_scv_session_release_v2}
+use app.buildrunner.scv_retire_v2.{build_runner_scv_settled_proof_v2, build_runner_scv_retire_v2}
+use app.buildrunner.scv_abort_v2.{build_runner_scv_abort_capture_v2}
 use app.buildrunner.cli_files_v1.{builder_cli_hash_outputs_v1, builder_cli_input_error_v1, builder_cli_inputs_match_v1, builder_cli_publish_v1, builder_cli_resolve_roots_v1, builder_cli_output_modes_match_v1}
 use app.buildrunner.database_session.{BuildRunnerDatabaseSessionV1, build_runner_database_session_open_v1}
 # The manager owns every canonical transition and published output. Worker
@@ -479,6 +481,16 @@ fn builder_cli_run_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderPro
                 Err(reason):
                     print "buildrunner: task database finalization failed: {reason}"
                     code = 2
+    if (code == 0 or code == 1) and scv != nil:
+        if database == nil:
+            print "buildrunner: SCV reader retained; task database finalization unavailable"
+            code = 2
+        else:
+            match build_runner_scv_session_release_v2(scv):
+                case Ok(_): ()
+                case Err(reason):
+                    print "buildrunner: SCV reader release failed: {reason}"
+                    code = 2
     file_unlock(lock)
     build_runner_stage_trace_v1(config.trace_stages, "manager", "run", "end", nil, code)
     code
@@ -500,7 +512,10 @@ fn build_runner_verify_settled_v1(run: BuildRunV1, config: BuilderCliV1,
         case Err(_):
             file_unlock(lock)
             return 2
-    val code = builder_cli_verify_settled_locked_v1(run, resolved, process, scv)
+    var code = builder_cli_verify_settled_locked_v1(run, resolved, process, scv)
+    if code == 0 and scv != nil:
+        if build_runner_scv_settled_proof_v2(run, resolved, process).is_err(): code = 2
+        elif build_runner_scv_session_release_v2(scv).is_err(): code = 2
     file_unlock(lock)
     code
 
@@ -564,7 +579,10 @@ fn builder_cli_verify_v1(run: BuildRunV1, config: BuilderCliV1, process: Builder
         case Err(_):
             file_unlock(lock)
             return 2
-    val code = builder_cli_verify_locked_v1(run, resolved, process, scv)
+    var code = builder_cli_verify_locked_v1(run, resolved, process, scv)
+    if code == 0 and scv != nil:
+        if build_runner_scv_settled_proof_v2(run, resolved, process).is_err(): code = 2
+        elif build_runner_scv_session_release_v2(scv).is_err(): code = 2
     file_unlock(lock)
     code
 
@@ -670,7 +688,9 @@ fn build_runner_cli_main_v1(process: BuilderProcessPortV1,
         print "buildrunner run --manifest FILE --state DIR [--source-root DIR] [--output-root DIR] [--trace-stages]"
         print "buildrunner verify --manifest FILE --state DIR [--source-root DIR] [--output-root DIR]"
         print "buildrunner verify-settled --manifest FILE --state DIR [--source-root DIR] [--output-root DIR]"
-        print "source snapshot opt-in for run/verify/verify-settled: --scv-session FILE"
+        print "buildrunner retire --manifest FILE --state DIR --source-root DIR --output-root DIR --scv-session FILE"
+        print "buildrunner abort-capture --manifest FILE --state DIR --source-root DIR --output-root DIR --scv-session FILE"
+        print "source snapshot opt-in for run/verify/verify-settled/retire/abort-capture: --scv-session FILE"
         print "buildrunner check --manifest FILE"
         print "buildrunner worker --request FILE --attempt-root DIR --host ID"
         return 0
@@ -686,6 +706,8 @@ fn build_runner_cli_main_v1(process: BuilderProcessPortV1,
                 return 0
             if config.command == "verify": return builder_cli_verify_v1(run, config, process, scv_options.session_file)
             if config.command == "verify-settled": return build_runner_verify_settled_v1(run, config, process, scv_options.session_file)
+            if config.command == "retire": return build_runner_scv_retire_v2(run, config, process, scv_options.session_file)
+            if config.command == "abort-capture": return build_runner_scv_abort_capture_v2(run, config, process, scv_options.session_file)
             return builder_cli_run_v1(run, config, process, scv_options.session_file)
 
 export build_runner_cli_main_v1

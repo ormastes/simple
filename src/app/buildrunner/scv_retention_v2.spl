@@ -1,0 +1,75 @@
+"""Manager-owned retention subject; no expiry or implicit physical collection."""
+use app.bootstrap_builder.cli_args.{BuilderCliV1}
+use std.scv.build_retention_v1.{BuildRetentionLimitsV1}
+use std.scv.build_retention_store_v1.{build_retention_store_capture_begin_v2,
+    build_retention_store_snapshot_admit_v2, build_retention_store_reader_release_v2,
+    build_retention_store_collect_v2}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use std.scv.compile_source_inventory.{compile_source_inventory_checkout_cache_root_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use app.io.file_ops.{path_absolute, file_exists}
+use app.io.dir_ops.{dir_create_all}
+use app.io.time_ops.{current_time_unix}
+
+pub struct BuildRunnerScvRetentionV2:
+    cache_root: text
+    checkout_root: text
+    state_root: text
+    session_id: text
+    revision_id: text
+
+# These are bounded admission budgets, not permission to collect snapshots.
+# max_remove=0 deliberately leaves physical deletion to an explicit store owner.
+pub fn build_runner_scv_retention_limits_v2() -> BuildRetentionLimitsV1:
+    BuildRetentionLimitsV1(max_nodes: 4096, max_edges: 65536, max_work: 16777216,
+        max_bytes: 1073741824, max_retained: 4, max_remove: 0)
+
+pub fn build_runner_scv_retired_path_v2(state_root: text) -> text:
+    state_root + "/scv-retired.sdn"
+
+pub fn build_runner_scv_retention_subject_v2(config: BuilderCliV1,
+        plan_sha256: text, revision_id: text = "") -> Result<BuildRunnerScvRetentionV2, text>:
+    val state = path_absolute(config.state).replace("\\", "/")
+    val checkout = path_absolute(config.source_root).replace("\\", "/")
+    if state == "" or checkout == "" or plan_sha256.len() != 64:
+        return Err("scv-retention-subject-invalid")
+    val subject = sdn_encode_canonical(SdnValue.Dict({"state_root": SdnValue.String(state),
+        "checkout_root": SdnValue.String(checkout), "plan_sha256": SdnValue.String(plan_sha256)}))
+    Ok(BuildRunnerScvRetentionV2(cache_root: compile_source_inventory_checkout_cache_root_v1(checkout),
+        checkout_root: checkout, state_root: state,
+        session_id: sha256_text("simple/buildrunner-retention/v2\n" + subject), revision_id: revision_id))
+
+pub fn build_runner_scv_retention_begin_v2(owner: BuildRunnerScvRetentionV2,
+        fresh_capture: bool = false) -> Result<bool, text>:
+    if file_exists(build_runner_scv_retired_path_v2(owner.state_root)):
+        return Err("scv-session-retired")
+    if not dir_create_all(owner.cache_root): return Err("scv-retention-cache-create-failed")
+    # This transaction releases the store lock before compiler acquisition.
+    build_retention_store_capture_begin_v2(owner.cache_root, owner.session_id,
+        build_runner_scv_retention_limits_v2())?
+    if fresh_capture:
+        # Accounting under the reservation authorizes zero physical removals.
+        # Existing sessions may still reopen their retained source under pressure.
+        val plan = build_retention_store_collect_v2(owner.cache_root, owner.checkout_root,
+            build_runner_scv_retention_limits_v2(), current_time_unix())?
+        if plan.status != "within_budget": return Err("scv-retention-capture-pressure:" + plan.status)
+    Ok(true)
+
+pub fn build_runner_scv_retention_admit_v2(owner: BuildRunnerScvRetentionV2,
+        snapshot: ScvCompileSnapshotV1) -> Result<BuildRunnerScvRetentionV2, text>:
+    build_retention_store_snapshot_admit_v2(owner.cache_root, owner.checkout_root, snapshot,
+        owner.session_id, build_runner_scv_retention_limits_v2(), current_time_unix())?
+    var admitted = owner
+    admitted.revision_id = snapshot.revision_id
+    Ok(admitted)
+
+pub fn build_runner_scv_retention_release_v2(owner: BuildRunnerScvRetentionV2) -> Result<text, text>:
+    build_retention_store_reader_release_v2(owner.cache_root, owner.session_id, owner.revision_id,
+        build_runner_scv_retention_limits_v2())
+
+export BuildRunnerScvRetentionV2, build_runner_scv_retention_limits_v2
+export build_runner_scv_retired_path_v2, build_runner_scv_retention_subject_v2
+export build_runner_scv_retention_begin_v2, build_runner_scv_retention_admit_v2
+export build_runner_scv_retention_release_v2

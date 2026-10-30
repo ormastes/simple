@@ -1,0 +1,35 @@
+"""Lifecycle-only child process; never a real compiler qualification oracle.
+
+Build with an admitted toolchain and provide the resulting executable as
+BUILDRUNNER_RETENTION_TEST_PROCESS. The real worker owns process observation,
+capacity, cancellation and tree-reap receipts. This fixture writes only known
+test bytes, crashes once through a real signal, or waits for cancellation.
+"""
+use app.io.args_ops.{get_args}
+use app.io.file_ops.{file_read, file_exists, file_atomic_write}
+use app.io.dir_ops.{dir_create_all}
+use app.io.process_ops.{process_kill}
+use app.io.time_ops.{sleep_ms}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+
+fn main() -> i64:
+    val args = get_args()
+    var output = ""
+    for index in 1..args.len():
+        if args[index] == "--output" and index + 1 < args.len(): output = args[index + 1]
+    if output != "out/main.o": return 2
+    val source = file_read("src/main.spl")
+    if not file_atomic_write("fixture.started", "retention-process-v2\n"): return 2
+    if source.contains("fixture-mode: retry"):
+        if not dir_create_all(".builder-cache"): return 2
+        if not file_exists(".builder-cache/retention-retry.once"):
+            if not file_atomic_write(".builder-cache/retention-retry.once", "first-attempt\n"): return 2
+            # Actual signal termination; the test never authors a reap receipt.
+            process_kill(getpid())
+            return 2
+    if source.contains("fixture-mode: cancel"):
+        for turn in 0..600: sleep_ms(100)
+        return 2
+    if not dir_create_all("out"): return 2
+    if not file_atomic_write(output, "retention-lifecycle-fixture-output-v2\n"): return 2
+    0
