@@ -16938,7 +16938,10 @@ int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args
  * stay untouched for seed-compiled callers. */
 static int64_t* rt_process_result_to_tuple(SplArray* result) {
     int64_t* tuple = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
-    if (!tuple) return NULL;
+    if (!tuple) {
+        rt_array_free(result);
+        return NULL;
+    }
     tuple[0] = rt_array_get(result, 0);
     tuple[1] = rt_array_get(result, 1);
     /* slot 2 is always pushed via rt_value_int by both C owners: untag. */

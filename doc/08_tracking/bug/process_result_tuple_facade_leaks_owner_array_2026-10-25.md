@@ -48,9 +48,10 @@ from the rt dual-implementation census (line-based regex).
 - **Fixed (C facade, macOS-measured):** `rt_process_result_to_tuple` in
   `src/runtime/runtime_native.c` now frees the owner array after copying slots
   0-2 (commit 55f705bb0ee). Callers pass fresh arrays (`posix_process_run_capture`
-  / `process_timeout_result` retain nothing); the free is shallow and a no-op for
-  tuple handles (the bytes path returns a tuple, which the registered-array lookup
-  rejects). Same contract as `rt_process_run_owned_observed_bounded_text`.
+  / `process_timeout_result` retain nothing); the free is shallow and also
+  reclaims the bytes-path tuple (a registered array with the TUPLE flag;
+  `rt_tuple_new` is `rt_array_new` + flag). Same contract as
+  `rt_process_run_owned_observed_bounded_text`.
 - **Evidence:** `test/runtime/process_result_tuple_owner_free_test.c` (run by
   `scripts/check/check-process-tuple-owner-free.shs`). Live malloc blocks per
   spawn via `malloc_zone_statistics`: HEAD 3.02/call (603 over 200) -> 1.01/call
@@ -62,6 +63,6 @@ from the rt dual-implementation census (line-based regex).
   - `rt_cpuid_tuple_block` (`runtime_native.c`): the 4-word block has no owner.
   - Rust twins in `src/compiler_rust/.../env_process.rs` (`raw_result_block`,
     intermediate `rt_tuple_new` owner) leak as before; not touched in this lane.
-  - Bytes path (`rt_process_run_bounded_bytes_tuple`): the result is a tuple, not
-    an array, so the new free is a no-op there; its tuple and two byte arrays still
-    leak.
+  - Bytes path (`rt_process_run_bounded_bytes_tuple`): the tuple is freed by the
+    same call (7 -> 5 blocks/call); the two `[u8]` arrays and the raw 3-word block
+    remain.
