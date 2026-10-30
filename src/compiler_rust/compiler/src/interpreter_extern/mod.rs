@@ -1602,6 +1602,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // (same class as the rt_enum_* gap in task #113). Alias to the Value-based
     // reader; the _rv boxing is transparent at the interpreter level.
     insert_simple!("rt_file_read_text_rv", file_io::rt_file_read_text);
+    // sffi/fs.spl `fs_read_text`: byte-exact, nil only on failure (C runtime
+    // parity) -- deliberately NOT aliased to the CR-stripping reader above.
+    insert_simple!("rt_fs_read_text", file_io::rt_fs_read_text);
     insert_simple!("rt_file_remove", file_io::rt_file_remove);
     insert_simple!("rt_file_rename", file_io::rt_file_rename);
     insert_simple!("rt_file_size", file_io::rt_file_size);

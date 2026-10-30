@@ -86,6 +86,9 @@ pub(crate) fn call_method_on_value(
             "is_empty" => return Ok(Value::Bool(s.is_empty())),
             "to_string" => return Ok(Value::shared_text(s.clone())),
             "chars" => return Ok(Value::array(s.chars().map(|c| Value::text(c.to_string())).collect::<Vec<Value>>())),
+            // Same shape as the direct-receiver arm (interpreter_method/string.rs)
+            // and `rt_string_bytes`: one Int per UTF-8 byte, never per char.
+            "bytes" | "to_bytes" => return Ok(Value::array(s.bytes().map(|b| Value::Int(b as i64)).collect::<Vec<Value>>())),
             "trim" | "strip" => return Ok(Value::text(s.trim().to_string())),
             "to_upper" | "upper" | "uppercase" => return Ok(Value::text(s.to_uppercase())),
             "to_lower" | "lower" | "lowercase" => return Ok(Value::text(s.to_lowercase())),
@@ -1198,6 +1201,31 @@ mod tests {
         assert_eq!(call(trimmed.clone(), "substring", &[Value::Int(-3)]), trimmed);
         // Byte offsets, matching `len`/`index_of` and native `rt_slice`.
         assert_eq!(call(Value::text("caféZ".to_string()), "substring", &[Value::Int(5)]), Value::text("Z".to_string()));
+    }
+
+    #[test]
+    fn nested_text_bytes_and_to_bytes_return_utf8_byte_ints() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        // 3 chars, 4 UTF-8 bytes: a C3 A9 z.
+        let expected = Value::array(vec![Value::Int(97), Value::Int(195), Value::Int(169), Value::Int(122)]);
+        for method in ["bytes", "to_bytes"] {
+            let got = call_method_on_value(
+                Value::text("a\u{E9}z"),
+                method,
+                &[],
+                &mut env,
+                &mut functions,
+                &mut classes,
+                &enums,
+                &impl_methods,
+            )
+            .expect("nested text byte view should dispatch");
+            assert_eq!(got, expected, "nested `{method}` must return one int per UTF-8 byte");
+        }
     }
 
     #[test]
