@@ -84,6 +84,7 @@ enum StoragePortError:
     MissingSecret(detail: text)
     AuthenticationFailed(detail: text)
     CorruptSource(detail: text)
+    SnapshotUnavailable(detail: text)
     Io(detail: text)
 
 impl StoragePortError:
@@ -99,6 +100,8 @@ impl StoragePortError:
                 "STORAGE_PORT_AUTHENTICATION_FAILED"
             StoragePortError.CorruptSource(_):
                 "STORAGE_PORT_CORRUPT_SOURCE"
+            StoragePortError.SnapshotUnavailable(_):
+                "STORAGE_PORT_SNAPSHOT_UNAVAILABLE"
             StoragePortError.Io(_):
                 "STORAGE_PORT_IO"
 
@@ -114,6 +117,8 @@ impl StoragePortError:
                 "authentication failed: {detail}"
             StoragePortError.CorruptSource(detail):
                 "corrupt source: {detail}"
+            StoragePortError.SnapshotUnavailable(detail):
+                "snapshot unavailable: {detail}"
             StoragePortError.Io(detail):
                 "io failure: {detail}"
 
@@ -123,6 +128,8 @@ fn _codec_error(err: Sqlcipher4Error) -> StoragePortError:
             StoragePortError.AuthenticationFailed(detail: d)
         Sqlcipher4Error.MissingSecret(d):
             StoragePortError.MissingSecret(detail: d)
+        Sqlcipher4Error.SnapshotUnavailable(d):
+            StoragePortError.SnapshotUnavailable(detail: d)
         Sqlcipher4Error.IoFailure(d):
             StoragePortError.Io(detail: d)
         other:
@@ -197,6 +204,21 @@ fn _bytes_read(path: text) -> Result<[u8], StoragePortError>:
         Err(_):
             Err(StoragePortError.Io(detail: "cannot read '{path}'"))
 
+# Wipe the actual mutable plaintext owner, including partially assembled images.
+# Portable overwrite/readback matches the key-session fallback; native KDF and
+# immutable environment text residuals remain outside this owner's reach.
+fn storage_wipe_plaintext_owner(image: [u8]) -> bool:
+    var i = 0
+    while i < image.len():
+        image[i] = 0u8
+        i = i + 1
+    var residual = 0
+    i = 0
+    while i < image.len():
+        residual = residual | image[i].to_i64()
+        i = i + 1
+    residual == 0
+
 fn _view_from_image(format_name: text, path: text, image: [u8]) -> Result<StorageReadView, StoragePortError>:
     match sqlite_header_parse(image):
         Ok(info):
@@ -263,7 +285,8 @@ fn storage_backend_sqlcipher4_open(path: text, secret_ref_uri: text) -> Result<S
             return Err(_codec_error(e))
         case Ok(s):
             s
-    val session = match codec.open_key_fn(secret_ref_uri, salt):
+    # @workaround bug=runner_callback_field_owner_2026_10_11 reason=explicit_function_field_call_preserves_configured_codec_owner
+    val session = match (codec.open_key_fn)(secret_ref_uri, salt):
         case Err(e):
             return Err(_codec_error(e))
         case Ok(s):
@@ -282,15 +305,35 @@ fn storage_backend_sqlcipher4_open(path: text, secret_ref_uri: text) -> Result<S
         while off < pg * SQLCIPHER4_PAGE_SIZE:
             encoded.push(file_bytes[off])
             off = off + 1
-        val decoded = match codec.decode_page_fn(pg, encoded, session):
+        # @workaround bug=runner_callback_field_owner_2026_10_11 reason=explicit_function_field_call_preserves_configured_codec_owner
+        val decoded = match (codec.decode_page_fn)(pg, encoded, session):
             case Err(e):
                 val mapped = _codec_error(e)
-                val _closed = codec.close_fn(session)
+                val wiped = storage_wipe_plaintext_owner(image)
+                # @workaround bug=runner_callback_field_owner_2026_10_11 reason=explicit_function_field_call_closes_original_session_once
+                val closed = (codec.close_fn)(session)
+                if not wiped:
+                    return Err(StoragePortError.CorruptSource(detail: "plaintext cleanup verification failed after codec rejection"))
+                match closed:
+                    case Err(e):
+                        return Err(_codec_error(e))
+                    case Ok(_):
+                        pass
                 return Err(mapped)
             case Ok(d):
                 d
         if decoded.len() != SQLCIPHER4_PAGE_BODY_BYTES:
-            val _closed = codec.close_fn(session)
+            val decoded_wiped = storage_wipe_plaintext_owner(decoded)
+            val image_wiped = storage_wipe_plaintext_owner(image)
+            # @workaround bug=runner_callback_field_owner_2026_10_11 reason=explicit_function_field_call_closes_original_session_once
+            val closed = (codec.close_fn)(session)
+            if not decoded_wiped or not image_wiped:
+                return Err(StoragePortError.CorruptSource(detail: "plaintext cleanup verification failed after page geometry rejection"))
+            match closed:
+                case Err(e):
+                    return Err(_codec_error(e))
+                case Ok(_):
+                    pass
             return Err(StoragePortError.CorruptSource(detail: "codec returned a wrong-size page body"))
         var b = 0
         while b < SQLCIPHER4_PAGE_BODY_BYTES:
@@ -303,11 +346,27 @@ fn storage_backend_sqlcipher4_open(path: text, secret_ref_uri: text) -> Result<S
         while b < SQLCIPHER4_PAGE_SIZE - SQLCIPHER4_PAGE_BODY_BYTES:
             image.push(0u8)
             b = b + 1
+        if not storage_wipe_plaintext_owner(decoded):
+            val image_wiped = storage_wipe_plaintext_owner(image)
+            # @workaround bug=runner_callback_field_owner_2026_10_11 reason=explicit_function_field_call_closes_original_session_once
+            val closed = (codec.close_fn)(session)
+            return Err(StoragePortError.CorruptSource(detail: "decoded plaintext cleanup verification failed"))
         pg = pg + 1
-    val _closed = codec.close_fn(session)
+    # @workaround bug=runner_callback_field_owner_2026_10_11 reason=explicit_function_field_call_closes_original_session_once
+    val closed = (codec.close_fn)(session)
+    match closed:
+        case Err(e):
+            val wiped = storage_wipe_plaintext_owner(image)
+            if not wiped:
+                return Err(StoragePortError.CorruptSource(detail: "plaintext cleanup verification failed after session close rejection"))
+            return Err(_codec_error(e))
+        case Ok(_):
+            pass
 
     match _view_from_image(STORAGE_FORMAT_SQLCIPHER4, path, image):
         case Err(e):
+            if not storage_wipe_plaintext_owner(image):
+                return Err(StoragePortError.CorruptSource(detail: "plaintext cleanup verification failed after header rejection"))
             Err(e)
         case Ok(view):
             Ok(StorageOpenResult.SqliteView(view: view))
@@ -381,12 +440,7 @@ class DatabaseStoragePortV1:
 
     fn close_view(view: StorageReadView) -> bool:
         """Release a view: zeroize the plaintext snapshot in place."""
-        var i = 0
-        val n = view.image.len()
-        while i < n:
-            view.image[i] = 0u8
-            i = i + 1
-        true
+        storage_wipe_plaintext_owner(view.image)
 
     fn list_diagnostics() -> [text]:
         self.diagnostics

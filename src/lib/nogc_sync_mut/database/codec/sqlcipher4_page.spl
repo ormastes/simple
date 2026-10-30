@@ -173,7 +173,12 @@ fn _zeroize_u8(buf: [u8]) -> bool:
     while i < n:
         buf[i] = 0u8
         i = i + 1
-    true
+    var residual = 0
+    i = 0
+    while i < n:
+        residual = residual | buf[i].to_i64()
+        i = i + 1
+    residual == 0
 
 # Zeroize an [i64] buffer in place (overwrite every slot with 0).
 fn _zeroize_i64(buf: [i64]) -> bool:
@@ -182,7 +187,12 @@ fn _zeroize_i64(buf: [i64]) -> bool:
     while i < n:
         buf[i] = 0
         i = i + 1
-    true
+    var residual = 0
+    i = 0
+    while i < n:
+        residual = residual | buf[i].to_i64()
+        i = i + 1
+    residual == 0
 
 # Append src[0,n) onto dst (both [i64] byte lists).
 fn _append_i64(dst: [i64], src: [i64], n: i64) -> [i64]:
@@ -230,7 +240,9 @@ fn sqlcipher4_page_hmac(ciphertext: [u8], iv16: [u8], page_no: i64, hmac_key32: 
     _append_i64(input, _u8_to_i64(ciphertext), ciphertext.len())
     _append_i64(input, _u8_to_i64(iv16), iv16.len())
     _append_i64(input, _page_number_le32(page_no), 4)
-    val mac = hmac_sha512_bytes(_u8_to_i64(hmac_key32), input)
+    val key_i64 = _u8_to_i64(hmac_key32)
+    val mac = hmac_sha512_bytes(key_i64, input)
+    _zeroize_i64(key_i64)
     _zeroize_i64(input)
     mac
 
@@ -398,8 +410,12 @@ fn sqlcipher4_decode_page(page_no: i64, page: [u8], aes_key32: [u8], hmac_key32:
                 return Err(Sqlcipher4Error.AuthenticationFailed(detail: "page {page_no} failed HMAC-SHA512 authentication"))
             # Only now decrypt (cipher-a no-padding CBC, exact-length output).
             val key_i64 = _u8_to_i64(aes_key32)
-            val body_result = aes_cbc_decrypt_blocks_no_padding(key_i64, _u8_to_i64(ct), _u8_to_i64(iv))
+            val ct_i64 = _u8_to_i64(ct)
+            val iv_i64 = _u8_to_i64(iv)
+            val body_result = aes_cbc_decrypt_blocks_no_padding(key_i64, ct_i64, iv_i64)
             _zeroize_i64(key_i64)
+            _zeroize_i64(ct_i64)
+            _zeroize_i64(iv_i64)
             _zeroize_u8(ct)
             _zeroize_u8(iv)
             val body = match body_result:
@@ -507,7 +523,9 @@ fn sqlcipher4_page_open_key(secret_ref: text, file_salt: [u8]) -> Result<CodecSe
                 material.push(session.hmac_key[i])
                 i = i + 1
             # Release the derived key buffers held by the cipher-b session.
-            session.close()
+            if not session.close():
+                _zeroize_u8(material)
+                return Err(Sqlcipher4Error.CorruptPage(detail: "derived key cleanup verification failed"))
             Ok(CodecSessionV1(
                 codec_id: SQLCIPHER4_PAGE_CODEC_ID,
                 open: true,
@@ -561,7 +579,8 @@ fn sqlcipher4_page_encode_with_session(page_no: i64, plaintext_page: [u8], sessi
 # though the struct value itself is by-value). The caller must discard its
 # handle; decode/encode on a zeroed session fails closed at authentication.
 fn sqlcipher4_page_close(session: CodecSessionV1) -> Result<(), Sqlcipher4Error>:
-    _zeroize_u8(session.secret_material)
+    if not _zeroize_u8(session.secret_material):
+        return Err(Sqlcipher4Error.CorruptPage(detail: "session material cleanup verification failed"))
     Ok(())
 
 # Build the PageCodecV1 record for the pure-Simple SQLCipher 4 page codec.
