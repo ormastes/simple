@@ -19,9 +19,15 @@ cache kept serving the old pass/fail verdict. The same module also backs
 
 ## Fix
 
-Each path now contributes `mtime@sha256(content)` to the fingerprint, using the
-runtime `rt_file_hash_sha256`. A missing path contributes `missing`, because
-the runtime returns nil for a missing file. Old cache rows simply miss once.
+Each path now contributes `mtime@sha256(content)`. The digest comes from
+`file_hash_sha256_or_empty`. A path with no 64-hex digest (missing, a
+directory, or an open/read failure) contributes `unreadable`, which never
+matches a real digest. Old cache rows simply miss once.
+
+`file_hash_sha256_or_empty` (`src/lib/nogc_sync_mut/io_runtime.spl`) promised
+an empty miss sentinel but called `.len()` on the runtime's nil for a missing
+path. It now returns `""` for nil. That also makes `file_hash_sha256`, which
+calls it first, well defined for a missing path.
 
 Cost, measured with the same tree and the same seed binary, on 63 deps and 10
 entries: 2.18 ms per entry before, 6.98 ms per entry after (about 76 us per
