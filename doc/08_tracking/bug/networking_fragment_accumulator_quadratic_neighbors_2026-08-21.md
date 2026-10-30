@@ -148,12 +148,12 @@ Regression: `io/buffer_spec.spl` PASS.
 
 ## Follow-up 2026-10-30: `io_append_chunk` never appended (removed)
 
-`io_append_chunk(buf, chunk)` pushed into its `buf` PARAMETER. Arrays are
+`io_append_chunk(buf, chunk)` pushed into its `buf` PARAMETER. In the interpreter lane arrays are
 values (doc/07_guide/language/value_semantics_by_engine.md), so on the
 interpreter the push never reached the caller: measured `copied=1 len=0`.
 Every converted reader (`TcpStream.read_exact` / `read_all` /
 `read_line_bounded`, `tcp_fd_read_line_or_empty`,
-`tcp_fd_read_bytes_or_empty`, `Pipe.read_exact`) therefore returned an EMPTY
+`tcp_fd_read_bytes_or_empty`, `Stdin.read_exact` (pipe.spl)) therefore returned an EMPTY
 buffer. Fix: each reader now appends through its own binding
 (`for b in chunk: buf.push(b)`), still linear, and `byte_append.spl` is
 deleted. Specs: `test/01_unit/lib/nogc_sync_mut/io/stream_reader_append_shape_spec.spl`
