@@ -145,3 +145,18 @@ The 4 correctness scenarios pass in BOTH shapes, confirming the refactor is
 behavior-preserving and that only the 3 work-counter scenarios discriminate.
 Regression: `io/buffer_spec.spl` PASS.
 
+
+## Follow-up 2026-10-30: `io_append_chunk` never appended (removed)
+
+`io_append_chunk(buf, chunk)` pushed into its `buf` PARAMETER. Arrays are
+values (doc/07_guide/language/value_semantics_by_engine.md), so on the
+interpreter the push never reached the caller: measured `copied=1 len=0`.
+Every converted reader (`TcpStream.read_exact` / `read_all` /
+`read_line_bounded`, `tcp_fd_read_line_or_empty`,
+`tcp_fd_read_bytes_or_empty`, `Pipe.read_exact`) therefore returned an EMPTY
+buffer. Fix: each reader now appends through its own binding
+(`for b in chunk: buf.push(b)`), still linear, and `byte_append.spl` is
+deleted. Specs: `test/01_unit/lib/nogc_sync_mut/io/stream_reader_append_shape_spec.spl`
+(in-place shape + no array-parameter helper) and
+`test/01_unit/lib/nogc_async_mut/http_server/body_fragment_accumulation_spec.spl`
+(linear copy work as fragment count doubles).
