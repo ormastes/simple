@@ -910,16 +910,29 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
     free(argv);
     return error == 0 ? (int64_t)pid : -1;
 #else
+    if (arg_count > 32768) return -1;
+    for (int64_t i = 0; i < arg_count; i++) if (!args[i]) return -1;
+    /* argv is built BEFORE fork: a multithreaded parent may hold the
+     * allocator lock, so the child must not calloc (it used to). */
+    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+    if (!argv) return -1;
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
     pid_t pid = fork();
-    if (pid < 0) return -1;
+    if (pid < 0) {
+        free(argv);
+        return -1;
+    }
     if (pid == 0) {
-        char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
-        if (!argv) _exit(1);
-        argv[0] = (char*)cmd;
-        for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
+        /* Deliberately NOT setpgid(0, 0) (audit P12 asked for parity with
+         * rt_fork_child_setup): the Rust twin keeps async children in the
+         * caller's group, and a child in a background group that reads the
+         * inherited tty would stop on SIGTTIN. Tree cleanup for test children
+         * is owned by rt_process_spawn_session instead. */
         execvp(cmd, argv);
         _exit(127);
     }
+    free(argv);
     return (int64_t)pid;
 #endif
 }

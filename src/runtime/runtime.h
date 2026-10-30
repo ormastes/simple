@@ -45,6 +45,9 @@ extern "C" {
 /* Include fork-without-exec support */
 #include "runtime_fork.h"
 
+/* Session-owned process trees (spawn/kill_tree, pdeathsig, birth identity) */
+#include "runtime_process_tree.h"
+
 /* ===== Runtime Configuration ===== */
 
 void rt_set_macro_trace(bool enabled);
@@ -1267,6 +1270,8 @@ int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* ar
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_spawn_guarded_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_spawn_async_value(int64_t cmd, SplArray* args);
+/* Session-leader spawn for tree cleanup; see runtime_process_tree.h. */
+int64_t   rt_process_spawn_session_value(int64_t cmd, SplArray* args);
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1423. NOT a bare SplArray*. */
 int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
