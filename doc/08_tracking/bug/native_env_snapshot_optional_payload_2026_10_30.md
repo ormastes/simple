@@ -1,6 +1,7 @@
 # Checked environment snapshots retain an unintended Option payload
 
-Status: native failure proven; typed library boundary repaired, native regression pending.
+Status: typed library boundary repaired; focused native regression PASS.
+Private-daemon/SSpec acceptance and broader verification remain pending.
 
 Generation-2 compiler `5dd85ea67087e063ae3a68ad0b282c82443e2ade6a178e0f10187fa93028260c`
 built standalone runner `e54464152e94c60610f18d15af71f4709c5ff54fd3acf94704d97c640c8ea0dd`.
@@ -46,5 +47,33 @@ intentional `Result<Option<T>, E>` payloads.
 `test/fixtures/compiler/native_env_snapshot_optional_payload.spl` exercises the
 real sync and async snapshot APIs with a process-local sentinel, the `?` consumer,
 and intentional None/Some(empty)/Some(nonempty) Result payload controls, including
-an empty text value distinct from a missing pair. The fixture has not yet run
-with this repair; private-daemon and SSpec acceptance remain pending.
+an empty text value distinct from a missing pair.
+
+## Focused native validation
+
+Compiler SHA-256:
+`5dd85ea67087e063ae3a68ad0b282c82443e2ade6a178e0f10187fa93028260c`.
+The immutable 80-path consumer source manifest has SHA-256
+`da6c7966a4c578d0a4c710eb67728d21e7bfed161a98a7167864e865be77be58`.
+It starts from generation-3 base `86b39` and includes repair
+`bb0b52de8dcecee229168710502470cacf6cca51`. Its async module preserves the
+upstream shared `env_vars_nilable` adapter and adds this explicit-match repair;
+that integration was independently source-reviewed. This is a consumer build
+with the admitted generation-2 compiler, not a new producer qualification.
+
+Receipts:
+`D:/dev/simple-runner-env-consumer-evidence-20261030/regression-env-snapshot-02`.
+The 61-module build and executable both exited 0. Stdout is exactly
+`ENV_SNAPSHOT_OPTIONAL_PAYLOAD_PASS`. Executable SHA-256:
+`6e376650af80af39d5b12901a7ed3becd2e0285722caec923b3c393a62e4bff0`.
+Build peak RSS was 4085408 KiB; run peak RSS was 2544 KiB. Both process-tree
+receipts report quiescence.
+
+Attempt `regression-env-snapshot-01` stopped with resource exit 88 at a 4 GiB
+cap. Attempt 02 continued its compatible cache with an 8 GiB cap; the earlier
+resource failure is retained and is not a passing test result.
+
+This qualifies the focused sync/async snapshot, `?` consumer, and intentional
+optional payload controls. It does not establish private-daemon startup,
+SSpec execution, or broad compiler/library acceptance. Runner acceptance with
+the next admitted producer remains pending.
