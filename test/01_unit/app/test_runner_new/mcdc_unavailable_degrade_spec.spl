@@ -1,0 +1,49 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-TESTRUNNER-MCDC-UNAVAILABLE-DEGRADE
+"""
+## Purpose and audience
+Under `SIMPLE_MCDC_MODE=on` the runner compiles an instrumented wrapper for
+every spec. Only the pure-Simple compiler emits MC/DC probes; the Rust
+bootstrap seed never does, so a seed-compiled wrapper can never yield real
+MC/DC evidence. The runner detects that producer once from its `--version`
+identity and degrades each file explicitly (`mcdc-unavailable`) instead of
+paying a slow, doomed compile per spec.
+
+A degraded run keeps every file's REAL pass/fail, but the summary must say
+the run is NOT MC/DC-compliant and count the degraded files.
+
+Audience: owners of `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl`
+(`mcdc_compiler_identity_lacks_probes`) and
+`src/lib/nogc_sync_mut/test_runner/test_runner_output.spl`
+(`mcdc_degrade_summary_line`).
+"""
+use std.spec.*
+use std.test_runner.test_runner_execute.{mcdc_compiler_identity_lacks_probes, MCDC_UNAVAILABLE_DEGRADE_TOKEN}
+use std.test_runner.test_runner_output.{mcdc_degrade_summary_line}
+use std.test_runner.test_runner_types.{TestFileResult}
+
+val SEED_IDENTITY = "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.\nBuild and use the pure-Simple bin/simple instead.\nSimple Language v1.0.0-rc.1"
+val SELF_HOSTED_IDENTITY = "Simple v1.0.0-rc.1"
+
+fn file_result(path: text, skip_reason: text) -> TestFileResult:
+    TestFileResult(path: path, passed: 1, failed: 0, skipped: 0, pending: 0,
+        duration_ms: 1, setup_ms: 0, error: "", timed_out: false, cached: false,
+        mcdc_skip_reason: skip_reason)
+
+describe "MC/DC probe-emission availability":
+    it "classifies the Rust seed identity as lacking probe emission":
+        expect(mcdc_compiler_identity_lacks_probes(SEED_IDENTITY))
+
+    it "keeps a self-hosted identity eligible for instrumentation":
+        expect_not(mcdc_compiler_identity_lacks_probes(SELF_HOSTED_IDENTITY))
+
+    it "names the degrade on the verdict token":
+        expect(MCDC_UNAVAILABLE_DEGRADE_TOKEN).to_equal("mcdc-unavailable:compiler-lacks-probe-emission")
+
+describe "MC/DC degrade summary":
+    it "prints nothing when every file collected MC/DC":
+        expect(mcdc_degrade_summary_line([file_result("a_spec.spl", ""), file_result("b_spec.spl", "")])).to_equal("")
+
+    it "marks the run not MC/DC-compliant and counts degraded files":
+        val line = mcdc_degrade_summary_line([file_result("a_spec.spl", "MC/DC: unavailable"), file_result("b_spec.spl", "")])
+        expect(line).to_start_with("MC/DC: NOT compliant -- 1 of 2 file(s) degraded")
