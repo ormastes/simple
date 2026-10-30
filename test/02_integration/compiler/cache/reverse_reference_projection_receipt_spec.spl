@@ -12,6 +12,7 @@ use compiler.driver.cache.package_module_index.{
 use compiler.driver.cache.reverse_reference_receipt.{
     REVERSE_REFERENCE_FAMILIES_V1, ReverseReferenceProjectionV1,
     ReverseReferenceGenerationReceiptV1, reverse_reference_read_current_v1,
+    reverse_reference_receipt_migrate_v1_to_v2,
     reverse_reference_consumers_v1, reverse_reference_receipt_encode_v1,
     reverse_reference_receipt_decode_v1, reverse_reference_receipt_digest_v1,
     reverse_reference_publish_generation_v1, reverse_reference_exact_key_v1,
@@ -430,7 +431,8 @@ describe "M2 immutable reverse-reference projection receipts":
             fixture.0, [fixture.1, fixture.2])
         expect(changes.files.contains(fixture.1)).to_equal(true)
         expect(changes.files.contains(fixture.2)).to_equal(true)
-        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
+            "unknown-projection-family:macro-definition-consumer")
 
     it "attributes a conservative closure rebuild when registry state is unknown":
         reverse_reference_owner_end_v1()
@@ -520,7 +522,7 @@ describe "M2 immutable reverse-reference projection receipts":
         expect(reverse_reference_owner_begin_v1()).to_equal(false)
         reverse_reference_owner_end_v1()
 
-    it "keeps an ordinary dependency reusable after a private-body edit":
+    it "widens a private-body edit when V1 lacks macro invalidation evidence":
         reverse_reference_owner_end_v1()
         expect(reverse_reference_owner_begin_v1()).to_equal(true)
         val root = fixture_root()
@@ -554,11 +556,14 @@ describe "M2 immutable reverse-reference projection receipts":
             cache, [provider, semantic_consumer, link_action])
         expect(changes.files.contains(provider)).to_equal(true)
         expect(changes.files.contains(link_action)).to_equal(true)
-        expect(changes.files.contains(semantic_consumer)).to_equal(false)
+        # V1 has no macro-definition family. The newly required macro-family
+        # query must therefore widen to every source in this cache scope.
+        expect(changes.files.contains(semantic_consumer)).to_equal(true)
         expect(build_cache_entry_is_valid_at(cache, semantic_consumer)).to_equal(true)
-        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
+            "unknown-projection-family:macro-definition-consumer")
 
-    it "follows exact semantic consumers after an exported-interface edit":
+    it "widens an exported-interface edit when macro source mapping is absent":
         reverse_reference_owner_end_v1()
         expect(reverse_reference_owner_begin_v1()).to_equal(true)
         val root = fixture_root()
@@ -586,7 +591,18 @@ describe "M2 immutable reverse-reference projection receipts":
             cache, [provider, semantic_consumer, unrelated])
         expect(changes.files.contains(provider)).to_equal(true)
         expect(changes.files.contains(semantic_consumer)).to_equal(true)
-        expect(changes.files.contains(unrelated)).to_equal(false)
+        expect(changes.files.contains(unrelated)).to_equal(true)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
+            "unknown-projection-family:macro-definition-consumer")
+
+    it "does not widen a no-change V2 cache scope":
+        val fixture = publish_fixture()
+        val current = reverse_reference_read_current_v1(fixture.0)
+        expect(current.valid).to_equal(true)
+        val v2 = reverse_reference_receipt_migrate_v1_to_v2(current.receipt!)
+        expect(reverse_reference_publish_generation_v1(fixture.0, v2)).to_equal(true)
+        val changes = incremental_detect_changes_at(fixture.0, [fixture.1, fixture.2])
+        expect(changes.files.len()).to_equal(0)
         expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
 
     it "computes the transitive causal closure through dependent consumers":

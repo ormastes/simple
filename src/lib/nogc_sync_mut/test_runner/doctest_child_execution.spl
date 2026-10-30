@@ -1,0 +1,121 @@
+# One owned invocation for Markdown and source-comment doctests. Compilation
+# failure is infrastructure failure, never an expected failure of the example.
+use std.test_runner.test_runner_types.{TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.native_compile_contract.{native_test_request_error,
+    native_test_compile_threads, native_test_compile_args_with_threads}
+use std.test_runner.native_test_source_stage.{native_test_stage_source_v1, native_test_cleanup_source_v1}
+use std.test_runner.native_execution_evidence.{native_execution_completion_v1}
+use std.test_runner.sdoctest.types.{should_fail_infra_reason}
+use std.common.test_runner.native_framework_wrapper.{native_plain_wrapper_source}
+use compiler.frontend.core.source_facts.{simple_code_lines,
+    simple_string_continuation_lines, simple_string_byte_ranges}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write, file_exists, file_read}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.env_ops.{cwd, env_get}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+
+struct DoctestChildResultV1:
+    stdout: text
+    stderr: text
+    exit_code: i64
+    infrastructure_error: text
+
+fn doctest_child_error_v1(reason: text, stdout: text = "", stderr: text = "") -> DoctestChildResultV1:
+    DoctestChildResultV1(stdout: stdout, stderr: stderr, exit_code: -1, infrastructure_error: reason)
+
+fn doctest_child_request_error_v1(backend: text, run_config: text) -> text:
+    if backend != "" and run_config != "":
+        return "native-doctest: run-config is not supported by the explicit native route"
+    ""
+
+fn doctest_child_cli_args_v1(path: text, run_config: text) -> [text]:
+    if run_config != "": ["--run-config={run_config}", path] else: [path]
+
+fn doctest_native_compile_error_v1(status: i64, artifact_exists: bool) -> text:
+    if status != 0 or not artifact_exists:
+        return "native-doctest: compilation failed or artifact missing"
+    ""
+
+fn doctest_native_body_result_v1(stdout: text, stderr: text, status: i64,
+        evidence_path: text, completion: text) -> DoctestChildResultV1:
+    # A prior panic diagnostic cannot turn a later transport timeout into an
+    # expected example failure. Timeout wins over the legacy panic classifier.
+    if status != 0 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
+        return doctest_child_error_v1("native-doctest: TIMEOUT during example execution", stdout, stderr)
+    val transport_error = should_fail_infra_reason(status, stderr)
+    if transport_error != "": return doctest_child_error_v1(transport_error, stdout, stderr)
+    if status == 0 and completion != native_execution_completion_v1(evidence_path, "plain", 0):
+        return doctest_child_error_v1("native-doctest: normal completion evidence missing or invalid", stdout, stderr)
+    DoctestChildResultV1(stdout: stdout, stderr: stderr, exit_code: status, infrastructure_error: "")
+
+fn doctest_child_in_directory_v1(directory: text, code: text, binary: text,
+        timeout_ms: i64, options: TestOptions?, run_config: text) -> DoctestChildResultV1:
+    val native_route = options != nil and options!.native_backend != ""
+    val backend = if native_route: options!.native_backend else: ""
+    # CLI --timeout is seconds; Markdown environment/default doctest timeouts
+    # are milliseconds. Native compilation and execution share one CLI budget.
+    val budget_ms = if native_route: options!.timeout * 1000 else: timeout_ms
+    if budget_ms <= 0: return doctest_child_error_v1("doctest: positive timeout required")
+    val request_error = doctest_child_request_error_v1(backend, run_config)
+    if request_error != "": return doctest_child_error_v1(request_error)
+    var source = code
+    if native_route:
+        val request = native_test_request_error(backend, options!.coverage,
+            options!.safe_mode, options!.native_source_roots, options!.library_mode)
+        if request != "": return doctest_child_error_v1(request)
+        val wrapped = native_plain_wrapper_source(code, simple_code_lines(code),
+            simple_string_continuation_lines(code), simple_string_byte_ranges(code))
+        if wrapped.is_err(): return doctest_child_error_v1(wrapped.unwrap_err())
+        source = wrapped.unwrap()
+    val source_path = directory + "/snippet.spl"
+    if not file_atomic_write(source_path, source):
+        return doctest_child_error_v1("doctest: owned snippet write failed")
+    if not native_route:
+        val result = process_run_bounded(binary, doctest_child_cli_args_v1(source_path, run_config),
+            budget_ms, TEST_OUTPUT_CAPTURE_BYTES)
+        return DoctestChildResultV1(stdout: result.0, stderr: result.1,
+            exit_code: result.2, infrastructure_error: "")
+    val threads = native_test_compile_threads(env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? "")
+    if threads.1 != "": return doctest_child_error_v1(threads.1)
+    val artifact = directory + "/snippet.exe"
+    if not dir_create_all(artifact + ".cache"):
+        return doctest_child_error_v1("native-doctest: owned artifact cache creation failed")
+    val staged = native_test_stage_source_v1(cwd(), source_path)
+    if staged.is_err(): return doctest_child_error_v1(staged.unwrap_err())
+    val stage = staged.unwrap()
+    val args = native_test_compile_args_with_threads(stage.path, artifact, backend,
+        threads.0, options!.native_source_roots, options!.library_mode)
+    val start = time_now_unix_micros()
+    val compiled = process_run_bounded(binary, args, budget_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    val cleaned = native_test_cleanup_source_v1(stage, options!.keep_artifacts)
+    if not cleaned: return doctest_child_error_v1("native-doctest: generated source cleanup failed")
+    val compile_error = doctest_native_compile_error_v1(compiled.2, file_exists(artifact))
+    if compile_error != "": return doctest_child_error_v1(compile_error, compiled.0, compiled.1)
+    val remaining = budget_ms - (time_now_unix_micros() - start) / 1000
+    if remaining <= 0: return doctest_child_error_v1("native-doctest: TIMEOUT before example execution")
+    val evidence = directory + "/completion"
+    val executed = process_run_bounded(artifact, ["--simple-native-evidence={evidence}"],
+        remaining, TEST_OUTPUT_CAPTURE_BYTES)
+    val completion = file_read(evidence + ".complete") ?? ""
+    doctest_native_body_result_v1(executed.0, executed.1, executed.2, evidence, completion)
+
+fn execute_doctest_child_v1(code: text, binary: text, timeout_ms: i64,
+        options: TestOptions? = nil, run_config: text = "") -> DoctestChildResultV1:
+    # Keep source lookup inside the tested checkout while isolating concurrent
+    # executions, including two invocations of the same source and line.
+    val parent = cwd() + "/.simple/doctest"
+    if not dir_create_all(parent): return doctest_child_error_v1("doctest: staging parent unavailable")
+    val created = secure_temp_dir(parent, "invocation-")
+    if created.is_err(): return doctest_child_error_v1(created.unwrap_err())
+    val directory = path_absolute(created.unwrap())
+    val result = doctest_child_in_directory_v1(directory, code, binary, timeout_ms, options, run_config)
+    if options == nil or not options!.keep_artifacts:
+        if not dir_remove_all(directory):
+            return doctest_child_error_v1("doctest: owned invocation cleanup failed", result.stdout, result.stderr)
+    result
+
+export DoctestChildResultV1, execute_doctest_child_v1, doctest_child_request_error_v1
+export doctest_child_cli_args_v1, doctest_native_body_result_v1
+export doctest_native_compile_error_v1

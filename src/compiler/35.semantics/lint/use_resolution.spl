@@ -18,6 +18,8 @@ use compiler.core.ast.{
 use compiler.common.assurance.policy.{strictness_for_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use std.nogc_sync_mut.io_runtime.{file_exists}
+use std.nogc_sync_mut.io_runtime.{dir_exists, dir_list}
+use compiler.common.source_root_resolution.{source_root_numbered_candidate_v1}
 
 # WP-10 (aerospace hardening plan, doc/03_plan/language/assurance/
 # aerospace_hardening_plan_2026-08-07.md): W0407 was warning-only under every
@@ -48,15 +50,47 @@ struct UseResolutionWarning:
 # Helpers
 # ============================================================================
 
-fn _dots_to_slashes(path: text) -> text:
-    """Convert dot-separated module path to slash-separated file path."""
-    val parts = path.split(".")
-    var result = parts[0]
-    var i = 1
-    while i < parts.len():
-        result = result + "/" + parts[i]
+fn _entry_basename(entry: text) -> text:
+    val parts = entry.split("/")
+    parts[parts.len() - 1]
+
+fn _resolve_dir_segment(parent: text, segment: text) -> text:
+    """Physical directory name for logical `segment` under `parent`.
+    Layered trees store `compiler.semantics` as `compiler/35.semantics`, so
+    the exact name is tried first and then a unique `<digits>.<segment>`
+    entry. Returns "" when neither (or more than one numbered twin) exists."""
+    if dir_exists(parent + segment):
+        return segment
+    var found = ""
+    for entry in dir_list(parent):
+        val name = _entry_basename(entry)
+        if source_root_numbered_candidate_v1(name, segment) and dir_exists(parent + name):
+            if found != "":
+                return ""
+            found = name
+    found
+
+fn _physical_module_base(src_root: text, mod_path: text) -> text:
+    """Map a logical module path to `<src_root><dirs>/<last>` (no extension).
+    Interior segments go through numbered-directory resolution; `std.` is the
+    `lib/` tree. Unresolvable interior segments keep their logical name so
+    the caller's existence probes report the import as unresolved.
+    An ambiguous numbered twin is reported as unresolved too (the message
+    says "not found", which is imprecise but still fails closed)."""
+    var segments = mod_path.split(".")
+    if segments.len() > 0 and segments[0] == "std":
+        segments[0] = "lib"
+    # `compiler.core.*` is the registered alias of compiler/10.frontend/core
+    # (driver_entry_closure_core.spl adds it for every frontend core module).
+    if segments.len() > 2 and segments[0] == "compiler" and segments[1] == "core":
+        segments = ["compiler", "frontend"] + segments[1:segments.len()]
+    var base = src_root
+    var i = 0
+    while i < segments.len() - 1:
+        val physical = _resolve_dir_segment(base, segments[i])
+        base = base + (if physical == "": segments[i] else: physical) + "/"
         i = i + 1
-    result
+    base + segments[segments.len() - 1]
 
 fn _derive_src_root(file_path: text) -> text:
     """Derive the src/ root directory from a file path being linted."""
@@ -94,9 +128,11 @@ fn check_use_resolution(decl_indices: [i64], file_path: text, profile_name: text
             continue
 
         val mod_path = decl_get_name(idx)
-        val rel_path = _dots_to_slashes(mod_path)
-        val target_file = src_root + rel_path + ".spl"
-        val dir_init = src_root + rel_path + "/__init__.spl"
+        val module_base = _physical_module_base(src_root, mod_path)
+        val target_file = module_base + ".spl"
+        val dir_parent = module_base.slice(0, module_base.len() - _entry_basename(module_base).len())
+        val dir_leaf = _resolve_dir_segment(dir_parent, _entry_basename(module_base))
+        val dir_init = dir_parent + (if dir_leaf == "": _entry_basename(module_base) else: dir_leaf) + "/__init__.spl"
 
         if (not file_exists(target_file) and not file_exists(dir_init)):
             warnings.push(UseResolutionWarning(

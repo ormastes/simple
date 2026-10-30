@@ -1,0 +1,30 @@
+# Shared real scheduling fixtures; no process admission or result is simulated.
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1, BuildRunV1}
+use std.common.task_runner.scheduler.{task_runner_start, task_runner_encode_v1}
+
+fn recovery_capacity_run(second_host: bool = false) -> BuildRunV1:
+    val digest = sha256_text("recovery-capacity-fixture")
+    var tasks: [BuildTaskV1] = []
+    for id in ["first", "second"]:
+        tasks = tasks.push(BuildTaskV1(id: id, attempt: 1, phase: "unit",
+            producer_digest: digest, source_digest: digest, toolchain_digest: digest,
+            dependencies: [], program: "compiler", args: [], inputs: [],
+            outputs: [id + ".bin"], cache_key: digest, timeout_ms: 1000,
+            memory_limit_bytes: 1, links: []))
+    var hosts = [BuildHostV1(id: "local", transport: "local", endpoint: "",
+        workspace: ".", worker_program: "worker", worker_digest: digest, slots: 1)]
+    if second_host:
+        hosts = hosts.push(BuildHostV1(id: "other", transport: "local", endpoint: "",
+            workspace: ".", worker_program: "worker", worker_digest: digest, slots: 1))
+    BuildRunV1(tasks: tasks, hosts: hosts, keep_going: true, max_attempts: 1)
+
+fn recovery_capacity_journal(run: BuildRunV1, statuses: [text], hosts: [text]) -> text:
+    # Deliberately author untrusted persisted rows outside normal dispatch.
+    # The decoder must independently enforce its reservation invariant.
+    var state = task_runner_start(run)
+    state.statuses = statuses
+    state.host_ids = hosts
+    task_runner_encode_v1(state)
+
+export recovery_capacity_run, recovery_capacity_journal

@@ -7,6 +7,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_ssr_renderer.{
 }
 use std.common.image.png_encode.{encode_argb_to_png}
 use std.concurrent.mutex.{mutex_new, mutex_with_lock_keeping, Mutex}
+use std.nogc_sync_mut.concurrent.channel.{channel_from_id}
 
 class SsrAsyncConfig:
     width: i32
@@ -72,14 +73,56 @@ fn _registered_ssr_handler(request: HttpRequestData,
                            _location: LocationConfig) -> HttpResponseData:
     render_ssr_request(request, SSR_CONFIG)
 
+# Parallel arrays, not Dict<i64, HttpResponseData>: struct-valued dict reads
+# are unreliable across lanes (see the native note in handler.spl dispatch).
+var SSR_COMPLETED_IDS: [i64] = []
+var SSR_COMPLETED_RESPONSES: [HttpResponseData] = []
+
+fn _ssr_completed_index(job_id: i64) -> i64:
+    var index: i64 = 0
+    while index < SSR_COMPLETED_IDS.len():
+        if SSR_COMPLETED_IDS[index] == job_id:
+            return index
+        index = index + 1
+    -1
+
+fn _ssr_completed_drop(index: i64):
+    SSR_COMPLETED_IDS.remove(index)
+    SSR_COMPLETED_RESPONSES.remove(index)
+
+fn _submit_ssr_job(job_id: i64, completion_channel_id: i64,
+                   request: HttpRequestData, _location: LocationConfig) -> bool:
+    """Blocking bridge, not a deferred submitter: render now, park the response
+    under job_id, and signal the scalar job_id on the completion channel.
+    Only scalars cross the channel (the compiled channel ABI is word-sized);
+    the consumer collects the response with take_ssr_job_response(job_id)."""
+    if completion_channel_id < 0 or _ssr_completed_index(job_id) >= 0:
+        return false
+    SSR_COMPLETED_IDS.push(job_id)
+    SSR_COMPLETED_RESPONSES.push(render_ssr_request(request, SSR_CONFIG))
+    if not channel_from_id(completion_channel_id).try_send(job_id):
+        _ssr_completed_drop(SSR_COMPLETED_IDS.len() - 1)
+        return false
+    true
+
+fn take_ssr_job_response(job_id: i64) -> HttpResponseData?:
+    """Claim (once) the response a completion signal announced for job_id."""
+    val index = _ssr_completed_index(job_id)
+    if index < 0:
+        return nil
+    val response = SSR_COMPLETED_RESPONSES[index]
+    _ssr_completed_drop(index)
+    Some(response)
+
 fn register_ssr_async_handler(mut registry: HandlerRegistry,
                               name: text,
                               config: SsrAsyncConfig) -> bool:
-    """Register SSR through the currently supported synchronous registry ABI."""
+    """Register SSR as an async submitter, plus the synchronous dispatch fallback."""
     if name == "" or config.width <= 0 or config.height <= 0 or config.max_html_bytes <= 0:
         return false
     SSR_CONFIG = config
+    registry.register_async(name, _submit_ssr_job)
     registry.register(name, _registered_ssr_handler)
     true
 
-export SsrAsyncConfig, render_ssr_request, register_ssr_async_handler
+export SsrAsyncConfig, render_ssr_request, register_ssr_async_handler, take_ssr_job_response

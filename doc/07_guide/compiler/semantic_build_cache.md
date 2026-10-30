@@ -2,6 +2,9 @@
 
 **Read this first: none of what follows is wired into your build yet.**
 
+For the caches and SCV source admission that *are* live today, see
+[simple_cache_scv.md](simple_cache_scv.md).
+
 As of 2026-08-10 the semantic build cache v2 modules exist, are tested, and are
 formally modelled. The legacy cache (`.build_cache.sdn` plus `.build/mir_cache/`)
 still makes **every** build decision. The one v2 code path a normal build can

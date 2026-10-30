@@ -2,10 +2,11 @@
 #
 # The reverse projection is DERIVED data: it is rebuilt per generation from the
 # sealed forward manifests and is never an identity input to a forward query.
-# Publication is lock-free: the receipt is an immutable content-addressed file
-# (create-exclusive, identical-content races are benign) and the CURRENT pointer
-# moves by temp-file + rename. A missing or torn `.rr` never means "zero
-# dependents": lookups answer conservatively until a replay republishes it.
+# The legacy receipt writer uses immutable content-addressed files and a
+# temp-file + rename CURRENT pointer. This gives old/new pointer visibility,
+# but does not provide expected-generation CAS or confirmed directory
+# durability. A missing or torn `.rr` never means "zero dependents": lookups
+# answer conservatively until an admitted full-scope replay can republish it.
 
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1}
@@ -99,26 +100,15 @@ fn reverse_reference_project_generation_v2(owner: text, root: text,
         previous: ReverseReferenceReceiptReadV1) -> ReverseReferenceProjectionBuildV2:
     var projections: [ReverseReferenceProjectionV1] = []
     var seen: [text] = []
-    var retained: [text] = []
     var incomplete_families: [text] = []
     for entry in manifests:
         if not entry.sealed or entry.manifest == nil:
-            # Failed/cancelled rebuild: keep this consumer's old outgoing edges.
-            if not previous.valid or previous.receipt == nil:
-                return reverse_reference_build_fail_v2(
-                    "failed-consumer-without-prior-generation:{entry.consumer_identity}")
-            for old in previous.receipt!.projections:
-                if old.consumer_identity == entry.consumer_identity and
-                        not old.key.subject_identity.starts_with("@"):
-                    val tag = "{old.key.subject_identity}|{old.key.projection_kind}|{old.key.projection_digest}|{old.consumer_identity}"
-                    if not seen.contains(tag):
-                        seen.push(tag)
-                        projections.push(reverse_reference_projection_v2(owner, root,
-                            old.key.subject_identity, old.key.projection_kind,
-                            old.key.projection_digest, old.consumer_identity))
-            if not retained.contains(entry.consumer_identity):
-                retained.push(entry.consumer_identity)
-            continue
+            # The old receipt may still be useful as historical data, but it
+            # cannot make this candidate generation complete. Returning no
+            # receipt ensures callers report Unknown and widen to the entire
+            # canonical scope instead of certifying retained edges as current.
+            return reverse_reference_build_fail_v2(
+                "unsealed-forward-manifest:{entry.consumer_identity}")
         val manifest = entry.manifest!
         if not semantic_query_read_manifest_valid_v1(manifest):
             return reverse_reference_build_fail_v2("invalid-forward-manifest:{entry.consumer_identity}")
@@ -132,6 +122,9 @@ fn reverse_reference_project_generation_v2(owner: text, root: text,
                     not incomplete_families.contains(family):
                 incomplete_families.push(family)
             val subject = reverse_reference_subject_for_key_v2(read.producer)
+            # V2 records a semantic edge fingerprint, not a versioned
+            # invocation/use-site identity. Keep its historical digest
+            # semantics until a persisted schema can carry stable use IDs.
             val digest = sha256_text("{read.facet}|{read.consumed_fingerprint}|{read.witness_digest}")
             val tag = "{subject}|{family}|{digest}|{entry.consumer_identity}"
             if not seen.contains(tag):
@@ -150,7 +143,7 @@ fn reverse_reference_project_generation_v2(owner: text, root: text,
     ReverseReferenceProjectionBuildV2(ok: true, reason: "ok",
         receipt: Some(ReverseReferenceGenerationReceiptV1(
             REVERSE_REFERENCE_RECEIPT_SCHEMA_V2, owner, root, projections)),
-        retained_consumers: retained)
+        retained_consumers: [])
 
 fn reverse_reference_publish_projection_v2(cache_path: text,
         build: ReverseReferenceProjectionBuildV2) -> bool:

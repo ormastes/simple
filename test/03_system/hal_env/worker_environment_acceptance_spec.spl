@@ -1,0 +1,45 @@
+# Acceptance: the environment a BuildRunner worker child gets is correct.
+# One child, started through the bounded HAL entry the worker path uses,
+# reports its platform, cwd and env; each value is compared to an independent
+# parent-side source.
+# Per host: macOS/Linux/FreeBSD run (/bin/sh). Windows: pending (needs a
+# cmd.exe report script; spawn+exit is covered by portable_process_hal_spec).
+# SimpleOS (SIMPLE_OS_KERNEL=simpleos): pending, no hosted spawn. Other: fail.
+use std.spec.{describe, it, expect, fail, pending}
+use std.nogc_sync_mut.io_runtime.{host_os, env_get, env_set, cwd}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_is_simpleos}
+
+fn hal_env_accept_line(report: text, key: text) -> text:
+    for line in report.split("\n"):
+        if line.starts_with(key + "="):
+            return line[key.len() + 1:]
+    "<missing " + key + ">"
+
+describe "BuildRunner worker environment acceptance":
+    it "gives the worker child the parent's platform, cwd and environment":
+        val os = host_os()
+        if sosix_test_is_simpleos() or os == "windows":
+            pending("Windows needs a cmd.exe report script; SimpleOS has no hosted spawn")
+            return
+        if os != "macos" and os != "linux" and os != "freebsd" and os != "darwin":
+            fail("unqualified host for worker environment: " + os)
+            return
+        val (parent_pwd, _pe, pc) = process_run_bounded("/bin/sh", ["-c", "cd -- \"$1\" && pwd -P", "sh", cwd()], 10000, 4096)
+        expect(pc).to_equal(0)
+        env_set("HAL_ENV_ACCEPT_MARK", "mark-42")
+        val script = "echo OS=$(uname -s); echo CWD=$(pwd -P); echo HOME=$HOME; echo TMPDIR=$TMPDIR; echo PATH=$PATH; echo MARK=$(printenv HAL_ENV_ACCEPT_MARK || echo unset); echo ABSENT=$(printenv HAL_ENV_ACCEPT_ABSENT || echo unset); exit 9"
+        val (report, err, code) = process_run_bounded("/bin/sh", ["-c", script], 20000, 65536)
+        expect(err).to_equal("")
+        expect(code).to_equal(9)
+        val child_os = hal_env_accept_line(report, "OS").lower()
+        val expected_os = if os == "darwin": "macos" else: os
+        expect(if child_os == "darwin": "macos" else: child_os).to_equal(expected_os)
+        expect(hal_env_accept_line(report, "CWD")).to_equal(parent_pwd.trim())
+        expect(hal_env_accept_line(report, "HOME")).to_equal(env_get("HOME"))
+        expect(hal_env_accept_line(report, "TMPDIR")).to_equal(env_get("TMPDIR"))
+        expect(hal_env_accept_line(report, "PATH")).to_equal(env_get("PATH"))
+        # positive control: a parent-set var passes through
+        expect(hal_env_accept_line(report, "MARK")).to_equal("mark-42")
+        # isolation control: a never-set var is absent
+        expect(hal_env_accept_line(report, "ABSENT")).to_equal("unset")

@@ -6,9 +6,10 @@
 use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_remove}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
-use std.io_runtime.{dir_walk, dir_create_all}
+use std.io_runtime.{dir_walk}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
-use std.test_runner.test_runner_types.{TestFileResult, TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.doctest_child_execution.{execute_doctest_child_v1}
 # PERF (2026-08-17): import find_simple_binary from its DEFINING module
 # (test_executor_parsing), not via test_runner_execute. The execute module
 # pulls test_executor_composite -> gpu_lane executors -> the whole compiler
@@ -400,51 +401,13 @@ fn _dt_strip_doc_marker(trimmed: text, marker_len: i64) -> text:
         r = r[1:]
     r
 
-# Where the same-file doctest composite is written.
-#
-# It MUST live INSIDE the repository under test. The seed resolves `use std.*`
-# by walking UP from the source file's directory looking for a stdlib root, and
-# only if that walk finds nothing does it fall back to a repo root baked in at
-# BUILD time (`env!("CARGO_MANIFEST_DIR")` in
-# `src/compiler_rust/compiler/src/pipeline/module_loader.rs`, tried BEFORE the
-# process cwd). Writing the composite to `$TMPDIR` (`/tmp`, `/mnt/data/tmp`)
-# gives the walk-up nothing to find, so every doctest block silently compiled
-# the stdlib of whatever worktree the seed binary happened to be BUILT in --
-# a different tree than the one under test. Measured 2026-08-24 by strace: a
-# composite under /mnt/data/tmp opened
-# `/mnt/data/worktrees/seed-deploy-1/src/lib/nogc_sync_mut/spec/decorators.spl`
-# while the repo under test was a different worktree entirely, so stdlib fixes
-# made in the tree under test were invisible and stale defects in the unrelated
-# build tree were reported as failures of this tree's examples.
-#
-# `.simple/` is already gitignored, so the composite is inside the repo (the
-# walk-up finds this tree's `src/lib`) without polluting `src/` -- a stray
-# composite left under `src/` by a killed run would be picked up as a source
-# file by the next doctest discovery sweep.
-fn _dt_composite_dir() -> text:
-    val dir = ".simple/doctest"
-    dir_create_all(dir)
-    dir
-
-# Composite basenames must be unique per SOURCE FILE, not just per line number.
-# Two different sources with a doctest on the same line ran concurrently would
-# otherwise write and delete the same path underneath each other.
-fn _dt_composite_slug(file_path: text) -> text:
-    var slug = ""
-    for ch in file_path:
-        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
-            slug = slug + ch
-        else:
-            slug = slug + "_"
-    slug
-
 fn build_spl_doctest_code(source_content: text, dt: Doctest) -> text:
     source_content + "\n\n# --- doctest from line {dt.line_number} ---\nuse std.spec.*\n" + dt.code
 
 # `binary` is the child compiler already resolved by the caller through
 # select_test_child_binary (std.test_runner.compiler_select); it is never
 # re-derived here, so --compiler=phase2 cannot be shadowed by a cached default.
-fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64, binary: text) -> SdoctestFileResult:
+fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64, binary: text, options: TestOptions? = nil) -> SdoctestFileResult:
     if not file_exists(file_path):
         return SdoctestFileResult(
             source_file: file_path,
@@ -477,16 +440,12 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64, binary: text) ->
     for dt in doctests:
         # Build composite file: source + doctest code
         val composite_code = build_spl_doctest_code(source_content, dt)
-        val temp_path = "{_dt_composite_dir()}/spl_doctest_{_dt_composite_slug(file_path)}_{dt.line_number}.spl"
-        file_atomic_write(temp_path, composite_code)
-
         val start = time_now_unix_micros()
-        val result = process_run_bounded(binary, [temp_path], timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
-        val stdout = result.0
-        val stderr = result.1
-        val exit_code = result.2
-        val end = time_now_unix_micros()
-        val duration_ms = (end - start) / 1000
+        val child = execute_doctest_child_v1(composite_code, binary, timeout_ms, options)
+        val stdout = child.stdout
+        val stderr = child.stderr
+        val exit_code = child.exit_code
+        val duration_ms = (time_now_unix_micros() - start) / 1000
 
         val block = SdoctestBlock(
             source_file: file_path,
@@ -500,7 +459,12 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64, binary: text) ->
         # the child, rc 134). Only a timeout or a child that never ran is an
         # Error; a crash with diagnostics is the example failing.
         val timed_out = stderr.contains("TIMEOUT") or stderr.contains("timed out")
-        if exit_code == -1 and (timed_out or stderr == ""):
+        if child.infrastructure_error != "":
+            errors = errors + 1
+            block_results.push(BlockResult(block: block, status: BlockStatus.Error,
+                duration_ms: duration_ms, stdout: stdout, stderr: stderr,
+                error: child.infrastructure_error))
+        elif exit_code == -1 and (timed_out or stderr == ""):
             errors = errors + 1
             val process_error = if timed_out:
                 "TIMEOUT"
@@ -552,7 +516,6 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64, binary: text) ->
                 ))
 
         total_duration = total_duration + duration_ms
-        file_remove(temp_path)
 
     SdoctestFileResult(
         source_file: file_path,

@@ -80,6 +80,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | Guide | Description |
 |-------|-------------|
 | [lib/misc/stdlib.md](lib/misc/stdlib.md) | Standard library guide, including SDN, text utilities, concurrency primitives, and database access |
+| [lib/stdlib_resource_helpers.md](lib/stdlib_resource_helpers.md) | Std lib layers (nogc_sync_mut, nogc_async_mut, sosix), host detection, resource scopes and memory evidence, temp dirs, bounded process runs, thread pool, concurrent containers, per host |
 
 ## FFI
 
@@ -108,6 +109,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [compiler/backends/baremetal.md](compiler/backends/baremetal.md) | Baremetal, QEMU, semihosting, embedded |
 | [compiler/llvm/llvm_backend_policy.md](compiler/llvm/llvm_backend_policy.md) | LLVM backend policy |
 | [compiler/llvm/llvm_optimization_workflow.md](compiler/llvm/llvm_optimization_workflow.md) | LLVM optimization workflow, IR quality, verification, benchmark gate |
+| [compiler/simple_cache_scv.md](compiler/simple_cache_scv.md) | Compiler cache and SCV: source authority, admission, virtual source store, cache keys, SCV-E-* refusal codes, debugging, per-file src-to-obj status |
 | [backend/trace32_docker_experiment.md](backend/trace32_docker_experiment.md) | TRACE32 Docker experiment |
 | [backend/trace32_linux_setup.md](backend/trace32_linux_setup.md) | TRACE32 Linux setup |
 

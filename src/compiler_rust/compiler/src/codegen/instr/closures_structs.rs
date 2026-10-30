@@ -15,36 +15,11 @@ use super::helpers::{
 use super::{InstrContext, InstrResult};
 
 fn resolve_unique_module_qualified_func<M: Module>(ctx: &InstrContext<'_, M>, name: &str) -> Option<FuncId> {
-    let sanitized = name.replace('.', "_dot_");
-    let tail = sanitized.rsplit("__").next().unwrap_or(sanitized.as_str());
-    let suffix = format!("__{}", tail);
-    let mut ids: Vec<FuncId> = Vec::new();
-    for (candidate, id) in ctx.func_ids.iter() {
-        // Suffix match must respect the mangling boundary: a private helper
-        // `_index_of` mangles to `<module>___index_of`, which ends_with
-        // "__index_of" and used to false-positive-match method `index_of`
-        // dynamic dispatch (SIGSEGV: test_config `.index_of` bound to
-        // devhub__cmd_storage___index_of). Require the candidate's own tail
-        // (after its LAST `__`) to equal the probed tail exactly.
-        //
-        // A flatten-owner identity (`__spl_flat_<owner>__Type.method`, one of
-        // two same-named structs of a flattened unit) is not a module
-        // qualifier: the bare `Type.method` is the OTHER owner's body, so it
-        // must never win by suffix over that exact name.
-        if candidate
-            .strip_suffix(&suffix)
-            .is_some_and(|prefix| !prefix.is_empty() && !prefix.ends_with('_'))
-            && !candidate.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX)
-            && !ids.contains(id)
-        {
-            ids.push(*id);
-        }
-    }
-    if ids.len() == 1 {
-        ids.first().copied()
-    } else {
-        None
-    }
+    // The suffix rule (mangling boundary, flatten-owner exclusion, uniqueness
+    // over distinct ids) lives with the index that answers it in O(bucket)
+    // instead of a scan over every declared function per probe:
+    // `codegen::func_id_table::FuncIdTable::resolve_unique_module_qualified`.
+    ctx.func_ids.resolve_unique_module_qualified(name)
 }
 
 fn resolve_unique_module_qualified_import<M: Module>(ctx: &InstrContext<'_, M>, name: &str) -> Option<String> {

@@ -10,6 +10,7 @@ pub mod cranelift_sffi;
 pub mod dispatch;
 pub mod emitter_trait;
 pub mod execution_manager;
+pub mod func_id_table;
 pub mod instr;
 pub mod inline_asm;
 pub mod instr_gpu;

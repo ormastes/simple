@@ -1,0 +1,264 @@
+# @req REQ-SOSIX-ATOMIC-COPY-V1
+use std.spec.*
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_list, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.nogc_sync_mut.io.retained_file.{
+    RetainedFile, retained_file_open, retained_file_read_at,
+    retained_file_sync, retained_file_identity_unchanged
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.sosix.atomic_copy_v1.{
+    SosixAtomicCopyStateV1, SosixAtomicCopyErrorKindV1,
+    SosixAtomicCopyReceiptV1, SosixAtomicCopyErrorV1,
+    sosix_atomic_copy_verified_v1
+}
+
+val ROOT: text = "/tmp/sosix_atomic_copy_v1_spec"
+
+fn write_atomic_copy_fixture(path: text, bytes: [u8]) -> bool:
+    val file = match retained_file_open(path, 16777216u64, true):
+        case Ok(value): value
+        case Err(_): return false
+    match file.write(bytes):
+        case Ok(_):
+            val synced = retained_file_sync(file)
+            val closed = file.close()
+            synced and closed
+        case Err(_):
+            val closed = file.close()
+            false
+
+fn open_atomic_copy_fixture(path: text) -> Result<RetainedFile, text>:
+    retained_file_open(path, 16777216u64)
+
+fn expect_atomic_copy_bytes(path: text, expected: [u8]):
+    val file = match open_atomic_copy_fixture(path):
+        case Ok(value): value
+        case Err(_):
+            assert_true(false)
+            return
+    val actual = if expected.len() == 0: Ok([]) else: retained_file_read_at(file, 0u64, expected.len())
+    expect(file.size).to_equal(expected.len() as u64)
+    val closed = file.close()
+    expect(actual.is_ok()).to_be(true)
+    if actual.is_ok(): expect(actual.unwrap()).to_equal(expected)
+    expect(closed).to_be(true)
+
+fn atomic_copy_identity_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
+
+describe "SOSIX verified binary atomic copy V1":
+    before_each:
+        dir_remove(ROOT, true)
+        expect(dir_create(ROOT, true)).to_be(true)
+
+    after_each:
+        dir_remove(ROOT, true)
+
+    it "leaves identical binary output and metadata untouched":
+        step("Verify exact binary equality before creating staging")
+        val bytes = [0u8, 255u8, 128u8, 10u8, 13u8]
+        val source_path = ROOT + "/source"
+        val destination = ROOT + "/destination"
+        expect(write_atomic_copy_fixture(source_path, bytes)).to_be(true)
+        expect(write_atomic_copy_fixture(destination, bytes)).to_be(true)
+        val before_time = file_modified_time(destination)
+        val before_entries = dir_list(ROOT).len()
+        val held_destination = match open_atomic_copy_fixture(destination):
+            case Ok(file): file
+            case Err(_):
+                assert_true(false)
+                return
+        val before_identity = held_destination.identity
+        val source = match open_atomic_copy_fixture(source_path):
+            case Ok(file): file
+            case Err(_):
+                val closed = held_destination.close()
+                assert_true(false)
+                return
+        val result = sosix_atomic_copy_verified_v1(source, destination, sha256_u8_hex(bytes), bytes.len(), 16777216)
+        val source_closed = source.close()
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val receipt = result.unwrap()
+            expect(receipt.state).to_equal(SosixAtomicCopyStateV1.Unchanged)
+            expect(receipt.digest).to_equal(sha256_u8_hex(bytes))
+            expect(receipt.byte_count).to_equal(bytes.len())
+            expect(receipt.cleanup_pending).to_be(false)
+            expect(receipt.cleanup_path).to_equal("")
+        val held_identity_result = retained_file_identity_unchanged(held_destination)
+        expect(held_identity_result.is_ok()).to_be(true)
+        expect(file_modified_time(destination)).to_equal(before_time)
+        expect(dir_list(ROOT).len()).to_equal(before_entries)
+        val after_destination = match open_atomic_copy_fixture(destination):
+            case Ok(file): file
+            case Err(_):
+                val closed = held_destination.close()
+                assert_true(false)
+                return
+        expect(atomic_copy_identity_equal(after_destination.identity, before_identity)).to_be(true)
+        val after_closed = after_destination.close()
+        val held_closed = held_destination.close()
+        expect_atomic_copy_bytes(destination, bytes)
+        expect(source_closed).to_be(true)
+        expect(after_closed).to_be(true)
+        expect(held_closed).to_be(true)
+
+    it "replaces changed bytes with the verified binary payload":
+        step("Replace changed output through a destination-local private stage")
+        val old_bytes = [9u8, 8u8, 7u8]
+        val new_bytes = [0u8, 255u8, 1u8, 128u8]
+        val source_path = ROOT + "/source"
+        val destination = ROOT + "/destination"
+        expect(write_atomic_copy_fixture(source_path, new_bytes)).to_be(true)
+        expect(write_atomic_copy_fixture(destination, old_bytes)).to_be(true)
+        val old_destination = match open_atomic_copy_fixture(destination):
+            case Ok(file): file
+            case Err(_):
+                assert_true(false)
+                return
+        val source = match open_atomic_copy_fixture(source_path):
+            case Ok(file): file
+            case Err(_):
+                val closed = old_destination.close()
+                assert_true(false)
+                return
+        var result: Result<SosixAtomicCopyReceiptV1, SosixAtomicCopyErrorV1> = Err(SosixAtomicCopyErrorV1(kind: SosixAtomicCopyErrorKindV1.Replace, cleanup_pending: false, cleanup_path: ""))
+        var old_handle_bytes: Result<[u8], text> = Err("not observed")
+        var old_closed = false
+        if host_is_windows_host():
+            # The retained Windows owner denies delete sharing. Close the old
+            # descriptor before replacement; POSIX below proves descriptor
+            # identity still refers to the pre-replacement bytes.
+            old_closed = old_destination.close()
+            result = sosix_atomic_copy_verified_v1(source, destination, sha256_u8_hex(new_bytes), new_bytes.len(), 16777216)
+        else:
+            result = sosix_atomic_copy_verified_v1(source, destination, sha256_u8_hex(new_bytes), new_bytes.len(), 16777216)
+            old_handle_bytes = old_destination.read(old_bytes.len())
+            old_closed = old_destination.close()
+        val source_closed = source.close()
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val receipt = result.unwrap()
+            expect(receipt.state == SosixAtomicCopyStateV1.ReplacedDurable or receipt.state == SosixAtomicCopyStateV1.ReplacedDurabilityUnknown).to_be(true)
+            expect(receipt.digest).to_equal(sha256_u8_hex(new_bytes))
+            expect(receipt.byte_count).to_equal(new_bytes.len())
+        if not host_is_windows_host():
+            expect(old_handle_bytes.is_ok()).to_be(true)
+            if old_handle_bytes.is_ok(): expect(old_handle_bytes.unwrap()).to_equal(old_bytes)
+        expect_atomic_copy_bytes(destination, new_bytes)
+        expect(old_closed).to_be(true)
+        expect(source_closed).to_be(true)
+
+    it "rejects a wrong source digest without changing the destination":
+        step("Reject unverified source content before staging or replacement")
+        val old_bytes = [3u8, 4u8]
+        val source_bytes = [0u8, 255u8, 128u8]
+        val source_path = ROOT + "/source"
+        val destination = ROOT + "/destination"
+        expect(write_atomic_copy_fixture(source_path, source_bytes)).to_be(true)
+        expect(write_atomic_copy_fixture(destination, old_bytes)).to_be(true)
+        val source = match open_atomic_copy_fixture(source_path):
+            case Ok(file): file
+            case Err(_):
+                assert_true(false)
+                return
+        val original_position = source.position
+        val consumed = source.read(1)
+        expect(consumed.is_ok()).to_be(true)
+        val call_position = source.position
+        val result = sosix_atomic_copy_verified_v1(source, destination, sha256_u8_hex(old_bytes), source_bytes.len(), 16777216)
+        expect(source.position).to_equal(call_position)
+        expect(call_position).to_equal(original_position + 1u64)
+        val source_closed = source.close()
+        expect(result.is_err()).to_be(true)
+        if result.is_err(): expect(result.unwrap_err().kind).to_equal(SosixAtomicCopyErrorKindV1.SourceDigestMismatch)
+        expect_atomic_copy_bytes(destination, old_bytes)
+        expect(dir_list(ROOT).len()).to_equal(2)
+        expect(source_closed).to_be(true)
+
+    it "creates an absent destination from the frozen binary source":
+        step("Publish exact source bytes when the destination leaf is absent")
+        val bytes = [0u8, 255u8, 128u8, 0u8, 17u8]
+        val source_path = ROOT + "/source"
+        val destination = ROOT + "/new-destination"
+        expect(write_atomic_copy_fixture(source_path, bytes)).to_be(true)
+        val source = match open_atomic_copy_fixture(source_path):
+            case Ok(file): file
+            case Err(_):
+                assert_true(false)
+                return
+        val result = sosix_atomic_copy_verified_v1(source, destination, sha256_u8_hex(bytes), bytes.len(), 16777216)
+        val source_closed = source.close()
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val receipt = result.unwrap()
+            expect(receipt.state == SosixAtomicCopyStateV1.ReplacedDurable or receipt.state == SosixAtomicCopyStateV1.ReplacedDurabilityUnknown).to_be(true)
+            expect(receipt.digest).to_equal(sha256_u8_hex(bytes))
+            expect(receipt.byte_count).to_equal(bytes.len())
+        expect_atomic_copy_bytes(destination, bytes)
+        expect(source_closed).to_be(true)
+
+    it "rejects destination directories instead of treating them as missing":
+        step("Preserve the distinction between an invalid destination and absence")
+        val bytes = [0u8, 1u8]
+        val source_path = ROOT + "/source"
+        val destination_dir = ROOT + "/directory"
+        expect(write_atomic_copy_fixture(source_path, bytes)).to_be(true)
+        expect(dir_create(destination_dir, true)).to_be(true)
+        val source = match open_atomic_copy_fixture(source_path):
+            case Ok(file): file
+            case Err(_):
+                assert_true(false)
+                return
+        val result = sosix_atomic_copy_verified_v1(source, destination_dir, sha256_u8_hex(bytes), bytes.len(), 16777216)
+        val source_closed = source.close()
+        expect(result.is_err()).to_be(true)
+        if result.is_err(): expect(result.unwrap_err().kind).to_equal(SosixAtomicCopyErrorKindV1.DestinationRead)
+        expect(dir_list(ROOT).len()).to_equal(2)
+        expect(source_closed).to_be(true)
+
+    it "does not collapse a missing parent into a missing destination":
+        step("Require an observable stable destination parent")
+        val bytes = [6u8, 0u8, 255u8]
+        val source_path = ROOT + "/source"
+        expect(write_atomic_copy_fixture(source_path, bytes)).to_be(true)
+        val source = match open_atomic_copy_fixture(source_path):
+            case Ok(file): file
+            case Err(_):
+                assert_true(false)
+                return
+        val result = sosix_atomic_copy_verified_v1(source, ROOT + "/absent/destination", sha256_u8_hex(bytes), bytes.len(), 16777216)
+        val source_closed = source.close()
+        expect(result.is_err()).to_be(true)
+        if result.is_err(): expect(result.unwrap_err().kind).to_equal(SosixAtomicCopyErrorKindV1.DestinationInspect)
+        expect(dir_list(ROOT).len()).to_equal(1)
+        expect(source_closed).to_be(true)
+
+    it "copies an empty binary object without inventing a nonzero extent":
+        step("Preserve exact zero-byte source and destination sizes")
+        val bytes: [u8] = []
+        val source_path = ROOT + "/empty-source"
+        val destination = ROOT + "/empty-destination"
+        expect(write_atomic_copy_fixture(source_path, bytes)).to_be(true)
+        val source = match open_atomic_copy_fixture(source_path):
+            case Ok(file): file
+            case Err(_):
+                assert_true(false)
+                return
+        val result = sosix_atomic_copy_verified_v1(source, destination, sha256_u8_hex(bytes), 0, 0)
+        val source_closed = source.close()
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val receipt = result.unwrap()
+            expect(receipt.state == SosixAtomicCopyStateV1.ReplacedDurable or receipt.state == SosixAtomicCopyStateV1.ReplacedDurabilityUnknown).to_be(true)
+            expect(receipt.byte_count).to_equal(0)
+            expect(receipt.digest).to_equal(sha256_u8_hex(bytes))
+        expect_atomic_copy_bytes(destination, bytes)
+        expect(source_closed).to_be(true)

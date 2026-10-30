@@ -29,11 +29,13 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_definitions.{HirFunction, HirConst}
+use compiler.hir.hir_function_selection_v1.{sorted_function_indices, is_generic_function}
+export use compiler.hir.hir_function_selection_v1.{sorted_function_indices, is_generic_function}
 use compiler.hir.nominal_type_relocation.{hir_relocate_types}
 use compiler.mono.mono_template_symbol_relocation_v1.{MonoTemplateRelocationPlanV1, mono_template_relocation_plan_v2, mono_relocation_error_v1, mono_template_closure_qualified_v1, mono_template_reject_unplanned_refs_v1, mono_target_declared_names_v1}
 use compiler.monomorphize.hir_subst.body_subst.{relocate_template_body_full_v1, collect_body_relocation_refs_v1}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
-use compiler.monomorphize.engine.*
+use compiler.monomorphize.engine.{specialize_function_with_types, mangle_type}
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
 use compiler.mono.nominal_type_identity.{mono_owned_type_key, mono_owned_type_keys,
@@ -132,15 +134,11 @@ fn mono_default_archive_requests_v1() -> [MonoSpecializationRequestV1]:
 
 class MonomorphizationPass:
     """Runs monomorphization on HIR modules."""
-    # Compatibility field for callers constructing the pass. The integration
-    # owns its worklist and emitted bodies below; the legacy engine table is
-    # not populated with a second, never-consumed copy of those bodies.
     # Nil preserves the ordinary compiler policy. Every verification invocation
     # receives a fresh ledger and owns its caches; no ambient save/restore.
     invocation_budget: MonoInvocationBudgetV1? = nil
     invocation_started_v1: bool = false
     invocation_template_facts_v1: Dict<text, MonoPreflightFactsV1> = {}
-    monomorphizer: Monomorphizer
     # Original generic function bodies, keyed by template name. Canonical
     # signatures are body-free; only demanded specializations rewrite bodies.
     generic_functions: Dict<text, HirFunction>
@@ -331,7 +329,6 @@ impl MonomorphizationPass:
 
     static fn create() -> MonomorphizationPass:
         MonomorphizationPass(
-            monomorphizer: monomorphizer_create(),
             generic_functions: {},
             generic_structs: {},
             generic_classes: {},
@@ -1751,9 +1748,6 @@ impl MonomorphizationPass:
         self.spec_module[mangled] = spec_mod
         self.spec_queue = self.spec_queue.push(mangled)
         self.stats.specializations_created = self.stats.specializations_created + 1
-        # spec_queue is the sole worklist. Mirroring this request into the
-        # legacy engine retained another template body until pass teardown,
-        # although that engine's pending queue is never drained or consumed.
         sym
 
     me has_template_v1(name: text) -> bool:
@@ -4714,49 +4708,6 @@ impl MonomorphizationPass:
 # ============================================================================
 # Helper Functions
 # ============================================================================
-
-fn sorted_function_indices(functions: [HirFunction]) -> [i64]:
-    """Value-array indices in ascending symbol-id order (deterministic roots).
-
-    Native erased dictionaries compare aggregate SymbolId keys by identity.
-    Sorting copied keys and looking them up loses the function payload. Keep
-    the values directly; sort only scalar indices so swaps never copy bodies.
-    """
-    var indices: [i64] = []
-    var symbol_ids: [i64] = []
-    var function_index = 0
-    while function_index < functions.len():
-        val function: HirFunction = functions[function_index]
-        val symbol: SymbolId = function.symbol
-        indices.push(function_index)
-        symbol_ids.push(symbol.id)
-        function_index = function_index + 1
-    # Preserve the existing stable insertion sort and ascending numeric order.
-    var i = 1
-    while i < indices.len():
-        val cur: i64 = indices[i]
-        var j = i - 1
-        while j >= 0:
-            val prev: i64 = indices[j]
-            if symbol_ids[prev] <= symbol_ids[cur]:
-                break
-            indices[j + 1] = prev
-            j = j - 1
-        indices[j + 1] = cur
-        i = i + 1
-    indices
-
-fn is_generic_function(func: HirFunction) -> bool:
-    """Check if a function has type parameters.
-
-    `.?` on the plain (non-optional) [HirTypeParam] field is TRUE for an
-    empty list, which classified EVERY function (incl. -c main) as generic
-    and dragged the whole mono machinery in (bug doc iteration 18). Check
-    emptiness, nil-guarded."""
-    val tps: [HirTypeParam] = func.type_params
-    if tps == nil:
-        return false
-    tps.len() > 0
 
 fn is_generic_struct(s: HirStruct) -> bool:
     """Check if a struct has type parameters (see is_generic_function)."""
