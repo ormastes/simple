@@ -810,37 +810,9 @@ bool rt_is_dir(const char* path) {
 }
 
 #if defined(_WIN32)
+#include "platform/runtime_win_remove_tree.h"
 static bool core_dir_remove_all_impl(const char* path) {
-    DWORD attributes = GetFileAttributesA(path);
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-        DWORD error = GetLastError();
-        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
-    }
-    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) return DeleteFileA(path) != 0;
-    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return RemoveDirectoryA(path) != 0;
-
-    char pattern[4096];
-    int pattern_len = snprintf(pattern, sizeof(pattern), "%s\\*", path);
-    if (pattern_len < 0 || (size_t)pattern_len >= sizeof(pattern)) return false;
-    WIN32_FIND_DATAA entry;
-    HANDLE handle = FindFirstFileA(pattern, &entry);
-    if (handle != INVALID_HANDLE_VALUE) {
-        do {
-            if (strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0) continue;
-            char child[4096];
-            int child_len = snprintf(child, sizeof(child), "%s\\%s", path, entry.cFileName);
-            if (child_len < 0 || (size_t)child_len >= sizeof(child) || !core_dir_remove_all_impl(child)) {
-                FindClose(handle);
-                return false;
-            }
-        } while (FindNextFileA(handle, &entry));
-        DWORD find_error = GetLastError();
-        FindClose(handle);
-        if (find_error != ERROR_NO_MORE_FILES) return false;
-    } else if (GetLastError() != ERROR_FILE_NOT_FOUND) {
-        return false;
-    }
-    return RemoveDirectoryA(path) != 0;
+    return rt_win_remove_tree_utf8(path, true, true);
 }
 #else
 static bool core_dir_remove_all_impl(const char* path) {
