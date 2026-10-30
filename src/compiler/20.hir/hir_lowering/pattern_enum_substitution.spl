@@ -4,6 +4,8 @@ The caller proves declaration/subject owner identity and formal/actual arity.
 Unknown binders and unresolved types produce Error; no nominal name guessing.
 """
 use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirDeclaredPatternEnumSlots}
+use compiler.frontend.parser_types_expr.{EnumPatternPayload, PatternKind}
 use compiler.common.diagnostics.span.{Span}
 
 pub fn declared_pattern_slot_type_is_concrete(type_: HirType) -> bool:
@@ -28,6 +30,52 @@ pub fn declared_pattern_slot_types_are_concrete(types: [HirType]) -> bool:
         val type_: HirType = raw
         if not declared_pattern_slot_type_is_concrete(type_):
             return false
+    true
+
+pub fn declared_pattern_payload_avoids_type_parameters(slots: HirDeclaredPatternEnumSlots, payload: EnumPatternPayload?) -> bool:
+    """True when no payload binder would read a type-parameter slot.
+
+    Wildcards bind nothing, so they pass over any slot. Anything else must
+    land on a concrete declared slot. Used only for untyped match subjects.
+    """
+    if val input_payload = payload:
+        match input_payload:
+            case EnumPatternPayload.Tuple(patterns):
+                var positional = slots.tuple_types
+                if slots.is_struct:
+                    positional = slots.field_types
+                if patterns.len() != positional.len():
+                    return false
+                var index = 0
+                while index < patterns.len():
+                    val pattern = patterns[index]
+                    val wildcard = match pattern.kind:
+                        case PatternKind.Wildcard: true
+                        case _: false
+                    if not wildcard and not declared_pattern_slot_type_is_concrete(positional[index]):
+                        return false
+                    index = index + 1
+                return true
+            case EnumPatternPayload.Struct(fields):
+                if not slots.is_struct:
+                    return false
+                for (field_name, field_pattern) in fields:
+                    var found = false
+                    var field_concrete = false
+                    var index = 0
+                    while index < slots.field_names.len():
+                        if slots.field_names[index] == field_name:
+                            found = true
+                            field_concrete = declared_pattern_slot_type_is_concrete(slots.field_types[index])
+                        index = index + 1
+                    if not found:
+                        return false
+                    val wildcard = match field_pattern.kind:
+                        case PatternKind.Wildcard: true
+                        case _: false
+                    if not wildcard and not field_concrete:
+                        return false
+                return true
     true
 
 pub fn substitute_declared_pattern_types(templates: [HirType], names: [text], actuals: [HirType]) -> [HirType]:
