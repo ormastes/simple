@@ -1,0 +1,65 @@
+# Compile this standalone fixture natively, then execute it. The expected
+# success marker is emitted only after callback ABI and tuple-chain assertions.
+struct CallbackRecord:
+    name: text
+    value: i64
+
+fn callback_identity<T>(value: T) -> T:
+    value
+
+fn callback_apply<T>(callback: fn(T) -> T, value: T) -> T:
+    callback(value)
+
+fn callback_compare<T>(left: T, right: T, callback: fn(T, T) -> i64) -> i64:
+    callback(left, right)
+
+fn callback_partition<T>(values: Dict<text, (text, T)>, owner: text) -> ([text], Dict<text, (text, T)>):
+    var removed: [text] = []
+    var kept: Dict<text, (text, T)> = {}
+    for pair in values:
+        val name = pair[0]
+        val record = pair[1]
+        if record[0] == owner:
+            removed.push(name)
+        else:
+            kept[name] = record
+    (removed, kept)
+
+fn callback_without_names<T>(values: Dict<text, (text, T)>, names: [text]) -> Dict<text, (text, T)>:
+    var kept: Dict<text, (text, T)> = {}
+    for pair in values:
+        val name = pair[0]
+        if not names.contains(name):
+            kept[name] = pair[1]
+    kept
+
+fn main() -> i64:
+    val a = CallbackRecord(name: "alpha", value: 42)
+    val z = CallbackRecord(name: "zeta", value: 99)
+    val ordered = callback_compare(a, z, \left, right:
+        val first: CallbackRecord = left
+        val second: CallbackRecord = right
+        if first.name < second.name: -1
+        elif first.name > second.name: 1
+        else: 0
+    )
+    assert(ordered == -1)
+    assert(callback_compare(z, a, \left, right: left.value - right.value) == 57)
+    assert(callback_apply(\value: callback_identity(value), 42) == 42)
+    var values: Dict<text, (text, CallbackRecord)> = {}
+    values["owned"] = ("old", z)
+    values["keep"] = ("new", a)
+    values["jit"] = ("new", z)
+    val (removed, remaining) = callback_partition(values, "old")
+    val final_values = callback_without_names(remaining, ["jit"])
+    assert(removed.len() == 1)
+    assert(removed[0] == "owned")
+    assert(final_values.len() == 1)
+    assert(final_values.has("keep"))
+    assert(not final_values.has("owned"))
+    assert(not final_values.has("jit"))
+    val retained = final_values["keep"]
+    assert(retained[0] == "new")
+    assert(retained[1].value == 42)
+    print "PASS contextual callback ABI and generic tuple projection"
+    0
