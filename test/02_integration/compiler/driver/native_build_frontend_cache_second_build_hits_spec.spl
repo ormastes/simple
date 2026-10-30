@@ -1,6 +1,6 @@
 use std.spec
 use std.io.{file_exists, file_read, file_write}
-use std.io_runtime.{dir_create_all}
+use std.io_runtime.{dir_create_all, file_read_bytes, file_write_bytes}
 use app.io.sysinfo_ops.{getpid}
 
 # Per-module FRONT-END cache
@@ -26,7 +26,7 @@ val FIXTURE_ROOT = "test/02_integration/compiler/driver/fixtures/native_build_ca
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_set(key: text, value: text)
 extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_dir_walk(path: text) -> [text]
 extern fn rt_file_delete(path: text) -> bool
 
 fn run_build(root: text, entry: text, cache_dir: text, fe_dir: text, output: text) -> (text, i64):
@@ -42,12 +42,24 @@ fn summary_line(blob: text) -> text:
             return line.trim()
     ""
 
+# Published cache entries, as full paths. The default store is the packed
+# `.spab` artifact, nested as artifacts/v1/<algo>/<d2>/<digest>-<calgo>-<cdigest>.spab
+# (frontend_spab_cache_v1.spl); in-flight `*.tmp` files never count.
 fn entry_files(dir: text) -> [text]:
     var out: [text] = []
-    for name in rt_dir_list(dir) ?? []:
-        if name.ends_with(".fpc"):
-            out = out.push(name)
+    for path in rt_dir_walk(dir) ?? []:
+        if path.ends_with(".spab"):
+            out = out.push(path)
     out
+
+# The legacy text `.fpc` entry is written only when the packed store is
+# refused; a healthy build must not fall back to it.
+fn legacy_entry_count(dir: text) -> i64:
+    var n = 0
+    for path in rt_dir_walk(dir) ?? []:
+        if path.ends_with(".fpc"):
+            n = n + 1
+    n
 
 describe "native-build front-end cache":
     # @manual scenario evidence
@@ -64,6 +76,7 @@ describe "native-build front-end cache":
         expect(line.contains("misses=3")).to_equal(true)
         expect(line.contains("hits=0")).to_equal(true)
         expect(entry_files(fe_dir).len()).to_equal(3)
+        expect(legacy_entry_count(fe_dir)).to_equal(0)
 
     slow_it "hits every module on an identical second build and parses nothing":
         val run_id = getpid()
@@ -135,9 +148,14 @@ describe "native-build front-end cache":
         expect(c1).to_equal(0)
         val names = entry_files(fe_dir)
         expect(names.len()).to_equal(3)
-        val victim = "{fe_dir}/{names[0]}"
-        val whole = file_read(victim)
-        expect(file_write(victim, whole.substring(0, whole.len() / 2))).to_equal(true)
+        val victim = names[0]
+        # `.spab` is binary: truncate by bytes, not through a text round trip.
+        val whole = file_read_bytes(victim)
+        expect(whole.len() > 0).to_equal(true)
+        var half: [u8] = []
+        for i in 0..(whole.len() / 2):
+            half = half.push(whole[i])
+        expect(file_write_bytes(victim, half)).to_equal(true)
         val (b2, c2) = run_build(FIXTURE_ROOT, entry, "{root}/cache", fe_dir, "{root}/out2")
         expect(c2).to_equal(0)
         val line = summary_line(b2)
