@@ -26,13 +26,26 @@ through this resolver.
 
 ## Fix
 `detect_stdlib_root` now climbs until it reaches the existing `.git`/`.jj`
-workspace boundary, with no fixed depth cap. On the climb it takes the first
+workspace boundary (or `/` when there is none; the interpreter lane instead
+keeps a 10-level cap there),
+with no fixed depth cap. On the climb it takes the first
 ancestor's `src/lib` before the other candidates. `find_project_root` is
 unchanged, so fixture projects with their own `src/` keep their roots.
+
+Blast radius: only files whose `project_root` has no stdlib candidate reach the
+climb. Shallow specs (four levels below the repo) in the `nogc_async_mut`,
+`gc_sync_mut`, `gc_async_mut` and `nogc_sync_mut` mirrors now get `src/lib` where
+they previously got the seed snapshot `src/compiler_rust/lib/std/src`. That
+matches the interpreter lane's ordering. Deeper files, including
+`test/fixtures/arch_check/src/**` (which imports no `std.*`), previously got no
+stdlib root at all. Files whose project root
+is the repo still go through the unchanged first loop, so seed-first ordering
+there is not addressed here.
 
 ## Specs
 - Reproduction: `test/01_unit/lib/nogc_async_mut/gpu/environment_variant_task_{owner,contract}_v1_spec.spl`,
   `environment_variant_native_task_bridge_v1_spec.spl`, and
   `engine2d/{packed_completion_authority_v1,environment_variant_completion_bridge_v1,draw_ir_runtime_queue}_spec.spl`.
 - Generalization: `test/01_unit/lib/nogc_async_mut/gpu/engine2d/bare_common_import_deep_spec_dir_spec.spl`
-  (ERROR on the old seed, PASS on the fixed one).
+  (on the `simple run` lane that directory sweeps use: ERROR on the old seed,
+  PASS on the fixed one; single-file `simple test` does not use this resolver).
