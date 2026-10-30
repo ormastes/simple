@@ -484,4 +484,3 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: %s v2-argv-env-cwd <exact-unit.service> <private-evidence-dir>\n", argv[0]);
     return 2;
 }
-
