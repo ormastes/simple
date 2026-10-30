@@ -146,6 +146,7 @@ pub mod host_gpu_lane;
 pub mod win32_hosted;
 #[cfg(windows)]
 pub mod windows_abi;
+pub mod cache_host;
 pub mod enum_sffi;
 pub mod vulkan;
 
@@ -3609,6 +3610,12 @@ pub(crate) fn call_extern_function_with_values(
     // clobbered by unrelated commit cb71c629f611 on 2026-08-05 and restored
     // 2026-08-17; see
     // doc/08_tracking/bug/interpreter_extern_registration_wiring_clobbered_2026-08-17.md.)
+    // Cache host authority + descriptor-pinned file view families, backed
+    // by the linked runtime crate (see cache_host.rs).
+    if cache_host::is_supported_name(name) {
+        return cache_host::dispatch(name, &evaluated);
+    }
+
     if capability_gap::matches(name) {
         return capability_gap::dispatch(name);
     }
