@@ -43,10 +43,39 @@ Executable SHA256:
 Build/run peak RSS was 3,308,412/1,928 KiB; both process-tree receipts report
 quiescent=1. Post-run fixture/protocol/FileHandle hashes match the baseline
 manifest. Evidence is retained under `baseline-01`; this is a reproduced
-failure, not a repaired PASS. A changed-source run of the same fixture is
-authorized only after the primary workload's resource slot becomes available.
-Independent source review is clear; repaired native execution and required
-compiler/lib/MCP/LSP checks remain pending. No broad qualification is claimed.
+failure, not a repaired PASS.
+
+The repaired owner passed the same real native response control on 2026-10-31.
+Evidence: `C:/dev/simple-sdk-atomic-repaired-evidence-v2-20261030/repaired-01`;
+author artifact/source review: sibling `astra-native-acceptance.sdn`.
+The consumer is exact `42382184c46cb09d38d18515e9e7118726fea4bc`, using admitted
+compiler SHA256 `5dd85ea67087e063ae3a68ad0b282c82443e2ade6a178e0f10187fa93028260c`
+and its original producer-bound runtime capsule. The prepared manifest SHA256 is
+`5999f7e903dd8bf6cb0994dba39763a44c2320d83a6c97a72d07dcd644bed26e`.
+Native build and fixture execution both exited 0; 61 modules compiled.
+
+- `rename_succeeded=false`, `direct_write_allowed=true` retained the real
+  Windows failure condition.
+- `response_published=false`, `old_final_preserved=true`,
+  `temporary_removed=true` establish fail-closed response publication.
+- After releasing the handle, normal replacement succeeded and changed the
+  old bytes; the fixture emitted `DAEMON_ATOMIC_RESPONSE_PASS`.
+
+Repaired executable SHA256:
+`6cf26bed3eb3816d6706750b24d7830d8c2b296327d094a8bc2a9bd4e8afe120`.
+Build/run peak RSS was 3,249,180/1,928 KiB under an enforced 8 GiB cap, one
+worker, and normal 1 GiB reserve. Both trees reported quiescent=1 and no
+unexpected session PIDs. Actual fixture/protocol hashes and all six sealed
+input artifacts matched the recorded review. These are response-path native
+results; request publication still has source review only.
+
+A preceding repaired attempt failed source admission because its minimal
+checkout omitted declared source roots and the bug database. That attempt did
+not execute the fixture; its artifacts remain preserved separately. The final
+consumer contains all declared roots and a fresh canonical materialization
+receipt. The sixth and final integrated setup/verification cycle passed; no
+repeated native check is needed. Required compiler/lib/MCP/LSP checks remain
+pending. No broad qualification or SSpec PASS is claimed.
 
 This contract defect is established from source. Whether the intermittent
 source92 startup failure actually entered the fallback is unproven; the most
