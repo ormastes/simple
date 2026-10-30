@@ -1,0 +1,65 @@
+# GZIP decoder ownership and compatibility contract.
+use std.spec.step
+use std.spec.*
+use std.nogc_sync_mut.compression.gzip.decompress.{gzip_decompress as owned_decompress}
+use std.nogc_sync_mut.compression.gzip.compress.{gzip_decompress as compatibility_decompress}
+use std.common.compress.gzip.{gzip_compress as common_compress, gzip_decompress as common_decompress}
+
+val _header: [u8] = [31, 139, 8, 0, 0, 0, 0, 0, 0, 3]
+val _abc_member: [u8] = [31,139,8,0,0,0,0,0,0,3, 1,3,0,252,255,97,98,99, 194,65,36,53,3,0,0,0]
+val _empty_member: [u8] = [31,139,8,0,0,0,0,0,0,3, 1,0,0,255,255, 0,0,0,0,0,0,0,0]
+
+fn _append_bytes(left: [u8], right: [u8]) -> [u8]:
+    var result: [u8] = []
+    for byte in left:
+        result.push(byte)
+    for byte in right:
+        result.push(byte)
+    result
+
+fn _copy_bytes(source: [u8]) -> [u8]:
+    var result: [u8] = []
+    for byte in source:
+        result.push(byte)
+    result
+
+fn _is_nil(value: [u8]?) -> bool:
+    value == nil
+
+describe "gzip decompression owner API":
+    it "decodes independently specified empty and stored members":
+        step("decodes independently specified empty and stored members")
+        expect((owned_decompress(_empty_member) ?? [9]).len()).to_equal(0)
+        expect(owned_decompress(_abc_member) ?? []).to_equal([97u8, 98u8, 99u8])
+
+    it "concatenates independent gzip members in order":
+        step("concatenates independent gzip members in order")
+        expect(owned_decompress(_append_bytes(_abc_member, _empty_member)) ?? []).to_equal([97u8, 98u8, 99u8])
+        expect(owned_decompress(_append_bytes(_abc_member, _abc_member)) ?? []).to_equal([97u8, 98u8, 99u8, 97u8, 98u8, 99u8])
+
+    it "rejects malformed headers and a truncated deflate body":
+        step("rejects malformed headers and a truncated deflate body")
+        var bad_header = _copy_bytes(_abc_member)
+        bad_header[0] = 0
+        expect(_is_nil(owned_decompress(bad_header))).to_equal(true)
+        val truncated_body = _append_bytes(_header, [1u8, 10u8, 0u8, 245u8, 255u8, 97u8, 98u8, 99u8])
+        expect(_is_nil(owned_decompress(truncated_body))).to_equal(true)
+
+    it "rejects truncated trailers and CRC mismatches":
+        step("rejects truncated trailers and CRC mismatches")
+        var truncated_trailer: [u8] = []
+        var i = 0
+        while i < _abc_member.len() - 1:
+            truncated_trailer.push(_abc_member[i])
+            i = i + 1
+        expect(_is_nil(owned_decompress(truncated_trailer))).to_equal(true)
+        var bad_crc = _copy_bytes(_abc_member)
+        bad_crc[18] = bad_crc[18] ^ 1
+        expect(_is_nil(owned_decompress(bad_crc))).to_equal(true)
+
+    it "keeps the old module wrapper and common facade behavior":
+        step("keeps the old module wrapper and common facade behavior")
+        expect(compatibility_decompress(_abc_member) ?? []).to_equal([97u8, 98u8, 99u8])
+        expect(compatibility_decompress(_abc_member)).to_equal(owned_decompress(_abc_member))
+        val payload: [u8] = [0, 1, 2, 127, 128, 255]
+        expect(common_decompress(common_compress(payload))).to_equal(payload)
