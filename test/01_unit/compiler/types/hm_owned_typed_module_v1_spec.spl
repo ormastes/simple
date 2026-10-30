@@ -1,0 +1,92 @@
+# Actual parser/lowerer/HM producer calls; source-authored, not execution proof.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirExprKind}
+use compiler.types.type_infer.typed_module_owner_v1.*
+
+fn hm_owned_typed_fixture_v1(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "src/typed.spl", "typed", Logger(level: 0))
+    var lowering = HirLowering.with_filename("src/typed.spl")
+    lowering.use_explicit_semantic_policy()
+    lowering.lower_module(parsed)
+
+fn hm_owned_limits_v1() -> HmTypedModuleLimitsV1:
+    HmTypedModuleLimitsV1(max_functions: 64, max_nodes: 4096, max_depth: 32, max_work: 1000000)
+
+describe "Actual HM-owned finite typed module producer":
+    it "annotates actual 42 as i64 from inference while leaving original HIR unannotated":
+        step("setup")
+        val original = hm_owned_typed_fixture_v1("fn answer() -> i64:\n    42\n")
+        val keys = original.functions.keys()
+        expect(keys.len()).to_equal(1)
+        val key = keys[0]
+        expect(original.functions[key].body.has).to_equal(true)
+        expect(original.functions[key].body.value.has_type_).to_equal(false)
+        step("exercise")
+        val result = hm_infer_owned_typed_module_v1(original, hm_owned_limits_v1()).unwrap()
+        step("assert")
+        expect(result.annotated_functions).to_equal(1)
+        expect(result.annotated_expressions).to_equal(1)
+        val terminal = result.module.functions[key].body.value
+        expect(terminal.has_type_).to_equal(true)
+        match terminal.type_.kind:
+            case HirTypeKind.Int(bits, signed):
+                expect(bits).to_equal(64)
+                expect(signed).to_equal(true)
+            case _: fail("actual HM result was not i64")
+        match terminal.kind:
+            case HirExprKind.IntLit(number, _): expect(number).to_equal(42)
+            case _: fail("annotation changed the actual literal")
+        expect(original.functions[key].body.value.has_type_).to_equal(false)
+        expect(original.functions[key].body.value.type_).to_be_nil()
+
+    it "synthesizes bool independently and preserves original function containers across repeated runs":
+        step("setup")
+        val original = hm_owned_typed_fixture_v1("fn yes() -> bool:\n    true\n")
+        val key = original.functions.keys()[0]
+        step("exercise")
+        val first = hm_infer_owned_typed_module_v1(original, hm_owned_limits_v1()).unwrap()
+        val second = hm_infer_owned_typed_module_v1(original, hm_owned_limits_v1()).unwrap()
+        step("assert")
+        match first.module.functions[key].body.value.type_.kind:
+            case HirTypeKind.Bool: expect(first.module.functions[key].body.value.has_type_).to_equal(true)
+            case _: fail("actual HM result was not bool")
+        expect(second.annotated_expressions).to_equal(1)
+        expect(original.functions[key].body.value.has_type_).to_equal(false)
+        expect(original.functions[key].body.value.type_).to_be_nil()
+        # Returned symbol dictionaries have separate mutable container owners.
+        val original_symbol_count = original.symbols.symbols.len()
+        first.module.symbols.symbols = {}
+        expect(original.symbols.symbols.len()).to_equal(original_symbol_count)
+        expect(second.module.symbols.symbols.len()).to_equal(original_symbol_count)
+
+    it "returns a real inference error for i64 returning bool and never changes original nodes":
+        step("setup")
+        val original = hm_owned_typed_fixture_v1("fn wrong() -> i64:\n    true\n")
+        val key = original.functions.keys()[0]
+        step("exercise")
+        val result = hm_infer_owned_typed_module_v1(original, hm_owned_limits_v1())
+        step("assert")
+        expect(result.unwrap_err()).to_equal("hm-typed-inference-rejected")
+        expect(original.functions[key].body.value.has_type_).to_equal(false)
+        expect(original.functions[key].body.value.type_).to_be_nil()
+
+    it "refuses unresolved metadata unsupported body kinds and aggregate limits before module inference":
+        step("setup")
+        val unsupported = hm_owned_typed_fixture_v1("fn other() -> i64:\n    1 + 2\n")
+        expect(hm_infer_owned_typed_module_v1(unsupported, hm_owned_limits_v1()).unwrap_err()).to_equal("hm-typed-body-profile")
+        val original = hm_owned_typed_fixture_v1("fn answer() -> i64:\n    42\n")
+        for control in ["work", "nodes", "functions", "metadata"]:
+            var limits = hm_owned_limits_v1()
+            var changed = original
+            if control == "work": limits.max_work = 1
+            elif control == "nodes": limits.max_nodes = 1
+            elif control == "functions": limits.max_functions = 0
+            else: changed.name = "n".repeat(257)
+            step("assert")
+            expect(hm_infer_owned_typed_module_v1(changed, limits).is_err()).to_equal(true)
+        expect(original.functions[original.functions.keys()[0]].body.value.has_type_).to_equal(false)
