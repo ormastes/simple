@@ -831,6 +831,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_byte_char", conversion::rt_byte_char_fn);
     insert_simple!("rt_char_from_code", conversion::rt_char_from_code_fn);
     insert_simple!("rt_tuple_get", conversion::rt_tuple_get_fn);
+    insert_simple!("rt_tuple_len", conversion::rt_tuple_len_fn);
     insert_simple!("rt_bytes_alloc", file_io::rt_bytes_alloc);
     insert_simple!("rt_bytes_from_raw", file_io::rt_bytes_from_raw);
     insert_simple!("rt_u32s_from_raw", file_io::rt_u32s_from_raw);
