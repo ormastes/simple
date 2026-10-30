@@ -40,7 +40,7 @@ use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
 use compiler.driver.driver_worker_surface_path_v1.{worker_surface_path_suffix_v1}
 use compiler.driver.driver_log_helpers.{driver_phase_trace_enabled, log_phase}
 use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
-use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
+use compiler.driver.cache.worker_surface_table_owner_v1.{worker_surface_table_lookup_v1, worker_surface_table_publish_v1}
 use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
     module_tldr_companion_sections_v1}
 use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
@@ -55,8 +55,6 @@ var _ws_surfaces_loaded: i64 = 0
 var _ws_skeleton_parses: i64 = 0
 var _ws_restricted: bool = false
 var _ws_allowed: Dict<text, bool> = {}
-var _ws_table_ready: bool = false
-var _ws_table: TldrTableV1 = TldrTableV1.create()
 var _ws_hir_restricted: bool = false
 var _ws_hir_allowed: Dict<text, bool> = {}
 var _ws_hir_loaded: i64 = 0
@@ -269,14 +267,11 @@ fn _ws_publish_sidecar_v1(path: text, digest: text, skeleton: text) -> bool:
 # section, fresh sidecar, else a new skeleton published for the next process.
 # `tldr_root` "" disables the on-disk layers.
 pub fn worker_surface_text_v1(source_path: text, source: text, tldr_root: text) -> text:
-    if not _ws_table_ready:
-        _ws_table = TldrTableV1.create()
-        _ws_table_ready = true
     _ws_skeleton_parses = _ws_skeleton_parses + 1
     val digest = sha256_text(source)
-    if _ws_table.is_loaded(digest):
+    if val retained = worker_surface_table_lookup_v1(digest):
         _ws_surfaces_loaded = _ws_surfaces_loaded + 1
-        return _ws_table.entries[digest]
+        return retained
     var text = ""
     if tldr_root != "":
         text = _ws_tldr_surface_v1(tldr_root, source_path, source)
@@ -290,7 +285,7 @@ pub fn worker_surface_text_v1(source_path: text, source: text, tldr_root: text) 
         if tldr_root != "":
             val _published = _ws_publish_sidecar_v1(_ws_sidecar_path_v1(tldr_root, source_path), digest, text)
     if text != "":
-        val _stored = _ws_table.publish(digest, text)
+        val _stored = worker_surface_table_publish_v1(digest, text)
     text
 
 # Per-file unit child (SIMPLE_FILE_WORKER_UNIT=1, native_file_worker_v1.spl):

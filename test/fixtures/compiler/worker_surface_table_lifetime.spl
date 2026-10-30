@@ -1,0 +1,85 @@
+# Native-only lifetime probe of the production process-local cache owner.
+# Optional --omit-owner-retention is a bounded negative control, never a pass.
+use compiler.driver.cache.worker_surface_table_owner_v1.{worker_surface_table_lookup_v1, worker_surface_table_publish_v1, worker_surface_table_promote_transient_owner_v1}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
+use std.sffi.cli.{cli_get_args}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+
+fn publish_scope(prefix: text, index: i64, retain: bool) -> bool:
+    if not rt_transient_array_scope_begin(): return false
+    val key = prefix + ":key:" + index.to_text()
+    val surface = prefix + ":surface:" + index.to_text()
+    val published = worker_surface_table_publish_v1(key, surface)
+    val early_refused = if retain: not worker_surface_table_promote_transient_owner_v1() else: true
+    val paused = rt_transient_array_scope_pause()
+    var retained = not retain
+    if paused and retain:
+        retained = worker_surface_table_promote_transient_owner_v1()
+    val ended = rt_transient_array_scope_end()
+    published and early_refused and paused and retained and ended
+
+fn churn_scope(prefix: text) -> bool:
+    if not rt_transient_array_scope_begin(): return false
+    var scratch: [text] = []
+    for index in 0..2048:
+        scratch.push(prefix + ":churn:" + index.to_text())
+    val complete = scratch.len() == 2048
+    val ended = rt_transient_array_scope_end()
+    complete and ended
+
+fn retained_entry(prefix: text, index: i64) -> bool:
+    val key = prefix + ":key:" + index.to_text()
+    match worker_surface_table_lookup_v1(key):
+        case Some(value): value == prefix + ":surface:" + index.to_text()
+        case _: false
+
+fn class_graph_retained(prefix: text) -> bool:
+    if not rt_transient_array_scope_begin(): return false
+    var table = TldrTableV1.create()
+    val published = table.publish(prefix + ":class-key", prefix + ":class-surface")
+    table.requested[prefix + ":pending"] = true
+    table.fill_queue.push(prefix + ":queued")
+    # Populate every nested owner directly; width128 id_of intentionally does
+    # not use the collision map. Do not let an unrelated local text escape.
+    table.ids.owners[prefix + ":identity"] = prefix + ":retained-owner"
+    table.ids.bloom[17] = true
+    val paused = rt_transient_array_scope_pause()
+    var retained = false
+    if paused: retained = rt_transient_heap_promote<TldrTableV1>(table)
+    val ended = rt_transient_array_scope_end()
+    if not (published and paused and retained and ended): return false
+    if not churn_scope(prefix): return false
+    table.entries[prefix + ":class-key"] == prefix + ":class-surface" and
+        table.requested.has(prefix + ":pending") and
+        table.fill_queue.len() == 1 and table.fill_queue[0] == prefix + ":queued" and
+        table.ids.bloom.len() == 65536 and table.ids.bloom[17] and
+        table.ids.owners[prefix + ":identity"] == prefix + ":retained-owner"
+
+fn main() -> i64:
+    val args = cli_get_args()
+    val prefix = "worker-surface-probe:" + args.join("|")
+    var retain = true
+    for arg in args:
+        if arg == "--omit-owner-retention": retain = false
+    if not publish_scope(prefix, 1, retain): return 1
+    if not churn_scope(prefix): return 2
+    if not retained_entry(prefix, 1): return 3
+    if not publish_scope(prefix, 2, retain): return 4
+    if not churn_scope(prefix): return 5
+    if not retained_entry(prefix, 1) or not retained_entry(prefix, 2): return 6
+    # Repeated dirty leases must retain both new entries and the oldest entry.
+    # This also exercises dict growth after its raw class carrier is retained.
+    for index in 3..67:
+        if not publish_scope(prefix, index, retain): return 9
+        if not churn_scope(prefix): return 10
+        if not retained_entry(prefix, 1) or not retained_entry(prefix, index): return 11
+    if not class_graph_retained(prefix): return 7
+    if not retain:
+        print "CONTROL: omission did not reproduce; lifetime cause remains unproven"
+        return 8
+    print "PASS: production surface owner retains 66 publications and complete class graph"
+    0
