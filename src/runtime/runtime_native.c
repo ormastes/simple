@@ -16091,7 +16091,7 @@ int8_t rt_file_exists_str(int64_t path_value) {
  * above has always called realpath(path, NULL) from those same binaries, so
  * the two engines disagreed (/tmp vs /private/tmp on macOS). */
 #if defined(_WIN32)
-static int64_t rt_win_final_path_text(const wchar_t* final_path, DWORD length) {
+static int64_t native_win_final_path_text(const wchar_t* final_path, DWORD length) {
     static const wchar_t sep = (wchar_t)92;
     /* \\?\UNC\server\share\... -> \\server\share\...; \\?\C:\... -> C:\... */
     if (length >= 4 && final_path[0] == sep && final_path[1] == sep &&
@@ -16140,7 +16140,7 @@ int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
         if (final_path) {
             DWORD written = GetFinalPathNameByHandleW(handle, final_path, need + 1, VOLUME_NAME_DOS);
             if (written > 0 && written <= need) {
-                result = rt_win_final_path_text(final_path, written);
+                result = native_win_final_path_text(final_path, written);
             }
             free(final_path);
         }
