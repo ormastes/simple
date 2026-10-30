@@ -130,6 +130,7 @@ fn make_modules(owner: text, caller: text, display: text, concrete: HirType, lin
     var modules: Dict<text, HirModule> = {}
     var provider = module
     provider.name = owner
+    provider.path = owner.replace(".", "/") + ".spl"
     provider.functions = {}
     provider.functions[identity.symbol] = identity
     if owner == caller:
@@ -137,6 +138,7 @@ fn make_modules(owner: text, caller: text, display: text, concrete: HirType, lin
     else:
         var consumer = module
         consumer.name = caller
+        consumer.path = caller.replace(".", "/") + ".spl"
         consumer.functions = {}
         consumer.functions[main_fn.symbol] = main_fn
         modules[caller] = consumer
@@ -249,6 +251,27 @@ describe "fixed-point specialization inventory placement":
         for mangled in pass_.spec_queue:
             val spec: HirFunction = pass_.specialized_functions[mangled]
             expect(output["owner"].functions.has(spec.symbol)).to_equal(true)
+
+    it "uses admitted provider paths for cross-module specialization call names":
+        step("historical numbered alias resolves to its actual provider")
+        var modules = make_modules("compiler.core.provider", "caller", "identity", mk_type(HirTypeKind.Int(64, true)))
+        var provider: HirModule = modules["compiler.core.provider"]
+        provider.name = "compiler.frontend.core.provider"
+        provider.path = "src/compiler/10.frontend/core/provider.spl"
+        modules["compiler.core.provider"] = provider
+        var pass_ = MonomorphizationPass.create()
+        val output = pass_.process_modules(modules)
+        expect(pass_.diagnostics.len()).to_equal(0)
+        expect(named_call(output["caller"])).to_equal("compiler.frontend.core.provider.identity$i64")
+        step("a real unnumbered overlay retains its distinct provider linkage")
+        var overlay_modules = make_modules("compiler.core.provider", "caller", "identity", mk_type(HirTypeKind.Int(64, true)))
+        var overlay_provider: HirModule = overlay_modules["compiler.core.provider"]
+        overlay_provider.path = "src/compiler/core/provider.spl"
+        overlay_modules["compiler.core.provider"] = overlay_provider
+        var overlay_pass = MonomorphizationPass.create()
+        val overlay_output = overlay_pass.process_modules(overlay_modules)
+        expect(overlay_pass.diagnostics.len()).to_equal(0)
+        expect(named_call(overlay_output["caller"])).to_equal("compiler.core.provider.identity$i64")
 
     it "registers original and specialized rows under one physical provider through aliases":
         step("retain canonical and historical keys for one numbered physical provider")
