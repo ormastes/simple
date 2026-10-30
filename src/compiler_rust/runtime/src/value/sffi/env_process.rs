@@ -9,8 +9,8 @@
 
 use crate::coverage::{rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_path_probe};
 use crate::value::collections::{
-    rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_string_new, rt_tuple_get, rt_tuple_new,
-    rt_tuple_set,
+    rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_string_new, rt_tuple_free, rt_tuple_get,
+    rt_tuple_new, rt_tuple_set,
 };
 use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use crate::value::{RuntimeString, RuntimeValue};
@@ -99,8 +99,71 @@ fn configure_timeout_child_process_group(command: &mut std::process::Command) {
     command.process_group(0);
 }
 
-#[cfg(not(unix))]
-fn configure_timeout_child_process_group(_command: &mut std::process::Command) {}
+/// A capturing child together with the host handle that lets a timeout take
+/// down its whole process tree, not only the leader.
+struct CaptureChild {
+    child: std::process::Child,
+    #[cfg(windows)]
+    job: process_bytes_windows::CaptureJob,
+}
+
+/// The ONE spawn path for every timeout-capable capture owner
+/// (`rt_process_run_timeout`, `rt_process_run_with_limits`,
+/// `rt_process_run_bounded`, `rt_process_run_bounded_bytes`): stdin closed,
+/// stdout/stderr piped, and the tree-kill primitive of the host attached.
+///
+/// - unix (Linux, macOS, FreeBSD): the child leads a new process group, so the
+///   deadline SIGKILLs `-pid` and reaches every descendant.
+/// - Windows: the child starts suspended inside a Job object with
+///   KILL_ON_JOB_CLOSE and is only resumed once admitted, so terminating the
+///   job reaches every descendant. (Rust twin of the C owner's
+///   `win_process_run_capture`, runtime_process.c.)
+/// - any other host: no tree-kill primitive exists here; refuse explicitly
+///   rather than spawn a child the timeout could not clean up.
+fn spawn_capture_child(command: &mut std::process::Command) -> std::io::Result<CaptureChild> {
+    use std::process::Stdio;
+
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        configure_timeout_child_process_group(command);
+        Ok(CaptureChild { child: command.spawn()? })
+    }
+    #[cfg(windows)]
+    {
+        let (child, job) = process_bytes_windows::spawn(command)?;
+        Ok(CaptureChild { child, job })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "process capture with timeout cleanup is not supported on this host",
+        ))
+    }
+}
+
+impl CaptureChild {
+    /// Wait for the child (killing its tree at the deadline) while capturing
+    /// at most `max_output_bytes` per stream; see
+    /// [`finish_child_output_bounded_mode`] for the result contract.
+    fn finish(
+        self,
+        timeout_ms: i64,
+        max_output_bytes: usize,
+        raw_prefix: bool,
+    ) -> std::io::Result<(Vec<u8>, Vec<u8>, i64, bool)> {
+        #[cfg(windows)]
+        {
+            let CaptureChild { child, job } = self;
+            finish_child_output_bounded_mode(child, timeout_ms, max_output_bytes, raw_prefix, Some(&job))
+        }
+        #[cfg(not(windows))]
+        {
+            finish_child_output_bounded_mode(self.child, timeout_ms, max_output_bytes, raw_prefix)
+        }
+    }
+}
 
 const SSH_USERAUTH_PASSWORD_ONLY_FAILURE_PAYLOAD: &[u8; 14] = &[
     51, 0x00, 0x00, 0x00, 0x08, b'p', b'a', b's', b's', b'w', b'o', b'r', b'd', 0x00,
@@ -469,19 +532,6 @@ pub unsafe extern "C" fn rt_shell_exec_tuple(cmd: RuntimeValue) -> RuntimeValue 
     tuple
 }
 
-fn spawn_output_reader<R>(reader: Option<R>) -> std::thread::JoinHandle<Vec<u8>>
-where
-    R: std::io::Read + Send + 'static,
-{
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = reader {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    })
-}
-
 fn spawn_bounded_output_reader<R>(reader: Option<R>, max_bytes: usize, raw_prefix: bool) -> std::sync::mpsc::Receiver<Vec<u8>>
 where
     R: std::io::Read + Send + 'static,
@@ -535,11 +585,11 @@ where
 }
 
 fn finish_child_output_bounded(
-    child: std::process::Child,
+    started: CaptureChild,
     timeout_ms: i64,
     max_output_bytes: usize,
 ) -> std::io::Result<(Vec<u8>, Vec<u8>, i64, bool)> {
-    finish_child_output_bounded_mode(child, timeout_ms, max_output_bytes, false, #[cfg(windows)] None)
+    started.finish(timeout_ms, max_output_bytes, false)
 }
 
 fn finish_child_output_bounded_mode(
@@ -648,43 +698,18 @@ fn finish_child_output_bounded_mode(
     }
 }
 
-fn finish_child_output(mut child: std::process::Child, timeout_ms: i64) -> std::io::Result<(Vec<u8>, Vec<u8>, i64)> {
-    use std::time::{Duration, Instant};
-
-    let stdout_handle = spawn_output_reader(child.stdout.take());
-    let stderr_handle = spawn_output_reader(child.stderr.take());
-
-    let status = if timeout_ms <= 0 {
-        child.wait()?
-    } else {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-        loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                #[cfg(unix)]
-                {
-                    let pgid = -(child.id() as i32);
-                    let group_kill_rc = unsafe { libc::kill(pgid, libc::SIGKILL) };
-                    if group_kill_rc != 0 {
-                        let _ = child.kill();
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = child.kill();
-                }
-                let _ = child.wait();
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "TIMEOUT"));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    };
-
-    let stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
-    Ok((stdout, stderr, status.code().unwrap_or(-1) as i64))
+/// Unbounded capture with the legacy timeout contract: output is never
+/// truncated, and a deadline surfaces as `ErrorKind::TimedOut` so the callers'
+/// `("", "TIMEOUT", -1)` result stays unchanged. A thin wrapper over the single
+/// tree-killing wait path, so the deadline reaches the whole child tree on
+/// every host (it used to kill only the leader: no process group here on unix,
+/// no Job on Windows).
+fn finish_child_output(started: CaptureChild, timeout_ms: i64) -> std::io::Result<(Vec<u8>, Vec<u8>, i64)> {
+    let (stdout, stderr, exit_code, timed_out) = started.finish(timeout_ms, usize::MAX, false)?;
+    if timed_out {
+        return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "TIMEOUT"));
+    }
+    Ok((stdout, stderr, exit_code))
 }
 
 /// Execute a command and capture output
@@ -1427,12 +1452,7 @@ pub unsafe extern "C" fn rt_process_run_timeout(
         }
     }
 
-    let child = match command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+    let child = match spawn_capture_child(&mut command) {
         Ok(c) => c,
         Err(_) => {
             let empty_str = rt_string_new(b"".as_ptr(), 0);
@@ -1490,7 +1510,7 @@ pub unsafe extern "C" fn rt_process_run_bounded(
     timeout_ms: i64,
     max_output_bytes: i64,
 ) -> RuntimeValue {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     crate::value::sffi::file_io::file_ops::invalidate_all_read_caches();
 
     let make_tuple = |stdout: &[u8], stderr: &[u8], exit_code: i64| {
@@ -1519,18 +1539,12 @@ pub unsafe extern "C" fn rt_process_run_bounded(
 
     let mut command = Command::new(resolve_command_path(&cmd_str));
     clear_simple_child_stack_env(&mut command);
-    configure_timeout_child_process_group(&mut command);
     for index in 0..rt_array_len(args) {
         if let Some(arg) = extract_string(rt_array_get(args, index)) {
             command.arg(arg);
         }
     }
-    let child = match command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    let child = match spawn_capture_child(&mut command) {
         Ok(child) => child,
         // Name the spawn failure like the C owner (runtime_process.c) does.
         // An empty stderr made callers report "failed (-1): " with no cause,
@@ -1562,7 +1576,7 @@ pub unsafe extern "C" fn rt_process_run_bounded_bytes(
     timeout_ms: i64,
     max_output_bytes: i64,
 ) -> RuntimeValue {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     let make_tuple = |stdout: &[u8], stderr: &[u8], status: i64| {
         let tuple = rt_tuple_new(3);
         rt_tuple_set(tuple, 0, runtime_byte_array(stdout));
@@ -1594,20 +1608,11 @@ pub unsafe extern "C" fn rt_process_run_bounded_bytes(
         command.arg(arg);
     }
     clear_simple_child_stack_env(&mut command);
-    configure_timeout_child_process_group(&mut command);
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    let (child, job) = match process_bytes_windows::spawn(&mut command) {
-        Ok(started) => started,
-        Err(_) => return make_tuple(b"", b"", -1),
-    };
-    #[cfg(not(windows))]
-    let child = match command.spawn() {
+    let child = match spawn_capture_child(&mut command) {
         Ok(child) => child,
         Err(_) => return make_tuple(b"", b"", -1),
     };
-    match finish_child_output_bounded_mode(child, timeout_ms, max_output_bytes as usize,
-        true, #[cfg(windows)] Some(&job)) {
+    match child.finish(timeout_ms, max_output_bytes as usize, true) {
         Ok((stdout, stderr, status, _)) => make_tuple(&stdout, &stderr, status),
         Err(_) => make_tuple(b"", b"", -1),
     }
@@ -1643,14 +1648,14 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
     use std::process::Command;
     crate::value::sffi::file_io::file_ops::invalidate_all_read_caches();
 
-    let make_error_tuple = || -> RuntimeValue {
-        let empty_str = rt_string_new(b"".as_ptr(), 0);
+    let make_failure_tuple = |reason: &str| -> RuntimeValue {
         let tuple = rt_tuple_new(3);
-        rt_tuple_set(tuple, 0, empty_str);
-        rt_tuple_set(tuple, 1, empty_str);
+        rt_tuple_set(tuple, 0, rt_string_new(b"".as_ptr(), 0));
+        rt_tuple_set(tuple, 1, rt_string_new(reason.as_ptr(), reason.len() as u64));
         rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
         tuple
     };
+    let make_error_tuple = || make_failure_tuple("");
 
     if cmd_ptr.is_null() {
         return make_error_tuple();
@@ -1661,6 +1666,25 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
         Ok(s) => s,
         Err(_) => return make_error_tuple(),
     };
+
+    // Only unix hosts have rlimits. Anywhere else a requested limit must be
+    // refused up front: running the child unlimited and reporting its exit
+    // status as success would silently drop the caller's sandbox. (Windows
+    // Job limits would be the native equivalent; `max_fds` has none.)
+    #[cfg(not(unix))]
+    {
+        let requested: Vec<&str> =
+            [(memory_bytes, "memory_bytes"), (cpu_seconds, "cpu_seconds"), (max_fds, "max_fds"), (max_procs, "max_procs")]
+                .iter()
+                .filter(|(value, _)| *value > 0)
+                .map(|(_, name)| *name)
+                .collect();
+        if !requested.is_empty() {
+            let reason =
+                format!("rt_process_run_with_limits: process limits are not supported on this host: {}", requested.join(", "));
+            return make_failure_tuple(&reason);
+        }
+    }
 
     let mut command = Command::new(resolve_command_path(cmd_str));
     clear_simple_child_stack_env(&mut command);
@@ -1729,12 +1753,7 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
         });
     }
 
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let child = match command.spawn() {
+    let child = match spawn_capture_child(&mut command) {
         Ok(c) => c,
         Err(_) => return make_error_tuple(),
     };
@@ -1873,10 +1892,23 @@ pub extern "C" fn rt_cpuid_tuple(leaf: i32, subleaf: i32) -> RuntimeValue {
     tuple
 }
 
-/// Leak `words` as a raw word block: the pure-Simple native lanes destructure
+/// Copy `words` into a raw word block: the pure-Simple native lanes destructure
 /// a tuple result by loading words 0/8/16/... instead of calling rt_tuple_get.
+///
+/// The block comes from the tracked C allocator (`rt_alloc`, runtime_memory.c),
+/// exactly like the C twins (`rt_process_result_to_tuple`,
+/// `rt_cpuid_tuple_block`): a transient raw scope reclaims it at scope end, and
+/// a consumer may `rt_free` it. A `Box` here was invisible to both. Null when
+/// the allocator refuses, as in C; consumers already treat 0 as "no result".
 fn raw_result_block(words: &[i64]) -> *mut i64 {
-    Box::into_raw(words.to_vec().into_boxed_slice()) as *mut i64
+    let bytes = (words.len() * std::mem::size_of::<i64>()) as u64;
+    let block = crate::value::sffi::memory::rt_alloc(bytes) as *mut i64;
+    if block.is_null() {
+        return std::ptr::null_mut();
+    }
+    // rt_alloc returns a fresh, 8-byte aligned (calloc) region of `bytes`.
+    unsafe { std::ptr::copy_nonoverlapping(words.as_ptr(), block, words.len()) };
+    block
 }
 
 /// Raw 4-word CPUID block (C twin: `rt_cpuid_tuple_block`, runtime_native.c).
@@ -1921,11 +1953,18 @@ pub unsafe extern "C" fn rt_process_run_bounded_tuple(
 /// Repack a (stdout, stderr, status) result tuple: slots 0/1 keep their
 /// runtime values, slot 2 is untagged (C twin: `rt_process_result_to_tuple`).
 fn process_result_block(tuple: RuntimeValue) -> *mut i64 {
-    raw_result_block(&[
+    let block = raw_result_block(&[
         rt_tuple_get(tuple, 0).to_raw() as i64,
         rt_tuple_get(tuple, 1).to_raw() as i64,
         rt_tuple_get(tuple, 2).as_int(),
-    ])
+    ]);
+    // The owner tuple is ours: every caller hands over a fresh result and
+    // nothing else reads it once the slots are copied out (the two payload
+    // slots stay alive through block[0]/block[1]). Free the shallow owner
+    // here, as the C twin frees its result array (#5342); before this, each
+    // bounded spawn leaked one registered tuple. A NIL tuple is a no-op.
+    rt_tuple_free(tuple);
+    block
 }
 
 /// 1 when this runtime was built for x86_64, else 0 (C twin: `rt_cpu_is_x86_64`).
@@ -2417,6 +2456,178 @@ mod tests {
             assert!(extract_string_test(rt_tuple_get(result, 1)).ends_with("TIMEOUT\n"));
             assert!(started.elapsed() < std::time::Duration::from_millis(1500));
         }
+    }
+
+    /// Shell + argv that print `hi` and exit 0 on every seed host.
+    fn echo_hi_command() -> (&'static str, Vec<&'static str>) {
+        if cfg!(windows) {
+            ("cmd", vec!["/c", "echo hi"])
+        } else {
+            ("/bin/sh", vec!["-c", "echo hi"])
+        }
+    }
+
+    /// Rust twin of C fix #5342 (`rt_process_result_to_tuple` frees its owner
+    /// array): the raw-block facade must release the owner tuple it copies out
+    /// of. Checked directly (the tuple is unregistered once the block exists)
+    /// and, under the crate's single-threaded test default, as a plateau of the
+    /// process-wide live `Tuple` count over N spawns (pre-fix: exactly +N).
+    #[test]
+    fn bounded_tuple_facade_frees_owner_tuple_per_spawn() {
+        use crate::value::collections::rt_tuple_len;
+        use crate::value::heap::rt_heap_live_count_by_kind;
+        let tuple_kind = HeapObjectType::Tuple as i64;
+        let (cmd, args) = echo_hi_command();
+
+        // Direct: the owner tuple is live before the copy and released after it.
+        unsafe {
+            let owner = rt_process_run_bounded(cmd.as_ptr(), cmd.len() as u64, runtime_args(&args), 10_000, -1);
+            assert_eq!(rt_tuple_len(owner), 3);
+            let stdout = rt_tuple_get(owner, 0);
+            let block = process_result_block(owner);
+            assert!(!block.is_null());
+            assert_eq!(rt_tuple_len(owner), -1, "owner tuple still registered after the block copy");
+            assert_eq!(RuntimeValue::from_raw(*block as u64), stdout);
+            assert_eq!(*block.add(2), 0);
+            assert!(extract_string_test(stdout).starts_with("hi"));
+            crate::value::sffi::memory::rt_free(block as *mut u8);
+        }
+
+        // Plateau: only meaningful when no other test moves the global counter
+        // concurrently (src/compiler_rust/.cargo/config.toml sets RUST_TEST_THREADS=1).
+        if std::env::var("RUST_TEST_THREADS").ok().as_deref() != Some("1") {
+            eprintln!("skipping live-tuple plateau: tests are not single-threaded");
+            return;
+        }
+        let iterations = 200_i64;
+        let before = rt_heap_live_count_by_kind(tuple_kind);
+        for _ in 0..iterations {
+            unsafe {
+                let args = runtime_args(&args);
+                let block = rt_process_run_bounded_tuple(cmd.as_ptr(), cmd.len() as u64, args, 10_000, -1);
+                assert!(!block.is_null());
+                assert_eq!(*block.add(2), 0);
+                crate::value::sffi::memory::rt_free(block as *mut u8);
+            }
+        }
+        let delta = rt_heap_live_count_by_kind(tuple_kind) - before;
+        assert!(delta < iterations / 2, "owner tuples leaked across {iterations} spawns: live Tuple delta {delta}");
+    }
+
+    /// The raw word blocks are the C twins' `rt_alloc` blocks: the tracked
+    /// allocator must own them (a transient raw scope sees their words), so
+    /// that a scope end reclaims them exactly as it reclaims the C ones.
+    #[test]
+    fn cpuid_tuple_block_is_owned_by_the_tracked_allocator() {
+        extern "C" {
+            fn rt_transient_raw_scope_begin() -> i32;
+            fn rt_transient_raw_scope_end() -> i32;
+            fn rt_transient_raw_words(value: i64, words: *mut *const usize, canonical_ptr: *mut usize) -> i64;
+        }
+        // The raw scope is process-global (safe under the crate's default
+        // RUST_TEST_THREADS=1); another test may still briefly hold it.
+        let scope_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while unsafe { rt_transient_raw_scope_begin() } == 0 {
+            assert!(std::time::Instant::now() < scope_deadline, "transient raw scope stayed busy");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let block = rt_cpuid_tuple_block(0, 0);
+        let words = unsafe { rt_transient_raw_words(block as i64, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let regs: Vec<i64> = if block.is_null() {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(block, 4).to_vec() }
+        };
+        if !block.is_null() {
+            // Our block: free it here so the scope end does not free it again.
+            crate::value::sffi::memory::rt_free(block as *mut u8);
+        }
+        assert_eq!(unsafe { rt_transient_raw_scope_end() }, 1);
+
+        assert!(!block.is_null());
+        assert_eq!(words, 4, "cpuid block is not an rt_alloc allocation (word count {words})");
+        let tuple = rt_cpuid_tuple(0, 0);
+        let expected: Vec<i64> = (0..4).map(|index| rt_tuple_get(tuple, index).as_int()).collect();
+        assert_eq!(regs, expected);
+    }
+
+    /// Timeout cleanup must take the whole tree, not only the shell leader
+    /// (`sh -c 'sleep 30 &'` leaves the sleep behind when only sh is killed).
+    #[cfg(unix)]
+    #[test]
+    fn process_run_timeout_kills_the_detached_grandchild() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "simple-rt-timeout-grandchild-{}-{}.pid",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let cmd = "/bin/sh";
+        let result = unsafe {
+            let args = runtime_args(&["-c", &script]);
+            rt_process_run_timeout(cmd.as_ptr(), cmd.len() as u64, args, 1_000)
+        };
+        let (stdout, stderr, status) = unsafe {
+            (
+                extract_string_test(rt_tuple_get(result, 0)),
+                extract_string_test(rt_tuple_get(result, 1)),
+                rt_tuple_get(result, 2).as_int(),
+            )
+        };
+        let grandchild: i32 = std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .expect("grandchild pid file");
+        let _ = std::fs::remove_file(&pid_file);
+
+        // Poll: the orphaned sleep is reaped by init shortly after SIGKILL.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut alive = true;
+        while alive && std::time::Instant::now() < deadline {
+            alive = unsafe { libc::kill(grandchild, 0) } == 0;
+            if alive {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        if alive {
+            // Never leave a 30 s sleep behind on a failing run.
+            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        }
+        assert_eq!((stdout.as_str(), stderr.as_str(), status), ("", "TIMEOUT", -1));
+        assert!(!alive, "grandchild sleep {grandchild} survived the timeout");
+    }
+
+    /// Unix limits are real rlimits; the fd limit is the cheapest to observe.
+    #[cfg(unix)]
+    #[test]
+    fn process_run_with_limits_applies_the_fd_limit() {
+        let cmd = "/bin/sh";
+        let result = unsafe {
+            let args = runtime_args(&["-c", "ulimit -n"]);
+            rt_process_run_with_limits(cmd.as_ptr(), cmd.len() as u64, args, 10_000, 0, 0, 64, 0)
+        };
+        let stdout = unsafe { extract_string_test(rt_tuple_get(result, 0)) };
+        assert_eq!(unsafe { rt_tuple_get(result, 2).as_int() }, 0);
+        assert_eq!(stdout.trim(), "64");
+    }
+
+    /// A host without rlimits must refuse a requested limit, never run the
+    /// child unlimited and report success.
+    #[cfg(not(unix))]
+    #[test]
+    fn process_run_with_limits_refuses_limits_on_hosts_without_rlimit() {
+        let (cmd, args) = echo_hi_command();
+        let result = unsafe {
+            let args = runtime_args(&args);
+            rt_process_run_with_limits(cmd.as_ptr(), cmd.len() as u64, args, 10_000, 1 << 20, 0, 0, 0)
+        };
+        let stderr = unsafe { extract_string_test(rt_tuple_get(result, 1)) };
+        assert_eq!(unsafe { rt_tuple_get(result, 2).as_int() }, -1);
+        assert!(stderr.contains("not supported on this host"), "{stderr}");
+        assert!(stderr.contains("memory_bytes"), "{stderr}");
     }
 
     #[cfg(unix)]
