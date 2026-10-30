@@ -16943,6 +16943,12 @@ static int64_t* rt_process_result_to_tuple(SplArray* result) {
     tuple[1] = rt_array_get(result, 1);
     /* slot 2 is always pushed via rt_value_int by both C owners: untag. */
     tuple[2] = rt_value_as_int(rt_array_get(result, 2));
+    /* The owner array is ours: every caller hands over a fresh result and
+     * nothing else reads it after the slots are copied out (the two text
+     * slots stay alive through tuple[0]/tuple[1]). Free the shallow owner
+     * here, as rt_process_run_owned_observed_bounded_text does; before this,
+     * each spawn leaked its result array. */
+    rt_array_free(result);
     return tuple;
 }
 
