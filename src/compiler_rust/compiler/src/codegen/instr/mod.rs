@@ -116,7 +116,7 @@ use units::{compile_unit_bound_check, compile_unit_narrow, compile_unit_saturate
 /// Context for instruction compilation, holding all state needed to compile MIR instructions.
 pub struct InstrContext<'a, M: Module> {
     pub module: &'a mut M,
-    pub func_ids: &'a mut std::collections::BTreeMap<String, cranelift_module::FuncId>,
+    pub func_ids: &'a mut super::func_id_table::FuncIdTable,
     pub runtime_funcs: &'a HashMap<&'static str, cranelift_module::FuncId>,
     pub global_ids: &'a std::collections::BTreeMap<String, cranelift_module::DataId>,
     pub vreg_values: &'a mut HashMap<VReg, cranelift_codegen::ir::Value>,
@@ -135,6 +135,11 @@ pub struct InstrContext<'a, M: Module> {
     /// aliasing two distinct locals onto one Variable — see flat_ast_to_module
     /// stage4 SIGSEGV, 2026-06-10.)
     pub extra_var_base: u32,
+    /// `shared::implicit_local_param_slots(func)`, computed once per function.
+    /// `compile_store` needs it for every `Store` to a local; recomputing it
+    /// there walked every instruction of the function per store (quadratic in
+    /// function size -- the top frame of the 2026-10-30 seed JIT samples).
+    pub implicit_param_slots: usize,
     /// Reverse map: VReg → local_index, for VRegs produced by Load from a local.
     /// Used by push codegen to store the new array pointer back to the local Variable.
     pub vreg_from_local: &'a mut HashMap<VReg, usize>,
@@ -258,8 +263,8 @@ impl<'a, M: Module> InstrContext<'a, M> {
         let runtime_funcs: &'static HashMap<&'static str, cranelift_module::FuncId> = Box::leak(Box::new(static_map));
 
         // Leak auxiliary maps so we can take &'a mut references
-        let func_ids: &'a mut std::collections::BTreeMap<String, cranelift_module::FuncId> =
-            Box::leak(Box::new(std::collections::BTreeMap::new()));
+        let func_ids: &'a mut super::func_id_table::FuncIdTable =
+            Box::leak(Box::new(super::func_id_table::FuncIdTable::new()));
         let global_ids: &'static std::collections::BTreeMap<String, cranelift_module::DataId> =
             Box::leak(Box::new(std::collections::BTreeMap::new()));
         let vreg_values: &'a mut HashMap<VReg, cranelift_codegen::ir::Value> = Box::leak(Box::new(HashMap::new()));
@@ -312,6 +317,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             variables,
             extra_variables,
             extra_var_base: 1000,
+            implicit_param_slots: crate::codegen::shared::implicit_local_param_slots(func),
             vreg_from_local,
             func,
             entry_block,

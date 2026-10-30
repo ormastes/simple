@@ -20,6 +20,7 @@ use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
 use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirInst, MirModule};
 
+use super::func_id_table::FuncIdTable;
 use super::instr::compile_function_body;
 use super::mir_inline::inline_small_pure_functions;
 use super::runtime_sffi::runtime_funcs_for_target;
@@ -781,7 +782,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
 pub struct CodegenBackend<M: Module> {
     pub module: M,
     pub ctx: Context,
-    pub func_ids: BTreeMap<String, cranelift_module::FuncId>,
+    pub func_ids: FuncIdTable,
     pub runtime_funcs: HashMap<&'static str, cranelift_module::FuncId>,
     pub global_ids: BTreeMap<String, cranelift_module::DataId>,
     pub body_stub: Option<cranelift_module::FuncId>,
@@ -1335,7 +1336,7 @@ impl<M: Module> CodegenBackend<M> {
         Ok(Self {
             module,
             ctx,
-            func_ids: BTreeMap::new(),
+            func_ids: FuncIdTable::new(),
             runtime_funcs: HashMap::new(),
             global_ids: BTreeMap::new(),
             body_stub: None,
@@ -1554,7 +1555,7 @@ impl<M: Module> CodegenBackend<M> {
         // Runtime IDs are fallback name-resolution entries. Never let a later
         // compilation unit replace an existing local raw-name mapping.
         for (name, id) in &self.runtime_funcs {
-            self.func_ids.entry((*name).to_string()).or_insert(*id);
+            self.func_ids.or_insert((*name).to_string(), *id);
         }
 
         let _total_mir_functions = functions.len();
@@ -1614,9 +1615,9 @@ impl<M: Module> CodegenBackend<M> {
                 self.function_return_types.insert(symbol_name, func.return_type);
             } else {
                 // Imports never displace an already-known local body.
-                self.func_ids.entry(func.name.clone()).or_insert(func_id);
+                self.func_ids.or_insert(func.name.clone(), func_id);
                 if symbol_name != func.name {
-                    self.func_ids.entry(symbol_name.clone()).or_insert(func_id);
+                    self.func_ids.or_insert(symbol_name.clone(), func_id);
                 }
                 self.function_return_types
                     .entry(func.name.clone())
@@ -1754,7 +1755,7 @@ impl<M: Module> CodegenBackend<M> {
                                     name, sanitized
                                 );
                             }
-                            self.func_ids.entry(name.clone()).or_insert(fid);
+                            self.func_ids.or_insert(name.clone(), fid);
                             continue;
                         }
                     }
