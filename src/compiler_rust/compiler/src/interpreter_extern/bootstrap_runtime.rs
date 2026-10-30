@@ -25,7 +25,9 @@ unsafe extern "C" {
     // Session-owned process trees: src/runtime/runtime_process_tree.c, the one
     // implementation for every engine. Return codes: >= 0 success,
     // -errno failure, RT_PTREE_UNSUPPORTED (-100000) when this host has no
-    // owner arm (never a silent success).
+    // owner arm (never a silent success); rt_process_kill_tree may also return
+    // -100001 (not a session leader) or -100002 (leader reaped, second sweep
+    // failed: stop tracking the pid).
     #[link_name = "rt_process_tree_support"]
     fn c_process_tree_support() -> i64;
     #[link_name = "rt_process_spawn_session"]

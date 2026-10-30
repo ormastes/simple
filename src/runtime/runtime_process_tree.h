@@ -43,6 +43,11 @@ extern "C" {
 #define RT_PTREE_UNSUPPORTED (-100000)
 /* "pid is alive but is not a session leader this API spawned." */
 #define RT_PTREE_NOT_SESSION_LEADER (-100001)
+/* rt_process_kill_tree: the leader was reaped (or is no longer this process's
+ * child), but the second sweep's enumeration failed. The pid is no longer
+ * owned (it may be recycled), so callers must stop tracking it; survivors of
+ * the race the second sweep guards against may remain. */
+#define RT_PTREE_SWEEP_FAILED_AFTER_REAP (-100002)
 
 /* 0 when session ownership works on this host, RT_PTREE_UNSUPPORTED otherwise. */
 int64_t rt_process_tree_support(void);
@@ -75,6 +80,7 @@ int64_t rt_process_kill_session(int64_t sid, int32_t signo);
  * reap the leader, and sweep once more for forks that raced the first pass.
  *   0  session enumerated, every member signalled, leader reaped or not ours
  *   RT_PTREE_NOT_SESSION_LEADER  pid is alive and getsid(pid) != pid
+ *   RT_PTREE_SWEEP_FAILED_AFTER_REAP  leader gone, second sweep failed
  *   -EINVAL / -errno / RT_PTREE_UNSUPPORTED  as above */
 int64_t rt_process_kill_tree(int64_t pid);
 

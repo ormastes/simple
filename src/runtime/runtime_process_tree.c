@@ -67,16 +67,16 @@ int64_t rt_process_tree_support(void) {
 typedef struct {
     pid_t pid;
     pid_t sid;
-} rt_ptree_entry;
+} ptree_entry;
 
-static int64_t rt_ptree_enumerate(rt_ptree_entry** out, size_t* out_count) {
+static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
     *out = NULL;
     *out_count = 0;
 #if defined(__linux__)
     DIR* proc = opendir("/proc");
     if (!proc) return -(int64_t)errno;
     size_t cap = 256, n = 0;
-    rt_ptree_entry* list = (rt_ptree_entry*)malloc(cap * sizeof(*list));
+    ptree_entry* list = (ptree_entry*)malloc(cap * sizeof(*list));
     if (!list) {
         closedir(proc);
         return -ENOMEM;
@@ -94,7 +94,7 @@ static int64_t rt_ptree_enumerate(rt_ptree_entry** out, size_t* out_count) {
         if (sid < 0) continue;
         if (n == cap) {
             size_t new_cap = cap * 2;
-            rt_ptree_entry* grown = (rt_ptree_entry*)realloc(list, new_cap * sizeof(*list));
+            ptree_entry* grown = (ptree_entry*)realloc(list, new_cap * sizeof(*list));
             if (!grown) {
                 free(list);
                 closedir(proc);
@@ -130,7 +130,7 @@ static int64_t rt_ptree_enumerate(rt_ptree_entry** out, size_t* out_count) {
             free(pids);
             continue;
         }
-        rt_ptree_entry* list = (rt_ptree_entry*)malloc(((size_t)filled + 1) * sizeof(*list));
+        ptree_entry* list = (ptree_entry*)malloc(((size_t)filled + 1) * sizeof(*list));
         if (!list) {
             free(pids);
             return -ENOMEM;
@@ -165,7 +165,7 @@ static int64_t rt_ptree_enumerate(rt_ptree_entry** out, size_t* out_count) {
             return -(int64_t)saved;
         }
         size_t count = size / sizeof(struct kinfo_proc);
-        rt_ptree_entry* list = (rt_ptree_entry*)malloc((count + 1) * sizeof(*list));
+        ptree_entry* list = (ptree_entry*)malloc((count + 1) * sizeof(*list));
         if (!list) {
             free(procs);
             return -ENOMEM;
@@ -188,21 +188,21 @@ static int64_t rt_ptree_enumerate(rt_ptree_entry** out, size_t* out_count) {
 #endif
 }
 
-static void rt_ptree_sleep_ms(int ms) {
+static void ptree_sleep_ms(int ms) {
     struct timespec ts;
     ts.tv_sec = ms / 1000;
     ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
 }
 
-static int64_t rt_ptree_monotonic_ms(void) {
+static int64_t ptree_monotonic_ms(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 /* Exit status in the rt_process_wait convention. */
-static int64_t rt_ptree_status_code(int status) {
+static int64_t ptree_status_code(int status) {
     if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return -(128 + (int64_t)WTERMSIG(status));
     return -1;
@@ -233,6 +233,15 @@ int64_t rt_process_spawn_session(const char* cmd, const char** args, int64_t arg
     /* The child reports an exec failure through a CLOEXEC pipe, so the caller
      * gets -errno instead of a pid that exits 127 a moment later. */
     int err_pipe[2];
+#if defined(__linux__) || defined(__FreeBSD__)
+    /* Atomic: no window in which a concurrent fork+exec elsewhere in the
+     * process inherits the pipe. (macOS defines O_CLOEXEC but has no pipe2.) */
+    if (pipe2(err_pipe, O_CLOEXEC) != 0) {
+        int saved = errno;
+        free(argv);
+        return -(int64_t)saved;
+    }
+#else
     if (pipe(err_pipe) != 0) {
         int saved = errno;
         free(argv);
@@ -245,6 +254,7 @@ int64_t rt_process_spawn_session(const char* cmd, const char** args, int64_t arg
         free(argv);
         return -(int64_t)saved;
     }
+#endif
 
     fflush(stdout);
     fflush(stderr);
@@ -327,19 +337,19 @@ int64_t rt_process_session_wait(int64_t pid, int64_t timeout_ms) {
             waited = waitpid((pid_t)pid, &status, 0);
         } while (waited < 0 && errno == EINTR);
         if (waited < 0) return -1;
-        return rt_ptree_status_code(status);
+        return ptree_status_code(status);
     }
-    int64_t deadline = rt_ptree_monotonic_ms() + timeout_ms;
+    int64_t deadline = ptree_monotonic_ms() + timeout_ms;
     int sleep_ms = 1;
     for (;;) {
         pid_t waited = waitpid((pid_t)pid, &status, WNOHANG);
-        if (waited == (pid_t)pid) return rt_ptree_status_code(status);
+        if (waited == (pid_t)pid) return ptree_status_code(status);
         if (waited < 0) {
             if (errno == EINTR) continue;
             return -1;
         }
-        if (rt_ptree_monotonic_ms() >= deadline) return -2;
-        rt_ptree_sleep_ms(sleep_ms);
+        if (ptree_monotonic_ms() >= deadline) return -2;
+        ptree_sleep_ms(sleep_ms);
         if (sleep_ms < 10) sleep_ms++;
     }
 #endif
@@ -381,9 +391,9 @@ int64_t rt_process_kill_session(int64_t sid, int32_t signo) {
     if (sid <= 1 || sid > INT32_MAX || signo < 0) return -EINVAL;
     /* Never our own session: that would take the runner down with the tree. */
     if ((pid_t)sid == getsid(0)) return -EINVAL;
-    rt_ptree_entry* list = NULL;
+    ptree_entry* list = NULL;
     size_t count = 0;
-    int64_t rc = rt_ptree_enumerate(&list, &count);
+    int64_t rc = ptree_enumerate(&list, &count);
     if (rc < 0) return rc;
     pid_t self = getpid();
     int64_t signalled = 0;
@@ -417,24 +427,26 @@ int64_t rt_process_kill_tree(int64_t pid) {
 
     /* Reap the leader if it is our child. SIGKILL is not deferrable, so this
      * completes quickly; the bound only guards against a stopped/traced leader. */
-    int64_t deadline = rt_ptree_monotonic_ms() + 2000;
+    int64_t deadline = ptree_monotonic_ms() + 2000;
+    int leader_gone = 0; /* reaped here, or no longer waitable by us */
     for (;;) {
         int status = 0;
         pid_t waited = waitpid((pid_t)pid, &status, WNOHANG);
-        if (waited == (pid_t)pid) break;
+        if (waited == (pid_t)pid) { leader_gone = 1; break; }
         if (waited < 0) {
             if (errno == EINTR) continue;
+            if (errno == ECHILD) leader_gone = 1;
             break; /* ECHILD: not our child, or already reaped */
         }
-        if (rt_ptree_monotonic_ms() >= deadline) break;
-        rt_ptree_sleep_ms(1);
+        if (ptree_monotonic_ms() >= deadline) break;
+        ptree_sleep_ms(1);
     }
 
     /* Second sweep: a member may have forked between enumeration and its own
      * SIGKILL; the new process inherited the session and is caught here. */
-    rt_ptree_sleep_ms(5);
+    ptree_sleep_ms(5);
     rc = rt_process_kill_session(pid, SIGKILL);
-    if (rc < 0) return rc;
+    if (rc < 0) return leader_gone ? RT_PTREE_SWEEP_FAILED_AFTER_REAP : rc;
     return 0;
 #endif
 }

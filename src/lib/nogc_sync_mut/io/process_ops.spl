@@ -837,7 +837,7 @@ extern fn rt_process_spawn_session_value(cmd: text, args: [text]) -> i64
 extern fn rt_process_session_wait(pid: i64, timeout_ms: i64) -> i64
 @unsafe(reason: "session-leader liveness without reaping; 1 running, 0 exited or absent, -100000 unsupported", capabilities: [ffi])
 extern fn rt_process_session_is_running(pid: i64) -> i64
-@unsafe(reason: "SIGKILL every process in the leader's session and reap the leader; 0 success, else -errno / -100000 / -100001", capabilities: [ffi])
+@unsafe(reason: "SIGKILL every process in the leader's session and reap the leader; 0 success, else -errno / -100000 / -100001 / -100002 (leader reaped, second sweep failed)", capabilities: [ffi])
 extern fn rt_process_kill_tree(pid: i64) -> i64
 @unsafe(reason: "raw piped-child spawn; positive PID is owned and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
@@ -1000,6 +1000,7 @@ fn _process_kill_raw(pid: i64) -> bool:
 # Same codes as runtime_process_tree.h.
 val RT_PTREE_UNSUPPORTED: i64 = -100000
 val RT_PTREE_NOT_SESSION_LEADER: i64 = -100001
+val RT_PTREE_SWEEP_FAILED_AFTER_REAP: i64 = -100002
 
 fn _process_tree_support_raw() -> i64:
     unsafe(capabilities: [ffi]):
@@ -1027,6 +1028,8 @@ fn _ptree_error_text(code: i64) -> text:
         return "no process-tree ownership on host '{host_os()}': runtime_process_tree.c has no arm for it"
     if code == RT_PTREE_NOT_SESSION_LEADER:
         return "pid is alive but is not a session leader spawned by process_spawn_session"
+    if code == RT_PTREE_SWEEP_FAILED_AFTER_REAP:
+        return "leader reaped, but the second sweep of its session failed; late forks may survive"
     if code < 0:
         return "errno {0 - code}"
     "unexpected code {code}"
@@ -2432,7 +2435,11 @@ pub fn process_kill_tree_result(pid: i64) -> Result<(), text>:
     if code == 0:
         _session_forget(pid)
         return Ok(())
-    # Ownership is kept on failure so is_running/wait still route to the owner.
+    if code == RT_PTREE_SWEEP_FAILED_AFTER_REAP:
+        # The leader is gone and its pid may be recycled: stop owning it.
+        _session_forget(pid)
+        return Err("process_kill_tree({pid}): {_ptree_error_text(code)}")
+    # Otherwise ownership is kept so is_running/wait still route to the owner.
     Err("process_kill_tree({pid}): {_ptree_error_text(code)}")
 
 # Bool view. The reason is printed, so false is never silent.
