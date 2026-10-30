@@ -256,6 +256,7 @@ mod tests {
     fn linux_owner_text_pairs_preserve_arrays_and_scalar_limits() {
         assert_eq!(text_arg_indices("rt_linux_group_available_capacity_v1"), Some(&[0][..]));
         assert_eq!(text_arg_indices("rt_linux_group_parent_acquire_v1"), Some(&[0, 1][..]));
+        assert_eq!(text_arg_indices("rt_linux_group_parent_acquire_at_v2"), Some(&[0, 1, 2][..]));
         assert_eq!(text_arg_indices("rt_linux_group_launch_broker_v1"), Some(&[0, 1][..]));
         assert_eq!(text_arg_indices("rt_linux_group_start_v1"), Some(&[0, 1, 4, 5, 6, 9, 10][..]));
         assert_eq!(text_arg_indices("rt_linux_group_poll_v1"), None);
@@ -308,6 +309,57 @@ mod tests {
             std::mem::transmute(module.get_finalized_function(entry))
         };
         assert_eq!(compiled(), 1, "generated native call must deliver all four C ABI words");
+    }
+
+    #[test]
+    fn linux_parent_v2_generated_call_keeps_six_machine_arguments() {
+        use cranelift_codegen::{ir::{types, AbiParam, InstBuilder}, settings};
+        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+        use cranelift_jit::{JITBuilder, JITModule};
+        use cranelift_module::Module;
+
+        extern "C" fn capture(path: i64, path_len: i64, attempt: i64, attempt_len: i64,
+                identity: i64, identity_len: i64) -> i64 {
+            i64::from([path, path_len, attempt, attempt_len, identity, identity_len] ==
+                [101, 7, 202, 9, 303, 64])
+        }
+
+        let isa = cranelift_native::builder().expect("host ISA")
+            .finish(settings::Flags::new(settings::builder())).expect("ISA flags");
+        let mut jit = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        jit.symbol("rt_linux_group_parent_acquire_at_v2", capture as *const u8);
+        let mut module = JITModule::new(jit);
+        let spec = crate::codegen::runtime_sffi::spec_for("rt_linux_group_parent_acquire_at_v2")
+            .expect("registered Linux owner machine signature");
+        let signature = spec.build_signature(module.make_signature().call_conv);
+        let owner = module.declare_function(spec.name, Linkage::Import, &signature).unwrap();
+        let mut context = module.make_context();
+        context.func.signature = module.make_signature();
+        context.func.signature.returns.push(AbiParam::new(types::I64));
+        let entry = module.declare_function("linux_parent_v2_abi_probe", Linkage::Export,
+            &context.func.signature).unwrap();
+        let mut frontend = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+            let block = builder.create_block();
+            builder.switch_to_block(block);
+            builder.seal_block(block);
+            let target = module.declare_func_in_func(owner, builder.func);
+            let machine_args = [101, 7, 202, 9, 303, 64].into_iter()
+                .map(|value| builder.ins().iconst(types::I64, value)).collect();
+            let adapted = super::adapt_args_to_signature(&mut builder, target, machine_args);
+            assert_eq!(adapted.len(), 6, "three text arguments must retain all six ABI words");
+            let call = builder.ins().call(target, &adapted);
+            let result = builder.inst_results(call)[0];
+            builder.ins().return_(&[result]);
+            builder.finalize();
+        }
+        module.define_function(entry, &mut context).unwrap();
+        module.finalize_definitions().unwrap();
+        let compiled: extern "C" fn() -> i64 = unsafe {
+            std::mem::transmute(module.get_finalized_function(entry))
+        };
+        assert_eq!(compiled(), 1, "generated native call must deliver all six C ABI words");
     }
 
     #[test]
@@ -3093,6 +3145,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
         "rt_linux_group_available_capacity_v1" => Some(&[0]),
         "rt_linux_group_parent_acquire_v1" => Some(&[0, 1]),
+        "rt_linux_group_parent_acquire_at_v2" => Some(&[0, 1, 2]),
         "rt_linux_group_launch_broker_v1" => Some(&[0, 1]),
         "rt_linux_group_start_v1" => Some(&[0, 1, 4, 5, 6, 9, 10]),
         // Print/IO (text → ptr, len)

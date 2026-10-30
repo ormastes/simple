@@ -1,0 +1,51 @@
+# Purpose and audience: executable specification evidence for the Linux process owner.
+# @req REQ-SSPEC-UNIT
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use std.nogc_sync_mut.io.linux_process_owner.{
+    LinuxCgroupParentAdmissionV1, linux_cgroup_parent_decode_at_v2
+}
+
+describe "Linux delegated cgroup parent receipt decoding v2":
+    it "keeps an ordinary native rejection distinct from unknown ownership":
+        step("keeps an ordinary native rejection distinct from unknown ownership")
+        match linux_cgroup_parent_decode_at_v2([22, 0, 0, 0], "/delegated", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"):
+            LinuxCgroupParentAdmissionV1.Rejected(reason):
+                assert_equal(reason, "Linux delegated parent acquisition rejected: 22")
+            _: assert_equal(true, false)
+
+    it "accepts only a complete positive ownership receipt":
+        step("accepts only a complete positive ownership receipt")
+        match linux_cgroup_parent_decode_at_v2([0, 7, 12, 34], "/delegated", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"):
+            LinuxCgroupParentAdmissionV1.Acquired(parent):
+                assert_equal(parent.token, 7)
+                assert_equal(parent.path, "/delegated/simple-parent-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                assert_equal(parent.device, 12)
+                assert_equal(parent.inode, 34)
+            _: assert_equal(true, false)
+
+    it "retains a cleanup-pending handle only when its identity is proven":
+        step("retains a cleanup-pending handle only when its identity is proven")
+        match linux_cgroup_parent_decode_at_v2([16, 8, 12, 34], "/delegated", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"):
+            LinuxCgroupParentAdmissionV1.CleanupPending(parent, reason):
+                assert_equal(parent.token, 8)
+                assert_equal(parent.inode, 34)
+                assert_equal(reason, "Linux delegated parent acquisition rejected: 16")
+            _: assert_equal(true, false)
+
+    it "reports unknown when a status cannot prove ownership":
+        step("reports unknown when a status cannot prove ownership")
+        match linux_cgroup_parent_decode_at_v2([130, -1, 0, 0], "/delegated", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"):
+            LinuxCgroupParentAdmissionV1.Unknown(reason):
+                assert_equal(reason, "Linux delegated parent ownership could not be proven")
+            _: assert_equal(true, false)
+
+    it "does not invent success when the token or receipt layout is invalid":
+        step("does not invent success when the token or receipt layout is invalid")
+        match linux_cgroup_parent_decode_at_v2([0, 0, 0, 0], "/delegated", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"):
+            LinuxCgroupParentAdmissionV1.Unknown(_): assert_equal(true, true)
+            _: assert_equal(true, false)
+        match linux_cgroup_parent_decode_at_v2([0, 7, 12], "/delegated", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"):
+            LinuxCgroupParentAdmissionV1.Unknown(_): assert_equal(true, true)
+            _: assert_equal(true, false)

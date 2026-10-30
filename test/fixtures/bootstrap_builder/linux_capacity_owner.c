@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,7 +45,19 @@ int64_t rt_array_get(SplArray *array, int64_t index) {
 int64_t rt_string_len(int64_t value) { (void)value; return -1; }
 const uint8_t *rt_string_data(int64_t value) { (void)value; return NULL; }
 
-static int fail_delegation, fail_rollback;
+static int fail_delegation, fail_rollback, fail_parent_open, fail_readonly_mkdir;
+static int probe_openat(int fd, const char *name, int flags, ...) {
+    if (fail_parent_open && strncmp(name, "simple-parent-", 14) == 0 &&
+        (flags & O_DIRECTORY)) {
+        fail_parent_open = 0; errno = EACCES; return -1;
+    }
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list args; va_start(args, flags); mode = (mode_t)va_arg(args, int); va_end(args);
+        return (int)syscall(SYS_openat, fd, name, flags, mode);
+    }
+    return (int)syscall(SYS_openat, fd, name, flags);
+}
 static ssize_t probe_write(int fd, const void *data, size_t size) {
     if (fail_delegation && size == 7 && memcmp(data, "+memory", 7) == 0) {
         fail_delegation = 0; errno = EPERM; return -1;
@@ -57,9 +70,19 @@ static int probe_unlinkat(int fd, const char *name, int flags) {
     }
     return (int)syscall(SYS_unlinkat, fd, name, flags);
 }
+static int probe_mkdirat(int fd, const char *name, mode_t mode) {
+    if (fail_readonly_mkdir && strncmp(name, "simple-parent-", 14) == 0) {
+        fail_readonly_mkdir = 0; errno = EROFS; return -1;
+    }
+    return (int)syscall(SYS_mkdirat, fd, name, mode);
+}
 #define write probe_write
 #define unlinkat probe_unlinkat
+#define openat probe_openat
+#define mkdirat probe_mkdirat
 #include "runtime_linux_group_owner_impl.h"
+#undef mkdirat
+#undef openat
 #undef write
 #undef unlinkat
 
@@ -95,12 +118,205 @@ static int lifecycle_probe(const char *path) {
     retained = rt_lg_delegation_fd(); assert(retained >= 0); close(retained);
     assert(rt_linux_group_parent_release_v1(field(pending, 1)) == 0);
     assert(!rt_lg_delegation.active);
+    fail_parent_open = 1; fail_rollback = 1;
+    pending = rt_linux_group_parent_acquire_v1(path, strlen(path), second, 64);
+    assert(field(pending, 0) == EOWNERDEAD && field(pending, 1) == -1);
+    assert(!rt_lg_delegation.active);
+    /* The shim could not pin the inode after mkdir, so it must not unlink by
+     * name or publish fabricated device/inode ownership. Clean the injected
+     * fixture only after proving its expected test name is still present. */
+    int cleanup_root = open("/sys/fs/cgroup", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(cleanup_root >= 0);
+    struct stat orphan;
+    assert(fstatat(cleanup_root, "simple-parent-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        &orphan, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(orphan.st_mode));
+    assert(syscall(SYS_unlinkat, cleanup_root,
+        "simple-parent-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        AT_REMOVEDIR) == 0);
+    close(cleanup_root);
     puts("PASS: nonreused lease rejects stale release; failed acquisition rollback retains exact owner until cleanup");
+    return 0;
+}
+
+static void assert_v2_rejected(const char *path, const char *attempt, const char *identity) {
+    SplArray *receipt = rt_linux_group_parent_acquire_at_v2(path, strlen(path),
+        attempt, strlen(attempt), identity, strlen(identity));
+    assert(field(receipt, 0) != 0 && field(receipt, 1) == 0);
+}
+
+static int has_word(const char *text, const char *word) {
+    const char *at = text;
+    size_t wanted = strlen(word);
+    while (*at) {
+        at += strspn(at, " \t\r\n");
+        size_t length = strcspn(at, " \t\r\n");
+        if (length == wanted && memcmp(at, word, wanted) == 0) return 1;
+        at += length;
+    }
+    return 0;
+}
+
+/* This test-only setup writes controllers only in this uniquely named,
+ * process-empty transient service parent. DelegateSubgroup keeps the test
+ * process in its supervisor child while the service parent is configured. */
+static int setup_owned_service_parent(int parent, const char *path,
+        const char *expected_service) {
+    const char *name = strrchr(path, '/'); name = name ? name + 1 : path;
+    size_t name_len = strlen(name);
+    if (!expected_service || strcmp(name, expected_service) != 0 ||
+        strncmp(name, "simple-linux-parent-v2-", 23) != 0 || name_len < 8 ||
+        strcmp(name + name_len - 8, ".service") != 0) return 0;
+    char procs[4096], available[4096], enabled[4096];
+    if (rt_lg_read_at(parent, "cgroup.procs", procs, sizeof(procs))) {
+        if (strspn(procs, " \t\r\n") != strlen(procs)) return 0;
+    } else if (errno != ENODATA) return 0;
+    if (!rt_lg_read_at(parent, "cgroup.controllers", available, sizeof(available)) ||
+        !has_word(available, "memory") || !has_word(available, "pids")) return 0;
+    if (rt_lg_read_at(parent, "cgroup.subtree_control", enabled, sizeof(enabled))) {
+        if (strspn(enabled, " \t\r\n") != strlen(enabled)) return 0;
+    } else if (errno == ENODATA) enabled[0] = 0;
+    else return 0;
+    printf("V2_DELEGATION_BEFORE=subtree_control_empty; available=%s; parent_procs_empty=true\n",
+        available); fflush(stdout);
+    if (!rt_lg_write_at(parent, "cgroup.subtree_control", "+memory +pids") ||
+        !rt_lg_read_at(parent, "cgroup.subtree_control", enabled, sizeof(enabled)) ||
+        !has_word(enabled, "memory") || !has_word(enabled, "pids")) return 0;
+    int count = 0;
+    const char *at = enabled;
+    while (*at) {
+        at += strspn(at, " \t\r\n");
+        size_t length = strcspn(at, " \t\r\n");
+        if (!length) break;
+        if (!((length == 6 && memcmp(at, "memory", 6) == 0) ||
+              (length == 4 && memcmp(at, "pids", 4) == 0))) return 0;
+        count++; at += length;
+    }
+    if (count != 2) return 0;
+    printf("V2_DELEGATION_AFTER=memory,pids; readback=%s; service=%s\n",
+        enabled, expected_service); fflush(stdout);
+    return 1;
+}
+
+static int v2_service_probe(const char *expected_service) {
+    char mount_path[4096], current_path[4096], delegated_path[4096];
+    char parsed_root[4096], parsed_mount[4096], parsed_member[4096];
+    const char *valid_mount = "1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n";
+    const char *duplicate_mount =
+        "1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
+        "2 0 0:1 / /mnt/cgroup rw - cgroup2 cgroup rw\n";
+    const char *escaped_mount = "1 0 0:1 / /sys/fs/cgroup\\040x rw - cgroup2 cgroup rw\n";
+    const char *valid_then_escaped =
+        "1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
+        "2 0 0:1 / /sys/fs/cgroup\\040x rw - cgroup2 cgroup rw\n";
+    const char *valid_then_truncated =
+        "1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
+        "2 0 0:1 / /sys/fs/cgroup rw";
+    assert(rt_lg_parse_mountinfo(valid_mount, strlen(valid_mount), parsed_root,
+        sizeof(parsed_root), parsed_mount, sizeof(parsed_mount)));
+    assert(!rt_lg_parse_mountinfo(duplicate_mount, strlen(duplicate_mount), parsed_root,
+        sizeof(parsed_root), parsed_mount, sizeof(parsed_mount)));
+    assert(!rt_lg_parse_mountinfo(escaped_mount, strlen(escaped_mount), parsed_root,
+        sizeof(parsed_root), parsed_mount, sizeof(parsed_mount)));
+    assert(!rt_lg_parse_mountinfo(valid_then_escaped, strlen(valid_then_escaped), parsed_root,
+        sizeof(parsed_root), parsed_mount, sizeof(parsed_mount)));
+    assert(!rt_lg_parse_mountinfo(valid_then_truncated, strlen(valid_then_truncated), parsed_root,
+        sizeof(parsed_root), parsed_mount, sizeof(parsed_mount)));
+    const char *duplicate_membership = "0::/a\n0::/b\n";
+    assert(!rt_lg_parse_membership(duplicate_membership, strlen(duplicate_membership),
+        parsed_member, sizeof(parsed_member)));
+    assert(rt_lg_current_mapping(mount_path, sizeof(mount_path),
+        current_path, sizeof(current_path)));
+    size_t current_len = strlen(current_path);
+    assert(current_len > 11 && strcmp(current_path + current_len - 11, "/supervisor") == 0);
+    memcpy(delegated_path, current_path, current_len - 11);
+    delegated_path[current_len - 11] = 0;
+    assert(delegated_path[0] == '/' && delegated_path[1] != 0);
+    printf("V2_DELEGATED_PATH=%s\n", delegated_path); fflush(stdout);
+
+    const char *attempt = "/tmp/linux-parent-v2-selfcheck";
+    const char *identities[] = {
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        "3333333333333333333333333333333333333333333333333333333333333333",
+        "4444444444444444444444444444444444444444444444444444444444444444"
+    };
+    assert_v2_rejected("relative/path", attempt, identities[0]);
+    assert_v2_rejected("/sys/fs/cgroup/../cgroup", attempt, identities[0]);
+    assert_v2_rejected(mount_path, attempt, identities[0]); /* actual cgroup2 mount root */
+    assert_v2_rejected("/tmp", attempt, identities[0]); /* wrong filesystem/ancestor */
+    char sibling[4096], symlink_path[4096], temp_dir[] = "/tmp/simple-v2-link-XXXXXX";
+    assert(snprintf(sibling, sizeof(sibling), "%s-sibling", delegated_path) < (int)sizeof(sibling));
+    assert_v2_rejected(sibling, attempt, identities[0]);
+    char missing[4096];
+    assert(snprintf(missing, sizeof(missing), "%s/missing", delegated_path) < (int)sizeof(missing));
+    assert_v2_rejected(missing, attempt, identities[0]); /* missing path */
+    char *created = mkdtemp(temp_dir); assert(created);
+    assert(snprintf(symlink_path, sizeof(symlink_path), "%s/linked", created) < (int)sizeof(symlink_path));
+    assert(symlink(delegated_path, symlink_path) == 0);
+    assert_v2_rejected(symlink_path, attempt, identities[0]);
+    assert(unlink(symlink_path) == 0);
+    assert(rmdir(created) == 0);
+
+    int parent = rt_lg_open_absolute_dir(delegated_path); assert(parent >= 0);
+    char controls_before[4096], controls_after[4096], child_name[80];
+    if (!setup_owned_service_parent(parent, delegated_path, expected_service)) {
+        printf("UNSUPPORTED: owned service parent could not enable/read back memory+pids (errno=%d)\n", errno);
+        close(parent); return 77;
+    }
+    if (!rt_lg_read_at(parent, "cgroup.subtree_control", controls_before, sizeof(controls_before))) {
+        printf("UNSUPPORTED: service parent controller state is unreadable (errno=%d)\n", errno);
+        close(parent); return 77;
+    }
+    snprintf(child_name, sizeof(child_name), "simple-parent-%s", identities[0]);
+    struct stat no_offscope_child;
+    assert(fstatat(parent, child_name, &no_offscope_child, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+    assert(mkdirat(parent, child_name, 0700) == 0);
+    SplArray *busy = rt_linux_group_parent_acquire_at_v2(delegated_path,
+        strlen(delegated_path), attempt, strlen(attempt), identities[0], 64);
+    assert(field(busy, 0) == EEXIST && field(busy, 1) == 0);
+    assert(unlinkat(parent, child_name, AT_REMOVEDIR) == 0);
+    snprintf(child_name, sizeof(child_name), "simple-parent-%s", identities[0]);
+    struct stat rejected_absent;
+    assert(fstatat(parent, child_name, &rejected_absent, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+
+    fail_readonly_mkdir = 1;
+    SplArray *readonly = rt_linux_group_parent_acquire_at_v2(delegated_path,
+        strlen(delegated_path), attempt, strlen(attempt), identities[2], 64);
+    assert(field(readonly, 0) == EROFS && field(readonly, 1) == 0);
+    snprintf(child_name, sizeof(child_name), "simple-parent-%s", identities[2]);
+    struct stat readonly_absent;
+    assert(fstatat(parent, child_name, &readonly_absent, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+
+    /* Exercise the shared V1/V2 transaction's failed-open rollback path using
+     * only this service's delegated directory, never the host mount root. */
+    fail_parent_open = 1; fail_rollback = 1;
+    SplArray *unknown = rt_lg_parent_acquire_root(dup(parent), attempt, identities[2]);
+    assert(field(unknown, 0) == EOWNERDEAD && field(unknown, 1) == -1);
+    assert(field(unknown, 2) == 0 && field(unknown, 3) == 0 && !rt_lg_delegation.active);
+    snprintf(child_name, sizeof(child_name), "simple-parent-%s", identities[2]);
+    struct stat orphan;
+    assert(fstatat(parent, child_name, &orphan, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(orphan.st_mode));
+    assert(syscall(SYS_unlinkat, parent, child_name, AT_REMOVEDIR) == 0);
+    fail_parent_open = 0; fail_rollback = 0;
+
+    SplArray *acquired = rt_linux_group_parent_acquire_at_v2(delegated_path,
+        strlen(delegated_path), attempt, strlen(attempt), identities[3], 64);
+    assert(field(acquired, 0) == 0 && field(acquired, 1) > 0 && field(acquired, 3) > 0);
+    assert(rt_lg_read_at(parent, "cgroup.subtree_control", controls_after, sizeof(controls_after)));
+    assert(strcmp(controls_before, controls_after) == 0);
+    assert(rt_linux_group_parent_release_v1(field(acquired, 1)) == 0);
+    snprintf(child_name, sizeof(child_name), "simple-parent-%s", identities[3]);
+    struct stat absent;
+    assert(fstatat(parent, child_name, &absent, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+    close(parent);
+    puts("PASS: explicit delegated-parent controls and shared-transaction unknown rollback classification");
     return 0;
 }
 
 int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[2], "lifecycle") == 0) return lifecycle_probe(argv[1]);
+    if (argc == 3 && strcmp(argv[1], "v2-service") == 0)
+        return v2_service_probe(argv[2]);
     int monitor = argc == 3 && strcmp(argv[2], "monitor") == 0;
     assert((argc == 2 || monitor) && argv[1][0] == '/');
     const char *identity = "cafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00d";
