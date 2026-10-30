@@ -135,7 +135,7 @@ executors also call `exit_block_local` when they restore.
 
 The fix also closes a second hazard. Before it, an unmarked arm binding was
 added to the frame's `nonlocal_overlay`. On each call made out of the frame,
-`drop_published_globals` / `nonlocal_overlay_entries` publish any non-local
+`publish_live_bound_globals` (via `nonlocal_overlay_entries`) publishes any non-local
 name that has a module binding. So a call inside `case String(value):` could
 also publish the payload over the owned `value` global, not just misread it.
 
