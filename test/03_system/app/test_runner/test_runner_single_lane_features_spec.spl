@@ -1,0 +1,99 @@
+# @req REQ-MC-012
+# @cover src/app/test_runner_new/test_runner_single.spl
+"""
+# The default single lane keeps every lane feature under MC/DC
+
+`simple test --no-session-daemon <spec>` resolves MC/DC to `on` for every
+default profile. MC/DC is ADDITIVE to the single lane: the spec still runs
+through the normal lane body, so its header directives, the `slow_it` budget
+floor, the legacy infix matcher rewrite and the `child binary:` identity line
+all still apply, and the run is not dominated by a doomed instrumented compile.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io_runtime.{time_now_unix_micros}
+
+val DIR = "test/fixtures/test_runner_mcdc/"
+val WAIVER = ["SIMPLE_MCDC_MODE=off", "SIMPLE_MCDC_OFF_WAIVER_REASON=fixture",
+    "SIMPLE_MCDC_OFF_WAIVER_REVIEWER=qa", "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID=R-1",
+    "SIMPLE_MCDC_OFF_WAIVER_VERSION=1"]
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY") ?? ""
+    if b != "":
+        return b
+    "bin/simple"
+
+# Default MC/DC (no MC/DC env) unless extra_env says otherwise. The budget
+# variables are cleared so the fixture sees exactly what the lane set.
+fn run_lane(fixture: text, extra_env: [text]) -> (text, i64):
+    var argv: [text] = ["-u", "SIMPLE_MCDC_MODE", "-u", "SIMPLE_MCDC_MODE_ERROR",
+        "-u", "SIMPLE_MCDC_OFF_WAIVER_REASON", "-u", "SIMPLE_MCDC_OFF_WAIVER_REVIEWER",
+        "-u", "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID", "-u", "SIMPLE_MCDC_OFF_WAIVER_VERSION",
+        "-u", "SIMPLE_EXECUTION_LIMIT", "-u", "SIMPLE_TIMEOUT_SECONDS"]
+    for e in extra_env:
+        argv.push(e)
+    argv.push(real_binary())
+    argv.push("test")
+    argv.push("--no-session-daemon")
+    argv.push(DIR + fixture)
+    val (out, err, code) = process_run_bounded("env", argv, 600000, 4194304)
+    (out + err, code)
+
+fn timed_lane_ms(fixture: text, extra_env: [text]) -> i64:
+    val start = time_now_unix_micros()
+    val (_, code) = run_lane(fixture, extra_env)
+    expect(code).to_equal(0)
+    (time_now_unix_micros() - start) / 1000
+
+describe "default MC/DC-on single lane":
+    # @capture(exec)
+    it "forwards @exec_limit into the child":
+        step("Run a fixture that asserts its own SIMPLE_EXECUTION_LIMIT")
+        val (report, code) = run_lane("exec_limit_fixture.spl", [])
+        expect(report).to_contain("MC/DC: mode=on evidence=")
+        expect(report).to_contain("PASS " + DIR + "exec_limit_fixture.spl")
+        expect(code).to_equal(0)
+
+    # @capture(exec)
+    it "honours the @timeout_secs directive":
+        step("Run a fixture that asserts its own SIMPLE_TIMEOUT_SECONDS=700")
+        val (report, code) = run_lane("timeout_directive_fixture.spl", [])
+        expect(report).to_contain("MC/DC: mode=on evidence=")
+        expect(report).to_contain("PASS " + DIR + "timeout_directive_fixture.spl")
+        expect(code).to_equal(0)
+
+    # @capture(exec)
+    it "applies the slow_it 600s floor":
+        step("Run a slow_it fixture that asserts SIMPLE_TIMEOUT_SECONDS=600")
+        val (report, code) = run_lane("slow_it_fixture.spl", [])
+        expect(report).to_contain("PASS " + DIR + "slow_it_fixture.spl")
+        expect(code).to_equal(0)
+
+    # @capture(exec)
+    it "evaluates the legacy infix matcher":
+        step("Run a fixture whose only expectation is a false infix matcher")
+        val (report, code) = run_lane("infix_matcher_spec.spl", [])
+        expect(report).to_contain("expected 2 to equal 3")
+        expect(report).to_contain("FAIL " + DIR + "infix_matcher_spec.spl")
+        expect(code).to_equal(1)
+
+    # @capture(exec)
+    it "names the child binary":
+        step("Run the quick fixture and read the identity line")
+        val (report, code) = run_lane("quick_fixture.spl", [])
+        expect(report).to_contain("child binary: ")
+        expect(report).to_contain("MC/DC: mode=on evidence=")
+        expect(code).to_equal(0)
+
+    # @capture(exec)
+    it "is not much slower than the waiver run":
+        step("Time the quick fixture with default MC/DC and with the off waiver")
+        val waiver_ms = timed_lane_ms("quick_fixture.spl", WAIVER)
+        val default_ms = timed_lane_ms("quick_fixture.spl", [])
+        # 3x the waiver run, with a 1s floor for process-start jitter.
+        val budget = if waiver_ms * 3 > 1000: waiver_ms * 3 else: 1000
+        expect(default_ms).to_be_less_than(budget + 1)
