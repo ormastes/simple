@@ -5,7 +5,8 @@ use std.gc_async_mut.http_server.ssr_submitter.{
     SsrAsyncConfig, render_ssr_request, register_ssr_async_handler
 }
 use std.http_server.handler.{HandlerRegistry}
-use std.http_server.types.{HttpRequestData, default_location_config}
+use std.http_server.types.{HttpRequestData, HttpResponseData, default_location_config}
+use std.concurrent.channel.{channel_new_id, channel_try_recv_by_id}
 use std.http_server.response.{serialize_response_bytes}
 
 fn ssr_request(method: text, body: text) -> HttpRequestData:
@@ -33,6 +34,24 @@ describe "canonical hosted SSR submitter":
             ssr_request("POST", "<html><body><p>route</p></body></html>"), location)
         expect(response.status).to_equal(200)
         expect(response.headers).to_contain(("Content-Type", "image/png"))
+
+    it "registers an async submitter that delivers the response on the completion channel":
+        var registry = HandlerRegistry.new()
+        val config = SsrAsyncConfig.production(8, 8, 4096, "cpu")
+        expect(register_ssr_async_handler(registry, "server-render", config)).to_equal(true)
+        expect(registry.has_async("server-render")).to_equal(true)
+        var location = default_location_config()
+        location.handler_type = "server-render"
+        val channel_id = channel_new_id()
+        val accepted = registry.submit_async("server-render", 41, channel_id,
+            ssr_request("POST", "<html><body><p>job</p></body></html>"), location)
+        expect(accepted).to_equal(true)
+        val delivered: (i64, HttpResponseData)? = channel_try_recv_by_id(channel_id)
+        match delivered:
+            Some(pair):
+                expect(pair.0).to_equal(41)
+                expect(pair.1.status).to_equal(200)
+            nil: fail("no SSR response on the completion channel")
 
     it "renders in-memory HTML to a PNG through the canonical web Engine2D route":
         val config = SsrAsyncConfig.production(8, 8, 4096, "cpu")

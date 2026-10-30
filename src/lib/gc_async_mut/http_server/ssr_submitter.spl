@@ -7,6 +7,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_ssr_renderer.{
 }
 use std.common.image.png_encode.{encode_argb_to_png}
 use std.concurrent.mutex.{mutex_new, mutex_with_lock_keeping, Mutex}
+use std.concurrent.channel.{channel_send_by_id}
 
 class SsrAsyncConfig:
     width: i32
@@ -72,13 +73,23 @@ fn _registered_ssr_handler(request: HttpRequestData,
                            _location: LocationConfig) -> HttpResponseData:
     render_ssr_request(request, SSR_CONFIG)
 
+fn _submit_ssr_job(job_id: i64, completion_channel_id: i64,
+                   request: HttpRequestData, _location: LocationConfig) -> bool:
+    """Async submission: render, then deliver (job_id, response) on the completion channel."""
+    if completion_channel_id <= 0:
+        return false
+    val response = render_ssr_request(request, SSR_CONFIG)
+    channel_send_by_id(completion_channel_id, (job_id, response))
+    true
+
 fn register_ssr_async_handler(mut registry: HandlerRegistry,
                               name: text,
                               config: SsrAsyncConfig) -> bool:
-    """Register SSR through the currently supported synchronous registry ABI."""
+    """Register SSR as an async submitter, plus the synchronous dispatch fallback."""
     if name == "" or config.width <= 0 or config.height <= 0 or config.max_html_bytes <= 0:
         return false
     SSR_CONFIG = config
+    registry.register_async(name, _submit_ssr_job)
     registry.register(name, _registered_ssr_handler)
     true
 
