@@ -13,6 +13,12 @@ use std.spec.step
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.file_ops.{file_write}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.test_runner.test_runner_execute.{mcdc_compiler_lacks_probes, MCDC_UNAVAILABLE_DEGRADE_TOKEN}
+
+# Same gate as mcdc_real_instrumentation_spec: only a pure-Simple-built
+# compiler emits MC/DC probes; the Rust seed never does.
+val MCDC_COMPILER_GATE_REASON = "requires SIMPLE_MCDC_COMPILER naming a self-hosted (pure-Simple-built) compiler that emits MC/DC probes; the Rust seed cannot"
+val SEED_GATE_REASON = "SIMPLE_BINARY emits MC/DC probes, so the seed's mcdc-unavailable degrade does not apply"
 
 val FIXTURE = "use std.spec\ndescribe \"conditions\":\n    it \"if and or\":\n        val a = 3\n        val b = 7\n        var hits = 0\n        if a > 1 and b < 10:\n            hits = hits + 1\n        if a > 5 or b > 5:\n            hits = hits + 1\n        expect(hits).to_equal(2)\n"
 
@@ -33,10 +39,28 @@ fn make_case(case: text, name: text, body: text) -> text:
     file_write(dir + "/" + name + "_spec.spl", body)
     dir
 
+fn mcdc_compiler() -> text:
+    env_get("SIMPLE_MCDC_COMPILER")
+
+fn probe_capable_compiler_absent() -> bool:
+    val compiler = mcdc_compiler()
+    compiler == "" or mcdc_compiler_lacks_probes(compiler)
+
+# An unset SIMPLE_BINARY is NOT a skip: the seed example then fails with NO_BINARY.
+fn binary_emits_probes() -> bool:
+    real_binary() != "" and not mcdc_compiler_lacks_probes(real_binary())
+
 fn run_target(target: text, envs: [text], extra: [text]) -> (text, i64):
-    if real_binary() == "":
+    run_target_with(real_binary(), target, envs, extra)
+
+# The probe-capable lane forces MC/DC on, so "no degrade" cannot mean "MC/DC was off".
+fn run_target_mcdc(target: text) -> (text, i64):
+    run_target_with(mcdc_compiler(), target, ["SIMPLE_MCDC_MODE=on"], [])
+
+fn run_target_with(binary: text, target: text, envs: [text], extra: [text]) -> (text, i64):
+    if binary == "":
         return (NO_BINARY, 127)
-    val argv = UNSET_MCDC_ENV + envs + [real_binary(), "test", target, "--no-session-daemon", "--no-db", "--no-cache"] + extra
+    val argv = UNSET_MCDC_ENV + envs + ["SIMPLE_BINARY=" + binary, binary, "test", target, "--no-session-daemon", "--no-db", "--no-cache"] + extra
     val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
     (out + err, code)
 
@@ -62,15 +86,6 @@ fn mcdc_report_names_decisions(output: text, dir: text) -> bool:
             return true
     false
 
-# Body of the skipped "reports decisions" example. The case dir name must not
-# contain "decision" (it used to, which made the old check vacuous).
-fn check_nodaemon_reports_decisions():
-    step("Require decisions in the single-file lane output")
-    val dir = make_case("nodaemon_report", "cond", FIXTURE)
-    val (output, _code) = run_target(dir + "/cond_spec.spl", [], [])
-    expect(output.contains("[mcdc-fallback]")).to_equal(false)
-    expect(mcdc_report_names_decisions(output, dir)).to_equal(true)
-
 describe "simple test <file> --no-session-daemon":
     it "runs the fixture and reports it passed":
         step("Run the and/or fixture through the single-file lane")
@@ -85,9 +100,24 @@ describe "simple test <file> --no-session-daemon":
         val (output, _code) = run_target(dir + "/cond_spec.spl", [], [])
         expect(mentions_mcdc(output) or verdict_line(output).contains("degraded=")).to_equal(true)
 
-    # RED until the runner reports decisions; restore as
-    # `it "reports decisions for the instrumented single-file run": check_nodaemon_reports_decisions()`.
-    skip("reports decisions for the instrumented single-file run", "red until fixed: doc/08_tracking/bug/mcdc_runner_never_finalizes_evidence_2026-10-30.md")
+    skip_if(fn(): probe_capable_compiler_absent(), MCDC_COMPILER_GATE_REASON)(
+        "reports decisions for the instrumented single-file run",
+        fn():
+            step("Require decisions in the single-file lane output")
+            val dir = make_case("nodaemon_report", "cond", FIXTURE)
+            val (output, _code) = run_target_mcdc(dir + "/cond_spec.spl")
+            expect(output.contains("[mcdc-fallback]")).to_equal(false)
+            expect(mcdc_report_names_decisions(output, dir)).to_equal(true)
+    )
+
+    skip_if(fn(): binary_emits_probes(), SEED_GATE_REASON)(
+        "names the mcdc-unavailable degrade on the seed single-file run",
+        fn():
+            val dir = make_case("nodaemon_report_seed", "cond", FIXTURE)
+            val (output, _code) = run_target(dir + "/cond_spec.spl", [], [])
+            expect(verdict_line(output)).to_contain("passed=1")
+            expect(verdict_line(output)).to_contain(MCDC_UNAVAILABLE_DEGRADE_TOKEN)
+    )
 
     it "still fails a red spec":
         step("Run a failing spec through the single-file lane")
