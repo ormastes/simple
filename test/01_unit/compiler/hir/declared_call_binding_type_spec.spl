@@ -1,0 +1,58 @@
+# @req REQ-SSPEC-COMPILER
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, SymbolId, SymbolKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return}
+
+fn binding_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn direct_binding_call(symbol: SymbolId, displayed: text, explicit: [HirType] = []) -> HirExpr:
+    val callee = HirExpr(kind: HirExprKind.NamedVar(symbol, displayed), has_type_: false,
+        type_: nil, span: Span.empty())
+    HirExpr(kind: HirExprKind.Call(callee, [], explicit), has_type_: false,
+        type_: nil, span: Span.empty())
+
+describe "declared direct-call type transport for bindings":
+    it "uses the exact declaration ID across same-name owners":
+        val table = SymbolTable.new()
+        val text_type = binding_type(HirTypeKind.Str)
+        val integer = binding_type(HirTypeKind.Int(64, true))
+        val left_result = binding_type(HirTypeKind.Result(text_type, text_type))
+        val right_result = binding_type(HirTypeKind.Result(integer, text_type))
+        val left = table.define("fetch", SymbolKind.Function,
+            binding_type(HirTypeKind.Function([], left_result, [])), Span.empty(), Visibility.Public, false, "left.spl")
+        val right = table.define("fetch", SymbolKind.Function,
+            binding_type(HirTypeKind.Function([], right_result, [])), Span.empty(), Visibility.Public, false, "right.spl")
+        expect(left.id == right.id).to_equal(false)
+        val left_type = hir_binding_direct_call_return(direct_binding_call(left, "right.fetch"), table)
+        val right_type = hir_binding_direct_call_return(direct_binding_call(right, "left.fetch"), table)
+        expect(left_type != nil and right_type != nil).to_equal(true)
+        match left_type.unwrap().kind:
+            case HirTypeKind.Result(ok, _): expect(ok.kind).to_equal(HirTypeKind.Str)
+            case _: panic("left call lost Result declaration")
+        match right_type.unwrap().kind:
+            case HirTypeKind.Result(ok, _): expect(ok.kind).to_equal(HirTypeKind.Int(64, true))
+            case _: panic("right call borrowed another owner")
+        val shadow = table.define("fetch", SymbolKind.Variable, integer, Span.empty(), Visibility.Private, false, nil)
+        expect(hir_binding_direct_call_return(direct_binding_call(shadow, "fetch"), table) == nil).to_equal(true)
+        expect(hir_binding_direct_call_return(direct_binding_call(SymbolId(id: 999999), "fetch"), table) == nil).to_equal(true)
+
+    it "leaves generic and unsettled return inference to its owning pass":
+        val table = SymbolTable.new()
+        val text_type = binding_type(HirTypeKind.Str)
+        val signature = binding_type(HirTypeKind.Function([], text_type, []))
+        val generic = table.define("generic", SymbolKind.Function, signature, Span.empty(), Visibility.Public, false, nil)
+        var declaration = table.get_symbol_raw(generic.id).unwrap()
+        declaration.generic_param_count = 1
+        table.register_preserved_symbol(declaration)
+        expect(hir_binding_direct_call_return(direct_binding_call(generic, "generic"), table) == nil).to_equal(true)
+        val ordinary = table.define("ordinary", SymbolKind.Function, signature, Span.empty(), Visibility.Public, false, nil)
+        expect(hir_binding_direct_call_return(direct_binding_call(ordinary, "ordinary", [text_type]), table) == nil).to_equal(true)
+        val unsettled = binding_type(HirTypeKind.Result(text_type, binding_type(HirTypeKind.Infer(0, 0))))
+        val unknown = table.define("unknown", SymbolKind.Function,
+            binding_type(HirTypeKind.Function([], unsettled, [])), Span.empty(), Visibility.Public, false, nil)
+        expect(hir_binding_direct_call_return(direct_binding_call(unknown, "unknown"), table) == nil).to_equal(true)

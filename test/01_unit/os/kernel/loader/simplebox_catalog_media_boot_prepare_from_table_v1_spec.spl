@@ -1,0 +1,83 @@
+"""Legacy (no-PTRD) Simplebox media path used by combined toolchain boot.
+
+combined_toolchain_catalog_media_boot_v1 calls
+simplebox_catalog_media_boot_prepare_from_table_v1 when no primary-tool
+descriptor is present. That owner was missing on release/1.0.0 after the
+88aac2ffe28 transplant. These examples pin its fail-closed media discovery
+before any signature work.
+"""
+
+use std.spec.*
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.crypto.types.{bytes_to_hex}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.fs_driver.types.{MountOptions, OpenFlags}
+use os.kernel.loader.simplebox_catalog_media_boot_v1.{
+    SimpleboxCatalogMediaBootErrorV1, SimpleboxCatalogMediaBootPolicyV1,
+    SimpleboxCatalogMediaLayoutV1,
+    simplebox_catalog_media_boot_prepare_from_table_v1}
+
+fn _hex_v1(bytes: [u8]) -> text:
+    var values: [i64] = []
+    for byte in bytes: values.push(byte as i64)
+    bytes_to_hex(values)
+
+fn _policy_v1() -> SimpleboxCatalogMediaBootPolicyV1:
+    val key = pure_ed25519_keypair_from_seed([71u8; 32]).1
+    SimpleboxCatalogMediaBootPolicyV1(
+        target: ManifestTarget(os: "simpleos", arch: "riscv64", abi: "simpleos"),
+        layouts: [SimpleboxCatalogMediaLayoutV1(
+            artifact_path: "/simplebox", scr1_path: "/simplebox.scr1",
+            trust_config_path: "/simplebox.trust")],
+        pinned_key_id: "legacy-simplebox-root",
+        pinned_public_key_hex: _hex_v1(key),
+        pinned_public_key_sha256: sha256_u8_hex(key))
+
+fn _table_v1() -> MountTable:
+    var table = MountTable.new()
+    table.mount(
+        "/", DriverInstance.DbFs(DbFsDriver.new_hosted()),
+        MountOptions.default()).unwrap()
+    table
+
+fn _write_v1(table: MountTable, path: text, bytes: [u8]):
+    val file = table.open(path, OpenFlags.create_write()).unwrap()
+    table.positioned_write_bytes(
+        file.id, PositionedDriverKind.Dbfs, 0u64, bytes).unwrap()
+    table.close(file).unwrap()
+
+describe "simplebox catalog media prepare from table v1":
+    it "reports missing media when no layout file exists":
+        step("Prepare a valid policy against an empty mounted table")
+        var table = _table_v1()
+        val prepared = simplebox_catalog_media_boot_prepare_from_table_v1(
+            table, _policy_v1())
+        expect(prepared.unwrap_err().error).to_equal(
+            SimpleboxCatalogMediaBootErrorV1.MediaMissing)
+        table.unmount("/").unwrap()
+
+    it "rejects a partial layout and releases every opened snapshot":
+        step("Provide only the artifact and signed record, not the trust file")
+        var table = _table_v1()
+        _write_v1(table, "/simplebox", [1u8])
+        _write_v1(table, "/simplebox.scr1", [2u8])
+        val prepared = simplebox_catalog_media_boot_prepare_from_table_v1(
+            table, _policy_v1())
+        expect(prepared.unwrap_err().error).to_equal(
+            SimpleboxCatalogMediaBootErrorV1.MediaPartial)
+        # Successful unmount proves no stable-snapshot lease was left open.
+        table.unmount("/").unwrap()
+
+    it "rejects an invalid policy before touching the table":
+        var table = _table_v1()
+        var policy = _policy_v1()
+        policy.pinned_key_id = ""
+        val prepared = simplebox_catalog_media_boot_prepare_from_table_v1(
+            table, policy)
+        expect(prepared.unwrap_err().error).to_equal(
+            SimpleboxCatalogMediaBootErrorV1.PolicyRejected)
+        table.unmount("/").unwrap()

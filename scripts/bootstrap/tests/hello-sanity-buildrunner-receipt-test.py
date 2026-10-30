@@ -6,6 +6,8 @@ evidence. They are not a BuildRunner Hello PASS.
 """
 import hashlib
 import importlib.util
+import sys
+import importlib.util
 import os
 import shutil
 import zipfile
@@ -130,6 +132,11 @@ class ReceiptTests(unittest.TestCase):
 
     def test_output_path_mismatch_refused(self):
         self.write(lines=self.result_lines(path="other.zip"))
+        self.refuses("result does not bind the published executable")
+
+    def test_output_path_traversal_refused(self):
+        # Positive control: test_well_formed_receipt_binds_memory_evidence binds OUTPUT.
+        self.write(lines=self.result_lines(path="../hello"))
         self.refuses("result does not bind the published executable")
 
     def test_output_digest_mismatch_refused(self):
@@ -276,6 +283,322 @@ class BundleTests(unittest.TestCase):
     def test_record_value_not_a_literal_refused(self):
         self.write(lane="format: (\n")
         self.refuses("malformed worker evidence record")
+
+
+
+MONITOR_VERDICT = "functional-only BuildRunner hello (monitor policy; memory qualification deferred)"
+MONITOR_CLAIM = "monitor receipt claims enforcement it did not request"
+ENFORCE_REFUSAL = "worker did not prove the requested memory enforcement"
+
+
+def monitor_fields(**over):
+    fields = dict(format="simple-build-memory-v1", task_identity=IDENTITY,
+                  requested_policy="monitor", reserved_bytes=str(LIMIT),
+                  enforcement="none", enforced_bytes="0",
+                  observed_peak_bytes="4096", peak_metric="process-tree-peak")
+    fields.update(over)
+    return fields
+
+
+class MonitorReceiptTests(unittest.TestCase):
+    """Opt-in functional-only mode: never a qualified memory PASS."""
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp(prefix="hello-buildrunner-monitor-"))
+        self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
+        self.state = self.work / "state"
+        self.artifact = self.work / OUTPUT
+        self.artifact.write_bytes(b"bundle bytes")
+        self.digest = hashlib.sha256(b"bundle bytes").hexdigest()
+        self.receipt = self.state / "receipts/hello.sdn"
+        self.receipt.parent.mkdir(parents=True)
+        self.receipt.write_text("\n".join([
+            "SIMPLE-BUILD-RESULT-1", "hello", "1", IDENTITY, "local-1", "OK", "0",
+            "0", "1", "1", "1", OUTPUT, self.digest]) + "\n")
+
+    def write_memory(self, fields):
+        path = self.state / "attempts/hello/1/local-1/compiler.memory"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(k + "=" + v + "\n" for k, v in fields.items()))
+        return path
+
+    def verify(self, policy):
+        return h.verified_memory_receipt(self.state, self.receipt, OUTPUT, self.artifact, LIMIT, policy)
+
+    def refuses(self, policy, message):
+        with self.assertRaises(ValueError) as caught:
+            self.verify(policy)
+        self.assertEqual(str(caught.exception), message)
+
+    def test_monitor_receipt_accepted(self):
+        # Positive control: the refusals below are meaningful only if this passes.
+        memory = self.write_memory(monitor_fields())
+        self.assertEqual(self.verify("monitor"), memory)
+
+    def test_monitor_child_rss_metric_accepted(self):
+        self.write_memory(monitor_fields(peak_metric="child-rss-peak"))
+        self.verify("monitor")
+
+    def test_monitor_refuses_enforcement_label_monitor(self):
+        # Under monitor the enforcement value must be exactly "none".
+        self.write_memory(monitor_fields(enforcement="monitor"))
+        self.refuses("monitor", MONITOR_CLAIM)
+
+    def test_monitor_refuses_non_monitor_peak_metric(self):
+        for metric in ("cgroup-memory-peak", "job-commit-peak", "none", ""):
+            with self.subTest(metric=metric):
+                self.write_memory(monitor_fields(peak_metric=metric))
+                self.refuses("monitor", "monitor receipt peak metric is not monitor-only")
+
+    def test_monitor_refuses_enforcement_it_did_not_request(self):
+        for over in (dict(enforcement="job-memory", peak_metric="job-commit-peak"),
+                     dict(enforcement="cgroup-memory-max", peak_metric="cgroup-memory-peak"),
+                     dict(enforcement="observe"), dict(enforced_bytes=str(LIMIT)),
+                     dict(enforced_bytes="1"), dict(requested_policy="enforce")):
+            with self.subTest(**over):
+                self.write_memory(monitor_fields(**over))
+                self.refuses("monitor", MONITOR_CLAIM)
+
+    def test_monitor_refuses_wrong_reservation(self):
+        self.write_memory(monitor_fields(reserved_bytes=str(LIMIT - 1)))
+        self.refuses("monitor", "worker did not prove the requested memory monitoring")
+
+    def test_monitor_refuses_invalid_peak(self):
+        for peak in ("", "-1", "01", "1.5"):
+            with self.subTest(peak=peak):
+                self.write_memory(monitor_fields(observed_peak_bytes=peak))
+                self.refuses("monitor", "invalid worker memory peak")
+
+    def test_monitor_refuses_identity_and_field_drift(self):
+        self.write_memory(monitor_fields(task_identity="c" * 64))
+        self.refuses("monitor", "memory receipt identity or format mismatch")
+        fields = monitor_fields()
+        del fields["peak_metric"]
+        self.write_memory(fields)
+        self.refuses("monitor", "memory receipt identity or format mismatch")
+
+    def test_enforce_refuses_monitor_receipt(self):
+        # Policy mismatch, the other direction: enforce keeps its existing refusal.
+        self.write_memory(monitor_fields())
+        self.refuses("enforce", ENFORCE_REFUSAL)
+
+    def test_unknown_policy_refused(self):
+        self.write_memory(monitor_fields())
+        with self.assertRaises(ValueError):
+            self.verify("observe")
+
+
+MATRIX = ROOT / "scripts/bootstrap/hello-sanity-matrix.py"
+matrix_spec = importlib.util.spec_from_file_location("hello_sanity_matrix", MATRIX)
+m = importlib.util.module_from_spec(matrix_spec)
+matrix_spec.loader.exec_module(m)
+
+
+class MatrixAggregationTests(unittest.TestCase):
+    """BuildRunner summary, downgrade and exit code of the matrix."""
+
+    def test_functional_lanes_never_summarise_as_pass(self):
+        for states in ({"FUNCTIONAL"}, {"FUNCTIONAL", "UNRUN"}, {"FUNCTIONAL", "PASS"}):
+            with self.subTest(states=states):
+                self.assertEqual(m.buildrunner_summary(states), "FUNCTIONAL")
+        self.assertEqual(m.buildrunner_summary({"FUNCTIONAL", "FAIL"}), "FAIL")
+
+    def test_known_states_keep_their_summary(self):
+        self.assertEqual(m.buildrunner_summary({"PASS"}), "PASS")
+        self.assertEqual(m.buildrunner_summary({"PASS", "UNRUN"}), "PARTIAL")
+        self.assertEqual(m.buildrunner_summary({"UNRUN"}), "UNRUN")
+        self.assertEqual(m.buildrunner_summary({"PASS", "FAIL"}), "FAIL")
+
+    def test_unknown_or_empty_states_are_never_pass(self):
+        for states in ({"RUNNING"}, {"PASS", "SKIPPED"}, {"PASS", "weird"}, {"FUNCTIONAL", "??"}, set()):
+            with self.subTest(states=states):
+                self.assertNotEqual(m.buildrunner_summary(states), "PASS")
+
+    def test_non_pass_buildrunner_downgrades_pass_to_partial(self):
+        self.assertEqual(m.apply_buildrunner_status("PASS", "FUNCTIONAL"), "PARTIAL")
+        self.assertEqual(m.apply_buildrunner_status("PASS", "UNRUN"), "PARTIAL")
+        self.assertEqual(m.apply_buildrunner_status("PASS", "PASS"), "PASS")
+        self.assertEqual(m.apply_buildrunner_status("PASS", "FAIL"), "FAIL")
+        self.assertEqual(m.apply_buildrunner_status("FAIL", "PASS"), "FAIL")
+        self.assertEqual(m.apply_buildrunner_status("PARTIAL", "FUNCTIONAL"), "PARTIAL")
+
+    def test_exit_code_is_zero_only_for_pass(self):
+        self.assertEqual(m.matrix_exit_code("PASS"), 0)
+        for status in ("PARTIAL", "FAIL", "RUNNING_FINALIZATION"):
+            with self.subTest(status=status):
+                self.assertEqual(m.matrix_exit_code(status), 1)
+
+    def test_monitor_matrix_exits_nonzero_end_to_end(self):
+        for states in ({"FUNCTIONAL"}, {"FUNCTIONAL", "UNRUN"}, {"FUNCTIONAL", "PASS"}):
+            with self.subTest(states=states):
+                status = m.apply_buildrunner_status("PASS", m.buildrunner_summary(states))
+                self.assertEqual(m.matrix_exit_code(status), 1)
+
+
+class LaneStatusTests(unittest.TestCase):
+    def test_only_enforce_maps_to_qualified_pass(self):
+        self.assertEqual(h.lane_status("enforce"), "PASS")
+        self.assertEqual(h.lane_status("monitor"), "FUNCTIONAL")
+        self.assertNotIn("PASS", h.lane_status("monitor"))
+        with self.assertRaises(ValueError):
+            h.lane_status("observe")
+
+
+class FakeMatrix:
+    """Just enough matrix surface for run_lane; the manager is scripted."""
+
+    def __init__(self, out, policy, memory):
+        import types
+        self.root = ROOT
+        self.out = out
+        self.args = types.SimpleNamespace(phase=2, compile_route="coordinator", timeout_seconds=60,
+                                          max_rss_kib=LIMIT // 1024, windows_abi="msvc",
+                                          memory_policy=policy, trace_stages=False,
+                                          min_free_disk_bytes=0, max_log_bytes=4096)
+        self.compiler = out / "compiler-input"
+        self.compiler.write_bytes(b"compiler bytes")
+        self.sha = h.matrix_digest(self.compiler)
+        self.linker = out / "linker-input"
+        self.linker.write_bytes(b"linker bytes")
+        self.runtime = out / "runtime-input"
+        self.runtime_hashes = {}
+        self.memory = memory
+        self.commands = []
+
+    def run(self, lane, name, cmd, seconds=None):
+        self.commands.append((name, list(cmd)))
+        if name == "manager-run":
+            self.publish(cmd)
+        if name == "manager-verify":
+            return b"builder: verified tasks=1\n", b""
+        return b"", b""
+
+    def check_executable(self, lane, artifact):
+        return None
+
+    def publish(self, cmd):
+        state = Path(cmd[cmd.index("--state") + 1])
+        published = Path(cmd[cmd.index("--output-root") + 1])
+        published.mkdir(parents=True)
+        lane = dict(format="hello-buildrunner-lane-v1", lane="one-source", backend="llvm",
+                    phase=2, compile_route="coordinator", compiler_sha256=self.sha,
+                    status="PASS", admitted="false")
+        lane_sdn = "".join(k + ": " + (v if v == "false" else repr(v)) + "\n" for k, v in lane.items())
+        result_sdn = ("status: 'PASS'\nphase: 2\ncompiler_sha256: %r\ncompile_route: 'coordinator'\n"
+                      "executable_sha256: %r\n" % (self.sha, hashlib.sha256(b"hello bytes").hexdigest()))
+        bundle = published / OUTPUT
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.writestr("managed-lane.sdn", lane_sdn)
+            archive.writestr("result.sdn", result_sdn)
+            archive.writestr("hello", b"hello bytes")
+        with bundle.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        (state / "receipts").mkdir(parents=True)
+        (state / "receipts/hello.sdn").write_text("\n".join([
+            "SIMPLE-BUILD-RESULT-1", "hello", "1", IDENTITY, "local-1", "OK", "0",
+            "0", "1", "1", "1", OUTPUT, digest]) + "\n")
+        memory = state / "attempts/hello/1/local-1/compiler.memory"
+        memory.parent.mkdir(parents=True)
+        memory.write_text("".join(k + "=" + v + "\n" for k, v in self.memory.items()))
+
+
+def native_target():
+    import platform
+    machine = platform.machine().lower()
+    arch = "aarch64" if machine in {"arm64", "aarch64"} else "x86_64" if machine in {"amd64", "x86_64"} else None
+    if arch is None or os.name == "nt":
+        return None
+    if sys.platform == "darwin":
+        return arch + "-apple-darwin"
+    if sys.platform.startswith("linux"):
+        return arch + "-unknown-linux-gnu"
+    return None
+
+
+class RunLaneTests(unittest.TestCase):
+    """End to end through run_lane with a scripted manager and synthetic evidence."""
+
+    def setUp(self):
+        self.target = native_target()
+        if self.target is None:
+            self.skipTest("no native BuildRunner target for this host")
+        self.work = Path(tempfile.mkdtemp(prefix="hello-buildrunner-lane-"))
+        self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
+        self.manager = self.work / "manager"
+        self.manager.write_bytes(b"manager bytes")
+        self.manifest_writer = self.work / "manifest-writer"
+        self.manifest_writer.write_bytes(b"writer bytes")
+        self.template = self.work / "template"
+        self.template.write_bytes(b"template bytes")
+
+    def lane(self, policy, memory):
+        import contextlib
+        import io
+        out = self.work / ("out-" + policy)
+        out.mkdir()
+        matrix = FakeMatrix(out, policy, memory)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            values = h.run_lane(matrix, "llvm", "one-source", self.manager,
+                                self.manifest_writer, self.template, self.target)
+        return values, buffer.getvalue(), matrix
+
+    def test_monitor_lane_is_functional_with_exact_verdict(self):
+        values, stdout, _ = self.lane("monitor", monitor_fields())
+        self.assertNotIn("reason", values)
+        self.assertEqual(values["status"], "FUNCTIONAL")
+        self.assertNotIn("PASS", values["status"])
+        self.assertEqual(values["verdict"], MONITOR_VERDICT)
+        self.assertEqual(values["memory_policy"], "monitor")
+        self.assertEqual(values["evidence_scope"], "functional-only-memory-deferred")
+        self.assertEqual(stdout, MONITOR_VERDICT + "\n")
+        self.assertNotIn("qualified", stdout)
+
+    def test_monitor_manifest_argv_carries_policy_before_manifest(self):
+        _, _, matrix = self.lane("monitor", monitor_fields())
+        cmd = dict(matrix.commands)["manifest"]
+        index = cmd.index("--memory-policy")
+        self.assertEqual(cmd[index + 1], "monitor")
+        self.assertEqual(cmd[index + 2], "--manifest")
+        self.assertLess(cmd.index("--work-timeout-ms"), index)
+
+    def test_enforce_manifest_argv_unchanged(self):
+        _, _, matrix = self.lane("enforce", {
+            "format": "simple-build-memory-v1", "task_identity": IDENTITY,
+            "requested_policy": "enforce", "reserved_bytes": str(LIMIT),
+            "enforcement": "cgroup-memory-max", "enforced_bytes": str(LIMIT),
+            "observed_peak_bytes": "4096", "peak_metric": "cgroup-memory-peak"})
+        cmd = dict(matrix.commands)["manifest"]
+        self.assertNotIn("--memory-policy", cmd)
+
+    def test_enforce_lane_keeps_qualified_pass_and_no_monitor_keys(self):
+        values, stdout, _ = self.lane("enforce", {
+            "format": "simple-build-memory-v1", "task_identity": IDENTITY,
+            "requested_policy": "enforce", "reserved_bytes": str(LIMIT),
+            "enforcement": "cgroup-memory-max", "enforced_bytes": str(LIMIT),
+            "observed_peak_bytes": "4096", "peak_metric": "cgroup-memory-peak"})
+        self.assertNotIn("reason", values)
+        self.assertEqual(values["status"], "PASS")
+        for key in ("verdict", "memory_policy", "evidence_scope"):
+            self.assertNotIn(key, values)
+        self.assertEqual(stdout, "")
+
+    def test_enforce_lane_refuses_monitor_receipt(self):
+        values, stdout, _ = self.lane("enforce", monitor_fields())
+        self.assertEqual(values["status"], "FAIL")
+        self.assertEqual(values["reason"], ENFORCE_REFUSAL)
+        self.assertEqual(stdout, "")
+
+    def test_monitor_lane_refuses_enforce_receipt(self):
+        values, stdout, _ = self.lane("monitor", {
+            "format": "simple-build-memory-v1", "task_identity": IDENTITY,
+            "requested_policy": "enforce", "reserved_bytes": str(LIMIT),
+            "enforcement": "cgroup-memory-max", "enforced_bytes": str(LIMIT),
+            "observed_peak_bytes": "4096", "peak_metric": "cgroup-memory-peak"})
+        self.assertEqual(values["status"], "FAIL")
+        self.assertEqual(values["reason"], MONITOR_CLAIM)
+        self.assertNotIn("verdict", values)
+        self.assertEqual(stdout, "")
 
 
 if __name__ == "__main__":

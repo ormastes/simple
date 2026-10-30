@@ -1,0 +1,54 @@
+"""
+## Purpose and audience
+Purpose: Prove a closure started with `thread_spawn_with_args` runs on its
+own thread, so it can rendezvous with its spawner through a shared
+`Barrier`, and that its result still comes back through `join()`.
+Regression for doc/08_tracking/bug/interpreter_isolated_thread_barrier_hang_2026-10-30.md
+(the seed interpreter ran the closure inline, so the first `gate.wait()`
+spun forever).
+Audience: interpreter and concurrency-library engineers.
+"""
+
+use std.spec
+use std.nogc_async_mut.concurrent.{Barrier, barrier_new}
+use std.concurrent.thread.{thread_spawn_with_args}
+
+describe "thread_spawn_with_args rendezvous":
+    it "lets a worker and its spawner both pass a two-party barrier":
+        val gate = barrier_new(2)
+        val handle = thread_spawn_with_args(1, 2, \a, b:
+            gate.wait()
+            a + b
+        )
+        gate.wait()
+        expect(handle.join().unwrap()).to_equal(3)
+        gate.free()
+
+    it "releases eight workers waiting on one barrier and joins every result":
+        val workers = 8
+        val gate = barrier_new(workers)
+        var handles = []
+        var worker = 0
+        while worker < workers:
+            handles.push(thread_spawn_with_args(worker, 10, \id, scale:
+                gate.wait()
+                id * scale
+            ))
+            worker = worker + 1
+        var total = 0
+        for handle in handles:
+            total = total + handle.join().unwrap()
+        expect(total).to_equal(280)
+        gate.free()
+
+    it "reuses one barrier across two generations with the spawner":
+        val gate = barrier_new(2)
+        val handle = thread_spawn_with_args(5, 0, \v, unused:
+            gate.wait()
+            gate.wait()
+            v
+        )
+        gate.wait()
+        gate.wait()
+        expect(handle.join().unwrap()).to_equal(5)
+        gate.free()

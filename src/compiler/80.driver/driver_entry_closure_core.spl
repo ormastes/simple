@@ -14,9 +14,17 @@ use std.common.crypto.sha256.{sha256_text}
 use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
-    driver_admitted_epoch_read_v1, driver_admitted_epoch_root_v1,
+    driver_admitted_epoch_read_v1, driver_admitted_epoch_root_v1, driver_admitted_epoch_retain_failure_v1,
     driver_admitted_epoch_normalize_v1, driver_admitted_epoch_declares_path_v1}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_closure_walk_check_v1, tldr_imports_enabled_v1}
+
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+@unsafe(reason: "bound epoch owner-check scratch to this worker", capabilities: [ffi])
+extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "pause epoch owner-check scratch before retaining failure", capabilities: [ffi])
+extern fn rt_transient_array_scope_pause() -> bool
+@unsafe(reason: "release epoch owner-check scratch", capabilities: [ffi])
+extern fn rt_transient_array_scope_end() -> bool
 
 @unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
@@ -63,6 +71,14 @@ var _g_entry_scan_read_count: i64 = 0
 var _g_entry_scan_scan_count: i64 = 0
 var _g_entry_scan_hit_count: i64 = 0
 var _g_source_classification_count: i64 = 0
+# Scalar diagnostics only; no source or scratch object escapes the worker.
+var _g_worker_owner_epoch_checks: i64 = 0
+var _g_worker_owner_scopes: i64 = 0
+var _g_worker_owner_nested: i64 = 0
+var _g_worker_owner_legacy: i64 = 0
+
+pub fn driver_owner_scope_counters_v1() -> (i64, i64, i64, i64):
+    (_g_worker_owner_epoch_checks, _g_worker_owner_scopes, _g_worker_owner_nested, _g_worker_owner_legacy)
 # Physical key of the in-process `run` entry that gets the SSpec prelude.
 var _g_spec_prelude_entry_key: text = ""
 
@@ -1564,9 +1580,84 @@ pub fn driver_resolve_closure_import_v1(
         module_path, importer_dir)
 
 fn _driver_file_natively_owns_v1(path: text, module_name: text) -> bool:
-    for source in _driver_collect_explicit_compiler_source(path):
+    # Epoch reads must still validate current bytes on every access. Ownership
+    # only depends on the physical path and aliases, so it does not need the
+    # import/sibling scan or its global content cache after that validation.
+    if driver_admitted_epoch_active_v1():
+        _g_worker_owner_epoch_checks = _g_worker_owner_epoch_checks + 1
+        # This platform cache survives the scope, so initialise it before any
+        # scratch allocations. Never take ownership of a caller's scope.
+        val _platform = host_is_windows_host()
+        if transient_array_scope_state_v1() != 0:
+            _g_worker_owner_nested = _g_worker_owner_nested + 1
+            return _driver_epoch_file_natively_owns_v1(path, module_name)
+        var started = false
+        unsafe(capabilities: [ffi]):
+            started = rt_transient_array_scope_begin()
+        if not started: panic("epoch owner scratch begin failed")
+        _g_worker_owner_scopes = _g_worker_owner_scopes + 1
+        val owns = _driver_epoch_file_natively_owns_v1(path, module_name)
+        var paused = false
+        unsafe(capabilities: [ffi]):
+            paused = rt_transient_array_scope_pause()
+        if not paused: panic("epoch owner scratch pause failed")
+        driver_admitted_epoch_retain_failure_v1()
+        var ended = false
+        unsafe(capabilities: [ffi]):
+            ended = rt_transient_array_scope_end()
+        if not ended: panic("epoch owner scratch end failed")
+        return owns
+    _g_worker_owner_legacy = _g_worker_owner_legacy + 1
+    if not path.ends_with(".spl"):
+        eprint("[explicit-source] rejected non-spl path={path}")
+        return false
+    # The scan publishes content/import/sibling caches. Complete it before
+    # owning scratch; these process-retained values must outlive this lookup.
+    val (content, _, _, _) = _driver_cached_entry_source_scan(path)
+    if content == "":
+        eprint("[explicit-source] empty content path={path}")
+        return false
+    val _platform = host_is_windows_host()
+    if transient_array_scope_state_v1() != 0:
+        _g_worker_owner_nested = _g_worker_owner_nested + 1
+        return _driver_alias_content_natively_owns_v1(path, content, module_name)
+    var started = false
+    unsafe(capabilities: [ffi]):
+        started = rt_transient_array_scope_begin()
+    if not started: panic("legacy owner scratch begin failed")
+    _g_worker_owner_scopes = _g_worker_owner_scopes + 1
+    val owns = _driver_alias_content_natively_owns_v1(path, content, module_name)
+    var ended = false
+    unsafe(capabilities: [ffi]):
+        ended = rt_transient_array_scope_end()
+    if not ended: panic("legacy owner scratch end failed")
+    owns
+
+fn _driver_alias_content_natively_owns_v1(path: text, content: text, module_name: text) -> bool:
+    # Only a scalar escapes. Physical identity and walked spelling still use
+    # exactly the explicit-source alias policy; no new memoized authority.
+    val aliases = _driver_module_aliases_with_closure(
+        path, content, _driver_module_name_from_path(path), true)
+    if aliases.len() == 0:
+        eprint("[explicit-source] zero aliases path={path} content_len={content.len()}")
+    for source in aliases:
         if source.module_name == module_name: return true
     false
+
+fn _driver_epoch_file_natively_owns_v1(path: text, module_name: text) -> bool:
+    if not path.ends_with(".spl"): return false
+    val key = _driver_physical_source_key_strict_v1(path)
+    val loaded = driver_admitted_epoch_read_v1(path, key)
+    if loaded.is_err():
+        eprint("[epoch-read-fail] path={path} key={key} reason={loaded.unwrap_err()}")
+        return false
+    var content = loaded.unwrap()
+    if _g_spec_prelude_entry_key != "" and key == _g_spec_prelude_entry_key:
+        content = driver_spec_prelude_source(content)
+    if content == "": return false
+    for source in _driver_module_aliases_with_closure(path, content, _driver_module_name_from_path(path), true):
+        if source.module_name == module_name: return true
+    return false
 
 pub fn driver_closure_native_owner_v1(file: text, module_name: text, importer_dir: text) -> text:
     # A source-root hit whose native names omit the import spelling (a src/lib
@@ -1596,6 +1687,17 @@ pub fn driver_closure_import_specs_v1(path: text) -> [text]:
     # `.sibling` declarations whose file exists (generated facades keep
     # comments for moved owners; a missing hint is not an import).
     val (_, imports, siblings, _) = _driver_cached_entry_source_scan(path)
+    driver_closure_import_specs_finish_v1(path, imports, siblings)
+
+# The phase-2 worker already owns the verified phase-1 source text. Reuse it
+# without re-reading and retaining another full copy in the phase-1 cache.
+pub fn driver_closure_import_specs_from_source_v1(path: text, content: text) -> [text]:
+    val selected = _pp_preprocess_conditionals(content)
+    val imports = _driver_entry_import_module_paths(selected)
+    val siblings = _driver_entry_sibling_module_paths(selected)
+    driver_closure_import_specs_finish_v1(path, imports, siblings)
+
+fn driver_closure_import_specs_finish_v1(path: text, imports: [text], siblings: [text]) -> [text]:
     var specs = imports
     val dir = _driver_entry_import_dirname(path)
     for sibling in siblings:

@@ -665,7 +665,9 @@ finish:
         ? process_capture_result(stdout_capture.data, stdout_capture.len, stderr_capture.data,
             stderr_capture.len, failure ? -1 : code,
             0, timeout_ms, 1, max_output_bytes)
-        : process_timeout_result(stdout_capture.data, result_error, failure ? -1 : code, timed_out, timeout_ms);
+        : process_capture_result(stdout_capture.data, stdout_capture.len,
+            result_error, failure ? strlen(failure) : stderr_capture.len,
+            failure ? -1 : code, timed_out, timeout_ms, 0, -1);
     win_close_handle(&stdout_read);
     win_close_handle(&stderr_read);
     win_close_handle(&process.hProcess);

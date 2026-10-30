@@ -1,0 +1,35 @@
+use compiler.driver.driver_entry_closure_core.{driver_closure_native_owner_v1, _driver_collect_explicit_compiler_source, _driver_cached_entry_source_scan, driver_entry_scan_cache_reset, driver_entry_scan_cache_scan_count, driver_owner_scope_counters_v1}
+use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn main() -> i64:
+    if driver_admitted_epoch_active_v1(): return 1
+    val path = "src/compiler/10.frontend/core/types.spl"
+    driver_entry_scan_cache_reset()
+    val aliases = _driver_collect_explicit_compiler_source(path)
+    if aliases.len() < 2: return 2
+    val (content, imports, siblings, _) = _driver_cached_entry_source_scan(path)
+    if content == "": return 3
+    val (_, scopes_before, nested_before, legacy_before) = driver_owner_scope_counters_v1()
+    for iteration in 0..64:
+        for source in aliases:
+            if driver_closure_native_owner_v1(path, source.module_name, "src/compiler/10.frontend/core") != path: return 4
+            if transient_array_scope_state_v1() != 0: return 5
+    val (_, scopes_after, _, legacy_after) = driver_owner_scope_counters_v1()
+    if scopes_after - scopes_before != 64 * aliases.len(): return 6
+    if legacy_after - legacy_before != 64 * aliases.len(): return 7
+    if driver_entry_scan_cache_scan_count() != 1: return 8
+    val (retained, retained_imports, retained_siblings, hit) = _driver_cached_entry_source_scan(path)
+    if not hit or retained != content or retained_imports != imports or retained_siblings != siblings: return 9
+    if not rt_transient_array_scope_begin(): return 10
+    val selected = driver_closure_native_owner_v1(path, aliases[0].module_name, "src/compiler/10.frontend/core")
+    val nested_state = transient_array_scope_state_v1()
+    val ended = rt_transient_array_scope_end()
+    if not ended or nested_state == 0 or selected != path: return 11
+    val (_, final_scopes, final_nested, _) = driver_owner_scope_counters_v1()
+    if final_scopes != scopes_after or final_nested != nested_before + 1: return 12
+    print "PASS legacy owner aliases, cache retention, and caller-scope ownership"
+    0

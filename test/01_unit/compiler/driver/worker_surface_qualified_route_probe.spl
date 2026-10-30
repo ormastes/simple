@@ -1,0 +1,55 @@
+# Real filesystem closure plus parser/frozen-registry readiness agreement.
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_v1}
+use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_import_ids_v1, worker_surface_ready_v1}
+
+fn check_route(export_source: text) -> i64:
+    val base = "test/01_unit/compiler/driver/qualified_route_case/"
+    val facade_path = base + "facade.spl"
+    val provider_path = base + "provider.spl"
+    val provider_source = "pub fn item() -> i64:\n    7\n"
+    val paths: [text] = [facade_path, provider_path]
+    val needed = worker_surface_closure_v1(paths, paths, [export_source, provider_source], [true, false])
+    if needed.len() != 2 or not needed[0] or not needed[1]: return 1
+    val facade = parse_and_build_module(export_source, facade_path)
+    val provider = parse_and_build_module(provider_source, provider_path)
+    val result = module_surfaces_from_modules({"route.facade": facade, "route.provider": provider},
+        [SourceFile(path: facade_path, content: export_source, module_name: "route.facade"),
+         SourceFile(path: provider_path, content: provider_source, module_name: "route.provider")])
+    if result.is_err(): return 2
+    val registry = result.unwrap()
+    var edges: [[i64]] = []
+    var built: [bool] = []
+    var facade_index = -1
+    var index = 0
+    var routes = 0
+    for surface in registry.surfaces:
+        var dependencies: [i64] = []
+        for dependency in surface.import_target_indices: dependencies.push(dependency)
+        for dependency in surface.export_route_target_indices:
+            dependencies.push(dependency)
+            if dependency >= 0: routes = routes + 1
+        edges.push(dependencies)
+        built.push(true)
+        if surface.canonical_path.ends_with("facade.spl"): facade_index = index
+        index = index + 1
+    if facade_index < 0 or routes < 1: return 3
+    val ready = worker_surface_ready_v1(built, edges)
+    if not ready[facade_index]: return 4
+    index = 0
+    while index < built.len():
+        built[index] = index == facade_index
+        index = index + 1
+    val incomplete = worker_surface_ready_v1(built, edges)
+    if incomplete[facade_index]: return 5
+    0
+
+fn main() -> i64:
+    val member = check_route("export provider.item\n")
+    val alias = check_route("export provider.item as renamed # sibling route\n")
+    val glob = check_route("export provider.*\n")
+    val local_only = worker_surface_import_ids_v1("export item, renamed\n")
+    print "qualified-route member={member} alias={alias} glob={glob} local_only={local_only.len()}"
+    if member == 0 and alias == 0 and glob == 0 and local_only.len() == 0: 0 else: 1

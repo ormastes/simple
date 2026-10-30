@@ -214,13 +214,14 @@ impl MirLowering:
 
     me register_declaration_trait_receiver_impls_v1(module: HirModule):
         # Local impl registration is still the existing consumer-owned pass.
-        self.register_trait_impls_of(module.name, module.symbols, module.impls, {}, true)
+        val visible_scalar_traits = mir_visible_scalar_traits_v1(module.symbols, module.name)
+        self.register_trait_impls_of(module.name, module.symbols, module.impls, {}, true, visible_scalar_traits)
         val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
         for name in repository.ordered_modules:
             val provider: MirHirModuleDeclarationsV1 = repository.modules[name]
             if provider.name != module.name and provider.impls.len() > 0:
                 self.register_trait_impls_of(provider.name, provider.symbols, provider.impls,
-                    self.declaration_links_v1(provider), false)
+                    self.declaration_links_v1(provider), false, visible_scalar_traits)
 
     fn declaration_links_v1(module: MirHirModuleDeclarationsV1) -> Dict<i64, text>:
         var links: Dict<i64, text> = {}
@@ -355,7 +356,11 @@ impl MirLowering:
                             self.error_fatal("parameter default lacks its declared tagged callable adapter", Some(param.span))
                             return args
                     else:
-                        val local = self.lower_expr_for_slot(remapped, declared)
+                        var local = self.lower_expr_for_slot(remapped, declared)
+                        match declared.kind:
+                            case HirTypeKind.Any:
+                                local = self.box_runtime_value(local)
+                            case _: ()
                         mir_operand_copy(local)
                     result.push(operand)
                     self.declaration_default_bind_parameter_v1(param, operand, frame)
@@ -662,6 +667,9 @@ impl MirLowering:
                     val prescan_param: MirHirParamDeclarationV1 = raw_prescan_param
                     prescan_param_tys.push(prescan_param.type_)
                 bootstrap_fn_param_hir_types_register(prescan_fn.name, prescan_param_tys)
+                # Relocated callables use this exact admitted link, not the bare name.
+                # Keep symbol-free admission and ambiguity checks in the registry.
+                bootstrap_fn_param_hir_types_register(prescan_call_name, prescan_param_tys)
         # Trait method SIGNATURES are not functions, so the loop above never
         # registered them. A consumer matching on `recv.method()` through an
         # IMPORTED trait-typed receiver finds no method symbol in its own

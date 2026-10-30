@@ -31,14 +31,19 @@ it "...":
 ```
 
 ## Fix
-`refresh_stale_module_global_receiver` (`interpreter/expr/calls.rs`) refreshes a
-non-local binding that has no owner provenance from `MODULE_GLOBALS` before
-both receiver paths use it.
+`refresh_stale_module_global_receiver` (`interpreter/expr/calls.rs`) refreshes
+the ROOT variable of the receiver chain (`g`, `g.a`, `g[i]`, `g.a[i].b`, found by
+`receiver_root_identifier`) from `MODULE_GLOBALS` before any receiver branch
+runs. Only a non-local binding without owner provenance is refreshed, in both
+the expression path (`calls.rs`) and the statement path
+(`patterns.rs::handle_method_call_with_self_update`).
 
 ## Specs
 - Reproduction: `test/01_unit/compiler/spec_it_method_receiver_stale_module_var_spec.spl`
   (2 of 3 fail on the old seed; all 3 pass after the fix).
-- Generalization: the same spec covers `fn` and `me` receivers and an array receiver.
+- Generalization: the same spec covers `fn` and `me` receivers, an array
+  receiver, and field (`g.a.m()`) and index (`g.a[i].m()`) receivers.
+  The old seed passes 1 of these 5 examples; the fixed seed passes 5/5.
 
 ## Remaining (not this defect)
 With the fix, the two async_host specs no longer hit the nil error, but their

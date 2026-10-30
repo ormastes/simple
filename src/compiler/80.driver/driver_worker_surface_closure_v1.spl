@@ -31,6 +31,7 @@
 # (worker_hir_*_v1 below). A target whose closure is not fully built fails
 # closed (MONO-PENDING). MIR shards that run GLOBAL mono are unchanged: they
 # still build every surface and load every HIR module.
+use compiler.frontend.core.parser_preprocessor.{pp_scan_diagnostic_state_v1}
 use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_import_ids_v1, worker_surface_ready_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, dir_list_optional, getpid}
@@ -46,7 +47,12 @@ use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
 use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_parse_v1, mono_module_scoped_selected_v1}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_guards_active_v1, tldr_closure_walk_check_v1}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_resolve_v1, driver_library_mode_native_owner_v1}
+use compiler.driver.driver_source_loading.{_driver_entry_import_dirname, _driver_physical_source_key, driver_closure_import_specs_from_source_v1, driver_owner_scope_counters_v1}
 extern fn rt_process_start_identity(pid: i64) -> i64
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_aux_live_bytes() -> i64
 
 val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v2"
 
@@ -146,6 +152,127 @@ fn _ws_canonical_key_v1(resolved: text, canonical_paths: [text], by_canonical: D
         j = j + 1
     _ws_lookup_misses = _ws_lookup_misses + 1
     -1
+
+# Resolve the same admitted owner as phase 1. Phase-1 scans are required;
+# extra scanner candidates include speculative grouped members and qualified
+# export providers, so a missing candidate is not an import failure.
+pub struct WorkerAdmittedGraphV1:
+    edges: [[i64]]
+    errors: [text]
+
+pub fn worker_admitted_edges_v1(paths: [text], contents: [text], names: [text],
+        roots: [text], library_mode: text) -> Result<WorkerAdmittedGraphV1, text>:
+    var seeds: [bool] = []
+    for _path in paths: seeds.push(true)
+    worker_admitted_edges_selected_v1(paths, contents, names, roots, library_mode, seeds)
+
+# Build only nodes reachable from worker seeds; unit ordering deliberately
+# calls the all-seeds wrapper because it orders the complete inventory.
+pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names: [text],
+        roots: [text], library_mode: text, seeds: [bool]) -> Result<WorkerAdmittedGraphV1, text>:
+    if paths.len() != contents.len() or paths.len() != names.len() or paths.len() != seeds.len():
+        return Err("worker surface inventory length mismatch")
+    var by_physical: Dict<text, i64> = {}
+    var i = 0
+    while i < paths.len():
+        val physical = _driver_physical_source_key(paths[i])
+        if not by_physical.contains_key(physical): by_physical[physical] = i
+        i = i + 1
+    val (epoch_base, scopes_base, nested_base, legacy_base) = driver_owner_scope_counters_v1()
+    if driver_phase_trace_enabled():
+        val (pp_target, pp_cfg, pp_log_size, pp_count_size) = pp_scan_diagnostic_state_v1()
+        log_phase("phase2:surface:admitted-graph:preprocess-start pp_target={pp_target} pp_cfg={pp_cfg} pp_memo_log={pp_log_size} pp_memo_count={pp_count_size}")
+    var graph: [[i64]] = []
+    var errors: [text] = []
+    var queued: [bool] = []
+    var queue: [i64] = []
+    i = 0
+    while i < paths.len():
+        graph.push([])
+        errors.push("")
+        queued.push(seeds[i])
+        if seeds[i]: queue.push(i)
+        i = i + 1
+    var head = 0
+    while head < queue.len():
+        i = queue[head]
+        head = head + 1
+        val required = driver_closure_import_specs_from_source_v1(paths[i], contents[i])
+        var candidates: [text] = []
+        for candidate in required:
+            candidates.push(candidate)
+        for candidate in worker_surface_import_ids_v1(contents[i]):
+            if not candidates.contains(candidate): candidates.push(candidate)
+        val dir = _driver_entry_import_dirname(paths[i])
+        var deps: [i64] = []
+        var error = ""
+        for candidate in candidates:
+            val is_required = required.contains(candidate)
+            val result = driver_library_mode_resolve_v1(candidate, roots, dir, library_mode, names[i])
+            if result.is_err():
+                if is_required and error == "": error = result.unwrap_err()
+                continue
+            val selected = result.unwrap()
+            var target = ""
+            match selected:
+                case SourceRootResolutionV1.Found(path): target = path
+                case SourceRootResolutionV1.Ambiguous(directory):
+                    if is_required and error == "": error = "SOURCE_ROOT_AMBIGUOUS: " + paths[i] + "|" + candidate + "|" + directory
+                case SourceRootResolutionV1.Missing:
+                    if is_required and candidate.contains(".") and error == "":
+                        error = "WORKER_IMPORT_MISSING: " + paths[i] + "|" + candidate
+            if target == "": continue
+            val owner = driver_library_mode_native_owner_v1(target, candidate, dir, library_mode, names[i])
+            val physical = _driver_physical_source_key(owner)
+            if not by_physical.contains_key(physical):
+                if is_required and error == "": error = "WORKER_PROVIDER_NOT_ADMITTED: " + paths[i] + "|" + candidate + "|" + owner
+                continue
+            val dep = by_physical[physical]
+            if dep != i and not deps.contains(dep): deps.push(dep)
+            if not queued[dep]:
+                queued[dep] = true
+                queue.push(dep)
+        graph[i] = deps
+        errors[i] = error
+        if driver_phase_trace_enabled() and head % 128 == 0:
+            val (epoch_checks, scopes, nested, legacy) = driver_owner_scope_counters_v1()
+            val live = rt_heap_live_bytes()
+            val aux = rt_heap_aux_live_bytes()
+            val epoch_delta = epoch_checks - epoch_base
+            val scopes_delta = scopes - scopes_base
+            val nested_delta = nested - nested_base
+            val legacy_delta = legacy - legacy_base
+            val (pp_target, pp_cfg, pp_log_size, pp_count_size) = pp_scan_diagnostic_state_v1()
+            log_phase("phase2:surface:admitted-graph:progress scanned={head} queued={queue.len()} inventory={paths.len()} owner_epoch={epoch_delta} owner_scopes={scopes_delta} owner_nested={nested_delta} owner_legacy={legacy_delta} heap_live={live} heap_aux={aux} pp_target={pp_target} pp_cfg={pp_cfg} pp_memo_log={pp_log_size} pp_memo_count={pp_count_size}")
+    if driver_phase_trace_enabled():
+        log_phase("phase2:surface:admitted-graph:done scanned={head} inventory={paths.len()}")
+    Ok(WorkerAdmittedGraphV1(edges: graph, errors: errors))
+
+pub fn worker_admitted_error_v1(graph: WorkerAdmittedGraphV1, selected: [bool]) -> text:
+    var i = 0
+    while i < graph.errors.len():
+        if i < selected.len() and selected[i] and graph.errors[i] != "": return graph.errors[i]
+        i = i + 1
+    ""
+
+pub fn worker_admitted_closure_v1(edges: [[i64]], seeds: [bool]) -> [bool]:
+    var needed: [bool] = []
+    var queue: [i64] = []
+    var i = 0
+    while i < edges.len():
+        val selected = i < seeds.len() and seeds[i]
+        needed.push(selected)
+        if selected: queue.push(i)
+        i = i + 1
+    var head = 0
+    while head < queue.len():
+        val at = queue[head]
+        head = head + 1
+        for dep in edges[at]:
+            if dep >= 0 and dep < needed.len() and not needed[dep]:
+                needed[dep] = true
+                queue.push(dep)
+    needed
 
 # Restrict this worker's claims to `paths` (the ready modules' sources).
 pub fn worker_surface_restrict_claims_v1(paths: [text]):
@@ -317,12 +444,15 @@ pub fn worker_unit_pick_order_v1(paths: [text], canonical_paths: [text], content
                 if key >= 0 and key != i and not deps.contains(key): deps.push(key)
         edges.push(deps)
         i = i + 1
+    worker_admitted_order_v1(edges)
+
+pub fn worker_admitted_order_v1(edges: [[i64]]) -> [i64]:
     var state: [i64] = []
-    for _p in paths:
+    for _p in edges:
         state.push(0)
     var order: [i64] = []
     var root = 0
-    while root < paths.len():
+    while root < edges.len():
         if state[root] == 0:
             var stack: [i64] = [root]
             var next: [i64] = [0]

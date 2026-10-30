@@ -47,7 +47,7 @@ use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, prin
 use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_encode}
 use std.nogc_sync_mut.test_runner.test_db_trace_record.{TestDbTraceFile, TestDbTraceRecord, test_db_trace_record_encode}
 use std.nogc_sync_mut.test_runner.trace_transport.{validate_requested_trace_transport}
-use std.nogc_sync_mut.test_runner.test_executor_parsing.{find_simple_binary}
+use std.nogc_sync_mut.test_runner.test_executor_parsing.{find_simple_binary, shell_safe_child_binary_path}
 # use test_db_types.*
 # use std.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
 # GROUP 5: Doc generation & sdoctest
@@ -1413,6 +1413,14 @@ fn run_test_cli() -> i64:
             if selected != "":
                 options.compiler_binary = selected
                 env_set("SIMPLE_BINARY", selected)
+    # Directory lane: publish the same nested-probe authority the single-file
+    # lane does (test_runner_single.spl), so contract specs that shell out to
+    # SIMPLE_TEST_BINARY run the admitted binary instead of guessing a
+    # cwd-relative `bin/simple` that does not exist in a worktree.
+    if (env_get("SIMPLE_TEST_BINARY") ?? "") == "":
+        val child_binary = find_simple_binary()
+        if child_binary != "":
+            env_set("SIMPLE_TEST_BINARY", shell_safe_child_binary_path(child_binary))
     report_free_mem("AFTER_PARSE_ARGS")
 
     # Load test configuration to determine what to run
@@ -1421,7 +1429,12 @@ fn run_test_cli() -> i64:
     var run_sdoc = config.run_sdoctests
     var run_spl_doc = config.run_spl_doctests
 
-    # Still needed when --spl-doctest is also set (e.g. --whole).
+    # A named source selects that file; configured repository-wide doctest
+    # sweeps apply only to broader runs. Explicit flags can opt lanes back in.
+    if options.path_explicit and not options.whole and options.path.ends_with(".spl"):
+        run_sdoc = false
+        run_spl_doc = false
+
     if options.sdoctest:
         run_sdoc = true
 
@@ -1452,6 +1465,9 @@ fn run_test_cli() -> i64:
             val source = file_read(options.path) ?? ""
             if not source_has_bdd_structure(source):
                 run_spec = false
+
+    if options.verbose:
+        eprint "test lanes: target={options.path} spec={run_spec} markdown={run_sdoc} source={run_spl_doc}"
 
     val library_lanes_error = native_test_library_lanes_error(options.library_mode, run_sdoc, run_spl_doc)
     if library_lanes_error != "":
