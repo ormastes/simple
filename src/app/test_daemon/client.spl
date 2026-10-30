@@ -9,6 +9,8 @@ use std.daemon_sdk.client.{
 }
 use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, DaemonState}
 use std.daemon_sdk.lock.{is_daemon_running}
+use std.test_runner.test_runner_types.{TestOptions}
+use app.test_daemon.native_profile.{NATIVE_SESSION_PROFILE_V1, native_session_request, native_session_shape_error}
 use app.test_daemon.types.{
     TestDaemonConfig, test_daemon_config_default,
     test_request_to_daemon, daemon_response_to_test_result, TestResult,
@@ -88,6 +90,25 @@ fn test_result_checked_mcdc(requested_mode: text, resp: DaemonResponse) -> TestR
         return result
     TestResult(test_path: result.test_path, status: -1, passed: 0, failed: 1, skipped: 0, duration_ms: result.duration_ms,
         output: "test daemon did not apply the client's MC/DC mode ({requested_mode}); refusing its verdict", cached: false)
+
+fn test_submit_native_and_wait(path: text, config: TestDaemonConfig, options: TestOptions) -> TestResult:
+    # Old generic daemons ignore unknown request fields. Negotiate support
+    # before submitting, so they cannot silently run an unbound bin/simple.
+    val status = daemon_submit_and_wait(test_request_to_daemon(TREQ_STATUS, "", "", false), config.daemon, 1500)
+    if status.status != TRESP_COMPLETED or (status.fields["native_profile"] ?? "") != NATIVE_SESSION_PROFILE_V1:
+        return TestResult(path, -1, 0, 1, 0, 0, "test daemon does not support pinned native execution", false)
+    val req = native_session_request(test_request_to_daemon(TREQ_RUN_SINGLE, path, "", true), options)
+    val shape_error = native_session_shape_error(req)
+    if shape_error != "":
+        return TestResult(path, -1, 0, 1, 0, 0, shape_error, false)
+    val resp = daemon_submit_and_wait(req, config.daemon, options.timeout * 1000 + 2000)
+    if resp.request_id != req.id:
+        return TestResult(path, -1, 0, 1, 0, 0, "native daemon did not return this request's result", false)
+    if resp.status == TRESP_COMPLETED:
+        for field in ["native_profile", "worker_sha256", "producer_sha256", "runtime_sha256", "environment_sha256"]:
+            if (resp.fields[field] ?? "") != (req.fields[field] ?? ""):
+                return TestResult(path, -1, 0, 1, 0, 0, "native daemon result binding mismatch: " + field, false)
+    daemon_response_to_test_result(resp)
 
 # ============================================================================
 # Status
