@@ -1,0 +1,44 @@
+"""Mixed-C byte/text owner admission; native execution is a separate oracle."""
+use std.spec.{describe, it, expect}
+use compiler.backend.runtime_byte_text_owner_v1.{runtime_byte_text_owner_selected_v1,
+    runtime_byte_text_owner_cache_material_v1, runtime_byte_text_owner_define_args_v1,
+    runtime_byte_text_owner_symbols_v1}
+
+describe "Canonical tagged byte/text runtime owners":
+    it "selects only the C-owned composition containing both runtime translation units":
+        val mixed = ["runtime", "runtime_native", "runtime_memory"]
+        expect(runtime_byte_text_owner_selected_v1("c", mixed)).to_equal(true)
+        expect(runtime_byte_text_owner_selected_v1("rust", mixed)).to_equal(false)
+        expect(runtime_byte_text_owner_selected_v1("c", ["runtime_native", "runtime_core_io_exports"])).to_equal(false)
+        expect(runtime_byte_text_owner_selected_v1("c", ["runtime"])).to_equal(false)
+        expect(runtime_byte_text_owner_define_args_v1("runtime_native", "c", mixed, false)).to_equal([])
+        expect(runtime_byte_text_owner_define_args_v1("runtime", "rust", mixed, false)).to_equal([])
+
+    it "privately renames both obsolete exports only in the legacy translation unit":
+        val mixed = ["runtime", "runtime_native"]
+        expect(runtime_byte_text_owner_define_args_v1("runtime", "c", mixed, false)).to_equal([
+            "-Drt_text_to_bytes=simple_legacy_hosted_text_to_bytes_v1",
+            "-Drt_bytes_to_text=simple_legacy_hosted_bytes_to_text_v1"])
+        expect(runtime_byte_text_owner_define_args_v1("runtime", "c", mixed, true)).to_equal([
+            "/Drt_text_to_bytes=simple_legacy_hosted_text_to_bytes_v1",
+            "/Drt_bytes_to_text=simple_legacy_hosted_bytes_to_text_v1"])
+        expect(runtime_byte_text_owner_cache_material_v1("c", mixed)).to_equal("byte-text-owner-v1:tagged-native")
+        expect(runtime_byte_text_owner_cache_material_v1("rust", mixed)).to_equal("byte-text-owner-v1:unchanged")
+
+    it "rejects stale legacy objects and incomplete or weak native owners":
+        val stale = "0000 T rt_text_to_bytes\n0040 T rt_bytes_to_text\n"
+        expect(runtime_byte_text_owner_symbols_v1("runtime", stale).is_err()).to_equal(true)
+        expect(runtime_byte_text_owner_symbols_v1("runtime", "0000 u rt_text_to_bytes\n").is_err()).to_equal(true)
+        expect(runtime_byte_text_owner_symbols_v1("runtime", " w rt_text_to_bytes\n v rt_bytes_to_text\n").is_ok()).to_equal(true)
+        expect(runtime_byte_text_owner_symbols_v1("runtime_native", stale).is_ok()).to_equal(true)
+        expect(runtime_byte_text_owner_symbols_v1("runtime_native", "0000 T rt_text_to_bytes\n").is_err()).to_equal(true)
+        expect(runtime_byte_text_owner_symbols_v1("runtime_native", "0000 W rt_text_to_bytes\n0040 T rt_bytes_to_text\n").is_err()).to_equal(true)
+        expect(runtime_byte_text_owner_symbols_v1("runtime_native", "").is_err()).to_equal(true)
+
+    it "recognizes Mach-O C spelling and intentionally omitted legacy definitions":
+        val native = "0000 T _rt_text_to_bytes\n0040 T _rt_bytes_to_text\n"
+        val legacy = "0000 W _simple_legacy_hosted_text_to_bytes_v1\n0040 W _simple_legacy_hosted_bytes_to_text_v1\n U _rt_array_len_safe\n"
+        expect(runtime_byte_text_owner_symbols_v1("runtime_native", native).is_ok()).to_equal(true)
+        expect(runtime_byte_text_owner_symbols_v1("runtime", legacy).is_ok()).to_equal(true)
+        expect(runtime_byte_text_owner_symbols_v1("runtime", "0000 T unrelated_host_function\n").is_ok()).to_equal(true)
+        expect(runtime_byte_text_owner_symbols_v1("unselected", native).is_err()).to_equal(true)

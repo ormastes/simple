@@ -1,0 +1,69 @@
+"""Select the canonical tagged text/byte owners in mixed C runtime bundles.
+
+Only the legacy runtime translation unit receives private symbol names. The
+native owner retains the public ABI; other compositions keep their selection.
+"""
+use std.io_runtime.{file_hash_sha256_or_empty, process_run}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
+use compiler.backend.llvm_capability.{find_nm_portable}
+
+pub fn runtime_byte_text_owner_selected_v1(runtime_owner: text, sources: [text]) -> bool:
+    runtime_owner == "c" and sources.contains("runtime") and sources.contains("runtime_native")
+
+pub fn runtime_byte_text_owner_cache_material_v1(runtime_owner: text, sources: [text]) -> text:
+    if runtime_byte_text_owner_selected_v1(runtime_owner, sources):
+        return "byte-text-owner-v1:tagged-native"
+    "byte-text-owner-v1:unchanged"
+
+pub fn runtime_byte_text_owner_define_args_v1(name: text, runtime_owner: text,
+        sources: [text], msvc: bool) -> [text]:
+    if name != "runtime" or not runtime_byte_text_owner_selected_v1(runtime_owner, sources): return []
+    val prefix = if msvc: "/D" else: "-D"
+    [prefix + "rt_text_to_bytes=simple_legacy_hosted_text_to_bytes_v1",
+        prefix + "rt_bytes_to_text=simple_legacy_hosted_bytes_to_text_v1"]
+
+# Pure checker also covers stale cached objects. Presence means a definition,
+# not an undefined reference. Mach-O's C spelling has one leading underscore.
+pub fn runtime_byte_text_owner_symbols_v1(name: text, symbols: text) -> Result<bool, text>:
+    if name != "runtime" and name != "runtime_native": return Err("byte-text owner source is not selected")
+    var definitions: Dict<text, text> = {}
+    for line in symbols.split("\n"):
+        var parts: [text] = []
+        for part in line.trim().split(" "):
+            if part != "": parts.push(part)
+        if parts.len() >= 2:
+            val kind = parts[parts.len() - 2]
+            var symbol = parts[parts.len() - 1]
+            if symbol.starts_with("_"): symbol = symbol.substring(1)
+            # GNU lowercase u is a defined unique-global symbol. Lowercase
+            # w/v are undefined weak references; uppercase W/V are defined.
+            if kind != "U" and kind != "w" and kind != "v": definitions[symbol] = kind
+    for symbol in ["rt_text_to_bytes", "rt_bytes_to_text"]:
+        if name == "runtime":
+            if definitions.contains_key(symbol): return Err("legacy runtime still defines canonical byte-text symbol " + symbol)
+        else:
+            if not definitions.contains_key(symbol): return Err("native runtime lacks canonical byte-text symbol " + symbol)
+            if definitions[symbol] != "T": return Err("native byte-text symbol is not a strong function " + symbol)
+    # Windows standalone preprocessing already omits the legacy definitions;
+    # absence of their private aliases is therefore permitted. The public
+    # symbols must still be absent here and strong in runtime_native.
+    Ok(true)
+
+pub fn runtime_byte_text_owner_admit_v1(name: text, source: text, object_path: text,
+        runtime_owner: text, sources: [text]) -> Result<bool, text>:
+    if not runtime_byte_text_owner_selected_v1(runtime_owner, sources): return Ok(true)
+    if name != "runtime" and name != "runtime_native": return Ok(true)
+    if file_hash_sha256_or_empty(source) == "" or file_hash_sha256_or_empty(object_path) == "":
+        return Err("byte-text runtime owner has missing source/object identity")
+    val nm = if native_tool_strict_requested_v1():
+        native_tool_strict_resolve_v1("nm")?
+    else:
+        find_nm_portable()
+    if nm == "": return Err("byte-text runtime owner has no symbol inspection tool")
+    val (stdout, stderr, code) = process_run(nm, [object_path])
+    if code != 0: return Err("byte-text runtime owner symbol inspection failed: " + stderr)
+    runtime_byte_text_owner_symbols_v1(name, stdout)
+
+export runtime_byte_text_owner_selected_v1, runtime_byte_text_owner_cache_material_v1
+export runtime_byte_text_owner_define_args_v1, runtime_byte_text_owner_symbols_v1
+export runtime_byte_text_owner_admit_v1

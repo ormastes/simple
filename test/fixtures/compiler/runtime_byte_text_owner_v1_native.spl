@@ -1,0 +1,73 @@
+"""Native behavioral oracle; compile with the selected mixed-C owner policy.
+
+Distinct exits preserve the first real failing boundary. No compiler/runtime
+provider is fabricated here, and parser/hash algorithms remain unchanged.
+"""
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_located_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_text_native_or_empty}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.strict_types_v1.{sdn_strict_limits_v1}
+use std.common.sdn.value.{SdnValue}
+use std.scv.build_retention_v1.{BuildRetentionStateV1, build_retention_sdn_v1, build_retention_root_v1}
+use std.scv.build_retention_codec_v1.{build_retention_parse_v1}
+
+extern fn rt_exit(code: i32)
+
+fn require_owner(condition: bool, code: i32, label: text):
+    if not condition:
+        print "FAIL {label}"
+        rt_exit(code)
+
+fn native_capture_owner(value: SdnValue) -> bool:
+    match value:
+        case Dict(fields):
+            if not fields.contains_key("capture_owners"): return false
+            match fields["capture_owners"]:
+                case Array(owners):
+                    if owners.len() != 1: return false
+                    match owners[0]:
+                        case String(owner): owner == "native-probe"
+                        case _: false
+                case _: false
+        case _: false
+
+fn main() -> i64:
+    val ascii = text_to_utf8_bytes("abc")
+    require_owner(ascii.len() == 3, 41, "ASCII byte count")
+    require_owner(ascii[0] == 97u8 and ascii[1] == 98u8 and ascii[2] == 99u8, 42, "ASCII byte values")
+    require_owner(bytes_to_text(ascii) == "abc", 43, "ASCII roundtrip")
+    val nul = bytes_to_text([97u8, 0u8, 98u8])
+    val nul_bytes = text_to_utf8_bytes(nul)
+    require_owner(nul_bytes.len() == 3, 44, "embedded NUL length")
+    require_owner(nul_bytes[0] == 97u8 and nul_bytes[1] == 0u8 and nul_bytes[2] == 98u8, 45, "embedded NUL values")
+    val unicode = text_to_utf8_bytes("éλ")
+    require_owner(unicode.len() == 4, 46, "UTF8 byte count")
+    require_owner(unicode[0] == 195u8 and unicode[1] == 169u8 and unicode[2] == 206u8 and unicode[3] == 187u8, 47, "UTF8 byte values")
+    require_owner(bytes_to_text(unicode) == "éλ", 48, "UTF8 roundtrip")
+    val source = "version: 1\n"
+    require_owner(validated_utf8_bytes_to_text_located_v1(source.bytes()).unwrap() == source, 49, "validated source text custody")
+    val empty_digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    val abc_digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    val a_digest = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+    require_owner(sha256_text("") == empty_digest, 50, "empty SHA256")
+    require_owner(sha256_text("abc") == abc_digest, 51, "abc SHA256")
+    require_owner(sha256_text("a") == a_digest, 52, "distinct nonempty SHA256")
+    require_owner(sha256_text_native_or_empty("abc") == abc_digest, 53, "native SHA256 accelerator")
+    require_owner(sdn_parse_strict_v1("x: 1\n", sdn_strict_limits_v1()).is_ok(), 54, "unchanged flat scalar grammar")
+    require_owner(sdn_parse_strict_v1("x = []\n", sdn_strict_limits_v1()).is_ok(), 55, "unchanged inline array grammar")
+    val v1 = BuildRetentionStateV1(generation: 1, nodes: [], pins: [], leases: [])
+    val v1_source = build_retention_sdn_v1(v1)
+    require_owner(v1_source.starts_with("version: 1\n"), 56, "historical V1 wire version")
+    val v1_read = build_retention_parse_v1(v1_source.bytes()).unwrap()
+    require_owner(build_retention_root_v1(v1_read) == build_retention_root_v1(v1), 57, "V1 exact root roundtrip")
+    # This provider-only fixture also runs before the independently developed
+    # retention V2 owner lands. Exercise its actual wire grammar here; typed
+    # V2 authority admission belongs to that integration's separate oracle.
+    val v2_source = v1_source.replace("version: 1", "version: 2") + "capture_owners: [\"native-probe\"]\n"
+    require_owner(v2_source.starts_with("version: 2\n"), 58, "V2 reservation wire version")
+    val v2_read = sdn_parse_strict_v1(v2_source, sdn_strict_limits_v1()).unwrap()
+    require_owner(native_capture_owner(v2_read.value), 59, "V2 capture wire grammar")
+    require_owner(sha256_text(v2_source) != sha256_text(v1_source), 60, "distinct exact wire hashes")
+    print "PASS runtime_byte_text_owner_v1 native controls=20"
+    0

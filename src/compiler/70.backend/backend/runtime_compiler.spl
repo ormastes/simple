@@ -11,9 +11,10 @@
 #       case Err(msg): report_error(msg)
 
 use compiler.backend.io_compat.{backend_shell_tuple}
-use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use compiler.backend.runtime_object_cache_windows.{runtime_windows_cache_toolchain_v1, runtime_windows_cached_compile_v1, runtime_windows_cache_publish_batch_v1}
 use compiler.backend.runtime_tagged_callback_owner_v1.{runtime_tagged_callback_owner_v1}
+use compiler.backend.runtime_byte_text_owner_v1.{runtime_byte_text_owner_define_args_v1,
+    runtime_byte_text_owner_cache_material_v1, runtime_byte_text_owner_admit_v1}
 use std.io_runtime.{host_arch, host_os, env_get_nullable, file_copy, file_exists, file_delete, file_write, file_hash_sha256_or_empty, process_run}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_cap_bytes}
@@ -23,413 +24,14 @@ use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_sour
 
 extern fn rt_path_absolute(path: text) -> text?
 
-# ============================================================================
-# Platform Helpers
-# ============================================================================
-
-# Was: delegate to std.nogc_sync_mut.env.platform.is_windows() (itself a
-# 2026-09-02 fail-open fix over a bare `OS` env-var read). That delegation was
-# ITSELF broken under this file's own execution context: traced live inside
-# the Stage 2 bootstrap sanity harness's in-process native-build (the
-# "hosted native link" path this file's find_c_compiler serves), host_os()
-# two lines above correctly answered "windows" while
-# nogc_sync_mut.env.platform.is_windows() answered false in the SAME call --
-# two independent OS-detection implementations disagreeing in one process.
-# That silent false routed every _find_c_compiler_windows candidate probe
-# through the POSIX branch (backend_shell_tuple's `/bin/sh -c`) instead of
-# `cmd.exe /c`, well upstream of that function's own (otherwise unconditional)
-# diagnostics -- which is why "No C compiler found" printed nothing about what
-# was tried. host_os() is already imported by this file and already proven
-# correct in this exact failing context by that same trace; compare against it
-# directly instead of trusting a second detector.
-fn _is_windows() -> bool:
-    host_os() == "windows"
-
-fn _is_msvc_cc(cc: text) -> bool:
-    val normalized = cc.lower().replace("\\", "/")
-    val parts = normalized.split("/")
-    val driver = parts[parts.len() - 1]
-    driver == "cl" or driver == "cl.exe" or driver == "clang-cl" or driver == "clang-cl.exe"
-
-pub fn windows_link_flavor_select(target: text, linker_abi: text, flavor_override: text,
-        abi_override: text) -> text:
-    """Pure Windows toolchain-flavor selector: "msvc" or "gnu".
-
-    An ABI-qualified TARGET wins (`*-windows-msvc` / `windows-msvc` -> msvc;
-    `*-windows-gnu`, `*-w64-mingw32` / `windows-gnu` -> gnu), then the
-    explicit env overrides `SIMPLE_LINKER_FLAVOR` (msvc|gnu|mingw) and
-    `SIMPLE_WINDOWS_ABI` (msvc|gnu); otherwise gnu (llvm-mingw, no-MSVC policy).
-
-    MSYSTEM (set by every MSYS2/Git Bash shell) is deliberately not consulted,
-    unlike the Rust seed's `Target::linker_flavor`: it says nothing about the
-    C compiler, and the runtime objects are compiled for the C compiler's
-    default (MSVC) ABI, so MSYSTEM -> gnu linked MSVC objects through MinGW
-    (undefined `__stdio_common_vfprintf`, `__chkstk`, `_fltused`). See
-    doc/08_tracking/bug/windows_unqualified_native_build_msystem_gnu_flavor_mismatch_2026-10-18.md."""
-    val normalized_target = target.lower()
-    val normalized_abi = linker_abi.lower()
-    if normalized_abi == "windows-msvc" or normalized_target.ends_with("-windows-msvc"):
-        return "msvc"
-    if normalized_abi == "windows-gnu" or normalized_target.ends_with("-windows-gnu") or
-            normalized_target.ends_with("-w64-mingw32"):
-        return "gnu"
-    val flavor = flavor_override.lower()
-    if flavor == "msvc":
-        return "msvc"
-    if flavor == "gnu" or flavor == "mingw":
-        return "gnu"
-    val abi = abi_override.lower()
-    if abi == "msvc":
-        return "msvc"
-    if abi == "gnu":
-        return "gnu"
-    # No-MSVC policy (2026-10-27): an unqualified Windows link defaults to the
-    # llvm-mingw GNU lane (clang + lld). MSVC only when the target or an
-    # override asks for it explicitly.
-    "gnu"
-
-pub fn windows_link_flavor_env_conflict(target: text, linker_abi: text, flavor_override: text) -> text:
-    """Message when SIMPLE_LINKER_FLAVOR contradicts an ABI-qualified target
-    (the target wins, exactly as in the seed); "" when there is no conflict."""
-    val flavor = flavor_override.lower()
-    if flavor != "msvc" and flavor != "gnu" and flavor != "mingw":
-        return ""
-    val selected = windows_link_flavor_select(target, linker_abi, "", "")
-    val requested = if flavor == "mingw": "gnu" else: flavor
-    if selected == requested:
-        return ""
-    if not target.lower().contains("-windows-") and linker_abi == "":
-        return ""
-    "SIMPLE_LINKER_FLAVOR=" + flavor_override + " ignored: target '" + target + "' names the " + selected + " ABI"
-
-fn _env_text(name: text) -> text:
-    val value = env_get_nullable(name)
-    if value == nil:
-        return ""
-    value
-
-pub fn windows_link_flavor_for_target(target: text, linker_abi: text) -> text:
-    """windows_link_flavor_select over the live environment. An empty
-    `target` falls back to SIMPLE_NATIVE_BUILD_TARGET (the driver's --target)."""
-    val effective_target = if target != "": target else: _env_text("SIMPLE_NATIVE_BUILD_TARGET")
-    val flavor_override = _env_text("SIMPLE_LINKER_FLAVOR")
-    val conflict = windows_link_flavor_env_conflict(effective_target, linker_abi, flavor_override)
-    if conflict != "":
-        print "[linker-flavor] {conflict}"
-    windows_link_flavor_select(effective_target, linker_abi, flavor_override,
-        _env_text("SIMPLE_WINDOWS_ABI"))
-
-fn _is_mingw() -> bool:
-    windows_link_flavor_for_target("", "") == "gnu"
-
-fn _msys_drive_path(p: text) -> text:
-    """On Windows, rewrite an MSYS/Cygwin '/d/foo' path to native 'd:/foo'.
-
-    TMPDIR/TMP/TEMP under Git Bash / MSYS2 hold POSIX-form paths. Every
-    consumer below hands the result to a NATIVE Windows tool via
-    process_run (no shell, so no MSYS argv conversion happens), and such a
-    tool cannot open '/d/...' at all.
-
-    Measured 2026-09-02 on the MSVC bootstrap lane, clang-cl 18.1.8, same
-    probe source, argv differing only in path form:
-      clang-cl /nologo /c /Fo/d/.../ccprobe.o /d/.../ccprobe.c
-        -> "no such file or directory: '/d/.../ccprobe.c'", rc=1
-      clang-cl /nologo /c /Fod:\...\ccprobe.o d:\...\ccprobe.c
-        -> rc=0, 753-byte object
-    This is why _cc_verify_compiles rejected EVERY candidate and
-    find_c_compiler() returned "", producing "No C compiler found. Install
-    clang or gcc." from llvm_native_link_orchestrator.spl:125 — the Stage 2
-    receiver gate's real failure.
-
-    Drive letters are case-insensitive on Windows, so no case folding is
-    needed. CROSS-PLATFORM IMPACT: guarded by _is_windows(); on every other
-    platform this returns its argument unchanged, and '/d/foo' is a perfectly
-    ordinary POSIX path that must NOT be rewritten.
-    """
-    if not _is_windows():
-        return p
-    if p.len() < 3:
-        return p
-    if not p.starts_with("/"):
-        return p
-    if p.substring(2, 3) != "/":
-        return p
-    val drive = p.substring(1, 2)
-    if drive == "/" or drive == "":
-        return p
-    "{drive}:{p.substring(2)}"
-
-fn _get_temp_dir() -> text:
-    val tmpdir = env_get_nullable("TMPDIR")
-    if tmpdir != "" and tmpdir != nil:
-        return _msys_drive_path(tmpdir)
-    val tmp = env_get_nullable("TMP")
-    if tmp != "" and tmp != nil:
-        return _msys_drive_path(tmp)
-    val temp = env_get_nullable("TEMP")
-    if temp != "" and temp != nil:
-        return _msys_drive_path(temp)
-    if _is_windows():
-        return "C:/Windows/Temp"
-    "/tmp"
-
-fn _obj_ext() -> text:
-    if _is_windows() and not _is_mingw():
-        ".obj"
-    else:
-        ".o"
-
-fn runtime_compile_trace_enabled() -> bool:
-    (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
-
-pub fn runtime_abi_policy_v1() -> Result<text, text>:
-    val configured = env_get_nullable("SIMPLE_ABI_POLICY") ?? ""
-    if configured == "" or configured == "v1":
-        return Ok("v1")
-    Err("SIMPLE_ABI_POLICY selected policy is v1; rejected '{configured}'")
-
-pub fn runtime_abi_define_args_v1(policy: text, msvc: bool) -> [text]:
-    val prefix = if msvc: "/D" else: "-D"
-    if policy == "v1":
-        return ["{prefix}SIMPLE_ABI_VERSION=1",
-            "{prefix}SIMPLE_ABI_VERSION_DEFERRED=0"]
-    []
-
-# ============================================================================
-# C Compiler Discovery
-# ============================================================================
-
-pub struct HostedCCompilerPlan:
-    requires_cross: bool
-    supported: bool
-    command: text
-
-fn hosted_c_arch_kind(arch: text) -> text:
-    if arch == "riscv64" or arch == "riscv64gc" or arch == "rv64" or arch == "rv64gc":
-        return "riscv64"
-    val normalized = mir_target_context_normalize_arch(arch)
-    if normalized == "x86_64" or normalized == "aarch64":
-        return normalized
-    ""
-
-fn hosted_c_target_os_matches(target: text, host_os_name: text) -> bool:
-    if not target.contains("-"):
-        return true
-    if host_os_name == "linux":
-        return target.ends_with("-linux-gnu")
-    if host_os_name == "macos" or host_os_name == "darwin":
-        return target.ends_with("-apple-darwin")
-    if host_os_name == "windows":
-        return target.ends_with("-pc-windows-msvc") or target.ends_with("-pc-windows-gnu")
-    if host_os_name == "freebsd":
-        return target.ends_with("-unknown-freebsd")
-    false
-
-pub fn hosted_c_compiler_plan(target: text, host_os_name: text, host_arch_name: text) -> HostedCCompilerPlan:
-    """Classify hosted C compilation without enabling unsupported cross targets."""
-    if target == "" or target == "host" or target == "native":
-        return HostedCCompilerPlan(requires_cross: false, supported: true, command: "")
-    val target_arch_text = if target.contains("-"): target.split("-")[0] else: target
-    val target_arch = hosted_c_arch_kind(target_arch_text)
-    val host_kind = hosted_c_arch_kind(host_arch_name)
-    val os_matches = hosted_c_target_os_matches(target, host_os_name)
-    val linux_to_mingw = host_os_name == "linux" and target.ends_with("-pc-windows-gnu")
-    val requires_cross = target_arch != "" and host_kind != "" and
-        (target_arch != host_kind or not os_matches)
-    if target_arch == "" or host_kind == "" or (not os_matches and not linux_to_mingw):
-        return HostedCCompilerPlan(requires_cross: requires_cross, supported: false, command: "")
-    if not requires_cross:
-        return HostedCCompilerPlan(requires_cross: false, supported: true, command: "")
-    if linux_to_mingw:
-        return HostedCCompilerPlan(requires_cross: true, supported: true, command: "clang")
-    if host_os_name == "linux" and target_arch == "aarch64":
-        return HostedCCompilerPlan(requires_cross: true, supported: true, command: "aarch64-linux-gnu-gcc")
-    if host_os_name == "linux" and target_arch == "riscv64":
-        return HostedCCompilerPlan(requires_cross: true, supported: true, command: "riscv64-linux-gnu-gcc")
-    HostedCCompilerPlan(requires_cross: true, supported: false, command: "")
-
-pub fn hosted_cross_c_compiler_name(target: text, host_os_name: text, host_arch_name: text) -> text:
-    val plan = hosted_c_compiler_plan(target, host_os_name, host_arch_name)
-    if plan.requires_cross and plan.supported:
-        return plan.command
-    ""
-
-fn find_c_compiler() -> text:
-    """Find a C compiler on the system.
-
-    Tries SIMPLE_CC env var first, then platform-specific discovery.
-    Returns the command name or empty string if none found.
-    """
-    val target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-    val plan = hosted_c_compiler_plan(target, host_os(), host_arch())
-    if not plan.supported:
-        return ""
-    if native_tool_strict_requested_v1():
-        match native_tool_strict_resolve_v1("cc"):
-            case Ok(path): return path
-            case Err(_): return ""
-
-    # User override via env var, after target admission.
-    val simple_cc = env_get_nullable("SIMPLE_CC")
-    if simple_cc != "" and simple_cc != nil:
-        if target.ends_with("-pc-windows-gnu") and not simple_cc.lower().contains("clang"):
-            return ""
-        return simple_cc
-
-    if plan.requires_cross:
-        val (out, err, code) = backend_shell_tuple("command -v {plan.command} 2>/dev/null")
-        if code == 0:
-            for path in out.split("\n"):
-                val resolved = path.trim()
-                if resolved != "":
-                    return resolved
-        return ""
-
-    if _is_windows():
-        return _find_c_compiler_windows()
-
-    # Unix: check well-known paths first
-    if file_exists("/usr/bin/clang"):
-        return "/usr/bin/clang"
-    if file_exists("/usr/bin/gcc"):
-        return "/usr/bin/gcc"
-    if file_exists("/usr/bin/cc"):
-        return "/usr/bin/cc"
-
-    val candidates = ["clang", "clang-18", "clang-17", "clang-16", "gcc", "cc"]
-    for candidate in candidates:
-        val (out, err, code) = backend_shell_tuple("which {candidate} 2>/dev/null")
-        if code == 0:
-            return candidate
-    ""
-
-fn _cc_verify_compiles(cc: text) -> bool:
-    """VERIFY a hosted C compiler by compiling a translation unit that requires
-    the C library headers, checking exit status AND the produced object file.
-
-    A bare `where`/`which` hit is not evidence the compiler works: on this
-    lane a PATH-shadowed MinGW gcc passed `where gcc` while its cc1.exe
-    crashed on every input with no output at all (Git-for-Windows DLLs
-    shadowing MSYS2's), and the llc bug this lane started from was the same
-    exists-but-never-executed probe shape. Never assume; execute."""
-    val tmp = _get_temp_dir()
-    # getpid(), NOT the bare extern rt_getpid(): `rt_getpid` is not declared
-    # `extern fn` anywhere in this file, so under native codegen `{pid}`
-    # interpolated an opaque handle as the literal text `<value:0x34d4>`.
-    # `<` and `>` are ILLEGAL in a Windows filename, so rt_file_write_text
-    # below failed for EVERY candidate, _cc_verify_compiles returned false
-    # four times, and find_c_compiler() returned "" -- the real
-    # `reason=stage2-struct-receiver-failed` on the MSVC lane (measured
-    # 2026-09-02). The typed wrapper was already imported at the top of this
-    # file and simply unused. Third instance of the undeclared-extern
-    # silent-value class; see
-    # doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md.
-    # CROSS-PLATFORM: on Unix `<value:0x...>` is a legal filename, so the
-    # probe worked there; the numeric name is strictly cleaner with no
-    # behaviour change.
-    val pid = getpid()
-    # Staging names, not durable artifacts: the write-temp-then-rename idiom's
-    # temp half. Nothing here is ever reused across runs -- the probe MUST
-    # execute every time (a cached verdict would call a compiler healthy after
-    # it broke, which is the exact incident this function exists to catch), so
-    # there is no durable name to content-key. The pid only keeps two concurrent
-    # probes from clobbering each other's file; the .tmp suffix marks it as
-    # transient. See scripts/check/check-no-pid-keyed-build-artifacts.shs.
-    # The .c / .o suffix must stay LAST: both clang and cl.exe select the input
-    # language from the file extension, so a trailing .tmp would make the probe
-    # unbuildable on every platform.
-    val src = "{tmp}/simple-cc-verify.{pid}.tmp.c"
-    val obj = "{tmp}/simple-cc-verify.{pid}.tmp.o"
-    # A headerless object does not prove the hosted SDK is available. clang-cl
-    # can emit it without a Windows SDK, then fail on runtime.h's stdlib.h.
-    # Reject that candidate here so discovery can try the next toolchain.
-    if not file_write(src, "#include <stdlib.h>\nint main(void) { return 0; }\n"):
-        # UNGATED, exactly like the REJECTED branch below and for the same
-        # reason its own comment already gives: gating this behind
-        # SIMPLE_COMPILER_TRACE meant the only lane that ever hits it never
-        # printed it. The resulting silence was read as "every `where` probe
-        # failed" and cost a full diagnosis cycle on 2026-09-02.
-        print "[CC-VERIFY] {cc}: REJECTED could not write probe source {src}"
-        return false
-    var args: [text] = []
-    if _is_msvc_cc(cc):
-        args = ["/nologo", "/c", "/Fo{obj}", src]
-    else:
-        args = ["-c", "-o", obj, src]
-    val (out, err, code) = process_run(cc, args)
-    val ok = code == 0 and file_exists(obj)
-    if runtime_compile_trace_enabled():
-        print "[CC-VERIFY] {cc}: exit={code} obj_exists={ok}"
-    elif not ok:
-        # A failing probe is the thing worth reporting, and gating it behind a
-        # trace flag meant the only lane that ever hits it never printed it.
-        print "[CC-VERIFY] {cc}: REJECTED exit={code} src={src} obj={obj}"
-        print "[CC-VERIFY] {cc}: stderr={err}"
-    file_delete(src)
-    file_delete(obj)
-    ok
-
-fn _find_c_compiler_windows() -> text:
-    """Find a C compiler on Windows (MSVC cl.exe or MinGW gcc/clang).
-
-    Every candidate is verified by actually compiling a trivial file
-    (_cc_verify_compiles) — a `where` hit alone selects nothing."""
-    # MinGW: llvm-mingw clang only (the windows-gnu lane never uses GCC).
-    if _is_mingw():
-        val mingw_candidates = ["clang"]
-        for candidate in mingw_candidates:
-            val resolved = _first_verified_windows_compiler(candidate)
-            if resolved != "":
-                return resolved
-
-    # clang-cl BEFORE cl.exe on the MSVC lane. cl.exe passes the trivial
-    # _cc_verify_compiles probe and then cannot compile the C runtime at all:
-    # measured 2026-09-01 on cl.exe 19.44.35228, src/runtime/runtime.c yields
-    # C1189 ("C atomic support is not enabled" — stdatomic needs BOTH /std:c11
-    # and /experimental:c11atomics), then C2099 non-constant initializers, then
-    # C2143/C2091 on the GNU `__attribute__(...)` the runtime uses throughout.
-    # clang-cl compiles the same file clean with the flags below. clang-cl is
-    # also the compiler the stage-2 candidate itself was built with, so probing
-    # the candidate with a DIFFERENT compiler than built it is its own defect.
-    # Windows-only ordering change: the MinGW branch above and the Unix path in
-    # find_c_compiler are untouched.
-    val msvc_candidates = ["clang-cl", "cl.exe"]
-    for candidate in msvc_candidates:
-        val resolved = _first_verified_windows_compiler(candidate)
-        if resolved != "":
-            return resolved
-
-    # Try clang/gcc on PATH (works in both MSVC and MinGW)
-    val candidates = ["clang", "gcc"]
-    for candidate in candidates:
-        val resolved = _first_verified_windows_compiler(candidate)
-        if resolved != "":
-            return resolved
-
-    # Returning "" here yields the bare message "No C compiler found. Install
-    # clang or gcc." at two DIFFERENT call sites with identical text, and names
-    # neither the candidates tried nor the temp dir the probe used. That cost a
-    # full bootstrap cycle to re-diagnose. Always say what was attempted.
-    print "[cc-detect] no C compiler verified on Windows."
-    print "[cc-detect] temp dir: {_get_temp_dir()}"
-    print "[cc-detect] tried: clang-cl, cl.exe, clang, gcc (each `where` + a real compile)"
-    print "[cc-detect] set SIMPLE_CC to override, or SIMPLE_COMPILER_TRACE=1 for per-candidate exit codes"
-    ""
-
-fn _first_verified_windows_compiler(candidate: text) -> text:
-    """Return the first executable reported by `where` that really compiles.
-
-    `where` may report multiple installations. Verifying the bare candidate
-    name only retries the first PATH hit and can never reach a later healthy
-    toolchain when the first executable has a missing DLL."""
-    val (out, err, code) = backend_shell_tuple("where {candidate} 2>nul")
-    if code != 0:
-        return ""
-    for path in out.split("\n"):
-        val resolved = path.trim()
-        if resolved != "" and _cc_verify_compiles(resolved):
-            return resolved
-    ""
+export use compiler.backend.runtime_host_compiler_v1.{
+    HostedCCompilerPlan, _is_windows, _is_msvc_cc, windows_link_flavor_select,
+    windows_link_flavor_env_conflict, _env_text, windows_link_flavor_for_target, _is_mingw,
+    _msys_drive_path, _get_temp_dir, _obj_ext, runtime_compile_trace_enabled,
+    runtime_abi_policy_v1, runtime_abi_define_args_v1, hosted_c_arch_kind, hosted_c_target_os_matches,
+    hosted_c_compiler_plan, hosted_cross_c_compiler_name, find_c_compiler, _cc_verify_compiles,
+    _find_c_compiler_windows, _first_verified_windows_compiler
+}
 
 # ============================================================================
 # Runtime Source Directory Discovery
@@ -569,7 +171,8 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
     for name in sources:
         source_sig = source_sig + ";" + name
     val timestamp_owner = runtime_profile == "core-c-bootstrap" or alloc_observer
-    val flag_sig = "v7;alloc_observer_v1={alloc_observer};profile={runtime_profile};sources={source_sig};timestamp_owner={timestamp_owner};legacy_owner={legacy_owner};cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext};rt_dir={rt_dir};riscv_vec={riscv_vec};host_arch={host_arch()};abi_policy={abi_policy};runtime_owner={runtime_owner}"
+    val byte_text_owner = runtime_byte_text_owner_cache_material_v1(runtime_owner, sources)
+    val flag_sig = "v8;byte_text_owner={byte_text_owner};alloc_observer_v1={alloc_observer};profile={runtime_profile};sources={source_sig};timestamp_owner={timestamp_owner};legacy_owner={legacy_owner};cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext};rt_dir={rt_dir};riscv_vec={riscv_vec};host_arch={host_arch()};abi_policy={abi_policy};runtime_owner={runtime_owner}"
     var cmd = "( printf '%s\\n' '" + flag_sig + "'; '" + cc + "' --version 2>/dev/null; "
     cmd = cmd + "find '" + rt_dir + "' -type f \\( -name '*.c' -o -name '*.h' \\) 2>/dev/null | LC_ALL=C sort | xargs -r sha256sum 2>/dev/null "
     cmd = cmd + ") | sha256sum 2>/dev/null | cut -c1-40"
@@ -889,6 +492,8 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args.push(obj_path)
             comp_args.push(src_path)
 
+        for owner_define in runtime_byte_text_owner_define_args_v1(name, runtime_owner, sources, use_msvc):
+            comp_args.push(owner_define)
         val cache_obj = if cache_dir != "": cache_dir + "/" + name + ext else: ""
         var cache_hit = false
         var cache_obj_exists = false
@@ -911,7 +516,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
                 if checked.unwrap() != cc:
                     cleanup_runtime_objects(objects)
                     return Err("runtime C compiler authority changed")
-            val runtime_context = ["target=" + target, "profile=" + runtime_profile, "alloc_observer_v1={alloc_observer}", "abi=" + abi_policy, "host=" + host_arch()]
+            val runtime_context = ["target=" + target, "profile=" + runtime_profile, "alloc_observer_v1={alloc_observer}", "abi=" + abi_policy, "host=" + host_arch(), runtime_byte_text_owner_cache_material_v1(runtime_owner, sources)]
             if windows_toolchain != "":
                 val result = runtime_windows_cached_compile_v1(windows_cache_root, cc, windows_compiler_digest, windows_toolchain, comp_args, src_path, obj_path, runtime_context, trace)
                 comp_out = result.stdout
@@ -935,6 +540,14 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
                 # missing DLL, spawn failure), not a diagnosis of the source.
                 comp_detail = "(no compiler output; cc='{cc}' exited with code {comp_code} — the compiler crashed or could not start)"
             return Err("Failed to compile {name}.c:\n{comp_detail}")
+
+        # Both staged cache hits and fresh objects must prove the public ABI
+        # owner before either publication or link admission.
+        match runtime_byte_text_owner_admit_v1(name, src_path, obj_path, runtime_owner, sources):
+            case Ok(_): ()
+            case Err(reason):
+                cleanup_runtime_objects(objects)
+                return Err(reason)
 
         if core_c_profile and name == "runtime_native":
             match runtime_tagged_callback_owner_v1(src_path, obj_path):
