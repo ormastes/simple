@@ -360,11 +360,19 @@ class HttpRequestParser:
         Delegates to http_core body_decision (chunked allowed on this
         transport): rejects duplicate/invalid Content-Length (400), oversized
         bodies (413), and Content-Length combined with chunked (400 smuggling
-        ambiguity). Returns false and enters Error state on rejection.
+        ambiguity), then the Host policy (400 missing/duplicate/invalid Host,
+        or Host disagreeing with an absolute-form target). Body framing is
+        checked first so an oversized body still maps to 413. Returns false
+        and enters Error state on rejection.
         """
         val d = body_decision(self.headers, self.max_body, true)
         if d.0 != "":
             self.error_message = d.0
+            self.state = ParseState.Error
+            return false
+        val host_err = _async_request_host_error(self.headers, self.version, self.path)
+        if host_err != "":
+            self.error_message = host_err
             self.state = ParseState.Error
             return false
         self.content_length = d.1.to_i64()
@@ -388,3 +396,71 @@ class HttpRequestParser:
         if self.error_message.starts_with("413"):
             return HttpServerError.BodyTooLarge(self.error_message)
         HttpServerError.ParseError(self.error_message)
+
+# ============================================================================
+# Host policy (RFC 9112 §3.2) — parity with the sync parser's
+# request_host_error, plus authority validation and absolute-form agreement.
+# ============================================================================
+
+# Lower-cased authority of an absolute-form target ("http://Host:1/a" ->
+# "host:1"), or "" when the target is origin-form.
+fn _async_absolute_form_authority(target: text) -> text:
+    val lower = target.lower()
+    var rest = ""
+    if lower.starts_with("http://"):
+        rest = lower.slice(7, lower.len())
+    elif lower.starts_with("https://"):
+        rest = lower.slice(8, lower.len())
+    else:
+        return ""
+    var end = rest.len()
+    for sep in ["/", "?", "#"]:
+        val i = rest.index_of(sep)
+        if i >= 0 and i < end:
+            end = i
+    rest.slice(0, end)
+
+# A Host value must be a bare uri-host[:port]. Userinfo ("@"), whitespace,
+# path/query delimiters and controls are rejected so a downstream component
+# can never pick a different authority than the one validated here.
+fn _async_host_authority_valid(host: text) -> bool:
+    for code in string_bytes(host):
+        val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        # - . _ ~ ! $ & ' ( ) * + , ; = % : [ ]
+        val allowed = (
+            code == 45 or code == 46 or code == 95 or code == 126 or
+            code == 33 or code == 36 or code == 38 or code == 39 or
+            code == 40 or code == 41 or code == 42 or code == 43 or
+            code == 44 or code == 59 or code == 61 or code == 37 or
+            code == 58 or code == 91 or code == 93
+        )
+        if not alpha and not digit and not allowed:
+            return false
+    true
+
+# Returns "" when the Host policy admits the request, else a 400 message.
+# HTTP/1.1 requires exactly one non-empty Host field; duplicates are invalid
+# even when equal. HTTP/1.0 keeps its optional-Host behavior, but any Host
+# that is present must still be valid and agree with an absolute-form target.
+fn _async_request_host_error(headers: [(text, text)], version: text, target: text) -> text:
+    var host_count: i32 = 0
+    var host_value = ""
+    for header in headers:
+        if header.0.lower() == "host":
+            host_count = host_count + 1
+            host_value = header.1.trim()
+    if host_count == 0:
+        if version == "HTTP/1.1":
+            return "400 Missing Host header"
+        return ""
+    if host_count > 1:
+        return "400 Multiple Host headers"
+    if host_value == "":
+        return "400 Empty Host header"
+    if not _async_host_authority_valid(host_value):
+        return "400 Invalid Host header"
+    val target_authority = _async_absolute_form_authority(target)
+    if target_authority != "" and target_authority != host_value.lower():
+        return "400 Host does not match request-target authority"
+    ""
