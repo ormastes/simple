@@ -342,7 +342,9 @@ pub fn spl_thread_pool_spawn_worker(_args: &[Value]) -> Result<Value, CompileErr
 /// the local `THREAD_RESULTS`. Under a `Native` backend that made join a lookup in
 /// a table nothing ever wrote, and `NativeThreadProvider::thread_join` ends in
 /// `.unwrap_or(Value::Nil)` — so every join silently returned nil. Spawn must be
-/// backend-aware exactly where join is.
+/// backend-aware exactly where join is. Spawned workers now live in
+/// `THREAD_HANDLES` (see `spawn_isolated_worker`); the id still comes from
+/// the backend-aware allocator so it never collides with registry ids.
 fn alloc_thread_handle_id() -> i64 {
     let registry = get_concurrent_registry();
     if registry.backend() != ConcurrentBackend::PureStd {
