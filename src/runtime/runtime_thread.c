@@ -802,6 +802,19 @@ static int64_t spl_pool_v1_boxed_task_dispatch(int64_t raw_task) {
     return result;
 }
 
+/* Zero-argument boxed dispatch for rt_pool_submit: a registered closure's
+ * func_ptr is the boxed entry `(closure) -> tagged`. */
+static int64_t spl_pool_boxed0_task_dispatch(int64_t raw_task) {
+    RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
+    if (!task || !task->boxed_entry) return 0;
+    int64_t closure = task->boxed_closure;
+    int64_t (*entry0)(int64_t) = (int64_t (*)(int64_t))(intptr_t)task->boxed_entry;
+    int64_t result = rt_value_unbox_int(entry0(closure));
+    task->boxed_closure = 0;
+    rt_closure_release(closure);
+    return result;
+}
+
 typedef struct RtPoolStateV1 {
     int64_t capacity;
     int64_t outstanding;
@@ -1450,13 +1463,34 @@ int64_t rt_pool_safepoint(void) {
 int64_t rt_pool_submit(int64_t arg0, int64_t arg1) {
     int64_t closure_ptr = (arg1 != 0) ? arg1 : arg0;
     if (!closure_ptr) return 0;
-    rt_closure_fn_t fn_ptr = *(rt_closure_fn_t*)(intptr_t)closure_ptr;
-    if (!fn_ptr) return 0;
+    /* A native Simple closure value is a TAG_HEAP-tagged RtCoreClosure whose
+     * first word is not an entry: dispatch it boxed, pinned until it runs. */
+    int64_t boxed = rt_closure_func_ptr(closure_ptr);
+    rt_closure_fn_t fn_ptr = NULL;
+    if (boxed) {
+        if (!rt_closure_retain(closure_ptr)) return 0;
+    } else {
+        /* Legacy raw record: first word is `int64_t entry(record)`. */
+        if (((uint64_t)closure_ptr) & 7ULL) return 0;
+        fn_ptr = *(rt_closure_fn_t*)(intptr_t)closure_ptr;
+        if (!fn_ptr) return 0;
+    }
 
     RtPoolTask* task = (RtPoolTask*)SPL_MALLOC(sizeof(RtPoolTask), "rt_pool_task");
-    if (!task) return 0;
-    task->entry = fn_ptr;
-    task->closure_ptr = closure_ptr;
+    if (!task) {
+        if (boxed) rt_closure_release(closure_ptr);
+        return 0;
+    }
+    memset(task, 0, sizeof(*task));
+    if (boxed) {
+        task->boxed_entry = (int64_t (*)(int64_t, int64_t))(intptr_t)boxed;
+        task->boxed_closure = closure_ptr;
+        task->entry = spl_pool_boxed0_task_dispatch;
+        task->closure_ptr = (int64_t)(intptr_t)task;
+    } else {
+        task->entry = fn_ptr;
+        task->closure_ptr = closure_ptr;
+    }
     task->result = 0;
     task->done = 0;
     task->joined = 0;
@@ -1480,6 +1514,7 @@ int64_t rt_pool_submit(int64_t arg0, int64_t arg1) {
 #else
         DeleteCriticalSection(&task->lock);
 #endif
+        if (task->boxed_closure) rt_closure_release(task->boxed_closure);
         SPL_FREE(task);
         return 0;
     }
