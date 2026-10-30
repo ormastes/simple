@@ -107,13 +107,16 @@ exit "$FIXTURE_EXIT"
     assert (evidence / "hello.spl").is_file(), name
     assert (evidence / ("hello" + exe)).is_file(), name
     phase = root / "out" / (platform + "-p2") / "PHASE"
-    rejected = root / "out" / (platform + "-rejected-p2") / ("simple" + exe)
+    rejected_dir = root / "build/ladder/evidence/rejected" / (platform + "-rejected-p2")
+    rejected = rejected_dir / ("simple" + exe)
     assert (result.returncode == 0) == accepted, (name, result.returncode, result.stderr)
     assert phase.exists() == accepted, name
     if accepted:
         assert phase.read_text() == "2\n", name
     else:
         assert rejected.read_bytes() == (root / "compiler").read_bytes(), name
+        assert "reason: hello-run-failed\n" in (rejected_dir / "REJECTED.sdn").read_text(), name
+        assert not (root / "out" / (platform + "-rejected-p2")).exists(), name
         assert not list((root / "out").glob("*/PHASE")), name
         if (root / "github-output").exists():
             assert "phase=" not in (root / "github-output").read_text(), name
