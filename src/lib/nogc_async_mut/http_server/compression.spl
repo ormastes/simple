@@ -80,17 +80,28 @@ fn compress_response_for(resp: HttpResponseData, accept_header: text) -> HttpRes
     # (doc/08_tracking/bug/compression_stored_only_encoders_lz4_2026-09-16.md);
     # trying only the top codec would ship the body uncompressed even when a
     # lower-preference codec on offer does shrink it.
+    # The walk order is the negotiated ranking: client q-value first, server
+    # preference breaking ties. Each round asks negotiate_encoding for the best
+    # of the codecs not yet tried, so a higher-q codec later in server order
+    # is still tried before a lower-q codec earlier in it.
     var chosen: text = ""
     var compressed: [u8] = []
-    for candidate in supported_encodings():
-        if chosen.len() == 0 and negotiate_encoding(accept_header, [candidate]).len() > 0:
-            val res = compress_response_body(body_bytes, candidate)
-            if res.is_ok():
-                val value = res.unwrap()
-                # Never emit a Content-Encoding header without a smaller body.
-                if value.len() > 0 and value.len() < body_bytes.len():
-                    chosen = candidate
-                    compressed = value
+    var remaining = supported_encodings()
+    var candidate = negotiate_encoding(accept_header, remaining)
+    while chosen.len() == 0 and candidate.len() > 0:
+        val res = compress_response_body(body_bytes, candidate)
+        if res.is_ok():
+            val value = res.unwrap()
+            # Never emit a Content-Encoding header without a smaller body.
+            if value.len() > 0 and value.len() < body_bytes.len():
+                chosen = candidate
+                compressed = value
+        var next_remaining: [text] = []
+        for codec in remaining:
+            if codec != candidate:
+                next_remaining.push(codec)
+        remaining = next_remaining
+        candidate = negotiate_encoding(accept_header, remaining)
     if chosen.len() == 0:
         return resp
     val new_headers = _set_content_encoding(_strip_content_length(resp.headers), chosen)
