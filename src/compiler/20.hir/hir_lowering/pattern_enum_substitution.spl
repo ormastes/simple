@@ -5,7 +5,7 @@ Unknown binders and unresolved types produce Error; no nominal name guessing.
 """
 use compiler.hir.hir_types.{HirType, HirTypeKind}
 use compiler.hir.hir_lowering.types.{HirDeclaredPatternEnumSlots}
-use compiler.frontend.parser_types_expr.{EnumPatternPayload, PatternKind}
+use compiler.frontend.parser_types_expr.{EnumPatternPayload, Pattern, PatternKind}
 use compiler.common.diagnostics.span.{Span}
 
 pub fn declared_pattern_slot_type_is_concrete(type_: HirType) -> bool:
@@ -32,6 +32,16 @@ pub fn declared_pattern_slot_types_are_concrete(types: [HirType]) -> bool:
             return false
     true
 
+# A payload sub-pattern that binds nothing. The flat AST bridge lowers `_`
+# inside an enum payload (`case P.Ready(_)`) to `Binding("_", false)`, not
+# `Wildcard` (convert_nodes.spl, enum-call payload branch), so both spellings
+# must count or the real frontend never reaches the untyped-subject admission.
+pub fn declared_pattern_is_discard(pattern: Pattern) -> bool:
+    match pattern.kind:
+        case PatternKind.Wildcard: true
+        case PatternKind.Binding(name, _): name == "_"
+        case _: false
+
 pub fn declared_pattern_payload_avoids_type_parameters(slots: HirDeclaredPatternEnumSlots, payload: EnumPatternPayload?) -> bool:
     """True when no payload binder would read a type-parameter slot.
 
@@ -48,11 +58,7 @@ pub fn declared_pattern_payload_avoids_type_parameters(slots: HirDeclaredPattern
                     return false
                 var index = 0
                 while index < patterns.len():
-                    val pattern = patterns[index]
-                    val wildcard = match pattern.kind:
-                        case PatternKind.Wildcard: true
-                        case _: false
-                    if not wildcard and not declared_pattern_slot_type_is_concrete(positional[index]):
+                    if not declared_pattern_is_discard(patterns[index]) and not declared_pattern_slot_type_is_concrete(positional[index]):
                         return false
                     index = index + 1
                 return true
@@ -70,10 +76,7 @@ pub fn declared_pattern_payload_avoids_type_parameters(slots: HirDeclaredPattern
                         index = index + 1
                     if not found:
                         return false
-                    val wildcard = match field_pattern.kind:
-                        case PatternKind.Wildcard: true
-                        case _: false
-                    if not wildcard and not field_concrete:
+                    if not declared_pattern_is_discard(field_pattern) and not field_concrete:
                         return false
                 return true
     true
