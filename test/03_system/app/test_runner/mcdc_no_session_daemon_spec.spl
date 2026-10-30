@@ -16,11 +16,15 @@ use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 
 val FIXTURE = "use std.spec\ndescribe \"conditions\":\n    it \"if and or\":\n        val a = 3\n        val b = 7\n        var hits = 0\n        if a > 1 and b < 10:\n            hits = hits + 1\n        if a > 5 or b > 5:\n            hits = hits + 1\n        expect(hits).to_equal(2)\n"
 
+# MC/DC variables the outer runner may have set; each child run starts clean
+# so a CI waiver or mode cannot flip the default-profile examples.
+val UNSET_MCDC_ENV = ["-u", "SIMPLE_MCDC_MODE", "-u", "SIMPLE_MCDC_MODE_ERROR", "-u", "SIMPLE_MCDC_OFF_WAIVER_REASON", "-u", "SIMPLE_MCDC_OFF_WAIVER_REVIEWER", "-u", "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID", "-u", "SIMPLE_MCDC_OFF_WAIVER_VERSION"]
+val NO_BINARY = "error: SIMPLE_BINARY is unset; set it to the compiler under test (no fallback to the deployed bin/simple)"
+
+# The compiler under test. Deliberately no fallback to bin/simple, which is
+# the deployed binary and may be stale.
 fn real_binary() -> text:
-    val b = env_get("SIMPLE_BINARY")
-    if b != "":
-        return b
-    "bin/simple"
+    env_get("SIMPLE_BINARY")
 
 fn make_case(case: text, name: text, body: text) -> text:
     val dir = "build/mcdc_kind/" + case
@@ -30,7 +34,9 @@ fn make_case(case: text, name: text, body: text) -> text:
     dir
 
 fn run_target(target: text, envs: [text], extra: [text]) -> (text, i64):
-    val argv = envs + [real_binary(), "test", target, "--no-session-daemon", "--no-db", "--no-cache"] + extra
+    if real_binary() == "":
+        return (NO_BINARY, 127)
+    val argv = UNSET_MCDC_ENV + envs + [real_binary(), "test", target, "--no-session-daemon", "--no-db", "--no-cache"] + extra
     val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
     (out + err, code)
 
@@ -48,6 +54,23 @@ fn mentions_mcdc(output: text) -> bool:
     val stripped = kept.join("\n").replace("mcdc_kind", "")
     stripped.contains("MC/DC") or stripped.contains("mcdc") or stripped.contains("MCDC")
 
+# True only when an MC/DC report line names decisions. The case path is
+# removed first so a fixture directory name can never satisfy the check.
+fn mcdc_report_names_decisions(output: text, dir: text) -> bool:
+    for line in output.replace(dir, "").split("\n"):
+        if line.contains("MC/DC") and line.contains("decision"):
+            return true
+    false
+
+# Body of the skipped "reports decisions" example. The case dir name must not
+# contain "decision" (it used to, which made the old check vacuous).
+fn check_nodaemon_reports_decisions():
+    step("Require decisions in the single-file lane output")
+    val dir = make_case("nodaemon_report", "cond", FIXTURE)
+    val (output, _code) = run_target(dir + "/cond_spec.spl", [], [])
+    expect(output.contains("[mcdc-fallback]")).to_equal(false)
+    expect(mcdc_report_names_decisions(output, dir)).to_equal(true)
+
 describe "simple test <file> --no-session-daemon":
     it "runs the fixture and reports it passed":
         step("Run the and/or fixture through the single-file lane")
@@ -62,12 +85,9 @@ describe "simple test <file> --no-session-daemon":
         val (output, _code) = run_target(dir + "/cond_spec.spl", [], [])
         expect(mentions_mcdc(output) or verdict_line(output).contains("degraded=")).to_equal(true)
 
-    it "reports decisions for the instrumented single-file run":
-        step("Require decisions in the single-file lane output")
-        val dir = make_case("nodaemon_decisions", "cond", FIXTURE)
-        val (output, _code) = run_target(dir + "/cond_spec.spl", [], [])
-        expect(output).to_contain("MC/DC")
-        expect(output).to_contain("decision")
+    # RED until the runner reports decisions; restore as
+    # `it "reports decisions for the instrumented single-file run": check_nodaemon_reports_decisions()`.
+    skip("reports decisions for the instrumented single-file run", "red until fixed: doc/08_tracking/bug/mcdc_runner_never_finalizes_evidence_2026-10-30.md")
 
     it "still fails a red spec":
         step("Run a failing spec through the single-file lane")
