@@ -1,0 +1,44 @@
+# The harness supplies a real non-executable file and an admitted Simple CLI.
+# No recording shell is used as evidence for semantic negative execution.
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.io_runtime.{file_hash_sha256_or_empty, getpid}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.sdoctest.config.{default_sdoctest_config}
+use std.test_runner.sdoctest.types.{SdoctestBlock, SdoctestModifier, BlockStatus}
+use std.test_runner.sdoctest.runner.{run_sdoctest_block}
+
+fn select_child(path: text) -> bool:
+    val digest = file_hash_sha256_or_empty(path)
+    if digest.len() != 64: return false
+    env_set("SIMPLE_PHASE2_FULL_CLI", path) and env_set("SIMPLE_PHASE2_FULL_CLI_SHA256", digest)
+
+fn main() -> i64:
+    val bad_command = env_get("SIMPLE_SDOCTEST_INFRA_COMMAND")
+    val real_compiler = env_get("SIMPLE_PHASE2_FULL_CLI")
+    if bad_command == "" or real_compiler == "": return 1
+    val options = parse_test_args(["--compiler=phase2"])
+    val config = default_sdoctest_config()
+    val line = getpid() * 10
+    val negative = SdoctestBlock(source_file: "negative.md", line_number: line,
+        code: "assert(false)", language: "simple", modifiers: [SdoctestModifier.ShouldFail])
+    val ordinary_negative = SdoctestBlock(source_file: "negative.md", line_number: line + 1,
+        code: "assert(false)", language: "simple", modifiers: [])
+    if not select_child(bad_command): return 2
+    val failed_launch = run_sdoctest_block(negative, config, "", options, "")
+    print "expected-failure launch diagnostic: {failed_launch.error}"
+    # Selector refusals have empty stderr. Require the real process provider's
+    # diagnostic, so rejection before launch cannot satisfy this regression.
+    if failed_launch.status != BlockStatus.Error or failed_launch.error == "" or failed_launch.stderr == "": return 3
+    val ordinary_launch = run_sdoctest_block(ordinary_negative, config, "", options, "")
+    if ordinary_launch.status != BlockStatus.Error: return 4
+    if not select_child(real_compiler): return 5
+    val semantic_failure = run_sdoctest_block(negative, config, "", options, "")
+    print "semantic negative diagnostic: {semantic_failure.error} stderr={semantic_failure.stderr}"
+    if semantic_failure.status != BlockStatus.Passed: return 6
+    val unmarked_failure = run_sdoctest_block(ordinary_negative, config, "", options, "")
+    if unmarked_failure.status != BlockStatus.Failed: return 7
+    val unexpected_success = SdoctestBlock(source_file: "positive.md", line_number: line + 2,
+        code: "val value = 1", language: "simple", modifiers: [SdoctestModifier.ShouldFail])
+    if run_sdoctest_block(unexpected_success, config, "", options, "").status != BlockStatus.Failed: return 8
+    print "sdoctest infrastructure native probe PASS checks=5"
+    0
