@@ -1,0 +1,386 @@
+# Production resolver and source-pipeline regressions; executable qualification
+# is recorded by the campaign owner, not implied by this authored specification.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.mono_archive_types_v1.{MonoTemplateSignatureV1}
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, run_monomorphization_with_diagnostics}
+use compiler.verify.post_mono_verify.*
+
+fn callback_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn callback_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, span: Span.empty())
+
+fn callback_arg(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: Span.empty())
+
+fn callback_param(type_: HirType, id: i64 = 901) -> HirParam:
+    HirParam(symbol: SymbolId(id: id), name: "value", type_: type_, has_default: false,
+        span: Span.empty(), is_mutable: false)
+
+fn callback_signature() -> MonoTemplateSignatureV1:
+    val t = callback_type(HirTypeKind.TypeParam("T", []))
+    val integer = callback_type(HirTypeKind.Int(64, true))
+    val parameter = HirTypeParam(symbol: SymbolId(id: 900), name: "T", bounds: [],
+        has_default: false, span: Span.empty())
+    # Callback comes first, so a one-pass left-to-right guess cannot succeed.
+    MonoTemplateSignatureV1(name: "apply", type_params: [parameter],
+        param_types: [callback_type(HirTypeKind.Function([t], integer, [])), callback_type(HirTypeKind.Array(t, nil))],
+        return_type: callback_type(HirTypeKind.Array(t, nil)))
+
+fn callback_integer_array() -> HirCallArg:
+    callback_arg(callback_expr(HirExprKind.ArrayLit([callback_expr(HirExprKind.IntLit(7, "i64"))], nil)))
+
+fn callback_lambda(body: HirExpr, type_: HirType) -> HirCallArg:
+    callback_arg(callback_expr(HirExprKind.Lambda([callback_param(type_)], body, [])))
+
+describe "Contextual generic callbacks preserve inference and validation":
+    it "uses a later concrete witness and restores the enclosing environment":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "callback"
+        val boolean = callback_type(HirTypeKind.Bool)
+        pass_.env[901] = boolean
+        val argument = callback_lambda(callback_expr(HirExprKind.Var(SymbolId(id: 901))), callback_type(HirTypeKind.Infer(0, 0)))
+        val resolved = pass_.resolve_call_type_args_signature_v1(callback_signature(), [argument, callback_integer_array()], [])
+        expect(resolved.is_ok()).to_equal(true)
+        expect(resolved.unwrap()[0].kind == HirTypeKind.Int(64, true)).to_equal(true)
+        expect(pass_.env[901].kind == HirTypeKind.Bool).to_equal(true)
+        expect(pass_.env.len()).to_equal(1)
+
+    it "uses a concrete expected result when an empty array supplies no witness":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "callback"
+        val argument = callback_lambda(callback_expr(HirExprKind.Var(SymbolId(id: 901))), callback_type(HirTypeKind.Infer(0, 0)))
+        val empty = callback_arg(callback_expr(HirExprKind.ArrayLit([], nil)))
+        val expected = callback_type(HirTypeKind.Array(callback_type(HirTypeKind.Int(64, true)), nil))
+        val resolved = pass_.resolve_call_type_args_signature_v1(callback_signature(), [argument, empty], [], expected)
+        expect(resolved.is_ok()).to_equal(true)
+        expect(resolved.unwrap()[0].kind == HirTypeKind.Int(64, true)).to_equal(true)
+        expect(pass_.env.has(901)).to_equal(false)
+
+    it "does not invent a generic type from an untyped callback alone":
+        var pass_ = MonomorphizationPass.create()
+        val argument = callback_lambda(callback_expr(HirExprKind.IntLit(1, "i64")), callback_type(HirTypeKind.Infer(0, 0)))
+        val empty = callback_arg(callback_expr(HirExprKind.ArrayLit([], nil)))
+        expect(pass_.resolve_call_type_args_signature_v1(callback_signature(), [argument, empty], []).is_err()).to_equal(true)
+
+    it "rejects unknown non-lambda evidence even when another argument binds T":
+        var pass_ = MonomorphizationPass.create()
+        val unknown = callback_arg(callback_expr(HirExprKind.Var(SymbolId(id: 999))))
+        val result = pass_.resolve_call_type_args_signature_v1(callback_signature(), [unknown, callback_integer_array()], [])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("no concrete local type")
+
+    it "rejects callback arity and explicit parameter conflicts":
+        var pass_ = MonomorphizationPass.create()
+        val body = callback_expr(HirExprKind.IntLit(1, "i64"))
+        val no_parameters = callback_arg(callback_expr(HirExprKind.Lambda([], body, [])))
+        val arity = pass_.resolve_call_type_args_signature_v1(callback_signature(), [no_parameters, callback_integer_array()], [])
+        expect(arity.is_err()).to_equal(true)
+        expect(arity.unwrap_err()).to_contain("parameter count")
+        for kind in [HirTypeKind.Bool, HirTypeKind.Any, HirTypeKind.Error]:
+            val argument = callback_lambda(body, callback_type(kind))
+            val conflict = pass_.resolve_call_type_args_signature_v1(callback_signature(), [argument, callback_integer_array()], [])
+            expect(conflict.is_err()).to_equal(true)
+            expect(conflict.unwrap_err()).to_contain("parameter type conflicts")
+
+    it "rejects wrong callback results and restores scope on failure":
+        var pass_ = MonomorphizationPass.create()
+        val argument = callback_lambda(callback_expr(HirExprKind.BoolLit(true)), callback_type(HirTypeKind.Infer(0, 0)))
+        val conflict = pass_.resolve_call_type_args_signature_v1(callback_signature(), [argument, callback_integer_array()], [])
+        expect(conflict.is_err()).to_equal(true)
+        expect(conflict.unwrap_err()).to_contain("result type conflicts")
+        expect(pass_.env.has(901)).to_equal(false)
+
+    it "validates an already annotated lambda body instead of trusting its stamp":
+        var pass_ = MonomorphizationPass.create()
+        val integer = callback_type(HirTypeKind.Int(64, true))
+        val signature = callback_type(HirTypeKind.Function([integer], integer, []))
+        var closure = callback_expr(HirExprKind.Lambda([callback_param(integer)], callback_expr(HirExprKind.BoolLit(true)), []))
+        closure.has_type_ = true
+        closure.type_ = signature
+        val conflict = pass_.resolve_call_type_args_signature_v1(callback_signature(), [callback_arg(closure), callback_integer_array()], [])
+        expect(conflict.is_err()).to_equal(true)
+        expect(conflict.unwrap_err()).to_contain("result type conflicts")
+        expect(pass_.env.has(901)).to_equal(false)
+
+    it "retains a typed callback as a witness without accepting a wrong parameter":
+        var pass_ = MonomorphizationPass.create()
+        val integer = callback_type(HirTypeKind.Int(64, true))
+        val signature = callback_type(HirTypeKind.Function([integer], integer, []))
+        var closure = callback_expr(HirExprKind.Lambda([callback_param(integer)], callback_expr(HirExprKind.IntLit(1, "i64")), []))
+        closure.has_type_ = true
+        closure.type_ = signature
+        val empty = callback_arg(callback_expr(HirExprKind.ArrayLit([], nil)))
+        val resolved = pass_.resolve_call_type_args_signature_v1(callback_signature(), [callback_arg(closure), empty], [])
+        expect(resolved.is_ok()).to_equal(true)
+        expect(resolved.unwrap()[0].kind == HirTypeKind.Int(64, true)).to_equal(true)
+        closure.kind = HirExprKind.Lambda([callback_param(callback_type(HirTypeKind.Bool))], callback_expr(HirExprKind.IntLit(1, "i64")), [])
+        val conflict = pass_.resolve_call_type_args_signature_v1(callback_signature(), [callback_arg(closure), empty], [])
+        expect(conflict.is_err()).to_equal(true)
+        expect(conflict.unwrap_err()).to_contain("parameter type conflicts")
+
+    it "rejects disagreeing branch result types":
+        var pass_ = MonomorphizationPass.create()
+        val left = HirBlock(stmts: [], has: true, value: callback_expr(HirExprKind.IntLit(1, "i64")), span: Span.empty())
+        val right = HirBlock(stmts: [], has: true, value: callback_expr(HirExprKind.BoolLit(false)), span: Span.empty())
+        val body = callback_expr(HirExprKind.If(callback_expr(HirExprKind.BoolLit(true)), left, Some(right)))
+        val argument = callback_lambda(body, callback_type(HirTypeKind.Infer(0, 0)))
+        val conflict = pass_.resolve_call_type_args_signature_v1(callback_signature(), [argument, callback_integer_array()], [])
+        expect(conflict.is_err()).to_equal(true)
+        expect(conflict.unwrap_err()).to_contain("no concrete result")
+
+    it "compares explicit nominal parameter identities in caller scope":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "callback"
+        var symbols = SymbolTable.new()
+        val left = symbols.define("Payload", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "left")
+        val right = symbols.define("Payload", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "right")
+        pass_.module_symbols["callback"] = symbols
+        val left_type = callback_type(HirTypeKind.Named(left, []))
+        val right_type = callback_type(HirTypeKind.Named(right, []))
+        val integer = callback_type(HirTypeKind.Int(64, true))
+        val expected = callback_type(HirTypeKind.Function([left_type], integer, []))
+        val body = callback_expr(HirExprKind.IntLit(1, "i64"))
+        val good = callback_lambda(body, left_type)
+        val bad = callback_lambda(body, right_type)
+        expect(pass_.contextual_lambda_v1(good.value, expected).is_ok()).to_equal(true)
+        expect(pass_.contextual_lambda_v1(bad.value, expected).is_err()).to_equal(true)
+
+    it "retains concrete callback parameter and function types through source rewriting":
+        # Keep parse/HIR setup inline: older native producers lose lowering state
+        # when this pipeline is hidden behind a module-level helper.
+        val source = "fn order<T>(values: [T], compare: fn(T, T) -> i64) -> [T]:\n    values\nfn invoke(values: [i64]) -> [i64]:\n    order(values, \\a, b: a - b)\n"
+        val parsed = parse_full_frontend(source, "callback_scalar.spl", "callback_scalar", Logger(level: 0))
+        var lowering = HirLowering.with_filename("callback_scalar.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["callback_scalar"] = hir
+        val (out, stats, diagnostics) = run_monomorphization_with_diagnostics(modules)
+        expect(diagnostics.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+        var checked = 0
+        val module = out["callback_scalar"]
+        for key in module.functions.keys():
+            val function: HirFunction = module.functions[key]
+            if function.name != "invoke": continue
+            match function.body.value.kind:
+                case HirExprKind.Call(_, arguments, _):
+                    val closure: HirExpr = arguments[1].value
+                    expect(closure.has_type_).to_equal(true)
+                    match closure.kind:
+                        case HirExprKind.Lambda(parameters, _, _):
+                            expect(parameters.len()).to_equal(2)
+                            for parameter in parameters:
+                                expect(parameter.type_.kind == HirTypeKind.Int(64, true)).to_equal(true)
+                            checked = checked + 1
+                        case _: assert(false)
+                case _: assert(false)
+        expect(checked).to_equal(1)
+        val report = post_mono_verify_modules(out)
+        expect(report.unresolved_type_param).to_equal(0)
+        expect(report.any_erasure).to_equal(0)
+        expect(report.generic_call).to_equal(0)
+
+    it "relocates callback bindings and fixed nominal parameters across owners":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "consumer"
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        # Deliberately collide local SymbolIds while keeping declaration owners
+        # distinct. Substituting caller IDs directly into provider types is wrong.
+        val fixed = provider.define("Payload", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "provider")
+        val actual = consumer.define("Payload", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "consumer")
+        val imported = consumer.define("Payload", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "provider")
+        pass_.module_symbols["provider"] = provider
+        pass_.module_symbols["consumer"] = consumer
+        pass_.template_module["compare_owned"] = "provider"
+        val parameter = HirTypeParam(symbol: SymbolId(id: 900), name: "T", bounds: [], has_default: false, span: Span.empty())
+        val t = callback_type(HirTypeKind.TypeParam("T", []))
+        val integer = callback_type(HirTypeKind.Int(64, true))
+        val fixed_type = callback_type(HirTypeKind.Named(fixed, []))
+        val actual_type = callback_type(HirTypeKind.Named(actual, []))
+        val imported_type = callback_type(HirTypeKind.Named(imported, []))
+        val signature = MonoTemplateSignatureV1(name: "compare_owned", type_params: [parameter],
+            param_types: [callback_type(HirTypeKind.Function([t, fixed_type], integer, []))], return_type: integer)
+        val transported = pass_.contextual_callback_signatures_v1(signature, [actual_type])
+        expect(transported.is_ok()).to_equal(true)
+        match transported.unwrap()[0].kind:
+            case HirTypeKind.Function(parameters, returned, _):
+                expect(parameters.len()).to_equal(2)
+                expect(pass_.same_type_key(parameters[0], actual_type)).to_equal(true)
+                expect(pass_.same_type_key(parameters[1], imported_type)).to_equal(true)
+                expect(pass_.same_type_key(parameters[0], parameters[1])).to_equal(false)
+                expect(returned.kind == HirTypeKind.Int(64, true)).to_equal(true)
+            case _: assert(false)
+
+    it "rewrites a nested generic callback call after supplying parameter types":
+        val source = "fn identity<T>(value: T) -> T:\n    value\nfn apply<T>(callback: fn(T) -> T, value: T) -> T:\n    callback(value)\nfn invoke() -> i64:\n    apply(\\value: identity(value), 42)\n"
+        val parsed = parse_full_frontend(source, "callback_nested.spl", "callback_nested", Logger(level: 0))
+        var lowering = HirLowering.with_filename("callback_nested.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["callback_nested"] = hir
+        val (out, stats, diagnostics) = run_monomorphization_with_diagnostics(modules)
+        expect(diagnostics.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(2)
+        var identities = 0
+        val module = out["callback_nested"]
+        for key in module.functions.keys():
+            val function: HirFunction = module.functions[key]
+            if function.name == "identity$i64": identities = identities + 1
+        expect(identities).to_equal(1)
+        val report = post_mono_verify_modules(out)
+        expect(report.unresolved_type_param).to_equal(0)
+        expect(report.any_erasure).to_equal(0)
+        expect(report.generic_call).to_equal(0)
+
+    it "types the header comparator's nominal locals and conditional body":
+        val source = "struct Entry:\n    name: text\nfn order<T>(values: [T], compare: fn(T, T) -> i64) -> [T]:\n    values\nfn invoke(values: [Entry]) -> [Entry]:\n    order(values, \\a, b:\n        val left: Entry = a\n        val right: Entry = b\n        if left.name < right.name: -1\n        elif left.name > right.name: 1\n        else: 0\n    )\n"
+        val parsed = parse_full_frontend(source, "callback_nominal.spl", "callback_nominal", Logger(level: 0))
+        var lowering = HirLowering.with_filename("callback_nominal.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["callback_nominal"] = hir
+        val (out, stats, diagnostics) = run_monomorphization_with_diagnostics(modules)
+        expect(diagnostics.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+        val report = post_mono_verify_modules(out)
+        expect(report.unresolved_type_param).to_equal(0)
+        expect(report.any_erasure).to_equal(0)
+        expect(report.generic_call).to_equal(0)
+
+    it "persists contextual receiver and nested member types through the source pipeline":
+        val source = "struct Inner:\n    tag: text\n    value: i64\nstruct Outer:\n    tag: text\n    inner: Inner\nfn project<T>(value: T, callback: fn(T) -> i64) -> i64:\n    callback(value)\nfn invoke(value: Outer) -> i64:\n    project(value, \\item: item.inner.value)\n"
+        val parsed = parse_full_frontend(source, "callback_fields.spl", "callback_fields", Logger(level: 0))
+        var lowering = HirLowering.with_filename("callback_fields.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["callback_fields"] = hir
+        val (out, stats, diagnostics) = run_monomorphization_with_diagnostics(modules)
+        expect(diagnostics.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        var checked = 0
+        val module = out["callback_fields"]
+        for key in module.functions.keys():
+            val function: HirFunction = module.functions[key]
+            if function.name != "invoke": continue
+            match function.body.value.kind:
+                case HirExprKind.Call(_, arguments, _):
+                    match arguments[1].value.kind:
+                        case HirExprKind.Lambda(parameters, body, _):
+                            expect(body.has_type_).to_equal(true)
+                            expect(body.type_.kind == HirTypeKind.Int(64, true)).to_equal(true)
+                            match body.kind:
+                                case HirExprKind.Field(inner, name, _):
+                                    expect(name).to_equal("value")
+                                    expect(inner.has_type_).to_equal(true)
+                                    match inner.type_.kind:
+                                        case HirTypeKind.Named(inner_symbol, _):
+                                            expect(module.symbols.get_symbol_raw(inner_symbol.id).unwrap().name).to_equal("Inner")
+                                        case _: assert(false)
+                                    match inner.kind:
+                                        case HirExprKind.Field(receiver, inner_name, _):
+                                            expect(inner_name).to_equal("inner")
+                                            expect(receiver.has_type_).to_equal(true)
+                                            expect(receiver.type_.kind == parameters[0].type_.kind).to_equal(true)
+                                            checked = checked + 1
+                                        case _: assert(false)
+                                case _: assert(false)
+                        case _: assert(false)
+                case _: assert(false)
+        expect(checked).to_equal(1)
+
+    it "relocates a nested field result instead of reusing a colliding provider id":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "consumer"
+        var provider = SymbolTable.new()
+        var consumer = SymbolTable.new()
+        val inner = provider.define("Inner", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "provider")
+        val unrelated = consumer.define("Unrelated", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "consumer")
+        val imported = consumer.define("Inner", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "provider")
+        val outer = consumer.define("Outer", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "consumer")
+        pass_.module_symbols["provider"] = provider
+        pass_.module_symbols["consumer"] = consumer
+        pass_.named_symbol_names["consumer#{outer.id}"] = "Outer"
+        pass_.named_symbol_names["provider#{inner.id}"] = "Inner"
+        pass_.named_symbol_names["consumer#{imported.id}"] = "Inner"
+        pass_.field_types["Outer::inner"] = callback_type(HirTypeKind.Named(inner, []))
+        pass_.field_owner_modules["Outer::inner"] = "provider"
+        pass_.field_types["Inner::value"] = callback_type(HirTypeKind.Int(64, true))
+        pass_.field_owner_modules["Inner::value"] = "provider"
+        pass_.env[901] = callback_type(HirTypeKind.Named(outer, []))
+        val receiver = callback_expr(HirExprKind.NamedVar(SymbolId(id: 901), "item"))
+        val member = callback_expr(HirExprKind.Field(receiver, "inner", nil))
+        # Inferred aliases must cross the same owner boundary before entering
+        # env, or stamping a later Var would turn provider ids into caller ids.
+        val alias = SymbolId(id: 902)
+        pass_.collect_lets_stmt(HirStmt(kind: HirStmtKind.Let(alias, callback_type(HirTypeKind.Infer(0, 0)), member), span: Span.empty()))
+        expect(pass_.env[902].kind == HirTypeKind.Named(imported, [])).to_equal(true)
+        val alias_read = callback_expr(HirExprKind.Var(alias))
+        val alias_field = pass_.rewrite_expr(callback_expr(HirExprKind.Field(alias_read, "value", nil)))
+        expect(alias_field.has_type_).to_equal(true)
+        expect(alias_field.type_.kind == HirTypeKind.Int(64, true)).to_equal(true)
+        match alias_field.kind:
+            case HirExprKind.Field(alias_base, _, _):
+                expect(alias_base.has_type_).to_equal(true)
+                expect(alias_base.type_.kind == HirTypeKind.Named(imported, [])).to_equal(true)
+            case _: assert(false)
+        val rewritten = pass_.rewrite_expr(callback_expr(HirExprKind.Field(member, "value", nil)))
+        expect(pass_.diagnostics.len()).to_equal(0)
+        expect(rewritten.has_type_).to_equal(true)
+        expect(rewritten.type_.kind == HirTypeKind.Int(64, true)).to_equal(true)
+        match rewritten.kind:
+            case HirExprKind.Field(nested, _, _):
+                expect(nested.has_type_).to_equal(true)
+                expect(nested.type_.kind == HirTypeKind.Named(imported, [])).to_equal(true)
+                expect(nested.type_.kind == HirTypeKind.Named(unrelated, [])).to_equal(false)
+                match nested.kind:
+                    case HirExprKind.Field(base, _, _):
+                        expect(base.has_type_).to_equal(true)
+                        expect(base.type_.kind == HirTypeKind.Named(outer, [])).to_equal(true)
+                    case _: assert(false)
+            case _: assert(false)
+
+    it "preserves concrete annotations and leaves unknown reads unresolved":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "callback"
+        pass_.env[901] = callback_type(HirTypeKind.Int(64, true))
+        var annotated = callback_expr(HirExprKind.Var(SymbolId(id: 901)))
+        annotated.has_type_ = true
+        annotated.type_ = callback_type(HirTypeKind.Bool)
+        val preserved = pass_.rewrite_expr(annotated)
+        expect(preserved.type_.kind == HirTypeKind.Bool).to_equal(true)
+        val unknown = pass_.rewrite_expr(callback_expr(HirExprKind.Var(SymbolId(id: 902))))
+        expect(unknown.has_type_).to_equal(false)
+
+    it "does not admit an inferred field alias when nominal transport fails":
+        var pass_ = MonomorphizationPass.create()
+        pass_.current_module = "consumer"
+        val outer = SymbolId(id: 7)
+        pass_.env[901] = callback_type(HirTypeKind.Named(outer, []))
+        pass_.named_symbol_names["consumer#7"] = "Outer"
+        pass_.field_types["Outer::inner"] = callback_type(HirTypeKind.Named(SymbolId(id: 8), []))
+        pass_.field_owner_modules["Outer::inner"] = "missing_provider"
+        val member = callback_expr(HirExprKind.Field(callback_expr(HirExprKind.Var(SymbolId(id: 901))), "inner", nil))
+        val alias = SymbolId(id: 902)
+        pass_.collect_lets_stmt(HirStmt(kind: HirStmtKind.Let(alias, callback_type(HirTypeKind.Infer(0, 0)), member), span: Span.empty()))
+        expect(pass_.env.has(902)).to_equal(false)
+        expect(pass_.diagnostics.len()).to_be_greater_than(0)
+        val rewritten = pass_.rewrite_expr(callback_expr(HirExprKind.Var(alias)))
+        expect(rewritten.has_type_).to_equal(false)
