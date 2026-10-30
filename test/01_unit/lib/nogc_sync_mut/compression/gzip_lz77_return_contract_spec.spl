@@ -1,0 +1,91 @@
+# @req REQ-SSPEC-LIB
+
+use std.spec.*
+use std.nogc_sync_mut.compression.gzip.lz77.{lz77_compress}
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.return_type_interface_v1.{rti_rows_from_hir_v1, ReturnTypeEntry, RtType}
+
+val LZ77_MODULE = "lib.nogc_sync_mut.compression.gzip.lz77"
+val GZIP_TYPES_MODULE = "lib.nogc_sync_mut.compression.gzip.types"
+val LZ77_SOURCE_PATH = "src/lib/nogc_sync_mut/compression/gzip/lz77.spl"
+val GZIP_TYPES_SOURCE_PATH = "src/lib/nogc_sync_mut/compression/gzip/types.spl"
+
+fn lz77_production_hir_v1() -> HirModule:
+    val log = Logger(level: 0)
+    val lz77_source = file_read(LZ77_SOURCE_PATH)
+    val types_source = file_read(GZIP_TYPES_SOURCE_PATH)
+    val lz77_ast = parse_full_frontend(lz77_source, LZ77_SOURCE_PATH, LZ77_MODULE, log)
+    val types_ast = parse_full_frontend(types_source, GZIP_TYPES_SOURCE_PATH,
+        GZIP_TYPES_MODULE, log)
+    var modules: Dict<text, Module> = {}
+    modules[LZ77_MODULE] = lz77_ast
+    modules[GZIP_TYPES_MODULE] = types_ast
+    val sources = [
+        SourceFile(path: LZ77_SOURCE_PATH, content: lz77_source, module_name: LZ77_MODULE),
+        SourceFile(path: GZIP_TYPES_SOURCE_PATH, content: types_source,
+            module_name: GZIP_TYPES_MODULE)]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module(LZ77_MODULE, surfaces)
+    val hir = lowering.lower_module(lz77_ast)
+    expect(lowering.errors.len()).to_equal(0)
+    hir
+
+describe "LZ77 return and token array contract":
+    it "returns empty outer arrays for nil and typed-empty inputs":
+        val nil_result: [[i64]] = lz77_compress(nil, 6)
+        val empty_input: [u8] = []
+        val empty_result: [[i64]] = lz77_compress(empty_input, 6)
+        expect(nil_result).to_equal([])
+        expect(empty_result).to_equal([])
+
+    it "preserves exact literal token rows including boundary byte values":
+        val data: [u8] = [0u8, 8u8, 56u8, 255u8]
+        val expected: [[i64]] = [[0, 0, 0], [0, 8, 0], [0, 56, 0], [0, 255, 0]]
+        expect(lz77_compress(data, 1)).to_equal(expected)
+
+    it "preserves exact repeated-match rows at levels 1, 6 and 9":
+        val data: [u8] = [97u8, 98u8, 99u8, 97u8, 98u8, 99u8, 97u8, 98u8, 99u8]
+        val expected: [[i64]] = [[0, 97, 0], [0, 98, 0], [0, 99, 0], [1, 3, 6]]
+        expect(lz77_compress(data, 1)).to_equal(expected)
+        expect(lz77_compress(data, 6)).to_equal(expected)
+        expect(lz77_compress(data, 9)).to_equal(expected)
+
+    it "keeps returned token rows and the outer list mutable arrays":
+        var tokens = lz77_compress([77u8], 1)
+        var row = tokens[0]
+        row[1] = 99
+        tokens[0] = row
+        tokens.push([1, 7, 3])
+        expect(tokens.len()).to_equal(2)
+        expect(tokens[0]).to_equal([0, 99, 0])
+        expect(tokens[1]).to_equal([1, 7, 3])
+        expect(lz77_compress([77u8], 1)[0]).to_equal([0, 77, 0])
+
+    it "publishes the actual production return as Array of Array of i64 through RTI":
+        val hir = lz77_production_hir_v1()
+        val rows = rti_rows_from_hir_v1(hir).unwrap().rows
+        var found = false
+        for row in rows:
+            if row.decl.display == "fn:lz77_compress":
+                found = true
+                match row.entry:
+                    case ReturnTypeEntry.Decided(term):
+                        match term:
+                            case RtType.ArrayT(inner, _):
+                                match inner:
+                                    case RtType.ArrayT(element, _):
+                                        match element:
+                                            case RtType.Builtin(name): expect(name).to_equal("i64")
+                                            case _: fail("LZ77 token row element is not a builtin")
+                                    case _: fail("LZ77 return outer element is not an array")
+                            case _: fail("LZ77 return is not an array of token rows")
+                    case _: fail("RTI did not publish a decided LZ77 return term")
+        expect(found).to_equal(true)

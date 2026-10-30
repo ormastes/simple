@@ -1958,6 +1958,19 @@ impl MonomorphizationPass:
             case _:
                 nil
 
+    me stamp_inferred_projection_type_v1(expr: HirExpr) -> HirExpr:
+        # Projection inference already validates the container and selector.
+        # Persist its caller-owned element type for downstream field layout;
+        # leave authoritative concrete annotations and unknown evidence alone.
+        if expr.has_type_ and hir_type_is_concrete(expr.type_): return expr
+        if val inferred = self.infer_expr_type(expr):
+            if hir_type_is_concrete(inferred):
+                var out = expr
+                out.has_type_ = true
+                out.type_ = inferred
+                return out
+        expr
+
     me stamp_instance_field_use(expr: HirExpr, operand: HirExpr) -> HirExpr:
         """`b.items[0]`, `b.first ?? d`, `b.first!`: an element/payload taken
         straight out of a generic instance's field. HIR typed it from the
@@ -2330,6 +2343,7 @@ impl MonomorphizationPass:
 
     me infer_call_bindings_signature_v1(template: MonoTemplateSignatureV1, args: [HirCallArg], explicit_prefix: [HirType], expected_result: HirType? = nil) -> Result<Dict<text, HirType>, text>:
         var bindings: Dict<text, HirType> = {}
+        var contextual_callbacks: [i64] = []
         val tps: [HirTypeParam] = template.type_params
         if explicit_prefix.len() > tps.len():
             return Err("too many explicit type arguments")
@@ -2349,6 +2363,13 @@ impl MonomorphizationPass:
             val at: HirCallArg = args[i]
             if at.has_name:
                 return Err("named call arguments are not supported by generic inference")
+            var contextual_callback = false
+            match mono_arg_value(at).kind:
+                case HirExprKind.Lambda(_, _, _):
+                    match pt.kind:
+                        case HirTypeKind.Function(_, _, _): contextual_callback = true
+                        case _: ()
+                case _: ()
             val arg_ty = self.infer_expr_type(mono_arg_value(at))
             if self.invocation_diag_enabled_v1():
                 if arg_ty == nil:
@@ -2360,8 +2381,16 @@ impl MonomorphizationPass:
                     return Err("generic inference lacks declaration/caller nominal context")
                 if not bind_type_params(pt, arg_ty, bindings, nominal_context):
                     return Err("argument inference conflicts with another argument or explicit prefix")
-            elif not hir_type_is_concrete(pt) and not mono_call_evidence_is_absent_v1(mono_arg_value(at)):
-                return Err("argument inference has no concrete local type; argument={i}; {self.missing_call_argument_type_reason_v1(mono_arg_value(at))}")
+                # Concrete annotations may supply bindings, but are not proof
+                # that this lambda's parameter/body types satisfy the callback.
+                if contextual_callback: contextual_callbacks = contextual_callbacks.push(i)
+            else:
+                if contextual_callback:
+                    # A later argument or result context can bind this callback's
+                    # parameter types. Unknown non-lambda expressions still fail.
+                    contextual_callbacks = contextual_callbacks.push(i)
+                elif not hir_type_is_concrete(pt) and not mono_call_evidence_is_absent_v1(mono_arg_value(at)):
+                    return Err("argument inference has no concrete local type; argument={i}; {self.missing_call_argument_type_reason_v1(mono_arg_value(at))}")
             i = i + 1
         if expected_result != nil:
             val expected: HirType = expected_result
@@ -2371,7 +2400,87 @@ impl MonomorphizationPass:
                     return Err("result inference lacks declaration/caller nominal context")
                 if not bind_type_params(semantic_return, expected, bindings, nominal_context):
                     return Err("result inference conflicts with argument bindings")
+        if contextual_callbacks.len() > 0:
+            val completed = self.complete_template_type_args_v1(template, bindings)
+            if completed.is_err(): return Err(completed.unwrap_err())
+            val signatures = self.contextual_callback_signatures_v1(template, completed.unwrap())
+            if signatures.is_err(): return Err(signatures.unwrap_err())
+            val caller_params: [HirType] = signatures.unwrap()
+            for index in contextual_callbacks:
+                val argument: HirCallArg = args[index]
+                val checked = self.contextual_lambda_v1(mono_arg_value(argument), caller_params[index])
+                if checked.is_err(): return Err(checked.unwrap_err())
         Ok(bindings)
+
+    me contextual_callback_signatures_v1(template: MonoTemplateSignatureV1, caller_args: [HirType]) -> Result<[HirType], text>:
+        # Substitution must happen in declaration scope: bindings carry caller
+        # SymbolIds, while fixed nominal types in the signature belong to owner.
+        val owner: text = self.template_module[template.name] ?? self.current_module
+        val moved = self.relocate_mono_types(caller_args, self.current_module, owner, "contextual callback type arguments")
+        if moved == nil: return Err("contextual callback arguments could not enter declaration scope")
+        val owner_args: [HirType] = moved.unwrap()
+        var substitution = typesubstitution_from_params(template.type_params, owner_args)
+        substitution.budget = self.invocation_budget
+        var instantiated: [HirType] = []
+        for param in template.param_types:
+            instantiated = instantiated.push(substitute_type(param, substitution))
+        if self.invocation_failed_v1(): return Err("contextual callback substitution exceeded invocation budget")
+        val returned = self.relocate_mono_types(instantiated, owner, self.current_module, "contextual callback signatures")
+        if returned == nil: return Err("contextual callback signature could not enter caller scope")
+        val caller_params: [HirType] = returned.unwrap()
+        Ok(caller_params)
+
+    me contextual_lambda_v1(expr: HirExpr, expected: HirType) -> Result<HirExpr, text>:
+        if not hir_type_is_concrete(expected): return Err("contextual callback signature is not concrete")
+        if expr.has_type_ and hir_type_is_concrete(expr.type_):
+            if not self.same_type_key(expr.type_, expected):
+                return Err("contextual callback annotation conflicts with inferred signature")
+        match expected.kind:
+            case HirTypeKind.Function(parameter_types, result_type, _):
+                match expr.kind:
+                    case HirExprKind.Lambda(parameters, body, captures):
+                        if parameters.len() != parameter_types.len():
+                            return Err("contextual callback parameter count mismatch")
+                        var typed_parameters: [HirParam] = []
+                        var index = 0
+                        for raw in parameters:
+                            var parameter: HirParam = raw
+                            val expected_parameter: HirType = parameter_types[index]
+                            var omitted = false
+                            match parameter.type_.kind:
+                                case HirTypeKind.Infer(_, _): omitted = true
+                                case _: ()
+                            if not omitted:
+                                if not hir_type_is_concrete(parameter.type_) or not self.same_type_key(parameter.type_, expected_parameter):
+                                    return Err("contextual callback parameter type conflicts with inferred signature")
+                            parameter.type_ = expected_parameter
+                            typed_parameters = typed_parameters.push(parameter)
+                            index = index + 1
+                        # Local inference needs the callback's parameters and
+                        # locals, but must not leak them into a sibling/root.
+                        val previous_env = self.env
+                        var local_env: Dict<i64, HirType> = {}
+                        for raw_id in previous_env.keys():
+                            val id: i64 = i64("{raw_id}")
+                            local_env[id] = previous_env[id]
+                        for parameter in typed_parameters:
+                            local_env[parameter.symbol.id] = parameter.type_
+                        self.env = local_env
+                        self.collect_lets_expr(body)
+                        val actual_result = self.infer_expr_type(body)
+                        self.env = previous_env
+                        if actual_result == nil:
+                            return Err("contextual callback body has no concrete result type")
+                        val actual: HirType = actual_result
+                        if not hir_type_is_concrete(actual) or not self.same_type_key(actual, result_type):
+                            return Err("contextual callback result type conflicts with inferred signature")
+                        var typed = expr
+                        typed.kind = HirExprKind.Lambda(typed_parameters, body, captures)
+                        typed.has_type_ = true
+                        typed.type_ = expected
+                        Ok(typed)
+                    case _: Err("contextual callback is not a lambda")
+            case _: Err("contextual callback parameter is not a function")
 
     me complete_declared_type_args_v1(tps: [HirTypeParam], canonical_tps: [HirTypeParam], owner_module: text, bindings: Dict<text, HirType>) -> Result<[HirType], text>:
         # Binding values arrive in caller scope. Existing complete calls keep
@@ -2599,8 +2708,14 @@ impl MonomorphizationPass:
                 if declared != nil: return declared
                 self.fn_sig_of(sym_id)
             case HirExprKind.Field(_, _, _):
-                val (ft, _fmod) = self.infer_field_chain(expr)
-                ft
+                # Plain inferred types enter caller-owned environments and
+                # generic bindings. Keep provider ids only inside the tagged
+                # field-chain helper, never across this boundary.
+                val (ft, fmod) = self.infer_field_chain(expr)
+                if val field_type = ft:
+                    if val moved = self.relocate_mono_types([field_type], fmod, self.current_module, "inferred field"):
+                        return moved[0]
+                nil
             case HirExprKind.ExistsCheck(exists_base):
                 # `opt.?` (also what `if val b = opt:` binds): still the
                 # optional itself, present-or-nil.
@@ -2756,6 +2871,18 @@ impl MonomorphizationPass:
                         index_is_int = true
                     case _: ()
                 match bty.kind:
+                    case HirTypeKind.Tuple(parts):
+                        # HIR tuple destructuring uses Index, not TupleIndex.
+                        # Only a literal slot identifies one heterogeneous type;
+                        # retain that exact type, including its nominal owner.
+                        if not index_is_int: return nil
+                        match ii.kind:
+                            case HirExprKind.IntLit(slot, _):
+                                if slot < 0 or slot >= parts.len(): return nil
+                                val part: HirType = parts[slot]
+                                if hir_type_is_concrete(part): return part
+                                nil
+                            case _: nil
                     case HirTypeKind.Array(elem, _):
                         val ae: HirType = elem
                         if index_is_int and hir_type_is_concrete(ae):
@@ -3670,7 +3797,18 @@ impl MonomorphizationPass:
         label + keys.join("\u001f")
 
     me rewrite_template_call_v1(gname: text, callee: HirExpr, args: [HirCallArg], type_args: [HirType], expected_result: HirType?, call_span: Span?) -> HirExprKind:
-        val new_args = self.rewrite_call_args(args)
+        var new_args: [HirCallArg] = []
+        for raw in args:
+            var argument: HirCallArg = raw
+            var needs_context = false
+            if gname != "":
+                match argument.value.kind:
+                    case HirExprKind.Lambda(_, _, _): needs_context = true
+                    case _: ()
+            # Rewriting an untyped callback first can reject generic calls in
+            # its body before the enclosing call has supplied parameter types.
+            if not needs_context: argument.value = self.rewrite_expr(argument.value)
+            new_args = new_args.push(argument)
         var new_callee = self.rewrite_expr(callee)
         var new_type_args: [HirType] = type_args
         if gname == "":
@@ -3721,6 +3859,31 @@ impl MonomorphizationPass:
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
             return HirExprKind.Call(new_callee, new_args, new_type_args)
+        match spec_sig.kind:
+            case HirTypeKind.Function(caller_parameters, _, _):
+                var contextual_args: [HirCallArg] = []
+                var index = 0
+                for raw in new_args:
+                    var argument: HirCallArg = raw
+                    match argument.value.kind:
+                        case HirExprKind.Lambda(_, _, _):
+                            if index >= caller_parameters.len():
+                                self.diagnostics = self.diagnostics.push("E-MONO-032: contextual callback has no declared parameter")
+                                self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
+                                return HirExprKind.Call(new_callee, new_args, new_type_args)
+                            val checked = self.contextual_lambda_v1(argument.value, caller_parameters[index])
+                            if checked.is_err():
+                                self.diagnostics = self.diagnostics.push("E-MONO-032: " + checked.unwrap_err())
+                                self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
+                                return HirExprKind.Call(new_callee, new_args, new_type_args)
+                            # Retain concrete lambda parameters and signature
+                            # through MIR, rather than admitting an Any ABI.
+                            argument.value = self.rewrite_expr(checked.unwrap())
+                        case _: ()
+                    contextual_args = contextual_args.push(argument)
+                    index = index + 1
+                new_args = contextual_args
+            case _: ()
         # Physical linkage and template owner survive both body modes;
         # caller spelling is not declaration ownership. The nominal signature
         # above remains transported into the caller's symbol table.
@@ -3963,6 +4126,15 @@ impl MonomorphizationPass:
             eprint("[mono-diag] expr line={expr.span.line}")
         var out = expr
         match expr.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                # Contextual lambda parameters enter env after HIR lowering.
+                # Persist their concrete type on reads so MIR can resolve the
+                # receiver layout; a declaration annotation remains authoritative.
+                if not expr.has_type_ or not hir_type_is_concrete(expr.type_):
+                    if val local_type = self.env_type(symbol):
+                        if hir_type_is_concrete(local_type):
+                            out.has_type_ = true
+                            out.type_ = local_type
             case HirExprKind.Call(callee, args, type_args):
                 val callee_t: HirExpr = callee
                 val args_t: [HirCallArg] = args
@@ -4006,14 +4178,25 @@ impl MonomorphizationPass:
                     out.type_ = instance_field
                 else:
                     self.note_unknown_instance_field_read(b1, field)
+                    if not expr.has_type_ or not hir_type_is_concrete(expr.type_):
+                        # Nested nominal fields carry the declaring module's
+                        # ids. Transport them before stamping caller-owned HIR.
+                        val (field_type, field_module) = self.infer_field_chain(expr)
+                        if val concrete_field = field_type:
+                            if hir_type_is_concrete(concrete_field):
+                                if val moved = self.relocate_mono_types([concrete_field], field_module, self.current_module, "contextual field {field}"):
+                                    out.has_type_ = true
+                                    out.type_ = moved[0]
                 out.kind = HirExprKind.Field(self.rewrite_expr(b1), field, resolved)
             case HirExprKind.Index(base, index):
                 val b2: HirExpr = base
                 val i2: HirExpr = index
                 out = self.stamp_instance_field_use(out, b2)
+                out = self.stamp_inferred_projection_type_v1(out)
                 out.kind = HirExprKind.Index(self.rewrite_expr(b2), self.rewrite_expr(i2))
             case HirExprKind.TupleIndex(base, index):
                 val b3: HirExpr = base
+                out = self.stamp_inferred_projection_type_v1(out)
                 out.kind = HirExprKind.TupleIndex(self.rewrite_expr(b3), index)
             case HirExprKind.OptionalChain(base, field):
                 val b4: HirExpr = base

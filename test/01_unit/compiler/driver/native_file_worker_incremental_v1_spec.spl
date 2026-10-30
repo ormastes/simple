@@ -23,7 +23,12 @@ use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use compiler.driver.cache.incremental_rebuild_plan_v1.{IncrementalObjectV1, incremental_link_decision_v1}
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{FileWorkerIncRowV1,
     file_worker_inc_select_v1, file_worker_inc_receipt_line_v1,
-    file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_parse_v1, file_worker_inc_link_objects_v1}
+    file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_encode_v2,
+    file_worker_inc_manifest_parse_v1, file_worker_inc_manifest_selected_scope_digest_v2,
+    file_worker_inc_manifest_inventory_digest_v2,
+    file_worker_inc_link_objects_v1}
+use compiler.driver.cache.macro_forward_candidate_contract_v1.{MacroForwardCandidateV1,
+    macro_forward_candidate_unknown_v1, macro_forward_candidate_digest_v1}
 use compiler.driver.driver_build.native_file_worker_reuse_v1.{FileWorkerReuseRowV1,
     file_worker_reuse_encode_v1, file_worker_reuse_find_v1}
 
@@ -31,7 +36,8 @@ use compiler.driver.driver_build.native_file_worker_reuse_v1.{FileWorkerReuseRow
 fn row(path: text, imports: [text]) -> FileWorkerIncRowV1:
     FileWorkerIncRowV1(path: path, source_digest: "s-" + path, iface_digest: "i-" + path,
         imports_known: true, imports: imports, object_digest: "o-" + path,
-        cached_object: "/cache/" + path + ".o", functions: 1, statics: 0, capsule: "")
+        cached_object: "/cache/" + path + ".o", functions: 1, statics: 0, capsule: "",
+        macro_candidate: macro_forward_candidate_unknown_v1())
 
 fn prev_rows() -> [FileWorkerIncRowV1]:
     [row("a.spl", ["b.spl"]), row("b.spl", ["c.spl"]), row("c.spl", []), row("d.spl", [])]
@@ -85,7 +91,7 @@ describe "file-worker incremental selection":
         var rows = prev_rows()
         rows[3] = FileWorkerIncRowV1(path: "d.spl", source_digest: "s-d.spl", iface_digest: "i-d.spl",
             imports_known: false, imports: [], object_digest: "o-d.spl", cached_object: "", functions: 0,
-            statics: 0, capsule: "")
+            statics: 0, capsule: "", macro_candidate: macro_forward_candidate_unknown_v1())
         var src = digests("s-")
         src["a.spl"] = ""
         val sel = file_worker_inc_select_v1(rows, src, digests("i-"), [])
@@ -128,6 +134,33 @@ describe "file-worker incremental records":
         assert_equal(rows[0].imports, ["b.spl"])
         assert_true(rows[2].imports_known)
         assert_equal(rows[2].imports.len(), 0)
+
+    it "transports bounded candidate bytes with both v2 scope roots":
+        var rows = prev_rows()
+        var first = rows[0]
+        val candidate_digest = macro_forward_candidate_digest_v1(first.path, first.source_digest,
+            true, "00ff", "abcd")
+        first.macro_candidate = MacroForwardCandidateV1(known: true, complete: true,
+            source_digest: first.source_digest, definitions_hex: "00ff", uses_hex: "abcd",
+            digest: candidate_digest)
+        rows[0] = first
+        val encoded = file_worker_inc_manifest_encode_v2(rows, "output", "prodA",
+            "selected-scope", "inventory-root")
+        val (parsed, output) = file_worker_inc_manifest_parse_v1(encoded, "prodA")
+        assert_equal(output, "output")
+        assert_equal(file_worker_inc_manifest_selected_scope_digest_v2(encoded, "prodA"), "selected-scope")
+        assert_equal(file_worker_inc_manifest_inventory_digest_v2(encoded, "prodA"), "inventory-root")
+        assert_true(parsed[0].macro_candidate.known)
+        assert_true(parsed[0].macro_candidate.complete)
+        assert_equal(parsed[0].macro_candidate.definitions_hex, "00ff")
+        assert_equal(parsed[0].macro_candidate.uses_hex, "abcd")
+
+    it "migrates old v1 manifests to unknown macro evidence":
+        val encoded = file_worker_inc_manifest_encode_v1(prev_rows(), "output", "prodA")
+        val (parsed, _output) = file_worker_inc_manifest_parse_v1(encoded, "prodA")
+        assert_equal(parsed.len(), 4)
+        assert_false(parsed[0].macro_candidate.known)
+        assert_equal(file_worker_inc_manifest_selected_scope_digest_v2(encoded, "prodA"), "")
         assert_equal(rows[1].cached_object, "/cache/b.spl.o")
 
     it "refuses a foreign manifest":

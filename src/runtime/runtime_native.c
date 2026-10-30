@@ -16073,61 +16073,89 @@ int8_t rt_file_exists_str(int64_t path_value) {
     return exists;
 }
 
-/* file_ops.rs: rt_file_canonicalize(path_ptr, path_len) -> RuntimeValue
- * (nil on failure). Deliberately NOT realpath(3)/std::fs::canonicalize --
- * file_ops.rs's own comment says libc::realpath segfaults in self-hosted
- * binaries -- so this is a pure lexical normalization: make absolute
- * (joining the cwd when relative), then drop "." components and pop on
- * ".." components, without touching the filesystem or resolving symlinks. */
+/* file_ops.rs: rt_file_canonicalize(path_ptr, path_len) -> RuntimeValue.
+ *
+ * The ONE cross-engine contract, shared with the Rust runtime
+ * (runtime/src/value/sffi/file_io/file_ops.rs), the interpreter twin
+ * (compiler/src/interpreter_extern/file_io.rs) and the pure-Simple owner
+ * (src/runtime/simple_core/core_fs.spl): the real absolute path with every
+ * symlink resolved -- realpath(3) on POSIX, GetFinalPathNameByHandleW on
+ * Windows (also expands 8.3 short names) with the \\?\ verbatim prefix
+ * stripped exactly as the Rust lanes do. The path must exist; every failure
+ * (missing path, unreadable component, invalid UTF-8, allocation) is the
+ * explicit nil, never a lexical guess.
+ *
+ * This used to be a lexical "join cwd, drop . and .." normalization that never
+ * touched the filesystem, justified by a stale note that libc realpath
+ * "segfaults in self-hosted binaries"; rt_path_absolute a few hundred lines
+ * above has always called realpath(path, NULL) from those same binaries, so
+ * the two engines disagreed (/tmp vs /private/tmp on macOS). */
+#if defined(_WIN32)
+static int64_t native_win_final_path_text(const wchar_t* final_path, DWORD length) {
+    static const wchar_t sep = (wchar_t)92;
+    /* \\?\UNC\server\share\... -> \\server\share\...; \\?\C:\... -> C:\... */
+    if (length >= 4 && final_path[0] == sep && final_path[1] == sep &&
+        final_path[2] == L'?' && final_path[3] == sep) {
+        if (length >= 8 && (final_path[4] == L'U' || final_path[4] == L'u') &&
+            (final_path[5] == L'N' || final_path[5] == L'n') &&
+            (final_path[6] == L'C' || final_path[6] == L'c') && final_path[7] == sep) {
+            /* Same as the Rust lanes' strip_verbatim_prefix: drop the 8-char
+             * "\\?\UNC\" and re-prefix the two leading separators. */
+            DWORD rest = length - 8;
+            wchar_t* unc = (wchar_t*)rt_observed_malloc_v1(((size_t)rest + 2) * sizeof(wchar_t));
+            if (!unc) return rt_core_nil();
+            unc[0] = sep;
+            unc[1] = sep;
+            if (rest > 0) memcpy(unc + 2, final_path + 8, (size_t)rest * sizeof(wchar_t));
+            int64_t result = native_host_text_from_wide(unc, rest + 2);
+            free(unc);
+            return result;
+        }
+        return native_host_text_from_wide(final_path + 4, length - 4);
+    }
+    return native_host_text_from_wide(final_path, length);
+}
+#endif
+
 int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    char* abs = NULL;
-    if (path[0] == '/') {
-        abs = spl_strdup(path);
-    } else {
-        /* rt_getcwd() (runtime.h), not raw getcwd(3): already used the same
-         * way elsewhere in this file (see the realpath fallback a few
-         * hundred lines above) and portable across the WIN32 branch, unlike
-         * a bare getcwd/_getcwd call. */
-        char* cwd = rt_getcwd();
-        if (!cwd) { free(path); return rt_core_nil(); }
-        size_t need = strlen(cwd) + 1 + strlen(path) + 1;
-        abs = (char*)rt_observed_malloc_v1(need);
-        if (abs) snprintf(abs, need, "%s/%s", cwd, path);
-        free(cwd);
-    }
+    if (path[0] == '\0') { free(path); return rt_core_nil(); }
+#if defined(_WIN32)
+    wchar_t* wide = rt_widen_long_path_rc(path);
     free(path);
-    if (!abs) return rt_core_nil();
-
-    char* out = (char*)rt_observed_malloc_v1(strlen(abs) + 2);
-    if (!out) { free(abs); return rt_core_nil(); }
-    out[0] = '/';
-    size_t out_len = 1;
-
-    char* saveptr = NULL;
-    char* tok = strtok_r(abs, "/", &saveptr);
-    while (tok) {
-        if (strcmp(tok, ".") == 0) {
-            /* skip */
-        } else if (strcmp(tok, "..") == 0) {
-            if (out_len > 1) {
-                size_t i = out_len - 1;
-                while (i > 0 && out[i - 1] != '/') i--;
-                out_len = i > 1 ? i - 1 : 1;
+    if (!wide) return rt_core_nil();
+    /* FILE_FLAG_BACKUP_SEMANTICS: CreateFileW refuses to open a directory
+     * handle without it; harmless on a regular file. No access bits are
+     * requested, so a read-protected file still canonicalizes (like realpath). */
+    HANDLE handle = CreateFileW(wide, 0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) return rt_core_nil();
+    int64_t result = rt_core_nil();
+    DWORD need = GetFinalPathNameByHandleW(handle, NULL, 0, VOLUME_NAME_DOS);
+    if (need > 0) {
+        wchar_t* final_path = (wchar_t*)rt_observed_malloc_v1(((size_t)need + 1) * sizeof(wchar_t));
+        if (final_path) {
+            DWORD written = GetFinalPathNameByHandleW(handle, final_path, need + 1, VOLUME_NAME_DOS);
+            if (written > 0 && written <= need) {
+                result = native_win_final_path_text(final_path, written);
             }
-        } else {
-            size_t tok_len = strlen(tok);
-            if (out_len > 1) out[out_len++] = '/';
-            memcpy(out + out_len, tok, tok_len);
-            out_len += tok_len;
+            free(final_path);
         }
-        tok = strtok_r(NULL, "/", &saveptr);
     }
-    int64_t result = rt_string_new((const uint8_t*)out, (uint64_t)out_len);
-    free(out);
-    free(abs);
+    CloseHandle(handle);
     return result;
+#else
+    /* realpath(path, NULL) returns libc-malloc'd memory: plain free(). */
+    char* resolved = realpath(path, NULL);
+    free(path);
+    if (!resolved) return rt_core_nil();
+    int64_t result = rt_string_new((const uint8_t*)resolved, (uint64_t)strlen(resolved));
+    free(resolved);
+    return result;
+#endif
 }
 
 /* file_ops.rs: rt_file_read_lines(path_ptr, path_len) -> RuntimeValue array

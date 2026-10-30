@@ -210,8 +210,24 @@ pub(crate) unsafe fn bytes_to_runtime_array(bytes: &[u8]) -> RuntimeValue {
     array_handle
 }
 
-/// Normalize/canonicalize a file path
-/// Returns the absolute path with all symbolic links resolved
+/// Canonicalize a file path: the ONE cross-engine contract.
+///
+/// Returns the real absolute path with every symlink resolved (realpath(3)
+/// semantics; on Windows `GetFinalPathNameByHandleW`, which also expands 8.3
+/// short names, with the `\\?\` verbatim prefix stripped). The path must
+/// exist. Failure (missing path, unreadable component, invalid UTF-8, null
+/// pointer) returns `NIL` -- the same explicit failure value on every engine.
+///
+/// The interpreter twin (compiler/src/interpreter_extern/file_io.rs) and the
+/// C runtime (src/runtime/runtime_native.c) implement this identical contract;
+/// the pure-Simple owner (src/runtime/simple_core/core_fs.spl) delegates to
+/// libc realpath and therefore reports NIL on SimpleOS, whose libc returns
+/// ENOSYS by design. This used to be a lexical "join cwd, drop . and .."
+/// normalization that never touched the filesystem, so `/tmp` stayed `/tmp`
+/// on a native macOS build but became `/private/tmp` under the interpreter.
+/// The comment justifying that ("libc::realpath segfaults in self-hosted
+/// binaries") is refuted in-tree: `rt_path_absolute` in path.rs has always
+/// called `Path::canonicalize`, and the C `rt_path_absolute` calls realpath.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_canonicalize(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     if path_ptr.is_null() {
@@ -223,32 +239,16 @@ pub unsafe extern "C" fn rt_file_canonicalize(path_ptr: *const u8, path_len: u64
         Ok(s) => s,
         Err(_) => return RuntimeValue::NIL,
     };
+    if path_str.is_empty() {
+        return RuntimeValue::NIL;
+    }
 
-    // Avoid std::fs::canonicalize (libc::realpath segfaults in self-hosted binaries).
-    // Make absolute and normalize . / .. components instead.
-    {
-        let p = std::path::Path::new(path_str);
-        let abs = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            match std::env::current_dir() {
-                Ok(cwd) => cwd.join(p),
-                Err(_) => return RuntimeValue::NIL,
-            }
-        };
-        let mut out = std::path::PathBuf::new();
-        for comp in abs.components() {
-            match comp {
-                std::path::Component::ParentDir => {
-                    out.pop();
-                }
-                std::path::Component::CurDir => {}
-                c => out.push(c),
-            }
+    match std::fs::canonicalize(Path::new(path_str)) {
+        Ok(canonical) => {
+            let text = super::path::strip_verbatim_prefix(canonical.to_string_lossy().into_owned());
+            rt_string_new(text.as_ptr(), text.len() as u64)
         }
-        let canonical_str = out.to_string_lossy();
-        let bytes = canonical_str.as_bytes();
-        rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        Err(_) => RuntimeValue::NIL,
     }
 }
 
@@ -2553,6 +2553,60 @@ mod tests {
     use crate::value::collections::{rt_string_data, rt_string_len};
     use std::fs;
     use tempfile::TempDir;
+
+    fn canonicalize_text(path: &str) -> Option<String> {
+        let value = unsafe { rt_file_canonicalize(path.as_ptr(), path.len() as u64) };
+        if value.is_nil() {
+            return None;
+        }
+        let len = rt_string_len(value) as usize;
+        let data = rt_string_data(value);
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        Some(String::from_utf8(bytes.to_vec()).expect("utf8"))
+    }
+
+    /// Cross-engine contract: realpath semantics, NIL on failure. The
+    /// interpreter twin's `canonicalize_tests` and the .spl spec
+    /// test/01_unit/lib/platform/file_canonicalize_cross_engine_spec.spl pin
+    /// the same cases for the other engines.
+    #[test]
+    fn canonicalize_resolves_symlinks_and_fails_closed() {
+        let dir = TempDir::new().expect("tempdir");
+        let real = dir.path().join("real.txt");
+        fs::write(&real, "x").expect("write");
+        let expected = fs::canonicalize(&real).expect("std canonicalize");
+        let expected = expected.to_string_lossy().into_owned();
+
+        // Existing file: equals std's answer and is absolute.
+        let got = canonicalize_text(real.to_str().unwrap()).expect("existing file canonicalizes");
+        assert_eq!(got, expected);
+        assert!(Path::new(&got).is_absolute());
+
+        // Symlink: resolved to the target, not kept lexically.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.txt");
+            std::os::unix::fs::symlink(&real, &link).expect("symlink");
+            let via_link = canonicalize_text(link.to_str().unwrap()).expect("symlink canonicalizes");
+            assert_eq!(via_link, expected, "symlink must resolve to its target");
+            assert!(!via_link.ends_with("link.txt"));
+        }
+
+        // Missing path: explicit NIL, never a lexical guess.
+        let missing = dir.path().join("does-not-exist.txt");
+        assert!(canonicalize_text(missing.to_str().unwrap()).is_none());
+        // Dot segments through a missing component also fail closed.
+        let missing_dots = dir.path().join("nope").join("..").join("real.txt");
+        assert!(canonicalize_text(missing_dots.to_str().unwrap()).is_none());
+
+        // Empty path and null pointer fail closed.
+        assert!(canonicalize_text("").is_none());
+        assert!(unsafe { rt_file_canonicalize(std::ptr::null(), 0) }.is_nil());
+
+        // Windows: no verbatim prefix leaks.
+        let verbatim: String = [char::from(92u8), char::from(92u8), '?'].iter().collect();
+        assert!(!got.starts_with(&verbatim), "verbatim prefix leaked: {got}");
+    }
 
     #[test]
     fn text_to_bytes_preserves_exact_utf8_nul_and_block_boundaries() {

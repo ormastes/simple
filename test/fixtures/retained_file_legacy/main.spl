@@ -1,0 +1,123 @@
+# Linux-only native fixture: this file uses the POSIX mkfifo pointer ABI.
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_directory_is_real_no_follow}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
+use std.nogc_sync_mut.io.retained_file_abi.{malloc, free}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+
+@unsafe(reason: "creates an owned FIFO fixture through the POSIX pointer ABI", capabilities: [ffi, raw_ptr])
+extern fn mkfifo(path: i64, mode: u32) -> i32
+
+@unsafe(reason: "builds and releases a NUL-terminated POSIX FIFO fixture path", capabilities: [ffi, raw_ptr])
+fn _legacy_fixture_mkfifo(path: text) -> bool:
+    val bytes = base_encoding_text_to_bytes(path)
+    val pointer = malloc((bytes.len() + 1) as u64)
+    if pointer == 0: return false
+    for index in 0..bytes.len(): volatile_write_u8(pointer + index, bytes[index] as i64)
+    volatile_write_u8(pointer + bytes.len(), 0)
+    val status = mkfifo(pointer, 384u32)
+    free(pointer)
+    status == 0
+
+fn main() -> i32:
+    val root = match secure_temp_dir("/tmp", "retained-file-legacy-"):
+        case Err(_):
+            print "RETAINED_FILE_LEGACY_FAIL|case=setup"
+            return 22
+        case Ok(path): path
+    val regular = "{root}/regular"
+    val regular_link = "{root}/regular-link"
+    val fifo = "{root}/pipe"
+    val directory = "{root}/directory"
+    val directory_link = "{root}/directory-link"
+    var failure = 0
+
+    if not dir_create(directory, false):
+        failure = 1
+    else:
+        match retained_file_open(regular, 1u64, true):
+            case Err(_): failure = 2
+            case Ok(output):
+                var retained_output = output
+                match retained_output.write([0x5au8]):
+                    case Err(_): failure = 3
+                    case Ok(wrote):
+                        if not wrote: failure = 3
+                if not retained_output.close() and failure == 0: failure = 4
+
+        if failure == 0:
+            match retained_file_open(regular, 1u64):
+                case Err(_): failure = 5
+                case Ok(input):
+                    var retained_input = input
+                    match retained_input.read_exact(1):
+                        case Err(_): failure = 6
+                        case Ok(bytes):
+                            if bytes.len() != 1 or bytes[0] != 0x5au8: failure = 6
+                    if not retained_input.close() and failure == 0: failure = 7
+
+        if failure == 0 and not snapshot_symlink_create_nofollow_v1(root, regular_link, "regular", 1):
+            failure = 8
+        if failure == 0:
+            match retained_file_open(regular_link, 1u64):
+                case Err(_): pass
+                case Ok(linked):
+                    var retained_linked = linked
+                    val closed = retained_linked.close()
+                    failure = 9
+
+        if failure == 0 and not retained_directory_is_real_no_follow(directory): failure = 10
+        if failure == 0 and not snapshot_symlink_create_nofollow_v1(root, directory_link, "directory", 2):
+            failure = 11
+        if failure == 0 and retained_directory_is_real_no_follow(directory_link): failure = 12
+
+        if failure == 0:
+            match retained_file_open(regular, 1u64, true):
+                case Err(_): pass
+                case Ok(duplicate):
+                    var retained_duplicate = duplicate
+                    val closed = retained_duplicate.close()
+                    failure = 13
+
+        # Exclusive-create refusal must leave the prior file contents intact.
+        if failure == 0:
+            match retained_file_open(regular, 1u64):
+                case Err(_): failure = 14
+                case Ok(input):
+                    var retained_input = input
+                    match retained_input.read_exact(1):
+                        case Err(_): failure = 15
+                        case Ok(bytes):
+                            if bytes.len() != 1 or bytes[0] != 0x5au8: failure = 15
+                    if not retained_input.close() and failure == 0: failure = 16
+
+        if failure == 0 and not _legacy_fixture_mkfifo(fifo): failure = 17
+        if failure == 0:
+            match retained_file_open(fifo, 1u64):
+                case Err(_): pass
+                case Ok(pipe):
+                    var retained_pipe = pipe
+                    val closed = retained_pipe.close()
+                    failure = 18
+
+    # Clean every known fixture path even after a failed assertion.
+    if not file_remove(regular_link):
+        if failure == 0: failure = 19
+    if not file_remove(directory_link):
+        if failure == 0: failure = 20
+    if not file_remove(fifo):
+        if failure == 0: failure = 21
+    if not file_remove(regular):
+        if failure == 0: failure = 23
+    if not dir_remove(directory, false):
+        if failure == 0: failure = 24
+    if not dir_remove(root, false):
+        if failure == 0: failure = 25
+
+    if failure != 0:
+        print "RETAINED_FILE_LEGACY_FAIL|case={failure}"
+        return failure
+    print "RETAINED_FILE_LEGACY_PASS|checks=8"
+    0

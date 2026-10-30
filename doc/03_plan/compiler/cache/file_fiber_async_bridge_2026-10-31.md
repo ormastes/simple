@@ -1,0 +1,69 @@
+# FileFiber canonical TLDR wait bridge — bounded opt-in implementation
+
+Source: explicit fetched release FETCH_HEAD 5ca148fd6cdb33bf4fbb07dcabf52fa9e997ade7. Worktree /tmp/filefiber-async-bridge-20261031. Astra design/review; dedicated Luna implementation. No compiler/build/test invocation; all executable evidence UNRUN. Work is bounded by the user-authorized window ending 2026-10-31 01:53:43 UTC; fixes must produce new evidence and unchanged checks must not be repeated. Existing worker surface owner remains ready-only and unchanged.
+
+## Scope and actual caller
+
+Extend the existing FileFiberRunV1 carrier; do not create another scheduler, resource registry, Future ABI or publication owner. New file_fiber_tldr_bridge_v1.spl owns only canonical ring reservations/subscriptions and their mapping to existing fibers. TldrTableV1 remains the one resource/result owner. FileFiber scalar wake behavior stays unchanged unless the explicit SIMPLE_FILE_TLDR_ASYNC=1 gate selects the new constructor. Wire this gate in the actual driver_parse_shard_entry.spl _driver_run_parse_fibers constructor seam; a free helper with no real caller is insufficient. Use the existing env facade. Default behavior remains unchanged until native qualification.
+
+Local module dependencies must use the bridge too: the actual parse-shard caller restricts imports to its current window and otherwise would never exercise an outside-only adapter. At begin, preclaim descriptors for this run's local module keys and consume only their initial table fill notifications, because the existing parse host owns their producers. This is bounded descriptor preparation, not parse/arena admission and not a phase barrier. A may publish/wake B while C has not parsed. Outside keys retain the existing one-fill queue and SourceReader fill adapter.
+
+## Frozen API and ownership
+
+New bridge module exports FileFiberTldrBridgeV1 and FileFiberTldrBridgeErrorV1. Errors must distinguish Busy, Closed, Capacity, InvalidFiber, TokenMismatch and wrapped map/ring/table errors (text diagnostics may accompany them). All operations touching raw map references remain explicitly unsafe internally under the same single-owner live-scope precondition as TldrTableV1; do not expose a new safe raw-reference lifetime promise.
+
+Add file_fiber_begin_tldr_async_v1(entries, worker_sockets, budget, key_capacity, waiter_capacity, ring_id, owner_id) -> Result<FileFiberRunV1, FileFiberTldrBridgeErrorV1>. It builds the same run, table and reactor, plus one SimpleRing<i64,i64> with capacity max(1, entries.len()). Key capacity covers local and discovered outside keys; waiter_capacity bounds cumulative subscriptions, not just simultaneous waits. Validate capacities before creating work, reject if local unique keys cannot fit, and clean partially created resources on error. Production gate uses named bounded defaults (4096 keys, 65536 cumulative waiters); invalid/unsupported provider returns a diagnostic and refuses this requested mode, never a legacy fallback. Existing run_v1/run_async_v1 host wrappers may share the selection helper to avoid divergent gating.
+
+The constructor requires injected nonzero u64 ring_id/owner_id; introduce no global FileFiber counter. The actual parse-shard caller already owns CompilerDriver.identity_id from compiler_driver_next_identity_v1. In that existing single-carrier context, bind owner_id to the checked positive driver identity and ring_id to `(owner_id << 32) | window_ordinal`, checking both components are in 1..4294967295. Window ordinals increase across that invocation. This uses the existing driver ownership domain; its ordinary identity allocator and _g_parse_fiber_keys are not multicore-qualified, and this opt-in does not claim concurrent OS-thread driver safety. Other callers must inject their own unique live identities. Canonical RingToken retains its actual ring ID, slot and generation; never use slot alone as the scheduler token. Tokens remain process-local.
+
+One bounded wait record per fiber stores exact module key, canonical reference/subscription, complete RingToken and lifecycle state. These references never appear in the successfully closed public result; clear records/cursors before map close. The result's existing table text/error/order remains inspectable after close; table async mode becomes Disabled. Callers using existing unsafe raw APIs must obey their live-scope precondition, including no dereference after run close. Do not pretend generation checks alone make stale raw pointers safe. On a fatal invariant error, drain real outstanding callbacks before aborting. If token corruption prevents safe retirement, report the original error and retained-scope disposition; never free the scope and label it closed. This is an explicit fatal-path resource-retention limitation, not successful cleanup.
+
+Use the existing-scheduler i64 bridge park namespace 4000000000 + fiber index. Constructor checks key_capacity <1000000000 and fiber_count <=333333333: each fiber issues at most open/read/close, keeping IO op IDs below1000000000. Module/parse/outside indices remain below their 1000000000/2000000000/3000000000 namespace boundaries, so the bridge range is disjoint without overflow. Map a validated canonical completion to that fiber-specific scalar token. This is an adapter to FiberSchedV1, not a replacement scheduler.
+
+## Registration and completion protocol
+
+Provide two bounded internal operations (prepare_wait and arm_wait) plus a production wait_on composition so tests can exercise a real interleaving boundary without a mock callback. prepare_wait validates fiber/owner state, requests the exact canonical table reference, observes terminal state and otherwise reserves one ring slot for that fiber. It must not park a fiber or commit the ring yet. A repeated live wait for the same fiber/key is idempotent and cannot allocate another record.
+
+arm_wait charges the cumulative subscription budget before subscribing to the reserved canonical token. Charge accepted attempts conservatively and never refund consumed scalar waiter capacity on cancellation or ring-slot reuse. Check/register/recheck:
+
+- If subscription poll is already terminal before ring commit, retire the subscription interest if present and cancel/release the Reserved ring reservation. Return Ready or the exact terminal failure without parking.
+- If Pending, commit the reserved operation and have this owner provider_take it to InFlight through SimpleRing's real API. Recheck once after admission. If now terminal, schedule the reference's canonical wake cursor; do not drop a wake or synthesize successful completion.
+- Production wait_on composes prepare/arm in one carrier turn. Tests may publish between them to prove no lost wake. Reservation/admission errors clean up interest and reservation explicitly before returning an error.
+
+On actual parse success, the acknowledged producer callback publishes through table.publish_async; parse/open/read/producer failure calls table.fail_async with the exact diagnostic. Outside completion uses tldr_table_fill_async_v1 (or admits an already-published legacy host result through publish_async before delivery). Terminal publication queues a retained canonical wake cursor. Process at most a fixed total batch per advance with fair continuation across keys; retain More/failed-delivery cursor positions for subsequent delivery. Never consume a wake on delivery failure. Use async_ref_deliver_wake_i64, then take_completion_retained, verify full token and task/fiber identity against the active record, release_retained_completion exactly once, and only then issue the existing scalar wake event. A stale/foreign completion cannot wake a new fiber or release its reservation. A popped retained completion stays explicitly owned until release succeeds, including mismatch/error paths. Permanent bridge errors propagate to the run and cleanup; they must not become silent infinite retries or a false finished result.
+
+Exact producer errors resolve through TldrTableV1.Source diagnostics and are stored for the dependent fiber before waking. A canceled consumer interest wakes/fails only that consumer; the shared producer and other interests continue. The bridge is its ring's provider, so after cancel_interest it may acknowledge its own ring cancellation with complete_cancelled; it must drain/release that terminal reservation rather than silently discard it.
+
+## Producer acknowledgements, abort and close
+
+Pending canonical subscriptions and local descriptor preclaims must not count as scheduler external_inflight: they may depend on an unadmitted local producer, and the existing progress rule must still admit that producer. Keep active-interest accounting separately for close. Only actual queued/dispatched host or I/O work and deliverable terminal events can suppress admission overcommit. Include a dependent-before-producer low-budget case.
+
+Track actual host dispatch separately from descriptor readiness. take_parse_requests and take_fill_requests mark each returned request dispatched exactly once; parse_done/module_filled acknowledge exactly that request once. This prevents cleared host queues from masquerading as quiescence. Existing async parse Futures remain outstanding host work until acknowledged; the bridge does not turn timeout into death evidence. Invalid/duplicate/late callbacks must not decrement counts twice or touch closed map storage.
+
+Add file_fiber_try_end_tldr_async_v1(run) -> Result<bool, FileFiberTldrBridgeErrorV1>. Return Busy while producers can still callback, parse/I/O work remains, canonical interests/cursors or ring reservations remain, or fibers still runnable. Normal completed runs drain canonical events before closing. Existing file_fiber_end_v1 must not bypass this path for an enabled bridge; it may leave the run open and record/report Busy rather than free storage.
+
+Add file_fiber_abort_tldr_async_v1(run, reason) -> Result<bool, FileFiberTldrBridgeErrorV1>. If dispatched host work/I/O/async parse remains, return Busy without freeing anything. Host cancellation is acknowledged through the same actual completion callbacks; no caller-supplied true flag is an acknowledgement. Once host work is quiescent, fail every still-pending local/outside claim, cancel/drain all owned wait records, abort existing scheduler state, clear queued work, and close only after exact ring occupancy and owned records/cursors are zero. Queued-but-undispatched work can be canceled by the owner; active host work cannot.
+
+Close clears internal refs and marks the run closed before releasing the map; preserve immutable entries and inspection arrays. After close all carrier callbacks/checks must reject/ignore late work before touching AsyncRef storage. No unbounded retained arena, no deleting live scope to make shutdown pass. Busy is a real disposition, not completion. Legacy close behavior remains untouched for non-enabled runs.
+
+## Author-first tests
+
+1. Actual FileFiber transitions: first local producer claim, two dependent fibers park on same canonical outcome, A parse_done publishes and wakes them while unrelated C remains unparsed; one accepted production, exact text/error identity, no parse-all barrier.
+2. Real SourceReader outside fill through the host adapter: second waiter joins before publication, both original exact canonical tokens terminally complete; third hit queues no refill. Failure wakes both with exact source diagnostic.
+3. Publish between real prepare_wait and arm_wait: no lost wake, Reserved slot retired and no fictitious parked fiber.
+4. Reuse a ring slot, inject old generation via actual ring completion API; it is rejected and cannot wake the current fiber. Verify full token mapping and unique ACK/release.
+5. Ring slot reuse does not reset cumulative waiter budget; exceed the finite budget and receive explicit Capacity without stranding existing interests.
+6. Cancel first interested caller, keep second waiting, publish once; second succeeds and first remains canceled. Producer is not canceled by losing one interest.
+7. End/abort while host request dispatched returns Busy and leaves resources alive; actual callback acknowledgement then terminal drain closes once. Inspect returned text/errors after close; late callback cannot dereference closed scope.
+8. Preserve existing legacy FileFiber tests and write a scenario-oriented SSpec covering actual carrier steps (first caller, joined waiter, unrelated progress, failure/close), with real assertions and UNRUN status, no generated-manual PASS claim.
+
+Luna owns file_fiber_v1.spl, new bridge source, minimal driver_parse_shard_entry gate and dedicated unit/integration/SSpec tests. Astra owns this design and final review. Do not edit shared map/ring internals, worker_surface, AOP, RR, build loops or another lane's files. Report any missing actual cancellation/lifetime primitive before substituting fake success.
+
+## Authored evidence inventory
+
+The executable sources contain **16 scenarios: 11 unit, 2 integration and 3 system**. These are authored counts, not executed results. All remain **UNRUN**; source review, whitespace and environment guards do not establish parser or runtime correctness.
+
+- `test/01_unit/compiler/driver/file_fiber_tldr_bridge_v1_spec.spl`: 11 cases, including the fatal notification/acknowledgement lifetime regression.
+- `test/02_integration/compiler/file_fiber_tldr_async_bridge_integration_spec.spl`: 2 real FileFiber/FileReader success and missing-file cases.
+- `test/03_system/compiler/file_fiber_tldr_async_bridge_spec.spl`: 3 scenarios covering local progress, outside-source success and outside-source failure.
+- `doc/06_spec/03_system/compiler/file_fiber_tldr_async_bridge_spec.md`: authored companion manual describing those three system scenarios; not generated execution evidence.
