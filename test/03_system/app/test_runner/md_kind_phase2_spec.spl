@@ -1,0 +1,112 @@
+# @req REQ-TESTRUNNER-PHASE2-4KINDS
+# @cover src/app/test_runner_new/test_runner_args.spl 5%
+"""
+# Test runner md kind with the phase2 compiler
+
+**Feature IDs:** #test-runner-phase2
+**Category:** Tooling
+
+## Overview
+
+`simple test --compiler=phase2 <file>.md` must run the Markdown fences on the
+phase2-built CLI named by SIMPLE_PHASE2_FULL_CLI. A recording stand-in CLI logs
+its argv and then runs the real binary. A missing SIMPLE_PHASE2_FULL_CLI is a
+clear error with exit 2, and a sha256 mismatch is refused.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io_runtime.{file_hash_sha256_or_empty}
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn abs_cwd() -> text:
+    val (out, err, code) = process_run_bounded("pwd", [], 10000, 65536)
+    out.trim()
+
+fn fresh(name: text) -> text:
+    val dir = abs_cwd() + "/build/md_kind/phase2_" + name
+    process_run_bounded("rm", ["-rf", dir], 10000, 65536)
+    process_run_bounded("mkdir", ["-p", dir], 10000, 65536)
+    dir
+
+fn write_md(dir: text, name: text, lines: [text]) -> text:
+    val path = dir + "/" + name + ".md"
+    file_write(path, lines.join("\n") + "\n")
+    path
+
+fn write_phase2_cli(dir: text) -> text:
+    val path = dir + "/phase2_simple"
+    file_write(path, "#!/bin/sh\necho \"phase2-invoked $*\" >> \"{path}.log\"\nexec \"{real_binary()}\" \"$@\"\n")
+    process_run_bounded("chmod", ["+x", path], 10000, 65536)
+    path
+
+fn run_phase2(cli: text, md: text) -> (text, i64):
+    val (out, err, code) = process_run_bounded("env", ["SIMPLE_PHASE2_FULL_CLI=" + cli, "SIMPLE_PHASE2_FULL_CLI_SHA256=" + file_hash_sha256_or_empty(cli), real_binary(), "test", "--compiler=phase2", "--no-session-daemon", md], 300000, 4194304)
+    (out + err, code)
+
+describe "simple test --compiler=phase2 on a markdown file":
+    # @capture(exec)
+    it "reports a green fence as PASS with exit 0":
+        val dir = fresh("green")
+        val cli = write_phase2_cli(dir)
+        step("Run a green md fence with phase2")
+        val (report, code) = run_phase2(cli, write_md(dir, "green", ["```simple", "val a = 1", "```"]))
+        expect(code).to_equal(0)
+        expect(report).to_contain("SDoctest Results: 1 total, 1 passed, 0 failed")
+
+    # @capture(exec)
+    it "reports a red fence as FAIL with exit 1":
+        val dir = fresh("red")
+        val cli = write_phase2_cli(dir)
+        step("Run a red md fence with phase2")
+        val (report, code) = run_phase2(cli, write_md(dir, "red", ["```simple", "assert 1 == 2", "```"]))
+        expect(code).to_equal(1)
+        expect(report).to_contain("SDoctest Results: 1 total, 0 passed, 1 failed")
+
+    # @capture(exec)
+    it "runs the fence on the phase2 CLI":
+        val dir = fresh("invoked")
+        val cli = write_phase2_cli(dir)
+        run_phase2(cli, write_md(dir, "one", ["```simple", "val a = 1", "```"]))
+        step("The phase2 CLI log exists")
+        expect(file_read(cli + ".log")).to_contain("phase2-invoked")
+
+    # @capture(exec)
+    it "invokes the phase2 CLI once per fence":
+        val dir = fresh("per_fence")
+        val cli = write_phase2_cli(dir)
+        run_phase2(cli, write_md(dir, "two", ["```simple", "val a = 1", "```", "```simple", "val b = 2", "```"]))
+        val log = file_read(cli + ".log")
+        expect(log.split("phase2-invoked").len() >= 3).to_equal(true)
+
+    # @capture(exec)
+    it "does not run skipped fences on the phase2 CLI":
+        val dir = fresh("skipped")
+        val cli = write_phase2_cli(dir)
+        val (report, code) = run_phase2(cli, write_md(dir, "skip", ["```simple:skip", "assert 1 == 2", "```", "```simple", "val a = 1", "```"]))
+        expect(code).to_equal(0)
+        expect(report).to_contain("2 total, 1 passed, 0 failed, 1 skipped")
+
+    # @capture(exec)
+    it "gives a clear error when SIMPLE_PHASE2_FULL_CLI is missing":
+        val dir = fresh("missing_cli")
+        val md = write_md(dir, "m", ["```simple", "val a = 1", "```"])
+        val (out, err, code) = process_run_bounded("env", ["-u", "SIMPLE_PHASE2_FULL_CLI", real_binary(), "test", "--compiler=phase2", "--no-session-daemon", md], 300000, 4194304)
+        expect(code).to_equal(2)
+        expect(out + err).to_contain("SIMPLE_PHASE2_FULL_CLI")
+
+    # @capture(exec)
+    it "refuses a phase2 CLI whose sha256 does not match":
+        val dir = fresh("bad_sha")
+        val cli = write_phase2_cli(dir)
+        val md = write_md(dir, "m", ["```simple", "val a = 1", "```"])
+        val (out, err, code) = process_run_bounded("env", ["SIMPLE_PHASE2_FULL_CLI=" + cli, "SIMPLE_PHASE2_FULL_CLI_SHA256=0000", real_binary(), "test", "--compiler=phase2", "--no-session-daemon", md], 300000, 4194304)
+        expect(code).to_equal(2)
