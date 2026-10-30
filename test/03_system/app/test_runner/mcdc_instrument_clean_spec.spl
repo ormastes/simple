@@ -24,7 +24,7 @@ use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.test_runner.test_runner_execute.{mcdc_compiler_lacks_probes, MCDC_UNAVAILABLE_DEGRADE_TOKEN}
 
 val MCDC_COMPILER_GATE_REASON = "requires SIMPLE_MCDC_COMPILER naming a self-hosted (pure-Simple-built) compiler that emits MC/DC probes; the Rust seed cannot"
-val SEED_GATE_REASON = "requires SIMPLE_BINARY to be a compiler without MC/DC probe emission (the Rust seed)"
+val SEED_GATE_REASON = "SIMPLE_BINARY emits MC/DC probes, so the seed's mcdc-unavailable degrade does not apply"
 
 val NAMESPACE_SRC = "test/01_unit/fs_driver/instance_test.spl"
 val RECORDER = "use std.spec\nstruct Rec:\n    recorder: i64\n    count: i64\ndescribe \"recorder field\":\n    it \"reads a field named recorder\":\n        val r = Rec(recorder: 4, count: 2)\n        if r.recorder > 1 and r.count < 5:\n            expect(r.recorder).to_equal(4)\n"
@@ -54,16 +54,21 @@ fn probe_capable_compiler_absent() -> bool:
     val compiler = mcdc_compiler()
     compiler == "" or mcdc_compiler_lacks_probes(compiler)
 
-fn seed_absent() -> bool:
-    real_binary() == "" or not mcdc_compiler_lacks_probes(real_binary())
+# An unset SIMPLE_BINARY is NOT a skip: the seed examples then fail with NO_BINARY.
+fn binary_emits_probes() -> bool:
+    real_binary() != "" and not mcdc_compiler_lacks_probes(real_binary())
 
 fn run_dir(dir: text) -> (text, i64):
-    run_dir_with(real_binary(), dir)
+    run_dir_with(real_binary(), dir, [])
 
-fn run_dir_with(binary: text, dir: text) -> (text, i64):
+# The probe-capable lane forces MC/DC on, so "no degrade" cannot mean "MC/DC was off".
+fn run_dir_mcdc(dir: text) -> (text, i64):
+    run_dir_with(mcdc_compiler(), dir, ["SIMPLE_MCDC_MODE=on"])
+
+fn run_dir_with(binary: text, dir: text, envs: [text]) -> (text, i64):
     if binary == "":
         return (NO_BINARY, 127)
-    val argv = UNSET_MCDC_ENV + ["SIMPLE_BINARY=" + binary, binary, "test", dir, "--no-db", "--no-cache", "--assert-ran"]
+    val argv = UNSET_MCDC_ENV + envs + ["SIMPLE_BINARY=" + binary, binary, "test", dir, "--no-db", "--no-cache", "--assert-ran"]
     val (out, err, code) = process_run_bounded("env", argv, 600000, 8388608)
     (out + err, code)
 
@@ -83,6 +88,12 @@ fn shape_case(prefix: text, shape: text) -> text:
         return make_case(prefix + "_recorder", "rec", RECORDER)
     make_case(prefix + "_false", "fe", FALSE_EQ)
 
+fn check_seed_degrade(shape: text):
+    step("Run the {shape} fixture on the seed")
+    val (output, _code) = run_dir(shape_case("seed", shape))
+    expect(verdict_line(output)).to_contain(MCDC_UNAVAILABLE_DEGRADE_TOKEN)
+    expect(output).to_contain("MC/DC: NOT compliant")
+
 describe "instrumented wrapper compiles":
     it "states the gates this file is skipped under, so it is never vacuous":
         expect(MCDC_COMPILER_GATE_REASON).to_contain("SIMPLE_MCDC_COMPILER")
@@ -92,7 +103,7 @@ describe "instrumented wrapper compiles":
         "handles a spec importing the namespace module (no _namespace_finish undefined)",
         fn():
             step("Run the fs_driver instance spec, which pulls in the namespace module")
-            val (output, _code) = run_dir_with(mcdc_compiler(), shape_case("clean", "namespace"))
+            val (output, _code) = run_dir_mcdc(shape_case("clean", "namespace"))
             expect(output.contains("_namespace_finish")).to_equal(false)
             expect(verdict_line(output).contains("degraded=")).to_equal(false)
     )
@@ -101,7 +112,7 @@ describe "instrumented wrapper compiles":
         "handles a struct field named recorder (no i64 has no field recorder)",
         fn():
             step("Run the recorder-field fixture")
-            val (output, _code) = run_dir_with(mcdc_compiler(), shape_case("clean", "recorder"))
+            val (output, _code) = run_dir_mcdc(shape_case("clean", "recorder"))
             expect(output.contains("has_no_field_named_`recorder`")).to_equal(false)
             expect(output.contains("has no field named `recorder`")).to_equal(false)
             expect(verdict_line(output)).to_contain("passed=1")
@@ -112,19 +123,24 @@ describe "instrumented wrapper compiles":
         "handles .to_equal(false) assertions in the wrapper",
         fn():
             step("Run the to_equal(false) fixture")
-            val (output, _code) = run_dir_with(mcdc_compiler(), shape_case("clean", "false"))
+            val (output, _code) = run_dir_mcdc(shape_case("clean", "false"))
             expect(output.contains("spipe_false_boolean_wrapper_assertions")).to_equal(false)
             expect(verdict_line(output)).to_contain("passed=1")
             expect(verdict_line(output).contains("degraded=")).to_equal(false)
     )
 
 describe "the Rust seed degrades explicitly":
-    skip_if(fn(): seed_absent(), SEED_GATE_REASON)(
-        "marks each shape mcdc-unavailable and reports MC/DC NOT compliant",
-        fn():
-            for shape in ["namespace", "recorder", "false"]:
-                step("Run the {shape} fixture on the seed")
-                val (output, _code) = run_dir(shape_case("seed", shape))
-                expect(verdict_line(output)).to_contain(MCDC_UNAVAILABLE_DEGRADE_TOKEN)
-                expect(output).to_contain("MC/DC: NOT compliant")
+    skip_if(fn(): binary_emits_probes(), SEED_GATE_REASON)(
+        "marks the namespace shape mcdc-unavailable and reports MC/DC NOT compliant",
+        fn(): check_seed_degrade("namespace")
+    )
+
+    skip_if(fn(): binary_emits_probes(), SEED_GATE_REASON)(
+        "marks the recorder shape mcdc-unavailable and reports MC/DC NOT compliant",
+        fn(): check_seed_degrade("recorder")
+    )
+
+    skip_if(fn(): binary_emits_probes(), SEED_GATE_REASON)(
+        "marks the to_equal(false) shape mcdc-unavailable and reports MC/DC NOT compliant",
+        fn(): check_seed_degrade("false")
     )
