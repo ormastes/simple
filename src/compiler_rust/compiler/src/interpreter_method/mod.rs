@@ -1177,7 +1177,7 @@ pub(crate) fn evaluate_method_call(
             match method {
                 "len" | "length" => return Ok(Value::Int(bytes.len() as i64)),
                 "is_empty" => return Ok(Value::Bool(bytes.is_empty())),
-                "bytes" => {
+                "bytes" | "to_bytes" => {
                     let out: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
                     return Ok(Value::array(out));
                 }
