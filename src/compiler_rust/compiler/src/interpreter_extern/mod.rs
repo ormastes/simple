@@ -146,6 +146,8 @@ pub mod host_gpu_lane;
 pub mod win32_hosted;
 #[cfg(windows)]
 pub mod windows_abi;
+#[cfg(unix)]
+pub mod posix_abi;
 pub mod cache_host;
 pub mod enum_sffi;
 pub mod vulkan;
@@ -833,6 +835,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_char_from_code", conversion::rt_char_from_code_fn);
     insert_simple!("rt_tuple_get", conversion::rt_tuple_get_fn);
     insert_simple!("rt_tuple_len", conversion::rt_tuple_len_fn);
+    insert_simple!("rt_tuple_new", conversion::rt_tuple_new_fn);
+    insert_simple!("rt_tuple_set", conversion::rt_tuple_set_fn);
     insert_simple!("rt_bytes_alloc", file_io::rt_bytes_alloc);
     insert_simple!("rt_bytes_from_raw", file_io::rt_bytes_from_raw);
     insert_simple!("rt_u32s_from_raw", file_io::rt_u32s_from_raw);
@@ -1394,6 +1398,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_dir_remove_all", file_io::rt_dir_remove_all);
     insert_simple!("rt_dir_remove", file_io::rt_dir_remove);
     insert_simple!("rt_dir_walk", file_io::rt_dir_walk);
+    insert_simple!("rt_list_dir_recursive", file_io::rt_list_dir_recursive);
     insert_simple!("rt_dns_lookup", interpreter_native_net::rt_dns_lookup_interp);
     insert_simple!(
         "rt_dyn_torch_tensor_from_bits_1d",
@@ -3597,6 +3602,18 @@ pub(crate) fn call_extern_function_with_values(
         return windows_abi::dispatch(name, &evaluated);
     }
 
+    // Bare POSIX libc externs declared by path_identity_abi.spl,
+    // _PathIdentityPosix/errno_abi.spl and retained_file_abi.spl (malloc,
+    // free, realpath, readlink, errno address, open/read/pread/write/close/
+    // fsync, Linux statx). Must precede try_call_dynamic: the errno-address
+    // extern returns a bridge-owned cell, which is only correct when this
+    // module also owns the calls that set errno. posix_abi also keeps an
+    // ownership registry (free refuses foreign or double frees). See posix_abi.rs.
+    #[cfg(unix)]
+    if posix_abi::is_supported_name(name) {
+        return posix_abi::dispatch(name, &evaluated);
+    }
+
     // capability gap. None of these five families has a real native
     // implementation anywhere in this tree (no C translation unit, no linked
     // Rust runtime crate) for a dispatcher to resolve against. Registering
@@ -3626,6 +3643,10 @@ pub(crate) fn call_extern_function_with_values(
 
     Err(common::unknown_function(name))
 }
+
+#[cfg(test)]
+#[path = "extern_drift_tests.rs"]
+mod extern_drift_tests;
 
 #[cfg(test)]
 mod tests {

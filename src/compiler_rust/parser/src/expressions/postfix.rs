@@ -906,6 +906,39 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
+            // Whatever the opportunistic loop above could not pair off is a
+            // real pseudo-INDENT whose compensating DEDENT is still in the
+            // stream, behind a token that is not Newline/Dedent. The canonical
+            // case is a leading-dot method chain that ENDS a block header:
+            //
+            //     if a !=
+            //             b
+            //                 .lower():      <- current is `:` here
+            //         body
+            //
+            // The lexer emits `Dedent Dedent Indent` after the header's
+            // Newline (16 -> 8), and `parse_condition_block` drains exactly
+            // `deferred_dedent_count` of them before expecting the body's
+            // Indent. Dropping the count here (the old behaviour) left one
+            // Dedent undrained and the `if` died with "expected Indent, found
+            // Dedent". The pure-Simple lexer (lexer_struct.spl, the
+            // leading-`.` rule) suppresses that Indent outright, so the shape
+            // is valid Simple; this is the seed's bookkeeping equivalent.
+            //
+            // The remainder goes into `binary_indent_count`, exactly like the
+            // trailing-`??` arm above and every binary-operator continuation
+            // (`expressions/binary.rs`): `parse_expression_inner` settles that
+            // count at the END of the enclosing expression, pairing the Dedent
+            // if it is right there (`a\n    .m() + 1` -- the chain is followed
+            // by an operator, so the Dedent only appears after `1`) and
+            // deferring it to the header reconciliation otherwise (the `:`
+            // case). Adding straight to `deferred_dedent_count` would skip
+            // that expression-end settlement, and an unsettled count lingers
+            // until the next block header anywhere in the file, where it would
+            // eat a Dedent belonging to an enclosing block.
+            if consumed_indents > 0 {
+                self.binary_indent_count += consumed_indents;
+            }
         }
 
         Ok(expr)

@@ -1277,13 +1277,36 @@ impl Lowerer {
                         && self.resolve_import_alias("assert").is_none()
                         && self.named_callable_value_type("assert").is_none()
                         && !self.globals.contains_key("assert")
-                        && args.len() == 1
-                        && args[0].name.is_none()
+                        && (1..=2).contains(&args.len())
+                        && args.iter().all(|arg| arg.name.is_none())
                     {
+                        // `assert(COND[, MSG])`: the pure-Simple front end
+                        // desugars this to `__assert(cond[, msg])`
+                        // (parser_stmts.spl). `HirStmt::Assert.message` is a
+                        // plain string, so only a literal (or the literal parts
+                        // of an f-string, as `parse_string_message` does for the
+                        // keyword form) is carried; any other message expression
+                        // is dropped from the native diagnostic exactly as the
+                        // pure-Simple C backend drops it (cg_expr.spl,
+                        // `spl_assert` takes only the condition). The condition
+                        // is still checked either way.
                         let condition = self.lower_condition(&args[0].value, ctx)?;
+                        let message = args.get(1).and_then(|arg| match &arg.value {
+                            Expr::String(text) | Expr::TypedString(text, _) => Some(text.clone()),
+                            Expr::FString { parts, .. } => Some(
+                                parts
+                                    .iter()
+                                    .filter_map(|part| match part {
+                                        simple_parser::ast::FStringPart::Literal(text) => Some(text.as_str()),
+                                        _ => None,
+                                    })
+                                    .collect::<String>(),
+                            ),
+                            _ => None,
+                        });
                         return Ok(vec![HirStmt::Assert {
                             condition,
-                            message: None,
+                            message,
                             span: None,
                         }]);
                     }

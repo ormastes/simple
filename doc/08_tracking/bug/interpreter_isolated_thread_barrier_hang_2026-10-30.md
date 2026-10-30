@@ -58,3 +58,11 @@ complete. The spec is left as-is (not pending).
 - Specs: `test/01_unit/lib/nogc_async_mut/isolated_thread_barrier_spec.spl`
   (repro + 8-worker and two-generation generalizations): old seed timeout,
   new 3/3. `lockless_map_i64_spec.spl`: hang -> 12/12.
+- Follow-up (no-argument spawn): `rt_thread_spawn_isolated_with_context`
+  (plain `thread_spawn`) still ran the closure inline and deadlocked the same
+  way. It now shares the OS-thread path (`spawn_isolated_worker`).
+  Spec: `test/01_unit/lib/nogc_async_mut/isolated_thread_spawn_barrier_spec.spl`
+  (two-party + 8-worker barrier): old seed timeout, new 2/2. Assertions that
+  encoded the synchronous contract (`is_done()` true straight after spawn,
+  `join()` after `free()` returning the value) were updated in the perf twins
+  and `concurrent_thread_lifecycle_spec.spl`.

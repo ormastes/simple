@@ -1,0 +1,101 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: pin that `simple run` (Cranelift JIT lane) flattens a `pub fn` that
+reaches the importer only through a package facade whose LAST path segment is
+a plain package directory under a numbered layer directory
+(`src/35.sem/pkg_a/__init__.spl`, the shape of
+`src/compiler/35.semantics/any_escape/__init__.spl`).
+Audience: compiler engineers maintaining `pipeline::module_loader`.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/jit_facade_reexport_numbered_layer_spec.spl`.
+2. Every scenario must pass; a failure means the JIT again drops the whole
+   program to the interpreter on a facade import.
+
+## Compatibility and limitations
+
+Shells out to the seed binary (`SIMPLE_BIN`, default `bin/simple`) because the
+interpreter lane resolves the facade through its own resolver and is always
+correct here -- an in-process assertion is green on a broken loader. The
+oracle is the loud `[jit-fallback] unresolved external symbol` marker the JIT
+prints on stderr, so no environment variable has to reach the child process
+(portable to Windows, where no `env`/`sh` wrapper is available).
+"""
+
+# doc-path: doc/08_tracking/bug/jit_pipeline_loader_skips_plain_package_init_under_numbered_layer_2026-10-30.md
+# @manual: primary
+
+"""
+# Facade re-export under a numbered layer must not de-JIT the program
+
+Bug: doc/08_tracking/bug/jit_pipeline_loader_skips_plain_package_init_under_numbered_layer_2026-10-30.md
+
+`resolve_numbered_parts_from_root` (pipeline/module_loader.rs) resolved the
+LAST segment of a `use` only as `<dir>/<last>.spl`, a layered alias, or a
+numbered `NN.<last>/__init__.spl`; the plain `<dir>/<last>/__init__.spl`
+package marker was never tried. `use compiler.semantics.any_escape.{...}`
+therefore resolved to nothing in the flattening loader, the facade's
+`export use ...checker.{any_escape_check}` was never followed, and the JIT
+module declared `any_escape_check` as an unresolved import:
+
+    [jit-fallback] unresolved external symbol 'any_escape_check': whole module dropped to the interpreter
+
+The interpreter's twin (`path_resolution::try_resolve_last_segment`) and the
+AOT resolver (`module_resolver::resolve_module_in_dir`) both already checked
+the plain package marker, so only the `simple run` lane lost the function.
+
+Fail-closed: a run that produced neither the fallback marker nor the expected
+output is a FAILURE, never a vacuous pass.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get, env_set}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn fixture_entry() -> text:
+    "test/fixtures/jit_facade_reexport_numbered_layer/src/main.spl"
+
+# The test runner exports `SIMPLE_EXECUTION_MODE=interpret` and the child
+# inherits it, which would skip the JIT entirely and make this spec vacuous.
+# Pin the child to the JIT lane through the process environment (a plain
+# env set, no `env`/`sh` wrapper, so it works on Windows too) and restore the
+# runner's value afterwards.
+fn run_fixture() -> (text, text, i64):
+    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    env_set("SIMPLE_EXECUTION_MODE", "jit")
+    val result = process_run(simple_binary(), ["run", fixture_entry()])
+    env_set("SIMPLE_EXECUTION_MODE", previous)
+    result
+
+describe "facade re-export through a plain package dir under a numbered layer (JIT lane)":
+    # @manual scenario evidence
+
+    it "computes the re-exported fn's result (fail-closed on a silent program)":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_fixture()
+        expect code == 0
+        expect stdout.contains("41")
+
+    it "keeps the program on the JIT: no unresolved-external fallback for the facade fn":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_fixture()
+        val combined = stdout + stderr
+        # Fail-closed: a missing/failed child (no `bin/simple` in a fresh
+        # worktree) prints nothing, which would pass the absence checks below
+        # vacuously. Require the program to have actually run first.
+        expect code == 0
+        expect stdout.contains("41")
+        expect not combined.contains("unresolved external symbol 'facade_f'")
+        expect not combined.contains("[jit-fallback]")

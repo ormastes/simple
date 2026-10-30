@@ -1,0 +1,290 @@
+# Source-bound macro forward candidates for the native file-worker manifest.
+# These parser/resolver tables are advisory invalidation evidence only: the
+# MIR worker sidecar has no source-generation witness, so this module never
+# admits object reuse or an exact reverse projection.
+
+use std.io_runtime.{file_exists, file_read, file_size}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_bytes, bytes_to_text, utf8_bytes_valid}
+use std.common.serialization.{bytes_to_hex}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
+    module_tldr_companion_body_v1, module_tldr_companion_sections_v1,
+    module_artifact_module_id_v1}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{
+    MacroDefinitionTableV1, MacroUseTableV1, MacroDefinitionEntryV1,
+    macro_definition_table_decode_v1, macro_use_table_decode_v1,
+    macro_def_id_canonical_v1, macro_definition_digest_v1, macro_reference_schema_v1}
+use compiler.driver.cache.macro_forward_candidate_contract_v1.{MacroForwardCandidateV1,
+    MacroForwardModuleCandidateV1, MacroForwardInvalidationV1,
+    MACRO_FORWARD_CANDIDATE_MAX_HEX_BYTES_V1, MACRO_FORWARD_CANDIDATE_MAX_MODULES_V1,
+    MACRO_FORWARD_CANDIDATE_MAX_TOTAL_HEX_BYTES_V1,
+    macro_forward_candidate_unknown_v1, macro_forward_candidate_digest_v1}
+
+pub val MACRO_FORWARD_CANDIDATE_MAX_TABLE_TEXT_V1: i64 =
+    MACRO_FORWARD_CANDIDATE_MAX_HEX_BYTES_V1 / 2
+
+struct _MacroForwardDecodedV1:
+    ok: bool
+    definitions: MacroDefinitionTableV1
+    uses: MacroUseTableV1
+
+fn _empty_decoded_v1() -> _MacroForwardDecodedV1:
+    _MacroForwardDecodedV1(ok: false,
+        definitions: MacroDefinitionTableV1(schema: 0, module_id: "", entries: []),
+        uses: MacroUseTableV1(schema: 0, module_id: "", uses: []))
+
+fn _hex_nibble_v1(value: text) -> i64:
+    if value >= "0" and value <= "9": return value.char_code_at(0) - "0".char_code_at(0)
+    if value >= "a" and value <= "f": return value.char_code_at(0) - "a".char_code_at(0) + 10
+    if value >= "A" and value <= "F": return value.char_code_at(0) - "A".char_code_at(0) + 10
+    -1
+
+fn _lower_hex_v1(value: text) -> bool:
+    if value == "" or value.len() % 2 != 0: return false
+    for ch in value.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn _text_from_hex_v1(value: text) -> text?:
+    if value == "" or value.len() % 2 != 0: return nil
+    var bytes: [u8] = []
+    var i = 0
+    while i < value.len():
+        val hi = _hex_nibble_v1(value.substring(i, i + 1))
+        val lo = _hex_nibble_v1(value.substring(i + 1, i + 2))
+        if hi < 0 or lo < 0: return nil
+        bytes.push((hi * 16 + lo) as u8)
+        i = i + 2
+    if not utf8_bytes_valid(bytes): return nil
+    Some(bytes_to_text(bytes))
+
+fn _decode_candidate_v1(row: MacroForwardModuleCandidateV1) -> _MacroForwardDecodedV1:
+    val candidate = row.candidate
+    if not candidate.known or not candidate.complete or
+            candidate.definitions_hex.len() + candidate.uses_hex.len() >
+                MACRO_FORWARD_CANDIDATE_MAX_HEX_BYTES_V1 or
+            not _lower_hex_v1(candidate.definitions_hex) or
+            not _lower_hex_v1(candidate.uses_hex) or
+            candidate.source_digest != row.source_digest or
+            candidate.digest != macro_forward_candidate_digest_v1(row.path, row.source_digest,
+                candidate.complete, candidate.definitions_hex, candidate.uses_hex):
+        return _empty_decoded_v1()
+    val defs_text = _text_from_hex_v1(candidate.definitions_hex)
+    val uses_text = _text_from_hex_v1(candidate.uses_hex)
+    if defs_text == nil or uses_text == nil: return _empty_decoded_v1()
+    val definitions = macro_definition_table_decode_v1(defs_text!)
+    val uses = macro_use_table_decode_v1(uses_text!)
+    val module_id = module_artifact_module_id_v1(row.path)
+    if not definitions.ok or not uses.ok or
+            definitions.value.schema != macro_reference_schema_v1() or
+            uses.value.schema != macro_reference_schema_v1() or
+            definitions.value.module_id != module_id or uses.value.module_id != module_id:
+        return _empty_decoded_v1()
+    for macro_use in uses.value.uses:
+        if macro_use.invoking_source_id != row.path or macro_use.coverage != "complete":
+            return _empty_decoded_v1()
+    _MacroForwardDecodedV1(ok: true, definitions: definitions.value, uses: uses.value)
+
+fn _macro_definition_fingerprint_v1(entry: MacroDefinitionEntryV1) -> text:
+    sha256_text(macro_definition_digest_v1(entry) + "\n" + entry.contract_digest + "\n" +
+        entry.hygiene_schema + "\n{entry.generation}")
+
+# Advisory inversion over captured forward candidates. It only identifies
+# additional consumer modules. Unknown, conservative, stale, or corrupt rows
+# request a full-scope recheck; this result never admits a cached object.
+pub fn macro_forward_candidate_invalidation_v1(previous: [MacroForwardModuleCandidateV1],
+        current_paths: [text], current_source_digests: Dict<text, text>,
+        tldr_root: text) -> MacroForwardInvalidationV1:
+    if previous.len() > MACRO_FORWARD_CANDIDATE_MAX_MODULES_V1 or
+            current_paths.len() > MACRO_FORWARD_CANDIDATE_MAX_MODULES_V1:
+        return MacroForwardInvalidationV1(users: [], needs_full_recheck: true,
+            reason: "macro-candidate-module-bound")
+    var previous_by_path: Dict<text, MacroForwardModuleCandidateV1> = {}
+    var previous_tables: Dict<text, _MacroForwardDecodedV1> = {}
+    var current_rows: [MacroForwardModuleCandidateV1] = []
+    var current_tables: Dict<text, _MacroForwardDecodedV1> = {}
+    var seen_current: Dict<text, bool> = {}
+    var full_recheck = false
+    var reason = "ok"
+    var total_hex_bytes = 0
+    for row in previous:
+        if previous_by_path.contains_key(row.path):
+            return MacroForwardInvalidationV1(users: [], needs_full_recheck: true,
+                reason: "duplicate-previous-module")
+        previous_by_path[row.path] = row
+        total_hex_bytes = total_hex_bytes + row.candidate.definitions_hex.len() +
+            row.candidate.uses_hex.len()
+        if total_hex_bytes > MACRO_FORWARD_CANDIDATE_MAX_TOTAL_HEX_BYTES_V1:
+            return MacroForwardInvalidationV1(users: [], needs_full_recheck: true,
+                reason: "macro-candidate-byte-bound")
+    for path in current_paths:
+        if seen_current.contains_key(path):
+            return MacroForwardInvalidationV1(users: [], needs_full_recheck: true,
+                reason: "duplicate-current-module")
+        seen_current[path] = true
+        if not current_source_digests.contains_key(path):
+            full_recheck = true
+            reason = "current-source-identity-missing"
+            continue
+        val candidate = macro_forward_candidate_capture_v1(path, tldr_root,
+            current_source_digests[path])
+        total_hex_bytes = total_hex_bytes + candidate.definitions_hex.len() + candidate.uses_hex.len()
+        if total_hex_bytes > MACRO_FORWARD_CANDIDATE_MAX_TOTAL_HEX_BYTES_V1:
+            return MacroForwardInvalidationV1(users: [], needs_full_recheck: true,
+                reason: "macro-candidate-byte-bound")
+        val row = MacroForwardModuleCandidateV1(path: path,
+            source_digest: current_source_digests[path], candidate: candidate)
+        current_rows.push(row)
+    # Enforce the aggregate byte budget over the entire previous/current set
+    # before any persisted or newly captured table is decoded.
+    for row in previous:
+        val decoded = _decode_candidate_v1(row)
+        if not decoded.ok:
+            full_recheck = true
+            reason = "unknown-previous-candidate"
+        else:
+            previous_tables[row.path] = decoded
+    for row in current_rows:
+        val decoded = _decode_candidate_v1(row)
+        if not decoded.ok:
+            full_recheck = true
+            reason = "unknown-current-candidate"
+        else:
+            current_tables[row.path] = decoded
+    var changed_ids: Dict<text, bool> = {}
+    var changed_names: Dict<text, bool> = {}
+    var all_definitions: [MacroDefinitionEntryV1] = []
+    for row in previous:
+        if previous_tables.contains_key(row.path):
+            for entry in previous_tables[row.path].definitions.entries:
+                all_definitions.push(entry)
+                if not current_tables.contains_key(row.path):
+                    changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
+                    changed_names[entry.macro_name] = true
+                else:
+                    val current_entries = current_tables[row.path].definitions.entries
+                    var found = false
+                    for current_entry in current_entries:
+                        if macro_def_id_canonical_v1(current_entry.def_id) ==
+                                macro_def_id_canonical_v1(entry.def_id):
+                            found = true
+                            if _macro_definition_fingerprint_v1(current_entry) !=
+                                    _macro_definition_fingerprint_v1(entry):
+                                changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
+                                changed_names[entry.macro_name] = true
+                                changed_ids[macro_def_id_canonical_v1(current_entry.def_id)] = true
+                                changed_names[current_entry.macro_name] = true
+                    if not found:
+                        changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
+                        changed_names[entry.macro_name] = true
+    for row in current_rows:
+        if current_tables.contains_key(row.path):
+            for entry in current_tables[row.path].definitions.entries:
+                all_definitions.push(entry)
+                if not previous_tables.contains_key(row.path):
+                    changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
+                    changed_names[entry.macro_name] = true
+                else:
+                    var found = false
+                    for old_entry in previous_tables[row.path].definitions.entries:
+                        if macro_def_id_canonical_v1(old_entry.def_id) ==
+                                macro_def_id_canonical_v1(entry.def_id):
+                            found = true
+                    if not found:
+                        changed_ids[macro_def_id_canonical_v1(entry.def_id)] = true
+                        changed_names[entry.macro_name] = true
+    # A changed nested macro is an additive candidate for macros which declare
+    # its canonical definition identity as a dependency. Iterate to closure.
+    var expanded = true
+    var closure_passes = 0
+    while expanded and closure_passes <= all_definitions.len():
+        closure_passes = closure_passes + 1
+        expanded = false
+        for entry in all_definitions:
+            var depends_changed = false
+            for dependency in entry.dependent_macros:
+                if changed_ids.contains_key(dependency): depends_changed = true
+            val identity = macro_def_id_canonical_v1(entry.def_id)
+            if depends_changed and not changed_ids.contains_key(identity):
+                changed_ids[identity] = true
+                changed_names[entry.macro_name] = true
+                expanded = true
+    if expanded:
+        full_recheck = true
+        reason = "nested-closure-bound"
+    var users: [text] = []
+    for row in previous:
+        if previous_tables.contains_key(row.path):
+            for macro_use in previous_tables[row.path].uses.uses:
+                if changed_ids.contains_key(macro_use.resolved_def_id) or
+                        changed_names.contains_key(macro_use.requested_scoped_name):
+                    if not users.contains(row.path): users.push(row.path)
+    for row in current_rows:
+        if current_tables.contains_key(row.path):
+            for macro_use in current_tables[row.path].uses.uses:
+                if changed_ids.contains_key(macro_use.resolved_def_id) or
+                        changed_names.contains_key(macro_use.requested_scoped_name):
+                    if not users.contains(row.path): users.push(row.path)
+    users.sort()
+    if not full_recheck:
+        full_recheck = true
+        reason = "object-generation-witness-unavailable"
+    MacroForwardInvalidationV1(users: users, needs_full_recheck: full_recheck, reason: reason)
+
+# Capture exactly one explicit definition and use table from the parser-backed
+# companion. Missing, stale, duplicate, foreign, or malformed sections remain
+# Unknown. `expected_source_digest` binds the observation to current source
+# bytes, but not to the MIR object generation that consumed those bytes.
+pub fn macro_forward_candidate_capture_v1(module_path: text, tldr_root: text,
+        expected_source_digest: text) -> MacroForwardCandidateV1:
+    if module_path == "" or tldr_root == "" or expected_source_digest == "" or
+            not file_exists(module_path):
+        return macro_forward_candidate_unknown_v1()
+    val source = file_read(module_path)
+    if sha256_text(source) != expected_source_digest:
+        return macro_forward_candidate_unknown_v1()
+    val companion = module_tldr_companion_path_v1(tldr_root, module_path)
+    if not file_exists(companion) or file_size(companion) > MACRO_FORWARD_CANDIDATE_MAX_TABLE_TEXT_V1 * 2 + 1024 * 1024:
+        return macro_forward_candidate_unknown_v1()
+    val content = file_read(companion)
+    if module_tldr_companion_body_v1(content, source) == "":
+        return macro_forward_candidate_unknown_v1()
+    var definition_text = ""
+    var use_text = ""
+    var definition_count = 0
+    var use_count = 0
+    for section in module_tldr_companion_sections_v1(content, source):
+        if section.starts_with("macro-def|"):
+            definition_text = section.substring(10)
+            definition_count = definition_count + 1
+        elif section.starts_with("macro-use|"):
+            use_text = section.substring(10)
+            use_count = use_count + 1
+    if definition_count != 1 or use_count != 1:
+        return macro_forward_candidate_unknown_v1()
+    if definition_text.len() + use_text.len() > MACRO_FORWARD_CANDIDATE_MAX_TABLE_TEXT_V1:
+        return macro_forward_candidate_unknown_v1()
+    val definitions = macro_definition_table_decode_v1(definition_text)
+    val uses = macro_use_table_decode_v1(use_text)
+    val module_id = module_artifact_module_id_v1(module_path)
+    if not definitions.ok or not uses.ok or
+            definitions.value.schema != macro_reference_schema_v1() or
+            uses.value.schema != macro_reference_schema_v1() or
+            definitions.value.module_id != module_id or uses.value.module_id != module_id:
+        return macro_forward_candidate_unknown_v1()
+    for macro_use in uses.value.uses:
+        if macro_use.invoking_source_id != module_path:
+            return macro_forward_candidate_unknown_v1()
+    var complete = true
+    for macro_use in uses.value.uses:
+        if macro_use.coverage != "complete": complete = false
+    val defs_hex = bytes_to_hex(text_to_bytes(definition_text))
+    val uses_hex = bytes_to_hex(text_to_bytes(use_text))
+    val digest = macro_forward_candidate_digest_v1(module_path, expected_source_digest,
+        complete, defs_hex, uses_hex)
+    MacroForwardCandidateV1(known: true, complete: complete, source_digest: expected_source_digest,
+        definitions_hex: defs_hex, uses_hex: uses_hex, digest: digest)
+
+export MACRO_FORWARD_CANDIDATE_MAX_TABLE_TEXT_V1,
+    macro_forward_candidate_capture_v1, macro_forward_candidate_invalidation_v1

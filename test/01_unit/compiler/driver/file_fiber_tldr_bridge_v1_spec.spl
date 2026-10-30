@@ -1,0 +1,327 @@
+use std.spec
+use compiler.driver.driver_build.file_fiber_v1.{
+    FileFiberEntryV1, FileFiberRunV1, file_fiber_begin_tldr_async_v1,
+    file_fiber_finished_v1, file_fiber_try_end_tldr_async_v1,
+    file_fiber_abort_tldr_async_v1, FILE_FIBER_TLDR_WAIT_TOKEN_BASE}
+use compiler.driver.driver_build.file_fiber_tldr_bridge_v1.{
+    FileFiberTldrBridgeErrorV1, FileFiberTldrWakeV1}
+use compiler.driver.cache.reader.tldr_table_fill_v1.{tldr_table_fill_async_v1}
+use compiler.driver.cache.source_reader_v1.{SourceReader}
+use compiler.frontend.parser_types.{ParserModule}
+use std.common.contracts.execution.simple_ring_async_v1.{RingToken}
+use std.nogc_async_mut.async_ring.simple_ring.{SimpleRingError}
+
+class StubReader:
+    broken: text
+
+impl SourceReader for StubReader:
+    fn read_src(path: text) -> ParserModule?: nil
+    fn read_tldr(path: text) -> text:
+        if path == self.broken: return ""
+        if path == "virtual/missing.spl": return ""
+        "tldr:" + path
+    fn update_src(path: text) -> bool: true
+    fn update_tldr(path: text) -> text:
+        if path == self.broken: return "source error: {path}"
+        ""
+
+fn _imports(source: text) -> [text]:
+    var out: [text] = []
+    for line in source.split("\n"):
+        val t = line.trim()
+        if t.starts_with("use "): out = out.push(t.substring(4, t.len()))
+    out
+
+fn _entry(key: text, body: text) -> FileFiberEntryV1:
+    FileFiberEntryV1(module_key: key, path: "virtual/{key}.spl", est_bytes: 8, content: body)
+
+fn _new(entries: [FileFiberEntryV1], waiters: i64, id: u64) -> FileFiberRunV1:
+    file_fiber_begin_tldr_async_v1(entries, [0], 4096, 16, waiters,
+        (id << 32) | 1u64, id).unwrap()
+
+fn _abort(run: FileFiberRunV1):
+    match file_fiber_abort_tldr_async_v1(run, "test scope cleanup"):
+        case Ok(true): ()
+        case other: fail("test did not quiesce its FileFiber scope: {other}")
+
+describe "FileFiber canonical TLDR wait bridge v1":
+    it "rejects duplicate local producer keys before allocating an async owner":
+        match file_fiber_begin_tldr_async_v1([_entry("same", "x"), _entry("same", "y")],
+                [0], 8, 4, 4, (100u64 << 32) | 1u64, 100u64):
+            case Err(FileFiberTldrBridgeErrorV1.InvalidKey): ()
+            case other: fail("duplicate local producer key was admitted: {other}")
+
+    it "publishes to two joined local dependants while an unrelated file has not parsed":
+        var run = _new([_entry("left", "use shared\n"), _entry("right", "use shared\n"),
+            _entry("unrelated", "fn untouched(): 0\n"), _entry("shared", "fn shared(): 1\n")], 32, 101u64)
+        var shared_request = -1
+        var unrelated_request = -1
+        var both_waiting = false
+        for _round in 0..32:
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                val key = run.entries[i].module_key
+                if key == "shared": shared_request = i
+                elif key == "unrelated": unrelated_request = i
+                else: run.parse_done(i, "tldr:{key}", "")
+            both_waiting = (run.sched.fiber_state[0] == 2 and run.sched.fiber_state[1] == 2 and
+                run.tldr_bridge.unwrap().waits.len() == 2 and shared_request >= 0)
+            if both_waiting: break
+        expect(both_waiting).to_be(true)
+        expect(run.sched.fiber_token[0]).to_equal(FILE_FIBER_TLDR_WAIT_TOKEN_BASE)
+        expect(run.sched.fiber_token[1]).to_equal(FILE_FIBER_TLDR_WAIT_TOKEN_BASE + 1)
+        expect(shared_request).to_be_greater_than(-1)
+        expect(run.parse_acknowledged[2]).to_be(false)
+        run.parse_done(shared_request, "tldr:shared-exact", "")
+        var completed = false
+        for _round in 0..32:
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                val key = run.entries[i].module_key
+                if key == "unrelated": unrelated_request = i
+                else: run.parse_done(i, "tldr:{key}", "")
+            completed = run.sched.fiber_state[0] == 3 and run.sched.fiber_state[1] == 3
+            if completed: break
+        expect(completed).to_be(true)
+        expect(run.parse_acknowledged[2]).to_be(false)
+        expect(run.error[0]).to_equal("")
+        expect(run.error[1]).to_equal("")
+        if unrelated_request >= 0: run.parse_done(unrelated_request, "tldr:unrelated", "")
+        var all_done = false
+        for _round in 0..8:
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                run.parse_done(i, "tldr:{run.entries[i].module_key}", "")
+            if file_fiber_finished_v1(run): all_done = true
+            if all_done: break
+        expect(run.table.entries["shared"]).to_equal("tldr:shared-exact")
+        expect(all_done).to_be(true)
+        expect(run.done_order.len()).to_equal(4)
+        expect(file_fiber_try_end_tldr_async_v1(run).unwrap()).to_be(true)
+        expect(run.table.is_loaded("shared")).to_be(true)
+
+    it "admits a local producer after a dependent parks under the memory budget":
+        var run = file_fiber_begin_tldr_async_v1([_entry("consumer", "use producer\n"),
+            _entry("producer", "fn producer(): 1\n")], [0], 8, 8, 8,
+            (109u64 << 32) | 1u64, 109u64).unwrap()
+        run.advance(_imports)
+        val consumer_request = run.take_parse_requests()
+        expect(consumer_request).to_equal([0])
+        run.parse_done(consumer_request[0], "tldr:consumer", "")
+        var dependent_waiting = false
+        for _round in 0..8:
+            run.advance(_imports)
+            dependent_waiting = run.tldr_bridge.unwrap().waits.len() == 1
+            if dependent_waiting: break
+        expect(dependent_waiting).to_be(true)
+        expect(run.sched.fiber_state[0]).to_equal(2)
+        expect(run.sched.fiber_token[0]).to_equal(FILE_FIBER_TLDR_WAIT_TOKEN_BASE)
+        expect(run.sched.fiber_state[1] != 3).to_be(true)
+        var producer_request: [i64] = []
+        for _round in 0..8:
+            run.advance(_imports)
+            producer_request = run.take_parse_requests()
+            if producer_request.len() > 0: break
+        expect(run.sched.fiber_state[1]).to_equal(2)
+        expect(run.sched.fiber_token[1]).to_equal(2000000001)
+        expect(producer_request).to_equal([1])
+        run.parse_done(producer_request[0], "tldr:producer", "")
+        var all_done = false
+        for _round in 0..16:
+            run.advance(_imports)
+            if file_fiber_finished_v1(run): all_done = true
+            if all_done: break
+        expect(all_done).to_be(true)
+        expect(file_fiber_try_end_tldr_async_v1(run).unwrap()).to_be(true)
+
+    it "does not lose publication between reservation and canonical subscription":
+        var run = _new([_entry("consumer", "use producer\n"),
+            _entry("producer", "fn producer(): 1\n")], 8, 102u64)
+        unsafe(capabilities: [ffi]):
+            val bridge = run.tldr_bridge.unwrap()
+            expect(bridge.prepare_wait(run.table, 0, "producer").unwrap()).to_be(true)
+            expect(bridge.publish(run.table, "producer", "tldr:producer").unwrap()).to_be(true)
+            expect(bridge.arm_wait(run.table, 0).unwrap()).to_be(false)
+            expect(bridge.waits.len()).to_equal(0)
+        expect(run.sched.fiber_state[0]).to_equal(0)
+        expect(run.table.entries["producer"]).to_equal("tldr:producer")
+        _abort(run)
+
+    it "rejects a reused slot's old generation through SimpleRing itself":
+        var run = _new([_entry("a", "use outside\n")], 4, 103u64)
+        unsafe(capabilities: [ffi]):
+            val bridge = run.tldr_bridge.unwrap()
+            bridge.prepare_wait(run.table, 0, "outside").unwrap()
+            bridge.arm_wait(run.table, 0).unwrap()
+            val old_token: RingToken = bridge.waits[0].token
+            bridge.cancel_wait(run.table, 0, "cancel first wait").unwrap()
+            val _cancel_wake = bridge.take_wakes()
+            expect(bridge.ring.occupancy()).to_equal(0u64)
+            expect(bridge.waits.len()).to_equal(0)
+            bridge.prepare_wait(run.table, 0, "outside-again").unwrap()
+            val current_token: RingToken = bridge.waits[0].token
+            expect(current_token.ring_id).to_equal(old_token.ring_id)
+            expect(current_token.slot).to_equal(old_token.slot)
+            expect(current_token.generation.value).to_be_greater_than(old_token.generation.value)
+            match bridge.ring.complete_success(old_token, 0):
+                case Err(SimpleRingError.StaleToken): ()
+                case other: fail("old generation was not rejected by SimpleRing: {other}")
+            expect(bridge.waits.len()).to_equal(1)
+        _abort(run)
+
+    it "does not refund cumulative waiter budget after a ring slot is reused":
+        var run = file_fiber_begin_tldr_async_v1([_entry("a", "use one\n")],
+            [0], 4096, 8, 1, (104u64 << 32) | 1u64, 104u64).unwrap()
+        unsafe(capabilities: [ffi]):
+            val bridge = run.tldr_bridge.unwrap()
+            bridge.prepare_wait(run.table, 0, "one").unwrap()
+            bridge.arm_wait(run.table, 0).unwrap()
+            bridge.cancel_wait(run.table, 0, "withdraw first consumer").unwrap()
+            val _cancel_wake = bridge.take_wakes()
+            bridge.prepare_wait(run.table, 0, "two").unwrap()
+            match bridge.arm_wait(run.table, 0):
+                case Err(FileFiberTldrBridgeErrorV1.Capacity): ()
+                case other: fail("waiter capacity was refunded or ignored: {other}")
+            expect(bridge.waits.len()).to_equal(0)
+        _abort(run)
+
+    it "cancels one interested fiber without canceling the shared producer or other subscriber":
+        var run = _new([_entry("a", "use shared\n"), _entry("b", "use shared\n")], 8, 105u64)
+        unsafe(capabilities: [ffi]):
+            val bridge = run.tldr_bridge.unwrap()
+            bridge.prepare_wait(run.table, 0, "shared").unwrap()
+            bridge.arm_wait(run.table, 0).unwrap()
+            bridge.prepare_wait(run.table, 1, "shared").unwrap()
+            bridge.arm_wait(run.table, 1).unwrap()
+            bridge.cancel_wait(run.table, 0, "consumer cancelled").unwrap()
+            bridge.publish(run.table, "shared", "tldr:shared").unwrap()
+            var wakes: [FileFiberTldrWakeV1] = []
+            for _round in 0..4:
+                bridge.advance(run.table).unwrap()
+                wakes = wakes + bridge.take_wakes()
+            var first_error = ""
+            var second_error = "missing second wake"
+            var first_seen = false
+            var second_seen = false
+            for wake in wakes:
+                if wake.fiber == 0:
+                    first_error = wake.error
+                    first_seen = true
+                if wake.fiber == 1:
+                    second_error = wake.error
+                    second_seen = true
+            expect(first_error).to_contain("consumer cancelled")
+            expect(second_error).to_equal("")
+            expect(first_seen).to_be(true)
+            expect(second_seen).to_be(true)
+            expect(bridge.waits.len()).to_equal(0)
+            expect(bridge.ring.occupancy()).to_equal(0u64)
+            expect(run.table.is_loaded("shared")).to_be(true)
+        _abort(run)
+
+    it "keeps a dispatched producer alive on Busy and accepts its real callback before close":
+        var run = _new([_entry("producer", "fn p(): 1\n")], 4, 106u64)
+        run.advance(_imports)
+        val dispatched = run.take_parse_requests()
+        expect(dispatched.len()).to_equal(1)
+        match file_fiber_try_end_tldr_async_v1(run):
+            case Err(FileFiberTldrBridgeErrorV1.Busy): ()
+            case other: fail("end did not report Busy for dispatched host work: {other}")
+        match file_fiber_abort_tldr_async_v1(run, "requested abort"):
+            case Err(FileFiberTldrBridgeErrorV1.Busy): ()
+            case other: fail("abort freed or ignored dispatched host work: {other}")
+        run.parse_done(dispatched[0], "tldr:producer", "")
+        run.parse_done(dispatched[0], "late duplicate", "late duplicate error")
+        expect(run.table.entries["producer"]).to_equal("tldr:producer")
+        expect(run.error[0]).to_equal("")
+        var completed = false
+        for _round in 0..16:
+            run.advance(_imports)
+            if file_fiber_finished_v1(run): completed = true
+            if completed: break
+        expect(completed).to_be(true)
+        expect(file_fiber_try_end_tldr_async_v1(run).unwrap()).to_be(true)
+        expect(run.table.is_loaded("producer")).to_be(true)
+        run.parse_done(dispatched[0], "late result", "")
+        expect(run.table.is_loaded("producer")).to_be(true)
+
+    it "keeps a notification failure Busy until a real parse callback is acknowledged, then aborts safely":
+        var run = _new([_entry("consumer", "use outside\n"),
+            _entry("pending", "fn pending(): 0\n")], 8, 110u64)
+        var pending_index = -1
+        var waiting = false
+        for _round in 0..16:
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                if run.entries[i].module_key == "consumer":
+                    run.parse_done(i, "tldr:consumer", "")
+                else:
+                    pending_index = i
+            unsafe(capabilities: [ffi]):
+                waiting = run.tldr_bridge.unwrap().waits.len() == 1
+            if waiting and pending_index >= 0: break
+        expect(waiting).to_be(true)
+        expect(pending_index).to_be_greater_than(-1)
+        expect(run.take_fill_requests()).to_equal(["outside"])
+        # A host claims a successful fill callback without publishing the
+        # table's canonical outcome. This is an invalid producer transition,
+        # not evidence that the AsyncRef became ready.
+        run.module_filled("outside", "")
+        val original_error = run.close_error
+        expect(original_error).to_contain("async completion notification failed")
+        expect(file_fiber_finished_v1(run)).to_be(false)
+        expect(run.closed).to_be(false)
+        run.parse_done(pending_index, "tldr:pending", "")
+        expect(file_fiber_finished_v1(run)).to_be(true)
+        expect(run.closed).to_be(true)
+        expect(run.close_error).to_contain("async completion notification failed")
+
+    it "fills an outside key through the SourceReader adapter and shares one outcome":
+        var run = _new([_entry("a", "use outside\n"), _entry("b", "use outside\n")], 8, 107u64)
+        unsafe(capabilities: [ffi]):
+            val bridge = run.tldr_bridge.unwrap()
+            bridge.prepare_wait(run.table, 0, "outside").unwrap()
+            bridge.arm_wait(run.table, 0).unwrap()
+            bridge.prepare_wait(run.table, 1, "outside").unwrap()
+            bridge.arm_wait(run.table, 1).unwrap()
+            val requests = run.table.take_fill_requests()
+            expect(requests).to_equal(["outside"])
+            expect(tldr_table_fill_async_v1(run.table, StubReader(broken: ""),
+                "outside", "virtual/outside.spl")).to_equal("")
+            expect(run.table.take_fill_requests()).to_equal([])
+            bridge.notice_terminal("outside").unwrap()
+            var wakes: [FileFiberTldrWakeV1] = []
+            for _round in 0..4:
+                bridge.advance(run.table).unwrap()
+                wakes = wakes + bridge.take_wakes()
+            expect(wakes.len()).to_equal(2)
+            expect(wakes[0].fiber != wakes[1].fiber).to_be(true)
+            expect(bridge.waits.len()).to_equal(0)
+            expect(bridge.ring.occupancy()).to_equal(0u64)
+            expect(run.table.entries["outside"]).to_equal("tldr:virtual/outside.spl")
+        _abort(run)
+
+    it "delivers the exact outside source failure to every canonical waiter":
+        var run = _new([_entry("a", "use missing\n"), _entry("b", "use missing\n")], 8, 108u64)
+        unsafe(capabilities: [ffi]):
+            val bridge = run.tldr_bridge.unwrap()
+            bridge.prepare_wait(run.table, 0, "missing").unwrap()
+            bridge.arm_wait(run.table, 0).unwrap()
+            bridge.prepare_wait(run.table, 1, "missing").unwrap()
+            bridge.arm_wait(run.table, 1).unwrap()
+            expect(run.table.take_fill_requests()).to_equal(["missing"])
+            val diagnostic = "source error: virtual/missing.spl"
+            expect(tldr_table_fill_async_v1(run.table, StubReader(broken: "virtual/missing.spl"),
+                "missing", "virtual/missing.spl")).to_equal(diagnostic)
+            bridge.notice_terminal("missing").unwrap()
+            var wakes: [FileFiberTldrWakeV1] = []
+            for _round in 0..4:
+                bridge.advance(run.table).unwrap()
+                wakes = wakes + bridge.take_wakes()
+            expect(wakes.len()).to_equal(2)
+            expect(wakes[0].fiber != wakes[1].fiber).to_be(true)
+            expect(bridge.waits.len()).to_equal(0)
+            expect(bridge.ring.occupancy()).to_equal(0u64)
+            expect(wakes[0].error).to_equal(diagnostic)
+            expect(wakes[1].error).to_equal(diagnostic)
+        _abort(run)

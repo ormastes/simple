@@ -81,6 +81,19 @@ static int64_t spl_pool_boxed_task_dispatch(int64_t raw_task) {
     return result;
 }
 
+/* Zero-argument twin of spl_pool_boxed_task_dispatch for rt_pool_submit: a
+ * registered closure's func_ptr is the boxed entry `(closure) -> tagged`. */
+static int64_t spl_pool_boxed0_task_dispatch(int64_t raw_task) {
+    RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
+    if (task == NULL || task->boxed_entry == NULL) return 0;
+    int64_t closure = task->boxed_closure;
+    int64_t (*entry0)(int64_t) = (int64_t (*)(int64_t))(intptr_t)task->boxed_entry;
+    int64_t result = rt_value_unbox_int(entry0(closure));
+    task->boxed_closure = 0; /* the submit pin ends with the run, exactly once */
+    rt_closure_release(closure);
+    return result;
+}
+
 /* Every task free goes through here: a task freed unrun drops its submit pin. */
 static void spl_pool_task_free(RtPoolTask* task) {
     if (task == NULL) return;
@@ -822,6 +835,32 @@ int64_t rt_pool_safepoint(void) {
 static RtPoolTask* rt_pool_task_create(int64_t arg0, int64_t arg1) {
     int64_t closure_ptr = (arg1 != 0) ? arg1 : arg0;
     if (closure_ptr == 0) return NULL;
+    /* A native Simple closure value is a TAG_HEAP-tagged RtCoreClosure
+     * {kind, func_ptr=boxed `(closure) -> tagged`, captures...}; its first
+     * word is not an entry. Dispatch it boxed, pinned until it has run. */
+    int64_t boxed = rt_closure_func_ptr(closure_ptr);
+    if (boxed != 0) {
+        if (!rt_closure_retain(closure_ptr)) return NULL;
+        RtPoolTask* btask = (RtPoolTask*)calloc(1, sizeof(RtPoolTask));
+        if (btask == NULL) {
+            rt_closure_release(closure_ptr);
+            return NULL;
+        }
+        btask->boxed_entry = (int64_t (*)(int64_t, int64_t))(intptr_t)boxed;
+        btask->boxed_closure = closure_ptr;
+        btask->entry = spl_pool_boxed0_task_dispatch;
+        btask->closure_ptr = (int64_t)(intptr_t)btask;
+#ifdef RT_POOL_PTHREAD
+        pthread_mutex_init(&btask->lock, NULL);
+        pthread_cond_init(&btask->done_cond, NULL);
+#else
+        InitializeCriticalSection(&btask->lock);
+        InitializeConditionVariable(&btask->done_cond);
+#endif
+        return btask;
+    }
+    /* Legacy raw record: first word is `int64_t entry(record)`. */
+    if ((((uint64_t)closure_ptr) & 7ULL) != 0) return NULL;
     rt_pool_closure_fn_t entry = *(rt_pool_closure_fn_t*)(intptr_t)closure_ptr;
     if (entry == NULL) return NULL;
     RtPoolTask* task = (RtPoolTask*)calloc(1, sizeof(RtPoolTask));

@@ -3,6 +3,10 @@
 
 Synthetic receipts only: these prove the parser refuses malformed or mismatched
 evidence. They are not a BuildRunner Hello PASS.
+
+Hosts: runs wherever CPython 3 runs (macOS, Linux, FreeBSD, Windows). SimpleOS
+has no CPython, so this file does not run there; the Simple-side receipt
+contract is covered by test/01_unit/app/bootstrap_builder/result_receipt_decode_spec.spl.
 """
 import hashlib
 import importlib.util

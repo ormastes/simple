@@ -1,0 +1,430 @@
+# Bounded adapter from the canonical TLDR AsyncRef outcome to the existing
+# FileFiber scalar scheduler wake protocol. This module owns no producer or
+# resource registry; TldrTableV1 remains the sole result owner.
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, TldrAsyncErrorV1}
+use std.nogc_async_mut.concurrent.lockless_map_i64.{MapError}
+use std.common.contracts.execution.simple_ring_async_v1.{RingToken, RingTerminalKind, RingCompletion, TaskPollResult}
+use std.nogc_async_mut.async_ring.simple_ring.{
+    SimpleRing, SimpleRingError, RingReservation, RingCancelOutcome}
+use std.nogc_async_mut.async_ring.async_ref.{
+    AsyncRefI64, AsyncRefError, AsyncSubscriptionI64, AsyncWakeCursorI64, AsyncWakeI64,
+    AsyncWakeScanI64, AsyncRefStateI64, async_ref_deliver_wake_i64}
+
+const _FF_WAIT_RESERVED: i64 = 0
+const _FF_WAIT_ARMED: i64 = 1
+const _FF_WAIT_TERMINAL: i64 = 2
+const _FF_WAKE_BATCH: i64 = 32
+
+pub enum FileFiberTldrBridgeErrorV1:
+    Busy
+    Closed
+    Capacity
+    InvalidKey
+    InvalidFiber
+    TokenMismatch
+    Map(MapError)
+    Table(TldrAsyncErrorV1)
+    Reference(AsyncRefError)
+    Ring(SimpleRingError)
+
+pub struct FileFiberTldrWaitV1:
+    fiber: i64
+    key: text
+    reference: AsyncRefI64
+    token: RingToken
+    reservation: RingReservation?
+    subscription: AsyncSubscriptionI64?
+    state: i64
+
+pub struct FileFiberTldrWakeV1:
+    fiber: i64
+    error: text
+
+pub class FileFiberTldrBridgeV1:
+    ring: SimpleRing<i64, i64>
+    owner_id: u64
+    ring_id: u64
+    fiber_count: i64
+    waiter_capacity: i64
+    waiter_charges: i64
+    waits: [FileFiberTldrWaitV1]
+    keys: [text]
+    references: [AsyncRefI64]
+    cursors: [AsyncWakeCursorI64?]
+    cursor_next: i64
+    wakes: [FileFiberTldrWakeV1]
+    pending_completion: RingCompletion<i64>?
+    closed: bool
+
+    pub static fn create(ring_id: u64, owner_id: u64, fiber_count: i64,
+            waiter_capacity: i64) -> Result<FileFiberTldrBridgeV1, FileFiberTldrBridgeErrorV1>:
+        if fiber_count < 0 or waiter_capacity < 0:
+            return Err(FileFiberTldrBridgeErrorV1.Capacity)
+        val capacity = if fiber_count > 0: fiber_count else: 1
+        match SimpleRing<i64, i64>.create(ring_id, owner_id, capacity):
+            case Err(error): Err(FileFiberTldrBridgeErrorV1.Ring(error))
+            case Ok(ring):
+                Ok(FileFiberTldrBridgeV1(ring: ring, owner_id: owner_id,
+                    ring_id: ring_id, fiber_count: fiber_count,
+                    waiter_capacity: waiter_capacity, waiter_charges: 0,
+                    waits: [], keys: [], references: [], cursors: [], cursor_next: 0,
+                    wakes: [], pending_completion: nil, closed: false))
+
+    fn _wait_index(fiber: i64) -> i64:
+        for i in 0..self.waits.len():
+            if self.waits[i].fiber == fiber: return i
+        -1
+
+    fn _ref_index(key: text) -> i64:
+        for i in 0..self.keys.len():
+            if self.keys[i] == key: return i
+        -1
+
+    fn _same_token(left: RingToken, right: RingToken) -> bool:
+        (left.ring_id == right.ring_id and left.slot == right.slot and
+            left.generation.value == right.generation.value)
+
+    @unsafe(reason: "requests an AsyncRef from the table's live single-owner scope", capabilities: [ffi])
+    pub me prepare_wait(table: TldrTableV1, fiber: i64, key: text) -> Result<bool, FileFiberTldrBridgeErrorV1>:
+        if self.closed: return Err(FileFiberTldrBridgeErrorV1.Closed)
+        if fiber < 0 or fiber >= self.fiber_count or key == "":
+            return Err(FileFiberTldrBridgeErrorV1.InvalidFiber)
+        val old = self._wait_index(fiber)
+        if old >= 0:
+            if self.waits[old].key == key and self.waits[old].state != _FF_WAIT_TERMINAL:
+                return Ok(true)
+            return Err(FileFiberTldrBridgeErrorV1.Busy)
+        val reference = match table.request_async(table.handle(key, "")):
+            case Err(error): return Err(FileFiberTldrBridgeErrorV1.Table(error))
+            case Ok(value): value
+        match reference.try_ready():
+            case AsyncRefStateI64.Ready(_): return Ok(false)
+            case AsyncRefStateI64.Failed(_): return Ok(false)
+            case AsyncRefStateI64.InvalidReference: return Err(FileFiberTldrBridgeErrorV1.Closed)
+            case AsyncRefStateI64.Pending: ()
+        val reservation = match self.ring.reserve(self.owner_id, (fiber + 1).to_u64()):
+            case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+            case Ok(value): value
+        val ix = self._ref_index(key)
+        if ix < 0:
+            self.keys.push(key)
+            self.references.push(reference)
+            self.cursors.push(nil)
+        self.waits.push(FileFiberTldrWaitV1(fiber: fiber, key: key,
+            reference: reference, token: reservation.token,
+            reservation: Some(reservation), subscription: nil, state: _FF_WAIT_RESERVED))
+        Ok(true)
+
+    @unsafe(reason: "subscribes a canonical AsyncRef to a reserved ring token", capabilities: [ffi])
+    pub me arm_wait(table: TldrTableV1, fiber: i64) -> Result<bool, FileFiberTldrBridgeErrorV1>:
+        if self.closed: return Err(FileFiberTldrBridgeErrorV1.Closed)
+        val index = self._wait_index(fiber)
+        if index < 0: return Err(FileFiberTldrBridgeErrorV1.InvalidFiber)
+        if self.waits[index].state == _FF_WAIT_ARMED: return Ok(true)
+        if self.waits[index].state != _FF_WAIT_RESERVED:
+            return Err(FileFiberTldrBridgeErrorV1.Busy)
+        if self.waiter_charges >= self.waiter_capacity:
+            match self._release_reserved(index):
+                case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+                case Ok(_): ()
+            self.waits.remove(index)
+            return Err(FileFiberTldrBridgeErrorV1.Capacity)
+        self.waiter_charges = self.waiter_charges + 1
+        val subscription = match self.waits[index].reference.subscribe(self.waits[index].token):
+            case Err(error):
+                match self._release_reserved(index):
+                    case Err(release_error): return Err(FileFiberTldrBridgeErrorV1.Ring(release_error))
+                    case Ok(_): ()
+                self.waits.remove(index)
+                return Err(FileFiberTldrBridgeErrorV1.Reference(error))
+            case Ok(value): value
+        self.waits[index].subscription = Some(subscription)
+        match subscription.poll():
+            case TaskPollResult.Ready(_):
+                match subscription.cancel_interest():
+                    case Err(error): return Err(FileFiberTldrBridgeErrorV1.Reference(error))
+                    case Ok(_): ()
+                match self._release_reserved(index):
+                    case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+                    case Ok(_): ()
+                self.waits.remove(index)
+                return Ok(false)
+            case TaskPollResult.Pending(token):
+                if not self._same_token(token, self.waits[index].token):
+                    match self._cancel_and_release(index, "canonical token mismatch"):
+                        case Err(error): return Err(error)
+                        case Ok(_): ()
+                    return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
+        val reservation = match self.waits[index].reservation:
+            case Some(value): value
+            case nil: return Err(FileFiberTldrBridgeErrorV1.Busy)
+        val committed = match self.ring.commit(self.owner_id, reservation, fiber):
+            case Err(error):
+                match self._cancel_and_release(index, "ring commit failed"):
+                    case Err(cleanup_error): return Err(cleanup_error)
+                    case Ok(_): ()
+                return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+            case Ok(token): token
+        if not self._same_token(committed, self.waits[index].token):
+            match self._cancel_and_release(index, "ring commit token mismatch"):
+                case Err(error): return Err(error)
+                case Ok(_): ()
+            return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
+        self.waits[index].reservation = nil
+        self.waits[index].state = _FF_WAIT_ARMED
+        match self.ring.provider_take(1):
+            case Err(error):
+                match self._cancel_and_release(index, "provider admission failed"):
+                    case Err(cleanup_error): return Err(cleanup_error)
+                    case Ok(_): ()
+                match self._drain_completions(table):
+                    case Err(cleanup_error): return Err(cleanup_error)
+                    case Ok(_): ()
+                return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+            case Ok(nil):
+                match self._cancel_and_release(index, "provider admission returned no work"):
+                    case Err(error): return Err(error)
+                    case Ok(_): ()
+                match self._drain_completions(table):
+                    case Err(error): return Err(error)
+                    case Ok(_): ()
+                return Err(FileFiberTldrBridgeErrorV1.Busy)
+            case Ok(Some(submission)):
+                if not self._same_token(submission.token, self.waits[index].token) or submission.task_key != (fiber + 1).to_u64():
+                    match self._cancel_and_release(index, "provider returned a foreign token"):
+                        case Err(error): return Err(error)
+                        case Ok(_): ()
+                    match self._drain_completions(table):
+                        case Err(error): return Err(error)
+                        case Ok(_): ()
+                    return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
+        match subscription.poll():
+            case TaskPollResult.Ready(_):
+                match self.notice_terminal(self.waits[index].key):
+                    case Err(error): return Err(error)
+                    case Ok(_): ()
+            case TaskPollResult.Pending(_): ()
+        match self._drain_completions(table):
+            case Err(error): return Err(error)
+            case Ok(_): ()
+        Ok(self._wait_index(fiber) >= 0)
+
+    @unsafe(reason: "the table is the sole AsyncRef publisher for this live carrier", capabilities: [ffi])
+    pub me publish(table: TldrTableV1, key: text, value: text) -> Result<bool, FileFiberTldrBridgeErrorV1>:
+        if self.closed: return Err(FileFiberTldrBridgeErrorV1.Closed)
+        match table.publish_async(key, value):
+            case Err(error): Err(FileFiberTldrBridgeErrorV1.Table(error))
+            case Ok(published):
+                match self.notice_terminal(key):
+                    case Err(error): Err(error)
+                    case Ok(_): Ok(published)
+
+    @unsafe(reason: "the table is the sole AsyncRef publisher for this live carrier", capabilities: [ffi])
+    pub me fail(table: TldrTableV1, key: text, error_text: text) -> Result<bool, FileFiberTldrBridgeErrorV1>:
+        if self.closed: return Err(FileFiberTldrBridgeErrorV1.Closed)
+        match table.fail_async(key, error_text):
+            case Err(error): Err(FileFiberTldrBridgeErrorV1.Table(error))
+            case Ok(failed):
+                match self.notice_terminal(key):
+                    case Err(error): Err(error)
+                    case Ok(_): Ok(failed)
+
+    @unsafe(reason: "called by the actual table producer acknowledgement after terminal publication", capabilities: [ffi])
+    pub me notice_terminal(key: text) -> Result<(), FileFiberTldrBridgeErrorV1>:
+        if self.closed: return Err(FileFiberTldrBridgeErrorV1.Closed)
+        self._seed_key_cursor(key)
+
+    @unsafe(reason: "scans table-owned wake cursors and completes this ring's reservations", capabilities: [ffi])
+    pub me advance(table: TldrTableV1) -> Result<(), FileFiberTldrBridgeErrorV1>:
+        if self.closed: return Err(FileFiberTldrBridgeErrorV1.Closed)
+        var scanned = 0
+        var index = self.cursor_next
+        while scanned < _FF_WAKE_BATCH and scanned < self.cursors.len():
+            if index >= self.cursors.len(): index = 0
+            val i = index
+            index = index + 1
+            scanned = scanned + 1
+            if val cursor = self.cursors[i]:
+                match cursor.next_pending(1):
+                    case AsyncWakeScanI64.Wake(wake):
+                        match async_ref_deliver_wake_i64(self.ring, wake):
+                            case Ok(next): self.cursors[i] = Some(next)
+                            case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+                    case AsyncWakeScanI64.More(next): self.cursors[i] = Some(next)
+                    case AsyncWakeScanI64.Done: self.cursors[i] = nil
+                    case AsyncWakeScanI64.Invalid: return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
+        if self.cursors.len() > 0: self.cursor_next = index % self.cursors.len()
+        match self._drain_completions(table):
+            case Err(error): return Err(error)
+            case Ok(_): ()
+        Ok(())
+
+    @unsafe(reason: "obtains a wake cursor for a canonical reference in the live table scope", capabilities: [ffi])
+    me _seed_key_cursor(key: text) -> Result<(), FileFiberTldrBridgeErrorV1>:
+        val i = self._ref_index(key)
+        # A producer may finish before any consumer subscribes. The table has
+        # already validated its canonical claim; no cursor needs retaining.
+        if i < 0: return Ok(())
+        if self.cursors[i] != nil: return Ok(())
+        match self.references[i].try_ready():
+            case AsyncRefStateI64.InvalidReference: return Err(FileFiberTldrBridgeErrorV1.Closed)
+            case AsyncRefStateI64.Pending: return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
+            case AsyncRefStateI64.Ready(_): self.cursors[i] = self.references[i].wake_cursor()
+            case AsyncRefStateI64.Failed(_): self.cursors[i] = self.references[i].wake_cursor()
+        Ok(())
+
+    @unsafe(reason: "resolves the canonical outcome while its table scope is live", capabilities: [ffi])
+    me _drain_completions(table: TldrTableV1) -> Result<(), FileFiberTldrBridgeErrorV1>:
+        var drained = 0
+        while drained < _FF_WAKE_BATCH:
+            val completion = if val retained = self.pending_completion:
+                retained
+            else:
+                match self.ring.take_completion_retained(self.owner_id):
+                    case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+                    case Ok(nil): return Ok(())
+                    case Ok(Some(value)):
+                        self.pending_completion = Some(value)
+                        value
+            var found = -1
+            for i in 0..self.waits.len():
+                if self._same_token(self.waits[i].token, completion.token):
+                    found = i
+                    break
+            if found < 0:
+                # A foreign/stale completion is never allowed to release a live
+                # reservation owned by another record.
+                return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
+            val fiber = self.waits[found].fiber
+            if completion.task_key != (fiber + 1).to_u64():
+                return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
+            var error_text = ""
+            if completion.kind == RingTerminalKind.Cancelled:
+                error_text = completion.error
+            else:
+                match table.resolve_async(table.handle(self.waits[found].key, ""), self.waits[found].reference):
+                    case Err(TldrAsyncErrorV1.Source(message)): error_text = message
+                    case Err(error): return Err(FileFiberTldrBridgeErrorV1.Table(error))
+                    case Ok(nil): return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
+                    case Ok(Some(_)): ()
+            match self.ring.release_retained_completion(self.owner_id, completion.token):
+                case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+                case Ok(_): ()
+            self.pending_completion = nil
+            self.wakes.push(FileFiberTldrWakeV1(fiber: fiber, error: error_text))
+            self.waits.remove(found)
+            drained = drained + 1
+        Ok(())
+
+    me _release_reserved(index: i64) -> Result<(), SimpleRingError>:
+        if val reservation = self.waits[index].reservation:
+            match self.ring.release(self.owner_id, reservation):
+                case Ok(_):
+                    self.waits[index].reservation = nil
+                    Ok(())
+                case Err(error): Err(error)
+        else:
+            Ok(())
+
+    @unsafe(reason: "cancels this consumer's canonical interest and drains its ring reservation", capabilities: [ffi])
+    me _cancel_and_release(index: i64, reason: text) -> Result<bool, FileFiberTldrBridgeErrorV1>:
+        if val subscription = self.waits[index].subscription:
+            match subscription.cancel_interest():
+                case Err(error): return Err(FileFiberTldrBridgeErrorV1.Reference(error))
+                case Ok(_): ()
+        if val reservation = self.waits[index].reservation:
+            match self.ring.release(self.owner_id, reservation):
+                case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+                case Ok(_): ()
+            self.waits.remove(index)
+            return Ok(true)
+        else:
+            match self.ring.cancel(self.owner_id, self.waits[index].token):
+                case RingCancelOutcome.ProviderCancelRequested(token):
+                    match self.ring.complete_cancelled(token, reason):
+                        case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+                        case Ok(_): ()
+                case RingCancelOutcome.AlreadyTerminal(_): ()
+                case RingCancelOutcome.CancelledBeforeCommit(_):
+                    self.waits.remove(index)
+                    return Ok(true)
+                case RingCancelOutcome.UnknownOrStale(_):
+                    return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
+                case RingCancelOutcome.CancelRejected(error):
+                    return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+        if index < self.waits.len(): self.waits[index].state = _FF_WAIT_TERMINAL
+        Ok(true)
+
+    @unsafe(reason: "cancels only this fiber's subscription and drains its owned ring token", capabilities: [ffi])
+    pub me cancel_wait(table: TldrTableV1, fiber: i64, reason: text) -> Result<bool, FileFiberTldrBridgeErrorV1>:
+        if self.closed: return Err(FileFiberTldrBridgeErrorV1.Closed)
+        val index = self._wait_index(fiber)
+        if index < 0: return Ok(false)
+        match self._cancel_and_release(index, reason):
+            case Err(error): return Err(error)
+            case Ok(_): ()
+        match self._drain_completions(table):
+            case Err(error): return Err(error)
+            case Ok(_): ()
+        if self._wait_index(fiber) >= 0: return Err(FileFiberTldrBridgeErrorV1.Busy)
+        Ok(true)
+
+    @unsafe(reason: "quiesces every ring waiter owned by this carrier during cancellation", capabilities: [ffi])
+    pub me cancel_all(table: TldrTableV1, reason: text) -> Result<bool, FileFiberTldrBridgeErrorV1>:
+        if self.closed: return Err(FileFiberTldrBridgeErrorV1.Closed)
+        while self.waits.len() > 0:
+            val before = self.waits.len()
+            match self._cancel_and_release(before - 1, reason):
+                case Err(error): return Err(error)
+                case Ok(_): ()
+            match self._drain_completions(table):
+                case Err(error): return Err(error)
+                case Ok(_): ()
+            if self.waits.len() == before: return Err(FileFiberTldrBridgeErrorV1.Busy)
+        for _round in 0..(self.waiter_capacity + self.keys.len() + 2):
+            if not self._has_cursor(): break
+            match self.advance(table):
+                case Err(error): return Err(error)
+                case Ok(_): ()
+        if self.ring.occupancy() != 0: return Err(FileFiberTldrBridgeErrorV1.Busy)
+        Ok(true)
+
+    pub me take_wakes() -> [FileFiberTldrWakeV1]:
+        val out = self.wakes
+        self.wakes = []
+        out
+
+    pub fn quiescent() -> bool:
+        if (self.waits.len() != 0 or self.ring.occupancy() != 0 or self.wakes.len() != 0 or
+            self.pending_completion != nil): return false
+        for cursor in self.cursors:
+            if cursor != nil: return false
+        true
+
+    pub fn pending_work() -> i64:
+        if self.quiescent(): 0 else: 1
+
+    pub fn deliverable_work() -> i64:
+        if self.wakes.len() > 0 or self.pending_completion != nil: return 1
+        for cursor in self.cursors:
+            if cursor != nil: return 1
+        0
+
+    fn _has_cursor() -> bool:
+        for cursor in self.cursors:
+            if cursor != nil: return true
+        false
+
+    @unsafe(reason: "clears every raw reference before the table's live map scope closes", capabilities: [ffi])
+    pub me clear_quiescent() -> Result<bool, FileFiberTldrBridgeErrorV1>:
+        if not self.quiescent(): return Err(FileFiberTldrBridgeErrorV1.Busy)
+        self.closed = true
+        self.cursors = []
+        self.references = []
+        self.keys = []
+        self.waits = []
+        self.pending_completion = nil
+        Ok(true)
+
+export FileFiberTldrBridgeErrorV1, FileFiberTldrWaitV1, FileFiberTldrWakeV1
+export FileFiberTldrBridgeV1

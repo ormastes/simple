@@ -1,0 +1,235 @@
+#!/bin/sh
+# Run one FreeBSD ladder command and retain bounded host observations around it.
+# This is diagnostic telemetry only: it does not classify memory failure or OOM.
+
+set -u
+
+if [ "$#" -lt 3 ]; then
+  echo "freebsd-command-telemetry: usage: evidence-dir -- command [args...]" >&2
+  exit 2
+fi
+evidence_dir=$1
+shift
+if [ "$1" != "--" ]; then
+  echo "freebsd-command-telemetry: expected -- before command" >&2
+  exit 2
+fi
+shift
+if [ "$#" -lt 1 ]; then
+  echo "freebsd-command-telemetry: missing command" >&2
+  exit 2
+fi
+
+receipt=$evidence_dir/command-telemetry.sdn
+storage_ready=1
+storage_warned=0
+if ! mkdir -p "$evidence_dir" 2>/dev/null; then
+  storage_ready=0
+fi
+if [ "$storage_ready" -eq 1 ]; then
+  if ! printf '' > "$receipt" 2>/dev/null; then storage_ready=0; fi
+fi
+
+warn_storage() {
+  if [ "$storage_warned" -eq 0 ]; then
+    echo "freebsd-command-telemetry: evidence storage unavailable; command result will be preserved" >&2
+    storage_warned=1
+  fi
+}
+
+record() {
+  [ "$storage_ready" -eq 1 ] || { warn_storage; return 1; }
+  if ! printf '%s: %s\n' "$1" "$2" >> "$receipt" 2>/dev/null; then
+    storage_ready=0
+    warn_storage
+    return 1
+  fi
+  return 0
+}
+
+record_unavailable() {
+  unavailable_key=$1
+  unavailable_reason=$2
+  unavailable_output=$3
+  printf '' > "$unavailable_output" 2>/dev/null || warn_storage
+  record "${unavailable_key}_status" unavailable || :
+  record "${unavailable_key}_reason" "$unavailable_reason" || :
+  record "${unavailable_key}_tool_exit_code" not-run || :
+  record "${unavailable_key}_truncated" false || :
+  record "${unavailable_key}_output" "${unavailable_key}.log" || :
+}
+
+# Run one telemetry command behind a bounded timeout and a bounded raw capture.
+# The file-size limit caps intermediate bytes; awk retains only the last N lines
+# and truncates each line before writing the smaller receipt artifact.
+capture_observation() {
+  obs_snapshot=$1
+  obs_name=$2
+  obs_lines=$3
+  obs_chars=$4
+  shift 4
+  obs_key=${obs_snapshot}_${obs_name}
+  obs_output=$evidence_dir/$obs_key.log
+  obs_truncated_file=$evidence_dir/$obs_key.truncated
+  obs_raw=$evidence_dir/.telemetry-$obs_key-$$.raw
+  obs_rc_file=$evidence_dir/.telemetry-$obs_key-$$.exit
+
+  if [ "$storage_ready" -ne 1 ]; then
+    warn_storage
+    return 1
+  fi
+  if ! printf '' > "$obs_output" 2>/dev/null; then
+    storage_ready=0
+    warn_storage
+    return 1
+  fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    record_unavailable "$obs_key" timeout-tool-unavailable "$obs_output"
+    return 0
+  fi
+  if ! command -v "$1" >/dev/null 2>&1; then
+    record_unavailable "$obs_key" tool-unavailable "$obs_output"
+    return 0
+  fi
+  if ! command -v awk >/dev/null 2>&1; then
+    record_unavailable "$obs_key" bounded-capture-tool-unavailable "$obs_output"
+    return 0
+  fi
+  if ! (ulimit -f 512) 2>/dev/null; then
+    record_unavailable "$obs_key" bounded-file-limit-unavailable "$obs_output"
+    return 0
+  fi
+  (
+    ulimit -f 512 2>/dev/null || exit 125
+    timeout -k 1 5 "$@" > "$obs_raw" 2>&1
+    obs_rc=$?
+    printf '%s\n' "$obs_rc" > "$obs_rc_file" 2>/dev/null || :
+  )
+  obs_wait_rc=$?
+  LC_ALL=C awk -v keep_lines="$obs_lines" -v max_chars="$obs_chars" \
+    -v trunc_path="$obs_truncated_file" '
+      {
+        slot = (NR - 1) % keep_lines
+        kept[slot] = substr($0, 1, max_chars)
+        if (length($0) > max_chars) line_truncated = 1
+      }
+      END {
+        start = (NR > keep_lines) ? NR - keep_lines : 0
+        for (i = start; i < NR; i++) print kept[i % keep_lines]
+        print ((NR > keep_lines || line_truncated) ? "true" : "false") > trunc_path
+        close(trunc_path)
+      }
+    ' "$obs_raw" > "$obs_output"
+  obs_filter_rc=$?
+  obs_tool_rc=not-run
+  if [ -f "$obs_rc_file" ]; then obs_tool_rc=$(cat "$obs_rc_file" 2>/dev/null || echo not-readable); fi
+  obs_truncated=false
+  if [ -f "$obs_truncated_file" ]; then obs_truncated=$(cat "$obs_truncated_file" 2>/dev/null || echo false); fi
+  rm -f "$obs_raw" "$obs_rc_file" "$obs_truncated_file" 2>/dev/null || :
+
+  if [ "$obs_filter_rc" -ne 0 ] || [ "$obs_wait_rc" -ne 0 ] ||
+     [ "$obs_tool_rc" = not-run ] || [ "$obs_tool_rc" = not-readable ]; then
+    record "${obs_key}_status" unavailable || :
+    record "${obs_key}_reason" bounded-capture-failed || :
+  elif [ "$obs_tool_rc" -eq 0 ]; then
+    record "${obs_key}_status" available || :
+    record "${obs_key}_reason" none || :
+  else
+    record "${obs_key}_status" unavailable || :
+    if [ "$obs_tool_rc" -eq 124 ]; then
+      record "${obs_key}_reason" timeout-or-command-exit-124 || :
+    else
+      record "${obs_key}_reason" command-failed || :
+    fi
+  fi
+  record "${obs_key}_tool_exit_code" "$obs_tool_rc" || :
+  record "${obs_key}_truncated" "$obs_truncated" || :
+  record "${obs_key}_output" "${obs_key}.log" || :
+  return 0
+}
+
+snapshot() {
+  snapshot_name=$1
+  capture_observation "$snapshot_name" timestamp 1 64 date -u +%s
+  capture_observation "$snapshot_name" dmesg 80 2048 dmesg
+  capture_observation "$snapshot_name" sysctl_hw_physmem 1 512 sysctl -n hw.physmem
+  capture_observation "$snapshot_name" sysctl_hw_pagesize 1 512 sysctl -n hw.pagesize
+  capture_observation "$snapshot_name" sysctl_vm_free_count 1 512 sysctl -n vm.stats.vm.v_free_count
+  capture_observation "$snapshot_name" sysctl_vm_inactive_count 1 512 sysctl -n vm.stats.vm.v_inactive_count
+  capture_observation "$snapshot_name" swapinfo 24 512 swapinfo -h
+}
+
+peak_status=unavailable
+peak_reason=evidence-unavailable
+peak_scope=single-command-rusage-not-process-tree-peak
+peak_output=none
+peak_unit=unavailable
+peak_probe=$evidence_dir/.telemetry-time-probe-$$
+peak_raw=$evidence_dir/.telemetry-time-output-$$
+peak_receipt=$evidence_dir/command-peak-rusage.txt
+peak_host=unknown
+if command -v timeout >/dev/null 2>&1 && command -v uname >/dev/null 2>&1; then
+  peak_host=$(timeout -k 1 5 uname -s 2>/dev/null) || peak_host=unknown
+fi
+if [ "$storage_ready" -eq 1 ]; then
+  if [ "$peak_host" = FreeBSD ] && [ -x /usr/bin/time ] && command -v grep >/dev/null 2>&1 &&
+     command -v timeout >/dev/null 2>&1 &&
+     LC_ALL=C timeout -k 1 5 /usr/bin/time -l -o "$peak_probe" /usr/bin/true >/dev/null 2>&1 &&
+     grep -Eiq 'maximum resident set size' "$peak_probe"; then
+    peak_status=available
+    peak_reason=none
+    peak_output=command-peak-rusage.txt
+    peak_unit=KiB
+  else
+    peak_reason=unsupported-or-probe-failed
+  fi
+  rm -f "$peak_probe" 2>/dev/null || :
+fi
+
+record schema freebsd-command-telemetry-v1 || :
+record peak_capability_status "$peak_status" || :
+record peak_capability_reason "$peak_reason" || :
+record peak_scope "$peak_scope" || :
+record timestamp_semantics observational-only || :
+snapshot before
+
+if [ "$storage_ready" -eq 1 ] && [ "$peak_status" = available ]; then
+  /usr/bin/time -l -o "$peak_raw" "$@"
+  command_status=$?
+  if [ -f "$peak_raw" ] && LC_ALL=C awk '
+      tolower($0) ~ /maximum resident set size/ {
+        print substr($0, 1, 512)
+        found = 1
+        exit
+      }
+      END { if (!found) exit 1 }
+    ' "$peak_raw" > "$peak_receipt"; then
+    peak_status=available
+    peak_reason=none
+    peak_output=command-peak-rusage.txt
+    peak_unit=KiB
+  else
+    peak_status=unavailable
+    peak_reason=peak-output-unavailable
+    peak_output=none
+    peak_unit=unavailable
+    rm -f "$peak_receipt" 2>/dev/null || :
+  fi
+  rm -f "$peak_raw" 2>/dev/null || :
+else
+  "$@"
+  command_status=$?
+  peak_status=unavailable
+  peak_output=none
+  peak_unit=unavailable
+  if [ "$storage_ready" -ne 1 ]; then peak_reason=evidence-unavailable; fi
+fi
+
+snapshot after
+record peak_status "$peak_status" || :
+record peak_reason "$peak_reason" || :
+record peak_output "$peak_output" || :
+record peak_unit "$peak_unit" || :
+record command_exit_status "$command_status" || :
+if [ "$storage_ready" -ne 1 ]; then warn_storage; fi
+exit "$command_status"

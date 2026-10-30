@@ -1,0 +1,121 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Reproducing spec for the rt_file_canonicalize cross-engine contract (2026-10-30).
+# The interpreter resolved symlinks (fs::canonicalize) while the native Rust
+# runtime and the C runtime only normalized lexically, so on macOS "/tmp"
+# canonicalized to "/private/tmp" under the interpreter and stayed "/tmp" in a
+# native build; the interpreter also never failed (cwd-join fallback) while the
+# native engines returned nil.
+
+use std.spec.step
+use std.spec.*
+
+use std.io_runtime.{host_os, shell, file_exists}
+use std.sffi.fs.{file_canonicalize}
+
+# ============================================================================
+# ONE contract on every engine: realpath semantics (absolute, every symlink
+# resolved, the path must exist); nil is the single failure value.
+#
+# Engines: the owner running this spec (interpreter or native Rust runtime),
+# and -- when `cc` exists -- the C runtime compiled from source and driven by
+# a tiny harness on the same inputs. The native Rust runtime and the
+# interpreter are additionally pinned by cargo tests
+# (runtime file_ops.rs `canonicalize_resolves_symlinks_and_fails_closed`,
+# compiler interpreter_extern/file_io.rs `canonicalize_tests`). The
+# simple-core owner (core_fs.spl) shares the libc realpath call and reports
+# nil on SimpleOS, whose realpath is ENOSYS by design.
+# ============================================================================
+
+fn c_harness_source() -> text:
+    "#include <stdio.h>\n#include <stdint.h>\nint64_t rt_file_canonicalize(const uint8_t* p, uint64_t n);\nint64_t rt_string_len(int64_t s);\nconst uint8_t* rt_string_data(int64_t s);\nint main(int argc, char** argv){for(int i=1;i<argc;i++){size_t n=0;while(argv[i][n])n++;int64_t s=rt_file_canonicalize((const uint8_t*)argv[i],n);if(s==3){printf(\"nil\\n\");continue;}fwrite(rt_string_data(s),1,(size_t)rt_string_len(s),stdout);fputc(10,stdout);}return 0;}\n"
+
+fn as_evidence(value: text?) -> text:
+    if value == nil: "nil" else: value
+
+describe "rt_file_canonicalize cross-engine contract":
+    context "the owner running this spec":
+        it "resolves symlinks to the real target":
+            # @req REQ-SSPEC-UNIT
+            step("resolves symlinks to the real target")
+            if host_os() == "windows":
+                step("symlink case skipped: creating symlinks needs a privilege on Windows")
+                expect(true).to_equal(true)
+            else:
+                val mk = shell("mktemp -d 2>/dev/null || mktemp -d -t spl_canon")
+                expect(mk.exit_code).to_equal(0)
+                val dir = mk.stdout.trim()
+                expect(dir.len() > 0).to_equal(true)
+                val made = shell("printf x > '{dir}/real.txt' && ln -s '{dir}/real.txt' '{dir}/link.txt'")
+                expect(made.exit_code).to_equal(0)
+                val real = file_canonicalize("{dir}/real.txt")
+                val link = file_canonicalize("{dir}/link.txt")
+                shell("rm -rf '{dir}'")
+                expect(real != nil).to_equal(true)
+                expect(link != nil).to_equal(true)
+                expect(as_evidence(link)).to_equal(as_evidence(real))
+                expect(as_evidence(real).ends_with("/real.txt")).to_equal(true)
+                expect(as_evidence(link).ends_with("/link.txt")).to_equal(false)
+
+        it "returns nil for a missing path instead of a lexical guess":
+            # @req REQ-SSPEC-UNIT
+            step("returns nil for a missing path instead of a lexical guess")
+            expect(file_canonicalize("/definitely/not/a/path/{host_os()}/missing.txt") == nil).to_equal(true)
+            expect(file_canonicalize("relative-missing-{host_os()}.txt") == nil).to_equal(true)
+            expect(file_canonicalize("") == nil).to_equal(true)
+
+        it "makes /tmp canonical on macOS (the /private/tmp repro)":
+            # @req REQ-SSPEC-UNIT
+            step("makes /tmp canonical on macOS (the /private/tmp repro)")
+            if host_os() == "macos":
+                expect(as_evidence(file_canonicalize("/tmp"))).to_equal("/private/tmp")
+            elif host_os() != "windows":
+                val tmp = file_canonicalize("/tmp")
+                expect(tmp != nil).to_equal(true)
+                expect(as_evidence(tmp).starts_with("/")).to_equal(true)
+            else:
+                expect(true).to_equal(true)
+
+    context "against the C runtime owner compiled from source":
+        it "agrees with the owner running this spec on symlink, missing and /tmp inputs":
+            # @req REQ-SSPEC-UNIT
+            step("agrees with the owner running this spec on symlink, missing and /tmp inputs")
+            val os = host_os()
+            val source = "src/runtime/runtime_native.c"
+            if os == "windows" or not file_exists(source):
+                step("C cross-check skipped: host={os} source_present={file_exists(source)}")
+                expect(true).to_equal(true)
+            elif shell("command -v cc >/dev/null 2>&1").exit_code != 0:
+                step("C cross-check skipped: no cc on PATH")
+                expect(true).to_equal(true)
+            else:
+                val mk = shell("mktemp -d 2>/dev/null || mktemp -d -t spl_canon_c")
+                expect(mk.exit_code).to_equal(0)
+                val dir = mk.stdout.trim()
+                expect(dir.len() > 0).to_equal(true)
+                val made = shell("printf x > '{dir}/real.txt' && ln -s '{dir}/real.txt' '{dir}/link.txt' && printf '%s' '{c_harness_source()}' > '{dir}/harness.c'")
+                expect(made.exit_code).to_equal(0)
+                val lazy = if os == "macos": "-Wl,-undefined,dynamic_lookup" else: "-Wl,--unresolved-symbols=ignore-all"
+                val build = shell("cc -w -O0 -I src/runtime src/runtime/runtime_native.c '{dir}/harness.c' {lazy} -o '{dir}/harness' 2>&1")
+                if build.exit_code != 0:
+                    print "C runtime harness build failed:\n{build.stdout}"
+                expect(build.exit_code).to_equal(0)
+                val run = shell("'{dir}/harness' '{dir}/link.txt' '{dir}/missing.txt' '{dir}/nope/../real.txt' /tmp ''")
+                val mine = [
+                    as_evidence(file_canonicalize("{dir}/link.txt")),
+                    as_evidence(file_canonicalize("{dir}/missing.txt")),
+                    as_evidence(file_canonicalize("{dir}/nope/../real.txt")),
+                    as_evidence(file_canonicalize("/tmp")),
+                    as_evidence(file_canonicalize(""))
+                ]
+                shell("rm -rf '{dir}'")
+                expect(run.exit_code).to_equal(0)
+                val c_lines = run.stdout.trim().split("\n")
+                expect(c_lines.len()).to_equal(5)
+                var i = 0
+                while i < 5:
+                    expect(c_lines[i]).to_equal(mine[i])
+                    i = i + 1
+                expect(c_lines[1]).to_equal("nil")
+                expect(c_lines[2]).to_equal("nil")
+                expect(c_lines[4]).to_equal("nil")

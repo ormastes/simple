@@ -4934,6 +4934,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
               sh "${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs" \
               "--target=//bootstrap:stage3" \
               "--reason=${produce_stage3_receipt_reason}" \
+              "--planner-backend=${backend}" \
               "--parent-compiler=${stage2_bin}" \
               "--bootstrap-output=${output_dir}" \
               "--out=${stage3_planner_receipt}"; then
@@ -4954,6 +4955,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
               sh "${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs" \
               "--target=//bootstrap:stage4" \
               "--reason=${produce_managed_receipt_reason}" \
+              "--planner-backend=${backend}" \
               "--parent-compiler=${stage2_bin}" \
               "--bootstrap-output=${output_dir}" \
               "--out=${managed_stage4_planner_receipt}"; then

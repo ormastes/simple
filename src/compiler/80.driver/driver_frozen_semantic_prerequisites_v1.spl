@@ -1,0 +1,338 @@
+# Actual diagnostic-only driver call: frozen source -> real frontend -> HIR
+# -> enforcing HM diagnostics. No cache, semantic grant, codegen or publication.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.semantic_prerequisite_types_v1.*
+use compiler.driver.semantic_prerequisite_profile_v1.*
+use compiler.driver.semantic_prerequisite_hir_observation_v1.{frozen_semantic_observe_hir_function_v1}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1, frontend_cfg_target_from_triple_v1}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.core.parser.{parser_initialization_generation_v1, par_had_error_get,
+    par_had_error_mirror_get, par_had_error_mirror_clear, parser_first_error_get}
+use compiler.core.ast.{ast_prepare_persistent_owner_v1}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules, module_surfaces_retained_alignment}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.driver.driver_source_parse_support.{driver_parse_transient_scope_begin_v1,
+    driver_parse_transient_scope_pause_v1, driver_promote_retained_frontend_owners_v1,
+    driver_end_transient_parse_scope}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_promote}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.driver.semantic_owner_prerequisite_types_v1.*
+use compiler.frontend.frontend_target_cfg_receipt_v1.{FrontendCfgDecisionReceiptV1}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.portable_body_budget.{PortableBodyLedgerV1}
+use compiler.hir.portable_body_profile_types.{PortableBodyLimitsV1, PortableBodyErrorV1}
+use compiler.hir.portable_body_semantics.{portable_hir_semantic_facts_from_typed_v1,
+    portable_embedded_body_profile_digest_v1}
+use compiler.types.type_infer.typed_module_owner_v1.{hm_infer_owned_typed_module_v1, HmTypedModuleLimitsV1}
+
+# Source/AST owners and handle constructors remain private to the transaction
+# that executes the real parser and HM consumer below. No caller DTO factory.
+struct _FrozenDeclarationHandleV1:
+    owner_identity: i64
+    epoch: i64
+    parser_generation: i64
+    serial: i64
+
+class _FrozenSourceDeclarationOwnerV1:
+    identity: i64
+    epoch: i64
+    parser_generation: i64
+    source_sha256: text
+    target_receipt: FrontendCfgDecisionReceiptV1
+    module: ParserModule
+    surfaces: ModuleSurfacesByName
+    surface_generation: i64
+    declaration_digest: text
+    limits: FrozenSemanticPrerequisiteLimitsV1
+    row: _FrozenDeclarationHandleV1?
+    closed: bool
+
+    fn validate(handle: _FrozenDeclarationHandleV1) -> Result<i64, text>:
+        if self.closed or transient_array_scope_state_v1() != 1: return Err("declaration-owner-retired")
+        if self.row == nil: return Err("declaration-handle-not-retained")
+        val row = self.row.unwrap()
+        if (handle.owner_identity != self.identity or handle.owner_identity != row.owner_identity or
+                handle.epoch != self.epoch or handle.epoch != row.epoch or
+                handle.serial != row.serial or handle.serial <= 0 or
+                handle.parser_generation != self.parser_generation or
+                handle.parser_generation != parser_initialization_generation_v1()): return Err("declaration-handle-foreign-or-stale")
+        if (self.surface_generation != self.surfaces.generation or
+                not module_surfaces_retained_alignment(self.surfaces) or
+                module_surface_canonical_digest_v1(self.module) != self.declaration_digest or
+                not frontend_cfg_receipt_valid_v1(self.target_receipt,
+                    self.target_receipt.source_identity, self.source_sha256, self.target_receipt.target_triple)):
+            return Err("declaration-owner-mutated")
+        val covered = frozen_semantic_ast_profile_v1(self.module, self.limits)
+        if not covered.supported or self.surfaces.surfaces.len() != 1:
+            return Err("declaration-universe-incomplete")
+        val surface = self.surfaces.surfaces[0]
+        if surface.callable_names.len() != covered.function_count or surface.callable_values.len() != covered.function_count:
+            return Err("declaration-universe-incomplete")
+        for name in self.module.function_order:
+            if not surface.callable_names.contains(name): return Err("declaration-owner-binding-missing")
+        Ok(covered.function_count)
+
+    me retire():
+        self.row = nil
+        self.epoch = self.epoch + 1
+        self.closed = true
+
+class _FrozenOwnerObservationV1:
+    observation: FrozenSemanticOwnerPrerequisiteObservationV1
+
+var _frozen_declaration_next_identity_v1: i64 = 1
+
+fn _portable_body_refusal_v1(error: PortableBodyErrorV1) -> text:
+    match error:
+        case UnsupportedSemantics(detail): "unsupported-semantics:" + detail
+        case BoundsExceeded(detail): "bounds:" + detail
+        case AuthorityUnavailable(detail): "authority-unavailable:" + detail
+        case InvalidProfileIdentity: "invalid-profile"
+        case UnsupportedBodyKind: "unsupported-body-kind"
+        case EncodeRefused: "encode-refused"
+        case DecodeRefused(detail): "decode-refused:" + detail
+
+fn _consume_frozen_source_owners_v1(request: FrozenSemanticPrerequisiteRequestV1,
+        module: ParserModule, receipt: FrontendCfgDecisionReceiptV1,
+        surfaces: ModuleSurfacesByName, hir: HirModule) -> FrozenSemanticOwnerPrerequisiteObservationV1:
+    var out = frozen_semantic_owner_unavailable_v1()
+    if _frozen_declaration_next_identity_v1 <= 0 or _frozen_declaration_next_identity_v1 == 9223372036854775807:
+        out.body_verifier_detail = "declaration-owner-identity-exhausted"
+        return out
+    val identity = _frozen_declaration_next_identity_v1
+    _frozen_declaration_next_identity_v1 = identity + 1
+    val generation = parser_initialization_generation_v1()
+    val handle = _FrozenDeclarationHandleV1(owner_identity: identity,
+        epoch: 1, parser_generation: generation, serial: 1)
+    val owner = _FrozenSourceDeclarationOwnerV1(identity: identity, epoch: 1,
+        parser_generation: generation, source_sha256: request.expected_source_sha256,
+        target_receipt: receipt, module: module, surfaces: surfaces,
+        surface_generation: surfaces.generation,
+        declaration_digest: module_surface_canonical_digest_v1(module), limits: request.limits,
+        row: Some(handle), closed: false)
+    out.declaration_handles_issued = if owner.row != nil: 1 else: 0
+    val consumed = owner.validate(handle)
+    if consumed.is_ok():
+        out.declaration_count = consumed.unwrap()
+        out.declaration_consumptions = out.declaration_consumptions + 1
+    # Exercise actual membership checks, not a copied diagnostic pass flag.
+    val foreign = _FrozenDeclarationHandleV1(owner_identity: identity + 1,
+        epoch: handle.epoch, parser_generation: generation, serial: handle.serial)
+    if owner.validate(foreign).is_err(): out.foreign_handle_refusals = out.foreign_handle_refusals + 1
+    if consumed.is_ok():
+        val annotated = hm_infer_owned_typed_module_v1(hir, HmTypedModuleLimitsV1(
+            max_functions: request.limits.max_functions, max_nodes: request.limits.max_ast_nodes,
+            max_depth: request.limits.max_depth, max_work: 1000000))
+        if annotated.is_err():
+            out.body_verifier_status = "unavailable"
+            out.body_verifier_detail = annotated.unwrap_err()
+        else:
+            val typed = annotated.unwrap()
+            out.hm_annotated_functions = typed.annotated_functions
+            out.hm_annotated_expressions = typed.annotated_expressions
+            # Actual existing visibility/CFG/Deny diagnostics on the typed clone
+            # remain required; the types layer never imports driver policy.
+            val typed_checks = collect_module_typecheck_receipt_v1(hir.name, typed.module, TypecheckPassSeverity.Deny)
+            if typed_checks.errors.len() != 0:
+                out.body_verifier_status = "unavailable"
+                out.body_verifier_detail = "typed-hir-driver-checks-rejected"
+            else:
+                out = _consume_typed_body_verifier_v1(request, typed.module, out)
+    # Terminal diagnostic sabotage operates on the actual retained registry.
+    # Nothing from this scope is installed into the five production issuer rows.
+    owner.surfaces.generation = owner.surfaces.generation + 1
+    if owner.validate(handle).is_err(): out.mutated_owner_refusals = out.mutated_owner_refusals + 1
+    owner.retire()
+    if owner.validate(handle).is_err(): out.retired_handle_refusals = out.retired_handle_refusals + 1
+    out.active_handles_after_retirement = if owner.row == nil: 0 else: 1
+    out
+
+fn _consume_typed_body_verifier_v1(request: FrozenSemanticPrerequisiteRequestV1,
+        hir: HirModule, observation: FrozenSemanticOwnerPrerequisiteObservationV1) -> FrozenSemanticOwnerPrerequisiteObservationV1:
+    var out = observation
+    val limits = PortableBodyLimitsV1.standard()
+    limits.max_functions = request.limits.max_functions
+    limits.max_nodes = request.limits.max_ast_nodes
+    limits.max_semantic_depth = request.limits.max_depth
+    val ledger_result = PortableBodyLedgerV1.create(limits)
+    if ledger_result.is_ok():
+        out.body_verifier_calls = out.body_verifier_calls + 1
+        val verified = portable_hir_semantic_facts_from_typed_v1(hir,
+            portable_embedded_body_profile_digest_v1(), ledger_result.unwrap())
+        if val Err(error) = verified:
+            out.body_verifier_status = "unavailable"
+            out.body_verifier_detail = _portable_body_refusal_v1(error)
+        else:
+            # Real typed facts still cannot create an L7 attempt/pin lease.
+            out.body_verifier_status = "facts-only"
+            out.body_verifier_detail = "live-attempt-pin-body-lease-required"
+    else:
+        out.body_verifier_status = "unavailable"
+        out.body_verifier_detail = "body-ledger-unavailable"
+    out
+
+fn _frozen_semantic_request_reason_v1(request: FrozenSemanticPrerequisiteRequestV1) -> text:
+    val limits = request.limits
+    if (limits.max_source_bytes <= 0 or limits.max_source_bytes > 65536 or
+            limits.max_functions <= 0 or limits.max_functions > 64 or
+            limits.max_ast_nodes <= 0 or limits.max_ast_nodes > 4096 or
+            limits.max_depth < 5 or limits.max_depth > 32): return "request-limits-unsupported"
+    if request.source_bytes.len() == 0 or request.source_bytes.len() > limits.max_source_bytes: return "source-byte-budget"
+    for field in [request.source_path, request.module_name, request.target_triple]:
+        if field.len() == 0 or field.len() > 256 or field.contains("\n") or field.contains("\r") or field.contains("\0"): return "source-identity-invalid"
+    if (request.source_path.starts_with("/") or request.source_path.contains("..") or
+            request.source_path.contains("\\") or not request.source_path.ends_with(".spl")): return "source-path-unsupported"
+    if request.expected_source_sha256.len() != 64 or sha256_u8_hex(request.source_bytes) != request.expected_source_sha256: return "source-digest-mismatch"
+    if frontend_cfg_target_from_triple_v1(request.target_triple).is_err(): return "target-unsupported"
+    ""
+
+fn _diagnose_frozen_semantic_borrowed_v1(request: FrozenSemanticPrerequisiteRequestV1,
+        identity: i64, owner_observation: _FrozenOwnerObservationV1?) -> FrozenSemanticPrerequisiteDiagnosticV1:
+    var result = frozen_semantic_diagnostic_v1(request, identity, "unsupported", "source-utf8-invalid")
+    val decoded = validated_utf8_bytes_to_text_linear(request.source_bytes)
+    if decoded.is_err(): return result
+    val source = decoded.unwrap()
+    val lexical_reason = frozen_semantic_lexical_profile_v1(source, request.limits)
+    if lexical_reason != "":
+        result.reason = lexical_reason
+        return result
+    par_had_error_mirror_clear()
+    val parsed = parse_full_frontend_target_receipted_uncached_in_borrowed_scope_v1(source,
+        request.source_path, request.module_name, Logger(level: 0), request.source_path,
+        request.expected_source_sha256, request.target_triple)
+    if parsed.is_err():
+        result.status = "rejected"
+        result.reason = "frontend-rejected"
+        result.errors = [parsed.unwrap_err()]
+        return result
+    val (module, target_receipt) = parsed.unwrap()
+    result.preprocessed_sha256 = target_receipt.preprocessed_digest
+    result.target_decision_digest = target_receipt.decision_digest
+    if par_had_error_get() or par_had_error_mirror_get():
+        result.status = "rejected"
+        result.reason = "parser-rejected"
+        result.errors = [parser_first_error_get()]
+        return result
+    if not frontend_cfg_receipt_valid_v1(target_receipt, request.source_path,
+            request.expected_source_sha256, request.target_triple):
+        result.reason = "target-receipt-mismatch"
+        return result
+    if target_receipt.decisions.len() != 0:
+        result.reason = "initial-profile-conditional-source-unsupported"
+        return result
+    result.parsed_functions = module.functions.len()
+    val profile = frozen_semantic_ast_profile_v1(module, request.limits)
+    result.visited_ast_nodes = profile.visited_nodes
+    if not profile.supported:
+        result.reason = profile.reason
+        return result
+    if module.name != request.module_name:
+        result.reason = "parsed-module-identity-mismatch"
+        return result
+    var modules: Dict<text, ParserModule> = {}
+    modules[request.module_name] = module
+    val sources = [SourceFile(path: request.source_path, authored_path: request.source_path,
+        content: source, module_name: request.module_name)]
+    val extracted = module_surfaces_from_modules(modules, sources)
+    if extracted.is_err():
+        result.status = "rejected"
+        result.reason = "declaration-extraction-rejected"
+        result.errors = [extracted.unwrap_err()]
+        return result
+    val surfaces = extracted.unwrap()
+    if not module_surfaces_retained_alignment(surfaces):
+        result.reason = "declaration-owner-invalid"
+        return result
+    var lowering = hirlowering_for_module(request.source_path, surfaces)
+    lowering.use_explicit_semantic_policy()
+    val hir = lowering.lower_module(module)
+    result.lowered_functions = hir.functions.len()
+    if lowering.errors.len() > 0:
+        result.status = "rejected"
+        result.reason = "hir-lowering-rejected"
+        for finding in lowering.errors: result.errors.push(finding.message)
+        return result
+    if hir.name != request.module_name or hir.path != request.source_path or hir.functions.len() != profile.function_count:
+        result.reason = "lowered-module-identity-or-count-mismatch"
+        return result
+    # This actual consumer runs infer_module; type_check_impl is not used.
+    val checked = collect_module_typecheck_receipt_v1(request.module_name, hir, TypecheckPassSeverity.Deny)
+    result.hm_checked_functions = hir.functions.len()
+    result.errors = checked.errors
+    result.warnings = checked.warnings
+    if checked.errors.len() > 0:
+        result.status = "rejected"
+        result.reason = "hm-typecheck-rejected"
+        return result
+    # Retain actual parser declaration order rather than dictionary iteration.
+    # At most 64 functions; every source name must match exactly one HIR owner.
+    for name in module.function_order:
+        var found = 0
+        for key in hir.functions.keys():
+            val function_ = hir.functions[key]
+            if function_.name != name: continue
+            found = found + 1
+            val observed = frozen_semantic_observe_hir_function_v1(function_)
+            if observed.is_err():
+                result.reason = observed.unwrap_err()
+                return result
+            result.observations.push(observed.unwrap())
+        if found != 1:
+            result.reason = "lowered-function-identity-missing-or-duplicate"
+            return result
+    result.status = "diagnosed"
+    result.reason = "actual-parse-hir-hm-diagnostics-only"
+    if val observation = owner_observation:
+        observation.observation = _consume_frozen_source_owners_v1(request, module, target_receipt, surfaces, hir)
+    result
+
+# Compiler driver API entry. Input bytes are already frozen; no path is opened.
+# Only idle drivers may enter the global frontend scratch boundary.
+pub fn compiler_driver_diagnose_frozen_semantic_prerequisites_v1(driver: CompilerDriver,
+        request: FrozenSemanticPrerequisiteRequestV1) -> FrozenSemanticPrerequisiteDiagnosticV1:
+    _run_frozen_semantic_prerequisites_v1(driver, request, false).diagnostic
+
+pub fn compiler_driver_observe_frozen_owner_prerequisites_v1(driver: CompilerDriver,
+        request: FrozenSemanticPrerequisiteRequestV1) -> FrozenSemanticOwnerPrerequisiteDiagnosticV1:
+    _run_frozen_semantic_prerequisites_v1(driver, request, true)
+
+fn _run_frozen_semantic_prerequisites_v1(driver: CompilerDriver,
+        request: FrozenSemanticPrerequisiteRequestV1, observe_owners: bool) -> FrozenSemanticOwnerPrerequisiteDiagnosticV1:
+    val owner_observation = _FrozenOwnerObservationV1(observation: frozen_semantic_owner_unavailable_v1())
+    val invalid = _frozen_semantic_request_reason_v1(request)
+    if invalid != "": return FrozenSemanticOwnerPrerequisiteDiagnosticV1(diagnostic: frozen_semantic_diagnostic_v1(request, driver.identity_id, "unsupported", invalid), owner_observation: owner_observation.observation)
+    if (driver.identity_id <= 0 or driver.ctx.has_errors() or driver.ctx.sources.len() != 0 or
+            driver.ctx.modules.len() != 0 or driver.ctx.hir_modules.len() != 0 or driver.ctx.mir_modules.len() != 0 or
+            driver.streaming_surface_owner_ready or driver.ctx.module_surfaces != nil):
+        return FrozenSemanticOwnerPrerequisiteDiagnosticV1(diagnostic: frozen_semantic_diagnostic_v1(request, driver.identity_id, "unsupported", "idle-driver-required"), owner_observation: owner_observation.observation)
+    if transient_array_scope_state_v1() != 0:
+        return FrozenSemanticOwnerPrerequisiteDiagnosticV1(diagnostic: frozen_semantic_diagnostic_v1(request, driver.identity_id, "unsupported", "foreign-scratch-scope-active"), owner_observation: owner_observation.observation)
+    ast_prepare_persistent_owner_v1()
+    val generation = parser_initialization_generation_v1()
+    if not driver_parse_transient_scope_begin_v1():
+        return FrozenSemanticOwnerPrerequisiteDiagnosticV1(diagnostic: frozen_semantic_diagnostic_v1(request, driver.identity_id, "unsupported", "scratch-scope-unavailable"), owner_observation: owner_observation.observation)
+    val consumer = if observe_owners: Some(owner_observation) else: nil
+    val diagnosed = _diagnose_frozen_semantic_borrowed_v1(request, driver.identity_id, consumer)
+    var result = FrozenSemanticOwnerPrerequisiteDiagnosticV1(diagnostic: diagnosed,
+        owner_observation: owner_observation.observation)
+    val paused = driver_parse_transient_scope_pause_v1()
+    var owned = false
+    var globals_owned = false
+    if paused:
+        globals_owned = driver_promote_retained_frontend_owners_v1(parser_initialization_generation_v1() != generation)
+        owned = transient_promote(result)
+    val ended = driver_end_transient_parse_scope()
+    if not paused or not globals_owned or not owned or not ended:
+        # A dangling diagnostics graph cannot be returned as a bounded failure.
+        panic("frozen semantic prerequisite scratch ownership failed")
+    result

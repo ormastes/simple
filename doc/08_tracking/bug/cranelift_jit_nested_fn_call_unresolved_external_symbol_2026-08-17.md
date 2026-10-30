@@ -93,3 +93,12 @@ earlier with a construct-level diagnostic. Both are resolver/lowering changes an
 are deliberately out of scope for this filing; the reproducer above is the
 deliverable.
 
+
+## See also (2026-10-30)
+
+Same `unresolved external symbol` text, different mechanism:
+`jit_pipeline_loader_skips_plain_package_init_under_numbered_layer_2026-10-30.md`
+-- a `pub fn` re-exported through a package facade whose last path segment
+is a plain directory under a numbered layer (`compiler.semantics.any_escape`)
+was never flattened by `pipeline::module_loader`, so the JIT declared it as
+an import. FIXED there; this nested-`fn` filing stays open.

@@ -272,6 +272,22 @@ pub fn rt_tuple_get_fn(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::LabeledTuple { values, .. }) => values,
         Some(Value::Array(arr)) => arr.as_ref(),
         Some(Value::FrozenArray(arr)) => arr.as_ref(),
+        // Raw runtime handle (from `rt_tuple_new_fn` / `rt_array_new_fn`):
+        // read the slot through the runtime and hand back the raw word, as the
+        // `rt_tuple_len_fn` Int arm does. Only a word that the runtime's heap
+        // registry recognises takes this path; any other `Int` keeps the
+        // historical "not a tuple -> Nil" contract relied on by HIR lowering.
+        // A negative index yields the nil word (the runtime's own refusal).
+        Some(Value::Int(raw))
+            if simple_runtime::value::RuntimeValue::from_raw(*raw as u64).heap_type().is_some() =>
+        {
+            let tuple = simple_runtime::value::RuntimeValue::from_raw(*raw as u64);
+            let word = match args.get(1) {
+                Some(Value::Int(i)) if *i >= 0 => simple_runtime::value::rt_tuple_get(tuple, *i as u64),
+                _ => simple_runtime::value::RuntimeValue::NIL,
+            };
+            return Ok(Value::Int(word.to_raw() as i64));
+        }
         _ => return Ok(Value::Nil),
     };
     let idx = match args.get(1) {
@@ -282,6 +298,69 @@ pub fn rt_tuple_get_fn(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Nil);
     }
     Ok(items[idx as usize].clone())
+}
+
+/// Largest tuple length the interpreter will ask the runtime to allocate.
+///
+/// The runtime's `rt_tuple_new(len: u64)` computes `header + len * 16` and
+/// `unwrap()`s the `Layout`, so an absurd length (e.g. `-1` reinterpreted as
+/// `u64::MAX`) would panic the interpreter instead of failing closed. Anything
+/// above this cap is treated as an allocation failure (nil handle).
+const RT_TUPLE_MAX_LEN: i64 = i32::MAX as i64;
+
+/// Allocate a raw runtime tuple of `length` slots and return its handle word.
+///
+/// Mirrors the runtime ABI `rt_tuple_new(u64) -> RuntimeValue` (Rust runtime
+/// collections.rs, C runtime runtime_native.c, core_array.spl) using the same
+/// raw-handle convention as `sffi_array::rt_array_new_fn`: the handle is a
+/// `Value::Int` holding the packed `RuntimeValue`, and `rt_tuple_len_fn` /
+/// `rt_tuple_set_fn` / `rt_tuple_get_fn` accept it back. Caller:
+/// `enum_wire.spl` (`enum_wire_restore_nil` rebuilds a tuple payload), which
+/// checks `rt_tuple_len(payload) != arity` after this call -- so every failure
+/// (negative or oversized length, allocation failure) returns the nil word,
+/// never a panic. It was missing from the interpreter table, so interpreted
+/// tuple-payload restore died with "unknown extern function: rt_tuple_new".
+pub fn rt_tuple_new_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let length = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_tuple_new expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+    if !(0..=RT_TUPLE_MAX_LEN).contains(&length) {
+        return Ok(Value::Int(simple_runtime::value::RuntimeValue::NIL.to_raw() as i64));
+    }
+    let handle = simple_runtime::value::rt_tuple_new(length as u64);
+    Ok(Value::Int(handle.to_raw() as i64))
+}
+
+/// Store the raw word `value` in slot `index` of a raw runtime tuple.
+///
+/// Mirrors the runtime ABI `rt_tuple_set(RuntimeValue, u64, RuntimeValue) ->
+/// bool`, reported as the `i8` the `.spl` extern declares (1 = written,
+/// 0 = refused) so `enum_wire.spl`'s `written == 0` check is exact. Refused
+/// without touching memory when the target is not a live tuple handle, the
+/// index is negative or out of range, or the arguments are not raw words.
+pub fn rt_tuple_set_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let arity_error = || {
+        CompileError::semantic_with_context(
+            "rt_tuple_set expects 3 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    };
+    let tuple_raw = args.first().ok_or_else(arity_error)?.as_int()?;
+    let index = args.get(1).ok_or_else(arity_error)?.as_int()?;
+    let value_raw = args.get(2).ok_or_else(arity_error)?.as_int()?;
+    if index < 0 {
+        return Ok(Value::Int(0));
+    }
+    let tuple = simple_runtime::value::RuntimeValue::from_raw(tuple_raw as u64);
+    let value = simple_runtime::value::RuntimeValue::from_raw(value_raw as u64);
+    let written = simple_runtime::value::rt_tuple_set(tuple, index as u64, value);
+    Ok(Value::Int(i64::from(written)))
 }
 
 /// Length of a tuple, or -1 when the argument is not a tuple.

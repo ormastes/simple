@@ -20,8 +20,10 @@ use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
     SemanticQueryReadManifestV1, semantic_query_read_manifest_encode_v1
 }
 use compiler.common.cache_contract.reverse_reference_shard_v1.{
-    ReverseReferenceEdgeV1, ReverseReferenceShardV1
+    ReverseReferenceEdgeV1, ReverseReferenceShardV1,
+    reverse_reference_shard_encode_v1, reverse_reference_shard_decode_v1
 }
+use compiler.common.cache_contract.generation_manifest_v1.{generation_manifest_digest_v1}
 use compiler.common.cache_contract.portable_object_ref_v1.{
     PortableObjectStageV1, PortablePortabilityV1
 }
@@ -53,8 +55,10 @@ use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
 }
 use compiler.driver.cache.publication.three_payload_generation_publisher_v1.{
     ThreePayloadImmutableObjectV1, ThreePayloadGenerationPrepareInputV1,
-    prepare_three_payload_generation_v1, publish_three_payload_generation_v1
+    prepare_three_payload_generation_v1, publish_three_payload_generation_v1,
+    prepared_three_payload_generation_binding_digest_v2
 }
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{verified_cas_kind_digest_v1}
 use compiler.hir.portable_object_profile_v1.{
     PortableHirProfileInputV1, encode_portable_hir_object_v1,
     portable_hir_semantic_verifier_digest_v1,
@@ -120,6 +124,41 @@ fn input_identity(prepared: PreparedThreePayloadV2) -> ThreePayloadInputIdentity
     ThreePayloadInputIdentityV1(source_digest: prepared.seal.source_digest,
         prior_tld_digest: prepared.seal.prior_tld_digest,
         init_tld_digest: prepared.seal.init_tld_digest, seal_digest: prepared.seal_digest)
+
+fn generation_input_for_forward_v1(query_manifest: SemanticQueryReadManifestV1,
+        stale_rr_refs: [text], stale_rr_objects: [ThreePayloadImmutableObjectV1]
+        ) -> ThreePayloadGenerationPrepareInputV1:
+    val closure = pack_payload(false).unwrap()
+    val identity = input_identity(closure)
+    val query_bytes = semantic_query_read_manifest_encode_v1(query_manifest)
+    val summary_bytes = text_to_bytes("summary")
+    val diagnostic_bytes = text_to_bytes("diagnostic")
+    val summary_digest = sha256_u8_hex(summary_bytes)
+    val query_digest = sha256_u8_hex(query_bytes)
+    val diagnostic_digest = sha256_u8_hex(diagnostic_bytes)
+    val receipt = ThreePayloadReadReceiptV1(input_identity: identity,
+        executor_digest: digest("executor"), distinct_source: 1, distinct_prior: 0,
+        distinct_init: 1, external_input_count: 0, rr_input_count: 0,
+        open_calls: 2, read_calls: 2, read_bytes: closure.seal.payload_bytes,
+        decoded_sections: closure.seal.section_count, peak_decode_bytes: 1,
+        denied_io_attempts: 0)
+    val result = ThreePayloadWorkerResultV1(input_identity: identity,
+        new_summary_digest: summary_digest, query_reads: query_manifest,
+        portable_refs: [], diagnostic_digest: diagnostic_digest, read_receipt: receipt)
+    val worker_bytes = three_payload_worker_result_encode_v1(result)
+    val worker_digest = sha256_u8_hex(worker_bytes)
+    var objects = [
+        ThreePayloadImmutableObjectV1(digest: diagnostic_digest, kind: "diagnostic", bytes: diagnostic_bytes),
+        ThreePayloadImmutableObjectV1(digest: query_digest, kind: "forward_manifest", bytes: query_bytes),
+        ThreePayloadImmutableObjectV1(digest: summary_digest, kind: "summary", bytes: summary_bytes),
+        ThreePayloadImmutableObjectV1(digest: worker_digest, kind: "worker_result", bytes: worker_bytes)]
+    for object in stale_rr_objects: objects.push(object)
+    ThreePayloadGenerationPrepareInputV1(snapshot_digest: digest("snapshot"),
+        catalog_digest: digest("catalog"), summary_refs: [summary_digest],
+        scope_refs: [worker_digest], rr_shard_refs: stale_rr_refs,
+        forward_manifest_refs: [query_digest], target_refs: [],
+        diagnostic_refs: [diagnostic_digest], worker_result: result,
+        immutable_objects: objects)
 
 describe "L7 three-payload driver coordinator":
     it "prepares cold2 and warm3 identities and keeps the worker confined closed":
@@ -236,45 +275,220 @@ describe "L7 three-payload driver coordinator":
         expect(removal.inserted.len()).to_equal(0)
         expect(removal.removed.len()).to_equal(1)
 
-    it "binds prepared objects but refuses publication before mutation authority":
-        step("Prepare a coherent generation, then refuse before any journal or lookup write")
-        val prepared = pack_payload(false).unwrap()
-        val identity = input_identity(prepared)
+    it "rebuilds RR payloads from named forwards and revalidates prepared candidates":
+        step("Replace stale supplied RR data from the full declared forward-object set")
+        val producer = query("provider")
         val consumer = query("consumer")
+        val forward_read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+            facet: "membership", ordinal: 0, consumed_fingerprint: digest("new-state"),
+            witness_digest: digest("forward-witness"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
         val query_manifest = SemanticQueryReadManifestV1(schema: 1,
+            consumer: consumer, ordered_reads: [forward_read])
+        val old_edge = ReverseReferenceEdgeV1(producer: producer, facet: "membership",
+            consumer: consumer, consumed_fingerprint: digest("stale-state"),
+            forward_manifest_digest: digest("old-forward"), partition_id: "partition-a")
+        val old_shard = ReverseReferenceShardV1(schema: 1, partition_id: "partition-a",
+            coverage: SemanticCoverageV1.Complete, sorted_edges: [old_edge])
+        val old_shard_bytes = reverse_reference_shard_encode_v1(old_shard)
+        val old_shard_digest = verified_cas_kind_digest_v1("reverse_reference_shard", old_shard_bytes)
+        val old_shard_object = ThreePayloadImmutableObjectV1(digest: old_shard_digest,
+            kind: "reverse_reference_shard", bytes: old_shard_bytes)
+        var input = generation_input_for_forward_v1(query_manifest,
+            [old_shard_digest], [old_shard_object])
+        val second_consumer = query("consumer-two")
+        val second_read = SemanticQueryReadV1(producer: producer, consumer: second_consumer,
+            facet: "membership", ordinal: 0, consumed_fingerprint: digest("second-state"),
+            witness_digest: digest("second-witness"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
+        val second_manifest = SemanticQueryReadManifestV1(schema: 1,
+            consumer: second_consumer, ordered_reads: [second_read])
+        val second_bytes = semantic_query_read_manifest_encode_v1(second_manifest)
+        val second_digest = sha256_u8_hex(second_bytes)
+        val first_digest = input.forward_manifest_refs[0]
+        input.forward_manifest_refs = if first_digest < second_digest:
+            [first_digest, second_digest] else: [second_digest, first_digest]
+        var input_objects = input.immutable_objects
+        input_objects.push(ThreePayloadImmutableObjectV1(digest: second_digest,
+            kind: "forward_manifest", bytes: second_bytes))
+        input.immutable_objects = input_objects
+        val generation = prepare_three_payload_generation_v1(input).unwrap()
+        expect(generation.manifest.forward_manifest_refs).to_equal(input.forward_manifest_refs)
+        expect(generation.manifest.rr_shard_refs.len()).to_equal(1)
+        expect(generation.manifest.rr_shard_refs[0] == old_shard_digest).to_be(false)
+        var retained_non_rr = 0
+        var rebuilt_rr = 0
+        for object in generation.immutable_objects:
+            if object.kind == "reverse_reference_shard":
+                rebuilt_rr = rebuilt_rr + 1
+                val decoded = reverse_reference_shard_decode_v1(object.bytes)
+                expect(decoded.ok).to_be(true)
+                val shard = decoded.value.unwrap()
+                expect(shard.sorted_edges.len()).to_equal(2)
+                var saw_first_consumer = false
+                var saw_second_consumer = false
+                for edge in shard.sorted_edges:
+                    if edge.consumer == consumer:
+                        saw_first_consumer = true
+                        expect(edge.consumed_fingerprint).to_equal(digest("new-state"))
+                    if edge.consumer == second_consumer:
+                        saw_second_consumer = true
+                        expect(edge.consumed_fingerprint).to_equal(digest("second-state"))
+                expect(saw_first_consumer).to_be(true)
+                expect(saw_second_consumer).to_be(true)
+            else:
+                for original in input.immutable_objects:
+                    if original.kind == object.kind and original.digest == object.digest and
+                            original.bytes == object.bytes:
+                        retained_non_rr = retained_non_rr + 1
+        expect(rebuilt_rr).to_equal(1)
+        expect(retained_non_rr).to_equal(input.immutable_objects.len() - 1)
+        expect(prepared_three_payload_generation_binding_digest_v2(generation) != "").to_be(true)
+        val no_uses = SemanticQueryReadManifestV1(schema: 1,
             consumer: consumer, ordered_reads: [])
-        val query_bytes = semantic_query_read_manifest_encode_v1(query_manifest)
-        val summary_bytes = text_to_bytes("summary")
-        val diagnostic_bytes = text_to_bytes("diagnostic")
-        val summary_digest = sha256_u8_hex(summary_bytes)
-        val query_digest = sha256_u8_hex(query_bytes)
-        val diagnostic_digest = sha256_u8_hex(diagnostic_bytes)
-        val receipt = ThreePayloadReadReceiptV1(input_identity: identity,
-            executor_digest: digest("executor"), distinct_source: 1, distinct_prior: 0,
-            distinct_init: 1, external_input_count: 0, rr_input_count: 0,
-            open_calls: 2, read_calls: 2, read_bytes: prepared.seal.payload_bytes,
-            decoded_sections: prepared.seal.section_count, peak_decode_bytes: 1,
-            denied_io_attempts: 0)
-        val result = ThreePayloadWorkerResultV1(input_identity: identity,
-            new_summary_digest: summary_digest, query_reads: query_manifest,
-            portable_refs: [], diagnostic_digest: diagnostic_digest, read_receipt: receipt)
-        val worker_bytes = three_payload_worker_result_encode_v1(result)
-        val worker_digest = sha256_u8_hex(worker_bytes)
-        val objects = [
-            ThreePayloadImmutableObjectV1(digest: diagnostic_digest, kind: "diagnostic", bytes: diagnostic_bytes),
-            ThreePayloadImmutableObjectV1(digest: query_digest, kind: "forward_manifest", bytes: query_bytes),
-            ThreePayloadImmutableObjectV1(digest: summary_digest, kind: "summary", bytes: summary_bytes),
-            ThreePayloadImmutableObjectV1(digest: worker_digest, kind: "worker_result", bytes: worker_bytes)
-        ]
-        val generation = prepare_three_payload_generation_v1(
-            ThreePayloadGenerationPrepareInputV1(snapshot_digest: digest("snapshot"),
-                catalog_digest: digest("catalog"), summary_refs: [summary_digest], scope_refs: [worker_digest],
-                rr_shard_refs: [], forward_manifest_refs: [query_digest], target_refs: [],
-                diagnostic_refs: [diagnostic_digest], worker_result: result,
-                immutable_objects: objects)).unwrap()
+        val removed_last_use = prepare_three_payload_generation_v1(
+            generation_input_for_forward_v1(no_uses, [old_shard_digest], [old_shard_object])).unwrap()
+        expect(removed_last_use.manifest.rr_shard_refs.len()).to_equal(0)
+        for object in removed_last_use.immutable_objects:
+            expect(object.kind == "reverse_reference_shard").to_be(false)
+        expect(generation.manifest.rr_shard_refs.len()).to_equal(1)
+        for object in generation.immutable_objects:
+            if object.kind == "reverse_reference_shard":
+                expect(reverse_reference_shard_decode_v1(object.bytes).value.unwrap().sorted_edges.len())
+                    .to_equal(2)
+        var forged_manifest = generation.manifest
+        forged_manifest.rr_shard_refs = []
+        var forged = generation
+        forged.manifest = forged_manifest
+        forged.manifest_digest = generation_manifest_digest_v1(forged_manifest)
+        expect(prepared_three_payload_generation_binding_digest_v2(forged)).to_equal("")
+        var omitted_forward = generation
+        var omitted_forward_manifest = generation.manifest
+        omitted_forward_manifest.forward_manifest_refs = []
+        omitted_forward_manifest.rr_shard_refs = []
+        omitted_forward.manifest = omitted_forward_manifest
+        omitted_forward.manifest_digest = generation_manifest_digest_v1(omitted_forward_manifest)
+        var without_rr_objects: [ThreePayloadImmutableObjectV1] = []
+        for object in generation.immutable_objects:
+            if object.kind != "reverse_reference_shard": without_rr_objects.push(object)
+        omitted_forward.immutable_objects = without_rr_objects
+        expect(prepared_three_payload_generation_binding_digest_v2(omitted_forward)).to_equal("")
+        var extra_worker_input = input
+        var extra_worker = input.worker_result
+        extra_worker.query_reads = SemanticQueryReadManifestV1(schema: 1,
+            consumer: query("unlisted-consumer"), ordered_reads: [])
+        val extra_worker_bytes = three_payload_worker_result_encode_v1(extra_worker)
+        expect(extra_worker_bytes.len()).to_be_greater_than(0)
+        val extra_worker_digest = sha256_u8_hex(extra_worker_bytes)
+        val existing_worker_digest = extra_worker_input.scope_refs[0]
+        val expanded_scope = if existing_worker_digest < extra_worker_digest:
+            [existing_worker_digest, extra_worker_digest]
+            else: [extra_worker_digest, existing_worker_digest]
+        extra_worker_input.scope_refs = expanded_scope
+        var expanded_objects = extra_worker_input.immutable_objects
+        expanded_objects.push(ThreePayloadImmutableObjectV1(digest: extra_worker_digest,
+            kind: "worker_result", bytes: extra_worker_bytes))
+        extra_worker_input.immutable_objects = expanded_objects
+        match prepare_three_payload_generation_v1(extra_worker_input):
+            case Err(CorruptPayload): pass
+            case _: fail("scoped worker query without its named forward was accepted")
+        var extra_rr = generation
+        extra_rr.immutable_objects.push(old_shard_object)
+        expect(prepared_three_payload_generation_binding_digest_v2(extra_rr)).to_equal("")
+        # The named forward set is declared evidence only; it cannot certify
+        # that an unlisted consumer does not exist or open the live scope gate.
         match publish_three_payload_generation_v1(generation, digest("action")):
             case Err(AuthorityUnavailable): pass
-            case _: fail("publication bypassed mutation-scoped authority")
+            case _: fail("declared-set inversion bypassed mutation-scoped authority")
+
+    it "rejects missing, wrong-kind, corrupt, omitted and incomplete forward evidence":
+        step("Require each declared forward ref to name canonical complete bytes")
+        val producer = query("provider")
+        val consumer = query("consumer")
+        val complete_read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+            facet: "membership", ordinal: 0, consumed_fingerprint: digest("state"),
+            witness_digest: digest("witness"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
+        val manifest = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+            ordered_reads: [complete_read])
+        val good = generation_input_for_forward_v1(manifest, [], [])
+        var missing = good
+        var missing_objects: [ThreePayloadImmutableObjectV1] = []
+        for object in good.immutable_objects:
+            if object.kind != "forward_manifest": missing_objects.push(object)
+        missing.immutable_objects = missing_objects
+        match prepare_three_payload_generation_v1(missing):
+            case Err(CorruptPayload): pass
+            case _: fail("missing named forward object was accepted")
+
+        var wrong_kind = good
+        var wrong_kind_objects: [ThreePayloadImmutableObjectV1] = []
+        for object in good.immutable_objects:
+            if object.kind == "forward_manifest":
+                wrong_kind_objects.push(ThreePayloadImmutableObjectV1(digest: object.digest,
+                    kind: "diagnostic_manifest", bytes: object.bytes))
+            else:
+                wrong_kind_objects.push(object)
+        wrong_kind.immutable_objects = wrong_kind_objects
+        match prepare_three_payload_generation_v1(wrong_kind):
+            case Err(CorruptPayload): pass
+            case _: fail("wrong-kind forward object was accepted")
+
+        var corrupt = good
+        var corrupt_objects: [ThreePayloadImmutableObjectV1] = []
+        for object in good.immutable_objects:
+            if object.kind == "forward_manifest":
+                corrupt_objects.push(ThreePayloadImmutableObjectV1(digest: object.digest,
+                    kind: object.kind, bytes: text_to_bytes("corrupt")))
+            else:
+                corrupt_objects.push(object)
+        corrupt.immutable_objects = corrupt_objects
+        match prepare_three_payload_generation_v1(corrupt):
+            case Err(CorruptPayload): pass
+            case _: fail("corrupt forward bytes were accepted")
+
+        var omitted = good
+        omitted.forward_manifest_refs = []
+        match prepare_three_payload_generation_v1(omitted):
+            case Err(WitnessIncomplete): pass
+            case _: fail("omitted worker forward reference was accepted")
+
+        var incomplete_read = complete_read
+        incomplete_read.completeness = SemanticCoverageV1.Conservative
+        val incomplete_manifest = SemanticQueryReadManifestV1(schema: 1,
+            consumer: consumer, ordered_reads: [incomplete_read])
+        val incomplete = generation_input_for_forward_v1(incomplete_manifest, [], [])
+        match prepare_three_payload_generation_v1(incomplete):
+            case Err(CorruptPayload): pass
+            case _: fail("incomplete forward coverage was accepted")
+
+        val empty_manifest = SemanticQueryReadManifestV1(schema: 1,
+            consumer: consumer, ordered_reads: [])
+        val explicit_empty = prepare_three_payload_generation_v1(
+            generation_input_for_forward_v1(empty_manifest, [], [])).unwrap()
+        expect(explicit_empty.manifest.rr_shard_refs.len()).to_equal(0)
+        for object in explicit_empty.immutable_objects:
+            expect(object.kind == "reverse_reference_shard").to_be(false)
+
+        val conflicting_read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+            facet: "membership", ordinal: 0, consumed_fingerprint: digest("other-state"),
+            witness_digest: digest("other-witness"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
+        val conflicting_manifest = SemanticQueryReadManifestV1(schema: 1,
+            consumer: consumer, ordered_reads: [conflicting_read])
+        val conflicting_bytes = semantic_query_read_manifest_encode_v1(conflicting_manifest)
+        val conflicting_digest = sha256_u8_hex(conflicting_bytes)
+        var conflicts = good
+        val good_forward_digest = good.forward_manifest_refs[0]
+        conflicts.forward_manifest_refs = if good_forward_digest < conflicting_digest:
+            [good_forward_digest, conflicting_digest] else: [conflicting_digest, good_forward_digest]
+        var conflict_objects = good.immutable_objects
+        conflict_objects.push(ThreePayloadImmutableObjectV1(digest: conflicting_digest,
+            kind: "forward_manifest", bytes: conflicting_bytes))
+        conflicts.immutable_objects = conflict_objects
+        match prepare_three_payload_generation_v1(conflicts):
+            case Err(CorruptPayload): pass
+            case _: fail("conflicting forward manifests for one consumer were accepted")
 
     it "keeps portable semantic admission closed independently of physical authorities":
         step("Distinguish a stable verifier identity from public verifier availability")

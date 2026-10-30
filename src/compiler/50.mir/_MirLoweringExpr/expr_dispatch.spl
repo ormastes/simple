@@ -1960,6 +1960,43 @@ impl MirLowering:
                 case _: ()
         false
 
+    me box_runtime_dictionary_key_v1(local: LocalId) -> LocalId:
+        # Preserve registered text identity even when a field/load lost its
+        # static tagged-text note. rt_string_data is registry-aware: tagged
+        # text returns its data buffer; a borrowed C string returns itself.
+        # Only the latter needs materialization. No new runtime owner or
+        # lookup-time key copy is introduced for an existing text handle.
+        if self.nil_locals.contains(local.id) or self.is_runtime_value_local(local.id) or self.is_tagged_text_local(local.id) or not self.local_is_str(local):
+            return self.box_runtime_value(local)
+        var probe = self.builder
+        val word = probe.emit_cast(mir_operand_copy(local), MirType.i64())
+        val data_function = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_string_data"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()],
+                return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))))
+        val data = probe.emit_call(data_function, [mir_operand_copy(word)], MirType(kind: MirTypeKind.Opaque("str")))
+        val data_word = probe.emit_cast(mir_operand_copy(data ?? local), MirType.i64())
+        val is_borrowed = probe.emit_binop(MirBinOp.Eq, mir_operand_copy(word), mir_operand_copy(data_word), MirType.bool())
+        val borrowed_block = probe.new_block(Some("dict_key_borrowed_text"))
+        val tagged_block = probe.new_block(Some("dict_key_tagged_text"))
+        val merge_block = probe.new_block(Some("dict_key_text_merge"))
+        val result = probe.new_temp(MirType.i64())
+        probe.terminate_if(mir_operand_copy(is_borrowed), borrowed_block, tagged_block)
+        probe.switch_to_block(borrowed_block)
+        self.builder = probe
+        val boxed = self.box_runtime_value(local)
+        var borrowed = self.builder
+        val boxed_word = borrowed.emit_cast(mir_operand_copy(boxed), MirType.i64())
+        borrowed.emit_copy(result, boxed_word)
+        borrowed.terminate_goto(merge_block)
+        borrowed.switch_to_block(tagged_block)
+        borrowed.emit_copy(result, word)
+        borrowed.terminate_goto(merge_block)
+        borrowed.switch_to_block(merge_block)
+        self.builder = borrowed
+        self.mark_runtime_value_local(result.id)
+        result
+
     me box_runtime_value(local: LocalId) -> LocalId:
         if self.nil_locals.contains(local.id):
             var nil_builder = self.builder
