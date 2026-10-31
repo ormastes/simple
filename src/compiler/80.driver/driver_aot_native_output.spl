@@ -21,7 +21,7 @@ use std.io_runtime.{dir_create, dir_list, file_copy, file_exists, hash_text,
 use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_STAGE_ENV_V1,
     generic_instance_keyed_functions_v1, generic_instance_stage_path_v1,
     generic_instance_mir_module_of_v1, generic_instance_stage_publish_v1}
-use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_is_regular_no_follow,
     file_read_regular_no_follow_bounded,
     file_read_regular_no_follow_bounded_bytes, file_write_bytes,
     secure_temp_dir_raw, file_fsync, directory_fsync}
@@ -257,7 +257,6 @@ use std.common.build_manager.grouped_native_contract.{NativeGroupManifestV1,
     NativeModuleResultV1, NativeGroupResultV1, native_group_manifest_identity_v1,
     native_group_result_encode_v1, native_module_result_encode_v1,
     native_group_result_validate_against_manifest_v1}
-use std.nogc_sync_mut.shell.file.{rename}
 
 @unsafe(reason: "raw recursive directory-remove ABI", capabilities: [ffi])
 extern fn rt_dir_remove_all(path: text) -> bool
@@ -2533,7 +2532,7 @@ impl CompilerDriver:
         # Staged batches carry the counts/lines; only the final call writes
         # the build-wide receipt.
         if not staged_flushing:
-            _sffi_file_write_text(_sffi_path_join(cache_scope_root,
+            file_atomic_write(_sffi_path_join(cache_scope_root,
                 "native-module-witness-shadow-v1.receipt"),
                 witness_shadow_receipt_lines.join("\n") + "\n")
 
@@ -3033,17 +3032,14 @@ impl CompilerDriver:
             for item in normalized_results:
                 val progress_path = _sffi_path_join(group_progress_root,
                     sha256_text(item.module_id) + ".sdn")
-                val progress_tmp = progress_path + ".tmp-{getpid()}"
                 val progress_text = native_module_result_encode_v1(item)
-                if progress_text == "" or not _sffi_file_write_text(
-                        progress_tmp, progress_text) or
-                        not rename(progress_tmp, progress_path):
+                if progress_text == "" or not file_atomic_write(
+                        progress_path, progress_text):
                     return CompileResult.CodegenError(
                         "native group progress receipt write failed")
             val result_text = native_group_result_encode_v1(group_result)
-            val result_tmp = group_result_path + ".tmp-{getpid()}"
-            if result_text == "" or not _sffi_file_write_text(result_tmp,
-                    result_text) or not rename(result_tmp, group_result_path):
+            if result_text == "" or not file_atomic_write(group_result_path,
+                    result_text):
                 return CompileResult.CodegenError(
                     "native group result write failed")
             if group_failed:
@@ -3443,11 +3439,9 @@ fn _driver_group_pair_mark_started_v1(
         return "native group progress directory unavailable"
     val marker = _sffi_path_join(progress_root,
         sha256_text(member_id) + ".started")
-    val marker_tmp = marker + ".tmp-{getpid()}"
     val marker_body = "SIMPLE-NATIVE-MODULE-STARTED-1\n" +
         native_group_manifest_identity_v1(manifest) + "\n" + member_id + "\n"
-    if not _sffi_file_write_text(marker_tmp, marker_body) or
-            not rename(marker_tmp, marker):
+    if not file_atomic_write(marker, marker_body):
         return "native group start marker write failed"
     ""
 
@@ -3473,7 +3467,7 @@ fn _driver_group_pair_finalize_receipt_v1(
         print "[receipt-size-canary] optional-bound scalar field read miscompiled: {size_canary} path={object_path}"
         _sffi_stdout_flush()
     val receipt_path = object_path + ".capsule-receipt"
-    if not _sffi_file_write_text(receipt_path, receipt):
+    if not file_atomic_write(receipt_path, receipt):
         return "capsule-receipt-write-failed"
     if (_sffi_file_read_text(receipt_path) ?? "") != receipt:
         return "capsule-receipt-write-unverified"
@@ -3683,11 +3677,9 @@ fn _compile_frozen_module_capsule(
                 "native group progress directory unavailable")
         val marker = _sffi_path_join(progress_root,
             sha256_text(member_id) + ".started")
-        val marker_tmp = marker + ".tmp-{getpid()}"
         val marker_body = "SIMPLE-NATIVE-MODULE-STARTED-1\n" +
             native_group_manifest_identity_v1(manifest) + "\n" + member_id + "\n"
-        if not _sffi_file_write_text(marker_tmp, marker_body) or
-                not rename(marker_tmp, marker):
+        if not file_atomic_write(marker, marker_body):
             return _aot_compile_failure(name,
                 "native group start marker write failed")
         group_member_id = member_id
@@ -3769,7 +3761,7 @@ fn _compile_frozen_module_capsule(
             if size_canary != "":
                 print "[receipt-size-canary] optional-bound scalar field read miscompiled: {size_canary} path={object_path}"
                 _sffi_stdout_flush()
-            if not _sffi_file_write_text(receipt_path, receipt):
+            if not file_atomic_write(receipt_path, receipt):
                 return _aot_compile_failure(name, "capsule-receipt-write-failed")
             # Do not trust the write's own bool. A `file_write_text` name
             # collision (a same-arity stdlib shadow returning `()`) once made
