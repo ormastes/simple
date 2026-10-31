@@ -7554,6 +7554,74 @@ impl MirLowering:
         # boundaries. Declaration-owned slots use the typed entry below.
         self.lower_lambda_value_for_type(lam, nil, runtime_any_abi)
 
+    me erased_callback_record_bindings_for_call(args: [HirCallArg], call_param_types: [HirType], lowered: [MirOperand]) -> Dict<text, text>:
+        """Binder name -> struct layout key, from every positional argument
+        whose declared parameter type is a bare `T` and whose value is
+        statically a known record: the HIR `Named` type when the expression
+        carries one, else the struct identity of its already-lowered local
+        (`lowered` holds the operands of the arguments before this one).
+        Conflicting evidence drops the binder."""
+        var bindings: Dict<text, text> = {}
+        var conflicted: [text] = []
+        val trace = (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1"
+        var index = 0
+        while index < args.len() and index < call_param_types.len():
+            val call_arg: HirCallArg = args[index]
+            if not call_arg.has_name:
+                val declared_param: HirType = call_param_types[index]
+                # A bare `T` binds from the record argument; a `[T]` binds
+                # from the array argument's element identity (`array_sort_by
+                # (records, \l, r: l.key - r.key)`).
+                var binder_name = ""
+                var element_binder = false
+                match declared_param.kind:
+                    case HirTypeKind.TypeParam(bare_binder, _):
+                        binder_name = bare_binder
+                    case HirTypeKind.Array(array_member, _) | HirTypeKind.Slice(array_member):
+                        match array_member.kind:
+                            case HirTypeKind.TypeParam(member_binder, _):
+                                binder_name = member_binder
+                                element_binder = true
+                            case _: ()
+                    case _: ()
+                if binder_name != "":
+                    val arg_expr: HirExpr = call_arg.value
+                    var record = ""
+                    if arg_expr.has_type_ and arg_expr.type_ != nil:
+                        val arg_hir: HirType = arg_expr.type_
+                        if element_binder:
+                            match arg_hir.kind:
+                                case HirTypeKind.Array(arg_member, _) | HirTypeKind.Slice(arg_member):
+                                    record = self.optional_payload_struct_name(arg_member)
+                                case _: ()
+                        else:
+                            record = self.optional_payload_struct_name(arg_hir)
+                    if record == "" and index < lowered.len():
+                        val lowered_operand: MirOperand = lowered[index]
+                        match lowered_operand.kind:
+                            case MirOperandKind.Copy(lowered_local) | MirOperandKind.Move(lowered_local):
+                                if element_binder:
+                                    if self.array_element_struct_syms.contains(lowered_local.id):
+                                        record = self.array_element_struct_syms[lowered_local.id]
+                                elif self.struct_value_syms.contains(lowered_local.id):
+                                    record = self.struct_value_syms[lowered_local.id]
+                            case _: ()
+                    if trace:
+                        print "[erased-callback-binding] arg={index} binder={binder_name} record={record} has_type={arg_expr.has_type_}"
+                    if record != "":
+                        if bindings.contains(binder_name) and bindings[binder_name] != record:
+                            conflicted = conflicted.push(binder_name)
+                        elif not bindings.contains(binder_name):
+                            bindings[binder_name] = record
+            index = index + 1
+        # Dict.remove differs between lanes (see mir_lowering_types.spl):
+        # rebuild without the conflicted binders instead.
+        var agreed: Dict<text, text> = {}
+        for binder_name in bindings.keys():
+            if not conflicted.contains(binder_name):
+                agreed[binder_name] = bindings[binder_name]
+        agreed
+
     me lower_lambda_value_for_type(lam: HirExpr, declared: HirType?, runtime_any_abi: bool = false) -> MirOperand?:
         if runtime_any_abi and declared != nil:
             self.error_fatal("lambda cannot combine declared and contextual tagged ABI authority", Some(lam.span))
@@ -7827,6 +7895,17 @@ impl MirLowering:
                             lw.remember_local_hir_type(argument_local.id, argument_hir, 0, 0)
                         elif declared_return != nil:
                             lw.remember_local_hir_type(argument_local.id, declared_params[qi], 0, 0)
+                            match declared_params[qi].kind:
+                                case HirTypeKind.TypeParam(binder_name, _):
+                                    # An erased binder arrives as the tagged
+                                    # word; a record passes through as its
+                                    # handle. Give it the call site's layout.
+                                    lw.mark_runtime_value_local(argument_local.id)
+                                    if (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+                                        print "[erased-callback-lift] param={qi} binder={binder_name} bound={self.erased_callback_record_bindings.contains(binder_name)}"
+                                    if self.erased_callback_record_bindings.contains(binder_name):
+                                        lw.struct_value_syms[argument_local.id] = self.erased_callback_record_bindings[binder_name]
+                                case _: ()
                         lw.bind_local(psym, argument_local)
                     qi = qi + 1
                 if capture_syms.len() > 0:
@@ -8442,7 +8521,15 @@ impl MirLowering:
                 val expected_lambda_type: HirType? = if current_arg_index < call_param_types.len() and not arg.has_name:
                     Some(call_param_types[current_arg_index])
                 else: nil
+                # `callback_compare(a, z, \l, r: l.value - r.value)`: the
+                # callee's `fn(T, T) -> i64` slot says nothing about the
+                # record behind `T`, but the sibling arguments do. Bind the
+                # binder's record identity for the lift so the lambda's field
+                # reads resolve against the real layout instead of index 0.
+                val saved_callback_bindings = self.erased_callback_record_bindings
+                self.erased_callback_record_bindings = self.erased_callback_record_bindings_for_call(args, call_param_types, arg_operands)
                 val lambda_operand = self.lower_lambda_value_for_type(arg_value, expected_lambda_type)
+                self.erased_callback_record_bindings = saved_callback_bindings
                 if lambda_operand != nil:
                     arg_operands = arg_operands.push(lambda_operand.unwrap())
                     continue
