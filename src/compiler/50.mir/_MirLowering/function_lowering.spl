@@ -584,11 +584,13 @@ impl MirLowering:
                                     self.array_element_struct_syms[local.id] = element.name
                             case _:
                                 ()
-                case HirTypeKind.Any:
-                    # An Any parameter arrives as a tagged RuntimeValue. Keep
-                    # that representation fact after its MIR type erases to
-                    # i64 so comparison and rendering consumers do not treat
-                    # the tag bits as a raw scalar.
+                case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
+                    # An Any (or erased generic `T`) parameter arrives as a
+                    # tagged RuntimeValue: every caller boxes into the slot
+                    # (the `Any | TypeParam` arms of lower_call). Keep that representation
+                    # fact after its MIR type erases to i64 so comparison,
+                    # rendering and scalar-slot consumers decode instead of
+                    # treating the tag bits as a raw scalar.
                     self.mark_runtime_value_local(local.id)
                 case Isolated(inner):
                     # WP-F0 (resource ownership unblock, 2026-08-06): an
@@ -810,10 +812,10 @@ impl MirLowering:
                 if fn_.body.has:
                     returned_tail_local = self.coerce_native_trait_object(tail_local, fn_.body.value, fn_.return_type)
                 match fn_.return_type.kind:
-                    case HirTypeKind.Any:
-                        # `-> Any` is a tagged ABI boundary. A raw scalar tail
-                        # must be boxed before the caller records the result as
-                        # a RuntimeValue local.
+                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
+                        # `-> Any` and `-> T` (erased generic) share the tagged
+                        # ABI boundary. A raw scalar tail must be boxed before
+                        # the caller records the result as a RuntimeValue local.
                         returned_tail_local = self.box_runtime_value(tail_local)
                     case HirTypeKind.Optional(_):
                         # `-> T?` implicit tail: the same canonical-handle
@@ -834,7 +836,7 @@ impl MirLowering:
                         # returned unchanged by the helper.
                         returned_tail_local = self.option_scalar_payload_of(returned_tail_local)
                         if val tail_hir = self.find_local_hir_type(returned_tail_local.id):
-                            if tail_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(returned_tail_local.id):
+                            if self.local_needs_erased_decode(returned_tail_local.id, tail_hir):
                                 returned_tail_local = self.decode_runtime_value(returned_tail_local, return_type)
                     case _:
                         ()
@@ -1457,10 +1459,16 @@ impl MirLowering:
                 # Normalized to MirTypeKind.Opaque("layer") — same reasoning as
                 # Tensor: a layer is a runtime handle, shapes live in HIR only.
                 MirType(kind: MirTypeKind.Opaque("layer"))
-            case HirTypeKind.TypeParam(name, _):
-                # Unsupported: a generic parameter has no MIR representation; reaching here is a bug
-                # upstream, not something MIR can represent.
-                self.error_fatal("E-MIR-TYPE-TypeParam: unsubstituted generic type parameter '{name}' reached MIR lowering", Some(type_.span))
+            case HirTypeKind.TypeParam(_, _):
+                # Generics = ONE ERASED BODY per generic fn (owner decision,
+                # 2026-10-31; no monomorphization, no substitution). A `T`
+                # slot is the tagged runtime word, exactly the `Any` slot
+                # below but WITHOUT the profile diagnostic: erasure is the
+                # chosen representation, not an escape. Boxing on the way in
+                # and decoding on the way out happen at every boundary whose
+                # `Any` arm also matches `TypeParam` (lower_call args/results,
+                # return/tail, let, method args) and in
+                # `local_needs_erased_decode` (mir_lowering_types.spl).
                 MirType.i64()
             case HirTypeKind.Projection(_, assoc_name):
                 # Unsupported: associated-type projections must be resolved by

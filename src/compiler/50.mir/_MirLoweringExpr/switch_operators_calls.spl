@@ -227,26 +227,6 @@ fn enum_variant_disc(names: [text], variant: text) -> i64:
     -1
 
 impl MirLowering:
-    me refuse_generic_template_call(direct_symbol: SymbolId, source_name: text, span: Span) -> bool:
-        """E-GEN-001: a direct call whose callee is a generic template.
-
-        Generics are erased; no pass specializes
-        `fn f<T>(..)`, templates are never emitted (module_lowering.spl),
-        so the call can neither be typed nor linked. Refuse it here, at the
-        call site, instead of letting an undefined symbol reach the linker
-        or an erased `T` reach codegen. Local templates come from the
-        per-module prescan registry; imported ones carry the explicit
-        `generic_param_count` marker on their symbol."""
-        var is_template = self.generic_template_fn_symbols.contains(direct_symbol.id)
-        if not is_template:
-            if val present_sym = self.symbols.get_symbol_raw(direct_symbol.id):
-                val sym: HirSymbol = present_sym
-                is_template = sym.generic_param_count > 0
-        if not is_template:
-            return false
-        self.error_fatal("E-GEN-001: call to generic function `{source_name}` cannot be compiled: generic functions are not specialized; rewrite the callee without type parameters", Some(span))
-        true
-
     me enum_qualified_key(symbol: SymbolId) -> text:
         """The `runtime_name` key ("{owner_module}.{Name}") for an enum SYMBOL,
         or "" when the symbol has no defining module (then the bare name IS the
@@ -1279,7 +1259,7 @@ impl MirLowering:
             val default_expr = self.bind_resident_default_global_v1(callee_name, params[i].default)
             var default_local = self.lower_expr(default_expr)
             match params[i].type_.kind:
-                case HirTypeKind.Any:
+                case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                     default_local = self.box_runtime_value(default_local)
                 case _: ()
             result = result.push(mir_operand_copy(default_local))
@@ -7899,6 +7879,12 @@ impl MirLowering:
                         case HirTypeKind.Optional(_): result = lw.ensure_option_handle(result, typed_return)
                         case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
                             result = lw.option_scalar_payload_of(result)
+                        case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
+                            # A lambda lifted for `fn(.., C) -> C` (walker
+                            # callbacks) returns into a tagged slot: box the
+                            # raw tail, else the caller reads a raw word as
+                            # tagged.
+                            result = lw.box_runtime_value(result)
                         case _: ()
                 elif runtime_any_abi:
                     result = lw.box_runtime_value(result)
@@ -8476,7 +8462,9 @@ impl MirLowering:
                 if hir_type_is_plain_scalar(declared_param_type):
                     arg_local = self.option_scalar_payload_of(arg_local)
                     if val argument_hir = self.find_local_hir_type(arg_local.id):
-                        if argument_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(arg_local.id):
+                        # Tagged `T`/Any word into a declared scalar slot:
+                        # decode (the x8 class of PR #5661).
+                        if self.local_needs_erased_decode(arg_local.id, argument_hir):
                             arg_local = self.decode_runtime_value(arg_local, self.lower_type(declared_param_type))
                 # Internal Simple text parameters accept the complete text
                 # value. Unwrapping a tagged handle here discards its length.
@@ -8523,7 +8511,7 @@ impl MirLowering:
                                         var b_narrow = self.builder
                                         arg_local = b_narrow.emit_cast(mir_operand_copy(arg_local), declared_mir_ty)
                                         self.builder = b_narrow
-                    case HirTypeKind.Any:
+                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                         # any_slot_holds_untagged_scalar_2026-08-05 (pure-Simple
                         # parity gap): a scalar argument passed into an
                         # `Any`-typed parameter must be tagged into a
@@ -8533,7 +8521,11 @@ impl MirLowering:
                         # callee's `Any` param holds a raw untagged bit
                         # pattern and every consumer (`.to_text()`, `==`, ...)
                         # misreads it. box_runtime_value no-ops for an
-                        # already-tagged/str/array/dict local.
+                        # already-tagged/str/array/dict local. An erased
+                        # generic `T` parameter is the same slot (generics =
+                        # one erased body, 2026-10-31): i64 outside the
+                        # 61-bit range goes through the wide heap box, f64
+                        # through rt_value_float, a record pointer passes.
                         arg_local = self.box_runtime_value(arg_local)
                     case HirTypeKind.Isolated(_):
                         boundary_transfer_mode = MirTransferMode.OwnedMove
@@ -8624,11 +8616,6 @@ impl MirLowering:
             val source_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
             val resolved_name = self.provider_callable_symbol_name(direct_symbol, source_name)
             var return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
-            if self.refuse_generic_template_call(direct_symbol, source_name, callee.span):
-                var refused_builder = self.builder
-                val refused_local = refused_builder.new_temp(return_type)
-                self.builder = refused_builder
-                return refused_local
             # A stamped `fn(..) -> R` on the callee node types the call when
             # R carries no module-table SymbolId; a nominal R is resolved
             # through the name-keyed cross-module return-shape registry.
@@ -8710,7 +8697,7 @@ impl MirLowering:
                     case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                         self.runtime_array_locals[result.id] = true
                         self.mark_runtime_value_local(result.id)
-                    case HirTypeKind.Any:
+                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                         self.mark_runtime_value_local(result.id)
                     case _:
                         ()
@@ -8797,7 +8784,7 @@ impl MirLowering:
                 case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                     self.runtime_array_locals[indirect_result.id] = true
                     self.mark_runtime_value_local(indirect_result.id)
-                case HirTypeKind.Any:
+                case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                     self.mark_runtime_value_local(indirect_result.id)
                 case _: ()
         indirect_result

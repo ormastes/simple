@@ -785,7 +785,7 @@ impl MirLowering:
         val st: HirType = stamped
         match st.kind:
             case HirTypeKind.Error: return nil
-            case HirTypeKind.Any: return nil
+            case HirTypeKind.Any | HirTypeKind.TypeParam(_, _): return nil
             case HirTypeKind.Infer(_, _): return nil
             case _: ()
         if self.hir_type_mentions_type_param(st, self.symbols):
@@ -1791,7 +1791,7 @@ impl MirLowering:
         # `str(x)` builtin already uses for any-typed values.
         if val any_hir_type = self.find_local_hir_type(local.id):
             match any_hir_type.kind:
-                case HirTypeKind.Any:
+                case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                     val any_op = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_value_to_string"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
@@ -2306,6 +2306,41 @@ impl MirLowering:
                         case _:
                             ()
             self.runtime_elem_value_type[container.id] = elem_array_type
+
+    me decode_erased_binop_operands(left: LocalId, right: LocalId) -> (LocalId, LocalId):
+        """Arithmetic / ordering / bitwise operands: when exactly ONE side is
+        an erased tagged word (`T` / Any, see local_needs_erased_decode) and
+        the other is a plain raw scalar (I64/U64/F64/F32/Bool MIR type that
+        is not itself a runtime handle), decode the erased side to that
+        scalar type. Both-erased and neither-erased pairs pass through
+        unchanged: there is no dynamic arithmetic runtime entry, and that
+        gap is reported, not guessed (generics = one erased body,
+        2026-10-31)."""
+        var left_erased = false
+        if val left_hir = self.find_local_hir_type(left.id):
+            left_erased = self.local_needs_erased_decode(left.id, left_hir)
+        var right_erased = false
+        if val right_hir = self.find_local_hir_type(right.id):
+            right_erased = self.local_needs_erased_decode(right.id, right_hir)
+        if left_erased == right_erased:
+            return (left, right)
+        val other = if left_erased: right else: left
+        if self.is_runtime_value_local(other.id) or self.local_is_str(other) or self.runtime_array_locals.contains(other.id) or self.runtime_dict_locals.contains(other.id):
+            return (left, right)
+        val other_type_opt = self.local_mir_type_of(other)
+        if other_type_opt == nil:
+            return (left, right)
+        val other_type: MirType = other_type_opt ?? MirType.i64()
+        val disc = _sffi_enum_discriminant<MirTypeKind>(other_type.kind)
+        val plain_scalar = (self.mir_type_is_integer(other_type) or
+            disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.F64) or
+            disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.F32) or
+            disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Bool))
+        if not plain_scalar:
+            return (left, right)
+        if left_erased:
+            return (self.decode_runtime_value(left, other_type), right)
+        (left, self.decode_runtime_value(right, other_type))
 
     me decode_runtime_value(raw: LocalId, result_type: MirType) -> LocalId:
         var b = self.builder
@@ -3090,9 +3125,10 @@ impl MirLowering:
                     if optional_payload_name != "":
                         if not self.struct_value_syms.contains(local.id):
                             self.struct_value_syms[local.id] = optional_payload_name
-                case HirTypeKind.Any:
-                    # The callee's return boundary guarantees a tagged word;
-                    # retain that fact after Any erases to MIR i64.
+                case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
+                    # The callee's return boundary guarantees a tagged word
+                    # (`-> Any` and erased `-> T` alike); retain that fact
+                    # after the slot erases to MIR i64.
                     self.mark_runtime_value_local(local.id)
                 case HirTypeKind.Named(_, _):
                     # The name-keyed shape registry above answers nothing for
@@ -3188,7 +3224,7 @@ impl MirLowering:
             case HirTypeKind.Dict(_, _):
                 self.runtime_dict_locals[local.id] = true
                 self.mark_runtime_value_local(local.id)
-            case HirTypeKind.Any:
+            case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                 self.mark_runtime_value_local(local.id)
             case _: ()
 
@@ -3279,16 +3315,17 @@ impl MirLowering:
                 match found_return.kind:
                     case HirTypeKind.Optional(_):
                         result = self.ensure_option_handle(result, found_return)
-                    case HirTypeKind.Any:
+                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                         # Explicit and implicit returns share the same tagged
-                        # Any ABI. Never hand a raw scalar to an Any caller.
+                        # ABI for `-> Any` and erased `-> T`. Never hand a raw
+                        # scalar to a caller that reads a tagged word.
                         result = self.box_runtime_value(result)
                     case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
                         # `return v` with `v: i64?` from a `-> i64` function
                         # returns the payload, not the Option handle.
                         result = self.option_scalar_payload_of(result)
                         if val result_hir = self.find_local_hir_type(result.id):
-                            if result_hir.kind == HirTypeKind.Any and self.is_runtime_value_local(result.id):
+                            if self.local_needs_erased_decode(result.id, result_hir):
                                 result = self.decode_runtime_value(result, self.lower_type(found_return))
                     case _:
                         ()
@@ -3594,6 +3631,12 @@ impl MirLowering:
         # HIR element type is i64 too), which is why `[i64]` was the one case
         # that always worked and why this cannot regress it.
         var result_type_is_erased_i64 = _sffi_enum_discriminant<MirTypeKind>(result_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64)
+        # `items[i]` on `items: [T]` inside an erased generic body: the
+        # element's dynamic type is unknown here, so the tagged element word
+        # is handed on AS IS (marked runtime value, HIR type `T`); the typed
+        # consumer decodes it. Decoding it as I64 would shred a record
+        # pointer or a text handle (generics = one erased body, 2026-10-31).
+        var erased_element_hir: HirType? = nil
         if (not result_type_from_base or result_type_is_erased_i64) and self.find_local_hir_type(base_local.id) != nil:
             val base_hir_type = self.find_local_hir_type(base_local.id) ?? HirType(kind: HirTypeKind.Error, span: base.span)
             match base_hir_type.kind:
@@ -3601,9 +3644,16 @@ impl MirLowering:
                     match element_type.kind:
                         case HirTypeKind.Str:
                             result_type = self.bootstrap_text_type()
+                        case HirTypeKind.TypeParam(_, _):
+                            result_type = MirType.i64()
+                            erased_element_hir = Some(element_type)
                         case _:
                             result_type = self.lower_type(element_type)
                     result_type_from_base = true
+                case _: ()
+        if erased_element_hir == nil and has_index_result_hir_type:
+            match index_result_hir_type.kind:
+                case HirTypeKind.TypeParam(_, _): erased_element_hir = Some(index_result_hir_type)
                 case _: ()
         if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base and not is_tuple_base:
             result_type = self.bootstrap_text_type()
@@ -3768,6 +3818,12 @@ impl MirLowering:
                     result_type
                 if has_real_struct_name or elem_is_runtime_array:
                     self.mark_runtime_value_local(getter_local.id)
+                if val erased_elem_t = erased_element_hir:
+                    if not has_real_struct_name and not elem_is_runtime_array:
+                        self.mark_runtime_value_local(getter_local.id)
+                        self.remember_local_hir_type(getter_local.id, erased_elem_t, 0, 0)
+                        self.remember_array_index_projection_provenance(base_local, getter_local)
+                        return getter_local
                 val decoded_elem = self.decode_runtime_value(getter_local, decode_type)
                 # Bug (array-of-structs field misread): propagate the
                 # array's known element struct name onto THIS decoded
@@ -4419,6 +4475,13 @@ impl MirLowering:
                 if binary_reads_payload:
                     left_local = self.option_scalar_payload_of(left_local)
                     right_local = self.option_scalar_payload_of(right_local)
+                    # Erased generic `T` (or Any) operand against a raw
+                    # scalar: decode the tagged word to the scalar's MIR type
+                    # first. `ident(5) + 1` otherwise computes on `5 << 3`
+                    # (the x8 class of PR #5661 in expression position).
+                    val erased_pair = self.decode_erased_binop_operands(left_local, right_local)
+                    left_local = erased_pair.0
+                    right_local = erased_pair.1
                 else:
                     val eq_negate = match op:
                         case NotEq: true
@@ -5087,12 +5150,12 @@ impl MirLowering:
                 var left_is_any_value = false
                 if val left_hir_type = self.find_local_hir_type(left_local.id):
                     match left_hir_type.kind:
-                        case HirTypeKind.Any: left_is_any_value = true
+                        case HirTypeKind.Any | HirTypeKind.TypeParam(_, _): left_is_any_value = true
                         case _: ()
                 var right_is_any_value = false
                 if val right_hir_type = self.find_local_hir_type(right_local.id):
                     match right_hir_type.kind:
-                        case HirTypeKind.Any: right_is_any_value = true
+                        case HirTypeKind.Any | HirTypeKind.TypeParam(_, _): right_is_any_value = true
                         case _: ()
                 var bin_is_runtime_value_eq = false
                 match op:
