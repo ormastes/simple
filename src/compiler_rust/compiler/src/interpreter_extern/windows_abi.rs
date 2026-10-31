@@ -88,6 +88,10 @@ unsafe extern "system" {
     fn ReadFile(file: Handle, buffer: *mut c_void, capacity: u32, count: *mut u32, overlapped: *mut c_void) -> i32;
     fn GetFinalPathNameByHandleW(handle: Handle, buffer: *mut u16, capacity: u32, flags: u32) -> u32;
     fn GetFileAttributesW(path: *const u16) -> u32;
+    fn GetFileType(file: Handle) -> u32;
+    fn WriteFile(file: Handle, buffer: *const c_void, count: u32, written: *mut u32, overlapped: *mut c_void) -> i32;
+    fn FlushFileBuffers(file: Handle) -> i32;
+    fn SetFilePointerEx(file: Handle, distance: i64, position: *mut i64, method: u32) -> i32;
 }
 
 #[link(name = "bcrypt")]
@@ -151,6 +155,12 @@ const NAMES: &[&str] = &[
     // same JIT interp-splice during native-build cache/path identity checks.
     "GetFinalPathNameByHandleW",
     "GetFileAttributesW",
+    // std.nogc_sync_mut.io.retained_file_abi (Windows branch) and
+    // windows_pty_abi: retained-handle stream writes, flush, seek, type probe.
+    "GetFileType",
+    "WriteFile",
+    "FlushFileBuffers",
+    "SetFilePointerEx",
 ];
 
 /// True when `name` is one of the direct Win64 ABI externs this module implements.
@@ -385,6 +395,29 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         "GetFileAttributesW" => {
             let path = opt_ptr(arg_i64(args, 0, name)?);
             Ok(Value::Int(unsafe { GetFileAttributesW(path.cast()) } as i64))
+        }
+        "GetFileType" => {
+            let file = opt_ptr(arg_i64(args, 0, name)?);
+            Ok(Value::Int(unsafe { GetFileType(file) } as i64))
+        }
+        "WriteFile" => {
+            let file = opt_ptr(arg_i64(args, 0, name)?);
+            let buffer = opt_ptr(arg_i64(args, 1, name)?);
+            let count = arg_i64(args, 2, name)? as u32;
+            let written = opt_ptr(arg_i64(args, 3, name)?);
+            let overlapped = opt_ptr(arg_i64(args, 4, name)?);
+            Ok(Value::Int(unsafe { WriteFile(file, buffer, count, written.cast(), overlapped) } as i64))
+        }
+        "FlushFileBuffers" => {
+            let file = opt_ptr(arg_i64(args, 0, name)?);
+            Ok(Value::Int(unsafe { FlushFileBuffers(file) } as i64))
+        }
+        "SetFilePointerEx" => {
+            let file = opt_ptr(arg_i64(args, 0, name)?);
+            let distance = arg_i64(args, 1, name)?;
+            let position = opt_ptr(arg_i64(args, 2, name)?);
+            let method = arg_i64(args, 3, name)? as u32;
+            Ok(Value::Int(unsafe { SetFilePointerEx(file, distance, position.cast(), method) } as i64))
         }
         "BCryptOpenAlgorithmProvider" => {
             let provider = opt_ptr(arg_i64(args, 0, name)?);
