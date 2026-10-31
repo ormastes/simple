@@ -133,9 +133,11 @@ function produces(l,   s) {
   gsub(/matches!\([^,]*,[ \t]*Value::Nil/,"",s)
   gsub(/[!=]=[ \t]*Value::Nil/,"",s)
   gsub(/(if|while) let Value::Nil/,"",s)
+  # Alternation first, anchored to what ends the pattern: run after the `=>`
+  # strip it would eat the arm's BODY in `Int(_) | Value::Nil => Value::Nil`.
+  gsub(/[)}A-Za-z0-9_][ \t]+\|[ \t]*Value::Nil[ \t]*(=>|\|[^|]|$)/,"X ",s)
   gsub(/Value::Nil[ \t]*\)[ \t]*(=>|\||if )/,"",s)
   gsub(/Value::Nil[ \t]*(=>|\|[^|])/,"",s)
-  gsub(/[)}A-Za-z0-9_][ \t]+\|[ \t]*Value::Nil/,"X",s)
   return (s ~ /Value::Nil/)
 }
 AWKEOF
@@ -200,9 +202,9 @@ AWKEOF
 # `identifier(` textually inside a fn's body (heuristic, not a real call graph).
 # `.name(` METHOD calls are not counted: a method sharing a name with some
 # nil-capable free fn (`get`, `read`, `len`...) says nothing about that fn, and
-# counting them let common method names convict every caller. `Type::name(`
-# with a capitalised qualifier (an associated fn of another type) is skipped
-# too; `module::name(` and `Self::name(` still count. Exists to catch a wrapper
+# counting them let common method names convict every caller. Qualifiers on
+# the curated std list are skipped; every other `Qualifier::name(`, including
+# `module::name(`, `Self::name(` and capitalised in-tree types, still counts. Exists to catch a wrapper
 # like `rt_env_get` whose OWN body has no literal `Value::Nil` because it
 # delegates to a shared helper (`runtime_to_value`) that does -- nil.awk alone
 # is blind to that one hop (see non_optional_wrappers_return_nil_sweep_2026-08-21.md).
@@ -768,6 +770,12 @@ pub fn rt_cmp_then_prod(args: &[Value]) -> Result<Value, CompileError> {
     if args[0] == Value::Nil { return Ok(Value::Nil) }
     Ok(Value::Int(1))
 }
+pub fn rt_alt_body(args: &[Value]) -> Result<Value, CompileError> {
+    match args[0] {
+        Value::Int(_) | Value::Nil => Value::Nil,
+        _ => Ok(Value::Int(2)),
+    }
+}
 pub fn rt_alt_only(args: &[Value]) -> Result<Value, CompileError> {
     match args[0] {
         Value::Int(_) | Value::Nil => Ok(Value::Int(1)),
@@ -820,6 +828,7 @@ RSEOF
     insert_simple!("rt_arm_and_prod", impls::rt_arm_and_prod);
     insert_simple!("rt_cmp_then_prod", impls::rt_cmp_then_prod);
     insert_simple!("rt_alt_only", impls::rt_alt_only);
+    insert_simple!("rt_alt_body", impls::rt_alt_body);
     insert_simple!("rt_crlf_blank", impls::rt_crlf_blank);
 RSEOF
     derive_nil_externs "$_sd/rust" "$_sd/nil.txt"
@@ -844,6 +853,7 @@ RSEOF
     st_has "$_sd/nil.txt" 'rt_closure_nil0' "Value::Nil produced in a || closure body was not derived"
     st_has "$_sd/nil.txt" 'rt_arm_and_prod' "\`Value::Nil => Ok(Value::Nil)\` (pattern AND production on one line) was not derived"
     st_has "$_sd/nil.txt" 'rt_cmp_then_prod' "one-line \`if x == Value::Nil { return Ok(Value::Nil) }\` was not derived"
+    st_has "$_sd/nil.txt" 'rt_alt_body' "\`Int(_) | Value::Nil => Value::Nil\` (alternation with a nil-producing body) was not derived"
     st_not "$_sd/nil.txt" 'rt_alt_only' "a pattern alternation \`Int(_) | Value::Nil =>\` was counted as producing Value::Nil"
 
     # ---- wrapper shapes (class b) ---------------------------------------------
