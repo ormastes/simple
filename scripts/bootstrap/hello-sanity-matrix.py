@@ -153,16 +153,35 @@ def inherited_build_settings(environ):
     every Hello build on a smaller or shared host. A present but noncanonical
     value is refused rather than silently ignored.
     """
+    kept = {}
     key = "SIMPLE_BUILD_MEMORY_RESERVE_BYTES"
-    if key not in environ:
+    if key in environ:
+        value = environ[key]
+        # The compiler parses an out-of-range value as 0 and falls back to the
+        # 24 GiB default, so bound it to i64 here.
+        if (not value.isascii() or not value.isdigit() or value[0] == "0" or
+                len(value) > 19 or int(value) > 2**63 - 1):
+            raise ValueError(key + " must be a canonical positive i64 decimal")
+        kept[key] = value
+    # @workaround bug=stage2_llc_discovery_ignores_path_2026-10-31 reason=a Stage 2
+    # compiler without SIMPLE_LLVM_BIN fails every AOT unit with "llc failed
+    # (exit -1)" even with llc on PATH; keep the operator's LLVM bin directory.
+    key = "SIMPLE_LLVM_BIN"
+    if key in environ:
+        value = environ[key]
+        if not os.path.isabs(value) or not os.path.isdir(value):
+            raise ValueError(key + " must name an existing absolute directory")
+        kept[key] = value
+    return kept
+
+
+def llvm_bin_identity(environ):
+    """Record a kept SIMPLE_LLVM_BIN and the llc it supplies (unpinned tool)."""
+    value = environ.get("SIMPLE_LLVM_BIN")
+    if not value:
         return {}
-    value = environ[key]
-    # The compiler parses an out-of-range value as 0 and falls back to the
-    # 24 GiB default, so bound it to i64 here.
-    if (not value.isascii() or not value.isdigit() or value[0] == "0" or
-            len(value) > 19 or int(value) > 2**63 - 1):
-        raise ValueError(key + " must be a canonical positive i64 decimal")
-    return {key: value}
+    llc = Path(value) / ("llc.exe" if os.name == "nt" else "llc")
+    return {"llvm_bin": value, "llvm_bin_llc_sha256": digest(llc) if llc.is_file() else "absent"}
 
 
 def phase_capabilities(phase):
@@ -734,6 +753,7 @@ class Matrix:
             "source_root": self.root, "source_revision": revision, "runtime": self.runtime,
             "linker": self.linker, "linker_sha256": self.linker_sha,
             **({"driver": self.driver, "driver_sha256": self.driver_sha, "sdk": self.sdk} if self.darwin else {}),
+            **llvm_bin_identity(self.base),
             **{name.replace(".", "_") + "_sha256": sha for name, sha in fixture_hashes.items()}})
         sdn(self.out / "runtime-inputs.sdn", self.runtime_hashes)
         setup = self.out / "setup"
