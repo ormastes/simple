@@ -1251,6 +1251,7 @@ static int64_t rt_process_spawn_piped_argv(
 #include <pthread.h>
 #include <poll.h>
 #include <spawn.h>
+#include <sys/ioctl.h>
 #ifdef __APPLE__
 #include <crt_externs.h>
 #endif
@@ -3521,5 +3522,35 @@ bool rt_pty_is_running(int64_t handle) {
     if (ready < 0) return false;
     if (probe.revents & (POLLHUP | POLLERR | POLLNVAL)) return false;
     return true;
+}
+#endif
+
+/* C lane of rt_pty_resize. Same scope as rt_pty_is_running above: no C pty
+ * implementation exists to mirror, and this needs none of its state.
+ *
+ * POSIX: `handle` is the pty master fd. TIOCSWINSZ stores the size and the
+ * kernel delivers SIGWINCH to the terminal's foreground process group. Unlike
+ * the Rust lane this cannot also signal the spawned child directly, because it
+ * has no child table. NOT exercised on any POSIX host at the time of writing.
+ *
+ * Windows: the ConPTY handle lives in the Rust lane's SESSIONS map, so this
+ * lane cannot resolve `handle` and reports false, which std.sys.pty's
+ * capability probe reads as "this provider cannot resize". */
+#ifdef _WIN32
+bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {
+    (void)handle;
+    (void)rows;
+    (void)cols;
+    return false;
+}
+#else
+bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {
+    if (handle < 0 || rows < 1 || rows > 65535 || cols < 1 || cols > 65535) return false;
+    struct winsize size;
+    size.ws_row = (unsigned short)rows;
+    size.ws_col = (unsigned short)cols;
+    size.ws_xpixel = 0;
+    size.ws_ypixel = 0;
+    return ioctl((int)handle, TIOCSWINSZ, &size) == 0;
 }
 #endif
