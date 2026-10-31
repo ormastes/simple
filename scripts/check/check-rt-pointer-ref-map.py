@@ -10,8 +10,10 @@ which derives nil-capability from the Rust interpreter, not from C bodies.
            return (text, [T], tuple) is non-optional. Shrink-only baseline.
 
 Text scan of all hosts' sources: no statement about what compiles or links on any
-target. A C function with no visible body, or which returns NULL only through a
-callee, is counted as UNKNOWN, never as proven non-null. Raw i64/u64 handles are
+target. A bare-typed edge whose C body has no direct null return (no visible body, or
+any null could come through a callee) is counted UNKNOWN, never proven non-null.
+Not matched: multi-line C signatures and __attribute__ prefixes (none in tree
+today). src/compiler_rust/lib is out of scope. Raw i64/u64 handles are
 counted, not judged. Do not flip signatures from this report alone: see the
 interpreter Option-unwrapping note in the nil-return follow-ups.
 
@@ -21,8 +23,10 @@ Usage: check-rt-pointer-ref-map.py [--root DIR] [--regen-baseline] [--selftest]
 import os, re, sys, tempfile
 
 CDEF = re.compile(r'^(?!static\b)(?:[A-Za-z_]\w*[ \t]+)*?[A-Za-z_]\w*(?:[ \t]+const)?[ \t]*\*+[ \t]*(rt_\w+)[ \t]*\(', re.M)
-EXT = re.compile(r'^[ \t]*(?:pub[ \t]+)?extern[ \t]+fn[ \t]+(rt_\w+)[ \t]*\([^)]*\)[ \t]*(?:->[ \t]*([^\n#]+?))?[ \t]*(?:#.*)?$', re.M)
-NULLRET = re.compile(r'\breturn\s+(?:NULL|0|nullptr|\(\s*\w+\s*\*\s*\)\s*(?:NULL|0))\s*;')
+EXT = re.compile(r'^[ \t]*(?:pub[ \t]+)?extern[ \t]+fn[ \t]+(rt_\w+)(?:<[^>]*>)?[ \t]*\((?:[^()]|\([^()]*\))*\)[ \t]*(?:->[ \t]*([^\n#]+?))?[ \t]*(?:#.*)?$', re.M)
+_NULL = r'(?:\(\s*[\w ]+\*+\s*\)\s*)?(?:NULL|nullptr|0)'
+NULLRET = re.compile(r'\breturn\s*\(?\s*' + _NULL + r'\s*\)?\s*;|\breturn\b[^;]*[?:]\s*' + _NULL + r'\s*\)?\s*;')
+NOISE = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'', re.S)
 NARROW = {'i8', 'i16', 'i32', 'u8', 'u16', 'u32', 'bool', 'f32', 'f64'}
 BASELINE = 'scripts/check/rt_pointer_ref_map_baseline.txt'
 
@@ -67,7 +71,7 @@ def body_after(src, pos):
 def scan(root):
     c = {}  # symbol -> 'nil' | 'unknown'
     for path in walk(root, 'src/runtime', ('.c', '.h')):
-        src = read(path)
+        src = NOISE.sub(' ', read(path))
         for m in CDEF.finditer(src):
             body = body_after(src, m.end() - 1)
             state = c.get(m[1], 'unknown')
@@ -87,14 +91,16 @@ def scan(root):
                 edges += 1
                 ty = (m[2] or 'void').strip()
                 key = '%s:%s:%s' % (os.path.relpath(path, root), m[1], ty)
-                if ty in NARROW:
+                if ty.rstrip('?') in NARROW:
                     narrow.add(key)
-                elif ty in ('i64', 'u64', 'void'):
+                elif ty.rstrip('?') in ('i64', 'u64', 'usize', 'isize', 'void'):
                     raw += 1
-                elif c[m[1]] == 'unknown':
-                    unknown += 1
-                elif c[m[1]] == 'nil' and not ty.endswith('?'):
+                elif ty.endswith('?'):
+                    continue
+                elif c[m[1]] == 'nil':
                     nil.add(key)
+                else:
+                    unknown += 1
     return len(c), edges, unknown, raw, narrow, nil
 
 
@@ -150,12 +156,25 @@ def selftest():
         ('char *rt_x(void);\n', 'extern fn rt_x() -> text\n', 0),
         ('static char *rt_x(void) { return NULL; }\n', 'extern fn rt_x() -> text\n', 2),
         (nilc, 'fn other() -> text\n', 2),
+        (okc, 'extern fn rt_x() -> i32?\n', 1),
+        ('char *rt_x(void) {\n  if (c == \'}\') y();\n  return NULL;\n}\n', 'extern fn rt_x() -> text\n', 1),
+        ('char *rt_x(void) {\n  return p ? p : NULL;\n}\n', 'extern fn rt_x() -> text\n', 1),
+        (nilc, 'extern fn rt_x<T>(v: T) -> [T]\n', 1),
+        (nilc, 'extern fn rt_x(cb: fn(i64) -> i64) -> text\n', 1),
     ]
     for i, (c, spl, want) in enumerate(cases):
         got = run(tree(c, spl), False)
         if got != want:
             print('ERROR — selftest case %d wanted %d got %d' % (i, want, got))
             return 2
+    t = tree(nilc, 'extern fn rt_x() -> text\n')
+    row = 'src/lib/a.spl:rt_x:text\n'
+    open(t + '/' + BASELINE, 'w').write(row)
+    held = run(t, False)
+    open(t + '/' + BASELINE, 'w').write(row + 'src/lib/a.spl:rt_y:text\n')
+    if held != 0 or run(t, False) != 1:
+        print('ERROR — selftest baseline held/stale')
+        return 2
     print('PASS — selftest %d cases' % len(cases))
     return 0
 
