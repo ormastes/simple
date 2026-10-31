@@ -27,7 +27,6 @@ mod builder;
 mod builder_macros;
 mod error;
 mod interner;
-pub mod lazy_instantiator;
 pub mod layout;
 pub mod mold_sffi;
 mod native;
@@ -65,9 +64,6 @@ pub use layout::{LayoutOptimizer, LayoutSegment, LayoutStats, LayoutSymbol};
 
 // Native binary exports (standalone executables)
 pub use native_binary::{compile_to_native_binary, NativeBinaryBuilder, NativeBinaryOptions, NativeBinaryResult};
-
-// Lazy instantiation exports (link-time template instantiation)
-pub use lazy_instantiator::{LazyInstantiationResult, LazyInstantiationStats, LazyInstantiator, LazyInstantiatorConfig};
 
 // Mold SFFI exports (linker detection and execution)
 pub use mold_sffi::{find_linker, LinkerType};

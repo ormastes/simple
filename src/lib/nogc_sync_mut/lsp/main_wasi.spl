@@ -20,12 +20,12 @@ use std.nogc_sync_mut.lsp.parser_adapter.{ParserAdapter}
 # WASI I/O Helpers
 # ============================================================================
 
-extern fn rt_stdin_read_line() -> text
+extern fn rt_stdin_read_line() -> text?
 extern fn rt_stdout_write(data: text)
 extern fn rt_stderr_write(data: text)
 
-fn wasi_read_line() -> text:
-    """Read a line from stdin (WASI fd_read)."""
+fn wasi_read_line() -> text?:
+    """Read a line from stdin (WASI fd_read); nil at end of input."""
     rt_stdin_read_line()
 
 fn wasi_write(data: text):
@@ -53,14 +53,21 @@ fn read_lsp_message() -> text?:
     var content_length = 0
     var found_header = false
 
-    var header_line = wasi_read_line()
-    while header_line != "" and header_line != "\r\n" and header_line != "\n":
-        val trimmed = header_line.replace("\r\n", "").replace("\n", "")
-        if trimmed.starts_with("Content-Length: "):
-            val len_str = trimmed[16:]
-            content_length = int(len_str)
-            found_header = true
-        header_line = wasi_read_line()
+    var reading_headers = true
+    while reading_headers:
+        val header_opt = wasi_read_line()
+        if header_opt == nil:
+            # absent: end of input inside the header block; no message.
+            return nil
+        val header_line = header_opt.unwrap()
+        if header_line == "" or header_line == "\r\n" or header_line == "\n":
+            reading_headers = false
+        else:
+            val trimmed = header_line.replace("\r\n", "").replace("\n", "")
+            if trimmed.starts_with("Content-Length: "):
+                val len_str = trimmed[16:]
+                content_length = int(len_str)
+                found_header = true
 
     if not found_header or content_length <= 0:
         return nil
@@ -69,7 +76,11 @@ fn read_lsp_message() -> text?:
     var body_parts: [text] = []
     var remaining = content_length
     while remaining > 0:
-        val chunk = wasi_read_line()
+        val chunk_opt = wasi_read_line()
+        if chunk_opt == nil:
+            # absent: end of input before the declared body length; truncated message.
+            return nil
+        val chunk = chunk_opt.unwrap()
         body_parts.push(chunk)
         remaining = remaining - chunk.len()
 

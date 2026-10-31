@@ -17,7 +17,6 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::import_loader::{has_script_statements, load_module_with_imports, load_module_with_imports_for_target};
 use crate::interpreter::evaluate_module_with_di_and_aop;
 use crate::mir;
-use crate::monomorphize::{monomorphize_module, specialize_bindings};
 use crate::value::FUNC_MAIN;
 
 // Re-export SMF generation functions for backward compatibility
@@ -383,12 +382,6 @@ impl CompilerPipeline {
         // Validate release mode configuration (#1034-1035)
         self.validate_release_config()?;
 
-        // Interface binding specialization: rewrite method calls based on `bind Interface = Impl`
-        let module = specialize_bindings(&module);
-
-        // Monomorphization: specialize generic functions for concrete types
-        let module = monomorphize_module(&module);
-
         // Hoist nested type definitions to module scope so type-check, lint,
         // and HIR lowering all see them as if authored at the top level.
         // Allows `class Foo:` inside an `it` block etc. (R1).
@@ -512,12 +505,6 @@ impl CompilerPipeline {
         // Validate release mode configuration (#1034-1035)
         self.validate_release_config()?;
 
-        // 1. Interface binding specialization: rewrite method calls based on `bind Interface = Impl`
-        let ast_module = specialize_bindings(&ast_module);
-
-        // 2. Monomorphization: specialize generic functions for concrete types
-        let ast_module = monomorphize_module(&ast_module);
-
         // 2.5. Hoist nested type definitions to module scope (R1).
         let ast_module = crate::hir::module_with_hoisted_defs(&ast_module).unwrap_or(ast_module);
 
@@ -634,25 +621,9 @@ impl CompilerPipeline {
             simple_common::target::TargetCpu::builtin_default_for_arch(Target::host().arch),
         )?;
 
-        // 10. Partition generic templates from specialized instances
-        let (templates, _specialized, metadata) = crate::monomorphize::partition_generic_constructs(&ast_module);
-
-        // 11. Wrap object code in SMF format with optional templates
-        if templates.is_empty() {
-            generate_linked_smf_from_object(&object_code, &mir_module)
-        } else {
-            // Include templates in SMF
-            crate::smf_writer::generate_linked_smf_with_templates(
-                &object_code,
-                &mir_module,
-                Some(&templates),
-                Some(&metadata),
-                None,
-                self.gc.as_ref(),
-                Target::host(),
-            )
-            .map_err(CompileError::Codegen)
-        }
+        // 10. Wrap object code in SMF format. Generic functions are lowered
+        // type-erased (type params resolve to ANY), so no template sections.
+        generate_linked_smf_from_object(&object_code, &mir_module)
     }
 
     /// Compile source code to SMF bytes for a specific target architecture.
@@ -734,9 +705,6 @@ impl CompilerPipeline {
         // Validate release mode configuration (#1034-1035)
         self.validate_release_config()?;
 
-        // 2. Monomorphization: specialize generic functions for concrete types
-        let ast_module = monomorphize_module(&ast_module);
-
         // 2.5. Hoist nested type definitions to module scope (R1).
         let ast_module = crate::hir::module_with_hoisted_defs(&ast_module).unwrap_or(ast_module);
 
@@ -807,29 +775,13 @@ impl CompilerPipeline {
             simple_common::target::TargetCpu::builtin_default_for_arch(target.arch),
         )?;
 
-        // 10. Partition generic templates from specialized instances
-        let (templates, _specialized, metadata) = crate::monomorphize::partition_generic_constructs(&ast_module);
-
-        // 11. For WASM targets, link into a complete module; otherwise wrap in SMF
+        // 10. For WASM targets, link into a complete module; otherwise wrap in SMF
         if target.arch.is_wasm() {
             // Link WASM object file into a complete WASM module
             link_wasm_object(&object_code)
         } else {
-            // Wrap object code in SMF format for native targets with optional templates
-            if templates.is_empty() {
-                generate_linked_smf_from_object(&object_code, &mir_module)
-            } else {
-                crate::smf_writer::generate_linked_smf_with_templates(
-                    &object_code,
-                    &mir_module,
-                    Some(&templates),
-                    Some(&metadata),
-                    None,
-                    self.gc.as_ref(),
-                    target,
-                )
-                .map_err(CompileError::Codegen)
-            }
+            // Wrap object code in SMF format for native targets.
+            generate_linked_smf_from_object(&object_code, &mir_module)
         }
     }
 
@@ -871,9 +823,6 @@ impl CompilerPipeline {
                 CompileError::semantic_with_context(e, ctx)
             })?;
         }
-
-        // Monomorphization
-        let ast_module = monomorphize_module(&ast_module);
 
         // Hoist nested type definitions to module scope (R1).
         let ast_module = crate::hir::module_with_hoisted_defs(&ast_module).unwrap_or(ast_module);
@@ -991,9 +940,6 @@ impl CompilerPipeline {
                 CompileError::semantic_with_context(e, ctx)
             })?;
         }
-
-        // Monomorphization
-        let ast_module = monomorphize_module(&ast_module);
 
         // Hoist nested type definitions to module scope (R1).
         let ast_module = crate::hir::module_with_hoisted_defs(&ast_module).unwrap_or(ast_module);
