@@ -4017,8 +4017,8 @@ SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
 SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
                                                        SplArray* digest_value) {
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
-    if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_ACK,
-        POV4_REASON_BINDING, 0, 0, NULL);
+    if (!owner) return SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value",
+        pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_ACK, POV4_REASON_BINDING, 0, 0, NULL));
     uint8_t digest[POV4_DIGEST_BYTES];
     int valid = owner->frozen && digest_value &&
         rt_array_bytes_copy_checked((int64_t)(uintptr_t)digest_value,
@@ -4028,8 +4028,8 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
         different |= (unsigned)(digest[i] ^ owner->frozen_digest[i]);
     if (!valid || different) {
         pov4_release_busy(index);
-        return pov4_rejected(ESTALE, POV4_FAIL_ACK, POV4_REASON_BINDING,
-            0, 0, NULL);
+        return SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value",
+            pov4_rejected(ESTALE, POV4_FAIL_ACK, POV4_REASON_BINDING, 0, 0, NULL));
     }
     int64_t ack[POV4_WORDS]; memcpy(ack, owner->words, sizeof(ack));
     ack[POV4_PACKET_KIND] = owner->cleanup_only
@@ -4040,7 +4040,9 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
     ack[POV4_BINDING_LENGTH] = POV4_DIGEST_BYTES;
     SplArray* result = pov4_tuple4(NULL, 0, NULL, 0, owner->frozen_digest,
         POV4_DIGEST_BYTES, ack);
-    if (!result) { pov4_release_busy(index); return NULL; }
+    if (!result) pov4_release_busy(index);
+    /* Allocation failure is the only way pov4_tuple4 yields NULL: abort, never NULL. */
+    (void)SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value", result);
     pthread_mutex_lock(&pov4_slots_lock);
     RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
     memset(owner, 0, sizeof(*owner));
