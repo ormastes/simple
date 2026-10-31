@@ -25,7 +25,8 @@ val RISCV_GEN2_QUALIFICATION_EXCLUSIONS = [
     "legacy V1 generators",
     "separate architectural retirement producer"]
 
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 
 class RiscvGen2QualificationRow:
     architecture: text
@@ -394,9 +395,12 @@ fn riscv_gen2_parse_qualification_manifest(
         exclusions: exclusions, rows: [rv32, rv64]))
 
 fn _g2_bound_file(path: text, expected_sha256: text) -> bool:
-    val canonical = rt_path_absolute(path) ?? ""
-    val expected = (rt_path_absolute(cwd()) ?? "") + "/" + path
-    file_is_regular_no_follow(path) and canonical == expected and
+    val canonical = rt_path_absolute(path)
+    val workspace = rt_path_absolute(cwd())
+    if canonical == nil or workspace == nil:
+        # An unresolvable path cannot be proven bound to the workspace.
+        return false
+    file_is_regular_no_follow(path) and canonical.unwrap() == workspace.unwrap() + "/" + path and
         file_hash_sha256(path) == expected_sha256
 
 fn _g2_json_text(object: any, key: text) -> text:
@@ -724,10 +728,14 @@ fn riscv_gen2_write_qualification_receipt(
     # existing root before creating or removing anything through it; otherwise
     # a symlinked parent could redirect publication and cleanup outside the
     # repository.
-    val workspace = rt_path_absolute(cwd()) ?? ""
+    val workspace_abs = rt_path_absolute(cwd())
+    if workspace_abs == nil:
+        return Err("qualification-workspace-unresolvable")
+    val workspace = workspace_abs.unwrap()
+    val evidence_root_abs = rt_path_absolute(RISCV_GEN2_QUALIFICATION_ROOT)
     if (not file_exists(RISCV_GEN2_QUALIFICATION_ROOT) or workspace == "" or
-            (rt_path_absolute(RISCV_GEN2_QUALIFICATION_ROOT) ?? "") !=
-                workspace + "/" + RISCV_GEN2_QUALIFICATION_ROOT):
+            evidence_root_abs == nil or
+            evidence_root_abs.unwrap() != workspace + "/" + RISCV_GEN2_QUALIFICATION_ROOT):
         return Err("qualification-evidence-root-noncanonical")
     val run_dir = RISCV_GEN2_QUALIFICATION_ROOT + "/" + run_id
     val receipt_path = run_dir + "/qualification_receipt.json"
@@ -735,7 +743,8 @@ fn riscv_gen2_write_qualification_receipt(
         return Err("qualification-run-directory-exists")
     if not dir_create_all(run_dir):
         return Err("qualification-run-directory-create-failed")
-    if (rt_path_absolute(run_dir) ?? "") != workspace + "/" + run_dir:
+    val run_dir_abs = rt_path_absolute(run_dir)
+    if run_dir_abs == nil or run_dir_abs.unwrap() != workspace + "/" + run_dir:
         if not dir_remove(run_dir, true):
             return Err("qualification-partial-run-cleanup-failed")
         return Err("qualification-run-directory-noncanonical")

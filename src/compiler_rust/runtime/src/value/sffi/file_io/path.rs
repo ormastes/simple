@@ -109,8 +109,11 @@ pub(crate) fn strip_verbatim_prefix(path: String) -> String {
     path
 }
 
-/// Convert path to absolute path
-/// Returns the canonicalized absolute path
+/// Convert path to absolute path.
+/// Returns the canonicalized path when it exists, otherwise the path joined
+/// onto the cwd. Returns `RuntimeValue::NIL` when the path is relative, does
+/// not exist, and the cwd cannot be read (never the relative input). Simple
+/// declares it `-> text?`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_path_absolute(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     if path_ptr.is_null() {
@@ -130,21 +133,45 @@ pub unsafe extern "C" fn rt_path_absolute(path_ptr: *const u8, path_len: u64) ->
     let absolute = if let Ok(canonical) = path.canonicalize() {
         strip_verbatim_prefix(canonical.to_str().unwrap_or(path_str).to_string())
     } else {
-        // Fallback: join with current directory
-        match std::env::current_dir() {
-            Ok(cwd) => {
-                let abs_path = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    cwd.join(path)
-                };
-                abs_path.to_str().unwrap_or(path_str).to_string()
-            }
-            Err(_) => path_str.to_string(),
+        match absolute_against_cwd(path, std::env::current_dir) {
+            Some(abs_path) => abs_path.to_str().unwrap_or(path_str).to_string(),
+            None => return RuntimeValue::NIL,
         }
     };
 
     rt_string_new(absolute.as_ptr(), absolute.len() as u64)
+}
+
+/// Make `p` absolute without touching the filesystem. `cwd` is only called for
+/// a relative path; its failure yields `None` (never the relative input).
+pub(crate) fn absolute_against_cwd(
+    p: &Path,
+    cwd: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if p.is_absolute() {
+        return Some(p.to_path_buf());
+    }
+    cwd().ok().map(|dir| dir.join(p))
+}
+
+#[cfg(test)]
+mod rt_path_absolute_tests {
+    use super::*;
+
+    #[test]
+    fn rt_path_absolute_cwd_failure_is_none() {
+        let got = absolute_against_cwd(Path::new("rel/child.spl"), || {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "cwd gone"))
+        });
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn rt_path_absolute_missing_path_is_absolute_text() {
+        let raw = b"no_such_dir_xyz/child.spl";
+        let v = unsafe { rt_path_absolute(raw.as_ptr(), raw.len() as u64) };
+        assert!(v != RuntimeValue::NIL, "missing path with a live cwd must not be nil");
+    }
 }
 
 /// Get platform-specific path separator
