@@ -1,0 +1,41 @@
+use std.spec
+use std.spec.step
+use app.snpm.cache.{cache_package}
+use app.snpm.config.{SnpmConfig}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+"""
+## Purpose and audience
+
+snpm creates directories through `rt_mkdir`, whose status is an i64 (0 on
+success, -errno on failure). `cache_package` must create the per-package and
+per-version cache directories on disk and copy the tarball into them.
+Audience: snpm maintainers.
+"""
+
+describe "snpm directory creation":
+    it "creates the package cache directories on disk":
+        step("Create a scratch root with a source tarball")
+        val (base, _e0, code0) = rt_process_run("mktemp", ["-d"])
+        expect(code0).to_equal(0)
+        val root = base.trim()
+        val (_w, _we, wcode) = rt_process_run("/bin/sh", ["-c", "echo payload > " + root + "/src.spk"])
+        expect(wcode).to_equal(0)
+        step("Cache the package using the scratch root as cache_dir")
+        val config = SnpmConfig(
+            registry_url: "",
+            cache_dir: root,
+            modules_dir: root + "/spl_modules",
+            lockfile_name: "snpm-lock.sdn",
+            manifest_name: "package.sdn",
+            auth_token: ""
+        )
+        cache_package("demo", "1.0.0", root + "/src.spk", config)
+        step("The version directory exists on disk")
+        val (_o1, _e1, probe_dir) = rt_process_run("/bin/test", ["-d", root + "/demo/1.0.0"])
+        expect(probe_dir).to_equal(0)
+        step("The tarball was copied into the version directory")
+        val (_o2, _e2, probe_file) = rt_process_run("/bin/test", ["-f", root + "/demo/1.0.0/demo-1.0.0.spk"])
+        expect(probe_file).to_equal(0)
+        rt_process_run("/bin/rm", ["-rf", root])
