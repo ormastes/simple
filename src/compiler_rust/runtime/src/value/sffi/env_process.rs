@@ -3176,7 +3176,7 @@ pub unsafe fn rt_process_owned_v3_collect_value(_handle: i64) -> RuntimeValue {
     owned_process_v3_unsupported_words(15, 14)
 }
 
-pub fn rt_process_owned_v3_release_value(_handle: i64) -> i32 {
+pub fn rt_process_owned_v3_release_value(_handle: i64) -> i8 {
     // A platform without an OwnedProcess V3 table owns no lease to release.
     0
 }

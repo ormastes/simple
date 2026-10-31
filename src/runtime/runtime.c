@@ -2486,7 +2486,7 @@ int rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_
     return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
 }
 
-int rt_mem_snapshot_close(int64_t fd) {
+bool rt_mem_snapshot_close(int64_t fd) {
 #if defined(_WIN32)
     return fd != -1 && CloseHandle((HANDLE)(intptr_t)fd) != 0;
 #else
