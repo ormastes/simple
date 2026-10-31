@@ -20,6 +20,19 @@ JOB_MANIFEST = "job-manifest.sdn"
 MONITOR_VERDICT = "functional-only BuildRunner hello (monitor policy; memory qualification deferred)"
 
 
+def prepare_private_roots(*paths):
+    """Create fresh private manager roots.
+
+    The production manager refuses an explicit output or state root that does
+    not already exist ("private output and state roots must already exist"),
+    and never creates one itself. Each root must be new so no earlier run's
+    state is reused.
+    """
+    for path in paths:
+        path.mkdir(mode=0o700)
+        path.chmod(0o700)
+
+
 def lane_status(policy):
     """Only enforce evidence may carry the qualified PASS marker."""
     if policy == "enforce":
@@ -220,6 +233,7 @@ def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
         if getattr(matrix.args, "trace_stages", False):
             cmd.append("--trace-stages")
         matrix.run(lane, LANE_COMMANDS[0], cmd)
+        prepare_private_roots(state, published)
         args = ["--manifest", manifest, "--state", state, "--source-root", source,
                 "--output-root", published]
         trace_args = ["--trace-stages"] if getattr(matrix.args, "trace_stages", False) else []
