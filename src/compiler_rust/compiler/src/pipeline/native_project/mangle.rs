@@ -293,7 +293,7 @@ fn requalify_enum_check_variant_ids(
 fn is_enum_helper_method(name: &str) -> bool {
     matches!(
         name,
-        "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+        "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
     )
 }
 
@@ -1719,7 +1719,7 @@ mod tests {
             ),
         ]);
 
-        for helper in ["unwrap", "unwrap_or", "unwrap_err", "is_some", "is_none", "is_ok", "is_err"] {
+        for helper in ["unwrap", "unwrap_or", "unwrap_err", "expect", "is_some", "is_none", "is_ok", "is_err"] {
             for receiver in ["str", "text", "string"] {
                 let mut name = format!("{receiver}.{helper}");
                 resolve_method_call_static(
