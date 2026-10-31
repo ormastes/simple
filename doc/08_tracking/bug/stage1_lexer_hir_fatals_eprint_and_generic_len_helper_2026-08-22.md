@@ -50,6 +50,12 @@ helper carried no interpreter-cost property to preserve.
 - Guard: `scripts/check/check-no-free-generic-fn-in-bootstrap-closure.shs`
   (`--selftest` 6 fixtures, fail-closed verdict convention, baseline in
   `scripts/check/free_generic_fn_bootstrap_closure_baseline.txt`).
+  RETIRED 2026-10-31: the gate had never been wired
+  (guard_wiring_unwired_baseline), its baseline was 65 entries behind the
+  closure, and direct template calls are already refused fail-closed by
+  MIR lowering (E-GEN-001). Its `use` BFS
+  survives as `scripts/check/lib/bootstrap-closure.shs` for
+  `check-no-direct-rt.shs --closure-entry`.
 
 ## OPEN: `src/compiler/20.hir/generated/hir_visitor.spl`
 

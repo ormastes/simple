@@ -1,0 +1,111 @@
+# scripts/check/lib/bootstrap-closure.shs -- sourced helper, not a gate.
+#
+# The ONE static `use` BFS over Simple sources: given a repo root and an entry
+# file (e.g. src/app/cli/bootstrap_main.spl) it prints the entry's module
+# closure, one repo-relative path per line, sorted. Consumers:
+#   check-no-direct-rt.shs --closure-entry   (scopes the rt_* scan to a binary)
+#
+# History: this BFS was the body of check-no-free-generic-fn-in-bootstrap-closure
+# .shs (2026-08-22 .. 2026-10-31), a ratchet that FAILed when a free generic
+# fn (`fn name<T>` at module top level) entered the bootstrap closure, because
+# at the time stage1 fataled on it. Retired 2026-10-31: it was never wired
+# into any manifest, its baseline had gone 65 entries stale, and a declaration
+# inventory cannot catch what matters: a direct call to a template is refused
+# fail-closed by MIR lowering (E-GEN-001). The enforcement of "never revive"
+# lives in check-no-monomorphization.shs. Only the
+# closure computation survived, here, so check-no-direct-rt keeps one BFS.
+#
+# Mechanism: top-level (column-0) `use`/`export use` lines are followed;
+# function-local `use` lines are deliberately NOT (matches the driver: a
+# 2026-08-22 stage1 log shows 667 parsed modules and no 99.loader files even
+# though codegen.spl had an indented `use compiler.loader`). Module prefixes:
+# `std.`/`lib.` -> src/lib, `app.` -> src/app, `compiler.<layer>` -> the
+# numbered layer dir src/compiler/NN.<layer> (glob) or src/compiler/<layer>.
+# A module resolves to <path>.spl, <path>/__init__.spl or <path>/mod.spl;
+# `use a.b.Symbol` falls back to module a.b. Portable sh: ERE only (BSD sed).
+#
+# Functions:
+#   bootstrap_closure_resolve_module ROOT DOTTED  -> prints relative path or nothing
+#   bootstrap_closure ROOT ENTRY                  -> prints the closure (empty if
+#                                                    ENTRY is missing)
+#   bootstrap_closure_selftest                    -> returns 2 with a message on stderr
+#                                                    on a broken fixture (never exits:
+#                                                    it runs in the caller's shell), else prints
+#                                                    "bootstrap-closure selftest: 3 fixtures OK"
+
+bootstrap_closure_resolve_module() {
+    bc_r=$1; bc_m=$2
+    case "$bc_m" in
+        std.*|lib.*) bc_rel="src/lib/$(printf '%s' "$bc_m" | cut -d. -f2- | tr . /)" ;;
+        app.*)       bc_rel="src/app/$(printf '%s' "$bc_m" | cut -d. -f2- | tr . /)" ;;
+        compiler.*)
+            bc_rest=$(printf '%s' "$bc_m" | cut -d. -f2-)
+            bc_layer=$(printf '%s' "$bc_rest" | cut -d. -f1)
+            bc_tail=$(printf '%s' "$bc_rest" | cut -d. -f2- -s | tr . /)
+            bc_d=""
+            for bc_cand in "$bc_r"/src/compiler/[0-9][0-9]."$bc_layer" "$bc_r/src/compiler/$bc_layer"; do
+                [ -d "$bc_cand" ] && { bc_d=$bc_cand; break; }
+            done
+            [ -z "$bc_d" ] && return 0
+            bc_rel="${bc_d#"$bc_r"/}${bc_tail:+/$bc_tail}" ;;
+        *) return 0 ;;
+    esac
+    if [ -f "$bc_r/$bc_rel.spl" ]; then printf '%s\n' "$bc_rel.spl"
+    elif [ -f "$bc_r/$bc_rel/__init__.spl" ]; then printf '%s\n' "$bc_rel/__init__.spl"
+    elif [ -f "$bc_r/$bc_rel/mod.spl" ]; then printf '%s\n' "$bc_rel/mod.spl"
+    fi
+    return 0
+}
+
+bootstrap_closure() {
+    bc_r=$1; bc_e=$2
+    [ -f "$bc_r/$bc_e" ] || return 0
+    bc_seen=$(mktemp) || return 1
+    bc_queue=$(mktemp) || { rm -f "$bc_seen"; return 1; }
+    printf '%s\n' "$bc_e" > "$bc_queue"; printf '%s\n' "$bc_e" > "$bc_seen"
+    while [ -s "$bc_queue" ]; do
+        bc_f=$(head -n1 "$bc_queue"); tail -n +2 "$bc_queue" > "$bc_queue.next"; mv "$bc_queue.next" "$bc_queue"
+        sed -En 's/^(export[[:space:]]+)?use[[:space:]]+([A-Za-z0-9_.]*).*/\2/p' "$bc_r/$bc_f" |
+        while IFS= read -r bc_mod; do
+            bc_mod=${bc_mod%.}
+            bc_p=$(bootstrap_closure_resolve_module "$bc_r" "$bc_mod")
+            # `use a.b.Symbol` names a symbol inside module a.b
+            [ -z "$bc_p" ] && case "$bc_mod" in *.*) bc_p=$(bootstrap_closure_resolve_module "$bc_r" "${bc_mod%.*}") ;; esac
+            [ -z "$bc_p" ] && continue
+            grep -qxF "$bc_p" "$bc_seen" || { printf '%s\n' "$bc_p" >> "$bc_seen"; printf '%s\n' "$bc_p" >> "$bc_queue"; }
+        done
+    done
+    sort "$bc_seen"; rm -f "$bc_seen" "$bc_queue"
+    return 0
+}
+
+bootstrap_closure_selftest() {
+    bc_t=$(mktemp -d) || { echo "bootstrap-closure selftest FAIL (cannot mktemp)" >&2; return 2; }
+    bc_mk() { mkdir -p "$(dirname "$bc_t/$1")"; printf '%s\n' "$2" > "$bc_t/$1"; }
+    # entry -> compiler.frontend.core.lexer (numbered layer dir, symbol import)
+    #       -> app helper (glob import); an unreferenced sibling stays out;
+    #       a function-local (indented) use is NOT followed.
+    bc_mk src/app/cli/bootstrap_main.spl 'use compiler.frontend.core.lexer.{lex}
+use app.util.helper.*
+fn main(): ()
+    use std.not_followed'
+    bc_mk src/compiler/10.frontend/core/lexer.spl 'export use std.core.chars
+fn lex(): ()'
+    bc_mk src/lib/core/chars/__init__.spl 'pub fn chars(): ()'
+    bc_mk src/lib/not_followed.spl 'fn nf(): ()'
+    bc_mk src/app/util/helper.spl 'pub fn ok(): ()'
+    bc_mk src/app/unreached.spl 'fn unreached(): ()'
+    bc_out=$(bootstrap_closure "$bc_t" src/app/cli/bootstrap_main.spl | tr '\n' ' ')
+    bc_want='src/app/cli/bootstrap_main.spl src/app/util/helper.spl src/compiler/10.frontend/core/lexer.spl src/lib/core/chars/__init__.spl '
+    [ "$bc_out" = "$bc_want" ] || { echo "bootstrap-closure selftest FAIL (closure): got [$bc_out] want [$bc_want]" >&2; rm -rf "$bc_t"; return 2; }
+    # missing entry -> empty closure
+    bc_out=$(bootstrap_closure "$bc_t" src/app/cli/nope.spl)
+    [ -z "$bc_out" ] || { echo "bootstrap-closure selftest FAIL (missing entry): [$bc_out]" >&2; rm -rf "$bc_t"; return 2; }
+    # unresolvable module prefix is skipped, not an error
+    bc_mk src/app/cli/bootstrap_main.spl 'use nowhere.x.y
+fn main(): ()'
+    bc_out=$(bootstrap_closure "$bc_t" src/app/cli/bootstrap_main.spl)
+    [ "$bc_out" = "src/app/cli/bootstrap_main.spl" ] || { echo "bootstrap-closure selftest FAIL (unresolvable use): [$bc_out]" >&2; rm -rf "$bc_t"; return 2; }
+    rm -rf "$bc_t"
+    echo "bootstrap-closure selftest: 3 fixtures OK"
+}
