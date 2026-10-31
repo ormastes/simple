@@ -2581,7 +2581,9 @@ enum {
     /* Darwin-only exec proof: posix_spawn returned success for a
      * START_SUSPENDED child, and before it ran an instruction its main image
      * vnode (PROC_PIDREGIONPATHINFO) matched the snapshot dev/ino and the
-     * snapshot bytes still matched the bound digest. Not PTRACE_EXEC. */
+     * snapshot bytes still matched the bound digest. Not PTRACE_EXEC.
+     * Owner-accepted Darwin exec proof (2026-10-31): kqueue NOTE_EXEC cannot
+     * observe a posix_spawn exec, whose pid exists only afterwards. */
     POV4_CAP_DARWIN_SPAWN_EXEC_PROOF = 1 << 10,
     /* ProcessGroup descendant policy: the unreaped leader pins its group; the
      * leader is reaped only after a zero-live (non-zombie) group sample.
