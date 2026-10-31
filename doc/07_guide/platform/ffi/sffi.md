@@ -32,7 +32,7 @@ The standard pattern for wrapping runtime C functions:
 # In the canonical no-GC sync runtime owner.
 # Actual declarations must state their exact ABI and error contract.
 @unsafe(reason: "raw runtime ABI", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 @unsafe(reason: "raw runtime ABI", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
 @unsafe(reason: "raw runtime ABI", capabilities: [ffi])
@@ -47,7 +47,7 @@ Naming convention: `rt_` prefix maps to C functions in `src/runtime/runtime.c`.
 # In src/lib/fs/mod.spl
 use std.ffi.{rt_file_read_text, rt_file_write_text, rt_file_exists}
 
-fn file_read(path: text) -> text:
+fn file_read(path: text) -> text?:
     unsafe(capabilities: [ffi]):
         rt_file_read_text(path)
 
@@ -440,7 +440,7 @@ SFFI-gen produces:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `rt_file_read_text` | `(path: text) -> text` | Read entire file as text |
+| `rt_file_read_text` | `(path: text) -> text?` | Read entire file as text; `nil` indicates failure |
 | `rt_file_write_text` | `(path: text, content: text) -> bool` | Write text to file |
 | `rt_file_exists` | `(path: text) -> bool` | Check if file exists |
 | `rt_file_delete` | `(path: text) -> bool` | Delete a file |
