@@ -3615,8 +3615,12 @@ int8_t rt_transient_heap_adopt(int64_t value) {
 
 static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap);
 
+#include "runtime_console_utf8_private.h"
 static void rt_core_write_bytes(FILE* stream, const uint8_t* ptr, uint64_t len) {
     if (!ptr || len == 0) return;
+#if defined(_WIN32)
+    if (rt_console_write_utf8(stream, ptr, (size_t)len)) return;
+#endif
     fwrite(ptr, 1, (size_t)len, stream);
 }
 
@@ -3863,7 +3867,7 @@ void (__cdecl *rt_win_set_binary_stdio_ptr)(void) = rt_win_set_binary_stdio_ctor
 int64_t rt_stdout_write_text(const char* s) {
     if (!s) return 0;
     int64_t len = (int64_t)strlen(s);
-    fputs(s, stdout);
+    rt_core_write_bytes(stdout, (const uint8_t*)s, (uint64_t)len);
     return len;
 }
 
