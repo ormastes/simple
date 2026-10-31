@@ -1,0 +1,165 @@
+# Acceptance layer: production Messenger verbs over the dense encrypted database,
+# policy denials, configuration failures and the absence of any write surface.
+#
+# Everything here is decided before a page is decrypted (policy gates, the
+# identifier gate, the secret, the first page's HMAC, the file length), so the
+# whole file runs in seconds on the Phase 1 seed.  The successful reads, each of
+# which costs a full nine-page decrypt, are the sibling dense_messenger_*_spec.spl
+# files, one verb call per file.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: messenger-policy-and-config
+
+"""
+## Purpose and audience
+Purpose: through the production Messenger verbs only, show that an agent without
+the body grant is denied with an empty payload, that a wrong, near-miss, missing
+or unusable key or database is a configuration error with an empty payload and
+no secret in the error text, and that the adapter exposes no write verb.
+Audience: DevHub release reviewers who accept the encrypted Messenger read path.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use app.devhub.messenger.config.{MessengerTarget}
+use app.devhub.messenger.plugin_access.{
+    messenger_load_adapter, messenger_reset_adapters, port_call_read, port_call_send,
+    MessengerPortResult
+}
+use app.devhub.messenger.adapter.sqlcipher_reader.{
+    messenger_register_sqlcipher4_adapter, messenger_sqlcipher4_list_rooms,
+    messenger_sqlcipher4_list_members, messenger_sqlcipher4_history,
+    messenger_sqlcipher4_fetch_message
+}
+
+val truth = dense_truth()
+val good = truth_passphrase(truth)
+val _secret_ready = dense_set_secret(good)
+val LEAKS: [text] = [good, "definitely-wrong", "SQLite format", "tie-first", "fresh general"]
+
+fn with_wrong_key(value: text) -> MessengerPortResult:
+    val _set = dense_set_secret(value)
+    val r = messenger_sqlcipher4_history(dense_target_with(dense_path(DENSE_BASE), DENSE_REF, true), "1", 3, "user")
+    val _back = dense_set_secret(good)
+    r
+
+fn config_error_clean(r: MessengerPortResult) -> bool:
+    r.status == "config_error" and r.exit_code == 2 and r.payload == "" and leaks_none(r.error, LEAKS)
+
+describe "policy denial":
+    it "denies an agent the message bodies of history with an empty payload":
+        # @req REQ-MSGR-DENSE-ACC-POLICY-001
+        step("Call history as an agent on a target without the body grant")
+        # @capture(protocol_json): status, exit code, payload and error of the denied history call
+        val r = messenger_sqlcipher4_history(dense_target_with(dense_path(DENSE_BASE), DENSE_REF, false), "1", 3, "agent")
+        expect(r.status).to_equal("permission_denied")
+        expect(r.exit_code).to_equal(3)  # oracle: exit code 3 is the documented permission-denied code in plugin_access
+        expect(r.payload).to_equal("")
+        expect(leaks_none(r.error, LEAKS)).to_equal(true)
+
+    it "denies an agent fetch_message without the body grant":
+        # @req REQ-MSGR-DENSE-ACC-POLICY-002
+        step("Call fetch_message for the overflow message as an agent on a target without the body grant")
+        # @capture(protocol_json): status, exit code and payload of the denied fetch_message call
+        val r = messenger_sqlcipher4_fetch_message(dense_target_with(dense_path(DENSE_BASE), DENSE_REF, false), "15", "agent")
+        expect(outcome_line(r)).to_equal("permission_denied:3:empty")
+
+describe "no write surface":
+    it "advertises exactly the four read verbs and is read-only":
+        # @req REQ-MSGR-DENSE-ACC-WRITE-001
+        step("Register the sqlcipher4 adapter and load it through the lazy seam")
+        # @capture(protocol_json): provider id, read-only flag and capability list of the loaded adapter
+        messenger_reset_adapters()
+        val _registered = messenger_register_sqlcipher4_adapter()
+        val port = messenger_load_adapter("sqlcipher4_database")
+        expect(port == nil).to_equal(false)
+        val live = port.?
+        expect(live.read_only).to_equal(true)
+        expect(live.capabilities.join(",")).to_equal("list_rooms,list_members,history,fetch_message")
+        expect(live.unavailable_reason).to_equal("")
+
+    it "rejects every write-shaped verb as unsupported and a send as denied":
+        # @req REQ-MSGR-DENSE-ACC-WRITE-002
+        step("Dispatch send, write, insert, update, delete, rekey and exec through the read port")
+        # @capture(statistics): status and exit code of each write-shaped dispatch
+        messenger_reset_adapters()
+        val _registered = messenger_register_sqlcipher4_adapter()
+        val live = messenger_load_adapter("sqlcipher4_database").?
+        val target = dense_target_with(dense_path(DENSE_BASE), DENSE_REF, true)
+        val ops: [text] = ["send", "write", "insert", "update", "delete", "rekey", "exec"]
+        var seen = ""
+        for op in ops:
+            seen = seen + outcome_line(port_call_read(live, target, op, "user")) + ";"
+        expect(seen).to_equal("capability_unavailable:4:empty;capability_unavailable:4:empty;capability_unavailable:4:empty;capability_unavailable:4:empty;capability_unavailable:4:empty;capability_unavailable:4:empty;capability_unavailable:4:empty;")
+        expect(outcome_line(port_call_send(live, target))).to_equal("permission_denied:3:empty")
+
+describe "configuration failures leave the payload empty and the error clean":
+    it "reports a wrong key as a configuration error that never echoes it":
+        # @req REQ-MSGR-DENSE-ACC-CONFIG-001
+        step("Call history with an unrelated passphrase in the secret variable")
+        # @capture(protocol_json): status, exit code, payload and error text for the wrong key
+        val r = with_wrong_key("definitely-wrong")
+        expect(config_error_clean(r)).to_equal(true)
+        expect(r.error.starts_with("authentication-failed")).to_equal(true)
+
+    it "reports a near-miss key the same way as an unrelated key":
+        # @req REQ-MSGR-DENSE-ACC-CONFIG-002
+        step("Call history with the right passphrase plus one trailing character")
+        # @capture(protocol_json): error text for the near-miss key against the error text for the unrelated key
+        val near = with_wrong_key(good + "x")
+        val far = with_wrong_key("definitely-wrong")
+        expect(config_error_clean(near)).to_equal(true)
+        expect(near.error).to_equal(far.error)
+
+    it "reports a tampered first page the same way as a wrong key":
+        # @req REQ-MSGR-DENSE-ACC-CONFIG-003
+        step("Call history on the database whose first page has a flipped ciphertext byte")
+        # @capture(protocol_json): error text for the tampered file against the error text for a wrong key
+        val tampered = messenger_sqlcipher4_history(dense_target_with(dense_path("dense_multipage_tamper_first.sqlcipher4"), DENSE_REF, true), "1", 3, "user")
+        val wrong = with_wrong_key("definitely-wrong")
+        expect(config_error_clean(tampered)).to_equal(true)
+        expect(tampered.error).to_equal(wrong.error)
+
+    it "reports a missing secret without naming a value":
+        # @req REQ-MSGR-DENSE-ACC-CONFIG-004
+        step("Unset the secret variable and call list_rooms")
+        # @capture(protocol_json): status, exit code, payload and error text with the secret unset
+        val _gone = dense_unset_secret()
+        val r = messenger_sqlcipher4_list_rooms(dense_target_with(dense_path(DENSE_BASE), DENSE_REF, true), "user")
+        val _back = dense_set_secret(good)
+        expect(config_error_clean(r)).to_equal(true)
+        expect(r.error.starts_with("missing-secret")).to_equal(true)
+
+    it "reports an unusable source file as a configuration error":
+        # @req REQ-MSGR-DENSE-ACC-CONFIG-005
+        step("Call list_members on a missing file, an empty file and a partial-page file")
+        # @capture(statistics): error class for each unusable source
+        val missing = messenger_sqlcipher4_list_members(dense_target_with(dense_path("no_such_database.sqlcipher4"), DENSE_REF, true), "1", "user")
+        val empty = messenger_sqlcipher4_list_members(dense_target_with(dense_path("dense_multipage_empty.dat"), DENSE_REF, true), "1", "user")
+        val partial = messenger_sqlcipher4_list_members(dense_target_with(dense_path("dense_multipage_partial_page.dat"), DENSE_REF, true), "1", "user")
+        expect(config_error_clean(missing)).to_equal(true)
+        expect(config_error_clean(empty)).to_equal(true)
+        expect(config_error_clean(partial)).to_equal(true)
+        expect(missing.error).to_equal("source-unavailable")
+        expect(empty.error).to_equal("corrupt-source")
+        expect(partial.error).to_equal("corrupt-source")
+
+    it "rejects a target whose database block is absent or whose table name fails the identifier gate":
+        # @req REQ-MSGR-DENSE-ACC-CONFIG-006
+        step("Call list_rooms with no database block, then with a table name that is not a SQL identifier")
+        # @capture(protocol_json): error text for each unusable target
+        var no_db = dense_target_with(dense_path(DENSE_BASE), DENSE_REF, true)
+        no_db.db = nil
+        var bad_table = dense_target_with(dense_path(DENSE_BASE), DENSE_REF, true)
+        var schema = dense_schema()
+        schema.room_table = "room; drop table room"
+        bad_table.schema = schema
+        val a = messenger_sqlcipher4_list_rooms(no_db, "user")
+        val b = messenger_sqlcipher4_list_rooms(bad_table, "user")
+        expect(config_error_clean(a)).to_equal(true)
+        expect(config_error_clean(b)).to_equal(true)
+        expect(a.error.contains("no db block")).to_equal(true)
+        expect(b.error.contains("identifier gate")).to_equal(true)
