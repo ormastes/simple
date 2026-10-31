@@ -1,0 +1,61 @@
+# Purpose and audience: executable specification evidence for the runtime and SFFI maintainers.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @cover scripts/check/check-rt-pointer-ref-map.py 90%
+"""
+# rt pointer map classification
+
+## Purpose and audience
+
+Runtime maintainers read this for how one C and one Simple declaration are classified.
+
+## Operator workflow
+
+Run `python3 -I scripts/check/check-rt-pointer-ref-map.py`; the last stdout line is the verdict.
+
+## Compatibility and limitations
+
+The guard is a text scan, so it gives mapping evidence only. Compile and link stay UNTESTED on every host.
+
+## Verification guidance and troubleshooting
+
+A stale baseline row means a mismatch was fixed: delete that row. Never regenerate to hide a new row.
+"""
+
+use std.spec.step
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn gate(c: text, spl: text) -> i64:
+    val script = "t=$(mktemp -d); mkdir -p $t/src/runtime $t/src/lib; printf '%b' \"$1\" > $t/src/runtime/a.c; printf '%b' \"$2\" > $t/src/lib/a.spl; python3 -I scripts/check/check-rt-pointer-ref-map.py --root $t"
+    val (_out, _err, code) = rt_process_run("sh", ["-c", script, "gate", c, spl])
+    return code
+
+val NIL_C = "char *rt_x(void) {\\n if (a) return NULL;\\n return b;\\n}\\n"
+val OK_C = "char *rt_x(void) {\\n return b;\\n}\\n"
+
+describe "rt pointer map classification":
+    it "fails a nullable C return declared as bare text":
+        step("Classify the nil mismatch")
+        expect(gate(NIL_C, "extern fn rt_x() -> text\\n")).to_equal(1)
+
+    it "passes a nullable C return declared optional":
+        step("Classify the optional declaration")
+        expect(gate(NIL_C, "extern fn rt_x() -> text?\\n")).to_equal(0)
+
+    it "passes a C body with no direct null return":
+        step("Classify the non-null body")
+        expect(gate(OK_C, "extern fn rt_x() -> text\\n")).to_equal(0)
+
+    it "fails a pointer narrowed to i32":
+        step("Classify the truncating declaration")
+        expect(gate(OK_C, "extern fn rt_x() -> i32\\n")).to_equal(1)
+
+    it "counts a bodyless prototype as unknown and never as a finding":
+        step("Classify the prototype")
+        expect(gate("char *rt_x(void);\\n", "extern fn rt_x() -> text\\n")).to_equal(0)
+
+    it "refuses to pass when a static helper leaves nothing to check":
+        step("Classify the empty join")
+        expect(gate("static char *rt_x(void) { return NULL; }\\n", "extern fn rt_x() -> text\\n")).to_equal(2)
