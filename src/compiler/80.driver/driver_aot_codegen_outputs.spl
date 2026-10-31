@@ -1,5 +1,6 @@
 # Driver AOT source and GPU text outputs.
 
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.backend.backend_helpers.{compile_module_with_backend}
 use compiler.backend.backend_types.{CompiledModule}
 use compiler.backend.cmake_gen.{generate_cmake_for_modules}
@@ -10,7 +11,6 @@ use compiler.driver.driver_source_loading.{_driver_entry_import_dirname}
 use compiler.driver.aot_output_aggregation.{aot_join_text_fragments, aot_join_wat_fragments}
 use compiler.common.config.{Logger}
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
 
@@ -55,7 +55,7 @@ impl CompilerDriver:
             c_fragments.push(module.assembly)
 
         val all_c_source = aot_join_text_fragments(c_fragments)
-        if not rt_file_write_text(output, all_c_source):
+        if not file_atomic_write(output, all_c_source):
             return CompileResult.CodegenError("Failed to write C++ source to {output}")
         output_log_info(log, "C++20 source written to {output}")
         CompileResult.Success(output)
@@ -86,13 +86,13 @@ impl CompilerDriver:
             if not rt_dir_create(parent_dir, true):
                 return CompileResult.CodegenError(
                     "Failed to create directory {parent_dir}")
-            if not rt_file_write_text(full_path, module.assembly):
+            if not file_atomic_write(full_path, module.assembly):
                 return CompileResult.CodegenError("Failed to write {full_path}")
 
             if module.has_llvm_ir and module.llvm_ir != "":
                 val h_rel_path = name.replace(".", "/") + ".h"
                 val h_full_path = rt_path_join(output_dir, h_rel_path)
-                if not rt_file_write_text(h_full_path, module.llvm_ir):
+                if not file_atomic_write(h_full_path, module.llvm_ir):
                     return CompileResult.CodegenError("Failed to write {h_full_path}")
                 output_log_trace(log, "wrote {h_rel_path}")
 
@@ -128,7 +128,7 @@ impl CompilerDriver:
             ptx_fragments.push(module.assembly ?? "")
 
         val all_ptx = aot_join_text_fragments(ptx_fragments)
-        if not rt_file_write_text(output, all_ptx):
+        if not file_atomic_write(output, all_ptx):
             return CompileResult.CodegenError("Failed to write PTX to {output}")
         output_log_info(log, "PTX assembly written to {output}")
         CompileResult.Success(output)
@@ -152,7 +152,7 @@ impl CompilerDriver:
             source_fragments.push(module.assembly ?? "")
 
         val all_source = aot_join_text_fragments(source_fragments)
-        if not rt_file_write_text(output, all_source):
+        if not file_atomic_write(output, all_source):
             return CompileResult.CodegenError(
                 "Failed to write OpenCL source to {output}")
         output_log_info(log, "OpenCL C source written to {output}")
@@ -186,7 +186,7 @@ impl CompilerDriver:
         if entry_modules == 0 or all_spirv == "":
             return CompileResult.CodegenError(
                 "Vulkan backend produced no compute entry point")
-        if not rt_file_write_text(output, all_spirv):
+        if not file_atomic_write(output, all_spirv):
             return CompileResult.CodegenError(
                 "Failed to write Vulkan SPIR-V assembly to {output}")
         output_log_info(log, "Vulkan SPIR-V assembly written to {output}")
@@ -211,7 +211,7 @@ impl CompilerDriver:
             wat_fragments.push(module.assembly ?? "")
 
         val all_wat = aot_join_wat_fragments(wat_fragments)
-        if not rt_file_write_text(output, all_wat):
+        if not file_atomic_write(output, all_wat):
             return CompileResult.CodegenError("Failed to write WAT to {output}")
         output_log_info(log, "WAT written to {output}")
         CompileResult.Success(output)
