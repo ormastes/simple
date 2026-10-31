@@ -48,6 +48,21 @@ bootstrap while admitting the full self-hosted CLI used to execute DevHub.
 An explicit `SIMPLE_BINARY` override is subject to the same capability check;
 an executable filename alone is insufficient.
 
+## Harness provisioning
+
+`bin/devhub` admits only a pure-Simple runtime carrying a provenance
+receipt, and no admitted runtime exists on a fresh checkout (the Rust seed
+is refused by design). Each wrapper scenario therefore provisions an
+admitted test-double runtime — a tiny executable plus a generated
+`simple-runtime-provenance-v1` receipt whose `run` command forwards to the
+Simple engine executing this spec — and admits it through the wrapper's
+designed fixture hook (`SIMPLE_HOST_RESOLVER_FIXTURE_MODE=1` plus
+`SIMPLE_BINARY`). The wrapper's selection, admission, and dispatch logic is
+the subject under test; the binary behind the receipt is the only double.
+The Electron launch scenario likewise provisions a package fixture with a
+stub `node_modules/.bin/electron`, because the managed Electron install is
+not vendored in the checkout.
+
 ## Scope
 
 The scenarios cover:
@@ -147,17 +162,26 @@ handled the request.
 use std.spec.step
 
 use std.spec.*
-use app.io.mod.{process_run, dir_create_all, file_read, file_write}
+use app.io.mod.{process_run, dir_create_all, file_read, file_write, cwd}
 use app.devhub.gui.{devhub_gui_html, devhub_gui_status_json}
 use app.devhub.gui_server.{devhub_gui_options}
 use app.ui.electron.app_launcher.{resolve_electron_app_launch,
     electron_app_launch_args}
+use fixtures.process_fixture_provision.{provision_admitted_runtime}
 
 val TUI_CAPTURE_DIR = "build/test-artifacts/03_system/app/devhub/feature/devhub_terminal_ui"
 val TUI_CAPTURE_PATH = TUI_CAPTURE_DIR + "/help_tui.txt"
+val ADMITTED_RUNTIME_ROOT = "build/test-artifacts/03_system/app/devhub/feature/devhub_terminal_ui/admitted_runtime"
+val ELECTRON_FIXTURE_ROOT = TUI_CAPTURE_DIR + "/electron_repo"
 
 fn run_devhub(args: [text]) -> (text, text, i64):
-    process_run("bin/devhub", args)
+    # bin/devhub admits only a pure-Simple runtime with a provenance receipt,
+    # and no admitted runtime exists on a fresh checkout. Provision the
+    # admitted test-double runtime (see process_fixture_provision.spl) and
+    # admit it through the wrapper's designed fixture hook.
+    val runtime = provision_admitted_runtime(cwd() + "/" + ADMITTED_RUNTIME_ROOT)
+    process_run("env", ["SIMPLE_HOST_RESOLVER_FIXTURE_MODE=1",
+        "SIMPLE_BINARY=" + runtime, "bin/devhub"] + args)
 
 fn capture_tui_help(content: text) -> bool:
     if not dir_create_all(TUI_CAPTURE_DIR):
@@ -273,8 +297,18 @@ describe "REQ-DEVHUB-TERM-001: launch the real DevHub app on terminal and TUI su
 
     it "should launch the resolved Electron application instead of its welcome screen":
         # @req REQ-DEVHUB-TERM-001
+        step("Provision a managed Electron package fixture; node_modules is not vendored")
+        val package_dir = ELECTRON_FIXTURE_ROOT + "/tools/electron-shell"
+        expect(dir_create_all(package_dir + "/node_modules/.bin")).to_equal(true)
+        expect(file_write(package_dir + "/package.json",
+            "{\"name\":\"electron-shell-fixture\"}\n")).to_equal(true)
+        val electron_stub = package_dir + "/node_modules/.bin/electron"
+        expect(file_write(electron_stub, "#!/bin/sh\nexit 0\n")).to_equal(true)
+        val (_chmod_out, _chmod_err, chmod_code) = process_run("chmod", ["+x", electron_stub])
+        expect(chmod_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
+
         step("Resolve the managed Electron package and build the launch arguments")
-        val launch = resolve_electron_app_launch(".")
+        val launch = resolve_electron_app_launch(ELECTRON_FIXTURE_ROOT)
         val args = electron_app_launch_args(launch.package_dir,
             "http://127.0.0.1:8765/", "")
 

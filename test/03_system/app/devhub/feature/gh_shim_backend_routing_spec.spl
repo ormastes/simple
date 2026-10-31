@@ -74,6 +74,19 @@ CLI's own version banner, which is only reachable through that fast path.
 | `bin/gh pr create --draft --json number` | 1 | refusal on the JSON path too, never `blocked-auth` |
 | `bin/devhub gh --help` | 0 | facade help, no backend required |
 
+## Harness provisioning
+
+The bitbucket scenarios cross the `bin/devhub` wrapper, which admits only a
+pure-Simple runtime carrying a provenance receipt (the Rust seed is refused
+by design, and no admitted runtime exists on a fresh checkout). The scenarios
+therefore provision an admitted test-double runtime — a tiny executable plus
+a generated `simple-runtime-provenance-v1` receipt whose `run` command
+forwards to the Simple engine executing this spec — and admit it through the
+wrapper's designed fixture hook (`SIMPLE_HOST_RESOLVER_FIXTURE_MODE=1` plus
+`SIMPLE_BINARY`). Shim resolution, backend routing, and translation wording
+remain the subject under test; the binary behind the receipt is the only
+double.
+
 ## Exclusions
 
 The scenarios deliberately do not contact GitHub, Bitbucket, or any other
@@ -101,13 +114,22 @@ the intended contents.
 use std.spec.step
 
 use std.spec.*
-use app.io.mod.{process_run}
+use app.io.mod.{process_run, cwd}
+use fixtures.process_fixture_provision.{provision_admitted_runtime}
 
+val ADMITTED_RUNTIME_ROOT = "build/test-artifacts/03_system/app/devhub/feature/gh_shim_backend_routing/admitted_runtime"
 
 fn run_sh(script: text) -> (text, text, i64):
     """Run a shell line so each scenario can set the environment variable that
-    selects the backend. The shim reads it as its highest-precedence rung."""
-    process_run("/bin/sh", ["-c", script])
+    selects the backend. The shim reads it as its highest-precedence rung.
+    The bitbucket scenarios reach `bin/devhub`, which admits only a
+    pure-Simple runtime with a provenance receipt; provision the admitted
+    test-double runtime (see fixtures/process_fixture_provision.spl) and admit
+    it through the wrapper's designed fixture hook. The fixture path is
+    absolute because scenarios may cd into scratch repositories."""
+    val runtime = provision_admitted_runtime(cwd() + "/" + ADMITTED_RUNTIME_ROOT)
+    process_run("env", ["SIMPLE_HOST_RESOLVER_FIXTURE_MODE=1",
+        "SIMPLE_BINARY=" + runtime, "/bin/sh", "-c", script])
 
 
 describe "REQ-DEVHUB-GHSHIM-001: `gh` routes to the configured backend":

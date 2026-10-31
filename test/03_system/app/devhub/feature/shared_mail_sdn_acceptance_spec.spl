@@ -6,17 +6,31 @@
 """
 Shared mail SDN acceptance through production DevHub and mail-cli config owners.
 Uses a checked-in synthetic account file; never sends mail or contacts a server.
-MAIL_CONFIG_BIN must identify the compiled production config-json helper.
+MAIL_CONFIG_BIN selects the compiled production config-json helper: when the
+environment already exports MAIL_CONFIG_BIN (CI lanes build the real helper
+natively, see scripts/ci/prepare_mail_config_helper.py) the spec uses it;
+otherwise the spec provisions a fixture helper that runs the same production
+entrypoint (src/app/mail_credentials/main.spl) through the Simple engine
+executing the spec.
 """
 use std.spec.*
 use std.spec.step
 use std.process.{run}
 use std.common.json.value.{json_value_parse_or_null, json_value_field, json_value_text_or, json_value_serialize}
-use app.io.mod.{file_read}
+use app.io.mod.{file_read, cwd}
 use app.devhub.email_support.{load_email_config_checked, resolve_email_account}
 use app.devhub.email_config_sdn.{parse_email_sdn_json}
+use fixtures.process_fixture_provision.{provision_mail_config_helper}
 
 val SHARED_MAIL_FIXTURE = "test/03_system/app/devhub/feature/fixtures/shared_mail.sdn"
+val MAIL_HELPER_ROOT = "build/test-artifacts/03_system/app/devhub/feature/shared_mail_sdn_acceptance/mail_helper"
+
+fn mail_config_helper() -> text:
+    """The compiled production config-json helper selected by MAIL_CONFIG_BIN.
+    Uses the exported MAIL_CONFIG_BIN when the environment provides it (CI
+    lanes build the real helper natively); otherwise provisions a fixture that
+    runs the same entrypoint through the spec's own Simple engine."""
+    provision_mail_config_helper(cwd() + "/" + MAIL_HELPER_ROOT)
 
 describe "REQ-005 and REQ-007: shared SDN mail accounts":
     it "should resolve the same named POP3 account through both production clients":
@@ -40,7 +54,7 @@ describe "REQ-005 and REQ-007: shared SDN mail accounts":
                 expect(selected.1.email).to_equal("alice@example.test")
                 expect(selected.1.config_file).to_equal(SHARED_MAIL_FIXTURE)
         step("Execute the request")
-        val result = run("bash", ["-c", "set -eu; source tools/mail-cli/lib/config.bash; MAIL_CONFIG_FILE=$1; mail_config_get_account work", "shared-mail", SHARED_MAIL_FIXTURE])
+        val result = run("env", ["MAIL_CONFIG_BIN=" + mail_config_helper(), "bash", "-c", "set -eu; source tools/mail-cli/lib/config.bash; MAIL_CONFIG_FILE=$1; mail_config_get_account work", "shared-mail", SHARED_MAIL_FIXTURE])
         step("Check response and redaction")
         expect(result.exit_code).to_equal(0)
         val account = json_value_parse_or_null(result.stdout)
@@ -95,7 +109,7 @@ describe "REQ-005 and REQ-007: shared SDN mail accounts":
                 expect(selected.1.config_file).to_equal(selected_path)
         step("Execute the request")
         val home_path = "test/03_system/app/devhub/feature/fixtures/poison_home"
-        val result = run("env", ["HOME=" + home_path, "MAIL_CONFIG_FILE=" + home_path + "/.config/devhub/email.json", "bash", "tools/mail-cli/bin/mail", "config", "get", "default_account", "--config-file", selected_path])
+        val result = run("env", ["HOME=" + home_path, "MAIL_CONFIG_FILE=" + home_path + "/.config/devhub/email.json", "MAIL_CONFIG_BIN=" + mail_config_helper(), "bash", "tools/mail-cli/bin/mail", "config", "get", "default_account", "--config-file", selected_path])
         step("Check response and redaction")
         expect(result.exit_code).to_equal(0)
         expect(result.stdout.trim()).to_equal("nested-work")
@@ -112,7 +126,7 @@ describe "REQ-005 and REQ-007: shared SDN mail accounts":
             case Err(code):
                 expect(code).to_equal("MAIL_CONFIG_ACCOUNTS")
         step("Execute the request")
-        val result = run("env", ["HOME=test/03_system/app/devhub/feature/fixtures/poison_home", "bash", "tools/mail-cli/bin/mail", "config", "get", "default_account", "--config-file", selected_path])
+        val result = run("env", ["HOME=test/03_system/app/devhub/feature/fixtures/poison_home", "MAIL_CONFIG_BIN=" + mail_config_helper(), "bash", "tools/mail-cli/bin/mail", "config", "get", "default_account", "--config-file", selected_path])
         step("Check response and redaction")
         expect(result.exit_code).to_be_greater_than(0)
         expect(result.stderr).to_contain("MAIL_CONFIG_ACCOUNTS")
@@ -128,7 +142,7 @@ describe "REQ-005 and REQ-007: shared SDN mail accounts":
             case Err(code):
                 expect(code).to_equal("MAIL_CONFIG_EMAIL")
         step("Execute the request")
-        val result = run("env", ["HOME=test/03_system/app/devhub/feature/fixtures/poison_home", "bash", "tools/mail-cli/bin/mail", "config", "get", "default_account", "--config-file", selected_path])
+        val result = run("env", ["HOME=test/03_system/app/devhub/feature/fixtures/poison_home", "MAIL_CONFIG_BIN=" + mail_config_helper(), "bash", "tools/mail-cli/bin/mail", "config", "get", "default_account", "--config-file", selected_path])
         step("Check response and redaction")
         expect(result.exit_code).to_be_greater_than(0)
         expect(result.stderr).to_contain("MAIL_CONFIG_EMAIL")
