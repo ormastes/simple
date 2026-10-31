@@ -10,15 +10,11 @@
 # Uses:
 # - compiler.types.type_infer.HmInferContext for cross-module type unification
 # - ObjTaker for object extraction and instantiation
-# - LazyInstantiator for link-time instantiation
 # - SmfReaderImpl for reading input files
 # - MoldBackend for native binary generation
 
 use compiler.types.type_infer.*
-use compiler.mono.monomorphize.note_sdn.*
-use compiler.mono.monomorphize.note_sdn.{TypeInferenceEntry}
 use compiler.backend.linker.obj_taker.*
-use compiler.backend.linker.lazy_instantiator.*
 use compiler.backend.linker.smf_reader.*
 use compiler.backend.linker.mold.*
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write_bytes}
@@ -107,7 +103,6 @@ struct LinkStats:
     """Statistics from linking."""
     input_count: i32
     symbol_count: i32
-    instantiated_count: i32
     deferred_count: i32
     output_size: i64
 
@@ -123,7 +118,6 @@ enum LinkErrorKind:
     DuplicateSymbol
     TypeMismatch
     CircularDependency
-    InstantiationFailed
     OutputFailed
     InternalError
 
@@ -137,8 +131,6 @@ struct Linker:
     infer_ctx: HmInferContext
     # ObjTaker for object extraction
     obj_taker: ObjTaker
-    # Lazy instantiator for link-time instantiation
-    lazy_inst: LazyInstantiator
     # Loaded SMF readers
     readers: [SmfReaderImpl]
     # Collected symbols (name -> (reader_index, symbol))
@@ -164,7 +156,6 @@ impl Linker:
         Linker(
             infer_ctx: infer_ctx,
             obj_taker: ObjTaker.with_inference_context(infer_ctx, obj_taker_config),
-            lazy_inst: LazyInstantiator.new(LazyInstantiatorConfig.default()),
             readers: [],
             symbols: {},
             unresolved: {},
@@ -218,15 +209,9 @@ impl Linker:
                 errors: self.errors
             )
 
-        # 6. Generate instantiations for unresolved symbols
-        val inst_result = self.generate_instantiations()
-        if inst_result.is_err():
-            return LinkResult.Error(
-                message: "Instantiation failed",
-                errors: self.errors
-            )
-
-        # 7. Check for remaining unresolved
+        # 6. Check for remaining unresolved. Link-time generic instantiation
+        # was deleted with src/compiler/40.mono (2026-10-31): an unresolved
+        # symbol is a plain link error, never a template to specialize.
         if not self.unresolved.is_empty() and not self.config.allow_deferred:
             for sym in self.unresolved:
                 self.errors = self.errors.push(LinkError(
@@ -256,7 +241,6 @@ impl Linker:
         val stats = LinkStats(
             input_count: self.readers.len() as i32,
             symbol_count: self.symbols.keys().len() as i32,
-            instantiated_count: self.lazy_inst.instantiated.len() as i32,
             deferred_count: self.unresolved.len() as i32,
             output_size: output_size
         )
@@ -280,8 +264,6 @@ impl Linker:
             match SmfReaderImpl.open(path):
                 case Ok(reader):
                     self.readers = self.readers.push(reader)
-                    val metadata: NoteSdnMetadata = reader.read_note_sdn()
-                    self.lazy_inst.load_metadata(path, metadata)
                 case Err(open_err):
                     self.errors = self.errors.push(LinkError(
                         kind: LinkErrorKind.InternalError,
@@ -290,16 +272,6 @@ impl Linker:
                         location: Some(path)
                     ))
                     return Err("Failed to open {path}")
-            # Load note.sdn metadata (done in the Ok arm above) for lazy instantiation.
-            # `SmfReaderImpl.read_note_sdn` returns `NoteSdnMetadata` directly
-            # (smf_reader.spl:294), not a Result -- same bug class as
-            # collect_deferred_hints below (the previous `.is_ok()`/
-            # `.unwrap()` here left the value receiver-typed ANY). There is
-            # no failure case to gate on: an absent note.sdn section yields
-            # `NoteSdnMetadata.new()` (all-empty), and `load_metadata` is a
-            # no-op-safe merge over empty arrays plus an idempotent map
-            # write, so calling it unconditionally is the correct restored
-            # semantics, not a behavior change.
 
         Ok(())
 
@@ -334,35 +306,12 @@ impl Linker:
                         self.unresolved = self.unresolved.push(symbol.name)
 
     fn collect_deferred_hints() -> [DeferredHints]:
-        """Collect all deferred type hints from all modules."""
-        var all_hints: [DeferredHints] = []
+        """Collect deferred type hints from all modules.
 
-        for reader in self.readers:
-            # `SmfReaderImpl.read_note_sdn` returns `NoteSdnMetadata` directly,
-            # NOT a Result (smf_reader.spl:294) -- there is no error case to
-            # check. Treating it as one (the previous `.is_ok()`/`.unwrap()`
-            # here) left `metadata_result`/`metadata` receiver-typed ANY,
-            # the same class of bug documented at lazy_instantiator.spl's
-            # `load_template` comment (GenericTemplate? mistaken for Result).
-            val metadata: NoteSdnMetadata = reader.read_note_sdn()
-            # Convert type_inferences to DeferredHints
-            var ti_idx = 0
-            while ti_idx < metadata.type_inferences.len():
-                val ti: TypeInferenceEntry = metadata.type_inferences[ti_idx]
-                val hint = DeferredHints(
-                    symbol: ti.expr,
-                    type_vars: [],
-                    constraints: [],
-                    usage_sites: [UsageSite(
-                        file: ti.from_file,
-                        loc: ti.from_loc,
-                        context_type: nil
-                    )]
-                )
-                all_hints = all_hints.push(hint)
-                ti_idx = ti_idx + 1
-
-        all_hints
+        The note.sdn `type_inferences` table that used to feed this was
+        written by the deleted monomorphization pass (40.mono); SMF inputs no
+        longer carry it, so there are no cross-module hints to collect."""
+        []
 
     me resolve_cross_module(hints: [DeferredHints]) -> Result<(), text>:
         """Resolve cross-module type unifications."""
@@ -429,61 +378,6 @@ impl Linker:
                 self.infer_ctx.unify(first, ty)
 
         Ok(())
-
-    me generate_instantiations() -> Result<(), text>:
-        """Generate instantiations for unresolved generic symbols."""
-        val results = self.lazy_inst.instantiate_all_missing(self.unresolved)
-
-        for result in results:
-            match result:
-                case Success(code, symbol, _):
-                    # @workaround bug=methods-mir-20261031 reason=enum-payload-array-recv-untyped-in-mir
-                    val code_bytes: [u8] = code
-                    val code_len: i64 = code_bytes.len()
-                    # Add to symbols
-                    self.symbols[symbol] = (-1, SmfSymbol(
-                        name: symbol,
-                        section_index: -1,
-                        offset: 0,
-                        size: code_len,
-                        ty: SymbolType.Function,
-                        binding: SymbolBinding.Global,
-                        is_generic_template: false,
-                        template_param_count: 0,
-                        template_offset: 0
-                    ))
-                    self.unresolved = _linker_remove_text(self.unresolved, symbol)
-
-                case Error(msg):
-                    self.errors = self.errors.push(LinkError(
-                        kind: LinkErrorKind.InstantiationFailed,
-                        message: msg,
-                        symbol: nil,
-                        location: nil
-                    ))
-
-                case CircularDependency(cycle):
-                    self.errors = self.errors.push(LinkError(
-                        kind: LinkErrorKind.CircularDependency,
-                        message: "Circular dependency: {cycle.join(\" -> \")}",
-                        symbol: nil,
-                        location: nil
-                    ))
-
-                case _:
-                    pass
-
-        # Same placeholder-lambda inference gap as resolve_cross_module above.
-        var has_instantiation_failure = false
-        for e in self.errors:
-            val err: LinkError = e
-            if err.kind == LinkErrorKind.InstantiationFailed:
-                has_instantiation_failure = true
-                break
-        if has_instantiation_failure:
-            Err("Instantiation failed")
-        else:
-            Ok(())
 
     me write_output() -> Result<i64, text>:
         """Write the linked output."""

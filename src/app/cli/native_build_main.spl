@@ -12,8 +12,6 @@ use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_
 use app.cli.native_build_shard_admission.{native_build_hir_shard_policy_v1}
 use app.cli.native_build_output_plan.{native_build_is_value_consuming_flag,
     native_build_mir_output_requires_full_set_v1}
-use app.cli.native_build_mir_selective_admission.{native_mir_selective_admission_v1,
-    native_mir_selective_disk_bytes_v1, native_mir_selective_requested_workers_v1}
 use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1,
     native_build_parse_closure_reuse_decision_v1, NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1}
 use app.io._CliCompile.native_build_closure_request_admit.{native_build_closure_request_admit_v1}
@@ -75,8 +73,7 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     native_file_worker_mir_count_v1, native_file_worker_receipt_publish_v1, native_file_worker_receipts_in_v1,
     native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
     native_file_worker_hir_ledger_state_v1, native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
-    NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1, mono_module_scoped_selected_v1,
-    native_file_worker_deps_read_v1,
+    NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1, file_worker_module_scoped_selected_v1,
     NativeFileUnitInvokerV1, NATIVE_FILE_WORKER_UNIT_ENV_V1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
 use compiler.driver.driver_build.native_file_unit_loop_v1.{native_file_unit_worker_loop_v1}
@@ -87,20 +84,8 @@ use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{
     FILE_WORKER_INC_DIR_ENV_V1, FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1,
     file_worker_inc_receipt_line_v1}
-use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_dir_v1, file_worker_inc_producer_v1, file_worker_inc_iface_digest_v1,
+use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_dir_v1, file_worker_inc_producer_v1,
     file_worker_inc_prepare_v1, file_worker_inc_finish_v1}
-use compiler.driver.driver_build.native_file_worker_instances_v1.{prelink_instances_run_v1,
-    prelink_instances_blocks_link_v1, prelink_instances_writes_retire_v1,
-    file_worker_instances_receipt_line_v1}
-use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_STAGE_ENV_V1,
-    GENERIC_INSTANCE_RETIRE_ENV_V1, GENERIC_INSTANCE_LINK_ENV_V1, generic_instance_object_from_stage_v1,
-    generic_instance_retire_snapshot_v1, generic_instance_retire_record_v1, generic_instance_verified_v1,
-    generic_instance_link_objects_v1, generic_instance_list_write_v1, generic_instance_concrete_of_v1,
-    generic_instance_lists_with_body_v1, generic_instance_module_ids_v1}
-use compiler.driver.cache.generic_specialization_list_v1.{GenericSpecializationListV1}
-use compiler.driver.cache.generic_spec_rr_producer_v1.{generic_spec_list_of_module_v1}
-use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{
-    native_mir_selective_job_count_v1}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_begin_run, ice_boundary_claim_run, ice_boundary_release_run,
     ice_boundary_dead_worker_modules, ice_boundary_attribute_dead_worker_with_stderr,
@@ -1196,7 +1181,12 @@ fn native_build_mir_shard_parallel(args: [text]) -> i64:
     if (env_get("SIMPLE_MIR_SHARD") ?? "") != "" or (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
             (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
         return 0      # already a shard child; never recurse
-    val selective = (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1"
+    # The selective MIR lane was removed together with monomorphization
+    # (2026-10-31): it only emitted/consumed the specialization placement
+    # bundle. Refuse the flag explicitly instead of silently sharding.
+    if (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1":
+        eprint "[mir-shard] SIMPLE_MIR_SELECTIVE=1: the selective MIR lane was removed (no specialization pass exists); unset it"
+        return -1
     # Ad-hoc lanes (hand-driven native-build outside the managed bootstrap
     # stages) default to MIR sharding: each shard worker lowers its claimed
     # modules, emits their objects, records terminals and EXITS, returning
@@ -1209,51 +1199,21 @@ fn native_build_mir_shard_parallel(args: [text]) -> i64:
     # Explicit opt-out: SIMPLE_MIR_SHARDING=0. Explicit opt-in (=1) unchanged.
     val shard_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
     val adhoc_default = shard_flag == "" and
-        (env_get("SIMPLE_BOOTSTRAP") ?? "") != "1" and not selective
-    if shard_flag != "1" and not selective and not adhoc_default:
+        (env_get("SIMPLE_BOOTSTRAP") ?? "") != "1"
+    if shard_flag != "1" and not adhoc_default:
         return 0
     # Every worker would wipe the shared object scope under --clean.
     if (env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") == "1" or args.contains("--clean"):
         eprint "[mir-shard] disabled: --clean wipes the object scope the shards share"
-        return if selective: -1 else: 0
-    if selective:
-        return native_build_mir_selective_parallel_v1(args)
+        return 0
     # Ordinary workers cannot evict MIR for Both/SMF output. Screen the known
     # output intent before budgeting or spawning a worker that must refuse it.
-    if native_build_mir_output_requires_full_set_v1(args, selective,
+    if native_build_mir_output_requires_full_set_v1(args, false,
             (env_get("SIMPLE_NATIVE_GROUP_MANIFEST") ?? "") != ""):
         eprint "[mir-shard] disabled: output format re-reads MIR set"
         return 0
     val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1))
     if requested > 0: requested else: 1
-
-fn native_build_mir_selective_parallel_v1(args: [text]) -> i64:
-    val requested = native_mir_selective_requested_workers_v1(args,
-        env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? "")
-    val host_request = shard_host_threads_cap(requested,
-        env_get("SIMPLE_HOST_MAX_THREADS") ?? "")
-    val parent = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_PARENT_KIB") ?? "")
-    val worker = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_WORKER_KIB") ?? "")
-    val exporter = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_EXPORTER_KIB") ?? "")
-    val phase = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_PHASE_KIB") ?? "")
-    val declared_tree = shard_mem_available_kb_from_field(env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
-    val tree = shard_tree_budget_kb_for(declared_tree, shard_cgroup_memory_max_kb())
-    val disk_budget = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_DISK_BYTES") ?? "")
-    val disk_reserve = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_DISK_RESERVE_BYTES") ?? "")
-    val root = machine_cache_root()
-    if not dir_exists(root) and not dir_create_all(root):
-        eprint "[mir-selective] cache disk probe directory unavailable"
-        return -1
-    val (disk_out, _disk_err, disk_code) = process_run_timeout("df", ["-Pk", root], 2000)
-    val disk_available = if disk_code == 0: native_mir_selective_disk_bytes_v1(disk_out) else: 0
-    val admission = native_mir_selective_admission_v1(host_request, phase, tree,
-        shard_mem_available_kb(), parent, worker, exporter, disk_budget,
-        disk_reserve, disk_available)
-    if admission.workers <= 0:
-        eprint "[mir-selective] admission refused: {admission.reason}"
-        return -1
-    print "[mir-selective] admitted_workers={admission.workers} requested={requested} phase_kib={phase} tree_kib={tree} parent_estimate_kib={parent} worker_estimate_kib={worker} exporter_estimate_kib={exporter} disk_budget_bytes={disk_budget} disk_reserve_bytes={disk_reserve}"
-    admission.workers
 
 fn native_build_mir_shard_count(parallel: i64) -> i64:
     val configured = (env_get("SIMPLE_MIR_SHARD_COUNT") ?? "").to_i64() ?? 0
@@ -1270,27 +1230,16 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         eprint "[mir-shard] cannot establish invocation ledger"
         # No worker ran: nothing claimed, nothing left running.
         return (native_mir_shard_outcome_v1(1, 0, 0, true), "")
-    val selective = (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1"
     val old_export_dir = env_get("SIMPLE_MIR_SHARD_EXPORT_DIR") ?? ""
     val export_dir = run_mir_shard_export_summaries(base, queue_dir, simple_bin, timeout_ms)
     var count = native_build_mir_shard_count(parallel)
-    if selective:
-        if export_dir == "": return ("fail", "")
-        val jobs = native_mir_selective_job_count_v1(export_dir)
-        if jobs.is_err():
-            eprint "[mir-selective] physical emission schedule refused: {jobs.unwrap_err()}"
-            return ("fail", "")
-        # One process owns one physical emission and all of its logical
-        # specialization bodies. No previous job's lazy canonical IDs or
-        # promoted heap can affect the next emission's output or footprint.
-        count = jobs.unwrap()
     # EXPERIMENTAL SIMPLE_MIR_FORK_WORKERS=N: spawn ONE root shard worker; it
-    # forks N copy-on-write MIR children after mono
+    # forks N copy-on-write MIR children after HIR lowering
     # (compiler/80.driver/driver_build/native_mir_fork_v1.spl). K roots would
-    # each fork N children and each hold a full post-mono heap.
+    # each fork N children and each hold a full HIR+MIR heap.
     var run_parallel = parallel
     val fork_workers = native_mir_fork_workers_of_v1(env_get("SIMPLE_MIR_FORK_WORKERS") ?? "")
-    if not selective and fork_workers > 0:
+    if fork_workers > 0:
         count = 1
         run_parallel = 1
         print "[mir-shard] fork_workers={fork_workers} (experimental): one root worker"
@@ -1306,7 +1255,6 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         run.total_claims, run.all_stopped)
     if outcome != "link":
         eprint "[mir-shard] outcome={outcome} exit={run.code} failed_modules={run.failed_modules} claims={run.total_claims} all_stopped={run.all_stopped} blocked={run.blocked_reason}"
-        if selective: return ("fail", "")
     if outcome == "link": (outcome, queue_dir) else: (outcome, "")
 
 # ===== Focused-capsule shard pre-pass (exact Stage3/Stage4) =================
@@ -1390,14 +1338,13 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     # pool returns "fail" (error on stderr); it never continues to the two-pass path.
     if allow_mir and native_bootstrap_stage3_per_file_selected_v1(env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
             env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "") and
-            (env_get("SIMPLE_MIR_SHARDING") ?? "") != "0" and (env_get("SIMPLE_MIR_SELECTIVE") ?? "") != "1":
+            (env_get("SIMPLE_MIR_SHARDING") ?? "") != "0":
         val file_result = run_file_worker_pool_v1(base, args, simple_bin, timeout_ms)
         env_set("SIMPLE_MEM_SNAPSHOT_FILE", old_mem_snapshot)
         env_set("SIMPLE_COMPILER_PHASE_PROFILE_FILE", old_phase_file)
         env_set("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
         return file_result
     var hir_ok = true
-    var shard_hir_queue = ""
     val hir_count = if native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "",
             env_get("SIMPLE_HIR_SHARDING") ?? "") == 1: native_build_hir_shard_count(args) else: 0
     if hir_count > 1:
@@ -1405,7 +1352,6 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
         if hir_queue == "":
             hir_ok = false
         else:
-            shard_hir_queue = hir_queue
             print "[capsule-shard] hir shards={hir_count} ledger={hir_queue}"
             val hir_run = run_ledger_shards("hir-shard", "--hir-shard", "SIMPLE_HIR_SHARD_QUEUE",
                 "SIMPLE_HIR_SHARD_OWNER", base, hir_queue, args, hir_count, hir_count,
@@ -1415,7 +1361,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
                 eprint "[capsule-shard] HIR warm-up failed (exit={hir_run.code} failed_modules={hir_run.failed_modules}); in-process build redoes HIR and reports it"
     var result = ""
     val mir_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
-    if allow_mir and hir_ok and mir_flag != "0" and (env_get("SIMPLE_MIR_SELECTIVE") ?? "") != "1":
+    if allow_mir and hir_ok and mir_flag != "0":
         val parallel = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1))
         if parallel > 1:
             val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
@@ -1428,19 +1374,6 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
                 val outcome = native_mir_shard_outcome_v1(mir_run.code, mir_run.failed_modules,
                     mir_run.total_claims, mir_run.all_stopped)
                 if outcome == "link":
-                    # Same pre-link instance step as the file-worker pool, but the
-                    # shard route retires no COMDAT copies (may_retire=false), so an
-                    # instance failure only warns and the link uses the COMDAT copies.
-                    if shard_hir_queue == "":
-                        print "[capsule-shard] prelink: skipped (no deps ledger)"
-                    else:
-                        val shard_producer = file_worker_inc_producer_v1(
-                            native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity()), args)
-                        val (_shard_relink, shard_instances_ok) = prelink_generic_instances_v1(args, mir_queue,
-                            shard_hir_queue, shard_producer, false, [])
-                        if not shard_instances_ok:
-                            eprint "[capsule-shard] warning: generic instance objects unavailable; linking on COMDAT copies"
-                            env_set(GENERIC_INSTANCE_LINK_ENV_V1, "")
                     result = mir_queue
                 elif outcome == "fail":
                     eprint "[capsule-shard] MIR aggregate failure exit={mir_run.code} failed_modules={mir_run.failed_modules} blocked={mir_run.blocked_reason}; link blocked"
@@ -1516,26 +1449,9 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
         selected_scope_digest, selected_inventory_digest, frontend_tldr_root)
     val old_reuse = env_get(FILE_WORKER_REUSE_ENV_V1) ?? ""
     env_set(FILE_WORKER_REUSE_ENV_V1, reuse_path)
-    # P-G7: children stage instance objects and retire only the COMDAT copies
-    # whose verified instance object this build will link.
-    val instance_stage = "{mir_queue}.instances/stage"
-    val retire_snapshot = generic_instance_retire_snapshot_v1(machine_cache_root(), inc_producer,
-        file_worker_inc_iface_digest_v1)
-    val retire_path = "{mir_queue}.instances/retire"
-    var retire_concrete: [text] = []
-    for body_key in retire_snapshot:
-        retire_concrete.push(generic_instance_concrete_of_v1(body_key))
-    val retire_written = dir_create_all("{mir_queue}.instances") and
-        generic_instance_list_write_v1(retire_path, retire_concrete)
-    val old_stage = env_get(GENERIC_INSTANCE_STAGE_ENV_V1) ?? ""
-    val old_retire = env_get(GENERIC_INSTANCE_RETIRE_ENV_V1) ?? ""
-    env_set(GENERIC_INSTANCE_STAGE_ENV_V1, instance_stage)
-    env_set(GENERIC_INSTANCE_RETIRE_ENV_V1, if retire_written: retire_path else: "")
     val run = run_ledger_shards("file-worker", "--file-worker", NATIVE_FILE_WORKER_QUEUE_ENV_V1,
         NATIVE_FILE_WORKER_OWNER_ENV_V1, base, mir_queue, args, parallel, parallel,
         simple_bin, timeout_ms)
-    env_set(GENERIC_INSTANCE_STAGE_ENV_V1, old_stage)
-    env_set(GENERIC_INSTANCE_RETIRE_ENV_V1, old_retire)
     env_set(FILE_WORKER_REUSE_ENV_V1, old_reuse)
     env_set(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, old_hir_queue)
     if reuse_path != "":
@@ -1546,11 +1462,6 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     print "[file-worker] receipts={receipts.len()} overlap_proven={file_worker_overlap_proven_v1(receipts)}"
     val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules, run.total_claims, run.all_stopped)
     if outcome == "link":
-        val (instances_relink, instances_ok) = prelink_generic_instances_v1(args, mir_queue, hir_queue, inc_producer, true,
-            if retire_written: retire_snapshot else: [])
-        if prelink_instances_blocks_link_v1(true, instances_ok):
-            eprint "[file-worker] retired COMDAT copies have no verified instance object; link blocked"
-            return "fail"
         if inc_dir != "":
             val fin = file_worker_inc_finish_v1(inc_dir, inc_producer, mir_queue, hir_queue,
                 inc_output, reused, frontend_tldr_root, selected_source_digests,
@@ -1558,7 +1469,7 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
             print file_worker_inc_receipt_line_v1(fin.reused, fin.rebuilt, fin.relink)
             env_set(FILE_WORKER_INC_DIR_ENV_V1, inc_dir)
             env_set(FILE_WORKER_INC_PRODUCER_ENV_V1, inc_producer)
-            if not fin.relink and not instances_relink:
+            if not fin.relink:
                 env_set(FILE_WORKER_LINK_PLACED_ENV_V1, "1")
         return mir_queue
     if outcome == "fail":
@@ -1566,81 +1477,6 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
         return "fail"
     eprint "[file-worker] no MIR module verdict; per-file pool selected, no in-process fallback"
     "fail"
-
-# P-G6/P-G7: after every module object exists (no barrier before the first
-# one), plan the needed generic instances from the fresh TLDR lists and run
-# them as single-flight jobs; the producer is the object the MIR children
-# staged for the key (generic_instance_object_producer_v1). Returns
-# (relink, ok): relink when an instance was built or dropped (P-E
-# removed-module rule); ok is false only when a COMDAT copy the children
-# retired (`retired`) has no verified instance object to link.
-fn prelink_generic_instances_v1(args: [text], mir_queue: text, hir_queue: text, producer: text, may_retire: bool,
-        retired: [text]) -> (bool, bool):
-    val frontend_env = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
-    val frontend = if frontend_env != "": frontend_env else: native_build_frontend_cache_dir_arg(args)
-    if frontend == "" or producer == "" or not file_exists("{mir_queue}/inventory"):
-        return file_worker_instances_link_v1(mir_queue, producer, retired, false)
-    var modules: [text] = []
-    val inventory = file_read("{mir_queue}/inventory").split("\n")
-    var i = 1
-    while i < inventory.len():
-        if inventory[i] != "":
-            modules.push(inventory[i])
-        i = i + 1
-    # Body keys: ConcreteTldrKey + the template owner's current source digest, so
-    # a body-only template edit rebuilds the instance (P-G7 review r1).
-    var lists: [GenericSpecializationListV1?] = []
-    for m in modules:
-        lists.push(generic_spec_list_of_module_v1(m, frontend + "/tldr"))
-    # Owner identity = source + direct imports' interface digests (P-E rule);
-    # an owner with no deps record keeps its specs' lists incomplete.
-    var deps_of: Dict<text, [text]> = {}
-    for m in modules:
-        val deps = native_file_worker_deps_read_v1(hir_queue, m)
-        if deps.is_ok():
-            deps_of[m] = deps.unwrap()
-    val (body_lists, owners) = generic_instance_lists_with_body_v1(lists, generic_instance_module_ids_v1(modules),
-        deps_of, file_worker_inc_iface_digest_v1)
-    val stage = "{mir_queue}.instances/stage"
-    val (plan, run) = prelink_instances_run_v1(body_lists, machine_cache_root(), producer, "{mir_queue}.instances/jobs",
-        "coordinator-{getpid()}", generic_instance_object_from_stage_v1(stage, _1), modules)
-    print file_worker_instances_receipt_line_v1(run)
-    # Retirable from the next build on only when every needed key PASSED.
-    var needed: [text] = []
-    for s in plan.needed:
-        needed.push(s.concrete_key)
-    if prelink_instances_writes_retire_v1(may_retire):
-        val _recorded = generic_instance_retire_record_v1(machine_cache_root(), producer, needed, owners,
-            run.complete and run.retire_comdat)
-    # A retired key no module needs any more had its copy retired nowhere.
-    var link_keys: [text] = []
-    for k in retired:
-        if needed.contains(k) or generic_instance_verified_v1(machine_cache_root(), producer, k):
-            link_keys.push(k)
-    if run.complete and run.retire_comdat:
-        for k in needed:
-            if not link_keys.contains(k):
-                link_keys.push(k)
-    val (relink, ok) = file_worker_instances_link_v1(mir_queue, producer, link_keys, run.relink)
-    (relink, ok)
-
-# Extract the verified instance objects for `keys` and hand their list to the
-# link step (aot_link_mir_shards_v1). A changed link set forces a relink.
-fn file_worker_instances_link_v1(mir_queue: text, producer: text, keys: [text],
-        relink: bool) -> (bool, bool):
-    env_set(GENERIC_INSTANCE_LINK_ENV_V1, "")
-    if keys.len() == 0:
-        return (relink, true)
-    val (objects, ok) = generic_instance_link_objects_v1(machine_cache_root(), producer, keys,
-        "{mir_queue}.instances/link")
-    if not ok:
-        return (relink, false)
-    val list_path = "{mir_queue}.instances/link.list"
-    if not generic_instance_list_write_v1(list_path, objects):
-        return (relink, false)
-    env_set(GENERIC_INSTANCE_LINK_ENV_V1, list_path)
-    print "[file-worker] instance objects linked={objects.len()}"
-    (true, true)
 
 # Worker side of `--file-worker=i/n` (bootstrap_main.spl dispatch). Claims
 # one module (SIMPLE_FILE_WORKER_BATCH, default 1) per round through a HIR
@@ -1657,7 +1493,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
         eprint "[file-worker] invalid role spec={spec} or ledger/self path missing"
         return 1
     val batch = native_file_worker_batch_from_env_v1()
-    if mono_module_scoped_selected_v1(env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "", true):
+    if file_worker_module_scoped_selected_v1(env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "", true):
         return native_file_unit_worker_loop_v1(NativeFileUnitProcessInvokerV1(simple_bin: simple_bin, args: args,
             spec: spec, hir_queue: hir_queue, mir_queue: mir_queue, batch: batch), owner, mir_queue, hir_queue)
     var round: i64 = 0
@@ -1738,8 +1574,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
 # fallback to the full HIR load, never a build failure.
 fn run_mir_shard_export_summaries(base: [text], queue_dir: text, simple_bin: text,
         timeout_ms: i64) -> text:
-    val selective = (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1"
-    if (env_get("SIMPLE_MIR_SHARD_EXPORT_SUMMARIES") ?? "") != "1" and not selective:
+    if (env_get("SIMPLE_MIR_SHARD_EXPORT_SUMMARIES") ?? "") != "1":
         return ""
     val export_dir = "{queue_dir}.export"
     # A bundle from an earlier invocation must never be admitted by this one.
@@ -1758,12 +1593,9 @@ fn run_mir_shard_export_summaries(base: [text], queue_dir: text, simple_bin: tex
         val _killed = process_kill(pid)
         val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
         stopped = reaped != -1 and reaped != -2 and not process_is_running(pid)
-    val manifest = if selective: "{export_dir}/selective.manifest" else: "{export_dir}/manifest"
+    val manifest = "{export_dir}/manifest"
     if code != 0 or not stopped or not file_exists(manifest):
-        if selective:
-            eprint "[mir-selective] export failed exit={code} stopped={stopped}; no MIR children admitted"
-        else:
-            eprint "[mir-shard-export] summary step exit={code}; workers use full HIR"
+        eprint "[mir-shard-export] summary step exit={code}; workers use full HIR"
         return ""
     print "[mir-shard-export] bundle={export_dir}"
     export_dir
@@ -2093,7 +1925,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     if mir_shard_parallel < 0:
         env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
         env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
-        eprint "error: selective MIR admission refused; no serial fallback"
+        eprint "error: MIR shard admission refused; no serial fallback"
         return 1
     if mir_shard_parallel > 0:
         val (mir_outcome, mir_ledger) = run_mir_shards(forwarded_args, mir_shard_parallel, simple_bin, native_build_timeout_ms(args))
@@ -2103,13 +1935,6 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
                 env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
                 eprint "error: MIR link ledger environment could not be installed"
                 return 1
-            if (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1":
-                if not env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", mir_ledger + ".export"):
-                    env_set("SIMPLE_MIR_SHARD_LINK", old_mir_link)
-                    env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
-                    env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
-                    eprint "error: selective MIR link bundle environment could not be installed"
-                    return 1
         elif mir_outcome == "fallback":
             # No module verdict: the workers never got a usable HIR
             # inventory/cache. The final worker lowers MIR in process.
