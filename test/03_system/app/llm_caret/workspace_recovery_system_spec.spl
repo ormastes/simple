@@ -42,9 +42,9 @@ real broadcast-on-dead-session contract gap — keep it red until fixed.
 
 use std.spec.{describe, it, expect, step}
 use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists,
-    file_write, file_exists, cwd, current_time_ms}
+    file_write, file_exists, cwd, current_time_ms, sleep_ms}
 use app.llm_caret.agent_workspace.{AgentWorkspace, agent_workspace, workspace_available, workspace_backend,
-    session_alive, session_ensure, session_kill, list_panes, send_to_each_pane,
+    session_alive, session_ensure, session_kill, list_panes, send_to_each_pane, pane_split, window_exists, send_to_pane, wait_for_pane_text,
     worktree_path, worktree_add, worktree_list, agent_attach, agent_detach}
 
 val CLI = "src/app/llm_caret/main.spl"
@@ -278,4 +278,54 @@ describe "LLM Caret workspace recovery and idempotency":
 
         step("The failed broadcast did not create a session as a side effect")
         expect(session_alive(ws)).to_be(false)
+        dir_remove_all(root)
+
+    it "starts the attach command, rejects ghost windows and addresses panes exactly":
+        # @req REQ-LLM-CARET-WS-008
+        # @capture(statistics): command start proof, ghost split verdict, exact-target verdicts
+        step("Confirm a real pane backend drives the scenarios; an absent one is an environment failure")
+        expect(workspace_available()).to_equal(true)  # oracle: a missing backend is a host defect, not a skip
+        val root = _scratch("exact")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        # Fixed id: the smux owner port derives from it, so a rerun reclaims a leaked owner.
+        val id = "rec-exact"
+        val ws = agent_workspace(id, repo, root + "/trees")
+        session_kill(ws)
+
+        step("attach starts its command: the child writes a file inside the agent worktree")
+        expect(agent_attach(ws, "cmd-a", "echo ran > ran.txt; exec sh -i").status).to_equal("ok")
+        val ran = worktree_path(ws, "cmd-a") + "/ran.txt"
+        val deadline = current_time_ms() + 60000
+        while current_time_ms() < deadline and not file_exists(ran):
+            sleep_ms(250)
+        expect(file_exists(ran)).to_be(true)  # oracle: the attach command really ran in the agent shell
+
+        step("A split of a window that does not exist is refused and creates no window")
+        expect(pane_split(ws, "ghost", repo).status).to_equal("error")
+        expect(window_exists(ws, "ghost")).to_be(false)
+
+        step("A target is exact: cmd-a.0 reaches cmd-a, cmd-a.7 and a missing agent reach nothing")
+        expect(send_to_pane(ws, id + ":cmd-a.0", "echo EXACT_$((40+2))").status).to_equal("ok")
+        expect(wait_for_pane_text(ws, id + ":cmd-a", "EXACT_42", 30000)).to_be(true)  # oracle: the shell executed it; the typed text has no EXACT_42
+        expect(send_to_pane(ws, id + ":cmd-a.7", "echo never").status).to_equal("error")
+        expect(send_to_pane(ws, id + ":nobody", "echo never").status).to_equal("error")
+
+        step("A 300-column output line is captured whole, not hard-wrapped")
+        var wide = ""
+        while wide.len() < 300:
+            wide = wide + "W"
+        expect(send_to_pane(ws, id + ":cmd-a", "echo " + wide + "_$((1+1))").status).to_equal("ok")
+        expect(wait_for_pane_text(ws, id + ":cmd-a", wide + "_2", 30000)).to_be(true)  # oracle: 302 printed chars on one captured line
+
+        if workspace_backend() == "smux":
+            step("smux rejects names that would corrupt targets or the owner protocol, and creates nothing")
+            expect(agent_attach(ws, "my agent", "").reason).to_equal("invalid_name")
+            expect(agent_attach(ws, "a.0", "").reason).to_equal("invalid_name")
+            expect(agent_attach(ws, "main", "").reason).to_equal("invalid_name")  # oracle: the owner bootstrap window name is reserved, so it is never reported as an attached agent
+            expect(dir_exists(worktree_path(ws, "my agent"))).to_be(false)
+            expect(dir_exists(worktree_path(ws, "main"))).to_be(false)
+
+        agent_detach(ws, "cmd-a")
+        session_kill(ws)
         dir_remove_all(root)
