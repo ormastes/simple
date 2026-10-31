@@ -102,7 +102,7 @@ pub(crate) use coverage_sites::register_module_sites;
 
 // Place (lvalue) model: identifier root + arbitrary field/index projections.
 // Backs both deep field assignment and mutating-method receivers.
-mod place;
+pub(crate) mod place;
 
 // Node execution
 mod node_exec;

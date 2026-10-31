@@ -350,9 +350,9 @@ pub(crate) fn eval_dict_map_values(
         let mut new_map = HashMap::new();
         for (k, v) in map {
             crate::interpreter::check_execution_limit()?;
-            let mut local_env = bind_lambda_param(captured, params, v);
+            let mut local_env = bind_lambda_param(captured, params, Value::dict_entry_value_ref(v));
             let new_val = eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
-            new_map.insert(k.clone(), new_val);
+            new_map.insert(k.clone(), Value::rewrap_dict_entry(v, new_val));
         }
         Ok(Value::Dict(Arc::new(new_map)))
     })
@@ -373,10 +373,10 @@ pub(crate) fn eval_dict_filter(
             crate::interpreter::check_execution_limit()?;
             let mut local_env = captured.clone();
             if params.len() >= 2 {
-                local_env.insert(params[0].clone(), Value::text(k.clone()));
-                local_env.insert(params[1].clone(), v.clone());
+                local_env.insert(params[0].clone(), Value::dict_entry_key_for_iteration(v, k));
+                local_env.insert(params[1].clone(), Value::dict_entry_value_for_iteration(v));
             } else if let Some(param) = params.first() {
-                local_env.insert(param.clone(), v.clone());
+                local_env.insert(param.clone(), Value::dict_entry_value_for_iteration(v));
             }
             let pred_val = eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
             if is_condition_present(body, &pred_val) {

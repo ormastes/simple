@@ -110,3 +110,50 @@ A hello-world `native-build` on this Windows host failed both ways; neither is e
 - Stage 3 from another lane's worktree, built 2026-10-25, sha256 `13d73267e690b2cd`, with LLVM 23 and the MSVC env: `lld-link: undefined symbol: rt_proc_start_time`, referenced by `rt_process_start_identity`. Its runtime source list predates the current tree. A Stage 3 is not a Stage 4 substitute in any case.
 
 Unblocks when a Windows Stage 4 full CLI from this source exists (bootstrap lane, PR #5540), or the seed's JIT keeps PLT and GOT within 2 GB.
+
+## Native lane update, branch work/relfix-native-20261031 (2026-10-31)
+
+Fixed on this branch: the JIT panic (per-module arena, vendor patch in
+`vendor/cranelift-jit/src/memory.rs`), ConPTY stdio inheritance, surrogate input on
+VK_MENU key-up, `PaneRecord` aliasing, C `rt_random_hex` ABI, native
+`to_start_with`/`to_end_with`, and family re-export lookup.
+
+Recipe used. It is not the sanctioned lane; the specs ran as plain native-built
+executables, not through a test runner:
+
+    export SIMPLE_MINGW_ROOT=<llvm-mingw-ucrt>
+    . scripts/setup/windows-gitbash-bootstrap-env.shs
+    # cwd = a staged copy of src/{lib,app,os,compiler} with
+    # src/providers/windows_native/lib copied over src/lib
+    SIMPLE_NATIVE_BUILD_RUST=1 seed native-build --source src/app --source src/lib \
+      --source src/os --source src/compiler --entry <spec> -o <spec>.exe
+
+`SIMPLE_TEST_CONFIGURED_CWD` must be a backslash path containing a space and Hangul.
+
+### Open
+
+1. `--source src/providers/windows_native/lib` does not select the overlay in the seed
+   native-build: `std.sys.pty` still resolves to `src/lib/sys/pty.spl` and the link
+   reports undefined `rt_pty_*`. The staged tree above is a workaround for this gap.
+2. Native callers get a corrupted result from the console `open` once the PTY facade is
+   in the closure. Inside `windows_console_open_v1` the handle is 1; the caller's
+   `opened.unwrap()` is a varying 32-bit value, so the first write fails with `invalid or
+   closed console lease`. Importing `std.sys.terminal_console` directly fails the same
+   way. Cause not found. Preferring the exact import owner in
+   `named_callable_return_type` did not change it. Blocks `smux_windows_shared_clients`
+   (fixture exit 17) and any smux client attach built this way.
+3. `rt_driver_*` and `rt_package_*` do not link in this lane. `pane_backend.spl` uses
+   `std.nogc_async_mut.sosix` and `package_sffi`, so `pane_backend_spec` and
+   `pane_backend_windows_spec` cannot build natively.
+4. `smux_windows_owner_lifecycle`: "delayed output beyond pipe capacity" failed in 2 of
+   3 runs and "keep another session responsive" in 3 of 3. Not investigated.
+5. `smux_presentation_native` failed once in 4 runs on the final seed, on a host with
+   little free memory. Not investigated.
+6. A spec built directly with `--entry` exits 0 even when examples fail. Read the
+   `N examples, M failures` line.
+7. Default `native-build` (no `SIMPLE_NATIVE_BUILD_RUST`) now gets past the panic, then
+   `build_memory_start_refusal_v1` refused it at 8.8 GiB and 3.6 GiB headroom. Hello has
+   not completed on that path.
+8. `llm_caret_cli_cached`, `llm_caret_cli_hidden_cached` and `llm_caret_native_closure`
+   require a self-hosted runtime and reject seed-built artifacts by design. They need a
+   Stage 4 binary. `llm_caret_messaging_phase_cli` was not run.

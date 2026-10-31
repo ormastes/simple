@@ -1,6 +1,6 @@
 //! Defines `JITModule`.
 
-use crate::{compiled_blob::CompiledBlob, memory::BranchProtection, memory::Memory};
+use crate::{compiled_blob::CompiledBlob, memory::BranchProtection, memory::Memory, memory::ModuleArena};
 use cranelift_codegen::binemit::Reloc;
 use cranelift_codegen::isa::{OwnedTargetIsa, TargetIsa};
 use cranelift_codegen::settings::Configurable;
@@ -517,6 +517,7 @@ impl JITModule {
             } else {
                 BranchProtection::None
             };
+        let module_arena = ModuleArena::reserve();
         let mut module = Self {
             isa: builder.isa,
             hotswap_enabled: builder.hotswap_enabled,
@@ -528,10 +529,14 @@ impl JITModule {
                 // contiguous 128 MiB arena on AArch64 so that direct `bl`
                 // relocations between this module's functions are always in
                 // range. See memory.rs `aarch64_arena`.
-                code: Memory::new_code(branch_protection),
+                //
+                // LOCAL PATCH: `module_arena` keeps code, PLT, GOT and data of
+                // this module within i32 PC-relative reach on Windows x86_64.
+                // See memory.rs `windows_x64_arena`.
+                code: Memory::new_code(branch_protection).in_module_arena(&module_arena),
                 // Branch protection is not applicable to non-executable memory.
-                readonly: Memory::new(BranchProtection::None),
-                writable: Memory::new(BranchProtection::None),
+                readonly: Memory::new(BranchProtection::None).in_module_arena(&module_arena),
+                writable: Memory::new(BranchProtection::None).in_module_arena(&module_arena),
             },
             declarations: ModuleDeclarations::default(),
             function_got_entries: SecondaryMap::new(),

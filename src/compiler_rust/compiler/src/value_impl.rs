@@ -262,9 +262,9 @@ impl Value {
     /// Whether `to_key_string()` on this value is a type-preserving round
     /// trip, i.e. the interpreter's `Dict` (a `HashMap<String, Value>`
     /// keyed by `to_key_string()`) never needs extra bookkeeping to hand
-    /// the original key back on iteration. True for the scalar-ish types
-    /// the interpreter's dict representation already handled correctly;
-    /// false for composite types (struct/enum/tuple/array) whose
+    /// the original key back on iteration. True for text-like keys, which
+    /// read back unchanged from the string key;
+    /// false for numbers, bools and composites (struct/enum/tuple/array) whose
     /// `to_key_string()` is a canonical-but-lossy serialization.
     ///
     /// See `dict_struct_key_iteration_single_entry_2026-06-13`: iterating a
@@ -274,23 +274,19 @@ impl Value {
     /// `wrap_dict_entry`/`unwrap_dict_entry`/`dict_entry_key_for_iteration`
     /// close that gap for non-scalar keys only, so scalar-keyed dict
     /// behavior (int/text/bool/float/nil) is completely unchanged.
-    pub fn dict_key_is_scalar(&self) -> bool {
+    pub fn dict_key_round_trips(&self) -> bool {
         match self {
-            Value::Int(_)
-            | Value::UInt { .. }
-            | Value::Float(_)
-            | Value::Float32(_)
-            | Value::Bool(_)
-            | Value::Str(_)
-            | Value::Symbol(_)
-            | Value::Nil => true,
-            Value::Unit { value, .. } => value.dict_key_is_scalar(),
-            Value::Unique(u) => u.inner().dict_key_is_scalar(),
-            Value::Shared(s) => s.inner().dict_key_is_scalar(),
-            Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil).dict_key_is_scalar(),
-            Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).dict_key_is_scalar(),
-            Value::Borrow(b) => b.inner().dict_key_is_scalar(),
-            Value::BorrowMut(b) => b.inner().dict_key_is_scalar(),
+            // Numbers and bools are NOT self-describing: `to_key_string` flattens
+            // `7` to "7", and handing that back from `.keys()` gave a text that
+            // printed as 7 but compared unequal to the i64 7.
+            Value::Str(_) | Value::Symbol(_) | Value::Nil => true,
+            Value::Unit { value, .. } => value.dict_key_round_trips(),
+            Value::Unique(u) => u.inner().dict_key_round_trips(),
+            Value::Shared(s) => s.inner().dict_key_round_trips(),
+            Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil).dict_key_round_trips(),
+            Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).dict_key_round_trips(),
+            Value::Borrow(b) => b.inner().dict_key_round_trips(),
+            Value::BorrowMut(b) => b.inner().dict_key_round_trips(),
             _ => false,
         }
     }
@@ -304,7 +300,7 @@ impl Value {
     /// double-underscore reserved name, mirroring this codebase's existing
     /// `__setitem__`/`__getitem__` convention for internal dunder names.
     pub fn wrap_dict_entry(key: &Value, value: Value) -> Value {
-        if key.dict_key_is_scalar() {
+        if key.dict_key_round_trips() {
             value
         } else {
             Value::Tuple(vec![Value::Symbol(DICT_ENTRY_MARKER.to_string()), key.clone(), value])
@@ -313,10 +309,10 @@ impl Value {
 
     /// Inverse of `wrap_dict_entry` for call sites that already know the
     /// key they looked up with (`get`, `contains`, `set`, ...).
-    pub fn unwrap_dict_entry(key: &Value, stored: Value) -> Value {
-        if key.dict_key_is_scalar() {
-            return stored;
-        }
+    ///
+    /// Decided by the stored entry, not by `key`: the map is keyed by
+    /// `to_key_string`, so `d["7"]` finds the entry `d[7] = v` stored wrapped.
+    pub fn unwrap_dict_entry(_key: &Value, stored: Value) -> Value {
         match stored {
             Value::Tuple(ref items) if is_dict_entry_marker(items) => items[2].clone(),
             other => other,
@@ -331,6 +327,31 @@ impl Value {
         match stored {
             Value::Tuple(items) if is_dict_entry_marker(items) => items[1].clone(),
             _ => Value::text(string_key.to_string()),
+        }
+    }
+
+    /// Store `value` under the same key as `stored`, keeping its key wrapper.
+    pub fn rewrap_dict_entry(stored: &Value, value: Value) -> Value {
+        match stored {
+            Value::Tuple(items) if is_dict_entry_marker(items) => Value::wrap_dict_entry(&items[1], value),
+            _ => value,
+        }
+    }
+
+    /// The value slot inside a stored dict entry, for writing through it in place.
+    pub fn dict_entry_value_mut(stored: &mut Value) -> &mut Value {
+        if matches!(stored, Value::Tuple(items) if is_dict_entry_marker(items)) {
+            let Value::Tuple(items) = stored else { unreachable!() };
+            return &mut items[2];
+        }
+        stored
+    }
+
+    /// The value slot inside a stored dict entry, without copying it.
+    pub fn dict_entry_value_ref(stored: &Value) -> &Value {
+        match stored {
+            Value::Tuple(items) if is_dict_entry_marker(items) => &items[2],
+            other => other,
         }
     }
 
@@ -468,14 +489,14 @@ impl Value {
             Value::Dict(map) => {
                 let parts: Vec<String> = dict_entries_sorted(map)
                     .into_iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
             Value::FrozenDict(map) => {
                 let parts: Vec<String> = dict_entries_sorted(map)
                     .into_iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
@@ -505,7 +526,7 @@ impl Value {
             Value::Object { class, fields } => {
                 let parts: Vec<String> = fields
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
                 format!("{}({})", class, parts.join(", "))
             }
@@ -513,7 +534,7 @@ impl Value {
                 let fields = instance.fields_snapshot();
                 let parts: Vec<String> = fields
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
                 format!("{}({})", instance.class(), parts.join(", "))
             }
@@ -567,7 +588,7 @@ impl Value {
             Value::Object { class, fields } => {
                 let parts: Vec<String> = fields
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_debug_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_debug_string()))
                     .collect();
                 format!("{}({})", class, parts.join(", "))
             }
@@ -592,7 +613,7 @@ impl Value {
             Value::Dict(map) => {
                 let parts: Vec<String> = dict_entries_sorted(map)
                     .into_iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_debug_string()))
+                    .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_debug_string()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
@@ -961,16 +982,32 @@ mod dict_composite_key_tests {
     }
 
     #[test]
-    fn wrap_dict_entry_is_a_noop_for_scalar_keys() {
-        // Scalar keys (int/text/bool/float/nil/symbol) must be stored
-        // bit-for-bit unchanged -- wrap_dict_entry must NOT wrap them in a
-        // marker tuple, so scalar-keyed dict behavior is untouched by this
-        // fix (per the fix's own stated scope).
+    fn typed_scalar_keys_round_trip_through_iteration() {
         for key in [
             Value::Int(42),
-            Value::text("k"),
+            Value::UInt { value: 42, width: 8 },
             Value::Bool(true),
             Value::Float(1.5),
+        ] {
+            let stored = Value::wrap_dict_entry(&key, Value::text("v"));
+            assert_eq!(Value::dict_entry_key_for_iteration(&stored, &key.to_key_string()), key);
+            assert_eq!(Value::dict_entry_value_for_iteration(&stored), Value::text("v"));
+            assert_eq!(Value::unwrap_dict_entry(&key, stored.clone()), Value::text("v"));
+            // The map is keyed by text, so a text probe reaches the same entry.
+            assert_eq!(
+                Value::unwrap_dict_entry(&Value::text(key.to_key_string()), stored),
+                Value::text("v")
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_dict_entry_is_a_noop_for_self_describing_keys() {
+        // Text-like keys read back unchanged from the map's own string key, so
+        // they are stored bit-for-bit -- no marker tuple.
+        for key in [
+            Value::text("k"),
+            Value::Symbol("k".to_string()),
             Value::Nil,
         ] {
             let value = Value::text("v");

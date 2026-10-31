@@ -753,11 +753,17 @@ pub(crate) fn execute_function_body(
 
     for param in &func.params {
         local_env.mark_local(param.name.clone());
+        if param_is_borrow_mut(param) {
+            local_env.insert(crate::interpreter::place::borrow_param_marker(&param.name), Value::Nil);
+        }
     }
 
     // Insert bound arguments into environment
     for (name, val) in bound_args {
-        local_env.insert(name, val);
+        if matches!(val, Value::BorrowMut(_)) {
+            local_env.insert(crate::interpreter::place::borrow_param_marker(&name), val.clone());
+        }
+        local_env.insert(name, unwrap_aggregate_borrow(val));
     }
 
     // Generator function support: set up GENERATOR_YIELDS before execution
@@ -1127,6 +1133,9 @@ pub(crate) fn exec_function_with_captured_env(
             write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
         }
         restore_parked_arguments(&parked, outer_env, &local_env);
+        if result.is_ok() {
+            write_back_borrow_arguments(func, args, outer_env, &local_env, functions, classes, enums, impl_methods, self_mode)?;
+        }
         result
     })
 }
@@ -1367,7 +1376,7 @@ fn park_written_back_arguments(
             continue;
         }
         let parkable = match outer_env.get(caller_name.as_str()) {
-            Some(v @ (Value::Array(_) | Value::Dict(_) | Value::Tuple(_) | Value::Object { .. })) => {
+            Some(v @ (Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Tuple(_) | Value::Object { .. })) => {
                 !is_value_type_struct(v, classes)
             }
             _ => false,
@@ -1402,6 +1411,158 @@ fn restore_parked_arguments(parked: &[ParkedArg], outer_env: &mut Env, local_env
         }
         crate::perf_counters::bump(&crate::perf_counters::PARK_ARG_RESTORED, 1);
     }
+}
+
+/// Peel every `&mut` layer off a value.
+fn peel_borrow_mut(value: &Value) -> Value {
+    let mut current = value.clone();
+    while let Value::BorrowMut(borrow) = &current {
+        let inner = borrow.inner().clone();
+        current = inner;
+    }
+    current
+}
+
+/// A `&mut` argument to a non-scalar binds as the plain value, so every mutation
+/// form in the callee (`p.f = v`, `p.a.b = v`, `p[i] = v`, `p.push(v)`) works on
+/// it without each one having to know about `Value::BorrowMut`;
+/// `write_back_borrow_arguments` stores the result back into the borrowed place.
+/// A scalar has no projections to write through and keeps its wrapper so that
+/// `*p` stays valid.
+fn unwrap_aggregate_borrow(value: Value) -> Value {
+    if !matches!(value, Value::BorrowMut(_)) {
+        return value;
+    }
+    let peeled = peel_borrow_mut(&value);
+    match peeled {
+        Value::Int(_)
+        | Value::UInt { .. }
+        | Value::Float(_)
+        | Value::Float32(_)
+        | Value::Bool(_)
+        | Value::Str(_)
+        | Value::Symbol(_)
+        | Value::Nil => value,
+        aggregate => aggregate,
+    }
+}
+
+/// True when `param` is declared `&mut T`.
+fn param_is_borrow_mut(param: &simple_parser::ast::Parameter) -> bool {
+    matches!(
+        &param.ty,
+        Some(Type::Pointer {
+            kind: simple_parser::ast::PointerKind::BorrowMut,
+            ..
+        })
+    )
+}
+
+/// Store a callee's final `&mut` parameter value into the place the caller
+/// borrowed: `f(&mut x)`, `f(&mut a.b[i])`, or a bare `f(x)` against a parameter
+/// declared `&mut T`.
+///
+/// The interpreter copies values into a callee (copy-on-write `Arc`s), so a
+/// borrow is modelled as copy-in/copy-out. Unlike the by-value write-back below,
+/// this one deliberately ignores the task #91 value-type exclusion: an explicit
+/// `&mut` is what opts a `struct` out of value semantics. A throwing callee
+/// publishes nothing, matching the by-value write-back's contract.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_back_borrow_arguments(
+    func: &FunctionDef,
+    args: &[Argument],
+    outer_env: &mut Env,
+    local_env: &Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_mode: SelfMode,
+) -> Result<(), CompileError> {
+    let is_ref_mut = |arg: &Argument| {
+        matches!(
+            &arg.value,
+            Expr::Unary {
+                op: simple_parser::ast::UnaryOp::RefMut,
+                ..
+            }
+        )
+    };
+    if !args.iter().any(is_ref_mut) && !func.params.iter().any(param_is_borrow_mut) {
+        return Ok(());
+    }
+    let params: Vec<_> = func
+        .params
+        .iter()
+        .filter(|p| !(self_mode == SelfMode::SkipSelf && p.name == METHOD_SELF))
+        .collect();
+    let mut positional_idx = 0usize;
+    for arg in args {
+        if matches!(&arg.value, Expr::Spread(_)) {
+            return Ok(());
+        }
+        let param = match &arg.name {
+            Some(name) => params.iter().find(|p| p.name == name.as_str()),
+            None => {
+                positional_idx += 1;
+                params.get(positional_idx - 1)
+            }
+        };
+        let Some(param) = param.copied() else {
+            continue;
+        };
+        if param.variadic {
+            return Ok(());
+        }
+        let place_expr = match &arg.value {
+            Expr::Unary {
+                op: simple_parser::ast::UnaryOp::RefMut,
+                operand,
+            } => operand.as_ref(),
+            bare if param_is_borrow_mut(param) => bare,
+            _ => continue,
+        };
+        let Some(callee_val) = local_env.get(&param.name) else {
+            continue;
+        };
+        let new_val = peel_borrow_mut(callee_val);
+        // The place the `&mut` expression resolved when it was evaluated.
+        if is_ref_mut(arg) {
+            if let Some(Value::BorrowMut(borrow)) =
+                local_env.get(&crate::interpreter::place::borrow_param_marker(&param.name))
+            {
+                if let Some(place) = borrow.place() {
+                    crate::interpreter::place::write_place(outer_env, place, new_val);
+                    continue;
+                }
+            }
+        }
+        // A caller variable that is itself a live borrow keeps its wrapper.
+        if let Expr::Identifier(name) = place_expr {
+            if let Some(Value::BorrowMut(borrow)) = outer_env.get(name) {
+                *borrow.inner_mut() = new_val;
+                continue;
+            }
+        }
+        match crate::interpreter::place::resolve_place(
+            place_expr, outer_env, functions, classes, enums, impl_methods,
+        )? {
+            Some(place) => {
+                crate::interpreter::place::write_place(outer_env, &place, new_val);
+            }
+            // Not a place (a call result, say): the borrow was of a temporary,
+            // which nothing can observe. A module global not promoted into this
+            // frame is the one identifier case left.
+            None => {
+                if let Expr::Identifier(name) = place_expr {
+                    if MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) {
+                        crate::interpreter::interpreter_helpers::sync_flat_global(name, &new_val);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // Bug #19 fix: write back mutable-container parameters to caller's bindings.
@@ -1552,7 +1713,7 @@ fn write_back_mutable_arguments(
                     if !is_value_type_struct(callee_val, classes)
                         && matches!(
                             callee_val,
-                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                            Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                         )
                         && outer_env.contains_key(&caller_name)
                     {
@@ -1601,7 +1762,7 @@ fn write_back_mutable_arguments(
                     if !is_value_type_struct(&callee_val, classes)
                         && matches!(
                             callee_val,
-                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                            Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                         )
                     {
                         // Same dead-alias copy-on-write as the value-type path
@@ -1736,6 +1897,9 @@ fn exec_function_inner(
         write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
     }
     restore_parked_arguments(&parked, outer_env, &local_env);
+    if result.is_ok() {
+        write_back_borrow_arguments(func, args, outer_env, &local_env, functions, classes, enums, impl_methods, self_mode)?;
+    }
 
     // Runtime profiler return hook
     if crate::runtime_profile::is_profiling_active() {
@@ -1814,6 +1978,9 @@ fn exec_function_with_values_and_writeback_inner(
         write_back_mutable_arguments(func, original_args, outer_env, &local_env, classes, self_mode);
     }
     restore_parked_arguments(&parked, outer_env, &local_env);
+    if result.is_ok() {
+        write_back_borrow_arguments(func, original_args, outer_env, &local_env, functions, classes, enums, impl_methods, self_mode)?;
+    }
 
     if crate::runtime_profile::is_profiling_active() {
         crate::runtime_profile::record_full_return(None);

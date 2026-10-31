@@ -872,7 +872,7 @@ pub fn handle_array_methods(
         }
         "group_by" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let mut groups: HashMap<String, Vec<Value>> = HashMap::new();
+            let mut groups: HashMap<String, (Value, Vec<Value>)> = HashMap::new();
             if let Value::Lambda {
                 params,
                 body,
@@ -885,11 +885,17 @@ pub fn handle_array_methods(
                         local_env.insert(param.clone(), item.clone());
                     }
                     let key = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
-                    let key_str = key.to_key_string();
-                    groups.entry(key_str).or_default().push(item.clone());
+                    groups
+                        .entry(key.to_key_string())
+                        .or_insert_with(|| (key, Vec::new()))
+                        .1
+                        .push(item.clone());
                 }
             }
-            let result: HashMap<String, Value> = groups.into_iter().map(|(k, v)| (k, Value::array(v))).collect();
+            let result: HashMap<String, Value> = groups
+                .into_iter()
+                .map(|(k, (key, v))| (k, Value::wrap_dict_entry(&key, Value::array(v))))
+                .collect();
             Value::Dict(Arc::new(result))
         }
         "compact" => {
@@ -1635,7 +1641,7 @@ pub fn handle_dict_methods(
             // Remove nil/None entries, unwrap Some values
             let result: HashMap<String, Value> = map
                 .iter()
-                .filter_map(|(k, v)| match v {
+                .filter_map(|(k, stored)| match Value::dict_entry_value_ref(stored) {
                     Value::Nil => None,
                     Value::Enum {
                         ref enum_name,
@@ -1643,12 +1649,14 @@ pub fn handle_dict_methods(
                         ref payload,
                     } if enum_name == "Option" => {
                         if variant == "Some" {
-                            payload.as_ref().map(|p| (k.clone(), p.as_ref().clone()))
+                            payload
+                                .as_ref()
+                                .map(|p| (k.clone(), Value::rewrap_dict_entry(stored, p.as_ref().clone())))
                         } else {
                             None
                         }
                     }
-                    other => Some((k.clone(), other.clone())),
+                    _ => Some((k.clone(), stored.clone())),
                 })
                 .collect();
             Value::Dict(Arc::new(result))
@@ -1665,10 +1673,13 @@ pub fn handle_dict_methods(
         }
         "setdefault" => {
             // Get value if key exists, otherwise set and return default
-            let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+            let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let mut new_map = map.clone();
-            let value = new_map.entry(key).or_insert(default.clone()).clone();
+            let stored = new_map
+                .entry(key_val.to_key_string())
+                .or_insert_with(|| Value::wrap_dict_entry(&key_val, default.clone()));
+            let value = Value::dict_entry_value_for_iteration(stored);
             // Return tuple of [value, new_dict]
             Value::Tuple(vec![value, Value::Dict(Arc::new(new_map))])
         }

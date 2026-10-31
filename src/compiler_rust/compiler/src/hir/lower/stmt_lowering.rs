@@ -3570,6 +3570,18 @@ impl Lowerer {
                 args: vec![simple_parser::Argument::new(None, e.clone())],
                 generic_args: vec![],
             }),
+            ("to_start_with", Some(e)) => Pred::Truthy(Expr::MethodCall {
+                receiver: Box::new(subject.clone()),
+                method: "starts_with".to_string(),
+                args: vec![simple_parser::Argument::new(None, e.clone())],
+                generic_args: vec![],
+            }),
+            ("to_end_with", Some(e)) => Pred::Truthy(Expr::MethodCall {
+                receiver: Box::new(subject.clone()),
+                method: "ends_with".to_string(),
+                args: vec![simple_parser::Argument::new(None, e.clone())],
+                generic_args: vec![],
+            }),
             _ => return Ok(None),
         };
 
