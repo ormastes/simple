@@ -1,3 +1,4 @@
+# @timeout_secs 900 (each scenario starts its own smux owner process on Windows)
 # @cover src/app/llm_caret/agent_workspace.spl 80%
 # @tag: system, llm_caret, tmux, worktree, agent_team
 """Operator runs a team of long-lived agents, each isolated in its own worktree.
@@ -19,9 +20,9 @@ tmux server's own exit status on the private socket.
 use std.spec.{describe, it, expect, step, pending}
 use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists,
     file_write, file_read, file_exists, cwd, sleep_ms, current_time_ms}
-use app.llm_caret.agent_workspace.{agent_workspace, tmux_available,
+use app.llm_caret.agent_workspace.{agent_workspace, workspace_available, workspace_backend,
     session_alive, session_kill, list_panes, send_to_pane, send_to_each_pane,
-    wait_for_pane_text, worktree_path, worktree_list, agent_attach, agent_detach}
+    wait_for_pane_text, worktree_path, worktree_list, agent_attach, agent_detach, workspace_server_alive}
 
 val AGENTS = ["agent-1", "agent-2", "agent-3"]
 
@@ -74,8 +75,8 @@ fn _contains(items: [text], needle: text) -> bool:
 
 describe "LLM Caret agent team lifecycle":
     it "runs three isolated heartbeat agents, broadcasts to all, survives one detach, and tears down cleanly":
-        if not tmux_available():
-            pending("BLOCKED: tmux not installed on this host")
+        if not workspace_available():
+            pending("BLOCKED: neither tmux nor smux available on this host")
             return
         val run_id = current_time_ms().to_text()
         val root = _scratch("lifecycle")
@@ -140,8 +141,13 @@ describe "LLM Caret agent team lifecycle":
 
         step("Nothing is left: session dead, no server answers on the socket, git registers only the main repo")
         expect(session_alive(ws)).to_be(false)
-        val (_o, _e, ls_code) = process_run("tmux", ["-L", ws.socket, "list-sessions"])
-        expect(ls_code).to_be_greater_than(0)
+        if workspace_backend() == "smux":
+            # smux equivalent of "no server on the socket": the owner process no longer answers.
+            expect(workspace_server_alive(ws)).to_be(false)
+            expect(list_panes(ws).len()).to_equal(0)
+        else:
+            val (_o, _e, ls_code) = process_run("tmux", ["-L", ws.socket, "list-sessions"])
+            expect(ls_code).to_be_greater_than(0)
         val trees = worktree_list(ws)
         expect(trees.len()).to_equal(1)
         # git prints the resolved path; the fixture may sit behind a symlinked cwd.

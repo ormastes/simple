@@ -10,6 +10,9 @@ use std.sosix.stdio.{sosix_println}
 use os.apps.smux.api.{smux_poll_output, smux_reset_for_test, smux_reap_expired_clients}
 use os.apps.smux.smux_remote.{smux_remote_dispatch}
 use os.apps.smux.client_leases.{SMUX_CLIENT_LEASE_SWEEP_MS}
+use std.common.crypto.constant_time.{constant_time_compare}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
 const REQUEST_LIMIT: i64 = 4096
 const REPLY_LIMIT: i64 = 65536
@@ -42,9 +45,13 @@ fn local_endpoint(address: text) -> bool:
 pub fn smux_server_dispatch(request: text, token: text) -> text:
     if text_to_bytes(request).len() > REQUEST_LIMIT or request.contains("\n") or request.contains("\r"):
         return "smux: invalid request"
-    if not valid_token(token) or not request.starts_with(token + " "):
+    if not valid_token(token):
         return "smux: unauthorized"
-    val command = request[token.len() + 1:]
+    # The token is the first space-separated field, compared in constant time.
+    val presented = request.split(" ")[0]
+    if presented.len() == request.len() or not constant_time_compare(presented, token):
+        return "smux: unauthorized"
+    val command = request[presented.len() + 1:]
     if command == "stop-server":
         return "smux: stopping server"
     return smux_remote_dispatch(command)
@@ -94,7 +101,38 @@ pub fn smux_server_serve(address: text, token: text) -> i64:
     val bound = TcpListener.bind(address)
     if bound.is_err():
         return 1
+    _serve_on(bound.unwrap(), address, token)
+
+# Owner-file mode. The file (in a directory only the user can open) holds
+# `<id> <token>`; the owner binds an OS-chosen loopback port FIRST, then
+# rewrites the file as `<id> 127.0.0.1:PORT <token> <pid>`. No client ever
+# sends the token while discovering a port, and a client can check that the
+# recorded pid is the one listening before it authenticates.
+pub fn smux_server_serve_owner_file(path: text) -> i64:
+    val f = file_read(path).trim().split(" ")
+    if f.len() != 2 or not valid_token(f[1]):
+        return 1
+    val bound = TcpListener.bind("127.0.0.1:0")
+    if bound.is_err():
+        return 1
     var listener = bound.unwrap()
+    val local = listener.local_addr()
+    if local.is_err() or not local_endpoint(local.unwrap()):
+        val _closed = listener.close()
+        return 1
+    val address = local.unwrap()
+    # A starter that gave up removes or replaces the file; serving then would
+    # leave an owner no client can reach, so a stale start exits instead.
+    if file_read(path).trim() != f[0] + " " + f[1]:
+        val _closed = listener.close()
+        return 1
+    if not file_write(path, f[0] + " " + address + " " + f[1] + " " + getpid().to_text() + "\n"):
+        val _closed = listener.close()
+        return 1
+    _serve_on(listener, address, f[1])
+
+fn _serve_on(bound_listener: TcpListener, address: text, token: text) -> i64:
+    var listener = bound_listener
     var clients: [PendingClient] = []
     var stop = false
     var socket_cleanup_failed = false
@@ -247,4 +285,4 @@ pub fn smux_server_request(address: text, token: text, command: text) -> Result<
     val _closed = stream.close()
     return Err("smux response timeout")
 
-export smux_server_dispatch, smux_server_decode_reply, smux_server_serve, smux_server_request
+export smux_server_dispatch, smux_server_decode_reply, smux_server_serve, smux_server_serve_owner_file, smux_server_request
