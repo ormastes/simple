@@ -67,3 +67,27 @@ the absent case explicitly. A nil on a non-optional path is allowed only in unsa
 - [ ] #5626 (mono, another session): may be moot because mono is being deleted.
 - [ ] Worktree `.claude/worktrees/agent-a0b73dcc3dc631657` has 6 uncommitted files (from a
   runner phase-3 doctest fixer). Review them, then land or discard.
+
+## Addendum at close (2026-10-31)
+
+- [ ] #5633 (HIR NIL-RET-001, 48 -> 0): open. The required check fails on stale-snapshot-rewind,
+  which blames a release merge in the branch (`b4039861a82`), not the fix commits. Rebuild it
+  as the HIR commits on top of current release with no intermediate merges, re-push, then
+  dispatch admission.
+- [ ] #5646 (nil-extern baseline batch: class a 1381 -> 1264, b 24 -> 1, c 8): draft. It needs a
+  release merge (conflicts with #5642), a guard re-prune and a spec rerun.
+- [ ] MIR NIL-RET-001 (5 findings): the local branch `work/nil-return-core-mir-20261031` was never
+  pushed, so redo the fix from scratch.
+- [ ] Interpreter: a `T?` return arrives as `Option::Some(v)`. Only `if val`, `??` and
+  `.unwrap()` unwrap it. A typed `val`, a struct field, `.push` and `for` keep the wrapper, so
+  changing a signature to `T?` silently breaks callers that don't unwrap. Fix the interpreter, or
+  lint call sites, before more signatures move to `T?`.
+- [ ] Interpreter: a class read from an optional field through `if val` is a copy, so mutations
+  (e.g. budget failures) don't reach the caller. Write a bug record; the original record was lost
+  with the deleted mono branch.
+- [ ] Three `rt_path_absolute -> text` declarations remain under `src/compiler_rust/lib/std/src/`.
+- [ ] Silent `""` defaults remain in the `file_read` wrappers in `database/atomic.spl`,
+  `database/core.spl` and `exp/storage.spl`, and in the shell facades. About 30 callers depend on them.
+- [ ] Compiled binaries still print `[u8]` as text in `rt_stdout_write` / `rt_stderr_write`; the
+  native runtime `io_print.rs` was not changed in #5639.
+- [ ] Test tree: 1240 class (a) rows, mostly spec-local `rt_file_read_text` declarations.
