@@ -2428,6 +2428,17 @@ impl MirLowering:
             self.mark_runtime_value_local(typed.id)
             self.builder = b
             return typed
+        if disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Tuple([])):
+            # A tuple literal is a native record (rt_alloc + fields) and a
+            # container stores its raw pointer. Hand back a Tuple-typed
+            # local so the next `pair[i]` takes the native get_field path;
+            # the untyped i64 word used to send it through rt_array_get,
+            # which rejected the pointer as an invalid array handle
+            # (contextual_callback_native `retained[0]`).
+            val typed = b.new_temp(result_type)
+            b.emit_copy(typed, raw)
+            self.builder = b
+            return typed
         if self.mir_type_is_str(result_type):
             # A string element/value read back off an array or dict is a
             # TAGGED heap-string handle (box_runtime_value tags raw string
@@ -3636,12 +3647,19 @@ impl MirLowering:
         # HIR element type is i64 too), which is why `[i64]` was the one case
         # that always worked and why this cannot regress it.
         var result_type_is_erased_i64 = _sffi_enum_discriminant<MirTypeKind>(result_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64)
+        if (mir_expr_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+            var base_mir_disc = -1
+            if has_base_mir_type: base_mir_disc = _sffi_enum_discriminant<MirTypeKind>(base_mir_type.kind)
+            print "[index-base] local={base_local.id} has_mir={has_base_mir_type} mir_disc={base_mir_disc} tuple_base={is_tuple_base} runtime_array={self.local_is_runtime_array(base_local)} hir={self.find_local_hir_type(base_local.id) != nil}"
         # `items[i]` on `items: [T]` inside an erased generic body: the
         # element's dynamic type is unknown here, so the tagged element word
         # is handed on AS IS (marked runtime value, HIR type `T`); the typed
         # consumer decodes it. Decoding it as I64 would shred a record
         # pointer or a text handle (generics = one erased body, 2026-10-31).
         var erased_element_hir: HirType? = nil
+        # Record identity of a runtime tuple member (`pair[1]` on
+        # `(text, Record)`), consumed where the array-element owner is.
+        var tuple_member_record = ""
         if (not result_type_from_base or result_type_is_erased_i64) and self.find_local_hir_type(base_local.id) != nil:
             val base_hir_type = self.find_local_hir_type(base_local.id) ?? HirType(kind: HirTypeKind.Error, span: base.span)
             match base_hir_type.kind:
@@ -3674,6 +3692,7 @@ impl MirLowering:
                                 erased_element_hir = Some(tuple_member)
                             case _:
                                 result_type = self.lower_type(tuple_member)
+                                tuple_member_record = self.optional_payload_struct_name(tuple_member)
                         result_type_from_base = true
                 case _: ()
         if erased_element_hir == nil and has_index_result_hir_type:
@@ -3805,6 +3824,10 @@ impl MirLowering:
                                     esn = recovered_elem_owner
                                     self.array_element_struct_syms[base_local.id] = recovered_elem_owner
                             case _: ()
+                if esn == "" and tuple_member_record != "":
+                    # Per-member identity: never recorded on the base, which
+                    # would claim it for every member of the tuple.
+                    esn = tuple_member_record
                 val has_real_struct_name = esn != "" and esn != "__runtime_array__"
                 # A1 (bug cranelift_native_aggregate_return_nil_receiver_
                 # hosted_wm_2026-07-26): an element that is ITSELF an array
