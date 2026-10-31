@@ -1,0 +1,42 @@
+use compiler.driver.driver_log_helpers.{
+    build_trace_list,
+    build_trace_detail,
+    BUILD_TRACE_LIST_CAP,
+    BUILD_TRACE_DETAIL_CAP
+}
+use std.io_runtime.{file_read}
+
+describe "SIMPLE_BUILD_TRACE native build trace switch":
+    it "renders short lists verbatim and caps long ones":
+        expect(build_trace_list([])).to_equal("")
+        expect(build_trace_list(["a", "b"])).to_equal("a,b")
+        var many: [text] = []
+        var i = 0
+        while i < BUILD_TRACE_LIST_CAP + 3:
+            many = many.push("m{i}")
+            i = i + 1
+        val rendered = build_trace_list(many)
+        expect(rendered).to_contain("m0,m1,")
+        expect(rendered).to_contain(",+3 more")
+        expect(rendered).to_not_contain("m{BUILD_TRACE_LIST_CAP}")
+
+    it "keeps only the first line of a failure detail, bounded":
+        expect(build_trace_detail("undefined symbol\nsecond line")).to_equal("undefined symbol")
+        var long = ""
+        var j = 0
+        while j < BUILD_TRACE_DETAIL_CAP + 10:
+            long = long + "x"
+            j = j + 1
+        val bounded = build_trace_detail(long)
+        expect(bounded.len()).to_equal(BUILD_TRACE_DETAIL_CAP + 3)
+        expect(bounded.ends_with("...")).to_equal(true)
+
+    it "is its own gate, read once, and never aliases the wide compiler trace":
+        val source = file_read("src/compiler/80.driver/driver_log_helpers.spl")
+        expect(source).to_contain("env_get(\"SIMPLE_BUILD_TRACE\") == \"1\"")
+        expect(source).to_contain("print \"[build-trace] +")
+        expect(source).to_contain("_phase_elapsed_ms()}ms ")
+        # driver_phase_trace_enabled stays on its two historical switches.
+        expect(source).to_contain("(env_get(\"SIMPLE_COMPILER_PHASE_PROFILE\") == \"1\") or (env_get(\"SIMPLE_COMPILER_TRACE\") == \"1\")\n")
+        val identity = file_read("src/compiler/80.driver/cache/native_build_environment_identity.spl")
+        expect(identity).to_contain("\"SIMPLE_BUILD_TRACE\",")

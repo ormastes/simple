@@ -28,6 +28,52 @@ extern fn rt_mem_snapshot_record(
 pub fn driver_phase_trace_enabled() -> bool:
     (env_get("SIMPLE_COMPILER_PHASE_PROFILE") == "1") or (env_get("SIMPLE_COMPILER_TRACE") == "1")
 
+# --- Native build trace (SIMPLE_BUILD_TRACE=1, default OFF) -------------------
+# One narrow switch for the native build path: phase boundaries in the build
+# coordinator, worker and driver (discovery, parse, HIR, MIR, codegen, link,
+# worker dispatch) with module names, counts, paths, sizes and exit codes.
+# Deliberately NOT tied to SIMPLE_COMPILER_TRACE, which fans out into
+# per-receipt MIR/AST tracing and is neither bounded nor cheap. The gate is
+# read once per process; callers on per-module paths test
+# `build_trace_enabled()` before interpolating so an OFF build builds no text.
+# Format: `[build-trace] +<ms>ms <site> key=value ...`, stdout only (the
+# worker's stderr is dropped by the parent's relay chain), flushed per line.
+var _g_build_trace_state: i64 = -1
+
+pub fn build_trace_enabled() -> bool:
+    if _g_build_trace_state < 0:
+        _g_build_trace_state = if env_get("SIMPLE_BUILD_TRACE") == "1": 1 else: 0
+    _g_build_trace_state == 1
+
+pub const BUILD_TRACE_LIST_CAP: i64 = 16
+pub const BUILD_TRACE_DETAIL_CAP: i64 = 240
+
+pub fn build_trace_list(items: [text]) -> text:
+    """Bounded `a,b,c,+N more` rendering for name/path lists."""
+    var out = ""
+    var idx = 0
+    while idx < items.len() and idx < BUILD_TRACE_LIST_CAP:
+        if idx > 0: out = out + ","
+        out = out + items[idx]
+        idx = idx + 1
+    if items.len() > BUILD_TRACE_LIST_CAP:
+        out = out + ",+{items.len() - BUILD_TRACE_LIST_CAP} more"
+    out
+
+pub fn build_trace_detail(detail: text) -> text:
+    """First line of a failure detail, truncated to BUILD_TRACE_DETAIL_CAP."""
+    var first = detail
+    val nl = detail.index_of("\n")
+    if nl >= 0: first = detail.substring(0, nl)
+    if first.len() > BUILD_TRACE_DETAIL_CAP:
+        first = first.substring(0, BUILD_TRACE_DETAIL_CAP) + "..."
+    first
+
+pub fn log_build_trace(msg: text):
+    if build_trace_enabled():
+        print "[build-trace] +{_phase_elapsed_ms()}ms {msg}"
+        rt_stdout_flush()
+
 # Monotonic base captured at the first log_phase call, so every phase marker
 # carries a wall-clock delta. This is what turns the [BOOTSTRAP-PHASE] trail
 # into a usable profile: the stage-4 graph-load wall

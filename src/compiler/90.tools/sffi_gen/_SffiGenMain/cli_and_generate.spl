@@ -36,14 +36,14 @@ use std.nogc_sync_mut.io_runtime.{env_get}
 # Minimal runtime-backed IO helpers. Keeping these local avoids importing the
 # full app.io surface or depending on private helpers inside std.nogc_sync_mut.io.
 extern fn sys_get_args() -> [text]
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_dir_remove_all(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-fn sffi_file_read(path: text) -> text:
-    rt_file_read_text(path) ?? ""
+fn sffi_file_read(path: text) -> text?:
+    rt_file_read_text(path)
 
 fn sffi_file_write(path: text, content: text) -> bool:
     val (stdout, stderr, exit_code) = rt_process_run("/bin/sh", ["-c", "cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF"])
@@ -122,7 +122,11 @@ fn read_rust_config(project_root: text) -> RustEnvConfig:
     if not sffi_file_exists(sdn_path):
         return config
 
-    val content: text = sffi_file_read(sdn_path)
+    val content_opt = sffi_file_read(sdn_path)
+    if content_opt == nil:
+        sffi_print_error("Failed to read {sdn_path}")
+        return config
+    val content: text = content_opt.unwrap()
     if content == "":
         return config
 
@@ -348,7 +352,8 @@ fn ensure_rust_env(project_root: text, rust_config: RustEnvConfig, verbose: bool
     var needs_write = true
     if sffi_file_exists(toolchain_path):
         val existing = sffi_file_read(toolchain_path)
-        if existing == toolchain_content:
+        # absent: an unreadable toolchain file is rewritten
+        if existing != nil and existing.unwrap() == toolchain_content:
             needs_write = false
             sffi_log_info("Rust environment already up to date", verbose)
 
@@ -389,7 +394,11 @@ fn generate_for_file(input_path: text) -> i64:
     sffi_log_info("Reading {input_path}", opts.verbose)
 
     # Read source file
-    val source = sffi_file_read(input_path)
+    val source_opt = sffi_file_read(input_path)
+    if source_opt == nil:
+        sffi_print_error("Failed to read file: {input_path}")
+        return 1
+    val source = source_opt.unwrap()
     if source == "":
         sffi_print_error("Failed to read or empty file: {input_path}")
         return 1
@@ -491,7 +500,11 @@ fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
 
     sffi_log_info("Reading intern spec: {spec_path}", opts.verbose)
 
-    val source: text = sffi_file_read(spec_path)
+    val source_opt = sffi_file_read(spec_path)
+    if source_opt == nil:
+        sffi_print_error("Failed to read file: {spec_path}")
+        return 1
+    val source: text = source_opt.unwrap()
     if source == "":
         sffi_print_error("Failed to read or empty file: {spec_path}")
         return 1
