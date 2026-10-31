@@ -2321,6 +2321,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     ), // ptr, capacity, row bytes, values, source stride/x/y, width/height -> copied pixels
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
     RuntimeFuncSpec::new("rt_file_write_bytes_array", &[I64, I64], &[I8]), // path/data RuntimeValues -> bool
+    RuntimeFuncSpec::new("rt_file_atomic_write_bytes_array", &[I64, I64], &[I8]), // path/data RuntimeValues -> bool
     // SimpleOS syscall byte adapters. Every array occupies one RuntimeValue
     // slot so its owner stays live through the consuming runtime call. In
     // particular, rename retains both path owners and read/recv retain their
