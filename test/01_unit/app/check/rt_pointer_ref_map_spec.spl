@@ -27,13 +27,20 @@ use std.spec.*
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-fn gate(c: text, spl: text) -> i64:
+fn gate_run(c: text, spl: text) -> (text, i64):
     val script = "t=$(mktemp -d); mkdir -p $t/src/runtime $t/src/lib; printf '%b' \"$1\" > $t/src/runtime/a.c; printf '%b' \"$2\" > $t/src/lib/a.spl; python3 -I scripts/check/check-rt-pointer-ref-map.py --root $t"
-    val (_out, _err, code) = rt_process_run("sh", ["-c", script, "gate", c, spl])
+    val (out, _err, code) = rt_process_run("sh", ["-c", script, "gate", c, spl])
+    return (out, code)
+
+fn gate(c: text, spl: text) -> i64:
+    val (_out, code) = gate_run(c, spl)
     return code
 
 val NIL_C = "char *rt_x(void) {\\n if (a) return NULL;\\n return b;\\n}\\n"
 val OK_C = "char *rt_x(void) {\\n return b;\\n}\\n"
+val ENF_C = "char *rt_x(void) {\\n return SIMPLE_RT_NONNULL(\"rt_x\", b);\\n}\\n"
+val MIX_C = "char *rt_x(void) {\\n if (a) return NULL;\\n return SIMPLE_RT_NONNULL(\"rt_x\", b);\\n}\\n"
+val PART_C = "char *rt_x(void) {\\n if (a) return SIMPLE_RT_NONNULL(\"rt_x\", p);\\n return b;\\n}\\n"
 
 describe "rt pointer map classification":
     it "fails a nullable C return declared as bare text":
@@ -75,3 +82,23 @@ describe "rt pointer map classification":
     it "sees a null in the true branch of a ternary":
         step("Classify the null-first ternary")
         expect(gate("char *rt_x(void) {\\n return bad ? NULL : p;\\n}\\n", "extern fn rt_x() -> text\\n")).to_equal(1)
+
+    it "counts a body whose every return is SIMPLE_RT_NONNULL as enforced, not UNKNOWN":
+        step("Classify the fully bridged body")
+        val (out, code) = gate_run(ENF_C, "extern fn rt_x() -> text\\n")
+        expect(code).to_equal(0)
+        expect(out).to_contain("enforced=1 ")
+        expect(out).to_contain("UNKNOWN=0 ")
+
+    it "keeps a body that mixes SIMPLE_RT_NONNULL with return NULL nil":
+        step("Classify the mixed body")
+        val (out, code) = gate_run(MIX_C, "extern fn rt_x() -> text\\n")
+        expect(code).to_equal(1)
+        expect(out).to_contain("enforced=0 ")
+
+    it "keeps a partly bridged body UNKNOWN, not enforced":
+        step("Classify the partly bridged body")
+        val (out, code) = gate_run(PART_C, "extern fn rt_x() -> text\\n")
+        expect(code).to_equal(0)
+        expect(out).to_contain("enforced=0 ")
+        expect(out).to_contain("UNKNOWN=1 ")
