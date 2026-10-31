@@ -58,7 +58,7 @@ use std.test_runner.test_runner_mcdc_report.{test_runner_mcdc_run_gate}
 
 use std.io_runtime.{file_exists, file_read_nullable}
 @unsafe(reason: "raw test-source/coverage text ABI; helper return types cannot carry I/O errors", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{env_set}
@@ -189,7 +189,7 @@ fn _single_last_slash(s: text) -> i64:
 fn preprocess_infix_for_child(file_path: text) -> text:
     if not file_path.ends_with("_spec.spl"):
         return file_path
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
     if content == "":
         return file_path
     val lines = content.split("\n")
@@ -430,7 +430,7 @@ fn file_has_di_test_tag(file_path: text) -> bool:
     Mirrors std.test_runner.test_runner_files.file_has_di_test_tag. Duplicated
     here (rather than imported) so this child runner stays independent of
     std.test_runner.* per the file-level design note above."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
     content.contains("# @di_test")
 
 fn spec_exec_limit_directive(file_path: text) -> i64:
@@ -440,7 +440,7 @@ fn spec_exec_limit_directive(file_path: text) -> i64:
     10M-operation cap declare the cap they need; run_spec forwards it into
     the child env (raise-only) because the driver reads
     SIMPLE_EXECUTION_LIMIT once at startup and in-process arming is inert."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
     val idx = find_raw(content, "# @exec_limit ")
     if idx < 0:
         return 0
@@ -469,7 +469,7 @@ fn spec_timeout_secs_directive(file_path: text) -> i64:
     outer runner printed "Process timed out" with NO verdict line at all — a
     fail-open hole, because a spec that cannot report a verdict can never
     report a failure either. Raise-only, same shape as @exec_limit."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
     val idx = find_raw(content, "# @timeout_secs ")
     if idx < 0:
         return 0
@@ -735,7 +735,7 @@ fn parse_child_example_summary(output: text) -> (i64, i64, i64):
 fn read_test_result_evidence(path: text) -> (i64, i64, i64):
     if path == "" or not file_exists(path):
         return (0, 0, 0)
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path) ?? ""
     val parts = content.split("\n")
     if parts.len() < 3 or parts[0] != "simple-bdd-v1":
         return (0, 0, 0)
@@ -1044,7 +1044,7 @@ fn _cov_recorded_file_for_target(path: text, files: [text]) -> text:
 
 fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, bool>,
                         files: [text]) -> text:
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path) ?? ""
     if content == "":
         return "coverage: {path} 0% (0/0 lines)"
     # Resolve which recorded module path denotes this target once, up front; a
@@ -1178,7 +1178,7 @@ fn _cov_print_report(spec_path: text, sdn: text):
                 if not seen_dec_files.contains_key(f):
                     seen_dec_files[f] = true
                     dec_files.push(f)
-    val spec_src = unsafe(capabilities: [ffi]): rt_file_read_text(spec_path)
+    val spec_src = unsafe(capabilities: [ffi]): rt_file_read_text(spec_path) ?? ""
     if spec_src == "":
         return
     val targets = _cov_targets(spec_src)
@@ -1359,7 +1359,8 @@ fn main() -> i64:
     if mcdc_error != "":
         print mcdc_error
         return 2
-    if unsafe(capabilities: [ffi]): rt_file_read_text(run.path).contains("slow_it ") and run.timeout_secs < 600:
+    val spec_text_for_slow_it = unsafe(capabilities: [ffi]): rt_file_read_text(run.path) ?? ""
+    if spec_text_for_slow_it.contains("slow_it ") and run.timeout_secs < 600:
         run.timeout_secs = 600
     val declared_timeout = spec_timeout_secs_directive(run.path)
     if declared_timeout > run.timeout_secs:
@@ -1527,7 +1528,7 @@ fn main() -> i64:
     var runtime_coverage_sdn = ""
     if runtime_coverage_path != "":
         if file_exists(runtime_coverage_path):
-            runtime_coverage_sdn = unsafe(capabilities: [ffi]): rt_file_read_text(runtime_coverage_path)
+            runtime_coverage_sdn = unsafe(capabilities: [ffi]): rt_file_read_text(runtime_coverage_path) ?? ""
             if not runtime_evidence_is_child_owned:
                 val _ = file_delete(runtime_coverage_path)
         if not env_set("SIMPLE_COVERAGE_OUTPUT", previous_coverage_output):
@@ -1537,7 +1538,7 @@ fn main() -> i64:
             return 1
     var child_apk_receipt = ""
     if child_apk_receipt_path != "" and file_exists(child_apk_receipt_path):
-        child_apk_receipt = unsafe(capabilities: [ffi]): rt_file_read_text(child_apk_receipt_path)
+        child_apk_receipt = unsafe(capabilities: [ffi]): rt_file_read_text(child_apk_receipt_path) ?? ""
         val _ = file_delete(child_apk_receipt_path)
     if cov_on:
         if not env_set("SIMPLE_PHASE7_CHILD_APK_REQUIRED", previous_child_apk_required) or
@@ -1588,7 +1589,7 @@ fn main() -> i64:
             # test run on a malformed pre-existing artifact.
             val new_cov = parse_coverage_sdn(cov_sdn)
             val to_write = if file_exists(cov_output_path):
-                val existing_raw = unsafe(capabilities: [ffi]): rt_file_read_text(cov_output_path)
+                val existing_raw = unsafe(capabilities: [ffi]): rt_file_read_text(cov_output_path) ?? ""
                 if existing_raw.trim().starts_with("# Coverage Report"):
                     render_coverage_sdn(merge_coverage(parse_coverage_sdn(existing_raw), new_cov))
                 else:
@@ -1810,7 +1811,7 @@ fn main() -> i64:
             print "error: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated"
         else:
             print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
-    if source_is_in_development(rt_file_read_text(run.path)):
+    if source_is_in_development(rt_file_read_text(run.path) ?? ""):
         print in_development_explicit_line(run.path)
     if mcdc_mode == "on" or mcdc_mode == "dynamic":
         if not _single_mcdc_attempt(args, run.path, mcdc_mode, binary, run.timeout_secs) and failed == 0 and unverified_error == "":
