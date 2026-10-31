@@ -5,7 +5,8 @@ use std.cli.cli_util (get_cli_args, find_manifest_path, parse_deps_section)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (file_read, file_atomic_write, cwd)
 use app.pkg.requires_range.{classify_manifest_interface_ranges, resolve_manifest_requires,
-    generate_requires_lock, current_phase8_policy_receipt}
+    generate_requires_lock, current_phase8_policy_receipt, RequiresRangeResult}
+use compiler.common.assurance.package_pins.{PackagePin}
 use std.log.{error}
 
 fn print_help():
@@ -125,6 +126,9 @@ fn run_update_command(args: [text]) -> i64:
                 print "  " + message
             return 1
         case Ok((pin, result)):
+            # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR loses tuple-payload binding types in library mode, so for-in over pin.dependencies saw an I64 collection; rebind to a typed local
+            val pin_typed: PackagePin = pin
+            val result_typed: RequiresRangeResult = result
             var lock_content = ""
             match policy_receipt:
                 case Err(errors):
@@ -136,26 +140,26 @@ fn run_update_command(args: [text]) -> i64:
                     lock_content = generate_requires_lock(pin, result, policy)
             if target_pkg != "":
                 var found = false
-                for edge in pin.dependencies:
+                for edge in pin_typed.dependencies:
                     if edge.package_name == target_pkg or edge.project_path == target_pkg:
                         found = true
                 if not found:
                     print "update: dependency '" + target_pkg + "' not found in manifest"
                     return 1
             if as_json:
-                print "{\"dry_run\":{dry_run},\"target\":\"{target_pkg}\",\"resolutions\":{result.resolutions.len()}}"
+                print "{\"dry_run\":{dry_run},\"target\":\"{target_pkg}\",\"resolutions\":{result_typed.resolutions.len()}}"
                 return 0
             if log_opts.progress != "summary":
-                val progress_line = render_progress(log_opts.progress, result.resolutions.len(), result.resolutions.len(), "update")
+                val progress_line = render_progress(log_opts.progress, result_typed.resolutions.len(), result_typed.resolutions.len(), "update")
                 if progress_line != "":
                     print progress_line
             if dry_run:
-                print "Would update simple.lock with {result.resolutions.len()} interface resolutions"
+                print "Would update simple.lock with {result_typed.resolutions.len()} interface resolutions"
                 return 0
             if not file_atomic_write(lockfile_path, lock_content):
                 print "update: failed to write lockfile"
                 return 1
-            print "Updated simple.lock with {result.resolutions.len()} interface resolutions"
+            print "Updated simple.lock with {result_typed.resolutions.len()} interface resolutions"
 
     0
 

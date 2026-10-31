@@ -110,12 +110,18 @@ pub fn wm_access_execute(command: text, args: [text], output_mode: AccessOutputM
         return Err(AccessError.detailed("timeout", "WM access request timed out", "TIMEOUT", "Observe current state before retrying", true, false))
     val captured_at_ms = _wm_access_now_ms()
     val snapshot = wm_access_snapshot_from_windows(windows, captured_at_ms)
-    val result = match descriptor.operation:
-        ACCESS_OPERATION_LIST: access_result_from_snapshot(ACCESS_OPERATION_LIST, WM_ACCESS_SOURCE, "", snapshot.access, WM_ACCESS_LIMIT)
-        ACCESS_OPERATION_SNAPSHOT: AccessResult.document(ACCESS_OPERATION_SNAPSHOT, WM_ACCESS_SOURCE, "", snapshot.access.snapshot_revision, ui_access_snapshot_to_json(snapshot.access), snapshot.access.nodes.len().to_i64(), false)
-        ACCESS_OPERATION_FIND: _wm_access_find(snapshot, args[1])
-        ACCESS_OPERATION_ACT: return _wm_access_act(snapshot, args, output_mode, started_at_ms)
-        _: return Err(AccessError.create("invalid_argument", "unsupported WM operation"))
+    # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR treats constant (val) match arms as binding/wildcard arms and rejects the match (B5b multiple default arms); equality if/elif chain is equivalent for text constants
+    var result: AccessResult = AccessResult.status([], "")
+    if descriptor.operation == ACCESS_OPERATION_LIST:
+        result = access_result_from_snapshot(ACCESS_OPERATION_LIST, WM_ACCESS_SOURCE, "", snapshot.access, WM_ACCESS_LIMIT)
+    elif descriptor.operation == ACCESS_OPERATION_SNAPSHOT:
+        result = AccessResult.document(ACCESS_OPERATION_SNAPSHOT, WM_ACCESS_SOURCE, "", snapshot.access.snapshot_revision, ui_access_snapshot_to_json(snapshot.access), snapshot.access.nodes.len().to_i64(), false)
+    elif descriptor.operation == ACCESS_OPERATION_FIND:
+        result = _wm_access_find(snapshot, args[1])
+    elif descriptor.operation == ACCESS_OPERATION_ACT:
+        return _wm_access_act(snapshot, args, output_mode, started_at_ms)
+    else:
+        return Err(AccessError.create("invalid_argument", "unsupported WM operation"))
     Ok(_wm_access_render(result, output_mode))
 
 fn _wm_access_find(snapshot: WinTextSnapshot, query: text) -> AccessResult:
@@ -174,7 +180,8 @@ fn _wm_access_act(snapshot: WinTextSnapshot, args: [text], output_mode: AccessOu
     Ok(_wm_access_render(result, output_mode))
 
 pub fn wm_access_validate_action_args(action: text, args: [text]) -> Result<(), AccessError>:
-    val positionals = match wm_access_action_positionals(args):
+    # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR loses the receiver type of enum-payload match-expression results in library mode; annotate the binding
+    val positionals: [text] = match wm_access_action_positionals(args):
         Err(e): return Err(e)
         Ok(found): found
     if positionals.len() < 2 or positionals[1] != action:

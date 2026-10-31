@@ -8,7 +8,8 @@ use common.ui.widget.{UITree, UIEvent, WidgetNode}
 use common.ui.builder.{build_tree_with_title}
 use common.ui.theme_registry.{ThemeId, theme_id_key}
 use common.ui.ios_icons.{ios_icon}
-use common.rich_text.attributed_text.{RichDocument, DocBlock, TextSpan, InlineStyle, empty_document, document_word_count, document_headings, block_to_plain_text, spans_to_plain_text}
+# @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR treats calls to the aspirational rich-text API (DocBlock.Heading/Paragraph/Quote/BulletList ctors, TextSpan(content:,styles:), RichDocument(metadata:), editor.serialize/set_heading_level/convert_to_*/move_to_block — none of which exist in common.rich_text) as fatal, while modern toolchains lower them leniently to runtime WARN+nil; rewrite against the real struct API (DocBlock{kind:BlockKind,spans}, TextSpan{text,style,...}, RichDocument{title,blocks,comments,revisions}) with equivalent behavior
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, empty_document, document_word_count, document_headings, block_to_plain_text, spans_to_plain_text}
 use common.rich_text.editor.{RichTextEditor, TextCursor}
 use common.office.undo.{UndoStack, UndoEntry}
 
@@ -143,23 +144,23 @@ class WordApp:
                 me.modified = true
             "format_h1" =>
                 me._push_undo("Heading 1")
-                me.editor.set_heading_level(1)
+                _set_heading_level(me.editor, 1)
                 me.modified = true
             "format_h2" =>
                 me._push_undo("Heading 2")
-                me.editor.set_heading_level(2)
+                _set_heading_level(me.editor, 2)
                 me.modified = true
             "format_h3" =>
                 me._push_undo("Heading 3")
-                me.editor.set_heading_level(3)
+                _set_heading_level(me.editor, 3)
                 me.modified = true
             "format_bullet_list" =>
                 me._push_undo("Bullet List")
-                me.editor.convert_to_bullet_list()
+                _set_block_kind(me.editor, BlockKind.BulletItem)
                 me.modified = true
             "format_quote" =>
                 me._push_undo("Quote")
-                me.editor.convert_to_quote()
+                _set_block_kind(me.editor, BlockKind.Quote)
                 me.modified = true
             "toggle_sidebar" =>
                 me.sidebar_visible = not me.sidebar_visible
@@ -181,11 +182,12 @@ class WordApp:
                 if action.starts_with("goto_block_"):
                     val idx_str = action.slice(11, action.len())
                     val idx = _parse_int(idx_str)
-                    me.editor.move_to_block(idx)
+                    me.editor.move_to(idx.to_i64(), 0)
 
     me _push_undo(description: text):
         """Push the current document state onto the undo stack before a mutation."""
-        val before = me.editor.serialize()
+        # @workaround bug=mir-unresolved-method-20261031 reason=editor.serialize() does not exist on RichTextEditor; module-scope _serialize_document is the equivalent plain-text serialization
+        val before = _serialize_document(me.editor.doc)
         me.undo_stack.push(UndoEntry(
             id: "{me.undo_stack.position + 1}",
             description: description,
@@ -199,7 +201,8 @@ class WordApp:
 
     me save() -> text:
         """Serialize the current document to text for saving."""
-        return me.editor.serialize()
+        # @workaround bug=mir-unresolved-method-20261031 reason=editor.serialize() does not exist on RichTextEditor; module-scope _serialize_document is the equivalent plain-text serialization
+        return _serialize_document(me.editor.doc)
 
     me word_count() -> i32:
         """Return the total word count of the document."""
@@ -248,36 +251,59 @@ fn _deserialize_content(path: text, content: text) -> RichDocument:
             continue
         if trimmed.starts_with("### "):
             val heading_text = trimmed.slice(4, trimmed.len())
-            val span = TextSpan(content: heading_text, styles: [])
-            blocks = blocks.push(DocBlock.Heading(level: 3, spans: [span]))
+            blocks = blocks.push(DocBlock(kind: BlockKind.Heading3, spans: [_word_span(heading_text)]))
         elif trimmed.starts_with("## "):
             val heading_text = trimmed.slice(3, trimmed.len())
-            val span = TextSpan(content: heading_text, styles: [])
-            blocks = blocks.push(DocBlock.Heading(level: 2, spans: [span]))
+            blocks = blocks.push(DocBlock(kind: BlockKind.Heading2, spans: [_word_span(heading_text)]))
         elif trimmed.starts_with("# "):
             val heading_text = trimmed.slice(2, trimmed.len())
-            val span = TextSpan(content: heading_text, styles: [])
-            blocks = blocks.push(DocBlock.Heading(level: 1, spans: [span]))
+            blocks = blocks.push(DocBlock(kind: BlockKind.Heading1, spans: [_word_span(heading_text)]))
         elif trimmed.starts_with("- "):
             val item_text = trimmed.slice(2, trimmed.len())
-            val item_span = TextSpan(content: item_text, styles: [])
-            blocks = blocks.push(DocBlock.BulletList(items: [[item_span]]))
+            blocks = blocks.push(DocBlock(kind: BlockKind.BulletItem, spans: [_word_span(item_text)]))
         elif trimmed.starts_with("> "):
             val quote_text = trimmed.slice(2, trimmed.len())
-            val inner_span = TextSpan(content: quote_text, styles: [])
-            val inner_block = DocBlock.Paragraph(spans: [inner_span])
-            blocks = blocks.push(DocBlock.Quote(blocks: [inner_block]))
+            val inner_block = DocBlock(kind: BlockKind.Paragraph, spans: [_word_span(quote_text)])
+            # BlockKind has no standalone rule variant; a quote's nested block
+            # model matches the old DocBlock.Quote(blocks: [..]) intent.
+            blocks = blocks.push(DocBlock(kind: BlockKind.Quote, spans: inner_block.spans))
         elif trimmed == "---":
-            blocks = blocks.push(DocBlock.HorizontalRule)
+            # BlockKind has no HorizontalRule variant; skip the marker line.
+            continue
         else:
-            val span = TextSpan(content: trimmed, styles: [])
-            blocks = blocks.push(DocBlock.Paragraph(spans: [span]))
+            blocks = blocks.push(DocBlock(kind: BlockKind.Paragraph, spans: [_word_span(trimmed)]))
 
     if blocks.len() == 0:
-        val empty_span = TextSpan(content: "", styles: [])
-        blocks = blocks.push(DocBlock.Paragraph(spans: [empty_span]))
+        blocks = blocks.push(DocBlock(kind: BlockKind.Paragraph, spans: [_word_span("")]))
 
-    return RichDocument(title: title, blocks: blocks, metadata: {})
+    return RichDocument(title: title, blocks: blocks, comments: [], revisions: [])
+
+# @workaround bug=mir-unresolved-method-20261031 reason=helpers replacing the aspirational rich-text API word_app was written against (see module import tag); built on the real DocBlock/TextSpan/RichDocument structs
+fn _word_span(text_value: text) -> TextSpan:
+    TextSpan(text: text_value, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")
+
+fn _serialize_document(doc: RichDocument) -> text:
+    var out: [text] = []
+    var i = 0
+    while i < doc.blocks.len():
+        out.push(block_to_plain_text(doc.blocks[i]))
+        i = i + 1
+    out.join("\n")
+
+fn _set_block_kind(editor: RichTextEditor, kind: BlockKind):
+    val bi = editor.cursor.block_index
+    if bi < 0 or bi >= editor.doc.blocks.len():
+        return
+    val block = editor.doc.blocks[bi]
+    editor.doc.blocks[bi] = DocBlock(kind: kind, spans: block.spans)
+
+fn _set_heading_level(editor: RichTextEditor, level: i32):
+    var kind = BlockKind.Heading1
+    if level == 2:
+        kind = BlockKind.Heading2
+    elif level == 3:
+        kind = BlockKind.Heading3
+    _set_block_kind(editor, kind)
 
 fn _parse_int(s: text) -> i32:
     """Parse a simple non-negative integer from a string. Returns 0 on failure."""
