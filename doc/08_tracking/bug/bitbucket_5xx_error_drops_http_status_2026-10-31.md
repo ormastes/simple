@@ -1,16 +1,23 @@
-# Bitbucket 5xx errors dropped the HTTP status from the message
+# Bitbucket 5xx errors drop the HTTP status from the message
 
-Status: fixed 2026-10-31. Found by the emulated gh parity spec.
+Status: open, owner decision. Found 2026-10-31 by the emulated gh parity spec.
 
-`bb_map_http_error` (`src/app/devhub/adapter_bitbucket_protocol.spl:310`) used the raw
-response body as the whole message for any status it did not name. A 500 with body
-`server exploded` printed `error: server exploded`, with nothing saying it was a server
-failure, while GitHub through `gh` printed `HTTP 500`.
+`bb_map_http_error` (`src/app/devhub/adapter_bitbucket_protocol.spl:310`) uses the raw
+response body as the whole message for any status it does not name. A 500 with body
+`server exploded` prints `error: server exploded`, with nothing saying it was a server
+failure. GitHub through `gh` prints `HTTP 500`.
 
-The fix prefixes `api_error (HTTP <status>): `, the same wording as `_bbc_status_label`
-in `adapter_bitbucket_curl.spl`.
+A fix prefixing `api_error (HTTP <status>): ` was tried and reverted: it made both parity
+scenarios pass but broke `test/01_unit/app/devhub/redaction_followup_spec.spl`, scenario
+"redacts provider bodies included in mapped errors", which pins the bare redacted body as
+the exact message. Choosing between those two contracts is the owner's call.
 
-Specs in `test/03_system/app/devhub/feature/devhub_gh_parity_emulated_spec.spl`:
+## Reproduction
 
-- Reproduction: "reports an error for a 500 on bitbucket".
-- Generalisation: "names the status of a 503 on bitbucket".
+`test/03_system/app/devhub/feature/devhub_gh_parity_emulated_spec.spl`, scenarios "reports
+an error for a 500 on bitbucket" and "names the status of a 503 on bitbucket". Both stay RED.
+
+## Unblock
+
+Either put the status in the message and update the pinned expectation, or have the
+command layer print `ItfError.status_code`.

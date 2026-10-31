@@ -10,7 +10,8 @@ From the repo root:
 then read the `SPEC FILE VERDICT:` line.
 ## Compatibility and limitations
 Mail is synthetic, never real mailbox content, and labelled in
-`test/fixtures/devhub/emulated/index.sdn`. The Graph scenarios drive `adapter_outlook_curl`
+`test/fixtures/devhub/emulated/index.sdn`. Graph scenarios drive `adapter_outlook_curl`
+(daily-debug) and `adapter_outlook` (the email facade)
 directly because the CLI hardcodes the Graph host (survey, Mail). IMAP, SMTP and POP3 are
 not on a socket here: those backends shell to the external `mail-cli`. Unsupported behavior
 is asserted as a typed refusal with no server contact.
@@ -27,6 +28,7 @@ A client defect appears as `MISMATCH` text in the assertion message; the raw log
 use std.spec.*
 use std.spec.step
 use app.devhub.adapter_outlook_curl.{OutlookCurlClient, outlook_curl_list_folders, outlook_curl_list_messages, outlook_curl_get_message}
+use app.devhub.adapter_outlook.{OutlookClient, outlook_list_messages, outlook_list_folders, outlook_mark_read}
 use test.fixtures.devhub.emulated.emu_harness.{emu_start, emu_base, emu_row, emu_load, emu_problems, emu_stop, emu_refused_after_stop, emu_home, emu_mail_accounts, emu_devhub}
 
 val AUTH = "Authorization=Bearer syn-graph-token"
@@ -37,6 +39,9 @@ val ACCOUNTS = "default_account: work-gmail\naccounts:\n  work-gmail:\n    provi
 
 fn client() -> OutlookCurlClient:
     OutlookCurlClient(access_token: "syn-graph-token", mailbox_upn: "syn@example.test", base_url: emu_base(), curl_path: "curl")
+
+fn email_client() -> OutlookClient:
+    OutlookClient(access_token: "syn-graph-token", mailbox_upn: "syn@example.test", base_url: emu_base())
 
 fn messages_target(top: i64) -> text:
     "{USER}/mailFolders/inbox/messages?$top={top}&$select={SELECT}"
@@ -156,6 +161,38 @@ describe "Outlook Graph over an emulated server":
         val gen_id = emu_load([emu_row("GET", USER + "/messages/AAMkMsg1", AUTH, "none", 200, JSON_CT, "@graph/message.json", "truncate")])
         # @capture(protocol): the truncated response
         val (ok, _msg, _message) = outlook_curl_get_message(client(), "AAMkMsg1")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+
+describe "the Graph adapter behind devhub email":
+    it "lists messages through adapter_outlook":
+        # @req REQ-DEVHUB-EMU-MAIL-011
+        step("Drive the adapter the email facade uses, not the daily-debug one")
+        val gen_id = emu_load([
+            emu_row("GET", messages_target(2), AUTH, "none", 200, JSON_CT, "@graph/messages_page1.json"),
+            emu_row("GET", USER + "/mailFolders/inbox/messages?$skip=1", AUTH, "none", 200, JSON_CT, "@graph/messages_page2.json")
+        ])
+        # @capture(protocol): both GET requests
+        val (ok, messages, _raw) = outlook_list_messages(email_client(), "inbox", "", 2)
+        expect(emu_problems(gen_id, 2)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(messages.len()).to_equal(2)  # oracle: one message on each page
+
+    it "marks a message read with a PATCH":
+        # @req REQ-DEVHUB-EMU-MAIL-012
+        step("Mark read and check the Graph body")
+        val gen_id = emu_load([emu_row("PATCH", USER + "/messages/AAMkMsg1", AUTH, "has:isRead", 200, JSON_CT, "@graph/message.json")])
+        # @capture(protocol): the PATCH request
+        val (ok, _message) = outlook_mark_read(email_client(), "AAMkMsg1", true)
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "reports 401 through adapter_outlook":
+        # @req REQ-DEVHUB-EMU-MAIL-012
+        step("Answer InvalidAuthenticationToken")
+        val gen_id = emu_load([emu_row("GET", USER + "/mailFolders?$top=50", AUTH, "none", 401, JSON_CT, "@graph/error_401.json")])
+        # @capture(protocol): the refused request
+        val (ok, _folders, _message) = outlook_list_folders(email_client())
         expect(emu_problems(gen_id, 1)).to_equal("")
         expect(ok).to_equal(false)
 
