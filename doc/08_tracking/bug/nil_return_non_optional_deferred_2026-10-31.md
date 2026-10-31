@@ -24,12 +24,12 @@ declares `T?`; a non-optional return type must never yield nil.
 
 ## Fixed
 
-- app/lib (PR #5609): all 47
+- app/lib (PR #5609): all 47 NIL-RET-001 lint
   app/lib findings (llm_caret, dashboard, test_daemon, editor, debug, js,
   json_array_first, both dwarf copies). It also drops the 70 `-> nil`
   annotations in `llm_caret/claude_full`.
   `-> nil` is a non-optional contract. A bare `return` under it is nil, and on
-  the current seed that crashes with **SIGILL (rc=132)**. Three-line repro:
+  the current seed that crashes with **SIGILL (rc=132)**. Repro:
   `fn f() -> nil:\n    return\n` then `f()`.
 - compiler macro_check (this PR; `try_match_rule`, `check_hygiene` -> `text?`). Their
   callers used a catch-all `case x:` arm ahead of `case nil:`, so nil never
