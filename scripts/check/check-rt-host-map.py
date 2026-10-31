@@ -19,13 +19,13 @@ import os, re, sys, tempfile
 
 HOSTS = {
     'linux': {'__linux__', '__unix__'},
-    'macos': {'__APPLE__', '__MACH__', '__unix__'},
+    'macos': {'__APPLE__', '__MACH__'},
     'windows': {'_WIN32', '_WIN64'},
     'freebsd': {'__FreeBSD__', '__unix__'},
     'simpleos': {'__simpleos__'},
 }
 KNOWN = set().union(*HOSTS.values()) | {'__NetBSD__', '__OpenBSD__'}
-SUFFIX = {'windows': 'windows', 'win32': 'windows', 'linux': 'linux', 'macos': 'macos',
+SUFFIX = {'windows': 'windows', 'win32': 'windows', 'win': 'windows', 'linux': 'linux', 'macos': 'macos',
           'darwin': 'macos', 'freebsd': 'freebsd', 'simpleos': 'simpleos'}
 DEF = re.compile(r'^(?!static\b)[\w \t*]*?\b(rt_\w+)[ \t]*\([^;{}]*\)\s*\{', re.M)
 EXT = re.compile(r'^[ \t]*(?:pub[ \t]+)?extern[ \t]+fn[ \t]+(rt_\w+)', re.M)
@@ -68,7 +68,11 @@ def evaluate(expr, host):
         if t and t.startswith('defined'):
             m = re.search(r'(\w+)\W*$', t)[1]
             return m in HOSTS[host] if m in KNOWN else None
-        raise ValueError
+        if t and t.isdigit():
+            return t != '0'
+        if t in KNOWN:
+            return t in HOSTS[host]
+        return None
 
     def andx():
         v = prim()
@@ -94,14 +98,15 @@ def evaluate(expr, host):
 def host_view(src, host):
     out = []
     stack = []  # [active, any_branch_taken]
-    for line in src.split('\n'):
+    for line in src.replace('\\\n', ' ').split('\n'):
         m = re.match(r'\s*#\s*(ifdef|ifndef|if|elif|else|endif)\b(.*)', line)
         if m:
             k, rest = m[1], m[2].strip()
             if k in ('ifdef', 'ifndef'):
                 n = rest.split()[0] if rest else ''
                 v = (n in HOSTS[host]) if n in KNOWN else None
-                stack.append([v if k == 'ifdef' else NOT(v), v])
+                a = v if k == 'ifdef' else NOT(v)
+                stack.append([a, a])
             elif k == 'if':
                 v = evaluate(rest, host)
                 stack.append([v, v])
@@ -119,7 +124,7 @@ def host_view(src, host):
 
 
 def file_host(name):
-    for tok in re.split(r'[_.]', os.path.basename(name)):
+    for tok in re.split(r'[-_./\\]', name.split('src/runtime', 1)[-1]):
         if tok in SUFFIX:
             return SUFFIX[tok]
     return None
@@ -140,10 +145,10 @@ def read(p):
 
 def scan(root):
     prov = {h: set() for h in HOSTS}
-    nocomment = re.compile(r'/\*.*?\*/|//[^\n]*', re.S)
+    nocomment = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"', re.S)
     for p in files(root, 'src/runtime', ('.c', '.cpp', '.m', '.mm')):
         only = file_host(p)
-        src = nocomment.sub('', read(p))
+        src = nocomment.sub(' ', read(p))
         for h in HOSTS:
             if only in (None, h):
                 prov[h].update(DEF.findall(host_view(src, h)))
@@ -184,7 +189,7 @@ def run(root, regen):
     for h in hosted:
         n = sum(1 for k in missing if k.startswith(h + ':'))
         print('RT_AUDIT host=%s map_gaps=%d compile=UNTESTED link=UNTESTED' % (h, n))
-    print('coverage edges=%d rust_skipped=%d no_provider=%d' % (len(edges), len(decl & rust), len(decl - anyhost - rust)))
+    print('coverage edges=%d rust_skipped_UNKNOWN=%d no_provider=%d' % (len(edges), len(decl & rust), len(decl - anyhost - rust)))
     if new or stale:
         print('FAIL — %d finding(s)' % (len(new) + len(stale)))
         return 1
@@ -197,6 +202,7 @@ def selftest():
         t = tempfile.mkdtemp()
         for d in ('src/runtime', 'src/lib', 'scripts/check'):
             os.makedirs(t + '/' + d)
+        os.makedirs(os.path.dirname(t + '/src/runtime/' + name), exist_ok=True)
         open(t + '/src/runtime/' + name, 'w').write(c)
         open(t + '/src/lib/a.spl', 'w').write('extern fn rt_x() -> i64\n')
         return t
@@ -207,13 +213,19 @@ def selftest():
         ('#ifdef _WIN32\n' + body + '#else\n' + body + '#endif\n', 'a.c', 0),
         ('#if defined(FEATURE_X)\n' + body + '#endif\n', 'a.c', 0),
         (body, 'a_windows.c', 1),
+        (body, 'windows/a.c', 1),
+        ('#ifndef __APPLE__\nint y;\n#else\n' + body + '#endif\n', 'a.c', 1),
+        ('#if defined(__linux__) || \\\n defined(__APPLE__)\n' + body + '#endif\n', 'a.c', 1),
+        ('#if __linux__\n' + body + '#endif\n', 'a.c', 1),
+        ('#if defined(__unix__)\n' + body + '#endif\n', 'a.c', 1),
+        ('#if 0\n' + body + '#endif\n', 'a.c', 2),
         ('static long rt_x(void) { return 1; }\n', 'a.c', 2),
     ]):
         got = run(tree(c, name), False)
         if got != want:
             print('ERROR — selftest case %d wanted %d got %d' % (i, want, got))
             return 2
-    print('PASS — selftest 6 cases')
+    print('PASS — selftest 12 cases')
     return 0
 
 
