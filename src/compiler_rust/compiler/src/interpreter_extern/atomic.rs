@@ -634,8 +634,10 @@ fn runtime_to_value(rv: RuntimeValue) -> Value {
 ///
 /// The runtime mutex/rwlock stores a `RuntimeValue`, but the interpreter's
 /// bridge (`runtime_bridge::value_to_runtime`) cannot represent every
-/// interpreter `Value`: a struct (`Value::Object`), class instance, closure or
-/// an enum carrying one marshals to NIL or to a lossy copy. Before this table,
+/// interpreter `Value`: a closure (or an enum carrying one) marshals to NIL,
+/// and a struct / class instance marshals to a bridge `RuntimeObject` copy
+/// (doc/08_tracking/bug/runtime_bridge_class_instances_marshal_to_nil_2026-10-31.md)
+/// that native code cannot read. Before this table,
 /// `mutex_new(MyStruct(..))` stored nil, `mutex_lock` handed back nil, and a
 /// `mutex_with_lock` update closure faulted while the real lock was held, so
 /// every later lock blocked forever (PR #1901, NVFS identity/lease owners).
