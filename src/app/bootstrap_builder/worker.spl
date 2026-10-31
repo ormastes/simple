@@ -14,7 +14,7 @@ use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use app.io.env_ops.{env_vars}
 use app.io.time_ops.{sleep_ms}
 use std.common.build_manager.memory_policy.{builder_memory_enforcement_bytes_v1, builder_memory_receipt_for_task_v1}
-use std.common.process.observation_v4.{ProcessObservationTreeMetricKindV4, POV4_VALID_DIRECT_RSS}
+use std.common.process.observation_v4.{ProcessObservationTreeMetricKindV4, POV4_VALID_DIRECT_RSS, process_observation_monitor_group_gap_v4}
 use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
 use std.common.build_manager.capacity_request.{BuilderCapacitySettlementV1, builder_capacity_settlement_encode_v1}
 use std.nogc_sync_mut.io.process_observation_v4.{OwnedCwdPinV4, ProcessObservationLeaseV4, process_observation_capabilities_v4}
@@ -159,8 +159,8 @@ fn builder_worker_abort_v1(owner: ProcessObservationLeaseV4, root: text, identit
     false
 
 fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text, trace_stages: bool = false) -> Result<(text, i64), text>:
-    # This worker requires process-group retirement from its provider. The
-    # current native V4 owner rejects that policy; it has no per-tree memory cap.
+    # This worker requires process-group retirement from its provider (Darwin
+    # V4 provides it; Linux V4 is leader-only). No provider has a per-tree cap.
     build_runner_stage_trace_v1(trace_stages, "worker", "memory-admission", "begin", task)
     val admitted = builder_worker_memory_admit_v1(task, root, host_id)?
     build_runner_stage_trace_v1(trace_stages, "worker", "v4-capabilities", "begin", task)
@@ -171,6 +171,12 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text, trace_sta
     if not capabilities.available:
         return Err(builder_worker_reject_before_start_v1(task, root, host_id,
             "exact process observation V4 unavailable"))
+    # Admission is per policy, not `available`: the monitor request below needs
+    # ProcessGroup retirement plus an executable identity and exec proof.
+    val capability_gap = process_observation_monitor_group_gap_v4(capabilities.capability_bits)
+    if capability_gap != "":
+        return Err(builder_worker_reject_before_start_v1(task, root, host_id,
+            "process observation V4 lacks " + capability_gap))
     build_runner_stage_trace_v1(trace_stages, "worker", "environment-admission", "begin", task)
     val environment = builder_worker_environment_v1(root)?
     for input in task.inputs:
@@ -218,7 +224,9 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text, trace_sta
     val _executable_closed = executable.close()
     val start = started?
     var lease = start.lease
-    if not lease.active: return Err("compiler process was rejected before ownership transfer")
+    if not lease.active:
+        return Err("compiler process was rejected before ownership transfer: errno=" +
+            str(start.receipt.packet.errno_value))
     build_runner_stage_trace_v1(trace_stages, "worker", "v4-start", "owned", task)
     val identity = builder_task_identity_v1(task)
     var cancelled = false
