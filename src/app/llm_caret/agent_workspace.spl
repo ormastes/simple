@@ -122,7 +122,6 @@ val SMUX_FIRST_WINDOW = "main"      # the session's first window; not an agent n
 val SMUX_PANE_COLS = 500            # a line longer than this wraps in capture
 val SMUX_PANE_ROWS = 50
 val SMUX_CLIENT = "src/app/hosted_apps/smux_client.spl"
-val SMUX_PORT_PROBES = 32
 
 struct WsPane:
     window_id: text
@@ -131,12 +130,13 @@ struct WsPane:
     pid: i64
     target: text
 
-# One owner per workspace: its address and a per-owner CSPRNG token, read from
+# One owner per workspace: its address, pid and a per-owner CSPRNG token, read from
 # a file only the current user can open. The id in the file is checked, so an
 # owner file never answers for another workspace.
 struct SmuxOwner:
     addr: text
     token: text
+    pid: i64
 
 fn _hash(s: text) -> i64:
     var h = 7
@@ -173,17 +173,43 @@ fn _smux_owner(ws: AgentWorkspace) -> SmuxOwner?:
     val path = _smux_owner_path(ws) ?? ""
     if path == "" or not file_exists(path):
         return nil
+    # `<id> <addr> <token> <pid>`, written by the owner once it has bound.
     val f = file_read(path).trim().split(" ")
-    if f.len() != 3 or f[0] != ws.session:
+    if f.len() != 4 or f[0] != ws.session:
         return nil
-    SmuxOwner(addr: f[1], token: f[2])
+    val pid = int(f[3]) ?? 0
+    if pid <= 0:
+        return nil
+    SmuxOwner(addr: f[1], token: f[2], pid: pid)
+
+# The listener on `addr` belongs to `pid` (Windows: netstat's owning process).
+# Checked before every request, so the token never reaches a process that
+# took the port after the owner died.
+fn _smux_listener_is(addr: text, pid: i64) -> bool:
+    val (out, _e, code) = process_run_timeout("netstat", ["-ano", "-p", "TCP"], 10000)
+    if code != 0:
+        return false
+    for line in out.split("\n"):
+        val f = _words(line)
+        if f.len() == 5 and f[1] == addr and f[3] == "LISTENING":
+            return (int(f[4]) ?? 0) == pid
+    false
+
+fn _words(line: text) -> [text]:
+    var out: [text] = []
+    for part in line.trim().split(" "):
+        if part != "":
+            out.push(part)
+    out
 
 # The owner reply, or nil when no owner holding this workspace's token answers.
 fn _smux_req(ws: AgentWorkspace, command: text) -> text?:
     val owner = _smux_owner(ws)
     if owner == nil:
         return nil
-    val o = owner ?? SmuxOwner(addr: "", token: "")
+    val o = owner ?? SmuxOwner(addr: "", token: "", pid: 0)
+    if not _smux_listener_is(o.addr, o.pid):
+        return nil
     val r = smux_server_request(o.addr, o.token, command)
     if r.is_err():
         return nil
@@ -243,21 +269,11 @@ fn _simple_root() -> text?:
 fn _ps_quote(s: text) -> text:
     "'" + s.replace("'", "''") + "'"
 
-# A free loopback port near the workspace's hash: a port where nothing accepts.
-fn _smux_free_port(ws: AgentWorkspace, token: text) -> i64:
-    val base = _hash(ws.session + "|" + _norm_path(ws.repo)) % 20000
-    var k = 0
-    while k < SMUX_PORT_PROBES:
-        val port = 30000 + (base + k) % 20000
-        val probe = smux_server_request("127.0.0.1:" + port.to_text(), token, "list-sessions")
-        if probe.is_err() and probe.unwrap_err() == "smux owner unavailable":
-            return port
-        k = k + 1
-    -1
-
 # Start the owner when none holding this workspace's token answers: a fresh
 # CSPRNG token goes into the private owner file, which only the owner and this
-# workspace's CLI processes read (the token is never on a command line).
+# workspace's CLI processes read (the token is never on a command line). The
+# owner binds an OS-chosen port itself and records it with its pid; nothing
+# probes ports, so the token is sent only to a listener verified as that pid.
 # SIMPLE_BINARY is cleared for it so panes that run `bin/simple test` are not
 # pinned to the spec runner binary.
 #
@@ -273,11 +289,10 @@ fn _smux_owner_up(ws: AgentWorkspace) -> bool:
     val token = random_hex(16) ?? ""
     if path == "" or root == "" or exe == "" or token.len() != 32:
         return false
-    val port = _smux_free_port(ws, token)
-    if port < 0 or not _smux_private_dir(_dir_of(path)):
+    if not _smux_private_dir(_dir_of(path)):
         return false
     val _gone = file_delete(path)
-    if not file_create_exclusive(path, ws.session + " 127.0.0.1:" + port.to_text() + " " + token + "\n"):
+    if not file_create_exclusive(path, ws.session + " " + token + "\n"):
         return false
     # Start-Process joins -ArgumentList with spaces, so each element is double-quoted.
     var arglist: [text] = []
@@ -297,6 +312,13 @@ fn _smux_owner_up(ws: AgentWorkspace) -> bool:
         if _smux_req(ws, "list-sessions") != nil:
             return true
         sleep_ms(500)
+    # Timed out: retire this attempt so no owner keeps serving a token nobody
+    # holds. A bound owner is stopped; one still starting finds the file gone.
+    val now = file_read(path).trim().split(" ")
+    if now.len() == 4 and now[2] == token and _smux_listener_is(now[1], int(now[3]) ?? 0):
+        val _stop = smux_server_request(now[1], token, "stop-server")
+    if (now.len() == 2 and now[1] == token) or (now.len() == 4 and now[2] == token):
+        val _gone = file_delete(path)
     false
 
 fn _ws_panes(ws: AgentWorkspace) -> [WsPane]:
@@ -377,7 +399,7 @@ pub fn workspace_server_address(ws: AgentWorkspace) -> text?:
     val owner = _smux_owner(ws)
     if owner == nil:
         return nil
-    (owner ?? SmuxOwner(addr: "", token: "")).addr
+    (owner ?? SmuxOwner(addr: "", token: "", pid: 0)).addr
 
 pub fn workspace_server_token_path(ws: AgentWorkspace) -> text?:
     if not _smux():
