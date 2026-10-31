@@ -85,7 +85,7 @@ extern fn rt_file_copy(src: text, dst: text) -> bool
 @unsafe(reason: "raw nullable byte-array read; nil is invalid path, unreadable input, allocation, or runtime failure", capabilities: [ffi])
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 @unsafe(reason: "raw file digest; non-64-byte text is the unreadable or provider-failure sentinel", capabilities: [ffi])
-extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_file_hash_sha256(path: text) -> text?
 @unsafe(reason: "raw nullable environment lookup; wrapper normalizes absence", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text?
 @unsafe(reason: "raw environment integer lookup uses the caller default as its failure sentinel", capabilities: [ffi])
@@ -322,7 +322,7 @@ pub fn file_read_bytes_result(path: text) -> Result<[u8], text>:
     if bytes == nil:
         Err("file byte read failed: {path}")
     else:
-        Ok(bytes ?? [])
+        Ok(bytes.unwrap())
 
 pub fn file_read_bytes(path: text) -> [u8]:
     match file_read_bytes_result(path):
@@ -356,8 +356,9 @@ pub fn file_hash_sha256_or_empty(path: text) -> text:
     # The runtime returns nil, not text, for a missing or unreadable path.
     if hash == nil:
         return ""
-    if hash.len() == 64:
-        return hash
+    val digest = hash.unwrap()
+    if digest.len() == 64:
+        return digest
     ""
 
 # Read `size` bytes starting at `offset`. The only ranged read in this module:
@@ -611,8 +612,8 @@ pub fn is_char_device(path: text) -> bool:
 pub fn list_dir(path: text) -> [text]:
     val native = unsafe(capabilities: [ffi]):
         rt_dir_list(host_path_native(path))
-    if native != nil:
-        return native
+    if val listed = native:
+        return listed
     val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", "ls '{path}'"])
     if code != 0:
         return []
@@ -622,6 +623,7 @@ pub fn list_dir(path: text) -> [text]:
     trimmed.split("\n")
 
 pub fn dir_list(path: text) -> [text]:
+    # Contract: failure == empty; dir_list_optional below distinguishes them.
     unsafe(capabilities: [ffi]):
         rt_dir_list(host_path_native(path)) ?? []
 

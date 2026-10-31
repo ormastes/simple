@@ -39,6 +39,12 @@ use app.test.x25519mlkem768_coverage_contract.{
     x25519_mlkem768_coverage_owner_paths,
     x25519_mlkem768_coverage_spec_paths}
 
+# Absence is a mismatch: an unreadable file never matches any expected digest.
+fn _sha256_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false
+
 fn _coverage_error(code: text, subject: text = "") -> X25519MlKem768CoverageComposeError:
     x25519_mlkem768_coverage_error(code, subject)
 
@@ -81,10 +87,8 @@ fn _coverage_tool_provenance_valid(
             not file_is_regular_no_follow(
                 X25519_MLKEM768_COVERAGE_CONTRACT_PATH)):
         return false
-    (file_hash_sha256(X25519_MLKEM768_COVERAGE_COMPOSER_PATH) ==
-        receipt.composer_source_sha256 and
-        file_hash_sha256(X25519_MLKEM768_COVERAGE_CONTRACT_PATH) ==
-        receipt.contract_source_sha256)
+    (_sha256_matches(X25519_MLKEM768_COVERAGE_COMPOSER_PATH, receipt.composer_source_sha256) and
+        _sha256_matches(X25519_MLKEM768_COVERAGE_CONTRACT_PATH, receipt.contract_source_sha256))
 
 fn _coverage_uint(value: text, positive: bool = false) -> bool:
     if value == "": return false
@@ -442,10 +446,16 @@ fn x25519_mlkem768_compose_coverage_receipt_from_text(
         critical_inventory_sha256: text) -> Result<X25519MlKem768CoverageReceipt, X25519MlKem768CoverageComposeError>:
     if not _coverage_hex64(critical_inventory_sha256):
         return Err(_coverage_error("critical-branch-inventory-sha256-invalid"))
-    val composer_source_sha256 = file_hash_sha256(
+    val composer_source_sha256_opt = file_hash_sha256(
         X25519_MLKEM768_COVERAGE_COMPOSER_PATH)
-    val contract_source_sha256 = file_hash_sha256(
+    if composer_source_sha256_opt == nil:
+        return Err(_coverage_error("coverage-tool-source-sha256-unavailable"))
+    val composer_source_sha256 = composer_source_sha256_opt.unwrap()
+    val contract_source_sha256_opt = file_hash_sha256(
         X25519_MLKEM768_COVERAGE_CONTRACT_PATH)
+    if contract_source_sha256_opt == nil:
+        return Err(_coverage_error("coverage-tool-source-sha256-unavailable"))
+    val contract_source_sha256 = contract_source_sha256_opt.unwrap()
     if (not _coverage_hex64(composer_source_sha256) or
             not _coverage_hex64(contract_source_sha256)):
         return Err(_coverage_error("coverage-tool-source-sha256-unavailable"))
@@ -673,10 +683,22 @@ fn x25519_mlkem768_write_coverage_receipt_artifacts(
         return Err(_coverage_error("spec-manifest-write-failed"))
     if not _coverage_tool_provenance_valid(receipt):
         return Err(_coverage_error("coverage-tool-source-mutated-during-write"))
-    val zero_sha = file_hash_sha256(zero_path)
-    val source_sha = file_hash_sha256(source_path)
-    val spec_sha = file_hash_sha256(spec_path)
-    val validator_sha = file_hash_sha256(validator_path)
+    val zero_sha_opt = file_hash_sha256(zero_path)
+    if zero_sha_opt == nil:
+        return Err(_coverage_error("output-sha256-unavailable"))
+    val zero_sha = zero_sha_opt.unwrap()
+    val source_sha_opt = file_hash_sha256(source_path)
+    if source_sha_opt == nil:
+        return Err(_coverage_error("output-sha256-unavailable"))
+    val source_sha = source_sha_opt.unwrap()
+    val spec_sha_opt = file_hash_sha256(spec_path)
+    if spec_sha_opt == nil:
+        return Err(_coverage_error("output-sha256-unavailable"))
+    val spec_sha = spec_sha_opt.unwrap()
+    val validator_sha_opt = file_hash_sha256(validator_path)
+    if validator_sha_opt == nil:
+        return Err(_coverage_error("output-sha256-unavailable"))
+    val validator_sha = validator_sha_opt.unwrap()
     if (not _coverage_hex64(zero_sha) or not _coverage_hex64(source_sha) or
             not _coverage_hex64(spec_sha) or not _coverage_hex64(validator_sha)):
         return Err(_coverage_error("output-sha256-unavailable"))
@@ -687,7 +709,10 @@ fn x25519_mlkem768_write_coverage_receipt_artifacts(
         return Err(_coverage_error("receipt-write-failed"))
     if not _coverage_tool_provenance_valid(receipt):
         return Err(_coverage_error("coverage-tool-source-mutated-during-write"))
-    val receipt_sha = file_hash_sha256(receipt_path)
+    val receipt_sha_opt = file_hash_sha256(receipt_path)
+    if receipt_sha_opt == nil:
+        return Err(_coverage_error("receipt-sha256-unavailable"))
+    val receipt_sha = receipt_sha_opt.unwrap()
     if not _coverage_hex64(receipt_sha):
         return Err(_coverage_error("receipt-sha256-unavailable"))
     Ok(X25519MlKem768CoverageReceiptArtifacts(
@@ -711,17 +736,14 @@ fn _coverage_bind_inputs(
             manifest.compiler_artifact_path != cli.compiler_artifact or
             manifest.runtime_artifact_path != cli.runtime_artifact):
         return Err(_coverage_error("run-manifest-path-binding-mismatch"))
-    if (file_hash_sha256(cli.raw_coverage) != manifest.raw_coverage_sha256 or
-            file_hash_sha256(cli.compiler_artifact) != manifest.compiler_artifact_sha256 or
-            file_hash_sha256(manifest.compiler_provenance_path) !=
-                manifest.compiler_provenance_sha256 or
-            file_hash_sha256(manifest.compiler_version_path) !=
-                manifest.compiler_version_sha256 or
-            file_hash_sha256(X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH) !=
-                X25519_MLKEM768_CRITICAL_SYMBOLIC_SHA256 or
+    if (not _sha256_matches(cli.raw_coverage, manifest.raw_coverage_sha256) or
+            not _sha256_matches(cli.compiler_artifact, manifest.compiler_artifact_sha256) or
+            not _sha256_matches(manifest.compiler_provenance_path, manifest.compiler_provenance_sha256) or
+            not _sha256_matches(manifest.compiler_version_path, manifest.compiler_version_sha256) or
+            not _sha256_matches(X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH, X25519_MLKEM768_CRITICAL_SYMBOLIC_SHA256) or
             file_read(manifest.compiler_version_path).trim() !=
                 manifest.compiler_version or
-            file_hash_sha256(cli.runtime_artifact) != manifest.runtime_artifact_sha256):
+            not _sha256_matches(cli.runtime_artifact, manifest.runtime_artifact_sha256)):
         return Err(_coverage_error("run-manifest-artifact-sha256-mismatch"))
     val compiler_provenance = stage4_compiler_provenance_from_text(
         file_read(manifest.compiler_provenance_path))
@@ -737,18 +759,17 @@ fn _coverage_bind_inputs(
     var index: i64 = 0
     while index < ids.len():
         if not file_is_regular_no_follow(paths[index]) or
-                file_hash_sha256(paths[index]) != (manifest.source_sha256[paths[index]] ?? ""):
+                not _sha256_matches(paths[index], manifest.source_sha256[paths[index]] ?? ""):
             return Err(_coverage_error("run-manifest-source-sha256-mismatch", ids[index]))
         index = index + 1
     val specs = _coverage_spec_paths()
     for path in specs:
         if not file_is_regular_no_follow(path) or
-                file_hash_sha256(path) != (manifest.spec_sha256[path] ?? ""):
+                not _sha256_matches(path, manifest.spec_sha256[path] ?? ""):
             return Err(_coverage_error("run-manifest-spec-sha256-mismatch", path))
         val aot_path = manifest.spec_aot_path[path] ?? ""
         if not file_is_regular_no_follow(aot_path) or
-                file_hash_sha256(aot_path) !=
-                    (manifest.spec_aot_sha256[path] ?? ""):
+                not _sha256_matches(aot_path, manifest.spec_aot_sha256[path] ?? ""):
             return Err(_coverage_error("run-manifest-spec-aot-sha256-mismatch", path))
     Ok(())
 
@@ -779,8 +800,16 @@ fn main() -> i64:
                 (if reason.subject == "": "" else: "-" + reason.subject))
             return 2
         case Ok(_): ()
-    val run_sha_before = file_hash_sha256(cli.run_manifest)
-    val critical_sha_before = file_hash_sha256(cli.critical_inventory)
+    val run_sha_before_opt = file_hash_sha256(cli.run_manifest)
+    if run_sha_before_opt == nil:
+        _coverage_print_failure("input-sha256-unavailable")
+        return 2
+    val run_sha_before = run_sha_before_opt.unwrap()
+    val critical_sha_before_opt = file_hash_sha256(cli.critical_inventory)
+    if critical_sha_before_opt == nil:
+        _coverage_print_failure("input-sha256-unavailable")
+        return 2
+    val critical_sha_before = critical_sha_before_opt.unwrap()
     val raw_text = file_read(cli.raw_coverage)
     val critical_text = file_read(cli.critical_inventory)
     val receipt = match x25519_mlkem768_compose_coverage_receipt_from_text(
@@ -791,9 +820,9 @@ fn main() -> i64:
             _coverage_print_failure(reason.code +
                 (if reason.subject == "": "" else: "-" + reason.subject))
             return 1
-    if (run_sha_before != file_hash_sha256(cli.run_manifest) or
-            critical_sha_before != file_hash_sha256(cli.critical_inventory) or
-            manifest.raw_coverage_sha256 != file_hash_sha256(cli.raw_coverage) or
+    if (not _sha256_matches(cli.run_manifest, run_sha_before) or
+            not _sha256_matches(cli.critical_inventory, critical_sha_before) or
+            not _sha256_matches(cli.raw_coverage, manifest.raw_coverage_sha256) or
             not _coverage_tool_provenance_valid(receipt)):
         _coverage_print_failure("input-mutated-during-compose")
         return 2

@@ -85,6 +85,29 @@ fn record_import_binding(
     crate::interpreter::record_owner_binding(importer, local_name.to_owned(), binding);
 }
 
+/// Re-export counterpart of [`record_import_binding`]: when the source module
+/// declares `source_name` itself, bind to THAT declaration instead of whatever
+/// the source's own binding table resolves the name to (a glob-imported twin).
+fn record_reexport_binding(
+    module_path: Option<&Path>,
+    local_name: &str,
+    source_owner: Option<&Arc<str>>,
+    source_name: &str,
+    functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+) {
+    if let (Some(importer), Some(owner)) = (module_owner(module_path), source_owner) {
+        if crate::interpreter::interpreter_call::function_declared_by(owner, source_name, functions) {
+            crate::interpreter::record_owner_binding(
+                importer,
+                local_name.to_owned(),
+                (Arc::clone(owner), source_name.to_owned()),
+            );
+            return;
+        }
+    }
+    record_import_binding(module_path, local_name, source_owner, source_name);
+}
+
 /// Whole-surface counterpart of [`record_import_binding`]: bind every key of
 /// `names` as `record_import_binding(module_path, key, source_owner, key)`
 /// would, by one reference instead of one entry per key.
@@ -760,14 +783,14 @@ fn process_export_stmt(
             match &export_stmt.target {
                 ImportTarget::Single(name) => {
                     if let Some(value) = source_exports.get(name) {
-                        record_import_binding(module_path, name, source_owner.as_ref(), name);
+                        record_reexport_binding(module_path, name, source_owner.as_ref(), name, global_functions);
                         exports.insert(name.clone(), value.clone());
                         env.insert(name.clone(), value.clone());
                     }
                 }
                 ImportTarget::Aliased { name, alias } => {
                     if let Some(value) = source_exports.get(name) {
-                        record_import_binding(module_path, alias, source_owner.as_ref(), name);
+                        record_reexport_binding(module_path, alias, source_owner.as_ref(), name, global_functions);
                         exports.insert(alias.clone(), value.clone());
                         env.insert(alias.clone(), value.clone());
                     }
@@ -784,14 +807,14 @@ fn process_export_stmt(
                         match item {
                             ImportTarget::Single(name) => {
                                 if let Some(value) = source_exports.get(name) {
-                                    record_import_binding(module_path, name, source_owner.as_ref(), name);
+                                    record_reexport_binding(module_path, name, source_owner.as_ref(), name, global_functions);
                                     exports.insert(name.clone(), value.clone());
                                     env.insert(name.clone(), value.clone());
                                 }
                             }
                             ImportTarget::Aliased { name, alias } => {
                                 if let Some(value) = source_exports.get(name) {
-                                    record_import_binding(module_path, alias, source_owner.as_ref(), name);
+                                    record_reexport_binding(module_path, alias, source_owner.as_ref(), name, global_functions);
                                     exports.insert(alias.clone(), value.clone());
                                     env.insert(alias.clone(), value.clone());
                                 }

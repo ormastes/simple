@@ -24,6 +24,12 @@ val X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH =
 val X25519_MLKEM768_CRITICAL_SYMBOLIC_SHA256 =
     "7ed24e210eda5e03a4c3f740fa7b82148f208446d5135aef781a52cbe98a2b1f"
 
+# Absence is a mismatch: an unreadable file never matches any expected digest.
+fn _sha256_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false
+
 struct X25519MlKem768CriticalCondition:
     decision_id: text
     condition_id: text
@@ -311,9 +317,21 @@ fn main() -> i64:
     if file_exists(output_path):
         print "status=fail\nreason=output-exists"
         return 2
-    val raw_sha = file_hash_sha256(raw_path)
-    val run_sha = file_hash_sha256(run_path)
-    val symbolic_sha = file_hash_sha256(symbolic_path)
+    val raw_sha_opt = file_hash_sha256(raw_path)
+    if raw_sha_opt == nil:
+        print "status=fail\nreason=input-sha256-unavailable"
+        return 2
+    val raw_sha = raw_sha_opt.unwrap()
+    val run_sha_opt = file_hash_sha256(run_path)
+    if run_sha_opt == nil:
+        print "status=fail\nreason=input-sha256-unavailable"
+        return 2
+    val run_sha = run_sha_opt.unwrap()
+    val symbolic_sha_opt = file_hash_sha256(symbolic_path)
+    if symbolic_sha_opt == nil:
+        print "status=fail\nreason=input-sha256-unavailable"
+        return 2
+    val symbolic_sha = symbolic_sha_opt.unwrap()
     if (symbolic_path != X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH or
             symbolic_sha != X25519_MLKEM768_CRITICAL_SYMBOLIC_SHA256):
         print "status=fail\nreason=symbolic-spec-not-canonical"
@@ -341,7 +359,11 @@ fn main() -> i64:
         if not file_is_regular_no_follow(path):
             print "status=fail\nreason=owner-source-not-regular"
             return 2
-        actual_hashes[path] = file_hash_sha256(path)
+        val actual_opt = file_hash_sha256(path)
+        if actual_opt == nil:
+            print "status=fail\nreason=owner-source-sha256-unavailable"
+            return 2
+        actual_hashes[path] = actual_opt.unwrap()
         source_texts[path] = file_read(path)
     val output = match x25519_mlkem768_calibrate_critical_inventory_from_text(
             file_read(symbolic_path), file_read(raw_path), actual_hashes,
@@ -350,18 +372,22 @@ fn main() -> i64:
         case Err(reason):
             print "status=fail\nreason=" + reason
             return 1
-    if (raw_sha != file_hash_sha256(raw_path) or run_sha != file_hash_sha256(run_path) or
-            symbolic_sha != file_hash_sha256(symbolic_path)):
+    if (not _sha256_matches(raw_path, raw_sha) or not _sha256_matches(run_path, run_sha) or
+            not _sha256_matches(symbolic_path, symbolic_sha)):
         print "status=fail\nreason=input-mutated-during-calibration"
         return 2
     for path in _critical_owner_paths():
-        if (actual_hashes[path] ?? "") != file_hash_sha256(path):
+        if not _sha256_matches(path, actual_hashes[path] ?? ""):
             print "status=fail\nreason=owner-source-mutated-during-calibration"
             return 2
     if not file_create_exclusive(output_path, output):
         print "status=fail\nreason=output-exclusive-create-failed"
         return 2
-    val output_sha = file_hash_sha256(output_path)
+    val output_sha_opt = file_hash_sha256(output_path)
+    if output_sha_opt == nil:
+        print "status=fail\nreason=output-sha256-unavailable"
+        return 2
+    val output_sha = output_sha_opt.unwrap()
     if not _critical_hex64(output_sha):
         print "status=fail\nreason=output-sha256-unavailable"
         return 2

@@ -2326,17 +2326,20 @@ describe "hosted browser renderer broker policy":
         expect(policy.ok).to_be(true)
         expect(policy.mode == RequestMode.Cors).to_be(true)
         expect(policy.credentials).to_equal("omit")
-        expect(policy.sanitized_headers).to_equal(
-            "Origin: https://example.test"
-        )
-        val wire = build_request_bytes(FetchRequest(
+        # FetchEngine/CorsChecker.prepare_actual_request owns the Origin header.
+        expect(policy.sanitized_headers).to_equal("")
+        val policy_request = FetchRequest(
             method: "GET",
             url: Url.parse_or_opaque(policy.canonical_url),
             headers: policy.sanitized_headers,
             body: [],
             mode: policy.mode,
             credentials: "omit"
-        ))
+        )
+        expect(build_request_bytes(policy_request).contains("Origin:")).to_be(false)
+        val wire = build_request_bytes(
+            CorsChecker.new("https://example.test").prepare_actual_request(policy_request)
+        )
         expect(wire).to_contain(
             "\r\nOrigin: https://example.test\r\n"
         )
@@ -2879,9 +2882,7 @@ describe "hosted browser renderer broker policy":
         )
         expect(script.ok).to_be(true)
         expect(script.mode == RequestMode.Cors).to_be(true)
-        expect(script.sanitized_headers).to_equal(
-            "Origin: https://example.test"
-        )
+        expect(script.sanitized_headers).to_equal("")
 
     it "accepts only exact broker-owned HSTS transport upgrades":
         # @req REQ-SSPEC-OS
@@ -3274,10 +3275,11 @@ describe "hosted browser renderer broker policy":
                 "text/plain"
             )
         )
-        expect(policy.ok).to_be(false)
-        expect(policy.reason).to_equal(
-            "cross-origin-preflight-unavailable"
-        )
+        # Preflight is now owned by FetchEngine (build_cors_preflight), so the
+        # policy admits the request as CORS and leaves Origin to the engine.
+        expect(policy.ok).to_be(true)
+        expect(policy.mode == RequestMode.Cors).to_be(true)
+        expect(policy.sanitized_headers).to_equal("Content-Type: text/plain")
 
     it "runs hosted OPTIONS before the admitted actual request":
         # @req REQ-SSPEC-OS

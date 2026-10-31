@@ -1,0 +1,44 @@
+"""
+## Purpose and audience
+Acceptance contract for NIL-RET-001: "all null return able must be option".
+A function whose declared return type is not optional must never yield nil;
+the static lint table reports the violation before the interpreter faults with
+"nil is forbidden by the non-optional return contract".
+Audience: compiler and stdlib engineers.
+## Operator workflow
+Run `bin/simple test test/03_system/tools/lint/nil_return_non_optional_lint_spec.spl`.
+"""
+# @tag: system, lint
+
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, static_lint_rule_table, run_static_lint_rule_table}
+
+fn nil_ret_codes(src: text) -> [text]:
+    # Messages of the NIL-RET-001 findings from the full static rule table.
+    val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("accept.spl", src), static_lint_rule_table())
+    var out: [text] = []
+    for f in run.findings:
+        if f.code == "NIL-RET-001":
+            out.push(f.message)
+    out
+
+describe "NIL-RET-001 acceptance":
+    it "is registered in the static rule table":
+        var ids: [text] = []
+        for rule in static_lint_rule_table():
+            ids.push(rule.id())
+        expect(ids.contains("nil_return_non_optional")).to_equal(true)
+
+    it "reports the path_absolute incident shape through the full rule table":
+        val src = "extern fn rt_file_canonicalize(p: text) -> text?\n\npub fn path_absolute(p: text) -> text:\n    rt_file_canonicalize(p)\n"
+        val found = nil_ret_codes(src)
+        expect(found.len()).to_equal(1)
+        expect(found[0].contains("path_absolute")).to_equal(true)
+
+    it "is clean once the signature declares the absent case":
+        val src = "extern fn rt_file_canonicalize(p: text) -> text?\n\npub fn path_absolute(p: text) -> text?:\n    rt_file_canonicalize(p)\n"
+        expect(nil_ret_codes(src).len()).to_equal(0)
+
+    it "is clean when the nil source is replaced by a real value":
+        val src = "fn name_or_default(n: text?) -> text:\n    if val v = n:\n        return v\n    \"anonymous\"\n"
+        expect(nil_ret_codes(src).len()).to_equal(0)

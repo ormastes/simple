@@ -17,16 +17,19 @@ the one cross-module registry that must know modules lowered after it freezes.
 ## Expected Outcome
 
 The batch knob parses strictly (default 0 = off, garbage fails closed);
-a batch flushes only when full and more modules remain, so the tail batch
-always reaches the ordinary final verdict and link; and freezing the typed
-storage registry for the whole schedule admits a module that was not yet
-lowered when it froze, without changing the frozen identity.
+a batch flushes only when full and more modules remain, so a successful tail
+reaches the ordinary final verdict and link. After a lowering failure, the
+pending tail flushes with its own verdict so good modules still emit while the
+overall build fails. Freezing the typed storage registry for the whole schedule
+admits a module that was not yet lowered when it froze, without changing the
+frozen identity.
 """
 use std.spec.step
 use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use compiler.driver.driver_build.native_staged_codegen.{
     NativeStagedCodegenStateV1, NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1,
-    native_staged_codegen_batch_parse_v1, native_staged_codegen_flush_due_v1}
+    native_staged_codegen_batch_parse_v1, native_staged_codegen_flush_due_v1,
+    native_staged_codegen_recovery_flush_due_v1}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 
@@ -59,11 +62,30 @@ describe "when a batch is flushed":
         assert_true(native_staged_codegen_flush_due_v1(64, 64, 64, 1302))
         assert_false(native_staged_codegen_flush_due_v1(63, 64, 63, 1302))
 
-    it "never flushes the tail, so the final call owns verdict and link":
+    it "keeps a successful tail for the final verdict and link":
         # @req REQ-SSPEC-COMPILER
-        step("never flushes the tail, so the final call owns verdict and link")
+        step("keeps a successful tail for the final verdict and link")
         assert_false(native_staged_codegen_flush_due_v1(64, 64, 128, 128))
         assert_false(native_staged_codegen_flush_due_v1(64, 0, 64, 1302))
+        assert_false(native_staged_codegen_recovery_flush_due_v1(true, false, 64, 0))
+
+    it "flushes a pending tail only after lowering failure":
+        # @req REQ-SSPEC-COMPILER
+        step("flushes a pending tail only after lowering failure")
+        assert_true(native_staged_codegen_recovery_flush_due_v1(true, false, 1, 1))
+        assert_true(native_staged_codegen_recovery_flush_due_v1(true, false, 8, 1))
+        assert_false(native_staged_codegen_recovery_flush_due_v1(false, false, 1, 1))
+        assert_false(native_staged_codegen_recovery_flush_due_v1(true, true, 1, 1))
+        assert_false(native_staged_codegen_recovery_flush_due_v1(true, false, 0, 1))
+
+    it "keeps the lowering verdict local to the batch that failed":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the lowering verdict local to the batch that failed")
+        var state = NativeStagedCodegenStateV1.begin(8)
+        state.record_batch_lowering_v1(true)
+        assert_true(state.lowering_failed)
+        state.record_batch_lowering_v1(false)
+        assert_false(state.lowering_failed)
 
     it "starts with no failed batches, so a failure is recorded per batch":
         # @req REQ-SSPEC-COMPILER

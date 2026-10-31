@@ -63,6 +63,12 @@ use app.test.vulkan_2d_qualification.candidate_receipts.{
     SKIA_REVISION, safe_output_dir, path_components_no_symlink,
     lowercase_hex, read_candidate, verify_candidates}
 
+# Absence is a mismatch: an unreadable file never matches any expected digest.
+fn _sha256_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false
+
 struct SkiaBuildProvenance:
     revision: text
     receipt_sha256: text
@@ -112,7 +118,10 @@ fn provider_build_revision(provider_path: text,
         json_object_get(record, "gn_args")) ?? ""
     val affine_v3 = json_to_number(
         json_object_get(record, "affine_v3_enabled")) ?? -1.0
-    val receipt_sha = file_hash_sha256(receipt_path)
+    val receipt_sha_opt = file_hash_sha256(receipt_path)
+    if receipt_sha_opt == nil:
+        return Err("skia-build-receipt-hash-unavailable")
+    val receipt_sha = receipt_sha_opt.unwrap()
     val pin_parsed = json_parse_with_error(read_file(
         "tools/upstream-skia-ganesh-vulkan/skia-pin.json"))
     if pin_parsed.1 != "" or revision != SKIA_REVISION or
@@ -218,7 +227,10 @@ fn save_candidate(artifact: VulkanBackendCaptureArtifact, output_dir: text,
         return Err("output-already-exists")
     if not file_write_bytes(pixel_path, bytes):
         return Err("pixel-write-failed")
-    val pixel_sha = file_hash_sha256(pixel_path)
+    val pixel_sha_opt = file_hash_sha256(pixel_path)
+    if pixel_sha_opt == nil:
+        return Err("pixel-hash-failed")
+    val pixel_sha = pixel_sha_opt.unwrap()
     if pixel_sha.len() != 64:
         return Err("pixel-hash-failed")
     val metadata = capture.metadata
@@ -300,9 +312,12 @@ fn worker_engine2d(output_dir: text, executable: text, nonce: text,
         return blocked("worker-output-domain-invalid")
     if not file_is_regular_no_follow(executable):
         return blocked("worker-executable-missing-or-symlink")
-    val executable_sha = file_hash_sha256(executable)
+    val executable_sha_opt = file_hash_sha256(executable)
+    if executable_sha_opt == nil:
+        return blocked("worker-executable-hash-unavailable")
+    val executable_sha = executable_sha_opt.unwrap()
     if executable_sha.len() != 64 or
-        file_hash_sha256("/proc/self/exe") != executable_sha:
+        not _sha256_matches("/proc/self/exe", executable_sha):
         return blocked("worker-executable-hash-unavailable")
     # Case 31 text has no physical gate yet: the upstream provider rejects
     # every text command and the native glyph contract record is not wired
@@ -398,10 +413,16 @@ fn worker_skia(output_dir: text, executable: text,
     if not file_is_regular_no_follow(executable) or
         not file_is_regular_no_follow(provider_path):
         return blocked("worker-or-provider-missing-or-symlink")
-    val executable_sha = file_hash_sha256(executable)
-    val provider_sha = file_hash_sha256(provider_path)
+    val executable_sha_opt = file_hash_sha256(executable)
+    if executable_sha_opt == nil:
+        return blocked("worker-or-provider-hash-mismatch")
+    val executable_sha = executable_sha_opt.unwrap()
+    val provider_sha_opt = file_hash_sha256(provider_path)
+    if provider_sha_opt == nil:
+        return blocked("worker-or-provider-hash-mismatch")
+    val provider_sha = provider_sha_opt.unwrap()
     if executable_sha.len() != 64 or provider_sha != expected_provider_sha or
-        file_hash_sha256("/proc/self/exe") != executable_sha:
+        not _sha256_matches("/proc/self/exe", executable_sha):
         return blocked("worker-or-provider-hash-mismatch")
     val skia_build = match provider_build_revision(provider_path,
         provider_sha, kind):
@@ -491,12 +512,18 @@ fn run_fresh_workers(executable: text, provider_path: text,
     if not file_is_regular_no_follow(executable) or
         not file_is_regular_no_follow(provider_path):
         return blocked("executable-or-provider-missing-or-symlink")
-    val executable_sha = file_hash_sha256(executable)
-    val provider_sha = file_hash_sha256(provider_path)
+    val executable_sha_opt = file_hash_sha256(executable)
+    if executable_sha_opt == nil:
+        return blocked("executable-or-provider-hash-unavailable")
+    val executable_sha = executable_sha_opt.unwrap()
+    val provider_sha_opt = file_hash_sha256(provider_path)
+    if provider_sha_opt == nil:
+        return blocked("executable-or-provider-hash-unavailable")
+    val provider_sha = provider_sha_opt.unwrap()
     if not lowercase_hex(executable_sha, 64) or
         not lowercase_hex(provider_sha, 64):
         return blocked("executable-or-provider-hash-unavailable")
-    if file_hash_sha256("/proc/self/exe") != executable_sha:
+    if not _sha256_matches("/proc/self/exe", executable_sha):
         return blocked("run-executable-must-be-current-native-binary")
     val skia_build = match provider_build_revision(provider_path, provider_sha, kind):
         case Err(reason): return blocked(reason)
@@ -572,10 +599,9 @@ fn run_fresh_workers(executable: text, provider_path: text,
     if engine_code != 0 or skia_code != 0 or
         not engine_log_ok or not skia_log_ok:
         return blocked("isolated-worker-failed; inspect retained logs")
-    if file_hash_sha256(executable) != executable_sha or
-        file_hash_sha256(provider_path) != provider_sha or
-        file_hash_sha256(provider_path + ".receipt.json") !=
-            skia_build.receipt_sha256:
+    if not _sha256_matches(executable, executable_sha) or
+        not _sha256_matches(provider_path, provider_sha) or
+        not _sha256_matches(provider_path + ".receipt.json", skia_build.receipt_sha256):
         return blocked("executable-or-provider-changed-during-run")
     val verified = match verify_candidates(output_dir,
         executable_sha, provider_sha, kind):
@@ -587,10 +613,16 @@ fn run_fresh_workers(executable: text, provider_path: text,
             return blocked(reason)
     if verified.nonce != nonce:
         return blocked("fresh-worker-nonce-mismatch")
-    val engine_pixel_sha = file_hash_sha256(
+    val engine_pixel_sha_opt = file_hash_sha256(
         output_dir + "/engine2d-vulkan.rgba")
-    val skia_pixel_sha = file_hash_sha256(
+    if engine_pixel_sha_opt == nil:
+        return blocked("pixel-artifact-hash-unavailable")
+    val engine_pixel_sha = engine_pixel_sha_opt.unwrap()
+    val skia_pixel_sha_opt = file_hash_sha256(
         output_dir + "/upstream-skia-ganesh-vulkan.rgba")
+    if skia_pixel_sha_opt == nil:
+        return blocked("pixel-artifact-hash-unavailable")
+    val skia_pixel_sha = skia_pixel_sha_opt.unwrap()
     val scope = scene_scope(kind)
     val fixture_id = scene_fixture_id(kind)
     val fixture_sha = scene_fixture_sha(kind)
@@ -615,7 +647,10 @@ fn run_fresh_workers(executable: text, provider_path: text,
     val comparison_path = output_dir + "/comparison.sdn"
     if not file_atomic_write(comparison_path, comparison_record):
         return blocked("comparison-receipt-write-failed")
-    val comparison_sha = file_hash_sha256(comparison_path)
+    val comparison_sha_opt = file_hash_sha256(comparison_path)
+    if comparison_sha_opt == nil:
+        return blocked("comparison-receipt-hash-failed")
+    val comparison_sha = comparison_sha_opt.unwrap()
     if not lowercase_hex(comparison_sha, 64):
         return blocked("comparison-receipt-hash-failed")
     val run_record = "schema: simple-2d-physical-run/v1\n" +
@@ -689,8 +724,14 @@ fn run_gui_button(executable: text, provider_path: text,
         pressed_dir, SCENE_GUI_PRESSED, false)
     if pressed_code != 0:
         return pressed_code
-    val executable_sha = file_hash_sha256(executable)
-    val provider_sha = file_hash_sha256(provider_path)
+    val executable_sha_opt = file_hash_sha256(executable)
+    if executable_sha_opt == nil:
+        return blocked("gui-executable-or-provider-hash-unavailable")
+    val executable_sha = executable_sha_opt.unwrap()
+    val provider_sha_opt = file_hash_sha256(provider_path)
+    if provider_sha_opt == nil:
+        return blocked("gui-executable-or-provider-hash-unavailable")
+    val provider_sha = provider_sha_opt.unwrap()
     val resting = match read_candidate(resting_dir, "engine2d-vulkan",
         executable_sha, executable_sha, SCENE_GUI_RESTING):
         case Ok(value): value
@@ -715,8 +756,14 @@ fn run_gui_button(executable: text, provider_path: text,
         return failed("gui-button-state-output-unchanged")
     if not mkdir_p(output_dir):
         return blocked("gui-combined-output-unavailable")
-    val resting_run_sha = file_hash_sha256(resting_dir + "/run.sdn")
-    val pressed_run_sha = file_hash_sha256(pressed_dir + "/run.sdn")
+    val resting_run_sha_opt = file_hash_sha256(resting_dir + "/run.sdn")
+    if resting_run_sha_opt == nil:
+        return blocked("gui-state-run-receipt-hash-unavailable")
+    val resting_run_sha = resting_run_sha_opt.unwrap()
+    val pressed_run_sha_opt = file_hash_sha256(pressed_dir + "/run.sdn")
+    if pressed_run_sha_opt == nil:
+        return blocked("gui-state-run-receipt-hash-unavailable")
+    val pressed_run_sha = pressed_run_sha_opt.unwrap()
     if not lowercase_hex(resting_run_sha, 64) or
         not lowercase_hex(pressed_run_sha, 64):
         return blocked("gui-state-run-receipt-hash-unavailable")
