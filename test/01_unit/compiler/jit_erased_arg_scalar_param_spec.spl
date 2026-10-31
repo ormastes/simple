@@ -1,0 +1,130 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/jit_erased_arg_scalar_param_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+
+## Execution status
+
+Authored 2026-10-31 against the Rust seed fix in
+`coerce_args_for_param_slots` (mir/lower/lowering_expr_call.rs). The
+fixture's ground truth was verified by hand through the seed's native-build
+lane (aarch64-apple-darwin, LLVM backend); this spec file itself is
+UNEXECUTED until `bin/simple test` has been run on it and the result
+recorded here. Treat it as authored evidence, not as a passing run.
+"""
+
+# doc-path: doc/08_tracking/bug/erased_field_arg_into_scalar_param_tagged_seed_2026-10-31.md
+# @manual: primary
+
+"""
+# Erased `T` value passed to a declared scalar parameter (JIT lane)
+
+A generic type parameter resolves to `TypeId::ANY`
+(hir/lower/type_resolver.rs), so a read of an erased struct field
+(`Box<i64>.value`), a generic fn result (`id(7)`) or an untyped local holding
+one is a TAGGED word. `val` bindings, `return` and `if` merges decode it into
+a raw slot; a CALL argument into a declared `i64`/`f64`/`u64` parameter did
+not, so `double_it(a.value)` received `21 << 3` and returned 336. A tagged
+`false` bound to a `bool` parameter read as `true` (presence only).
+
+**This spec must shell out.** `bin/simple test` overwrites
+SIMPLE_EXECUTION_MODE to "interpret" before every child spec, and the
+interpreter was always CORRECT here -- an in-process assertion would be
+green on a broken compiler. So it runs the fixture through `simple run`
+under both engines, exactly like
+scripts/check/check_jit_interpreter_differential.spl, and requires the JIT
+lane to agree with the interpreter AND with pinned ground truth.
+Set SIMPLE_BIN to target a specific binary; default `bin/simple`.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get}
+
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn fixture_path() -> text:
+    "test/fixtures/jit_differential/erased_arg_scalar_param.spl"
+
+fn run_engine(mode_env: text) -> text:
+    val command = mode_env + " " + simple_binary() + " run " + fixture_path()
+    val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", command])
+    stdout + stderr
+
+fn jit_output() -> text:
+    # The JIT engine must be named EXPLICITLY: the test runner exports
+    # SIMPLE_EXECUTION_MODE=interpret before every child spec, and a plain
+    # `simple run` inherits it.
+    run_engine("SIMPLE_EXECUTION_MODE=jit")
+
+fn interp_output() -> text:
+    run_engine("SIMPLE_EXECUTION_MODE=interpreter")
+
+describe "erased T value flowing into a declared scalar parameter under the JIT":
+    # @manual scenario evidence
+
+    it "passes an erased i64 field read straight into an i64 parameter":
+        # @req REQ-SSPEC-UNIT
+        step("passes an erased i64 field read straight into an i64 parameter")
+        expect(jit_output()).to_contain("direct=42")
+
+    it "passes an untyped local holding an erased field read":
+        # @req REQ-SSPEC-UNIT
+        step("passes an untyped local holding an erased field read")
+        expect(jit_output()).to_contain("untyped_local=42")
+
+    it "passes a generic fn result into an i64 parameter":
+        # @req REQ-SSPEC-UNIT
+        step("passes a generic fn result into an i64 parameter")
+        expect(jit_output()).to_contain("generic_ret=14")
+
+    it "keeps a tagged false bound to a bool parameter false":
+        # @req REQ-SSPEC-UNIT
+        step("keeps a tagged false bound to a bool parameter false")
+        val out = jit_output()
+        expect(out).to_contain("bool_false=F")
+        expect(out).to_contain("bool_true=T")
+
+    it "decodes f64 and u64 erased payloads into their raw parameters":
+        # @req REQ-SSPEC-UNIT
+        step("decodes f64 and u64 erased payloads into their raw parameters")
+        val out = jit_output()
+        expect(out).to_contain("float_arg=0.75")
+        expect(out).to_contain("u64_arg=9")
+
+    it "covers method-call arguments and nested generic receivers":
+        # @req REQ-SSPEC-UNIT
+        step("covers method-call arguments and nested generic receivers")
+        val out = jit_output()
+        expect(out).to_contain("method_arg=42")
+        expect(out).to_contain("nested=42")
+
+    it "leaves a raw literal argument untouched":
+        # @req REQ-SSPEC-UNIT
+        step("leaves a raw literal argument untouched")
+        expect(jit_output()).to_contain("literal=42")
+
+    it "agrees with the interpreter, which was always correct here":
+        # @req REQ-SSPEC-UNIT
+        step("agrees with the interpreter, which was always correct here")
+        val summary = "summary=42|42|14|F|T|0.75|9|42|42|42"
+        expect(interp_output()).to_contain(summary)
+        expect(jit_output()).to_contain(summary)
