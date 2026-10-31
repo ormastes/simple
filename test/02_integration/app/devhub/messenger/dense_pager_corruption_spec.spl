@@ -1,0 +1,137 @@
+# Integration layer, I/O: structural corruption of the DECRYPTED dense database
+# image, read back through the storage port's table reader.
+#
+# The dense encrypted database is opened ONCE (the open is the whole Phase 1 seed
+# budget); each scenario then copies the decrypted image, damages one structure
+# the generator located by parsing the plaintext (overflow link, overflow chain,
+# interior-page child pointer, leaf cell count) and reads the message table.
+# A control read of the undamaged image proves the damage, not the reader, is
+# what is rejected.  Offsets and page numbers come from dense_ground_truth.json.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: pager-structural-corruption
+
+"""
+## Purpose and audience
+Purpose: a broken overflow pointer, an out-of-range page pointer, an overflow
+chain that ends early, an overflow cycle, a b-tree child-pointer cycle and an
+impossible cell count must each be rejected as corruption, never returned as
+rows and never looped on.
+Audience: reviewers of the SQLite page reader behind the Messenger encrypted read
+path. The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field}
+use std.database.server.storage_port.{database_storage_port_v1, DatabaseStoragePortV1, StorageReadView}
+
+val truth = dense_truth()
+val _secret_ready = dense_set_secret(truth_passphrase(truth))
+val dn_view: StorageReadView? = dense_open_view(dense_path(DENSE_BASE))
+val dn_port: DatabaseStoragePortV1 = database_storage_port_v1()
+val dn_overflow = json_value_field(truth, "overflow")
+
+# Copy of the image with a 4-byte big-endian value written at offset.
+fn with_u32(image: [u8], offset: i64, value: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < image.len():
+        if i >= offset and i < offset + 4:
+            val shift = 3 - (i - offset)
+            var v = value
+            var k = 0
+            while k < shift:
+                v = v / 256
+                k = k + 1
+            out.push((v % 256) as u8)
+        else:
+            out.push(image[i])
+        i = i + 1
+    out
+
+# Copy of the image with a 2-byte big-endian value written at offset.
+fn with_u16(image: [u8], offset: i64, value: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < image.len():
+        if i == offset:
+            out.push((value / 256) as u8)
+        elif i == offset + 1:
+            out.push((value % 256) as u8)
+        else:
+            out.push(image[i])
+        i = i + 1
+    out
+
+fn damaged_view(image: [u8]) -> StorageReadView:
+    val v = dn_view.?
+    StorageReadView(format: v.format, source_path: v.source_path, image: image,
+        page_size: v.page_size, page_count: v.page_count, reserved_bytes: v.reserved_bytes,
+        text_encoding: v.text_encoding)
+
+# "OK:<rows>" or the storage-port error code for reading `table` of the image.
+fn read_verdict(image: [u8], table: text) -> text:
+    match dn_port.read_table(damaged_view(image), table):
+        case Ok(rows): "OK:{rows.len()}"
+        case Err(problem): problem.code()
+
+describe "undamaged controls":
+    it "reads the undamaged message table so the damage below is what gets rejected":
+        # @req REQ-MSGR-DENSE-PAGER-001
+        step("Read the message table of the opened image and a table on an overflow-damaged copy")
+        # @capture(statistics): row count of table messages on the undamaged image and of table room on a damaged copy
+        val image = dn_view.?.image
+        val rows = rows_in(json_value_field(json_value_field(truth, "tables"), "messages"))
+        expect(read_verdict(image, "messages")).to_equal("OK:{rows}")
+        val room_rows = rows_in(json_value_field(json_value_field(truth, "tables"), "room"))
+        expect(read_verdict(with_u32(image, tn(dn_overflow, "pointer_image_offset"), 0), "room")).to_equal("OK:{room_rows}")
+
+describe "damaged overflow links are rejected":
+    it "rejects an overflow pointer of zero":
+        # @req REQ-MSGR-DENSE-PAGER-002
+        step("Zero the dn_overflow link in the leaf cell of message 15 and read the message table")
+        # @capture(protocol_binary): 4 bytes at the generator-located dn_overflow pointer set to 0
+        val image = dn_view.?.image
+        expect(read_verdict(with_u32(image, tn(dn_overflow, "pointer_image_offset"), 0), "messages")).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+    it "rejects an overflow pointer beyond the last page":
+        # @req REQ-MSGR-DENSE-PAGER-003
+        step("Point the dn_overflow link far past the page count and read the message table")
+        # @capture(protocol_binary): 4 bytes at the generator-located dn_overflow pointer set past the page count
+        val image = dn_view.?.image
+        val beyond = tn(truth, "page_count") + 90
+        expect(read_verdict(with_u32(image, tn(dn_overflow, "pointer_image_offset"), beyond), "messages")).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+    it "rejects an overflow chain that ends before the payload does":
+        # @req REQ-MSGR-DENSE-PAGER-004
+        step("Zero the next-page link of the first dn_overflow page and read the message table")
+        # @capture(protocol_binary): next-page link of the first dn_overflow page set to 0
+        val image = dn_view.?.image
+        expect(read_verdict(with_u32(image, list_int(dn_overflow, "chain_next_image_offsets", 0), 0), "messages")).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+    it "rejects an overflow chain that loops back on itself":
+        # @req REQ-MSGR-DENSE-PAGER-005
+        step("Point the first dn_overflow page's next link at itself and read the message table")
+        # @capture(protocol_binary): next-page link of the first dn_overflow page set to its own page number
+        val image = dn_view.?.image
+        val first = list_int(dn_overflow, "overflow_chain", 0)
+        expect(read_verdict(with_u32(image, list_int(dn_overflow, "chain_next_image_offsets", 0), first), "messages")).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+describe "damaged b-tree structure is rejected":
+    it "rejects an interior page whose child pointer is the page itself":
+        # @req REQ-MSGR-DENSE-PAGER-006
+        step("Point the message table's interior root at itself and read the message table")
+        # @capture(protocol_binary): rightmost child pointer of the interior root set to the root's own page number
+        val image = dn_view.?.image
+        expect(read_verdict(with_u32(image, tn(dn_overflow, "interior_rightmost_image_offset"), tn(dn_overflow, "interior_root_page")), "messages")).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+    it "rejects a leaf page that claims an impossible number of cells":
+        # @req REQ-MSGR-DENSE-PAGER-007
+        step("Set the cell count of the dn_overflow cell's leaf page to 65535 and read the message table")
+        # @capture(protocol_binary): 2-byte cell count of the leaf page set to 65535
+        val image = dn_view.?.image
+        val impossible = 65535
+        expect(read_verdict(with_u16(image, tn(dn_overflow, "leaf_cell_count_image_offset"), impossible), "messages")).to_equal("STORAGE_PORT_CORRUPT_SOURCE")

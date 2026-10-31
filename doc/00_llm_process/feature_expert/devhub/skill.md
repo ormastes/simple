@@ -233,3 +233,28 @@ The focused async HTTP encoder native regression subsequently passed five actual
 ## Messenger SQLCipher read status (2026-10-31)
 
 Phase 1 reads the encrypted fixture through direct codec and storage rows. Phase 2 opens the key session, decrypts real pages and passes `test/fixtures/devhub/native_crypto_kat`, then fails reading rows because decoded text comes out empty. Do not call Messenger database support done until `test/fixtures/devhub/fresh_secured_db` passes natively. On Phase 2, `.to_i64()` on `.len()` or a compound expression returns 0; use a typed local, and check crypto against published vectors, since round trips hid a wrong AES key schedule. Read secrets with `env_get_opt`, not `env_get`, whose co-compiled definitions can collide. Phase 1 cannot prove a wipe; judge wipes natively with `test/fixtures/devhub/native_storage_wipe_alias`. Bugs: `doc/08_tracking/bug/native_to_i64_compound_receiver_2026_10_31.md`, `doc/08_tracking/bug/devhub_secured_db_key_session_open_failure_2026_10_27.md`, `env_get_cocompiled_signature_collision_2026_10_31.md`, `seed_interpreter_zeroize_not_guaranteed_2026_10_31.md`.
+
+## Messenger encrypted-database test layers and run order (2026-10-31)
+
+Run these in order; the system test is last and runs only after the first two layers pass on the same encrypted database.
+
+1. **Integration, I/O and crypto** (`test/02_integration/app/devhub/messenger/dense_*_spec.spl`): codec page authentication matrix, key and file negatives, late failures, invalid header, exact rows, structural pager corruption.
+2. **Acceptance through production Messenger verbs** (`test/03_system/app/devhub/messenger/dense_messenger_*_spec.spl`): rooms, members, history at limits 0, 1, 5 and 9, fetch of Unicode, overflow and missing messages, policy denial, configuration failures, absence of write verbs.
+3. **System test** (`test/fixtures/devhub/fresh_secured_db/main.spl` via `provision.py --native`): only after 1 and 2 pass.
+
+Shared fixture: `test/fixtures/database/sqlcipher4/dense_multipage.sqlcipher4` and its variants, produced deterministically by `gen_dense_messenger_fixture.py` (reuses the `provision.py` builders) with a PUBLIC synthetic passphrase, fixed salt and fixed IVs. `dense_ground_truth.json` holds every expected value, computed by Python sqlite3, hashlib and json.dumps, never by the code under test. Regenerate with `python test/fixtures/database/sqlcipher4/gen_dense_messenger_fixture.py`; the encrypted bytes must come out identical. Helpers: `test/support/devhub_messenger_dense.spl`.
+
+Cost model on the Phase 1 seed (measured 2026-10-31): the key session costs under a second, a page HMAC rejection about 0.35 s, but a successful page decryption about 45 s because AES runs interpreted. A full nine-page open therefore costs about seven minutes and one spec file can afford exactly one. Rejections that fail at an HMAC are cheap, so the negative families share files and one key session; every success-path production verb call gets its own file. Run each with `SIMPLE_TIMEOUT_SECONDS=550 SIMPLE_EXECUTION_MODE=interpret <phase1 seed> run <spec>` and read the `SPEC FILE VERDICT` line. `run` of a spec file is interpreted even without `SIMPLE_EXECUTION_MODE`; only a plain `fn main` script is JIT-compiled (30 ms per page).
+## Handoff Notes (2026-10-31) — emulated near-system specs
+
+`test/03_system/app/devhub/feature/devhub_*_emulated_spec.spl` drive production DevHub over
+a real loopback socket to `test/fixtures/devhub/emulated/emu_http_server.spl`, a separate
+process that checks method, target, headers and body per scripted row. Survey and gaps:
+[service interface survey](../../../01_research/app/devhub/service_interface_survey_2026-10-31.md).
+
+- Run one spec at a time with `SIMPLE_BINARY` set, stdout to a FILE. The emulator inherits
+  stdout, so a pipe stays open until it exits (it idles out after 120 s).
+- The runtime watchdog does not reap the emulator; only `emu_stop` or its idle exit does.
+- Only the last failed `expect` in an `it` is printed. Check the emulator log before
+  concluding which one failed.
+- Real gh reaches the emulator through `GH_HOST=github.localhost` plus `HTTP_PROXY`.

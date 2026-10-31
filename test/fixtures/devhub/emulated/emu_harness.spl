@@ -1,0 +1,213 @@
+# Spec side of the DevHub emulator: spawn emu_http_server.spl as a separate
+# process, load scenario scripts, and read back what it observed.
+#
+# Process env holds the handle (EMU_ADDR, EMU_PID): module `var`s are unreliable
+# across `it` blocks in the interpreter (.claude/skills/spipe.md landmines 2+3).
+
+use std.io_runtime.{process_spawn_async, process_kill, process_is_running, env_set, thread_sleep, read_file_text_result, file_write, time_now_unix_micros, cwd, dir_create_all}
+use std.env.{env_get}
+use std.io_runtime.{host_os, getpid}
+use std.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.process.run
+use std.common.json.value.{JsonValue, json_value_parse_or_null, json_value_field, json_value_has, json_value_serialize}
+
+val FIXTURE_ROOT = "test/fixtures/devhub/emulated"
+val START_TIMEOUT_MS: i64 = 90000
+
+fn _scratch() -> text:
+    val base = env_get("TEMP")
+    val root = if base != "": base else: "/tmp"
+    root.replace("\\", "/") + "/devhub_emu_" + env_get("EMU_TAG")
+
+
+fn _seed() -> text:
+    """SIMPLE_BINARY when set, otherwise the executable running this spec (same pid
+    query as std test_executor_parsing), so server and client use one binary."""
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != "":
+        return configured
+    if host_os() == "windows":
+        val (out, _e, code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id {getpid()}).Path"], 20000, 65536)
+        if code == 0:
+            return out.trim()
+        return ""
+    val (ps_out, _pe, ps_code) = process_run_bounded("ps", ["-o", "comm=", "-p", "{getpid()}"], 2000, 65536)
+    if ps_code == 0: ps_out.trim() else: ""
+
+fn emu_script_path() -> text:
+    env_get("EMU_SCRIPT")
+
+fn emu_start(tag: text) -> text:
+    """Start (or reuse) this spec's emulator and return its host:port, or "" on failure."""
+    val existing = env_get("EMU_ADDR")
+    if existing != "":
+        return existing
+    val stamp = time_now_unix_micros().to_string()
+    env_set("EMU_TAG", tag + "_" + stamp)
+    val dir = _scratch()
+    val _m = dir_create_all(dir)
+    val portfile = dir + "/port"
+    env_set("EMU_SCRIPT", dir + "/script")
+    env_set("EMU_LOG", dir + "/log")
+    env_set("EMU_PORTFILE", portfile)
+    env_set("EMU_FIXTURES", cwd() + "/" + FIXTURE_ROOT)
+    val _s = file_write(dir + "/script", "GEN\t0\n")
+    val pid = process_spawn_async(_seed(), ["run", FIXTURE_ROOT + "/emu_http_server.spl"])
+    if pid <= 0:
+        return ""
+    env_set("EMU_PID", pid.to_string())
+    val deadline = time_now_unix_micros() + START_TIMEOUT_MS * 1000
+    while time_now_unix_micros() < deadline:
+        match read_file_text_result(portfile):
+            Ok(content):
+                val addr = content.trim()
+                if addr != "":
+                    env_set("EMU_ADDR", addr)
+                    return addr
+            Err(_): pass
+        if not process_is_running(pid):
+            return ""
+        thread_sleep(100)
+    val _k = process_kill(pid)
+    ""
+
+fn emu_base() -> text:
+    "http://" + env_get("EMU_ADDR")
+
+fn emu_row(method: text, target: text, headers: text, body_assert: text, status: i64, resp_headers: text, body: text, mode: text = "-") -> text:
+    """One expected request and its scripted answer; see emu_http_server.spl for the field grammar."""
+    "{method}\t{target}\t{_dash(headers)}\t{_dash(body_assert)}\t{status}\t{_dash(resp_headers)}\t{_dash(body)}\t{mode}"
+
+fn _dash(field: text) -> text:
+    if field == "": "-" else: field
+
+fn emu_load(rows: [text]) -> text:
+    """Install a scenario. Returns its generation id, which emu_problems() takes."""
+    val gen_id = time_now_unix_micros().to_string()
+    var script = "GEN\t{gen_id}\n"
+    for row in rows:
+        script = script + row + "\n"
+    val _ = file_write(emu_script_path(), script)
+    gen_id
+
+fn _log_lines() -> [text]:
+    match read_file_text_result(env_get("EMU_LOG")):
+        Ok(content): content.split("\n")
+        Err(_): []
+
+fn emu_problems(gen_id: text, expected_requests: i64) -> text:
+    """Empty iff the server saw exactly `expected_requests` requests in this
+    generation and every one matched. Otherwise the reasons, for the failure text."""
+    var seen: i64 = 0
+    var problems = ""
+    for line in _log_lines():
+        val fields = line.split("\t")
+        if fields.len() >= 3 and fields[1] == gen_id:
+            if fields[0] == "REQ":
+                seen = seen + 1
+            if fields[0] == "MISMATCH":
+                problems = problems + line + "\n"
+    if seen != expected_requests:
+        problems = problems + "server saw {seen} request(s), expected {expected_requests}\n"
+    problems
+
+fn emu_request_times_ms(gen_id: text) -> [i64]:
+    """Server-side receipt time of each request in a generation (epoch ms)."""
+    var out: [i64] = []
+    for line in _log_lines():
+        val fields = line.split("\t")
+        if fields.len() >= 4 and fields[0] == "REQ" and fields[1] == gen_id:
+            out = out + [fields[3].to_i64()]
+    out
+
+fn emu_stop() -> bool:
+    """Shut the emulator down and prove its process is gone."""
+    val addr = env_get("EMU_ADDR")
+    val pid_text = env_get("EMU_PID")
+    if addr == "" or pid_text == "":
+        return false
+    val pid = pid_text.to_i64()
+    match TcpStream.connect_timeout(addr, 2000):
+        Ok(stream):
+            val _w = stream.write_text("POST /__emu/shutdown HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n")
+        Err(_): pass
+    var waited = 0
+    while process_is_running(pid) and waited < 100:
+        thread_sleep(100)
+        waited = waited + 1
+    val stopped = not process_is_running(pid)
+    if not stopped:
+        val _k = process_kill(pid)
+    env_set("EMU_ADDR", "")
+    env_set("EMU_PID", "")
+    stopped
+
+fn emu_refused_after_stop(addr: text) -> bool:
+    """True when nothing accepts on addr any more."""
+    TcpStream.connect_timeout(addr, 1000).is_err()
+
+class DevhubRun:
+    rc: i64
+    out: text
+    err: text
+
+    fn combined() -> text:
+        """Output with the runtime's compile warnings removed."""
+        var kept = ""
+        for line in (self.out + "\n" + self.err).split("\n"):
+            val noise = line.contains("warning") or line.contains("WARNING") or line.contains("export use") or line.contains("-->") or line.trim() == "|" or line.contains("pure-Simple") or line.contains("explicit export") or line.contains("Example:") or line.contains("import")
+            if not noise and line.trim() != "":
+                kept = kept + line + "\n"
+        kept
+
+fn emu_home(config_sdn: text, auth_sdn: text) -> text:
+    """A scratch HOME holding only synthetic config, so no real credential is read."""
+    val home = emu_script_path() + "_home"
+    val _d = dir_create_all(home + "/.config/devhub")
+    val _c = file_write(home + "/.config/devhub/config.sdn", config_sdn)
+    val _a = file_write(home + "/.config/devhub/auth.sdn", auth_sdn)
+    env_set("HOME", home)
+    env_set("USERPROFILE", home)
+    home
+
+fn emu_real_gh_env(home: text):
+    """Aim the real gh at the emulator. github.localhost is gh's plain-HTTP host and
+    Go only skips a proxy for literal localhost, so every call goes to HTTP_PROXY.
+    If that ever failed the name would not resolve to a real service, and the token
+    and config dir are synthetic either way."""
+    env_set("GH_TOKEN", "syn-gh-token")
+    env_set("GH_HOST", "github.localhost")
+    env_set("HTTP_PROXY", "http://" + env_get("EMU_ADDR"))
+    env_set("NO_PROXY", "")
+    env_set("GH_CONFIG_DIR", home + "/ghcfg")
+    env_set("GH_PROMPT_DISABLED", "1")
+
+fn emu_devhub(args: [text]) -> DevhubRun:
+    """Run the production DevHub CLI as a child process, as a user would."""
+    val result = run(_seed(), ["run", "src/app/devhub/main.spl"] + args)
+    DevhubRun(rc: result.exit_code, out: result.stdout, err: result.stderr)
+
+fn emu_json(stdout: text) -> JsonValue:
+    """Parse the JSON document printed on stdout (from its first { or [)."""
+    val brace = stdout.find("\{")
+    val bracket = stdout.find("[")
+    var start = brace
+    if start < 0 or (bracket >= 0 and bracket < start):
+        start = bracket
+    if start < 0:
+        return json_value_parse_or_null("null")
+    json_value_parse_or_null(stdout[start:])
+
+fn emu_field(obj: JsonValue, key: text) -> text:
+    """A JSON field as text without its quotes; "" when absent."""
+    if not json_value_has(obj, key):
+        return ""
+    val s = json_value_serialize(json_value_field(obj, key))
+    if s.len() >= 2 and s.starts_with("\"") and s.ends_with("\""):
+        return s[1:s.len() - 1]
+    s
+
+fn emu_mail_accounts(email_sdn: text):
+    """Add a synthetic email.sdn to the scratch HOME; never a real mailbox."""
+    val _e = file_write(env_get("HOME") + "/.config/devhub/email.sdn", email_sdn)

@@ -136,15 +136,17 @@ def sqlite_oracle(image):
         assert database.execute("SELECT id FROM messages WHERE room_id=1 ORDER BY seq,rowid LIMIT 3").fetchall() == [(12,), (13,), (14,)]
 
 
-def encrypt_image(image, passphrase):
-    salt = secrets.token_bytes(16)
+def encrypt_image(image, passphrase, salt=None, iv_fn=None):
+    """Ephemeral by default; a fixed salt and iv_fn(page_no) make it deterministic."""
+    salt = secrets.token_bytes(16) if salt is None else salt
+    iv_fn = iv_fn or (lambda page_no: secrets.token_bytes(16))
     key, mac_key = reference.derive_keys(passphrase.encode("utf-8"), salt)
     encoded = bytearray()
     for page_no, offset in enumerate(range(0, len(image), PAGE), 1):
         body = image[offset:offset + USABLE]
         if page_no == 1:
             body = salt + body[16:]
-        encoded += reference.encode_page(page_no, body, secrets.token_bytes(16), key, mac_key)
+        encoded += reference.encode_page(page_no, body, iv_fn(page_no), key, mac_key)
     rebuilt = bytearray()
     for page_no, offset in enumerate(range(0, len(encoded), PAGE), 1):
         rebuilt += reference.decode_page(page_no, encoded[offset:offset + PAGE], key, mac_key) + bytes(RESERVE)
@@ -292,16 +294,17 @@ def main():
     return result.returncode
 
 
-def encrypt_image_without_oracle(image, passphrase):
+def encrypt_image_without_oracle(image, passphrase, salt=None, iv_fn=None):
     """Authenticate a deliberately invalid header so header rejection is exercised."""
-    salt = secrets.token_bytes(16)
+    salt = secrets.token_bytes(16) if salt is None else salt
+    iv_fn = iv_fn or (lambda page_no: secrets.token_bytes(16))
     key, mac_key = reference.derive_keys(passphrase.encode("utf-8"), salt)
     pages = []
     for page_no, offset in enumerate(range(0, len(image), PAGE), 1):
         body = image[offset:offset + USABLE]
         if page_no == 1:
             body = salt + body[16:]
-        pages.append(reference.encode_page(page_no, body, secrets.token_bytes(16), key, mac_key))
+        pages.append(reference.encode_page(page_no, body, iv_fn(page_no), key, mac_key))
     return b"".join(pages), key, mac_key
 
 

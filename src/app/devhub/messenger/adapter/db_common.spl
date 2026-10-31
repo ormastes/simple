@@ -71,24 +71,36 @@ fn _col(row: DbRow, name: text) -> DbValue?:
         i = i + 1
     nil
 
-# Text form of a column value; NULL/missing -> "".
-fn _col_text(row: DbRow, name: text) -> text:
+# Text form of a column value. An explicitly empty schema name means the
+# external schema deliberately has no such field, so it reads as "". A named
+# column the row does not carry is nil (a schema failure for the verb). A NULL
+# value in a present column stays "".
+fn _col_text(row: DbRow, name: text) -> text?:
+    if name == "":
+        return Some("")
     match _col(row, name):
         Some(v):
             match v:
                 DbValue.Null:
-                    ""
+                    Some("")
                 other:
-                    other.to_text()
+                    Some(other.to_text())
         nil:
-            ""
+            nil
 
-fn _col_int(row: DbRow, name: text) -> i64:
+# Integer form of a column value; nil when the column is missing, unnamed,
+# or not an integer.
+fn _col_int(row: DbRow, name: text) -> i64?:
+    if name == "":
+        return nil
     match _col(row, name):
         Some(v):
-            v.as_int() ?? -1
+            v.as_int()
         nil:
-            -1
+            nil
+
+fn _missing_column_error(table: text) -> MessengerPortResult:
+    MessengerPortResult.config_error("schema column missing in table '{table}'")
 
 # ----------------------------------------------------------------------------
 # Internal read channel: typed rows or an already-rendered failure.
@@ -188,11 +200,17 @@ fn messenger_db_list_rooms(target: MessengerTarget, format_name: text, actor_kin
                     var payload = _lb() + "\"rooms\":["
                     var i = 0
                     while i < rows.len():
+                        val rid = _col_text(rows[i], profile.room_id)
+                        val rname = _col_text(rows[i], profile.room_name)
+                        if rid == nil or rname == nil:
+                            return _missing_column_error(profile.room_table)
+                        val id_text: text = rid ?? ""
+                        val name_text: text = rname ?? ""
                         if i > 0:
                             payload = payload + ","
                         payload = payload + _lb() +
-                            "\"id\":{_json_str(_col_text(rows[i], profile.room_id))}," +
-                            "\"name\":{_json_str(_col_text(rows[i], profile.room_name))}" + _rb()
+                            "\"id\":{_json_str(id_text)}," +
+                            "\"name\":{_json_str(name_text)}" + _rb()
                         i = i + 1
                     MessengerPortResult.ok(payload + "],\"count\":{rows.len()}" + _rb())
             return outcome
@@ -212,28 +230,52 @@ fn messenger_db_list_members(target: MessengerTarget, format_name: text, room: t
                     var i = 0
                     var count = 0
                     while i < rows.len():
-                        if room == "" or _col_text(rows[i], profile.member_room_id) == room:
+                        val row_room = _col_text(rows[i], profile.member_room_id)
+                        val row_identity = _col_text(rows[i], profile.member_identity_id)
+                        val row_joined = _col_text(rows[i], profile.member_joined_at)
+                        if row_room == nil or row_identity == nil or row_joined == nil:
+                            return _missing_column_error(profile.member_table)
+                        if room == "" or (row_room ?? "") == room:
                             if count > 0:
                                 payload = payload + ","
+                            val room_text: text = row_room ?? ""
+                            val identity_text: text = row_identity ?? ""
+                            val joined_text: text = row_joined ?? ""
                             payload = payload + _lb() +
-                                "\"room_id\":{_json_str(_col_text(rows[i], profile.member_room_id))}," +
-                                "\"identity_id\":{_json_str(_col_text(rows[i], profile.member_identity_id))}," +
-                                "\"joined_at\":{_json_str(_col_text(rows[i], profile.member_joined_at))}" + _rb()
+                                "\"room_id\":{_json_str(room_text)}," +
+                                "\"identity_id\":{_json_str(identity_text)}," +
+                                "\"joined_at\":{_json_str(joined_text)}" + _rb()
                             count = count + 1
                         i = i + 1
                     MessengerPortResult.ok(payload + "],\"count\":{count}" + _rb())
             return outcome
 
 # One message row rendered as a JSON object (body included: reaching this
-# point means the policy gate admitted the caller).
-fn _message_json(row: DbRow, profile: SchemaProfile) -> text:
-    _lb() +
-        "\"id\":{_json_str(_col_text(row, profile.message_id))}," +
-        "\"room_id\":{_json_str(_col_text(row, profile.message_room_id))}," +
-        "\"sender_id\":{_json_str(_col_text(row, profile.message_sender_id))}," +
-        "\"created_at\":{_json_str(_col_text(row, profile.message_created_at))}," +
-        "\"seq\":{_json_str(_col_text(row, profile.message_sequence))}," +
-        "\"body\":{_json_str(_col_text(row, profile.message_body))}" + _rb()
+# point means the policy gate admitted the caller). nil when a mapped column
+# is missing from the row.
+fn _message_json(row: DbRow, profile: SchemaProfile) -> text?:
+    val id = _col_text(row, profile.message_id)
+    val room_id = _col_text(row, profile.message_room_id)
+    val sender_id = _col_text(row, profile.message_sender_id)
+    val created_at = _col_text(row, profile.message_created_at)
+    val seq = _col_text(row, profile.message_sequence)
+    val body = _col_text(row, profile.message_body)
+    if id == nil or room_id == nil or sender_id == nil or created_at == nil or seq == nil or body == nil:
+        return nil
+    val id_text: text = id ?? ""
+    val room_text: text = room_id ?? ""
+    val sender_text: text = sender_id ?? ""
+    val created_text: text = created_at ?? ""
+    val seq_text: text = seq ?? ""
+    val body_text: text = body ?? ""
+    val json = _lb() +
+        "\"id\":{_json_str(id_text)}," +
+        "\"room_id\":{_json_str(room_text)}," +
+        "\"sender_id\":{_json_str(sender_text)}," +
+        "\"created_at\":{_json_str(created_text)}," +
+        "\"seq\":{_json_str(seq_text)}," +
+        "\"body\":{_json_str(body_text)}" + _rb()
+    Some(json)
 
 fn messenger_db_history(target: MessengerTarget, format_name: text, room: text, limit: i64, actor_kind: text) -> MessengerPortResult:
     if val gate = _read_gate(target, actor_kind, true):
@@ -259,7 +301,11 @@ fn messenger_db_history(target: MessengerTarget, format_name: text, room: text, 
                     while i < ordered.len():
                         if i > 0:
                             payload = payload + ","
-                        payload = payload + _message_json(ordered[i], profile)
+                        val message_json = _message_json(ordered[i], profile)
+                        if message_json == nil:
+                            return _missing_column_error(profile.message_table)
+                        val message_text: text = message_json ?? ""
+                        payload = payload + message_text
                         i = i + 1
                     val count = ordered.len()
                     MessengerPortResult.ok(payload + "],\"count\":{count}" + _rb())
@@ -278,8 +324,15 @@ fn messenger_db_fetch_message(target: MessengerTarget, format_name: text, messag
                 case DbReadOutcome.Rows(rows):
                     var i = 0
                     while i < rows.len():
-                        if _col_text(rows[i], profile.message_id) == message_id:
-                            return MessengerPortResult.ok(_message_json(rows[i], profile))
+                        val row_id = _col_text(rows[i], profile.message_id)
+                        if row_id == nil:
+                            return _missing_column_error(profile.message_table)
+                        if (row_id ?? "") == message_id:
+                            val message_json = _message_json(rows[i], profile)
+                            if message_json == nil:
+                                return _missing_column_error(profile.message_table)
+                            val message_text: text = message_json ?? ""
+                            return MessengerPortResult.ok(message_text)
                         i = i + 1
                     MessengerPortResult.ok(_lb() + "\"found\":false,\"id\":{_json_str(message_id)}" + _rb())
             return outcome
