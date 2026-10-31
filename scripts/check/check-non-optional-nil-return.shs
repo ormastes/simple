@@ -124,12 +124,19 @@ function produces(l,   s) {
   s=l; sub(/\/\/.*$/,"",s)
   if (s ~ /^[ \t]*\*/) return 0
   if (s !~ /Value::Nil/) return 0
-  if (s ~ /matches!/) return 0
-  if (s ~ /(==|!=)[ \t]*Value::Nil/) return 0
-  if (s ~ /Value::Nil[ \t]*(\||=>)/) return 0
-  if (s ~ /Value::Nil[ \t]*\)[ \t]*(\||=>|if )/) return 0
-  if (s ~ /(if|while) let Value::Nil/) return 0
-  return 1
+  # Strip every READER occurrence, then rescan what is left: only a remaining
+  # `Value::Nil` produces one. So `Value::Nil => Value::Nil` and the one-line
+  # `if x == Value::Nil { return Ok(Value::Nil) }` count, while a bare pattern
+  # or comparison does not. A pattern alternation `|` has whitespace before it
+  # (`Int(_) | Value::Nil`); a closure's `|` does not (`|_| Value::Nil`,
+  # `|| Value::Nil`), and a closure body IS a production, so it stays counted.
+  gsub(/matches!\([^,]*,[ \t]*Value::Nil/,"",s)
+  gsub(/[!=]=[ \t]*Value::Nil/,"",s)
+  gsub(/(if|while) let Value::Nil/,"",s)
+  gsub(/Value::Nil[ \t]*\)[ \t]*(=>|\||if )/,"",s)
+  gsub(/Value::Nil[ \t]*(=>|\|[^|])/,"",s)
+  gsub(/[)}A-Za-z0-9_][ \t]+\|[ \t]*Value::Nil/,"X",s)
+  return (s ~ /Value::Nil/)
 }
 AWKEOF
 
@@ -167,9 +174,9 @@ function body(l,   n,rs,rl,pre,free,q,qn,callee,k) {
   n=l; sub(/\/\/.*$/,"",n)
   while (match(n,/[A-Za-z_][A-Za-z0-9_]*\(/)) {
     rs=RSTART; rl=RLENGTH; callee=substr(n,rs,rl-1)
-    pre=(rs>1)?substr(n,rs-1,1):""; free=1
-    if (pre=="." || pre ~ /[A-Za-z0-9_]/) free=0
-    if (pre==":" && rs>2) { q=substr(n,1,rs-3); if (match(q,/[A-Za-z_][A-Za-z0-9_]*$/)) { qn=substr(q,RSTART,RLENGTH); if (qn ~ /^[A-Z]/ && qn!="Self") free=0 } }
+    pre=substr(n,1,rs-1); free=1
+    if (pre ~ /\.[ \t]*$/) free=0
+    else if (pre ~ /(^|[^A-Za-z0-9_])(std|core|alloc|fs|env|thread|mem|ptr|str|slice|iter|fmt|sync|String|Vec|Box|Arc|Rc|Path|PathBuf|File|OpenOptions|Command|HashMap|BTreeMap|HashSet|Option|Result|Cell|RefCell|Mutex)::$/) free=0
     if (free) for (k=1;k<=na;k++) print arm[k], callee
     n=substr(n,rs+rl)
   }
@@ -213,15 +220,16 @@ FNR==1 { cur="" }
   if ($0 !~ /^[ \t]*$/ && i<=ci && $0 !~ /^[ \t]*[})]/) { cur=""; next }
   n=$0; sub(/\/\/.*$/,"",n)
   while (match(n,/[A-Za-z_][A-Za-z0-9_]*\(/)) {
-    rs=RSTART; rl=RLENGTH   # the qualifier match() below clobbers RSTART/RLENGTH
+    rs=RSTART; rl=RLENGTH
     callee=substr(n,rs,rl-1)
-    pre=(rs>1)?substr(n,rs-1,1):""
+    pre=substr(n,1,rs-1)
     free=1
-    if (pre=="." || pre ~ /[A-Za-z0-9_]/) free=0
-    if (pre==":" && rs>2) {
-      q=substr(n,1,rs-3)
-      if (match(q,/[A-Za-z_][A-Za-z0-9_]*$/)) { qn=substr(q,RSTART,RLENGTH); if (qn ~ /^[A-Z]/ && qn!="Self") free=0 }
-    }
+    # `.name(` is a method (resolves to std or a type, not the same-named free
+    # fn). Only qualifiers naming std/core items and NO module of this tree are
+    # dropped; `io::`, `process::`, `time::`, `net::` are in-tree modules here,
+    # so a call through them stays an edge (curated list, not capitalisation).
+    if (pre ~ /\.[ \t]*$/) free=0
+    else if (pre ~ /(^|[^A-Za-z0-9_])(std|core|alloc|fs|env|thread|mem|ptr|str|slice|iter|fmt|sync|String|Vec|Box|Arc|Rc|Path|PathBuf|File|OpenOptions|Command|HashMap|BTreeMap|HashSet|Option|Result|Cell|RefCell|Mutex)::$/) free=0
     if (free) print cur, callee
     n=substr(n,rs+rl)
   }
@@ -739,7 +747,32 @@ pub fn rt_via_method(args: &[Value]) -> Result<Value, CompileError> {
     Ok(args[0].shared_helper())
 }
 pub fn rt_via_type_path(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Other::shared_helper(&args[0]))
+    Ok(Vec::shared_helper(&args[0]))
+}
+pub fn rt_via_module_path(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(io::shared_helper(&args[0]))
+}
+pub fn rt_closure_nil(args: &[Value]) -> Result<Value, CompileError> {
+    read(args).map(|_| Value::Nil).or_else(|_| Ok(Value::Int(0)))
+}
+pub fn rt_closure_nil0(args: &[Value]) -> Result<Value, CompileError> {
+    read(args).unwrap_or_else(|| Value::Nil)
+}
+pub fn rt_arm_and_prod(args: &[Value]) -> Result<Value, CompileError> {
+    match args[0] {
+        Value::Nil => Ok(Value::Nil),
+        _ => Ok(Value::Int(1)),
+    }
+}
+pub fn rt_cmp_then_prod(args: &[Value]) -> Result<Value, CompileError> {
+    if args[0] == Value::Nil { return Ok(Value::Nil) }
+    Ok(Value::Int(1))
+}
+pub fn rt_alt_only(args: &[Value]) -> Result<Value, CompileError> {
+    match args[0] {
+        Value::Int(_) | Value::Nil => Ok(Value::Int(1)),
+        _ => Ok(Value::Int(2)),
+    }
 }
 RSEOF
     # CRLF file with a blank line inside the body: the "\r"-only line must not end the fn
@@ -781,6 +814,12 @@ RSEOF
     insert_simple!("rt_via_free", impls::rt_via_free);
     insert_simple!("rt_via_method", impls::rt_via_method);
     insert_simple!("rt_via_type_path", impls::rt_via_type_path);
+    insert_simple!("rt_via_module_path", impls::rt_via_module_path);
+    insert_simple!("rt_closure_nil", impls::rt_closure_nil);
+    insert_simple!("rt_closure_nil0", impls::rt_closure_nil0);
+    insert_simple!("rt_arm_and_prod", impls::rt_arm_and_prod);
+    insert_simple!("rt_cmp_then_prod", impls::rt_cmp_then_prod);
+    insert_simple!("rt_alt_only", impls::rt_alt_only);
     insert_simple!("rt_crlf_blank", impls::rt_crlf_blank);
 RSEOF
     derive_nil_externs "$_sd/rust" "$_sd/nil.txt"
@@ -799,7 +838,13 @@ RSEOF
     st_not "$_sd/nil.txt" 'rt_cmp_only' "comparisons / matches! / pattern arms / comments were counted as producing Value::Nil"
     st_not "$_sd/nil.txt" 'rt_some_arm_only' "a \`Some(Value::Nil) =>\` pattern arm was counted as producing Value::Nil"
     st_not "$_sd/nil.txt" 'rt_via_method' "a .method() call was counted as a call of the nil-capable free fn of the same name"
-    st_not "$_sd/nil.txt" 'rt_via_type_path' "Type::name() was counted as a call of the nil-capable free fn of the same name"
+    st_not "$_sd/nil.txt" 'rt_via_type_path' "a std-qualified call (Vec::name) was counted as a call of the nil-capable free fn of the same name"
+    st_has "$_sd/nil.txt" 'rt_via_module_path' "an in-tree module-qualified call (io::name) was dropped as an edge"
+    st_has "$_sd/nil.txt" 'rt_closure_nil' "Value::Nil produced in a |_| closure body was not derived"
+    st_has "$_sd/nil.txt" 'rt_closure_nil0' "Value::Nil produced in a || closure body was not derived"
+    st_has "$_sd/nil.txt" 'rt_arm_and_prod' "\`Value::Nil => Ok(Value::Nil)\` (pattern AND production on one line) was not derived"
+    st_has "$_sd/nil.txt" 'rt_cmp_then_prod' "one-line \`if x == Value::Nil { return Ok(Value::Nil) }\` was not derived"
+    st_not "$_sd/nil.txt" 'rt_alt_only' "a pattern alternation \`Int(_) | Value::Nil =>\` was counted as producing Value::Nil"
 
     # ---- wrapper shapes (class b) ---------------------------------------------
     mkdir -p "$_sd/spl2"

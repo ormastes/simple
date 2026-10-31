@@ -1,0 +1,104 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/nil_return_non_optional_deferred_2026-10-31.md
+
+# Extern nil-forwarding wrappers declare `T?`
+#
+# A thin wrapper that forwards an `rt_*` extern whose Rust interpreter handler
+# can return Value::Nil must declare an optional return type, and its callers
+# must handle the absent case. Before 2026-10-31 these wrappers declared
+# `-> text` / `-> [text]` and handed nil on as if it were a value: on the
+# current seed that is not a trap, it is a silent wrong value (`.split` on it
+# yields 0 parts, `.len()` yields 0), which is worse.
+#
+# The reproducer block calls each fixed wrapper on an input whose handler takes
+# its nil branch. The generalization block probes the same contract through
+# sibling surfaces of the same modules.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.sffi.io.{dir_list, file_mmap_read_text}
+use std.nogc_async_mut.io.mod_stub.{file_hash_sha256}
+use app.io.bootstrap_adhoc_ops.{bootstrap_adhoc_file_hash, bootstrap_adhoc_hash_text}
+use app.game.inspect.{_list}
+use app.ui.web.session_token.{random_hex, session_token_runtime_random_hex}
+
+val MISSING = "/nonexistent/simple-nil-ret-extern-probe/zz"
+
+describe "extern nil-forwarding wrappers return nil for an absent result":
+    """
+    ## Each fixed wrapper reports absence as nil
+
+    The wrapper is called on a path that does not exist, so the runtime
+    handler takes its nil branch. The wrapper must hand back nil, never a
+    value that looks real.
+    """
+
+    it "sffi.io dir_list reports an unreadable directory as nil":
+        # @req REQ-SSPEC-UNIT
+        step("List a directory that does not exist through std.nogc_sync_mut.sffi.io.dir_list")
+        val listed = dir_list(MISSING)
+        expect(listed == nil).to_equal(true)
+
+    it "sffi.io file_mmap_read_text reports an unreadable file as nil":
+        # @req REQ-SSPEC-UNIT
+        step("Map a file that does not exist through file_mmap_read_text")
+        val text_opt = file_mmap_read_text(MISSING)
+        expect(text_opt == nil).to_equal(true)
+
+    it "async mod_stub file_hash_sha256 reports an unreadable file as nil":
+        # @req REQ-SSPEC-UNIT
+        step("Hash a file that does not exist through the async mod_stub")
+        val digest = file_hash_sha256(MISSING)
+        expect(digest == nil).to_equal(true)
+
+    it "bootstrap_adhoc_file_hash reports an unreadable input as nil":
+        # @req REQ-SSPEC-UNIT
+        step("Hash a bootstrap ad-hoc input that does not exist")
+        val digest = bootstrap_adhoc_file_hash(MISSING)
+        expect(digest == nil).to_equal(true)
+
+    it "game inspect _list reports a missing asset directory as nil":
+        # @req REQ-SSPEC-UNIT
+        step("List a game asset directory that does not exist")
+        val listed = _list(MISSING)
+        expect(listed == nil).to_equal(true)
+
+describe "extern nil-forwarding wrappers keep present results intact":
+    """
+    ## The optional type does not change a present result
+
+    The same wrappers, and sibling helpers in the same modules, still return
+    the real value when the runtime succeeds.
+    """
+
+    it "sffi.io dir_list returns the entries of a readable directory":
+        # @req REQ-SSPEC-UNIT
+        step("List the repository's test directory")
+        val listed = dir_list("test")
+        expect(listed == nil).to_equal(false)
+        expect(listed.unwrap().len() > 0).to_equal(true)
+
+    it "async mod_stub file_hash_sha256 returns a 64-char digest for a readable file":
+        # @req REQ-SSPEC-UNIT
+        step("Hash this spec file")
+        val digest = file_hash_sha256("test/01_unit/app/contract/extern_nil_wrapper_optional_spec.spl")
+        expect(digest == nil).to_equal(false)
+        expect(digest.unwrap().len()).to_equal(64)
+
+    it "bootstrap_adhoc_hash_text reports an unwritable root with its empty failure value":
+        # @req REQ-SSPEC-UNIT
+        step("Hash authority text under a root that cannot be created")
+        expect(bootstrap_adhoc_hash_text("/nonexistent/simple-nil-ret-extern-probe", "x")).to_equal("")
+
+    it "session_token runtime random hex is present and 2*N hex chars":
+        # @req REQ-SSPEC-UNIT
+        step("Draw 16 CSPRNG bytes through the optional runtime wrapper")
+        val hex = session_token_runtime_random_hex(16)
+        expect(hex == nil).to_equal(false)
+        expect(hex.unwrap().len()).to_equal(32)
+
+    it "session_token random_hex still returns plain text of 2*N chars":
+        # @req REQ-SSPEC-UNIT
+        step("Draw 32 bytes through the public random_hex helper")
+        expect(random_hex(32).len()).to_equal(64)
