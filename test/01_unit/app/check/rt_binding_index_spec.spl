@@ -1,0 +1,58 @@
+# Purpose and audience: executable specification evidence for the runtime and SFFI maintainers.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/compiler/rt_mapping_pointer_contract_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/compiler/rt_mapping_pointer_contract_design.md
+# @cover scripts/check/rt-binding-index.py 90%
+"""
+# rt binding index (R1)
+
+## Purpose and audience
+
+Runtime and SFFI maintainers read this for what the metadata index records per rt_ extern.
+
+## Operator workflow
+
+Run `python3 -I scripts/check/rt-binding-index.py --out <path>` to write the index. The
+last stdout line is the summary. Run `--selftest` for the built-in checks.
+
+## Compatibility and limitations
+
+The index is metadata only. Compile and link are UNTESTED on every record. UNKNOWN never
+counts as PASS. The guards it reuses are not changed.
+
+## Verification guidance and troubleshooting
+
+Two runs over the same tree must be byte-identical. A simpleos provider row is always
+unknown, because no C macro selects SimpleOS.
+"""
+
+use std.spec.step
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn index_cmd(args: text) -> i64:
+    val (_out, _err, code) = rt_process_run("sh", ["-c", "python3 -I scripts/check/rt-binding-index.py " + args])
+    return code
+
+describe "rt binding index":
+    it "passes the built-in selftest":
+        step("Run the selftest")
+        expect(index_cmd("--selftest")).to_equal(0)
+
+    it "writes byte-identical output on two runs":
+        step("Run the index twice over the same tree and compare")
+        val script = "t=$(mktemp -d); python3 -I scripts/check/rt-binding-index.py --out $t/a.json >/dev/null && python3 -I scripts/check/rt-binding-index.py --out $t/b.json >/dev/null && cmp $t/a.json $t/b.json"
+        val (_out, _err, code) = rt_process_run("sh", ["-c", script])
+        expect(code).to_equal(0)
+
+    it "never records compile or link as PASS":
+        step("Scan the written index for compile or link verdicts other than UNTESTED")
+        val script = "t=$(mktemp -d); python3 -I scripts/check/rt-binding-index.py --out $t/a.json >/dev/null && ! grep -Eq '\"(compile|link)\": \"(PASS|FAIL|UNKNOWN)\"' $t/a.json"
+        val (_out, _err, code) = rt_process_run("sh", ["-c", script])
+        expect(code).to_equal(0)
+
+    it "never records a simpleos provider as mapped":
+        step("Scan the written index for a mapped simpleos row")
+        val script = "t=$(mktemp -d); python3 -I scripts/check/rt-binding-index.py --out $t/a.json >/dev/null && ! (grep -A1 '\"host\": \"simpleos\"' $t/a.json | grep -q '\"mapped\"')"
+        val (_out, _err, code) = rt_process_run("sh", ["-c", script])
+        expect(code).to_equal(0)
