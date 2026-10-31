@@ -156,7 +156,7 @@ pub fn rt_value_truthy_fn(args: &[Value]) -> Result<Value, CompileError> {
 // as a `Value::Object`/`Value::Enum`, whose `as_int()` failed with "type
 // mismatch: cannot convert object to int" and killed the seed's hello
 // native-build in llvm_bootstrap_ssa_function (2026-10-31). A record is never
-// nil or int; an `Option::None` carrier is nil.
+// nil or int; an `Option::None` carrier is a heap enum, not the nil singleton.
 pub fn rt_value_is_nil_fn(args: &[Value]) -> Result<Value, CompileError> {
     let value = args.first().ok_or_else(|| {
         CompileError::semantic_with_context(
@@ -265,8 +265,8 @@ pub fn rt_value_is_bool_fn(args: &[Value]) -> Result<Value, CompileError> {
     }))
 }
 
-/// Check if value is heap pointer. A record carrier and Option::None are heap
-/// objects in compiled code; only the nil singleton is not heap.
+/// Check if value is heap pointer. Records and Option::None are heap objects
+/// in compiled code; Value::Nil and raw Int/Bool carriers are not heap.
 pub fn rt_value_is_heap_fn(args: &[Value]) -> Result<Value, CompileError> {
     let value = probe_arg(args, "rt_value_is_heap")?;
     Ok(Value::Bool(match classify_probe(value) {
@@ -482,9 +482,9 @@ mod carrier_probe_tests {
     }
 
     #[test]
-    fn option_none_carrier_is_nil() {
+    fn option_none_carrier_is_not_nil() {
         let none = Value::none();
-        assert!(matches!(rt_value_is_nil_fn(&[none.clone()]).unwrap(), Value::Bool(true)));
+        assert!(matches!(rt_value_is_nil_fn(&[none.clone()]).unwrap(), Value::Bool(false)));
         assert!(matches!(rt_value_is_int_fn(&[none]).unwrap(), Value::Bool(false)));
     }
 
