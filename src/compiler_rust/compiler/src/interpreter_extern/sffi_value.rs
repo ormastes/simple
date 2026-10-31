@@ -168,10 +168,11 @@ pub fn rt_value_is_nil_fn(args: &[Value]) -> Result<Value, CompileError> {
     // A word-convertible argument keeps the raw RuntimeValue contract. A
     // concrete carrier (struct/enum/object) is classified as the interpreter
     // value itself; see `classify_interpreter_carrier`.
-    match value.as_int() {
-        Ok(raw) => Ok(Value::Bool(rt_value_is_nil(RuntimeValue::from_raw(raw as u64)))),
-        Err(_) => Ok(Value::Bool(value.is_nil_like())),
-    }
+    Ok(Value::Bool(match classify_probe(value) {
+        ProbeCarrier::Word(rv) => rt_value_is_nil(rv),
+        ProbeCarrier::Nil => true,
+        ProbeCarrier::Float | ProbeCarrier::Heap => false,
+    }))
 }
 
 /// Check if value is int
@@ -185,10 +186,10 @@ pub fn rt_value_is_int_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     // A concrete carrier that cannot be read as a word is not an int carrier,
     // so callers never reach `rt_value_as_int` with it.
-    match value.as_int() {
-        Ok(raw) => Ok(Value::Bool(rt_value_is_int(RuntimeValue::from_raw(raw as u64)))),
-        Err(_) => Ok(Value::Bool(false)),
-    }
+    Ok(Value::Bool(match classify_probe(value) {
+        ProbeCarrier::Word(rv) => rt_value_is_int(rv),
+        ProbeCarrier::Float | ProbeCarrier::Heap | ProbeCarrier::Nil => false,
+    }))
 }
 
 /// Read the single argument of a `rt_value_is_*` / `rt_value_type_tag` probe.
@@ -211,15 +212,36 @@ fn probe_arg<'a>(args: &'a [Value], name: &str) -> Result<&'a Value, CompileErro
 /// `Option::None`, which is nil (matching `rt_value_is_nil_fn`).
 enum ProbeCarrier {
     Word(RuntimeValue),
+    /// An interpreter float. Kept distinct instead of encoding through
+    /// `rt_value_float`, which boxes (allocates) a HeapFloat per probe.
+    Float,
     Heap,
     Nil,
 }
 
+// Classify by interpreter variant, NOT via `as_int()`: `as_int` coerces
+// Float/Bool/Nil to plain integers (Float(1.5) -> 1, which decodes as a
+// heap-tagged word) and unwraps single-`value` records, so it misclassifies
+// every non-word carrier. Mirrors the variant split in
+// `rt_heap_ref_registered_fn`.
 fn classify_probe(value: &Value) -> ProbeCarrier {
-    match value.as_int() {
-        Ok(raw) => ProbeCarrier::Word(RuntimeValue::from_raw(raw as u64)),
-        Err(_) if value.is_nil_like() => ProbeCarrier::Nil,
-        Err(_) => ProbeCarrier::Heap,
+    match value {
+        // Raw RuntimeValue words: the historical contract.
+        Value::Int(raw) => ProbeCarrier::Word(RuntimeValue::from_raw(*raw as u64)),
+        Value::UInt { value, .. } => ProbeCarrier::Word(RuntimeValue::from_raw(*value)),
+        // Interpreter scalars: encode as the native runtime would.
+        Value::Float(_) | Value::Float32(_) => ProbeCarrier::Float,
+        Value::Bool(b) => ProbeCarrier::Word(rt_value_bool(*b)),
+        Value::Nil => ProbeCarrier::Nil,
+        // Transparent wrappers classify as their inner value.
+        Value::Unit { value, .. } => classify_probe(value),
+        Value::Borrow(b) => classify_probe(&*b.inner()),
+        Value::BorrowMut(b) => classify_probe(&*b.inner()),
+        // `Option::None` is nil; every other carrier (Str, Array, Dict,
+        // Object incl. single-`value` records, Enum, Unique/Shared/Weak/
+        // Handle, ...) is a heap object in compiled code.
+        _ if value.is_nil_like() => ProbeCarrier::Nil,
+        _ => ProbeCarrier::Heap,
     }
 }
 
@@ -228,6 +250,7 @@ pub fn rt_value_is_float_fn(args: &[Value]) -> Result<Value, CompileError> {
     let value = probe_arg(args, "rt_value_is_float")?;
     Ok(Value::Bool(match classify_probe(value) {
         ProbeCarrier::Word(rv) => rt_value_is_float(rv),
+        ProbeCarrier::Float => true,
         ProbeCarrier::Heap | ProbeCarrier::Nil => false,
     }))
 }
@@ -237,7 +260,7 @@ pub fn rt_value_is_bool_fn(args: &[Value]) -> Result<Value, CompileError> {
     let value = probe_arg(args, "rt_value_is_bool")?;
     Ok(Value::Bool(match classify_probe(value) {
         ProbeCarrier::Word(rv) => rt_value_is_bool(rv),
-        ProbeCarrier::Heap | ProbeCarrier::Nil => false,
+        ProbeCarrier::Float | ProbeCarrier::Heap | ProbeCarrier::Nil => false,
     }))
 }
 
@@ -248,7 +271,7 @@ pub fn rt_value_is_heap_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(match classify_probe(value) {
         ProbeCarrier::Word(rv) => rt_value_is_heap(rv),
         ProbeCarrier::Heap => true,
-        ProbeCarrier::Nil => false,
+        ProbeCarrier::Float | ProbeCarrier::Nil => false,
     }))
 }
 
@@ -285,6 +308,7 @@ pub fn rt_value_type_tag_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rv = match classify_probe(value) {
         ProbeCarrier::Word(rv) => rv,
         ProbeCarrier::Nil => rt_value_nil(),
+        ProbeCarrier::Float => return Ok(Value::Int(simple_runtime::value::tags::TAG_FLOAT as i64)),
         ProbeCarrier::Heap => return Ok(Value::Int(simple_runtime::value::tags::TAG_HEAP as i64)),
     };
     Ok(Value::Int(rt_value_type_tag(rv) as i64))
@@ -507,5 +531,41 @@ mod carrier_probe_tests {
         assert!(rt_value_is_bool_fn(&[]).is_err());
         assert!(rt_value_is_heap_fn(&[]).is_err());
         assert!(rt_value_type_tag_fn(&[]).is_err());
+    }
+
+    #[test]
+    fn interpreter_scalars_classify_by_variant_not_as_int() {
+        let yes = |v: Value| matches!(v, Value::Bool(true));
+        assert!(yes(rt_value_is_float_fn(&[Value::Float(1.5)]).unwrap()));
+        assert!(!yes(rt_value_is_heap_fn(&[Value::Float(1.5)]).unwrap()));
+        assert!(!yes(rt_value_is_int_fn(&[Value::Float(1.5)]).unwrap()));
+        assert!(yes(rt_value_is_float_fn(&[Value::Float32(2.5)]).unwrap()));
+        assert!(yes(rt_value_is_bool_fn(&[Value::Bool(true)]).unwrap()));
+        assert!(yes(rt_value_is_bool_fn(&[Value::Bool(false)]).unwrap()));
+        assert!(!yes(rt_value_is_heap_fn(&[Value::Bool(true)]).unwrap()));
+        assert!(!yes(rt_value_is_int_fn(&[Value::Bool(false)]).unwrap()));
+        assert!(!yes(rt_value_is_int_fn(&[Value::Nil]).unwrap()));
+        assert!(yes(rt_value_is_nil_fn(&[Value::Nil]).unwrap()));
+        let nil_tag = rt_value_type_tag(rt_value_nil()) as i64;
+        assert!(matches!(rt_value_type_tag_fn(&[Value::Nil]).unwrap(), Value::Int(t) if t == nil_tag));
+        let bool_tag = rt_value_type_tag(rt_value_bool(true)) as i64;
+        assert!(matches!(rt_value_type_tag_fn(&[Value::Bool(true)]).unwrap(), Value::Int(t) if t == bool_tag));
+        let float_tag = simple_runtime::value::tags::TAG_FLOAT as i64;
+        assert!(matches!(rt_value_type_tag_fn(&[Value::Float(1.5)]).unwrap(), Value::Int(t) if t == float_tag));
+        assert!(!yes(rt_value_is_nil_fn(&[Value::Float(0.0)]).unwrap()));
+    }
+
+    #[test]
+    fn str_and_single_value_record_are_heap() {
+        let yes = |v: Value| matches!(v, Value::Bool(true));
+        let s = Value::Str("abc".to_string().into());
+        assert!(yes(rt_value_is_heap_fn(&[s.clone()]).unwrap()));
+        assert!(!yes(rt_value_is_int_fn(&[s]).unwrap()));
+        let mut fields = HashMap::new();
+        fields.insert("value".to_string(), Value::Int(0));
+        let local_id = Value::Object { class: "LocalId".to_string(), fields: Arc::new(fields) };
+        assert!(yes(rt_value_is_heap_fn(&[local_id.clone()]).unwrap()));
+        assert!(!yes(rt_value_is_int_fn(&[local_id.clone()]).unwrap()));
+        assert!(!yes(rt_value_is_nil_fn(&[local_id]).unwrap()));
     }
 }
