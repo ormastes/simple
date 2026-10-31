@@ -32,7 +32,7 @@ fn blend_mask_span_or_empty(dst: [u32], offset: i64, mask: [u8], mask_offset: i6
         return span
     []
 @unsafe(reason: "native SIMD kernel probe", capabilities: [ffi])
-extern fn rt_engine2d_blend_cov_span_u32(dst: [u32], offset: i64, colcov: [i32], count: i64, cov_y_and_alpha: i64, color: u32) -> [u32]
+extern fn rt_engine2d_blend_cov_span_u32(dst: [u32], offset: i64, colcov: [i32], count: i64, cov_y_and_alpha: i64, color: u32) -> [u32]?
 
 fn oracle_mask_blend(dst: u32, alpha: i64, color: u32) -> u32:
     val fr = ((color >> 16) & 0xFFu32) as i64
@@ -133,17 +133,19 @@ fn main():
             i = i + 1
         val cy: i64 = 200
         val al: i64 = 180
-        val got = rt_engine2d_blend_cov_span_u32(dst, 0, cov, n, cy * 1024 + al, 0xFF3366CCu32)
-        if got.len() != n:
-            bad = bad + 1
+        if val got = rt_engine2d_blend_cov_span_u32(dst, 0, cov, n, cy * 1024 + al, 0xFF3366CCu32):
+            if got.len() != n:
+                bad = bad + 1
+            else:
+                i = 0
+                while i < n:
+                    checked = checked + 1
+                    if got[i.to_i32()] != oracle_cov_blend(dst[i.to_i32()], (cov[i.to_i32()]).to_i64(), cy, al, 0xFF3366CCu32):
+                        bad = bad + 1
+                        bad_cov = bad_cov + 1
+                    i = i + 1
         else:
-            i = 0
-            while i < n:
-                checked = checked + 1
-                if got[i.to_i32()] != oracle_cov_blend(dst[i.to_i32()], (cov[i.to_i32()]).to_i64(), cy, al, 0xFF3366CCu32):
-                    bad = bad + 1
-                    bad_cov = bad_cov + 1
-                i = i + 1
+            bad = bad + 1
         n = n + 1
 
     # --- soft-shadow with NEGATIVE coverage ---
@@ -168,18 +170,20 @@ fn main():
             i = i + 1
         val cy2: i64 = 200
         val al2: i64 = 180
-        val got = rt_engine2d_blend_cov_span_u32(dst, 0, cov, n, cy2 * 1024 + al2, 0xFF3366CCu32)
-        if got.len() != n:
-            bad = bad + 1
+        if val got = rt_engine2d_blend_cov_span_u32(dst, 0, cov, n, cy2 * 1024 + al2, 0xFF3366CCu32):
+            if got.len() != n:
+                bad = bad + 1
+            else:
+                i = 0
+                while i < n:
+                    checked = checked + 1
+                    # every negative coverage must leave the destination verbatim
+                    if got[i.to_i32()] != dst[i.to_i32()]:
+                        bad = bad + 1
+                        bad_cov = bad_cov + 1
+                    i = i + 1
         else:
-            i = 0
-            while i < n:
-                checked = checked + 1
-                # every negative coverage must leave the destination verbatim
-                if got[i.to_i32()] != dst[i.to_i32()]:
-                    bad = bad + 1
-                    bad_cov = bad_cov + 1
-                i = i + 1
+            bad = bad + 1
         n = n + 1
 
     # --- the DB LIBRARY's own public functions, not the raw externs ---
