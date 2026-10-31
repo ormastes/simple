@@ -1,0 +1,112 @@
+#!/bin/sh
+# Ratchet: a function declared `-> T` (non-optional) must not `return nil` or end in a bare `nil`.
+# Rule: anything that can return nil declares `T?`. Fails on NEW violations only; the frozen set
+# lives in scripts/check/nullable_return_option_baseline.txt (key = <file>:<fn>, no line numbers).
+# Static, single-line-signature heuristic; `nil` inside nested closures can false-positive, which is
+# why the baseline (reviewed) rather than zero is the bar. Verdict is the last stdout line:
+#   PASS - <n> file(s) scanned, 0 new   exit 0 | FAIL - ... exit 1 | ERROR - nothing was checked exit 2
+# Usage: check-nullable-return-option-ratchet.shs [--root DIR] [--generate-baseline] [--selftest]
+set -u
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$SELF_DIR/../.." && pwd)
+BASELINE="$SELF_DIR/nullable_return_option_baseline.txt"
+GEN=0; SELFTEST=1
+
+scan() { # $1 root -> prints "file:fn" lines to stdout; file count on fd 3 via return of count file
+  _root=$1
+  ( cd "$_root" && for d in src/lib src/app src/os src/compiler; do [ -d "$d" ] && find "$d" -name '*.spl' -not -path '*/vendor/*' -not -path '*/generated/*'; done ) > "$TMPD/files.txt"
+  wc -l < "$TMPD/files.txt" | tr -d ' ' > "$TMPD/nfiles.txt"
+  [ -s "$TMPD/files.txt" ] || return 0
+  ( cd "$_root" && xargs awk '
+function flush() { if (infn && (hit || lastbody == "nil")) print ffile ":" fname; infn = 0; hit = 0; lastbody = "" }
+FNR == 1 { flush() }
+{
+  ind = match($0, /[^ \t]/) ? RSTART - 1 : 0
+  s = substr($0, ind + 1)
+  if (s ~ /^(pub |export )?(static )?(me )?fn [A-Za-z_0-9]+.*\) *-> *[^:]+: *$/) {
+    flush()
+    ret = s; sub(/^.*\) *-> */, "", ret); sub(/: *$/, "", ret); sub(/ +$/, "", ret)
+    o = gsub(/\(/, "(", ret); c = gsub(/\)/, ")", ret)
+    if (ret !~ /\?$/ && ret !~ /^Option</ && ret != "()" && c <= o) {
+      nm = s; sub(/^.*fn /, "", nm); sub(/[(<].*$/, "", nm)
+      infn = 1; findent = ind; fname = nm; ffile = FILENAME
+    }
+    next
+  }
+  if (infn) {
+    if (s == "" || s ~ /^#/) next
+    if (ind <= findent) { flush(); next }
+    if (s ~ /^return nil *(#.*)?$/) hit = 1
+    if (s !~ /^(else|elif)/) lastbody = (s ~ /^nil *(#.*)?$/) ? "nil" : s
+  }
+}
+END { flush() }' < "$TMPD/files.txt" ) | sort -u
+}
+
+fixture() { # $1 dir
+  mkdir -p "$1/src/app"
+  cat > "$1/src/app/bad.spl" <<'EOF'
+fn finds(x: i64) -> text:
+    if x == 0:
+        return nil
+    "ok"
+
+fn trailing(x: i64) -> i64:
+    if x > 0:
+        return x
+    nil
+EOF
+  cat > "$1/src/app/good.spl" <<'EOF'
+fn finds(x: i64) -> text?:
+    if x == 0:
+        return nil
+    "ok"
+
+fn total(x: i64) -> text:
+    if x == 0:
+        return ""
+    "ok"
+
+fn takes(p: fn(i64) -> bool):
+    nil
+EOF
+}
+
+selftest() {
+  _t=$(mktemp -d); TMPD=$_t
+  fixture "$_t/f"; scan "$_t/f" > "$_t/out.txt"
+  grep -qx 'src/app/bad.spl:finds' "$_t/out.txt" && grep -qx 'src/app/bad.spl:trailing' "$_t/out.txt" || { echo "ERROR - selftest: bad fixture not flagged"; return 2; }
+  grep -q 'good.spl' "$_t/out.txt" && { echo "ERROR - selftest: good fixture flagged"; return 2; }
+  mkdir -p "$_t/empty"; scan "$_t/empty" > "$_t/e.txt"
+  [ "$(cat "$TMPD/nfiles.txt")" = "0" ] || { echo "ERROR - selftest: empty tree must scan 0 files"; return 2; }
+  rm -rf "$_t"; return 0
+}
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --root) ROOT=$2; shift ;;
+    --generate-baseline) GEN=1 ;;
+    --selftest) SELFTEST=2 ;;
+    *) echo "ERROR - nothing was checked (unknown arg $1)"; exit 2 ;;
+  esac; shift
+done
+
+selftest; rc=$?
+[ "$rc" = 0 ] || exit 2
+[ "$SELFTEST" = 2 ] && { echo "PASS - selftest ok (2 fixtures)"; exit 0; }
+
+TMPD=$(mktemp -d)
+scan "$ROOT" > "$TMPD/cur.txt"
+N=$(cat "$TMPD/nfiles.txt")
+[ "$N" -gt 0 ] || { echo "ERROR - nothing was checked (0 files under $ROOT)"; exit 2; }
+if [ "$GEN" = 1 ]; then cp "$TMPD/cur.txt" "$BASELINE"; echo "PASS - baseline written: $(wc -l < "$BASELINE" | tr -d ' ') entries, $N file(s) scanned"; exit 0; fi
+[ -f "$BASELINE" ] || { echo "ERROR - nothing was checked (missing $BASELINE)"; exit 2; }
+sort -u "$BASELINE" > "$TMPD/base.txt"
+comm -13 "$TMPD/base.txt" "$TMPD/cur.txt" > "$TMPD/new.txt"
+comm -23 "$TMPD/base.txt" "$TMPD/cur.txt" > "$TMPD/fixed.txt"
+if [ -s "$TMPD/new.txt" ]; then
+  echo "FAIL - $N file(s) scanned, $(wc -l < "$TMPD/new.txt" | tr -d ' ') new non-optional fn(s) returning nil: $(tr '\n' ' ' < "$TMPD/new.txt") (declare '-> T?')"
+  exit 1
+fi
+echo "PASS - $N file(s) scanned, 0 new ($(wc -l < "$TMPD/cur.txt" | tr -d ' ') baselined, $(wc -l < "$TMPD/fixed.txt" | tr -d ' ') fixed since baseline; regenerate to ratchet down)"
+exit 0
