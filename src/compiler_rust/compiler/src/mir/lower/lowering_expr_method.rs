@@ -12,18 +12,12 @@ impl<'a> MirLowerer<'a> {
         args: &[HirExpr],
         arg_regs: &mut [VReg],
     ) -> MirLowerResult<()> {
+        // Both directions, exactly like a direct call: box raw scalars into
+        // tagged (`any`/`T`/`T?`) params and UNBOX tagged words (erased field
+        // reads, generic results) into raw scalar params. See
+        // `coerce_args_for_param_slots` in lowering_expr_call.rs.
         let params = self.function_param_types.get(func_name).cloned().unwrap_or_default();
-        if params.is_empty() {
-            return Ok(());
-        }
-        for (i, arg_reg) in arg_regs.iter_mut().enumerate() {
-            if params.get(i).copied() == Some(TypeId::ANY) {
-                if let Some(arg_expr) = args.get(i) {
-                    *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
-                }
-            }
-        }
-        Ok(())
+        self.coerce_args_for_param_slots(&params, args, arg_regs, false)
     }
 
     fn builtin_method_receiver_name(&self, ty: TypeId) -> Option<&'static str> {
@@ -1537,13 +1531,7 @@ impl<'a> MirLowerer<'a> {
                 if is_callable_field {
                     let (param_types, return_type) =
                         field_signature.unwrap_or_else(|| (vec![TypeId::ANY; args.len()], TypeId::ANY));
-                    for (i, arg_reg) in arg_regs.iter_mut().enumerate() {
-                        if param_types.get(i).copied() == Some(TypeId::ANY) {
-                            if let Some(arg_expr) = args.get(i) {
-                                *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
-                            }
-                        }
-                    }
+                    self.coerce_args_for_param_slots(&param_types, args, &mut arg_regs, false)?;
                     let owner_name = self
                         .type_registry
                         .and_then(|registry| registry.get_type_name(owner_ty))
