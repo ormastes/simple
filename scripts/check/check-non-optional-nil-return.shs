@@ -28,17 +28,40 @@
 # A run that examined 0 wrappers or derived 0 nil-capable externs is ERROR,
 # never a pass: absence of evidence is not evidence of absence.
 #
+# Four legs, three ratcheted baselines (a header-preserving rewrite of all three
+# is `--regen-baseline`):
+#   class (a)  `extern fn rt_x(..) -> T` with T non-optional while rt_x is
+#              nil-capable (the declaration itself lies), plus the same check on
+#              the `decl:` of every scripts/check/rt_alias_map.sdn entry.
+#              Baseline non_optional_nil_return_classa_baseline.txt, keyed
+#              <file>:<extern>:<type> (alias map: rt_alias_map:<extern>:<type>).
+#              Raw-ABI / void-sentinel externs that cannot be optional are listed
+#              WITH A WRITTEN REASON in non_optional_nil_return_classa_optout.txt
+#              (`<extern> <type> <reason>`; a row without a reason is an ERROR).
+#   class (b)  thin Simple wrapper `fn f() -> T` forwarding such an extern.
+#   class (c)  hand-written `return nil` / nil tail under `-> T`.
+#   mixed      an extern declared both optional and non-optional somewhere in the
+#              tree. Reported as a count; its non-optional sides are enforced by
+#              class (a).
+#
 # Usage:  sh scripts/check/check-non-optional-nil-return.shs [--root DIR]
 #         sh scripts/check/check-non-optional-nil-return.shs --selftest
+#         sh scripts/check/check-non-optional-nil-return.shs --regen-baseline
+#         sh scripts/check/check-non-optional-nil-return.shs --explain
 
 set -u
+LC_ALL=C; export LC_ALL
 
 ROOT=""
 SELFTEST_ONLY=0
+REGEN=0
+EXPLAIN=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --root) ROOT="$2"; shift 2 ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
+        --regen-baseline) REGEN=1; shift ;;
+        --explain) EXPLAIN=1; shift ;;
         *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (bad usage)"; exit 2 ;;
     esac
 done
@@ -52,19 +75,24 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 
 # ---------------------------------------------------------------- awk programs
 cat > "$TMP/wrap.awk" <<'AWKEOF'
+# A wrapper is a fn (free, `static fn`, `me fn`, `async fn`) whose whole body is
+# ONE forwarded `rt_x(..)` call, optionally inside an `unsafe(..):` block, whether
+# that block is written on the call's own line or as a header line above it.
 function flush() {
-  if (nb==1 && curr!="" && curr !~ /\?[ \t]*$/ && curr !~ /^(Option|Optional)</ && curr!="()" && curr!="void" && curr!="unit" && curr!="Unit" && body ~ /^(return[ \t]+)?rt_[a-z0-9_]+\(.*\)$/ && body !~ /\?\?/ && body !~ /!/)
-    printf "%s:%d:%s:%s:%s\n", pf, bline, curf, curr, body
-  curf=""; nb=0; un=0
+  if (nb==1 && curr!="" && curr !~ /\?[ \t]*$/ && curr !~ /^(Option|Optional)</ && curr!="()" && curr!="void" && curr!="unit" && curr!="Unit" && body ~ /^(return[ \t]+)?rt_[a-z0-9_]+\(.*\)$/ && body !~ /\?\?/ && body !~ /!/) {
+    b=body; gsub(/:/,"~",b)   # keep the colon-separated row parseable
+    printf "%s:%d:%s:%s:%s\n", pf, bline, curf, curr, b
+  }
+  curf=""; nb=0; pend=0
 }
 FNR==1 { flush(); curf="" }
-/^[ \t]*(pub[ \t]+)?fn[ \t]+[A-Za-z_]/ {
+/^[ \t]*(pub[ \t]+)?((static|me|async)[ \t]+)*fn[ \t]+[A-Za-z_]/ {
   flush()
   match($0,/^[ \t]*/); curind=RLENGTH
   fname=""; rtype=""
   if (match($0,/fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) { fname=substr($0,RSTART,RLENGTH); sub(/fn[ \t]+/,"",fname) }
   if (match($0,/->[ \t]*[^:]+/)) { rtype=substr($0,RSTART,RLENGTH); sub(/->[ \t]*/,"",rtype); gsub(/[ \t]+$/,"",rtype) }
-  curf=fname; curr=rtype; nb=0; un=0; body=""; bline=0; pf=FILENAME; next
+  curf=fname; curr=rtype; nb=0; body=""; bline=0; pend=0; pf=FILENAME; next
 }
 {
   if (curf=="") next
@@ -72,58 +100,119 @@ FNR==1 { flush(); curf="" }
   if ($0 ~ /^[ \t]*$/) next
   match($0,/^[ \t]*/); i=RLENGTH
   if (i<=curind) { flush(); next }
-  # A body wrapped in one `unsafe(capabilities: [...]):` block is still a
-  # thin wrapper: look through the block header to the forwarded call.
-  if (nb==0 && !un && $0 ~ /^[ \t]*unsafe(\(.*\))?:[ \t]*$/) { un=1; next }
-  if (nb==0) { bline=FNR; body=$0; gsub(/^[ \t]+|[ \t]+$/,"",body) }
+  t=$0; gsub(/^[ \t]+|[ \t]+$/,"",t)
+  if (pend) { pend=0; nb=1; bline=FNR; body=t; next }
+  if (nb==0) {
+    if (t ~ /^unsafe(\(.*\))?:$/) { pend=1; next }
+    if (t ~ /^unsafe\(.*\):[ \t]*[^ \t]/) { sub(/^unsafe\(.*\):[ \t]*/,"",t) }
+    bline=FNR; body=t
+  }
   nb++
 }
 END { flush() }
 AWKEOF
 
+# nil.awk -- fn names whose body PRODUCES a Value::Nil. A line counts only if it
+# constructs the nil value: comments, `matches!(.., Value::Nil)`, `== / !=
+# Value::Nil` tests and pattern arms (`Value::Nil =>`, `| Value::Nil`,
+# `Some(Value::Nil) =>`, `if let Value::Nil`) READ a nil, they never return one.
+# Counting them is how the total rt_value_is_*, rt_vulkan_* and rt_path_absolute
+# were wrongly derived as nil-capable.
+# prod.awk -- does this Rust line PRODUCE a Value::Nil (see above).
+cat > "$TMP/prod.awk" <<'AWKEOF'
+function produces(l,   s) {
+  s=l; sub(/\/\/.*$/,"",s)
+  if (s ~ /^[ \t]*\*/) return 0
+  if (s !~ /Value::Nil/) return 0
+  # Strip every READER occurrence, then rescan what is left: only a remaining
+  # `Value::Nil` produces one. So `Value::Nil => Value::Nil` and the one-line
+  # `if x == Value::Nil { return Ok(Value::Nil) }` count, while a bare pattern
+  # or comparison does not. A pattern alternation `|` has whitespace before it
+  # (`Int(_) | Value::Nil`); a closure's `|` does not (`|_| Value::Nil`,
+  # `|| Value::Nil`), and a closure body IS a production, so it stays counted.
+  gsub(/matches!\([^,]*,[ \t]*Value::Nil/,"",s)
+  gsub(/[!=]=[ \t]*Value::Nil/,"",s)
+  gsub(/(if|while) let Value::Nil/,"",s)
+  # Alternation first, anchored to what ends the pattern: run after the `=>`
+  # strip it would eat the arm's BODY in `Int(_) | Value::Nil => Value::Nil`.
+  gsub(/[)}A-Za-z0-9_][ \t]+\|[ \t]*Value::Nil[ \t]*(=>|\|[^|]|$)/,"X ",s)
+  gsub(/Value::Nil[ \t]*\)[ \t]*(=>|\||if )/,"",s)
+  gsub(/Value::Nil[ \t]*(=>|\|[^|])/,"",s)
+  return (s ~ /Value::Nil/)
+}
+AWKEOF
+
 cat > "$TMP/nil.awk" <<'AWKEOF'
+# some .rs files are CRLF: a lone "\r" line is not blank and would end the fn early
+{ sub(/\r$/,"") }
 FNR==1 { cur="" }
-/^[ \t]*(pub[ \t]*(\([a-z()]*\))?[ \t]*)?fn[ \t]+[A-Za-z_]/ {
+/^[ \t]*(pub[ \t]*(\([a-z()]*\))?[ \t]*)?((unsafe|async|const)[ \t]+)*fn[ \t]+[A-Za-z_]/ {
   if (match($0,/fn[ \t]+[A-Za-z0-9_]*/)) { f=substr($0,RSTART,RLENGTH); sub(/fn[ \t]+/,"",f) }
   match($0,/^[ \t]*/); ci=RLENGTH; cur=f; found=0; next
 }
 { if (cur=="") next
   match($0,/^[ \t]*/); i=RLENGTH
-  # A closing brace at (or left of) the fn's own indent ENDS the fn. Without
-  # this the old exception for lines starting `}` or `)` kept the function
-  # "open" past its own closing brace, so a `Value::Nil` belonging to whatever
-  # followed (a const, an impl block, a nested helper) was attributed to it --
-  # which is how the total `rt_vulkan_free_buffer` was derived as nil-capable.
   if ($0 ~ /^[ \t]*\}/ && i<=ci) { cur=""; next }
   if ($0 !~ /^[ \t]*$/ && i<=ci && $0 !~ /^[ \t]*[})]/) { cur=""; next }
-  # `Value::Nil` as a match PATTERN (`Value::Nil =>`, `A | Value::Nil`) or a
-  # comparison (`== Value::Nil`, `matches!(x, Value::Nil`) does not PRODUCE a
-  # nil; only a remaining occurrence does. Without this, a total classifier
-  # such as `classify_probe` was derived nil-capable and convicted every
-  # `rt_value_is_*` wrapper.
-  s=$0
-  # The alternation `|` of a pattern has whitespace before it
-  # (`Value::Int(_) | Value::Nil`); a closure's closing `|` does not
-  # (`.map(|_| Value::Nil)`, `|| Value::Nil`), and a closure body IS a
-  # production, so it must stay counted.
-  gsub(/Value::Nil[ \t]*(=>|\|[^|])/,"",s); gsub(/[)}A-Za-z0-9_][ \t]+\|[ \t]*Value::Nil/,"X",s)
-  gsub(/[!=]=[ \t]*Value::Nil/,"",s); gsub(/matches!\([^,]*,[ \t]*Value::Nil/,"",s)
-  if (s ~ /Value::Nil/) { if(!found){print cur; found=1} }
+  if (!found && produces($0)) { print cur; found=1 }
 }
 AWKEOF
 
-# call.awk — <caller> <callee> pairs, one per line, for every plain
-# `identifier(` call textually inside a fn's body (heuristic, not a real
-# call graph: over-approximates by also matching keywords/macros, which is
-# fine here since callee names are filtered against a known nil-capable set
-# before use). Exists to catch a wrapper like `rt_env_get` whose OWN body has
-# no literal `Value::Nil` because it delegates to a shared helper
-# (`runtime_to_value`) that does -- nil.awk alone is blind to that one hop,
-# which is exactly how `rt_env_get` escaped this guard (see
-# non_optional_wrappers_return_nil_sweep_2026-08-21.md).
+# arms.awk -- `"rt_x" => body` dispatch arms (io_driver.rs style: one fn matching
+# on the extern NAME). Each arm acts as a pseudo-fn named rt_x.
+#   -v mode=names  every arm name
+#   -v mode=nil    arm names whose arm produces a Value::Nil
+#   -v mode=call   `<rt_x> <callee>` free-call pairs inside the arm
+cat > "$TMP/arms.awk" <<'AWKEOF'
+function startarm(l,   head,nm) {
+  na=0; head=l; sub(/=>.*$/,"",head)
+  while (match(head,/"rt_[a-z0-9_]+"/)) { arm[++na]=substr(head,RSTART+1,RLENGTH-2); head=substr(head,RSTART+RLENGTH) }
+  match(l,/^[ \t]*/); ai=RLENGTH; inarm=1; hit=0
+  if (mode=="names") for (k=1;k<=na;k++) print arm[k]
+}
+function body(l,   n,rs,rl,pre,free,q,qn,callee,k) {
+  if (mode=="nil") { if (!hit && produces(l)) { hit=1; for (k=1;k<=na;k++) print arm[k] } return }
+  if (mode!="call") return
+  n=l; sub(/\/\/.*$/,"",n)
+  while (match(n,/[A-Za-z_][A-Za-z0-9_]*\(/)) {
+    rs=RSTART; rl=RLENGTH; callee=substr(n,rs,rl-1)
+    pre=substr(n,1,rs-1); free=1
+    if (pre ~ /\.[ \t]*$/) free=0
+    else if (pre ~ /(^|[^A-Za-z0-9_])(std|core|alloc|fs|env|thread|mem|ptr|str|slice|iter|fmt|sync|String|Vec|Box|Arc|Rc|Path|PathBuf|File|OpenOptions|Command|HashMap|BTreeMap|HashSet|Option|Result|Cell|RefCell|Mutex)::$/) free=0
+    if (free) for (k=1;k<=na;k++) print arm[k], callee
+    n=substr(n,rs+rl)
+  }
+}
+{ sub(/\r$/,"") }
+FNR==1 { inarm=0 }
+/^[ \t]*"rt_[a-z0-9_]+"([ \t]*\|[ \t]*"rt_[a-z0-9_]+")*[ \t]*(if [^=]*)?=>/ {
+  startarm($0)
+  r=$0; sub(/^[^=]*=>/,"",r); body(r); next
+}
+{ if (!inarm) next
+  if ($0 ~ /^[ \t]*$/) next
+  match($0,/^[ \t]*/); i=RLENGTH
+  if (i>ai) { body($0); next }
+  if (i==ai && $0 ~ /^[ \t]*[})]/) { body($0); inarm=0; next }
+  inarm=0
+}
+AWKEOF
+
+# call.awk -- <caller> <callee> pairs, one per line, for every FREE call
+# `identifier(` textually inside a fn's body (heuristic, not a real call graph).
+# `.name(` METHOD calls are not counted: a method sharing a name with some
+# nil-capable free fn (`get`, `read`, `len`...) says nothing about that fn, and
+# counting them let common method names convict every caller. Qualifiers on
+# the curated std list are skipped; every other `Qualifier::name(`, including
+# `module::name(`, `Self::name(` and capitalised in-tree types, still counts. Exists to catch a wrapper
+# like `rt_env_get` whose OWN body has no literal `Value::Nil` because it
+# delegates to a shared helper (`runtime_to_value`) that does -- nil.awk alone
+# is blind to that one hop (see non_optional_wrappers_return_nil_sweep_2026-08-21.md).
 cat > "$TMP/call.awk" <<'AWKEOF'
+# some .rs files are CRLF: a lone "\r" line is not blank and would end the fn early
+{ sub(/\r$/,"") }
 FNR==1 { cur="" }
-/^[ \t]*(pub[ \t]*(\([a-z()]*\))?[ \t]*)?fn[ \t]+[A-Za-z_]/ {
+/^[ \t]*(pub[ \t]*(\([a-z()]*\))?[ \t]*)?((unsafe|async|const)[ \t]+)*fn[ \t]+[A-Za-z_]/ {
   if (match($0,/fn[ \t]+[A-Za-z0-9_]*/)) { f=substr($0,RSTART,RLENGTH); sub(/fn[ \t]+/,"",f) }
   match($0,/^[ \t]*/); ci=RLENGTH; cur=f; next
 }
@@ -131,67 +220,21 @@ FNR==1 { cur="" }
   match($0,/^[ \t]*/); i=RLENGTH
   if ($0 ~ /^[ \t]*\}/ && i<=ci) { cur=""; next }
   if ($0 !~ /^[ \t]*$/ && i<=ci && $0 !~ /^[ \t]*[})]/) { cur=""; next }
-  # Callees are joined BY BARE NAME across the whole tree, so a method call
-  # (`.collect()`, `.write(..)`, `.take()`) or a std path call (`fs::write`)
-  # must not be an edge: it resolves to std, not to whichever unrelated
-  # in-tree `fn collect` / `fn write` happens to return nil. Those two shapes
-  # alone convicted 110 total externs (rt_file_write_text, rt_vulkan_init,
-  # rt_text_to_lower_ascii, ...) on 2026-10-31.
-  # Known residual, accepted: an in-tree helper reached ONLY as a method
-  # (`registry.lookup(..)` returning a nil Value) is no longer followed. The
-  # direct `Value::Nil` scan still convicts the method's own body.
-  n=$0
+  n=$0; sub(/\/\/.*$/,"",n)
   while (match(n,/[A-Za-z_][A-Za-z0-9_]*\(/)) {
-    callee=substr(n,RSTART,RLENGTH-1)
-    pre=substr(n,1,RSTART-1)
-    n=substr(n,RSTART+RLENGTH)
-    if (pre ~ /\.[ \t]*$/) continue
-    # Only qualifiers that name std/core items and NO module of this tree:
-    # `io::`, `process::`, `time::`, `net::` are in-tree modules here, so a
-    # call through them stays an edge.
-    if (pre ~ /(^|[^A-Za-z0-9_])(std|core|alloc|fs|env|thread|mem|ptr|str|slice|iter|fmt|sync|String|Vec|Box|Arc|Rc|Path|PathBuf|File|OpenOptions|Command|HashMap|BTreeMap|HashSet|Option|Result|Cell|RefCell|Mutex)::$/) continue
-    print cur, callee
+    rs=RSTART; rl=RLENGTH
+    callee=substr(n,rs,rl-1)
+    pre=substr(n,1,rs-1)
+    free=1
+    # `.name(` is a method (resolves to std or a type, not the same-named free
+    # fn). Only qualifiers naming std/core items and NO module of this tree are
+    # dropped; `io::`, `process::`, `time::`, `net::` are in-tree modules here,
+    # so a call through them stays an edge (curated list, not capitalisation).
+    if (pre ~ /\.[ \t]*$/) free=0
+    else if (pre ~ /(^|[^A-Za-z0-9_])(std|core|alloc|fs|env|thread|mem|ptr|str|slice|iter|fmt|sync|String|Vec|Box|Arc|Rc|Path|PathBuf|File|OpenOptions|Command|HashMap|BTreeMap|HashSet|Option|Result|Cell|RefCell|Mutex)::$/) free=0
+    if (free) print cur, callee
+    n=substr(n,rs+rl)
   }
-}
-AWKEOF
-
-# decl.awk -- class (a): every `extern fn rt_x(...) -> T` with a non-optional,
-# non-unit T that is NOT annotated `@unsafe(...)` on the line above. Joined
-# against the nil-capable set: the declaration itself is the safe surface, so
-# a nil-capable extern must declare `T?` there. A raw non-optional nil is
-# allowed only on an `@unsafe` declaration, whose safe wrapper class (b) then
-# holds to `T?`. Output: <file>:<line>:<name>:<type>.
-cat > "$TMP/decl.awk" <<'AWKEOF'
-# A declaration whose parameter list spans several lines is joined until its
-# parentheses balance; the return type is read after the closing `)` at
-# depth 0, so a `fn(..) -> T` PARAMETER cannot be mistaken for it.
-function depth(t,   i,c,d) { d=0; for (i=1;i<=length(t);i++) { c=substr(t,i,1); if (c=="(") d++; else if (c==")") d-- } return d }
-function emit(   i,c,d,cl,rt) {
-  d=0; cl=0
-  for (i=1;i<=length(acc);i++) { c=substr(acc,i,1); if (c=="(") d++; else if (c==")") { d--; if (d==0) { cl=i; break } } }
-  rt=""
-  if (cl>0) { rt=substr(acc,cl+1); if (rt ~ /^[ \t]*->/) { sub(/^[ \t]*->[ \t]*/,"",rt); gsub(/[ \t]+$/,"",rt) } else rt="" }
-  if (rt!="" && rt !~ /\?$/ && rt !~ /^(Option|Optional)</ && rt!="()" && rt!="void" && rt!="unit" && rt!="Unit" && !uns)
-    printf "%s:%d:%s:%s\n", FILENAME, aline, an, rt
-  pending=0
-}
-FNR==1 { prev=""; pending=0 }
-/^[ \t]*$/ { next }
-/^[ \t]*#/ { next }
-{
-  line=$0
-  l=line; sub(/[ \t]*#.*$/,"",l)
-  if (pending) {
-    acc=acc " " l
-    if (depth(acc)<=0) emit()
-    prev=line; next
-  }
-  if (line ~ /^[ \t]*extern[ \t]+fn[ \t]+rt_[a-z0-9_]+[ \t]*\(/) {
-    an=line; sub(/^[ \t]*extern[ \t]+fn[ \t]+/,"",an); sub(/[ \t]*\(.*/,"",an)
-    uns = (prev ~ /^[ \t]*@unsafe/); aline=FNR; acc=l; pending=1
-    if (depth(acc)<=0) emit()
-  }
-  prev=line
 }
 AWKEOF
 
@@ -254,20 +297,95 @@ FNR==1 { flush() }
 END { flush() }
 AWKEOF
 
+
+# ret.awk -- shared by classa.awk and alias.awk.
+#   toplevel_ret: text after the LAST `->` at bracket depth 0 (a closure
+#   PARAMETER's own `->` sits inside the parens and is ignored).
+#   kindof: "none" (no type, or unit/void/Never), "opt" (`T?`, `Option<..>`),
+#   "non" (everything else, i.e. a non-optional contract).
+cat > "$TMP/ret.awk" <<'AWKEOF'
+function toplevel_ret(l,   i,n,c,d,r) {
+  d=0; r=""; n=length(l)
+  for (i=1;i<=n;i++) {
+    c=substr(l,i,1)
+    if (c=="-" && substr(l,i+1,1)==">") { if (d==0) r=substr(l,i+2); i++; continue }
+    if (c=="(" || c=="[" || c=="{" || c=="<") d++
+    else if (c==")" || c=="]" || c=="}" || c==">") d--
+  }
+  gsub(/^[ \t]+|[ \t]+$/,"",r)
+  return r
+}
+function kindof(t) {
+  if (t=="" || t=="()" || t=="void" || t=="unit" || t=="Unit" || t=="Never" || t=="never") return "none"
+  if (t ~ /\?$/ || t ~ /^(Option|Optional)</) return "opt"
+  return "non"
+}
+function depth(l,   i,n,c,d) {
+  d=0; n=length(l)
+  for (i=1;i<=n;i++) { c=substr(l,i,1); if (c=="(") d++; else if (c==")") d-- }
+  return d
+}
+AWKEOF
+
+# classa.awk -- one TSV row per `extern fn rt_x(..) -> T` declaration:
+# <file> <extern> <none|opt|non> <type, whitespace removed>. Handles a
+# declaration split over several lines and a trailing `# comment`.
+cat > "$TMP/classa.awk" <<'AWKEOF'
+function emit(buf,   nm,t) {
+  if (!match(buf,/rt_[a-z0-9_]+/)) return
+  nm=substr(buf,RSTART,RLENGTH)
+  t=toplevel_ret(buf)
+  k=kindof(t); gsub(/[ \t]+/,"",t)
+  printf "%s\t%s\t%s\t%s\n", FILENAME, nm, k, t
+}
+FNR==1 { st=0 }
+{
+  if (st==0) {
+    if ($0 !~ /^[ \t]*(pub[ \t]+)?extern[ \t]+fn[ \t]+rt_[a-z0-9_]+/) next
+    buf=$0; sub(/[ \t]*#.*$/,"",buf); nl=1
+    if (depth(buf)>0) { st=1; next }
+    emit(buf); next
+  }
+  l=$0; sub(/[ \t]*#.*$/,"",l); buf=buf " " l; nl++
+  if (depth(buf)<=0 || nl>40) { st=0; emit(buf) }
+}
+AWKEOF
+
+# alias.awk -- the entry-level `decl:` of every rt_alias_map.sdn entry, in the
+# same TSV shape (file field is the literal `rt_alias_map`). `variants:` decls
+# (8-space `- decl:`) are deliberate legacy-contract aliases and are not read.
+cat > "$TMP/alias.awk" <<'AWKEOF'
+/^    rt_[a-z0-9_]+:[ \t]*$/ { nm=$1; sub(/:$/,"",nm); next }
+/^      decl:[ \t]*"/ {
+  if (nm=="") next
+  d=$0; sub(/^      decl:[ \t]*"/,"",d); sub(/"[ \t]*$/,"",d)
+  t=toplevel_ret(d); k=kindof(t); gsub(/[ \t]+/,"",t)
+  printf "rt_alias_map\t%s\t%s\t%s\n", nm, k, t
+  nm=""
+}
+AWKEOF
+
 # ------------------------------------------------------------------- functions
 # derive_nil_externs <extern_dir> <out>  — rt_* names whose impl can return Nil
 derive_nil_externs() {
     _dir="$1"; _out="$2"
     [ -d "$_dir" ] || { : > "$_out"; return 0; }
     find "$_dir" -name '*.rs' -print0 2>/dev/null \
-        | xargs -0 -n200 awk -f "$TMP/nil.awk" 2>/dev/null | sort -u > "$TMP/_nilfns.txt"
+        | xargs -0 -n200 awk -f "$TMP/prod.awk" -f "$TMP/nil.awk" 2>/dev/null > "$TMP/_nilfns.raw"
+    find "$_dir" -name '*.rs' -print0 2>/dev/null \
+        | xargs -0 -n200 awk -v mode=nil -f "$TMP/prod.awk" -f "$TMP/arms.awk" 2>/dev/null >> "$TMP/_nilfns.raw"
+    sort -u "$TMP/_nilfns.raw" > "$TMP/_nilfns.txt"
     # One-hop (to fixpoint, bounded) transitive closure: a fn whose own body
     # has no literal `Value::Nil` but that CALLS a fn already known to be
     # nil-capable (e.g. a shared `runtime_to_value` conversion helper) is
     # itself nil-capable. Without this, a thin delegator like `rt_env_get`
     # is invisible to the direct scan above.
     find "$_dir" -name '*.rs' -print0 2>/dev/null \
-        | xargs -0 -n200 awk -f "$TMP/call.awk" 2>/dev/null | sort -u > "$TMP/_calls.txt"
+        | xargs -0 -n200 awk -f "$TMP/call.awk" 2>/dev/null > "$TMP/_calls.raw"
+    find "$_dir" -name '*.rs' -print0 2>/dev/null \
+        | xargs -0 -n200 awk -v mode=call -f "$TMP/prod.awk" -f "$TMP/arms.awk" 2>/dev/null >> "$TMP/_calls.raw"
+    sort -u "$TMP/_calls.raw" > "$TMP/_calls.txt"
+    cp "$TMP/_nilfns.txt" "$TMP/_nilfns_direct.txt"
     cp "$TMP/_nilfns.txt" "$TMP/_nilfns_prev.txt"
     _iter=0
     while [ "$_iter" -lt 5 ]; do
@@ -279,11 +397,21 @@ derive_nil_externs() {
         mv "$TMP/_nilfns_next.txt" "$TMP/_nilfns_prev.txt"
     done
     mv "$TMP/_nilfns_prev.txt" "$TMP/_nilfns.txt"
-    grep -rh 'insert_simple!("rt_' "$_dir" 2>/dev/null \
-        | sed 's/.*insert_simple!("\(rt_[a-z0-9_]*\)"[, ]*\(.*\)/\1 \2/' \
-        | sed 's/);*[ ]*$//' \
-        | awk '{n=$2; sub(/.*::/,"",n); print $1, n}' | sort -u > "$TMP/_map.txt"
+    # Registrations: `insert_simple!("rt_x", impl)` on one line or split over
+    # several (rustfmt wraps the long ones), and `"rt_x" =>` dispatch arms,
+    # each of which is its own pseudo-fn named rt_x.
+    find "$_dir" -name '*.rs' -print0 2>/dev/null | xargs -0 cat 2>/dev/null | tr '\r\n' '  ' \
+        | grep -oE 'insert_simple!\([[:space:]]*"rt_[a-z0-9_]+"[[:space:]]*,[[:space:]]*[A-Za-z0-9_:]+' \
+        | sed -E 's/.*"(rt_[a-z0-9_]+)"[[:space:]]*,[[:space:]]*/\1 /' \
+        | awk '{n=$2; sub(/.*::/,"",n); print $1, n}' > "$TMP/_map.raw"
+    find "$_dir" -name '*.rs' -print0 2>/dev/null \
+        | xargs -0 -n200 awk -v mode=names -f "$TMP/prod.awk" -f "$TMP/arms.awk" 2>/dev/null \
+        | awk '{print $1, $1}' >> "$TMP/_map.raw"
+    sort -u "$TMP/_map.raw" > "$TMP/_map.txt"
     awk 'NR==FNR{n[$1]=1;next} n[$2]{print $1}' "$TMP/_nilfns.txt" "$TMP/_map.txt" | sort -u > "$_out"
+    # rt_* nil-capable by their OWN body alone (for --explain: the closure adds
+    # the difference).
+    awk 'NR==FNR{n[$1]=1;next} n[$2]{print $1}' "$TMP/_nilfns_direct.txt" "$TMP/_map.txt" | sort -u > "$TMP/nil_direct_rt.txt"
 }
 
 # scan_wrappers <spl_root> <out>
@@ -293,14 +421,6 @@ scan_wrappers() {
     [ -d "$_sroot" ] || return 0
     find "$_sroot" -name '*.spl' -not -path '*/vendor/*' -print0 2>/dev/null \
         | xargs -0 -n200 awk -f "$TMP/wrap.awk" 2>/dev/null > "$_out"
-}
-
-# scan_decls <spl_root> <out>  -- append class (a) declaration sites
-scan_decls() {
-    _sroot="$1"; _out="$2"
-    [ -d "$_sroot" ] || return 0
-    find "$_sroot" -name '*.spl' -not -path '*/vendor/*' -print0 2>/dev/null \
-        | xargs -0 -n200 awk -f "$TMP/decl.awk" 2>/dev/null >> "$_out"
 }
 
 # scan_classc <spl_root> <out>  -- append class (c) sites found under <spl_root>
@@ -358,7 +478,77 @@ drop_locally_defined() {
     done < "$_in"
 }
 
+
+# scan_externs <spl_root> <out> -- append decl rows for every extern under root
+scan_externs() {
+    _sroot="$1"; _out="$2"
+    [ -d "$_sroot" ] || return 0
+    grep -rl --include='*.spl' 'extern fn rt_' "$_sroot" 2>/dev/null | grep -v '/vendor/' | tr '\n' '\0' \
+        | xargs -0 -n200 awk -f "$TMP/ret.awk" -f "$TMP/classa.awk" 2>/dev/null >> "$_out"
+}
+
+# scan_alias <sdn> <out> -- append alias-map decl rows
+scan_alias() {
+    [ -f "$1" ] || return 0
+    awk -f "$TMP/ret.awk" -f "$TMP/alias.awk" "$1" >> "$2" 2>/dev/null
+}
+
+# load_optout <file> <out_tsv>  -- `<extern> <type> <reason...>` rows to
+# `extern<TAB>type`. A row with no written reason is an error (rc 1, rows on
+# stderr): an opt-out is a statement that a decl may stay non-optional, and a
+# statement needs its justification.
+load_optout() {
+    : > "$2"
+    [ -f "$1" ] || return 0
+    awk -v out="$2" '
+        /^[ \t]*#/ || /^[ \t]*$/ { next }
+        NF<3 { printf "%s:%d: opt-out row has no written reason: %s\n", FILENAME, FNR, $0 > "/dev/stderr"; bad=1; next }
+        { printf "%s\t%s\n", $1, $2 >> out }
+        END { exit bad }' "$1"
+}
+
+# classa_keys <raw_decl_rows> <nil_names> <optout_tsv> <used_out> <keys_out>
+# Non-optional decl of a nil-capable extern, minus opted-out (extern,type) pairs.
+# Appends the opt-out pairs that matched something to <used_out> (stale check).
+classa_keys() {
+    : >> "$4"
+    awk -F'\t' -v used="$4" -v root="$ROOT/" '
+        FILENAME==ARGV[1] { nil[$1]=1; next }
+        FILENAME==ARGV[2] { oo[$1 SUBSEP $2]=1; next }
+        $3=="non" && ($2 in nil) {
+            k=$2 SUBSEP $4
+            if (k in oo) { print $2 "\t" $4 >> used; next }
+            f=$1; sub("^" root, "", f)
+            print f ":" $2 ":" $4
+        }' "$2" "$3" "$1" | sort -u > "$5"
+}
+
+# mixed_externs <raw_decl_rows> <nil_names> <out>  -- `<extern> <nil|total>` for
+# every extern declared both `T?` and non-optional `T`.
+mixed_externs() {
+    awk -F'\t' '
+        FILENAME==ARGV[1] { nil[$1]=1; next }
+        $3=="opt" { o[$2]=1 } $3=="non" { n[$2]=1 }
+        END { for (e in o) if (e in n) print e, ((e in nil) ? "nil" : "total") }' "$2" "$1" | sort -u > "$3"
+}
+
+# write_baseline <file> <keys> -- rewrite a baseline, keeping its leading
+# comment/blank header untouched.
+write_baseline() {
+    _wf="$1"; _wk="$2"
+    {
+        if [ -s "$_wf" ]; then awk '/^#/ || /^[ \t]*$/ { print; next } { exit }' "$_wf"; fi
+        cat "$_wk"
+    } > "$TMP/wb.new" && cat "$TMP/wb.new" > "$_wf"
+}
+
 # ------------------------------------------------------------------- selftest
+
+NFIX=19   # assertions made inline by the original fixtures; st_has / st_not add one each
+# st_has <file> <literal> <msg>  /  st_not <file> <literal> <msg>
+st_has() { NFIX=$((NFIX + 1)); grep -qF -- "$2" "$1" 2>/dev/null || { echo "selftest FAIL: $3"; _fail=1; }; }
+st_not() { NFIX=$((NFIX + 1)); grep -qF -- "$2" "$1" 2>/dev/null && { echo "selftest FAIL: $3"; _fail=1; }; return 0; }
+
 selftest() {
     _fail=0
     _sd="$TMP/selftest"
@@ -381,54 +571,10 @@ pub fn rt_always_total(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 const SOME_TABLE: &[Value] = &[Value::Nil];
-
-// An unrelated fn that happens to be NAMED like a std method and CAN return
-// nil. Only a bare free call `collect(...)` reaches it; `.collect()` and
-// `fs::write(...)` resolve to std, never to this.
-pub fn collect(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Nil)
-}
-pub fn write(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Nil)
-}
-pub fn rt_total_std_calls(args: &[Value]) -> Result<Value, CompileError> {
-    let v: Vec<u8> = args.iter().map(|_| 0u8).collect();
-    match fs::write("/x", &v) {
-        Ok(_) => Ok(Value::Bool(true)),
-        Err(_) => Ok(Value::Bool(false)),
-    }
-}
-// Value::Nil only as a match PATTERN / comparison: total.
-pub fn rt_total_nil_pattern(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(match &args[0] {
-        Value::Nil => true,
-        Value::Int(_) | Value::Nil => false,
-        other => *other == Value::Nil,
-    }))
-}
-// A delegator through a bare free call to a nil-capable helper: nil-capable.
-fn helper_maybe_nil(rv: u64) -> Value {
-    if rv == 0 {
-        Value::Nil
-    } else {
-        Value::Int(rv as i64)
-    }
-}
-pub fn rt_delegates_nil(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(helper_maybe_nil(0))
-}
-// Nil produced ONLY inside a closure body: nil-capable.
-pub fn rt_closure_nil(args: &[Value]) -> Result<Value, CompileError> {
-    read(args).map(|_| Value::Nil).or_else(|_| Ok(Value::Int(0)))
-}
 RSEOF
     cat > "$_sd/rust/reg.rs" <<'RSEOF'
     insert_simple!("rt_maybe_nil", impls::rt_maybe_nil);
     insert_simple!("rt_always_total", impls::rt_always_total);
-    insert_simple!("rt_total_std_calls", impls::rt_total_std_calls);
-    insert_simple!("rt_total_nil_pattern", impls::rt_total_nil_pattern);
-    insert_simple!("rt_delegates_nil", impls::rt_delegates_nil);
-    insert_simple!("rt_closure_nil", impls::rt_closure_nil);
 RSEOF
     derive_nil_externs "$_sd/rust" "$_sd/nil.txt"
     if ! grep -qx 'rt_maybe_nil' "$_sd/nil.txt" 2>/dev/null; then
@@ -437,18 +583,6 @@ RSEOF
     if grep -qx 'rt_always_total' "$_sd/nil.txt" 2>/dev/null; then
         echo "selftest FAIL: total extern rt_always_total was wrongly derived as nil-capable"; _fail=1
     fi
-    if grep -qx 'rt_total_std_calls' "$_sd/nil.txt" 2>/dev/null; then
-        echo "selftest FAIL: rt_total_std_calls convicted through a .method()/std:: call sharing a name with an unrelated nil-capable fn"; _fail=1
-    fi
-    if grep -qx 'rt_total_nil_pattern' "$_sd/nil.txt" 2>/dev/null; then
-        echo "selftest FAIL: rt_total_nil_pattern convicted by Value::Nil used only as a match pattern / comparison"; _fail=1
-    fi
-    if ! grep -qx 'rt_delegates_nil' "$_sd/nil.txt" 2>/dev/null; then
-        echo "selftest FAIL: rt_delegates_nil (bare call to a nil-capable helper) was not derived"; _fail=1
-    fi
-    if ! grep -qx 'rt_closure_nil' "$_sd/nil.txt" 2>/dev/null; then
-        echo "selftest FAIL: rt_closure_nil (Value::Nil produced in a closure body) was not derived"; _fail=1
-    fi
 
     # fixture 1: the incident shape — must be flagged
     cat > "$_sd/spl/bad.spl" <<'SPEOF'
@@ -456,14 +590,6 @@ extern fn rt_maybe_nil(k: text) -> text
 
 fn bad_wrapper(k: text) -> text:
     rt_maybe_nil(k)
-SPEOF
-    # fixture: the same forward inside an `unsafe(...)` block — must be flagged
-    cat > "$_sd/spl/bad_unsafe.spl" <<'SPEOF'
-extern fn rt_maybe_nil(k: text) -> text
-
-fn bad_unsafe_wrapper(k: text) -> text:
-    unsafe(capabilities: [ffi]):
-        rt_maybe_nil(k)
 SPEOF
     # fixture 2: optional return — must NOT be flagged
     cat > "$_sd/spl/opt.spl" <<'SPEOF'
@@ -512,7 +638,6 @@ SPEOF
     grep -q ':local_def_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: a wrapper calling a same-file Simple fn definition was wrongly flagged as forwarding the extern"; _fail=1; }
 
     grep -q ':bad_wrapper:' "$_sd/off.txt" 2>/dev/null || { echo "selftest FAIL: bad_wrapper not flagged"; _fail=1; }
-    grep -q ':bad_unsafe_wrapper:' "$_sd/off.txt" 2>/dev/null || { echo "selftest FAIL: a wrapper forwarding inside an unsafe(...) block was not flagged"; _fail=1; }
     grep -q ':opt_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: opt_wrapper wrongly flagged"; _fail=1; }
     grep -q ':total_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: total_wrapper wrongly flagged"; _fail=1; }
     grep -q ':fine_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: fine_wrapper wrongly flagged"; _fail=1; }
@@ -521,31 +646,6 @@ SPEOF
     mkdir -p "$_sd/empty"
     scan_wrappers "$_sd/empty" "$_sd/empty.txt"
     if [ -s "$_sd/empty.txt" ]; then echo "selftest FAIL: empty tree produced wrappers"; _fail=1; fi
-    # ---- class (a) fixtures -------------------------------------------------
-    mkdir -p "$_sd/decl"
-    cat > "$_sd/decl/decls.spl" <<'SPEOF'
-extern fn rt_maybe_nil(k: text) -> text
-extern fn rt_always_total(k: text) -> i64
-@unsafe(reason: "raw", capabilities: [ffi])
-extern fn rt_closure_nil(k: text) -> text
-extern fn rt_delegates_nil(
-    k: text,
-    cb: fn(i64) -> bool
-) -> text
-SPEOF
-    cat > "$_sd/decl/opt.spl" <<'SPEOF'
-extern fn rt_maybe_nil_ext(k: text) -> text?   # nil when absent
-extern fn rt_maybe_nil_ext(k: text)
-SPEOF
-    : > "$_sd/decl_raw.txt"
-    scan_decls "$_sd/decl" "$_sd/decl_raw.txt"
-    awk -F: 'NR==FNR{n[$1]=1;next} n[$3]' "$_sd/nil.txt" "$_sd/decl_raw.txt" > "$_sd/decl_off.txt"
-    grep -q ':rt_maybe_nil:' "$_sd/decl_off.txt" || { echo "selftest FAIL: class (a) non-optional declaration of a nil-capable extern not flagged"; _fail=1; }
-    grep -q ':rt_always_total:' "$_sd/decl_off.txt" && { echo "selftest FAIL: class (a) declaration of a total extern flagged"; _fail=1; }
-    grep -q ':rt_closure_nil:' "$_sd/decl_off.txt" && { echo "selftest FAIL: class (a) @unsafe raw declaration flagged"; _fail=1; }
-    grep -q ':rt_maybe_nil_ext:' "$_sd/decl_raw.txt" && { echo "selftest FAIL: class (a) optional declaration (with trailing comment) scanned as non-optional"; _fail=1; }
-    grep -q ':rt_delegates_nil:text$' "$_sd/decl_off.txt" || { echo "selftest FAIL: class (a) multi-line declaration (fn-typed parameter) not flagged with its real return type"; _fail=1; }
-
     # ---- class (c) fixtures -------------------------------------------------
     mkdir -p "$_sd/cls"
     cat > "$_sd/cls/pos_return.spl" <<'SPEOF'
@@ -611,6 +711,275 @@ SPEOF
     scan_classc "$_sd/empty" "$_sd/cls_empty.txt"
     if [ -s "$_sd/cls_empty.txt" ]; then echo "selftest FAIL: empty tree produced class (c) sites"; _fail=1; fi
 
+    # ---- precision fixtures (nil.awk / call.awk) -----------------------------
+    cat > "$_sd/rust/precision.rs" <<'RSEOF'
+pub fn rt_cmp_only(args: &[Value]) -> Result<Value, CompileError> {
+    // Ok(Value::Nil) inside a comment never counts
+    if args[0] == Value::Nil {
+        return Ok(Value::Bool(false));
+    }
+    if args[1] != Value::Nil {
+        return Ok(Value::Bool(true));
+    }
+    if matches!(args[2], Value::Nil) {
+        return Ok(Value::Int(1));
+    }
+    if let Value::Nil = args[3] {
+        return Ok(Value::Int(2));
+    }
+    match args[4] {
+        Value::Nil => Ok(Value::Int(3)),
+        Value::Int(_) | Value::Nil => Ok(Value::Int(4)),
+        _ => Ok(Value::Int(5)),
+    }
+}
+pub fn rt_some_arm_only(args: &[Value]) -> Result<Value, CompileError> {
+    match args.first() {
+        Some(Value::Nil) | None => Ok(Value::Int(0)),
+        Some(_) => Ok(Value::Int(1)),
+    }
+}
+fn shared_helper(v: &Value) -> Value {
+    Value::Nil
+}
+pub fn rt_via_free(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(shared_helper(&args[0]))
+}
+pub fn rt_via_method(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(args[0].shared_helper())
+}
+pub fn rt_via_type_path(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Vec::shared_helper(&args[0]))
+}
+pub fn rt_via_module_path(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(io::shared_helper(&args[0]))
+}
+pub fn rt_closure_nil(args: &[Value]) -> Result<Value, CompileError> {
+    read(args).map(|_| Value::Nil).or_else(|_| Ok(Value::Int(0)))
+}
+pub fn rt_closure_nil0(args: &[Value]) -> Result<Value, CompileError> {
+    read(args).unwrap_or_else(|| Value::Nil)
+}
+pub fn rt_arm_and_prod(args: &[Value]) -> Result<Value, CompileError> {
+    match args[0] {
+        Value::Nil => Ok(Value::Nil),
+        _ => Ok(Value::Int(1)),
+    }
+}
+pub fn rt_cmp_then_prod(args: &[Value]) -> Result<Value, CompileError> {
+    if args[0] == Value::Nil { return Ok(Value::Nil) }
+    Ok(Value::Int(1))
+}
+pub fn rt_alt_body(args: &[Value]) -> Result<Value, CompileError> {
+    match args[0] {
+        Value::Int(_) | Value::Nil => Value::Nil,
+        _ => Ok(Value::Int(2)),
+    }
+}
+pub fn rt_alt_only(args: &[Value]) -> Result<Value, CompileError> {
+    match args[0] {
+        Value::Int(_) | Value::Nil => Ok(Value::Int(1)),
+        _ => Ok(Value::Int(2)),
+    }
+}
+RSEOF
+    # CRLF file with a blank line inside the body: the "\r"-only line must not end the fn
+    printf 'pub fn rt_crlf_blank(args: &[Value]) -> Result<Value, CompileError> {\r\n    let x = 1;\r\n\r\n    Ok(Value::Nil)\r\n}\r\n' > "$_sd/rust/crlf.rs"
+    cat > "$_sd/rust/arms.rs" <<'RSEOF'
+pub fn rt_split_nil(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Nil)
+}
+pub fn rt_split_total(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(1))
+}
+fn dispatch(name: &str, args: &[Value]) -> Result<Option<Value>, CompileError> {
+    let result = match name {
+        "rt_arm_total" => Ok(Value::Int(unsafe { f(1) })),
+        "rt_arm_nil" => {
+            unsafe { g(2) };
+            Ok(Value::Nil)
+        }
+        "rt_arm_one_line_nil" => Ok(Value::Nil),
+        "rt_arm_a" | "rt_arm_b" => Ok(shared_helper(&args[0])),
+        "rt_arm_cmp" => Ok(Value::Bool(args[0] == Value::Nil)),
+        other => return Ok(None),
+    };
+    Ok(Some(result?))
+}
+RSEOF
+    cat >> "$_sd/rust/reg.rs" <<'RSEOF'
+    insert_simple!(
+        "rt_split_nil",
+        impls::rt_split_nil
+    );
+    insert_simple!(
+        "rt_split_total",
+        impls::rt_split_total
+    );
+    cmp_only_follows!();
+    insert_simple!("rt_cmp_only", impls::rt_cmp_only);
+    insert_simple!("rt_some_arm_only", impls::rt_some_arm_only);
+    insert_simple!("rt_via_free", impls::rt_via_free);
+    insert_simple!("rt_via_method", impls::rt_via_method);
+    insert_simple!("rt_via_type_path", impls::rt_via_type_path);
+    insert_simple!("rt_via_module_path", impls::rt_via_module_path);
+    insert_simple!("rt_closure_nil", impls::rt_closure_nil);
+    insert_simple!("rt_closure_nil0", impls::rt_closure_nil0);
+    insert_simple!("rt_arm_and_prod", impls::rt_arm_and_prod);
+    insert_simple!("rt_cmp_then_prod", impls::rt_cmp_then_prod);
+    insert_simple!("rt_alt_only", impls::rt_alt_only);
+    insert_simple!("rt_alt_body", impls::rt_alt_body);
+    insert_simple!("rt_crlf_blank", impls::rt_crlf_blank);
+RSEOF
+    derive_nil_externs "$_sd/rust" "$_sd/nil.txt"
+    st_has "$_sd/nil.txt" 'rt_via_free' "an extern reaching Value::Nil through a FREE helper call was not derived (closure broken)"
+    st_has "$TMP/nil_direct_rt.txt" 'rt_maybe_nil' "direct nil-capable set lost rt_maybe_nil"
+    st_not "$TMP/nil_direct_rt.txt" 'rt_via_free' "a closure-only extern leaked into the direct set"
+    st_has "$_sd/nil.txt" 'rt_crlf_blank' "a CRLF .rs file with a blank line in the body was cut short (nil path missed)"
+    st_has "$_sd/nil.txt" 'rt_split_nil' "a multi-line insert_simple!( registration was not parsed"
+    st_not "$_sd/nil.txt" 'rt_split_total' "a total multi-line registration was derived as nil-capable"
+    st_has "$_sd/nil.txt" 'rt_arm_nil' "a \"rt_x\" => { .. Value::Nil } dispatch arm was not derived"
+    st_has "$_sd/nil.txt" 'rt_arm_one_line_nil' "a one-line dispatch arm producing Value::Nil was not derived"
+    st_has "$_sd/nil.txt" 'rt_arm_a' "an alternation dispatch arm reaching Value::Nil through a free helper (closure) was not derived"
+    st_has "$_sd/nil.txt" 'rt_arm_b' "the second name of an alternation dispatch arm was not derived"
+    st_not "$_sd/nil.txt" 'rt_arm_total' "a total dispatch arm was derived as nil-capable (arm boundary leaked)"
+    st_not "$_sd/nil.txt" 'rt_arm_cmp' "a dispatch arm that only COMPARES with Value::Nil was derived as nil-capable"
+    st_not "$_sd/nil.txt" 'rt_cmp_only' "comparisons / matches! / pattern arms / comments were counted as producing Value::Nil"
+    st_not "$_sd/nil.txt" 'rt_some_arm_only' "a \`Some(Value::Nil) =>\` pattern arm was counted as producing Value::Nil"
+    st_not "$_sd/nil.txt" 'rt_via_method' "a .method() call was counted as a call of the nil-capable free fn of the same name"
+    st_not "$_sd/nil.txt" 'rt_via_type_path' "a std-qualified call (Vec::name) was counted as a call of the nil-capable free fn of the same name"
+    st_has "$_sd/nil.txt" 'rt_via_module_path' "an in-tree module-qualified call (io::name) was dropped as an edge"
+    st_has "$_sd/nil.txt" 'rt_closure_nil' "Value::Nil produced in a |_| closure body was not derived"
+    st_has "$_sd/nil.txt" 'rt_closure_nil0' "Value::Nil produced in a || closure body was not derived"
+    st_has "$_sd/nil.txt" 'rt_arm_and_prod' "\`Value::Nil => Ok(Value::Nil)\` (pattern AND production on one line) was not derived"
+    st_has "$_sd/nil.txt" 'rt_cmp_then_prod' "one-line \`if x == Value::Nil { return Ok(Value::Nil) }\` was not derived"
+    st_has "$_sd/nil.txt" 'rt_alt_body' "\`Int(_) | Value::Nil => Value::Nil\` (alternation with a nil-producing body) was not derived"
+    st_not "$_sd/nil.txt" 'rt_alt_only' "a pattern alternation \`Int(_) | Value::Nil =>\` was counted as producing Value::Nil"
+
+    # ---- wrapper shapes (class b) ---------------------------------------------
+    mkdir -p "$_sd/spl2"
+    cat > "$_sd/spl2/shapes.spl" <<'SPEOF'
+fn w_unsafe_block(k: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_via_free(k)
+
+fn w_unsafe_inline(k: text) -> text:
+    unsafe(capabilities: [ffi]): rt_via_free(k)
+
+class Holder:
+    static fn w_static(k: text) -> text:
+        rt_via_free(k)
+
+    me fn w_me(k: text) -> text:
+        unsafe(capabilities: [ffi]):
+            rt_via_free(k)
+
+    pub static fn w_pub_static(k: text) -> text:
+        rt_via_free(k)
+
+fn w_two_statements(k: text) -> text:
+    unsafe(capabilities: [ffi]):
+        val x = 1
+        rt_via_free(k)
+
+fn w_unsafe_optional(k: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_via_free(k)
+
+fn w_colon_arg(k: text) -> text:
+    rt_via_free("a:b")
+SPEOF
+    scan_wrappers "$_sd/spl2" "$_sd/wrap2.txt"
+    match_nil_callee "$_sd/nil.txt" "$_sd/wrap2.txt" "$_sd/off2.txt"
+    st_has "$_sd/off2.txt" ':w_unsafe_block:' "wrapper: multi-line unsafe(..): block not seen"
+    st_has "$_sd/off2.txt" ':w_unsafe_inline:' "wrapper: same-line unsafe(..): call not seen"
+    st_has "$_sd/off2.txt" ':w_static:' "wrapper: static fn not seen"
+    st_has "$_sd/off2.txt" ':w_me:' "wrapper: me fn (with unsafe block) not seen"
+    st_has "$_sd/off2.txt" ':w_pub_static:' "wrapper: pub static fn not seen"
+    st_has "$_sd/off2.txt" ':w_colon_arg:' "wrapper: a body containing a colon was lost to the colon-separated row format"
+    st_not "$_sd/off2.txt" ':w_two_statements:' "wrapper: a two-statement unsafe block was treated as a thin wrapper"
+    st_not "$_sd/off2.txt" ':w_unsafe_optional:' "wrapper: an optional return was flagged"
+
+    # ---- class (a) fixtures --------------------------------------------------
+    mkdir -p "$_sd/ext"
+    cat > "$_sd/ext/pos.spl" <<'SPEOF'
+extern fn rt_maybe_nil(k: text) -> text
+extern fn rt_via_free(
+    k: text,
+    n: i64
+) -> i64   # -> trailing comment must not be read as the type
+extern fn rt_via_free(cb: fn(i64) -> bool) -> [text]
+SPEOF
+    cat > "$_sd/ext/neg.spl" <<'SPEOF'
+extern fn rt_maybe_nil(k: text) -> text?
+extern fn rt_maybe_nil(k: text) -> Option<text>
+extern fn rt_maybe_nil(k: text)
+extern fn rt_maybe_nil(k: text) -> ()
+extern fn rt_maybe_nil(k: text) -> void
+extern fn rt_always_total(k: text) -> text
+extern fn rt_via_method(k: text) -> i64
+extern fn rt_always_opt(k: text) -> text?
+extern fn rt_always_opt2(k: text) -> text?
+SPEOF
+    : > "$_sd/ext_raw.txt"
+    scan_externs "$_sd/ext" "$_sd/ext_raw.txt"
+    : > "$_sd/oo.tsv"; : > "$_sd/used.txt"
+    classa_keys "$_sd/ext_raw.txt" "$_sd/nil.txt" "$_sd/oo.tsv" "$_sd/used.txt" "$_sd/ca_keys.txt"
+    st_has "$_sd/ca_keys.txt" "$_sd/ext/pos.spl:rt_maybe_nil:text" "class (a): non-optional decl of a nil-capable extern not flagged"
+    st_has "$_sd/ca_keys.txt" "$_sd/ext/pos.spl:rt_via_free:i64" "class (a): multi-line decl (type after the closing paren) not flagged / trailing comment misread"
+    st_has "$_sd/ca_keys.txt" "$_sd/ext/pos.spl:rt_via_free:[text]" "class (a): closure parameter's -> misread as the declared return type"
+    st_not "$_sd/ca_keys.txt" "neg.spl:rt_maybe_nil" "class (a): an optional / Option<> / unit / void / absent return was flagged"
+    st_not "$_sd/ca_keys.txt" "rt_always_total" "class (a): a TOTAL extern was flagged"
+    st_not "$_sd/ca_keys.txt" "rt_via_method" "class (a): a non-nil-capable extern was flagged"
+    # opt-out: a row with a reason suppresses and is recorded as used; a bare row is an error
+    printf '# c\nrt_maybe_nil text raw ABI: nil is the void sentinel, see impl\n' > "$_sd/oo.txt"
+    load_optout "$_sd/oo.txt" "$_sd/oo.tsv" 2>/dev/null || { echo "selftest FAIL: a well-formed opt-out row was rejected"; _fail=1; }
+    : > "$_sd/used.txt"
+    classa_keys "$_sd/ext_raw.txt" "$_sd/nil.txt" "$_sd/oo.tsv" "$_sd/used.txt" "$_sd/ca_keys.txt"
+    st_not "$_sd/ca_keys.txt" "pos.spl:rt_maybe_nil:text" "class (a): an opted-out (extern,type) was still flagged"
+    st_has "$_sd/ca_keys.txt" "pos.spl:rt_via_free:i64" "class (a): an opt-out for another extern suppressed this one"
+    st_has "$_sd/used.txt" "rt_maybe_nil	text" "class (a): a matching opt-out row was not recorded as used"
+    printf 'rt_maybe_nil text\n' > "$_sd/oo_bare.txt"
+    if load_optout "$_sd/oo_bare.txt" "$_sd/oo_bare.tsv" 2>/dev/null; then echo "selftest FAIL: an opt-out row with no written reason was accepted"; _fail=1; fi
+    NFIX=$((NFIX + 1))
+    # mixed declarations
+    mixed_externs "$_sd/ext_raw.txt" "$_sd/nil.txt" "$_sd/mixed.txt"
+    st_has "$_sd/mixed.txt" "rt_maybe_nil nil" "mixed: extern declared both T? and T not reported"
+    st_not "$_sd/mixed.txt" "rt_always_opt" "mixed: an only-optional extern was reported"
+    st_not "$_sd/mixed.txt" "rt_always_total" "mixed: an only-non-optional extern was reported"
+    # alias map decl
+    cat > "$_sd/alias.sdn" <<'SDNEOF'
+rt_alias_map:
+  entries:
+    rt_maybe_nil:
+      class: same
+      decl: "(key: text) -> text"
+      variants:
+        - decl: "(key: text) -> text"
+    rt_via_free:
+      class: same
+      decl: "(key: text) -> i64?"
+    rt_via_method:
+      class: same
+      decl: "(key: text) -> i64"
+SDNEOF
+    : > "$_sd/alias_raw.txt"
+    scan_alias "$_sd/alias.sdn" "$_sd/alias_raw.txt"
+    : > "$_sd/used.txt"
+    : > "$_sd/oo_none.tsv"
+    classa_keys "$_sd/alias_raw.txt" "$_sd/nil.txt" "$_sd/oo_none.tsv" "$_sd/used.txt" "$_sd/al_keys.txt"
+    st_has "$_sd/al_keys.txt" "rt_alias_map:rt_maybe_nil:text" "alias map: non-optional decl of a nil-capable extern not flagged"
+    st_not "$_sd/al_keys.txt" "rt_via_free" "alias map: an optional decl was flagged"
+    st_not "$_sd/al_keys.txt" "rt_via_method" "alias map: a non-nil-capable extern was flagged"
+    # --regen-baseline keeps the header, replaces the rows
+    printf '# header one\n#\n# header two\nstale:row:x\n' > "$_sd/bl.txt"
+    printf 'new:row:a\nnew:row:b\n' > "$_sd/bl_keys.txt"
+    write_baseline "$_sd/bl.txt" "$_sd/bl_keys.txt"
+    [ "$(sed -n 1,3p "$_sd/bl.txt")" = "$(printf '# header one\n#\n# header two')" ] || { echo "selftest FAIL: --regen-baseline lost the baseline header"; _fail=1; }
+    st_has "$_sd/bl.txt" "new:row:b" "--regen-baseline did not write the new rows"
+    st_not "$_sd/bl.txt" "stale:row" "--regen-baseline kept a stale row"
+    NFIX=$((NFIX + 2))
+
     return $_fail
 }
 
@@ -620,7 +989,7 @@ if ! selftest; then
     exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — selftest only, 29 fixture(s) checked, 0 failures"
+    echo "PASS — selftest only, $NFIX fixture(s) checked, 0 failures"
     exit 0
 fi
 
@@ -680,30 +1049,6 @@ awk -F: -v root="$ROOT/" 'NR==FNR{k[$0]=1;next}
     "$TMP/off_new_keys.txt" "$TMP/off_all.txt" > "$TMP/off.txt"
 OFF_N=$(awk "END{print NR}" "$TMP/off.txt" 2>/dev/null); [ -n "$OFF_N" ] || OFF_N=0
 
-# ------------------------------------------------------- class (a) leg
-# Every non-@unsafe `extern fn rt_x -> T` (T non-optional, non-unit) whose
-# Rust handler is nil-capable. Same ratchet convention as the other legs.
-: > "$TMP/decl_raw.txt"
-for _r in $SCAN_ROOTS; do
-    scan_decls "$ROOT/$_r" "$TMP/decl_raw.txt"
-done
-DECL_N=$(awk "END{print NR}" "$TMP/decl_raw.txt" 2>/dev/null); [ -n "$DECL_N" ] || DECL_N=0
-if [ "$DECL_N" -eq 0 ]; then
-    echo "ERROR — nothing was checked (0 non-optional rt_* extern declarations found under $SCAN_ROOTS)"
-    exit 2
-fi
-awk -F: 'NR==FNR{n[$1]=1;next} n[$3]' "$TMP/nil.txt" "$TMP/decl_raw.txt" > "$TMP/decl_off_all.txt"
-awk -F: -v root="$ROOT/" '{ f=$1; sub("^" root, "", f); print f ":" $3 ":decl" }' "$TMP/decl_off_all.txt" | sort -u > "$TMP/decl_norm.txt"
-BASELINE_A="$SCRIPT_DIR/non_optional_nil_return_classa_baseline.txt"
-if [ -f "$BASELINE_A" ]; then
-    grep -v '^#' "$BASELINE_A" | grep -v '^[[:space:]]*$' | sort -u > "$TMP/base_a.txt"
-else
-    : > "$TMP/base_a.txt"
-fi
-comm -23 "$TMP/decl_norm.txt" "$TMP/base_a.txt" > "$TMP/decl_new.txt"
-comm -13 "$TMP/decl_norm.txt" "$TMP/base_a.txt" > "$TMP/decl_stale.txt"
-BASE_A_N=$(awk "END{print NR}" "$TMP/base_a.txt"); DECL_NEW_N=$(awk "END{print NR}" "$TMP/decl_new.txt"); DECL_STALE_N=$(awk "END{print NR}" "$TMP/decl_stale.txt")
-
 # ------------------------------------------------------- class (c) leg
 # Hand-written `return nil` / bare-nil tail under a non-optional declared
 # return type. Independent of any extern: each such site aborts the moment its
@@ -746,21 +1091,106 @@ CLSC_N=$(awk "END{print NR}" "$TMP/classc_new.txt" 2>/dev/null); [ -n "$CLSC_N" 
 STALE_N=$(awk "END{print NR}" "$TMP/classc_stale.txt" 2>/dev/null); [ -n "$STALE_N" ] || STALE_N=0
 cp "$TMP/classc_new.txt" "$TMP/classc.txt"
 
-if [ "$OFF_N" -gt 0 ] || [ "$CLSC_N" -gt 0 ] || [ "$STALE_N" -gt 0 ] || [ "$OFF_STALE_N" -gt 0 ] || [ "$DECL_NEW_N" -gt 0 ] || [ "$DECL_STALE_N" -gt 0 ]; then
-    if [ "$DECL_NEW_N" -gt 0 ]; then
-        echo "class (a) nil-capable rt_* externs declared non-optional, NOT in the baseline (file:extern:decl):"
-        cat "$TMP/decl_new.txt"
+# ------------------------------------------------------------ class (a) leg
+# `extern fn rt_x(..) -> T`, T non-optional, rt_x nil-capable. Scans the same
+# roots plus src/os and src/compiler_rust/lib, and the alias map's `decl:` rows.
+CLSA_ROOTS="$SCAN_ROOTS src/os src/compiler_rust/lib src/plugins test"
+: > "$TMP/ext_raw.txt"
+for _r in $CLSA_ROOTS; do
+    scan_externs "$ROOT/$_r" "$TMP/ext_raw.txt"
+done
+EXT_N=$(awk "END{print NR}" "$TMP/ext_raw.txt" 2>/dev/null); [ -n "$EXT_N" ] || EXT_N=0
+if [ "$EXT_N" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 'extern fn rt_*' declarations found under $CLSA_ROOTS in $ROOT)"
+    exit 2
+fi
+: > "$TMP/alias_raw.txt"
+scan_alias "$ROOT/scripts/check/rt_alias_map.sdn" "$TMP/alias_raw.txt"
+ALIAS_N=$(awk "END{print NR}" "$TMP/alias_raw.txt" 2>/dev/null); [ -n "$ALIAS_N" ] || ALIAS_N=0
+
+OPTOUT="$SCRIPT_DIR/non_optional_nil_return_classa_optout.txt"
+if ! load_optout "$OPTOUT" "$TMP/optout.tsv" 2> "$TMP/optout.err"; then
+    cat "$TMP/optout.err"
+    echo "ERROR — nothing was checked (opt-out rows in $OPTOUT need a written reason: '<extern> <type> <reason>')"
+    exit 2
+fi
+OPTOUT_N=$(awk "END{print NR}" "$TMP/optout.tsv" 2>/dev/null); [ -n "$OPTOUT_N" ] || OPTOUT_N=0
+: > "$TMP/optout_used.txt"
+classa_keys "$TMP/ext_raw.txt" "$TMP/nil.txt" "$TMP/optout.tsv" "$TMP/optout_used.txt" "$TMP/classa_ext_keys.txt"
+classa_keys "$TMP/alias_raw.txt" "$TMP/nil.txt" "$TMP/optout.tsv" "$TMP/optout_used.txt" "$TMP/classa_alias_keys.txt"
+sort -u "$TMP/classa_ext_keys.txt" "$TMP/classa_alias_keys.txt" > "$TMP/classa_norm.txt"
+sort -u "$TMP/optout_used.txt" > "$TMP/optout_used.s"
+awk -F'\t' '{print $1 "\t" $2}' "$TMP/optout.tsv" | sort -u > "$TMP/optout.s"
+comm -13 "$TMP/optout_used.s" "$TMP/optout.s" > "$TMP/optout_stale.txt"
+OPTOUT_STALE_N=$(awk "END{print NR}" "$TMP/optout_stale.txt" 2>/dev/null); [ -n "$OPTOUT_STALE_N" ] || OPTOUT_STALE_N=0
+mixed_externs "$TMP/ext_raw.txt" "$TMP/nil.txt" "$TMP/mixed.txt"
+MIXED_N=$(awk "END{print NR}" "$TMP/mixed.txt" 2>/dev/null); [ -n "$MIXED_N" ] || MIXED_N=0
+MIXED_NIL_N=$(awk '$2=="nil"{n++} END{print n+0}' "$TMP/mixed.txt")
+
+BASELINE_A="$SCRIPT_DIR/non_optional_nil_return_classa_baseline.txt"
+if [ -f "$BASELINE_A" ]; then
+    grep -v '^#' "$BASELINE_A" | grep -v '^[[:space:]]*$' | sort -u > "$TMP/base_a.txt"
+else
+    : > "$TMP/base_a.txt"
+fi
+comm -23 "$TMP/classa_norm.txt" "$TMP/base_a.txt" > "$TMP/classa_new.txt"
+comm -13 "$TMP/classa_norm.txt" "$TMP/base_a.txt" > "$TMP/classa_stale.txt"
+BASE_A_N=$(awk "END{print NR}" "$TMP/base_a.txt" 2>/dev/null); [ -n "$BASE_A_N" ] || BASE_A_N=0
+CLSA_N=$(awk "END{print NR}" "$TMP/classa_new.txt" 2>/dev/null); [ -n "$CLSA_N" ] || CLSA_N=0
+CLSA_STALE_N=$(awk "END{print NR}" "$TMP/classa_stale.txt" 2>/dev/null); [ -n "$CLSA_STALE_N" ] || CLSA_STALE_N=0
+
+if [ "$EXPLAIN" -eq 1 ]; then
+    echo "== nil-capable rt_* by their own body: $(awk 'END{print NR}' "$TMP/nil_direct_rt.txt")"
+    echo "== nil-capable rt_* total (with transitive closure): $NIL_N"
+    echo "== added by the closure only:"
+    comm -13 "$TMP/nil_direct_rt.txt" "$TMP/nil.txt" > "$TMP/closure_only.txt"
+    # <extern> -> <impl fn> via <nil-capable callees> ("*" marks a callee that
+    # produces Value::Nil itself; unmarked callees are nil-capable only via the closure)
+    awk 'FILENAME==ARGV[1] { c[$1]=1; next }
+         FILENAME==ARGV[2] { m[$1]=$2; next }
+         FILENAME==ARGV[3] { d[$1]=1; next }
+         FILENAME==ARGV[4] { n[$1]=1; next }
+         { cl[$1] = cl[$1] " " $2 }
+         END { for (r in c) { f=m[r]; v="";
+                 split(cl[f], a, " ");
+                 for (i in a) if (a[i] in n) v = v " " a[i] ((a[i] in d) ? "*" : "")
+                 print r " -> " f " via" v } }' \
+        "$TMP/closure_only.txt" "$TMP/_map.txt" "$TMP/_nilfns_direct.txt" "$TMP/_nilfns.txt" "$TMP/_calls.txt" | sort
+    echo "== mixed optional/non-optional externs ($MIXED_N, $MIXED_NIL_N nil-capable):"
+    cat "$TMP/mixed.txt"
+    echo "== opt-outs: $OPTOUT_N row(s), $OPTOUT_STALE_N stale"
+fi
+
+# ------------------------------------------------------------ --regen-baseline
+if [ "$REGEN" -eq 1 ]; then
+    write_baseline "$BASELINE_A" "$TMP/classa_norm.txt"
+    write_baseline "$BASELINE_B" "$TMP/off_norm.txt"
+    write_baseline "$BASELINE" "$TMP/classc_norm.txt"
+    echo "regenerated: class (a) $(awk 'END{print NR}' "$TMP/classa_norm.txt") ($OPTOUT_N opted out), class (b) $(awk 'END{print NR}' "$TMP/off_norm.txt"), class (c) $(awk 'END{print NR}' "$TMP/classc_norm.txt"); header comments preserved."
+    echo "PASS — baselines rewritten against the tree; review the diff before committing"
+    exit 0
+fi
+
+REGEN_HINT="regenerate with: sh scripts/check/check-non-optional-nil-return.shs --regen-baseline (after confirming each removed row was fixed, not hidden)"
+if [ "$OFF_N" -gt 0 ] || [ "$CLSC_N" -gt 0 ] || [ "$STALE_N" -gt 0 ] || [ "$OFF_STALE_N" -gt 0 ] || [ "$CLSA_N" -gt 0 ] || [ "$CLSA_STALE_N" -gt 0 ] || [ "$OPTOUT_STALE_N" -gt 0 ]; then
+    if [ "$CLSA_N" -gt 0 ]; then
+        echo "class (a) offenders NOT in the baseline (file:extern:type -- declare the return \`T?\`, or add a reasoned row to $OPTOUT):"
+        cat "$TMP/classa_new.txt"
     fi
-    if [ "$DECL_STALE_N" -gt 0 ]; then
-        echo "stale class (a) baseline entries (remove them from $BASELINE_A):"
-        cat "$TMP/decl_stale.txt"
+    if [ "$CLSA_STALE_N" -gt 0 ]; then
+        echo "stale class (a) baseline entries (no longer offenders -- remove them from $BASELINE_A; $REGEN_HINT):"
+        cat "$TMP/classa_stale.txt"
+    fi
+    if [ "$OPTOUT_STALE_N" -gt 0 ]; then
+        echo "stale class (a) opt-out rows (extern<TAB>type no longer a nil-capable non-optional decl -- remove them from $OPTOUT):"
+        cat "$TMP/optout_stale.txt"
     fi
     if [ "$OFF_N" -gt 0 ]; then
         echo "class (b) offenders NOT in the baseline (file:line:fn:return-type:body):"
         cat "$TMP/off.txt"
     fi
     if [ "$OFF_STALE_N" -gt 0 ]; then
-        echo "stale class (b) baseline entries (no longer offenders -- remove them from $BASELINE_B):"
+        echo "stale class (b) baseline entries (no longer offenders -- remove them from $BASELINE_B; $REGEN_HINT):"
         cat "$TMP/off_stale.txt"
     fi
     if [ "$CLSC_N" -gt 0 ]; then
@@ -768,13 +1198,13 @@ if [ "$OFF_N" -gt 0 ] || [ "$CLSC_N" -gt 0 ] || [ "$STALE_N" -gt 0 ] || [ "$OFF_
         cat "$TMP/classc.txt"
     fi
     if [ "$STALE_N" -gt 0 ]; then
-        echo "stale baseline entries (no longer offenders -- remove them):"
+        echo "stale class (c) baseline entries (no longer offenders -- remove them from $BASELINE; $REGEN_HINT):"
         cat "$TMP/classc_stale.txt"
     fi
-    NAMES=$( { [ "$OFF_N" -gt 0 ] && awk -F: '{print $3}' "$TMP/off.txt"; [ "$CLSC_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc.txt"; [ "$STALE_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc_stale.txt"; [ "$DECL_NEW_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/decl_new.txt"; [ "$DECL_STALE_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/decl_stale.txt"; } | sort -u | tr '\n' ' ' | sed 's/ $//')
-    echo "FAIL — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s) and $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline, $OFF_N new class (b) + $OFF_STALE_N stale class (b) + $CLSC_N new class (c) + $STALE_N stale baseline entry(ies) + $DECL_NEW_N new class (a) + $DECL_STALE_N stale class (a) of $DECL_N declaration(s): $NAMES"
+    NAMES=$( { [ "$CLSA_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classa_new.txt"; [ "$CLSA_STALE_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classa_stale.txt"; [ "$OFF_N" -gt 0 ] && awk -F: '{print $3}' "$TMP/off.txt"; [ "$CLSC_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc.txt"; [ "$STALE_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc_stale.txt"; } | sort -u | tr '\n' ' ' | sed 's/ $//')
+    echo "FAIL — $WRAP_N wrapper(s) and $EXT_N extern decl(s) + $ALIAS_N alias decl(s) checked against $NIL_N nil-capable extern(s), $CLSC_FILES file(s) scanned for hand-written nil returns; $CLSA_N new + $CLSA_STALE_N stale class (a) (baseline $BASE_A_N, $OPTOUT_N opted out, $OPTOUT_STALE_N stale opt-out), $OFF_N new + $OFF_STALE_N stale class (b), $CLSC_N new + $STALE_N stale class (c) (baseline $BASE_N); mixed optional/non-optional externs: $MIXED_N ($MIXED_NIL_N nil-capable): $NAMES"
     exit 1
 fi
 
-echo "PASS — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s) ($BASE_B_N baselined class (b)), $DECL_N non-optional rt_* declaration(s) ($BASE_A_N baselined class (a)), $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline (0 new, 0 stale), 0 returning nil through a non-optional type"
+echo "PASS — $WRAP_N wrapper(s) and $EXT_N extern decl(s) + $ALIAS_N alias decl(s) checked against $NIL_N nil-capable extern(s): class (a) $BASE_A_N baselined + $OPTOUT_N opted out (0 new, 0 stale), class (b) $BASE_B_N baselined (0 new, 0 stale), class (c) $BASE_N baselined over $CLSC_FILES file(s) (0 new, 0 stale); mixed optional/non-optional externs: $MIXED_N ($MIXED_NIL_N nil-capable, non-optional sides counted in class (a))"
 exit 0
