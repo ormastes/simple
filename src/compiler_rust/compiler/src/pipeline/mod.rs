@@ -48,7 +48,6 @@ mod tests {
     use crate::import_loader::has_script_statements;
     use crate::lint::{LintConfig, LintLevel, LintName};
     use crate::mir::{self, ContractMode};
-    use crate::monomorphize::monomorphize_module;
     use crate::pipeline::SimdMode;
     use crate::CompileError;
     use simple_common::target::{Target, TargetArch, TargetOS};
@@ -474,8 +473,7 @@ main = 0
         let source = "let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0";
         let mut parser = simple_parser::Parser::new(source);
         let ast = parser.parse().expect("parse ok");
-        let module = monomorphize_module(&ast);
-        let item_kinds: Vec<&str> = module
+        let item_kinds: Vec<&str> = ast
             .items
             .iter()
             .map(|n| match n {

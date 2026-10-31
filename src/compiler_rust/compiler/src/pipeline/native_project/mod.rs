@@ -266,8 +266,8 @@ fn read_usable_cached_object(path: &Path) -> Option<Vec<u8>> {
 /// Initialize the rayon global thread pool with appropriate stack size and
 /// thread count for compilation workloads.
 ///
-/// Compilation threads need large stacks (16 MiB) because monomorphization,
-/// HIR lowering, and codegen can produce deep call stacks. Without this,
+/// Compilation threads need large stacks (16 MiB) because HIR lowering
+/// and codegen can produce deep call stacks. Without this,
 /// rayon's default 2 MiB stacks can overflow on complex modules.
 ///
 /// The pool is initialized exactly once per process via `std::sync::Once`.

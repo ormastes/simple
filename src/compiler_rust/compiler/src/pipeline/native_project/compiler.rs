@@ -13,7 +13,6 @@ use crate::codegen::Codegen;
 use crate::hir::Lowerer;
 use crate::hir::dynamic_module_initializer_name;
 use crate::module_resolver::ModuleResolver;
-use crate::monomorphize::monomorphize_module;
 
 use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_file, ModuleImports, NativeProjectBuilder};
 use super::aggregate_layout::resolve_owner_has_vtable;
@@ -717,9 +716,6 @@ pub(crate) fn compile_file_to_object(
 
     // Build per-module use_map from AST `use` statements.
     let use_map = build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
-
-    // Mono
-    let ast = monomorphize_module(&ast);
 
     // HIR
     let hir_source_root = source_root.to_path_buf();
