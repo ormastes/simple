@@ -35,6 +35,7 @@
 
 #define SPL_LEGACY_VALUE_RUNTIME 1
 #include "runtime.h"
+#include "runtime_nonnull.h"
 #if defined(__APPLE__)
 #include <sys/stdio.h>
 #endif
@@ -2873,17 +2874,23 @@ bool rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len) {
  * and for a missing one alike. The worker is now rt_dir_list_cpath and this is
  * the entry point the compiler actually calls. */
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
-    int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
+    const int64_t rt_nil = 3;
     char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return result;
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_nil;
     int64_t count = 0;
     const char** entries = rt_dir_list_cpath(path, &count);
+    if (!entries) return rt_nil;
+    int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
+    if (result == 0) {
+        rt_dir_list_free(entries, count);
+        return rt_nil;
+    }
     for (int64_t i = 0; i < count; i++) {
         const char* e = entries[i] ? entries[i] : "";
         rt_array_push((SplArray*)(uintptr_t)result,
                       rt_string_new((const uint8_t*)e, (uint64_t)strlen(e)));
     }
-    if (entries) rt_dir_list_free(entries, count);
+    rt_dir_list_free(entries, count);
     return result;
 }
 
@@ -3276,10 +3283,10 @@ const char* rt_byte_char(int64_t v) {
     /* Returns a malloc'd 2-byte buffer: [byte_value, '\0'].
      * Note: rt_byte_char(0) returns a string whose first byte is NUL,
      * so strlen() will report 0. This is intentional for binary wire use. */
-    char* buf = (char*)SPL_MALLOC(2, "str");
+    char* buf = SIMPLE_RT_NONNULL("rt_byte_char", SPL_MALLOC(2, "str"));
     buf[0] = (char)(unsigned char)(v & 0xFF);
     buf[1] = '\0';
-    return buf;
+    return SIMPLE_RT_NONNULL("rt_byte_char", buf);
 }
 
 /* ---- rt_time_now_seconds: Unix timestamp in seconds ---- */
@@ -4182,15 +4189,14 @@ const char* rt_hex_to_wire(const char* hex_str) {
     int64_t len;
     uint8_t* buf = hex_decode(hex_str, &len);
     if (!buf) {
-        char* empty = (char*)malloc(1);
-        if (empty) empty[0] = '\0';
-        return empty;
+        char* empty = SIMPLE_RT_NONNULL("rt_hex_to_wire", malloc(1));
+        empty[0] = '\0';
+        return SIMPLE_RT_NONNULL("rt_hex_to_wire", empty);
     }
     /* Ensure NUL termination for C string safety */
-    uint8_t* result = (uint8_t*)realloc(buf, (size_t)(len + 1));
-    if (!result) { free(buf); return NULL; }
+    uint8_t* result = SIMPLE_RT_NONNULL("rt_hex_to_wire", realloc(buf, (size_t)(len + 1)));
     result[len] = 0;
-    return (const char*)result;
+    return (const char*)SIMPLE_RT_NONNULL("rt_hex_to_wire", result);
 }
 
 #include "runtime_utf8_lossy_private.h"

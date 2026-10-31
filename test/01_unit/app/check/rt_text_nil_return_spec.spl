@@ -1,0 +1,74 @@
+# Purpose and audience: executable specification evidence for the runtime and SFFI maintainers.
+# @req REQ-SSPEC-APP
+"""
+# Nil-capable runtime text returns
+
+## Purpose and audience
+
+SFFI and runtime maintainers read this for how a `text?` runtime extern is consumed.
+
+## Compatibility and limitations
+
+The base64url SFFI wrapper now returns `text?` because its C body returns NULL on invalid
+arguments. The interpreter keeps the optional wrapped, so every caller must unwrap it with
+`??` or `if val`. The nil branch is driven through a local `text?` producer because valid
+arguments never yield nil in-process. The stdin EOF path depends on the host stdin and is not
+driven here.
+
+## Verification guidance and troubleshooting
+
+If a caller uses the wrapped value as plain text, the comparison fails with a wrapped value,
+not with the encoded text. Unwrap it first.
+"""
+
+use std.spec.step
+use std.spec.*
+use std.nogc_sync_mut.sffi.crypto.{base64url_encode}
+
+fn _encode_or_marker(input: text, len: i64) -> text:
+    val encoded = base64url_encode(input, len) ?? "<nil>"
+    encoded
+
+fn _encode_via_if_val(input: text, len: i64) -> text:
+    if val encoded = base64url_encode(input, len):
+        return encoded
+    "<nil>"
+
+fn _maybe_encode(input: text, len: i64, want: bool) -> text?:
+    if want:
+        return base64url_encode(input, len)
+    nil
+
+describe "nil-capable base64url runtime text":
+    it "unwraps a present value with ??":
+        step("unwraps a present value with ??")
+        expect(_encode_or_marker("foo", 3)).to_equal("Zm9v")
+
+    it "unwraps a present value with if val":
+        step("unwraps a present value with if val")
+        expect(_encode_via_if_val("f", 1)).to_equal("Zg")
+
+    it "encodes empty input as empty text, not as nil":
+        step("encodes empty input as empty text, not as nil")
+        expect(_encode_or_marker("", 0)).to_equal("")
+
+    it "takes the ?? fallback on a nil result":
+        step("takes the ?? fallback on a nil result")
+        val absent = _maybe_encode("foo", 3, false) ?? "<nil>"
+        expect(absent).to_equal("<nil>")
+
+    it "takes the if val else branch on a nil result":
+        step("takes the if val else branch on a nil result")
+        var seen = "unset"
+        if val present = _maybe_encode("foo", 3, false):
+            seen = present
+        else:
+            seen = "<nil>"
+        expect(seen).to_equal("<nil>")
+
+    it "returns the value through if val when present":
+        step("returns the value through if val when present")
+        var seen = "unset"
+        if val present = _maybe_encode("foo", 3, true):
+            seen = present
+        expect(seen).to_equal("Zm9v")

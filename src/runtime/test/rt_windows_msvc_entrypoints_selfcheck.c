@@ -309,8 +309,8 @@ int main(void) {
     }
     check(saw_a && saw_b && saw_g, "rt_dir_list names all three files");
     check(!saw_dot, "rt_dir_list excludes . and ..");
-    v = rt_array_len_safe(rt_dir_list((const uint8_t*)"no_such_dir_xyzzy", 17));
-    check_i(v == 0, "rt_dir_list on a missing directory returns an EMPTY array (not nil)", v);
+    check(rt_dir_list((const uint8_t*)"no_such_dir_xyzzy", 17) == 3,
+          "rt_dir_list on a missing directory returns nil");
 
     /* ============ 6. shell / popen ====================================== */
     int64_t out = rt_shell_exec(mkstr("echo SPLTOKEN9137"));
