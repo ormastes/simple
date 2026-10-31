@@ -62,9 +62,22 @@ GraphQL errors (`Could not resolve to a Repository`, `no pull requests found`).
 
 ## Open: the seed resolves a bare name only to `.exe`
 
-`cmd_jira_spec.spl` relies on PATHEXT resolution of a `.cmd` shim by bare name.
-It has the same limit and is NOT migrated by this change. It will fail or reach
-real acli on Windows. Owner: follow the same `fake_bin` recipe there.
+`cmd_jira_spec.spl` had the same limit and is migrated (commit `a75434832c0`).
+Its REST fallback hardcoded the bare `curl`, so it now routes through the
+`DEVHUB_REAL_CURL` seam (`cmd_jira.spl` `_jira_curl_binary`). Verdict: 12/12.
+
+Other devhub specs that put a fake on PATH by bare name: none remain. Specs that
+mention gh/acli/curl/mc only as strings or argv builders install no fake.
+`email_cmd_spec.spl` fakes `mail` by path and never sets PATH.
+`test/03_system/app/devhub/feature/gh_shim_backend_routing_spec.spl` runs the
+real `bin/gh` on purpose, and one scenario (`pr diff 1`) reaches real gh over the
+network. It is not migrated and was not run.
+
+Production bare-name callers without a seam, not faked by any spec:
+`adapter_bitbucket.spl:284` and `adapter_confluence.spl:135` call `curl`,
+`adapter_minio_mc.spl:395` calls `curl`, and `adapter_outlook_curl.spl` uses
+`curl_path: "curl"`. A spec that drives these on Windows would reach the system
+curl.exe.
 
 Owner fix for the seed (out of scope here): resolve bare commands through PATH
 with PATHEXT on win32. This is not required for the harness fix above.
