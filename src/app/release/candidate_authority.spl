@@ -3,7 +3,7 @@
 # admission evidence but deliberately never mutates protected Git refs, signs,
 # pushes, builds, or publishes.
 
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_hash_sha256, file_read}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_hash_sha256, file_hash_sha256_optional, file_read}
 use std.nogc_sync_mut.io.crypto_sffi.{hash_sha256}
 use app.io.mod.{process_run_bounded, dir_create_all, file_atomic_write, file_lock, file_unlock}
 use app.release.policy.{
@@ -199,7 +199,12 @@ fn create_candidate_plan(root: text, session: ReleaseSession, candidate: Candida
                 if reason == "":
                     val ref_name = "refs/heads/" + candidate.candidate_ref
                     val plan = "create-once " + ref_name + " at " + candidate.commit_sha + " with protected integration authority; expected old ref: absent; no mutation performed"
-                    result = CandidateCreateResult(valid: true, reason: "", candidate_identity: candidate_identity(candidate), state_path: state_path, state_sha256: file_hash_sha256(state_path), authority_plan: plan, mutation: "candidate-state-only")
+                    val state_sha_opt = file_hash_sha256_optional(state_path)
+                    if state_sha_opt == nil:
+                        result = _create_rejected("candidate state digest is unavailable")
+                    else:
+                        val state_sha: text = state_sha_opt ?? ""
+                        result = CandidateCreateResult(valid: true, reason: "", candidate_identity: candidate_identity(candidate), state_path: state_path, state_sha256: state_sha, authority_plan: plan, mutation: "candidate-state-only")
                 else:
                     result = _create_rejected(reason)
                 if not file_unlock(lock):
@@ -231,11 +236,18 @@ fn load_candidate_status(root: text, version: text, attempt: i64) -> CandidateSt
         if not promotion_check.valid or admission.candidate_identity != candidate_identity(candidate):
             return _status_rejected("persisted release admission is malformed or does not bind the candidate")
         admission_present = true
-        admission_sha = file_hash_sha256(admission_path)
+        val admission_sha_opt = file_hash_sha256_optional(admission_path)
+        if admission_sha_opt == nil:
+            return _status_rejected("persisted release admission digest is unavailable")
+        admission_sha = admission_sha_opt ?? ""
+    val candidate_sha_opt = file_hash_sha256_optional(candidate_path)
+    if candidate_sha_opt == nil:
+        return _status_rejected("release candidate state digest is unavailable")
+    val candidate_sha: text = candidate_sha_opt ?? ""
     CandidateStatus(
         valid: true, reason: "", candidate: candidate,
         candidate_identity: candidate_identity(candidate),
-        candidate_state_sha256: file_hash_sha256(candidate_path), admission: admission,
+        candidate_state_sha256: candidate_sha, admission: admission,
         admission_present: admission_present, admission_state_sha256: admission_sha,
         state_digest: _state_digest(candidate_content, admission_content)
     )
