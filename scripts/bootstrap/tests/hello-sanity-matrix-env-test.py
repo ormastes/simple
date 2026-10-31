@@ -34,28 +34,12 @@ class ReserveTests(unittest.TestCase):
 
 
 class LlvmBinTests(unittest.TestCase):
-    def test_absolute_directory_is_kept(self):
+    def test_llvm_bin_is_sanitized(self):
+        # Stage 2 resolves llc from PATH to an absolute path itself
+        # (bug stage2_llc_discovery_ignores_path_2026-10-31, resolved), so the
+        # matrix no longer keeps SIMPLE_LLVM_BIN across sanitization.
         with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(m.inherited_build_settings({"SIMPLE_LLVM_BIN": d}), {"SIMPLE_LLVM_BIN": d})
-
-    def test_relative_or_missing_directory_refused(self):
-        for value in ("", "bin", "/nonexistent-simple-llvm-bin-dir"):
-            with self.assertRaises(ValueError):
-                m.inherited_build_settings({"SIMPLE_LLVM_BIN": value})
-
-
-    def test_both_settings_kept_together(self):
-        with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(m.inherited_build_settings({"SIMPLE_LLVM_BIN": d, KEY: "1"}),
-                             {"SIMPLE_LLVM_BIN": d, KEY: "1"})
-
-    def test_identity_records_llc_digest(self):
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "llc").write_bytes(b"x")
-            ident = m.llvm_bin_identity({"SIMPLE_LLVM_BIN": d})
-            self.assertEqual(ident["llvm_bin"], d)
-            self.assertEqual(len(ident["llvm_bin_llc_sha256"]), 64)
-        self.assertEqual(m.llvm_bin_identity({}), {})
+            self.assertEqual(m.inherited_build_settings({"SIMPLE_LLVM_BIN": d, KEY: "1"}), {KEY: "1"})
 
 
 if __name__ == "__main__":

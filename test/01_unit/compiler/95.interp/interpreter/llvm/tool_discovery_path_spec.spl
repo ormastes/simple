@@ -1,0 +1,62 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+#
+# Bug stage2_llc_discovery_ignores_path_2026-10-31: with SIMPLE_LLVM_BIN
+# unset, _find_tool_discover answered the `command -v` probe with the BARE
+# candidate name. compile_ir_to_object_path then spawned that name through
+# process_run, which does not search PATH, and every AOT unit failed with
+# "llc failed (exit -1)" although llc was on PATH. Discovery must hand back
+# the absolute, existing path of the PATH hit (`;` + PATHEXT on Windows).
+#
+# PATH is restored and the fixture removed BEFORE any assertion.
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get, env_set, cwd, host_os, file_write, file_exists,
+    dir_create_all, dir_remove_all, process_run}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use compiler.interp.interpreter.llvm.tools.{_find_tool_discover}
+
+fn _windows() -> bool:
+    host_os() == "windows"
+
+fn _norm(path: text) -> text:
+    val slashed = path.replace("\\", "/")
+    if _windows(): slashed.lower() else: slashed
+
+fn _is_absolute(path: text) -> bool:
+    if path.starts_with("/"):
+        return true
+    # Windows drive path: C:\... or C:/...
+    path.len() >= 3 and path.char_at(1) == ":" and (path.char_at(2) == "\\" or path.char_at(2) == "/")
+
+describe "LLVM tool discovery resolves PATH hits to absolute paths":
+    it "returns the absolute path of a tool found only on PATH":
+        val root = "{cwd()}/build/test/llvm_tool_discovery_{getpid()}"
+        val bin = "{root}/bin"
+        val name = "spl-discovery-tool-{getpid()}"
+        val file_name = if _windows(): name + ".cmd" else: name
+        val tool_path = "{bin}/{file_name}"
+        val body = if _windows(): "@exit /b 0\r\n" else: "#!/bin/sh\nexit 0\n"
+        var fixture_ok = dir_create_all(bin) and file_write(tool_path, body)
+        if fixture_ok and not _windows():
+            val (o, e, c) = process_run("/bin/sh", ["-c", "chmod +x '{tool_path}'"])
+            fixture_ok = c == 0
+        val saved_path = env_get("PATH")
+        val sep = if _windows(): ";" else: ":"
+        val path_set = env_set("PATH", bin + sep + saved_path)
+
+        val found = _find_tool_discover(["spl-nonesuch-discovery-tool", name])
+        val absent = _find_tool_discover(["spl-nonesuch-discovery-tool"])
+        val found_exists = found != "" and file_exists(found)
+
+        val path_restored = env_set("PATH", saved_path)
+        val fixture_removed = dir_remove_all(root)
+
+        expect(fixture_ok).to_equal(true)
+        expect(path_set).to_equal(true)
+        expect(path_restored).to_equal(true)
+        expect(fixture_removed).to_equal(true)
+        expect(_is_absolute(found)).to_equal(true)
+        expect(found_exists).to_equal(true)
+        expect(_norm(found)).to_equal(_norm(tool_path))
+        expect(absent).to_equal("")
