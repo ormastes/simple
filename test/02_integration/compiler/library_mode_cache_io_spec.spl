@@ -5,10 +5,6 @@ use std.common.crypto.sha256.{sha256_text}
 use compiler.hir.hir_types.{HirModule, SymbolTable}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_dir, hir_cache_key,
     hir_cache_path, hir_cache_store, hir_cache_load}
-use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveInputV1, HirBodyArchiveV1}
-use compiler.driver.cache.hir_mono_verification_recipe_codec_v1.{
-    MonoVerificationModuleRecipeV1, mono_verification_module_encode_v1,
-    mono_verification_module_decode_v1}
 
 fn library_mode_cache_module(name: text, path: text) -> HirModule:
     HirModule(name: name, path: path, imports: [], exports: [], domain_blocks: [],
@@ -16,17 +12,6 @@ fn library_mode_cache_module(name: text, path: text) -> HirModule:
         gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
         bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
         aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [], types: [], extend_enums: [])
-
-fn library_mode_recipe(mode: text) -> MonoVerificationModuleRecipeV1:
-    # Codec-only descriptor: never passed off as an admitted provider or body.
-    val input = HirBodyArchiveInputV1(source_path: "/fixture/entry.spl",
-        closure_digest: sha256_text("closure"), is_entry: true, module_name: "entry",
-        runtime_provider_receipt_path: "/fixture/not-admission", runtime_provider_digest: sha256_text("provider"),
-        producer_header: "codec-only", stage: "lowered-unresolved-v1", library_mode: mode)
-    val archive = HirBodyArchiveV1(input: input, source_key: sha256_text("source"),
-        archive_key: sha256_text("archive"), body_digest: sha256_text("body"),
-        lowering_warnings_digest: sha256_text("warnings"))
-    MonoVerificationModuleRecipeV1(archive: archive, roots: [], specializations: [], coverage_digest: sha256_text("coverage"))
 
 describe "request-owned library mode cache isolation":
     it "stores and reloads interleaved modes in one real private cache":
@@ -64,18 +49,3 @@ describe "request-owned library mode cache isolation":
         expect(old!.name).to_equal("legacy_owner")
         expect(hir_cache_load(legacy, "", source, "nogc-sync-mut")).to_be_nil()
         for key in [sync, gc, legacy]: expect(file_delete(hir_cache_path(key))).to_equal(true)
-
-    it "roundtrips the configured archive mode and refuses invalid mode envelopes":
-        step("roundtrips the configured archive mode and refuses invalid mode envelopes")
-        val legacy = mono_verification_module_encode_v1(library_mode_recipe(""))
-        expect(legacy != "").to_equal(true)
-        val decoded = mono_verification_module_decode_v1(legacy).unwrap()
-        expect(decoded.archive.input.library_mode).to_equal("")
-        expect(mono_verification_module_encode_v1(decoded)).to_equal(legacy)
-        for mode in ["nogc-sync-mut", "gc-sync-mut"]:
-            val bytes = mono_verification_module_encode_v1(library_mode_recipe(mode))
-            expect(bytes != "" and bytes != legacy).to_equal(true)
-            val replayed = mono_verification_module_decode_v1(bytes).unwrap()
-            expect(replayed.archive.input.library_mode).to_equal(mode)
-            expect(mono_verification_module_encode_v1(replayed)).to_equal(bytes)
-        expect(mono_verification_module_encode_v1(library_mode_recipe("physical/family/path"))).to_equal("")

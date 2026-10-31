@@ -1,0 +1,64 @@
+# @manual: show
+# @req: REQ-FV2-C1-SM, ARCH-02
+# Source-authored actual API scenarios. All UNRUN; no execution/proof claim.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.verification_call_lowering_v1.{ResolvedCallLoweringV1,
+    lower_module_with_resolved_calls_for_target_v1}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature}
+use compiler.mir.verification_call_identity.{validate_resolved_direct_call_manifest_v1}
+use compiler.tools.verify.source_calls_v1.{SourceResolvedCallsV1,
+    source_calls_from_source_v1, source_calls_inventory_v1}
+
+fn omitted_defaults_result(source: text) -> Result<SourceResolvedCallsV1, text>:
+    source_calls_from_source_v1(source, "omitted_defaults.spl", "x86_64-unknown-linux-gnu")
+
+# These two existing lowerer-depth controls intentionally bypass the NEW
+# whole-stage work cap. They test the unchanged 128-frame MIR contract, not
+# admission of an arbitrarily large module.
+fn omitted_defaults_depth_capture(source: text) -> Result<ResolvedCallLoweringV1, text>:
+    val parsed = parse_full_frontend(source, "omitted_defaults_depth.spl", "omitted_defaults_depth.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("omitted_defaults_depth.spl")
+    val module = lowering.lower_module(parsed)
+    if lowering.errors.len() != 0: return Err(lowering.diagnostic_messages.join("; "))
+    val target = mir_target_context_from("x86_64-unknown-linux-gnu", "", "", "llvm", 0)
+    lower_module_with_resolved_calls_for_target_v1(module, target)
+
+describe "canonical source omitted-default expansion":
+    it "preserves the active omitted-default cycle refusal":
+        step("reject repeated active declaration and parameter positions at actual MIR expansion")
+        val source = "fn cycle_leaf(value: i64 = cycle_peer()) -> i64:\n    value\n\nfn cycle_peer(value: i64 = cycle_leaf()) -> i64:\n    value\n\nfn caller() -> i64:\n    cycle_leaf()\n"
+        match omitted_defaults_result(source):
+            case Ok(_): fail("cyclic omitted defaults unexpectedly published an inventory")
+            case Err(message): expect(message).to_contain("DEFAULT-CYCLE")
+
+    it "accepts the existing maximum active default expansion depth":
+        step("expand 128 actual omitted defaults and bind every completed call")
+        var source = "fn depth_0(value: i64 = 1) -> i64:\n    value\n"
+        for index in 1..128:
+            val previous = index - 1
+            source = source + "\nfn depth_{index}(value: i64 = depth_{previous}()) -> i64:\n    value\n"
+        match omitted_defaults_depth_capture(source + "\nfn caller() -> i64:\n    depth_127()\n"):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(128)
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+            case Err(message): fail(message)
+
+    it "preserves the refusal above the existing active default depth":
+        step("reject 129 actual omitted default frames without publishing a partial inventory")
+        var source = "fn depth_0(value: i64 = 1) -> i64:\n    value\n"
+        for index in 1..129:
+            val previous = index - 1
+            source = source + "\nfn depth_{index}(value: i64 = depth_{previous}()) -> i64:\n    value\n"
+        match omitted_defaults_depth_capture(source + "\nfn caller() -> i64:\n    depth_128()\n"):
+            case Ok(_): fail("excessive default depth unexpectedly published an inventory")
+            case Err(message): expect(message).to_contain("DEFAULT-DEPTH")

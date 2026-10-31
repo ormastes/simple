@@ -1,0 +1,171 @@
+# @tag: unit, compiler, generics
+"""
+# Observable behaviour of type-erased generics
+
+Generics are type-erased: one body serves every instantiation. These examples
+pin what a program can see, independent of how the compiler lowers it.
+
+Coverage carried over from the removed pass-level specs: generic call results
+at several element types, independent type parameters, nested generic calls,
+inference through match arms, loops, fields and return context, generic
+struct/class/enum/impl members, static generic factories, trait static
+dispatch, callbacks and optional payloads.
+
+Run: `bin/simple test test/01_unit/compiler/generics/erased_generic_behavior_spec.spl`
+"""
+
+use std.spec
+
+fn pick<T>(a: T, b: T, first: bool) -> T:
+    if first:
+        return a
+    b
+
+fn second<A, B>(a: A, b: B) -> B:
+    b
+
+fn head<T>(items: [T]) -> T:
+    items[0]
+
+fn apply<T>(value: T, f: fn(T) -> T) -> T:
+    f(value)
+
+fn wrap<T>(value: T) -> T?:
+    Some(value)
+
+fn twice<T>(value: T) -> T:
+    pick<T>(value, value, true)
+
+struct Pair<A, B>:
+    a: A
+    b: B
+
+struct Holder<T>:
+    v: T
+
+struct Acc:
+    n: i64
+
+class Box<T>:
+    value: T
+
+    fn get(self) -> T:
+        self.value
+
+    static fn from_value(value: T) -> Box<T>:
+        Box(value: value)
+
+enum Tree<T>:
+    Leaf(T)
+    Empty
+
+fn leaf_or<T>(tree: Tree<T>, fallback: T) -> T:
+    match tree:
+        Tree.Leaf(v):
+            v
+        Tree.Empty:
+            fallback
+
+trait Named:
+    fn name(self) -> text
+
+struct Cat:
+    id: i64
+
+struct Dog:
+    id: i64
+
+impl Named for Cat:
+    fn name(self) -> text:
+        "cat"
+
+impl Named for Dog:
+    fn name(self) -> text:
+        "dog"
+
+describe "generic function call results":
+    it "returns the argument at every element type":
+        expect(pick<i64>(1, 2, true)).to_equal(1)
+        expect(pick<text>("a", "b", false)).to_equal("b")
+        expect(pick<bool>(true, false, false)).to_equal(false)
+        expect(pick<f64>(1.5, 2.5, true) == 1.5).to_equal(true)
+
+    it "keeps nominal values intact":
+        expect(pick<Acc>(Acc(n: 1), Acc(n: 2), false).n).to_equal(2)
+
+    it "infers from arguments without explicit type arguments":
+        expect(pick(3, 4, false)).to_equal(4)
+        expect(pick("x", "y", true)).to_equal("x")
+
+    it "binds independent type parameters per call site":
+        expect(second(1, "two")).to_equal("two")
+        expect(second("one", 2)).to_equal(2)
+
+    it "reads an element from arrays of different element types":
+        expect(head([7, 8])).to_equal(7)
+        expect(head(["p", "q"])).to_equal("p")
+
+    it "resolves a generic call nested in a generic body":
+        expect(twice(9)).to_equal(9)
+        expect(twice("n")).to_equal("n")
+
+    it "works in interpolation, conditions and match arms":
+        expect("v={pick(1, 2, true)}").to_equal("v=1")
+        var seen = 0
+        if pick(true, false, true):
+            seen = 1
+        expect(seen).to_equal(1)
+        val r = match 1:
+            1:
+                pick(5, 6, false)
+            _:
+                0
+        expect(r).to_equal(6)
+
+    it "runs callbacks through a generic parameter":
+        expect(apply(2, \x: x * 3)).to_equal(6)
+        expect(apply("a", \s: s + "b")).to_equal("ab")
+
+    it "preserves optional payloads":
+        expect(wrap(4).unwrap()).to_equal(4)
+        expect(wrap("t").unwrap()).to_equal("t")
+        val none: i64? = nil
+        expect(none == nil).to_equal(true)
+
+describe "generic data":
+    it "keeps field values and operators by instance":
+        val p = Pair(a: "x", b: 2)
+        expect(p.a + "y").to_equal("xy")
+        expect(p.b + 1).to_equal(3)
+
+    it "does not share field types between two instances":
+        val i = Holder(v: 1)
+        val t = Holder(v: "s")
+        expect(i.v == 1).to_equal(true)
+        expect(t.v == "s").to_equal(true)
+
+    it "chains into a nested instance field":
+        val n = Holder(v: Holder(v: Acc(n: 5)))
+        expect(n.v.v.n).to_equal(5)
+
+    it "calls generic class methods":
+        expect(Box(value: 3).get()).to_equal(3)
+        expect(Box(value: "b").get()).to_equal("b")
+
+    it "constructs through a static generic factory":
+        expect(Box.from_value(11).get()).to_equal(11)
+        expect(Box<text>.from_value("s").get()).to_equal("s")
+
+    it "matches generic enum payloads":
+        expect(leaf_or(Tree.Leaf(5), 0)).to_equal(5)
+        expect(leaf_or(Tree.Empty, 9)).to_equal(9)
+        expect(leaf_or(Tree.Leaf("z"), "y")).to_equal("z")
+
+describe "trait static dispatch":
+    it "selects the method of the concrete receiver":
+        expect(Cat(id: 1).name()).to_equal("cat")
+        expect(Dog(id: 2).name()).to_equal("dog")
+
+    it "keeps dispatch through a generic pick":
+        expect(pick(Cat(id: 1), Cat(id: 2), true).name()).to_equal("cat")
+        expect(pick(Dog(id: 1), Dog(id: 2), false).id).to_equal(2)
