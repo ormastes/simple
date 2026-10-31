@@ -224,6 +224,21 @@ fn candidate_declared_by(
         .find(|candidate| function_module_owner(candidate).is_some_and(|o| *o == *owner))
 }
 
+/// True when module `owner` itself DECLARES `name` (owner-mangled symbol or an
+/// owner-matched candidate). Used when recording a re-export binding: a module
+/// that declares the function wins over any same-named symbol its own glob
+/// imports expose, so the recorded origin must be that module, not the
+/// glob-reachable twin (std.io_runtime -> nogc_sync_mut.io_runtime.file_write
+/// was rebound to io.file_ops.file_write, a different body).
+pub(in crate::interpreter) fn function_declared_by(
+    owner: &str,
+    name: &str,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> bool {
+    functions.contains_key(&crate::interpreter::flatten_owner_mangled_name(owner, name))
+        || candidate_declared_by(owner, name, functions).is_some()
+}
+
 /// Explicit-import dispatch for a bare call of a MULTIPLY-defined name.
 ///
 /// `use m.{f}` records an owner binding (`record_flattened_import_binding` /

@@ -1,0 +1,30 @@
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_sync}
+
+fn tmp_dir(name: text) -> text:
+    val dir = "build/spec_tmp/{name}"
+    dir_create_all(dir)
+    dir
+
+# On Windows the retained-file boundary calls GetFileType / FlushFileBuffers
+# (and WriteFile / SetFilePointerEx for writers) through the seed's Win64 ABI
+# table; an unregistered name died with "unknown extern function".
+describe "retained file open/sync through the host ABI":
+    it "creates a writable retained file and syncs it":
+        val dir = tmp_dir("retained_abi_a")
+        val path = "{dir}/created.bin"
+        file_delete(path)
+        match retained_file_open(path, 4096u64, true):
+            Err(e): expect(e).to_equal("")
+            Ok(file):
+                expect(retained_file_sync(file)).to_equal(true)
+                val closed = file.close()
+        expect(file_exists(path)).to_equal(true)
+        file_delete(path)
+
+    it "refuses to open a missing file read-only":
+        val dir = tmp_dir("retained_abi_b")
+        match retained_file_open("{dir}/missing.bin", 4096u64, false):
+            Ok(_): expect("opened").to_equal("SCVDB_FILE_OPEN")
+            Err(e): expect(e).to_equal("SCVDB_FILE_OPEN")

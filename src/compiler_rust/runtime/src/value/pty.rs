@@ -187,6 +187,29 @@ mod pty_process {
         }
     }
 
+    /// TIOCSWINSZ makes the kernel signal the foreground group; the direct
+    /// SIGWINCH covers a child that is not (yet) that group.
+    pub(super) fn resize(master_fd: i64, rows: i32, cols: i32) -> bool {
+        if master_fd < 0 || !(1..=u16::MAX as i32).contains(&rows) || !(1..=u16::MAX as i32).contains(&cols) {
+            return false;
+        }
+        let ws = libc::winsize {
+            ws_row: rows as libc::c_ushort,
+            ws_col: cols as libc::c_ushort,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        if unsafe { libc::ioctl(master_fd as i32, libc::TIOCSWINSZ as _, &ws as *const libc::winsize) } != 0 {
+            return false;
+        }
+        if let Some(pid) = CHILD_TABLE.lock().ok().and_then(|table| table.get(&(master_fd as i32)).copied()) {
+            unsafe {
+                libc::kill(pid, libc::SIGWINCH);
+            }
+        }
+        true
+    }
+
     pub(super) fn forget(master_fd: i64) {
         if let Ok(mut table) = CHILD_TABLE.lock() {
             table.remove(&(master_fd as i32));
@@ -212,7 +235,7 @@ mod pty_process {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-    use windows::Win32::System::Console::{ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON};
+    use windows::Win32::System::Console::{ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON};
     use windows::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
     use windows::Win32::System::Threading::{
         CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, TerminateProcess,
@@ -478,6 +501,23 @@ mod pty_process {
         session.terminate_child()
     }
 
+    pub(super) fn resize(handle: i64, rows: i32, cols: i32) -> bool {
+        if !(1..=i16::MAX as i32).contains(&rows) || !(1..=i16::MAX as i32).contains(&cols) {
+            return false;
+        }
+        let Ok(sessions) = SESSIONS.lock() else {
+            return false;
+        };
+        let Some(session) = sessions.get(&(handle as i32)) else {
+            return false;
+        };
+        let size = COORD {
+            X: cols as i16,
+            Y: rows as i16,
+        };
+        unsafe { ResizePseudoConsole(HPCON(session.pseudo_console), size).is_ok() }
+    }
+
     pub(super) fn is_running(handle: i64) -> bool {
         let Ok(sessions) = SESSIONS.lock() else {
             return false;
@@ -531,6 +571,11 @@ pub fn host_pty_close(handle: i64) -> bool {
 #[cfg(windows)]
 pub fn host_pty_is_running(handle: i64) -> bool {
     pty_process::is_running(handle)
+}
+
+#[cfg(windows)]
+pub fn host_pty_resize(handle: i64, rows: i32, cols: i32) -> bool {
+    pty_process::resize(handle, rows, cols)
 }
 
 #[no_mangle]
@@ -762,6 +807,19 @@ pub extern "C" fn rt_pty_is_running(handle: i64) -> RuntimeValue {
     RuntimeValue::from_bool(false)
 }
 
+/// Changes the viewport of the child attached to `handle`. False for an unknown
+/// handle, a dimension the platform cannot represent, or a refused native call.
+#[no_mangle]
+pub extern "C" fn rt_pty_resize(handle: i64, rows: i32, cols: i32) -> bool {
+    #[cfg(any(unix, windows))]
+    return pty_process::resize(handle, rows, cols);
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (handle, rows, cols);
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,6 +879,73 @@ mod tests {
         assert!(pty_process::close(handle as i64));
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
         assert!(!pty_process::close(handle as i64));
+    }
+
+    #[test]
+    fn resize_refuses_unknown_handles_and_bad_dimensions() {
+        assert!(!rt_pty_resize(-1, 24, 80));
+        let handle = rt_pty_open(24, 80) as i64;
+        assert!(handle >= 0);
+        assert!(!rt_pty_resize(handle, 0, 80));
+        assert!(!rt_pty_resize(handle, 24, -1));
+        assert!(!rt_pty_resize(handle, 24, 70_000));
+        assert!(rt_pty_resize(handle, 30, 100));
+        rt_pty_close(handle);
+        assert!(!rt_pty_resize(handle, 24, 80));
+    }
+
+    /// The child itself must report the new size; a true return is not proof.
+    #[test]
+    #[cfg(windows)]
+    fn conpty_resize_changes_the_size_the_child_reports() {
+        /// ConPTY may render the padding before a value as a cursor move, so
+        /// control sequences go first and only then is the label's number read.
+        fn strip_csi(text: &str) -> String {
+            let mut out = String::new();
+            let mut chars = text.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    if chars.next() == Some('[') {
+                        for d in chars.by_ref() {
+                            if ('@'..='~').contains(&d) {
+                                break;
+                            }
+                        }
+                    }
+                    out.push(' ');
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+        fn field(text: &str, label: &str) -> Option<i32> {
+            let rest = &text[text.rfind(label)? + label.len()..];
+            let digits: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
+            digits.parse().ok()
+        }
+        fn mode_con(handle: i64) -> (i32, i32) {
+            assert!(pty_process::write(handle, b"mode con\r\n"));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut raw = String::new();
+            while std::time::Instant::now() < deadline {
+                raw.push_str(&pty_process::read(handle, 100));
+                if strip_csi(&raw).contains("Keyboard") {
+                    break;
+                }
+            }
+            let text = strip_csi(&raw);
+            let lines = field(&text, "Lines:").unwrap_or_else(|| panic!("no Lines in {raw:?}"));
+            let cols = field(&text, "Columns:").unwrap_or_else(|| panic!("no Columns in {raw:?}"));
+            (lines, cols)
+        }
+        let handle = pty_process::open(24, 80) as i64;
+        assert!(handle > 0);
+        assert!(pty_process::spawn(handle as i32, "cmd.exe /Q") > 0);
+        assert_eq!(mode_con(handle), (24, 80));
+        assert!(pty_process::resize(handle, 31, 97));
+        assert_eq!(mode_con(handle), (31, 97));
+        assert!(pty_process::close(handle));
     }
 
     #[test]

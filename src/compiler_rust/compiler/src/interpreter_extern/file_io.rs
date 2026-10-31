@@ -810,6 +810,16 @@ pub fn rt_file_write_text(args: &[Value]) -> Result<Value, CompileError> {
 /// Synchronize file contents and metadata with durable storage.
 pub fn rt_file_fsync(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
+    // Windows: FlushFileBuffers needs write access (and BACKUP_SEMANTICS for
+    // directories), so delegate to the runtime's CreateFileW-based twin.
+    #[cfg(windows)]
+    {
+        let bytes = path.as_bytes();
+        return Ok(Value::Bool(unsafe {
+            simple_runtime::value::rt_file_fsync(bytes.as_ptr(), bytes.len() as u64)
+        }));
+    }
+    #[cfg(not(windows))]
     match OpenOptions::new().read(true).open(&path) {
         Ok(file) => Ok(Value::Bool(file.sync_all().is_ok())),
         Err(_) => Ok(Value::Bool(false)),
@@ -1287,6 +1297,20 @@ pub fn rt_file_remove(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_file_rename(args: &[Value]) -> Result<Value, CompileError> {
     let from = extract_path(args, 0)?;
     let to = extract_path(args, 1)?;
+    // Windows: delegate to the runtime twin (atomic replace of an existing
+    // file destination, long-path aware), matching POSIX rename(2).
+    #[cfg(windows)]
+    {
+        return Ok(Value::Bool(unsafe {
+            simple_runtime::value::rt_file_rename(
+                from.as_ptr(),
+                from.len() as u64,
+                to.as_ptr(),
+                to.len() as u64,
+            )
+        }));
+    }
+    #[cfg(not(windows))]
     match fs::rename(&from, &to) {
         Ok(_) => Ok(Value::Bool(true)),
         Err(_) => Ok(Value::Bool(false)),

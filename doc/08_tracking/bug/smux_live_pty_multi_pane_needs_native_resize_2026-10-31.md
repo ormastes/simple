@@ -1,7 +1,7 @@
 # smux cannot split or zoom next to a live PTY child without a native resize provider
 
 - **Filed:** 2026-10-31
-- **Status:** OPEN (capability absent, fail-closed by design)
+- **Status:** FIXED on Windows 2026-10-31 (`rt_pty_resize`); POSIX lanes implemented but not run
 - **Lane:** Windows caret triage, Rust seed `simple test`
 - **Keeps RED:** `test/01_unit/app/llm_caret/pane_backend_spec.spl`, "spawns a shell, runs a typed command in it, then maximizes and kills it"
 
@@ -32,3 +32,28 @@ Compose a native PTY provider whose `can_resize()` is true (ConPTY
 `ResizePseudoConsole` / `TIOCSWINSZ`) into the source-tree runtime, then re-run the
 spec. Separately worth doing: return the split error from `_smux_free_pane` rather
 than an empty pane.
+
+## Resolution (2026-10-31)
+
+`rt_pty_resize(handle, rows, cols)` now exists in the Rust runtime and interpreter
+(`ResizePseudoConsole`; `TIOCSWINSZ` plus `SIGWINCH`) and in the C lane
+(`TIOCSWINSZ` on POSIX; `false` on Windows, where that lane cannot resolve a
+ConPTY handle). `can_resize()` resizes one real scratch PTY once per process
+instead of answering false. `Pane.error` carries the refusal reason.
+
+Proof that the child's viewport really changes:
+`conpty_resize_changes_the_size_the_child_reports` (`value/pty.rs`) and
+`test/03_system/tools/smux_live_multi_pane_spec.spl` read `mode con` from inside
+`cmd.exe`.
+
+Known limits:
+
+- A binary older than this change aborts on `can_resize()` with the
+  unresolved-extern error, but only when a layout holds a live PTY. It no longer
+  answers "cannot resize" politely; it needs a redeploy.
+- The POSIX and C paths were compiled for Windows only or not at all; no POSIX
+  host ran them.
+- `smux_presentation_native_spec` is intermittent on a loaded host: its PowerShell
+  probe has a 5 s deadline, and a measured probe took 0.4 s to 14.7 s (one
+  exceeded 25 s) with correct dimensions whenever it answered. Its Percent example
+  starts its child after the split and never resizes it, so it runs no new code.
