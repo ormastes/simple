@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+Regression oracles for the unified SOSIX capsule's hosted time and console
+leaves (`std.sosix.time`, `std.sosix.stdio`). Audience: the lane that touches
+`src/lib/nogc_async_mut/sosix/**` — the 2026-10-31 sweep found product code in
+`src/os/apps/smux/*` and `src/app/llm_dashboard/web_login.spl` importing
+`sosix_time_now_monotonic_ms`, `sosix_sleep_ms`, and `sosix_println` through
+the capsule while the capsule exported only the ns-deadline and raw/checked
+console APIs, so every consumer failed semantic resolution with
+`function ... not found` (E1002).
+## Operator workflow
+bin/simple test test/01_unit/lib/sosix/time_ms_console_alias_spec.spl
+## Compatibility and limitations
+Hosted lanes only: `sosix_sleep_ms` blocks the calling thread by design.
+## Verification guidance and troubleshooting
+A missing-name failure names the capsule leaf that lost its re-export; the
+canonical definitions live in `std.nogc_sync_mut.sosix.{time,stdio}`.
+"""
+# doc-path: doc/05_design/runtime/sosix_runtime_unification_design.md
+# @manual_section: sosix-capsule-surface
+
+use std.spec.{describe, it, expect, step}
+use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms, sosix_time_now_unix_micros}
+use std.sosix.stdio.{sosix_println, sosix_read_stdin_line, sosix_print_raw}
+
+describe "std.sosix capsule keeps the millisecond time and console leaves":
+
+    it "resolves the legacy capsule surface that smux and dashboard consumers import":
+        # @req REQ-SOSIX-CAPSULE-SURFACE-001
+        step("Reference every legacy leaf so semantic resolution must bind each name")
+        if false:
+            sosix_read_stdin_line()
+        # @capture: evidence_manifest("sosix_capsule_surface") -> time_ms_console_alias_spec.evidence.sdn
+        step("Verify the console leaves are callable")
+        sosix_println("sosix capsule surface probe")
+        sosix_print_raw("")
+
+    it "returns a monotonic millisecond clock that advances across a slept interval":
+        # @req REQ-SOSIX-CAPSULE-SURFACE-002
+        step("Read the monotonic clock before and after a 25 ms sleep")
+        val before = sosix_time_now_monotonic_ms()
+        sosix_sleep_ms(25)
+        val after = sosix_time_now_monotonic_ms()
+        # oracle: monotonic clock must never go backwards; 25 ms sleep must
+        # be observable at millisecond resolution
+        step("Verify the clock is non-decreasing and the interval elapsed")
+        expect(after >= before).to_be(true)
+        expect(after - before >= 20).to_be(true)
+
+    it "reports unix realtime in microseconds on the same capsule leaf":
+        # @req REQ-SOSIX-CAPSULE-SURFACE-003
+        step("Read the unix microsecond clock twice")
+        val first = sosix_time_now_unix_micros()
+        val second = sosix_time_now_unix_micros()
+        # oracle: realtime is non-decreasing across two consecutive reads
+        step("Verify realtime does not go backwards")
+        expect(second >= first).to_be(true)
