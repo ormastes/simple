@@ -19,6 +19,13 @@ CASE_TIMEOUT_SECONDS=5
 CAPTURE_LIMIT_BLOCKS=64
 CAPTURE_LIMIT_BYTES=65536
 
+is_msys_host() {
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*) return 0 ;;
+    esac
+    return 1
+}
+
 usage() {
     printf '%s\n' \
         "usage: sh scripts/check/check-llm-caret-installed-claude-cli.shs --case <prerequisites|version|help|missing-input|hidden-max-turns|removed-option|all>"
@@ -97,7 +104,8 @@ list_child_pids() {
         pgrep -P "${parent_pid}" 2>/dev/null || :
         return 0
     fi
-    # Windows (MSYS2/Git Bash) ships no pgrep; ps -ef lists PID and PPID.
+    # MSYS2/Git Bash ships no pgrep; ps -ef lists PID and PPID. Windows only.
+    is_msys_host || return 0
     ps -ef 2>/dev/null | awk -v p="${parent_pid}" '$3 == p { print $2 }' || :
 }
 
@@ -113,6 +121,16 @@ freeze_probe_tree() {
 
 terminate_probe_tree() {
     root_pid=$1
+    if is_msys_host; then
+        # MSYS ps cannot see native grandchildren and kill -STOP is a no-op
+        # on win32 processes, so kill the whole native tree by Windows PID.
+        win_pid=$(cat "/proc/${root_pid}/winpid" 2>/dev/null || :)
+        if [ "${win_pid}" != "" ]; then
+            taskkill //F //T //PID "${win_pid}" >/dev/null 2>&1 || :
+        fi
+        kill -KILL "${root_pid}" 2>/dev/null || :
+        return
+    fi
     frozen_pids=$(freeze_probe_tree "${root_pid}")
     [ "${frozen_pids}" != "" ] || return
     kill -TERM ${frozen_pids} 2>/dev/null || :
@@ -147,13 +165,13 @@ invoke_isolated() {
             "${probe_tmp}/work" ||
             exit 125
         cd "${probe_tmp}/work" || exit 125
-        if ! ulimit -f "${CAPTURE_LIMIT_BLOCKS}" 2>/dev/null; then
-            # MSYS2/Git Bash on Windows cannot set RLIMIT_FSIZE; every other
-            # host must still enforce the capture limit.
-            case "$(uname -s 2>/dev/null)" in
-                MINGW*|MSYS*|CYGWIN*) : ;;
-                *) exit 125 ;;
-            esac
+        if ulimit -f "${CAPTURE_LIMIT_BLOCKS}" 2>/dev/null; then
+            printf '%s\n' "ulimit" >"${invoke_dir}/limit.txt" || exit 125
+        elif is_msys_host; then
+            # MSYS2 cannot set RLIMIT_FSIZE; the size is verified after the run.
+            printf '%s\n' "post-run-size-check" >"${invoke_dir}/limit.txt" || exit 125
+        else
+            exit 125
         fi
         env -i \
             HOME="${probe_tmp}/home" \
@@ -182,13 +200,20 @@ invoke_isolated() {
         exit "${probe_status}"
     ) >"${invoke_dir}/stdout.txt" 2>"${invoke_dir}/stderr.txt"
     invoke_status=$?
+    if [ "$(sed -n 1p "${invoke_dir}/limit.txt" 2>/dev/null)" != "ulimit" ]; then
+        # No kernel-enforced limit on this host: fail closed on oversize output.
+        for capture_file in "${invoke_dir}/stdout.txt" "${invoke_dir}/stderr.txt"; do
+            capture_size=$(wc -c <"${capture_file}" | tr -d ' ')
+            [ "${capture_size}" -le "${CAPTURE_LIMIT_BYTES}" ] || return 125
+        done
+    fi
     printf '%s\n' "${invoke_status}" >"${invoke_dir}/exit.txt" || return 125
     return "${invoke_status}"
 }
 
 discover_claude() {
     mkdir -p "${ARTIFACT_ROOT}" || fail_prerequisite "artifact_directory_unavailable"
-    command -v pgrep >/dev/null 2>&1 || command -v ps >/dev/null 2>&1 ||
+    command -v pgrep >/dev/null 2>&1 || { is_msys_host && command -v ps >/dev/null 2>&1; } ||
         fail_prerequisite "pgrep_utility_missing"
     CLAUDE_PATH=$(command -v claude 2>/dev/null || :)
     [ "${CLAUDE_PATH}" != "" ] || fail_prerequisite "claude_binary_absent"
@@ -241,6 +266,7 @@ copy_version_capture() {
     cp "${METADATA_DIR}/stdout.txt" "${capture_dir}/stdout.txt" || return 1
     cp "${METADATA_DIR}/stderr.txt" "${capture_dir}/stderr.txt" || return 1
     cp "${METADATA_DIR}/exit.txt" "${capture_dir}/exit.txt" || return 1
+    cp "${METADATA_DIR}/limit.txt" "${capture_dir}/limit.txt" || return 1
 }
 
 emit_case_summary() {
@@ -258,6 +284,7 @@ emit_case_summary() {
     printf '%s\n' "raw_stdout=${summary_dir}/stdout.txt"
     printf '%s\n' "raw_stderr=${summary_dir}/stderr.txt"
     printf '%s\n' "capture_limit_bytes=${CAPTURE_LIMIT_BYTES}"
+    printf '%s\n' "capture_limit_enforcement=$(sed -n 1p "${summary_dir}/limit.txt" 2>/dev/null || printf unknown)"
 }
 
 run_prerequisites_case() {
