@@ -8,6 +8,21 @@ import os
 import re
 import shutil
 
+# Process observation V4 wall-budget ceiling (3600 s, every host).
+V4_MAX_WALL_SECONDS = 3600
+# Headers src/runtime includes from outside itself; staged with it.
+RUNTIME_EXTERNAL_HEADERS = ("src/compiler/70.backend/backend_plugin/abi/simple_backend_plugin_v1.h",
+                            "tools/counterpart/sdk/c/simple_counterpart_abi.h")
+
+
+def task_budget_seconds(command_timeout_seconds):
+    """Whole-task bound for up to eight sequential commands, within the V4 cap.
+
+    The worker still bounds each command; only the task total is clamped, so a
+    default 900 s command timeout no longer asks V4 for 7230 s and gets refused.
+    """
+    return min(command_timeout_seconds * 8 + 30, V4_MAX_WALL_SECONDS)
+
 
 MEMORY_POLICIES = ("enforce", "monitor")
 MONITOR_PEAK_METRICS = ("process-tree-peak", "child-rss-peak")
@@ -195,6 +210,14 @@ def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
             shutil.copyfile(matrix.root / relative, destination)
         fixtures = Path("test/fixtures/bootstrap/hello_sanity_matrix")
         shutil.copytree(matrix.root / fixtures, source / fixtures)
+        # The compiler builds its core C runtime objects from src/runtime even
+        # when linking the prebuilt archive; the isolated attempt has no other
+        # repository root to find them under.
+        shutil.copytree(matrix.root / "src/runtime", source / "src/runtime", symlinks=False)
+        for relative in RUNTIME_EXTERNAL_HEADERS:
+            destination = source / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(matrix.root / relative, destination)
         shutil.copyfile(matrix.compiler, source / ("compiler.exe" if os.name == "nt" else "compiler"))
         for relative, expected_hash in matrix.runtime_hashes.items():
             destination = source / "runtime" / relative
@@ -214,7 +237,10 @@ def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
         output = "hello-result.zip"
         # A form has up to eight sequential commands. The worker retains each
         # per-command bound; the production owner also caps the complete task.
-        task_seconds = matrix.args.timeout_seconds * 8 + 30
+        # Process observation V4 admits at most a 3600 s wall budget on every
+        # host (runtime_process_owned.c); a larger task budget is refused
+        # before the compiler starts, so the whole-task cap stays within it.
+        task_seconds = task_budget_seconds(matrix.args.timeout_seconds)
         cmd = [manifest_writer, "--job-from-inventory", template, producer,
                source, "hello", "sanity", output, "inputs.txt",
                "--memory-limit-bytes", str(matrix.args.max_rss_kib * 1024),
