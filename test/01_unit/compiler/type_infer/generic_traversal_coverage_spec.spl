@@ -1,0 +1,620 @@
+"""
+## Purpose and audience
+
+Pins Hindley-Milner traversal coverage in `30.types`: `Substitution.apply`,
+`HmInferContext.occurs` and `collect_free_vars` must walk every type-bearing
+payload (Union, Isolated, Projection, Throws effects, Tensor, TypeParam bounds).
+For compiler engineers changing type inference. A carrier that is skipped lets
+an infinite type bind, leaves an inference variable unresolved, or under-quantifies.
+
+## Operator workflow
+
+Run `bin/simple test test/01_unit/compiler/type_infer/generic_traversal_coverage_spec.spl`
+with the pure-Simple binary. Expected strings come from a local structural
+renderer, independent of the kernels under test.
+"""
+
+# @manual_section: hm-traversal-coverage
+
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use std.spec.step
+
+fn sp() -> Span:
+    lex_span_empty()
+
+fn mk(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: sp())
+
+fn int64() -> HirType:
+    mk(HirTypeKind.Int(64, true))
+
+fn str_ty() -> HirType:
+    mk(HirTypeKind.Str)
+
+fn unit_ty() -> HirType:
+    mk(HirTypeKind.Unit)
+
+fn throws(payload: HirType) -> Effect:
+    Effect(kind: EffectKind.Throws(payload), span: sp())
+
+fn wrap_union(x: HirType) -> HirType:
+    mk(HirTypeKind.Union([x, str_ty()]))
+
+fn wrap_isolated(x: HirType) -> HirType:
+    mk(HirTypeKind.Isolated(x))
+
+fn wrap_projection(x: HirType) -> HirType:
+    mk(HirTypeKind.Projection(x, "Item"))
+
+fn wrap_throws(x: HirType) -> HirType:
+    mk(HirTypeKind.Function([], unit_ty(), [throws(x)]))
+
+fn wrap_tensor(x: HirType) -> HirType:
+    mk(HirTypeKind.Tensor(x, [], nil))
+
+fn wrap_bound(x: HirType) -> HirType:
+    mk(HirTypeKind.TypeParam("T", [x]))
+
+fn show_all(items: [HirType]) -> text:
+    var parts: [text] = []
+    for item in items:
+        parts = parts.push(show(item))
+    parts.join(",")
+
+fn show_effect(effect: Effect) -> text:
+    match effect.kind:
+        case Throws(payload): "throws " + show(payload)
+        case IO: "io"
+        case Custom(name): "custom " + name
+        case _: "other"
+
+fn show_effects(effects: [Effect]) -> text:
+    var parts: [text] = []
+    for effect in effects:
+        parts = parts.push(show_effect(effect))
+    parts.join(",")
+
+fn show(ty: HirType) -> text:
+    match ty.kind:
+        case Int(bits, _): "i{bits}"
+        case Str: "str"
+        case Unit: "unit"
+        case Bool: "bool"
+        case Infer(id, _): "?{id}"
+        case Union(members): "Union[" + show_all(members) + "]"
+        case Isolated(inner): "Iso[" + show(inner) + "]"
+        case Projection(base, name): "Proj[" + show(base) + "." + name + "]"
+        case Function(params, ret, effects): "Fn[" + show_all(params) + "->" + show(ret) + "!" + show_effects(effects) + "]"
+        case Tensor(element, _, _): "Tensor[" + show(element) + "]"
+        case TypeParam(name, bounds): name + ":[" + show_all(bounds) + "]"
+        case Optional(inner): "Opt[" + show(inner) + "]"
+        case Tuple(elements): "Tup[" + show_all(elements) + "]"
+        case _: "leaf"
+
+fn var_id(ty: HirType) -> i64:
+    match ty.kind:
+        case Infer(id, _): id
+        case _: -1
+
+fn occurs_error_id(result: Result<(), TypeInferError>) -> i64:
+    match result:
+        case Err(TypeInferError.OccursCheck(id, _, _)): id
+        case _: -1
+
+fn bound_var(ctx: HmInferContext) -> HirType:
+    ctx.enter_level()
+    val v = ctx.fresh_var(sp())
+    ctx.exit_level()
+    v
+describe "HM traversal through Union":
+    it "apply resolves a bound variable under Union":
+        # @req REQ-HM-TRAV-001
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Bind a variable to i64 and apply over Union")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(ctx.unify(v, int64()).is_ok()).to_equal(true)
+        expect(show(ctx.apply_subst(wrap_union(v)))).to_equal("Union[i64,str]")
+
+    it "apply keeps an unbound variable under Union":
+        # @req REQ-HM-TRAV-002
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply over Union with no binding for its variable")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val id = var_id(v)
+        expect(show(ctx.apply_subst(wrap_union(v)))).to_equal("Union[?{id},str]")
+
+    it "occurs finds a variable under Union":
+        # @req REQ-HM-TRAV-003
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask whether a variable occurs in Union around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        assert_true(ctx.occurs(var_id(v), wrap_union(v)))
+
+    it "occurs rejects a different variable under Union":
+        # @req REQ-HM-TRAV-004
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask about a variable absent from Union")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val other = ctx.fresh_var(sp())
+        assert_false(ctx.occurs(var_id(other), wrap_union(v)))
+
+    it "unify rejects a self reference through Union":
+        # @req REQ-HM-TRAV-005
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Unify a variable with Union around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val result = ctx.unify(v, wrap_union(v))
+        expect(occurs_error_id(result)).to_equal(var_id(v))
+        expect(show(ctx.resolve(v))).to_equal("?{var_id(v)}")
+
+    it "generalize quantifies a variable under Union":
+        # @req REQ-HM-TRAV-006
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Generalize Union around an inner-level variable")
+        var ctx = HmInferContext.new()
+        val v = bound_var(ctx)
+        expect(ctx.generalize(wrap_union(v)).vars).to_equal([var_id(v)])
+
+describe "HM traversal through Isolated":
+    it "apply resolves a bound variable under Isolated":
+        # @req REQ-HM-TRAV-007
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Bind a variable to i64 and apply over Isolated")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(ctx.unify(v, int64()).is_ok()).to_equal(true)
+        expect(show(ctx.apply_subst(wrap_isolated(v)))).to_equal("Iso[i64]")
+
+    it "apply keeps an unbound variable under Isolated":
+        # @req REQ-HM-TRAV-008
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply over Isolated with no binding for its variable")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val id = var_id(v)
+        expect(show(ctx.apply_subst(wrap_isolated(v)))).to_equal("Iso[?{id}]")
+
+    it "occurs finds a variable under Isolated":
+        # @req REQ-HM-TRAV-009
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask whether a variable occurs in Isolated around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        assert_true(ctx.occurs(var_id(v), wrap_isolated(v)))
+
+    it "occurs rejects a different variable under Isolated":
+        # @req REQ-HM-TRAV-010
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask about a variable absent from Isolated")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val other = ctx.fresh_var(sp())
+        assert_false(ctx.occurs(var_id(other), wrap_isolated(v)))
+
+    it "unify rejects a self reference through Isolated":
+        # @req REQ-HM-TRAV-011
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Unify a variable with Isolated around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val result = ctx.unify(v, wrap_isolated(v))
+        expect(occurs_error_id(result)).to_equal(var_id(v))
+        expect(show(ctx.resolve(v))).to_equal("?{var_id(v)}")
+
+    it "generalize quantifies a variable under Isolated":
+        # @req REQ-HM-TRAV-012
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Generalize Isolated around an inner-level variable")
+        var ctx = HmInferContext.new()
+        val v = bound_var(ctx)
+        expect(ctx.generalize(wrap_isolated(v)).vars).to_equal([var_id(v)])
+
+describe "HM traversal through Projection":
+    it "apply resolves a bound variable under Projection":
+        # @req REQ-HM-TRAV-013
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Bind a variable to i64 and apply over Projection")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(ctx.unify(v, int64()).is_ok()).to_equal(true)
+        expect(show(ctx.apply_subst(wrap_projection(v)))).to_equal("Proj[i64.Item]")
+
+    it "apply keeps an unbound variable under Projection":
+        # @req REQ-HM-TRAV-014
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply over Projection with no binding for its variable")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val id = var_id(v)
+        expect(show(ctx.apply_subst(wrap_projection(v)))).to_equal("Proj[?{id}.Item]")
+
+    it "occurs finds a variable under Projection":
+        # @req REQ-HM-TRAV-015
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask whether a variable occurs in Projection around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        assert_true(ctx.occurs(var_id(v), wrap_projection(v)))
+
+    it "occurs rejects a different variable under Projection":
+        # @req REQ-HM-TRAV-016
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask about a variable absent from Projection")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val other = ctx.fresh_var(sp())
+        assert_false(ctx.occurs(var_id(other), wrap_projection(v)))
+
+    it "unify rejects a self reference through Projection":
+        # @req REQ-HM-TRAV-017
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Unify a variable with Projection around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val result = ctx.unify(v, wrap_projection(v))
+        expect(occurs_error_id(result)).to_equal(var_id(v))
+        expect(show(ctx.resolve(v))).to_equal("?{var_id(v)}")
+
+    it "generalize quantifies a variable under Projection":
+        # @req REQ-HM-TRAV-018
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Generalize Projection around an inner-level variable")
+        var ctx = HmInferContext.new()
+        val v = bound_var(ctx)
+        expect(ctx.generalize(wrap_projection(v)).vars).to_equal([var_id(v)])
+
+describe "HM traversal through Throws":
+    it "apply resolves a bound variable under Throws":
+        # @req REQ-HM-TRAV-019
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Bind a variable to i64 and apply over Throws")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(ctx.unify(v, int64()).is_ok()).to_equal(true)
+        expect(show(ctx.apply_subst(wrap_throws(v)))).to_equal("Fn[->unit!throws i64]")
+
+    it "apply keeps an unbound variable under Throws":
+        # @req REQ-HM-TRAV-020
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply over Throws with no binding for its variable")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val id = var_id(v)
+        expect(show(ctx.apply_subst(wrap_throws(v)))).to_equal("Fn[->unit!throws ?{id}]")
+
+    it "occurs finds a variable under Throws":
+        # @req REQ-HM-TRAV-021
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask whether a variable occurs in Throws around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        assert_true(ctx.occurs(var_id(v), wrap_throws(v)))
+
+    it "occurs rejects a different variable under Throws":
+        # @req REQ-HM-TRAV-022
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask about a variable absent from Throws")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val other = ctx.fresh_var(sp())
+        assert_false(ctx.occurs(var_id(other), wrap_throws(v)))
+
+    it "unify rejects a self reference through Throws":
+        # @req REQ-HM-TRAV-023
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Unify a variable with Throws around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val result = ctx.unify(v, wrap_throws(v))
+        expect(occurs_error_id(result)).to_equal(var_id(v))
+        expect(show(ctx.resolve(v))).to_equal("?{var_id(v)}")
+
+    it "generalize quantifies a variable under Throws":
+        # @req REQ-HM-TRAV-024
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Generalize Throws around an inner-level variable")
+        var ctx = HmInferContext.new()
+        val v = bound_var(ctx)
+        expect(ctx.generalize(wrap_throws(v)).vars).to_equal([var_id(v)])
+
+describe "HM traversal through Tensor":
+    it "apply resolves a bound variable under Tensor":
+        # @req REQ-HM-TRAV-025
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Bind a variable to i64 and apply over Tensor")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(ctx.unify(v, int64()).is_ok()).to_equal(true)
+        expect(show(ctx.apply_subst(wrap_tensor(v)))).to_equal("Tensor[i64]")
+
+    it "apply keeps an unbound variable under Tensor":
+        # @req REQ-HM-TRAV-026
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply over Tensor with no binding for its variable")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val id = var_id(v)
+        expect(show(ctx.apply_subst(wrap_tensor(v)))).to_equal("Tensor[?{id}]")
+
+    it "occurs finds a variable under Tensor":
+        # @req REQ-HM-TRAV-027
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask whether a variable occurs in Tensor around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        assert_true(ctx.occurs(var_id(v), wrap_tensor(v)))
+
+    it "occurs rejects a different variable under Tensor":
+        # @req REQ-HM-TRAV-028
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask about a variable absent from Tensor")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val other = ctx.fresh_var(sp())
+        assert_false(ctx.occurs(var_id(other), wrap_tensor(v)))
+
+    it "unify rejects a self reference through Tensor":
+        # @req REQ-HM-TRAV-029
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Unify a variable with Tensor around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val result = ctx.unify(v, wrap_tensor(v))
+        expect(occurs_error_id(result)).to_equal(var_id(v))
+        expect(show(ctx.resolve(v))).to_equal("?{var_id(v)}")
+
+    it "generalize quantifies a variable under Tensor":
+        # @req REQ-HM-TRAV-030
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Generalize Tensor around an inner-level variable")
+        var ctx = HmInferContext.new()
+        val v = bound_var(ctx)
+        expect(ctx.generalize(wrap_tensor(v)).vars).to_equal([var_id(v)])
+
+describe "HM traversal through TypeParam bound":
+    it "apply resolves a bound variable under TypeParam bound":
+        # @req REQ-HM-TRAV-031
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Bind a variable to i64 and apply over TypeParam bound")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(ctx.unify(v, int64()).is_ok()).to_equal(true)
+        expect(show(ctx.apply_subst(wrap_bound(v)))).to_equal("T:[i64]")
+
+    it "apply keeps an unbound variable under TypeParam bound":
+        # @req REQ-HM-TRAV-032
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply over TypeParam bound with no binding for its variable")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val id = var_id(v)
+        expect(show(ctx.apply_subst(wrap_bound(v)))).to_equal("T:[?{id}]")
+
+    it "occurs finds a variable under TypeParam bound":
+        # @req REQ-HM-TRAV-033
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask whether a variable occurs in TypeParam bound around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        assert_true(ctx.occurs(var_id(v), wrap_bound(v)))
+
+    it "occurs rejects a different variable under TypeParam bound":
+        # @req REQ-HM-TRAV-034
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Ask about a variable absent from TypeParam bound")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val other = ctx.fresh_var(sp())
+        assert_false(ctx.occurs(var_id(other), wrap_bound(v)))
+
+    it "unify rejects a self reference through TypeParam bound":
+        # @req REQ-HM-TRAV-035
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Unify a variable with TypeParam bound around itself")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val result = ctx.unify(v, wrap_bound(v))
+        expect(occurs_error_id(result)).to_equal(var_id(v))
+        expect(show(ctx.resolve(v))).to_equal("?{var_id(v)}")
+
+    it "generalize quantifies a variable under TypeParam bound":
+        # @req REQ-HM-TRAV-036
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Generalize TypeParam bound around an inner-level variable")
+        var ctx = HmInferContext.new()
+        val v = bound_var(ctx)
+        expect(ctx.generalize(wrap_bound(v)).vars).to_equal([var_id(v)])
+
+describe "HM traversal: payload preservation":
+    it "apply preserves Union member order":
+        # @req REQ-HM-TRAV-037
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply over a three-member union")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(ctx.unify(v, int64()).is_ok()).to_equal(true)
+        val u = mk(HirTypeKind.Union([str_ty(), v, unit_ty()]))
+        expect(show(ctx.apply_subst(u))).to_equal("Union[str,i64,unit]")
+
+    it "apply keeps non-Throws effects around a resolved Throws":
+        # @req REQ-HM-TRAV-038
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply over effects IO, Throws, Custom")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(ctx.unify(v, str_ty()).is_ok()).to_equal(true)
+        val fx = [Effect(kind: EffectKind.IO, span: sp()), throws(v), Effect(kind: EffectKind.Custom("net"), span: sp())]
+        val f = mk(HirTypeKind.Function([], unit_ty(), fx))
+        expect(show(ctx.apply_subst(f))).to_equal("Fn[->unit!io,throws str,custom net]")
+
+    it "apply preserves the Projection associated name":
+        # @req REQ-HM-TRAV-039
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply over a projection named Output")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(ctx.unify(v, int64()).is_ok()).to_equal(true)
+        expect(show(ctx.apply_subst(mk(HirTypeKind.Projection(v, "Output"))))).to_equal("Proj[i64.Output]")
+
+    it "apply preserves the source span of a rebuilt Union":
+        # @req REQ-HM-TRAV-040
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply over a union carrying a distinctive span")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val marked = Span(start: 11, end: 22, line: 3, col: 4, file: "m.spl", length: 11)
+        val out = ctx.apply_subst(HirType(kind: HirTypeKind.Union([v]), span: marked))
+        expect(out.span.start).to_equal(11)  # oracle: input span above
+        expect(out.span.file).to_equal("m.spl")
+
+    it "apply is idempotent across nested carriers":
+        # @req REQ-HM-TRAV-041
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Apply twice over Union inside Isolated inside Throws")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(ctx.unify(v, int64()).is_ok()).to_equal(true)
+        val t = wrap_throws(wrap_isolated(wrap_union(v)))
+        val once = ctx.apply_subst(t)
+        expect(show(once)).to_equal("Fn[->unit!throws Iso[Union[i64,str]]]")
+        expect(show(ctx.apply_subst(once))).to_equal(show(once))
+
+    it "apply chases a variable chain under Projection":
+        # @req REQ-HM-TRAV-042
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Link two variables then apply")
+        var ctx = HmInferContext.new()
+        val a = ctx.fresh_var(sp())
+        val b = ctx.fresh_var(sp())
+        expect(ctx.unify(a, b).is_ok()).to_equal(true)
+        expect(ctx.unify(b, int64()).is_ok()).to_equal(true)
+        expect(show(ctx.apply_subst(wrap_projection(a)))).to_equal("Proj[i64.Item]")
+
+    it "apply resolves a variable bound to a carrier containing another variable":
+        # @req REQ-HM-TRAV-043
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Bind a to Union of b, then bind b")
+        var ctx = HmInferContext.new()
+        val a = ctx.fresh_var(sp())
+        val b = ctx.fresh_var(sp())
+        expect(ctx.unify(a, wrap_union(b)).is_ok()).to_equal(true)
+        expect(ctx.unify(b, int64()).is_ok()).to_equal(true)
+        expect(show(ctx.resolve(a))).to_equal("Union[i64,str]")
+
+describe "HM traversal: nesting and soundness":
+    it "rejects a cycle formed in two steps through Isolated":
+        # @req REQ-HM-TRAV-044
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Bind a to Isolated b, then unify b with a")
+        var ctx = HmInferContext.new()
+        val a = ctx.fresh_var(sp())
+        val b = ctx.fresh_var(sp())
+        expect(ctx.unify(a, wrap_isolated(b)).is_ok()).to_equal(true)
+        expect(occurs_error_id(ctx.unify(b, a))).to_equal(var_id(b))
+
+    it "rejects a self reference with the variable on the right":
+        # @req REQ-HM-TRAV-045
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Unify Union of a with a")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        expect(occurs_error_id(ctx.unify(wrap_union(v), v))).to_equal(var_id(v))
+
+    it "rejects a self reference nested under Optional, Function and Union":
+        # @req REQ-HM-TRAV-046
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Unify a with a deeply nested self reference")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val inner = mk(HirTypeKind.Function([wrap_union(v)], unit_ty(), []))
+        expect(occurs_error_id(ctx.unify(v, mk(HirTypeKind.Optional(inner))))).to_equal(var_id(v))
+
+    it "finds a variable in a Throws payload nested in a Throws payload":
+        # @req REQ-HM-TRAV-047
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Occurs over a thrown function that throws the variable")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        assert_true(ctx.occurs(var_id(v), wrap_throws(wrap_throws(v))))
+
+    it "quantifies in first encounter order across params, return and Throws":
+        # @req REQ-HM-TRAV-048
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Generalize a function with a variable in each slot")
+        var ctx = HmInferContext.new()
+        val a = bound_var(ctx)
+        val b = bound_var(ctx)
+        val c = bound_var(ctx)
+        val f = mk(HirTypeKind.Function([wrap_union(a)], wrap_isolated(b), [throws(c)]))
+        expect(ctx.generalize(f).vars).to_equal([var_id(a), var_id(b), var_id(c)])
+
+    it "deduplicates a variable repeated across carriers":
+        # @req REQ-HM-TRAV-049
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Generalize one variable present in Union and Throws")
+        var ctx = HmInferContext.new()
+        val v = bound_var(ctx)
+        val f = mk(HirTypeKind.Function([wrap_union(v)], wrap_projection(v), [throws(v)]))
+        expect(ctx.generalize(f).vars).to_equal([var_id(v)])
+
+    it "does not quantify an environment variable hidden under Union":
+        # @req REQ-HM-TRAV-050
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Bind a mono Union of a variable, then generalize it")
+        var ctx = HmInferContext.new()
+        val v = bound_var(ctx)
+        ctx.bind_mono("x", wrap_union(v))
+        expect(ctx.generalize(v).vars.len()).to_equal(0)  # oracle: env owns the variable
+
+    it "does not quantify an environment variable hidden under Throws":
+        # @req REQ-HM-TRAV-051
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Bind a mono thrown function, then generalize its variable")
+        var ctx = HmInferContext.new()
+        val v = bound_var(ctx)
+        ctx.bind_mono("x", wrap_throws(v))
+        expect(ctx.generalize(v).vars.len()).to_equal(0)  # oracle: env owns the variable
+
+    it "instantiates a generalized Union with a fresh variable":
+        # @req REQ-HM-TRAV-052
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Generalize then instantiate a Union scheme")
+        var ctx = HmInferContext.new()
+        val v = bound_var(ctx)
+        val scheme = ctx.generalize(wrap_union(v))
+        val fresh = ctx.instantiate(scheme)
+        assert_false(ctx.occurs(var_id(v), fresh))
+
+describe "HM traversal: leaf and existing-arm controls":
+    it "leaves every non-type-bearing leaf unchanged and var-free":
+        # @req REQ-HM-TRAV-053
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Walk a table of leaf kinds through all three kernels")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val leaves = [HirTypeKind.Int(8, false), HirTypeKind.Float(32), HirTypeKind.Bool, HirTypeKind.Char, HirTypeKind.Str, HirTypeKind.Unit, HirTypeKind.Error, HirTypeKind.Never, HirTypeKind.Any, HirTypeKind.DynTrait(SymbolId(id: 1)), HirTypeKind.Layer([], [])]
+        for kind in leaves:
+            assert_false(ctx.occurs(var_id(v), mk(kind)))
+            expect(ctx.free_vars_with_levels(mk(kind)).len()).to_equal(0)  # oracle: leaves carry no type
+
+    it "still covers every pre-existing carrier":
+        # @req REQ-HM-TRAV-054
+        # @capture(statistics): the rendered type or verdict, retained for review
+        step("Walk a table of pre-existing carriers through occurs and apply")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(sp())
+        val carriers = [mk(HirTypeKind.Tuple([v])), mk(HirTypeKind.Array(v, nil)), mk(HirTypeKind.Slice(v)), mk(HirTypeKind.Dict(str_ty(), v)), mk(HirTypeKind.Ref(v, false)), mk(HirTypeKind.Ptr(v, true)), mk(HirTypeKind.Optional(v)), mk(HirTypeKind.Result(v, str_ty())), mk(HirTypeKind.Named(SymbolId(id: 2), [v])), mk(HirTypeKind.Unique(v)), mk(HirTypeKind.Shared(v)), mk(HirTypeKind.Weak(v))]
+        for carrier in carriers:
+            assert_true(ctx.occurs(var_id(v), carrier))
+            expect(ctx.free_vars_with_levels(carrier).len()).to_equal(1)  # oracle: one variable per carrier
+
