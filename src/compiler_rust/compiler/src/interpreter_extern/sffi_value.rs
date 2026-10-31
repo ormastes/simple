@@ -191,52 +191,65 @@ pub fn rt_value_is_int_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// Check if value is float
+/// Read the single argument of a `rt_value_is_*` / `rt_value_type_tag` probe.
+fn probe_arg<'a>(args: &'a [Value], name: &str) -> Result<&'a Value, CompileError> {
+    args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            format!("{} expects 1 argument", name),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })
+}
+
+/// How a probe argument looks to the native runtime.
+///
+/// A word-convertible argument is decoded as a raw `RuntimeValue` (the
+/// historical contract). Any other argument is a concrete carrier (a
+/// struct/class record, enum, string, collection, ...) passed to a generic
+/// `extern fn rt_value_is_*<T>(value: T)` without reboxing. Compiled code
+/// receives that as a heap pointer, so it is classified as heap, except
+/// `Option::None`, which is nil (matching `rt_value_is_nil_fn`).
+enum ProbeCarrier {
+    Word(RuntimeValue),
+    Heap,
+    Nil,
+}
+
+fn classify_probe(value: &Value) -> ProbeCarrier {
+    match value.as_int() {
+        Ok(raw) => ProbeCarrier::Word(RuntimeValue::from_raw(raw as u64)),
+        Err(_) if value.is_nil_like() => ProbeCarrier::Nil,
+        Err(_) => ProbeCarrier::Heap,
+    }
+}
+
+/// Check if value is float. A record/heap carrier is never a float.
 pub fn rt_value_is_float_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let raw = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_value_is_float expects 1 argument".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
-
-    let rv = RuntimeValue::from_raw(raw as u64);
-    Ok(Value::Bool(rt_value_is_float(rv)))
+    let value = probe_arg(args, "rt_value_is_float")?;
+    Ok(Value::Bool(match classify_probe(value) {
+        ProbeCarrier::Word(rv) => rt_value_is_float(rv),
+        ProbeCarrier::Heap | ProbeCarrier::Nil => false,
+    }))
 }
 
-/// Check if value is bool
+/// Check if value is bool. A record/heap carrier is never a bool.
 pub fn rt_value_is_bool_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let raw = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_value_is_bool expects 1 argument".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
-
-    let rv = RuntimeValue::from_raw(raw as u64);
-    Ok(Value::Bool(rt_value_is_bool(rv)))
+    let value = probe_arg(args, "rt_value_is_bool")?;
+    Ok(Value::Bool(match classify_probe(value) {
+        ProbeCarrier::Word(rv) => rt_value_is_bool(rv),
+        ProbeCarrier::Heap | ProbeCarrier::Nil => false,
+    }))
 }
 
-/// Check if value is heap pointer
+/// Check if value is heap pointer. A record carrier is a heap object, as in
+/// compiled code; `Option::None` is nil, not heap.
 pub fn rt_value_is_heap_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let raw = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_value_is_heap expects 1 argument".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
-
-    let rv = RuntimeValue::from_raw(raw as u64);
-    Ok(Value::Bool(rt_value_is_heap(rv)))
+    let value = probe_arg(args, "rt_value_is_heap")?;
+    Ok(Value::Bool(match classify_probe(value) {
+        ProbeCarrier::Word(rv) => rt_value_is_heap(rv),
+        ProbeCarrier::Heap => true,
+        ProbeCarrier::Nil => false,
+    }))
 }
 
 /// RuntimeValue-aware equality for native/raw i64 carriers.
@@ -265,19 +278,15 @@ pub fn rt_native_neq_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(rt_native_neq(left, right)))
 }
 
-/// Get type tag from RuntimeValue
+/// Get type tag from RuntimeValue. A record carrier reports the heap tag and
+/// `Option::None` the nil tag, matching compiled code.
 pub fn rt_value_type_tag_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let raw = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_value_type_tag expects 1 argument".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
-
-    let rv = RuntimeValue::from_raw(raw as u64);
+    let value = probe_arg(args, "rt_value_type_tag")?;
+    let rv = match classify_probe(value) {
+        ProbeCarrier::Word(rv) => rv,
+        ProbeCarrier::Nil => rt_value_nil(),
+        ProbeCarrier::Heap => return Ok(Value::Int(simple_runtime::value::tags::TAG_HEAP as i64)),
+    };
     Ok(Value::Int(rt_value_type_tag(rv) as i64))
 }
 
@@ -464,5 +473,39 @@ mod carrier_probe_tests {
         assert!(matches!(rt_value_is_nil_fn(&[Value::Int(nil_word)]).unwrap(), Value::Bool(true)));
         assert!(rt_value_is_nil_fn(&[]).is_err());
         assert!(rt_value_is_int_fn(&[]).is_err());
+    }
+
+    #[test]
+    fn record_carrier_is_heap_not_float_or_bool() {
+        assert!(matches!(rt_value_is_heap_fn(&[record()]).unwrap(), Value::Bool(true)));
+        assert!(matches!(rt_value_is_float_fn(&[record()]).unwrap(), Value::Bool(false)));
+        assert!(matches!(rt_value_is_bool_fn(&[record()]).unwrap(), Value::Bool(false)));
+        let heap_tag = simple_runtime::value::tags::TAG_HEAP as i64;
+        assert!(matches!(rt_value_type_tag_fn(&[record()]).unwrap(), Value::Int(t) if t == heap_tag));
+    }
+
+    #[test]
+    fn option_none_carrier_is_not_heap() {
+        let none = Value::none();
+        assert!(matches!(rt_value_is_heap_fn(&[none.clone()]).unwrap(), Value::Bool(false)));
+        assert!(matches!(rt_value_is_float_fn(&[none.clone()]).unwrap(), Value::Bool(false)));
+        assert!(matches!(rt_value_is_bool_fn(&[none.clone()]).unwrap(), Value::Bool(false)));
+        let nil_tag = rt_value_type_tag(rt_value_nil()) as i64;
+        assert!(matches!(rt_value_type_tag_fn(&[none]).unwrap(), Value::Int(t) if t == nil_tag));
+    }
+
+    #[test]
+    fn raw_word_float_bool_heap_contract_is_unchanged() {
+        let f = rt_value_float(1.5).to_raw() as i64;
+        let b = rt_value_bool(true).to_raw() as i64;
+        let i = rt_value_int(7).to_raw() as i64;
+        assert!(matches!(rt_value_is_float_fn(&[Value::Int(f)]).unwrap(), Value::Bool(true)));
+        assert!(matches!(rt_value_is_bool_fn(&[Value::Int(b)]).unwrap(), Value::Bool(true)));
+        assert!(matches!(rt_value_is_heap_fn(&[Value::Int(i)]).unwrap(), Value::Bool(false)));
+        assert!(matches!(rt_value_is_float_fn(&[Value::Int(i)]).unwrap(), Value::Bool(false)));
+        assert!(rt_value_is_float_fn(&[]).is_err());
+        assert!(rt_value_is_bool_fn(&[]).is_err());
+        assert!(rt_value_is_heap_fn(&[]).is_err());
+        assert!(rt_value_type_tag_fn(&[]).is_err());
     }
 }
