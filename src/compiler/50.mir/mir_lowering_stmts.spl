@@ -4452,6 +4452,7 @@ impl MirLowering:
                     MirType(kind: MirTypeKind.Opaque("str")),
                     body,
                     source_span,
+                    nil,
                     nil
                 )
 
@@ -4470,7 +4471,7 @@ impl MirLowering:
                     case _: ()
 
         if self.local_is_runtime_array(collection_local) or ((collection_is_erased_word or array_iter_local.id != collection_local.id) and element_type_from_hir):
-            return self.lower_for_array_indexed(var_, array_iter_local, element_type, body, source_span, declared_element_type)
+            return self.lower_for_array_indexed(var_, array_iter_local, element_type, body, source_span, declared_element_type, erased_element_hir)
 
         # Erased-collection lane: `for x in v` where v's declared type is the
         # type-erasure slot (`Any` / `Optional(Any)` — the JSON facade's `any?`
@@ -4493,7 +4494,7 @@ impl MirLowering:
                         case MirTypeKind.Tuple(_):
                             erased_coll_local = self.option_payload_or_self(collection_local)
                         case _: ()
-            return self.lower_for_array_indexed(var_, erased_coll_local, MirType.i64(), body, source_span)
+            return self.lower_for_array_indexed(var_, erased_coll_local, MirType.i64(), body, source_span, nil, nil)
 
         # `for (k, v) in dict` / `for e in dict`: iterate the dict's
         # (key, value) 2-tuples, exactly the form the interpreter yields and
@@ -4519,7 +4520,7 @@ impl MirLowering:
                 self.builtin_dict_entry_field_type(dict_value_hir, entry_value_mir)
             ]
             val native_entries = self.builtin_dict_entries_array(collection_local, entry_fields)
-            return self.lower_for_array_indexed(var_, native_entries, MirType(kind: MirTypeKind.Tuple(entry_fields)), body, source_span, nil)
+            return self.lower_for_array_indexed(var_, native_entries, MirType(kind: MirTypeKind.Tuple(entry_fields)), body, source_span, nil, nil)
 
         # Non-array iterable: no supported lowering (#143). Fail loudly.
         # Diagnostics: `body.span` is frequently (0,0) on this pipeline, which
@@ -4547,7 +4548,7 @@ impl MirLowering:
                     match dict_keys_mir_type.kind:
                         case MirTypeKind.Array(key_elem_type, _): dict_key_elem_type = key_elem_type
                         case _: ()
-                return self.lower_for_array_indexed(var_, dict_keys_local, dict_key_elem_type, body, source_span, nil)
+                return self.lower_for_array_indexed(var_, dict_keys_local, dict_key_elem_type, body, source_span, nil, nil)
 
         val iter_coll_type_text = mir_type_probe_text(self.local_mir_type_of(collection_local))
         val iter_unsupported_msg = "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while (collection mir type: {iter_coll_type_text}; module: {self.current_module_id})"
@@ -4582,7 +4583,8 @@ impl MirLowering:
         element_type: MirType,
         body: HirBlock,
         source_span: Span,
-        declared_element_type: HirType?
+        declared_element_type: HirType?,
+        erased_element_hir: HirType?
     ) -> LocalId:
         """Lower `for x in arr` over a runtime array as a counted index loop.
 
