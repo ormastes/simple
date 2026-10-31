@@ -4152,6 +4152,32 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn rt_pool_join_result_is_not_shifted() {
+        let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+        backend.create_module("pool_join_raw").unwrap();
+        let mut func = MirFunction::new(
+            "join".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        func.params.push(MirLocal {
+            name: "handle".to_string(), ty: crate::hir::TypeId::I64,
+            kind: LocalKind::Parameter, is_ghost: false,
+        });
+        func.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(1)),
+            target: CallTarget::from_name("rt_pool_join"),
+            args: vec![VReg(0)],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("@rt_pool_join("), "{ir}");
+        assert!(!ir.contains("rt_pool_join_tagged") && !ir.contains(" shl "), "rt_pool_join result must stay raw: {ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
     fn boolean_constants_match_unboxed_payloads_in_both_dispatch_paths() {
         let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
         backend.create_module("raw_boolean_constants").unwrap();

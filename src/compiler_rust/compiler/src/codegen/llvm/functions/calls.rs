@@ -3042,18 +3042,13 @@ impl LlvmBackend {
         // Store result if there's a destination
         if let Some(d) = dest {
             if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                let final_ret = if sffi_name == "rt_pool_join" {
-                    let raw = self
-                        .coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
-                        .into_int_value();
-                    let shift = i64_type.const_int(3, false);
-                    builder
-                        .build_left_shift(raw, shift, "rt_pool_join_tagged")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_pool_join tag", &e))?
-                        .into()
-                } else {
-                    ret_val
-                };
+                // rt_pool_join returns the task's raw i64 result (runtime_pool.c
+                // rt_pool_join; a boxed closure's tagged return is unboxed by the
+                // pool, PR #5507). A `<< 3` here turned `7` into `56`. No tagging
+                // shift, matching Cranelift, whose
+                // `tag_runtime_pool_join_result` defaults to false and is
+                // forced false for native-project builds.
+                let final_ret = ret_val;
                 vreg_map.insert(d, final_ret);
             } else {
                 let default_val = i64_type.const_int(0, false);
