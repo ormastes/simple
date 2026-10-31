@@ -1,0 +1,86 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/nil_return_non_optional_deferred_2026-10-31.md
+"""
+# Small nil-capable externs declare `T?`
+
+The Rust handlers of `rt_file_read_text`, `rt_platform_name`,
+`rt_term_enable_ansi`, `rt_stdin_read_line`, `rt_get_args`,
+`rt_byte_array_new`, `rt_simd_profile_name` and the `rt_serial_*` status
+externs can return nil: a failed read, end of input, a failed allocation, or
+a runtime bridge that produced no value. Their declarations claimed a
+non-optional result. A `bin/simple test` run executes the deployed binary,
+which returns nil whatever the declaration says, so the behaviour blocks may
+pass against reverted source. The source block pins each declaration.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file_text}
+use std.nogc_sync_mut.sffi.io.{file_read_text_nilable}
+use std.nogc_sync_mut.sffi.fs.{file_read_text_unchecked}
+use std.nogc_sync_mut.sffi.platform.{platform_name_raw}
+use std.nogc_sync_mut.shell.file.{read_text}
+
+val MISSING = "/nonexistent/simple-nil-ret-small-extern-probe/zz"
+
+fn _declares(path: text, decl: text) -> bool:
+    if val src = read_file_text(path):
+        for line in src.split("\n"):
+            if line.split("  #")[0].trim() == decl:
+                return true
+    false
+
+describe "changed wrappers report absence explicitly":
+    it "sffi.io file_read_text_nilable returns nil for an unreadable file":
+        # @req REQ-SSPEC-UNIT
+        step("Read a missing path through the nilable io wrapper")
+        expect(file_read_text_nilable(MISSING) == nil).to_equal(true)
+
+    it "sffi.fs file_read_text_unchecked returns nil for an unreadable file":
+        # @req REQ-SSPEC-UNIT
+        step("Read a missing path through the unchecked fs wrapper")
+        expect(file_read_text_unchecked(MISSING) == nil).to_equal(true)
+
+    it "shell read_text keeps its documented empty result for an unreadable file":
+        # @req REQ-SSPEC-UNIT
+        step("Read a missing path through the shell facade")
+        expect(read_text(MISSING)).to_equal("")
+
+    it "platform_name_raw names the host platform":
+        # @req REQ-SSPEC-UNIT
+        step("Query the platform through the checked wrapper")
+        expect(platform_name_raw().len() > 0).to_equal(true)
+
+describe "declarations pinned in source":
+    it "rt_file_read_text is optional in the io, fs and app declaring files":
+        # @req REQ-SSPEC-UNIT
+        step("Read the declaring files")
+        val decl = "extern fn rt_file_read_text(path: text) -> text?"
+        for path in ["src/lib/nogc_sync_mut/sffi/io.spl", "src/lib/nogc_sync_mut/sffi/fs.spl", "src/app/editor/editor_controller.spl", "src/app/snpm/manifest.spl", "src/app/compile/llvm_direct.spl", "src/lib/nogc_sync_mut/database/core.spl"]:
+            step(path)
+            expect(_declares(path, decl)).to_equal(true)
+
+    it "rt_platform_name is optional where it is declared":
+        # @req REQ-SSPEC-UNIT
+        step("Read the declaring files")
+        val decl = "extern fn rt_platform_name() -> text?"
+        for path in ["src/lib/nogc_sync_mut/sffi/platform.spl", "src/lib/nogc_sync_mut/tui/terminal.spl", "src/app/ui.tui/app.spl", "src/app/dashboard/dashboard_export_runtime.spl"]:
+            step(path)
+            expect(_declares(path, decl)).to_equal(true)
+
+    it "rt_term_enable_ansi, rt_stdin_read_line and rt_get_args are optional":
+        # @req REQ-SSPEC-UNIT
+        step("Read the declaring files")
+        expect(_declares("src/app/ui.tui/backend.spl", "extern fn rt_term_enable_ansi() -> bool?")).to_equal(true)
+        expect(_declares("src/lib/nogc_sync_mut/hooks/stop.spl", "extern fn rt_stdin_read_line() -> text?")).to_equal(true)
+        expect(_declares("src/app/office/interactive.spl", "extern fn rt_stdin_read_line() -> text?")).to_equal(true)
+        expect(_declares("src/app/cli/bootstrap_reason_planner.spl", "extern fn rt_get_args() -> [text]?")).to_equal(true)
+
+    it "rt_byte_array_new, rt_simd_profile_name and the serial status externs are optional":
+        # @req REQ-SSPEC-UNIT
+        step("Read the declaring files")
+        expect(_declares("src/lib/common/text_bytes.spl", "extern fn rt_byte_array_new(capacity: i64) -> [u8]?")).to_equal(true)
+        expect(_declares("src/lib/nogc_sync_mut/simd/profile.spl", "extern fn rt_simd_profile_name() -> text?")).to_equal(true)
+        expect(_declares("src/app/io/serial_ffi.spl", "extern fn rt_serial_read(fd: i64, max_bytes: i32) -> text?")).to_equal(true)
+        expect(_declares("src/app/io/serial_ffi.spl", "extern fn rt_serial_close(fd: i64) -> bool?")).to_equal(true)

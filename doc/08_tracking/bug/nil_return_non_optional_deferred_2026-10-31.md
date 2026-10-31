@@ -148,3 +148,66 @@ Open:
 - `src/os`, `src/compiler_rust/lib` and `test/**` declarations are outside the scanned roots.
 - A null pointer or invalid UTF-8 input to the native `rt_path_absolute` still returns `""`.
 - `bin/simple` pointed at a deleted bootstrap generation during this work. The last verification runs used a seed built in a scratch worktree.
+
+## Baseline clearing pass (2026-10-31, late)
+
+The guard was rewritten upstream during this pass (#5616). It now scans class
+(a) in `src/os`, `src/compiler_rust/lib`, `src/plugins` and `test/**`, strips
+CRLF, checks `rt_alias_map.sdn` decls, and takes raw-ABI opt-outs from
+`non_optional_nil_return_classa_optout.txt`, where every row needs a reason. So
+the earlier 88 / 26 / 8 became 1456 / 29 / 8 under the new scan, with 38
+opt-outs.
+
+| leg | at #5616 (04f552c8ea7) | release 312564eee8d (after #5634/#5637/#5638 landed in parallel) | after this pass |
+|---|---|---|---|
+| (a) | 1456 | 1381 | 1264 |
+| (b) | 29 | 24 | 1 |
+| (c) | 8 | 8 | 8 |
+| opt-outs | 38 | 38 | 30 (8 went stale because the extern became `T?` or lost its bogus return type) |
+
+Fixed:
+- **#5639:** `rt_stderr_write([u8])` and `rt_stdout_write([u8])` in the
+  interpreter write raw bytes.
+- **Declared `T?`, with every caller handling absence:**
+  - `rt_file_read_text` (all non-test, non-core declarations)
+  - `rt_platform_name`, `rt_term_enable_ansi`, `rt_stdin_read_line`,
+    `rt_get_args`, `rt_byte_array_new*`, `rt_simd_profile_name`
+  - `rt_serial_*`, `rt_env_get`, `rt_env_cwd`, `rt_dir_list`,
+    `rt_file_read_bytes`
+  - the mutex/rwlock/channel/tls externs
+  - all of `src/os` and `src/compiler_rust/lib`
+- **Handle constructors:** where nil is a runtime invariant violation, the
+  wrapper stays non-optional and panics with `E-SFFI-<AREA>-001`.
+- **Unit externs** (`rt_thread_sleep`, `rt_ptr_write_*`, `rt_stdout_flush`) lost
+  their bogus return type.
+- **Gate:** class (b) now inherits a class (a) opt-out when the forwarded
+  extern AND the wrapper return type both match an opt-out row (selftest
+  fixtures cover both directions). This cleared the raw `i64` simple_core
+  wrappers and `_sffi_enum_payload`. As a side effect it also cleared the
+  `50.mir/_MirLoweringExpr/expr_dispatch.spl` row; that file was not edited.
+- **`rt_alias_map.sdn`:** 12 `decl:` rows now match their `T?` module
+  declarations.
+
+Deferred, with reasons:
+- **`test/**`: 1240 class (a) rows**, mostly spec-local `rt_file_read_text`
+  declarations. This needs its own PR series per test area. It was not swept
+  here, so the reproducing specs would not be churned blind.
+- **`sffi/io.spl` `file_hash_sha256`** (class b; `file_read` and `file_read_text` were fixed in parallel by #5634)
+  and their `rt_file_read_text_rv` / `rt_file_hash_sha256` declarations, plus
+  the alias row: these are `@unsafe` raw wrappers with 44+ importers, including
+  `40.mono` (another owner) and many tests. They need a coordinated `T?`
+  migration.
+- **`io/process_ops.spl` `rt_process_observation_v4_*` (7):** tuple-valued
+  returns. Widening them to `?` hits the Option-wrapped-tuple `.0` hazard
+  (free_fn_optional_wrap_2026-06-26).
+- **Compiler core** (`10.frontend`, `20.hir`, `40.mono`, `50.mir`; another
+  owner): 14 class (a) rows (`rt_env_get` x5, `rt_dir_list`, `rt_path_absolute`,
+  `rt_enum_payload -> Expr` x7) and all 8 class (c) rows.
+- **Explicit-but-total `""` defaults kept at documented wrapper boundaries**,
+  with `# absent:` comments: `database/{atomic,core}.spl`, `exp/storage.spl`
+  `file_read` (about 30 callers), `shell/file.spl read_text`, and the lib/std
+  `shell.spl` facade. Making these `T?` cascades into their callers. That is
+  follow-up work.
+- **Native runtime:** `io_print.rs` `rt_stdout_write` / `rt_stderr_write` still
+  print the display form for `[u8]`. The interpreter is fixed; compiled
+  binaries are not.

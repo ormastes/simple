@@ -9,7 +9,7 @@ use simple_sdn.*
 
 # SFFI for file operations
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_atomic_write(path: text, content: text) -> bool
 @unsafe(reason: "acquires an OS-owned file descriptor that must be released exactly once", capabilities: [ffi])
 extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
@@ -63,7 +63,11 @@ fn atomic_update_file(
     # Read existing content (empty if file doesn't exist)
     var content = ""
     if rt_file_exists(path):
-        content = rt_file_read_text(path)
+        val read = rt_file_read_text(path)
+        if read == nil:
+            lock.release()
+            return Err("Failed to read file: " + path)
+        content = read.unwrap()
 
     # Apply update function
     val new_content = updater(content)
@@ -94,7 +98,9 @@ fn atomic_read_file(path: text) -> Result<text, text>:
 
     val content = rt_file_read_text(path)
     lock.release()
-    Ok(content)
+    if content == nil:
+        return Err("Failed to read file: " + path)
+    Ok(content.unwrap())
 
 # Atomic write with file locking
 #

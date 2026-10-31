@@ -1543,6 +1543,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_secure_temp_dir_set_prefix", file_io::rt_secure_temp_dir_set_prefix);
     insert_simple!("rt_secure_temp_dir_make", file_io::rt_secure_temp_dir_make);
     insert_simple!("rt_file_atomic_write", file_io::rt_file_atomic_write);
+    insert_simple!("rt_file_atomic_write_bytes_array", file_io::rt_file_atomic_write_bytes);
     insert_simple!("rt_file_atomic_write_mode", file_io::rt_file_atomic_write_mode);
     insert_simple!("rt_file_mode", file_io::rt_file_mode);
     insert_simple!("rt_file_canonicalize", file_io::rt_file_canonicalize);

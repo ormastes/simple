@@ -1,0 +1,40 @@
+# NIL-RET-001: a generated enum decoder that can reject (wire-nil restore
+# budget, char validation) returns nil, so it declares `T?`. Decoders with no
+# reject path keep their non-optional signature.
+# @req REQ-HIR-CODEC-A1
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.hir.generated.hir_codec.{hc_dec_hir_expr_kind, hc_dec_hir_type}
+use compiler.hir.hir_types.{HirTypeKind}
+
+describe "HIR codec enum decoders that can reject":
+    it "declares an optional return on every rejecting enum decoder":
+        step("Read the generated codec signatures")
+        val src = file_read("src/compiler/20.hir/generated/hir_codec.spl")
+        expect(src.contains("fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind?:")).to_equal(true)
+        expect(src.contains("fn hc_dec_hir_type_kind(r: FlatPoolReader) -> HirTypeKind?:")).to_equal(true)
+        expect(src.contains("fn hc_dec_asm_location(r: FlatPoolReader) -> AsmLocation?:")).to_equal(true)
+        expect(src.contains("fn hc_dec_visibility(r: FlatPoolReader) -> Visibility:")).to_equal(true)
+
+    it "returns nil without aborting when the wire-nil restore budget is exhausted":
+        step("Decode CharLit with a nil char slot under a tiny allocation budget")
+        # tag 4 = HirExprKind.CharLit; `\N` marks its char payload nil, which
+        # needs a reserve(80) on top of the 197 bytes the reader holds for its input.
+        var r = FlatPoolReader.new_bounded("4\n\\N\n", 6, 220, 8, 4, 100)
+        val kind = hc_dec_hir_expr_kind(r)
+        expect(kind).to_equal(nil)
+        expect(r.ok).to_equal(false)
+        expect(r.failure_kind).to_equal("bounds")
+
+    it "stores the unwrapped kind, not an Option, in the decoded node":
+        step("Decode a HirType whose kind comes from an optional decoder")
+        # present marker 1, tag 2 = HirTypeKind.Bool, span absent marker 0
+        var r = FlatPoolReader.new("1\n2\n0\n")
+        val decoded = hc_dec_hir_type(r)
+        expect(r.ok).to_equal(true)
+        var is_bool = false
+        match decoded.kind:
+            case HirTypeKind.Bool: is_bool = true
+            case _: is_bool = false
+        expect(is_bool).to_equal(true)
