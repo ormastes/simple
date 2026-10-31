@@ -41,7 +41,9 @@ fn qualification_require(condition: bool, message: text) -> Result<bool, text>:
 
 fn qualification_file_digest(path: text) -> Result<text, text>:
     qualification_require(file_is_regular_no_follow(path), "missing regular identity file: " + path)?
-    val digest = file_hash_sha256(path)
+    val digest_opt = file_hash_sha256(path)
+    qualification_require(digest_opt != nil, "cannot hash identity file: " + path)?
+    val digest = digest_opt.unwrap()
     qualification_require(digest.len() == 64, "cannot hash identity file: " + path)?
     Ok(digest)
 
@@ -161,7 +163,7 @@ fn qualification_local(config: BuilderQualificationConfig) -> Result<bool, text>
     for task in fixture.run.tasks:
         val receipt = builder_read_result_v1(fixture.directory + "/state/receipts/" + task.id + ".sdn")?
         qualification_require(receipt.status == "OK" and receipt.identity_digest == builder_task_identity_v1(task), "local execution receipt identity mismatch")?
-        qualification_require(receipt.outputs[0].digest == file_hash_sha256(fixture.directory + "/source/" + task.outputs[0]), "published bytes disagree with receipt")?
+        qualification_require(receipt.outputs[0].digest == file_hash_sha256(fixture.directory + "/source/" + task.outputs[0]).unwrap(), "published bytes disagree with receipt")?
         qualification_require(file_read(fixture.directory + "/source/" + task.outputs[0]).contains("producer-pid="), "fixture producer did not execute")?
     qualification_worker_identity(config)?
     Ok(true)
@@ -184,7 +186,7 @@ fn qualification_worker_identity(config: BuilderQualificationConfig) -> Result<b
 
 fn assert_cache_reused(fixture: BuilderLifecycleFixture, original_output: text, stdout: text) -> Result<bool, text>:
     qualification_require(stdout.contains("verified_cache_hits=1"), "manager did not report exactly one verified receipt reuse")?
-    qualification_require(file_hash_sha256(fixture.directory + "/source/cached.out") == original_output, "cache reuse reran or changed task output")?
+    qualification_require(file_hash_sha256(fixture.directory + "/source/cached.out").unwrap() == original_output, "cache reuse reran or changed task output")?
     assert_terminal_task_rows(fixture, ["SUCCEEDED"])
 
 fn qualification_cache(config: BuilderQualificationConfig) -> Result<bool, text>:
@@ -315,7 +317,7 @@ fn assert_stale_result_rejected(fixture: BuilderLifecycleFixture, result: (text,
         qualification_require(result.0.contains("verified_cache_hits=0"), "invalidated single-task run reported reuse without verified artifact restoration")?
     qualification_require(result.2 == 0, "invalidated output was rejected but not rebuilt; cached continuation remains incomplete")?
     val receipt = builder_read_result_v1(fixture.directory + "/state/receipts/cached.sdn")?
-    qualification_require(file_hash_sha256(fixture.directory + "/source/cached.out") == receipt.outputs[0].digest, "successful rebuild retained corrupt output")?
+    qualification_require(file_hash_sha256(fixture.directory + "/source/cached.out").unwrap() == receipt.outputs[0].digest, "successful rebuild retained corrupt output")?
     qualification_require(file_read(fixture.directory + "/source/cached.out").contains("producer-pid="), "invalidated output not rebuilt")?
     Ok(true)
 

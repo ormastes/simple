@@ -192,7 +192,7 @@ fn phase2_source_snapshot_publish_v1(
     if checkout_root == "" or source_root == "" or
             not builder_digest_valid_v1(authority_digest) or
             not file_is_regular_no_follow(authority_path) or
-            file_hash_sha256(authority_path) != authority_digest or
+            _native_group_phase2_source_snapshot_sha_mismatch(authority_path, authority_digest) or
             (file_exists(source_root) or dir_is_real_no_follow(source_root)) or
             not dir_create_all(source_root) or
             not dir_is_real_no_follow(source_root):
@@ -224,21 +224,20 @@ fn phase2_source_snapshot_publish_v1(
         val original = "{checkout_root}/{record.relative_path}"
         val destination = "{source_root}/{record.relative_path}"
         if not file_is_regular_no_follow(original) or
-                file_hash_sha256(original) != record.digest or
+                _native_group_phase2_source_snapshot_sha_mismatch(original, record.digest) or
                 file_exists(destination):
             return Err("phase2 source snapshot original differs")
         val bytes = file_read_regular_no_follow_bounded_bytes(
             original, PHASE2_AUTHORITY_MAX_FILE_BYTES_V1)?
         if not file_write_bytes(destination + ".phase2-staging", bytes) or
-                file_hash_sha256(destination + ".phase2-staging") !=
-                    record.digest:
+                _native_group_phase2_source_snapshot_sha_mismatch(destination + ".phase2-staging", record.digest):
             return Err("phase2 source snapshot staging differs")
         val published = file_publish_noreplace(
             destination + ".phase2-staging", destination)
         if published.is_err() or not published.unwrap() or
                 not file_is_regular_no_follow(destination) or
-                file_hash_sha256(destination) != record.digest or
-                file_hash_sha256(original) != record.digest or
+                _native_group_phase2_source_snapshot_sha_mismatch(destination, record.digest) or
+                _native_group_phase2_source_snapshot_sha_mismatch(original, record.digest) or
                 not set_permissions(destination,
                     if record.executable: 365 else: 292) or
                 not snapshot_readonly_nofollow_v1(destination, 1):
@@ -284,7 +283,7 @@ fn phase2_source_snapshot_publish_v1(
         val target = "{source_root}/{record.resolved_path}"
         if record.kind == "link-hex" and
                 (not file_is_regular_no_follow(target) or
-                    file_hash_sha256(target) != record.digest):
+                    _native_group_phase2_source_snapshot_sha_mismatch(target, record.digest)):
             return Err("phase2 source snapshot link target differs")
         if record.kind == "link-dir-hex" and
                 not dir_is_real_no_follow(target):
@@ -316,15 +315,14 @@ fn phase2_source_snapshot_publish_v1(
     val inventory = canonical_identity_sort_texts(source_paths).join("\n") + "\n"
     val inventory_path = "{source_root}/source.inventory"
     if not file_create_exclusive(inventory_path, inventory) or
-            file_hash_sha256(inventory_path) != sha256_text(inventory) or
+            _native_group_phase2_source_snapshot_sha_mismatch(inventory_path, sha256_text(inventory)) or
             not snapshot_readonly_nofollow_v1(inventory_path, 1):
         return Err("phase2 source snapshot inventory publication failed")
     val full_inventory = canonical_identity_sort_texts(
         full_regular_paths).join("\n") + "\n"
     val full_inventory_path = "{source_root}/full-source.inventory"
     if not file_create_exclusive(full_inventory_path, full_inventory) or
-            file_hash_sha256(full_inventory_path) !=
-                sha256_text(full_inventory) or
+            _native_group_phase2_source_snapshot_sha_mismatch(full_inventory_path, sha256_text(full_inventory)) or
             not snapshot_readonly_nofollow_v1(full_inventory_path, 1):
         return Err("phase2 full source inventory publication failed")
     var link_lines: [text] = []
@@ -340,7 +338,7 @@ fn phase2_source_snapshot_publish_v1(
         link_lines.join("\n") + "\n"
     val links_path = "{source_root}/full-source-links.inventory"
     if not file_create_exclusive(links_path, links_inventory) or
-            file_hash_sha256(links_path) != sha256_text(links_inventory) or
+            _native_group_phase2_source_snapshot_sha_mismatch(links_path, sha256_text(links_inventory)) or
             not snapshot_readonly_nofollow_v1(links_path, 1):
         return Err("phase2 source link inventory publication failed")
     Ok(Phase2SourceSnapshotV1(source_root, inventory_path,
@@ -354,3 +352,9 @@ fn phase2_source_snapshot_publish_v1(
 export PHASE2_AUTHORITY_MAX_BYTES_V1, PHASE2_AUTHORITY_MAX_FILES_V1
 export Phase2SourceRecordV1, Phase2SourceSnapshotV1
 export phase2_source_authority_decode_v1, phase2_source_snapshot_publish_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _native_group_phase2_source_snapshot_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

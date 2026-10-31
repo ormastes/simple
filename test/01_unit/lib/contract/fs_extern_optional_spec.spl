@@ -19,6 +19,9 @@ use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file_text}
 use std.nogc_sync_mut.sffi.fs.{file_list_dir, file_read_bytes_raw, file_read_lines_raw}
 use std.nogc_sync_mut.db.accel.{row_bitmap_and_words, row_bitmap_or_words, row_bitmap_andnot_words}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.io_runtime.{process_run}
+use compiler.driver.driver_build.incremental.{native_build_spl_tree_fingerprint}
 
 val MISSING = "/nonexistent/simple-nil-ret-fs-probe/zz"
 val SELF = "test/01_unit/lib/contract/fs_extern_optional_spec.spl"
@@ -158,3 +161,40 @@ describe "fs extern wrappers keep present results intact":
         val n = row_bitmap_andnot_words(lhs, rhs, 3, 3)
         expect(n.len()).to_equal(3)
         expect(n[2] == 240u32).to_equal(true)
+
+describe "file digests never report absence as an empty digest":
+    """
+    ## A missing file has no digest, and nothing built on it is fresh
+
+    An empty digest compares equal to every other failed digest, so the
+    absent case must be nil (or an always-unique "unfingerprintable" marker).
+    """
+
+    it "file_ops file_hash_sha256 reports a missing file as nil":
+        # @req REQ-SSPEC-UNIT
+        step("Hash a file that does not exist through std.nogc_sync_mut.io.file_ops")
+        expect(file_hash_sha256(MISSING) == nil).to_equal(true)
+
+    it "file_ops file_hash_sha256 returns a 64-char digest for a readable file":
+        # @req REQ-SSPEC-UNIT
+        val digest = file_hash_sha256(SELF)
+        expect(digest == nil).to_equal(false)
+        expect(digest.unwrap().len()).to_equal(64)
+
+    it "file_ops and incremental declare the digest helpers without an empty fallback":
+        # @req REQ-SSPEC-UNIT
+        expect(_declares("src/lib/nogc_sync_mut/io/file_ops.spl", "fn file_hash_sha256(path: text) -> text?:")).to_equal(true)
+        val inc = read_file_text("src/compiler/80.driver/driver_build/incremental.spl")
+        expect(inc.contains("_incremental_file_sha256_or_empty")).to_equal(false)
+
+    it "an spl tree fingerprint over an unreadable file is never fresh":
+        # @req REQ-SSPEC-UNIT
+        step("Build a tree whose only .spl entry is a dangling symlink")
+        val root = "build/fs_extern_optional_probe_tree"
+        val (_o, _e, code) = process_run("/bin/sh", ["-c", "rm -rf {root} && mkdir -p {root} && ln -s /nonexistent/simple-nil-ret-fs-probe/zz {root}/gone.spl"])
+        expect(code).to_equal(0)
+        val first = native_build_spl_tree_fingerprint(root)
+        val second = native_build_spl_tree_fingerprint(root)
+        process_run("/bin/sh", ["-c", "rm -rf {root}"])
+        expect(first.starts_with("unfingerprintable-")).to_equal(true)
+        expect(first == second).to_equal(false)

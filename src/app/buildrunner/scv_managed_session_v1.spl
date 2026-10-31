@@ -40,6 +40,12 @@ pub struct BuildRunnerScvManagedSetV1:
     record_payload: text
     source_session_digest: text
 
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _scv_managed_sha_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false
+
 pub fn build_runner_scv_managed_context_error_v1(context: BuildRunnerTaskContextV1) -> text:
     if context.target_layout_digest == "" and context.configuration_digest == "":
         return "scv-managed-target-and-configuration-unavailable"
@@ -192,7 +198,7 @@ pub fn build_runner_scv_managed_open_v1(task: BuildTaskV1, context: BuildRunnerT
             bytes: bytes, origin: origin, producer_digest: producer))
     var program = task.program
     if not program.starts_with("/") and not program.contains(":"): program = checkout + "/" + program
-    if not file_is_regular_no_follow(program) or file_hash_sha256(program) != task.producer_digest:
+    if not file_is_regular_no_follow(program) or not _scv_managed_sha_matches_v1(program, task.producer_digest):
         return Err("scv-managed-compiler-digest-differs")
     if builder_worker_environment_digest_v1()? != context.environment_digest: return Err("scv-managed-environment-differs")
     val epoch = build_runner_scv_managed_epoch_v1(task)?
@@ -272,6 +278,6 @@ pub fn build_runner_scv_managed_task_error_v1(owners: BuildRunnerScvManagedSetV1
         return checked.unwrap_err()
     if not builder_regular_input_parents_safe_v1(task, owner.staging_root): return "scv-managed-staging-path-unsafe"
     for input in task.inputs:
-        if file_hash_sha256(owner.staging_root + "/" + input.path) != input.digest:
+        if not _scv_managed_sha_matches_v1(owner.staging_root + "/" + input.path, input.digest):
             return "scv-managed-staging-input-changed:" + input.path
     ""

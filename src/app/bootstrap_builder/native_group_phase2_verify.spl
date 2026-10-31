@@ -54,8 +54,7 @@ fn phase2_native_authority_verify_v1(
         return Err("Phase2 Stage2 receipt binding differs")
     if canonical_snapshot_path == value.source_authority.path or
             not file_is_regular_no_follow(canonical_snapshot_path) or
-            file_hash_sha256(canonical_snapshot_path) !=
-                value.source_authority.digest:
+            _native_group_phase2_verify_sha_mismatch(canonical_snapshot_path, value.source_authority.digest):
         return Err("Phase2 freshly emitted canonical source snapshot differs")
     val authority = file_read_regular_no_follow_bounded(
         value.source_authority.path, 64 * 1024 * 1024)?
@@ -79,7 +78,7 @@ fn phase2_native_authority_verify_v1(
         val path = "{value.source_root}/{record.relative_path}"
         if record.kind == "file-hex":
             if not file_is_regular_no_follow(path) or
-                    file_hash_sha256(path) != record.digest:
+                    _native_group_phase2_verify_sha_mismatch(path, record.digest):
                 return Err("Phase2 source regular file differs: " +
                     record.relative_path)
             full_paths = full_paths.push(record.relative_path)
@@ -100,7 +99,7 @@ fn phase2_native_authority_verify_v1(
             if record.kind == "link-hex":
                 val resolved = "{value.source_root}/{record.resolved_path}"
                 if not file_is_regular_no_follow(resolved) or
-                        file_hash_sha256(resolved) != record.digest:
+                        _native_group_phase2_verify_sha_mismatch(resolved, record.digest):
                     return Err("Phase2 source link target differs")
             else:
                 val resolved = "{value.source_root}/{record.resolved_path}"
@@ -123,8 +122,7 @@ fn phase2_native_authority_verify_v1(
     val role_policy = file_read_regular_no_follow_bounded(
         value.module_role_policy.path, 65536)?
     if sha256_text(role_policy) != role_policy_stage2_digest or
-            file_hash_sha256(value.module_role_policy.path) !=
-                role_policy_stage2_digest:
+            _native_group_phase2_verify_sha_mismatch(value.module_role_policy.path, role_policy_stage2_digest):
         return Err("Phase2 module role policy readback differs")
     val selection = phase2_module_roles_select_v1(
         role_policy, module_sources)?
@@ -157,3 +155,9 @@ fn phase2_native_authority_verify_v1(
     Ok(value)
 
 export phase2_native_authority_verify_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _native_group_phase2_verify_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true
