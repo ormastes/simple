@@ -15,7 +15,14 @@ use std.spec.step
 use std.spec.{describe, it, assert_equal}
 
 @unsafe(reason: "parity probe of the glyph mask-blend kernel", capabilities: [ffi])
-extern fn rt_engine2d_blend_mask_span_u32(dst: [u32], offset: i64, mask: [u8], mask_offset: i64, count: i64, color: u32) -> [u32]
+extern fn rt_engine2d_blend_mask_span_u32(dst: [u32], offset: i64, mask: [u8], mask_offset: i64, count: i64, color: u32) -> [u32]?
+
+# A bad request returns nil from native (and an empty span from the interpreter twin);
+# both mean "no span", so callers below see [] for either.
+fn blend_mask_span_or_empty(dst: [u32], offset: i64, mask: [u8], mask_offset: i64, count: i64, color: u32) -> [u32]:
+    if val span = rt_engine2d_blend_mask_span_u32(dst, offset, mask, mask_offset, count, color):
+        return span
+    []
 
 # The exact arithmetic blit_glyph uses, kept here as the oracle.
 fn oracle_blend(dst: u32, alpha: i64, color: u32) -> u32:
@@ -54,7 +61,7 @@ fn mask_ramp(n: i64) -> [u8]:
 fn span_matches_oracle(n: i64, color: u32) -> bool:
     val dst = dst_ramp(n)
     val mask = mask_ramp(n)
-    val got = rt_engine2d_blend_mask_span_u32(dst, 0, mask, 0, n, color)
+    val got = blend_mask_span_or_empty(dst, 0, mask, 0, n, color)
     if got.len() != n:
         return false
     var i: i64 = 0
@@ -84,7 +91,7 @@ describe "glyph mask-blend kernel matches the blit_glyph oracle":
             mask.push(i as u8)
             i = i + 1
         val dst = dst_ramp(n)
-        val got = rt_engine2d_blend_mask_span_u32(dst, 0, mask, 0, n, 0xFF10A0F0u32)
+        val got = blend_mask_span_or_empty(dst, 0, mask, 0, n, 0xFF10A0F0u32)
         var bad = 0
         i = 0
         while i < n:
@@ -104,7 +111,7 @@ describe "glyph mask-blend kernel matches the blit_glyph oracle":
     it "always writes opaque alpha, never the destination alpha":
         step("blit_glyph forces 0xFF; a general Porter-Duff path would not")
         val n: i64 = 32
-        val got = rt_engine2d_blend_mask_span_u32(dst_ramp(n), 0, mask_ramp(n), 0, n, 0xFF204060u32)
+        val got = blend_mask_span_or_empty(dst_ramp(n), 0, mask_ramp(n), 0, n, 0xFF204060u32)
         var non_opaque = 0
         var i: i64 = 0
         while i < n:
@@ -118,7 +125,7 @@ describe "glyph mask-blend kernel matches the blit_glyph oracle":
         val n: i64 = 64
         val dst = dst_ramp(n)
         val mask = mask_ramp(n)
-        val got = rt_engine2d_blend_mask_span_u32(dst, 10, mask, 5, 20, 0xFF884422u32)
+        val got = blend_mask_span_or_empty(dst, 10, mask, 5, 20, 0xFF884422u32)
         assert_equal(got.len(), 20)
         var bad = 0
         var i: i64 = 0
@@ -132,7 +139,7 @@ describe "glyph mask-blend kernel matches the blit_glyph oracle":
         step("a short row must be refused, not clamped — clamping paints the wrong pixels")
         val dst = dst_ramp(32)
         val mask = mask_ramp(32)
-        assert_equal(rt_engine2d_blend_mask_span_u32(dst, 0, mask, 0, 64, 0xFF000000u32).len(), 0)
-        assert_equal(rt_engine2d_blend_mask_span_u32(dst, 30, mask, 0, 8, 0xFF000000u32).len(), 0)
-        assert_equal(rt_engine2d_blend_mask_span_u32(dst, 0, mask, 30, 8, 0xFF000000u32).len(), 0)
-        assert_equal(rt_engine2d_blend_mask_span_u32(dst, 0, mask, 0, 0, 0xFF000000u32).len(), 0)
+        assert_equal(blend_mask_span_or_empty(dst, 0, mask, 0, 64, 0xFF000000u32).len(), 0)
+        assert_equal(blend_mask_span_or_empty(dst, 30, mask, 0, 8, 0xFF000000u32).len(), 0)
+        assert_equal(blend_mask_span_or_empty(dst, 0, mask, 30, 8, 0xFF000000u32).len(), 0)
+        assert_equal(blend_mask_span_or_empty(dst, 0, mask, 0, 0, 0xFF000000u32).len(), 0)

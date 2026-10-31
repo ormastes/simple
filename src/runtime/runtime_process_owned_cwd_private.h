@@ -178,7 +178,9 @@ SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle) {
         }
         pthread_mutex_unlock(&pov4_cwd_lock);
     }
-    return owned_adapter_bytes((const char*)digest, found ? sizeof(digest) : 0);
+    size_t digest_len = found ? sizeof(digest) : 0;
+    return SIMPLE_RT_NONNULL("rt_process_observation_v4_cwd_digest_value",
+        owned_adapter_bytes((const char*)digest, digest_len));
 }
 
 int rt_process_observation_v4_close_cwd_value(int64_t handle) {

@@ -2,6 +2,7 @@
  * ABI. Focused C selfchecks cover provider and receipt failure paths; deployed
  * qualification still requires source-matched Stage2/native facade evidence. */
 #include "runtime.h"
+#include "runtime_nonnull.h"
 
 /* The `*_value` wrappers answer the Simple facade's `-> (text, text, [i64])`.
  * Native codegen destructures that result with rt_tuple_get, which requires a
@@ -2168,7 +2169,7 @@ SplArray* rt_process_owned_v3_capabilities_value(void) {
         available,
         available ? (int64_t)RT_PROCESS_OBSERVATION_CAP_REQUIRED : 0,
     };
-    return owned_adapter_values(values, 3);
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_capabilities_value", owned_adapter_values(values, 3));
 }
 
 SplArray* rt_process_owned_v3_set_capture_limits_value(int64_t handle,
@@ -4057,7 +4058,7 @@ SplArray* rt_process_observation_v4_capabilities_value(void) {
 #else
     const int64_t values[8] = {POV4_VERSION_VALUE, 8, 0, 0, 0, 0, 0, ENOTSUP};
 #endif
-    return owned_adapter_values(values, 8);
+    return SIMPLE_RT_NONNULL("rt_process_observation_v4_capabilities_value", owned_adapter_values(values, 8));
 }
 
 SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
@@ -4359,14 +4360,14 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
     int64_t values[75] = {1};
 #ifdef RT_OWNED_DARWIN_V4
     (void)ticket; values[10] = ENOTSUP;
-    return owned_adapter_values(values, 75);
+    return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", owned_adapter_values(values, 75));
 #endif
     uint32_t index = 0;
     Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
-    if (!owner) { values[10] = errno ? errno : ESTALE; return owned_adapter_values(values, 75); }
+    if (!owner) { values[10] = errno ? errno : ESTALE; return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", owned_adapter_values(values, 75)); }
     if (!owner->atomic_input_bound) {
         values[10] = EPROTO;
-        pov4_release_busy(index); return owned_adapter_values(values, 75);
+        pov4_release_busy(index); return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", owned_adapter_values(values, 75));
     }
     RtOwnedProcessInputReceiptV3 receipt = owner->atomic_input_receipt;
     if (!owner->frozen)
@@ -4386,7 +4387,7 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
         values[43 + i] = owner->request_digest[i];
     }
     pov4_release_busy(index);
-    return owned_adapter_values(values, 75);
+    return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", owned_adapter_values(values, 75));
 }
 
 #ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
@@ -5907,12 +5908,12 @@ SplArray* rt_process_owned_v3_capabilities_value(void) {
         RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION, 0, 0,
     };
     SplArray* values = rt_array_new(3);
-    if (!values) return NULL;
+    if (!values) return SIMPLE_RT_NONNULL("rt_process_owned_v3_capabilities_value", NULL);
     for (int i = 0; i < 3; i++)
         if (!rt_array_push(values, rt_value_int(fields[i]))) {
-            rt_array_free(values); return NULL;
+            rt_array_free(values); return SIMPLE_RT_NONNULL("rt_process_owned_v3_capabilities_value", NULL);
         }
-    return values;
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_capabilities_value", values);
 }
 
 SplArray* rt_process_owned_v3_set_capture_limits_value(int64_t handle,
@@ -6032,18 +6033,18 @@ fail:
 
 SplArray* rt_process_observation_v4_capabilities_value(void) {
     const int64_t fields[8] = {4, 8, 0, 0, 0, 0, 0, ENOTSUP};
-    SplArray* values = rt_array_new(8); if (!values) return NULL;
+    SplArray* values = rt_array_new(8); if (!values) return SIMPLE_RT_NONNULL("rt_process_observation_v4_capabilities_value", NULL);
     for (int i=0;i<8;i++) if (!rt_array_push(values, rt_value_int(fields[i]))) {
-        rt_array_free(values); return NULL;
+        rt_array_free(values); return SIMPLE_RT_NONNULL("rt_process_observation_v4_capabilities_value", NULL);
     }
-    return values;
+    return SIMPLE_RT_NONNULL("rt_process_observation_v4_capabilities_value", values);
 }
 #if !defined(__APPLE__) || defined(__unix__)
 int64_t rt_process_observation_v4_pin_cwd_value(const char* path_data, uint64_t path_len) {
     (void)path_data; (void)path_len; return 0;
 }
 SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle) {
-    (void)handle; return rt_array_new(0);
+    (void)handle; return SIMPLE_RT_NONNULL("rt_process_observation_v4_cwd_digest_value", rt_array_new(0));
 }
 int rt_process_observation_v4_close_cwd_value(int64_t handle) { (void)handle; return 0; }
 #endif
@@ -6064,11 +6065,11 @@ SplArray* rt_process_inspection_v1_start_pinned_value(int64_t executable_handle,
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
     (void)ticket;
     SplArray* values = rt_array_new(75);
-    if (!values) return NULL;
+    if (!values) return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", NULL);
     for (int i=0;i<75;i++) if (!rt_array_push(values, rt_value_int(i==0 ? 1 : (i==10 ? ENOTSUP : 0)))) {
-        rt_array_free(values); return NULL;
+        rt_array_free(values); return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", NULL);
     }
-    return values;
+    return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", values);
 }
 SplArray* rt_process_observation_v4_poll_value(SplArray* ticket, int64_t wait_ns) {
     (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();
