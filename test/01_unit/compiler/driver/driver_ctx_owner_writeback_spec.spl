@@ -58,3 +58,61 @@ describe "driver ctx owner write-back":
         var driver = writeback_new_driver()
         driver.record_through_local_copy()
         expect(driver.ctx.identities.len()).to_equal(0)
+
+# Poison-site class (driver_source_parse_retained/streaming,
+# driver_hir_pipeline_lowering): the loops poison through a local
+# `CompileContext` copy. Without the explicit `self.ctx = copy` write-back the
+# driver never sees the poisoned module list/count, so the collect-all summary
+# and the fail-fast `poison_budget_exhausted()` cap both read a stale zero.
+class PoisonCtx:
+    poisoned: [text]
+    poisoned_count: i64
+
+    me mark_module_poisoned(name: text):
+        self.poisoned = self.poisoned.push(name)
+        self.poisoned_count = self.poisoned_count + 1
+
+    fn poison_budget_exhausted() -> bool:
+        self.poisoned_count >= 2
+
+class PoisonDriver:
+    ctx: PoisonCtx
+
+    me poison_without_writeback(names: [text]) -> i64:
+        var visited = 0
+        for name in names:
+            visited = visited + 1
+            var poison_ctx: PoisonCtx = self.ctx
+            poison_ctx.mark_module_poisoned(name)
+            if poison_ctx.poison_budget_exhausted():
+                return visited
+        visited
+
+    me poison_with_writeback(names: [text]) -> i64:
+        var visited = 0
+        for name in names:
+            visited = visited + 1
+            var poison_ctx: PoisonCtx = self.ctx
+            poison_ctx.mark_module_poisoned(name)
+            self.ctx = poison_ctx
+            if poison_ctx.poison_budget_exhausted():
+                return visited
+        visited
+
+fn poison_new_driver() -> PoisonDriver:
+    PoisonDriver(ctx: PoisonCtx(poisoned: [], poisoned_count: 0))
+
+describe "driver poison-site write-back":
+    it "publishes poisoned modules and honors the budget across iterations":
+        var driver = poison_new_driver()
+        val visited = driver.poison_with_writeback(["a", "b", "c", "d"])
+        expect(visited).to_equal(2)
+        expect(driver.ctx.poisoned_count).to_equal(2)
+        expect(driver.ctx.poisoned[1]).to_equal("b")
+
+    # Interpreter-lane copy semantics (JIT still aliases).
+    it "loses poison and never exhausts the budget through an unsaved copy":
+        var driver = poison_new_driver()
+        val visited = driver.poison_without_writeback(["a", "b", "c", "d"])
+        expect(visited).to_equal(4)
+        expect(driver.ctx.poisoned_count).to_equal(0)
