@@ -56,6 +56,8 @@ pub mod common;
 pub mod conversion;
 pub mod dl_compat;
 pub mod process;
+#[cfg(target_os = "macos")]
+pub mod process_observation_v4;
 pub mod pty;
 pub mod time;
 pub mod math;
@@ -2009,6 +2011,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_process_owned_v3_observation_value",
         system::rt_process_owned_v3_adapter_unavailable
     );
+#[cfg(not(target_os = "macos"))]
+{
     insert_simple!(
         "rt_process_pin_executable_owned_value",
         system::rt_process_owned_v3_adapter_unavailable
@@ -2021,6 +2025,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_process_pinned_executable_sha256_value",
         system::rt_process_owned_v3_adapter_unavailable
     );
+}
     insert_simple!(
         "rt_process_owned_v3_start_pinned_value",
         system::rt_process_owned_v3_adapter_unavailable
@@ -2031,6 +2036,27 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_sosix_darwin_snapshot_v1_cancel_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
     insert_simple!("rt_sosix_darwin_snapshot_v1_output_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
     insert_simple!("rt_sosix_darwin_snapshot_v1_ack_value", system::rt_sosix_darwin_snapshot_v1_provider_unavailable);
+    // Darwin: marshal to the C V4 owner and its snapshot pin (C only; see
+    // process_observation_v4.rs). Every other host keeps the refusal below.
+    #[cfg(target_os = "macos")]
+    {
+        use process_observation_v4 as pov4;
+        insert_simple!("rt_process_observation_v4_capabilities_value", pov4::capabilities);
+        insert_simple!("rt_process_observation_v4_pin_cwd_value", pov4::pin_cwd);
+        insert_simple!("rt_process_observation_v4_cwd_digest_value", pov4::cwd_digest);
+        insert_simple!("rt_process_observation_v4_close_cwd_value", pov4::close_cwd);
+        insert_simple!("rt_process_observation_v4_start_value", system::rt_process_observation_v4_provider_unavailable);
+        insert_simple!("rt_process_observation_v4_start_pinned_value", pov4::start_pinned);
+        insert_simple!("rt_process_observation_v4_poll_value", pov4::poll);
+        insert_simple!("rt_process_observation_v4_cancel_value", pov4::cancel);
+        insert_simple!("rt_process_observation_v4_collect_value", pov4::collect);
+        insert_simple!("rt_process_observation_v4_ack_collect_value", pov4::ack_collect);
+        insert_simple!("rt_process_pin_executable_owned_value", pov4::pin_executable);
+        insert_simple!("rt_process_close_pinned_executable_owned_value", pov4::close_executable);
+        insert_simple!("rt_process_pinned_executable_sha256_value", pov4::executable_digest);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
     insert_simple!(
         "rt_process_observation_v4_capabilities_value",
         system::rt_process_observation_v4_capabilities_unavailable
@@ -2044,6 +2070,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_observation_v4_cancel_value", system::rt_process_observation_v4_provider_unavailable);
     insert_simple!("rt_process_observation_v4_collect_value", system::rt_process_observation_v4_provider_unavailable);
     insert_simple!("rt_process_observation_v4_ack_collect_value", system::rt_process_observation_v4_provider_unavailable);
+    }
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
     insert_simple!("rt_process_spawn_async_value", system::rt_process_spawn_async);

@@ -382,6 +382,7 @@ mod tests {
     #[test]
     fn owned_pinned_process_path_expands_to_ptr_len() {
         assert_eq!(text_arg_indices("rt_process_pin_executable_owned_value"), Some(&[0][..]));
+        assert_eq!(text_arg_indices("rt_process_observation_v4_pin_cwd_value"), Some(&[0][..]));
         assert_eq!(
             super::process_c_runtime_arg_indices("rt_process_owned_v3_start_pinned_value"),
             None
@@ -3281,7 +3282,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // Length-safe pinning likewise takes (path_ptr, path_len), rejecting
         // embedded NUL in the native provider without requiring C-string text.
         "rt_process_run_with_limits" | "rt_process_run_bounded_bytes"
-        | "rt_process_pin_executable_owned_value" => Some(&[0]),
+        | "rt_process_pin_executable_owned_value"
+        // The V4 cwd pin is (path_ptr, path_len) too; the pure-Simple table
+        // (50.mir/text_extern_abi.spl) already lists it. Missing here, JIT
+        // passed the string handle as path_ptr and every cwd pin was refused.
+        | "rt_process_observation_v4_pin_cwd_value" => Some(&[0]),
         // rt_io_file_open/exists/delete take (path_ptr, path_len[, mode]) —
         // runtime/src/value/sffi/file_io/io_file.rs:82,331,340. They were absent
         // from every text-arg table, so JIT/native passed the RuntimeString
