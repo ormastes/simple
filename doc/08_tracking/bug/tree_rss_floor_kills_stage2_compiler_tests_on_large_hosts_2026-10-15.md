@@ -100,6 +100,21 @@ requirement for `process-tree-rss-watchdog.pl` as in the original fix.
 
 **Status:** OPEN (recurrence; original floor fix remains valid for its case)
 
+**Sixth data point (2026-10-31, campaign `efBuq7`):** with the elevated ceiling
+raised to 56 GiB (request 58720256, admitted at lane start with 83 GiB
+available), the CAMPAIGN-start admission then correctly refused it:
+`available_bound=42571353` KiB — a concurrent session's lane
+(`build/devhub-goal/runtime-authority/`, 9 processes, ~70 GB) had consumed the
+host headroom. Fail-closed by design. With the other lane active, host RAM
+cannot hold its ~70 GB plus this campaign's measured ~50-55 GB demand
+(121 GiB host). Conclusion: on a busy shared host the phase cannot pass at any
+in-policy cap; it needs (a) an idle-host window, or (b) the durable policy fix
+(whole-build phases must not be priced by the compile-worker static ceiling —
+see "Suggested direction" above) so the cap is not needed, or (c) the phase's
+real demand reduction (the campaign builds the full CLI + test runner + LSP/MCP
+tools concurrently; demand scales with build threads x ~14.5 GiB shard RSS on
+this aarch64 host).
+
 **Fourth data point (2026-10-31, campaign `DudKGG`):** even at
 `BOOTSTRAP_VERIFY_BUILD_THREADS=2`, `BOOTSTRAP_VERIFY_TEST_WORKERS=1`,
 serialized tool builds and `--jobs=5`, killed at the cap again. Thread-count
