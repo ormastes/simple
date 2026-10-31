@@ -260,7 +260,10 @@ fn aes128_key_expansion(key: [u8]) -> [u8]:
             val r2 = _aes_sbox(sb, t3.to_i64())
             val r3 = _aes_sbox(sb, t0.to_i64())
             # XOR Rcon into first byte only (Rcon word = [rcon_byte, 0, 0, 0])
-            val rcon_b: i64 = _aes_rcon_byte(((word_idx / nk) - 1).to_i64())
+            # A typed local: `.to_i64()` on a compound receiver misconverts on the pinned
+            # Phase 2 producer. See doc/08_tracking/bug/native_to_i64_compound_receiver_2026_10_31.md.
+            val rcon_index: u64 = (word_idx / nk) - 1
+            val rcon_b: i64 = _aes_rcon_byte(rcon_index.to_i64())
             t0 = (r0.to_i64() ^ rcon_b).to_u8()
             t1 = r1
             t2 = r2
@@ -311,7 +314,10 @@ fn aes256_key_expansion(key: [u8]) -> [u8]:
             val r1 = _aes_sbox(sb, t2.to_i64())
             val r2 = _aes_sbox(sb, t3.to_i64())
             val r3 = _aes_sbox(sb, t0.to_i64())
-            val rcon_b: i64 = _aes_rcon_byte(((word_idx / nk) - 1).to_i64())
+            # A typed local: `.to_i64()` on a compound receiver misconverts on the pinned
+            # Phase 2 producer. See doc/08_tracking/bug/native_to_i64_compound_receiver_2026_10_31.md.
+            val rcon_index: u64 = (word_idx / nk) - 1
+            val rcon_b: i64 = _aes_rcon_byte(rcon_index.to_i64())
             t0 = (r0.to_i64() ^ rcon_b).to_u8()
             t1 = r1
             t2 = r2
@@ -319,7 +325,9 @@ fn aes256_key_expansion(key: [u8]) -> [u8]:
         else:
             if m == 4:
                 # AES-256-only: SubWord without RotWord, no Rcon
-                t0 = _aes_sbox(sb, t0.to_i64())
+                # t0 also takes a compound assignment above, so read the stored byte:
+                # `t0.to_i64()` misconverts here on the pinned Phase 2 producer.
+                t0 = _aes_sbox(sb, _u8_at(expanded, prev_base).to_i64())
                 t1 = _aes_sbox(sb, t1.to_i64())
                 t2 = _aes_sbox(sb, t2.to_i64())
                 t3 = _aes_sbox(sb, t3.to_i64())
@@ -365,7 +373,10 @@ fn aes192_key_expansion(key: [u8]) -> [u8]:
             val r1 = _aes_sbox(sb, t2.to_i64())
             val r2 = _aes_sbox(sb, t3.to_i64())
             val r3 = _aes_sbox(sb, t0.to_i64())
-            val rcon_b: i64 = _aes_rcon_byte(((word_idx / nk) - 1).to_i64())
+            # A typed local: `.to_i64()` on a compound receiver misconverts on the pinned
+            # Phase 2 producer. See doc/08_tracking/bug/native_to_i64_compound_receiver_2026_10_31.md.
+            val rcon_index: u64 = (word_idx / nk) - 1
+            val rcon_b: i64 = _aes_rcon_byte(rcon_index.to_i64())
             t0 = (r0.to_i64() ^ rcon_b).to_u8()
             t1 = r1
             t2 = r2
@@ -722,8 +733,8 @@ fn _aes_gcm_ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
 
     # Final block: len(A) || len(C) in bits, each as 64-bit big-endian
     # Use i64 for shifts to avoid Cranelift u32/u64 miscompile on wide shifts
-    val aad_bits: i64 = aad.len().to_i64() * 8
-    val ct_bits: i64 = ciphertext.len().to_i64() * 8
+    val aad_bits: i64 = aad.len() * 8
+    val ct_bits: i64 = ciphertext.len() * 8
 
     var len_block: [u8] = []
     len_block.push(((aad_bits >> 56) & 0xFF).to_u8())
