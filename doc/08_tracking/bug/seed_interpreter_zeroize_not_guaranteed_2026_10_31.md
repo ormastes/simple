@@ -38,7 +38,8 @@ would affect all interpreted code. Wipe guarantees are judged natively.
   that was in `storage_port_spec.spl`. On Phase 2 the original array was wiped and
   `val alias = image` was not, so the alias claim was dropped.
 - `fresh_secured_db` prints `UNVERIFIED wipe checks` when
-  `DEVHUB_FRESH_SEED_INTERPRETER=1`. Native runs always enforce the checks.
+  `DEVHUB_FRESH_SEED_INTERPRETER=1`. `provision.py` sets it only with
+  `--seed-interpreter` and otherwise clears it.
 
 Do not cite a Phase 1 run as evidence that secrets or plaintext were erased.
 
