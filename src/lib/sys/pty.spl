@@ -7,6 +7,7 @@ extern fn rt_pty_write(handle: i64, data: text) -> bool
 extern fn rt_pty_read(handle: i64, timeout_ms: i64) -> text
 extern fn rt_pty_close(handle: i64) -> bool
 extern fn rt_pty_is_running(handle: i64) -> bool
+extern fn rt_pty_resize(handle: i64, rows: i32, cols: i32) -> bool
 
 # HOST-OS DETECTOR CONSOLIDATION (2026-09-14): use the single canonical
 # rt_platform_name wrapper (std.sffi.platform), not a locally re-declared
@@ -89,15 +90,34 @@ pub fn is_running(handle: i32) -> bool:
         return false
     rt_pty_is_running(handle as i64)
 
-# This legacy runtime ABI has no resize operation. Native Windows composition
-# supplies the real ConPTY operation; callers distinguish absence from failure.
+var _resize_proven = false
+var _resize_refused = false
+
+# Positive probe, not a platform guess: resize one real scratch PTY once per
+# process. A lane that cannot resolve its handles (the C lane on Windows) answers
+# false. A failed open proves nothing about resize, so it is not remembered.
+# A runtime that predates rt_pty_resize stops here with its unresolved-extern
+# error, which is also a refusal.
 pub fn can_resize() -> bool:
-    false
+    if _resize_proven:
+        return true
+    if _resize_refused:
+        return false
+    val handle = open(2, 2)
+    if handle < 0:
+        return false
+    val resized = resize(handle, 3, 4)
+    val _closed = close(handle)
+    if resized:
+        _resize_proven = true
+    else:
+        _resize_refused = true
+    resized
 
 pub fn resize(handle: i32, rows: i32, cols: i32) -> bool:
     if handle < 0 or rows <= 0 or cols <= 0:
         return false
-    return false
+    rt_pty_resize(handle as i64, rows, cols)
 
 # The legacy close ABI reclaims synchronously; it owns no deferred buffers.
 # The native provider overrides this with its cancellation/JobObject sweep.
