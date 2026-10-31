@@ -59,7 +59,7 @@ use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
 use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_identity_scope_v1}
 use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
 use std.common.encoding.utf8.{text_byte_len}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write, file_create_exclusive, file_publish_noreplace}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write, file_create_exclusive, file_publish_noreplace, file_atomic_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
@@ -72,13 +72,11 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_rec
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_inventory_mismatch_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_hir_records_publish_v1, mono_module_scoped_selected_v1}
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text?
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
-extern fn rt_file_move(src: text, dst: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 
 # v4: keeps v3's body checksum and adds Any-warning diagnostics to cached HIR
@@ -683,7 +681,6 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
     val dir = hir_cache_dir()
     val _made = rt_dir_create_all(dir)
     val final_path = hir_cache_path(key, parser_classification != "")
-    val tmp = final_path + ".{rt_getpid()}.tmp"
     val header = if parser_classification != "": "spl-hircache-v4-parser " + hir_cache_header(library_mode) else: hir_cache_header(library_mode)
     # The store write fails (rt_core_string_bytes NULL -> -1) when any limb
     # of the concatenated content is a dead transient handle. Bind each part
@@ -705,24 +702,18 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
     if not hir_admit.admitted or not disk_publish_admitted(dir, text_byte_len(content_text)):
         _hir_cache_note_store_failure("admission", "over-storage-cap", final_path)
         return false
-    if not rt_file_write_text(tmp, content_text):
-        # A failed write can leave a partial temp (disk full is the measured
-        # case, P-INFRA-3); it was never unlinked and never reported.
-        val _partial = rt_file_delete(tmp)
+    # file_atomic_write does the temp write and rename into place; a failed
+    # write or rename is reported as io-write.
+    if not file_atomic_write(final_path, content_text):
         _hir_cache_disk_total = -1
-        _hir_cache_note_store_failure("write", "io-write", tmp)
+        _hir_cache_note_store_failure("write", "io-write", final_path)
         return false
-    if rt_file_move(tmp, final_path):
-        _hir_cache_stores = _hir_cache_stores + 1
-        val final_name = final_path.substring(dir.len() + 1)
-        val _evicted = disk_cache_source_record_v1(dir,
-            sha256_text(module_source_relative_path(module.path)).substring(0, 16),
-            final_name, hir_limits)
-        return true
-    val _cleaned = rt_file_delete(tmp)
-    _hir_cache_disk_total = -1
-    _hir_cache_note_store_failure("rename", "io-rename", final_path)
-    false
+    _hir_cache_stores = _hir_cache_stores + 1
+    val final_name = final_path.substring(dir.len() + 1)
+    val _evicted = disk_cache_source_record_v1(dir,
+        sha256_text(module_source_relative_path(module.path)).substring(0, 16),
+        final_name, hir_limits)
+    return true
 
 # Failure-only, explicitly opt-in evidence capture. The payload and manifest
 # live in a directory that the HIR cache loader never scans. The manifest is
