@@ -1,0 +1,68 @@
+# Purpose and audience: executable specification evidence for the runtime and SFFI maintainers.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @cover scripts/check/check-rt-host-map.py 90%
+"""
+# rt host map classification
+
+## Purpose and audience
+
+Runtime maintainers read this for how a C provider is judged on each host config.
+
+## Operator workflow
+
+Run `python3 -I scripts/check/check-rt-host-map.py`; the last stdout line is the verdict.
+
+## Compatibility and limitations
+
+The guard is a text scan, so it gives mapping evidence only. Compile and link stay UNTESTED on every host.
+
+## Verification guidance and troubleshooting
+
+A stale baseline row means a mismatch was fixed: delete that row. Never regenerate to hide a new row.
+"""
+
+use std.spec.step
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn gate(c: text) -> i64:
+    val script = "t=$(mktemp -d); mkdir -p $t/src/runtime $t/src/lib $t/scripts/check; printf '%b' \"$1\" > $t/src/runtime/a.c; printf 'extern fn rt_x() -> i64\\n' > $t/src/lib/a.spl; python3 -I scripts/check/check-rt-host-map.py --root $t"
+    val (_out, _err, code) = rt_process_run("sh", ["-c", script, "gate", c])
+    return code
+
+val BODY = "long rt_x(void) { return 1; }\\n"
+
+describe "rt host map classification":
+    it "passes a provider present on every host":
+        step("Classify an unguarded provider")
+        expect(gate(BODY)).to_equal(0)
+
+    it "fails a provider guarded to Linux alone":
+        step("Classify a host-only provider")
+        expect(gate("#if defined(__linux__)\\n" + BODY + "#endif\\n")).to_equal(1)
+
+    it "passes complementary host branches":
+        step("Classify the two branches")
+        expect(gate("#ifdef _WIN32\\n" + BODY + "#else\\n" + BODY + "#endif\\n")).to_equal(0)
+
+    it "keeps an unknown feature macro as a possible provider":
+        step("Classify the feature guard")
+        expect(gate("#if defined(FEATURE_X)\\n" + BODY + "#endif\\n")).to_equal(0)
+
+    it "refuses to pass when only a static helper exists":
+        step("Classify the empty join")
+        expect(gate("static long rt_x(void) { return 1; }\\n")).to_equal(2)
+
+    it "keeps the else arm of an ifndef on the matching host":
+        step("Classify the ifndef branch")
+        expect(gate("#ifndef __APPLE__\\nint y;\\n#else\\n" + BODY + "#endif\\n")).to_equal(1)
+
+    it "treats a bare host macro as a host condition":
+        step("Classify the bare macro")
+        expect(gate("#if __linux__\\n" + BODY + "#endif\\n")).to_equal(1)
+
+    it "refuses to count a disabled block as a provider":
+        step("Classify the disabled block")
+        expect(gate("#if 0\\n" + BODY + "#endif\\n")).to_equal(2)
