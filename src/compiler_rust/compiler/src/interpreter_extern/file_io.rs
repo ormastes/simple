@@ -3605,7 +3605,8 @@ pub fn rt_process_exists(args: &[Value]) -> Result<Value, CompileError> {
             return Ok(Value::Bool(false));
         }
         let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        let exists = result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        let exists =
+            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
         Ok(Value::Bool(exists))
     }
 
