@@ -65,6 +65,10 @@ struct FileFiberEntryV1:
     est_bytes: i64
     content: text
 
+# @workaround bug=ctor-mir-20261031 reason=Future<T> has a generic field (Poll<T>) so stage2 rejects [Future<text>] as an array record element; box it in a concrete record
+struct FileFiberFutureBoxV1:
+    fut: Future<text>
+
 # Outcome of one async parse: the fiber index and the update_tldr error text.
 struct FileFiberAsyncDoneV1:
     index: i64
@@ -90,7 +94,7 @@ class FileFiberRunV1:
     # async parse (SIMPLE_FILE_WORKERS=1): futures not yet resolved, results
     # ready to hand out, and how many parses had to wait for a later poll
     async_idx: [i64]
-    async_fut: [Future<text>]
+    async_fut: [FileFiberFutureBoxV1]  # @workaround bug=ctor-mir-20261031 reason=boxed Future
     async_done: [FileFiberAsyncDoneV1]
     async_parks: i64
     tldr_bridge: FileFiberTldrBridgeV1?
@@ -197,7 +201,8 @@ class FileFiberRunV1:
                                         return self._fail(i, "import {key}: {message}")
                                     case Err(error): return self._fail(i, "TLDR resolve failed for {key}: {error}")
                                     case Ok(Some(_)): return fiber_step_yield()
-                                    case Ok(nil): return fiber_step_yield()
+                                    # @workaround bug=ctor-mir-20261031 reason=nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
+                                    case Ok(_): return fiber_step_yield()
                             case Ok(true):
                                 match bridge.arm_wait(self.table, i):
                                     case Err(error): return self._fail(i, "TLDR wait arm failed for {key}: {error}")
@@ -278,16 +283,16 @@ class FileFiberRunV1:
             case Poll.Pending:
                 self.async_parks = self.async_parks + 1
                 self.async_idx = self.async_idx.push(i)
-                self.async_fut = self.async_fut.push(f)
+                self.async_fut = self.async_fut.push(FileFiberFutureBoxV1(fut: f))  # @workaround bug=ctor-mir-20261031 reason=boxed Future
 
     me poll_async() -> [FileFiberAsyncDoneV1]:
         """Poll every waiting future once; returns the parses that resolved."""
         var out = self.async_done
         self.async_done = []
         var keep_idx: [i64] = []
-        var keep_fut: [Future<text>] = []
+        var keep_fut: [FileFiberFutureBoxV1] = []  # @workaround bug=ctor-mir-20261031 reason=boxed Future
         for k in 0..self.async_idx.len():
-            val p: Poll<text> = self.async_fut[k].poll()
+            val p: Poll<text> = self.async_fut[k].fut.poll()  # @workaround bug=ctor-mir-20261031 reason=boxed Future
             match p:
                 case Poll.Ready(err):
                     out = out.push(FileFiberAsyncDoneV1(index: self.async_idx[k], err: err))
