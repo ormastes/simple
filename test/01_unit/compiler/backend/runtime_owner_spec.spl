@@ -1,6 +1,6 @@
 use std.spec.*
 use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_select_v1, runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1, runtime_owner_cede_archive_file_for_machine_v1, runtime_owner_write_bytes_v1}
-use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_compile_owner_v1, llvm_runtime_owner_coff_flavor_v1, llvm_runtime_owner_gnu_machine_v1}
+use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_compile_owner_v1, llvm_runtime_owner_coff_flavor_v1, llvm_runtime_owner_gnu_machine_v1, llvm_runtime_owner_c_archive_v1}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 
 # Hand-built AMD64 COFF member in an ar archive (374 bytes):
@@ -133,3 +133,17 @@ describe "Runtime symbol owner switch":
     it "reads no definitions from non-COFF input":
         val defined = runtime_owner_object_definitions_v1([[0 as u8, 1 as u8, 2 as u8]])
         expect(defined.len()).to_equal(0)
+
+    it "fails closed before caching when any input digest is unavailable":
+        val cache = "build/test_tmp/runtime_owner/cache"
+        val missing = llvm_runtime_owner_c_archive_v1(
+            "build/test_tmp/runtime_owner/absent.lib", [], cache)
+        expect(missing.is_err()).to_equal(true)
+        expect(missing.unwrap_err()).to_contain("cannot hash native archive")
+
+        val native_all = "build/test_tmp/runtime_owner/present.lib"
+        expect(runtime_owner_write_bytes_v1(native_all, owner_fixture_bytes())).to_equal(true)
+        val missing_object = llvm_runtime_owner_c_archive_v1(
+            native_all, ["build/test_tmp/runtime_owner/absent.obj"], cache)
+        expect(missing_object.is_err()).to_equal(true)
+        expect(missing_object.unwrap_err()).to_contain("cannot hash C object")
