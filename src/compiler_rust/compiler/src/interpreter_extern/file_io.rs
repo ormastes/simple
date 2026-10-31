@@ -1179,8 +1179,8 @@ pub fn rt_file_atomic_write_bytes(args: &[Value]) -> Result<Value, CompileError>
     if let Some(bytes) = args.get(1).and_then(Value::byte_array_view) {
         return Ok(Value::Bool(atomic_write_file(Path::new(&path), bytes)));
     }
-    let items = match args.get(1) {
-        Some(Value::Array(items)) => items.clone(),
+    let items: Vec<Value> = match args.get(1) {
+        Some(Value::Array(items)) => items.iter().cloned().collect(),
         Some(Value::FrozenArray(items)) => items.iter().cloned().collect(),
         _ => return Ok(Value::Bool(false)),
     };
