@@ -31,7 +31,8 @@ workspace-launched child from relaunching the suite.
 
 use std.spec.{describe, it, expect, step}
 use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, file_exists, cwd, env_set}
-use app.llm_caret.agent_workspace.{agent_workspace, tmux_available, session_kill, session_alive}
+use app.llm_caret.agent_workspace.{agent_workspace, workspace_available, workspace_backend, session_kill, session_alive, list_panes, worktree_list, capture_pane}
+use app.llm_caret.workspace_cli.{run_workspace_cli}
 
 val CLI = "src/app/llm_caret/main.spl"
 
@@ -66,6 +67,49 @@ fn _lines_with(out: text, prefix: text) -> [text]:
             hits = hits + [line]
     hits
 
+fn _cli_here(id: text, repo: text, args: [text]) -> i64:
+    run_workspace_cli(["workspace", id] + args + ["--repo", repo])
+
+fn _smux_team(id: text, repo: text, root: text):
+    val ws = agent_workspace(id, repo, repo + "/build/caret_worktrees/" + id)
+    step("Attach agent-1, agent-2, agent-3 through the CLI entry")
+    for agent in ["agent-1", "agent-2", "agent-3"]:
+        expect(_cli_here(id, repo, ["attach", agent])).to_equal(0)  # oracle: each attach succeeds
+        expect(list_panes(ws)).to_contain(id + ":" + agent + ".0")  # oracle: the window line the CLI prints names this pane
+
+    step("status lists one worktree and one pane per agent")
+    expect(_cli_here(id, repo, ["status"])).to_equal(0)  # oracle: status succeeds while the session is alive
+    expect(session_alive(ws)).to_be(true)
+    expect(worktree_list(ws).len()).to_equal(4)  # oracle: repo worktree plus three agent worktrees
+    expect(list_panes(ws).len()).to_equal(4)  # oracle: one pane per agent window plus the session owner
+
+    step("Each worktree is a real detached checkout and edits do not leak between them")
+    val wt1 = repo + "/build/caret_worktrees/" + id + "/agent-1"
+    val wt2 = repo + "/build/caret_worktrees/" + id + "/agent-2"
+    expect(file_exists(wt1 + "/README.md")).to_be(true)
+    file_write(wt1 + "/only_in_agent_1.txt", "x\n")
+    expect(file_exists(wt2 + "/only_in_agent_1.txt")).to_be(false)
+    val (head1, _e1, _c1) = process_run("git", ["-C", wt1, "symbolic-ref", "-q", "HEAD"])
+    expect(head1.trim()).to_equal("")  # oracle: detached checkout has no symbolic branch ref
+
+    step("broadcast reaches every pane and every agent pane shows the marker")
+    expect(_cli_here(id, repo, ["broadcast", "echo", "TEAM_BCAST_OK"])).to_equal(0)  # oracle: broadcast succeeds
+    for agent in ["agent-1", "agent-2", "agent-3"]:
+        expect(_cli_here(id, repo, ["wait", id + ":" + agent, "TEAM_BCAST_OK", "8000"])).to_equal(0)  # oracle: every agent pane observed the marker
+
+    step("capture returns the pane's scrollback")
+    expect(_cli_here(id, repo, ["capture", id + ":agent-2"])).to_equal(0)  # oracle: capture succeeds on a live pane
+    expect(capture_pane(ws, id + ":agent-2")).to_contain("TEAM_BCAST_OK")
+
+    step("detach removes window and worktree; kill leaves no session")
+    expect(_cli_here(id, repo, ["detach", "agent-1"])).to_equal(0)  # oracle: detach succeeds
+    expect(dir_exists(wt1)).to_be(false)
+    expect(list_panes(ws).len()).to_equal(3)  # oracle: two agents plus the session owner remain after one detach
+    expect(_cli_here(id, repo, ["kill"])).to_equal(0)  # oracle: teardown succeeds
+    expect(session_alive(ws)).to_be(false)
+    dir_remove_all(root)
+
+
 # @manual_section: workspace-cli
 describe "LLM Caret workspace CLI":
     it "prints usage and exits 2 when no command is given":
@@ -79,13 +123,20 @@ describe "LLM Caret workspace CLI":
 
     it "attaches three agents, isolates their worktrees, broadcasts, and tears down":
         # @req REQ-LLMCARET-WS-CLI-TEAM-002
-        if not tmux_available():
-            fail("BLOCKED: tmux not installed on this host")
+        if not workspace_available():
+            fail("BLOCKED: neither tmux nor smux available on this host")
             return
         val root = _scratch("team")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
         val id = "cli-team"
+        if workspace_backend() == "smux":
+            # smux panes live in the creating process, so one `bin/simple run`
+            # per command cannot share a session. Run the same CLI entry
+            # (`run_workspace_cli`, the code behind every command) in THIS
+            # process and assert exit codes plus the real pane/worktree state.
+            _smux_team(id, repo, root)
+            return
         session_kill(agent_workspace(id, repo, ""))
 
         step("Attach agent-1, agent-2, agent-3 through the CLI")
@@ -144,8 +195,8 @@ describe "LLM Caret workspace CLI":
 
     it "refuses a nested suite launch from a workspace-launched child":
         # @req REQ-LLMCARET-WS-CLI-RECURSION-004
-        if not tmux_available():
-            fail("BLOCKED: tmux not installed on this host")
+        if not workspace_available():
+            fail("BLOCKED: neither tmux nor smux available on this host")
             return
         step("The child inherits LLM_CARET_WORKSPACE_DEPTH=1 from its launcher")
         env_set("LLM_CARET_WORKSPACE_DEPTH", "1")
