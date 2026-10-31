@@ -1,0 +1,84 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# nil must not flow into a non-optional return
+
+"All null return able must be option." NIL-RET-001 flags nil reaching the
+return of a function whose declared return type is not `T?` / `Option<T>`.
+"""
+
+# @tag: unit, compiler, lint
+
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, StaticLintFinding, run_static_lint_rule_table}
+use compiler.tools.lint.rules.nil_return_non_optional_rule.{nil_return_non_optional_lint_rule}
+
+fn ret_findings(src: text) -> [StaticLintFinding]:
+    val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("fixture.spl", src), [nil_return_non_optional_lint_rule()])
+    run.findings
+
+describe "nil_return_non_optional lint":
+    it "flags return nil in a non-optional function":
+        val found = ret_findings("fn f(x: i64) -> text:\n    if x > 0:\n        return nil\n    \"ok\"\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("NIL-RET-001")
+        expect(found[0].line_num).to_equal(3)
+        expect(found[0].hint.contains("text?")).to_equal(true)
+
+    it "accepts nil in optional and Option returns":
+        expect(ret_findings("fn f() -> text?:\n    return nil\n").len()).to_equal(0)
+        expect(ret_findings("fn f() -> Option<text>:\n    nil\n").len()).to_equal(0)
+
+    it "ignores unit functions":
+        expect(ret_findings("fn f():\n    return\n").len()).to_equal(0)
+        expect(ret_findings("fn f() -> unit:\n    return\n").len()).to_equal(0)
+
+    it "flags a bare return, a nil tail and a nil branch":
+        expect(ret_findings("fn f() -> i64:\n    return\n").len()).to_equal(1)
+        expect(ret_findings("fn f() -> i64:\n    nil\n").len()).to_equal(1)
+        expect(ret_findings("fn f(k: i64) -> text:\n    match k:\n        case 0: \"z\"\n        case _: nil\n").len()).to_equal(1)
+        expect(ret_findings("fn f(k: bool) -> text:\n    return if k: \"a\" else: nil\n").len()).to_equal(1)
+
+    it "flags forwarding an optional same-file function or extern":
+        val src = "extern fn rt_file_canonicalize(p: text) -> text?\nfn path_absolute(p: text) -> text:\n    rt_file_canonicalize(p)\n"
+        val found = ret_findings(src)
+        expect(found.len()).to_equal(1)
+        expect(found[0].line_num).to_equal(3)
+        expect(ret_findings("fn g() -> i64?:\n    nil\nfn f() -> i64:\n    return g()\n").len()).to_equal(1)
+        expect(ret_findings("fn g() -> i64?:\n    nil\nfn f() -> i64?:\n    return g()\n").len()).to_equal(0)
+
+    it "scopes nested functions and methods by indent":
+        val src = "class C:\n    fn a() -> text?:\n        return nil\n    fn b() -> text:\n        \"x\"\n"
+        expect(ret_findings(src).len()).to_equal(0)
+        val bad = "class C:\n    fn a() -> text:\n        return nil\n"
+        expect(ret_findings(bad).len()).to_equal(1)
+
+    it "ignores comments, strings, docstrings and presence tests":
+        expect(ret_findings("fn f(x: text?) -> bool:\n    # return nil\n    print \"return nil\"\n    x != nil\n").len()).to_equal(0)
+        expect(ret_findings("fn f() -> i64:\n    \"\"\"\n    nil\n    \"\"\"\n    0\n").len()).to_equal(0)
+
+    it "treats has_T sugar and optional tuples with dict types as optional":
+        expect(ret_findings("fn f() -> has_Warning:\n    return nil\n").len()).to_equal(0)
+        expect(ret_findings("fn f(d: [u8]) -> ({text: text}, i64)?:\n    return nil\n").len()).to_equal(0)
+        expect(ret_findings("fn f(d: [u8]) -> ({text: text}, i64):\n    return nil\n").len()).to_equal(1)
+
+    it "skips nil that initializes a local or ends a non-tail block":
+        val init = "fn f(o: i64?) -> i64:\n    val x: i64? = match o:\n        case Some(v): v\n        case nil: nil\n    0\n"
+        expect(ret_findings(init).len()).to_equal(0)
+        val loop_body = "fn f() -> i64:\n    for i in [1]:\n        nil\n    0\n"
+        expect(ret_findings(loop_body).len()).to_equal(0)
+        val not_tail = "fn f(k: bool) -> i64:\n    if k:\n        nil\n    0\n"
+        expect(ret_findings(not_tail).len()).to_equal(0)
+        val tail_if = "fn f(k: bool) -> i64:\n    if k:\n        1\n    else:\n        nil\n"
+        expect(ret_findings(tail_if).len()).to_equal(1)
+
+    it "does not read a one-line triple-quoted return as a bare return":
+        expect(ret_findings("fn f() -> text:\n    return \"\"\"<div>ok</div>\"\"\"\n").len()).to_equal(0)
+
+    it "skips a callee name declared both optional and non-optional in the file":
+        val src = "fn a() -> i64:\n    fn walk(n: i64) -> i64:\n        n\n    walk(1)\nfn b() -> i64?:\n    fn walk(n: i64) -> i64?:\n        nil\n    walk(1)\n"
+        expect(ret_findings(src).len()).to_equal(0)
+
+    it "flags one-line if/else return nil and bare return":
+        expect(ret_findings("fn f(k: bool) -> text:\n    if k: return nil\n    \"x\"\n").len()).to_equal(1)
+        expect(ret_findings("fn f(k: bool) -> text:\n    if k: return\n    \"x\"\n").len()).to_equal(1)
+        expect(ret_findings("fn f(k: bool) -> text?:\n    if k: return nil\n    \"x\"\n").len()).to_equal(0)
