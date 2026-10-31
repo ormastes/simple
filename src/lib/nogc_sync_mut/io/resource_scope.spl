@@ -18,9 +18,9 @@ use std.convert.{try_parse_int}
 use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause, TerminationEvidence, ResourceBudget, BudgetDecision, evaluate_resource_budget, classify_termination}
 
 @unsafe(reason: "runtime-owned bounded child tree with versioned lifecycle and resource receipts", capabilities: [ffi])
-extern fn rt_process_run_owned_observed_bounded_value(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, [i64])
+extern fn rt_process_run_owned_observed_bounded_value(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, [i64])?
 
-fn _process_run_observed_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, [i64]):
+fn _process_run_observed_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, [i64])?:
     unsafe(capabilities: [ffi]):
         rt_process_run_owned_observed_bounded_value(cmd, args, timeout_ms, max_output_bytes)
 
@@ -688,10 +688,22 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
         return _legacy_process_fallback(cmd, args, timeout_ms, max_output_bytes, -1)
     val started = time_now_unix_micros()
     proc_slot_acquire()
-    val (stdout, stderr, fields) = _process_run_observed_raw(cmd, args, timeout_ms, max_output_bytes)
+    val observed = _process_run_observed_raw(cmd, args, timeout_ms, max_output_bytes)
     proc_slot_release()
     val ended = time_now_unix_micros()
     val wall_ms = if ended >= started: (ended - started) / 1000 else: 0
+    if observed == nil:
+        # The native owner returned nil: it refused before producing a receipt, so the
+        # child state is unknown. Fail closed with runtime_error -1 and never retry.
+        return ObservedProcessResult(
+            stdout: "",
+            stderr: "",
+            usage: _unavailable_usage(wall_ms, -1),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            runtime_error: -1
+        )
+    val (stdout, stderr, fields) = observed.unwrap()
     if fields.len() != 30 or fields[0] != 1 or fields[19] != 2:
         # A malformed/short payload here does NOT prove the child never ran
         # (unlike the explicit ENOTSUP lifecycle_error below, which is a

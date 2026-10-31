@@ -75,7 +75,7 @@ export boxed_text_bytes_checked, text_byte_extraction_checked
 # primitives (C + Rust runtime, seed interpreter); they never change semantics,
 # they only replace per-byte Simple loops.
 extern fn rt_utf8_validate(bytes: [u8]) -> bool
-extern fn rt_array_concat(head: [u8], tail: [u8]) -> [u8]
+extern fn rt_array_concat(head: [u8], tail: [u8]) -> [u8]?
 
 pub fn utf8_bytes_valid(bytes: [u8]) -> bool:
     """Whole-array strict UTF-8 check (std::str::from_utf8 accept set).
@@ -98,11 +98,12 @@ pub fn text_bytes_concat_checked(head: [u8], tail: [u8]) -> Result<[u8], TextByt
     """
     if tail.len() == 0: return Ok(head)
     if head.len() > 9223372036854775767 - tail.len(): return Err(TextByteBufferError.CapacityOverflow)
-    val joined = rt_array_concat(head, tail)
-    # A refused concat is nil (length 0); tail is non-empty, so the exact
-    # length check detects it in every lane.
-    if joined.len() != head.len() + tail.len():
-        return Err(TextByteBufferError.AllocationFailed)
-    Ok(joined)
+    # A refused concat is nil. A non-nil result of the wrong length is also a
+    # refusal: the exact length check stays in every lane.
+    if val joined = rt_array_concat(head, tail):
+        if joined.len() != head.len() + tail.len():
+            return Err(TextByteBufferError.AllocationFailed)
+        return Ok(joined)
+    Err(TextByteBufferError.AllocationFailed)
 
 export utf8_bytes_valid, text_bytes_concat_checked

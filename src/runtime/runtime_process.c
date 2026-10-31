@@ -1081,6 +1081,56 @@ const char* rt_process_read_stdout(int64_t pid) {
     const char* result = win_core_rt_process_read_stdout(pid);
     ReleaseSRWLockExclusive(&win_piped_lock); return result;
 }
+/* Windows owner of the simple DAP editor helpers. The POSIX twins sit in the
+ * #else branch below; the wire protocol bytes are identical. Only the spawn
+ * (SplArray argv through rt_process_spawn_piped) and the wait sleep (Sleep, not
+ * usleep) differ. Never compiled on Windows in this change: no Windows SDK
+ * host was available to the author. */
+int64_t rt_editor_spawn_simple_dap(void) {
+    SplArray* args = rt_array_new(2);
+    if (!args) return -1;
+    if (!rt_array_push(args, rt_string_new((const uint8_t*)"run", 3)) ||
+        !rt_array_push(args, rt_string_new((const uint8_t*)"src/app/dap/simple_dap_main.spl",
+                                           strlen("src/app/dap/simple_dap_main.spl")))) {
+        rt_array_free(args);
+        return -1;
+    }
+    int64_t pid = rt_process_spawn_piped("src/compiler_rust/target/debug/simple", args);
+    rt_array_free(args);
+    return pid;
+}
+
+bool rt_editor_start_simple_dap(int64_t pid) {
+    const char* init = "Content-Length: 84\r\n\r\n{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\",\"arguments\":{\"adapterID\":\"simple\"}}";
+    const char* launch = "Content-Length: 113\r\n\r\n{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":{\"program\":\"src/app/dap/simple_dap_main.spl\",\"cwd\":\".\"}}";
+    return rt_process_write_stdin(pid, init) && rt_process_write_stdin(pid, launch);
+}
+
+bool rt_editor_poll_simple_dap_stopped(int64_t pid) {
+    static char dap_buf[65536];
+    static size_t dap_len = 0;
+    for (int i = 0; i < 16; i++) {
+        const char* chunk = rt_process_read_stdout(pid);
+        if (!chunk || !*chunk) break;
+        size_t n = strlen(chunk);
+        if (dap_len + n >= sizeof(dap_buf)) {
+            dap_len = 0;
+        }
+        memcpy(dap_buf + dap_len, chunk, n);
+        dap_len += n;
+        dap_buf[dap_len] = '\0';
+    }
+    return strstr(dap_buf, "\"type\":\"event\"") != NULL && strstr(dap_buf, "\"event\":\"stopped\"") != NULL;
+}
+
+bool rt_editor_wait_simple_dap_stopped(int64_t pid) {
+    for (int i = 0; i < 40; i++) {
+        if (rt_editor_poll_simple_dap_stopped(pid)) return true;
+        Sleep(100); /* 40 x 100 ms, same budget as the POSIX usleep(100000) loop */
+    }
+    return false;
+}
+
 bool rt_process_is_alive(int64_t pid) {
     if (pid <= 0 || pid > UINT32_MAX) return false;
     AcquireSRWLockExclusive(&win_piped_lock);
