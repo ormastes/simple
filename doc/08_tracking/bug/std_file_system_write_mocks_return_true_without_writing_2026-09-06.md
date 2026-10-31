@@ -215,6 +215,28 @@ When the mocks became real, recursive operations could destroy data:
 
 Spec: 5 new data-safety examples in the same file. 3 of them failed before this follow-up and all 11 pass after.
 
+Re-review follow-up (`dir_move` is now rename-only). The copy+delete
+fallback ran on ANY rename failure, including EINVAL for `a` -> `a/b`. The
+containment check compared raw canonical text, so on Windows (`\\?\` prefix,
+backslashes) and on case-insensitive volumes a nested destination could slip
+through. Together those brought back copy-into-self-then-delete. `dir_move` now
+returns `file_rename(src, dest)` and never copies or deletes. The existence
+and containment refusals stay as defense in depth, comparing keys with the
+verbatim prefix stripped, "/" separators, and case folded on macOS and
+Windows. Cross-device moves are unsupported; the caller runs `dir_copy` and
+then an explicit `dir_delete_all`. Spec: refusal when the destination does
+not exist yet but lies inside the source under another spelling (`..`, a
+symlinked parent, case on macOS), in sync and async. These cases already
+pass with the previous canonical check on macOS, so they are regression
+guards; the Windows and EINVAL paths cannot be exercised on this host. The
+POSIX-only examples (`/tmp`, `/bin/ln`) return early on Windows (`is_windows()`
+guard). `skip_on_windows(...)` would report them as skipped, but on this seed
+it drops the example names ("unnamed").
+
+Known gap: on Windows the C runtime `rt_package_chmod` is a stub that returns
+0 (`src/runtime/runtime_core_host_services.c:158`). So `file_set_mode`, and
+everything built on it, can report a permission change that never happened.
+
 Latent homonym, not fixed: `src/compiler/10.frontend/core/aop.spl:120` defines
 `glob_match(pattern: text, target_name: text) -> bool`. That is the REVERSED
 argument order of `std.glob.glob_match(path, pattern)`, with identical types, so

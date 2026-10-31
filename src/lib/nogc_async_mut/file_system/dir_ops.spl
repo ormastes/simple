@@ -21,7 +21,7 @@ use std.nogc_async_mut.file_system.metadata.{file_is_file, file_size}
 # callers and broke `dir_copy`/`dir_walk_dirs` here.
 # See doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
 export use std.nogc_sync_mut.io_runtime.{dir_create, dir_list}
-use std.nogc_sync_mut.io_runtime.{dir_list_optional, dir_remove_all, file_rename}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional, dir_remove_all, file_rename, host_os}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
 use std.nogc_sync_mut.sffi.fs.{file_canonicalize}
@@ -202,14 +202,34 @@ fn _dir_canonical_target(path: text) -> text?:
         return nil
     Some(join2(parent_canon ?? "", base))
 
+fn _dir_compare_key(canonical: text) -> text:
+    """Comparison form of a canonical path: drop the Windows `\\?\` verbatim
+    prefix, use "/" separators, and fold case on hosts whose default volumes
+    are case-insensitive (macOS, Windows). Folding on a case-sensitive macOS
+    volume only makes the refusal below more conservative."""
+    var key = canonical
+    if key.starts_with("\\\\?\\"):
+        key = key.substring(4, key.len())
+    key = key.replace("\\", "/")
+    val os = host_os()
+    if os == "macos" or os == "windows":
+        key = key.lower()
+    while key.len() > 1 and key.ends_with("/"):
+        key = key.substring(0, key.len() - 1)
+    key
+
 # reason: positional file_system dir_ops API
 fn dir_move(src: text, dest: text) -> bool:
-    """Move a directory.
+    """Move a directory by RENAME ONLY.
 
-    Refuses (returns false) when `dest` already exists, or when `dest` is
-    `src` itself or lies inside `src`, compared on canonical paths, because
-    copy-then-delete would destroy the data. Tries an atomic rename first and
-    falls back to copy-then-delete only when the rename fails (e.g. EXDEV).
+    Returns `file_rename(src, dest)`; it never copies and never deletes, so a
+    failed move cannot lose data. Cross-device moves (EXDEV) are therefore
+    unsupported: the caller must `dir_copy(src, dest)` and then explicitly
+    `dir_delete_all(src)`.
+
+    Defense in depth before the rename: refuse when `src` is not a real
+    directory, when `dest` already exists, or when `dest` is `src` or lies
+    inside it (canonical paths, "/" separators, case folded on macOS/Windows).
     """
     if src == "" or dest == "":
         return false
@@ -221,15 +241,11 @@ fn dir_move(src: text, dest: text) -> bool:
     val dest_canon_opt = _dir_canonical_target(dest)
     if not src_canon_opt.? or not dest_canon_opt.?:
         return false
-    val src_canon = src_canon_opt ?? ""
-    val dest_canon = dest_canon_opt ?? ""
-    if dest_canon == src_canon or dest_canon.starts_with(src_canon + "/"):
+    val src_key = _dir_compare_key(src_canon_opt ?? "")
+    val dest_key = _dir_compare_key(dest_canon_opt ?? "")
+    if dest_key == src_key or dest_key.starts_with(src_key + "/"):
         return false
-    if file_rename(src, dest):
-        return true
-    if not dir_copy(src, dest):
-        return false
-    dir_delete_all(src)
+    file_rename(src, dest)
 
 fn dir_size(path: text) -> i64:
     """Calculate total size of directory recursively.
