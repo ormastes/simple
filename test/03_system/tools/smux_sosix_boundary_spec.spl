@@ -19,7 +19,11 @@ fn smux_host_boundary_valid(source: text) -> bool:
         if line.contains("rt_read_stdin_line("): return false
         if line.starts_with("use app.io."): return false
         if line.starts_with("use std."):
-            if not line.starts_with("use std.common.") and not line.starts_with("use std.nogc_sync_mut.sosix.") and not line.starts_with("use std.nogc_sync_mut.io.tcp.{"):
+            # std.sosix.* and std.io.tcp are library-mode selected names (configured import
+            # migration aaf879df355), not sync-only: std.sosix.stdio and std.sosix.time reach
+            # the async-tier facades over the sync owners. Naming a facade directly as
+            # std.nogc_async_mut.sosix.* stays rejected here.
+            if not line.starts_with("use std.common.") and not line.starts_with("use std.nogc_sync_mut.sosix.") and not line.starts_with("use std.sosix.") and not line.starts_with("use std.nogc_sync_mut.io.tcp.{") and not line.starts_with("use std.io.tcp.{"):
                 return false
         if line.contains("print(") or line.starts_with("print "): return false
     true
@@ -41,6 +45,11 @@ describe "SMUX synchronous SOSIX host boundary":
         step("Keep the host boundary above the selected provider")
         expect(smux_host_boundary_valid("use std.nogc_sync_mut.sosix.pty.\{sosix_pty_open}")).to_equal(true)
         expect(smux_host_boundary_valid("use std.nogc_sync_mut.io.tcp.\{TcpStream}")).to_equal(true)
+        expect(smux_host_boundary_valid("use std.sosix.pty.\{sosix_pty_open}")).to_equal(true)
+        expect(smux_host_boundary_valid("use std.io.tcp.\{TcpStream}")).to_equal(true)
+        step("The selected names admit only the SOSIX and TCP owners")
+        expect(smux_host_boundary_valid("use std.io.file.\{file_read}")).to_equal(false)
+        expect(smux_host_boundary_valid("use std.io_runtime.\{getpid}")).to_equal(false)
 
     it "keeps product leaves and independent Windows clients behind the boundary":
         # @req REQ-006

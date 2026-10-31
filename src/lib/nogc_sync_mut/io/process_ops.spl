@@ -898,12 +898,48 @@ pub fn process_read_stdout_result(pid: i64) -> Result<text?, text>:
     Ok(nil)
 
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.nogc_sync_mut.shell.shebang_script.{shebang_interpreter_argv, shebang_is_posix_shell,
+    shebang_msys_safe_word, shebang_source_script}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
 extern fn rt_stderr_flush()
+
+fn _shebang_prefix(path: text) -> [text]:
+    if path.lower().ends_with(".exe") or not file_exists(path):
+        return []
+    # ponytail: whole read, a positioned read reports ENOSYS (-38) on the Windows
+    # seed. Read a bounded prefix once the seed has a working partial read.
+    shebang_interpreter_argv(file_read_text(path).split("\n")[0])
+
+# `shell` is the discovered POSIX shell; prefer its sibling for the interpreter
+# the script actually names. Plain words cross the Windows command line as they
+# are. Anything else goes through a single quoted `-c` word (see
+# shebang_script.spl), with the script path as `$0` unless MSYS would read its
+# apostrophe as a quote.
+fn _shebang_shell_invocation(shell: text, prefix: [text], script: text, args: [text]) -> (text, [text]):
+    val shell_norm = shell.replace("\\", "/")
+    val sibling = shell_norm.substring(0, shell_norm.rfind("/") + 1) + prefix[0] + ".exe"
+    val interpreter = if file_exists(sibling): sibling else: shell
+    var flags: [text] = []
+    var index = 1
+    while index < prefix.len():
+        flags = flags.push(prefix[index])
+        index = index + 1
+    var plain = shebang_msys_safe_word(script)
+    for word in flags + args:
+        plain = plain and shebang_msys_safe_word(word)
+    if plain:
+        return (interpreter, flags + [script] + args)
+    var script_path = script.replace("\\", "/")
+    if not script_path.contains("/"):
+        script_path = "./" + script_path
+    var invocation = flags + ["-c", shebang_source_script(script_path, args)]
+    if not script_path.contains("'"):
+        invocation = invocation.push(script_path)
+    (interpreter, invocation)
 
 pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
     # Test suites spawn POSIX tools by absolute path ("/bin/sh" 2000+, plus
@@ -917,6 +953,16 @@ pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
     if not _is_windows_platform():
         return (cmd, args)
     val unix = cmd.replace("\\", "/")
+    # CreateProcess only runs PE images, so an existing shell script (a .shs
+    # fixture, or an extensionless wrapper like bin/caret) needs its interpreter
+    # named. A missing script or one for another interpreter passes through and
+    # fails at spawn.
+    val script_prefix = _shebang_prefix(cmd)
+    if script_prefix.len() > 0 and shebang_is_posix_shell(script_prefix[0]):
+        val script_shell = _windows_posix_shell_path()
+        if script_shell == "cmd.exe":
+            return (cmd, args)
+        return _shebang_shell_invocation(script_shell, script_prefix, cmd, args)
     if not unix.starts_with("/bin/") and not unix.starts_with("/usr/bin/"):
         return (cmd, args)
     val parts = unix.split("/")
@@ -2534,8 +2580,10 @@ fn process_pid_exists(pid: i64) -> bool:
     # pids (piped children process_is_running cannot observe).
     if pid <= 0:
         return false
-    if _process_exists_raw(pid):
+    if process_exists(pid):
         return true
+    if _is_windows_platform():
+        return false
     val probe = process_run("/bin/ps", ["-p", pid.to_text()])
     probe.2 == 0
 

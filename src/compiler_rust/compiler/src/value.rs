@@ -1555,6 +1555,19 @@ impl CowEnv {
             .retain(|(owner, name), _| !crate::interpreter::owned_global_present(owner, name));
     }
 
+    /// After a publish, a bound global still in the overlay (no scope binding to
+    /// read it through, so `drop_published_globals` kept it) equals the store but
+    /// is no longer this frame's own write. Mark it refreshed: reads go to the
+    /// store and no later publish can replay it over a newer value.
+    pub fn mark_published_globals_refreshed(&mut self) {
+        let names: Vec<String> = self
+            .nonlocal_overlay_entries()
+            .filter(|(name, _)| self.global_binding(name).is_some())
+            .map(|(name, _)| name.clone())
+            .collect();
+        self.refreshed_globals.extend(names);
+    }
+
     pub fn refresh_scope(&mut self, globals: OwnedGlobals) {
         if let Some(scope) = &mut self.scope {
             scope.globals = globals;

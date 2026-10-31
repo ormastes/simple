@@ -18,6 +18,7 @@ use os.apps.smux.split_checkpoint.{split_checkpoint_capture, split_checkpoint_re
 use os.apps.smux.pane_lifecycle.{remove_closed_pane_state}
 use os.apps.smux.frame_snapshot.{smux_frame_from_state, smux_frame_validate}
 use os.apps.smux.client_input.{client_input_new, client_input_feed}
+use std.common.text_bytes.{text_to_bytes}
 use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
 use os.apps.smux.smux_remote.{smux_remote_dispatch, smux_remote_reply_ok}
 use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
@@ -182,6 +183,19 @@ describe "authoritative smux window zoom":
         expect(retained.state.pane_count).to_equal(3)
         expect(retained.state.get_pane(2).focus).to_equal(true)
 
+    it "keeps a planned state's receiver unchanged across chained builders":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        val split = split_window_plan(zoomed, "p3", "s", "w", "p1", "vertical").unwrap()
+        expect(split.pane_count).to_equal(3)
+        expect(zoomed.pane_count).to_equal(2)
+        expect(zoomed.find_pane_idx("p3")).to_equal(-1)
+        step("A rollback snapshot of the prior state stays a two-pane viewport")
+        expect(window_viewport_rects(zoomed, "s", "w").len()).to_equal(2)
+        val removed = remove_closed_pane_state(zoomed, "s", "w", "p2").unwrap()
+        expect(removed.pane_count).to_equal(1)
+        expect(zoomed.pane_count).to_equal(2)
+        expect(zoomed.get_window(0).zoom_pane).to_equal("p1")
+
     it "refuses invalid split and overlap without losing the saved zoom map":
         val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
         expect(split_window_plan(zoomed, "p3", "s", "w", "p1", "diagonal").is_err()).to_equal(true)
@@ -236,8 +250,8 @@ describe "authoritative smux window zoom":
         expect(smux_frame_from_state(restored, "s", "w", "p1").unwrap()).to_contain("HIDDEN")
 
     it "binds prefix-z and the real dispatcher while refusing hidden interactive input":
-        val prefix = client_input_feed(client_input_new(), "\x02")
-        val key = client_input_feed(prefix.state, "z")
+        val prefix = client_input_feed(client_input_new(), text_to_bytes("\x02"))
+        val key = client_input_feed(prefix.state, text_to_bytes("z"))
         expect(key.actions.len()).to_equal(1)
         expect(key.actions[0].kind).to_equal("toggle-zoom")
         smux_reset_for_test()

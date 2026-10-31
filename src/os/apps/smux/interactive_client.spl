@@ -16,8 +16,9 @@ use os.apps.smux.client_copy_input.{ClientCopyInput, client_copy_new, client_cop
 use os.apps.smux.notification_client.{notification_reply_decode, notification_overlay}
 use os.apps.smux.client_leases.{client_lease_token_valid, SMUX_CLIENT_HEARTBEAT_MS}
 use os.apps.smux.lifecycle_reply.{smux_missing_window_reply, smux_missing_session_reply}
-use os.apps.smux.client_view.{client_input_hex, client_reply_ids,
+use os.apps.smux.client_view.{client_input_hex, client_input_wire_split, client_reply_ids,
     client_frame_body, client_next_id, client_copy_frame}
+use std.common.text_bytes.{bytes_to_text}
 
 class TerminalClient:
     address: text
@@ -36,6 +37,7 @@ class TerminalClient:
     mark: i64
     copy_input: ClientCopyInput
     copy_deadline: i64
+    input_held: [u8]
 
 # Only exact owner visibility refusals may trigger selection recovery. The
 # discarded input is never retried, and auth/transport failures stay failures.
@@ -108,6 +110,7 @@ fn recover_window_view(client: TerminalClient, removed: bool) -> Result<Terminal
     next.copy_input = client_copy_new()
     next.copy_deadline = 0
     next.layout = -1
+    next.input_held = []
     return Ok(next)
 
 fn copy_move(client: TerminalClient, delta: i64) -> TerminalClient:
@@ -151,12 +154,19 @@ fn copy_feed(client: TerminalClient, data: text, terminal: i64, flush_escape: bo
 
 fn apply_action(client: TerminalClient, action: ClientInputAction, terminal: i64) -> Result<TerminalClient, text>:
     var next = client
+    # A held fragment belongs to the pane it was typed at; a binding ends it.
+    if action.kind != "input": next.input_held = []
     if action.kind == "input":
         if client.copy:
-            return copy_feed(client, action.data, terminal, false)
-        val sent = request(client, "input " + client.session + " " + client.window + " " +
-            client.pane + " " + client_input_hex(action.data))
-        if sent.is_err(): return Err(sent.unwrap_err())
+            # Copy mode matches ASCII keys only, and U+FFFD's bytes are ignored
+            # exactly as the fragment's own bytes would be.
+            return copy_feed(client, bytes_to_text(action.data), terminal, false)
+        val framed = client_input_wire_split(client.input_held, action.data)
+        next.input_held = framed.1
+        if framed.0.len() > 0:
+            val sent = request(client, "input " + client.session + " " + client.window + " " +
+                client.pane + " " + client_input_hex(bytes_to_text(framed.0)))
+            if sent.is_err(): return Err(sent.unwrap_err())
     elif action.kind == "next-window":
         val ids = windows(client)
         if ids.is_err(): return Err(ids.unwrap_err())
@@ -247,7 +257,7 @@ pub fn smux_interactive_attach(address: text, token: text, session: text, client
     var client = TerminalClient(address: address, token: token, session: session,
         client_id: client_id, lease: "", window: "", pane: "", cols: 80, rows: 24,
         layout: -1, copy: false, history: [], offset: 0, mark: -1,
-        copy_input: client_copy_new(), copy_deadline: 0)
+        copy_input: client_copy_new(), copy_deadline: 0, input_held: [])
     var error = ""
     var attached = false
     val admission = request(client, "client-attach " + session + " " + client_id + " 80 24")
@@ -316,7 +326,7 @@ pub fn smux_interactive_attach(address: text, token: text, session: text, client
         if error == "":
             val read = console_read(terminal, 512)
             if read.is_err(): error = read.unwrap_err()
-            elif read.unwrap() != "":
+            elif read.unwrap().len() > 0:
                 val step = client_input_feed(input_state, read.unwrap())
                 input_state = step.state
                 for action in step.actions:

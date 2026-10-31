@@ -92,6 +92,22 @@ fn _child_alive(pr: PaneRecord) -> bool:
         return process_is_piped_alive(pr.child_pid)
     return false
 
+# Child output is untrusted and sizes the padding loop below. to_int() yields 0
+# (not nil) for non-numeric text, so admit digits explicitly and bound the count
+# to the widest canvas.
+pub fn pane_csi_forward_count(params: text) -> i64:
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < params.len():
+        val digit = params.byte_at(i) - 48
+        if digit < 0 or digit > 9:
+            return 1
+        n = n * 10 + digit
+        if n > 512:
+            n = 512
+        i = i + 1
+    return if n < 1: 1 else: n
+
 fn _clean_output(raw: text) -> text:
     val esc = "\x1b"
     val bel = "\x07"
@@ -117,9 +133,7 @@ fn _clean_output(raw: text) -> text:
                 if ch == "H" and out != "" and not out.ends_with("\n"):
                     out = out + "\n"
                 if ch == "C":
-                    var n = params.to_int() ?? 1
-                    if n < 1:
-                        n = 1
+                    var n = pane_csi_forward_count(params)
                     while n > 0:
                         out = out + " "
                         n = n - 1

@@ -239,6 +239,8 @@ pub(crate) fn copy_back_block_writes(block_env: &Env, env: &mut Env) {
     // A subject/condition can leave an older owned-global aggregate in the
     // caller overlay. Repointing only the scope does not help because overlay
     // lookup wins; refresh bound overlay copies before applying block writes.
+    // Every caller ran `publish_before_block_clone` before cloning, so no
+    // unpublished write of this frame can be lost here.
     super::interpreter_call::refresh_live_bound_globals(env);
     // Off-path cost: one bool load (see `strict_mem_enabled()`); the check
     // itself is skipped entirely rather than called-and-short-circuited.
@@ -272,6 +274,7 @@ pub(crate) fn exec_unsafe_block(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Control, Option<Value>), CompileError> {
+    super::interpreter_call::publish_before_block_clone(env);
     let mut block_env = env.clone();
     // Dirty-only write-back (see interpreter/expr/control.rs if-closure path):
     // copying every shared key replays stale cloned values over newer writes.

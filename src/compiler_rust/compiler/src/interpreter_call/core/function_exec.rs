@@ -208,6 +208,20 @@ pub(crate) fn publish_and_repoint(env: &mut Env) {
     publish_live_bound_globals(env);
     env.refresh_scope(owned_globals_snapshot());
     env.drop_published_globals();
+    env.mark_published_globals_refreshed();
+}
+
+/// Control-flow frames (if-expression and match arms, `unsafe` blocks, spec
+/// examples) run in a CLONE of `env` and later `copy_back_block_writes` refreshes
+/// `env` from the store, so a callee reached from the clone can update a global
+/// the frame also holds. Publish first, exactly as a call does: the frame then
+/// holds no unpublished write that the refresh could revert, and no copy that
+/// could be published over the callee's newer value. A frame with no global in
+/// its overlay pays one length check.
+pub(crate) fn publish_before_block_clone(env: &mut Env) {
+    if env.nonlocal_overlay_len() != 0 {
+        publish_and_repoint(env);
+    }
 }
 
 /// `SIMPLE_ENV_AUDIT=1`: recompute the `nonlocal_overlay` superset on every

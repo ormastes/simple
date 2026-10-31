@@ -1,0 +1,48 @@
+"""
+## Purpose and audience
+Lifecycle owners decide whether a child is gone from `process_exists`. It must
+tell a live process from a dead one on every host, with no always-true fallback.
+"""
+# @manual_section: Process liveness
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{process_exists, process_spawn_piped, process_close_piped}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.io_runtime.{getpid}
+use std.platform.{is_windows}
+
+fn spawn_short_child(windows_exit_code: text) -> i64:
+    if is_windows():
+        return process_spawn_piped("cmd.exe", ["/c", "exit {windows_exit_code}"])
+    process_spawn_piped("sh", ["-c", "exit 0"])
+
+describe "process_exists":
+    it "reports the current process as live":
+        # @req REQ-CMUX-003
+        step("Ask about this process")
+        expect(process_exists(getpid())).to_be(true)
+
+    it "rejects the id of a child that was spawned and reaped":
+        # @req REQ-CMUX-003
+        step("Spawn a child, close it so it is reaped, then ask about its id")
+        val pid = spawn_short_child("0")
+        expect(pid > 0).to_be(true)
+        expect(process_close_piped(pid)).to_be(true)
+        thread_sleep_ms(300)
+        expect(process_exists(pid)).to_be(false)
+
+    it "rejects invalid process ids":
+        # @req REQ-CMUX-003
+        step("Ask about zero and negative ids")
+        expect(process_exists(0)).to_be(false)
+        expect(process_exists(-1)).to_be(false)
+
+    it "treats an exited child as dead even when its exit code is STILL_ACTIVE":
+        # @req REQ-CMUX-003
+        if is_windows():
+            step("Hold an exited child whose exit code is 259 and ask about its id")
+            val pid = spawn_short_child("259")
+            expect(pid > 0).to_be(true)
+            thread_sleep_ms(1000)
+            val alive = process_exists(pid)
+            expect(process_close_piped(pid)).to_be(true)
+            expect(alive).to_be(false)

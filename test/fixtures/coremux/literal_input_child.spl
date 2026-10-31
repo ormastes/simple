@@ -4,6 +4,7 @@ use std.sys.terminal_console.{open, read, write, close, cleanup}
 use std.sosix.host.{sosix_get_cli_args}
 use std.sosix.stdio.{sosix_println}
 use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+use std.common.text_bytes.{bytes_to_text}
 
 fn main() -> i64:
     val args = sosix_get_cli_args()
@@ -16,7 +17,7 @@ fn main() -> i64:
         return 22
     val handle = opened.unwrap()
     var valid = write(handle, "LITERAL_CHILD_READY\r\n").is_ok()
-    var received = ""
+    var received: [u8] = []
     val begin = sosix_time_now_monotonic_ms()
     var now = begin
     var attempts = 0
@@ -26,14 +27,14 @@ fn main() -> i64:
             if input.is_err():
                 valid = false
             else:
-                received = received + input.unwrap()
+                for byte in input.unwrap(): received.push(byte)
                 if received.len() > 1024: valid = false
-                if received.ends_with("\r"): break
+                if received.len() > 0 and received[received.len() - 1] == 13: break
         sosix_sleep_ms(25)
         attempts = attempts + 1
         now = sosix_time_now_monotonic_ms()
     val expected = if mode == "paste": "PASTE 한글😀\r" else: "LITERAL 한글😀\r"
-    val observed = valid and mode != "channel" and received == expected
+    val observed = valid and mode != "channel" and bytes_to_text(received) == expected
     # Always restore the actual child console before emitting the oracle.
     var released = close(handle)
     attempts = 0

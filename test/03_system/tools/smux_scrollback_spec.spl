@@ -170,12 +170,19 @@ describe "smux bounded primary-screen scrollback":
             # @req REQ-SMUX-HISTORY-004
             step("Feed the actual PaneRecord owner a tail and an incomplete screen update")
             val pane = MuxPane.create("pane", "window", "session")
-            val record = PaneRecord.create(pane).feed("LIVE_NOT_VISIBLE").feed_screen("\x1b[?2026hX")
+            # A record without a PTY handle is a pipe owner, which captures its tail by
+            # design, and pipe output also feeds the shared screen. Only a PTY owner has
+            # terminal frames, so the fixture holds one (no native handle is touched).
+            val owner = PaneRecord.create(pane).with_pty(123, 456)
+            val frozen = owner.feed_screen("\x1b[?2026hX")
+            val record = frozen.feed("LIVE_NOT_VISIBLE")
+            expect(record.tail).to_equal("LIVE_NOT_VISIBLE")
             expect(record.capture_history(200).content).to_equal("")
             expect(record.capture_history(200).rows).to_equal(0)
             expect(record.capture_history(0).content).to_equal("")
-            expect(record.feed_screen("\x1b[?2026l").capture_history(200).content).to_equal("X")
-            val alternate = PaneRecord.create(pane).feed("PRIMARY_TAIL").feed_screen("\x1b[?1049h")
+            expect(record.feed_screen("\x1b[?2026l").capture_history(200).content).to_contain("X")
+            expect(frozen.feed_screen("\x1b[?2026l").capture_history(200).content).to_equal("X")
+            val alternate = owner.feed("PRIMARY_TAIL").feed_screen("\x1b[?1049h")
             expect(alternate.capture_history(200).content).to_equal("")
 
     describe "REQ-SMUX-HISTORY-005: bounded remote history command":

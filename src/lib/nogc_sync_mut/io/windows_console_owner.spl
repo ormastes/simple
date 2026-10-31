@@ -4,7 +4,6 @@ use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, H
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u16, volatile_read_u32, volatile_read_u64, volatile_write_u16, volatile_write_u32}
 use std.nogc_sync_mut.io.windows_console_codec.{WindowsConsoleDecoderV1, WindowsConsoleKeyV1, windows_console_decode_key_v1, windows_console_raw_input_mode_v1, windows_console_vt_output_mode_v1, windows_console_utf16_units_v1}
 use std.nogc_sync_mut.io.windows_clipboard_owner.{windows_clipboard_write_v1, windows_clipboard_cleanup_v1}
-use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 
 struct WindowsConsoleStateV1:
     heap: i64
@@ -164,9 +163,9 @@ pub fn windows_console_open_v1() -> Result<i64, text>:
         return Err(error)
     Ok(index + 1)
 
-fn _windows_console_take_v1(state: WindowsConsoleStateV1, max_bytes: i64) -> (WindowsConsoleStateV1, Result<text, text>):
+fn _windows_console_take_v1(state: WindowsConsoleStateV1, max_bytes: i64) -> (WindowsConsoleStateV1, Result<[u8], text>):
     var next = state
-    if next.keys.len() == 0: return (next, Ok(""))
+    if next.keys.len() == 0: return (next, Ok([]))
     var output: [u8] = [0u8; max_bytes]
     var length = 0
     var consumed = 0
@@ -185,10 +184,11 @@ fn _windows_console_take_v1(state: WindowsConsoleStateV1, max_bytes: i64) -> (Wi
         next.keys = retained
     var complete: [u8] = [0u8; length]
     for index in 0..length: complete[index] = output[index]
-    (next, validated_utf8_bytes_to_text_linear(complete))
+    # Whole key values only, so a bounded read never splits a scalar.
+    (next, Ok(complete))
 
 @unsafe(reason: "reads only already counted records using the single exclusive console consumer", capabilities: [ffi, raw_ptr])
-pub fn windows_console_read_v1(handle: i64, max_bytes: i64) -> Result<text, text>:
+pub fn windows_console_read_v1(handle: i64, max_bytes: i64) -> Result<[u8], text>:
     if not _windows_console_live_v1(handle): return Err("invalid or closed console lease")
     if max_bytes <= 0 or max_bytes > 65536: return Err("console read bound must be 1..65536 bytes")
     var state = _windows_console_slots_v1[handle - 1]

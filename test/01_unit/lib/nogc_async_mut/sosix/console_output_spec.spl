@@ -1,0 +1,45 @@
+"""
+## Purpose and audience
+Caret and smux print through the SOSIX console boundary. These scenarios keep
+that path working on every hosted platform, including Windows where the
+interpreter's descriptors are HANDLEs and 0..2 name the standard streams.
+"""
+# @manual_section: SOSIX console output
+use std.spec.*
+use std.sosix.stdio.{sosix_print_raw_checked, sosix_eprint_checked}
+use std.nogc_sync_mut.sffi.fs.{io_file_write, io_file_write_all}
+use std.sffi.io.{file_write_text}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.io_runtime.{env_get}
+
+val CHILD: text = "build/console_output_child.spl"
+
+describe "SOSIX console output":
+    it "writes raw UTF-8 text to standard output":
+        # @req REQ-CMUX-009
+        step("Print raw Unicode text through the checked console API")
+        val written = sosix_print_raw_checked("console-界😀\n")
+        expect(written.is_ok()).to_be(true)
+
+    it "delivers raw UTF-8 text to a captured stdout byte for byte":
+        # @req REQ-CMUX-009
+        step("Run a child that prints through sosix_print_raw and compare its stdout")
+        expect(file_write_text(CHILD, "use std.sosix.stdio.\{sosix_print_raw}\nsosix_print_raw(\"console-界😀\\n\")\n")).to_equal(true)
+        val override = env_get("SIMPLE_SPEC_COMPILER") ?? ""
+        val compiler = if override != "": override else: "bin/release/simple"
+        val result = process_run(compiler, ["run", CHILD])
+        expect(result.2).to_equal(0)
+        expect(result.0).to_equal("console-界😀\n")
+
+    it "writes an error line to standard error":
+        # @req REQ-CMUX-009
+        step("Print one line through the checked error API")
+        val written = sosix_eprint_checked("console-err")
+        expect(written.is_ok()).to_be(true)
+
+    it "reaches both standard streams by descriptor number":
+        # @req REQ-CMUX-009
+        step("Write bytes directly to descriptors 1 and 2")
+        val bytes: [u8] = [111u8, 107u8, 10u8]
+        expect(io_file_write(1, bytes)).to_equal(3)  # oracle: three bytes were passed
+        expect(io_file_write_all(2, bytes)).to_be(true)

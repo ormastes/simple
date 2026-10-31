@@ -139,3 +139,7 @@ Authoring trap: `SSDOC-ORA-003` matches `# oracle:` only on the **same line** as
 the assertion. A marker on the preceding line silently does nothing.
 
 Full audit: `doc/09_report/caret_smux_slang_agent_manager_gap_audit_2026-08-24.md`.
+
+## Handoff 2026-10-31
+
+Windows seed-only sweep and remaining RED list, by cause: `.spipe/caret_suite_harden/state.md`. On Windows, the interpreter's descriptors 0..2 are the standard streams, shebang scripts spawn through the POSIX shell, and smux terminal input is `[u8]` until a complete scalar reaches the wire.

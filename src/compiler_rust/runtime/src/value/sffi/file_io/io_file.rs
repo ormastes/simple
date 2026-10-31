@@ -69,10 +69,19 @@ unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
 /// back the same way the Unix branch does.
 #[cfg(windows)]
 unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
-    if fd <= 0 {
-        return default;
-    }
-    let mut file = File::from_raw_handle(fd as *mut std::ffi::c_void);
+    use std::os::windows::io::AsRawHandle;
+    // Descriptors 0..2 are the inherited standard streams, not HANDLE values.
+    let handle = match fd {
+        0 => std::io::stdin().as_raw_handle(),
+        1 => {
+            let _ = std::io::stdout().flush();
+            std::io::stdout().as_raw_handle()
+        }
+        2 => std::io::stderr().as_raw_handle(),
+        _ if fd < 0 => return default,
+        _ => fd as *mut std::ffi::c_void,
+    };
+    let mut file = File::from_raw_handle(handle);
     let out = f(&mut file);
     let _ = file.into_raw_handle();
     out

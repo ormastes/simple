@@ -1,12 +1,14 @@
 # Pure default-key decoder. Controller owns sessions, copy state and effects.
-# Input text is forwarded exactly; a prefix may span successive read chunks.
-use std.common.text_bytes.{text_to_bytes, bytes_to_text}
+# Input bytes are forwarded exactly; a prefix may span successive read chunks.
+# Text cannot carry a split scalar: the runtime replaces malformed UTF-8 with
+# U+FFFD, so a read chunk stays [u8] until the client frames it for the pane.
+use std.common.text_bytes.{bytes_to_text}
 struct ClientInputState:
     prefix: bool
 
 struct ClientInputAction:
     kind: text
-    data: text
+    data: [u8]
 
 struct ClientInputStep:
     state: ClientInputState
@@ -30,13 +32,12 @@ fn _client_input_binding(key: text) -> text:
     if key == "q": return "copy-exit"
     return ""
 
-pub fn client_input_feed(state: ClientInputState, data: text) -> ClientInputStep:
+pub fn client_input_feed(state: ClientInputState, data: [u8]) -> ClientInputStep:
     var prefix = state.prefix
     var input: [u8] = []
     var actions: [ClientInputAction] = []
-    # Match only ASCII control/binding bytes. Raw-copy conversion preserves
-    # UTF-8 fragments when a read splits a scalar across text chunks.
-    for byte in text_to_bytes(data):
+    # Match only ASCII control/binding bytes, so a UTF-8 fragment is never decoded.
+    for byte in data:
         if prefix:
             prefix = false
             val binding = if byte < 128: _client_input_binding(bytes_to_text([byte])) else: ""
@@ -48,15 +49,15 @@ pub fn client_input_feed(state: ClientInputState, data: text) -> ClientInputStep
                 input.push(byte)
             else:
                 if input.len() > 0:
-                    actions.push(ClientInputAction(kind: "input", data: bytes_to_text(input)))
+                    actions.push(ClientInputAction(kind: "input", data: input))
                     input = []
-                actions.push(ClientInputAction(kind: binding, data: ""))
+                actions.push(ClientInputAction(kind: binding, data: []))
         elif byte == 2:
             prefix = true
         else:
             input.push(byte)
     if input.len() > 0:
-        actions.push(ClientInputAction(kind: "input", data: bytes_to_text(input)))
+        actions.push(ClientInputAction(kind: "input", data: input))
     return ClientInputStep(state: ClientInputState(prefix: prefix), actions: actions)
 
 export ClientInputState, ClientInputAction, ClientInputStep
