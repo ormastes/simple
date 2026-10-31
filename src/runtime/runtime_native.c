@@ -193,27 +193,32 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
 #endif
 
 /* OS CSPRNG bytes encoded as lowercase hexadecimal.  This is the native
- * provider for std.nogc_sync_mut.io.crypto_sffi.random_hex. */
-const char* rt_random_hex(int64_t len) {
+ * provider for std.nogc_sync_mut.io.crypto_sffi.random_hex. Returns a
+ * RuntimeValue (nil == 3) like its Rust twin: it used to return the raw `char*`,
+ * which the caller read as a tagged value, so checked entropy always came back
+ * nil. */
+int64_t rt_string_new(const uint8_t* data, uint64_t len);
+
+int64_t rt_random_hex(int64_t len) {
     static const char hex[] = "0123456789abcdef";
-    if (len < 0 || (uint64_t)len > (SIZE_MAX - 1) / 2) return NULL;
+    if (len < 0 || (uint64_t)len > (SIZE_MAX - 1) / 2) return 3;
     size_t byte_len = (size_t)len;
     unsigned char* random_bytes = NULL;
     if (byte_len > 0) {
         random_bytes = (unsigned char*)rt_observed_malloc_v1(byte_len);
-        if (!random_bytes) return NULL;
+        if (!random_bytes) return 3;
 #if defined(_WIN32)
         typedef long (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
-        if (byte_len > 0xffffffffu) { free(random_bytes); return NULL; }
+        if (byte_len > 0xffffffffu) { free(random_bytes); return 3; }
         HMODULE library = LoadLibraryA("bcrypt.dll");
-        if (!library) { free(random_bytes); return NULL; }
+        if (!library) { free(random_bytes); return 3; }
         BCryptGenRandomFn fill = (BCryptGenRandomFn)GetProcAddress(library, "BCryptGenRandom");
         long status = fill ? fill(NULL, random_bytes, (unsigned long)byte_len, 0x00000002) : -1;
         FreeLibrary(library);
-        if (status != 0) { free(random_bytes); return NULL; }
+        if (status != 0) { free(random_bytes); return 3; }
 #else
         int fd = open("/dev/urandom", O_RDONLY);
-        if (fd < 0) { free(random_bytes); return NULL; }
+        if (fd < 0) { free(random_bytes); return 3; }
         size_t offset = 0;
         while (offset < byte_len) {
             ssize_t count = read(fd, random_bytes + offset, byte_len - offset);
@@ -221,7 +226,7 @@ const char* rt_random_hex(int64_t len) {
             if (count <= 0) {
                 close(fd);
                 free(random_bytes);
-                return NULL;
+                return 3;
             }
             offset += (size_t)count;
         }
@@ -229,14 +234,15 @@ const char* rt_random_hex(int64_t len) {
 #endif
     }
     char* encoded = (char*)rt_observed_malloc_v1(byte_len * 2 + 1);
-    if (!encoded) { free(random_bytes); return NULL; }
+    if (!encoded) { free(random_bytes); return 3; }
     for (size_t i = 0; i < byte_len; i++) {
         encoded[i * 2] = hex[random_bytes[i] >> 4];
         encoded[i * 2 + 1] = hex[random_bytes[i] & 0x0f];
     }
-    encoded[byte_len * 2] = '\0';
     free(random_bytes);
-    return encoded;
+    int64_t result = rt_string_new((const uint8_t*)encoded, (uint64_t)(byte_len * 2));
+    free(encoded);
+    return result;
 }
 
 static int rt_dir_create_all_cpath(const char* path);
