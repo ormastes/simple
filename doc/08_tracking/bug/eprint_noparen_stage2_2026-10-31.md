@@ -12,7 +12,7 @@ reason=pinned-stage2-predates-#5567` on the line above. Behaviour is identical.
 
 Removal condition: stage2 rebuilt from a tree containing #5567; then drop the parens and tags.
 
-Workaround sites (tag line; the eprint( call is the next line):
+Workaround sites (eprint( call line; the @workaround tag is the line above):
 - src/app/cli/bootstrap_main.spl (1)
 - src/app/cli/check_entry.spl (3)
 - src/app/cli/electron_entry.spl (2)
