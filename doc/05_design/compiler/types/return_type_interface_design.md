@@ -69,7 +69,7 @@ one table.
 Interface type term (symbol-free, serialisable, HIR-shaped):
 
 ```
-RtType = Builtin(name)                       i8..u64 f32 f64 bool char text unit never
+RtType = Builtin(name)                       i8..u64 f32 f64 bool char text unit never any
        | Nominal(DeclRef, args: [RtType])    struct/class/enum/trait/alias target
        | Result(ok, err) | Optional(inner) | Array(elem, size?) | Slice | Dict(k, v)
        | Tuple([..]) | Function(params, ret) | DynTrait(DeclRef) | Ref/Ptr/Unique/Shared/Weak(inner)
@@ -77,8 +77,9 @@ RtType = Builtin(name)                       i8..u64 f32 f64 bool char text unit
                                              generic_tldr_view_v1 (alpha-invariant)
 ```
 
-`Any`, `Infer`, `Error` are not representable: an exporter that meets one
-emits an error row (§7), not a term.
+`Any` is the builtin term `b:any` and round-trips through the interface.
+`Infer` and `Error` are not representable: an exporter that meets one emits an
+error row (§7), not a term.
 
 ## 4. The tri-state entry (centre of the API)
 
@@ -175,7 +176,7 @@ lane lands, the same rows are produced from each lowered `HirModule` by
 | E-RTI-004 | `bind` finds no local symbol for a DeclRef | `type '{m}.{decl}' is not imported in '{consumer}'` |
 | E-RTI-005 | alias/re-export cycle or depth > 32 | lists the chain |
 | E-RTI-006 | two rows for one key (overload across impls) | lists both decl refs — never collapses to nil |
-| E-RTI-007 | exporter meets `Any`/`Infer`/`Error` return | row refused at export; module interface build fails |
+| E-RTI-007 | exporter meets `Infer`/`Error` return or an unbound type parameter | row refused at export; module interface build fails |
 
 `Union` selection at MIR with no arm for the active target is E-RTI-002-class
 (hard error naming the target).
