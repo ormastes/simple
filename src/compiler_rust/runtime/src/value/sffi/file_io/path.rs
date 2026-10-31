@@ -159,7 +159,7 @@ mod rt_path_absolute_tests {
     use super::*;
 
     #[test]
-    fn rt_path_absolute_cwd_failure_is_none() {
+    fn path_absolute_cwd_failure_is_none() {
         let got = absolute_against_cwd(Path::new("rel/child.spl"), || {
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "cwd gone"))
         });
@@ -167,7 +167,7 @@ mod rt_path_absolute_tests {
     }
 
     #[test]
-    fn rt_path_absolute_missing_path_is_absolute_text() {
+    fn path_absolute_missing_path_is_absolute_text() {
         let raw = b"no_such_dir_xyz/child.spl";
         let v = unsafe { rt_path_absolute(raw.as_ptr(), raw.len() as u64) };
         assert!(v != RuntimeValue::NIL, "missing path with a live cwd must not be nil");

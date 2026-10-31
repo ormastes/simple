@@ -521,7 +521,7 @@ mod canonicalize_tests {
 
     /// A cwd failure must yield nil, never the relative input text.
     #[test]
-    fn rt_path_absolute_cwd_failure_is_none() {
+    fn path_absolute_cwd_failure_is_none() {
         let got = absolute_against_cwd(Path::new("rel/child.spl"), || {
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "cwd gone"))
         });
@@ -529,7 +529,7 @@ mod canonicalize_tests {
     }
 
     #[test]
-    fn rt_path_absolute_absolute_input_skips_cwd() {
+    fn path_absolute_absolute_input_skips_cwd() {
         let abs = std::env::temp_dir().join("x.spl");
         let got = absolute_against_cwd(&abs, || panic!("cwd must not be read"));
         assert_eq!(got, Some(abs));
@@ -538,7 +538,7 @@ mod canonicalize_tests {
     /// A missing path is made absolute against the cwd (matching
     /// runtime/src/value/sffi/file_io/path.rs); nil only when the cwd fails.
     #[test]
-    fn rt_path_absolute_of_missing_path_is_text_not_nil() {
+    fn path_absolute_of_missing_path_is_text_not_nil() {
         let got = rt_path_absolute(&[Value::text("no_such_dir_xyz/child.spl".to_string())])
             .expect("path_absolute call");
         let text = match got {
