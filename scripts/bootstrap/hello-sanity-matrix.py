@@ -153,16 +153,26 @@ def inherited_build_settings(environ):
     every Hello build on a smaller or shared host. A present but noncanonical
     value is refused rather than silently ignored.
     """
+    kept = {}
     key = "SIMPLE_BUILD_MEMORY_RESERVE_BYTES"
-    if key not in environ:
-        return {}
-    value = environ[key]
-    # The compiler parses an out-of-range value as 0 and falls back to the
-    # 24 GiB default, so bound it to i64 here.
-    if (not value.isascii() or not value.isdigit() or value[0] == "0" or
-            len(value) > 19 or int(value) > 2**63 - 1):
-        raise ValueError(key + " must be a canonical positive i64 decimal")
-    return {key: value}
+    if key in environ:
+        value = environ[key]
+        # The compiler parses an out-of-range value as 0 and falls back to the
+        # 24 GiB default, so bound it to i64 here.
+        if (not value.isascii() or not value.isdigit() or value[0] == "0" or
+                len(value) > 19 or int(value) > 2**63 - 1):
+            raise ValueError(key + " must be a canonical positive i64 decimal")
+        kept[key] = value
+    # @workaround bug=stage2_llc_discovery_ignores_path_2026-10-31 reason=a Stage 2
+    # compiler without SIMPLE_LLVM_BIN fails every AOT unit with "llc failed
+    # (exit -1)" even with llc on PATH; keep the operator's LLVM bin directory.
+    key = "SIMPLE_LLVM_BIN"
+    if key in environ:
+        value = environ[key]
+        if not os.path.isabs(value) or not os.path.isdir(value):
+            raise ValueError(key + " must name an existing absolute directory")
+        kept[key] = value
+    return kept
 
 
 def phase_capabilities(phase):
