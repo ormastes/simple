@@ -1,0 +1,106 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/nil_return_non_optional_deferred_2026-10-31.md
+"""
+# Environment and CSPRNG externs declare `T?`
+
+The Rust handlers of `rt_env_get`, `rt_env_get_var`, `rt_random_hex` and
+`rt_process_pinned_executable_sha256_value` return nil for an unset variable,
+an unknown name, a failed CSPRNG and a stale pin. Their declarations claimed a
+non-optional result. A `bin/simple test` run executes the deployed binary, which
+returns nil whatever the declaration says, so the behaviour blocks may pass
+against reverted source. The source block pins each declaration.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file_text, env_get, env_get_nullable}
+use std.nogc_sync_mut.sffi.env.{env_get_unchecked}
+use std.nogc_sync_mut.dual_fs.{fs_provider}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use app.io.process_limit_enforcer.{supports_ulimit}
+use app.io.process_governor.{_proc_slot_limit}
+
+val UNSET = "ZZ_SIMPLE_NIL_RET_UNSET_7731"
+
+fn _declares(path: text, decl: text) -> bool:
+    val src = read_file_text(path)
+    for line in src.split("\n"):
+        # A trailing comment documents the nil semantics; compare the code part.
+        if line.split("  #")[0].trim() == decl:
+            return true
+    false
+
+describe "changed wrappers report an unset variable explicitly":
+    it "env_get_unchecked returns nil":
+        # @req REQ-SSPEC-UNIT
+        step("Read an unset variable through the sffi env wrapper")
+        expect(env_get_unchecked(UNSET) == nil).to_equal(true)
+
+    it "fs_provider degrades to native when the switch is unset":
+        # @req REQ-SSPEC-UNIT
+        step("Read the provider with SIMPLE_FS_PROVIDER unset")
+        expect(fs_provider()).to_equal("native")
+
+    it "supports_ulimit treats an unset OS variable as Unix":
+        # @req REQ-SSPEC-UNIT
+        step("Query ulimit support with OS unset on a Unix host")
+        expect(supports_ulimit()).to_equal(true)
+
+    it "the process slot limit falls back to the CPU-derived default":
+        # @req REQ-SSPEC-UNIT
+        step("Compute the slot limit with SIMPLE_MAX_PROCS unset")
+        expect(_proc_slot_limit() >= 4).to_equal(true)
+
+describe "sibling environment surfaces keep the same contract":
+    it "env_get_nullable returns nil":
+        # @req REQ-SSPEC-UNIT
+        step("Read an unset variable through the nullable facade")
+        expect(env_get_nullable(UNSET) == nil).to_equal(true)
+
+    it "env_get documents unset as empty":
+        # @req REQ-SSPEC-UNIT
+        step("Read an unset variable through the text facade")
+        expect(env_get(UNSET)).to_equal("")
+
+    it "library random_hex returns 2*N characters on success":
+        # @req REQ-SSPEC-UNIT
+        step("Draw 16 bytes through the optional library wrapper")
+        val hex = random_hex(16)
+        expect(hex == nil).to_equal(false)
+        expect(hex.unwrap().len()).to_equal(32)
+
+describe "declarations pinned in source":
+    it "rt_env_get is optional in every in-scope library and app file":
+        # @req REQ-SSPEC-UNIT
+        step("Read the declaring lib and app files")
+        val decl = "extern fn rt_env_get(key: text) -> text?"
+        for path in ["src/lib/log.spl", "src/lib/nogc_sync_mut/dual_fs/__init__.spl", "src/lib/nogc_sync_mut/sffi/env.spl", "src/app/io/process_governor.spl", "src/app/io/process_limit_enforcer.spl", "src/app/snpm/config.spl", "src/app/snpm/cmd_auth.spl", "src/app/editor/editor_extension_roots.spl", "src/app/editor/editor_path_text_helpers.spl"]:
+            step(path)
+            expect(_declares(path, decl)).to_equal(true)
+
+    it "rt_env_get is optional in every in-scope compiler file":
+        # @req REQ-SSPEC-UNIT
+        step("Read the declaring compiler files")
+        val decl = "extern fn rt_env_get(key: text) -> text?"
+        for path in ["src/compiler/90.tools/lint/_LintMain/config_and_model.spl", "src/compiler/90.tools/sffi_gen/_SffiGenMain/generate_all_and_entry.spl", "src/compiler/95.interp/interpreter/llvm/tools.spl", "src/compiler/70.backend/linker/mold.spl", "src/compiler/70.backend/backend/llvm_backend_tools.spl", "src/compiler/70.backend/backend/opencl_backend.spl", "src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl", "src/compiler/70.backend/backend/_MirToLlvm/class_def.spl", "src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl", "src/compiler/70.backend/backend/cranelift_codegen_adapter.spl", "src/compiler/35.semantics/lint/hir_frontend_diagnostics.spl"]:
+            step(path)
+            expect(_declares(path, decl)).to_equal(true)
+
+    it "rt_random_hex and the wrappers forwarding it are optional":
+        # @req REQ-SSPEC-UNIT
+        step("Read both app crypto files")
+        for path in ["src/app/io/crypto_ffi.spl", "src/app/io/crypto_sffi.spl"]:
+            expect(_declares(path, "extern fn rt_random_hex(length: i64) -> text?")).to_equal(true)
+            expect(_declares(path, "fn random_hex(length: i64) -> text?:")).to_equal(true)
+            expect(_declares(path, "fn random_salt() -> text?:")).to_equal(true)
+
+    it "the pinned digest extern is optional":
+        # @req REQ-SSPEC-UNIT
+        step("Read process_ops")
+        expect(_declares("src/lib/nogc_sync_mut/io/process_ops.spl", "extern fn rt_process_pinned_executable_sha256_value(handle: i64) -> [u8]?")).to_equal(true)
+
+    it "env_get_unchecked is optional":
+        # @req REQ-SSPEC-UNIT
+        step("Read sffi env")
+        expect(_declares("src/lib/nogc_sync_mut/sffi/env.spl", "fn env_get_unchecked(key: text) -> text?:")).to_equal(true)
