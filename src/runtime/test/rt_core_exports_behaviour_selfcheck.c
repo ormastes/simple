@@ -482,6 +482,8 @@ static void test_process_output(void) {
 static void test_string_bytes(void) {
     /* round trip incl. UTF-8 and an embedded NUL (length-carried, no strlen) */
     static const uint8_t raw[] = { 'h', 0xC3, 0xA9, 0x00, 'x', 0xFF };
+    /* from_byte_array repairs the malformed trailing 0xFF to U+FFFD (Rust lossy contract). */
+    static const uint8_t repaired[] = { 'h', 0xC3, 0xA9, 0x00, 'x', 0xEF, 0xBF, 0xBD };
     int64_t txt = rt_string_new(raw, sizeof(raw));
     int64_t arr = rt_string_to_byte_array(txt);
     expect_i64("bytes.len", rt_array_len_safe(arr), (int64_t)sizeof(raw));
@@ -496,8 +498,8 @@ static void test_string_bytes(void) {
 
     int64_t back = rt_string_from_byte_array(arr);
     expect_true("bytes.round_trip",
-                rt_string_len(back) == (int64_t)sizeof(raw) &&
-                memcmp(rt_string_data(back), raw, sizeof(raw)) == 0,
+                rt_string_len(back) == (int64_t)sizeof(repaired) &&
+                memcmp(rt_string_data(back), repaired, sizeof(repaired)) == 0,
                 "round trip mismatch");
 
     /* empty both ways */

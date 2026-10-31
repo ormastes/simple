@@ -3,13 +3,20 @@
 #
 # Miscellaneous utilities: temporary files, glob patterns, tree operations,
 # symbolic links, disk usage, file type detection.
-# Pure Simple implementations with mock backends.
+# Real host-backed implementations; where the runtime has no primitive
+# (symlink create/read) the function fails closed instead of faking success.
 
 use std.nogc_sync_mut.file_system.types.{TempFile}
-use std.nogc_sync_mut.file_system.file_ops.{file_create, file_delete, file_exists, file_read_lines, file_read_text}
+use std.nogc_sync_mut.file_system.file_ops.{file_create, file_delete, file_exists, file_read_lines}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.sffi.fs.{file_canonicalize}
+# `glob_match(path, pattern)` has one real owner, std.glob. The copy that used
+# to live here took (pattern, path): identical parameter types in the opposite
+# order, so by-name binding could silently swap the arguments.
+export use std.nogc_sync_mut.glob.{glob_match}
 use std.nogc_sync_mut.file_system.dir_ops.{dir_create, dir_create_all, dir_exists, dir_list, dir_size, dir_walk_files}
 use std.nogc_sync_mut.file_system.path_ops.{path_dirname, path_extension, path_has_extension, path_join2}
-use std.nogc_sync_mut.file_system.metadata.{file_is_directory, file_is_file, file_is_symlink, file_size}
+use std.nogc_sync_mut.file_system.metadata.{file_is_directory, file_is_file, file_size}
 
 # ============================================================================
 # Temporary Files
@@ -49,7 +56,7 @@ fn temp_dir_create() -> text?:
         Some(path) or nil on error
     """
     val path = "/tmp/simple_temp_dir_" + random_suffix()
-    if not dir_create(path):
+    if not dir_create(path, false):
         return nil
     Some(path)
 
@@ -65,65 +72,14 @@ fn temp_file_cleanup(temp: TempFile) -> bool:
     file_delete(temp.path)
 
 fn random_suffix() -> text:
-    """Generate random suffix for temp files."""
-    # Mock: return fixed suffix
-    "abc123"
+    """Process- and time-unique suffix for temp paths."""
+    "{getpid()}_{time_now_unix_micros()}"
 
 # ============================================================================
 # Glob Pattern Matching
 # ============================================================================
 
-fn glob_match(pattern: text, path: text) -> bool:
-    """Check if path matches glob pattern.
-
-    Supports: *, ?, [abc]
-
-    Args:
-        pattern: Glob pattern
-        path: Path to test
-
-    Returns:
-        true if matches
-    """
-    glob_match_recursive(pattern: pattern, path: path, pi: 0, pathi: 0)
-
-fn glob_match_recursive(pattern: text, path: text, pi: i64, pathi: i64) -> bool:
-    """Recursive glob matching helper."""
-    # Base cases
-    if pi >= pattern.len() and pathi >= path.len():
-        return true
-    if pi >= pattern.len():
-        return false
-    if pathi >= path.len():
-        # Check if remaining pattern is all *
-        for i in pi..pattern.len():
-            if pattern[i:i+1] != "*":
-                return false
-        return true
-
-    val pc = pattern[pi:pi+1]
-    val pathc = path[pathi:pathi+1]
-
-    if pc == "*":
-        # Try matching 0 or more characters
-        val match_zero = glob_match_recursive(pattern: pattern, path: path, pi: pi + 1, pathi: pathi)
-        if match_zero:
-            return true
-        val match_more = glob_match_recursive(pattern: pattern, path: path, pi: pi, pathi: pathi + 1)
-        return match_more
-    elif pc == "?":
-        # Match any single character
-        return glob_match_recursive(pattern: pattern, path: path, pi: pi + 1, pathi: pathi + 1)
-    elif pc == "[":
-        # Character class (simplified)
-        return glob_match_recursive(pattern: pattern, path: path, pi: pi + 3, pathi: pathi + 1)
-    else:
-        # Literal character
-        if pc == pathc:
-            return glob_match_recursive(pattern: pattern, path: path, pi: pi + 1, pathi: pathi + 1)
-        return false
-
-fn glob_find(pattern: text, root: text) -> [text]:
+fn glob_find_under(pattern: text, root: text) -> [text]:
     """Find all files matching glob pattern.
 
     Args:
@@ -136,7 +92,7 @@ fn glob_find(pattern: text, root: text) -> [text]:
     val all_files = dir_walk_files(root)
     var matches = []
     for file in all_files:
-        if glob_match(pattern: pattern, path: file):
+        if glob_match(file, pattern):
             matches.push(file)
     matches
 
@@ -149,7 +105,7 @@ fn glob_find_files(pattern: text) -> [text]:
     Returns:
         Array of matching paths
     """
-    glob_find(pattern: pattern, root: ".")
+    glob_find_under(pattern, ".")
 
 fn glob_filter(paths: [text], pattern: text) -> [text]:
     """Filter paths by glob pattern.
@@ -163,7 +119,7 @@ fn glob_filter(paths: [text], pattern: text) -> [text]:
     """
     var matches = []
     for p in paths:
-        if glob_match(pattern: pattern, path: p):
+        if glob_match(p, pattern):
             matches.push(p)
     matches
 
@@ -213,31 +169,24 @@ fn tree_print(root: text) -> text:
 
 fn tree_print_recursive(path: text, indent: text, output):
     """Helper for tree printing."""
-    val entries_opt = dir_list(path)
-    if not entries_opt.?:
-        return pass
+    val entries = dir_list(path)
+    for i in 0..entries.len():
+        val entry = entries[i]
+        val is_last = i == entries.len() - 1
+        val branch = if is_last:
+            "└── "
+        else:
+            "├── "
 
-    match entries_opt:
-        Some(entries):
-            for i in 0..entries.len():
-                val entry = entries[i]
-                val is_last = i == entries.len() - 1
-                val branch = if is_last:
-                    "└── "
-                else:
-                    "├── "
+        output.push(indent + branch + entry + "\n")
 
-                output.push(indent + branch + entry + "\n")
-
-                val full_path = path_join2(base: path, child: entry)
-                if dir_exists(full_path):
-                    val new_indent = if is_last:
-                        indent + "    "
-                    else:
-                        indent + "│   "
-                    tree_print_recursive(path: full_path, indent: new_indent, output: output)
-        nil:
-            pass
+        val full_path = path_join2(base: path, child: entry)
+        if dir_exists(full_path):
+            val new_indent = if is_last:
+                indent + "    "
+            else:
+                indent + "│   "
+            tree_print_recursive(path: full_path, indent: new_indent, output: output)
 
 # ============================================================================
 # Symbolic Links
@@ -246,44 +195,24 @@ fn tree_print_recursive(path: text, indent: text, output):
 fn symlink_create(target: text, link: text) -> bool:
     """Create symbolic link.
 
-    Args:
-        target: Target path
-        link: Link path
-
-    Returns:
-        true on success, false on error
+    The runtime exposes no symlink(2) primitive, so this always fails closed
+    (returns false) rather than reporting a link that was never made.
     """
-    if target == "" or link == "":
-        return false
-    # Mock: simulate symlink creation
-    true
+    false
 
 fn symlink_read(link: text) -> text?:
     """Read symbolic link target.
 
-    Args:
-        link: Link path
-
-    Returns:
-        Some(target) or nil on error
+    The runtime exposes no readlink(2) primitive, so this always fails closed
+    with nil. Use `symlink_resolve` for the final canonical target.
     """
-    if not file_is_symlink(link):
-        return nil
-    Some("/mock/target")
+    nil
 
 fn symlink_resolve(path: text) -> text?:
-    """Resolve symbolic link to final target.
-
-    Args:
-        path: Path (may contain symlinks)
-
-    Returns:
-        Some(resolved) or nil on error
-    """
-    if not file_exists(path):
+    """Resolve every symbolic link in `path` (realpath(3)); nil on error."""
+    if path == "":
         return nil
-    # Mock: return path itself
-    Some(path)
+    file_canonicalize(path)
 
 # ============================================================================
 # Disk Usage
@@ -299,12 +228,7 @@ fn disk_usage(path: text) -> i64:
         Total size in bytes
     """
     if file_is_file(path):
-        val size_opt = file_size(path)
-        match size_opt:
-            Some(size):
-                return size
-            nil:
-                return 0
+        return file_size(path)
     elif file_is_directory(path):
         return dir_size(path)
     else:
@@ -498,13 +422,11 @@ fn file_word_count(path: text) -> i64?:
     Returns:
         Some(word count) or nil on error
     """
-    val content_opt = file_read_text(path)
-    match content_opt:
-        Some(content):
-            val words = content.split(" ")
-            Some(words.len())
-        nil:
-            nil
+    val content_opt = file_read_nullable(path)
+    if not content_opt.?:
+        return nil
+    val content = content_opt ?? ""
+    Some(content.split(" ").len())
 
 fn file_char_count(path: text) -> i64?:
     """Count characters in text file.
@@ -515,12 +437,11 @@ fn file_char_count(path: text) -> i64?:
     Returns:
         Some(char count) or nil on error
     """
-    val content_opt = file_read_text(path)
-    match content_opt:
-        Some(content):
-            Some(content.len())
-        nil:
-            nil
+    val content_opt = file_read_nullable(path)
+    if not content_opt.?:
+        return nil
+    val content = content_opt ?? ""
+    Some(content.len())
 
 # ============================================================================
 # Exports

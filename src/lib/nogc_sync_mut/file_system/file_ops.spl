@@ -1,92 +1,42 @@
 # File Operations
 #
 # Basic file operations: create, read, write, append, delete, rename, copy, move.
-# Uses Option/nil pattern for error handling (no try/catch).
-# Mock implementations for pure Simple demonstration.
+#
+# Every function here is either a re-export of the one real host owner or a
+# thin real wrapper over one. NO mocks: the seed binds unqualified calls by
+# NAME ALONE across the co-compiled closure
+# ([compiler_cross_module_private_symbol_collision] fires only for DIFFERING
+# signatures; identical ones are silent), so a mock defined here took over
+# real callers anywhere in the import closure, and a real owner could take
+# over callers of a mock. See
+# doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
+# and doc/08_tracking/bug/file_ops_mock_answers_for_nonexistent_paths_2026-09-06.md.
+
+# Real owners. `file_read_text` returns `text` ("" when unreadable); callers
+# that must tell a missing file from an empty one use
+# `std.nogc_sync_mut.io_runtime.file_read_nullable`. `file_modified_time` and
+# `file_read_lines` are re-exported from here by metadata.spl / utilities.
+export use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text, file_read_lines}
+export use std.nogc_sync_mut.sffi.io.{file_write_text, file_move}
+export use std.nogc_sync_mut.io_runtime.{file_write_bytes}
+export use std.nogc_sync_mut.io_runtime.{file_append_text, file_delete, file_rename, file_copy}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
 
 fn file_create(path: text) -> bool:
-    """Create a new empty file.
+    """Create a new empty file. Fails if the path already exists.
 
     Args:
         path: File path
 
     Returns:
-        true on success, false on error
+        true on success, false on error (including an existing path)
     """
-    # Mock: simulate file creation
-    if path == "" or path.contains(".."):
+    if path == "":
         return false
-    true
-
-fn file_read_text(path: text) -> text?:
-    """Read entire file as text.
-
-    Args:
-        path: File path
-
-    Returns:
-        Some(content) or nil on error
-    """
-    if path == "" or not file_exists_mock(path):
-        return nil
-    Some("mock file content: " + path)
-
-# `file_read_bytes` intentionally does NOT live here.
-# It has exactly one definition repo-wide: `std.io_runtime.file_read_bytes`,
-# returning `[u8]`. The mock that used to sit here returned `[i64]?` and, because
-# the flat function registry is keyed on NAME ALONE (see
-# `warn_duplicate_private_signatures` in pipeline/module_loader.rs), it could
-# hijack any call site in an import closure that happened to include this module
-# and serve a hardcoded "Hello" for every path.
-# See doc/08_tracking/bug/file_read_bytes_has_six_definitions_with_three_return_types_2026-08-09.md
-
-fn file_read_lines(path: text) -> Result<[text], text>:
-    """Read file as array of lines.
-
-    Args:
-        path: File path
-
-    Returns:
-        Ok(lines), or Err when the file cannot be read
-    """
-    val content_opt = file_read_text(path)
-    match content_opt:
-        Some(content):
-            Ok(content.split("\n"))
-        nil:
-            Err("file line read failed: {path}")
-
-# reason: positional file_system file_ops API
-fn file_write_text(path: text, content: text) -> bool:
-    """Write text to file (overwrite).
-
-    Args:
-        path: File path
-        content: Text content
-
-    Returns:
-        true on success, false on error
-    """
-    if path == "" or content == nil:
-        return false
-    true
-
-fn file_write_bytes(path: text, bytes: [i64]) -> bool:
-    """Write bytes to file (overwrite).
-
-    Args:
-        path: File path
-        bytes: Byte array
-
-    Returns:
-        true on success, false on error
-    """
-    if path == "" or bytes == nil:
-        return false
-    true
+    file_create_exclusive(path, "")
 
 fn file_write_lines(path: text, lines: [text]) -> bool:
-    """Write lines to file with newlines.
+    """Write lines to file with newlines (overwrite).
 
     Args:
         path: File path
@@ -95,10 +45,9 @@ fn file_write_lines(path: text, lines: [text]) -> bool:
     Returns:
         true on success, false on error
     """
-    if path == "" or lines == nil:
+    if path == "":
         return false
-    val content = lines.join("\n")
-    file_write_text(path, content)
+    file_write_text(path, lines.join("\n"))
 
 fn file_append_lines(path: text, lines: [text]) -> bool:
     """Append lines to file.
@@ -110,49 +59,4 @@ fn file_append_lines(path: text, lines: [text]) -> bool:
     Returns:
         true on success, false on error
     """
-    val content = lines.join("\n")
-    file_append_text(path, content + "\n")
-
-# reason: positional file_system file_ops API
-fn file_move(src: text, dest: text) -> bool:
-    """Move a file (copy then delete).
-
-    Args:
-        src: Source path
-        dest: Destination path
-
-    Returns:
-        true on success, false on error
-    """
-    if not file_copy(src, dest):
-        return false
-    file_delete(src)
-
-# `file_exists` intentionally does NOT live here: this module re-exports the
-# real host implementation. The mock that used to sit here answered true for
-# every absolute path and, because the flat function registry is keyed on NAME
-# ALONE (identical signatures raise no collision warning), it hijacked
-# `file_exists` calls across the native-build import closure (the environment
-# variant policy owner saw a missing simple.sdn as present and failed with
-# configuration-read-failed). The remaining mocks below use file_exists_mock.
-export use std.nogc_sync_mut.io.file_ops.{file_exists}
-
-fn file_exists_mock(path: text) -> bool:
-    """Mock implementation of file_exists."""
-    if path == "":
-        return false
-    # Mock: some paths exist
-    path.starts_with("/") or path.starts_with(".")
-
-# ============================================================================
-# Exports
-# ============================================================================
-
-# `file_append_text`, `file_delete`, `file_rename` and `file_copy` intentionally
-# do NOT live here: this module re-exports the real io_runtime implementations. The mocks that used to sit here returned success
-# without touching the filesystem and, because the flat function registry is
-# keyed on NAME ALONE (identical signatures raise no collision warning), they
-# hijacked calls across the native-build import closure (the MIR shard
-# coordinator's ledger directory was never created, so every worker's
-# inventory publication was refused).
-export use std.nogc_sync_mut.io_runtime.{file_append_text, file_delete, file_rename, file_copy}
+    file_append_text(path, lines.join("\n") + "\n")

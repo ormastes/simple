@@ -40,7 +40,7 @@ product; interpreter regression spec red on the pre-fix seed (0 vs 3/1).
 
 ## Update 2026-10-31 (release/1.0.0 sweep, Windows 11)
 
-**Evidence is Rust-seed only.** No self-hosted Windows binary exists on this host; Stage 4 is the bootstrap lane's (PR #5540). Binary: seed built from this branch, sha256 `c68209e1de31f314`. This is not release-grade PASS.
+**Evidence is Rust-seed only.** No self-hosted Windows binary exists on this host; Stage 4 is the bootstrap lane's (PR #5540). Binary: seed built from this branch, sha256 `ea7b4d9d7e2dc93d` (merged tree; the 187-spec counts below were taken on the pre-merge seed `8ce923d2df72814f` with identical results to branch head). This is not release-grade PASS.
 
 Caret + smux sweep of 187 specs, run one at a time:
 

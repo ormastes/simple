@@ -76,6 +76,22 @@ describe "empty array locals collect concrete element constraints from writes":
             expect(pass_.infer_expr_type(cached) == nil).to_equal(true)
             expect(pass_.rewrite_expr(cached).has_type_).to_equal(false)
 
+    it "keeps a lowerable (non-Infer) type on reads of a poisoned empty-array root":
+        var pass_ = MonomorphizationPass.create()
+        pass_.collect_lets_stmt(empty_array_declaration(901))
+        pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(42)))
+        pass_.collect_lets_expr(empty_array_push(901, empty_array_expr(HirExprKind.BoolLit(true))))
+        expect(pass_.env_type(SymbolId(id: 901)) == nil).to_equal(true)
+        var read = empty_array_read(901)
+        read.type_ = empty_array_type(HirTypeKind.Array(empty_array_type(HirTypeKind.Int(64, true)), nil))
+        val rewritten = pass_.rewrite_expr(read)
+        expect(rewritten.has_type_).to_equal(false)
+        var is_infer = false
+        match rewritten.type_.kind:
+            case HirTypeKind.Infer(_, _): is_infer = true
+            case _: ()
+        expect(is_infer).to_equal(false)
+
     it "does not infer from arbitrary push methods or unknown receiver provenance":
         var pass_ = MonomorphizationPass.create()
         pass_.collect_lets_expr(empty_array_push(777, empty_array_integer(42)))
@@ -86,6 +102,16 @@ describe "empty array locals collect concrete element constraints from writes":
         pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(42), custom))
         pass_.collect_lets_expr(empty_array_push(901, empty_array_integer(42)))
         expect(pass_.env_type(SymbolId(id: 901)) == nil).to_equal(true)
+
+    it "ignores an unknown receiver after another array root is tracked":
+        var pass_ = MonomorphizationPass.create()
+        pass_.collect_lets_stmt(empty_array_declaration(901))
+        val unknown = empty_array_read(777)
+        expect(pass_.array_constraint_root_v1(unknown)).to_equal(-1)
+        pass_.collect_lets_expr(empty_array_push(777, empty_array_integer(42)))
+        expect(pass_.env_type(SymbolId(id: 777)) == nil).to_equal(true)
+        expect(pass_.array_element_roots_v1.len()).to_equal(1)
+        expect(pass_.array_element_types_v1.len()).to_equal(1)
 
     it "rejects unknown call escape and captured mutation evidence":
         for capture in [false, true]:

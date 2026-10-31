@@ -2947,7 +2947,7 @@ impl MonomorphizationPass:
         if array_root >= 0: return self.env_type(SymbolId(id: array_root))
         val array_dependency = self.array_projection_dependency_v1(expr)
         if array_dependency >= 0:
-            if not hir_type_is_concrete(self.array_element_types_v1[array_dependency]): return nil
+            if not self.array_element_types_v1.has(array_dependency) or not hir_type_is_concrete(self.array_element_types_v1[array_dependency]): return nil
         elif expr.has_type_:
             val own: HirType = expr.type_
             if hir_type_is_concrete(own):
@@ -3372,7 +3372,11 @@ impl MonomorphizationPass:
         if self.array_element_roots_v1.len() == 0 or expr == nil: return -1
         match expr.kind:
             case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
-                return self.array_element_roots_v1[symbol.id] ?? -1
+                # `.get(..) ??`, not `[..] ??`: the Rust seed lowers a missing
+                # i64-valued Dict index to the raw nil tag (3), which `??`
+                # does not replace, so a stray root reached a nil type slot
+                # and Stage 3 segfaulted in constrain_array_element_v1.
+                return self.array_element_roots_v1.get(symbol.id) ?? -1
             case HirExprKind.MethodCall(receiver, method, args, resolution):
                 # The flat AST bridge lowers bracket-colon slices to this
                 # builtin method shape, including one-bound open-ended slices.
@@ -3404,7 +3408,7 @@ impl MonomorphizationPass:
         if self.array_element_roots_v1.len() == 0 or expr == nil: return -1
         match expr.kind:
             case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
-                self.array_element_roots_v1[symbol.id] ?? -1
+                self.array_element_roots_v1.get(symbol.id) ?? -1
             case HirExprKind.Index(base, _) | HirExprKind.TupleIndex(base, _) | HirExprKind.Field(base, _, _):
                 self.array_projection_dependency_v1(base)
             case HirExprKind.MethodCall(receiver, method, _, _):
@@ -3417,7 +3421,7 @@ impl MonomorphizationPass:
             self.array_element_types_v1[root] = HirType(kind: HirTypeKind.Error, span: Span.empty())
 
     me constrain_array_element_v1(root: i64, element: HirType?):
-        if root < 0: return
+        if root < 0 or not self.array_element_types_v1.has(root): return
         val previous: HirType = self.array_element_types_v1[root]
         match previous.kind:
             case HirTypeKind.Error: return
@@ -3510,6 +3514,7 @@ impl MonomorphizationPass:
         val s: SymbolId = sym_id
         if self.array_element_roots_v1.has(s.id):
             val root = self.array_element_roots_v1[s.id]
+            if not self.array_element_types_v1.has(root): return nil
             val element: HirType = self.array_element_types_v1[root]
             if hir_type_is_concrete(element):
                 return HirType(kind: HirTypeKind.Array(element, nil), span: element.span)
@@ -3686,7 +3691,7 @@ impl MonomorphizationPass:
         match expr.kind:
             case HirExprKind.Lambda(_, _, captures):
                 for captured in captures:
-                    self.poison_array_constraint_v1(self.array_element_roots_v1[captured.id] ?? -1)
+                    self.poison_array_constraint_v1(self.array_element_roots_v1.get(captured.id) ?? -1)
             case HirExprKind.Call(callee, args, _):
                 self.collect_array_call_v1(callee, args)
                 self.collect_lets_expr(callee)
@@ -4745,8 +4750,8 @@ impl MonomorphizationPass:
             self.observe_generic_uses_v1(expr.type_)
         var input = expr
         if self.array_projection_dependency_v1(expr) >= 0:
+            # has_type_ cleared; keep the lowerable type_ (no minted Infer)
             input.has_type_ = false
-            input.type_ = HirType(kind: HirTypeKind.Infer(0, 0), span: expr.span)
         var result = self.rewrite_expr_invocation_inner_v1(input)
         val array_root = self.array_constraint_root_v1(expr)
         if array_root >= 0:
@@ -4776,8 +4781,10 @@ impl MonomorphizationPass:
                 if self.array_element_roots_v1.has(symbol.id):
                     # Candidate annotations are inferred, never explicit. A
                     # poisoned constraint must not leave a cached receiver type.
+                    # Keep the read's own (lowerable) type_ with has_type_ cleared;
+                    # minting Infer(0, 0) here reached MIR lower_type (infer-arm).
                     out.has_type_ = false
-                    out.type_ = HirType(kind: HirTypeKind.Infer(0, 0), span: expr.span)
+                    out.type_ = expr.type_
                     if val array_type = self.env_type(symbol):
                         out.has_type_ = true
                         out.type_ = array_type

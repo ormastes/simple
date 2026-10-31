@@ -145,6 +145,27 @@ def verify_capture_receipt(capture, output, linker):
         raise ValueError("native reproduction archive/output/linker identity mismatch")
 
 
+def inherited_build_settings(environ):
+    """Operator settings kept across the SIMPLE_* sanitization below.
+
+    The build memory reserve is a host safety bound, not a compiler input.
+    Dropping it made the compiler fall back to its 24 GiB default and refuse
+    every Hello build on a smaller or shared host. A present but noncanonical
+    value is refused rather than silently ignored.
+    """
+    kept = {}
+    key = "SIMPLE_BUILD_MEMORY_RESERVE_BYTES"
+    if key in environ:
+        value = environ[key]
+        # The compiler parses an out-of-range value as 0 and falls back to the
+        # 24 GiB default, so bound it to i64 here.
+        if (not value.isascii() or not value.isdigit() or value[0] == "0" or
+                len(value) > 19 or int(value) > 2**63 - 1):
+            raise ValueError(key + " must be a canonical positive i64 decimal")
+        kept[key] = value
+    return kept
+
+
 def phase_capabilities(phase):
     """Required cases by compiler generation; skips are not passes."""
     return {1: (True, False), 2: (False, True), 3: (True, True)}[phase]
@@ -248,6 +269,7 @@ class Matrix:
         self.lock = threading.Lock()
         self.children = set()
         self.base = os.environ.copy()
+        kept = inherited_build_settings(self.base)
         for key in list(self.base):
             if key.startswith("SIMPLE_") or key.startswith("BOOTSTRAP_"):
                 del self.base[key]
@@ -261,6 +283,7 @@ class Matrix:
             "SIMPLE_RUNTIME_PATH": str(self.runtime),
             "SIMPLE_PACKAGE_INDEX_COLD_INIT": "1", "SIMPLE_LINKER": "lld-link" if self.windows and args.windows_abi == "msvc" else "lld",
         })
+        self.base.update(kept)
         if self.darwin:
             self.base.pop("SIMPLE_LINKER", None)
             self.base = self.darwin_adapter.driver_environment(self.base)

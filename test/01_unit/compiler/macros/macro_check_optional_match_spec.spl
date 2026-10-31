@@ -1,0 +1,33 @@
+"""
+# Macro rule matching returns an optional expansion type
+
+`MacroChecker.try_match_rule` and `check_hygiene` can legitimately find
+nothing, so they declare `text?` (NIL-RET-001: all nil-returnable functions are
+optional). An arity mismatch used to return nil through `-> text` and abort
+with "nil is forbidden by the non-optional return contract"; now it falls
+through to `NoMatchingRule`.
+"""
+
+# @tag: unit, compiler, macro
+
+use std.spec.*
+use compiler.semantics.macro_check.{TemplateToken, FragmentKind, MacroArg, MacroCheckResult, MacroChecker, macrorule_create, macrocall_create}
+
+describe "macro rule matching with an optional expansion type":
+    it "reports NoMatchingRule on an arity mismatch instead of trapping":
+        var checker = MacroChecker.create()
+        val rule = macrorule_create([TemplateToken.Param("x", FragmentKind.Expr)], [TemplateToken.Keyword("if")])
+        expect(checker.define_macro("log!", [rule])).to_equal(true)
+        val result = checker.check_call(macrocall_create("log!", []))
+        var no_match = false
+        match result:
+            case NoMatchingRule(name, _):
+                no_match = name == "log!"
+            case _:
+                no_match = false
+        expect(no_match).to_equal(true)
+
+    it "returns nil from check_hygiene when no argument captures a name":
+        var checker = MacroChecker.create()
+        val arg = MacroArg(tokens: [], has_span: false, span: 0)
+        expect(checker.check_hygiene(macrocall_create("log!", [arg])) == nil).to_equal(true)

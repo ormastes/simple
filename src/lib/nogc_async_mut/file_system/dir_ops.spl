@@ -2,39 +2,29 @@
 #
 # Directory operations: create, list, delete, walk, copy, move, size.
 # Includes recursive operations for tree walking and directory copying.
-# Uses Option/nil pattern for error handling.
+# Every function is real: either a re-export of the host owner or a wrapper
+# over one (see file_ops.spl for why no mocks may live here).
 
-use std.path.{join2}
+use std.path.{join2, dirname, basename}
 use std.nogc_async_mut.file_system.types.{DirEntry}
-use std.nogc_async_mut.file_system.file_ops.{file_copy}
-use std.nogc_async_mut.file_system.metadata.{file_is_directory, file_is_file, file_size}
+use std.nogc_async_mut.file_system.file_ops.{file_copy, file_exists}
+use std.nogc_async_mut.file_system.metadata.{file_is_file, file_size}
 
-fn dir_create(path: text) -> bool:
-    """Create a directory.
-
-    Args:
-        path: Directory path
-
-    Returns:
-        true on success, false on error
-    """
-    if path == "" or path.contains(".."):
-        return false
-    true
-
-fn dir_list(path: text) -> [text]?:
-    """List directory entries.
-
-    Args:
-        path: Directory path
-
-    Returns:
-        Some(entries) or nil on error
-    """
-    if path == "" or not dir_exists(path):
-        return nil
-    # Mock: return some entries
-    Some(["file1.txt", "file2.txt", "subdir"])
+# `dir_create` and `dir_list` intentionally do NOT live here: this module
+# re-exports the real io_runtime implementations (`dir_create(path, recursive)`,
+# `dir_list(path) -> [text]`, `[]` on error). The mocks that used to sit here
+# (`dir_create(path)` returning true without creating, `dir_list` returning
+# Some(["file1.txt", "file2.txt", "subdir"]) for any existing directory) had
+# DIFFERENT signatures from the real owners. The seed binds unqualified calls by
+# NAME ALONE across the co-compiled closure
+# ([compiler_cross_module_private_symbol_collision]), so they hijacked real
+# callers and broke `dir_copy`/`dir_walk_dirs` here.
+# See doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
+export use std.nogc_sync_mut.io_runtime.{dir_create, dir_list}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional, dir_remove_all, file_rename, host_os}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
+use std.nogc_sync_mut.sffi.fs.{file_canonicalize}
 
 fn dir_list_detailed(path: text) -> [DirEntry]?:
     """List directory with detailed entry information.
@@ -45,56 +35,41 @@ fn dir_list_detailed(path: text) -> [DirEntry]?:
     Returns:
         Some(entries) or nil on error
     """
-    val names_opt = dir_list(path)
+    val names_opt = dir_list_optional(path)
     if not names_opt.?:
         return nil
+    val names = names_opt ?? []
+    var entries = []
+    for name in names:
+        val full_path = join2(path, name)
+        val is_dir = dir_exists(full_path)
+        var entry_size = 0
+        if not is_dir:
+            entry_size = file_size(full_path)
+        val entry = DirEntry(
+            name: name,
+            path: full_path,
+            is_file: not is_dir,
+            is_directory: is_dir,
+            size: entry_size
+        )
+        entries.push(entry)
+    Some(entries)
 
-    match names_opt:
-        Some(names):
-            var entries = []
-            for name in names:
-                val full_path = join2(path, name)
-                val entry = DirEntry(
-                    name: name,
-                    path: full_path,
-                    is_file: true,
-                    is_directory: false,
-                    size: 1024
-                )
-                entries.push(entry)
-
-            Some(entries)
-        nil:
-            nil
-
-fn dir_delete(path: text) -> bool:
-    """Delete an empty directory.
-
-    Args:
-        path: Directory path
-
-    Returns:
-        true on success, false on error
-    """
-    if path == "" or not dir_exists(path):
-        return false
-    true
+# `dir_delete` (non-recursive; fails on a non-empty directory) is the real
+# sffi owner. The mock that used to sit here returned true without deleting.
+export use std.nogc_sync_mut.sffi.fs.{dir_delete}
 
 fn dir_delete_all(path: text) -> bool:
     """Delete directory and all contents recursively.
 
-    Args:
-        path: Directory path
-
-    Returns:
-        true on success, false on error
-
     Warning: Recursive deletion. Use with caution.
     """
-    if path == "" or not dir_exists(path):
+    # lstat(2) the root: a symlink to a directory must not have its TARGET
+    # emptied. Refuse anything that is not a real directory.
+    if path == "" or not dir_is_real_no_follow(path):
         return false
-    # Mock: simulate recursive deletion
-    true
+    dir_remove_all(path)
 
 # `dir_exists` intentionally does NOT live here: this module re-exports the
 # real host implementation. The mock that used to sit here answered true for
@@ -122,14 +97,11 @@ fn dir_is_empty(path: text) -> bool:
     Returns:
         true if empty, false otherwise
     """
-    val entries_opt = dir_list(path)
+    val entries_opt = dir_list_optional(path)
     if not entries_opt.?:
         return false
-    match entries_opt:
-        Some(entries):
-            entries.len() == 0
-        nil:
-            false
+    val entries = entries_opt ?? []
+    entries.len() == 0
 
 fn dir_walk_files(root: text) -> [text]:
     """Walk directory and return only file paths.
@@ -156,11 +128,21 @@ fn dir_walk_dirs(root: text) -> [text]:
     Returns:
         Array of directory paths
     """
-    val all_paths = dir_walk(root)
-    var dirs = []
-    for p in all_paths:
-        if file_is_directory(p):
-            dirs.push(p)
+    # `dir_walk` (rt_dir_walk) yields only non-directory entries, so filtering
+    # its output can never find a directory: recurse over `dir_list` instead.
+    var dirs: [text] = []
+    var queue: [text] = [root]
+    var next_index = 0
+    while next_index < queue.len():
+        val current = queue[next_index]
+        next_index = next_index + 1
+        for name in dir_list(current):
+            val full_path = join2(current, name)
+            # lstat(2): never descend through a symlink (a link cycle would
+            # otherwise loop forever).
+            if dir_is_real_no_follow(full_path):
+                dirs.push(full_path)
+                queue.push(full_path)
     dirs
 
 # reason: positional file_system dir_ops API
@@ -184,41 +166,86 @@ fn dir_copy(src: text, dest: text) -> bool:
         return false
 
     # Copy all entries
-    val entries_opt = dir_list(src)
+    val entries_opt = dir_list_optional(src)
     if not entries_opt.?:
         return false
-
-    match entries_opt:
-        Some(entries):
-            for entry in entries:
-                val src_path = join2(src, entry)
-                val dest_path = join2(dest, entry)
-
-                if dir_exists(src_path):
-                    if not dir_copy(src_path, dest_path):
-                        return false
-                else:
-                    if not file_copy(src_path, dest_path):
-                        return false
-        nil:
-            return false
-
+    val entries = entries_opt ?? []
+    for entry in entries:
+        val src_path = join2(src, entry)
+        val dest_path = join2(dest, entry)
+        # lstat(2) each entry. Real directories recurse, regular files are
+        # copied, and anything else (symlinks, including dangling ones and
+        # link cycles, sockets, FIFOs) is skipped: the runtime has no
+        # symlink(2) primitive to recreate a link as a link.
+        if dir_is_real_no_follow(src_path):
+            if not dir_copy(src_path, dest_path):
+                return false
+        elif file_is_regular_no_follow(src_path):
+            if not file_copy(src_path, dest_path):
+                return false
     true
+
+fn _dir_canonical_target(path: text) -> text?:
+    """Canonical form of a path that may not exist yet: canonicalize the
+    nearest existing ancestor and re-append the rest."""
+    val direct = file_canonicalize(path)
+    if direct.?:
+        return direct
+    val parent = dirname(path)
+    if parent == "" or parent == path:
+        return nil
+    val parent_canon = _dir_canonical_target(parent)
+    if not parent_canon.?:
+        return nil
+    val base = basename(path)
+    if base == "" or base == "." or base == "..":
+        return nil
+    Some(join2(parent_canon ?? "", base))
+
+fn _dir_compare_key(canonical: text) -> text:
+    """Comparison form of a canonical path: drop the Windows `\\?\` verbatim
+    prefix, use "/" separators, and fold case on hosts whose default volumes
+    are case-insensitive (macOS, Windows). Folding on a case-sensitive macOS
+    volume only makes the refusal below more conservative."""
+    var key = canonical
+    if key.starts_with("\\\\?\\"):
+        key = key.substring(4, key.len())
+    key = key.replace("\\", "/")
+    val os = host_os()
+    if os == "macos" or os == "windows":
+        key = key.lower()
+    while key.len() > 1 and key.ends_with("/"):
+        key = key.substring(0, key.len() - 1)
+    key
 
 # reason: positional file_system dir_ops API
 fn dir_move(src: text, dest: text) -> bool:
-    """Move directory (copy then delete).
+    """Move a directory by RENAME ONLY.
 
-    Args:
-        src: Source directory
-        dest: Destination directory
+    Returns `file_rename(src, dest)`; it never copies and never deletes, so a
+    failed move cannot lose data. Cross-device moves (EXDEV) are therefore
+    unsupported: the caller must `dir_copy(src, dest)` and then explicitly
+    `dir_delete_all(src)`.
 
-    Returns:
-        true on success, false on error
+    Defense in depth before the rename: refuse when `src` is not a real
+    directory, when `dest` already exists, or when `dest` is `src` or lies
+    inside it (canonical paths, "/" separators, case folded on macOS/Windows).
     """
-    if not dir_copy(src, dest):
+    if src == "" or dest == "":
         return false
-    dir_delete_all(src)
+    if not dir_is_real_no_follow(src):
+        return false
+    if dir_exists(dest) or file_exists(dest):
+        return false
+    val src_canon_opt = file_canonicalize(src)
+    val dest_canon_opt = _dir_canonical_target(dest)
+    if not src_canon_opt.? or not dest_canon_opt.?:
+        return false
+    val src_key = _dir_compare_key(src_canon_opt ?? "")
+    val dest_key = _dir_compare_key(dest_canon_opt ?? "")
+    if dest_key == src_key or dest_key.starts_with(src_key + "/"):
+        return false
+    file_rename(src, dest)
 
 fn dir_size(path: text) -> i64:
     """Calculate total size of directory recursively.
@@ -236,12 +263,7 @@ fn dir_size(path: text) -> i64:
     val entries = dir_walk(path)
     for entry in entries:
         if file_is_file(entry):
-            val size_opt = file_size(entry)
-            match size_opt:
-                Some(size):
-                    total_size = total_size + size
-                nil:
-                    pass
+            total_size = total_size + file_size(entry)
 
     total_size
 

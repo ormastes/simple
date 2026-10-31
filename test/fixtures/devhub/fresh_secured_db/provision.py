@@ -215,6 +215,7 @@ def private_directory(parent):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native", type=Path)
+    parser.add_argument("--seed-interpreter", action="store_true", help="the target is a Phase 1 seed run, where wipes cannot be proved")
     parser.add_argument("--parent", type=Path, default=Path(tempfile.gettempdir()))
     args = parser.parse_args()
     reference.self_test_aes()
@@ -273,6 +274,10 @@ def main():
     before = {name: (os.stat(directory / name).st_size, os.stat(directory / name).st_mtime_ns,
                      os.stat(directory / name).st_mode) for name in variants}
     environment = dict(os.environ)
+    # Native runs always enforce wipe checks, even if the caller's shell has this set.
+    environment.pop("DEVHUB_FRESH_SEED_INTERPRETER", None)
+    if args.seed_interpreter:
+        environment["DEVHUB_FRESH_SEED_INTERPRETER"] = "1"
     environment[SECRET_ENV] = passphrase
     environment["DEVHUB_FRESH_DB_DIR"] = str(directory).replace("\\", "/")
     result = subprocess.run([str(native)], env=environment, timeout=int(os.environ.get("DEVHUB_FRESH_TIMEOUT_SECONDS", "180")), check=False)

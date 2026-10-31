@@ -30,6 +30,23 @@ IDENTITY = "a" * 64
 OUTPUT = "hello-result.zip"
 
 
+class LaneLayoutTests(unittest.TestCase):
+    def test_job_manifest_is_not_a_command_status_record(self):
+        # Matrix.run writes <lane>/<command>.sdn for every lane command.
+        self.assertNotIn(h.JOB_MANIFEST, {name + ".sdn" for name in h.LANE_COMMANDS})
+
+
+    def test_private_roots_are_created_fresh_and_private(self):
+        with tempfile.TemporaryDirectory() as d:
+            state, published = Path(d) / "state", Path(d) / "published"
+            h.prepare_private_roots(state, published)
+            for path in (state, published):
+                self.assertTrue(path.is_dir())
+                self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+            with self.assertRaises(FileExistsError):
+                h.prepare_private_roots(state)
+
+
 class ReceiptTests(unittest.TestCase):
     def setUp(self):
         self.work = Path(tempfile.mkdtemp(prefix="hello-buildrunner-receipt-"))
@@ -483,7 +500,9 @@ class FakeMatrix:
     def publish(self, cmd):
         state = Path(cmd[cmd.index("--state") + 1])
         published = Path(cmd[cmd.index("--output-root") + 1])
-        published.mkdir(parents=True)
+        # Mirrors cli_files_v1.spl: the real manager never creates its roots.
+        if not published.is_dir() or not state.is_dir():
+            raise ValueError("private output and state roots must already exist")
         lane = dict(format="hello-buildrunner-lane-v1", lane="one-source", backend="llvm",
                     phase=2, compile_route="coordinator", compiler_sha256=self.sha,
                     status="PASS", admitted="false")

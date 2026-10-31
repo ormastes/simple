@@ -11,7 +11,26 @@ import shutil
 
 MEMORY_POLICIES = ("enforce", "monitor")
 MONITOR_PEAK_METRICS = ("process-tree-peak", "child-rss-peak")
+# Matrix.run records each command's status at <lane>/<command>.sdn, so the
+# job manifest must not be named after a lane command: "manifest.sdn" was
+# overwritten by the manifest command's own status record and the manager
+# read `exit_code: 0` as the run wire (invalid run wire header).
+LANE_COMMANDS = ("manifest", "manager-run", "manager-verify")
+JOB_MANIFEST = "job-manifest.sdn"
 MONITOR_VERDICT = "functional-only BuildRunner hello (monitor policy; memory qualification deferred)"
+
+
+def prepare_private_roots(*paths):
+    """Create fresh private manager roots.
+
+    The production manager refuses an explicit output or state root that does
+    not already exist ("private output and state roots must already exist"),
+    and never creates one itself. Each root must be new so no earlier run's
+    state is reused.
+    """
+    for path in paths:
+        path.mkdir(mode=0o700)
+        path.chmod(0o700)
 
 
 def lane_status(policy):
@@ -191,7 +210,7 @@ def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
             raise ValueError("invalid or ambiguous BuildRunner input inventory")
         (source / "inputs.txt").write_text("".join(p + "\n" for p in paths))
         (source / "links.txt").write_text("")
-        manifest, state, published = lane / "manifest.sdn", lane / "state", lane / "published"
+        manifest, state, published = lane / JOB_MANIFEST, lane / "state", lane / "published"
         output = "hello-result.zip"
         # A form has up to eight sequential commands. The worker retains each
         # per-command bound; the production owner also caps the complete task.
@@ -213,12 +232,13 @@ def run_lane(matrix, backend, name, manager, manifest_writer, template, target):
                "--output", output]
         if getattr(matrix.args, "trace_stages", False):
             cmd.append("--trace-stages")
-        matrix.run(lane, "manifest", cmd)
+        matrix.run(lane, LANE_COMMANDS[0], cmd)
+        prepare_private_roots(state, published)
         args = ["--manifest", manifest, "--state", state, "--source-root", source,
                 "--output-root", published]
         trace_args = ["--trace-stages"] if getattr(matrix.args, "trace_stages", False) else []
-        matrix.run(lane, "manager-run", [manager, "run", *args, *trace_args], seconds=task_seconds + 30)
-        out, _ = matrix.run(lane, "manager-verify", [manager, "verify", *args])
+        matrix.run(lane, LANE_COMMANDS[1], [manager, "run", *args, *trace_args], seconds=task_seconds + 30)
+        out, _ = matrix.run(lane, LANE_COMMANDS[2], [manager, "verify", *args])
         if b"builder: verified tasks=1" not in out:
             raise ValueError("manager did not verify the expected task")
         receipt, bundle = state / "receipts/hello.sdn", published / output

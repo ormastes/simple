@@ -254,10 +254,23 @@ pub fn hosted_cross_c_compiler_name(target: text, host_os_name: text, host_arch_
         return plan.command
     ""
 
+fn c_compiler_override(windows_gnu: bool, requires_cross: bool, target: text) -> text?:
+    var simple_cc = env_get_nullable("SIMPLE_CC")
+    if windows_gnu and not requires_cross:
+        val gnu_cc = env_get_nullable("CC")
+        if gnu_cc != "" and gnu_cc != nil:
+            simple_cc = gnu_cc
+    if simple_cc != "" and simple_cc != nil:
+        if ((windows_gnu and not requires_cross) or target.ends_with("-pc-windows-gnu")) and not simple_cc.lower().contains("clang"):
+            return ""
+    if simple_cc == "":
+        return nil
+    simple_cc
+
 fn find_c_compiler() -> text:
     """Find a C compiler on the system.
 
-    Tries SIMPLE_CC env var first, then platform-specific discovery.
+    Native Windows GNU shares the final linker's CC; other lanes try SIMPLE_CC first.
     Returns the command name or empty string if none found.
     """
     val target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
@@ -269,11 +282,11 @@ fn find_c_compiler() -> text:
             case Ok(path): return path
             case Err(_): return ""
 
-    # User override via env var, after target admission.
-    val simple_cc = env_get_nullable("SIMPLE_CC")
-    if simple_cc != "" and simple_cc != nil:
-        if target.ends_with("-pc-windows-gnu") and not simple_cc.lower().contains("clang"):
-            return ""
+    # Keep runtime and entry compilation on the same driver as the GNU linker.
+    val simple_cc = c_compiler_override(_is_windows() and _is_mingw(), plan.requires_cross, target)
+    if simple_cc == "":
+        return ""
+    if simple_cc != nil:
         return simple_cc
 
     if plan.requires_cross:

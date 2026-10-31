@@ -56,13 +56,25 @@ Evidence: `doc/09_report/verification/devhub_key_resolution_diagnostics_20261030
 Still OPEN on Phase 2. `fresh_secured_db`, built by the pinned producer
 (`13d73267...`) with `src/runtime/runtime_process_tree.c` linked as an extra
 object, still fails: `DIAGNOSTIC direct key session: SQLCIPHER4_MISSING_SECRET`.
-The error detail printed as a raw integer (`2205408678273`), so the failing branch
-is still unknown; `{detail}` on a pattern-bound enum payload is a separate defect
-to isolate. A diagnostic must not depend on interpolating that payload.
+The error detail printed as a raw integer (`2205408678273`); `{detail}` on a
+pattern-bound enum payload is a separate defect, not yet isolated, so diagnostics
+must not interpolate that payload.
 
 Phase 1 had a different cause, now fixed: `env_get` shadowing made
 `secret_ref_resolve` see a wrapped or nil value. See
 `env_get_cocompiled_signature_collision_2026_10_31.md`. Moving `secret_ref` to
-`env_get_opt` did not clear Phase 2, so do not treat that collision as its cause.
+`env_get_opt` did not clear Phase 2; that collision was not its cause.
 On Phase 1 the fixture passed direct codec and storage rows and reached
 Messenger verbs; it has no final verdict yet.
+
+## Phase 2 cause found (2026-10-31)
+
+The Phase 2 failure was `passphrase.len().to_i64() == 0` evaluating true: see
+`native_to_i64_compound_receiver_2026_10_31.md`. With the workaround the key session
+opens, the first 4 bytes of each derived key match hashlib (full keys match in
+`native_crypto_kat`), and real pages authenticate and decrypt, checked on sampled bytes.
+
+This bug stays OPEN because the fixture does not pass end to end. Phase 2 now opens
+the database and fails reading rows: `text_from_codepoints` returns empty text, so
+`SchemaNotFound` surfaces as `STORAGE_PORT_CORRUPT_SOURCE`. Messenger verbs and the
+rejection checks have not run on Phase 2. On Phase 1 the fixture has no final verdict.

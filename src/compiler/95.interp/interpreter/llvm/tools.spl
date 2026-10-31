@@ -6,7 +6,7 @@
 # Bootstrap-compatible subset: no generics and no Option types in shared bootstrap-sensitive code.
 # Portable: uses `where` on Windows, `command -v` on Unix.
 
-use compiler.backend.io_compat.{backend_shell_tuple}
+use compiler.backend.io_compat.{backend_shell_tuple, backend_tool_on_path}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_read_bytes, file_exists}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.process_ops.{process_run}
@@ -56,6 +56,12 @@ fn _tool_runs(cmd: text) -> bool:
     """
     val (out, err, code) = process_run(cmd, ["--version"])
     code == 0
+
+fn _tool_path_is_absolute(path: text) -> bool:
+    """POSIX `/...`, Windows `C:\\...` / `C:/...` or a UNC `\\\\host\\...` path."""
+    if path.starts_with("/") or path.starts_with("\\\\"):
+        return true
+    path.len() >= 3 and path.char_at(1) == ":" and (path.char_at(2) == "\\" or path.char_at(2) == "/")
 
 fn _env_tool_dirs() -> [text]:
     """Explicit LLVM bin dirs from the environment, highest priority.
@@ -146,10 +152,17 @@ fn _find_tool_discover(candidates: [text]) -> text:
         # cmd.exe; on Windows only `where` below applies.
         if not on_windows and file_exists("/usr/bin/{candidate}") and _tool_runs("/usr/bin/{candidate}"):
             return "/usr/bin/{candidate}"
-        if not on_windows:
-            val (out, err, code) = backend_shell_tuple("command -v {candidate} >/dev/null 2>&1")
-            if code == 0 and _tool_runs(candidate):
-                return candidate
+        # PATH hit resolved in process to the file it names. This used to ask
+        # `command -v` and return the BARE name, but callers spawn the result
+        # with process_run, which does not search PATH: every AOT unit then
+        # failed "llc failed (exit -1)" with llc on PATH and SIMPLE_LLVM_BIN
+        # unset (bug stage2_llc_discovery_ignores_path_2026-10-31).
+        # backend_tool_on_path follows the host rules (`:` on POSIX; `;`,
+        # the working directory and PATHEXT on Windows). Only an absolute hit
+        # is returned; a relative PATH entry falls through to `where`.
+        val on_path = backend_tool_on_path([candidate])
+        if _tool_path_is_absolute(on_path) and _tool_runs(on_path):
+            return on_path
         # Windows fallback: `where` can list several installs and the FIRST
         # can be broken (mingw64 llc missing its own DLLs) while a later one
         # works (e.g. an LLVM MSVC release install). Try each resolved path

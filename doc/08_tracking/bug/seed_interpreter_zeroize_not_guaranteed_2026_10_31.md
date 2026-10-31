@@ -38,6 +38,26 @@ would affect all interpreted code. Wipe guarantees are judged natively.
   that was in `storage_port_spec.spl`. On Phase 2 the original array was wiped and
   `val alias = image` was not, so the alias claim was dropped.
 - `fresh_secured_db` prints `UNVERIFIED wipe checks` when
-  `DEVHUB_FRESH_SEED_INTERPRETER=1`. Native runs always enforce the checks.
+  `DEVHUB_FRESH_SEED_INTERPRETER=1`. `provision.py` sets it only with
+  `--seed-interpreter` and otherwise clears it.
 
 Do not cite a Phase 1 run as evidence that secrets or plaintext were erased.
+
+## Also seen in
+
+`test/01_unit/lib/database/sqlite_format/writer_spec.spl` fails 4 scenarios on the
+seed with `bad magic`. The writer fills its image through parameters
+(`page[off] = ... as u8`), which fits this cause but was not confirmed. The Messenger
+read path does not use the writer.
+
+### Confirmed (2026-10-31): sqlite_format writer
+
+Confirmed with a probe on the Phase 1 seed: an element write made through an array
+parameter (`fn put(page: [u8], ...): page[off] = ...`) is lost for the caller, for
+both `val` and `var` arguments; a returned buffer (`c = put2(c, ...)`) and local
+writes work. This was the cause of the `writer_spec.spl` `bad magic` failures:
+`_put_u16`, `_put_u32` and `_write_header` in
+`src/lib/nogc_sync_mut/database/sqlite_format/wimage.spl` wrote nothing into the
+caller's buffer. Fixed by returning the updated buffer from the helpers. After the
+fix `writer_spec.spl` is 7/7 on the seed, including the Python sqlite3 oracle
+(integrity_check ok and exact rows).

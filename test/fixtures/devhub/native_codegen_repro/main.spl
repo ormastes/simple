@@ -1,0 +1,92 @@
+# Reproduces native codegen defects found through the SQLCipher read path.
+# Expected RED on the pinned Phase 2 producer; green means the compiler is fixed.
+# REPRO lines show a defect. GUARD lines are sibling forms that must stay correct.
+# Any wrong value exits 1. Measured on the pinned producer: the len and compound
+# forms reproduce; the branch and tuple shapes do not reproduce in this minimal form,
+# though both failed in aes_gcm.spl and the b-tree scan.
+# Bugs: native_to_i64_compound_receiver_2026_10_31,
+#       phase2_result_tuple_try_binding_metadata_2026_10_27
+use std.io_runtime.{exit}
+
+struct Cell:
+    rowid: i64
+    payload: [u8]
+
+fn make_u8(v: i64) -> u8:
+    v.to_u8()
+
+fn tuples(n: i64) -> Result<[(i64, [u8])], text>:
+    var out: [(i64, [u8])] = []
+    var i = 0
+    while i < n:
+        var payload: [u8] = []
+        payload.push((i + 1).to_u8())
+        out.push((i, payload))
+        i = i + 1
+    Ok(out)
+
+fn cells(n: i64) -> Result<[Cell], text>:
+    var out: [Cell] = []
+    var i = 0
+    while i < n:
+        var payload: [u8] = []
+        payload.push((i + 1).to_u8())
+        out.push(Cell(rowid: i, payload: payload))
+        i = i + 1
+    Ok(out)
+
+# The aes_gcm shape: a var with a compound assignment on another path.
+fn branch_assigned(v: i64, compound: bool) -> i64:
+    var t: u8 = make_u8(v)
+    if compound:
+        t = (v ^ 0).to_u8()
+    t.to_i64()
+
+fn main() -> i64:
+    var bad_len = 0
+    var bad_expr = 0
+    var bad_branch = 0
+    var bad_call = 0
+    var bad_local = 0
+    var grow: [u8] = []
+    var v = 0
+    while v < 256:
+        if grow.len().to_i64() != v:
+            bad_len = bad_len + 1
+        val w: u64 = v.to_u64()
+        if ((w + 1) - 1).to_i64() != v:
+            bad_expr = bad_expr + 1
+        if branch_assigned(v, false) != v:
+            bad_branch = bad_branch + 1
+        if make_u8(v).to_i64() != v:
+            bad_call = bad_call + 1
+        val local: u64 = w
+        if local.to_i64() != v:
+            bad_local = bad_local + 1
+        grow.push(0u8)
+        v = v + 1
+    print "REPRO len_to_i64 wrong={bad_len} of 256"
+    print "REPRO compound_to_i64 wrong={bad_expr} of 256"
+    print "REPRO branch_assigned_to_i64 wrong={bad_branch} of 256"
+    print "GUARD call_to_i64 wrong={bad_call} of 256"
+    print "GUARD typed_local_to_i64 wrong={bad_local} of 256"
+    var defects = bad_len + bad_expr + bad_branch + bad_call + bad_local
+    match cells(3):
+        case Ok(rows):
+            print "GUARD struct_array rowid={rows[2].rowid} byte={rows[2].payload[0]} expect=2,3"
+            if rows[2].rowid != 2 or rows[2].payload[0] != 3u8:
+                defects = defects + 1
+        case Err(_):
+            defects = defects + 1
+    print "REPRO tuple_array starting"
+    val rows = match tuples(3):
+        case Ok(value): value
+        case Err(_): []
+    for row in rows:
+        if row.1[0] != (row.0 + 1).to_u8():
+            defects = defects + 1
+    print "REPRO tuple_array survived"
+    print "DEFECTS {defects}"
+    if defects > 0:
+        exit(1)
+    0
