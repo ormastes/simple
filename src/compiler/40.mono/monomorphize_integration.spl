@@ -195,6 +195,7 @@ class MonomorphizationPass:
     # not survive monomorphization until these were bound (plan §9.4
     # "local annotations" / "enum payloads").
     enum_payload_types: Dict<text, HirType>
+    enum_payload_owner_modules: Dict<text, text>
     # Enum name derived from the scrutinee of the match currently being walked.
     match_enum_hint: text
     # Module whose function bodies are being rewritten right now (scopes the
@@ -356,6 +357,7 @@ impl MonomorphizationPass:
             field_types: {},
             field_owner_modules: {},
             enum_payload_types: {},
+            enum_payload_owner_modules: {},
             match_enum_hint: "",
             fn_returns: {},
             spec_queue: [],
@@ -985,6 +987,7 @@ impl MonomorphizationPass:
                         for t in types:
                             val tt: HirType = t
                             self.enum_payload_types["{en.name}::{vt.name}::{ti}"] = tt
+                            self.enum_payload_owner_modules["{en.name}::{vt.name}::{ti}"] = module_name
                             if self.invocation_diag_enabled_v1():
                                 eprint("[mono-diag] enum payload {en.name}::{vt.name}::{ti} concrete={hir_type_is_concrete(tt)}")
                             ti = ti + 1
@@ -992,6 +995,7 @@ impl MonomorphizationPass:
                         for f in fields:
                             val ft: HirField = f
                             self.enum_payload_types["{en.name}::{vt.name}::{ft.name}"] = ft.type_
+                            self.enum_payload_owner_modules["{en.name}::{vt.name}::{ft.name}"] = module_name
 
         # Collect generic classes
         val classes = module.classes
@@ -4092,11 +4096,19 @@ impl MonomorphizationPass:
                 val bs: SymbolId = sym
                 if self.invocation_diag_enabled_v1():
                     eprint("[mono-diag] bind payload key='{key}' known={self.enum_payload_types.has(key)} sym={bs.id}")
+                # HIR lowering already typed this binder in the CONSUMER's
+                # id space (expression_components.spl, imported_surface_type).
+                # That type is authoritative; the declared payload below is
+                # only a fallback for binders lowering left untyped.
+                if pat.has_type_ and pat.type_ != nil and hir_type_is_concrete(pat.type_):
+                    val own_type: HirType = pat.type_
+                    self.env[bs.id] = own_type
+                    return
                 if self.enum_payload_types.has(key):
                     val dt: HirType = self.enum_payload_types[key]
                     if dt != nil and hir_type_is_concrete(dt):
-                        self.env[bs.id] = dt
-                        return
+                        if self.bind_payload_declared_type(bs, key, dt):
+                            return
                 # Last resort when the enum NAME could be recovered from
                 # neither the pattern nor the scrutinee: a variant+slot suffix
                 # that is declared by exactly ONE enum in the whole program is
@@ -4104,21 +4116,43 @@ impl MonomorphizationPass:
                 # loud E-MONO-032 stands rather than a coin flip.
                 val suffix = mono_payload_key_suffix(key)
                 var found: HirType? = nil
+                var found_key = ""
                 var hits = 0
                 for k in self.enum_payload_types.keys():
                     val kt: text = k
                     if kt.ends_with(suffix):
                         hits = hits + 1
                         found = self.enum_payload_types[kt]
+                        found_key = kt
                 if hits == 1:
                     if found != nil:
                         val ft: HirType = found
                         if hir_type_is_concrete(ft):
-                            self.env[bs.id] = ft
-                            return
+                            if self.bind_payload_declared_type(bs, found_key, ft):
+                                return
                 self.collect_pattern_bindings(pat)
             case _:
                 self.collect_pattern_bindings(pat)
+
+    me bind_payload_declared_type(bs: SymbolId, key: text, declared: HirType) -> bool:
+        """Bind `bs` to a declared enum payload type, transported into the
+        module being rewritten. `enum_payload_types` rows are recorded by the
+        enum's DECLARING module (collect_generics), so their Named ids belong
+        to that module's symbol table. Stamping such a row unrelocated onto a
+        consumer binder made MIR render a foreign symbol at the same raw id
+        (bug mono_enum_payload_binder_foreign_symbol_ids_2026-10-31: `match
+        else_block` in narrowing.spl read as `parser_types_expr::Block`).
+        Returns false when the row cannot be transported; the caller then
+        leaves the binder for the untyped fallbacks."""
+        val owner: text = self.enum_payload_owner_modules[key] ?? ""
+        if owner == "" or owner == self.current_module or not hir_type_has_nominal(declared):
+            self.env[bs.id] = declared
+            return true
+        if val moved = self.relocate_mono_types([declared], owner, self.current_module, "enum payload {key}"):
+            val moved_type: HirType = moved[0]
+            self.env[bs.id] = moved_type
+            return true
+        false
 
     me collect_lets_block_opt(block: HirBlock?):
         match block:

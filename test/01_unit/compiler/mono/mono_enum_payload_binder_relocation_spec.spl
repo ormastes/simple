@@ -1,0 +1,224 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Enum payload binders across modules on the native (HIR -> 40.mono) path.
+#
+# bug doc: doc/08_tracking/bug/mono_enum_payload_binder_foreign_symbol_ids_2026-10-31.md
+#
+# `provider` declares `enum Kind: If(i64, Payload?)`. `consumer` matches on it
+# and then matches again on the bound `Payload?` slot. 40.mono records the
+# declared payload type from the PROVIDER's symbol table (collect_generics,
+# `enum_payload_types`) and used to stamp it unrelocated onto the consumer's
+# binder read (`rewrite_expr`, Var/NamedVar). The Named id inside that type is
+# provider-local, so the consumer's table names a different symbol at that id.
+# In the stage3 self-host build that read as `optional(parser_types_expr::Block)`
+# against a retained `optional(hir_definitions::HirBlock)` and MIR refused the
+# match ("enum match expression and retained Result/Optional declarations
+# conflict"). The binder's own HIR type (consumer-local) must win, and a
+# declared payload row must be transported into the consumer's table.
+
+# @tag:unit
+# @tag:compiler
+# @tag:mono
+# @tag:enum
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, SymbolId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirStmt, HirStmtKind, HirExpr, HirExprKind, HirBlock, HirMatchArm}
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+# The provider declares several nominal types BEFORE Payload so that Payload's
+# provider-local id is well past the ids the consumer hands out first.
+val PROVIDER_SRC = "struct Pad1:\n" +
+    "    v: i64\n" +
+    "\n" +
+    "struct Pad2:\n" +
+    "    v: i64\n" +
+    "\n" +
+    "struct Pad3:\n" +
+    "    v: i64\n" +
+    "\n" +
+    "struct Payload:\n" +
+    "    v: i64\n" +
+    "\n" +
+    "enum Kind:\n" +
+    "    If(i64, Payload?)\n" +
+    "    Leaf\n" +
+    "\n" +
+    "fn ident<T>(v: T) -> T:\n" +
+    "    v\n"
+
+# `ident` is generic so that 40.mono actually rewrites the consumer (a program
+# without generics returns from the pass before any binder is typed).
+val CONSUMER_SRC = "use provider.{Kind, Payload, ident}\n" +
+    "\n" +
+    "struct Wrong:\n" +
+    "    w: i64\n" +
+    "\n" +
+    "fn f(k: Kind) -> i64:\n" +
+    "    match k:\n" +
+    "        case If(_, else_block):\n" +
+    "            match else_block:\n" +
+    "                case Some(x):\n" +
+    "                    x.v\n" +
+    "                case nil:\n" +
+    "                    0\n" +
+    "        case Leaf:\n" +
+    "            ident(1)\n"
+
+struct Lowered:
+    modules: Dict<text, HirModule>
+    errors: [text]
+
+fn lower_two(lib_name: text, lib_src: text, main_name: text, main_src: text) -> Lowered:
+    val log = Logger(level: 0)
+    val lib_parsed = parse_full_frontend(lib_src, lib_name + ".spl", lib_name, log)
+    val main_parsed = parse_full_frontend(main_src, main_name + ".spl", main_name, log)
+    var parsed: Dict<text, ParserModule> = {}
+    parsed[lib_name] = lib_parsed
+    parsed[main_name] = main_parsed
+    val surfaces_result = module_surfaces_from_modules(parsed, [
+        SourceFile(path: lib_name + ".spl", content: lib_src, module_name: lib_name),
+        SourceFile(path: main_name + ".spl", content: main_src, module_name: main_name)])
+    if surfaces_result.is_err():
+        return Lowered(modules: {}, errors: ["surface build failed: " + surfaces_result.unwrap_err()])
+    val surfaces = surfaces_result.unwrap()
+    var hir: Dict<text, HirModule> = {}
+    var errors: [text] = []
+    # The consumer is lowered (and inserted) FIRST so that its module key
+    # precedes the provider's in dictionary order; collect_generics then sees
+    # the consumer before the provider, as in the real closure.
+    for name in [main_name, lib_name]:
+        var hl = hirlowering_for_module(name, surfaces)
+        hir[name] = hl.lower_module(parsed[name])
+        for e in hl.errors:
+            errors.push(e.message)
+    Lowered(modules: hir, errors: errors)
+
+# Collect every typed NamedVar/Var read named `name` reachable from `block`
+# (match scrutinees included), as the rendered name of the Named symbol
+# inside its `T?` type. Scalar/absent types render as "".
+fn named_reads_in_block(block: HirBlock, name: text, symbols_of: HirModule, out: [text]) -> [text]:
+    var acc = out
+    for st in block.stmts:
+        val s: HirStmt = st
+        match s.kind:
+            case HirStmtKind.Expr(e):
+                acc = named_reads_in_expr(e, name, symbols_of, acc)
+            case HirStmtKind.Let(_, _, init):
+                acc = named_reads_in_expr(init, name, symbols_of, acc)
+            case _:
+                pass
+    if block.has:
+        acc = named_reads_in_expr(block.value, name, symbols_of, acc)
+    acc
+
+fn optional_named_symbol(t: HirType) -> i64:
+    match t.kind:
+        case HirTypeKind.Optional(inner):
+            val inner_t: HirType = inner
+            match inner_t.kind:
+                case HirTypeKind.Named(sym, _):
+                    val s: SymbolId = sym
+                    s.id
+                case _: -1
+        case _: -1
+
+fn named_reads_in_expr(e: HirExpr, name: text, symbols_of: HirModule, out: [text]) -> [text]:
+    var acc = out
+    var read_name = ""
+    match e.kind:
+        case HirExprKind.NamedVar(_, n): read_name = n
+        case HirExprKind.Var(sym):
+            val vs: SymbolId = sym
+            read_name = symbols_of.symbols.symbol_name_scalar_raw(vs.id)
+        case _: pass
+    if read_name == name:
+        if e.has_type_ and e.type_ != nil:
+            val t: HirType = e.type_
+            val raw = optional_named_symbol(t)
+            if raw >= 0:
+                acc.push(symbols_of.symbols.symbol_name_scalar_raw(raw))
+            else:
+                acc.push("untyped-or-not-optional-named")
+        else:
+            acc.push("no-type")
+        return acc
+    match e.kind:
+        case HirExprKind.MatchCase(scrutinee, arms):
+            acc = named_reads_in_expr(scrutinee, name, symbols_of, acc)
+            for a in arms:
+                val arm: HirMatchArm = a
+                acc = named_reads_in_block(arm.body, name, symbols_of, acc)
+        case HirExprKind.Block(b):
+            acc = named_reads_in_block(b, name, symbols_of, acc)
+        case HirExprKind.If(cond, then_, else_):
+            acc = named_reads_in_expr(cond, name, symbols_of, acc)
+            acc = named_reads_in_block(then_, name, symbols_of, acc)
+            match else_:
+                case Some(eb):
+                    acc = named_reads_in_block(eb, name, symbols_of, acc)
+                case nil: pass
+        case _:
+            pass
+    acc
+
+fn function_named(m: HirModule, fname: text) -> HirFunction?:
+    for sym in m.functions.keys():
+        val f: HirFunction = m.functions[sym]
+        if f.name == fname:
+            return Some(f)
+    nil
+
+fn struct_symbol_id(m: HirModule, sname: text) -> i64:
+    for sym in m.structs.keys():
+        val sid: SymbolId = sym
+        if m.symbols.symbol_name_scalar_raw(sid.id) == sname:
+            return sid.id
+    -1
+
+describe "enum payload binder read across modules":
+    it "keeps the binder's Optional payload named by the consumer's own table after mono":
+        # @req REQ-SSPEC-COMPILER
+        step("lower provider and consumer, consumer first")
+        val lowered = lower_two("provider", PROVIDER_SRC, "consumer", CONSUMER_SRC)
+        for e in lowered.errors:
+            print "hir error: {e}"
+        expect(lowered.errors.len()).to_equal(0)
+        val provider_in: HirModule = lowered.modules["provider"]
+        val consumer_in: HirModule = lowered.modules["consumer"]
+
+        step("precondition: Payload has different raw ids in the two tables")
+        val provider_payload = struct_symbol_id(provider_in, "Payload")
+        expect(provider_payload >= 0).to_equal(true)
+        # Whatever the consumer's table calls the provider-local id must not be Payload,
+        # or the bug could not be observed here.
+        val foreign_name = consumer_in.symbols.symbol_name_scalar_raw(provider_payload)
+        print "provider Payload id={provider_payload} consumer names it '{foreign_name}'"
+        expect(foreign_name != "Payload").to_equal(true)
+
+        step("run 40.mono")
+        val (mono, _stats, diags) = run_monomorphization_with_diagnostics(lowered.modules)
+        for d in diags:
+            print "diag: {d}"
+        expect(diags.len()).to_equal(0)
+        val consumer_out: HirModule = mono["consumer"]
+
+        step("the inner `match else_block` scrutinee is typed Payload? in the consumer's table")
+        val f_opt = function_named(consumer_out, "f")
+        expect(f_opt != nil).to_equal(true)
+        val f: HirFunction = f_opt.unwrap()
+        val reads = named_reads_in_block(f.body, "else_block", consumer_out, [])
+        print "else_block reads: {reads}"
+        expect(reads.len() >= 1).to_equal(true)
+        for r in reads:
+            val rendered: text = r
+            expect(rendered).to_equal("Payload")
