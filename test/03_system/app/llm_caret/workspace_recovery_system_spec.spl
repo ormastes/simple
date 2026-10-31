@@ -40,12 +40,14 @@ real broadcast-on-dead-session contract gap — keep it red until fixed.
 # architecture doc/04_architecture/app/tools/llm_caret_agent_teams.md ;
 # design doc/05_design/app/llm_caret_embedded_tmux.md
 
-use std.spec.{describe, it, expect, step}
+use std.spec.{describe, it, expect, step, pending}
 use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists,
-    file_write, file_exists, cwd, current_time_ms, sleep_ms}
+    file_write, file_exists, file_delete, cwd, current_time_ms, sleep_ms}
 use app.llm_caret.agent_workspace.{AgentWorkspace, agent_workspace, workspace_available, workspace_backend,
     session_alive, session_ensure, session_kill, list_panes, send_to_each_pane, pane_split, window_exists, send_to_pane, wait_for_pane_text,
-    worktree_path, worktree_add, worktree_list, agent_attach, agent_detach}
+    worktree_path, worktree_add, worktree_list, agent_attach, agent_detach,
+    workspace_server_alive, workspace_server_address, workspace_server_token_path}
+use os.apps.smux.server.{smux_server_request}
 
 val CLI = "src/app/llm_caret/main.spl"
 
@@ -328,4 +330,113 @@ describe "LLM Caret workspace recovery and idempotency":
 
         agent_detach(ws, "cmd-a")
         session_kill(ws)
+        dir_remove_all(root)
+
+    it "a broadcast runs in each pane's own directory, never the caller's or the repo root":
+        # @req REQ-LLM-CARET-WS-009
+        # @capture(statistics): side-effect file locations after one broadcast
+        step("Confirm a real pane backend drives the scenarios; an absent one is an environment failure")
+        expect(workspace_available()).to_equal(true)  # oracle: a missing backend is a host defect, not a skip
+        val root = _scratch("where")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val ws = agent_workspace("rec-where", repo, root + "/trees")
+        session_kill(ws)
+        expect(agent_attach(ws, "wa", "").status).to_equal("ok")
+        expect(agent_attach(ws, "wb", "").status).to_equal("ok")
+
+        # A leftover from an earlier failing run would make the oracle below stale.
+        val _stale = file_delete(cwd() + "/bc_probe.txt")
+
+        step("Every pane, the session's first pane included, writes a file where it stands")
+        val reached = send_to_each_pane(ws, "echo BC_OK > bc_probe.txt")
+        expect(reached.len()).to_equal(3)  # oracle: first pane plus two agents
+        val deadline = current_time_ms() + 30000
+        while current_time_ms() < deadline and not (file_exists(worktree_path(ws, "wa") + "/bc_probe.txt") and file_exists(worktree_path(ws, "wb") + "/bc_probe.txt")):
+            sleep_ms(250)
+        sleep_ms(2000)
+        expect(file_exists(worktree_path(ws, "wa") + "/bc_probe.txt")).to_be(true)
+        expect(file_exists(worktree_path(ws, "wb") + "/bc_probe.txt")).to_be(true)
+        expect(file_exists(repo + "/bc_probe.txt")).to_be(false)  # oracle: no pane runs in the repo root
+        expect(file_exists(cwd() + "/bc_probe.txt")).to_be(false)  # oracle: no pane runs in the caller's directory
+
+        session_kill(ws)
+        dir_remove_all(root)
+
+# @manual_section: llm-caret-workspace-owner-auth
+describe "LLM Caret smux owner admits only its own workspace":
+    it "refuses a client without the owner's token and runs nothing":
+        # @req REQ-LLM-CARET-WS-010
+        # @capture(statistics): intruder replies and the absent side-effect file
+        if workspace_backend() != "smux":
+            pending("smux only: tmux serves on a per-user private unix socket (-L), there is no TCP token")
+            return
+        val root = _scratch("intruder")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        val ws = agent_workspace("rec-intruder", repo, root + "/trees")
+        session_kill(ws)
+        expect(agent_attach(ws, "victim", "").status).to_equal("ok")
+        val addr = workspace_server_address(ws) ?? ""
+        expect(addr.starts_with("127.0.0.1:")).to_be(true)
+
+        step("Guessed, wrong and missing tokens are all refused")
+        val pwned = (root + "/pwned.txt").replace("/", "\\")
+        val payload = "spawn-window " + ws.session + " intruder 80 24 cmd.exe /c echo PWNED> " + pwned
+        for token in ["caret", "0123456789abcdef0123456789abcdef"]:
+            val r = smux_server_request(addr, token, payload)
+            expect(if r.is_ok(): r.unwrap() else: r.unwrap_err()).to_equal("smux: unauthorized")
+        # A frame that starts with the verb carries no token at all.
+        val bare = smux_server_request(addr, "spawn-window", payload.substring(13))
+        expect(if bare.is_ok(): bare.unwrap() else: bare.unwrap_err()).to_equal("smux: unauthorized")
+
+        step("Nothing ran: no file, no intruder window; the owner still serves its workspace")
+        sleep_ms(3000)
+        expect(file_exists(root + "/pwned.txt")).to_be(false)
+        expect(window_exists(ws, "intruder")).to_be(false)
+        expect(window_exists(ws, "victim")).to_be(true)
+
+        step("The token file is readable by the current user only")
+        val tok = workspace_server_token_path(ws) ?? ""
+        expect(file_exists(tok)).to_be(true)
+        val (acl, _e, _c) = process_run("icacls", [tok])
+        expect(acl).not_to_contain("Everyone")
+        expect(acl).not_to_contain("BUILTIN\Users")
+        expect(acl).not_to_contain("Authenticated Users")
+
+        session_kill(ws)
+        dir_remove_all(root)
+
+    it "two workspaces whose ids hash alike never drive or stop each other":
+        # @req REQ-LLM-CARET-WS-011
+        # @capture(statistics): cross-workspace liveness after the other one's kill
+        if workspace_backend() != "smux":
+            pending("smux only: tmux names each workspace's private socket by id, there is no shared port")
+            return
+        val root = _scratch("collide")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        # coll-7 and coll-2890 shared one owner port under the id-only port hash.
+        val a = agent_workspace("coll-7", repo, root + "/trees-a")
+        val b = agent_workspace("coll-2890", repo, root + "/trees-b")
+        session_kill(a)
+        session_kill(b)
+        expect(agent_attach(a, "agent-a", "").status).to_equal("ok")
+
+        step("b sees no session, cannot address a's panes, and its kill leaves a running")
+        expect(session_alive(b)).to_be(false)
+        expect(list_panes(b).len()).to_equal(0)
+        val _k = session_kill(b)
+        expect(session_alive(a)).to_be(true)
+        expect(workspace_server_alive(a)).to_be(true)
+
+        step("b gets its own owner; both run side by side")
+        expect(agent_attach(b, "agent-b", "").status).to_equal("ok")
+        expect(window_exists(a, "agent-b")).to_be(false)
+        expect(window_exists(b, "agent-a")).to_be(false)
+        expect(session_kill(a).status).to_equal("ok")
+        expect(session_alive(b)).to_be(true)
+        expect(session_kill(b).status).to_equal("ok")
+        expect(workspace_server_alive(a)).to_be(false)
+        expect(workspace_server_alive(b)).to_be(false)
         dir_remove_all(root)

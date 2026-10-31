@@ -27,6 +27,7 @@ use os.apps.smux.api.{
     smux_reset_for_test
 }
 use std.sosix.pty.{sosix_pty_default_shell as platform_default_shell}
+use std.nogc_async_mut.sosix.environment.{sosix_env_set}
 use std.sosix.stdio.{sosix_read_stdin_line, sosix_println}
 use os.apps.smux.mux_rects.{mux_rect_to_text, MuxRect}
 use os.apps.smux.vt_screen.{vt_cell_width}
@@ -271,7 +272,11 @@ pub fn smux_remote_dispatch(line: text) -> text:
             return "smux: window capacity reached"
         val pane = smux_list_panes(sid, window.id)[0]
         val _sized = smux_resize(sid, window.id, pane.id, cols, rows)
+        # The child inherits this owner's environment: SMUX_PANE names its window,
+        # an id no later pane reuses, so a CLI inside it can skip its own pane.
+        val _named = sosix_env_set("SMUX_PANE", window.id)
         val spawned = smux_pane_spawn_pty(sid, window.id, pane.id, parts[5:].join(" "))
+        val _cleared = sosix_env_set("SMUX_PANE", "")
         if spawned.is_err():
             return "smux: spawn-window failed: " + spawned.unwrap_err()
         _spawned_pids.push(window.id + " " + spawned.unwrap().to_text())
