@@ -157,8 +157,11 @@ def inherited_build_settings(environ):
     if key not in environ:
         return {}
     value = environ[key]
-    if not value.isascii() or not value.isdigit() or value[0] == "0":
-        raise ValueError(key + " must be a canonical positive decimal")
+    # The compiler parses an out-of-range value as 0 and falls back to the
+    # 24 GiB default, so bound it to i64 here.
+    if (not value.isascii() or not value.isdigit() or value[0] == "0" or
+            len(value) > 19 or int(value) > 2**63 - 1):
+        raise ValueError(key + " must be a canonical positive i64 decimal")
     return {key: value}
 
 

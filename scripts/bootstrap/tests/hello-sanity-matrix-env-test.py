@@ -20,11 +20,14 @@ class ReserveTests(unittest.TestCase):
     def test_canonical_reserve_is_kept(self):
         self.assertEqual(m.inherited_build_settings({KEY: "6442450944", "SIMPLE_X": "1"}), {KEY: "6442450944"})
 
+    def test_i64_max_reserve_is_kept(self):
+        self.assertEqual(m.inherited_build_settings({KEY: "9223372036854775807"}), {KEY: "9223372036854775807"})
+
     def test_absent_reserve_adds_nothing(self):
         self.assertEqual(m.inherited_build_settings({"SIMPLE_X": "1"}), {})
 
     def test_noncanonical_reserve_refused(self):
-        for value in ("", "0", "012", "-1", "6G", " 1"):
+        for value in ("", "0", "012", "-1", "6G", " 1", "9223372036854775808", "1" * 20):
             with self.assertRaises(ValueError):
                 m.inherited_build_settings({KEY: value})
 
