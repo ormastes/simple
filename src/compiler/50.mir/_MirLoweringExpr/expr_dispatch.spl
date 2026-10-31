@@ -875,9 +875,9 @@ impl MirLowering:
                     if field_idx < inst_names.len():
                         nested = inst_names[field_idx]
                 return (true, inst_types[field_idx], nested)
-        val arg_hir = self.generic_instance_field_hir_arg(owner, base_local, field_idx)
-        if arg_hir != nil:
-            val arg_t: HirType = arg_hir
+        val arg_hir: HirType? = self.generic_instance_field_hir_arg(owner, base_local, field_idx)
+        if val present_arg = arg_hir:
+            val arg_t: HirType = present_arg
             var mt = self.lower_type(arg_t)
             var nested = ""
             match arg_t.kind:
@@ -904,22 +904,27 @@ impl MirLowering:
         val tp_name: text = markers[field_idx]
         if tp_name == "":
             return nil
-        val base_hir = self.find_local_hir_type(base_local.id)
-        if base_hir == nil:
-            return nil
-        val base_t: HirType = base_hir
-        match base_t.kind:
-            case HirTypeKind.Named(_, args):
-                val tps = self.struct_type_param_names[owner]
-                var i = 0
-                while i < tps.len():
-                    if tps[i] == tp_name and i < args.len():
-                        val arg_t: HirType = args[i]
-                        return arg_t
-                    i = i + 1
-                nil
-            case _:
-                nil
+        # Presence does not unwrap HirType?: find_local_hir_type returns a
+        # Some box, and binding it as a concrete HirType copied the box
+        # header as {kind, span} and then dereferenced the garbage span
+        # (SIGSEGV in this function on every `Box<i64>.value` read,
+        # generics = one erased body, 2026-11-01). Bind the payload.
+        val base_hir: HirType? = self.find_local_hir_type(base_local.id)
+        if val present_base = base_hir:
+            val base_t: HirType = present_base
+            match base_t.kind:
+                case HirTypeKind.Named(_, args):
+                    val tps = self.struct_type_param_names[owner]
+                    var i = 0
+                    while i < tps.len():
+                        if tps[i] == tp_name and i < args.len():
+                            val arg_t: HirType = args[i]
+                            return Some(arg_t)
+                        i = i + 1
+                    return nil
+                case _:
+                    return nil
+        nil
 
     me declared_field_type_in_current_table(owner: text, field_idx: i64, declared: HirType) -> HirType:
         """Rebind a declared field type's `Named` symbol into `self.symbols`.
@@ -5692,8 +5697,8 @@ impl MirLowering:
                     if generic_field_resolved:
                         if generic_field_nested_name != "":
                             self.struct_value_syms[field_result.id] = generic_field_nested_name
-                        if generic_field_hir != nil:
-                            val gf_hir_t: HirType = generic_field_hir
+                        if val present_gf_hir = generic_field_hir:
+                            val gf_hir_t: HirType = present_gf_hir
                             self.remember_local_hir_type(field_result.id, gf_hir_t, 0, 0)
                             self.mark_instance_field_local(field_result, gf_hir_t)
                         return field_result
