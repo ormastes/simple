@@ -28,3 +28,16 @@ workaround after the fix is deployed in a Stage 2 producer.
 
 Same shape elsewhere: `src/lib/nogc_sync_mut/failsafe/core.spl` (FailSafeResult<T>, 3 methods) -
 unchanged. DB reconciliation pending.
+
+## Additional worked-around site (2026-10-31)
+
+`src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl` (two `match
+subscription.poll()` sites in the phase-1 full-CLI closure) hit the same limitation
+with a non-self subject: an unqualified `TaskPollResult`-family arm match over a
+method-call subject whose type is unresolved at pattern lowering. Fix, landed as
+PR #5635: bind the poll result to an explicitly typed local
+(`val polled: TaskPollResult<Result<i64, AsyncRefError>>`) before matching, tagged
+`@workaround bug=hir_generic_enum_self_match_2026-10-23`. Verified: the module's HIR
+lowers clean under the pinned stage2 (sha 6c5c53aa); the full-CLI build gate then
+proceeds (a separate ctor-mir-20261031 MIR failure inside simple_ring.spl is tracked
+in its own record and is the next gate).
