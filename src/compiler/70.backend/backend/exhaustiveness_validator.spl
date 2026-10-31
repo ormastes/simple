@@ -42,7 +42,7 @@ For each catch-all, suggests:
 
 # Location in source file
 @unsafe(reason: "raw backend-validator source-text ABI; result model lacks I/O error state", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 
 struct SourceLocation:
     file_path: text
@@ -212,7 +212,11 @@ class ExhaustivenessValidator:
         val result = fileanalysisresult_new(file_path)
 
         # Read file content
-        val content = self.read_file(file_path)
+        val content_opt = self.read_file(file_path)
+        if content_opt == nil:
+            # absent: an unreadable file has no patterns to report
+            return result
+        val content = content_opt.unwrap()
 
         # Parse and detect patterns
         val patterns = self.detect_catch_alls(file_path, content)
@@ -222,11 +226,9 @@ class ExhaustivenessValidator:
 
         result
 
-    fn read_file(path: text) -> text:
-        """Read file content using SFFI."""
-        # MOVED TO MODULE LEVEL: extern fn rt_file_read_text(path: text) -> text
-        val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
-        content ?? ""
+    fn read_file(path: text) -> text?:
+        """Read file content using SFFI; nil when unreadable."""
+        unsafe(capabilities: [ffi]): rt_file_read_text(path)
 
     fn detect_catch_alls(file_path: text, content: text) -> [CatchAllPattern]:
         """

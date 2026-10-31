@@ -17,32 +17,22 @@
 # `digest` is sha256 over the full rendered section body (struct fields,
 # signatures, variants), NOT interface_digest_of_source (under-captures fields).
 #
-# Concurrency: in-process CacheSingleFlightV1; cross-process a `<path>.lease`
-# file created exclusively, holding "<pid> <start_identity>" from
-# rt_process_start_identity (process creation time). The owner is dead iff the
-# identity observed now differs from the recorded one (#4962 pattern).
-use std.io_runtime.{file_exists, file_read, file_delete, getpid, thread_sleep}
-use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
-use std.nogc_sync_mut.io_runtime.{dir_create_all}
-use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+# Concurrency: none needed. Content is a pure function of (module_id, source)
+# and readers check the source digest, so racing writers are harmless: the
+# rename is atomic and a stale winner reads as not fresh (closure route).
+use std.io_runtime.{file_exists, file_read}
 use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1,
     digest_v1_text, digest_v1_parse, digest_admits_identity_v1}
 use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text}
 use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_of_source_v1,
     module_tldr_sections_render_v1, module_tldr_sections_parse_v1}
-use compiler.driver.cache.module_artifacts_v1.{module_artifact_publish_atomic_v1}
-use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
-    SINGLE_FLIGHT_LEADER_V1, cache_single_flight_key_v1}
+use compiler.driver.cache.tldr_layout_v1.{tldr_publish_v1}
 use compiler.semantics.symbol_id.stable_id.{SymbolComponents, stable_symbol_id}
 
-extern fn rt_process_start_identity(pid: i64) -> i64
 
 val TLDR_SUMMARY_MAGIC_V1: text = "tldr-summary-v1.1"
-val TLDR_PUBLISH_RETRIES_V1: i64 = 8
-val TLDR_LEASE_WAIT_STEPS_V1: i64 = 200
 
 var _TLDR_FALLBACKS_V1: i64 = 0
-var _TLDR_FLIGHTS_V1: CacheSingleFlightV1 = CacheSingleFlightV1.create()
 
 pub fn tldr_summary_fallback_count_v1() -> i64:
     _TLDR_FALLBACKS_V1
@@ -237,81 +227,19 @@ fn _tldr_read_fresh_v1(root: text, module_id: text, source_digest: text) -> [tex
     if _tldr_header_v1(content, "module") != module_id: return nil
     tldr_summary_parse_v1(content)
 
-# Owner liveness, #4962 pattern (worker_unit_pick_owner_dead_v1): the owner is
-# alive iff its pid's current start identity equals the recorded one. 0 means
-# no such process (or unreadable), so a 0 observation is dead.
-pub fn tldr_lease_owner_alive_v1(pid: i64, start_identity: i64) -> bool:
-    if pid <= 0 or start_identity == 0: return false
-    val observed = rt_process_start_identity(pid)
-    observed != 0 and observed == start_identity
-
-pub fn tldr_lease_record_v1() -> text:
-    val pid = getpid()
-    "{pid} {rt_process_start_identity(pid)}"
-
-# Exclusive-create the lease; a lease whose owner is dead (identity differs)
-# is reclaimed once. false = a live owner holds it.
-pub fn tldr_lease_acquire_v1(lease_path: text) -> bool:
-    val slash = lease_path.rfind("/")
-    if slash > 0:
-        val _d = dir_create_all(lease_path.substring(0, slash))
-    if file_create_exclusive(lease_path, tldr_lease_record_v1()): return true
-    val held = file_read(lease_path).trim().split(" ")
-    val pid = if held.len() >= 1: held[0].to_i64() ?? -1 else: -1
-    val start = if held.len() >= 2: held[1].to_i64() ?? 0 else: 0
-    if tldr_lease_owner_alive_v1(pid, start): return false
-    val _r = file_delete(lease_path)
-    file_create_exclusive(lease_path, tldr_lease_record_v1())
-
-pub fn tldr_lease_release_v1(lease_path: text):
-    if file_read(lease_path).trim() == tldr_lease_record_v1():
-        val _r = file_delete(lease_path)
-
-# Atomic publish; the rename is retried with bounded backoff because Windows
-# MoveFileEx fails while a reader holds the destination open. Returns the
-# attempt that succeeded (1-based), or -1 after `max_attempts` (fail closed).
-pub fn tldr_summary_publish_attempts_v1(path: text, content: text, max_attempts: i64) -> i64:
-    var attempt = 0
-    while attempt < max_attempts:
-        if module_artifact_publish_atomic_v1(path, content): return attempt + 1
-        attempt = attempt + 1
-        if attempt < max_attempts:
-            thread_sleep(5 * attempt)
-    -1
-
 pub fn tldr_summary_publish_v1(path: text, content: text) -> bool:
-    tldr_summary_publish_attempts_v1(path, content, TLDR_PUBLISH_RETRIES_V1) > 0
+    tldr_publish_v1(path, content)
 
-# Produce-or-read. In process: single-flight per (module, source xxh3 index).
-# Across processes: the lease winner publishes; losers wait (bounded) and
-# re-read. nil = no verified summary (caller keeps the closure route).
+# Produce-or-read. nil = no verified summary (caller keeps the closure route).
 pub fn tldr_summary_ensure_v1(root: text, module_id: text, source: text) -> [text]?:
     val source_digest = _tldr_sha256_v1(source)
     val fresh = _tldr_read_fresh_v1(root, module_id, source_digest)
     if fresh != nil: return fresh
-    val key = cache_single_flight_key_v1("tldr-summary", module_id + "\u0000" + xxh3_128_text(source))
-    val request = "{getpid()}:{module_id}"
-    val (role, _flight) = _TLDR_FLIGHTS_V1.join(key, request)
-    if role != SINGLE_FLIGHT_LEADER_V1:
-        return _tldr_read_fresh_v1(root, module_id, source_digest)
-    val path = tldr_summary_path_v1(root, module_id)
-    val lease = path + ".lease"
-    var out: [text]? = nil
-    if tldr_lease_acquire_v1(lease):
-        if tldr_summary_publish_v1(path, tldr_summary_produce_v1(module_id, source)):
-            out = _tldr_read_fresh_v1(root, module_id, source_digest)
-        tldr_lease_release_v1(lease)
-    else:
-        var step = 0
-        while out == nil and step < TLDR_LEASE_WAIT_STEPS_V1:
-            thread_sleep(10)
-            out = _tldr_read_fresh_v1(root, module_id, source_digest)
-            step = step + 1
-    val done = _TLDR_FLIGHTS_V1.complete_flight(key, request, nil)
-    if done >= 0: _TLDR_FLIGHTS_V1.forget(done)
-    out
+    if not tldr_summary_publish_v1(tldr_summary_path_v1(root, module_id),
+            tldr_summary_produce_v1(module_id, source)):
+        return nil
+    _tldr_read_fresh_v1(root, module_id, source_digest)
 
 export tldr_summary_fallback_count_v1, tldr_summary_path_v1, tldr_summary_entries_v1
 export tldr_summary_produce_v1, tldr_summary_digest_v1, tldr_summary_parse_v1, read_tldr
-export tldr_lease_owner_alive_v1, tldr_lease_record_v1, tldr_lease_acquire_v1, tldr_lease_release_v1
-export tldr_summary_publish_v1, tldr_summary_publish_attempts_v1, tldr_summary_ensure_v1
+export tldr_summary_publish_v1, tldr_summary_ensure_v1
