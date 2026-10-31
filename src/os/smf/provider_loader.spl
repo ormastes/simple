@@ -267,11 +267,11 @@ fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDyn
         val path_policy = _provider_admission_policy_v1(request, false, "")
         val path_denied = _provider_policy_refusal_v1(path_policy)
         return ProviderDynamicAdmissionV1(admission: path_denied, session: _closed_provider_session(path_denied))
-    val read_bytes = if rt_file_exists(request.artifact_path): rt_file_read_bytes(request.artifact_path) else: nil
-    # absent: a missing or unreadable artifact is refused as not existing.
-    val exists = read_bytes != nil
-    val bytes: [u8] = if exists: read_bytes.unwrap() else: []
-    val digest = provider_artifact_digest_v1(bytes)
+    val exists = rt_file_exists(request.artifact_path)
+    val first_read = if exists: rt_file_read_bytes(request.artifact_path) else: nil
+    # An unreadable artifact has no digest ("" never matches a pin); it must not
+    # be hashed as if it were an empty file.
+    val digest = if first_read == nil: "" else: provider_artifact_digest_v1(first_read ?? [])
     val policy = _provider_admission_policy_v1(request, exists, if exists: digest else: "")
     if policy.status != PROVIDER_ADMISSION_OK:
         val refused = _provider_policy_refusal_v1(policy)
@@ -279,10 +279,10 @@ fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDyn
     val library = dynlib_open(request.artifact_path, 2)
     # This is cold admission work. Re-read after open and fail closed if the
     # path changed. The library generation stays retained by the session.
-    val reloaded = rt_file_read_bytes(request.artifact_path)
-    # absent: an unreadable re-read cannot match, so it fails closed as unstable.
-    val loaded_digest = if reloaded == nil: "" else: provider_artifact_digest_v1(reloaded.unwrap())
-    if loaded_digest != digest:
+    # An unreadable re-read is a changed artifact, never an empty one.
+    val reread = rt_file_read_bytes(request.artifact_path)
+    val loaded_digest = if reread == nil: "" else: provider_artifact_digest_v1(reread ?? [])
+    if reread == nil or first_read == nil or loaded_digest != digest:
         val unstable = _provider_admission_result(
             PROVIDER_ADMISSION_DIGEST_UNSTABLE, 0, loaded_digest, false,
             "artifact-digest-unstable"
