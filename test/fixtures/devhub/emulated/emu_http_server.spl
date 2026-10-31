@@ -28,6 +28,7 @@
 
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.io.types.{Shutdown}
+use std.common.char_from_code_pure.{char_from_code}
 use std.io_runtime.{read_file_text_result, file_write, time_now_unix_micros}
 use std.env.{env_get}
 use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
@@ -153,6 +154,35 @@ fn check_body(body: text, assertion: text) -> text:
         return ""
     "bad body assertion [{assertion}]"
 
+fn hex_value(code: i64) -> i64:
+    if code >= 48 and code <= 57: return code - 48
+    if code >= 65 and code <= 70: return code - 55
+    if code >= 97 and code <= 102: return code - 87
+    -1
+
+fn decode_target(target: text) -> text:
+    """Percent- and form-decode, as a real server does: %2C, %2c and "," name the
+    same value, and curl's -G writes a space as +. A double-encoded or wrongly
+    named parameter still differs. S3 signature checks keep the raw wire form."""
+    val question = target.find("?")
+    val path = if question >= 0: target[0:question] else: target
+    val query = if question >= 0: target[question + 1:].replace("+", " ") else: ""
+    val source = path + "?" + query
+    var out = ""
+    var i = 0
+    while i < source.len():
+        val ch = source[i]
+        if ch == "%" and i + 2 < source.len():
+            val high = hex_value(source.char_code_at(i + 1))
+            val low = hex_value(source.char_code_at(i + 2))
+            if high >= 0 and low >= 0:
+                out = out + char_from_code(high * 16 + low)
+                i = i + 3
+                continue
+        out = out + ch
+        i = i + 1
+    out
+
 fn reason_phrase(status: i64) -> text:
     if status == 200: return "OK"
     if status == 201: return "Created"
@@ -227,7 +257,7 @@ fn serve_one(stream: TcpStream, state: State, script_path: text, fixtures: text)
     var failures: [text] = []
     if req.method != row[0]:
         failures = failures + ["method: wanted {row[0]} got {req.method}"]
-    if req.target != row[1]:
+    if req.target != row[1] and decode_target(req.target) != decode_target(row[1]):
         failures = failures + ["target: wanted [{row[1]}] got [{req.target}]"]
     for assertion in split_list(row[2]):
         val problem = check_header(req, assertion, origin)

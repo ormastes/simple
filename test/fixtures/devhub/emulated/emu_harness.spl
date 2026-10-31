@@ -8,7 +8,6 @@ use std.io_runtime.{process_spawn_async, process_kill, process_is_running, env_s
 use std.env.{env_get}
 use std.io_runtime.{host_os, getpid}
 use std.io.process_ops.{process_run_bounded}
-use std.common.http_curl.{curl_request_text}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 use std.process.run
 use std.common.json.value.{JsonValue, json_value_parse_or_null, json_value_field, json_value_has, json_value_serialize}
@@ -130,7 +129,10 @@ fn emu_stop() -> bool:
     if addr == "" or pid_text == "":
         return false
     val pid = pid_text.to_i64()
-    val _r = curl_request_text("POST", "http://{addr}/__emu/shutdown", ["X-Emu: stop"], "")
+    match TcpStream.connect_timeout(addr, 2000):
+        Ok(stream):
+            val _w = stream.write_text("POST /__emu/shutdown HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n")
+        Err(_): pass
     var waited = 0
     while process_is_running(pid) and waited < 100:
         thread_sleep(100)
@@ -206,3 +208,7 @@ fn emu_field(obj: JsonValue, key: text) -> text:
     if s.len() >= 2 and s.starts_with("\"") and s.ends_with("\""):
         return s[1:s.len() - 1]
     s
+
+fn emu_mail_accounts(email_sdn: text):
+    """Add a synthetic email.sdn to the scratch HOME; never a real mailbox."""
+    val _e = file_write(env_get("HOME") + "/.config/devhub/email.sdn", email_sdn)

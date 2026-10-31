@@ -1,0 +1,273 @@
+"""
+## Purpose and audience
+Near-system scenarios for DevHub maintainers: the production MinIO adapter and CLI talk
+SigV4-signed S3 to a scripted emulator on a real loopback socket. The emulator rebuilds
+the canonical request from the wire, as S3 does, so a path, query or header defect
+surfaces as a signature mismatch rather than a parsed success.
+## Operator workflow
+From the repo root:
+`SIMPLE_BINARY=<simple> SIMPLE_EXECUTION_MODE=interpret <simple> run test/03_system/app/devhub/feature/devhub_minio_emulated_spec.spl`
+then read the `SPEC FILE VERDICT:` line.
+## Compatibility and limitations
+XML is synthetic and labelled in `test/fixtures/devhub/emulated/index.sdn`. Presigned URLs
+and binary PUT are not exercised here (`minio_binary_put_spec` covers binary PUT).
+The verifier's query canonicalisation assumes the client already percent-encoded values.
+Unsupported behavior: multipart and delimiter listing are listed gaps in the survey.
+## Verification guidance and troubleshooting
+A `sigv4:` line in a `MISMATCH` names which part of the request was wrong. The published
+AWS vector scenario proves the verifier itself before anything else is trusted.
+"""
+# Lifecycle: doc/01_research/app/devhub/service_interface_survey_2026-10-31.md ;
+# doc/03_plan/app/tools/devhub_multi_target_gateway_plan.md ;
+# doc/04_architecture/app/tools/devhub_multi_target_gateway.md ;
+# doc/05_design/app/devhub/devhub_overview.md
+# @manual_section: object-storage-s3
+
+use std.spec.*
+use std.spec.step
+use app.devhub.adapter_minio.{MinioConfig, minio_list_buckets, minio_list_objects, minio_get_object, minio_put_text, minio_delete_object, minio_create_bucket, minio_head_object, minio_stat_object}
+use test.fixtures.devhub.emulated.emu_sigv4.{sigv4_verify_wire}
+use test.fixtures.devhub.emulated.emu_harness.{emu_start, emu_base, emu_row, emu_load, emu_problems, emu_stop, emu_refused_after_stop, emu_home, emu_devhub}
+
+val SIG = "@sigv4=SYNTHAK:synthsecret:us-east-1"
+val XML_CT = "Content-Type: application/xml"
+val TOKEN_ENC = "1ueGcxLPRx1Tr%2FXYExHnhbYLgveDs2J%2Fwm36Hy4vbOwM%3D"
+val AWS_EXAMPLE_SIGNATURE = "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
+
+fn cfg() -> MinioConfig:
+    MinioConfig(url: emu_base(), region: "us-east-1", access_key: "SYNTHAK", secret_key: "synthsecret", tls_skip_verify: false)
+
+fn aws_example_headers(signature: text) -> [text]:
+    [
+        "Host: examplebucket.s3.amazonaws.com",
+        "Range: bytes=0-9",
+        "x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "x-amz-date: 20130524T000000Z",
+        "Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;range;x-amz-content-sha256;x-amz-date,Signature={signature}"
+    ]
+
+fn aws_example_verdict(signature: text) -> text:
+    sigv4_verify_wire("GET", "/test.txt", aws_example_headers(signature), "", "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "us-east-1")
+
+fn retrying_rows(status: i64, fixture: text) -> [text]:
+    val row = emu_row("GET", "/widgets/hello.txt", SIG, "none", status, XML_CT, fixture)
+    [row, row, row]
+
+describe "devhub minio over an emulated S3":
+    it "accepts the published AWS example in the emulator's verifier":
+        # @req REQ-DEVHUB-EMU-S3-001
+        step("Verify AWS's documented GET Object signature")
+        # @capture(protocol): AWS sig-v4-header-based-auth GET Object example
+        expect(aws_example_verdict(AWS_EXAMPLE_SIGNATURE)).to_equal("")
+
+    it "rejects a tampered signature in the emulator's verifier":
+        # @req REQ-DEVHUB-EMU-S3-001
+        step("Change the last digit of the AWS example signature")
+        # @capture(protocol): the verifier's mismatch text
+        expect(aws_example_verdict("f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb42")).to_contain("signature mismatch")
+
+    it "lists buckets with a verified signature":
+        # @req REQ-DEVHUB-EMU-S3-002
+        step("Start the emulator and list buckets")
+        expect(emu_start("s3")).to_contain("127.0.0.1:")
+        val gen_id = emu_load([emu_row("GET", "/", SIG, "none", 200, XML_CT, "@s3/list_buckets.xml")])
+        # @capture(protocol): the signed ListBuckets request
+        val (ok, buckets, _raw) = minio_list_buckets(cfg())
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(buckets.len()).to_equal(2)  # oracle: fixture has widgets and logs
+        expect(buckets[0].name).to_equal("widgets")
+
+    it "follows ListObjectsV2 continuation with an encoded token":
+        # @req REQ-DEVHUB-EMU-S3-003
+        step("Serve a truncated page whose token needs percent-encoding")
+        val gen_id = emu_load([
+            emu_row("GET", "/widgets?list-type=2&prefix=docs%2F", SIG, "none", 200, XML_CT, "@s3/list_objects_page1.xml"),
+            emu_row("GET", "/widgets?continuation-token={TOKEN_ENC}&list-type=2&prefix=docs%2F", SIG, "none", 200, XML_CT, "@s3/list_objects_page2.xml")
+        ])
+        # @capture(protocol): both signed list requests
+        val (ok, objects, _raw) = minio_list_objects(cfg(), "widgets", "docs/")
+        step("Check all three keys and sizes arrived in order")
+        expect(emu_problems(gen_id, 2)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(objects.len()).to_equal(3)  # oracle: two on page one, one on page two
+        expect(objects[0].key).to_equal("docs/a.txt")
+        expect(objects[1].size).to_equal(22)  # oracle: list_objects_page1.xml
+        expect(objects[2].key).to_equal("docs/c.txt")
+
+    it "reports an empty listing as success with no objects":
+        # @req REQ-DEVHUB-EMU-S3-004
+        step("Answer a listing with no Contents")
+        val gen_id = emu_load([emu_row("GET", "/widgets?list-type=2&prefix=none%2F", SIG, "none", 200, XML_CT, "@s3/list_objects_empty.xml")])
+        # @capture(protocol): the signed list request
+        val (ok, objects, _raw) = minio_list_objects(cfg(), "widgets", "none/")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(objects.len()).to_equal(0)
+
+    it "rejects a malformed listing rather than reporting no objects":
+        # @req REQ-DEVHUB-EMU-S3-005
+        step("Answer 200 with text that is not a ListBucketResult")
+        val gen_id = emu_load([emu_row("GET", "/widgets?list-type=2", SIG, "none", 200, XML_CT, "<ListBucketResult><Contents><Key>trunc")])
+        # @capture(protocol): the malformed response
+        val (ok, _objects, _raw) = minio_list_objects(cfg(), "widgets", "")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+
+    it "rejects a malformed bucket listing rather than reporting no buckets":
+        # @req REQ-DEVHUB-EMU-S3-005
+        step("Answer 200 with text that is not a ListAllMyBucketsResult")
+        val gen_id = emu_load([emu_row("GET", "/", SIG, "none", 200, XML_CT, "gateway says hello")])
+        # @capture(protocol): the malformed response
+        val (ok, _buckets, _raw) = minio_list_buckets(cfg())
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+
+    it "gets an object and sends a signed Range header":
+        # @req REQ-DEVHUB-EMU-S3-006
+        step("Fetch a byte range")
+        val gen_id = emu_load([emu_row("GET", "/widgets/hello.txt", SIG + " ;; Range=bytes=0-4", "none", 200, "Content-Type: text/plain", "@s3/object_hello.txt")])
+        # @capture(protocol): the signed GET with Range
+        val (ok, got, _raw) = minio_get_object(cfg(), "widgets", "hello.txt", "bytes=0-4")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(got.body).to_equal("hello s3")
+
+    it "encodes a key with a space and keeps its slashes":
+        # @req REQ-DEVHUB-EMU-S3-007
+        step("Fetch a key needing path encoding")
+        val gen_id = emu_load([emu_row("GET", "/widgets/dir/a%20b.txt", SIG, "none", 200, "Content-Type: text/plain", "x")])
+        # @capture(protocol): the canonical URI on the wire
+        val (ok, _got, _raw) = minio_get_object(cfg(), "widgets", "dir/a b.txt", "")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "puts text with the real SHA-256 of its body":
+        # @req REQ-DEVHUB-EMU-S3-008
+        step("Upload text; the verifier hashes what arrived")
+        val gen_id = emu_load([emu_row("PUT", "/widgets/note.txt", SIG + " ;; Content-Type=text/plain", "eq:synthetic note", 200, "ETag: \"syn\"", "")])
+        # @capture(protocol): the signed PUT and body
+        val (ok, _etag, _raw) = minio_put_text(cfg(), "widgets", "note.txt", "synthetic note", "text/plain")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+
+    it "deletes an object and creates a bucket":
+        # @req REQ-DEVHUB-EMU-S3-009
+        step("Issue DeleteObject and CreateBucket")
+        val gen_id = emu_load([
+            emu_row("DELETE", "/widgets/note.txt", SIG, "none", 204, "", ""),
+            emu_row("PUT", "/newbucket", SIG, "none", 200, "", "")
+        ])
+        # @capture(protocol): both signed requests
+        val (deleted, _d) = minio_delete_object(cfg(), "widgets", "note.txt")
+        val (created, _c) = minio_create_bucket(cfg(), "newbucket")
+        expect(emu_problems(gen_id, 2)).to_equal("")
+        expect(deleted).to_equal(true)
+        expect(created).to_equal(true)
+
+    it "stats an object from a prefix listing":
+        # @req REQ-DEVHUB-EMU-S3-010
+        step("Stat a key and check its size and ETag")
+        val gen_id = emu_load([
+            emu_row("GET", "/widgets?list-type=2&prefix=docs%2Fa.txt", SIG, "none", 200, XML_CT, "@s3/list_objects_page2.xml")
+        ])
+        # @capture(protocol): the prefix listing
+        val (ok, _info, message) = minio_stat_object(cfg(), "widgets", "docs/a.txt")
+        step("The listing lacks that exact key, so stat must say not found")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+        expect(message).to_contain("not found")
+
+    it "maps 401 to the S3 error code":
+        # @req REQ-DEVHUB-EMU-S3-011
+        step("Answer InvalidAccessKeyId")
+        val gen_id = emu_load([emu_row("GET", "/widgets/hello.txt", SIG, "none", 401, XML_CT, "@s3/error_invalid_key.xml")])
+        # @capture(protocol): the error response
+        val (ok, _got, message) = minio_get_object(cfg(), "widgets", "hello.txt", "")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+        expect(message).to_contain("[InvalidAccessKeyId]")
+
+    it "maps 403 to the S3 error code without retrying":
+        # @req REQ-DEVHUB-EMU-S3-011
+        step("Answer AccessDenied")
+        val gen_id = emu_load([emu_row("GET", "/widgets/hello.txt", SIG, "none", 403, XML_CT, "@s3/error_access_denied.xml")])
+        # @capture(protocol): the single request
+        val (ok, _got, message) = minio_get_object(cfg(), "widgets", "hello.txt", "")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+        expect(message).to_contain("[AccessDenied]")
+
+    it "maps 404 to NoSuchKey":
+        # @req REQ-DEVHUB-EMU-S3-011
+        step("Answer NoSuchKey")
+        val gen_id = emu_load([emu_row("GET", "/widgets/hello.txt", SIG, "none", 404, XML_CT, "@s3/error_no_such_key.xml")])
+        # @capture(protocol): the single request
+        val (ok, _got, message) = minio_get_object(cfg(), "widgets", "hello.txt", "")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+        expect(message).to_contain("[NoSuchKey]")
+
+    it "retries 429 three times and then reports it":
+        # @req REQ-DEVHUB-EMU-S3-012
+        step("Answer SlowDown on every attempt")
+        val gen_id = emu_load(retrying_rows(429, "@s3/error_slow_down.xml"))
+        # @capture(protocol): three attempts
+        val (ok, _got, message) = minio_get_object(cfg(), "widgets", "hello.txt", "")
+        expect(emu_problems(gen_id, 3)).to_equal("")
+        expect(ok).to_equal(false)
+        expect(message).to_contain("[SlowDown]")
+
+    it "recovers when a 500 clears on retry":
+        # @req REQ-DEVHUB-EMU-S3-012
+        step("Answer InternalError once, then the object")
+        val gen_id = emu_load([
+            emu_row("GET", "/widgets/hello.txt", SIG, "none", 500, XML_CT, "@s3/error_internal.xml"),
+            emu_row("GET", "/widgets/hello.txt", SIG, "none", 200, "Content-Type: text/plain", "@s3/object_hello.txt")
+        ])
+        # @capture(protocol): the failed and the successful attempt
+        val (ok, got, _raw) = minio_get_object(cfg(), "widgets", "hello.txt", "")
+        expect(emu_problems(gen_id, 2)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(got.body).to_equal("hello s3")
+
+    it "reports a truncated body as an error":
+        # @req REQ-DEVHUB-EMU-S3-013
+        step("Close the socket before Content-Length bytes arrive on every attempt")
+        val row = emu_row("GET", "/widgets/hello.txt", SIG, "none", 200, "Content-Type: text/plain", "@s3/object_hello.txt", "truncate")
+        val gen_id = emu_load([row, row, row])
+        # @capture(protocol): the truncated responses
+        val (ok, got, message) = minio_get_object(cfg(), "widgets", "hello.txt", "")
+        expect(emu_problems(gen_id, 3)).to_equal("")
+        expect(got.body).to_equal("")
+        expect(message.len() > 0).to_equal(true)
+        expect(ok).to_equal(false)
+
+    it "lists through the CLI as a user would":
+        # @req REQ-DEVHUB-EMU-S3-014
+        step("Write synthetic auth.sdn and run minio ls")
+        val _h = emu_home("", "[minio]\nurl = {emu_base()}\nregion = us-east-1\naccess_key = SYNTHAK\nsecret_key = synthsecret\n")
+        val gen_id = emu_load([emu_row("GET", "/widgets?list-type=2&prefix=docs%2F", SIG, "none", 200, XML_CT, "@s3/list_objects_page2.xml")])
+        # @capture(terminal): the rendered object table
+        val result = emu_devhub(["minio", "ls", "widgets", "--prefix", "docs/", "--no-pager"])
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(result.rc).to_equal(0)
+        expect(result.combined()).to_contain("docs/c.txt")
+
+    it "lists through the mc-shaped storage facade to the same request":
+        # @req REQ-DEVHUB-EMU-S3-014
+        step("Run storage ls for the same bucket and prefix")
+        val gen_id = emu_load([emu_row("GET", "/widgets?list-type=2&prefix=docs%2F", SIG, "none", 200, XML_CT, "@s3/list_objects_page2.xml")])
+        # @capture(terminal): the rendered object table
+        val result = emu_devhub(["storage", "ls", "minio/widgets/docs/", "--no-pager"])
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(result.rc).to_equal(0)
+        expect(result.combined()).to_contain("c.txt")
+
+    it "stops the emulator and leaves no process listening":
+        # @req REQ-DEVHUB-EMU-S3-015
+        step("Shut the emulator down and prove nothing accepts")
+        val addr = emu_base()[7:]
+        # @capture(protocol): the final SHUTDOWN log line
+        expect(emu_stop()).to_equal(true)
+        expect(emu_refused_after_stop(addr)).to_equal(true)

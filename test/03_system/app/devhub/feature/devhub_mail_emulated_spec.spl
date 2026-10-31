@@ -1,0 +1,201 @@
+"""
+## Purpose and audience
+Near-system scenarios for DevHub maintainers on the Gmail-shaped mail interface. The
+Outlook Graph client reaches a scripted emulator over a real loopback socket. Gmail-shaped
+verbs then run through the CLI on every backend, so a backend that lacks an operation
+shows here as a named refusal rather than a silent gap.
+## Operator workflow
+From the repo root:
+`SIMPLE_BINARY=<simple> SIMPLE_EXECUTION_MODE=interpret <simple> run test/03_system/app/devhub/feature/devhub_mail_emulated_spec.spl`
+then read the `SPEC FILE VERDICT:` line.
+## Compatibility and limitations
+Mail is synthetic, never real mailbox content, and labelled in
+`test/fixtures/devhub/emulated/index.sdn`. The Graph scenarios drive `adapter_outlook_curl`
+directly because the CLI hardcodes the Graph host (survey, Mail). IMAP, SMTP and POP3 are
+not on a socket here: those backends shell to the external `mail-cli`. Unsupported behavior
+is asserted as a typed refusal with no server contact.
+## Verification guidance and troubleshooting
+A client defect appears as `MISMATCH` text in the assertion message; the raw log is the
+`EMU_LOG` file.
+"""
+# Lifecycle: doc/01_research/app/devhub/service_interface_survey_2026-10-31.md ;
+# doc/03_plan/app/tools/devhub_multi_target_gateway_plan.md ;
+# doc/04_architecture/app/tools/devhub_multi_target_gateway.md ;
+# doc/05_design/app/devhub/devhub_overview.md
+# @manual_section: mail-gmail-shape
+
+use std.spec.*
+use std.spec.step
+use app.devhub.adapter_outlook_curl.{OutlookCurlClient, outlook_curl_list_folders, outlook_curl_list_messages, outlook_curl_get_message}
+use test.fixtures.devhub.emulated.emu_harness.{emu_start, emu_base, emu_row, emu_load, emu_problems, emu_stop, emu_refused_after_stop, emu_home, emu_mail_accounts, emu_devhub}
+
+val AUTH = "Authorization=Bearer syn-graph-token"
+val JSON_CT = "Content-Type: application/json"
+val USER = "/users/syn%40example.test"
+val SELECT = "id%2Csubject%2Cfrom%2CreceivedDateTime%2CbodyPreview%2ChasAttachments"
+val ACCOUNTS = "default_account: work-gmail\naccounts:\n  work-gmail:\n    provider: gmail\n    email: syn@example.test\n    password_cmd: \"printf synthetic\"\n  work-outlook:\n    provider: outlook\n    protocol: graph\n    email: syn@example.test\n    tenant_id: syn-tenant\n    client_id: syn-client\n  work-pop3:\n    provider: other\n    protocol: pop3\n    email: syn@example.test\n    pop3_server: pop.example.test\n    pop3_port: 995\n    tls: implicit\n    password_cmd: \"printf synthetic\"\n"
+
+fn client() -> OutlookCurlClient:
+    OutlookCurlClient(access_token: "syn-graph-token", mailbox_upn: "syn@example.test", base_url: emu_base(), curl_path: "curl")
+
+fn messages_target(top: i64) -> text:
+    "{USER}/mailFolders/inbox/messages?$top={top}&$select={SELECT}"
+
+fn assert_get_failure(status: i64, fixture: text, wanted: text, mode: text = "-"):
+    val gen_id = emu_load([emu_row("GET", USER + "/messages/AAMkMsg1", AUTH, "none", status, JSON_CT, fixture, mode)])
+    val (ok, _msg, message) = outlook_curl_get_message(client(), "AAMkMsg1")
+    expect(emu_problems(gen_id, 1)).to_equal("")
+    expect(ok).to_equal(false)
+    expect(message).to_contain(wanted)
+
+fn assert_refused(account: text, args: [text], wanted: text):
+    """Shared Gmail-shaped body: the same verb on each backend, no server involved."""
+    val gen_id = emu_load([])
+    val result = emu_devhub(["email"] + args + ["--account", account])
+    expect(result.combined()).to_contain(wanted)
+    expect(result.rc == 0).to_equal(false)
+    expect(emu_problems(gen_id, 0)).to_equal("")
+
+describe "Outlook Graph over an emulated server":
+    it "lists folders with the mailbox URL-encoded":
+        # @req REQ-DEVHUB-EMU-MAIL-001
+        step("Start the emulator and list folders")
+        expect(emu_start("mail")).to_contain("127.0.0.1:")
+        val gen_id = emu_load([emu_row("GET", USER + "/mailFolders?$top=50", AUTH, "none", 200, JSON_CT, "@graph/folders.json")])
+        # @capture(protocol): the GET mailFolders request
+        val (ok, folders, _raw) = outlook_curl_list_folders(client())
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(folders[0].display_name).to_equal("Inbox")
+        expect(folders[0].unread_item_count).to_equal(1)  # oracle: fixture unreadItemCount
+
+    it "follows @odata.nextLink to its end":
+        # @req REQ-DEVHUB-EMU-MAIL-002
+        step("Serve two pages of messages")
+        val gen_id = emu_load([
+            emu_row("GET", messages_target(2), AUTH, "none", 200, JSON_CT, "@graph/messages_page1.json"),
+            emu_row("GET", USER + "/mailFolders/inbox/messages?$skip=1", AUTH, "none", 200, JSON_CT, "@graph/messages_page2.json")
+        ])
+        # @capture(protocol): both GET requests
+        val (ok, messages, _raw) = outlook_curl_list_messages(client(), "inbox", "", 2)
+        expect(emu_problems(gen_id, 2)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(messages.len()).to_equal(2)  # oracle: one message on each page
+        expect(messages[1].subject).to_equal("Second synthetic mail")
+        expect(messages[0].from_address).to_equal("sender@example.test")
+
+    it "returns an empty inbox without error":
+        # @req REQ-DEVHUB-EMU-MAIL-003
+        step("Answer no messages")
+        val gen_id = emu_load([emu_row("GET", messages_target(2), AUTH, "none", 200, JSON_CT, "@graph/messages_empty.json")])
+        # @capture(protocol): the GET messages request
+        val (ok, messages, _raw) = outlook_curl_list_messages(client(), "inbox", "", 2)
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(messages.len()).to_equal(0)
+
+    it "rejects a nextLink pointing outside the configured endpoint":
+        # @req REQ-DEVHUB-EMU-MAIL-004
+        step("Serve a nextLink on another host and check the token is not sent there")
+        val gen_id = emu_load([emu_row("GET", messages_target(2), AUTH, "none", 200, JSON_CT, "@graph/messages_foreign_next.json")])
+        # @capture(protocol): one request only, then the refusal
+        val (ok, _messages, message) = outlook_curl_list_messages(client(), "inbox", "", 2)
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+        expect(message).to_contain("outside the configured endpoint")
+
+    it "reads a single message":
+        # @req REQ-DEVHUB-EMU-MAIL-005
+        step("Fetch one message and check its parsed fields")
+        val gen_id = emu_load([emu_row("GET", USER + "/messages/AAMkMsg1", AUTH, "none", 200, JSON_CT, "@graph/message.json")])
+        # @capture(protocol): the GET message request
+        val (ok, msg, _raw) = outlook_curl_get_message(client(), "AAMkMsg1")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(true)
+        expect(msg.subject).to_equal("First synthetic mail")
+
+    it "reports 401":
+        # @req REQ-DEVHUB-EMU-MAIL-006
+        step("Answer InvalidAuthenticationToken")
+        # @capture(protocol): the refused request
+        assert_get_failure(401, "@graph/error_401.json", "401")
+
+    it "reports 403":
+        # @req REQ-DEVHUB-EMU-MAIL-006
+        step("Answer ErrorAccessDenied")
+        # @capture(protocol): the refused request
+        assert_get_failure(403, "@graph/error_403.json", "403")
+
+    it "reports 404":
+        # @req REQ-DEVHUB-EMU-MAIL-006
+        step("Answer ErrorItemNotFound")
+        # @capture(protocol): the refused request
+        assert_get_failure(404, "@graph/error_404.json", "404")
+
+    it "reports 429 as rate limited":
+        # @req REQ-DEVHUB-EMU-MAIL-006
+        step("Answer TooManyRequests with Retry-After")
+        # @capture(protocol): the single request; Graph's Retry-After is not honoured
+        assert_get_failure(429, "@graph/error_429.json", "rate limited")
+
+    it "reports a 500":
+        # @req REQ-DEVHUB-EMU-MAIL-006
+        step("Answer 500")
+        # @capture(protocol): the failed request
+        assert_get_failure(500, "boom", "server error (HTTP 500)")
+
+    it "rejects malformed JSON":
+        # @req REQ-DEVHUB-EMU-MAIL-007
+        step("Answer 200 with a broken document")
+        # @capture(protocol): the malformed response
+        assert_get_failure(200, "\{\"id\":", "invalid JSON response")
+
+    it "rejects a truncated body":
+        # @req REQ-DEVHUB-EMU-MAIL-007
+        step("Close the socket before Content-Length bytes arrive")
+        val gen_id = emu_load([emu_row("GET", USER + "/messages/AAMkMsg1", AUTH, "none", 200, JSON_CT, "@graph/message.json", "truncate")])
+        # @capture(protocol): the truncated response
+        val (ok, _msg, _message) = outlook_curl_get_message(client(), "AAMkMsg1")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(ok).to_equal(false)
+
+describe "Gmail-shaped verbs across mail backends":
+    it "refuses a label add on gmail by name":
+        # @req REQ-DEVHUB-EMU-MAIL-008
+        step("Write synthetic accounts and add a label through mail-cli's backend")
+        val _h = emu_home("", "")
+        emu_mail_accounts(ACCOUNTS)
+        # @capture(terminal): the typed refusal, a listed Gmail-interface gap
+        assert_refused("work-gmail", ["label", "1", "--add", "Work"], "not yet supported via mail-cli")
+
+    it "refuses a label add on outlook by name":
+        # @req REQ-DEVHUB-EMU-MAIL-008
+        step("Add the same label on the Graph backend")
+        # @capture(terminal): the typed refusal, a listed Gmail-interface gap
+        assert_refused("work-outlook", ["label", "1", "--add", "Work"], "not yet supported on outlook backend")
+
+    it "refuses a label add on pop3 by name":
+        # @req REQ-DEVHUB-EMU-MAIL-008
+        step("Add the same label on POP3")
+        # @capture(terminal): the typed refusal, a listed Gmail-interface gap
+        assert_refused("work-pop3", ["label", "1", "--add", "Work"], "POP3 does not support")
+
+    it "refuses star removal on gmail by name":
+        # @req REQ-DEVHUB-EMU-MAIL-009
+        step("Remove a star, which Gmail's interface has")
+        # @capture(terminal): the typed refusal, a listed Gmail-interface gap
+        assert_refused("work-gmail", ["star", "1", "--off"], "--off")
+
+    it "refuses star on outlook by name":
+        # @req REQ-DEVHUB-EMU-MAIL-009
+        step("Star a message on the Graph backend")
+        # @capture(terminal): the typed refusal, a listed Gmail-interface gap
+        assert_refused("work-outlook", ["star", "1"], "not yet supported on outlook backend")
+
+    it "stops the emulator and leaves no process listening":
+        # @req REQ-DEVHUB-EMU-MAIL-010
+        step("Shut the emulator down and prove nothing accepts")
+        val addr = emu_base()[7:]
+        # @capture(protocol): the final SHUTDOWN log line
+        expect(emu_stop()).to_equal(true)
+        expect(emu_refused_after_stop(addr)).to_equal(true)
