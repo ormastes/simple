@@ -17,18 +17,41 @@ use common.crypto.types.{bytes_to_hex, text_to_bytes}
 use common.crypto.constant_time.{constant_time_compare}
 use std.io_runtime.{env_get}
 
-extern fn rt_random_hex(len: i64) -> text   # runtime: N CSPRNG bytes hex-encoded (OsRng)
+extern fn rt_random_hex(len: i64) -> text?  # runtime: N CSPRNG bytes hex-encoded (OsRng); nil on entropy failure
 extern fn rt_time_ms() -> u64               # runtime: current epoch milliseconds
 
-fn random_hex(len: i64) -> text:
+fn _is_lower_hex(value: text) -> bool:
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    return true
+
+fn checked_random_hex(raw: text?, len: i64) -> text?:
+    """Fail-closed gate for CSPRNG output: nil, a wrong length or non-hex text
+    is rejected, never passed on as a (short, guessable) token component."""
+    if len < 0:
+        return nil
+    if raw == nil:
+        return nil
+    # Bind through an annotated `text` before .len(): the JIT resolves .len()
+    # on an if-val payload of `text?` against the option (yielding 1).
+    val value: text = raw ?? ""
+    if value.len() != len * 2:
+        return nil
+    if not _is_lower_hex(value):
+        return nil
+    return value
+
+fn random_hex(len: i64) -> text?:
     """Produce N bytes' worth of cryptographically-secure random hex (2*N chars).
-    Backed by the Rust runtime's OsRng (OS CSPRNG)."""
-    return session_token_runtime_random_hex(len)
+    Backed by the Rust runtime's OsRng (OS CSPRNG). nil on entropy failure or a
+    malformed provider result; callers must fail closed."""
+    return checked_random_hex(session_token_runtime_random_hex(len), len)
 
 fn auth_time_ms() -> u64:
     return session_token_runtime_time_ms()
 
-fn session_token_runtime_random_hex(len: i64) -> text:
+fn session_token_runtime_random_hex(len: i64) -> text?:
     return rt_random_hex(len)
 
 fn session_token_runtime_time_ms() -> u64:
@@ -48,9 +71,12 @@ class SessionToken:
     expires_at_ms: u64
     signature: text      # HMAC-SHA256 over (token_id || "." || grant_id || "." || origin || "." || str(expires_at_ms))
 
-    static fn issue(grant_id: text, origin: text, ttl_ms: u64, secret: text) -> SessionToken:
-        """Mint a new signed SessionToken."""
-        val token_id = random_hex(32)
+    static fn issue(grant_id: text, origin: text, ttl_ms: u64, secret: text) -> SessionToken?:
+        """Mint a new signed SessionToken; nil when the CSPRNG fails (fail closed)."""
+        val token_id_opt = random_hex(32)
+        if token_id_opt == nil:
+            return nil
+        val token_id: text = token_id_opt ?? ""
         val exp = auth_time_ms() + ttl_ms
         val payload = _token_payload(token_id, grant_id, origin, exp)
         val sig = _sign_payload(secret, payload)
@@ -151,7 +177,12 @@ fn load_secret_with_policy(tls_mode: bool, allow_insecure_dev_secret: bool) -> t
         print "FATAL: SIMPLE_UI_WEB_TOKEN_SECRET env var is required; set SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 only for local non-TLS development"
         return ""
     print "WARNING: SIMPLE_UI_WEB_TOKEN_SECRET unset; using insecure dev secret. Do not use in production."
-    return "dev-insecure-secret-" + random_hex(8)
+    val suffix_opt = random_hex(8)
+    if suffix_opt == nil:
+        print "FATAL: OS entropy unavailable; cannot derive an ephemeral dev secret"
+        return ""
+    val suffix: text = suffix_opt ?? ""
+    return "dev-insecure-secret-" + suffix
 
 fn load_secret(tls_mode: bool) -> text:
     val allow_raw = env_get("SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET") ?? ""
