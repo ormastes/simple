@@ -1447,6 +1447,10 @@ fn resolve_import_name_strict(
         }
     }
 
+    if let Some(forwarded) = resolve_family_re_export(func_name, use_segments, re_exports) {
+        return Some(forwarded);
+    }
+
     let candidates = all_mangled.get(func_name)?;
     let matching = matching_import_owners(func_name, use_segments, candidates);
     if matching.len() == 1 {
@@ -1454,6 +1458,37 @@ fn resolve_import_name_strict(
     }
 
     None
+}
+
+/// `std.sosix.pty` names a module that physically lives under a runtime family
+/// (`src/lib/nogc_sync_mut/sosix/pty.spl`), so its re-export table is keyed with
+/// the family segment and the two exact lookups above miss it. Without this, a
+/// re-export alias lost its chain and later bound by bare name: with both
+/// `std.sosix.terminal_console` and `std.sosix.pty` in a closure,
+/// `sosix_console_write` called the PTY `write`. Families that disagree stay
+/// unresolved rather than pick one.
+fn resolve_family_re_export(
+    func_name: &str,
+    use_segments: &[&str],
+    re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+) -> Option<String> {
+    const FAMILIES: [&str; 5] = [
+        "common",
+        "nogc_sync_mut",
+        "nogc_async_mut",
+        "gc_async_mut",
+        "nogc_async_mut_noalloc",
+    ];
+    let (root, rest) = use_segments.split_first()?;
+    if *root != "lib" || rest.is_empty() {
+        return None;
+    }
+    let rest = rest.join("__");
+    let mut owners = FAMILIES
+        .iter()
+        .filter_map(|family| re_exports.get(&format!("lib__{family}__{rest}"))?.get(func_name));
+    let first = owners.next()?;
+    owners.all(|owner| owner == first).then(|| first.clone())
 }
 
 fn collect_target_names(target: &simple_parser::ast::ImportTarget, names: &mut Vec<String>) {
