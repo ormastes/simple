@@ -4,6 +4,7 @@
  * scalar split across two writes -- and reads the screen back as UTF-16.
  * Also checks that a pipe is NOT treated as a console (raw bytes kept).
  * Build: clang-cl /nologo src/runtime/test/rt_console_utf8_selfcheck.c */
+#ifdef _WIN32
 #include "../runtime_console_utf8_private.h"
 #include <fcntl.h>
 
@@ -27,7 +28,7 @@ int main(void) {
     g_log = fopen("rt_console_utf8_selfcheck.log", "w");
     setvbuf(g_log, NULL, _IONBF, 0);
     FreeConsole();
-    if (!AllocConsole()) { fprintf(g_log, "SKIP - no console available\n"); return 0; }
+    if (!AllocConsole()) { fprintf(g_log, "SKIP - no console available\n"); return 77; }
     SetConsoleOutputCP(437);
     HANDLE out = CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     SetStdHandle(STD_OUTPUT_HANDLE, out);
@@ -64,3 +65,6 @@ int main(void) {
     fprintf(g_log, "PASS - windows console utf-8 write path\n");
     return 0;
 }
+#else
+int main(void) { return 0; } /* Windows console path only. */
+#endif

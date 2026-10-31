@@ -65,6 +65,8 @@ int main(void) {
         const uint8_t bad3[] = {0xE2, 0x82, 0x41};            /* bad continuation, resync */
         const uint8_t bad4[] = {0xED, 0xA0, 0x80};            /* surrogate: 3 bad bytes */
         const uint8_t good[] = {0xF0, 0x9F, 0x98, 0x80};      /* valid 4-byte stays */
+        const uint8_t cut4[] = {0xF0, 0x9F, 0x98};            /* 3 bad bytes -> one 3-byte U+FFFD */
+        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)cut4, 3)), "\xEF\xBF\xBD", 3, "truncated 4-byte, same length -> repaired");
         expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad1, 3)), "a�" "b", 5, "malformed lead -> U+FFFD");
         expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad2, 3)), "a�", 4, "truncated sequence -> one U+FFFD");
         expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad3, 3)), "�" "A", 4, "bad continuation resyncs");
