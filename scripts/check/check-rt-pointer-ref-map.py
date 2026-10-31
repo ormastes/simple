@@ -95,7 +95,8 @@ def split_top(text):
     return [p.strip() for p in parts]
 
 
-LEN_NAME = re.compile(r'\b\w*(?:len|length|count|size|cap)\s*$|\b(?:n|kl|dl)\s*$')
+LEN_NAME = re.compile(r'\b\w*(?:len|length|count|size|cap)\s*$')
+BARE_LEN = re.compile(r'\b(?:n|kl|dl)\s*$')
 BYTE_PTR = ('uint8_t', 'char')
 
 
@@ -104,8 +105,9 @@ def c_params(text, fold=True):
 
     Text ABI fold: the runtime passes a .spl `text` as `const uint8_t *ptr, uint64_t len`.
     Text ABI fold: only a byte pointer (uint8_t, char) takes a length companion. An
-    integer named *len/*length/*count/*size/*cap or n/kl/dl directly after it is that
-    pointer's length; one pointer takes at most one. A count after a non-byte pointer,
+    integer named *len/*length/*count/*size/*cap directly after a byte pointer is that
+    pointer's length. The bare names n/kl/dl fold only after a uint8_t pointer, never
+    after char. One pointer takes at most one. A count after a non-byte pointer,
     or after a pointer whose length was already folded, is a real parameter.
     fold=True drops the companion; join_params tries the unfolded list first and uses
     the folded one only when the unfolded count differs from the .spl count, so a .spl
@@ -119,7 +121,8 @@ def c_params(text, fold=True):
         if p == '...':
             break
         if fold and out and out[-1][0] == 'ptr' and out[-1][1] in BYTE_PTR and not paired \
-                and '*' not in p and '(' not in p and '[' not in p and LEN_NAME.search(p):
+                and '*' not in p and '(' not in p and '[' not in p \
+                and (LEN_NAME.search(p) or (out[-1][1] == 'uint8_t' and BARE_LEN.search(p))):
             paired = True
             continue
         paired = False
@@ -445,6 +448,10 @@ def selftest():
         ('char *rt_x(const uint8_t *p, int64_t n);\n', 'extern fn rt_x(a: text) -> text\n', 0, 0, 0, '', 0),
         ('char *rt_x(const uint8_t *k, int64_t kl, const uint8_t *d, int64_t dl);\n', 'extern fn rt_x(a: text, b: text) -> text\n', 0, 0, 0, '', 0),
         ('char *rt_x(const char *s, int64_t count);\n', 'extern fn rt_x(a: text) -> text\n', 0, 0, 0, '', 0),
+        # bare n/kl/dl fold only after uint8_t; after char the n is a real parameter
+        # an i64 return is not a pointer edge, so a pointer anchor rt_y keeps the run non-empty
+        ('int64_t rt_x(const char *path, int64_t n);\nchar *rt_y(void) {\n return b;\n}\n',
+         'extern fn rt_x(path: text) -> i64\nextern fn rt_y() -> text\n', 1, 1, 0, '', 0),
         ('char *rt_x(const uint8_t *p, uint64_t p_len, int64_t count);\n', 'extern fn rt_x(a: text, n: i64) -> text\n', 0, 0, 0, '', 0),
         # a count after a non-byte pointer is a real parameter, not a companion
         ('char *rt_x(const int32_t *p, int64_t count);\n', 'extern fn rt_x(a: text) -> text\n', 0, 1, 0, '', 0),
