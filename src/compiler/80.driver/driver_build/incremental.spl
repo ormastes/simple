@@ -60,12 +60,19 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_file_hash_sha256(path: text) -> text?
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_getpid() -> i64
 extern fn rt_dir_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
+
+# Contract: failure == empty. Every caller rejects a digest that is not 64 hex
+# chars (or folds it into a fingerprint, where "" marks an unreadable file).
+fn _incremental_file_sha256_or_empty(path: text) -> text:
+    if val digest = rt_file_hash_sha256(path):
+        return digest
+    ""
 
 fn incremental_file_exists(path: text) -> bool:
     rt_file_exists(path)
@@ -177,12 +184,12 @@ fn native_build_compiler_source_fingerprint() -> text:
             if rt_dir_exists(full):
                 dirs = dirs.push(full)
             elif entry.ends_with(".spl"):
-                lines = lines.push("{full}|{rt_file_size(full)}|{rt_file_hash_sha256(full)}")
+                lines = lines.push("{full}|{rt_file_size(full)}|{_incremental_file_sha256_or_empty(full)}")
     var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
     dir_create_all("build")
     val tmp = "build/.compiler_src_fp.{rt_getpid()}.tmp"
     if rt_file_write_text(tmp, lines.join("\n")):
-        val digest = rt_file_hash_sha256(tmp)
+        val digest = _incremental_file_sha256_or_empty(tmp)
         rt_file_delete(tmp)
         if digest.len() == 64:
             fp = "sha256:{digest}n{lines.len()}"
@@ -209,12 +216,12 @@ pub fn native_build_spl_tree_fingerprint(root: text) -> text:
             if rt_dir_exists(full):
                 dirs = dirs.push(full)
             elif entry.ends_with(".spl"):
-                lines = lines.push("{full}|{rt_file_size(full)}|{rt_file_hash_sha256(full)}")
+                lines = lines.push("{full}|{rt_file_size(full)}|{_incremental_file_sha256_or_empty(full)}")
     var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
     dir_create_all("build")
     val tmp = "build/.spl_tree_fp.{rt_getpid()}.tmp"
     if rt_file_write_text(tmp, lines.join("\n")):
-        val digest = rt_file_hash_sha256(tmp)
+        val digest = _incremental_file_sha256_or_empty(tmp)
         rt_file_delete(tmp)
         if digest.len() == 64:
             fp = "sha256:{digest}n{lines.len()}"
@@ -256,12 +263,12 @@ fn native_build_frontend_source_fingerprint() -> text:
             if rt_dir_exists(full):
                 dirs = dirs.push(full)
             elif entry.ends_with(".spl"):
-                lines = lines.push("{full}|{rt_file_size(full)}|{rt_file_hash_sha256(full)}")
+                lines = lines.push("{full}|{rt_file_size(full)}|{_incremental_file_sha256_or_empty(full)}")
     var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
     dir_create_all("build")
     val tmp = "build/.frontend_src_fp.{rt_getpid()}.tmp"
     if rt_file_write_text(tmp, lines.join("\n")):
-        val digest = rt_file_hash_sha256(tmp)
+        val digest = _incremental_file_sha256_or_empty(tmp)
         rt_file_delete(tmp)
         if digest.len() == 64:
             fp = "sha256:{digest}n{lines.len()}"
@@ -343,7 +350,7 @@ pub fn native_build_frontend_portable_source_digest_v1(source_root: text,
                 # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
                 val relative_text: text = relative
                 val length = text_to_bytes(relative_text).len()
-                val digest = rt_file_hash_sha256(full)
+                val digest = _incremental_file_sha256_or_empty(full)
                 val size = rt_file_size(full)
                 if digest.len() != 64 or size < 0: return ""
                 val row_base = "file-hex:{length}:" +
@@ -377,12 +384,12 @@ fn _native_build_compiler_executable_hash_uncached() -> text:
     # (and every build run by the same compiler) shares one identity.
     val simple_bin = sosix_env_get_nullable("SIMPLE_BINARY") ?? ""
     if simple_bin != "" and rt_file_exists(simple_bin):
-        val bin_hash = rt_file_hash_sha256(simple_bin)
+        val bin_hash = _incremental_file_sha256_or_empty(simple_bin)
         if bin_hash.len() == 64:
             return bin_hash
     val args = rt_cli_get_args()
     if args.len() > 0:
-        val hash = rt_file_hash_sha256(args[0])
+        val hash = _incremental_file_sha256_or_empty(args[0])
         if hash.len() == 64:
             return hash
     ""
@@ -410,7 +417,7 @@ fn _native_build_runtime_provider_fingerprint_uncached(runtime_path: text) -> te
     if runtime_path == "":
         return "embedded"
     if rt_file_exists(runtime_path) and not rt_dir_exists(runtime_path):
-        val direct_hash = rt_file_hash_sha256(runtime_path)
+        val direct_hash = _incremental_file_sha256_or_empty(runtime_path)
         if direct_hash.len() == 64:
             return "file-sha256:{direct_hash}"
         return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
@@ -425,7 +432,7 @@ fn _native_build_runtime_provider_fingerprint_uncached(runtime_path: text) -> te
     for entry in entries:
         val full = runtime_path + "/" + entry
         if native_build_runtime_artifact(full) and not rt_dir_exists(full):
-            val digest = rt_file_hash_sha256(full)
+            val digest = _incremental_file_sha256_or_empty(full)
             if digest.len() != 64:
                 return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
             lines = lines.push("{entry}|{rt_file_size(full)}|{digest}")
@@ -434,7 +441,7 @@ fn _native_build_runtime_provider_fingerprint_uncached(runtime_path: text) -> te
     val manifest = lines.join("\n")
     val tmp = "build/.runtime_provider_fp.{rt_getpid()}.tmp"
     if rt_file_write_text(tmp, manifest):
-        val digest = rt_file_hash_sha256(tmp)
+        val digest = _incremental_file_sha256_or_empty(tmp)
         rt_file_delete(tmp)
         if digest.len() == 64:
             return "dir-sha256:{digest}n{lines.len()}"
@@ -890,7 +897,9 @@ pub fn incremental_digest_untag_v1(tagged: text) -> text:
             if d.algo_id == HASH_ALGO_SHA256_V1: d.hex else: ""
         case nil: ""
 
-pub fn incremental_fingerprint_digest_valid_v1(digest: text) -> bool:
+pub fn incremental_fingerprint_digest_valid_v1(digest_opt: text?) -> bool:
+    if digest_opt == nil: return false
+    val digest = digest_opt.unwrap()
     if digest.len() != 64: return false
     for index in 0..64:
         val byte = digest.byte_at(index) as i64
@@ -915,7 +924,7 @@ impl FileFingerprint:
         # A fingerprint is SHA-256 of the file bytes regardless of whether
         # a runtime admits those bytes as text. rt_hash_text is a decimal
         # machine-word hash and cannot authenticate a native capsule receipt.
-        val hash = rt_file_hash_sha256(path)
+        val hash = _incremental_file_sha256_or_empty(path)
         if not incremental_fingerprint_digest_valid_v1(hash):
             return nil
         val size = incremental_file_size(path)
