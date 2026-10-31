@@ -5,9 +5,9 @@
 # Every function is real: either a re-export of the host owner or a wrapper
 # over one (see file_ops.spl for why no mocks may live here).
 
-use std.path.{join2}
+use std.path.{join2, dirname, basename}
 use std.nogc_async_mut.file_system.types.{DirEntry}
-use std.nogc_async_mut.file_system.file_ops.{file_copy}
+use std.nogc_async_mut.file_system.file_ops.{file_copy, file_exists}
 use std.nogc_async_mut.file_system.metadata.{file_is_file, file_size}
 
 # `dir_create` and `dir_list` intentionally do NOT live here: this module
@@ -21,7 +21,10 @@ use std.nogc_async_mut.file_system.metadata.{file_is_file, file_size}
 # callers and broke `dir_copy`/`dir_walk_dirs` here.
 # See doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
 export use std.nogc_sync_mut.io_runtime.{dir_create, dir_list}
-use std.nogc_sync_mut.io_runtime.{dir_list_optional, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional, dir_remove_all, file_rename}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
+use std.nogc_sync_mut.sffi.fs.{file_canonicalize}
 
 fn dir_list_detailed(path: text) -> [DirEntry]?:
     """List directory with detailed entry information.
@@ -62,7 +65,9 @@ fn dir_delete_all(path: text) -> bool:
 
     Warning: Recursive deletion. Use with caution.
     """
-    if path == "" or not dir_exists(path):
+    # lstat(2) the root: a symlink to a directory must not have its TARGET
+    # emptied. Refuse anything that is not a real directory.
+    if path == "" or not dir_is_real_no_follow(path):
         return false
     dir_remove_all(path)
 
@@ -133,7 +138,9 @@ fn dir_walk_dirs(root: text) -> [text]:
         next_index = next_index + 1
         for name in dir_list(current):
             val full_path = join2(current, name)
-            if dir_exists(full_path):
+            # lstat(2): never descend through a symlink (a link cycle would
+            # otherwise loop forever).
+            if dir_is_real_no_follow(full_path):
                 dirs.push(full_path)
                 queue.push(full_path)
     dirs
@@ -166,25 +173,60 @@ fn dir_copy(src: text, dest: text) -> bool:
     for entry in entries:
         val src_path = join2(src, entry)
         val dest_path = join2(dest, entry)
-        if dir_exists(src_path):
+        # lstat(2) each entry. Real directories recurse, regular files are
+        # copied, and anything else (symlinks, including dangling ones and
+        # link cycles, sockets, FIFOs) is skipped: the runtime has no
+        # symlink(2) primitive to recreate a link as a link.
+        if dir_is_real_no_follow(src_path):
             if not dir_copy(src_path, dest_path):
                 return false
-        else:
+        elif file_is_regular_no_follow(src_path):
             if not file_copy(src_path, dest_path):
                 return false
     true
 
+fn _dir_canonical_target(path: text) -> text?:
+    """Canonical form of a path that may not exist yet: canonicalize the
+    nearest existing ancestor and re-append the rest."""
+    val direct = file_canonicalize(path)
+    if direct.?:
+        return direct
+    val parent = dirname(path)
+    if parent == "" or parent == path:
+        return nil
+    val parent_canon = _dir_canonical_target(parent)
+    if not parent_canon.?:
+        return nil
+    val base = basename(path)
+    if base == "" or base == "." or base == "..":
+        return nil
+    Some(join2(parent_canon ?? "", base))
+
 # reason: positional file_system dir_ops API
 fn dir_move(src: text, dest: text) -> bool:
-    """Move directory (copy then delete).
+    """Move a directory.
 
-    Args:
-        src: Source directory
-        dest: Destination directory
-
-    Returns:
-        true on success, false on error
+    Refuses (returns false) when `dest` already exists, or when `dest` is
+    `src` itself or lies inside `src`, compared on canonical paths, because
+    copy-then-delete would destroy the data. Tries an atomic rename first and
+    falls back to copy-then-delete only when the rename fails (e.g. EXDEV).
     """
+    if src == "" or dest == "":
+        return false
+    if not dir_is_real_no_follow(src):
+        return false
+    if dir_exists(dest) or file_exists(dest):
+        return false
+    val src_canon_opt = file_canonicalize(src)
+    val dest_canon_opt = _dir_canonical_target(dest)
+    if not src_canon_opt.? or not dest_canon_opt.?:
+        return false
+    val src_canon = src_canon_opt ?? ""
+    val dest_canon = dest_canon_opt ?? ""
+    if dest_canon == src_canon or dest_canon.starts_with(src_canon + "/"):
+        return false
+    if file_rename(src, dest):
+        return true
     if not dir_copy(src, dest):
         return false
     dir_delete_all(src)

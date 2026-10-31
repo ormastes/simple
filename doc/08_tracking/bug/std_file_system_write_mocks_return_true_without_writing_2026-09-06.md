@@ -205,6 +205,24 @@ Residual risk:
 - `dir_delete_all` and `dir_is_empty` share a name and signature with `std.nogc_*.fs`, and do the same thing.
 - The seed's name-only binding is unchanged (`interpreter_bare_fn_name_collision_file_read_text_at_2026-10-30.md`).
 
+### Review follow-up 2026-10-31 (data safety of the now-real recursive ops)
+
+When the mocks became real, recursive operations could destroy data:
+- `dir_move` (copy then `dir_delete_all`) destroyed the tree when `dest` was the source itself or lay inside it. It now compares canonical paths and refuses that case. It also refuses a `dest` that already exists. It tries `file_rename` first and copies then deletes only when the rename fails.
+- `dir_walk_dirs` and `dir_copy` followed symlinks to directories through `dir_exists`, so a link cycle would recurse without end. Both now check `dir_is_real_no_follow` (lstat). `dir_copy` copies only real directories and regular files and skips links; the runtime has no symlink(2) primitive to recreate a link.
+- `dir_delete_all` refuses a root that is not a real directory, so the target of a directory symlink is never emptied.
+- `sffi.fs.dir_delete` now goes through `host_path_native`. `permissions.spl` uses `sffi.host.package_chmod` instead of declaring its own extern.
+
+Spec: 5 new data-safety examples in the same file. 3 of them failed before this follow-up and all 11 pass after.
+
+Latent homonym, not fixed: `src/compiler/10.frontend/core/aop.spl:120` defines
+`glob_match(pattern: text, target_name: text) -> bool`. That is the REVERSED
+argument order of `std.glob.glob_match(path, pattern)`, with identical types, so
+no collision warning can fire. If both ever land in one co-compiled closure,
+name-only binding can silently swap the arguments, exactly as the
+`file_system` copy did. Rename it, for example to `aop_glob_match`, when that
+module is next touched.
+
 ## Previously open (now addressed above)
 
 1. **The mock itself.** `src/lib/nogc_async_mut/file_system/file_ops.spl` still

@@ -10,18 +10,24 @@
 use std.spec
 use std.nogc_sync_mut.file_system.dir_ops.{dir_walk_dirs as sync_fs_dir_walk_dirs, dir_copy as sync_fs_dir_copy}
 use std.nogc_async_mut.file_system.dir_ops.{dir_walk_dirs as async_fs_dir_walk_dirs, dir_copy as async_fs_dir_copy}
-use std.nogc_sync_mut.file_system.dir_ops.{dir_walk_files as sync_fs_dir_walk_files, dir_delete as sync_fs_dir_delete}
+use std.nogc_sync_mut.file_system.dir_ops.{dir_walk_files as sync_fs_dir_walk_files, dir_delete as sync_fs_dir_delete, dir_delete_all as sync_fs_dir_delete_all, dir_move as sync_fs_dir_move}
+use std.nogc_async_mut.file_system.dir_ops.{dir_move as async_fs_dir_move}
+use std.nogc_async_mut.file_system.utilities.{glob_match as async_fs_glob_match}
 use std.nogc_async_mut.file_system.dir_ops.{dir_walk_files as async_fs_dir_walk_files}
 use std.nogc_sync_mut.file_system.file_ops.{file_write_text as sync_fs_file_write_text, file_read_text as sync_fs_file_read_text, file_create as sync_fs_file_create, file_move as sync_fs_file_move}
 use std.nogc_async_mut.file_system.file_ops.{file_write_text as async_fs_file_write_text}
 use std.nogc_sync_mut.file_system.metadata.{file_is_file as sync_fs_file_is_file, file_modified_time as sync_fs_file_modified_time}
 use std.nogc_sync_mut.file_system.permissions.{file_set_mode as sync_fs_file_set_mode}
 use std.nogc_sync_mut.file_system.utilities.{glob_match as sync_fs_glob_match}
-use std.nogc_sync_mut.io_runtime.{dir_exists, file_exists, file_read, file_write, dir_create_all, dir_remove_all, getpid}
+use std.nogc_sync_mut.io_runtime.{dir_exists, file_exists, file_read, file_write, dir_create_all, dir_remove_all, getpid, process_run}
 use std.nogc_sync_mut.sffi.fs.{file_mode}
 
 fn fs_walk_copy_root(tag: text) -> text:
     "/tmp/simple_fs_walk_copy_spec_{getpid()}_{tag}"
+
+fn fs_make_symlink(target: text, link: text) -> bool:
+    val (_out, _err, code) = process_run("/bin/ln", ["-s", target, link])
+    code == 0
 
 describe "file_system dir_walk_dirs and dir_copy use the real filesystem":
     it "dir_walk_dirs returns the real subdirectories":
@@ -105,3 +111,63 @@ describe "file_system dir_walk_dirs and dir_copy use the real filesystem":
     it "glob_match takes (path, pattern)":
         expect(sync_fs_glob_match("src/a.spl", "*.spl")).to_equal(true)
         expect(sync_fs_glob_match("*.spl", "src/a.spl")).to_equal(false)
+        expect(async_fs_glob_match("src/a.spl", "*.spl")).to_equal(true)
+        expect(async_fs_glob_match("*.spl", "src/a.spl")).to_equal(false)
+
+describe "file_system recursive operations are data-safe":
+    it "dir_delete refuses a non-empty directory":
+        val root = fs_walk_copy_root("delnonempty")
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/d")).to_equal(true)
+        expect(file_write("{root}/d/keep.txt", "k")).to_equal(true)
+        expect(sync_fs_dir_delete("{root}/d")).to_equal(false)
+        expect(file_read("{root}/d/keep.txt")).to_equal("k")
+        val _done = dir_remove_all(root)
+
+    it "dir_move refuses itself and its own subdirectory":
+        val root = fs_walk_copy_root("moveself")
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/a/b")).to_equal(true)
+        expect(file_write("{root}/a/keep.txt", "k")).to_equal(true)
+        expect(sync_fs_dir_move("{root}/a", "{root}/a")).to_equal(false)
+        expect(sync_fs_dir_move("{root}/a", "{root}/a/b/c")).to_equal(false)
+        expect(sync_fs_dir_move("{root}/a", "{root}/a/../a")).to_equal(false)
+        expect(async_fs_dir_move("{root}/a", "{root}/a/b")).to_equal(false)
+        expect(file_read("{root}/a/keep.txt")).to_equal("k")
+        val _done = dir_remove_all(root)
+
+    it "dir_move relocates a tree":
+        val root = fs_walk_copy_root("moveok")
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/a/sub")).to_equal(true)
+        expect(file_write("{root}/a/sub/f.txt", "f")).to_equal(true)
+        expect(sync_fs_dir_move("{root}/a", "{root}/b")).to_equal(true)
+        expect(dir_exists("{root}/a")).to_equal(false)
+        expect(file_read("{root}/b/sub/f.txt")).to_equal("f")
+        val _done = dir_remove_all(root)
+
+    it "dir_walk_dirs and dir_copy do not follow a directory symlink cycle":
+        val root = fs_walk_copy_root("cycle")
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/src/sub")).to_equal(true)
+        expect(file_write("{root}/src/sub/f.txt", "f")).to_equal(true)
+        expect(fs_make_symlink("{root}/src", "{root}/src/sub/loop")).to_equal(true)
+        val dirs = sync_fs_dir_walk_dirs("{root}/src")
+        expect(dirs.len()).to_equal(1)
+        expect(sync_fs_dir_copy("{root}/src", "{root}/dst")).to_equal(true)
+        expect(file_read("{root}/dst/sub/f.txt")).to_equal("f")
+        expect(dir_exists("{root}/dst/sub/loop")).to_equal(false)
+        val _done = dir_remove_all(root)
+
+    it "dir_delete_all refuses a missing path and a directory symlink":
+        val root = fs_walk_copy_root("delall")
+        val _clean = dir_remove_all(root)
+        expect(sync_fs_dir_delete_all("{root}/missing")).to_equal(false)
+        expect(dir_create_all("{root}/target")).to_equal(true)
+        expect(file_write("{root}/target/keep.txt", "k")).to_equal(true)
+        expect(fs_make_symlink("{root}/target", "{root}/link")).to_equal(true)
+        expect(sync_fs_dir_delete_all("{root}/link")).to_equal(false)
+        expect(file_read("{root}/target/keep.txt")).to_equal("k")
+        expect(sync_fs_dir_delete_all("{root}/target")).to_equal(true)
+        expect(dir_exists("{root}/target")).to_equal(false)
+        val _done = dir_remove_all(root)
