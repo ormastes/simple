@@ -7,11 +7,40 @@ and why. No assertion was weakened and nothing was skipped.
 ## Seed bugs (src/compiler_rust, not edited)
 
 1. `mut buf: [u8]` mutation not visible to the caller under `seed test`
-   (works under `seed run`). Repro: `build/fix/repro/mutbuf_spec.spl`
+   (works under `seed run`). Repro (inlined from removed build/fix/repro/mutbuf_spec.spl, commit 77beb11f0f4):
+   ```simple
+   use std.spec.*
+
+   class D:
+       n: i64
+       fn fill(mut buf: [u8]) -> Result<i64, text>:
+           var i: i64 = 0
+           while i < buf.len() as i64:
+               buf[i] = 7u8
+               i = i + 1
+           Ok(i)
+
+   describe "mut buf":
+       it "propagates":
+           val d = D(n: 0)
+           var out: [u8] = [0u8, 0u8]
+           expect(d.fill(out).unwrap()).to_equal(2)
+           expect(out).to_equal([7u8, 7u8])
+   ```
    (`expect(out).to_equal([7u8, 7u8])` sees `[0, 0]`). Explains
    `os/feature/vfs_exec_bytes_spec.spl` ("keeps NVFS path reads pure Simple").
 2. `file_write` returns `true` but writes nothing inside a spec `it` body
-   (works under `seed run`). Repro: `build/fix/repro/fw_spec.spl`. Blocks
+   (works under `seed run`). Repro (inlined from removed build/fix/repro/fw_spec.spl, commit 77beb11f0f4). Blocks
+   ```simple
+   use std.spec.*
+   use std.io_runtime.{file_write, file_read}
+
+   describe "fw":
+       it "writes":
+           val ok = file_write("build/fix/repro/newdir2/x.txt", "hi\n")
+               expect(ok).to_equal(true)
+               expect(file_read("build/fix/repro/newdir2/x.txt")).to_contain("hi")
+   ```
    `nvme_firmware/nvme_nand_capture_spec.spl` after the missing
    `capture_text` helper was added to the spec.
 3. `UiAccessStore.memory()?` returns Err in a spec (embedded SQL backing not

@@ -302,8 +302,8 @@ pub fn rt_native_neq_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(rt_native_neq(left, right)))
 }
 
-/// Get type tag from RuntimeValue. A record carrier reports the heap tag and
-/// `Option::None` the nil tag, matching compiled code.
+/// Get type tag from RuntimeValue. Record carriers and Option::None report
+/// the heap tag, matching compiled code; only Value::Nil reports the nil tag.
 pub fn rt_value_type_tag_fn(args: &[Value]) -> Result<Value, CompileError> {
     let value = probe_arg(args, "rt_value_type_tag")?;
     let rv = match classify_probe(value) {
