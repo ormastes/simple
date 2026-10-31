@@ -95,7 +95,8 @@ def evaluate(expr, host):
         return None
 
 
-def host_view(src, host):
+def host_view(src, host, definite_only=False):
+    """Host view of src. definite_only also blanks lines whose guard is unknown (None)."""
     out = []
     stack = []  # [active, any_branch_taken]
     for line in src.replace('\\\n', ' ').split('\n'):
@@ -119,7 +120,12 @@ def host_view(src, host):
                 stack.pop()
             out.append('')
         else:
-            out.append('' if any(f[0] is False for f in stack) else line)
+            if any(f[0] is False for f in stack):
+                out.append('')
+            elif definite_only and any(f[0] is not True for f in stack):
+                out.append('')
+            else:
+                out.append(line)
     return '\n'.join(out)
 
 
@@ -146,7 +152,16 @@ def read(p):
 
 
 def scan(root):
+    prov, rust, decl, _definite = scan_detail(root)
+    return prov, rust, decl
+
+
+def scan_detail(root):
+    """scan() plus, per host, the providers whose guard is definitely true for that host.
+    definite[h] is a subset of prov[h]; prov[h] - definite[h] are conditional providers
+    (kept only because a non-host macro evaluated unknown). Verdicts use prov only."""
     prov = {h: set() for h in HOSTS}
+    definite = {h: set() for h in HOSTS}
     nocomment = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"', re.S)
     for p in files(root, 'src/runtime', ('.c', '.cpp', '.m', '.mm')):
         only = file_host(p)
@@ -154,6 +169,8 @@ def scan(root):
         for h in HOSTS:
             if only in (None, h):
                 prov[h].update(DEF.findall(host_view(src, h)))
+                definite[h].update(DEF.findall(host_view(src, h, True)))
+    definite = {h: definite[h] & prov[h] for h in HOSTS}
     rust = set()
     for rel in ('src/compiler_rust/runtime/src', 'src/runtime'):
         for p in files(root, rel, ('.rs',)):
@@ -162,7 +179,7 @@ def scan(root):
     for top in ('src/compiler', 'src/lib', 'src/app', 'src/os'):
         for p in files(root, top, ('.spl',)):
             decl.update(EXT.findall(read(p)))
-    return prov, rust, decl
+    return prov, rust, decl, definite
 
 
 def run(root, regen):

@@ -4041,13 +4041,12 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
     SplArray* result = pov4_tuple4(NULL, 0, NULL, 0, owner->frozen_digest,
         POV4_DIGEST_BYTES, ack);
     if (!result) pov4_release_busy(index);
-    /* Allocation failure is the only way pov4_tuple4 yields NULL: abort, never NULL. */
-    (void)SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value", result);
     pthread_mutex_lock(&pov4_slots_lock);
     RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
     memset(owner, 0, sizeof(*owner));
     pthread_mutex_unlock(&pov4_slots_lock);
-    return result;
+    /* Allocation failure is the only way pov4_tuple4 yields NULL: abort, never NULL. */
+    return SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value", result);
 }
 
 SplArray* rt_process_observation_v4_capabilities_value(void) {
@@ -6051,18 +6050,18 @@ SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle) {
 int rt_process_observation_v4_close_cwd_value(int64_t handle) { (void)handle; return 0; }
 #endif
 SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
-    (void)binding; return pov4_unavailable_tuple();
+    (void)binding; return SIMPLE_RT_NONNULL("rt_process_observation_v4_start_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_observation_v4_start_pinned_value(int64_t executable_handle,
         int64_t cwd_handle, SplArray* binding) {
-    (void)executable_handle; (void)cwd_handle; (void)binding; return pov4_unavailable_tuple();
+    (void)executable_handle; (void)cwd_handle; (void)binding; return SIMPLE_RT_NONNULL("rt_process_observation_v4_start_pinned_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_inspection_v1_start_pinned_value(int64_t executable_handle,
         int64_t cwd_handle, SplArray* binding, SplArray* atomic_input,
         SplArray* expected_input_digest) {
     (void)executable_handle; (void)cwd_handle; (void)binding;
     (void)atomic_input; (void)expected_input_digest;
-    return pov4_unavailable_tuple();
+    return SIMPLE_RT_NONNULL("rt_process_inspection_v1_start_pinned_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
     (void)ticket;
@@ -6074,16 +6073,16 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
     return SIMPLE_RT_NONNULL("rt_process_inspection_v1_input_receipt_value", values);
 }
 SplArray* rt_process_observation_v4_poll_value(SplArray* ticket, int64_t wait_ns) {
-    (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();
+    (void)ticket; (void)wait_ns; return SIMPLE_RT_NONNULL("rt_process_observation_v4_poll_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket, int64_t wait_ns) {
-    (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();
+    (void)ticket; (void)wait_ns; return SIMPLE_RT_NONNULL("rt_process_observation_v4_cancel_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_observation_v4_collect_value(SplArray* ticket, int64_t wait_ns) {
-    (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();
+    (void)ticket; (void)wait_ns; return SIMPLE_RT_NONNULL("rt_process_observation_v4_collect_value", pov4_unavailable_tuple());
 }
 SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray* digest) {
-    (void)ticket; (void)digest; return pov4_unavailable_tuple();
+    (void)ticket; (void)digest; return SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value", pov4_unavailable_tuple());
 }
 #endif
 #endif

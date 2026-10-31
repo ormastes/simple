@@ -1505,7 +1505,9 @@ SplArray* rt_engine2d_simd_fill_row_u32(int64_t count, int64_t color) {
     int64_t n = count;
     int64_t color_word = engine2d_box_pixel((uint32_t)color);
     SplArray* a = engine2d_new_pixel_array(n);
-    if (!a) return SIMPLE_RT_NONNULL("rt_engine2d_simd_fill_row_u32", NULL);
+    /* NULL here means a caller-visible refusal (invalid or oversized count),
+     * not an allocation bug: keep it NULL, the .spl extern is declared [u32]?. */
+    if (!a) return NULL;
     if (n <= 0) return SIMPLE_RT_NONNULL("rt_engine2d_simd_fill_row_u32", a);
     int64_t* out = (int64_t*)(uintptr_t)rt_array_data_ptr(a);
     if (!out) return SIMPLE_RT_NONNULL("rt_engine2d_simd_fill_row_u32", a);
