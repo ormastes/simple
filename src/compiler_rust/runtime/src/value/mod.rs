@@ -480,6 +480,7 @@ pub use sffi::{
     rt_text_to_bytes,
     rt_file_write_bytes,
     rt_file_write_bytes_array,
+    rt_file_atomic_write_bytes_array,
     rt_file_wrap_smf_dynlib,
     rt_file_extract_smf_dynlib,
     rt_file_move,
