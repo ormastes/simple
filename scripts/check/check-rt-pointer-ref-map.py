@@ -17,15 +17,15 @@ Text scan of all hosts' sources: no statement about what compiles or links on an
 target. A bare-typed edge whose C body has no direct null return and no full
 SIMPLE_RT_NONNULL coverage (no visible body, or any null could come through a
 callee) is counted UNKNOWN, never proven non-null.
-Not matched: multi-line C signatures and __attribute__ prefixes (none in tree
+Not matched: multi-line C signatures (none in tree
 today). src/compiler_rust/lib is out of scope. Raw i64/u64 handles are
 counted, not judged. Do not flip signatures from this report alone: see the
 interpreter Option-unwrapping note in the nil-return follow-ups.
 
 Parameter direction (second pass, same C and .spl sources). Each C parameter
 list is joined by position to the .spl extern params:
-  SRT003   parameter count differs between C and .spl. Report-only: printed and counted,
-           never fails the verdict (the tree has pre-existing drift; see the report).
+  SRT003   parameter count differs between C and .spl. Shrink-only baseline; params on
+           such an edge are not joined.
   SRT004   a C pointer parameter declared as a sub-pointer-width scalar in .spl
            (i8..u32, bool, f32, f64, optionals of those). Never baselined.
   SNULL002 .spl `T?` crossing a bare C `T *` parameter (NULL can cross unchecked).
@@ -51,6 +51,7 @@ NULLRET = re.compile(r'\breturn\s*\(?\s*' + _NULL + r'\s*\)?\s*;|\breturn\b[^;]*
 RET = re.compile(r'\breturn\b[^;]*;')
 ENFORCED = re.compile(r'\breturn\s*(?:\([^()]*\)\s*)?SIMPLE_RT_NONNULL\s*\(')
 RANK = {'unknown': 0, 'enforced': 1, 'seen': 2, 'nil': 3}
+ATTR = re.compile(r'__attribute__\s*\(\(.*?\)\)[ \t]*')
 NOISE = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'', re.S)
 NARROW = {'i8', 'i16', 'i32', 'u8', 'u16', 'u32', 'bool', 'f32', 'f64'}
 BASELINE = 'scripts/check/rt_pointer_ref_map_baseline.txt'
@@ -75,13 +76,15 @@ def close_paren(src, pos):
 
 
 def split_top(text):
-    """Split on commas outside (), [] and {}. Generic '<' is not tracked; no .spl param uses it."""
+    """Split on commas outside (), [], {} and generic <>; '->' is not a closer."""
     parts, cur, depth = [], '', 0
+    prev = ''
     for ch in text:
-        if ch in '([{':
+        if ch in '([{<':
             depth += 1
-        elif ch in ')]}':
+        elif ch in ')]}' or (ch == '>' and prev != '-'):
             depth -= 1
+        prev = ch
         if ch == ',' and depth == 0:
             parts.append(cur)
             cur = ''
@@ -92,27 +95,34 @@ def split_top(text):
     return [p.strip() for p in parts]
 
 
-LEN_NAME = re.compile(r'\b\w*(?:len|length|count|size|cap)\s*$')
+LEN_NAME = re.compile(r'\b\w*(?:len|length|count|size|cap)\s*$|\b(?:n|kl|dl)\s*$')
+BYTE_PTR = ('uint8_t', 'char')
 
 
 def c_params(text, fold=True):
     """C parameter list -> [(kind, base)]; kind is ptr, scalar or unparsed. Stops at '...'.
 
     Text ABI fold: the runtime passes a .spl `text` as `const uint8_t *ptr, uint64_t len`.
-    An integer named *len/*length/*count/*size/*cap directly after a pointer is that
-    pointer's length companion. fold=True drops it; join_params tries the unfolded
-    list first and uses the folded one only when the unfolded count differs from the
-    .spl count, so a .spl that spells the pair as two i64 still matches unfolded."""
+    Text ABI fold: only a byte pointer (uint8_t, char) takes a length companion. An
+    integer named *len/*length/*count/*size/*cap or n/kl/dl directly after it is that
+    pointer's length; one pointer takes at most one. A count after a non-byte pointer,
+    or after a pointer whose length was already folded, is a real parameter.
+    fold=True drops the companion; join_params tries the unfolded list first and uses
+    the folded one only when the unfolded count differs from the .spl count, so a .spl
+    that spells the pair as two i64 still matches unfolded."""
     t = ' '.join(text.split())
     if t in ('', 'void'):
         return []
     out = []
+    paired = False
     for p in split_top(t):
         if p == '...':
             break
-        if fold and out and out[-1][0] == 'ptr' and '*' not in p and '(' not in p \
-                and '[' not in p and LEN_NAME.search(p):
+        if fold and out and out[-1][0] == 'ptr' and out[-1][1] in BYTE_PTR and not paired \
+                and '*' not in p and '(' not in p and '[' not in p and LEN_NAME.search(p):
+            paired = True
             continue
+        paired = False
         if '(' in p or '[' in p:
             out.append(('unparsed', p))
         elif '*' in p:
@@ -204,7 +214,7 @@ def scan(root):
     c = {}  # symbol -> 'nil' | 'seen' | 'enforced' | 'unknown' (worst definition wins)
     sigs = {}  # symbol -> [c_params(...) | None] one entry per definition or prototype
     for path in walk(root, 'src/runtime', ('.c', '.h')):
-        src = NOISE.sub(' ', read(path))
+        src = ATTR.sub('', NOISE.sub(' ', read(path)))
         for m in SIGDEF.finditer(src):
             close = close_paren(src, m.end() - 1)
             sigs.setdefault(m[1], []).append(
@@ -328,8 +338,6 @@ def run(root, regen, regen_param=False):
         print('SRT003 new param count mismatch: ' + k)
     for k in cstale:
         print('SRT003 stale baseline row, remove it: ' + k)
-    for line in []:
-        print(line)
     for k in sorted(pres['narrow']):
         print('SRT004 narrow pointer param: ' + k)
     for k in pnew:
@@ -340,7 +348,6 @@ def run(root, regen, regen_param=False):
         pres['edges'], pres['ptr'], pres['unparsed'], len(pres['srt003']), len(pres['narrow']),
         sum(1 for v in snull.values() if v == 'SNULL002'), sum(1 for v in snull.values() if v == 'SNULL003'),
         len(set(snull) & pbase)))
-    # SRT003 is report-only: it is printed and counted above but never fails the verdict.
     bad = len(narrow) + len(new) + len(stale) + len(pres['narrow']) + len(pnew) + len(pstale) + len(cnew) + len(cstale)
     if bad:
         print('FAIL — %d edge(s) checked, %d finding(s)' % (edges, bad))
@@ -361,6 +368,7 @@ def selftest():
     nilc = 'char *rt_x(void) {\n  if (a) return NULL;\n  return b;\n}\n'
     okc = 'char *rt_x(void) {\n  return b;\n}\n'
     cases = [
+        ('__attribute__((weak)) char *rt_x(void) { return NULL; }\n', 'extern fn rt_x() -> text\n', 1),
         (nilc, 'extern fn rt_x() -> text\n', 1),
         (nilc, 'extern fn rt_x() -> text?\n', 0),
         (okc, 'extern fn rt_x() -> text\n', 0),
@@ -409,6 +417,7 @@ def selftest():
 
     # Parameter direction: (C source, .spl source, exit, srt003, narrow, snull codes, unparsed)
     pcases = [
+        ('char *rt_x(char *a, void *d) { return b; }\n', 'extern fn rt_x(a: text?, d: Dict<text, i64>) -> text\n', 1, 0, 0, 'SNULL002', 0),
         ('char *rt_x(int64_t h, int64_t size, const char *p);\n', 'extern fn rt_x(h: i64, p: text?) -> text\n', 1, 1, 0, '', 0),
         ('char *rt_x(char *a);\n', 'extern fn rt_x(a: Option<text>) -> text\n', 1, 0, 0, 'SNULL002', 0),
         ('char *rt_x(char *a);\n', 'extern fn rt_x(a: text? = nil) -> text\n', 1, 0, 0, 'SNULL002', 0),
@@ -431,6 +440,13 @@ def selftest():
         # the .spl spells ptr+len as two i64: the unfolded list matches, so no mismatch
         ('char *rt_x(const uint8_t *p, uint64_t p_len);\n', 'extern fn rt_x(p: i64, n: i64) -> text\n', 0, 0, 0, '', 0),
         ('char *rt_x(const uint8_t *p, uint64_t p_len, uint64_t extra);\n', 'extern fn rt_x(a: text) -> text\n', 0, 1, 0, '', 0),
+        # byte pointers take n/kl/dl and count as their length; one pointer takes one companion
+        ('char *rt_x(const uint8_t *p, int64_t n);\n', 'extern fn rt_x(a: text) -> text\n', 0, 0, 0, '', 0),
+        ('char *rt_x(const uint8_t *k, int64_t kl, const uint8_t *d, int64_t dl);\n', 'extern fn rt_x(a: text, b: text) -> text\n', 0, 0, 0, '', 0),
+        ('char *rt_x(const char *s, int64_t count);\n', 'extern fn rt_x(a: text) -> text\n', 0, 0, 0, '', 0),
+        ('char *rt_x(const uint8_t *p, uint64_t p_len, int64_t count);\n', 'extern fn rt_x(a: text, n: i64) -> text\n', 0, 0, 0, '', 0),
+        # a count after a non-byte pointer is a real parameter, not a companion
+        ('char *rt_x(const int32_t *p, int64_t count);\n', 'extern fn rt_x(a: text) -> text\n', 0, 1, 0, '', 0),
     ]
     for i, (c, spl, want_code, want_srt, want_narrow, want_snull, want_unp) in enumerate(pcases):
         want_code = want_code or int(want_srt > 0)

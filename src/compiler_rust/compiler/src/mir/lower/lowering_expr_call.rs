@@ -265,38 +265,177 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    /// Declared parameter types of `callee` (excluding `self`): the
+    /// `HirType::Function` signature when the callee expression carries one,
+    /// otherwise the per-module table filled from `HirFunction::params`.
+    fn callee_param_types(&self, callee: &HirExpr) -> Vec<TypeId> {
+        if let Some(registry) = self.type_registry {
+            if let Some(HirType::Function { params, .. }) = registry.get(callee.ty) {
+                return params.clone();
+            }
+        }
+        if let HirExprKind::Global(name) = &callee.kind {
+            return self.function_param_types.get(name).cloned().unwrap_or_default();
+        }
+        Vec::new()
+    }
+
     pub(super) fn box_args_for_any_params(
         &mut self,
         callee: &HirExpr,
         args: &[HirExpr],
         arg_regs: &mut [VReg],
     ) -> MirLowerResult<()> {
-        let params = if let Some(registry) = self.type_registry {
-            if let Some(HirType::Function { params, .. }) = registry.get(callee.ty) {
-                params.clone()
-            } else if let HirExprKind::Global(name) = &callee.kind {
-                self.function_param_types.get(name).cloned().unwrap_or_default()
-            } else {
-                Vec::new()
-            }
-        } else if let HirExprKind::Global(name) = &callee.kind {
-            self.function_param_types.get(name).cloned().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let params = self.callee_param_types(callee);
+        self.coerce_args_for_param_slots(&params, args, arg_regs, true)
+    }
+
+    /// A literal that HIR typed `ANY` is still a RAW machine word (it is what
+    /// `box_arg_for_any_param` boxes on the way INTO a tagged slot), so it must
+    /// never be fed to the tagged->raw decoders.
+    fn is_raw_literal_typed_any(arg: &HirExpr) -> bool {
+        arg.ty == TypeId::ANY
+            && matches!(
+                arg.kind,
+                HirExprKind::Integer(_) | HirExprKind::Float(_) | HirExprKind::Bool(_) | HirExprKind::Nil
+            )
+    }
+
+    /// Make every argument match the representation of its DECLARED parameter
+    /// slot, in both directions:
+    ///
+    /// - raw scalar -> tagged slot (`any`, `T`, `i64?`): box, as before;
+    /// - tagged value -> raw scalar slot (`i64`, `f64`, `u64`, ...): UNBOX.
+    ///
+    /// The second direction was missing. A generic type parameter `T` erases
+    /// to `TypeId::ANY` (hir/lower/type_resolver.rs), so a read of an erased
+    /// struct field (`Box<i64>.value`), a generic function's result
+    /// (`id(7)`), or an untyped local holding either is a TAGGED word. `val`
+    /// bindings, `return` and `if` merges already decode such a word into a
+    /// raw slot (`unbox_scalar_for_raw_slot`), but a CALL argument did not, so
+    /// `fn double_it(x: i64)` received `21 << 3 == 168` for `double_it(a.value)`
+    /// and returned 336 — while `print "{a.value}"` (an ANY consumer) and
+    /// `double_it(21)` (a raw literal) were both right.
+    /// Bug: doc/08_tracking/bug/erased_field_arg_into_scalar_param_tagged_seed_2026-10-31.md
+    ///
+    /// `bool` parameters follow the interpreter's presence rule for a dynamic
+    /// argument (nil -> false, present -> true, a real bool kept), see
+    /// `present_any_as_bool_arg`. Direct calls apply it in
+    /// `coerce_args_for_bool_params` BEFORE this pass and say so with
+    /// `bool_params_already_decoded`, so the already-raw result is not
+    /// decoded twice; method calls have no such pass and decode here.
+    pub(super) fn coerce_args_for_param_slots(
+        &mut self,
+        params: &[TypeId],
+        args: &[HirExpr],
+        arg_regs: &mut [VReg],
+        bool_params_already_decoded: bool,
+    ) -> MirLowerResult<()> {
         if params.is_empty() {
             return Ok(());
         }
         for (i, arg_reg) in arg_regs.iter_mut().enumerate() {
+            let Some(param_ty) = params.get(i).copied() else {
+                continue;
+            };
+            let Some(arg_expr) = args.get(i) else {
+                continue;
+            };
             // `Any?` params are tagged-value slots too -- see
             // `slot_holds_tagged_value`.
-            if params.get(i).copied().is_some_and(|p| self.slot_holds_tagged_value(p)) {
-                if let Some(arg_expr) = args.get(i) {
-                    *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
-                }
+            if self.slot_holds_tagged_value(param_ty) {
+                *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
+                continue;
             }
+            if !Self::is_raw_scalar_type(param_ty)
+                || !self.slot_holds_tagged_value(arg_expr.ty)
+                || Self::is_raw_literal_typed_any(arg_expr)
+            {
+                continue;
+            }
+            if param_ty == TypeId::BOOL {
+                if !bool_params_already_decoded && arg_expr.ty == TypeId::ANY {
+                    *arg_reg = self.present_any_as_bool_arg(*arg_reg)?;
+                }
+                continue;
+            }
+            *arg_reg = self.unbox_scalar_for_raw_slot(param_ty, arg_expr.ty, *arg_reg)?;
         }
         Ok(())
+    }
+
+    /// Decode a DYNAMIC (`any`-typed) argument bound to a declared `bool`
+    /// parameter with the interpreter's rule (`present_value_as_bool_arg`):
+    /// a real bool keeps its value, everything else is its presence.
+    ///
+    ///     if rt_value_is_bool(v): rt_value_truthy(v) else: rt_is_some(v)
+    ///
+    /// Plain `rt_is_some` mapped a TAGGED `false` (a present, non-nil word, e.g.
+    /// `Box<bool>(value: false).value`) to `true`.
+    fn present_any_as_bool_arg(&mut self, value: VReg) -> MirLowerResult<VReg> {
+        use crate::mir::effects::LocalKind;
+        use crate::mir::function::MirLocal;
+
+        let is_bool = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                dest: Some(dest),
+                target: CallTarget::from_name("rt_value_is_bool"),
+                args: vec![value],
+            });
+            dest
+        })?;
+        let (slot_addr, then_id, else_id, merge_id) = self.with_func(|func, current_block| {
+            let local_index = func.locals.len();
+            func.locals.push(MirLocal {
+                name: format!("$bool_arg_{}", local_index),
+                ty: TypeId::BOOL,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            let addr = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index,
+            });
+            let then_id = func.new_block();
+            let else_id = func.new_block();
+            let merge_id = func.new_block();
+            func.block_mut(current_block).unwrap().terminator = crate::mir::Terminator::Branch {
+                cond: is_bool,
+                then_block: then_id,
+                else_block: else_id,
+            };
+            (addr, then_id, else_id, merge_id)
+        })?;
+        for (block_id, decoder) in [(then_id, "rt_value_truthy"), (else_id, "rt_is_some")] {
+            self.set_current_block(block_id)?;
+            self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name(decoder),
+                    args: vec![value],
+                });
+                block.instructions.push(MirInst::Store {
+                    addr: slot_addr,
+                    value: dest,
+                    ty: TypeId::BOOL,
+                });
+            })?;
+            self.finalize_block_jump(merge_id)?;
+        }
+        self.set_current_block(merge_id)?;
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Load {
+                dest,
+                addr: slot_addr,
+                ty: TypeId::BOOL,
+            });
+            dest
+        })
     }
 
     /// `&mut scalar_local` passed to an `extern fn` is an out slot: the foreign
@@ -359,19 +498,7 @@ impl<'a> MirLowerer<'a> {
         args: &[HirExpr],
         arg_regs: &mut [VReg],
     ) -> MirLowerResult<()> {
-        let params = if let Some(registry) = self.type_registry {
-            if let Some(HirType::Function { params, .. }) = registry.get(callee.ty) {
-                params.clone()
-            } else if let HirExprKind::Global(name) = &callee.kind {
-                self.function_param_types.get(name).cloned().unwrap_or_default()
-            } else {
-                Vec::new()
-            }
-        } else if let HirExprKind::Global(name) = &callee.kind {
-            self.function_param_types.get(name).cloned().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let params = self.callee_param_types(callee);
 
         for (index, arg_reg) in arg_regs.iter_mut().enumerate() {
             if params.get(index) != Some(&TypeId::BOOL) {
@@ -386,11 +513,15 @@ impl<'a> MirLowerer<'a> {
 
             *arg_reg = if arg.ty == TypeId::NIL || matches!(arg.kind, HirExprKind::Nil) {
                 self.lower_bool_expr(false)?
-            } else if arg.ty == TypeId::ANY
-                || self
-                    .type_registry
-                    .and_then(|registry| registry.get(arg.ty))
-                    .is_some_and(|ty| matches!(ty, HirType::Pointer { .. }))
+            } else if arg.ty == TypeId::ANY {
+                // A dynamic word may BE a tagged bool (an erased `T` field or
+                // generic result holding `false`); presence alone read it as
+                // true. Keep a real bool, apply the presence rule to the rest.
+                self.present_any_as_bool_arg(*arg_reg)?
+            } else if self
+                .type_registry
+                .and_then(|registry| registry.get(arg.ty))
+                .is_some_and(|ty| matches!(ty, HirType::Pointer { .. }))
             {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
@@ -890,6 +1021,8 @@ impl<'a> MirLowerer<'a> {
             let callee_reg = self.lower_expr(callee)?;
 
             let (param_types, return_type) = self.function_signature_for_callee(callee, args);
+            self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
+            self.coerce_args_for_param_slots(&param_types, args, &mut arg_regs, true)?;
 
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
