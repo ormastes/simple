@@ -91,11 +91,21 @@ prepare_isolated_dir() {
     mkdir -p "${isolated_dir}" || return 1
 }
 
+list_child_pids() {
+    parent_pid=$1
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -P "${parent_pid}" 2>/dev/null || :
+        return 0
+    fi
+    # Windows (MSYS2/Git Bash) ships no pgrep; ps -ef lists PID and PPID.
+    ps -ef 2>/dev/null | awk -v p="${parent_pid}" '$3 == p { print $2 }' || :
+}
+
 freeze_probe_tree() {
     root_pid=$1
     kill -STOP "${root_pid}" 2>/dev/null || return
     printf '%s\n' "${root_pid}"
-    descendants=$(pgrep -P "${root_pid}" 2>/dev/null || :)
+    descendants=$(list_child_pids "${root_pid}")
     for descendant in ${descendants}; do
         freeze_probe_tree "${descendant}"
     done
@@ -137,7 +147,14 @@ invoke_isolated() {
             "${probe_tmp}/work" ||
             exit 125
         cd "${probe_tmp}/work" || exit 125
-        ulimit -f "${CAPTURE_LIMIT_BLOCKS}" || exit 125
+        if ! ulimit -f "${CAPTURE_LIMIT_BLOCKS}" 2>/dev/null; then
+            # MSYS2/Git Bash on Windows cannot set RLIMIT_FSIZE; every other
+            # host must still enforce the capture limit.
+            case "$(uname -s 2>/dev/null)" in
+                MINGW*|MSYS*|CYGWIN*) : ;;
+                *) exit 125 ;;
+            esac
+        fi
         env -i \
             HOME="${probe_tmp}/home" \
             CLAUDE_CONFIG_DIR="${probe_tmp}/config" \
@@ -171,7 +188,7 @@ invoke_isolated() {
 
 discover_claude() {
     mkdir -p "${ARTIFACT_ROOT}" || fail_prerequisite "artifact_directory_unavailable"
-    command -v pgrep >/dev/null 2>&1 ||
+    command -v pgrep >/dev/null 2>&1 || command -v ps >/dev/null 2>&1 ||
         fail_prerequisite "pgrep_utility_missing"
     CLAUDE_PATH=$(command -v claude 2>/dev/null || :)
     [ "${CLAUDE_PATH}" != "" ] || fail_prerequisite "claude_binary_absent"
