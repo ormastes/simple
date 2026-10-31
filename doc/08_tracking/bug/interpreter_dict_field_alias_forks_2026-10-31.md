@@ -27,14 +27,16 @@ store where they are shared. Other aliased dicts remain affected.
 ## Still red after this: lean_enum_elimination specs
 `test/03_system/compiler/lean_enum_elimination_spec.spl` and its
 `compiler_lean_enum_elimination_spec` twin measured 35 failed of 35 before and
-34 failed of 35 after (twin not re-run after the mirror change). Next layer:
+34 failed of 35 after. Next layer:
 "EE-E-METADATA: source lowering failed: non-exhaustive enum match on 'Flag'".
 
 `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:5175-5211`
 reports that through `self.error` for every match with no default arm, even when
 the arms cover every variant ("Arms are textually exhaustive"), and the spec
-helper treats any lowering error as failure. This is product code rather than a
-seed defect. Whether exhaustive matches should report, or the helper should ignore
-this class, is an owner decision. Other messages seen in the same run:
+helper treats any lowering error as failure. The report is unconditional in the
+source, so no seed defect is implicated at this check, but no lane has been shown
+to pass these specs: `test_db.sdn` lists them without a usable outcome. So the
+"blocked only by Dict keys" triage is not confirmed. Whether exhaustive matches
+should report, or the helper should ignore this class, is an owner decision. Other messages seen in the same run:
 `serialize_mir_module` not found, "nullary variant carries a payload",
 "lean-nominal-body: requires a known nonvariadic signature". None are triaged.
