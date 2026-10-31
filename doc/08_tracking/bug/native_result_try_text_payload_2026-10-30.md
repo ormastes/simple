@@ -1,6 +1,6 @@
 # Native Result text payload loses its MIR text representation
 
-Status: focused native regression PASS with rebuilt producer; private-daemon
+Status: resolved in MIR 2026-10-31 (see below); native re-verification of private_session_start_v1 pending. Focused native regression PASS with rebuilt producer; private-daemon
 acceptance and broader compiler checks remain separate pending gates.
 
 Producer SHA-256: `c978ab12656b7bf67d4bf9b6cc6450d08181c9140b19266863e93b3eba57e5f4`.
@@ -55,3 +55,59 @@ This validates heap-built and literal text extraction, equality, length,
 concatenation, and Err propagation in the fixture. Shared nested and multi-slot
 enum callers were source-reviewed, not independently exercised here. These
 receipts do not establish private-daemon startup or broad compiler acceptance.
+
+
+## Resolved 2026-10-31
+
+Root cause: `lower_try_expr`
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`, Result
+branch) read the Ok payload with `rt_enum_payload` as a raw `i64` and never
+restored the declared `ok_type`, so text methods (`trim`, `index_of`) were
+unresolved and concatenation stringified the handle.
+
+Fix (already on release/1.0.0 before this resolution; no new compiler change):
+`265252279c9` routes the static Result payload through
+`decode_declared_enum_payload_slot`; its `Str` arm
+(`src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl`) restores
+text via `option_text_value` (`rt_interp_cstr`) with `bootstrap_text_type`.
+`3aa79ca1610` applies the same decoder when the static base type is unknown but
+the lowered call remembered its declared Result return. Type aliases need no
+MIR handling: HIR expands `type R = Result<text, E>` to the underlying shape
+(`src/compiler/20.hir/hir_lowering/type_aliases.spl`).
+
+Test: `test/01_unit/compiler/mir/result_try_text_payload_spec.spl`, three
+examples:
+1. single module, direct and `type`-aliased `Result<text, text>` callees;
+2. three modules lowered through `module_surfaces_from_modules` +
+   `hirlowering_for_module` + `MirLowering.lower_module(consumer, providers)`:
+   `lib.io.ops` defines `read_bounded`, `lib.host` does
+   `export use lib.io.ops.{read_bounded as host_read}`, `app.main` imports
+   `host_read` and does `host_read(path, 16)?.trim()` - the
+   `workaround_host_read` / `secure_temp_dir` re-export shape;
+3. interpreter execution of the same text semantics and Err propagation.
+MIR examples assert zero MIR errors, one `rt_string_trim`, no
+`rt_raw_i64_to_string`, and that every `rt_enum_payload` destination is an
+argument of an `rt_interp_cstr` call.
+
+Sensitivity, run on 2026-10-31 with the Rust seed
+(`/Users/ormastes/simple/bin/simple test <spec>`, interpreter) by temporarily
+editing the worktree source and restoring it afterwards:
+- replacing `value = self.option_text_value(raw, self.bootstrap_text_type())`
+  in the decoder `Str` arm with `pass`: examples 1 and 2 FAIL, 3 passes;
+- replacing the static-path `case _: return self.decode_declared_enum_payload_slot(pl, ok_type)`
+  with `case _: return pl`: examples 1 and 2 FAIL, 3 passes;
+- disabling the remembered-call fallback (`find_local_hir_type(res_local.id)`
+  branch): all pass, so the re-export alias is resolved by the static
+  `enum_match_expr_type` path, not by `resolved_call_hir_return_type`.
+Unmodified source: 3/3 pass.
+
+Workarounds removed: all `val ...: text = ...?` annotations in
+`src/app/bug/workaround_store.spl` (`content`, `wal`, `final_head`, `head`) and
+the three `@workaround bug=native_result_try_payload_text_type_lost_2026_10_10`
+tags.
+
+Not verified here: native execution of the fixture or of `workaround_store`
+with a freshly built stage2 producer (only the Rust seed was available; its JIT
+falls back to the interpreter). The MIR spec runs the Simple compiler's own
+lowering in the interpreter; the real driver's module-surface construction may
+differ from `module_surfaces_from_modules`.

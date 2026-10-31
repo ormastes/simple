@@ -1,0 +1,159 @@
+# Regression: `expr?` on Result<text, E> must yield a real text local in MIR
+# (bugs native_result_try_payload_text_type_lost_2026_10_10 and
+# native_result_try_text_payload_2026-10-30). Covers a local callee, an
+# aliased Result return, and the interpreter semantics.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+val try_text_source = "type TextResult = Result<text, text>\nfn local_read(path: text) -> Result<text, text>:\n    if path == \"\": return Err(\"empty\")\n    Ok(path + \"-root\")\nfn alias_read(path: text) -> TextResult:\n    Ok(path)\nfn use_local(path: text) -> Result<text, text>:\n    val root = local_read(path)?\n    Ok(root.trim() + \"/owner.token\")\nfn use_alias(path: text) -> Result<text, text>:\n    val root = alias_read(path)?\n    Ok(root.trim() + \"/owner.token\")\n"
+
+fn try_text_call_count(function: MirFunction, name: text) -> i64:
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(actual), _):
+                            if actual == name or actual.ends_with("." + name): count = count + 1
+                        case _: ()
+                case _: ()
+    count
+
+fn try_text_callee_is(callee: MirOperand, name: text) -> bool:
+    match callee.kind:
+        case MirOperandKind.Const(MirConstValue.Str(actual), _):
+            return actual == name or actual.ends_with("." + name)
+        case _: return false
+
+# True when every rt_enum_payload word is handed straight to rt_interp_cstr,
+# i.e. the `?` success payload is restored to text instead of staying an i64.
+fn try_text_payload_restored(function: MirFunction) -> bool:
+    var payloads: [i64] = []
+    var restored: [i64] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(dest, callee, args):
+                    if try_text_callee_is(callee, "rt_enum_payload"):
+                        if val local = dest: payloads.push(local.id)
+                    if try_text_callee_is(callee, "rt_interp_cstr"):
+                        for arg in args:
+                            match arg.kind:
+                                case MirOperandKind.Copy(local): restored.push(local.id)
+                                case MirOperandKind.Move(local): restored.push(local.id)
+                                case _: ()
+                case _: ()
+    if payloads.len() == 0: return false
+    for id in payloads:
+        if not restored.contains(id): return false
+    true
+
+fn try_text_lowered() -> [MirFunction]:
+    val parsed = parse_full_frontend(try_text_source, "trytext.spl", "trytext", Logger(level: 0))
+    var hir = HirLowering.new()
+    val module = hir.lower_module(parsed)
+    expect(hir.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(module.symbols)
+    val mir = lowering.lower_module(module, [module])
+    # Before the repair, `.trim()` on the untyped payload failed here as an
+    # unresolved method call.
+    expect(lowering.errors.len()).to_equal(0)
+    var out: [MirFunction] = []
+    for name in ["use_local", "use_alias"]:
+        for function in mir.functions.values():
+            if function.name == name or function.name.ends_with("." + name):
+                out.push(function)
+    expect(out.len()).to_equal(2)
+    out
+
+# Mirrors workaround_store -> sosix.workaround_host (renamed re-export) ->
+# io.file_ops (definition): the consumer only sees the alias name.
+val try_text_provider = "pub fn read_bounded(path: text, limit: i64) -> Result<text, text>:\n    if path == \"\": return Err(\"empty\")\n    Ok(\"  \" + path + \"  \")\n"
+val try_text_facade = "export use lib.io.ops.\{read_bounded as host_read\}\n"
+val try_text_consumer = "use lib.host.\{host_read\}\nfn use_imported(path: text) -> Result<text, text>:\n    val content = host_read(path, 16)?\n    Ok(content.trim() + \"/owner.token\")\n"
+
+fn try_text_imported_lowered() -> MirFunction:
+    val logger = Logger(level: 0)
+    val provider_ast = parse_full_frontend(try_text_provider, "lib/io/ops.spl", "lib.io.ops", logger)
+    val facade_ast = parse_full_frontend(try_text_facade, "lib/host.spl", "lib.host", logger)
+    val consumer_ast = parse_full_frontend(try_text_consumer, "app/main.spl", "app.main", logger)
+    var modules: Dict<text, Module> = {}
+    modules["lib.io.ops"] = provider_ast
+    modules["lib.host"] = facade_ast
+    modules["app.main"] = consumer_ast
+    val sources = [
+        SourceFile(path: "lib/io/ops.spl", content: try_text_provider, module_name: "lib.io.ops"),
+        SourceFile(path: "lib/host.spl", content: try_text_facade, module_name: "lib.host"),
+        SourceFile(path: "app/main.spl", content: try_text_consumer, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var provider_hir_lowering = hirlowering_for_module("lib/io/ops.spl", surfaces)
+    var facade_hir_lowering = hirlowering_for_module("lib/host.spl", surfaces)
+    var consumer_hir_lowering = hirlowering_for_module("app/main.spl", surfaces)
+    val provider_hir = provider_hir_lowering.lower_module(provider_ast)
+    val facade_hir = facade_hir_lowering.lower_module(facade_ast)
+    val consumer_hir = consumer_hir_lowering.lower_module(consumer_ast)
+    expect(provider_hir_lowering.errors.len()).to_equal(0)
+    expect(facade_hir_lowering.errors.len()).to_equal(0)
+    expect(consumer_hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(consumer_hir.symbols)
+    val mir = lowering.lower_module(consumer_hir, [provider_hir, facade_hir])
+    for e in lowering.errors: print "MIRERR {e.message}"
+    expect(lowering.errors.len()).to_equal(0)
+    for function in mir.functions.values():
+        if function.name.ends_with("use_imported"): return function
+    fail("missing lowered consumer")
+
+fn run_local_read(path: text) -> Result<text, text>:
+    if path == "": return Err("empty")
+    Ok(path + "-root")
+
+type RunTextResult = Result<text, text>
+
+fn run_alias_read(path: text) -> RunTextResult:
+    Ok("  " + path + "  ")
+
+fn run_use_local(path: text) -> Result<text, text>:
+    val root = run_local_read(path)?
+    Ok(root + "/owner.token")
+
+fn run_use_alias(path: text) -> Result<text, text>:
+    val root = run_alias_read(path)?
+    Ok(root.trim())
+
+describe "Result<text, E> try payload":
+    it "restores the text ABI and dispatches text builtins for local and aliased callees":
+        for function in try_text_lowered():
+            expect(try_text_call_count(function, "rt_enum_payload")).to_be_greater_than(0)
+            expect(try_text_payload_restored(function)).to_be(true)
+            expect(try_text_call_count(function, "rt_string_trim")).to_equal(1)
+            expect(try_text_call_count(function, "rt_raw_i64_to_string")).to_equal(0)
+
+    it "restores the text payload for an imported, renamed re-export":
+        val function = try_text_imported_lowered()
+        expect(try_text_payload_restored(function)).to_be(true)
+        expect(try_text_call_count(function, "rt_string_trim")).to_equal(1)
+        expect(try_text_call_count(function, "rt_raw_i64_to_string")).to_equal(0)
+
+    it "keeps text semantics and Err propagation when executed":
+        expect(run_use_local("owned").unwrap()).to_equal("owned-root/owner.token")
+        expect(run_use_local("owned").unwrap().len()).to_equal(22)
+        expect(run_use_alias("x").unwrap()).to_equal("x")
+        match run_use_local(""):
+            case Ok(_): fail("Err must propagate through ?")
+            case Err(message): expect(message).to_equal("empty")
