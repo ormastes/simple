@@ -1,0 +1,61 @@
+# Session token CSPRNG gate: rt_random_hex is `text?`; nil / wrong length / non-hex
+# output must never become a token component. Also pins the cross-engine .len()
+# behaviour of a `text?` payload (JIT reported 1 for an 8-char payload).
+
+use std.spec.step
+use app.ui.web.session_token.{checked_random_hex, random_hex, SessionToken}
+
+extern fn rt_random_hex(len: i64) -> text?
+
+describe "session token entropy fails closed":
+    it "nil provider output is rejected":
+        step("nil")
+        expect(checked_random_hex(nil, 32)).to_equal(nil)
+
+    it "short output is rejected":
+        step("short")
+        expect(checked_random_hex("ab", 32)).to_equal(nil)
+
+    it "empty output for a non-zero length is rejected":
+        step("empty")
+        expect(checked_random_hex("", 32)).to_equal(nil)
+
+    it "over-long output is rejected":
+        step("long")
+        expect(checked_random_hex("0123456789abcdef0", 8)).to_equal(nil)
+
+    it "non-hex output is rejected":
+        step("non-hex")
+        expect(checked_random_hex("zzzzzzzzzzzzzzzz", 8)).to_equal(nil)
+
+    it "well-formed output passes through":
+        step("ok")
+        expect(checked_random_hex("0123456789abcdef", 8)).to_equal("0123456789abcdef")
+
+    it "length zero yields the empty string":
+        step("zero")
+        expect(checked_random_hex("", 0)).to_equal("")
+
+    it "real random_hex(32) is 64 chars":
+        step("real")
+        val v: text = random_hex(32) ?? ""
+        expect(v.len()).to_equal(64)
+
+    it "extern text? payload length is its character count":
+        step("len")
+        # 5 bytes -> 10 chars; a length other than 4 so 8 cannot be a constant.
+        val raw: text? = rt_random_hex(5)
+        if raw != nil:
+            val v: text = raw ?? ""
+            expect(v.len()).to_equal(10)
+        else:
+            expect(false).to_equal(true)
+
+    it "issued token has a 64-char token_id":
+        step("issue")
+        val tok_opt = SessionToken.issue("g", "http://localhost", 1000u64, "secret")
+        if val tok = tok_opt:
+            val id: text = tok.token_id
+            expect(id.len()).to_equal(64)
+        else:
+            expect(false).to_equal(true)

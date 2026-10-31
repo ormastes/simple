@@ -233,6 +233,12 @@ class WebServer:
                 val secret = load_secret(false)
                 if secret == "":
                     return Err("SIMPLE_UI_WEB_TOKEN_SECRET is required unless SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 is set for local development")
+                val login_grant_opt = random_hex(32)
+                val token_grant_id_opt = random_hex(32)
+                if login_grant_opt == nil or token_grant_id_opt == nil:
+                    return Err("OS entropy unavailable: cannot mint login/token grants")
+                val login_grant: text = login_grant_opt ?? ""
+                val token_grant_id: text = token_grant_id_opt ?? ""
                 return Ok(WebServer(
                     file_path: file_path,
                     port: port,
@@ -242,8 +248,8 @@ class WebServer:
                     wm_mode: wm_mode,
                     origin_guard: OriginGuard.from_env(),
                     token_secret: secret,
-                    login_grant: random_hex(32),
-                    token_grant_id: random_hex(32),
+                    login_grant: login_grant,
+                    token_grant_id: token_grant_id,
                     login_rate_window_start_ms: 0u64,
                     login_rate_attempt_count: 0
                 ))
@@ -615,11 +621,15 @@ class WebServer:
                     self.send_small_http(stream, resp)
                     return
 
-                val tok = SessionToken.issue(self.token_grant_id, origin, TOKEN_TTL_DEFAULT_MS, self.token_secret)
-                val serialized = tok.serialize()
-                val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
-                val resp = _simple_response_for_request(200, "application/json", body_json, headers)
-                self.send_small_http(stream, resp)
+                val tok_opt = SessionToken.issue(self.token_grant_id, origin, TOKEN_TTL_DEFAULT_MS, self.token_secret)
+                if val tok = tok_opt:
+                    val serialized = tok.serialize()
+                    val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
+                    val resp = _simple_response_for_request(200, "application/json", body_json, headers)
+                    self.send_small_http(stream, resp)
+                else:
+                    val resp = _simple_response_for_request(500, "application/json", "{\"error\": \"token_unavailable\"}", headers)
+                    self.send_small_http(stream, resp)
 
     fn handle_resume(stream: TcpStream, path: text, headers: text, body: text):
         if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, web_server_time_ms()):
@@ -735,8 +745,13 @@ fn run_shared_wm_web(title: text) -> i64:
     if secret == "":
         print "Error: SIMPLE_UI_WEB_TOKEN_SECRET is required unless SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 is set for local development"
         return 1
-    val login_grant = random_hex(32)
-    val token_grant_id = random_hex(32)
+    val login_grant_opt = random_hex(32)
+    val token_grant_id_opt = random_hex(32)
+    if login_grant_opt == nil or token_grant_id_opt == nil:
+        print "Error: OS entropy unavailable: cannot mint login/token grants"
+        return 1
+    val login_grant: text = login_grant_opt ?? ""
+    val token_grant_id: text = token_grant_id_opt ?? ""
     val mode_name_raw = env_get("SIMPLE_UI_WEB_SHELL_MODE")
     val mode_name = if mode_name_raw == "": "embedded" else: mode_name_raw
     val backend_name = env_get("SIMPLE_UI_BACKEND") ?? ""
@@ -954,11 +969,14 @@ fn _wm_handle_login(stream: TcpStream, headers: text, initial_body: text, guard:
         val forbidden = _simple_response(403, "application/json", "{\"error\": \"forbidden_login_grant\"}")
         stream.write_text(forbidden)
         return
-    val tok = SessionToken.issue(token_grant_id, origin, TOKEN_TTL_DEFAULT_MS, secret)
-    val serialized = tok.serialize()
-    val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
-    val resp = _simple_response(200, "application/json", body_json)
-    stream.write_text(resp)
+    val tok_opt = SessionToken.issue(token_grant_id, origin, TOKEN_TTL_DEFAULT_MS, secret)
+    if val tok = tok_opt:
+        val serialized = tok.serialize()
+        val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
+        val resp = _simple_response(200, "application/json", body_json)
+        stream.write_text(resp)
+    else:
+        stream.write_text(_simple_response(500, "application/json", "{\"error\": \"token_unavailable\"}"))
 
 fn _wm_handle_resume(stream: TcpStream, path: text, headers: text, body: text, guard: OriginGuard, secret: text):
     if not ui_web_request_authorized(headers, path, guard, secret, web_server_time_ms()):

@@ -158,12 +158,12 @@ CRLF, checks `rt_alias_map.sdn` decls, and takes raw-ABI opt-outs from
 the earlier 88 / 26 / 8 became 1456 / 29 / 8 under the new scan, with 38
 opt-outs.
 
-| leg | before (release 04f552c8ea7) | after |
-|---|---|---|
-| (a) | 1456 | 1263 |
-| (b) | 29 | 3 |
-| (c) | 8 | 8 |
-| opt-outs | 38 | 30 (8 went stale because the extern became `T?` or lost its bogus return type) |
+| leg | at #5616 (04f552c8ea7) | release 312564eee8d (after #5634/#5637/#5638 landed in parallel) | after this pass |
+|---|---|---|---|
+| (a) | 1456 | 1381 | 1264 |
+| (b) | 29 | 24 | 1 |
+| (c) | 8 | 8 | 8 |
+| opt-outs | 38 | 38 | 30 (8 went stale because the extern became `T?` or lost its bogus return type) |
 
 Fixed:
 - **#5639:** `rt_stderr_write([u8])` and `rt_stdout_write([u8])` in the
@@ -192,7 +192,7 @@ Deferred, with reasons:
 - **`test/**`: 1240 class (a) rows**, mostly spec-local `rt_file_read_text`
   declarations. This needs its own PR series per test area. It was not swept
   here, so the reproducing specs would not be churned blind.
-- **`sffi/io.spl` `file_read`, `file_read_text`, `file_hash_sha256`** (class b)
+- **`sffi/io.spl` `file_hash_sha256`** (class b; `file_read` and `file_read_text` were fixed in parallel by #5634)
   and their `rt_file_read_text_rv` / `rt_file_hash_sha256` declarations, plus
   the alias row: these are `@unsafe` raw wrappers with 44+ importers, including
   `40.mono` (another owner) and many tests. They need a coordinated `T?`

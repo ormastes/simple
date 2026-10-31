@@ -3,7 +3,7 @@
 
 # Extern declarations for file system SFFI
 @unsafe(reason: "raw filesystem read and runtime-owned text ABI; empty text conflates empty file and failure", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_read_text(path: text) -> text
 @unsafe(reason: "raw filesystem path/content write-status ABI", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
 @unsafe(reason: "raw filesystem existence ABI", capabilities: [ffi])
@@ -19,7 +19,7 @@ extern fn rt_dir_create(path: text) -> bool
 @unsafe(reason: "raw recursive directory-create status ABI", capabilities: [ffi])
 extern fn rt_dir_create_all(path: text) -> bool
 @unsafe(reason: "raw filesystem path and runtime-owned list ABI; empty list conflates empty and failure", capabilities: [ffi])
-extern fn rt_dir_list(path: text) -> List<text>?
+extern fn rt_dir_list(path: text) -> List<text>
 @unsafe(reason: "raw filesystem directory-removal status ABI", capabilities: [ffi])
 extern fn rt_dir_remove(path: text) -> bool
 @unsafe(reason: "raw recursive directory-removal status ABI", capabilities: [ffi])
@@ -46,7 +46,7 @@ extern fn rt_path_basename(path: text) -> text
 extern fn rt_path_dirname(path: text) -> text
 @unsafe(reason: "raw path parsing and runtime-owned extension text ABI", capabilities: [ffi])
 extern fn rt_path_ext(path: text) -> text
-@unsafe(reason: "raw path resolution and runtime-owned text ABI; empty text is failure", capabilities: [ffi])
+@unsafe(reason: "raw path resolution and runtime-owned text ABI; nil means cwd failure", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text?
 @unsafe(reason: "runtime-owned target path-separator text ABI", capabilities: [ffi])
 extern fn rt_path_separator() -> text
@@ -123,20 +123,13 @@ class shell:
 # File operations class
 class file:
     static fn read_text(path: text) -> text:
-        if val content = rt_file_read_text(path):
-            return content
-        # absent: shell `read_text` is total -- an unreadable file reads as
-        # empty text, the same as `cat` printing nothing.
-        ""
+        return rt_file_read_text(path)
 
     static fn write_text(path: text, content: text):
         rt_file_write_text(path, content)
 
     static fn append_text(path: text, content: text):
-        var existing = ""
-        if val read = rt_file_read_text(path):
-            existing = read
-        # absent: appending to a missing file creates it with just `content`
+        val existing = rt_file_read_text(path)
         rt_file_write_text(path, existing + content)
 
     static fn exist(path: text) -> bool:
@@ -183,11 +176,7 @@ class file:
 # Directory operations class
 class dir:
     static fn list(path: text) -> List<text>:
-        if val entries = rt_dir_list(path):
-            return entries
-        # absent: shell `dir.list` is total -- an unlistable path has no entries,
-        # like `ls` on nothing.
-        []
+        return rt_dir_list(path)
 
     static fn glob(path: text, pattern: text) -> List<text>:
         return rt_dir_glob(path, pattern)
@@ -238,12 +227,8 @@ class path:
     static fn ext(p: text) -> text:
         return rt_path_ext(p)
 
-    static fn absolute(p: text) -> text:
-        if val abs = rt_path_absolute(p):
-            return abs
-        # absent: the working directory could not be resolved; a relative path
-        # handed back as absolute would be a silent wrong value.
-        panic("E-SFFI-PATH-001: rt_path_absolute could not resolve {p}")
+    static fn absolute(p: text) -> text?:
+        return rt_path_absolute(p)
 
 # Environment variable class
 class env:
