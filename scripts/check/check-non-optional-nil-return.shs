@@ -155,6 +155,31 @@ FNR==1 { cur="" }
 }
 AWKEOF
 
+# decl.awk -- class (a): every `extern fn rt_x(...) -> T` with a non-optional,
+# non-unit T that is NOT annotated `@unsafe(...)` on the line above. Joined
+# against the nil-capable set: the declaration itself is the safe surface, so
+# a nil-capable extern must declare `T?` there. A raw non-optional nil is
+# allowed only on an `@unsafe` declaration, whose safe wrapper class (b) then
+# holds to `T?`. Output: <file>:<line>:<name>:<type>.
+cat > "$TMP/decl.awk" <<'AWKEOF'
+FNR==1 { prev="" }
+/^[ \t]*$/ { next }
+/^[ \t]*#/ { next }
+{
+  line=$0
+  if (line ~ /^[ \t]*extern[ \t]+fn[ \t]+rt_[a-z0-9_]+[ \t]*\(/) {
+    n=line; sub(/^[ \t]*extern[ \t]+fn[ \t]+/,"",n); sub(/[ \t]*\(.*/,"",n)
+    l=line; sub(/[ \t]*#.*$/,"",l)
+    rt=""
+    if (match(l,/\)[ \t]*->[ \t]*.*$/)) { rt=substr(l,RSTART,RLENGTH); sub(/^\)[ \t]*->[ \t]*/,"",rt); gsub(/[ \t]+$/,"",rt) }
+    uns = (prev ~ /^[ \t]*@unsafe/)
+    if (rt!="" && rt !~ /\?$/ && rt !~ /^(Option|Optional)</ && rt!="()" && rt!="void" && rt!="unit" && rt!="Unit" && !uns)
+      printf "%s:%d:%s:%s\n", FILENAME, FNR, n, rt
+  }
+  prev=line
+}
+AWKEOF
+
 cat > "$TMP/classc.awk" <<'AWKEOF'
 # class (c): explicit `return nil` / bare-nil tail under a NON-OPTIONAL declared
 # return type. Not extern related -- a hand-written nil under `-> T` aborts the
@@ -253,6 +278,14 @@ scan_wrappers() {
     [ -d "$_sroot" ] || return 0
     find "$_sroot" -name '*.spl' -not -path '*/vendor/*' -print0 2>/dev/null \
         | xargs -0 -n200 awk -f "$TMP/wrap.awk" 2>/dev/null > "$_out"
+}
+
+# scan_decls <spl_root> <out>  -- append class (a) declaration sites
+scan_decls() {
+    _sroot="$1"; _out="$2"
+    [ -d "$_sroot" ] || return 0
+    find "$_sroot" -name '*.spl' -not -path '*/vendor/*' -print0 2>/dev/null \
+        | xargs -0 -n200 awk -f "$TMP/decl.awk" 2>/dev/null >> "$_out"
 }
 
 # scan_classc <spl_root> <out>  -- append class (c) sites found under <spl_root>
@@ -473,6 +506,26 @@ SPEOF
     mkdir -p "$_sd/empty"
     scan_wrappers "$_sd/empty" "$_sd/empty.txt"
     if [ -s "$_sd/empty.txt" ]; then echo "selftest FAIL: empty tree produced wrappers"; _fail=1; fi
+    # ---- class (a) fixtures -------------------------------------------------
+    mkdir -p "$_sd/decl"
+    cat > "$_sd/decl/decls.spl" <<'SPEOF'
+extern fn rt_maybe_nil(k: text) -> text
+extern fn rt_always_total(k: text) -> i64
+@unsafe(reason: "raw", capabilities: [ffi])
+extern fn rt_closure_nil(k: text) -> text
+SPEOF
+    cat > "$_sd/decl/opt.spl" <<'SPEOF'
+extern fn rt_delegates_nil(k: text) -> text?   # nil when absent
+extern fn rt_maybe_nil_ext(k: text)
+SPEOF
+    : > "$_sd/decl_raw.txt"
+    scan_decls "$_sd/decl" "$_sd/decl_raw.txt"
+    awk -F: 'NR==FNR{n[$1]=1;next} n[$3]' "$_sd/nil.txt" "$_sd/decl_raw.txt" > "$_sd/decl_off.txt"
+    grep -q ':rt_maybe_nil:' "$_sd/decl_off.txt" || { echo "selftest FAIL: class (a) non-optional declaration of a nil-capable extern not flagged"; _fail=1; }
+    grep -q ':rt_always_total:' "$_sd/decl_off.txt" && { echo "selftest FAIL: class (a) declaration of a total extern flagged"; _fail=1; }
+    grep -q ':rt_closure_nil:' "$_sd/decl_off.txt" && { echo "selftest FAIL: class (a) @unsafe raw declaration flagged"; _fail=1; }
+    grep -q ':rt_delegates_nil:' "$_sd/decl_off.txt" && { echo "selftest FAIL: class (a) optional declaration (with trailing comment) flagged"; _fail=1; }
+
     # ---- class (c) fixtures -------------------------------------------------
     mkdir -p "$_sd/cls"
     cat > "$_sd/cls/pos_return.spl" <<'SPEOF'
@@ -547,7 +600,7 @@ if ! selftest; then
     exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — selftest only, 24 fixture(s) checked, 0 failures"
+    echo "PASS — selftest only, 28 fixture(s) checked, 0 failures"
     exit 0
 fi
 
@@ -607,6 +660,30 @@ awk -F: -v root="$ROOT/" 'NR==FNR{k[$0]=1;next}
     "$TMP/off_new_keys.txt" "$TMP/off_all.txt" > "$TMP/off.txt"
 OFF_N=$(awk "END{print NR}" "$TMP/off.txt" 2>/dev/null); [ -n "$OFF_N" ] || OFF_N=0
 
+# ------------------------------------------------------- class (a) leg
+# Every non-@unsafe `extern fn rt_x -> T` (T non-optional, non-unit) whose
+# Rust handler is nil-capable. Same ratchet convention as the other legs.
+: > "$TMP/decl_raw.txt"
+for _r in $SCAN_ROOTS; do
+    scan_decls "$ROOT/$_r" "$TMP/decl_raw.txt"
+done
+DECL_N=$(awk "END{print NR}" "$TMP/decl_raw.txt" 2>/dev/null); [ -n "$DECL_N" ] || DECL_N=0
+if [ "$DECL_N" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 non-optional rt_* extern declarations found under $SCAN_ROOTS)"
+    exit 2
+fi
+awk -F: 'NR==FNR{n[$1]=1;next} n[$3]' "$TMP/nil.txt" "$TMP/decl_raw.txt" > "$TMP/decl_off_all.txt"
+awk -F: -v root="$ROOT/" '{ f=$1; sub("^" root, "", f); print f ":" $3 ":decl" }' "$TMP/decl_off_all.txt" | sort -u > "$TMP/decl_norm.txt"
+BASELINE_A="$SCRIPT_DIR/non_optional_nil_return_classa_baseline.txt"
+if [ -f "$BASELINE_A" ]; then
+    grep -v '^#' "$BASELINE_A" | grep -v '^[[:space:]]*$' | sort -u > "$TMP/base_a.txt"
+else
+    : > "$TMP/base_a.txt"
+fi
+comm -23 "$TMP/decl_norm.txt" "$TMP/base_a.txt" > "$TMP/decl_new.txt"
+comm -13 "$TMP/decl_norm.txt" "$TMP/base_a.txt" > "$TMP/decl_stale.txt"
+BASE_A_N=$(awk "END{print NR}" "$TMP/base_a.txt"); DECL_NEW_N=$(awk "END{print NR}" "$TMP/decl_new.txt"); DECL_STALE_N=$(awk "END{print NR}" "$TMP/decl_stale.txt")
+
 # ------------------------------------------------------- class (c) leg
 # Hand-written `return nil` / bare-nil tail under a non-optional declared
 # return type. Independent of any extern: each such site aborts the moment its
@@ -649,7 +726,15 @@ CLSC_N=$(awk "END{print NR}" "$TMP/classc_new.txt" 2>/dev/null); [ -n "$CLSC_N" 
 STALE_N=$(awk "END{print NR}" "$TMP/classc_stale.txt" 2>/dev/null); [ -n "$STALE_N" ] || STALE_N=0
 cp "$TMP/classc_new.txt" "$TMP/classc.txt"
 
-if [ "$OFF_N" -gt 0 ] || [ "$CLSC_N" -gt 0 ] || [ "$STALE_N" -gt 0 ] || [ "$OFF_STALE_N" -gt 0 ]; then
+if [ "$OFF_N" -gt 0 ] || [ "$CLSC_N" -gt 0 ] || [ "$STALE_N" -gt 0 ] || [ "$OFF_STALE_N" -gt 0 ] || [ "$DECL_NEW_N" -gt 0 ] || [ "$DECL_STALE_N" -gt 0 ]; then
+    if [ "$DECL_NEW_N" -gt 0 ]; then
+        echo "class (a) nil-capable rt_* externs declared non-optional, NOT in the baseline (file:extern:decl):"
+        cat "$TMP/decl_new.txt"
+    fi
+    if [ "$DECL_STALE_N" -gt 0 ]; then
+        echo "stale class (a) baseline entries (remove them from $BASELINE_A):"
+        cat "$TMP/decl_stale.txt"
+    fi
     if [ "$OFF_N" -gt 0 ]; then
         echo "class (b) offenders NOT in the baseline (file:line:fn:return-type:body):"
         cat "$TMP/off.txt"
@@ -666,10 +751,10 @@ if [ "$OFF_N" -gt 0 ] || [ "$CLSC_N" -gt 0 ] || [ "$STALE_N" -gt 0 ] || [ "$OFF_
         echo "stale baseline entries (no longer offenders -- remove them):"
         cat "$TMP/classc_stale.txt"
     fi
-    NAMES=$( { [ "$OFF_N" -gt 0 ] && awk -F: '{print $3}' "$TMP/off.txt"; [ "$CLSC_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc.txt"; [ "$STALE_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc_stale.txt"; } | sort -u | tr '\n' ' ' | sed 's/ $//')
-    echo "FAIL — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s) and $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline, $OFF_N new class (b) + $OFF_STALE_N stale class (b) + $CLSC_N new class (c) + $STALE_N stale baseline entry(ies): $NAMES"
+    NAMES=$( { [ "$OFF_N" -gt 0 ] && awk -F: '{print $3}' "$TMP/off.txt"; [ "$CLSC_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc.txt"; [ "$STALE_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc_stale.txt"; [ "$DECL_NEW_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/decl_new.txt"; [ "$DECL_STALE_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/decl_stale.txt"; } | sort -u | tr '\n' ' ' | sed 's/ $//')
+    echo "FAIL — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s) and $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline, $OFF_N new class (b) + $OFF_STALE_N stale class (b) + $CLSC_N new class (c) + $STALE_N stale baseline entry(ies) + $DECL_NEW_N new class (a) + $DECL_STALE_N stale class (a) of $DECL_N declaration(s): $NAMES"
     exit 1
 fi
 
-echo "PASS — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s) ($BASE_B_N baselined class (b)), $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline (0 new, 0 stale), 0 returning nil through a non-optional type"
+echo "PASS — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s) ($BASE_B_N baselined class (b)), $DECL_N non-optional rt_* declaration(s) ($BASE_A_N baselined class (a)), $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline (0 new, 0 stale), 0 returning nil through a non-optional type"
 exit 0
