@@ -5,7 +5,7 @@ Design: doc/05_design/compiler/rt_mapping_pointer_contract_design.md
 | Stage | Scope | Status |
 |---|---|---|
 | R0 | Baselines and negative fixtures | Partial: pointer-return guard, #5648 |
-| R1 | Canonical contract records and profile view | Not started |
+| R1 | Canonical contract records and profile view | Partial: metadata index only, `scripts/check/rt-binding-index.py` (one record per extern, stable interface id, per-host provider rows, map and pointer verdicts, compile and link UNTESTED). Not done: SDN contract records, profile view, and any compile or link evidence |
 | R2 | Compiler-generated mapping and pointer evidence, both directions | Not started |
 | R3 | End-of-build all-variant audit | Not started |
 | R4 | Warn-to-error migration | Started: shrink the 38-row return baseline |
