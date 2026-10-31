@@ -1,15 +1,57 @@
 use std.spec
 use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1}
+use app.cli.shard_mem_clamp.{build_memory_reserve_kib_for, build_memory_reserve_default_kib_v1, BUILD_MEMORY_RESERVE_CAP_KIB_V1}
+use app.cli.shard_mem_clamp.{build_host_memory_total_kib, build_host_memory_total_kib_from_bytes_field, build_host_memory_total_kib_bounded}
 use app.io.env_ops.{env_get, env_set}
 use app.cli.native_build_main.{native_build_memory_gate_applies_v1, native_build_memory_admission_refusal_v1}
 
-# A build must not start when RAM+commit headroom is below the reserve
-# (default 24 GiB): host filled up during concurrent builds, 2026-10-26.
+# A build must not start when RAM+commit headroom is below the reserve: host
+# filled up during concurrent builds, 2026-10-26. The default reserve is
+# min(24 GiB, installed RAM / 2): the fixed 24 GiB equalled physical RAM on a
+# 24 GiB Mac and refused every self-hosted build there.
 describe "build memory reserve admission":
-    it "defaults the reserve to 24 GiB and honours SIMPLE_BUILD_MEMORY_RESERVE_BYTES":
+    it "scales the default reserve to half of host RAM, capped at 24 GiB":
+        val gib: i64 = 1048576
+        expect(build_memory_reserve_default_kib_v1(8 * gib)).to_equal(4 * gib)
+        expect(build_memory_reserve_default_kib_v1(16 * gib)).to_equal(8 * gib)
+        expect(build_memory_reserve_default_kib_v1(24 * gib)).to_equal(12 * gib)
+        expect(build_memory_reserve_default_kib_v1(48 * gib)).to_equal(24 * gib)
+        expect(build_memory_reserve_default_kib_v1(64 * gib)).to_equal(24 * gib)
+        expect(build_memory_reserve_default_kib_v1(128 * gib)).to_equal(24 * gib)
+        expect(BUILD_MEMORY_RESERVE_CAP_KIB_V1).to_equal(25165824)
+
+    it "keeps the 24 GiB cap when the host total is unknown or junk-small":
+        expect(build_memory_reserve_default_kib_v1(0)).to_equal(25165824)
+        expect(build_memory_reserve_default_kib_v1(-1)).to_equal(25165824)
+        expect(build_memory_reserve_default_kib_v1(1)).to_equal(25165824)
+        expect(build_memory_reserve_kib_for("", 0)).to_equal(25165824)
+        expect(build_memory_reserve_kib_for("junk", -5)).to_equal(25165824)
+
+    it "lets an explicit SIMPLE_BUILD_MEMORY_RESERVE_BYTES win over any host total":
+        expect(build_memory_reserve_kib_for("1073741824", 25165824)).to_equal(1048576)
+        expect(build_memory_reserve_kib_for("1073741824", 0)).to_equal(1048576)
+        expect(build_memory_reserve_kib_for("51539607552", 8388608)).to_equal(50331648)
+        # Sub-KiB bytes still collapse to 0 here; the shell boundary rejects them.
+        expect(build_memory_reserve_kib_for("1023", 25165824)).to_equal(0)
+
+    it "parses sysctl byte totals and bounds Linux totals by a cgroup cap":
+        expect(build_host_memory_total_kib_from_bytes_field("25769803776\n")).to_equal(25165824)
+        expect(build_host_memory_total_kib_from_bytes_field("8589934592")).to_equal(8388608)
+        expect(build_host_memory_total_kib_from_bytes_field("")).to_equal(0)
+        expect(build_host_memory_total_kib_from_bytes_field("x\n")).to_equal(0)
+        expect(build_host_memory_total_kib_bounded(126877696, 25165824)).to_equal(25165824)
+        expect(build_host_memory_total_kib_bounded(25165824, 126877696)).to_equal(25165824)
+        expect(build_host_memory_total_kib_bounded(25165824, 0)).to_equal(25165824)
+        expect(build_host_memory_total_kib_bounded(0, 25165824)).to_equal(25165824)
+        expect(build_host_memory_total_kib_bounded(0, 0)).to_equal(0)
+
+    it "composes the live default from the host probe and honours SIMPLE_BUILD_MEMORY_RESERVE_BYTES":
         val old = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
         env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "")
-        expect(build_memory_reserve_kib()).to_equal(25165824)
+        val live = build_memory_reserve_kib()
+        expect(live).to_equal(build_memory_reserve_kib_for("", build_host_memory_total_kib()))
+        expect(live > 0).to_be_true()
+        expect(live <= 25165824).to_be_true()
         env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1073741824")
         expect(build_memory_reserve_kib()).to_equal(1048576)
         env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", old)
