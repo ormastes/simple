@@ -91,3 +91,33 @@ handling None. Several externs have conflicting declarations across files.
   returning nil both ran clean (rc=0) under `bin/simple run`. The lint keeps
   `has_T` optional (HIR lowers it to `T?`) and `any` non-optional, per the
   rule.
+
+## Progress: extern declarations (2026-10-31, second pass)
+
+- **Guard repaired and wired (PR #5613).** `check-non-optional-nil-return.shs`
+  over-derived nil-capable externs. It joined callees by bare name, so
+  `.collect()` / `fs::write()` matched unrelated in-tree `fn collect`/`fn write`,
+  and it counted `Value::Nil =>` patterns as productions. The nil-capable set
+  dropped from 297 to 195 and the false class (b) rows went away. The guard
+  now looks through `unsafe(...)` wrapper bodies, which made 30 more
+  wrappers visible. They are baselined in
+  `non_optional_nil_return_classb_baseline.txt` (derived, not individually
+  verified), next to the 8 compiler-core class (c) rows. The guard is wired into
+  `code-idiom-gates.yml`. **Any PR that fixes a baselined site must delete its
+  line**, or the guard goes stale-red.
+- **Wrappers fixed (PR #5613):** sffi.io `dir_list`/`file_mmap_read_text`,
+  async mod_stub `file_hash_sha256`, `bootstrap_adhoc_file_hash`, game inspect
+  `_list`, session_token runtime random hex (CSPRNG failure now panics).
+- **Unit externs fixed (PR #5614, merged):** all five. `Stderr.write` and the
+  MIR `__simple_runtime_yield` hook had consumed the phantom result.
+- **Seed behaviour, measured:** a nil returned through `-> text` (extern or
+  wrapper) does NOT abort on the current seed. It leaks a silent wrong value,
+  e.g. `.split` on it gives 0 parts.
+- **New finding:** `rt_stderr_write(data: [u8])` (`io/pipe.spl`) prints the
+  array's display form (`[110, 105, 10]`), not the bytes, because the Rust
+  handler uses `to_display_string()`.
+- **Still open:** `rt_file_read_text` (61 in-scope files, 96 calls, plus about 1,000
+  test-tree declarations), the env and fs declaration sets (follow-up PRs),
+  `rt_enum_payload`/`rt_tuple_get` raw `i64` codegen declarations, and
+  `sffi_minimal.spl file_read_text_ptr` (raw pointer ABI; needs bootstrap
+  verification).

@@ -6,6 +6,7 @@ operator's build memory reserve. Without it the compiler falls back to its
 Hosts: wherever CPython 3 runs (macOS, Linux, FreeBSD, Windows).
 """
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -40,6 +41,35 @@ class LlvmBinTests(unittest.TestCase):
         # matrix no longer keeps SIMPLE_LLVM_BIN across sanitization.
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(m.inherited_build_settings({"SIMPLE_LLVM_BIN": d, KEY: "1"}), {KEY: "1"})
+
+
+@unittest.skipIf(os.name == "nt", "Windows drops the POSIX session contract")
+class NestedSessionTests(unittest.TestCase):
+    """A hello lane run by the BuildRunner worker sits inside the manager's
+    watchdog session. Its own watchdog must join that session: the inherited
+    contract (SIMPLE_BOOTSTRAP_SESSION_ID/EXEC) has to survive SIMPLE_*
+    sanitization, and a lane with it never opens a new session."""
+    SID = "SIMPLE_BOOTSTRAP_SESSION_ID"
+    EXEC = "SIMPLE_BOOTSTRAP_SESSION_EXEC"
+
+    def test_session_contract_survives_sanitization(self):
+        env = {self.SID: "4242", self.EXEC: "/tmp/s/bootstrap-session-exec", "SIMPLE_X": "1"}
+        self.assertEqual(m.inherited_build_settings(env),
+                         {self.SID: "4242", self.EXEC: "/tmp/s/bootstrap-session-exec"})
+
+    def test_partial_or_malformed_contract_refused(self):
+        for env in ({self.SID: "4242"}, {self.EXEC: "/tmp/x"},
+                    {self.SID: "0", self.EXEC: "/tmp/x"},
+                    {self.SID: "12a", self.EXEC: "/tmp/x"},
+                    {self.SID: "4242", self.EXEC: "relative/exec"}):
+            with self.assertRaises(ValueError):
+                m.inherited_build_settings(env)
+
+    def test_nested_lane_joins_session(self):
+        env = {self.SID: "4242", self.EXEC: "/tmp/s/bootstrap-session-exec"}
+        self.assertTrue(m.nested_session(env, windows=False))
+        self.assertFalse(m.nested_session(env, windows=True))
+        self.assertFalse(m.nested_session({}, windows=False))
 
 
 if __name__ == "__main__":
