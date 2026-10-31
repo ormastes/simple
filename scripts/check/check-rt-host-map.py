@@ -26,7 +26,7 @@ HOSTS = {
 }
 KNOWN = set().union(*HOSTS.values()) | {'__NetBSD__', '__OpenBSD__'}
 SUFFIX = {'windows': 'windows', 'win32': 'windows', 'win': 'windows', 'linux': 'linux', 'macos': 'macos',
-          'darwin': 'macos', 'freebsd': 'freebsd', 'simpleos': 'simpleos', 'baremetal': 'simpleos', 'common': 'simpleos'}
+          'darwin': 'macos', 'freebsd': 'freebsd', 'simpleos': 'simpleos'}
 DEF = re.compile(r'^(?!static\b)[\w \t*]*?\b(rt_\w+)[ \t]*\([^;{}]*\)\s*\{', re.M)
 EXT = re.compile(r'^[ \t]*(?:pub[ \t]+)?extern[ \t]+fn[ \t]+(rt_\w+)', re.M)
 RUST = re.compile(r'extern\s+"C"\s+fn\s+(rt_\w+)')
@@ -124,6 +124,8 @@ def host_view(src, host):
 
 
 def file_host(name):
+    if 'startup/baremetal/' in name.replace('\\', '/'):
+        return 'simpleos'
     for tok in re.split(r'[-_./\\]', name.split('src/runtime', 1)[-1]):
         if tok in SUFFIX:
             return SUFFIX[tok]
@@ -132,7 +134,7 @@ def file_host(name):
 
 def files(root, rel, exts):
     for d, dirs, names in os.walk(os.path.join(root, rel)):
-        dirs[:] = [x for x in dirs if x not in ('test', 'tests', 'examples', 'tools', 'vendor', 'target')]
+        dirs[:] = [x for x in dirs if x not in ('test', 'vendor', 'target')]
         for n in sorted(names):
             if n.endswith(exts):
                 yield os.path.join(d, n)
@@ -148,7 +150,7 @@ def scan(root):
     nocomment = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"', re.S)
     for p in files(root, 'src/runtime', ('.c', '.cpp', '.m', '.mm')):
         only = file_host(p)
-        src = re.sub(r'__attribute__\s*\(\(.*?\)\)', ' ', nocomment.sub(' ', read(p)))
+        src = re.sub(r'__attribute__\s*\(\((?:[^()]|\([^()]*\))*\)\)', ' ', nocomment.sub(' ', read(p)))
         for h in HOSTS:
             if only in (None, h):
                 prov[h].update(DEF.findall(host_view(src, h)))
@@ -214,6 +216,7 @@ def selftest():
         ('#if defined(FEATURE_X)\n' + body + '#endif\n', 'a.c', 0),
         (body, 'a_windows.c', 1),
         (body, 'windows/a.c', 1),
+        ('#if defined(__linux__)\n' + body + '#endif\n', 'io_common.c', 1),
         (body, 'startup/baremetal/a.c', 2),
         ('#ifndef __APPLE__\nint y;\n#else\n' + body + '#endif\n', 'a.c', 1),
         ('#if defined(__linux__) || \\\n defined(__APPLE__)\n' + body + '#endif\n', 'a.c', 1),
@@ -226,7 +229,7 @@ def selftest():
         if got != want:
             print('ERROR — selftest case %d wanted %d got %d' % (i, want, got))
             return 2
-    print('PASS — selftest 13 cases')
+    print('PASS — selftest 14 cases')
     return 0
 
 
