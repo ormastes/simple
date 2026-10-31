@@ -2880,6 +2880,10 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t pa
     const char** entries = rt_dir_list_cpath(path, &count);
     if (!entries) return rt_nil;
     int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
+    if (result == 0) {
+        rt_dir_list_free(entries, count);
+        return rt_nil;
+    }
     for (int64_t i = 0; i < count; i++) {
         const char* e = entries[i] ? entries[i] : "";
         rt_array_push((SplArray*)(uintptr_t)result,
