@@ -115,6 +115,44 @@ The capsule receipt check itself was **not** weakened. It is an authenticated
 cache checkpoint and still verifies identity, object existence, source
 identity, fingerprint, and exact receipt text.
 
+## Resolved 2026-10-31 (signature-differing mocks: `dir_create`, `dir_list`, `file_size`, `file_write_bytes`)
+
+Scope: only these four, in both `std.nogc_sync_mut.file_system` and
+`std.nogc_async_mut.file_system`. Items 1-3 under "Still open" stay open for
+the remaining identical-signature mocks (`file_write_text`, `file_read_text`,
+`file_create`, `file_write_lines`, `file_move`, `dir_delete`, ...).
+
+- **Root cause.** `dir_ops.spl` defined `dir_create(path) -> bool` and
+  `dir_list(path) -> [text]?`, `metadata.spl` defined `file_size(path) -> i64?`
+  and `file_ops.spl` defined `file_write_bytes(path, [i64])` as no-effect
+  mocks whose signatures differ from the real `std.nogc_sync_mut.io_runtime`
+  owners. The seed binds an unqualified call by bare name over the whole
+  co-compiled closure (interpreter: flat `functions` map,
+  `src/compiler_rust/compiler/src/interpreter_eval.rs:606`; MIR:
+  last-definition fallback in `mir/lower/lowering_expr_call.rs:847-867`), so the
+  build printed `compiler_cross_module_private_symbol_collision` for all four
+  and calls could reach the wrong body. Independently, `dir_walk_dirs` filtered
+  `dir_walk` output for directories, but `rt_dir_walk` only returns
+  non-directory entries, so it was `[]` for every tree.
+- **Fix (option b, stdlib).** The four mocks are deleted and the modules
+  `export use` the real io_runtime functions. `dir_copy`, `dir_is_empty` and
+  `dir_list_detailed` use `dir_list_optional` (so a read failure is still
+  `false`/`nil`), `dir_list_detailed` reports real `is_directory`/`size`,
+  `dir_size` and `disk_usage` use the `i64` `file_size`, `temp_dir_create`
+  calls `dir_create(path, false)`, `tree_print_recursive` uses the array
+  `dir_list`, and `dir_walk_dirs` walks breadth-first over `dir_list` +
+  `dir_exists`. The four collision warnings no longer appear.
+- **Why not option a.** Making unqualified calls prefer the caller's own or
+  imported symbol needs the caller's module and import table to be carried
+  into candidate selection in two engines: the interpreter, where every module's
+  functions are merged into one by-name map at many insert sites, and MIR
+  lowering, which has no import map. That change is not narrow, and it needs a
+  seed rebuild. `interpreter_bare_fn_name_collision_file_read_text_at_2026-10-30.md`
+  tracks it.
+- **Test.** `test/01_unit/lib/io/file_system_dir_walk_dirs_copy_real_spec.spl`
+  checks filesystem state for sync and async `dir_walk_dirs` / `dir_copy`:
+  0/2 before, 2/2 after.
+
 ## Still open
 
 1. **The mock itself.** `src/lib/nogc_async_mut/file_system/file_ops.spl` still

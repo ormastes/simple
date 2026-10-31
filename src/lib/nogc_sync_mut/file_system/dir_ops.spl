@@ -9,32 +9,18 @@ use std.nogc_sync_mut.file_system.types.{DirEntry}
 use std.nogc_sync_mut.file_system.file_ops.{file_copy}
 use std.nogc_sync_mut.file_system.metadata.{file_is_directory, file_is_file, file_size}
 
-fn dir_create(path: text) -> bool:
-    """Create a directory.
-
-    Args:
-        path: Directory path
-
-    Returns:
-        true on success, false on error
-    """
-    if path == "" or path.contains(".."):
-        return false
-    true
-
-fn dir_list(path: text) -> [text]?:
-    """List directory entries.
-
-    Args:
-        path: Directory path
-
-    Returns:
-        Some(entries) or nil on error
-    """
-    if path == "" or not dir_exists(path):
-        return nil
-    # Mock: return some entries
-    Some(["file1.txt", "file2.txt", "subdir"])
+# `dir_create` and `dir_list` intentionally do NOT live here: this module
+# re-exports the real io_runtime implementations (`dir_create(path, recursive)`,
+# `dir_list(path) -> [text]`, `[]` on error). The mocks that used to sit here
+# (`dir_create(path)` returning true without creating, `dir_list` returning
+# Some(["file1.txt", "file2.txt", "subdir"]) for any existing directory) had
+# DIFFERENT signatures from the real owners. The seed binds unqualified calls by
+# NAME ALONE across the co-compiled closure
+# ([compiler_cross_module_private_symbol_collision]), so they hijacked real
+# callers and broke `dir_copy`/`dir_walk_dirs` here.
+# See doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
+export use std.nogc_sync_mut.io_runtime.{dir_create, dir_list}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional}
 
 fn dir_list_detailed(path: text) -> [DirEntry]?:
     """List directory with detailed entry information.
@@ -45,27 +31,26 @@ fn dir_list_detailed(path: text) -> [DirEntry]?:
     Returns:
         Some(entries) or nil on error
     """
-    val names_opt = dir_list(path)
+    val names_opt = dir_list_optional(path)
     if not names_opt.?:
         return nil
-
-    match names_opt:
-        Some(names):
-            var entries = []
-            for name in names:
-                val full_path = join2(path, name)
-                val entry = DirEntry(
-                    name: name,
-                    path: full_path,
-                    is_file: true,
-                    is_directory: false,
-                    size: 1024
-                )
-                entries.push(entry)
-
-            Some(entries)
-        nil:
-            nil
+    val names = names_opt ?? []
+    var entries = []
+    for name in names:
+        val full_path = join2(path, name)
+        val is_dir = dir_exists(full_path)
+        var entry_size = 0
+        if not is_dir:
+            entry_size = file_size(full_path)
+        val entry = DirEntry(
+            name: name,
+            path: full_path,
+            is_file: not is_dir,
+            is_directory: is_dir,
+            size: entry_size
+        )
+        entries.push(entry)
+    Some(entries)
 
 fn dir_delete(path: text) -> bool:
     """Delete an empty directory.
@@ -122,14 +107,11 @@ fn dir_is_empty(path: text) -> bool:
     Returns:
         true if empty, false otherwise
     """
-    val entries_opt = dir_list(path)
+    val entries_opt = dir_list_optional(path)
     if not entries_opt.?:
         return false
-    match entries_opt:
-        Some(entries):
-            entries.len() == 0
-        nil:
-            false
+    val entries = entries_opt ?? []
+    entries.len() == 0
 
 fn dir_walk_files(root: text) -> [text]:
     """Walk directory and return only file paths.
@@ -156,11 +138,19 @@ fn dir_walk_dirs(root: text) -> [text]:
     Returns:
         Array of directory paths
     """
-    val all_paths = dir_walk(root)
-    var dirs = []
-    for p in all_paths:
-        if file_is_directory(p):
-            dirs.push(p)
+    # `dir_walk` (rt_dir_walk) yields only non-directory entries, so filtering
+    # its output can never find a directory: recurse over `dir_list` instead.
+    var dirs: [text] = []
+    var queue: [text] = [root]
+    var next_index = 0
+    while next_index < queue.len():
+        val current = queue[next_index]
+        next_index = next_index + 1
+        for name in dir_list(current):
+            val full_path = join2(current, name)
+            if dir_exists(full_path):
+                dirs.push(full_path)
+                queue.push(full_path)
     dirs
 
 # reason: positional file_system dir_ops API
@@ -184,25 +174,19 @@ fn dir_copy(src: text, dest: text) -> bool:
         return false
 
     # Copy all entries
-    val entries_opt = dir_list(src)
+    val entries_opt = dir_list_optional(src)
     if not entries_opt.?:
         return false
-
-    match entries_opt:
-        Some(entries):
-            for entry in entries:
-                val src_path = join2(src, entry)
-                val dest_path = join2(dest, entry)
-
-                if dir_exists(src_path):
-                    if not dir_copy(src_path, dest_path):
-                        return false
-                else:
-                    if not file_copy(src_path, dest_path):
-                        return false
-        nil:
-            return false
-
+    val entries = entries_opt ?? []
+    for entry in entries:
+        val src_path = join2(src, entry)
+        val dest_path = join2(dest, entry)
+        if dir_exists(src_path):
+            if not dir_copy(src_path, dest_path):
+                return false
+        else:
+            if not file_copy(src_path, dest_path):
+                return false
     true
 
 # reason: positional file_system dir_ops API
@@ -236,12 +220,7 @@ fn dir_size(path: text) -> i64:
     val entries = dir_walk(path)
     for entry in entries:
         if file_is_file(entry):
-            val size_opt = file_size(entry)
-            match size_opt:
-                Some(size):
-                    total_size = total_size + size
-                nil:
-                    pass
+            total_size = total_size + file_size(entry)
 
     total_size
 

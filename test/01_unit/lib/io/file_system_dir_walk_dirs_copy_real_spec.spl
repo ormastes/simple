@@ -1,0 +1,50 @@
+# Regression (root-cause item 4, 2026-10-31): std.{nogc_sync_mut,nogc_async_mut}
+# .file_system still carried mock `dir_create`, `dir_list`, `file_size` and
+# `file_write_bytes` whose SIGNATURES differ from the real io_runtime owners.
+# The seed's flat function registry binds by NAME ALONE, so the mocks
+# hijacked the real functions (compiler_cross_module_private_symbol_collision
+# warnings) and `dir_walk_dirs` / `dir_copy` never saw the real tree.
+# These cases check FILESYSTEM STATE, not return values.
+use std.spec
+use std.nogc_sync_mut.file_system.dir_ops.{dir_walk_dirs as sync_fs_dir_walk_dirs, dir_copy as sync_fs_dir_copy}
+use std.nogc_async_mut.file_system.dir_ops.{dir_walk_dirs as async_fs_dir_walk_dirs, dir_copy as async_fs_dir_copy}
+use std.nogc_sync_mut.io_runtime.{dir_exists, file_read, file_write, dir_create_all, dir_remove_all, getpid}
+
+fn fs_walk_copy_root(tag: text) -> text:
+    "/tmp/simple_fs_walk_copy_spec_{getpid()}_{tag}"
+
+describe "file_system dir_walk_dirs and dir_copy use the real filesystem":
+    it "dir_walk_dirs returns the real subdirectories":
+        val root = fs_walk_copy_root("walkdirs")
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/a/b")).to_equal(true)
+        expect(file_write("{root}/a/b/f.txt", "x")).to_equal(true)
+        val sync_dirs = sync_fs_dir_walk_dirs(root)
+        val async_dirs = async_fs_dir_walk_dirs(root)
+        var sync_has_b = false
+        for d in sync_dirs:
+            if d.ends_with("/a/b"):
+                sync_has_b = true
+            expect(dir_exists(d)).to_equal(true)
+        var async_has_b = false
+        for d in async_dirs:
+            if d.ends_with("/a/b"):
+                async_has_b = true
+            expect(dir_exists(d)).to_equal(true)
+        expect(sync_has_b).to_equal(true)
+        expect(async_has_b).to_equal(true)
+        val _done = dir_remove_all(root)
+
+    it "dir_copy copies real files and nested directories":
+        val root = fs_walk_copy_root("copy")
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/src/sub")).to_equal(true)
+        expect(file_write("{root}/src/top.txt", "top")).to_equal(true)
+        expect(file_write("{root}/src/sub/inner.txt", "inner")).to_equal(true)
+        expect(sync_fs_dir_copy("{root}/src", "{root}/sync_dst")).to_equal(true)
+        expect(file_read("{root}/sync_dst/top.txt")).to_equal("top")
+        expect(file_read("{root}/sync_dst/sub/inner.txt")).to_equal("inner")
+        expect(async_fs_dir_copy("{root}/src", "{root}/async_dst")).to_equal(true)
+        expect(file_read("{root}/async_dst/top.txt")).to_equal("top")
+        expect(file_read("{root}/async_dst/sub/inner.txt")).to_equal("inner")
+        val _done = dir_remove_all(root)
