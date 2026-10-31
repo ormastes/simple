@@ -32,7 +32,7 @@ val truth = dense_truth()
 val _secret_ready = dense_set_secret(truth_passphrase(truth))
 val dn_view: StorageReadView? = dense_open_view(dense_path(DENSE_BASE))
 val dn_port: DatabaseStoragePortV1 = database_storage_port_v1()
-val dn_overflow = json_value_field(truth, "dn_overflow")
+val dn_overflow = json_value_field(truth, "overflow")
 
 # Copy of the image with a 4-byte big-endian value written at offset.
 fn with_u32(image: [u8], offset: i64, value: i64) -> [u8]:
@@ -72,7 +72,7 @@ fn damaged_view(image: [u8]) -> StorageReadView:
         page_size: v.page_size, page_count: v.page_count, reserved_bytes: v.reserved_bytes,
         text_encoding: v.text_encoding)
 
-# "OK:<rows>" or the storage-dn_port error code for reading `table` of the image.
+# "OK:<rows>" or the storage-port error code for reading `table` of the image.
 fn read_verdict(image: [u8], table: text) -> text:
     match dn_port.read_table(damaged_view(image), table):
         case Ok(rows): "OK:{rows.len()}"
@@ -81,7 +81,7 @@ fn read_verdict(image: [u8], table: text) -> text:
 describe "undamaged controls":
     it "reads the undamaged message table so the damage below is what gets rejected":
         # @req REQ-MSGR-DENSE-PAGER-001
-        step("Read the message table of the dn_view image and a table on an dn_overflow-damaged copy")
+        step("Read the message table of the opened image and a table on an overflow-damaged copy")
         # @capture(statistics): row count of table messages on the undamaged image and of table room on a damaged copy
         val image = dn_view.?.image
         val rows = rows_in(json_value_field(json_value_field(truth, "tables"), "messages"))
@@ -89,15 +89,15 @@ describe "undamaged controls":
         val room_rows = rows_in(json_value_field(json_value_field(truth, "tables"), "room"))
         expect(read_verdict(with_u32(image, tn(dn_overflow, "pointer_image_offset"), 0), "room")).to_equal("OK:{room_rows}")
 
-describe "damaged dn_overflow links are rejected":
-    it "rejects an dn_overflow pointer of zero":
+describe "damaged overflow links are rejected":
+    it "rejects an overflow pointer of zero":
         # @req REQ-MSGR-DENSE-PAGER-002
         step("Zero the dn_overflow link in the leaf cell of message 15 and read the message table")
         # @capture(protocol_binary): 4 bytes at the generator-located dn_overflow pointer set to 0
         val image = dn_view.?.image
         expect(read_verdict(with_u32(image, tn(dn_overflow, "pointer_image_offset"), 0), "messages")).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
 
-    it "rejects an dn_overflow pointer beyond the last page":
+    it "rejects an overflow pointer beyond the last page":
         # @req REQ-MSGR-DENSE-PAGER-003
         step("Point the dn_overflow link far past the page count and read the message table")
         # @capture(protocol_binary): 4 bytes at the generator-located dn_overflow pointer set past the page count
@@ -105,14 +105,14 @@ describe "damaged dn_overflow links are rejected":
         val beyond = tn(truth, "page_count") + 90
         expect(read_verdict(with_u32(image, tn(dn_overflow, "pointer_image_offset"), beyond), "messages")).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
 
-    it "rejects an dn_overflow chain that ends before the payload does":
+    it "rejects an overflow chain that ends before the payload does":
         # @req REQ-MSGR-DENSE-PAGER-004
         step("Zero the next-page link of the first dn_overflow page and read the message table")
         # @capture(protocol_binary): next-page link of the first dn_overflow page set to 0
         val image = dn_view.?.image
         expect(read_verdict(with_u32(image, list_int(dn_overflow, "chain_next_image_offsets", 0), 0), "messages")).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
 
-    it "rejects an dn_overflow chain that loops back on itself":
+    it "rejects an overflow chain that loops back on itself":
         # @req REQ-MSGR-DENSE-PAGER-005
         step("Point the first dn_overflow page's next link at itself and read the message table")
         # @capture(protocol_binary): next-page link of the first dn_overflow page set to its own page number
