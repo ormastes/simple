@@ -163,6 +163,8 @@ and a child environment witness, not a compiler qualification run.
 
 Sanity receipts record `build_memory_reserve_bytes` and
 `build_memory_reserve_source` (explicit/default). Unset remains absent in the
-child environment and selects the current compiler default of 24 GiB. The
+child environment and selects the compiler default, min(24 GiB, installed
+RAM / 2): 24 GiB on hosts of 48 GiB and above, 12 GiB on a 24 GiB host, and
+the 24 GiB cap when the host total cannot be probed. The
 full shell-boundary regression is
 `scripts/check/check-bootstrap-stage2-sanity-environment.shs`.
