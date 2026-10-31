@@ -524,7 +524,7 @@ impl SymbolTable:
         # Preserve the first unqualified spelling.  Qualified lookup reaches
         # the canonical declaration above, including aliases and re-exports.
         if bind_lexical and (not is_canonical_class or self.scopes[self.current_scope.id].symbols.get(name) == nil):
-            self.scopes[self.current_scope.id].symbols[name] = raw_id
+            self.bind_in_current_scope(name, raw_id)
 
         id
 
@@ -558,10 +558,22 @@ impl SymbolTable:
             return
         self.qualified_types[key] = id.id
 
+    me bind_in_current_scope(name: text, raw_id: i64):
+        """Bind `name` lexically, keeping root_scope_symbols a mirror of scope 0.
+
+        `new()` makes the two the same dict, but only compiled lanes share that
+        storage: interpreter dicts are copy-on-write, so the alias forks on the
+        first write and the mirror stays empty. Writing both is a no-op repeat
+        where they are shared. See doc/08_tracking/bug/interpreter_dict_field_alias_forks_2026-10-31.md
+        """
+        self.scopes[self.current_scope.id].symbols[name] = raw_id
+        if self.current_scope.id == 0:
+            self.root_scope_symbols[name] = raw_id
+
     me bind_local_type_if_free(name: text, id: SymbolId):
         """Publish a lexical alias without changing canonical ownership."""
         if self.scopes[self.current_scope.id].symbols.get(name) == nil:
-            self.scopes[self.current_scope.id].symbols[name] = id.id
+            self.bind_in_current_scope(name, id.id)
 
     fn local_type_binding_raw(name: text) -> i64:
         """Raw id bound to `name` in the current scope, or -1."""
@@ -586,7 +598,7 @@ impl SymbolTable:
 
     me rebind_local_type(name: text, id: SymbolId):
         """Make `id` the current scope's unqualified binding of `name`."""
-        self.scopes[self.current_scope.id].symbols[name] = id.id
+        self.bind_in_current_scope(name, id.id)
         self.exact_symbols[name] = id.id
 
     fn lookup_qualified_type(module_name: text, member_name: text) -> SymbolId?:
