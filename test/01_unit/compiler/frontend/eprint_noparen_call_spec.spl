@@ -1,0 +1,99 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+#
+# Regression: no-paren `eprint <expr>` must parse exactly like no-paren
+# `print <expr>`: one call expression statement whose callee is the `eprint`
+# identifier. Before the fix only `print` took the no-paren branch, so
+# `eprint m` split into two expression statements (bare `eprint`, then `m`) and
+# the bare `eprint` reached MIR as `undefined variable eprint`. This broke
+# stage3 for src/app/cli/bootstrap_main.spl (`eprint memory_refusal`).
+#
+# HARNESS NOTE: the parse_full_frontend -> HirLowering -> lower_module pipeline
+# is inlined in every `it` block on purpose (see float_primitive_cast_spec.spl).
+#
+# tag: unit
+
+use std.spec.step
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+
+
+fn count_single_arg_calls(block: HirBlock, want_binary_arg: bool) -> i64:
+    var n = 0
+    for stmt in block.stmts:
+        match stmt.kind:
+            case HirStmtKind.Expr(expr):
+                n = n + call_arg_match(expr, want_binary_arg)
+            case _: pass
+    if block.has:
+        n = n + call_arg_match(block.value, want_binary_arg)
+    n
+
+# 1 when expr is a call with exactly one argument (and, when want_binary_arg,
+# that argument is a binary expression such as `"a: " + m`), else 0.
+fn call_arg_match(expr: HirExpr, want_binary_arg: bool) -> i64:
+    match expr.kind:
+        case HirExprKind.Call(_, args, _):
+            if args.len() != 1:
+                return 0
+            if not want_binary_arg:
+                return 1
+            match args[0].value.kind:
+                case HirExprKind.Binary(_, _, _): return 1
+                case _: return 0
+        case _: return 0
+    0
+
+
+describe "no-paren eprint <expr> parses as a call like print":
+    it "eprint <ident> lowers with zero errors and one call statement":
+        # @req REQ-SSPEC-COMPILER
+        step("eprint <ident> lowers with zero errors and one call statement")
+        val src = "fn main():\n" +
+            "    val m = \"x\"\n" +
+            "    eprint m\n"
+        val parsed = parse_full_frontend(src, "testdata/eprint_noparen_ident.spl", "eprint_noparen_ident", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/eprint_noparen_ident.spl")
+        val hir = hl.lower_module(parsed)
+
+        expect(hl.errors.len()).to_equal(0)
+        var found = false
+        for function_ in hir.functions.values():
+            if function_.name == "main":
+                found = count_single_arg_calls(function_.body, false) == 1
+        expect(found).to_equal(true)
+
+    it "eprint \"a: \" + m lowers with zero errors and one call statement":
+        # @req REQ-SSPEC-COMPILER
+        step("eprint \"a: \" + m lowers with zero errors and one call statement")
+        val src = "fn main():\n" +
+            "    val m = \"x\"\n" +
+            "    eprint \"a: \" + m\n"
+        val parsed = parse_full_frontend(src, "testdata/eprint_noparen_concat.spl", "eprint_noparen_concat", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/eprint_noparen_concat.spl")
+        val hir = hl.lower_module(parsed)
+
+        expect(hl.errors.len()).to_equal(0)
+        var found = false
+        for function_ in hir.functions.values():
+            if function_.name == "main":
+                found = count_single_arg_calls(function_.body, true) == 1
+        expect(found).to_equal(true)
+
+    it "module-level eprint \"x\" + \"y\" lowers with zero errors":
+        # @req REQ-SSPEC-COMPILER
+        step("module-level eprint \"x\" + \"y\" lowers with zero errors")
+        val src = "eprint \"x\" + \"y\"\n"
+        val parsed = parse_full_frontend(src, "testdata/eprint_noparen_module.spl", "eprint_noparen_module", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/eprint_noparen_module.spl")
+        val hir = hl.lower_module(parsed)
+
+        expect(hl.errors.len()).to_equal(0)
