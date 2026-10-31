@@ -91,7 +91,7 @@ fn load_minio_config() -> MinioConfig:
     if not file_exists(path):
         return MinioConfig.default()
     val content: text = match read_file_text_result(path):
-        case Ok(value): value
+        case Ok(bound): bound
         case Err(_): return MinioConfig.default()
     # NOTE: tls_skip_verify enforcement lives at the command boundary
     # (cmd_minio._require_transport), not here — this loader stays a pure
@@ -364,6 +364,8 @@ fn minio_list_buckets(cfg: MinioConfig) -> (bool, [BucketInfo], text):
     val mapped = map_s3_error(resp.status, resp.body, resp.error)
     if mapped.kind != "ok":
         return (false, [], mapped.message)
+    if not resp.body.contains("</ListAllMyBucketsResult>"):
+        return (false, [], "invalid S3 response: not a complete ListAllMyBucketsResult")
     (true, _parse_list_buckets_xml(resp.body), resp.body)
 
 
@@ -431,6 +433,8 @@ fn minio_list_objects(cfg: MinioConfig, bucket: text, prefix: text) -> (bool, [O
         val mapped = map_s3_error(resp.status, resp.body, resp.error)
         if mapped.kind != "ok":
             return (false, all, mapped.message)
+        if not resp.body.contains("</ListBucketResult>"):
+            return (false, all, "invalid S3 response: not a complete ListBucketResult")
         raw_last = resp.body
         val page = _parse_list_objects_xml(resp.body)
         for obj in page.objects:
@@ -452,6 +456,34 @@ class GetObjectResult:
     body: text          # text body for small/text objects
     content_length: i64 # always populated; -1 if unknown
     etag: text
+
+
+fn _minio_header_value(raw_headers: text, name: text) -> text:
+    """First value of a header in a raw response block; "" when absent."""
+    val prefix = name.lower() + ":"
+    for line in raw_headers.split("\n"):
+        if line.trim().lower().starts_with(prefix):
+            return line.trim()[prefix.len():].trim()
+    ""
+
+
+fn _minio_get_checked(url: text, headers: [text]) -> (i64, text, text):
+    """GET that treats a short body as a transport error. rt_http_request turns a
+    failed body read into an empty success and exposes no headers, so a truncated
+    object looked like a valid empty one. v2 exposes both sides of the comparison."""
+    # Typed: the runtime rejects an untyped empty array as "body must be bytes".
+    val no_body: [u8] = []
+    val response: (i64, text, text, [u8], text) = http_request_v2_raw("GET", url, headers, no_body, 30000)
+    # @workaround bug=windows_core_http_client_unavailable_2026_10_27 reason=The core Windows runtime has no native HTTP v2 provider; curl reports a short body itself
+    if response.0 == -1 and response.4.contains("native HTTP is unavailable"):
+        return curl_request_bytes("GET", url, headers, [])
+    if response.0 == -1:
+        return (0, "", response.4)
+    val received: [u8] = response.3
+    val declared = _minio_header_value(response.2, "Content-Length")
+    if declared != "" and declared != "{received.len()}":
+        return (0, "", "truncated response: Content-Length {declared}, received {received.len()} bytes")
+    (response.0, bytes_to_text(received), "")
 
 
 fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: text) -> (bool, GetObjectResult, text):
@@ -486,7 +518,7 @@ fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: tex
     var body = ""
     var err = ""
     while attempt < ITF_RETRY_MAX_ATTEMPTS:
-        val r = rt_http_request("GET", "{cfg.url}{canonical_uri}", sffi, "")
+        val r = _minio_get_checked("{cfg.url}{canonical_uri}", sffi)
         status = r.0
         body = r.1
         err = r.2
@@ -881,7 +913,7 @@ fn minio_put_object(cfg: MinioConfig, bucket: text, key: text, local_path: text)
     current single-request limit. Empty files are successful zero-byte bodies.
     """
     val body: [u8] = match file_read_regular_no_follow_bounded_bytes(local_path, MINIO_MULTIPART_THRESHOLD):
-        case Ok(value): value
+        case Ok(bound): bound
         case Err(reason): return (false, "", reason)
     minio_put_bytes(cfg, bucket, key, body, "application/octet-stream")
 

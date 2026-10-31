@@ -515,6 +515,7 @@ impl MirLowering:
             local_hir_type_resource_states: [],
             fn_return_types: {},
             extern_fn_symbols: {},
+            generic_template_fn_symbols: {},
             extern_result_locals: {},
             static_scalar_locals: {},
             current_function_symbols: [],
@@ -1805,7 +1806,7 @@ impl MirLowering:
 
     # Cycle-144 endgame: dict+key passing. The feed array's modules were
     # copy-corrupted at the big-host push site (cycle-141/144); the module
-    # is bound HERE (mono's process_modules precedent) from the caller's
+    # is bound HERE (the prior process_modules precedent) from the caller's
     # dict, and every functions walk goes through the param-only codec
     # getters (hir_fn_scalars_in_v1 -- the encode-proven access class).
     me prescan_module_struct_names(modules: Dict<text, HirModule>, module_key: text):
@@ -2321,7 +2322,7 @@ impl MirLowering:
            heap-typed globals are `mir_data.spl:_mir_trace_scope_slot` (an
            i64 array whose writes store no heap value) and
            `mir_bitfield.spl:BITFIELD_REGISTRY` (read-only — it has no write
-           site anywhere in the tree); 25.traits, 40.mono and 30.types
+           site anywhere in the tree); 25.traits and 30.types
            declare no heap-typed globals; the only 35.semantics import is the
            bool READER `rt_hal_compilation_requires_finalize`; the only
            15.blocks import is the `BlockValue` type; and none of the std
@@ -2520,7 +2521,7 @@ impl MirLowering:
         Ok(lowered)
 
     me record_exact_extern_declaration_v1(declaration: HirFunction):
-        # This field is issued by mono from the ORIGINAL generic declaration,
+        # This field is issued from the ORIGINAL generic declaration,
         # and survives HIR serialization. Concrete spelling/signature alone
         # never certifies a semantic RuntimeValue facade.
         val runtime_abi: i64 = declaration.extern_runtime_value_abi
@@ -3059,12 +3060,9 @@ impl MirLowering:
                 # #158 Phase C: a generic TEMPLATE is non-emittable (hardening
                 # plan 9.3 step 12). It carries unsubstituted TypeParams, so
                 # lowering it produces opaque pointer-width slots and silent
-                # wrong answers. 40.mono emits the specializations that ARE
-                # reachable; anything still flagged here has zero live
-                # instantiations and must simply not be emitted. A generic
-                # call that mono could NOT rewrite is still a hard error
-                # (E-MONO-030/032). Postmono invariants additionally reject
-                # retained templates under robust/critical profiles.
+                # wrong answers. Generics are erased: nothing specializes a template, so it is never emitted and
+                # every direct call to one is a hard E-GEN-001 error at the
+                # call site (switch_operators_calls.spl lower_call).
                 if fn_.is_generic_template:
                     ()
                 elif not self.hir_function_is_extern(fn_):
@@ -3449,6 +3447,10 @@ impl MirLowering:
                     # `-> i64` result as a declared scalar: `ext() == nil` folded
                     # to false and `take(ext())` boxed a nil word as Some.
                     self.extern_fn_symbols[prescan_fn.symbol.id] = true
+                if prescan_fn.is_generic_template:
+                    # Recorded before any body lowers so a call to a template
+                    # declared later in the module is still refused (E-GEN-001).
+                    self.generic_template_fn_symbols[prescan_fn.symbol.id] = true
                 if prescan_trace:
                     eprint("[mir-prescan-function] done module={module.name} index={psi} name={prescan_fn.name}")
             psi = psi + 1

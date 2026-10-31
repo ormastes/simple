@@ -1,0 +1,65 @@
+# Acceptance layer: history (limit 9) over the dense encrypted database.
+#
+# ONE production Messenger verb call over the dense encrypted database, made once
+# at load and shared by every scenario below.  A successful read decrypts all
+# nine pages (about 45 s each on the Phase 1 seed), so each success-path verb
+# lives in its own file to stay inside the per-spec time budget.  Expected
+# payloads are serialised by Python's json.dumps in the generator and parsed
+# back here; nothing is compared with a value the adapter produced itself.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: messenger-history-above-limit
+
+"""
+## Purpose and audience
+Purpose: history with a limit above the room's message count returns exactly the messages that exist, not padded and not an error.
+Audience: DevHub release reviewers who accept the encrypted Messenger read path.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field, json_value_items, json_value_len}
+use app.devhub.messenger.adapter.sqlcipher_reader.{
+    messenger_sqlcipher4_list_rooms, messenger_sqlcipher4_list_members,
+    messenger_sqlcipher4_history, messenger_sqlcipher4_fetch_message
+}
+
+val dn_truth = dense_truth()
+val dn_good = truth_passphrase(dn_truth)
+val _secret_ready = dense_set_secret(dn_good)
+val dn_target = dense_target_with(dense_path(DENSE_BASE), DENSE_REF, true)
+val dn_result = messenger_sqlcipher4_history(dn_target, "1", 9, "user")
+
+describe "history limit 9 through the production verb":
+    it "returns exactly the messages and order the generator computed":
+        # @req REQ-MSGR-DENSE-ACC-HIST9-001
+        step("Call history for room 1 with limit 9 and compare the payload with the json.dumps ground truth")
+        # @capture(protocol_json): history status, exit code and payload against the ground-truth payload
+        expect(outcome_line(dn_result)).to_equal("ok:0:payload")
+        expect(dn_result.payload == expected_history(dn_truth, "1", 9)).to_equal(true)
+        expect(history_ids(dn_result.payload)).to_equal(expected_ids(dn_truth, "1", 9))
+
+    it "renders valid JSON whose count equals the number of messages returned":
+        # @req REQ-MSGR-DENSE-ACC-HIST9-002
+        step("Parse the payload and compare its count with the messages array")
+        # @capture(statistics): parsed count against the length of the messages array
+        val parsed = payload_json(dn_result.payload)
+        expect(payload_is_json(dn_result.payload)).to_equal(true)
+        expect(tn(parsed, "count")).to_equal(json_value_len(json_value_field(parsed, "messages")))
+        expect(json_value_len(json_value_field(parsed, "messages"))).to_equal(5)
+
+    it "never returns another room's messages or the secret":
+        # @req REQ-MSGR-DENSE-ACC-HIST9-003
+        step("Search the payload for room 2 content and the passphrase")
+        # @capture(statistics): occurrences of foreign content in the history payload, which must be none
+        expect(leaks_none(dn_result.payload, ["other-room-only", "filler-", dn_good, "SQLite format"])).to_equal(true)
+
+    it "reports the real count rather than the requested limit":
+        # @req REQ-MSGR-DENSE-ACC-HIST9-004
+        step("Compare the payload count with the number of messages in room 1")
+        # @capture(statistics): payload count against the ground-truth message count of room 1
+        val orders = json_value_field(dn_truth, "history_order")
+        expect(payload_count(dn_result.payload)).to_equal(json_value_len(json_value_field(orders, "1")))

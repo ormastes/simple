@@ -42,6 +42,8 @@ class PageContent:
     ref: PageRef
     body_storage: text
 
+val CONFLUENCE_MAX_PAGES: i64 = 100
+
 class PageListItem:
     id: text
     title: text
@@ -84,7 +86,7 @@ fn _confluence_curl_argv(auth: text, method: text, url: text, payload: text, que
         argv = argv + ["-G"]
         for q in query:
             argv = argv + ["--data-urlencode", q]
-    argv + ["-w", "\n%\{http_code\}", url]
+    argv + ["-g", "-w", "\n%\{http_code\}", url]
 
 
 fn _confluence_configured_argv(auth: text, method: text, url: text, payload: text, query: [text], headers: [text]) -> [text]:
@@ -131,7 +133,8 @@ fn _confluence_request(config: ItfConfig, method: text, path: text, payload: tex
                 return (0, message)
             Ok(configured):
                 headers = configured
-    val argv = _confluence_configured_argv(confluence_auth_header(config), method, "{root}{path}", payload, query, headers)
+    val url = if path.starts_with("http://") or path.starts_with("https://"): path else: "{root}{path}"
+    val argv = _confluence_configured_argv(confluence_auth_header(config), method, url, payload, query, headers)
     val (stdout, stderr, exit_code) = sosix_process_run("curl", argv)
     confluence_response_result(stdout, stderr, exit_code)
 
@@ -243,6 +246,74 @@ fn _ok(status: i64) -> bool:
 # Public API
 # ============================================================================
 
+fn confluence_next_url(config: ItfConfig, next: text) -> (text, text):
+    """Resolve a `_links.next` value to (url, error). The credentialed request may
+    only go to this client's own REST content root, whatever the response says:
+    `_links.base` is server-supplied too, so it is never used. Relative links are
+    rooted at /rest/api/content; absolute ones must already be under the root."""
+    val root = confluence_content_root(config)
+    val outside = "Confluence pagination link is outside the configured endpoint"
+    if next.contains("\\") or next.contains("\r") or next.contains("\n") or next.contains("\t") or next.contains("#") or next.contains(".."):
+        return ("", outside)
+    val relative_root = "/rest/api/content"
+    if next.starts_with(relative_root):
+        val rest = next[relative_root.len():]
+        if rest.starts_with("/") or rest.starts_with("?"):
+            return (root + rest, "")
+        return ("", outside)
+    if next.starts_with(root + "/") or next.starts_with(root + "?"):
+        return (next, "")
+    ("", outside)
+
+
+fn _confluence_collect(config: ItfConfig, first_body: text, limit: i64) -> (bool, [PageListItem], text):
+    """Follow `_links.next` from a first page until absent or `limit` items, failing
+    loudly on a foreign link, a repeated link, or the page cap."""
+    val (first_ok, first_items, first_raw) = _parse_results(first_body)
+    if not first_ok:
+        return (false, [], first_raw)
+    var items = first_items
+    var body = first_body
+    var raw_rows: [text] = []
+    var visited: [text] = []
+    var pages = 1
+    while true:
+        val parsed = json_value_parse_opt(body).unwrap()
+        val rows = json_value_field(parsed, "results")
+        var i = 0
+        while i < json_value_len(rows):
+            raw_rows = raw_rows + [json_value_serialize(json_value_at(rows, i))]
+            i = i + 1
+        val links = json_value_field(parsed, "_links")
+        val next = if json_value_has(parsed, "_links"): _json_str(links, "next") else: ""
+        if next == "" or items.len() >= limit:
+            break
+        if pages >= CONFLUENCE_MAX_PAGES:
+            return (false, items, "confluence: stopped after {CONFLUENCE_MAX_PAGES} pages with results remaining; lower --limit")
+        val (url, refused) = confluence_next_url(config, next)
+        if refused != "":
+            return (false, items, refused)
+        if visited.contains(url):
+            return (false, items, "Confluence pagination link repeated; refusing to loop")
+        visited = visited + [url]
+        val (status, page_body) = _confluence_request(config, "GET", url, "", [])
+        if not _ok(status):
+            return (false, items, page_body)
+        val (page_ok, page_items, page_raw) = _parse_results(page_body)
+        if not page_ok:
+            return (false, items, page_raw)
+        items = items + page_items
+        body = page_body
+        pages = pages + 1
+    if items.len() > limit:
+        items = items[:limit]
+    if raw_rows.len() > limit:
+        raw_rows = raw_rows[:limit]
+    if pages == 1:
+        return (true, items, first_body)
+    (true, items, "\{\"results\": [" + raw_rows.join(", ") + "]\}")
+
+
 fn confluence_list_pages(config: ItfConfig, space_key: text, limit: i64) -> (bool, [PageListItem], text):
     """List pages in a space. Returns: (success, items, raw_json_for_--json_mode)"""
     var query = ["type=page", "limit={limit}", "expand=version,space"]
@@ -251,7 +322,7 @@ fn confluence_list_pages(config: ItfConfig, space_key: text, limit: i64) -> (boo
     val (status, body) = _confluence_request(config, "GET", "", "", query)
     if not _ok(status):
         return (false, [], body)
-    _parse_results(body)
+    _confluence_collect(config, body, limit)
 
 
 fn confluence_get_page(config: ItfConfig, page_id: text) -> (bool, PageContent, text):
@@ -336,4 +407,4 @@ fn confluence_search_pages(config: ItfConfig, query: text, space_key: text, limi
     val (status, body) = _confluence_request(config, "GET", "/search", "", params)
     if not _ok(status):
         return (false, [], body)
-    _parse_results(body)
+    _confluence_collect(config, body, limit)

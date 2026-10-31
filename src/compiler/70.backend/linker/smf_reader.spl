@@ -32,18 +32,11 @@ use compiler.hir.hir_types.{Effect}
 #
 # The SmfReaderImpl implements the SmfReader trait from obj_taker.spl.
 
-# ponytail: NoteSdnMetadata has ONE terminal declaration, in
-# compiler.mono.monomorphize.note_sdn. The 1-field `empty: bool` stub that used to
-# live here shadowed the real 7-field type for every wildcard importer of this
-# module (link.spl:22, module_loader.spl:16, module_loader_lib_support.spl:15),
-# each of which ALSO wildcard-imports note_sdn - so one name carried two terminal
-# identities in a single scope, and the type is an enum payload
-# (LazyInstantiationResult.Success, lazy_instantiator.spl:45). The old comment
-# claiming note_sdn cannot be imported here is stale: lazy_instantiator.spl:8,
-# link.spl:18 and smf_cache.spl:18 all import it today.
+# The note.sdn section (type 13) and its NoteSdnMetadata type were deleted
+# (2026-10-31). `has_note_sdn` below is only the
+# header flag bit (0x20) kept for wire compatibility; nothing reads the section.
 use compiler.backend.linker.obj_taker (SmfSymbol, SymbolType, SymbolBinding, SmfReader)
 use compiler.backend.linker.smf_enums (Platform, Arch, CompressionType)
-use compiler.mono.monomorphize.note_sdn (NoteSdnMetadata)
 use std.io_runtime.{file_exists, file_read_bytes}
 # The single SMF-decoding owner. Named import, NOT a wildcard: see the
 # ponytail note above for why a wildcard here would collide identities.
@@ -64,7 +57,7 @@ use compiler.backend.linker.smf_reader_memory.{SmfMemoryHeader, SmfReaderMemory,
 # RESOLVED 2026-08-17 (doc/08_tracking/bug/smf_reader_bridge_silent_nil.md).
 # `SmfReaderFfi` keeps its name and `open()`/`close()` signatures so no
 # consumer of `SmfReaderImpl` (link.spl, object_provider.spl,
-# object_resolver.spl, lazy_instantiator.spl, smf_getter.spl,
+# object_resolver.spl, smf_getter.spl,
 # 99.loader/loader/module_loader.spl) changes shape.
 struct SmfReaderFfi:
     handle: i64
@@ -219,7 +212,6 @@ struct SmfReaderImpl:
     # eagerly at open() -- unlike SmfReaderMemory's own lazy `symbols` field --
     # because that is what this direct-field caller already assumes.
     symbols: Dict<text, SmfSymbol>
-    note_sdn_cache: NoteSdnMetadata?
 
 impl SmfReader for SmfReaderImpl:
     static fn open(path: text) -> Result<SmfReaderImpl, text>:
@@ -240,8 +232,7 @@ impl SmfReader for SmfReaderImpl:
             sffi: sffi,
             file_path: path,
             header: header,
-            symbols: symbols,
-            note_sdn_cache: nil
+            symbols: symbols
         ))
 
     fn path() -> text:
@@ -286,35 +277,12 @@ impl SmfReader for SmfReaderImpl:
 
         Ok(section_data[data_start..data_end])
 
-    me read_note_sdn() -> NoteSdnMetadata:
-        # Read note.sdn metadata section.
-        if self.note_sdn_cache != nil:
-            return self.note_sdn_cache
-
-        val note_section_index = self.find_note_sdn_section()
-        if note_section_index >= 0:
-            val section_data = self.sffi.mem.read_section_by_index(note_section_index as i64)
-            if section_data.len() > 0:
-                val sdn_text = bytes_to_string(section_data)
-                val metadata = parse_note_sdn(sdn_text)
-                self.note_sdn_cache = metadata
-                return metadata
-
-        # No note.sdn section found or section is empty -- return empty metadata.
-        val metadata = NoteSdnMetadata.new()
-        self.note_sdn_cache = metadata
-        metadata
-
     fn find_section_by_type(section_type: i32) -> i32:
         # Preserve the legacy missing/error sentinel while consulting actual
         # section headers. Typed callers use the memory reader's Result API.
         match self.sffi.mem.find_section_by_type(section_type):
             case Ok(index): index as i32
             case Err(_): -1
-
-    fn find_note_sdn_section() -> i32:
-        # Find the note.sdn section index.
-        self.find_section_by_type(13)
 
     fn exported_symbols() -> [SmfSymbol]:
         # Get all exported (global/weak) symbols.
@@ -394,10 +362,6 @@ fn bytes_to_string(bytes: [u8]) -> text:
             return chars.join("")
         chars.push(char_from_byte(b))
     chars.join("")
-
-fn parse_note_sdn(sdn_text: text) -> NoteSdnMetadata:
-    # Stub: returns empty metadata (real impl in compiled mode)
-    NoteSdnMetadata.new()
 
 # ============================================================================
 # Exports

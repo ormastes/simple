@@ -1,0 +1,307 @@
+# Scripted HTTP/1.1 emulator for DevHub near-system tests. Runs as its OWN OS
+# process on a REAL loopback socket (TcpListener.bind on 127.0.0.1:0), because
+# DevHub's adapters block on a child `curl`/`gh` and a single interpreter
+# process cannot serve itself meanwhile.
+#
+# It asserts what the client sent. Each request is checked in order against the
+# next row of the script file: method, request target (path + query, exact),
+# required/forbidden headers and the body. Any difference is logged as MISMATCH
+# and answered with HTTP 599 so a client bug cannot parse its way to a pass.
+#
+# Env: EMU_SCRIPT (rows, re-read per request so a spec swaps scenarios without
+# restarting), EMU_LOG (event log the spec verifies), EMU_PORTFILE (written once
+# listening), EMU_FIXTURES (root for @file bodies). Exits after EMU_IDLE_MS with no
+# connection, so an aborted spec leaves no process behind; the runtime watchdog does
+# NOT reap it (measured: two orphans outlived SIMPLE_TIMEOUT_SECONDS by 4 hours).
+# Each accepted stream is forced blocking: on Windows accept_timeout leaves it
+# non-blocking (doc/08_tracking/bug/tcp_accept_timeout_nonblocking_stream_windows_2026-10-31.md).
+#
+# Script row, tab separated:
+#   GEN <n>          (first line; a new n resets the cursor)
+#   <method> <target> <header-asserts> <body-assert> <status> <resp-headers> <body> <mode>
+# Empty fields are "-". Lists use " ;; " between items.
+#   header-assert: Name=exact | Name^prefix | !Name (must be absent) | @sigv4=AK:SECRET:REGION
+#   body-assert:   any | none | eq:<text> | has:<a> ;; <b>
+#   body:          @relative/file | literal text; __EMU_BASE__ -> http://host:port
+#   mode:          - | truncate (Content-Length past the real body) | drop (close, no bytes)
+# POST /__emu/shutdown ends the process.
+
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.io.types.{Shutdown}
+use std.nogc_sync_mut.sffi.net.{io_tcp_set_nonblocking}
+use std.common.char_from_code_pure.{char_from_code}
+use std.io_runtime.{read_file_text_result, file_write, time_now_unix_micros}
+use std.env.{env_get}
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use test.fixtures.devhub.emulated.emu_sigv4.{sigv4_verify_wire}
+
+val MAX_HEADER_LINE = 65536
+val EMU_IDLE_MS: i64 = 120000
+
+class Req:
+    method: text
+    target: text
+    host: text
+    headers: [text]
+    body: text
+
+class State:
+    gen_id: text
+    cursor: i64
+    log: text
+    log_path: text
+
+    me note(line: text):
+        self.log = self.log + line + "\n"
+        val _ = file_write(self.log_path, self.log)
+
+fn read_request(stream: TcpStream) -> Req?:
+    val first = stream.read_line_bounded(MAX_HEADER_LINE)
+    if first.is_err():
+        return nil
+    val request_line = first.unwrap().trim()
+    if request_line == "":
+        return nil
+    val parts = request_line.split(" ")
+    if parts.len() < 2:
+        return nil
+    var headers: [text] = []
+    var length: i64 = 0
+    var reading = true
+    while reading:
+        val line_res = stream.read_line_bounded(MAX_HEADER_LINE)
+        if line_res.is_err():
+            reading = false
+        else:
+            val line = line_res.unwrap().trim()
+            if line == "":
+                reading = false
+            else:
+                headers = headers + [line]
+                if line.lower().starts_with("content-length:"):
+                    length = line[15:].trim().to_i64()
+    var body = ""
+    if length > 0:
+        val body_res = stream.read_exact(length)
+        if body_res.is_ok():
+            body = bytes_to_text(body_res.unwrap())
+    var target = parts[1]
+    var host = ""
+    # Absolute-form request target: a forward-proxied client such as gh.
+    if target.starts_with("http://"):
+        val rest = target[7:]
+        val slash = rest.find("/")
+        if slash >= 0:
+            host = rest[0:slash]
+            target = rest[slash:]
+    Req(method: parts[0], target: target, host: host, headers: headers, body: body)
+
+fn header_value(req: Req, name: text) -> text:
+    """Value of `name`, or the sentinel \\0 when absent (a present empty header is "")."""
+    val prefix = name.lower() + ":"
+    for line in req.headers:
+        if line.lower().starts_with(prefix):
+            return line[prefix.len():].trim()
+    "\u{0000}"
+
+fn split_list(field: text) -> [text]:
+    if field == "-" or field == "":
+        return []
+    field.split(" ;; ")
+
+fn check_header(req: Req, assertion: text, origin: text) -> text:
+    """Empty when the assertion holds, otherwise the mismatch description."""
+    if assertion.starts_with("@sigv4="):
+        val parts = assertion[7:].split(":")
+        return sigv4_verify_wire(req.method, req.target, req.headers, req.body, parts[0], parts[1], parts[2])
+    if assertion.starts_with("!"):
+        val name = assertion[1:]
+        val got = header_value(req, name)
+        if got != "\u{0000}":
+            return "header {name} must be absent, got [{got}]"
+        return ""
+    val eq_at = assertion.find("=")
+    val caret_at = assertion.find("^")
+    val is_exact = eq_at >= 0 and (caret_at < 0 or eq_at < caret_at)
+    val at = if is_exact: eq_at else: caret_at
+    if at < 0:
+        return "bad header assertion [{assertion}]"
+    val name = assertion[0:at]
+    val want = assertion[at + 1:].replace("__EMU_BASE__", origin)
+    val got = header_value(req, name)
+    if got == "\u{0000}":
+        return "header {name} missing, wanted [{want}]"
+    if is_exact and got != want:
+        return "header {name}: wanted [{want}] got [{got}]"
+    if not is_exact and not got.starts_with(want):
+        return "header {name}: wanted prefix [{want}] got [{got}]"
+    ""
+
+fn check_body(body: text, assertion: text) -> text:
+    if assertion == "any" or assertion == "-" or assertion == "":
+        return ""
+    if assertion == "none":
+        if body != "":
+            return "body must be empty, got [{body}]"
+        return ""
+    if assertion.starts_with("eq:"):
+        val want = assertion[3:]
+        if body != want:
+            return "body: wanted [{want}] got [{body}]"
+        return ""
+    if assertion.starts_with("has:"):
+        for needle in split_list(assertion[4:]):
+            if not body.contains(needle):
+                return "body lacks [{needle}], got [{body}]"
+        return ""
+    "bad body assertion [{assertion}]"
+
+fn hex_value(code: i64) -> i64:
+    if code >= 48 and code <= 57: return code - 48
+    if code >= 65 and code <= 70: return code - 55
+    if code >= 97 and code <= 102: return code - 87
+    -1
+
+fn decode_target(target: text) -> text:
+    """Percent- and form-decode, as a real server does: %2C, %2c and "," name the
+    same value, and curl's -G writes a space as +. A double-encoded or wrongly
+    named parameter still differs. S3 signature checks keep the raw wire form."""
+    val question = target.find("?")
+    val path = if question >= 0: target[0:question] else: target
+    val query = if question >= 0: target[question + 1:].replace("+", " ") else: ""
+    val source = path + "?" + query
+    var out = ""
+    var i = 0
+    while i < source.len():
+        val ch = source[i]
+        if ch == "%" and i + 2 < source.len():
+            val high = hex_value(source.char_code_at(i + 1))
+            val low = hex_value(source.char_code_at(i + 2))
+            if high >= 0 and low >= 0:
+                out = out + char_from_code(high * 16 + low)
+                i = i + 3
+                continue
+        out = out + ch
+        i = i + 1
+    out
+
+fn reason_phrase(status: i64) -> text:
+    if status == 200: return "OK"
+    if status == 201: return "Created"
+    if status == 204: return "No Content"
+    if status == 400: return "Bad Request"
+    if status == 401: return "Unauthorized"
+    if status == 403: return "Forbidden"
+    if status == 404: return "Not Found"
+    if status == 409: return "Conflict"
+    if status == 429: return "Too Many Requests"
+    if status == 500: return "Internal Server Error"
+    if status == 503: return "Service Unavailable"
+    "Emulator Mismatch"
+
+fn send_response(stream: TcpStream, status: i64, resp_headers: [text], body: text, mode: text):
+    if mode == "drop":
+        return
+    val body_len = text_to_utf8_bytes(body).len()
+    val declared = if mode == "truncate": body_len + 4096 else: body_len
+    var head = "HTTP/1.1 {status} {reason_phrase(status)}\r\n"
+    for h in resp_headers:
+        head = head + h + "\r\n"
+    head = head + "Content-Length: {declared}\r\nConnection: close\r\n\r\n"
+    val _ = stream.write_text(head + body)
+    val _f = stream.flush()
+
+fn load_body(field: text, fixtures: text, origin: text) -> text:
+    if field == "-" or field == "":
+        return ""
+    var body = field
+    if field.starts_with("@"):
+        match read_file_text_result(fixtures + "/" + field[1:]):
+            Ok(content): body = content
+            Err(_): return "EMU-MISSING-FIXTURE {field}"
+    body.replace("__EMU_BASE__", origin)
+
+fn serve_one(stream: TcpStream, state: State, script_path: text, fixtures: text) -> bool:
+    val req_opt = read_request(stream)
+    if req_opt == nil:
+        state.note("BADREQ")
+        return true
+    val req: Req = req_opt
+    # From the request, as a real service does: local_addr() text picks up an
+    # Option::Some(...) wrapper when concatenated on the seed.
+    val origin = "http://" + header_value(req, "Host")
+    if req.target == "/__emu/shutdown":
+        send_response(stream, 200, [], "bye", "-")
+        state.note("SHUTDOWN")
+        return false
+    var script = ""
+    match read_file_text_result(script_path):
+        Ok(content): script = content
+        Err(_): pass
+    val lines = script.split("\n")
+    val gen_id = if lines.len() > 0 and lines[0].starts_with("GEN\t"): lines[0][4:].trim() else: ""
+    if gen_id != state.gen_id:
+        state.gen_id = gen_id
+        state.cursor = 0
+    val now_ms = time_now_unix_micros() / 1000
+    val index = state.cursor
+    state.cursor = state.cursor + 1
+    state.note("REQ\t{gen_id}\t{index}\t{now_ms}\t{req.method}\t{req.target}\thost={req.host}")
+    if index + 1 >= lines.len() or lines[index + 1].trim() == "":
+        state.note("MISMATCH\t{gen_id}\t{index}\tunexpected request beyond script: {req.method} {req.target}")
+        send_response(stream, 599, [], "emu: unexpected request", "-")
+        return true
+    val row = lines[index + 1].split("\t")
+    if row.len() < 8:
+        state.note("MISMATCH\t{gen_id}\t{index}\tbad script row")
+        send_response(stream, 599, [], "emu: bad script row", "-")
+        return true
+    var failures: [text] = []
+    if req.method != row[0]:
+        failures = failures + ["method: wanted {row[0]} got {req.method}"]
+    if req.target != row[1] and decode_target(req.target) != decode_target(row[1]):
+        failures = failures + ["target: wanted [{row[1]}] got [{req.target}]"]
+    for assertion in split_list(row[2]):
+        val problem = check_header(req, assertion, origin)
+        if problem != "":
+            failures = failures + [problem]
+    val body_problem = check_body(req.body, row[3])
+    if body_problem != "":
+        failures = failures + [body_problem]
+    if failures.len() > 0:
+        for failure in failures:
+            state.note("MISMATCH\t{gen_id}\t{index}\t{failure}")
+        send_response(stream, 599, [], "emu: client request mismatch", "-")
+        return true
+    send_response(stream, row[4].to_i64(), split_list(row[5]), load_body(row[6], fixtures, origin), row[7])
+    true
+
+fn main():
+    val script_path = env_get("EMU_SCRIPT")
+    val log_path = env_get("EMU_LOG")
+    val port_path = env_get("EMU_PORTFILE")
+    val fixtures = env_get("EMU_FIXTURES")
+    val state = State(gen_id: "", cursor: 0, log: "", log_path: log_path)
+    val bound = TcpListener.bind("127.0.0.1:0")
+    if bound.is_err():
+        state.note("BIND_FAILED")
+        return
+    var listener = bound.unwrap()
+    val addr = listener.local_addr().unwrap()
+    # Written last: its presence proves the socket is already listening.
+    val _ = file_write(port_path, addr)
+    var running = true
+    while running:
+        val accepted = listener.accept_timeout(EMU_IDLE_MS)
+        if accepted.is_err():
+            state.note("IDLE_EXIT")
+            running = false
+        else:
+            var stream = accepted.unwrap()
+            val _b = io_tcp_set_nonblocking(stream.fd, false)
+            running = serve_one(stream, state, script_path, fixtures)
+            val _s = stream.shutdown(Shutdown.Both)
+            val _c = stream.close()
+    val _l = listener.close()
+
+main()

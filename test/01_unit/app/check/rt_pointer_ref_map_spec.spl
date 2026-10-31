@@ -27,13 +27,26 @@ use std.spec.*
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-fn gate(c: text, spl: text) -> i64:
+fn gate_run(c: text, spl: text) -> (text, i64):
     val script = "t=$(mktemp -d); mkdir -p $t/src/runtime $t/src/lib; printf '%b' \"$1\" > $t/src/runtime/a.c; printf '%b' \"$2\" > $t/src/lib/a.spl; python3 -I scripts/check/check-rt-pointer-ref-map.py --root $t"
-    val (_out, _err, code) = rt_process_run("sh", ["-c", script, "gate", c, spl])
+    val (out, _err, code) = rt_process_run("sh", ["-c", script, "gate", c, spl])
+    return (out, code)
+
+fn gate(c: text, spl: text) -> i64:
+    val (_out, code) = gate_run(c, spl)
     return code
+
+fn gate_param_run(c: text, spl: text, base: text) -> (text, i64):
+    val script = "t=$(mktemp -d); mkdir -p $t/src/runtime $t/src/lib $t/scripts/check; printf '%b' \"$1\" > $t/src/runtime/a.c; printf '%b' \"$2\" > $t/src/lib/a.spl; printf '%b' \"$3\" > $t/scripts/check/rt_param_ref_map_baseline.txt; python3 -I scripts/check/check-rt-pointer-ref-map.py --root $t"
+    val (out, _err, code) = rt_process_run("sh", ["-c", script, "gate", c, spl, base])
+    return (out, code)
 
 val NIL_C = "char *rt_x(void) {\\n if (a) return NULL;\\n return b;\\n}\\n"
 val OK_C = "char *rt_x(void) {\\n return b;\\n}\\n"
+val ENF_C = "char *rt_x(void) {\\n return SIMPLE_RT_NONNULL(\"rt_x\", b);\\n}\\n"
+val MIX_C = "char *rt_x(void) {\\n if (a) return NULL;\\n return SIMPLE_RT_NONNULL(\"rt_x\", b);\\n}\\n"
+val PTR_C = "char *rt_x(char *a);\\n"
+val PART_C = "char *rt_x(void) {\\n if (a) return SIMPLE_RT_NONNULL(\"rt_x\", p);\\n return b;\\n}\\n"
 
 describe "rt pointer map classification":
     it "fails a nullable C return declared as bare text":
@@ -75,3 +88,138 @@ describe "rt pointer map classification":
     it "sees a null in the true branch of a ternary":
         step("Classify the null-first ternary")
         expect(gate("char *rt_x(void) {\\n return bad ? NULL : p;\\n}\\n", "extern fn rt_x() -> text\\n")).to_equal(1)
+
+    it "counts a body whose every return is SIMPLE_RT_NONNULL as enforced, not UNKNOWN":
+        step("Classify the fully bridged body")
+        val (out, code) = gate_run(ENF_C, "extern fn rt_x() -> text\\n")
+        expect(code).to_equal(0)
+        expect(out).to_contain("enforced=1 ")
+        expect(out).to_contain("UNKNOWN=0 ")
+
+    it "keeps a body that mixes SIMPLE_RT_NONNULL with return NULL nil":
+        step("Classify the mixed body")
+        val (out, code) = gate_run(MIX_C, "extern fn rt_x() -> text\\n")
+        expect(code).to_equal(1)
+        expect(out).to_contain("enforced=0 ")
+
+    it "keeps a partly bridged body UNKNOWN, not enforced":
+        step("Classify the partly bridged body")
+        val (out, code) = gate_run(PART_C, "extern fn rt_x() -> text\\n")
+        expect(code).to_equal(0)
+        expect(out).to_contain("enforced=0 ")
+        expect(out).to_contain("UNKNOWN=1 ")
+
+describe "rt parameter direction":
+    it "fails a .spl optional crossing a bare C pointer parameter":
+        step("Classify the T? parameter")
+        val (out, code) = gate_param_run(PTR_C, "extern fn rt_x(a: text?) -> text\\n", "")
+        expect(code).to_equal(1)
+        expect(out).to_contain("SNULL002 new param mismatch")
+
+    it "fails a .spl reference crossing a bare C pointer parameter":
+        step("Classify the &T parameter")
+        val (out, code) = gate_param_run(PTR_C, "extern fn rt_x(a: &text) -> text\\n", "")
+        expect(code).to_equal(1)
+        expect(out).to_contain("SNULL003 new param mismatch")
+
+    it "passes a bare .spl text parameter across a C pointer":
+        step("Classify the bare parameter")
+        val (_out, code) = gate_param_run(PTR_C, "extern fn rt_x(a: text) -> text\\n", "")
+        expect(code).to_equal(0)
+
+    it "fails a pointer parameter declared as i32":
+        step("Classify the narrowed parameter")
+        val (out, code) = gate_param_run(PTR_C, "extern fn rt_x(a: i32) -> text\\n", "")
+        expect(code).to_equal(1)
+        expect(out).to_contain("SRT004 narrow pointer param")
+
+    it "fails a new C and .spl parameter count mismatch":
+        step("Classify the count mismatch")
+        val (out, code) = gate_param_run("char *rt_x(int64_t n, int64_t m);\\n", "extern fn rt_x(a: i64) -> text\\n", "")
+        expect(code).to_equal(1)
+        expect(out).to_contain("SRT003 new param count mismatch")
+        expect(out).to_contain("SRT003=1 ")
+
+    it "joins a .spl pair of i64 to a C pointer and length without a count mismatch":
+        step("Classify the unfolded i64 pair")
+        val (out, code) = gate_param_run("char *rt_x(const uint8_t *p, uint64_t p_len);\\n", "extern fn rt_x(p: i64, n: i64) -> text\\n", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")
+
+    it "folds a text pointer and its length into one .spl slot":
+        step("Classify the text ABI pair")
+        val (_out, code) = gate_param_run("char *rt_x(const uint8_t *p, uint64_t p_len);\\n", "extern fn rt_x(a: text) -> text\\n", "")
+        expect(code).to_equal(0)
+
+    it "accepts an unnamed pointer parameter and a variadic tail":
+        step("Classify the unnamed and variadic forms")
+        val (_out, code) = gate_param_run("char *rt_x(char *, ...);\\n", "extern fn rt_x(a: text) -> text\\n", "")
+        expect(code).to_equal(0)
+
+    it "counts an unparsed function-pointer parameter as UNKNOWN, never as checked":
+        step("Classify the function pointer")
+        val (out, code) = gate_param_run("char *rt_x(int (*cb)(void *));\\n", "extern fn rt_x(cb: text) -> text\\n", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("unparsed=1 ")
+
+    it "holds a SNULL row recorded in the param baseline":
+        step("Classify the baselined mismatch")
+        val (_out, code) = gate_param_run(PTR_C, "extern fn rt_x(a: text?) -> text\\n", "src/lib/a.spl:rt_x:0:text?\\n")
+        expect(code).to_equal(0)
+
+    it "fails a stale param baseline row":
+        step("Classify the stale row")
+        val (_out, code) = gate_param_run(PTR_C, "extern fn rt_x(a: text) -> text\\n", "src/lib/a.spl:rt_x:0:text?\\n")
+        expect(code).to_equal(1)
+
+    it "prints param coverage with the edge and pointer counts":
+        step("Classify the coverage line")
+        val (out, _code) = gate_param_run(PTR_C, "extern fn rt_x(a: text) -> text\\n", "")
+        expect(out).to_contain("param coverage: edges=1 ptr_params=1 unparsed=0 SRT003=0")
+
+    it "folds a byte-pointer length named n into one text slot":
+        step("Classify the n companion")
+        val (out, code) = gate_param_run("char *rt_x(const uint8_t *p, int64_t n);\\n", "extern fn rt_x(a: text) -> text\\n", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")
+
+    it "folds kl and dl after two byte pointers":
+        step("Classify the kl and dl companions")
+        val (out, code) = gate_param_run("char *rt_x(const uint8_t *k, int64_t kl, const uint8_t *d, int64_t dl);\\n", "extern fn rt_x(a: text, b: text) -> text\\n", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")
+
+    it "folds a count after a char pointer into one text slot":
+        step("Classify the char count companion")
+        val (out, code) = gate_param_run("char *rt_x(const char *s, int64_t count);\\n", "extern fn rt_x(a: text) -> text\\n", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")
+
+    it "does not fold a count after a non-byte pointer":
+        step("Classify the non-byte count")
+        val (out, code) = gate_param_run("char *rt_x(const int32_t *p, int64_t count);\\n", "extern fn rt_x(a: text) -> text\\n", "")
+        expect(code).to_equal(1)
+        expect(out).to_contain("SRT003 new param count mismatch")
+
+    it "does not fold a bare n after a char pointer":
+        step("Classify the bare n after char")
+        # an i64 return is not a pointer edge, so the pointer anchor rt_y keeps the run non-empty
+        val (out, code) = gate_param_run("int64_t rt_x(const char *path, int64_t n);\\nchar *rt_y(void) {\\n return b;\\n}\\n", "extern fn rt_x(path: text) -> i64\\nextern fn rt_y() -> text\\n", "")
+        expect(code).to_equal(1)
+        expect(out).to_contain("SRT003 new param count mismatch")
+        expect(out).to_contain("SRT003=1 ")
+
+    it "does not fold a second integer after a pointer already paired with its length":
+        step("Classify the second integer")
+        val (out, code) = gate_param_run("char *rt_x(const uint8_t *p, uint64_t p_len, int64_t count);\\n", "extern fn rt_x(a: text, n: i64) -> text\\n", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")
+
+    it "joins the hosted safe artifact bundle n_begin shape without a count mismatch":
+        step("Classify the bundle n_begin shape")
+        # a pointer return keeps the return pass non-empty; the params are the bundle n_begin shape
+        val c = "char *rt_x(int64_t root, const uint8_t* bundle, uint64_t bundle_len, const uint8_t* descriptor, uint64_t descriptor_len, int64_t count, int64_t max_bytes);\\n"
+        val spl = "extern fn rt_x(root_handle: i64, bundle: text, descriptor_leaf: text, count: i64, aggregate_max_bytes: i64) -> i64\\n"
+        val (out, code) = gate_param_run(c, spl, "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")

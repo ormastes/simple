@@ -8,9 +8,6 @@ use compiler.driver.cache.hir_body_typecheck_lease_v1.{
 use compiler.driver.cache.driver_hir_archive_authority_v1.{
     DriverHirRuntimeStdArchiveSelectionV1,
     driver_hir_archive_input_from_runtime_std_selection_v1}
-use compiler.mono.mono_archive_registration_v1.{
-    MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
-    mono_archive_collect_registration_in_owned_scope_v1}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
     transient_scope_end, transient_promote}
@@ -131,7 +128,6 @@ struct DriverHirShardTransactionReceiptV1:
     # successfully reclaimed UNCACHED work. Negative values are infrastructure failures.
     status: i64
     archive: HirBodyArchiveV1?
-    declaration_registration: MonoArchiveRegistrationReceiptV1?
 
 # The only issuer is the actual selected-source transaction below. Neither an
 # archive store nor a journal publisher can populate these private lookups.
@@ -182,40 +178,8 @@ fn driver_hir_source_body_actual_lowerer_v1(driver: CompilerDriver,
         lowering: actual, serial: _driver_source_body_serial_v1, context_key: context_key)
     Ok(actual)
 
-fn driver_hir_source_body_prepare_custody_in_owned_scope_v1(driver: CompilerDriver,
-        archive: HirBodyArchiveV1, source_index: i64) -> Result<DriverHirSourceBodyCustodyV1, text>:
-    val driver_word = driver.identity_id
-    if transient_array_scope_state_v1() != 1 or not _driver_source_body_custody_ready_v1 or
-            not _driver_source_body_lowerers_v1.has(driver_word): return Err("source-body custody private owner absent")
-    val owner: DriverHirSourceLoweringOwnerV1 = _driver_source_body_lowerers_v1[driver_word]
-    val context = driver_hir_source_body_context_in_owned_scope_v1(driver, archive, source_index,
-        driver_hir_explicit_semantic_policy(driver.ctx), driver_hir_forbids_written_any(driver.ctx))
-    if context == "" or owner.context_key != driver_hir_source_body_lowerer_key_v1(driver, archive.input):
-        return Err("source-body custody actual parsed source context differs")
-    Ok(DriverHirSourceBodyCustodyV1(archive: archive, driver_word: driver_word,
-        driver_serial: owner.serial, source_index: source_index, context_digest: context))
-
-fn driver_hir_source_body_custody_matches_in_owned_scope_v1(driver: CompilerDriver,
-        archive: HirBodyArchiveV1, source_index: i64) -> bool:
-    val driver_word = driver.identity_id
-    if transient_array_scope_state_v1() != 1 or not _driver_source_body_custody_ready_v1 or
-            not _driver_source_body_lowerers_v1.has(driver_word) or
-            not _driver_source_body_custody_v1.has("{driver_word}:{archive.archive_key}"): return false
-    if not hir_body_archive_matches_v1(archive, archive.input): return false
-    val actual: DriverHirSourceBodyCustodyV1 = _driver_source_body_custody_v1["{driver_word}:{archive.archive_key}"]
-    val owner: DriverHirSourceLoweringOwnerV1 = _driver_source_body_lowerers_v1[driver_word]
-    if actual.driver_word != driver_word or actual.driver_serial != owner.serial or actual.source_index != source_index or
-            actual.archive.source_key != archive.source_key or actual.archive.body_digest != archive.body_digest or
-            actual.archive.lowering_warnings_digest != archive.lowering_warnings_digest or
-            owner.context_key != driver_hir_source_body_lowerer_key_v1(driver, archive.input): return false
-    val context = driver_hir_source_body_context_in_owned_scope_v1(driver, archive, source_index,
-        driver_hir_explicit_semantic_policy(driver.ctx), driver_hir_forbids_written_any(driver.ctx))
-    # @workaround bug=BUG-2026-10-12-CONTEXT-COMPARISON recover=36df8df31c639e19d6b4947b3e5fa8aad0c32c75 reason=Rust seed treats a context comparison tail as a context statement
-    return context != "" and context == actual.context_digest
-
 fn driver_hir_failed_shard_receipt_v1(status: i64) -> DriverHirShardTransactionReceiptV1:
-    DriverHirShardTransactionReceiptV1(status: status,
-        archive: nil, declaration_registration: nil)
+    DriverHirShardTransactionReceiptV1(status: status, archive: nil)
 
 pub fn driver_hir_shard_cache_stored_v1(status: i64) -> bool:
     status == 0 or status == 1
@@ -704,43 +668,12 @@ impl CompilerDriver:
     ) -> i64:
         # Existing shard/default route deliberately requests no bounded receipts.
         val receipt = self.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, is_entry, cache_key, nil, nil, -1)
+            lowering, source, is_entry, cache_key, nil, -1)
         receipt.status
-
-    me lower_streaming_hir_archived_shard_transaction_v1(
-        lowering: HirLowering, source: SourceFile, source_index: i64, is_entry: bool,
-        selection: DriverHirRuntimeStdArchiveSelectionV1,
-        registration_owner: MonoArchiveRegistrationOwnerV1
-    ) -> Result<DriverHirShardTransactionReceiptV1, text>:
-        # Prerequisite only: no production main-loop selection is added.
-        if transient_array_scope_state_v1() != 0:
-            return Err("HIR archive driver lease already occupied")
-        if not self.streaming_surface_owner_ready:
-            return Err("HIR archive driver frozen surface owner unavailable")
-        val receipt = self.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, is_entry, "", Some(selection), Some(registration_owner), source_index)
-        # The caller publishes the declaration delta in its original collector
-        # order only AFTER this returned, closed transaction. No body escapes.
-        Ok(receipt)
-
-    me lower_streaming_hir_selected_archived_shard_transaction_v1(
-        lowering: HirLowering, source: SourceFile, source_index: i64, is_entry: bool,
-        registration_owner: MonoArchiveRegistrationOwnerV1
-    ) -> Result<DriverHirShardTransactionReceiptV1, text>:
-        if transient_array_scope_state_v1() != 0:
-            return Err("HIR archive driver lease already occupied")
-        if not self.streaming_surface_owner_ready:
-            return Err("HIR archive driver frozen surface owner unavailable")
-        if val Some(selected) = self.hir_archive_managed_runtime_selection:
-            Ok(self.lower_streaming_hir_shard_receipt_transaction_v1(
-                lowering, source, is_entry, "", nil, Some(registration_owner), source_index, Some(selected)))
-        else:
-            Err("HIR archive selected production provider owner unavailable")
 
     me lower_streaming_hir_shard_receipt_transaction_v1(
         lowering: HirLowering, source: SourceFile, is_entry: bool, cache_key: text,
-        archive_selection: DriverHirRuntimeStdArchiveSelectionV1?,
-        registration_owner: MonoArchiveRegistrationOwnerV1?, source_index: i64,
+        archive_selection: DriverHirRuntimeStdArchiveSelectionV1?, source_index: i64,
         managed_selection: DriverHirManagedRuntimeSelectionV1? = nil
     ) -> DriverHirShardTransactionReceiptV1:
         val representation_contexts = representation_invocation_context_index_v1(self.ctx)
@@ -832,8 +765,6 @@ impl CompilerDriver:
         var errors: [text] = []
         var warnings: [text] = []
         var archived_body: HirBodyArchiveV1? = nil
-        var declaration_registration: MonoArchiveRegistrationReceiptV1? = nil
-        var source_body_custody: DriverHirSourceBodyCustodyV1? = nil
         val parser_binding = hir_cache_parser_binding_v1(transaction_cache_key,
             source.module_name, source.path, sha256_text(source.content), self.ctx.options.library_mode)
         var parsed_classification_known = false
@@ -940,22 +871,7 @@ impl CompilerDriver:
                         # failures are infrastructure errors here.
                         eprint("[hir-shard] archive store refused (codec, not I/O); module will be lowered by the main build: {source.path}")
                 else:
-                    val archive = archived.unwrap()
-                    archived_body = Some(archive)
-                    if val Some(owner) = registration_owner:
-                        val registered = mono_archive_collect_registration_in_owned_scope_v1(
-                            owner, module, module.name, archive)
-                        if registered.is_err():
-                            infrastructure_error = "HIR shard declaration registration: {registered.unwrap_err()}"
-                        else:
-                            declaration_registration = Some(registered.unwrap())
-                            val custody = driver_hir_source_body_prepare_custody_in_owned_scope_v1(self, archive, source_index)
-                            if custody.is_err():
-                                infrastructure_error = custody.unwrap_err()
-                            else:
-                                source_body_custody = Some(custody.unwrap())
-                    else:
-                        infrastructure_error = "HIR shard archive registration owner unavailable"
+                    archived_body = Some(archived.unwrap())
 
         # Retain diagnostics and genuinely phase-wide memo/registry roots only.
         # Module bodies and their symbol-table snapshots stay transient, including
@@ -980,8 +896,6 @@ impl CompilerDriver:
         # Exact additional escape set: archive descriptor and compact delta.
         # Neither contains HirModule, full declaration bodies or SymbolTables.
         val archive_owned = archived_body == nil or rt_transient_heap_promote(archived_body)
-        val registration_owned = declaration_registration == nil or rt_transient_heap_promote(declaration_registration)
-        val custody_owned = source_body_custody == nil or rt_transient_heap_promote(source_body_custody)
         # Flat rows are unnecessary in a cache worker. Remove their references
         # before reclaiming the graph; the final compiler loads the complete cache.
         driver_rollback_flat_hir_row_or_abort(flat_rows_before)
@@ -992,7 +906,7 @@ impl CompilerDriver:
             actual_lowering.lowered_trait_count_value = 0
         hir_cache_clear_last_warnings()
         if not (errors_owned and warnings_owned and failure_owned and abi_owned and memos_owned and frontend_owned and
-                cache_reason_owned and archive_owned and registration_owned and cfg_owned and custody_owned):
+                cache_reason_owned and archive_owned and cfg_owned):
             val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             # Partial root promotion cannot authorize another task in this
             # process. The parent records an incomplete infrastructure failure.
@@ -1019,12 +933,8 @@ impl CompilerDriver:
         if not stored and not store_refused_codec:
             self.ctx.add_error("HIR shard completed without a durable module")
             return driver_hir_failed_shard_receipt_v1(-1)
-        if val Some(custody) = source_body_custody:
-            # Install only after every ownership, reverse-reference and error
-            # gate succeeded and scratch closed. No full body is retained.
-            _driver_source_body_custody_v1["{custody.driver_word}:{custody.archive.archive_key}"] = custody
         DriverHirShardTransactionReceiptV1(status: if cached: 0 elif stored: 1 else: 3,
-            archive: archived_body, declaration_registration: declaration_registration)
+            archive: archived_body)
 
     me lower_and_check_streaming_surfaces_impl() -> bool:
         pp_declare_parse_scope(self.ctx.runtime_std_full_inventory_selection != nil, self.ctx.native_target)
@@ -2344,7 +2254,7 @@ impl CompilerDriver:
                         name, hir_module.path, hir_module.structs,
                         hir_module.symbols)
                     if layout_scoped:
-                        # @workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23 reason=stage2 mono cannot infer T from a field-access argument to transient_promote<T>; typed locals carry the same handles
+                        # @workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23 reason=stage2 compiler cannot infer T from a field-access argument to transient_promote<T>; typed locals carry the same handles
                         val layout_structs_v: [ValueStructLayoutStructV1] = layout_projection.structs
                         val layout_symbols_v: Dict<i64, ValueStructLayoutSymbolV1> = layout_projection.struct_symbols
                         val layout_paused = transient_scope_pause()
@@ -2488,7 +2398,7 @@ impl CompilerDriver:
         # while HIR reports the module clean; this line decides where the
         # declaration ownership is lost:
         #   enums>=1 for lib.common.sdn.value here -> the module payload is
-        #     intact at handoff; the loss is in monomorphization or MIR's
+        #     intact at handoff; the loss is in MIR's
         #     scope build (next probe surface).
         #   enums=0  -> the loss is INSIDE the HIR lowering/reuse lane (the
         #     canonical-reuse guard handed another unit's payload under this
@@ -2501,7 +2411,7 @@ impl CompilerDriver:
                 # VALUES length BEFORE the deep read (separate eprints, so
                 # the length survives a deep-read fault). values_len=0 would
                 # mean the dict handle fails the runtime's as_dict cast (the
-                # empty-array path), reconciling mono's successful dict-index
+                # empty-array path), reconciling the prior successful dict-index
                 # reads with the .values()-array element faults.
                 eprint("[race-trace] hir-final module={race_key} enums={race_mod.enums.len()} classes={race_mod.classes.len()} functions={race_mod.functions.len()} fvals_len={hir_module_functions_at_v1(phase_hir_modules.values(), 0).values().len()}")
                 eprint("[race-trace] hir-final-idx first_fn_name={hir_module_first_fn_name_ordered_in_v1(phase_hir_modules, race_key)}")
@@ -2650,17 +2560,4 @@ impl CompilerDriver:
         (ctx, not ctx.has_errors())
 use compiler.common.diagnostics.span.{Span}
 export DriverHirShardTransactionReceiptV1
-export driver_hir_source_body_custody_matches_in_owned_scope_v1
 
-# Phase-1 owner reset. No caller body/digest can create a replacement pin.
-pub fn driver_hir_source_body_revoke_driver_v1(driver: CompilerDriver) -> bool:
-    if transient_array_scope_state_v1() != 0: return false
-    if not _driver_source_body_custody_ready_v1: return true
-    val word = driver.identity_id
-    _driver_source_body_lowerers_v1.remove(word)
-    for key in _driver_source_body_custody_v1.keys():
-        if _driver_source_body_custody_v1[key].driver_word == word:
-            _driver_source_body_custody_v1.remove(key)
-    true
-
-export driver_hir_source_body_revoke_driver_v1

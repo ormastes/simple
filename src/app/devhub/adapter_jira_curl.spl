@@ -33,6 +33,9 @@ use app.devhub.request_headers.{gateway_request_headers}
 # Client
 # ---------------------------------------------------------------------------
 
+val JIRA_SEARCH_MAX_PAGES: i64 = 100
+
+
 class JiraClient:
     base_url: text       # e.g. "https://yourorg.atlassian.net" or "https://host/jira" (no trailing slash)
     email: text
@@ -441,11 +444,9 @@ fn jira_curl_search(client: JiraClient, jql: text, fields: text, limit: i64) -> 
     # Cloud: POST /search/jql — Data Center: POST /search (same body).
     val url = jira_search_url(_jira_site(client))
 
-    # Build JSON body. fields "*all" means everything; empty string means default.
-    val esc_jql = escape_json(jql)
-    var body = "\{\"jql\":\"{esc_jql}\",\"maxResults\":{limit}"
+    # Fields array, shared by every page. "*all" means everything; "" the default.
+    var fields_json = ""
     if fields != "":
-        # Split comma-separated fields into a JSON array.
         val parts = fields.split(",")
         var arr = "["
         var i = 0
@@ -456,35 +457,60 @@ fn jira_curl_search(client: JiraClient, jql: text, fields: text, limit: i64) -> 
                     arr = arr + ","
                 arr = arr + "\"{escape_json(f)}\""
             i = i + 1
-        arr = arr + "]"
-        body = body + ",\"fields\":{arr}"
-    body = body + "\}"
+        fields_json = ",\"fields\":" + arr + "]"
 
-    val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_post(auth, url, body))
-
-    if exit_code != 0:
-        return (false, [], "curl exit {exit_code}: {stderr}")
-
-    val (resp_body, code) = _split_response(stdout)
-    if not _status_ok(code):
-        return (false, [], _status_message(code, resp_body))
-
-    val parsed_opt = json_value_parse_opt(resp_body)
-    if parsed_opt == nil:
-        return (false, [], "invalid JSON from Jira")
-    val parsed = parsed_opt.unwrap()
-
+    val esc_jql = escape_json(jql)
     var issues: [JiraIssue] = []
-    val issues_arr = json_value_field(parsed, "issues")
-    if json_value_type(issues_arr) == "array":
-        val n = json_value_len(issues_arr)
-        var i = 0
-        while i < n:
-            val item = json_value_at(issues_arr, i)
-            issues = issues + [_parse_jira_issue(item)]
-            i = i + 1
+    var raw_items: [text] = []
+    var first_body = ""
+    var token = ""
+    var seen_tokens: [text] = []
+    var pages = 0
+    while true:
+        if pages >= JIRA_SEARCH_MAX_PAGES:
+            return (false, issues, "jira search: stopped after {JIRA_SEARCH_MAX_PAGES} pages with results remaining; narrow the JQL or lower --limit")
+        var body = "\{\"jql\":\"{esc_jql}\",\"maxResults\":{limit - issues.len()}" + fields_json
+        if token != "":
+            body = body + ",\"nextPageToken\":\"{escape_json(token)}\""
+        body = body + "\}"
 
-    (true, issues, resp_body)
+        val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_post(auth, url, body))
+        if exit_code != 0:
+            return (false, [], "curl exit {exit_code}: {stderr}")
+
+        val (resp_body, code) = _split_response(stdout)
+        if not _status_ok(code):
+            return (false, [], _status_message(code, resp_body))
+
+        val parsed_opt = json_value_parse_opt(resp_body)
+        if parsed_opt == nil:
+            return (false, [], "invalid JSON from Jira")
+        val parsed = parsed_opt.unwrap()
+        pages = pages + 1
+        if pages == 1:
+            first_body = resp_body
+
+        val issues_arr = json_value_field(parsed, "issues")
+        if json_value_type(issues_arr) == "array":
+            val n = json_value_len(issues_arr)
+            var i = 0
+            while i < n and issues.len() < limit:
+                val item = json_value_at(issues_arr, i)
+                issues = issues + [_parse_jira_issue(item)]
+                raw_items = raw_items + [json_value_serialize(item)]
+                i = i + 1
+
+        val next_token = if json_value_type(json_value_field(parsed, "nextPageToken")) == "string": _jstr(parsed, "nextPageToken") else: ""
+        if next_token == "" or issues.len() >= limit:
+            break
+        if seen_tokens.contains(next_token):
+            return (false, issues, "jira search: server repeated a nextPageToken; refusing to loop")
+        seen_tokens = seen_tokens + [next_token]
+        token = next_token
+
+    if pages == 1:
+        return (true, issues, first_body)
+    (true, issues, "\{\"issues\":[" + raw_items.join(",") + "]\}")
 
 
 fn jira_curl_create_issue(
