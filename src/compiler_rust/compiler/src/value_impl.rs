@@ -330,6 +330,14 @@ impl Value {
         }
     }
 
+    /// Store `value` under the same key as `stored`, keeping its key wrapper.
+    pub fn rewrap_dict_entry(stored: &Value, value: Value) -> Value {
+        match stored {
+            Value::Tuple(items) if is_dict_entry_marker(items) => Value::wrap_dict_entry(&items[1], value),
+            _ => value,
+        }
+    }
+
     /// The value slot inside a stored dict entry, for writing through it in place.
     pub fn dict_entry_value_mut(stored: &mut Value) -> &mut Value {
         if matches!(stored, Value::Tuple(items) if is_dict_entry_marker(items)) {

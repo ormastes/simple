@@ -57,6 +57,23 @@ pub(crate) struct Place {
     pub projections: Vec<Projection>,
 }
 
+/// Frame key recording that parameter `name` is a borrow. Holds the
+/// `Value::BorrowMut` it was bound from, or `Nil` for a bare argument to a
+/// parameter declared `&mut T`. The NUL keeps it out of the user's namespace.
+pub(crate) fn borrow_param_marker(name: &str) -> String {
+    format!("\0borrow:{name}")
+}
+
+/// True when `expr` is an lvalue with an index in it, whose re-evaluation could
+/// run user code or see a changed variable.
+pub(crate) fn place_has_index(expr: &Expr) -> bool {
+    match expr {
+        Expr::Index { .. } => true,
+        Expr::FieldAccess { receiver, .. } => place_has_index(receiver),
+        _ => false,
+    }
+}
+
 /// Resolve `expr` to a place, or `None` when it is not one.
 ///
 /// The root must be an identifier that is currently bound in `env` (a module

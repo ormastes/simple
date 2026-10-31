@@ -297,6 +297,13 @@ fn is_2d_array(arr: &[Value]) -> bool {
 }
 
 /// Check if a value is a pointer type (can be dereferenced)
+/// A borrowed aggregate parameter binds as the plain value (see
+/// `unwrap_aggregate_borrow`), so `*p` on it is the value itself.
+fn operand_is_borrow_param(operand: &Expr, env: &Env) -> bool {
+    matches!(operand, Expr::Identifier(name)
+        if env.contains_key(&crate::interpreter::place::borrow_param_marker(name)))
+}
+
 fn is_pointer_type(val: &Value) -> bool {
     matches!(
         val,
@@ -1519,6 +1526,30 @@ pub(super) fn eval_op_expr(
                 }
             }
 
+            // `&mut a[f()]` names one element: resolve it once and keep it, so
+            // the call's write-back reaches that element without running f again.
+            if matches!(op, UnaryOp::RefMut) && crate::interpreter::place::place_has_index(operand) {
+                use crate::interpreter::place::{place_slot_ref, resolve_place, Projection};
+                if let Some(place) = resolve_place(operand, env, functions, classes, enums, impl_methods)? {
+                    let slot = place_slot_ref(env, &place).cloned();
+                    let current = match (slot, place.projections.last(), operand.as_ref()) {
+                        (Some(value), _, _) => Some(value),
+                        // A packed array's scalar elements have no slot to borrow.
+                        (None, Some(Projection::Index(Value::Int(index))), Expr::Index { receiver, .. }) => {
+                            let frozen = Expr::Index {
+                                receiver: receiver.clone(),
+                                index: Box::new(Expr::Integer(*index)),
+                            };
+                            Some(evaluate_expr(&frozen, env, functions, classes, enums, impl_methods)?)
+                        }
+                        _ => None,
+                    };
+                    if let Some(current) = current {
+                        return Ok(Some(Value::BorrowMut(BorrowMutValue::at_place(current, place))));
+                    }
+                }
+            }
+
             let val = evaluate_expr(operand, env, functions, classes, enums, impl_methods)?;
 
             // Check for unit type safety
@@ -1572,7 +1603,7 @@ pub(super) fn eval_op_expr(
                     }
                     UnaryOp::Deref => {
                         // E1054 - Invalid Dereference
-                        if !is_pointer_type(&val) {
+                        if !is_pointer_type(&val) && !operand_is_borrow_param(operand, env) {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::INVALID_DEREFERENCE)
                                 .with_help("dereference operator (*) can only be applied to pointer types")
@@ -1604,7 +1635,7 @@ pub(super) fn eval_op_expr(
             }
 
             // E1054 - Invalid Dereference (check for non-unit types)
-            if matches!(op, UnaryOp::Deref) && !is_pointer_type(&val) {
+            if matches!(op, UnaryOp::Deref) && !is_pointer_type(&val) && !operand_is_borrow_param(operand, env) {
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_DEREFERENCE)
                     .with_help("dereference operator (*) can only be applied to pointer types")

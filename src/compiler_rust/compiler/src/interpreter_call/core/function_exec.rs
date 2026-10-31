@@ -753,10 +753,16 @@ pub(crate) fn execute_function_body(
 
     for param in &func.params {
         local_env.mark_local(param.name.clone());
+        if param_is_borrow_mut(param) {
+            local_env.insert(crate::interpreter::place::borrow_param_marker(&param.name), Value::Nil);
+        }
     }
 
     // Insert bound arguments into environment
     for (name, val) in bound_args {
+        if matches!(val, Value::BorrowMut(_)) {
+            local_env.insert(crate::interpreter::place::borrow_param_marker(&name), val.clone());
+        }
         local_env.insert(name, unwrap_aggregate_borrow(val));
     }
 
@@ -1461,8 +1467,6 @@ fn param_is_borrow_mut(param: &simple_parser::ast::Parameter) -> bool {
 /// this one deliberately ignores the task #91 value-type exclusion: an explicit
 /// `&mut` is what opts a `struct` out of value semantics. A throwing callee
 /// publishes nothing, matching the by-value write-back's contract.
-///
-/// An index inside the borrowed place is evaluated again here, after the call.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_back_borrow_arguments(
     func: &FunctionDef,
@@ -1475,6 +1479,18 @@ pub(crate) fn write_back_borrow_arguments(
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
 ) -> Result<(), CompileError> {
+    let is_ref_mut = |arg: &Argument| {
+        matches!(
+            &arg.value,
+            Expr::Unary {
+                op: simple_parser::ast::UnaryOp::RefMut,
+                ..
+            }
+        )
+    };
+    if !args.iter().any(is_ref_mut) && !func.params.iter().any(param_is_borrow_mut) {
+        return Ok(());
+    }
     let params: Vec<_> = func
         .params
         .iter()
@@ -1510,6 +1526,17 @@ pub(crate) fn write_back_borrow_arguments(
             continue;
         };
         let new_val = peel_borrow_mut(callee_val);
+        // The place the `&mut` expression resolved when it was evaluated.
+        if is_ref_mut(arg) {
+            if let Some(Value::BorrowMut(borrow)) =
+                local_env.get(&crate::interpreter::place::borrow_param_marker(&param.name))
+            {
+                if let Some(place) = borrow.place() {
+                    crate::interpreter::place::write_place(outer_env, place, new_val);
+                    continue;
+                }
+            }
+        }
         // A caller variable that is itself a live borrow keeps its wrapper.
         if let Expr::Identifier(name) = place_expr {
             if let Some(Value::BorrowMut(borrow)) = outer_env.get(name) {
