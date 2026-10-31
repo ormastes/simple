@@ -17,8 +17,7 @@ Oct 25), `.to_i64()` returns 0 for every non-zero input on some receivers, silen
 | `t0.to_i64()` in `aes_gcm.spl`, where `t0` also takes a compound assignment | inferred 0 from the key schedule; not reproduced in a minimal fixture |
 
 Reproduction: `test/fixtures/devhub/native_codegen_repro/main.spl`, red on the pinned
-producer for the first two rows. Regression spec, interpreter only:
-`test/01_unit/compiler/50.mir/to_i64_compound_receiver_spec.spl`.
+producer for the first two rows.
 
 ## Cause
 

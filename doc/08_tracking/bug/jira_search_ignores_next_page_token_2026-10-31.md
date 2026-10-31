@@ -1,6 +1,6 @@
 # jira_curl_search stops after one page
 
-Status: fixed 2026-10-31, found by the emulated specs.
+Status: fixed for Jira Cloud 2026-10-31, found by the emulated specs. Data Center `startAt` paging stays open.
 
 `jira_curl_search` (`src/app/devhub/adapter_jira_curl.spl:431`) sends one POST to
 `/rest/api/3/search/jql` and never reads `nextPageToken`, although the file header
