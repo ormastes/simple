@@ -3,6 +3,10 @@
 use std.io_runtime.{env_get_opt, file_read_bytes_result, file_hash_sha256_or_empty, exit}
 use std.env.{env_set, env_unset}
 use std.database.sql.types.{DbRow}
+use std.nogc_sync_mut.database.sqlite_format.reader.{sqlite_format_read_table_bytes}
+use std.nogc_sync_mut.database.sqlite_format.types.{SqliteError}
+use std.nogc_sync_mut.database.sqlite_format.schema.{ascii_lower}
+use std.common.encoding.utf8.{text_codepoints, char_from_codepoint}
 use std.database.server.storage_port.{
     database_storage_port_v1, DatabaseStoragePortV1, StorageOpenResult,
     storage_backend_sqlcipher4_open
@@ -129,6 +133,50 @@ fn fresh_direct_codec(path: text):
         i = i + 1
     print "PASS fresh direct codec boundaries"
 
+fn fresh_text_primitives():
+    val sql = "CREATE TABLE room (id INTEGER)"
+    print "DIAGNOSTIC T1 len={sql.len()} expect=30"
+    print "DIAGNOSTIC T2 index0_eq={sql[0] == \"C\"} index7={sql[7] == \"T\"} index_len={sql[0].len()}"
+    var count = 0
+    var last = ""
+    for c in sql:
+        count = count + 1
+        last = c
+    print "DIAGNOSTIC T3 for_count={count} expect=30 last_eq={last == \")\"}"
+    val lower = ascii_lower("CREATE")
+    print "DIAGNOSTIC T4 ascii_lower_eq={lower == \"create\"} len={lower.len()}"
+    val cps = text_codepoints("C")
+    print "DIAGNOSTIC T5 codepoints_len={cps.len()} cp0={cps[0]} expect=1,67"
+    val rebuilt = char_from_codepoint(cps[0] + 32)
+    print "DIAGNOSTIC T6 char_eq={rebuilt == \"c\"} concat_eq={(\"\" + rebuilt) == \"c\"}"
+    print "DIAGNOSTIC T7 sub_eq={sql.substring(0, 6) == \"CREATE\"} slice_eq={sql[0:6] == \"CREATE\"}"
+
+# storage_port maps every SQLite error to one message, so name the variant here.
+fn fresh_sqlite_detail(image: [u8]) -> text:
+    match sqlite_format_read_table_bytes(image, "messages"):
+        case Ok(rows):
+            "read ok rows={rows.len()}"
+        case Err(e):
+            match e:
+                SqliteError.Io(_): "Io"
+                SqliteError.BadMagic(_): "BadMagic"
+                SqliteError.UnsupportedPageSize(value): "UnsupportedPageSize {value}"
+                SqliteError.UnsupportedFeature(_): "UnsupportedFeature"
+                SqliteError.TruncatedFile(expected, actual): "TruncatedFile {expected} {actual}"
+                SqliteError.PageOutOfRange(page, page_count): "PageOutOfRange {page} {page_count}"
+                SqliteError.OffsetOutOfBounds(offset, length): "OffsetOutOfBounds {offset} {length}"
+                SqliteError.MalformedVarint(offset): "MalformedVarint {offset}"
+                SqliteError.ReservedSerialType(serial): "ReservedSerialType {serial}"
+                SqliteError.UnknownSerialType(serial): "UnknownSerialType {serial}"
+                SqliteError.MalformedRecord(message): "MalformedRecord {message.len()}"
+                SqliteError.UnknownPageType(page, kind): "UnknownPageType {page} {kind}"
+                SqliteError.OverflowCycle(page): "OverflowCycle {page}"
+                SqliteError.OverflowLimitExceeded(page, steps): "OverflowLimitExceeded {page} {steps}"
+                SqliteError.CorruptPage(message): "CorruptPage {message.len()}"
+                SqliteError.SchemaNotFound(_): "SchemaNotFound"
+                SqliteError.MalformedSchema(message): "MalformedSchema: " + message
+                _: "other {e.message().len()}"
+
 fn fresh_read_storage(opened: StorageOpenResult):
     print "STAGE fresh read storage entered"
     val port: DatabaseStoragePortV1 = database_storage_port_v1()
@@ -141,6 +189,8 @@ fn fresh_read_storage(opened: StorageOpenResult):
                 case Ok(value): value
                 case Err(problem):
                     print "DIAGNOSTIC storage read: {problem.code()}"
+                    print "DIAGNOSTIC sqlite: {fresh_sqlite_detail(view.image)}"
+                    fresh_text_primitives()
                     val _closed = port.close_view(view)
                     require_fresh(false, "storage schema/interior/overflow rows")
                     return
