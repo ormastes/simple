@@ -169,29 +169,31 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
 /// other class id, or a field count that disagrees with the layout, decodes
 /// to nil exactly as before, so foreign RuntimeObjects are never misread.
 ///
-/// Semantics:
-/// * Struct (`Value::Object`): value semantics, deep copy both ways.
-/// * Class (`Value::ClassInstance`): reference semantics. The object carries
-///   one hidden trailing slot holding a never-reused identity token mapped to
-///   a `Weak<ClassInstance>`. Decoding an object whose token is still alive
-///   returns the SAME `Arc` (identity preserved; the interpreter instance is
-///   authoritative, so writes made natively via `rt_object_field_set` are not
-///   merged back -- merging would clobber interpreter-side mutations made by
-///   nested calls). If the instance has been dropped, a fresh instance is
-///   rebuilt from the object's fields and bound to the token. Tokens, not heap
-///   addresses, key identity because transient heap scopes free and reuse
-///   addresses. The registry holds only `Weak`s and is pruned, so it never
-///   keeps an instance alive.
-/// * Cycles / aliasing: within one crossing, an instance already being
-///   marshaled maps to the object already allocated for it (allocated before
-///   its fields are filled), so self-reference terminates and two aliases of
-///   one instance become one object; decoding mirrors this by object address,
-///   which is stable for the duration of the crossing.
+/// Semantics: VALUE semantics for both structs (`Value::Object`) and classes
+/// (`Value::ClassInstance`) -- classes are value types
+/// (doc/07_guide/language/capability_library_authoring.md; see
+/// doc/08_tracking/bug/jit_class_instances_alias_instead_of_copy_2026-09-27.md).
+/// Every crossing deep-copies: a mutation on either side after the crossing
+/// is not visible on the other, and a native `rt_object_field_set` is seen by
+/// the copy decoded from that object. No identity token or instance registry
+/// exists, so nothing is kept alive and the result never depends on timing.
+///
+/// Cycles / aliasing: within ONE crossing, an instance already being
+/// marshaled maps to the object already allocated for it (allocated before
+/// its fields are filled), so a self-reference terminates and two aliases of
+/// one instance inside one value become one object; decoding mirrors this
+/// keyed by object address, which is stable for the duration of the crossing.
+/// The memo is cleared when the outermost crossing ends.
+///
+/// Registry bound: one entry per distinct (class name, field-name set,
+/// carrier) ever marshaled. Field sets are fixed by class/struct definitions,
+/// so the size is bounded by the program's type count; as a hard backstop the
+/// registry refuses new layouts beyond `MAX_LAYOUTS` (the value then marshals
+/// to nil, the pre-existing behaviour) rather than growing without limit.
 mod object_bridge {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicI64, Ordering};
-    use std::sync::{Arc, LazyLock, Mutex, Weak};
+    use std::sync::{Arc, LazyLock, Mutex};
 
     use simple_runtime::value::{rt_object_class_id, rt_object_field_count, rt_object_field_get, rt_object_field_set};
     use simple_runtime::RuntimeValue;
@@ -200,8 +202,10 @@ mod object_bridge {
     use crate::value::{ClassInstance, Value};
 
     /// First class id owned by the bridge; far above any id the runtime or
-    /// codegen hands out, and disjoint from user enum ids (separate type).
+    /// codegen hands out.
     pub(super) const CLASS_ID_BASE: u32 = 0x7000_0000;
+    /// Hard cap on registered layouts (see module docs).
+    pub(super) const MAX_LAYOUTS: usize = 1 << 16;
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     enum Carrier {
@@ -214,13 +218,6 @@ mod object_bridge {
         class: String,
         fields: Arc<Vec<String>>,
         carrier: Carrier,
-    }
-
-    impl Layout {
-        /// Native slot count: the fields, plus the identity slot for classes.
-        fn slot_count(&self) -> usize {
-            self.fields.len() + usize::from(self.carrier == Carrier::Class)
-        }
     }
 
     #[derive(Default)]
@@ -237,8 +234,10 @@ mod object_bridge {
         if let Some(&id) = reg.ids.get(&key) {
             return Some((id, reg.layouts[(id - CLASS_ID_BASE) as usize].clone()));
         }
-        let index = u32::try_from(reg.layouts.len()).ok()?;
-        let id = CLASS_ID_BASE.checked_add(index)?;
+        if reg.layouts.len() >= MAX_LAYOUTS {
+            return None;
+        }
+        let id = CLASS_ID_BASE + reg.layouts.len() as u32;
         let layout = Layout {
             class: key.0.clone(),
             fields: Arc::new(key.1.clone()),
@@ -254,59 +253,6 @@ mod object_bridge {
         let index = id.checked_sub(CLASS_ID_BASE)? as usize;
         let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         reg.layouts.get(index).cloned()
-    }
-
-    // ---- class identity tokens -------------------------------------------
-
-    #[derive(Default)]
-    struct Identities {
-        by_token: HashMap<i64, Weak<ClassInstance>>,
-        /// Arc address -> token, validated by `Weak::ptr_eq` on lookup so a
-        /// reused address of a dead instance never inherits its token.
-        by_addr: HashMap<usize, (i64, Weak<ClassInstance>)>,
-        inserts_since_prune: usize,
-    }
-
-    impl Identities {
-        fn prune(&mut self) {
-            self.by_token.retain(|_, w| w.strong_count() > 0);
-            self.by_addr.retain(|_, (_, w)| w.strong_count() > 0);
-            self.inserts_since_prune = 0;
-        }
-
-        fn bind(&mut self, token: i64, instance: &Arc<ClassInstance>) {
-            self.inserts_since_prune += 1;
-            if self.inserts_since_prune >= 1024 {
-                self.prune();
-            }
-            let weak = Arc::downgrade(instance);
-            self.by_token.insert(token, weak.clone());
-            self.by_addr.insert(Arc::as_ptr(instance) as usize, (token, weak));
-        }
-    }
-
-    static IDENTITIES: LazyLock<Mutex<Identities>> = LazyLock::new(|| Mutex::new(Identities::default()));
-    static NEXT_TOKEN: AtomicI64 = AtomicI64::new(1);
-
-    fn token_for(instance: &Arc<ClassInstance>) -> i64 {
-        let mut ids = IDENTITIES.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((token, weak)) = ids.by_addr.get(&(Arc::as_ptr(instance) as usize)) {
-            if weak.strong_count() > 0 && std::ptr::eq(weak.as_ptr(), Arc::as_ptr(instance)) {
-                return *token;
-            }
-        }
-        let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-        ids.bind(token, instance);
-        token
-    }
-
-    fn instance_for_token(token: i64) -> Option<Arc<ClassInstance>> {
-        let ids = IDENTITIES.lock().unwrap_or_else(|e| e.into_inner());
-        ids.by_token.get(&token)?.upgrade()
-    }
-
-    fn rebind_token(token: i64, instance: &Arc<ClassInstance>) {
-        IDENTITIES.lock().unwrap_or_else(|e| e.into_inner()).bind(token, instance);
     }
 
     // ---- per-crossing memo -----------------------------------------------
@@ -348,27 +294,33 @@ mod object_bridge {
         names
     }
 
-    /// Fill `object`'s slots from `fields` in layout order. On failure the
-    /// whole value marshals to NIL (matching the array/dict helpers).
-    fn fill_fields(object: RuntimeValue, layout: &Layout, fields: &HashMap<String, Value>) -> bool {
+    /// Allocate the object for `fields`; `before_fill` runs after allocation
+    /// and before the fields are filled (used to memoize class instances).
+    fn object_to_runtime(
+        class: &str,
+        fields: &HashMap<String, Value>,
+        carrier: Carrier,
+        before_fill: impl FnOnce(RuntimeValue),
+    ) -> RuntimeValue {
+        let Some((id, layout)) = intern_layout(class, sorted_names(fields), carrier) else {
+            return RuntimeValue::NIL;
+        };
+        let object = simple_runtime::value::rt_object_new(id, layout.fields.len() as u32);
+        if object.is_nil() {
+            return RuntimeValue::NIL;
+        }
+        before_fill(object);
         for (i, name) in layout.fields.iter().enumerate() {
             let value = fields.get(name).map_or(RuntimeValue::NIL, value_to_runtime_inner);
             if !rt_object_field_set(object, i as u32, value) {
-                return false;
+                return RuntimeValue::NIL;
             }
         }
-        true
+        object
     }
 
     pub(super) fn struct_to_runtime(class: &str, fields: &HashMap<String, Value>) -> RuntimeValue {
-        let Some((id, layout)) = intern_layout(class, sorted_names(fields), Carrier::Struct) else {
-            return RuntimeValue::NIL;
-        };
-        let object = simple_runtime::value::rt_object_new(id, layout.slot_count() as u32);
-        if object.is_nil() || !fill_fields(object, &layout, fields) {
-            return RuntimeValue::NIL;
-        }
-        object
+        object_to_runtime(class, fields, Carrier::Struct, |_| {})
     }
 
     pub(super) fn class_to_runtime(instance: &Arc<ClassInstance>) -> RuntimeValue {
@@ -379,21 +331,11 @@ mod object_bridge {
         // Snapshot under the read lock, then release it before recursing: a
         // self-referencing field must not re-enter the lock.
         let fields = instance.fields_snapshot();
-        let Some((id, layout)) = intern_layout(instance.class(), sorted_names(&fields), Carrier::Class) else {
-            return RuntimeValue::NIL;
-        };
-        let object = simple_runtime::value::rt_object_new(id, layout.slot_count() as u32);
+        let object = object_to_runtime(instance.class(), &fields, Carrier::Class, |object| {
+            OUT_MEMO.with(|m| m.borrow_mut().insert(addr, object));
+        });
         if object.is_nil() {
-            return RuntimeValue::NIL;
-        }
-        let token = token_for(instance);
-        if !rt_object_field_set(object, layout.fields.len() as u32, RuntimeValue::from_int(token)) {
-            return RuntimeValue::NIL;
-        }
-        OUT_MEMO.with(|m| m.borrow_mut().insert(addr, object));
-        if !fill_fields(object, &layout, &fields) {
             OUT_MEMO.with(|m| m.borrow_mut().remove(&addr));
-            return RuntimeValue::NIL;
         }
         object
     }
@@ -404,7 +346,7 @@ mod object_bridge {
         let Some(layout) = layout_of(rt_object_class_id(rv)) else {
             return Value::Nil;
         };
-        if rt_object_field_count(rv) != layout.slot_count() as i64 {
+        if rt_object_field_count(rv) != layout.fields.len() as i64 {
             return Value::Nil;
         }
         match layout.carrier {
@@ -423,19 +365,11 @@ mod object_bridge {
                 if let Some(existing) = IN_MEMO.with(|m| m.borrow().get(&raw).cloned()) {
                     return Value::ClassInstance(existing);
                 }
-                let token_rv = rt_object_field_get(rv, layout.fields.len() as u32);
-                let token = if token_rv.is_int() { Some(token_rv.as_int()) } else { None };
-                if let Some(live) = token.and_then(instance_for_token) {
-                    return Value::ClassInstance(live);
-                }
                 let instance = Arc::new(ClassInstance::new(layout.class.clone(), HashMap::new()));
                 IN_MEMO.with(|m| m.borrow_mut().insert(raw, instance.clone()));
                 for (i, name) in layout.fields.iter().enumerate() {
                     let value = runtime_to_value_inner(rt_object_field_get(rv, i as u32));
                     instance.set_field(name.clone(), value);
-                }
-                if let Some(token) = token {
-                    rebind_token(token, &instance);
                 }
                 Value::ClassInstance(instance)
             }
@@ -1006,44 +940,73 @@ mod tests {
     }
 
     #[test]
-    fn class_instance_round_trip_preserves_identity_name_and_fields() {
+    fn class_instance_round_trip_is_a_value_copy_preserving_name_and_fields() {
         let (inst, value) = class_value("Counter", vec![("count", Value::Int(7)), ("name", Value::text("c".to_string()))]);
         let runtime = value_to_runtime(&value);
         assert_ne!(runtime, RuntimeValue::NIL, "class instance must not marshal to nil");
-        match runtime_to_value(runtime) {
-            Value::ClassInstance(back) => {
-                assert!(Arc::ptr_eq(&back, &inst), "live instance must come back by identity");
-                assert_eq!(back.class(), "Counter");
-                assert_eq!(back.field("count"), Some(Value::Int(7)));
-            }
+        let back = match runtime_to_value(runtime) {
+            Value::ClassInstance(back) => back,
             other => panic!("expected ClassInstance, got {other:?}"),
-        }
-        // Interpreter mutations after crossing are visible through the alias.
+        };
+        assert!(!Arc::ptr_eq(&back, &inst), "classes are value types: crossing copies");
+        assert_eq!(back.class(), "Counter");
+        assert_eq!(back.field("count"), Some(Value::Int(7)));
+        assert_eq!(back.field("name"), Some(Value::text("c".to_string())));
+        // A later interpreter-side mutation does not reach the crossed copy...
         inst.set_field("count".to_string(), Value::Int(8));
+        assert_eq!(back.field("count"), Some(Value::Int(7)));
+        // ...nor the native object (sorted fields ["count", "name"] -> slot 0).
+        assert_eq!(runtime_to_value(simple_runtime::value::rt_object_field_get(runtime, 0)), Value::Int(7));
+        // A native write is visible in the copy decoded afterwards.
+        assert!(simple_runtime::value::rt_object_field_set(runtime, 0, RuntimeValue::from_int(42)));
         match runtime_to_value(runtime) {
-            Value::ClassInstance(back) => assert_eq!(back.field("count"), Some(Value::Int(8))),
+            Value::ClassInstance(again) => {
+                assert_eq!(again.field("count"), Some(Value::Int(42)));
+                assert!(!Arc::ptr_eq(&again, &back));
+            }
             other => panic!("{other:?}"),
         }
+        assert_eq!(inst.field("count"), Some(Value::Int(8)), "native write must not reach the original");
     }
 
     #[test]
-    fn dropped_class_instance_is_rebuilt_from_native_fields() {
-        let (inst, value) = class_value("Gone", vec![("v", Value::Int(5))]);
-        let runtime = value_to_runtime(&value);
-        drop(value);
-        drop(inst);
-        let first = match runtime_to_value(runtime) {
-            Value::ClassInstance(back) => {
-                assert_eq!(back.class(), "Gone");
-                assert_eq!(back.field("v"), Some(Value::Int(5)));
-                back
-            }
-            other => panic!("{other:?}"),
-        };
-        // The rebuilt instance is rebound to the object's token: one identity.
-        match runtime_to_value(runtime) {
-            Value::ClassInstance(again) => assert!(Arc::ptr_eq(&again, &first)),
-            other => panic!("{other:?}"),
+    fn equal_class_copies_are_natively_structurally_equal() {
+        let (_a, va) = class_value("Pt", vec![("x", Value::Int(1)), ("y", Value::Int(2))]);
+        let (_b, vb) = class_value("Pt", vec![("x", Value::Int(1)), ("y", Value::Int(2))]);
+        let (_c, vc) = class_value("Pt", vec![("x", Value::Int(1)), ("y", Value::Int(3))]);
+        let ra = value_to_runtime(&va);
+        let rb = value_to_runtime(&vb);
+        let rc = value_to_runtime(&vc);
+        assert_ne!(ra, rb, "separate allocations");
+        assert_eq!(simple_runtime::value::rt_value_eq(ra, rb), 1);
+        assert_eq!(simple_runtime::value::rt_value_eq(ra, rc), 0);
+        // Two crossings of one instance are equal copies.
+        assert_eq!(simple_runtime::value::rt_value_eq(ra, value_to_runtime(&va)), 1);
+    }
+
+    #[test]
+    fn class_round_trip_works_from_two_threads() {
+        let handles: Vec<_> = (0..2i64)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for i in 0..200i64 {
+                        let (_inst, value) = class_value(
+                            if t == 0 { "ThreadA" } else { "ThreadB" },
+                            vec![("i", Value::Int(i)), ("t", Value::Int(t))],
+                        );
+                        match runtime_to_value(value_to_runtime(&value)) {
+                            Value::ClassInstance(back) => {
+                                assert_eq!(back.field("i"), Some(Value::Int(i)));
+                                assert_eq!(back.field("t"), Some(Value::Int(t)));
+                            }
+                            other => panic!("{other:?}"),
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread panicked");
         }
     }
 
@@ -1052,28 +1015,21 @@ mod tests {
         let (inst, value) = class_value("Node", vec![("id", Value::Int(1))]);
         inst.set_field("next".to_string(), value.clone());
         let runtime = value_to_runtime(&value);
-        assert_ne!(runtime, RuntimeValue::NIL);
-        // Native side: the `next` slot is the very same object.
-        let next_rv = {
-            let back = runtime_to_value(runtime);
-            drop(back);
-            // fields sorted: ["id", "next"] -> slot 1
-            simple_runtime::value::rt_object_field_get(runtime, 1)
-        };
-        assert_eq!(next_rv, runtime, "cycle must be one native object");
-        // Break the interpreter cycle so the test does not leak the Arc, then
-        // decode the native cycle with the instance dead: must terminate.
+        // Break the interpreter cycle so the test does not leak the Arc.
         inst.set_field("next".to_string(), Value::Nil);
-        drop(value);
-        drop(inst);
+        assert_ne!(runtime, RuntimeValue::NIL);
+        // Native side: the `next` slot (sorted ["id", "next"] -> 1) is the same object.
+        assert_eq!(simple_runtime::value::rt_object_field_get(runtime, 1), runtime);
+        // Decoding the native cycle terminates and yields one copied instance.
         match runtime_to_value(runtime) {
-            Value::ClassInstance(back) => match back.field("next") {
-                Some(Value::ClassInstance(n)) => {
-                    assert!(Arc::ptr_eq(&n, &back));
-                    back.set_field("next".to_string(), Value::Nil); // break cycle
+            Value::ClassInstance(back) => {
+                assert!(!Arc::ptr_eq(&back, &inst));
+                match back.field("next") {
+                    Some(Value::ClassInstance(n)) => assert!(Arc::ptr_eq(&n, &back)),
+                    other => panic!("next lost: {other:?}"),
                 }
-                other => panic!("next lost: {other:?}"),
-            },
+                back.set_field("next".to_string(), Value::Nil); // break cycle
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -1084,8 +1040,10 @@ mod tests {
         let runtime = value_to_runtime(&Value::array(vec![value.clone(), value.clone()]));
         let a = simple_runtime::value::rt_array_get(runtime, 0);
         let b = simple_runtime::value::rt_array_get(runtime, 1);
-        assert_eq!(a, b);
+        assert_eq!(a, b, "two aliases inside one crossing become one object");
         assert_ne!(a, RuntimeValue::NIL);
+        // A separate crossing is a separate copy.
+        assert_ne!(value_to_runtime(&value), a);
     }
 
     #[test]
@@ -1099,7 +1057,10 @@ mod tests {
             Value::Object { class, fields: f } => {
                 assert_eq!(class, "Holder");
                 match f.get("owner") {
-                    Some(Value::ClassInstance(o)) => assert!(Arc::ptr_eq(o, &inst)),
+                    Some(Value::ClassInstance(o)) => {
+                        assert!(!Arc::ptr_eq(o, &inst));
+                        assert_eq!(o.field("k"), Some(Value::Int(2)));
+                    }
                     other => panic!("{other:?}"),
                 }
             }

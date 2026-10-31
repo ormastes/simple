@@ -24,27 +24,30 @@ from.
   interpreter carrier (struct or class). If the id is not registered, or the
   field count does not match the layout, the object decodes to nil as before,
   so a foreign RuntimeObject is never misread.
-- Structs keep value semantics: they are deep-copied in both directions.
-- Classes keep reference semantics. The object has one hidden trailing slot
-  holding an identity token that is never reused, mapped to a
-  `Weak<ClassInstance>`. While the instance is alive, decoding returns the
-  same `Arc`. If it has been dropped, a new instance is rebuilt from the
-  native fields and bound to the token. Identity is keyed by token rather
-  than heap address because transient heap scopes free addresses and reuse
-  them. The registry stores only `Weak`s and prunes dead entries, so it never
-  keeps an instance alive.
+- Value semantics for both structs and classes. Classes are value types
+  (`doc/07_guide/language/capability_library_authoring.md`;
+  `doc/08_tracking/bug/jit_class_instances_alias_instead_of_copy_2026-09-27.md`),
+  so every crossing makes a deep copy in both directions. A mutation on
+  either side after the crossing is not visible on the other side. A native
+  `rt_object_field_set` is visible in the copy decoded from that object.
+  There are no identity tokens and no instance registry, so nothing is kept
+  alive and the result does not depend on timing. Two equal copies compare
+  equal under native structural equality (`sffi/equality.rs` `object_eq`:
+  same class id and same fields).
 - Cycles and aliasing are handled with a memo that lives for one crossing and
   is cleared when the outermost crossing ends, including on unwind. An object
   is allocated and memoized before its fields are filled, so a self-reference
-  terminates and two aliases of one instance become one native object.
-  Decoding mirrors this.
-- Known limit, by design: the interpreter instance is authoritative. A write
-  made natively through `rt_object_field_set` to a live instance's object is
-  not merged back, because merging would overwrite interpreter-side
-  mutations made during nested calls. Compiled code does not use
-  `rt_object_*` for its own structs (`StructInit` lowers to raw `rt_alloc`
-  aggregates), so the bridge object is opaque to native code: native code can
-  hold it and pass it back, but cannot read its fields by offset.
+  terminates and two aliases inside one value become one native object.
+  Decoding mirrors this. Two separate crossings are two copies.
+- Registry bound: there is one layout per distinct (class name, field-name
+  set, carrier). Field sets are fixed by the type definitions, so the count
+  is bounded by the program's types. A hard cap (`MAX_LAYOUTS` = 65536)
+  backstops it: a new layout beyond the cap marshals to nil, as before this
+  fix.
+- Compiled code does not use `rt_object_*` for its own structs (`StructInit`
+  lowers to raw `rt_alloc` aggregates), so the bridge object is opaque to
+  native code: native code can hold it and pass it back, but cannot read its
+  fields by offset.
 - `Value::TraitObject` still marshals to nil, now through an explicit arm,
   because the layout does not carry the trait name.
 - Separate pre-existing gap (not changed here): `runtime_to_value` has no
@@ -53,8 +56,10 @@ from.
 
 **Tests.** Rust unit tests in `runtime_bridge.rs` (`cargo test -p
 simple-compiler --lib runtime_bridge`): struct round trip with nested
-array and dict fields, struct copy semantics, class identity and later
-mutation, a dropped instance rebuilt and rebound, a self-cycle, two aliases
+array and dict fields, struct copy semantics, class copy and later
+mutation (copy semantics, native write visible after decode, original
+unchanged), native structural equality of two copies, round trips from two
+threads, a self-cycle, two aliases
 becoming one object, class inside struct and struct inside class, and
 foreign or unregistered class ids decoding to nil. A `.spl` interp <-> JIT
 spec was not added: the hybrid transform does not route class-typed values
