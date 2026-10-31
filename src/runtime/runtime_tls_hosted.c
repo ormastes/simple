@@ -14,7 +14,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "runtime_nonnull.h"
 
 #include <openssl/bio.h>
 #include <openssl/evp.h>
@@ -28,10 +27,11 @@
 #endif
 
 const char *rt_byte_char(int64_t value) {
-    char *result = SIMPLE_RT_NONNULL("rt_byte_char", malloc(2));
+    char *result = (char *)malloc(2);
+    if (!result) return NULL;
     result[0] = (char)(unsigned char)(value & 0xff);
     result[1] = '\0';
-    return SIMPLE_RT_NONNULL("rt_byte_char", result);
+    return result;
 }
 
 int64_t rt_random_i64(void) {
@@ -178,7 +178,8 @@ const char *rt_hex_to_wire(const char *hex) {
     hex_len = strlen(hex);
     if ((hex_len & 1u) != 0 || hex_len == SIZE_MAX) goto invalid;
     wire_len = hex_len / 2;
-    result = SIMPLE_RT_NONNULL("rt_hex_to_wire", malloc(wire_len + 1));
+    result = (char *)malloc(wire_len + 1);
+    if (!result) return NULL;
     for (size_t i = 0; i < wire_len; ++i) {
         int high = hex_value(hex[i * 2]);
         int low = hex_value(hex[i * 2 + 1]);
@@ -189,10 +190,10 @@ const char *rt_hex_to_wire(const char *hex) {
         result[i] = (char)((high << 4) | low);
     }
     result[wire_len] = '\0';
-    return SIMPLE_RT_NONNULL("rt_hex_to_wire", result);
+    return result;
 
 invalid:
-    result = SIMPLE_RT_NONNULL("rt_hex_to_wire", malloc(1));
-    result[0] = '\0';
-    return SIMPLE_RT_NONNULL("rt_hex_to_wire", result);
+    result = (char *)malloc(1);
+    if (result) result[0] = '\0';
+    return result;
 }
