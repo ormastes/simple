@@ -25,7 +25,7 @@ import os, re, sys, tempfile
 CDEF = re.compile(r'^(?!static\b)(?:[A-Za-z_]\w*[ \t]+)*?[A-Za-z_]\w*(?:[ \t]+const)?[ \t]*\*+[ \t]*(rt_\w+)[ \t]*\(', re.M)
 EXT = re.compile(r'^[ \t]*(?:pub[ \t]+)?extern[ \t]+fn[ \t]+(rt_\w+)(?:<[^>]*>)?[ \t]*\((?:[^()]|\([^()]*\))*\)[ \t]*(?:->[ \t]*([^\n#]+?))?[ \t]*(?:#.*)?$', re.M)
 _NULL = r'(?:\(\s*[\w ]+\*+\s*\)\s*)?(?:NULL|nullptr|0)'
-NULLRET = re.compile(r'\breturn\s*\(?\s*' + _NULL + r'\s*\)?\s*;|\breturn\b[^;]*[?:]\s*' + _NULL + r'\s*\)?\s*;')
+NULLRET = re.compile(r'\breturn\s*\(?\s*' + _NULL + r'\s*\)?\s*;|\breturn\b[^;]*[?:]\s*' + _NULL + r'\s*(?=[:;)])')
 NOISE = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'', re.S)
 NARROW = {'i8', 'i16', 'i32', 'u8', 'u16', 'u32', 'bool', 'f32', 'f64'}
 BASELINE = 'scripts/check/rt_pointer_ref_map_baseline.txt'
@@ -159,6 +159,7 @@ def selftest():
         (okc, 'extern fn rt_x() -> i32?\n', 1),
         ('char *rt_x(void) {\n  if (c == \'}\') y();\n  return NULL;\n}\n', 'extern fn rt_x() -> text\n', 1),
         ('char *rt_x(void) {\n  return p ? p : NULL;\n}\n', 'extern fn rt_x() -> text\n', 1),
+        ('char *rt_x(void) {\n  return bad ? NULL : p;\n}\n', 'extern fn rt_x() -> text\n', 1),
         (nilc, 'extern fn rt_x<T>(v: T) -> [T]\n', 1),
         (nilc, 'extern fn rt_x(cb: fn(i64) -> i64) -> text\n', 1),
     ]
