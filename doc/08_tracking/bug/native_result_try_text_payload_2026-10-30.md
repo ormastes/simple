@@ -1,6 +1,6 @@
 # Native Result text payload loses its MIR text representation
 
-Status: resolved 2026-10-31 (see below). Focused native regression PASS with rebuilt producer; private-daemon
+Status: resolved in MIR 2026-10-31 (see below); native re-verification of private_session_start_v1 pending. Focused native regression PASS with rebuilt producer; private-daemon
 acceptance and broader compiler checks remain separate pending gates.
 
 Producer SHA-256: `c978ab12656b7bf67d4bf9b6cc6450d08181c9140b19266863e93b3eba57e5f4`.
