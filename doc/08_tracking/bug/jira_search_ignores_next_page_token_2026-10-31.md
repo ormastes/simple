@@ -1,6 +1,6 @@
 # jira_curl_search stops after one page
 
-Status: open. Found 2026-10-31 by the emulated Jira spec.
+Status: fixed 2026-10-31, found by the emulated specs.
 
 `jira_curl_search` (`src/app/devhub/adapter_jira_curl.spl:431`) sends one POST to
 `/rest/api/3/search/jql` and never reads `nextPageToken`, although the file header
@@ -16,10 +16,8 @@ exercised by the spec.
 `test/03_system/app/devhub/feature/devhub_jira_emulated_spec.spl`, scenario "follows
 nextPageToken to collect every issue the limit allows". The emulator serves a first page
 carrying `nextPageToken` and expects a second POST. Observed: `server saw 1 request(s),
-expected 2`, and ACME-3 absent from the output. The spec stays RED until this is fixed.
+expected 2`, and ACME-3 absent from the output. The spec failed until the fix below.
 
-## Unblock
+## Fix
 
-Loop on `nextPageToken` until `--limit` issues are collected or `isLast` is true, with a
-page cap like `BB_MAX_PAGES`, and keep the first-page body in `raw` only when it is the
-only page.
+`jira_curl_search` follows `nextPageToken` until it is absent or `--limit` is reached. It fails loudly at `JIRA_SEARCH_MAX_PAGES` (100) or on a repeated token instead of truncating. Data Center `startAt` paging is still open and unexercised.

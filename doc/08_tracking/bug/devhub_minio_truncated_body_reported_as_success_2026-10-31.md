@@ -1,6 +1,6 @@
 # MinIO GET reports a truncated body as success
 
-Status: open. Found 2026-10-31 by the emulated MinIO spec on the Windows Phase 1 seed.
+Status: fixed 2026-10-31, found by the emulated specs.
 
 When a server closes the socket before `Content-Length` bytes arrive,
 `minio_get_object` (`src/app/devhub/adapter_minio.spl:457`) returns `ok=true` after one
@@ -13,14 +13,8 @@ the same condition as an error (curl exit 18), so this is specific to the
 
 `test/03_system/app/devhub/feature/devhub_minio_emulated_spec.spl`, scenario "reports a
 truncated body as an error". Observed: `expected true to equal false`, and one `REQ` line
-in the emulator log where three are scripted. The spec stays RED.
+in the emulator log where three are scripted. The spec failed until the fix below.
 
-## Unblock
+## Fix
 
-Root cause: `response.into_string().unwrap_or_default()` at `:141` and `:150` turns a
-read error into an empty body (`:61` has the same shape). Return it as a transport error
-instead. The extern lives in the
-seed (`src/compiler_rust/compiler/src/interpreter_extern/network/mod.rs:88`), and native
-callers use their own runtime path, so a fix needs a seed rebuild and a check of both.
-The adapter cannot detect this alone: the extern exposes no response headers
-(`adapter_minio.spl:577`). The native path was not tested here.
+`minio_get_object` now uses `_minio_get_checked`: `http_request_v2_raw` exposes the raw headers, so a `Content-Length` differing from the bytes received is a transport error and retries. If v2 is unavailable on Windows it falls back to curl, which reports a short body itself. No seed rebuild was needed. `into_string().unwrap_or_default()` in `rt_http_request` remains, and other callers of that extern (`_signed_get` listings, HEAD) keep the old behaviour; the listing closing-tag check covers listings.

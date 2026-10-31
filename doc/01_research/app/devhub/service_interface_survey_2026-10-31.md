@@ -158,10 +158,10 @@ None exercised a socket.
 
 | Service | Spec under `test/03_system/app/devhub/feature/` | Socket | Open red |
 |---|---|---|---|
-| GitHub, Bitbucket | `devhub_gh_parity_emulated_spec.spl` | yes (real gh; DevHub curl) | Bitbucket 5xx omits the status |
-| Jira Cloud, DC | `devhub_jira_emulated_spec.spl` | yes | no nextPageToken paging |
-| MinIO/S3 | `devhub_minio_emulated_spec.spl` | yes (SigV4 recomputed) | truncated GET reported as success |
-| Confluence | `devhub_confluence_emulated_spec.spl` | yes | no `_links.next` paging |
+| GitHub, Bitbucket | `devhub_gh_parity_emulated_spec.spl` | yes (real gh; DevHub curl) | none |
+| Jira Cloud, DC | `devhub_jira_emulated_spec.spl` | yes | none; DC `startAt` paging not followed |
+| MinIO/S3 | `devhub_minio_emulated_spec.spl` | yes (SigV4 recomputed) | none |
+| Confluence | `devhub_confluence_emulated_spec.spl` | yes | none |
 | Outlook Graph | `devhub_mail_emulated_spec.spl` | yes (both adapters, not the CLI) | none |
 | Gmail, IMAP, SMTP, POP3 | same spec | **no**: refusals only | no protocol server exists |
 

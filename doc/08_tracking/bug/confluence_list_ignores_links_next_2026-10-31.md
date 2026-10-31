@@ -1,6 +1,6 @@
 # confluence_list_pages stops after one page
 
-Status: open. Found 2026-10-31 by the emulated Confluence spec.
+Status: fixed 2026-10-31, found by the emulated specs.
 
 `confluence_list_pages` (`src/app/devhub/adapter_confluence.spl:246`) sends one GET and
 never reads `_links.next`. `confluence_search_pages` (`:333`) has the same shape but was
@@ -11,10 +11,8 @@ returns fewer pages, with exit 0 and no truncation note.
 
 `test/03_system/app/devhub/feature/devhub_confluence_emulated_spec.spl`, scenario "follows
 _links.next to reach every page". Observed: `server saw 1 request(s), expected 2`. The
-spec stays RED.
+spec failed until the fix below.
 
-## Unblock
+## Fix
 
-Follow `_links.next` until `limit` pages are collected, with a page cap. `_links.next` is
-relative to `_links.base`, so resolve it against that and refuse any other origin, as
-`outlook_page_error` does for Graph.
+`_confluence_collect` follows `_links.next` for list and search, with a 100-page cap and a repeat check. `confluence_next_url` only allows the configured REST content root and ignores the server-supplied `_links.base`. Scenario "rejects a next link that would send credentials to another host" pins that.
