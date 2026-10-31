@@ -212,6 +212,11 @@ def main():
                                     for i, c in enumerate(r)] for r in t["rows"]]}
                    for name, t in tables.items()},
         "overflow": overflow,
+        "page_first_bytes": [image[(n - 1) * PAGE] for n in range(1, page_count + 1)],
+        "page_header_after_salt": {"page_size": PAGE, "reserved": RESERVE, "text_encoding": 1},
+        "external_files": {name: {"bytes": os.path.getsize(os.path.join(HERE, name)),
+                                  "sha256": hashlib.sha256(open(os.path.join(HERE, name), "rb").read()).hexdigest()}
+                           for name in ["messenger.sqlcipher4", "messenger_plain.sqlite", "not_page_multiple.dat"]},
         "history_order": {room: ids for room, ids in order.items()},
         "message_object": objects,
         "rooms_payload": rooms_payload,
