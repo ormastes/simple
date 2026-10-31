@@ -3655,6 +3655,26 @@ impl MirLowering:
                         case _:
                             result_type = self.lower_type(element_type)
                     result_type_from_base = true
+                case HirTypeKind.Tuple(tuple_members):
+                    # A tuple read through a runtime handle (a `(text, T)`
+                    # dict value projected out of an erased generic result)
+                    # had no arm here, so every member fell to the bootstrap
+                    # `text` default: `pair[1]` on `(text, Record)` went
+                    # through rt_interp_cstr and read the record as a string
+                    # (contextual_callback_native step 12). Type the member
+                    # by its literal index exactly like an array element.
+                    val tuple_member_idx = self.tuple_index_literal(index)
+                    if tuple_member_idx >= 0 and tuple_member_idx < tuple_members.len():
+                        val tuple_member: HirType = tuple_members[tuple_member_idx]
+                        match tuple_member.kind:
+                            case HirTypeKind.Str:
+                                result_type = self.bootstrap_text_type()
+                            case HirTypeKind.TypeParam(_, _):
+                                result_type = MirType.i64()
+                                erased_element_hir = Some(tuple_member)
+                            case _:
+                                result_type = self.lower_type(tuple_member)
+                        result_type_from_base = true
                 case _: ()
         if erased_element_hir == nil and has_index_result_hir_type:
             match index_result_hir_type.kind:
