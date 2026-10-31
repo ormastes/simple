@@ -4,10 +4,19 @@ use std.nogc_sync_mut.io.sffi_common.{is_absolute_path}
 use std.path.{normalize}
 
 extern fn rt_dir_walk(path: text) -> [text]
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
+
+# Source discovery cannot name files without a resolvable root, so an
+# unreadable cwd is a fatal, explicit error rather than a relative fallback.
+fn _source_absolute(path: text) -> text:
+    val resolved = rt_path_absolute(path)
+    if resolved == nil:
+        panic("source discovery: cannot make '{path}' absolute: current directory unreadable")
+    resolved.unwrap()
 
 fn discover_spl_files(root: text) -> [text]:
-    val scan_root = rt_path_absolute(root).replace("\\", "/")
+    val scan_root = _source_absolute(root).replace("\\", "/")
     val relative_root = source_relative_root(root)
     var files: [text] = []
     for physical_path in rt_dir_walk(scan_root):
@@ -18,7 +27,7 @@ fn discover_spl_files(root: text) -> [text]:
     files
 
 fn source_path_identity(path: text) -> text:
-    normalize(rt_path_absolute(path).replace("\\", "/"))
+    normalize(_source_absolute(path).replace("\\", "/"))
 
 fn source_relative_root(path: text) -> text:
     if is_absolute_path(path):

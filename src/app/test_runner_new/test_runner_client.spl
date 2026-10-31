@@ -29,7 +29,8 @@ use std.io_runtime.{file_rename}
 use std.io_runtime.{getpid}
 use std.io_runtime.{thread_sleep}
 use std.io_runtime.{time_now_unix_micros}
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 extern fn sys_get_args() -> [text]
 
 # Atomic write: tmp + rename. Plain rt_file_write_text does open(create,
@@ -170,16 +171,16 @@ fn invoking_binary() -> text:
     simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md."""
     val current = cli_current_exe_path()
     if current != "" and file_exists(current):
-        val self_path = rt_path_absolute(current) ?? ""
-        if self_path.len() > 0 and file_exists(self_path):
-            return self_path
+        if val self_path = rt_path_absolute(current):
+            if self_path.len() > 0 and file_exists(self_path):
+                return self_path
     val raw = sys_get_args()
     # A source-mode argv[0] is a `.spl` path (this client's own source): it
     # exists but is not executable, so it is never the compiler binary.
     if raw.len() > 0 and not raw[0].ends_with(".spl") and file_exists(raw[0]):
-        val argv_binary = rt_path_absolute(raw[0]) ?? ""
-        if argv_binary != "" and file_exists(argv_binary):
-            return argv_binary
+        if val argv_binary = rt_path_absolute(raw[0]):
+            if argv_binary != "" and file_exists(argv_binary):
+                return argv_binary
     ""
 
 fn simple_binary() -> text:
@@ -194,7 +195,11 @@ fn simple_binary() -> text:
         return invoker
     if not file_exists(configured_raw):
         return ""
-    val configured = rt_path_absolute(configured_raw) ?? ""
+    val configured_abs = rt_path_absolute(configured_raw)
+    if configured_abs == nil:
+        # "" is this fn's documented "no qualified binary" result.
+        return ""
+    val configured = configured_abs.unwrap()
     if configured == "" or not file_exists(configured) or configured != invoker:
         return ""
     configured
@@ -328,8 +333,11 @@ fn daemon_recorded_binary() -> text:
     val recorded = (read_file_text(LIGHT_BINARY)).trim()
     if recorded == "" or not file_exists(recorded):
         return ""
-    val canonical = rt_path_absolute(recorded) ?? ""
-    if canonical != "" and file_exists(canonical): canonical else: ""
+    if val canonical = rt_path_absolute(recorded):
+        if canonical != "" and file_exists(canonical):
+            return canonical
+    # "" is this fn's documented "no recorded binary" result.
+    ""
 
 fn ensure_daemon() -> bool:
     if daemon_lock_alive():
