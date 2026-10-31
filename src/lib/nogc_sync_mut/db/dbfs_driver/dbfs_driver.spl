@@ -290,13 +290,14 @@ impl DbFsDriver:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Transient(code: 0u32))
         if dbfs_device_mount_seal_epoch_locked(
                 expected_inst_id, self.arena_block_count).is_err():
-            return _dbfs_finish_result(Err(FsError.StaleHandle))
+            # @workaround bug=mono-call-inference-20261031 reason=pinned stage2 cannot infer generic call args from match-arm/field bindings; annotate explicit type arguments
+            return _dbfs_finish_result<bool>(Err(FsError.StaleHandle))
         var fd_index: i32 = 0
         while fd_index < _dbfs_fds.len() as i32:
             if _dbfs_fds[fd_index].inst_id == expected_inst_id and not _dbfs_fds[fd_index].closed:
-                return _dbfs_finish_result(Err(FsError.Busy))
+                return _dbfs_finish_result<bool>(Err(FsError.Busy))
             fd_index = fd_index + 1
-        _dbfs_finish_result(Ok(true))
+        _dbfs_finish_result<bool>(Ok(true))
 
     pub fn close_device_backing(expected_inst_id: i64) -> Result<bool, FsError>:
         """Close one exact device-backed instance; true only on first release.
@@ -311,19 +312,20 @@ impl DbFsDriver:
         var terminal_index: i32 = 0
         while terminal_index < _dbfs_closed_device_ids.len() as i32:
             if _dbfs_closed_device_ids[terminal_index] == expected_inst_id:
-                return _dbfs_finish_result(Ok(false))
+                return _dbfs_finish_result<bool>(Ok(false))
             terminal_index = terminal_index + 1
         if dbfs_device_mount_seal_epoch_locked(
                 expected_inst_id, self.arena_block_count).is_err():
-            return _dbfs_finish_result(Err(FsError.StaleHandle))
+            return _dbfs_finish_result<bool>(Err(FsError.StaleHandle))
         var fd_index: i32 = 0
         while fd_index < _dbfs_fds.len() as i32:
             if _dbfs_fds[fd_index].inst_id == expected_inst_id and not _dbfs_fds[fd_index].closed:
-                return _dbfs_finish_result(Err(FsError.Busy))
+                return _dbfs_finish_result<bool>(Err(FsError.Busy))
             fd_index = fd_index + 1
         val unregistered = dbfs_device_unregister_locked(expected_inst_id)
         if unregistered.is_err() or not unregistered.unwrap():
-            return _dbfs_finish_result(Err(
+            # @workaround bug=mono-call-inference-20261031 reason=pinned stage2 cannot infer generic call args from match-arm/field bindings; annotate explicit type arguments
+            return _dbfs_finish_result<bool>(Err(
                 if unregistered.is_err(): unregistered.unwrap_err() else: FsError.IoError(code: 0u32)))
         var inode_index = _dbfs_inodes.len() as i32 - 1
         while inode_index >= 0:
@@ -338,7 +340,7 @@ impl DbFsDriver:
         if _dbfs_closed_device_ids.len() >= _DBFS_CLOSED_DEVICE_RECEIPT_CAPACITY:
             _dbfs_closed_device_ids.remove(0)
         _dbfs_closed_device_ids.push(expected_inst_id)
-        _dbfs_finish_result(Ok(true))
+        _dbfs_finish_result<bool>(Ok(true))
     static fn device_durability_blocker() -> text:
         """Machine-readable provider admission result for device-backed DBFS."""
         dbfs_device_serialization_blocker()
@@ -352,7 +354,8 @@ impl DbFsDriver:
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
-        _dbfs_finish_result(self._fstat_locked(handle))
+        # @workaround bug=mono-call-inference-20261031 reason=pinned stage2 cannot infer generic call args from match-arm/field bindings; annotate explicit type arguments
+        _dbfs_finish_result<FileStat>(self._fstat_locked(handle))
     static fn new_hosted() -> DbFsDriver:
         """Create a new in-memory DBFS driver with a root inode."""
         # The legacy signature cannot report lock admission failure.  Return
@@ -535,12 +538,13 @@ impl DbFsDriver:
         val mutation_epoch = dbfs_device_mount_seal_epoch_locked(
             self.inst_id, self.arena_block_count)
         if mutation_epoch.is_err():
-            return _dbfs_finish_result(Err(mutation_epoch.unwrap_err()))
+            # @workaround bug=mono-call-inference-20261031 reason=pinned stage2 cannot infer generic call args from match-arm/field bindings; annotate explicit type arguments
+            return _dbfs_finish_result<(i64, u64, u64)>(Err(mutation_epoch.unwrap_err()))
         if _dbfs_next_mount_seal_nonce == 0xFFFFFFFFFFFFFFFFu64:
-            return _dbfs_finish_result(Err(FsError.TooLarge))
+            return _dbfs_finish_result<(i64, u64, u64)>(Err(FsError.TooLarge))
         val nonce = _dbfs_next_mount_seal_nonce
         _dbfs_next_mount_seal_nonce = _dbfs_next_mount_seal_nonce + 1u64
-        _dbfs_finish_result(Ok((self.inst_id, nonce, mutation_epoch.unwrap())))
+        _dbfs_finish_result<(i64, u64, u64)>(Ok((self.inst_id, nonce, mutation_epoch.unwrap())))
 
     fn server_data_root_instance_identity() -> Result<(i64, u64), FsError>:
         """Observe the admitted identity without minting another seal nonce."""
@@ -548,8 +552,10 @@ impl DbFsDriver:
             return Err(FsError.Unsupported)
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         val epoch = dbfs_device_mount_seal_epoch_locked(self.inst_id, self.arena_block_count)
-        if epoch.is_err(): return _dbfs_finish_result(Err(epoch.unwrap_err()))
-        _dbfs_finish_result(Ok((self.inst_id, epoch.unwrap())))
+        if epoch.is_err():
+            # @workaround bug=mono-call-inference-20261031 reason=pinned stage2 cannot infer generic call args from match-arm/field bindings; annotate explicit type arguments
+            return _dbfs_finish_result<(i64, u64)>(Err(epoch.unwrap_err()))
+        _dbfs_finish_result<(i64, u64)>(Ok((self.inst_id, epoch.unwrap())))
 
     fn _direct_io_extent_for_consumer_locked(handle: FileHandle, file_offset: i64, byte_len: u64, consumer: text) -> Result<DirectIoExtent, FsError>:
         """Map a file-relative direct-I/O range onto the DBFS data region."""
@@ -602,7 +608,8 @@ impl DbFsDriver:
 
     fn direct_io_extent_for_consumer(handle: FileHandle, file_offset: i64, byte_len: u64, consumer: text) -> Result<DirectIoExtent, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
-        _dbfs_finish_result(self._direct_io_extent_for_consumer_locked(
+        # @workaround bug=mono-call-inference-20261031 reason=pinned stage2 cannot infer generic call args from match-arm/field bindings; annotate explicit type arguments
+        _dbfs_finish_result<DirectIoExtent>(self._direct_io_extent_for_consumer_locked(
             handle, file_offset, byte_len, consumer))
 
     fn write_passthrough(data: [u8]) -> Result<i64, FsError>:
@@ -753,14 +760,15 @@ impl DbFsDriver:
     fn fsync(handle: FileHandle) -> Result<(), FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         if _fd_inode_idx_locked(self.inst_id, handle.id) < 0:
-            return _dbfs_finish_result(Err(FsError.StaleHandle))
+            # @workaround bug=mono-call-inference-20261031 reason=pinned stage2 cannot infer generic call args from match-arm/field bindings; annotate explicit type arguments
+            return _dbfs_finish_result<()>(Err(FsError.StaleHandle))
         if self.arena_base < 0:
-            return _dbfs_finish_result(Err(FsError.Unsupported))
+            return _dbfs_finish_result<()>(Err(FsError.Unsupported))
         val flushed = dbfs_device_flush_locked(self.inst_id)
         if flushed.is_err() or not flushed.unwrap():
-            return _dbfs_finish_result(Err(
+            return _dbfs_finish_result<()>(Err(
                 if flushed.is_err(): flushed.unwrap_err() else: FsError.IoError(code: 0u32)))
-        _dbfs_finish_result(Ok(()))
+        _dbfs_finish_result<()>(Ok(()))
 
     fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
         self.fsync(handle)
