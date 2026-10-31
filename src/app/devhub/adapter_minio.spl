@@ -174,13 +174,46 @@ fn _host_from_url(url: text) -> text:
         return rest[0:slash]
     rest
 
+fn _resolve_key_segments(key: text) -> text:
+    """Resolve `.`/`..` segments client-side (RFC 3986 remove_dot_segments).
+
+    HTTP transports normalize dot segments out of the request target (the
+    seed ureq client resolves them at URL-parse time), so the signed
+    canonical URI must already contain the resolved path or the SigV4
+    signature will not match the path actually on the wire.
+    """
+    if key == "":
+        return ""
+    val segments = key.split("/")
+    var stack: [text] = []
+    for segment in segments:
+        if segment == ".":
+            pass
+        else if segment == "..":
+            if stack.len() > 0:
+                stack.pop()
+        else:
+            stack.push(segment)
+    var out = ""
+    var i = 0
+    while i < stack.len():
+        if i > 0:
+            out = out + "/"
+        out = out + stack[i]
+        i = i + 1
+    out
+
 fn _build_object_path(bucket: text, key: text) -> text:
-    """Build a path-style canonical URI for a bucket/key (each segment encoded)."""
+    """Build a path-style canonical URI for a bucket/key (each segment encoded).
+
+    Dot segments are resolved client-side so the canonical URI matches the
+    request target the HTTP transport puts on the wire (transports normalize
+    `dir/../` away at URL-parse time)."""
     if bucket == "":
-        return "/" + sigv4_uri_encode(key, false)
+        return "/" + sigv4_uri_encode(_resolve_key_segments(key), false)
     if key == "":
         return "/" + bucket
-    "/" + bucket + "/" + sigv4_uri_encode(key, false)
+    "/" + bucket + "/" + sigv4_uri_encode(_resolve_key_segments(key), false)
 
 
 # ---------------------------------------------------------------------------
@@ -829,10 +862,12 @@ fn minio_put_bytes(cfg: MinioConfig, bucket: text, key: text, body: [u8], conten
     val canonical_uri = _build_object_path(bucket, key)
     val amz_dt = _amz_datetime_now()
     val host = _host_from_url(cfg.url)
-    val payload_hash = _minio_binary_payload_hash(body)
+    # @workaround bug=native_empty_byte_array_carrier_rejected_2026_11_01 reason=The native bounded file read hands a zero-length body carrier across the extern boundary that rt_http_request_v2 rejects as "invalid HTTP v2 argument"; a fresh literal [] carries correctly (verified on the loopback fixture)
+    val payload: [u8] = if body.len() == 0: [] else: body
+    val payload_hash = _minio_binary_payload_hash(payload)
     val ct = if content_type == "": "application/octet-stream" else: content_type
     val sig_headers: [SigV4Header] = [
-        SigV4Header(name: "content-length", value: "{body.len()}"),
+        SigV4Header(name: "content-length", value: "{payload.len()}"),
         SigV4Header(name: "content-type", value: ct),
         SigV4Header(name: "host", value: host),
         SigV4Header(name: "x-amz-content-sha256", value: payload_hash),
@@ -841,7 +876,7 @@ fn minio_put_bytes(cfg: MinioConfig, bucket: text, key: text, body: [u8], conten
     val auth = sigv4_authorization_header("PUT", canonical_uri, "", sig_headers,
         payload_hash, cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt)
     val headers: [text] = ["Host: {host}", "Content-Type: {ct}",
-        "Content-Length: {body.len()}", "x-amz-content-sha256: {payload_hash}",
+        "Content-Length: {payload.len()}", "x-amz-content-sha256: {payload_hash}",
         "x-amz-date: {amz_dt}", "Authorization: {auth}"]
     var attempt = 0
     var status = 0
@@ -854,13 +889,13 @@ fn minio_put_bytes(cfg: MinioConfig, bucket: text, key: text, body: [u8], conten
             # provider. The real bounded compatibility transport keeps binary
             # octets and Authorization out of shell/argv interpolation.
             val response: (i64, text, text) = curl_request_bytes(
-                "PUT", "{cfg.url}{canonical_uri}", headers, body)
+                "PUT", "{cfg.url}{canonical_uri}", headers, payload)
             status = response.0
             response_body = response.1
             transport_error = response.2
         else:
             val response: (i64, text, text, [u8], text) = http_request_v2_raw(
-                "PUT", "{cfg.url}{canonical_uri}", headers, body, 30000)
+                "PUT", "{cfg.url}{canonical_uri}", headers, payload, 30000)
             status = response.0
             val response_bytes: [u8] = response.3
             response_body = bytes_to_text(response_bytes)

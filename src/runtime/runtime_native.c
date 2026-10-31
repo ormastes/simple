@@ -15227,6 +15227,17 @@ static int rt_http_method_is_token(const char* method) {
     return 1;
 }
 
+static int rt_http_headers_have(RtCoreArray* headers, const char* name) {
+    size_t name_len = strlen(name);
+    if (!headers) return 0;
+    for (int64_t i = 0; i < headers->len; i++) {
+        RtCoreString* header = rt_core_as_string(((int64_t*)headers->data)[i]);
+        if (!header || header->len <= (int64_t)name_len) continue;
+        if (strncasecmp(header->data, name, name_len) == 0 && header->data[name_len] == ':') return 1;
+    }
+    return 0;
+}
+
 static int rt_http_headers_valid(RtCoreArray* headers) {
     if (!headers || headers->len < 0 ||
         (headers->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) ||
@@ -15340,11 +15351,30 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
         if (!query_target) { close(fd); free(host_port); snprintf(error, error_cap, "out of memory"); return 0; }
         query_target[0] = '/'; strcpy(query_target + 1, request_target); request_target = query_target;
     }
+    /* The injected Host/Connection prelude must not duplicate headers the
+       caller already supplied: a second Host header is malformed HTTP/1.1
+       (servers read the first), which breaks SigV4 whose signature covers a
+       single Host value. The port is required in Host unless it is the
+       scheme default (80 for http). */
+    int caller_has_host = rt_http_headers_have(headers, "Host");
+    int caller_has_connection = rt_http_headers_have(headers, "Connection");
     char* request = NULL; size_t request_len = 0, request_cap = 0; char line[256];
-    int line_len = snprintf(line, sizeof(line), "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n",
-                            method, request_target, host_port);
+    int line_len = snprintf(line, sizeof(line), "%s %s HTTP/1.1\r\n",
+                            method, request_target);
     int ok = line_len > 0 && (size_t)line_len < sizeof(line) &&
              rt_http_append(&request, &request_len, &request_cap, line, (size_t)line_len);
+    if (ok && !caller_has_host) {
+        if (port == 80) {
+            line_len = snprintf(line, sizeof(line), "Host: %s\r\n", host_port);
+        } else {
+            line_len = snprintf(line, sizeof(line), "Host: %s:%d\r\n", host_port, port);
+        }
+        ok = line_len > 0 && (size_t)line_len < sizeof(line) &&
+             rt_http_append(&request, &request_len, &request_cap, line, (size_t)line_len);
+    }
+    if (ok && !caller_has_connection) {
+        ok = rt_http_append(&request, &request_len, &request_cap, "Connection: close\r\n", 19);
+    }
     free(query_target);
     if (ok && headers) {
         for (int64_t i = 0; i < headers->len; i++) {
