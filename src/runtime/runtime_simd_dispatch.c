@@ -6,6 +6,7 @@
 #include "runtime_simd_dispatch.h"
 #include "runtime.h"
 #include "runtime_value.h"
+#include "runtime_nonnull.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -1504,12 +1505,12 @@ SplArray* rt_engine2d_simd_fill_row_u32(int64_t count, int64_t color) {
     int64_t n = count;
     int64_t color_word = engine2d_box_pixel((uint32_t)color);
     SplArray* a = engine2d_new_pixel_array(n);
-    if (!a) return NULL;
-    if (n <= 0) return a;
+    if (!a) return SIMPLE_RT_NONNULL("rt_engine2d_simd_fill_row_u32", NULL);
+    if (n <= 0) return SIMPLE_RT_NONNULL("rt_engine2d_simd_fill_row_u32", a);
     int64_t* out = (int64_t*)(uintptr_t)rt_array_data_ptr(a);
-    if (!out) return a;
+    if (!out) return SIMPLE_RT_NONNULL("rt_engine2d_simd_fill_row_u32", a);
     engine2d_fill_into(out, n, color_word);
-    return a;
+    return SIMPLE_RT_NONNULL("rt_engine2d_simd_fill_row_u32", a);
 }
 
 SplArray* rt_engine2d_simd_fill_rows_u32(int64_t width, int64_t height,
@@ -1580,13 +1581,13 @@ SplArray* rt_engine2d_simd_fill_rows_u32(int64_t width, int64_t height,
 SplArray* rt_engine2d_simd_copy_row_u32(SplArray* src) {
     int64_t n = rt_array_len(src);
     SplArray* a = engine2d_new_pixel_array(n);
-    if (!a) return NULL;
-    if (n <= 0) return a;
+    if (!a) return SIMPLE_RT_NONNULL("rt_engine2d_simd_copy_row_u32", NULL);
+    if (n <= 0) return SIMPLE_RT_NONNULL("rt_engine2d_simd_copy_row_u32", a);
     const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
     int64_t* out = (int64_t*)(uintptr_t)rt_array_data_ptr(a);
-    if (!out || !src_data) return a;
+    if (!out || !src_data) return SIMPLE_RT_NONNULL("rt_engine2d_simd_copy_row_u32", a);
     engine2d_copy_into(out, src_data, n);
-    return a;
+    return SIMPLE_RT_NONNULL("rt_engine2d_simd_copy_row_u32", a);
 }
 
 SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src) {
@@ -1594,12 +1595,12 @@ SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src) {
     int64_t sn = rt_array_len(src);
     int64_t n = dn < sn ? dn : sn;
     SplArray* a = engine2d_new_pixel_array(n);
-    if (!a) return NULL;
-    if (n <= 0) return a;
+    if (!a) return SIMPLE_RT_NONNULL("rt_engine2d_simd_blend_row_u32", NULL);
+    if (n <= 0) return SIMPLE_RT_NONNULL("rt_engine2d_simd_blend_row_u32", a);
     const int64_t* dst_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(dst);
     const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
     int64_t* out = (int64_t*)(uintptr_t)rt_array_data_ptr(a);
-    if (!out || !dst_data || !src_data) return a;
+    if (!out || !dst_data || !src_data) return SIMPLE_RT_NONNULL("rt_engine2d_simd_blend_row_u32", a);
     if ((uint64_t)n <= SIZE_MAX / sizeof(int64_t)) {
         int64_t* raw_dst = (int64_t*)malloc((size_t)n * sizeof(int64_t));
         int64_t* raw_src = (int64_t*)malloc((size_t)n * sizeof(int64_t));
@@ -1614,7 +1615,7 @@ SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src) {
             }
             free(raw_src);
             free(raw_dst);
-            return a;
+            return SIMPLE_RT_NONNULL("rt_engine2d_simd_blend_row_u32", a);
         }
         free(raw_src);
         free(raw_dst);
@@ -1624,7 +1625,7 @@ SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src) {
         uint32_t src_pixel = engine2d_unbox_pixel(src_data[i]);
         out[i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel(src_pixel, dst_pixel));
     }
-    return a;
+    return SIMPLE_RT_NONNULL("rt_engine2d_simd_blend_row_u32", a);
 }
 
 #if SIMD_CAN_AVX2
