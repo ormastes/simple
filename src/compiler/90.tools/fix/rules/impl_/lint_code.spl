@@ -153,15 +153,33 @@ fn _collect_indexed_call_replacements(
             sequence = sequence + 1
             i = close_paren + 1
         byte_offset = byte_offset + line.len() + 1
-    indexed.sort_by(\a, b:
-        val ia: IndexedDuplicateCallReplacement = a
-        val ib: IndexedDuplicateCallReplacement = b
-        if ia.sig_index == ib.sig_index:
-            ia.sequence - ib.sequence
-        else:
-            ia.sig_index - ib.sig_index
-    )
-    indexed
+    # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR cannot lower sort_by with a lambda comparator; explicit selection sort by the same (sig_index, sequence) total order is equivalent (sequence is strictly increasing, so no ties)
+    var sorted: [IndexedDuplicateCallReplacement] = []
+    var take_i = 0
+    while take_i < indexed.len():
+        var best_i = 0
+        var j = 1
+        while j < indexed.len():
+            val ja: IndexedDuplicateCallReplacement = indexed[j]
+            val ba: IndexedDuplicateCallReplacement = indexed[best_i]
+            var ja_before = false
+            if ja.sig_index == ba.sig_index:
+                ja_before = ja.sequence < ba.sequence
+            else:
+                ja_before = ja.sig_index < ba.sig_index
+            if ja_before:
+                best_i = j
+            j = j + 1
+        sorted = sorted.push(indexed[best_i])
+        var remaining: [IndexedDuplicateCallReplacement] = []
+        var k = 0
+        while k < indexed.len():
+            if k != best_i:
+                remaining = remaining.push(indexed[k])
+            k = k + 1
+        indexed = remaining
+        take_i = take_i + 1
+    sorted
 
 fn _collect_duplicate_typed_arg_signatures(source: text) -> [DuplicateTypedArgSignature]:
     _collect_duplicate_typed_arg_signatures_from_contexts(line_contexts(source))
