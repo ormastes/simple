@@ -55,6 +55,7 @@ NOISE = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*
 NARROW = {'i8', 'i16', 'i32', 'u8', 'u16', 'u32', 'bool', 'f32', 'f64'}
 BASELINE = 'scripts/check/rt_pointer_ref_map_baseline.txt'
 PARAM_BASELINE = 'scripts/check/rt_param_ref_map_baseline.txt'
+COUNT_BASELINE = 'scripts/check/rt_param_count_baseline.txt'
 QUAL = re.compile(r'\b(?:const|volatile|restrict|__restrict|struct|enum|union)\b')
 REF_MUT = re.compile(r'&\s*mut\b\s*(.*)$')
 REF = re.compile(r'&\s*(.*)$')
@@ -124,6 +125,10 @@ def c_params(text, fold=True):
 
 def spl_type(typ):
     """.spl type -> (kind, base); kind is bare, opt, ref or refmut."""
+    typ = typ.split('=')[0].strip()
+    opt = re.fullmatch(r'Option<(.+)>', typ)
+    if opt:
+        return ('opt', opt[1].strip())
     m = REF_MUT.match(typ)
     if m:
         return ('refmut', m[1].strip())
@@ -259,7 +264,7 @@ def join_params(sym, params, rel, defs, acc):
         folded, raw = entry
         sig = raw if len(raw) == len(spl) else folded
         if len(sig) != len(spl):
-            p_srt003.add('SRT003 param count mismatch (report-only): %s:%s C=%d spl=%d' % (rel, sym, len(raw), len(spl)))
+            p_srt003.add('%s:%s C=%d spl=%d' % (rel, sym, len(raw), len(spl)))
             continue
         for i, (ck, _cb) in enumerate(sig):
             sk, sb, st = spl[i]
@@ -312,7 +317,18 @@ def run(root, regen, regen_param=False):
     pbase = load_baseline(ppath)
     pnew = sorted(k for k in snull if k not in pbase)
     pstale = sorted(k for k in pbase if k not in snull)
-    for line in pres['srt003']:
+    cpath = os.path.join(root, COUNT_BASELINE)
+    if regen_param:
+        with open(cpath, 'w') as f:
+            f.write('# Shrink-only. SRT003: <file>:<extern> C=<n> spl=<n>; these params are not joined.\n')
+            f.writelines(k + '\n' for k in pres['srt003'])
+    cbase = load_baseline(cpath)
+    cnew, cstale = sorted(set(pres['srt003']) - cbase), sorted(cbase - set(pres['srt003']))
+    for k in cnew:
+        print('SRT003 new param count mismatch: ' + k)
+    for k in cstale:
+        print('SRT003 stale baseline row, remove it: ' + k)
+    for line in []:
         print(line)
     for k in sorted(pres['narrow']):
         print('SRT004 narrow pointer param: ' + k)
@@ -325,7 +341,7 @@ def run(root, regen, regen_param=False):
         sum(1 for v in snull.values() if v == 'SNULL002'), sum(1 for v in snull.values() if v == 'SNULL003'),
         len(set(snull) & pbase)))
     # SRT003 is report-only: it is printed and counted above but never fails the verdict.
-    bad = len(narrow) + len(new) + len(stale) + len(pres['narrow']) + len(pnew) + len(pstale)
+    bad = len(narrow) + len(new) + len(stale) + len(pres['narrow']) + len(pnew) + len(pstale) + len(cnew) + len(cstale)
     if bad:
         print('FAIL — %d edge(s) checked, %d finding(s)' % (edges, bad))
         return 1
@@ -393,6 +409,9 @@ def selftest():
 
     # Parameter direction: (C source, .spl source, exit, srt003, narrow, snull codes, unparsed)
     pcases = [
+        ('char *rt_x(int64_t h, int64_t size, const char *p);\n', 'extern fn rt_x(h: i64, p: text?) -> text\n', 1, 1, 0, '', 0),
+        ('char *rt_x(char *a);\n', 'extern fn rt_x(a: Option<text>) -> text\n', 1, 0, 0, 'SNULL002', 0),
+        ('char *rt_x(char *a);\n', 'extern fn rt_x(a: text? = nil) -> text\n', 1, 0, 0, 'SNULL002', 0),
         ('char *rt_x(char *a, int64_t b);\n', 'extern fn rt_x(a: text) -> text\n', 0, 1, 0, '', 0),
         ('char *rt_x(char *a);\n', 'extern fn rt_x(a: i32) -> text\n', 1, 0, 1, '', 0),
         ('char *rt_x(char *a);\n', 'extern fn rt_x(a: text?) -> text\n', 1, 0, 0, 'SNULL002', 0),
@@ -414,6 +433,7 @@ def selftest():
         ('char *rt_x(const uint8_t *p, uint64_t p_len, uint64_t extra);\n', 'extern fn rt_x(a: text) -> text\n', 0, 1, 0, '', 0),
     ]
     for i, (c, spl, want_code, want_srt, want_narrow, want_snull, want_unp) in enumerate(pcases):
+        want_code = want_code or int(want_srt > 0)
         t = tree(c, spl)
         _s, _e, _u, _r, _n, _nil, _enf, pres = scan(t)
         codes = sorted(set(pres['snull'].values()))
