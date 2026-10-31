@@ -51,7 +51,7 @@ NULLRET = re.compile(r'\breturn\s*\(?\s*' + _NULL + r'\s*\)?\s*;|\breturn\b[^;]*
 RET = re.compile(r'\breturn\b[^;]*;')
 ENFORCED = re.compile(r'\breturn\s*(?:\([^()]*\)\s*)?SIMPLE_RT_NONNULL\s*\(')
 RANK = {'unknown': 0, 'enforced': 1, 'seen': 2, 'nil': 3}
-ATTR = re.compile(r'__attribute__\s*\(\(.*?\)\)[ \t]*')
+ATTR = re.compile(r'__attribute__\s*\(\((?:[^()]|\([^()]*\))*\)\)[ \t]*')
 NOISE = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'', re.S)
 NARROW = {'i8', 'i16', 'i32', 'u8', 'u16', 'u32', 'bool', 'f32', 'f64'}
 BASELINE = 'scripts/check/rt_pointer_ref_map_baseline.txt'
@@ -368,6 +368,7 @@ def selftest():
     nilc = 'char *rt_x(void) {\n  if (a) return NULL;\n  return b;\n}\n'
     okc = 'char *rt_x(void) {\n  return b;\n}\n'
     cases = [
+        ('__attribute__((visibility("default"))) char *rt_x(void) { return NULL; }\n', 'extern fn rt_x() -> text\n', 1),
         ('__attribute__((weak)) char *rt_x(void) { return NULL; }\n', 'extern fn rt_x() -> text\n', 1),
         (nilc, 'extern fn rt_x() -> text\n', 1),
         (nilc, 'extern fn rt_x() -> text?\n', 0),
