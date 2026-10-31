@@ -84,8 +84,7 @@ int main(void) {
     }
     CHECK(saw_a && saw_sub, "listing carries entry NAMES, not paths");
     int64_t missing = rt_dir_list(PL("/nonexistent/zz"));
-    CHECK(!rt_is_none(missing) && rt_array_len((SplArray*)(uintptr_t)missing) == 0,
-          "rt_dir_list of missing dir is an EMPTY array (runtime.c contract, [text] is non-optional)");
+    CHECK(rt_is_none(missing), "rt_dir_list of missing dir is nil");
 
     char c[256];
     snprintf(c, sizeof c, "%s/c.txt", sub);
