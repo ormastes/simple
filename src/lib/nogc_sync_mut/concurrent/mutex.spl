@@ -10,9 +10,9 @@ declaring duplicate lock hooks.
 @unsafe(reason: "raw runtime mutex allocation ABI; contract: returned handle is runtime-owned", capabilities: [ffi])
 extern fn rt_mutex_new<T>(initial: T) -> i64
 @unsafe(reason: "raw runtime mutex lock ABI; contract: nil means stale or foreign handle", capabilities: [ffi])
-extern fn rt_mutex_lock<T>(mutex: i64) -> T
+extern fn rt_mutex_lock<T>(mutex: i64) -> T?
 @unsafe(reason: "raw runtime mutex try-lock ABI; contract: nil means contended or invalid handle", capabilities: [ffi])
-extern fn rt_mutex_try_lock<T>(mutex: i64) -> T
+extern fn rt_mutex_try_lock<T>(mutex: i64) -> T?
 @unsafe(reason: "raw runtime mutex unlock ABI; contract: one means released and zero means invalid handle", capabilities: [ffi])
 extern fn rt_mutex_unlock<T>(mutex: i64, new_value: T) -> i64
 
@@ -47,7 +47,9 @@ class Mutex:
     fn with_lock<T>(f: fn(T) -> T) -> T:
         val current = unsafe(capabilities: [ffi]):
             rt_mutex_lock<T>(self._handle)
-        val updated = f(current)
+        if current == nil:
+            panic("E-SFFI-MUTEX-002: rt_mutex_lock failed on a stale or foreign handle")
+        val updated = f(current.unwrap())
         unsafe(capabilities: [ffi]):
             rt_mutex_unlock(self._handle, updated)
         updated
@@ -119,7 +121,9 @@ fn mutex_new<T>(initial: T) -> Mutex:
 fn mutex_with_lock<T>(mutex: Mutex, f: fn(T) -> T) -> T:
     val current = unsafe(capabilities: [ffi]):
         rt_mutex_lock<T>(mutex._handle)
-    val updated = f(current)
+    if current == nil:
+        panic("E-SFFI-MUTEX-002: rt_mutex_lock failed on a stale or foreign handle")
+    val updated = f(current.unwrap())
     unsafe(capabilities: [ffi]):
         rt_mutex_unlock(mutex._handle, updated)
     updated
@@ -137,8 +141,10 @@ fn mutex_with_lock<T>(mutex: Mutex, f: fn(T) -> T) -> T:
 # — `keep_value` stays `Any` on purpose: it is always the fixed gate
 # sentinel, never real data, so it never round-trips through user code.
 fn mutex_with_lock_keeping<T, K>(mutex: Mutex, keep_value: K, f: fn() -> T) -> T:
-    unsafe(capabilities: [ffi]):
+    val held = unsafe(capabilities: [ffi]):
         rt_mutex_lock<K>(mutex._handle)
+    if held == nil:
+        panic("E-SFFI-MUTEX-002: rt_mutex_lock failed on a stale or foreign handle")
     val result = f()
     unsafe(capabilities: [ffi]):
         rt_mutex_unlock(mutex._handle, keep_value)
