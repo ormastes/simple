@@ -21,7 +21,10 @@ use std.io_runtime.{file_read}
 use nogc_sync_mut.database.codec.sqlcipher4.{
     Sqlcipher4Error, sqlcipher4_error_code, sqlcipher4_error_text
 }
-use nogc_sync_mut.database.codec.codec_registry.{CodecSessionV1}
+use nogc_sync_mut.database.codec.codec_registry.{
+    CodecSessionV1, CodecRegistry, CodecRegistryEntry, codec_registry_sqlcipher4_entry
+}
+use nogc_sync_mut.database.codec.sqlcipher4.{sqlcipher4_profile}
 use nogc_sync_mut.database.codec.sqlcipher4_keys.{
     Sqlcipher4KeyError, sqlcipher4_hmac_salt_from_file_salt, sqlcipher4_key_error_text,
     sqlcipher4_key_session_open
@@ -33,7 +36,7 @@ use nogc_sync_mut.database.codec.sqlcipher4_page.{
     SQLCIPHER4_PAGE_SIZE, SQLCIPHER4_PAGE_BODY_BYTES, SQLCIPHER4_SESSION_MATERIAL_BYTES,
     sqlcipher4_encode_page, sqlcipher4_decode_page, sqlcipher4_page1_salt,
     sqlcipher4_page_decode_with_session, sqlcipher4_page_encode_with_session,
-    sqlcipher4_page_close, sqlcipher4_page_open_key
+    sqlcipher4_page_close, sqlcipher4_page_open_key, sqlcipher4_page_factory
 }
 use nogc_sync_mut.database.codec.secret_ref.{secret_ref_resolve_uri}
 
@@ -245,9 +248,49 @@ describe "SQLCipher 4 fail-closed read path":
         # @capture(statistics): forbidden form present per read-path source
         # A source guard, because this defect only shows in a native build and this
         # spec runs on the interpreter. Native proof: test/fixtures/devhub/native_codegen_repro.
-        step("Scan each read-path source for the forbidden conversion")
-        val sources = ["src/lib/nogc_sync_mut/database/codec/sqlcipher4_keys.spl", "src/lib/nogc_sync_mut/database/codec/sqlcipher4_page.spl", "src/lib/nogc_sync_mut/database/codec/secret_ref.spl", "src/lib/common/aes/modes.spl"]
+        step("Scan each read-path source for the forbidden conversions")
+        val base = "src/lib/nogc_sync_mut/database/"
+        val sources = [base + "codec/sqlcipher4_keys.spl", base + "codec/sqlcipher4_page.spl", base + "codec/secret_ref.spl", base + "sqlite_format/btree.spl", base + "sqlite_format/cell.spl", base + "sqlite_format/header.spl", base + "sqlite_format/pager.spl", base + "sqlite_format/reader.spl", base + "sqlite_format/record.spl", base + "sqlite_format/schema.spl", "src/lib/common/aes/modes.spl", "src/lib/common/crypto/aes_gcm.spl"]
         for source in sources:
             val body = file_read(source)
             expect(body.len() > 0).to_equal(true)
             expect(body.contains(".len().to_i64()")).to_equal(false)
+            expect(body.contains("nk) - 1).to_i64()")).to_equal(false)
+
+    it "rejects a manifest with a key outside any section or an empty version":
+        # @req REQ-CIPHER-READ-015
+        # @capture(statistics): typed error detail per manifest defect
+        step("Parse a manifest whose key has no section")
+        expect(_manifest_detail("id: x\n")).to_contain("parse errors")
+        step("Parse a manifest whose version is empty")
+        expect(_manifest_detail(_manifest_text("", "codec_version", ""))).to_contain("codec_version")
+
+    it "resolves the highest version of the named codec regardless of order":
+        # @req REQ-CIPHER-READ-016
+        # @capture(statistics): resolved versions and registered codec list
+        step("Register a second version, then a first, then another codec")
+        var registry = CodecRegistry.new()
+        val digest = match registry.register_profile(sqlcipher4_profile(), 1):
+            case Ok(d):
+                d
+            case Err(e):
+                fail("profile rejected: {sqlcipher4_error_code(e)}")
+        val again = match registry.register_profile(sqlcipher4_profile(), 1):
+            case Ok(d):
+                d
+            case Err(e):
+                fail("profile rejected: {sqlcipher4_error_code(e)}")
+        expect(again).to_equal(digest)
+        val entry_two = codec_registry_sqlcipher4_entry(sqlcipher4_page_factory, 2)
+        val entry_one = codec_registry_sqlcipher4_entry(sqlcipher4_page_factory, 1)
+        val other = CodecRegistryEntry(codec_id: "other", codec_version: 7, interface_version: entry_one.interface_version, profile_digest: digest, factory: sqlcipher4_page_factory)
+        expect(registry.register_codec(other).is_ok()).to_equal(true)
+        expect(registry.register_codec(entry_two).is_ok()).to_equal(true)
+        expect(registry.register_codec(entry_one).is_ok()).to_equal(true)
+        step("Ask for the latest version of each codec")
+        expect(registry.latest_version("sqlcipher4") ?? -1).to_equal(2)
+        expect(registry.latest_version("other") ?? -1).to_equal(7)
+        expect(registry.list_codecs().join(",")).to_equal("other@7,sqlcipher4@2,sqlcipher4@1")
+        step("Check an unregistered digest is reported as absent")
+        expect(registry.profile_registered("not-a-digest")).to_equal(false)
+        expect(registry.profile_registered(digest)).to_equal(true)

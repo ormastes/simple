@@ -71,7 +71,8 @@ Messenger verbs; it has no final verdict yet.
 
 The Phase 2 failure was `passphrase.len().to_i64() == 0` evaluating true: see
 `native_to_i64_compound_receiver_2026_10_31.md`. With the workaround the key session
-opens, derived keys match hashlib, and real pages decrypt to the expected plaintext.
+opens, the first 4 bytes of each derived key match hashlib (full keys match in
+`native_crypto_kat`), and real pages authenticate and decrypt, checked on sampled bytes.
 
 This bug stays OPEN because the fixture does not pass end to end. Phase 2 now opens
 the database and fails reading rows: `text_from_codepoints` returns empty text, so
