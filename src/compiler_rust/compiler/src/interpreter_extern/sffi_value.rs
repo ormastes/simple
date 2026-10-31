@@ -212,8 +212,9 @@ fn probe_arg<'a>(args: &'a [Value], name: &str) -> Result<&'a Value, CompileErro
 /// `Option::None`, which is nil (matching `rt_value_is_nil_fn`).
 enum ProbeCarrier {
     Word(RuntimeValue),
-    /// An interpreter float. Kept distinct instead of encoding through
-    /// `rt_value_float`, which boxes (allocates) a HeapFloat per probe.
+    /// An interpreter float. Native `rt_value_float` boxes a HeapFloat, so it
+    /// answers is_float = is_heap = true and type_tag = TAG_HEAP; this carrier
+    /// gives the same answers without allocating per probe.
     Float,
     Heap,
     Nil,
@@ -270,8 +271,8 @@ pub fn rt_value_is_heap_fn(args: &[Value]) -> Result<Value, CompileError> {
     let value = probe_arg(args, "rt_value_is_heap")?;
     Ok(Value::Bool(match classify_probe(value) {
         ProbeCarrier::Word(rv) => rt_value_is_heap(rv),
-        ProbeCarrier::Heap => true,
-        ProbeCarrier::Float | ProbeCarrier::Nil => false,
+        ProbeCarrier::Float | ProbeCarrier::Heap => true,
+        ProbeCarrier::Nil => false,
     }))
 }
 
@@ -308,8 +309,7 @@ pub fn rt_value_type_tag_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rv = match classify_probe(value) {
         ProbeCarrier::Word(rv) => rv,
         ProbeCarrier::Nil => rt_value_nil(),
-        ProbeCarrier::Float => return Ok(Value::Int(simple_runtime::value::tags::TAG_FLOAT as i64)),
-        ProbeCarrier::Heap => return Ok(Value::Int(simple_runtime::value::tags::TAG_HEAP as i64)),
+        ProbeCarrier::Float | ProbeCarrier::Heap => return Ok(Value::Int(simple_runtime::value::tags::TAG_HEAP as i64)),
     };
     Ok(Value::Int(rt_value_type_tag(rv) as i64))
 }
@@ -537,7 +537,8 @@ mod carrier_probe_tests {
     fn interpreter_scalars_classify_by_variant_not_as_int() {
         let yes = |v: Value| matches!(v, Value::Bool(true));
         assert!(yes(rt_value_is_float_fn(&[Value::Float(1.5)]).unwrap()));
-        assert!(!yes(rt_value_is_heap_fn(&[Value::Float(1.5)]).unwrap()));
+        // Native floats are boxed HeapFloats: heap as well as float.
+        assert!(yes(rt_value_is_heap_fn(&[Value::Float(1.5)]).unwrap()));
         assert!(!yes(rt_value_is_int_fn(&[Value::Float(1.5)]).unwrap()));
         assert!(yes(rt_value_is_float_fn(&[Value::Float32(2.5)]).unwrap()));
         assert!(yes(rt_value_is_bool_fn(&[Value::Bool(true)]).unwrap()));
@@ -550,9 +551,22 @@ mod carrier_probe_tests {
         assert!(matches!(rt_value_type_tag_fn(&[Value::Nil]).unwrap(), Value::Int(t) if t == nil_tag));
         let bool_tag = rt_value_type_tag(rt_value_bool(true)) as i64;
         assert!(matches!(rt_value_type_tag_fn(&[Value::Bool(true)]).unwrap(), Value::Int(t) if t == bool_tag));
-        let float_tag = simple_runtime::value::tags::TAG_FLOAT as i64;
+        let float_tag = simple_runtime::value::tags::TAG_HEAP as i64;
         assert!(matches!(rt_value_type_tag_fn(&[Value::Float(1.5)]).unwrap(), Value::Int(t) if t == float_tag));
         assert!(!yes(rt_value_is_nil_fn(&[Value::Float(0.0)]).unwrap()));
+    }
+
+    #[test]
+    fn unique_and_shared_pointers_are_heap() {
+        use crate::value::{ManualSharedValue, ManualUniqueValue};
+        let yes = |v: Value| matches!(v, Value::Bool(true));
+        let u = Value::Unique(ManualUniqueValue::new(Value::Int(0)));
+        let sh = Value::Shared(ManualSharedValue::new(Value::Int(0)));
+        for v in [u, sh] {
+            assert!(yes(rt_value_is_heap_fn(&[v.clone()]).unwrap()));
+            assert!(!yes(rt_value_is_int_fn(&[v.clone()]).unwrap()));
+            assert!(!yes(rt_value_is_nil_fn(&[v]).unwrap()));
+        }
     }
 
     #[test]
