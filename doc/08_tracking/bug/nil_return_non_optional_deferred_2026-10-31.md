@@ -121,3 +121,30 @@ handling None. Several externs have conflicting declarations across files.
   `rt_enum_payload`/`rt_tuple_get` raw `i64` codegen declarations, and
   `sffi_minimal.spl file_read_text_ptr` (raw pointer ABI; needs bootstrap
   verification).
+
+## Status after the extern sweep (2026-10-31, end of day)
+
+Merged: #5613 (guard repaired and wired), #5614 (unit externs), #5621 (class (a)
+leg covering every rt_* declaration, plus the #5613 review fixes), #5625
+(env/process/random), #5628 (rt_path_absolute returns nil on cwd failure, in
+all three runtimes), #5629 (fs/db externs; `file_ops.file_hash_sha256 -> text?`;
+cache formal model review recorded in
+`src/verification/cache_protocol/nil_digest_unfingerprintable_review_2026-10-31.txt`).
+
+The guard (`check-non-optional-nil-return.shs`) is the enforcement for the
+rt_* rule. NIL-RET-001 cannot enforce it, because it does not resolve
+callees across files. Remaining ratchet debt on release:
+
+| leg | lines | biggest |
+|---|---|---|
+| (a) nil-capable rt_* declared non-optional | 88 | rt_file_read_text 51, rt_enum_payload 11, rt_platform_name 5, rt_env_get 4 (10.frontend/20.hir) |
+| (b) non-optional wrapper forwarding a nil-capable extern | 26 | sffi/concurrent rwlock/channel/tls, sffi/host, simple_core |
+| (c) hand-written nil under a non-optional type | 8 | 20.hir codec, 40.mono (compiler-core owner) |
+
+Open:
+- `rt_file_read_text` (51 declarations) and the `rt_enum_payload`/`rt_tuple_get` raw i64 codegen declarations.
+- The compiler-core directories. `20.hir/hir_lowering/module_surface_source_identity.spl` still declares `rt_path_absolute -> text`, so a cwd failure now hands nil to a `.replace` call there (behaviour gap).
+- C runtime nil returns are not derived by the guard yet.
+- `src/os`, `src/compiler_rust/lib` and `test/**` declarations are outside the scanned roots.
+- A null pointer or invalid UTF-8 input to the native `rt_path_absolute` still returns `""`.
+- `bin/simple` pointed at a deleted bootstrap generation during this work. The last verification runs used a seed built in a scratch worktree.
