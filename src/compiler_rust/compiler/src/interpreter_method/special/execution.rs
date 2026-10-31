@@ -3,6 +3,7 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
+use crate::interpreter::interpreter_call::write_back_borrow_arguments;
 use crate::interpreter::{
     bind_args, captured_env_with_live_globals, execute_function_body, publish_and_repoint, sync_owned_captured_globals,
     Enums, ImplMethods,
@@ -252,13 +253,17 @@ pub fn exec_function_with_self_return(
             if let Some(updated_arg) = local_env.get(&param.name).cloned() {
                 if matches!(
                     updated_arg,
-                    Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                    Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                 ) {
                     outer_env.insert(var_name.clone(), updated_arg);
                 }
             }
         }
     }
+
+    write_back_borrow_arguments(
+        func, args, outer_env, &local_env, functions, classes, enums, impl_methods, self_mode,
+    )?;
 
     // Extract the potentially modified self (remove avoids an extra Arc clone)
     let updated_self = local_env.remove("self").unwrap_or_else(|| Value::Object {
@@ -463,7 +468,7 @@ pub fn exec_function_with_self_return_values(
                 // threw the clone away for every scalar.
                 let is_container = matches!(
                     local_env.get(&param.name),
-                    Some(Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_))
+                    Some(Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_))
                 );
                 if is_container {
                     if let Some(updated_arg) = local_env.get(&param.name).cloned() {
@@ -474,6 +479,18 @@ pub fn exec_function_with_self_return_values(
             }
         }
     }
+
+    write_back_borrow_arguments(
+        func,
+        arg_exprs,
+        outer_env,
+        &local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        simple_parser::ast::SelfMode::SkipSelf,
+    )?;
 
     let updated_self = local_env.remove("self").unwrap_or_else(|| Value::Object {
         class: class_name.to_string(),
