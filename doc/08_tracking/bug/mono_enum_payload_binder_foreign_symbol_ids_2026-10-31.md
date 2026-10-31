@@ -22,7 +22,7 @@ The subject is always a depth-1 enum-pattern binder whose payload type is declar
 
 1. `collect_generics` records `enum_payload_types["{Enum}::{Variant}::{slot}"] = <declared payload HirType>` from the declaring module's `HirEnum`. The `Named` ids inside that `HirType` belong to the declaring module's `SymbolTable`. No owner module was recorded.
 2. `bind_payload_pattern` preferred that row over the binder's own `pat.type_`, although HIR lowering had already typed the binder in the consumer's id space (`expression_components.spl`, `imported_surface_type`).
-3. `rewrite_expr` stamps `env_type(symbol)` onto every read of the binder (`has_type_ = true`), unrelocated. The sibling `Field` arm transports its type with `relocate_mono_types`; the Var arm did not.
+3. `rewrite_expr` stamps `env_type(symbol)` onto each read of the binder that carries no concrete type of its own (`has_type_ = true`), unrelocated. The sibling `Field` arm transports its type with `relocate_mono_types`; the Var arm did not.
 4. MIR's `enum_match_expr_type` trusts `expr.type_` first (presence bit), then compares it with the retained local declaration and refuses the match.
 
 Small probes rarely show it because the consumer's and provider's raw ids for the payload struct can coincide; the 490-module closure (`$S/mirfix/retained-red-all.log`) and the full stage3 closure show it reliably.

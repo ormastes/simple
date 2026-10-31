@@ -4087,8 +4087,10 @@ impl MonomorphizationPass:
                 pass_do_nothing("unit variant")
 
     me bind_payload_pattern(pat: HirPattern, key: text):
-        """Bind one payload sub-pattern, preferring the declared payload type
-        over the pattern's own (often absent) recorded type."""
+        """Bind one payload sub-pattern. The pattern's own recorded type (set by
+        HIR lowering in this module's id space) wins; the declared payload row
+        is the fallback for binders lowering left untyped, transported from
+        the declaring module before it is bound."""
         if pat == nil:
             return
         match pat.kind:
@@ -4104,11 +4106,13 @@ impl MonomorphizationPass:
                     val own_type: HirType = pat.type_
                     self.env[bs.id] = own_type
                     return
+                var direct_failed = false
                 if self.enum_payload_types.has(key):
                     val dt: HirType = self.enum_payload_types[key]
                     if dt != nil and hir_type_is_concrete(dt):
                         if self.bind_payload_declared_type(bs, key, dt):
                             return
+                        direct_failed = true
                 # Last resort when the enum NAME could be recovered from
                 # neither the pattern nor the scrutinee: a variant+slot suffix
                 # that is declared by exactly ONE enum in the whole program is
@@ -4124,7 +4128,9 @@ impl MonomorphizationPass:
                         hits = hits + 1
                         found = self.enum_payload_types[kt]
                         found_key = kt
-                if hits == 1:
+                # The same row is not retried (it already failed transport
+                # above and named the site once).
+                if hits == 1 and not (direct_failed and found_key == key):
                     if found != nil:
                         val ft: HirType = found
                         if hir_type_is_concrete(ft):
