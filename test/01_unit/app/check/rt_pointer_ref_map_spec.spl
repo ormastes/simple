@@ -176,3 +176,42 @@ describe "rt parameter direction":
         step("Classify the coverage line")
         val (out, _code) = gate_param_run(PTR_C, "extern fn rt_x(a: text) -> text\\n", "")
         expect(out).to_contain("param coverage: edges=1 ptr_params=1 unparsed=0 SRT003=0")
+
+    it "folds a byte-pointer length named n into one text slot":
+        step("Classify the n companion")
+        val (out, code) = gate_param_run("char *rt_x(const uint8_t *p, int64_t n);\\n", "extern fn rt_x(a: text) -> text\\n", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")
+
+    it "folds kl and dl after two byte pointers":
+        step("Classify the kl and dl companions")
+        val (out, code) = gate_param_run("char *rt_x(const uint8_t *k, int64_t kl, const uint8_t *d, int64_t dl);\\n", "extern fn rt_x(a: text, b: text) -> text\\n", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")
+
+    it "folds a count after a char pointer into one text slot":
+        step("Classify the char count companion")
+        val (out, code) = gate_param_run("char *rt_x(const char *s, int64_t count);\\n", "extern fn rt_x(a: text) -> text\\n", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")
+
+    it "does not fold a count after a non-byte pointer":
+        step("Classify the non-byte count")
+        val (out, code) = gate_param_run("char *rt_x(const int32_t *p, int64_t count);\\n", "extern fn rt_x(a: text) -> text\\n", "")
+        expect(code).to_equal(1)
+        expect(out).to_contain("SRT003 new param count mismatch")
+
+    it "does not fold a second integer after a pointer already paired with its length":
+        step("Classify the second integer")
+        val (out, code) = gate_param_run("char *rt_x(const uint8_t *p, uint64_t p_len, int64_t count);\\n", "extern fn rt_x(a: text, n: i64) -> text\\n", "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")
+
+    it "joins the hosted safe artifact bundle n_begin shape without a count mismatch":
+        step("Classify the bundle n_begin shape")
+        # a pointer return keeps the return pass non-empty; the params are the bundle n_begin shape
+        val c = "char *rt_x(int64_t root, const uint8_t* bundle, uint64_t bundle_len, const uint8_t* descriptor, uint64_t descriptor_len, int64_t count, int64_t max_bytes);\\n"
+        val spl = "extern fn rt_x(root_handle: i64, bundle: text, descriptor_leaf: text, count: i64, aggregate_max_bytes: i64) -> i64\\n"
+        val (out, code) = gate_param_run(c, spl, "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("SRT003=0 ")

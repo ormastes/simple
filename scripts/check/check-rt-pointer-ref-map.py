@@ -95,27 +95,34 @@ def split_top(text):
     return [p.strip() for p in parts]
 
 
-LEN_NAME = re.compile(r'\b\w*(?:len|length|count|size|cap)\s*$')
+LEN_NAME = re.compile(r'\b\w*(?:len|length|count|size|cap)\s*$|\b(?:n|kl|dl)\s*$')
+BYTE_PTR = ('uint8_t', 'char')
 
 
 def c_params(text, fold=True):
     """C parameter list -> [(kind, base)]; kind is ptr, scalar or unparsed. Stops at '...'.
 
     Text ABI fold: the runtime passes a .spl `text` as `const uint8_t *ptr, uint64_t len`.
-    An integer named *len/*length/*count/*size/*cap directly after a pointer is that
-    pointer's length companion. fold=True drops it; join_params tries the unfolded
-    list first and uses the folded one only when the unfolded count differs from the
-    .spl count, so a .spl that spells the pair as two i64 still matches unfolded."""
+    Text ABI fold: only a byte pointer (uint8_t, char) takes a length companion. An
+    integer named *len/*length/*count/*size/*cap or n/kl/dl directly after it is that
+    pointer's length; one pointer takes at most one. A count after a non-byte pointer,
+    or after a pointer whose length was already folded, is a real parameter.
+    fold=True drops the companion; join_params tries the unfolded list first and uses
+    the folded one only when the unfolded count differs from the .spl count, so a .spl
+    that spells the pair as two i64 still matches unfolded."""
     t = ' '.join(text.split())
     if t in ('', 'void'):
         return []
     out = []
+    paired = False
     for p in split_top(t):
         if p == '...':
             break
-        if fold and out and out[-1][0] == 'ptr' and '*' not in p and '(' not in p \
-                and '[' not in p and LEN_NAME.search(p):
+        if fold and out and out[-1][0] == 'ptr' and out[-1][1] in BYTE_PTR and not paired \
+                and '*' not in p and '(' not in p and '[' not in p and LEN_NAME.search(p):
+            paired = True
             continue
+        paired = False
         if '(' in p or '[' in p:
             out.append(('unparsed', p))
         elif '*' in p:
@@ -433,6 +440,13 @@ def selftest():
         # the .spl spells ptr+len as two i64: the unfolded list matches, so no mismatch
         ('char *rt_x(const uint8_t *p, uint64_t p_len);\n', 'extern fn rt_x(p: i64, n: i64) -> text\n', 0, 0, 0, '', 0),
         ('char *rt_x(const uint8_t *p, uint64_t p_len, uint64_t extra);\n', 'extern fn rt_x(a: text) -> text\n', 0, 1, 0, '', 0),
+        # byte pointers take n/kl/dl and count as their length; one pointer takes one companion
+        ('char *rt_x(const uint8_t *p, int64_t n);\n', 'extern fn rt_x(a: text) -> text\n', 0, 0, 0, '', 0),
+        ('char *rt_x(const uint8_t *k, int64_t kl, const uint8_t *d, int64_t dl);\n', 'extern fn rt_x(a: text, b: text) -> text\n', 0, 0, 0, '', 0),
+        ('char *rt_x(const char *s, int64_t count);\n', 'extern fn rt_x(a: text) -> text\n', 0, 0, 0, '', 0),
+        ('char *rt_x(const uint8_t *p, uint64_t p_len, int64_t count);\n', 'extern fn rt_x(a: text, n: i64) -> text\n', 0, 0, 0, '', 0),
+        # a count after a non-byte pointer is a real parameter, not a companion
+        ('char *rt_x(const int32_t *p, int64_t count);\n', 'extern fn rt_x(a: text) -> text\n', 0, 1, 0, '', 0),
     ]
     for i, (c, spl, want_code, want_srt, want_narrow, want_snull, want_unp) in enumerate(pcases):
         want_code = want_code or int(want_srt > 0)
