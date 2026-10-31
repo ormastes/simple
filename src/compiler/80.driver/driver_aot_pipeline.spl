@@ -35,18 +35,11 @@ use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
     native_mir_shard_link_inputs_v1, native_mir_shard_module_passed_v1}
 use compiler.driver.driver_aot_native_output.{driver_cold_hir_record_verified_object_v1, driver_cold_hir_record_objectless_v1}
-use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_RETIRE_ENV_V1,
-    GENERIC_INSTANCE_LINK_ENV_V1, generic_instance_retire_in_module_v1, generic_instance_list_read_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_arm_v1, native_mir_fork_disarm_v1, native_mir_fork_exit_v1}
 use compiler.driver.driver_build.native_mir_shard_export_v1.{
     native_mir_shard_export_enabled_v1, native_mir_shard_export_write_dir_v1}
 use compiler.driver.driver_mir_shard_export_v1.{driver_mir_shard_export_write_v1,
     driver_mir_shard_export_admit_v1}
-use compiler.driver.driver_mir_selective_worker_v1.{driver_mir_selective_enabled_v1}
-use compiler.driver.driver_mir_selective_worker_v1.*
-use compiler.driver.driver_mir_selective_eligibility_v1.{driver_mir_selective_explicit_native_eligible_v1,
-    driver_mir_selective_skip_post_chain_v1}
-use compiler.driver.driver_mir_selective_producer_v1.{driver_mir_selective_write_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal,
     hir_shard_recovery_complete, hir_shard_recovery_block}
 use compiler.driver.driver_build.build_outcome.{BuildUnitOutcome}
@@ -118,7 +111,7 @@ impl CompilerDriver:
             case None: pass
         self.stage_emit_object()
 
-    # PR2a stage: lower monomorphized HIR to MIR. The target is chosen here
+    # PR2a stage: lower HIR to MIR. The target is chosen here
     # (driver_mir_target_context from options); HIR stays target-neutral.
     # Some(result) stops the compilation, None continues to stage_emit_object.
     me stage_lower_mir() -> Option<CompileResult>:
@@ -407,7 +400,7 @@ impl CompilerDriver:
         poisoned module from ctx.hir_modules; this records each one (with the
         diagnostics that name its source path), excludes every surviving
         module that imports a failed one -- transitively -- and clears the
-        phase errors so monomorphization and MIR run over the rest. False when
+        phase errors so collection analysis and MIR run over the rest. False when
         the failure names no module (nothing to attribute: the caller stops)."""
         val poisoned_count = self.ctx.poisoned_module_count()
         if poisoned_count <= 0:
@@ -620,18 +613,13 @@ impl CompilerDriver:
         """Shards publish per-module objects only; lanes whose final step needs
         more than object paths (cold-HIR object persistence, collection
         receipts) or that wipe the shared cache scope stay unsharded."""
-        val selective = driver_mir_selective_enabled_v1()
-        val lane_ok = if selective:
-            driver_mir_selective_explicit_native_eligible_v1(self)
-        else:
-            self.native_staged_codegen_eligible_v1()
+        val lane_ok = self.native_staged_codegen_eligible_v1()
         val no_budget = self.ctx.options.collection_memory_budget_bytes < 0
         val not_clean = (env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
         val eligible = lane_ok and no_budget and not_clean
         if not eligible:
-            val lane_reason = if selective: "selective-explicit-native"
-                else: self.native_staged_codegen_eligible_reason_v1()
-            print "[mir-shard] eligibility refused lane_ok={lane_ok} lane_reason='{lane_reason}' selective={selective} receipts={self.ctx.cold_hir_typed_receipts.len()} budget_bytes={self.ctx.options.collection_memory_budget_bytes} clean_lane={not not_clean}"
+            val lane_reason = self.native_staged_codegen_eligible_reason_v1()
+            print "[mir-shard] eligibility refused lane_ok={lane_ok} lane_reason='{lane_reason}' receipts={self.ctx.cold_hir_typed_receipts.len()} budget_bytes={self.ctx.options.collection_memory_budget_bytes} clean_lane={not not_clean}"
             stdout_flush()
         eligible
 
@@ -659,9 +647,8 @@ impl CompilerDriver:
         # publication, so the root runs that setup once and N copy-on-write
         # children inherit it. A child returns from the fork with its own spec
         # and owner installed and continues as an ordinary shard worker; the
-        # root only reaps, seals, re-forks and exits there. Never for selective.
-        if not driver_mir_selective_enabled_v1():
-            native_mir_fork_arm_v1(queue, root_owner)
+        # root only reaps, seals, re-forks and exits there.
+        native_mir_fork_arm_v1(queue, root_owner)
         # Cold-HIR receipts stay: the worker records capsule identities for the
         # modules it claims and publishes them in the ledger; only the link child
         # persists (driver_cold_hir_persist is skipped while shard_queue is set).
@@ -671,8 +658,8 @@ impl CompilerDriver:
         self.native_staged_codegen = shard_state
         log_phase("aot:mir_shard:start owner={root_owner}")
         # Export summaries (opt-in): admission only. Lowering still reads the
-        # full post-mono HIR; a refusal is reported and changes nothing.
-        if native_mir_shard_export_enabled_v1() and not driver_mir_selective_enabled_v1():
+        # full HIR; a refusal is reported and changes nothing.
+        if native_mir_shard_export_enabled_v1():
             val export_admitted = driver_mir_shard_export_admit_v1(self)
             if export_admitted.is_ok():
                 print "[mir-shard] export summaries admitted owner={root_owner} records={export_admitted.unwrap()} lowering=full-hir"
@@ -682,10 +669,7 @@ impl CompilerDriver:
         var module_functions: {text: i64} = {}
         var module_statics: {text: i64} = {}
         var shard_borrow_failed = false
-        val shard_lowered = if driver_mir_selective_enabled_v1():
-            self.lower_selective_to_mir_v1()
-        else:
-            self.lower_to_mir()
+        val shard_lowered = self.lower_to_mir()
         # A forked child installed its own owner inside lower_to_mir; read it
         # only now so the seal/complete below are the child's, never the root's.
         val owner = native_mir_shard_owner_v1()
@@ -699,30 +683,15 @@ impl CompilerDriver:
             # the ordinary 0/1 worker it was spawned as.
             print "[mir-fork] fork point not reached owner={owner} lowered={shard_lowered}; no child forked"
             stdout_flush()
-        val skip_post_chain = driver_mir_selective_enabled_v1() and driver_mir_selective_skip_post_chain_v1()
-        if shard_lowered and not skip_post_chain and not self.borrow_check():
+        if shard_lowered and not self.borrow_check():
             shard_borrow_failed = true
         if shard_lowered and not shard_borrow_failed:
-            if not skip_post_chain:
-                val _async_state_machines = self.process_async()
-                if (env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? "") != "1":
-                    self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
-                self.weave_aop()
-                self.apply_debug_trace()
-            else:
-                log_phase("aot:flat_mir_passes:skipped")
-                log_bootstrap_flat_warning("aot:flat_mir_passes:skipped")
+            val _async_state_machines = self.process_async()
+            if (env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? "") != "1":
+                self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
+            self.weave_aop()
+            self.apply_debug_trace()
             if self.ctx.error_count_value == 0:
-                # P-G7: retire COMDAT copies whose instance object the link
-                # step links (coordinator-verified snapshot; empty = keep all).
-                val retire = generic_instance_list_read_v1(env_get_opt(GENERIC_INSTANCE_RETIRE_ENV_V1) ?? "")
-                if retire.len() > 0:
-                    for retire_name in self.ctx.mir_modules.keys():
-                        val (retired_module, retired_keys) = generic_instance_retire_in_module_v1(
-                            self.ctx.mir_modules[retire_name], retire)
-                        if retired_keys.len() > 0:
-                            self.ctx.mir_modules[retire_name] = retired_module
-                            print "[file-worker] instances retired module={retire_name} copies={retired_keys.len()}"
                 for held_name in self.ctx.mir_modules.keys():
                     module_functions[held_name] = self.ctx.mir_modules[held_name].functions.keys().len()
                     module_statics[held_name] = self.ctx.mir_modules[held_name].statics.keys().len()
@@ -794,12 +763,8 @@ impl CompilerDriver:
         CompileResult.Success(None)
 
     me aot_write_mir_shard_exports_v1() -> CompileResult:
-        """Post-mono export producer: publish declaration summaries, or the
-        selected complete-body/declaration bundle, then exit before MIR."""
-        val written = if driver_mir_selective_enabled_v1():
-            driver_mir_selective_write_v1(self, native_mir_shard_export_write_dir_v1())
-        else:
-            driver_mir_shard_export_write_v1(self)
+        """Export producer: publish declaration summaries, then exit before MIR."""
+        val written = driver_mir_shard_export_write_v1(self)
         if written.is_err():
             log_error("MIR shard export: {written.unwrap_err()}")
             print "[mir-shard-export] FAIL reason={written.unwrap_err()}"
@@ -815,22 +780,13 @@ impl CompilerDriver:
         and run the ordinary compile_to_native verdict + link over them."""
         if not self.native_mir_shard_eligible_v1():
             return CompileResult.CodegenError("MIR shard link is unsupported for this build lane")
-        val admitted = if driver_mir_selective_enabled_v1():
-            driver_mir_selective_admit_link_v1(self, native_mir_shard_link_ledger_v1())
-        else:
-            native_mir_shard_link_inputs_v1(native_mir_shard_link_ledger_v1(), self.ctx.native_sources_fingerprint)
+        val admitted = native_mir_shard_link_inputs_v1(native_mir_shard_link_ledger_v1(), self.ctx.native_sources_fingerprint)
         if admitted.is_err():
             return CompileResult.CodegenError(admitted.unwrap_err())
         val inputs = admitted.unwrap()
         var link_state = NativeStagedCodegenStateV1.begin(0)
         link_state.active = true
-        # P-G7: generic instance objects (one per ConcreteTldrKey, COMDAT/weak)
-        # the coordinator verified; linked once, after the module objects.
-        var link_objects = inputs.object_files
-        val instance_objects = generic_instance_list_read_v1(env_get_opt(GENERIC_INSTANCE_LINK_ENV_V1) ?? "")
-        for instance_object in instance_objects:
-            link_objects = link_objects.push(instance_object)
-        link_state.object_files = link_objects
+        link_state.object_files = inputs.object_files
         link_state.modules_flushed = inputs.modules.len()
         link_state.lane_functions = inputs.functions
         link_state.lane_statics = inputs.statics
@@ -855,7 +811,7 @@ impl CompilerDriver:
             if objectless_reason != "":
                 return CompileResult.CodegenError(objectless_reason)
         self.native_staged_codegen = link_state
-        print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} instance_objects={instance_objects.len()} objectless={inputs.objectless}"
+        print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} objectless={inputs.objectless}"
         val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
         self.compile_to_native(output)
 use compiler.common.diagnostics.span.{Span}

@@ -18,11 +18,6 @@ use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_pipeline_lowering.*
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.driver.driver_aot_pipeline.*
-use compiler.driver.driver_mir_selective_worker_v1.{driver_mir_selective_enabled_v1}
-use compiler.driver.driver_mir_selective_eligibility_v1.{driver_mir_selective_explicit_native_eligible_v1}
-use compiler.driver.driver_build.native_mir_shard_export_v1.{native_mir_shard_export_write_dir_v1}
-use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1,
-    native_mir_shard_link_ledger_v1}
 use compiler.driver.driver_collection_native_receipt.{collection_native_clear_v1, collection_native_validate_v1, collection_native_copy_v1}
 use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
 use compiler.driver.driver_log_helpers.{
@@ -67,13 +62,6 @@ use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_
 use compiler.backend.backend_helpers.{get_effective_backend_name}
 use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.{driver_hir_capture_managed_runtime_selection_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_shard_active}
-use compiler.driver.driver_hir_archive_production_controller_v1.{
-    driver_hir_archive_production_begin_v1,
-    driver_hir_archive_production_phase3_v1,
-    driver_hir_archive_production_phase4_v1,
-    driver_hir_archive_production_finish_v1,
-    driver_hir_archive_production_release_v1}
-use compiler.driver.cache.hir_mir_archive_consumer_v1.{mir_archive_declaration_publication_revoke_v1}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 pub use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
@@ -90,20 +78,6 @@ fn driver_noop_default_output_v1(input_files: [text]) -> text:
     val dot = base.rfind(".")
     val stem = if dot > 0: base.substring(0, dot) else: base
     "build/native/{stem}"
-
-fn driver_hir_archive_production_requested_v1(ctx: CompileContext, mode: text) -> bool:
-    val runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
-    mode == "aot" and driver_streaming_surface_route(ctx) == 1 and
-        ctx.options.output_format == driver_output_format_native() and
-        ctx.runtime_std_full_inventory_selection == nil and
-        ctx.demand_compile_execution == nil and ctx.demand_mir_input == nil and
-        ctx.demand_mir_admission == nil and ctx.demand_dirty_modules.len() == 0 and
-        ctx.sources.len() == ctx.source_paths_owner.len() and
-        ctx.source_contents_owner.len() == ctx.source_paths_owner.len() and
-        native_tool_strict_requested_v1() and hir_cache_enabled() and not hir_shard_active() and
-        (env_get("SIMPLE_RUNTIME_PATH") ?? "") != "none" and runtime_bundle != "" and runtime_bundle != "auto" and
-        env_get("SIMPLE_BOOTSTRAP") != "1" and
-        env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") != "1"
 
 fn driver_native_noop_request_v1(ctx: CompileContext) -> NativeNoopRequestV1:
     val options = ctx.options
@@ -216,11 +190,6 @@ impl CompilerDriver:
         if self.ctx.options.cli_mode_text != "":
             requested_mode = self.ctx.options.cli_mode_text
         val result = self.compile_with_reverse_reference_owner_v1()
-        val archive_finished = driver_hir_archive_production_finish_v1(self)
-        # Teardown of every identity-keyed entry this compilation created; ids are
-        # never reused, so long-lived processes would otherwise grow per driver.
-        mir_archive_declaration_publication_revoke_v1(self)
-        val archive_released = driver_hir_archive_production_release_v1(self)
         if requested_mode == "aot" and not result.is_success():
             val output = self.ctx.options.output_file ?? driver_noop_default_output_v1(self.ctx.options.input_files)
             val cleared = collection_native_clear_v1(output)
@@ -311,8 +280,6 @@ impl CompilerDriver:
         log_phase("compile:start")
         log_build_progress("load_sources", "files", -1, -1,
             "starting", 0, 6, 0, 0, "running")
-        if not driver_hir_archive_production_begin_v1(self):
-            return CompileResult.RuntimeError("bounded HIR production begin refused")
         log_phase("phase1:load_sources:start")
         val sources_streaming_in_place = streaming_route == 1
         # A native-build worker that admitted the parent's frozen closure
@@ -351,15 +318,11 @@ impl CompilerDriver:
         if compile_mode_text == "aot":
             log_phase("phase1:load_sources:fingerprint:start")
             self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)
-            if driver_mir_selective_enabled_v1() and native_mir_shard_export_write_dir_v1() != "":
-                if not driver_mir_selective_explicit_native_eligible_v1(self):
-                    return CompileResult.CodegenError("selective MIR export requires an explicit non-bootstrap native entry")
-            # Selective workers consume the admitted post-mono bundle. Enter
-            # before parse/HIR/typecheck/mono, never after a cache-hit frontend.
-            if driver_mir_selective_enabled_v1() and native_mir_shard_spec_v1() != "":
-                return self.aot_compile_mir_shard_v1()
-            if driver_mir_selective_enabled_v1() and native_mir_shard_link_ledger_v1() != "":
-                return self.aot_link_mir_shards_v1()
+            # The selective MIR lane consumed the monomorphized instance
+            # bundle; it was removed with monomorphization. Refuse loudly
+            # rather than silently running the full lane under its flag.
+            if (env_get_opt("SIMPLE_MIR_SELECTIVE") ?? "") == "1":
+                return CompileResult.CodegenError("SIMPLE_MIR_SELECTIVE=1: the selective MIR lane was removed together with monomorphization; unset it")
         if sources_streaming_in_place:
             # Streaming phase 2 consumes source_contents_owner. The boxed
             # SourceFile payloads are independent copies needed only through
@@ -374,8 +337,7 @@ impl CompilerDriver:
         match self.stage_parse():
             case Some(stop): return stop
             case None: pass
-        val archive_production = driver_hir_archive_production_requested_v1(self.ctx, compile_mode_text)
-        match self.stage_lower_hir(compile_mode_text, archive_production):
+        match self.stage_lower_hir(compile_mode_text):
             case Some(stop): return stop
             case None: pass
         # stage_lower_hir returns None only on an admitted HIR phase.
@@ -383,13 +345,13 @@ impl CompilerDriver:
 
         if compile_mode_text == "check":
             if self.ctx.config.contains_key("collection-plan-explain-mir"):
-                if not self.monomorphize_for_explicit_compilation(analyze_ok_effective):
+                if not self.analyze_collections_before_mir(analyze_ok_effective):
                     return CompileResult.TypeError(self.ctx.errors)
                 if not self.lower_to_mir_for_explicit_target(driver_mir_target_context(self.ctx.options)):
                     return CompileResult.CodegenError(self.ctx.errors.join("\n"))
             log_debug("check mode")
             return CompileResult.Success(None)
-        match self.stage_monomorphize(compile_mode_text, archive_production):
+        match self.stage_collection_analysis(compile_mode_text):
             case Some(stop): return stop
             case None: pass
 
@@ -506,7 +468,7 @@ impl CompilerDriver:
         None
 
     # Phase 3: lower AST to target-neutral typed HIR.
-    me stage_lower_hir(compile_mode_text: text, archive_production: bool) -> Option<CompileResult>:
+    me stage_lower_hir(compile_mode_text: text) -> Option<CompileResult>:
         log_phase("phase3:hir_typecheck:start")
         log_trace("BEFORE phase 3")
         # Derive routing from stable configuration, not the adjacent mutable
@@ -515,10 +477,7 @@ impl CompilerDriver:
         # the frozen owner before doing any work.
         val hir_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
         var analyze_ok_effective = false
-        if archive_production:
-            log_phase("phase3:hir_typecheck:carrier=owned-archives")
-            analyze_ok_effective = driver_hir_archive_production_phase3_v1(self)
-        elif hir_streaming_in_place:
+        if hir_streaming_in_place:
             analyze_ok_effective = self.lower_and_check_streaming_surfaces_impl()
         else:
             analyze_ok_effective = self.lower_and_check_retained_owner_impl()
@@ -624,26 +583,18 @@ impl CompilerDriver:
             self.ctx.evict_ast()
         None
 
-    # Phase 4: monomorphize the admitted HIR (still target-neutral).
-    me stage_monomorphize(compile_mode_text: text, archive_production: bool) -> Option<CompileResult>:
-        log_phase("phase4:monomorphize:start")
-        log_debug("phase 4: monomorphization...")
-        val mono_ok = if archive_production:
-            driver_hir_archive_production_phase4_v1(self, false, true, true)
-        else:
-            self.monomorphize_impl(true)
-        if not mono_ok:
+    # Phase 4: collection-plan analysis over the admitted HIR (still
+    # target-neutral). There is no specialization pass: generic templates
+    # stay in HIR and MIR lowering refuses any live call to one.
+    me stage_collection_analysis(compile_mode_text: text) -> Option<CompileResult>:
+        log_phase("phase4:collection_analysis:start")
+        if not self.analyze_collections_before_mir(true):
             log_error("phase 4 FAILED")
-            log_build_progress("monomorphize", "modules", -1, -1,
-                "failed", 3, 6, 1, 0, "failed")
             if compile_mode_text == "aot" and go_to_end_enabled_v1():
-                self.go_to_end_absorb_errors_v1("mono")
+                self.go_to_end_absorb_errors_v1("collection_analysis")
                 return Some(self.go_to_end_finish_v1(0, []))
             return Some(CompileResult.TypeError(self.ctx.errors))
-        log_debug("phase 4 done")
-        log_phase("phase4:monomorphize:done")
-        log_build_progress("monomorphize", "modules", -1, -1,
-            "complete", 4, 6, 0, 0, "running")
+        log_phase("phase4:collection_analysis:done")
         None
 
     me compile_vhdl_only() -> CompileResult:
@@ -669,7 +620,7 @@ impl CompilerDriver:
         if self.ctx.options.low_memory:
             self.ctx.evict_ast()
 
-        if not self.monomorphize_impl(analyze_ok):
+        if not self.analyze_collections_before_mir(analyze_ok):
             return CompileResult.TypeError(self.ctx.errors)
         if not self.lower_to_mir():
             # See driver_aot_pipeline.spl's aot_compile() for the full

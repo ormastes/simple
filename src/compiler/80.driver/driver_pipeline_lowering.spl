@@ -1,9 +1,4 @@
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
-use compiler.driver.cache.hir_mono_final_repository_v1.{MonoArchiveFinalRepositoryV1}
-use compiler.driver.cache.hir_mir_archive_consumer_v1.{mir_archive_try_production_repository_v1,
-    mir_archive_declaration_repository_v1, mir_archive_prepare_declarations_v1,
-    mir_archive_lower_final_module_v1, mir_archive_secondary_keys_v1, mir_archive_seed_symbols_v1,
-    mir_archive_declaration_publication_revoke_v1}
 # CompilerDriver MIR lowering and diagnostic methods.
 #
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
@@ -17,7 +12,6 @@ use compiler.mir.mir_instructions.{MirModule}
 use compiler.common.build_phase_accounting.{build_phase_record_failed_module_v1}
 use compiler.hir.hir_types.{SymbolTable}
 use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1}
-use compiler.mono.verify.post_mono_verify.{post_mono_archive_admission_v1}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_aot_pipeline.*  # CompilerDriver.native_staged_codegen_flush_v1 lives in this impl block
@@ -230,10 +224,8 @@ fn _format_mir_error(err: MirError) -> text:
 # bootstrap rows carry the registry spelling, which differs from `module.name`
 # under SIMPLE_BOOTSTRAP=1 and is looked up per module over all modules.
 # Symbol ids are NOT dense below next_symbol_id: register_preserved_symbol
-# raises the counter past every preserved id, and mono specializations live at
-# MONO_SYMBOL_BASE = 2^50 (40.mono/monomorphize_integration.spl), structural
-# unions at 900M. A dense 0..next_symbol_id walk therefore never finished for
-# any module with a specialization (bug
+# raises the counter past every preserved id, and structural unions live at
+# 900M. A dense 0..next_symbol_id walk therefore never finished (bug
 # mir_warm_names_dense_symbol_walk_hang_2026_10_24). Walk the real key set;
 # the one keys() array per module is the bounded price of state 0.
 fn driver_warm_mir_logical_names_v1(modules: Dict<text, HirModule>):
@@ -633,130 +625,6 @@ impl CompilerDriver:
             self.ctx.runtime_std_mir_emissions = emissions
         true
 
-    me lower_archived_to_mir_v1(final_repository: MonoArchiveFinalRepositoryV1,
-            target_context: MirTargetContext, force_all_sources: bool,
-            allow_bootstrap_shortcuts: bool) -> bool:
-        # This private route is only issued by the real full0 production owner.
-        # Policy mismatch is fatal and cannot fall back to the retained graph.
-        if final_repository.force_all_sources != force_all_sources or
-                final_repository.allow_bootstrap_shortcuts != allow_bootstrap_shortcuts or
-                final_repository.bootstrap_mode == "1" or final_repository.emission_rows.len() == 0:
-            self.ctx.add_error("MIR final repository policy or emission schedule differs")
-            return false
-        val projected = mir_archive_declaration_repository_v1(self, final_repository)
-        if projected.is_err():
-            self.ctx.add_error("MIR complete declaration projection failed: {projected.unwrap_err()}")
-            return false
-        val declarations = projected.unwrap()
-        val first = final_repository.emission_rows[0]
-        val seeded = mir_archive_seed_symbols_v1(self, final_repository, declarations, first.logical_name)
-        if seeded.is_err():
-            mir_archive_declaration_publication_revoke_v1(self)
-            self.ctx.add_error("MIR declaration symbol scratch failed: {seeded.unwrap_err()}")
-            return false
-        var lowering = MirLowering.new_for_target(seeded.unwrap(), target_context)
-        lowering.use_explicit_semantic_policy()
-        lowering.configure_mcdc_mode(_driver_mcdc_mir_mode(self.ctx),
-            _driver_mcdc_budget(self.ctx, "mcdc_owner_bytes", 1048576),
-            _driver_mcdc_budget(self.ctx, "mcdc_global_bytes", 67108864),
-            self.ctx.config["mcdc_include"] ?? "", self.ctx.config["mcdc_exclude"] ?? "")
-        lowering.trait_impl_closure_complete = driver_trait_devirtualization_allowed_v1(true,
-            self.ctx.runtime_std_full_inventory_selection != nil,
-            self.ctx.demand_mir_admission != nil or self.ctx.demand_dirty_modules.len() > 0)
-        val prepared = mir_archive_prepare_declarations_v1(self, lowering, final_repository, declarations)
-        if prepared.is_err():
-            mir_archive_declaration_publication_revoke_v1(self)
-            self.ctx.add_error("MIR complete declaration prescan failed: {prepared.unwrap_err()}")
-            return false
-        var done = 0
-        var failed = 0
-        val total = final_repository.emission_rows.len()
-        for row in final_repository.emission_rows:
-            val context_errors_before = self.ctx.error_count_value
-            val errors_before = lowering.errors.len()
-            val devirt_before: i64 = lowering.devirtualized_calls
-            val gate = ice_boundary_module_start(row.emission_name, row.path, "mir_lower", "")
-            if gate != "":
-                val may_continue = _driver_mir_ice_continue(self.ctx, row.emission_name, row.path,
-                    gate, ice_message_arena_aborted(gate))
-                done = done + 1
-                failed = build_phase_record_failed_module_v1(failed, true)
-                if not may_continue or done % 64 == 0 or done == total:
-                    log_build_progress("mir", "modules", done, total, row.emission_name, 4, 6, failed, 0, "running")
-                if not may_continue:
-                    mir_archive_declaration_publication_revoke_v1(self)
-                    return false
-                continue
-            val lowered = mir_archive_lower_final_module_v1(self, lowering,
-                final_repository, declarations, row.logical_name, row.is_entry)
-            if lowered.is_err():
-                val failure = lowered.unwrap_err()
-                _driver_collect_mir_errors(self.ctx, failure.errors)
-                driver_collect_mir_advisories(self.ctx, failure.advisories)
-                val _stop = _driver_mir_ice_continue(self.ctx, row.emission_name, row.path,
-                    "MIR archive lowering failed: {failure.message}", failure.arena_aborted)
-                done = done + 1
-                failed = build_phase_record_failed_module_v1(failed, true)
-                log_build_progress("mir", "modules", done, total, row.emission_name, 4, 6, failed, 0, "running")
-                mir_archive_declaration_publication_revoke_v1(self)
-                return false
-            var output: MirModule = lowered.unwrap()
-            val secondary_keys = mir_archive_secondary_keys_v1(self, final_repository, declarations, row.logical_name)
-            if secondary_keys.is_err():
-                self.ctx.add_error("MIR specialization schedule failed: {secondary_keys.unwrap_err()}")
-                done = done + 1
-                failed = build_phase_record_failed_module_v1(failed, true)
-                log_build_progress("mir", "modules", done, total, row.emission_name, 4, 6, failed, 0, "running")
-                mir_archive_declaration_publication_revoke_v1(self)
-                return false
-            var symbol_baseline_key = row.logical_name
-            for secondary_key in secondary_keys.unwrap():
-                val previous_symbols = lowering.symbols
-                val previous_thunks = lowering.native_trait_thunks
-                val additional = mir_archive_lower_final_module_v1(self, lowering,
-                    final_repository, declarations, secondary_key, false, row.logical_name,
-                    Some(output), Some(previous_symbols), symbol_baseline_key, previous_thunks)
-                if additional.is_err():
-                    val failure = additional.unwrap_err()
-                    _driver_collect_mir_errors(self.ctx, failure.errors)
-                    driver_collect_mir_advisories(self.ctx, failure.advisories)
-                    val _stop = _driver_mir_ice_continue(self.ctx, row.emission_name, row.path,
-                        "MIR archive specialization lowering failed: {failure.message}", failure.arena_aborted)
-                    done = done + 1
-                    failed = build_phase_record_failed_module_v1(failed, true)
-                    log_build_progress("mir", "modules", done, total, row.emission_name, 4, 6, failed, 0, "running")
-                    mir_archive_declaration_publication_revoke_v1(self)
-                    return false
-                output = additional.unwrap()
-                symbol_baseline_key = secondary_key
-            driver_trace_module_mir_errors(row.emission_name, row.path, lowering.errors, errors_before)
-            ice_boundary_module_done(row.emission_name, "mir_lower")
-            if val archived_devirt = post_mono_archive_admission_v1(row.emission_name,
-                    lowering.devirtualized_calls - devirt_before,
-                    self.ctx.runtime_std_full_inventory_selection != nil):
-                self.ctx.add_error(archived_devirt)
-                done = done + 1
-                failed = build_phase_record_failed_module_v1(failed, true)
-                log_build_progress("mir", "modules", done, total, row.emission_name, 4, 6, failed, 0, "running")
-                mir_archive_declaration_publication_revoke_v1(self)
-                return false
-            output.name = row.emission_name
-            self.ctx.mir_modules[row.emission_name] = output
-            if row.emission_name == "app.cli.bootstrap_main":
-                self.ctx.set_bootstrap_entry_mir(row.emission_name, output)
-            done = done + 1
-            failed = build_phase_record_failed_module_v1(failed,
-                driver_mir_has_new_fatal_errors_v1(lowering.errors, errors_before) or
-                self.ctx.error_count_value > context_errors_before)
-            if done % 64 == 0 or done == total:
-                log_build_progress("mir", "modules", done, total, row.emission_name, 4, 6, failed, 0, "running")
-        _driver_collect_mir_errors(self.ctx, lowering.errors)
-        driver_collect_mir_advisories(self.ctx, lowering.mir_advisories)
-        mir_archive_declaration_publication_revoke_v1(self)
-        if self.ctx.error_count_value != 0: return false
-        if not self.publish_runtime_std_mir_emissions_v1(): return false
-        true
-
     me lower_to_mir_with_target_context(
         target_context: MirTargetContext,
         force_all_sources: bool,
@@ -771,20 +639,9 @@ impl CompilerDriver:
         driver_warm_mir_logical_names_v1(self.ctx.hir_modules)
         log_phase("aot:mir_setup:warm_names:done")
         self.ctx.runtime_std_mir_emissions = {}
-        log_phase("aot:mir_setup:archive_repository:start")
-        log_build_progress("mir", "modules", 0, self.ctx.hir_modules.len(),
-            "mir_setup:archive_repository", 4, 6, 0, 0, "running")
-        val production = mir_archive_try_production_repository_v1(self)
-        log_phase("aot:mir_setup:archive_repository:done")
-        if production.is_err():
-            self.ctx.add_error("MIR actual production repository rejected: {production.unwrap_err()}")
-            return false
-        if val final_repository = production.unwrap():
-            return self.lower_archived_to_mir_v1(final_repository, target_context,
-                force_all_sources, allow_bootstrap_shortcuts)
         # Cycle-140: NO .values() on the module dict -- the cycle-139/140
         # evidence shows .values() returns modules whose nested handles
-        # (functions dicts) are corrupt, while dict-index reads (mono's
+        # (functions dicts) are corrupt, while dict-index reads (the
         # proven shape) are sound. Build the feed via keys + direct bracket.
         self.ctx.mir_feed_modules = []
         log_phase("aot:mir_setup:feed:start")
@@ -1167,7 +1024,7 @@ impl CompilerDriver:
             # resets the flat function registry per call, and the flat entry
             # emission (bootstrap_mir_function_count > 0) reads that registry,
             # the entry must be the LAST module lowered on this instance.
-            # Modules already in ctx.mir_modules (archive/mono replay) keep
+            # Modules already in ctx.mir_modules keep
             # their MIR and are skipped.
             var bootstrap_closure_idx = 0
             while bootstrap_closure_idx < self.ctx.sources.len():
@@ -1200,10 +1057,6 @@ impl CompilerDriver:
             self.ctx.set_bootstrap_entry_mir("app.cli.bootstrap_main", bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
             driver_collect_mir_advisories(self.ctx, bootstrap_lowering.mir_advisories)
-            if val archived_devirt = post_mono_archive_admission_v1(
-                    "app.cli.bootstrap_main", bootstrap_lowering.devirtualized_calls,
-                    self.ctx.runtime_std_full_inventory_selection != nil):
-                self.ctx.add_error(archived_devirt)
             log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()} closure_modules={self.ctx.mir_modules.keys().len()}")
             return self.ctx.error_count_value == 0
 
@@ -1568,7 +1421,6 @@ impl CompilerDriver:
                         # its enum header as the symbols pointer.
                         if val present_direct_hir = direct_hir:
                             direct_lowering.symbols = present_direct_hir.symbols
-                        val devirt_before: i64 = direct_lowering.devirtualized_calls
                         val module_errors_before = direct_lowering.errors.len()
                         if not first_actual_module_logged:
                             log_build_progress("mir", "modules", 0,
@@ -1610,22 +1462,9 @@ impl CompilerDriver:
                             lowered_entry = scoped_entry.unwrap()
                             lowered_entry.name = name_direct
                             # The module was lowered and left in order: close its
-                            # breadcrumb BEFORE the E-MONO-038 check, so that
-                            # orderly `return false` never leaves a `start` open
-                            # for the parent to read as a dead worker.
+                            # breadcrumb so that no `start` is left open for the
+                            # parent to read as a dead worker.
                             ice_boundary_module_done(name_direct, "mir_lower")
-                            # Verifier-side twin of driver_trait_devirtualization_allowed_v1:
-                            # a module bound for a package archive must carry NO
-                            # devirtualized trait-object call (E-MONO-038).
-                            if val archived_devirt = post_mono_archive_admission_v1(
-                                    name_direct, direct_lowering.devirtualized_calls - devirt_before,
-                                    self.ctx.runtime_std_full_inventory_selection != nil):
-                                self.ctx.add_error(archived_devirt)
-                                log_phase("aot:lower_to_mir:archived_devirtualization idx={direct_idx} module={name_direct}")
-                                mir_failed_modules = build_phase_record_failed_module_v1(mir_failed_modules, true)
-                                log_build_progress("mir", "modules", direct_pos + 1,
-                                    mir_source_indices.len(), name_direct, 4, 6, mir_failed_modules, 0, "running")
-                                return false
                             log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
                     if ice_message != "":
                         if not _driver_mir_ice_continue(self.ctx, name_direct, src_direct.path, ice_message, ice_arena_aborted):
@@ -1749,7 +1588,6 @@ impl CompilerDriver:
                             self.ctx.mir_feed_modules.len(), name, 4, 6, fallback_failed, 0, "running")
                     if not may_continue: return false
                     continue
-                val fallback_devirt_before: i64 = lowering.devirtualized_calls
                 val module_errors_before = lowering.errors.len()
                 val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, self.ctx.mir_feed_modules, true)
                 driver_trace_module_mir_errors(name, typed_hir_module.path,
@@ -1764,26 +1602,9 @@ impl CompilerDriver:
                     log_build_progress("mir", "modules", fallback_done,
                         self.ctx.mir_feed_modules.len(), name, 4, 6, fallback_failed, 0, "running")
                     return false
-                # Closed BEFORE the E-MONO-038 check below, so that orderly
-                # `return false` leaves no open `start` breadcrumb.
                 ice_boundary_module_done(name, "mir_lower")
                 var mir_module: MirModule = scoped_fallback.unwrap()
                 mir_module.name = name
-                # This instance never sets trait_impl_closure_complete, so it
-                # cannot devirtualize today; the admission check is still
-                # applied so every MirLowering the driver owns is covered by
-                # the same E-MONO-038 assertion (defense in depth, not a gate
-                # that is expected to fire).
-                if val fallback_archived_devirt = post_mono_archive_admission_v1(
-                        name, lowering.devirtualized_calls - fallback_devirt_before,
-                        self.ctx.runtime_std_full_inventory_selection != nil):
-                    self.ctx.add_error(fallback_archived_devirt)
-                    log_phase("aot:lower_to_mir:archived_devirtualization module={name}")
-                    fallback_done = fallback_done + 1
-                    fallback_failed = build_phase_record_failed_module_v1(fallback_failed, true)
-                    log_build_progress("mir", "modules", fallback_done,
-                        self.ctx.mir_feed_modules.len(), name, 4, 6, fallback_failed, 0, "running")
-                    return false
                 self.ctx.mir_modules[name] = mir_module
                 if name == "app.cli.bootstrap_main":
                     self.ctx.set_bootstrap_entry_mir(name, mir_module)

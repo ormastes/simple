@@ -73,7 +73,6 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
     native_file_worker_hir_ledger_state_v1, native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
     NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1, mono_module_scoped_selected_v1,
-    native_file_worker_deps_read_v1,
     NativeFileUnitInvokerV1, NATIVE_FILE_WORKER_UNIT_ENV_V1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
 use compiler.driver.driver_build.native_file_unit_loop_v1.{native_file_unit_worker_loop_v1}
@@ -84,18 +83,8 @@ use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{
     FILE_WORKER_INC_DIR_ENV_V1, FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1,
     file_worker_inc_receipt_line_v1}
-use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_dir_v1, file_worker_inc_producer_v1, file_worker_inc_iface_digest_v1,
+use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_dir_v1, file_worker_inc_producer_v1,
     file_worker_inc_prepare_v1, file_worker_inc_finish_v1}
-use compiler.driver.driver_build.native_file_worker_instances_v1.{prelink_instances_run_v1,
-    prelink_instances_blocks_link_v1, prelink_instances_writes_retire_v1,
-    file_worker_instances_receipt_line_v1}
-use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_STAGE_ENV_V1,
-    GENERIC_INSTANCE_RETIRE_ENV_V1, GENERIC_INSTANCE_LINK_ENV_V1, generic_instance_object_from_stage_v1,
-    generic_instance_retire_snapshot_v1, generic_instance_retire_record_v1, generic_instance_verified_v1,
-    generic_instance_link_objects_v1, generic_instance_list_write_v1, generic_instance_concrete_of_v1,
-    generic_instance_lists_with_body_v1, generic_instance_module_ids_v1}
-use compiler.driver.cache.generic_specialization_list_v1.{GenericSpecializationListV1}
-use compiler.driver.cache.generic_spec_rr_producer_v1.{generic_spec_list_of_module_v1}
 use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{
     native_mir_selective_job_count_v1}
 use compiler.driver.driver_ice_boundary.{
@@ -1394,7 +1383,6 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
         env_set("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
         return file_result
     var hir_ok = true
-    var shard_hir_queue = ""
     val hir_count = if native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "",
             env_get("SIMPLE_HIR_SHARDING") ?? "") == 1: native_build_hir_shard_count(args) else: 0
     if hir_count > 1:
@@ -1402,7 +1390,6 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
         if hir_queue == "":
             hir_ok = false
         else:
-            shard_hir_queue = hir_queue
             print "[capsule-shard] hir shards={hir_count} ledger={hir_queue}"
             val hir_run = run_ledger_shards("hir-shard", "--hir-shard", "SIMPLE_HIR_SHARD_QUEUE",
                 "SIMPLE_HIR_SHARD_OWNER", base, hir_queue, args, hir_count, hir_count,
@@ -1425,19 +1412,6 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
                 val outcome = native_mir_shard_outcome_v1(mir_run.code, mir_run.failed_modules,
                     mir_run.total_claims, mir_run.all_stopped)
                 if outcome == "link":
-                    # Same pre-link instance step as the file-worker pool, but the
-                    # shard route retires no COMDAT copies (may_retire=false), so an
-                    # instance failure only warns and the link uses the COMDAT copies.
-                    if shard_hir_queue == "":
-                        print "[capsule-shard] prelink: skipped (no deps ledger)"
-                    else:
-                        val shard_producer = file_worker_inc_producer_v1(
-                            native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity()), args)
-                        val (_shard_relink, shard_instances_ok) = prelink_generic_instances_v1(args, mir_queue,
-                            shard_hir_queue, shard_producer, false, [])
-                        if not shard_instances_ok:
-                            eprint "[capsule-shard] warning: generic instance objects unavailable; linking on COMDAT copies"
-                            env_set(GENERIC_INSTANCE_LINK_ENV_V1, "")
                     result = mir_queue
                 elif outcome == "fail":
                     eprint "[capsule-shard] MIR aggregate failure exit={mir_run.code} failed_modules={mir_run.failed_modules} blocked={mir_run.blocked_reason}; link blocked"
@@ -1513,26 +1487,9 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
         selected_scope_digest, selected_inventory_digest, frontend_tldr_root)
     val old_reuse = env_get(FILE_WORKER_REUSE_ENV_V1) ?? ""
     env_set(FILE_WORKER_REUSE_ENV_V1, reuse_path)
-    # P-G7: children stage instance objects and retire only the COMDAT copies
-    # whose verified instance object this build will link.
-    val instance_stage = "{mir_queue}.instances/stage"
-    val retire_snapshot = generic_instance_retire_snapshot_v1(machine_cache_root(), inc_producer,
-        file_worker_inc_iface_digest_v1)
-    val retire_path = "{mir_queue}.instances/retire"
-    var retire_concrete: [text] = []
-    for body_key in retire_snapshot:
-        retire_concrete.push(generic_instance_concrete_of_v1(body_key))
-    val retire_written = dir_create_all("{mir_queue}.instances") and
-        generic_instance_list_write_v1(retire_path, retire_concrete)
-    val old_stage = env_get(GENERIC_INSTANCE_STAGE_ENV_V1) ?? ""
-    val old_retire = env_get(GENERIC_INSTANCE_RETIRE_ENV_V1) ?? ""
-    env_set(GENERIC_INSTANCE_STAGE_ENV_V1, instance_stage)
-    env_set(GENERIC_INSTANCE_RETIRE_ENV_V1, if retire_written: retire_path else: "")
     val run = run_ledger_shards("file-worker", "--file-worker", NATIVE_FILE_WORKER_QUEUE_ENV_V1,
         NATIVE_FILE_WORKER_OWNER_ENV_V1, base, mir_queue, args, parallel, parallel,
         simple_bin, timeout_ms)
-    env_set(GENERIC_INSTANCE_STAGE_ENV_V1, old_stage)
-    env_set(GENERIC_INSTANCE_RETIRE_ENV_V1, old_retire)
     env_set(FILE_WORKER_REUSE_ENV_V1, old_reuse)
     env_set(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, old_hir_queue)
     if reuse_path != "":
@@ -1543,11 +1500,6 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     print "[file-worker] receipts={receipts.len()} overlap_proven={file_worker_overlap_proven_v1(receipts)}"
     val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules, run.total_claims, run.all_stopped)
     if outcome == "link":
-        val (instances_relink, instances_ok) = prelink_generic_instances_v1(args, mir_queue, hir_queue, inc_producer, true,
-            if retire_written: retire_snapshot else: [])
-        if prelink_instances_blocks_link_v1(true, instances_ok):
-            eprint "[file-worker] retired COMDAT copies have no verified instance object; link blocked"
-            return "fail"
         if inc_dir != "":
             val fin = file_worker_inc_finish_v1(inc_dir, inc_producer, mir_queue, hir_queue,
                 inc_output, reused, frontend_tldr_root, selected_source_digests,
@@ -1555,7 +1507,7 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
             print file_worker_inc_receipt_line_v1(fin.reused, fin.rebuilt, fin.relink)
             env_set(FILE_WORKER_INC_DIR_ENV_V1, inc_dir)
             env_set(FILE_WORKER_INC_PRODUCER_ENV_V1, inc_producer)
-            if not fin.relink and not instances_relink:
+            if not fin.relink:
                 env_set(FILE_WORKER_LINK_PLACED_ENV_V1, "1")
         return mir_queue
     if outcome == "fail":
@@ -1563,81 +1515,6 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
         return "fail"
     eprint "[file-worker] no MIR module verdict; per-file pool selected, no in-process fallback"
     "fail"
-
-# P-G6/P-G7: after every module object exists (no barrier before the first
-# one), plan the needed generic instances from the fresh TLDR lists and run
-# them as single-flight jobs; the producer is the object the MIR children
-# staged for the key (generic_instance_object_producer_v1). Returns
-# (relink, ok): relink when an instance was built or dropped (P-E
-# removed-module rule); ok is false only when a COMDAT copy the children
-# retired (`retired`) has no verified instance object to link.
-fn prelink_generic_instances_v1(args: [text], mir_queue: text, hir_queue: text, producer: text, may_retire: bool,
-        retired: [text]) -> (bool, bool):
-    val frontend_env = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
-    val frontend = if frontend_env != "": frontend_env else: native_build_frontend_cache_dir_arg(args)
-    if frontend == "" or producer == "" or not file_exists("{mir_queue}/inventory"):
-        return file_worker_instances_link_v1(mir_queue, producer, retired, false)
-    var modules: [text] = []
-    val inventory = file_read("{mir_queue}/inventory").split("\n")
-    var i = 1
-    while i < inventory.len():
-        if inventory[i] != "":
-            modules.push(inventory[i])
-        i = i + 1
-    # Body keys: ConcreteTldrKey + the template owner's current source digest, so
-    # a body-only template edit rebuilds the instance (P-G7 review r1).
-    var lists: [GenericSpecializationListV1?] = []
-    for m in modules:
-        lists.push(generic_spec_list_of_module_v1(m, frontend + "/tldr"))
-    # Owner identity = source + direct imports' interface digests (P-E rule);
-    # an owner with no deps record keeps its specs' lists incomplete.
-    var deps_of: Dict<text, [text]> = {}
-    for m in modules:
-        val deps = native_file_worker_deps_read_v1(hir_queue, m)
-        if deps.is_ok():
-            deps_of[m] = deps.unwrap()
-    val (body_lists, owners) = generic_instance_lists_with_body_v1(lists, generic_instance_module_ids_v1(modules),
-        deps_of, file_worker_inc_iface_digest_v1)
-    val stage = "{mir_queue}.instances/stage"
-    val (plan, run) = prelink_instances_run_v1(body_lists, machine_cache_root(), producer, "{mir_queue}.instances/jobs",
-        "coordinator-{getpid()}", generic_instance_object_from_stage_v1(stage, _1), modules)
-    print file_worker_instances_receipt_line_v1(run)
-    # Retirable from the next build on only when every needed key PASSED.
-    var needed: [text] = []
-    for s in plan.needed:
-        needed.push(s.concrete_key)
-    if prelink_instances_writes_retire_v1(may_retire):
-        val _recorded = generic_instance_retire_record_v1(machine_cache_root(), producer, needed, owners,
-            run.complete and run.retire_comdat)
-    # A retired key no module needs any more had its copy retired nowhere.
-    var link_keys: [text] = []
-    for k in retired:
-        if needed.contains(k) or generic_instance_verified_v1(machine_cache_root(), producer, k):
-            link_keys.push(k)
-    if run.complete and run.retire_comdat:
-        for k in needed:
-            if not link_keys.contains(k):
-                link_keys.push(k)
-    val (relink, ok) = file_worker_instances_link_v1(mir_queue, producer, link_keys, run.relink)
-    (relink, ok)
-
-# Extract the verified instance objects for `keys` and hand their list to the
-# link step (aot_link_mir_shards_v1). A changed link set forces a relink.
-fn file_worker_instances_link_v1(mir_queue: text, producer: text, keys: [text],
-        relink: bool) -> (bool, bool):
-    env_set(GENERIC_INSTANCE_LINK_ENV_V1, "")
-    if keys.len() == 0:
-        return (relink, true)
-    val (objects, ok) = generic_instance_link_objects_v1(machine_cache_root(), producer, keys,
-        "{mir_queue}.instances/link")
-    if not ok:
-        return (relink, false)
-    val list_path = "{mir_queue}.instances/link.list"
-    if not generic_instance_list_write_v1(list_path, objects):
-        return (relink, false)
-    env_set(GENERIC_INSTANCE_LINK_ENV_V1, list_path)
-    print "[file-worker] instance objects linked={objects.len()}"
-    (true, true)
 
 # Worker side of `--file-worker=i/n` (bootstrap_main.spl dispatch). Claims
 # one module (SIMPLE_FILE_WORKER_BATCH, default 1) per round through a HIR
