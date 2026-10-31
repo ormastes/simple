@@ -22,8 +22,9 @@ request's "gitbucket" to mean Bitbucket.
   states `bb_should_retry` and `_outlook_should_retry` are unwired scaffolding.
   Curl paths use `-w http_code` and never capture response headers
   (`adapter_bitbucket.spl:206`: "Retry-After is not captured").
-- **Retry wait shells to `sleep`** (`retry.spl:87`). On a Windows host without
-  MSYS on `PATH` the wait is silently skipped, because the result is ignored.
+- **Retry wait shells to `sleep`** (`retry.spl:87`) and ignores its result. **Probed:** on
+  this host, with MSYS `sleep` on `PATH`, the backoff is real (Jira 429 retry about 3 s
+  apart). A host without `sleep` was not tested.
 - **Scheme checks:** the only one found is `messenger/config.spl:731-738`. Other
   backends accept `http://127.0.0.1:PORT`, which is what makes the emulator possible.
 - **`accept_timeout` on Windows returns a non-blocking stream**
@@ -152,3 +153,17 @@ None exercised a socket.
 - `messenger`: local SQLite/SQLCipher readers; "No send ever executes"
   (`cmd_messenger.spl:196-203`). No network protocol to emulate.
 - `lifecycle`: local-only, `"remote_mutation":"disabled"` (`cmd_lifecycle.spl:63`).
+
+## Emulated coverage added by this survey's lane
+
+| Service | Spec under `test/03_system/app/devhub/feature/` | Socket | Open red |
+|---|---|---|---|
+| GitHub, Bitbucket | `devhub_gh_parity_emulated_spec.spl` | yes (real gh; DevHub curl) | none |
+| Jira Cloud, DC | `devhub_jira_emulated_spec.spl` | yes | no nextPageToken paging |
+| MinIO/S3 | `devhub_minio_emulated_spec.spl` | yes (SigV4 recomputed) | truncated GET reported as success |
+| Confluence | `devhub_confluence_emulated_spec.spl` | yes | no `_links.next` paging |
+| Outlook Graph | `devhub_mail_emulated_spec.spl` | yes (adapter only) | none |
+| Gmail, IMAP, SMTP, POP3 | same spec | **no**: refusals only | no protocol server exists |
+
+The Gmail API itself is not a backend: Gmail is reached through mail-cli over IMAP/SMTP.
+Data provenance: `test/fixtures/devhub/emulated/index.sdn`.

@@ -23,6 +23,7 @@ fixed it, with nothing else changed.
 
 Call `stream.set_nonblocking(false)` on the accepted stream in
 `rt_io_tcp_accept_timeout` before registering it. This needs a seed rebuild, so it
-was not done in the emulator lane; `test/fixtures/devhub/emulated/emu_http_server.spl`
-uses `accept()` instead. Any server using `accept_timeout` on Windows is affected,
+was not done in the emulator lane. `test/fixtures/devhub/emulated/emu_http_server.spl`
+keeps `accept_timeout` for its idle exit and forces each stream blocking with
+`io_tcp_set_nonblocking`. Any other server using `accept_timeout` on Windows is affected,
 including `test/fixture/net/simple_http_server.spl:133`.

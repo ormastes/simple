@@ -233,3 +233,17 @@ The focused async HTTP encoder native regression subsequently passed five actual
 ## Messenger SQLCipher read status (2026-10-31)
 
 Phase 1 reads the encrypted fixture through direct codec and storage rows. Phase 2 opens the key session, decrypts real pages and passes `test/fixtures/devhub/native_crypto_kat`, then fails reading rows because decoded text comes out empty. Do not call Messenger database support done until `test/fixtures/devhub/fresh_secured_db` passes natively. On Phase 2, `.to_i64()` on `.len()` or a compound expression returns 0; use a typed local, and check crypto against published vectors, since round trips hid a wrong AES key schedule. Read secrets with `env_get_opt`, not `env_get`, whose co-compiled definitions can collide. Phase 1 cannot prove a wipe; judge wipes natively with `test/fixtures/devhub/native_storage_wipe_alias`. Bugs: `doc/08_tracking/bug/native_to_i64_compound_receiver_2026_10_31.md`, `doc/08_tracking/bug/devhub_secured_db_key_session_open_failure_2026_10_27.md`, `env_get_cocompiled_signature_collision_2026_10_31.md`, `seed_interpreter_zeroize_not_guaranteed_2026_10_31.md`.
+
+## Handoff Notes (2026-10-31) — emulated near-system specs
+
+`test/03_system/app/devhub/feature/devhub_*_emulated_spec.spl` drive production DevHub over
+a real loopback socket to `test/fixtures/devhub/emulated/emu_http_server.spl`, a separate
+process that checks method, target, headers and body per scripted row. Survey and gaps:
+[service interface survey](../../../01_research/app/devhub/service_interface_survey_2026-10-31.md).
+
+- Run one spec at a time with `SIMPLE_BINARY` set, stdout to a FILE. The emulator inherits
+  stdout, so a pipe stays open until it exits (it idles out after 120 s).
+- The runtime watchdog does not reap the emulator; only `emu_stop` or its idle exit does.
+- Only the last failed `expect` in an `it` is printed. Check the emulator log before
+  concluding which one failed.
+- Real gh reaches the emulator through `GH_HOST=github.localhost` plus `HTTP_PROXY`.
