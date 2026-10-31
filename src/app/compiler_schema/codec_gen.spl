@@ -806,6 +806,28 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     parts.push("    " + decl.name + "(" + _join(names, ", ") + ")\n")
     parts.join("")
 
+# A `T?` decoder's result is an Option at run time, and storing it straight
+# into a slot keeps the Some wrapper (only `if val` unwraps it). Rewrite each
+# `x = <optional decoder>(r)` into an explicit unwrap; a nil result leaves the
+# slot nil and the reader already carries the failure.
+fn _unwrap_optional_decoder_calls(body: text, optional_decoders: [text]) -> text:
+    var out: [text] = []
+    for line in body.split("\n"):
+        var rewritten = false
+        for callee in optional_decoders:
+            val call = " = " + callee + "(r)"
+            if not rewritten and line.ends_with(call):
+                val lhs = line.substring(0, line.len() - call.len())
+                val target = lhs.trim()
+                if target != "" and not target.contains(" "):
+                    val indent = lhs.substring(0, lhs.len() - target.len())
+                    out.push(indent + "if val decoded_v1 = " + callee + "(r):")
+                    out.push(indent + "    " + target + " = decoded_v1")
+                    rewritten = true
+        if not rewritten:
+            out.push(line)
+    out.join("\n")
+
 fn emit_codec_file(u: CodecUniverse) -> text:
     var parts: [text] = [CODEC_GEN_HEADER]
     parts.push("#\n# HirModule <-> line blob codec. One encoder and one decoder per\n")
@@ -815,10 +837,20 @@ fn emit_codec_file(u: CodecUniverse) -> text:
     parts.push("# decoders route an unknown stored tag to hc_bad_tag, which exits.\n\n")
     parts.push(codec_use_lines() + "\n")
     val order = codec_emit_order(u)
+    var bodies: [text] = []
+    # Optional decoders (NIL-RET-001): every opaque decoder, plus each
+    # generated one whose signature came out `T?`.
+    var optional_decoders: [text] = []
+    for opaque in codec_opaque_types():
+        optional_decoders.push("hc_dec_opaque_" + _codec_snake(opaque))
     for name in order:
         val decl = u.decl_of(name)
-        parts.push(_emit_enc_decl(u, decl) + "\n")
-        parts.push(_emit_dec_decl(u, decl) + "\n")
+        bodies.push(_emit_enc_decl(u, decl) + "\n")
+        val dec = _emit_dec_decl(u, decl)
+        if dec.starts_with("fn " + dec_fn_name(name) + "(r: FlatPoolReader) -> " + name + "?:"):
+            optional_decoders.push(dec_fn_name(name))
+        bodies.push(dec + "\n")
+    parts.push(_unwrap_optional_decoder_calls(bodies.join(""), optional_decoders))
     var names: [text] = []
     for name in order:
         names.push(enc_fn_name(name))
