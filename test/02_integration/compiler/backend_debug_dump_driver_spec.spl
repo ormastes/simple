@@ -37,9 +37,9 @@ whole-compiler bootstrap is required.
 
 ## Examples
 
-The shared request selects `source,ast,hir,monomorphized-hir,mir,optimized-mir`.
+The shared request selects `source,ast,hir,mir,optimized-mir`.
 The full request adds `backend-ir,object,linked-binary,run-readback-receipt`.
-The exact valid fixture retains a generic call and a conditional through both
+The exact valid fixture retains a direct call and a conditional through both
 MIR checkpoints. Adjacent failures stop at parse and HIR boundaries without
 publishing later checkpoints. The malformed stage request uses `source,,mir`
 and must not start a partial build.
@@ -66,8 +66,8 @@ use std.io.{file_exists, file_read, file_write}
 use std.io_runtime.{dir_create_all}
 use app.io.sysinfo_ops.{getpid}
 
-val SHARED_STAGES = "source,ast,hir,monomorphized-hir,mir,optimized-mir"
-val ALL_STAGES = "source,ast,hir,monomorphized-hir,mir,optimized-mir,backend-ir,object,linked-binary,run-readback-receipt"
+val SHARED_STAGES = "source,ast,hir,mir,optimized-mir"
+val ALL_STAGES = "source,ast,hir,mir,optimized-mir,backend-ir,object,linked-binary,run-readback-receipt"
 
 fn artifact_status(path: text, first_oracle: text, second_oracle: text) -> text:
     if not file_exists(path):
@@ -85,10 +85,10 @@ fn expected_shared_status(option_error: text) -> text:
     if option_error == "": "PASS" else: "FAIL"
 
 fn fixture_source() -> text:
-    "fn identity<T>(value: T) -> T:\n" +
+    "fn identity(value: i64) -> i64:\n" +
     "    value\n\n" +
     "fn select_value(enabled: bool) -> i64:\n" +
-    "    if enabled: identity<i64>(41) + 1 else: 0\n\n" +
+    "    if enabled: identity(41) + 1 else: 0\n\n" +
     "fn main() -> i64:\n" +
     "    select_value(true) - 42\n"
 
@@ -114,7 +114,6 @@ fn shared_artifact_paths(dump: text, run_id: i64, fixture_name: text) -> [text]:
         "{lowered}.source.spl",
         "{frontend}.ast.ast.json",
         "{frontend}.hir.hir.json",
-        "{frontend}.monomorphized-hir.hir.json",
         "{lowered}.mir.mir.json",
         "{lowered}.optimized-mir.mir.json"
     ]
@@ -122,12 +121,11 @@ fn shared_artifact_paths(dump: text, run_id: i64, fixture_name: text) -> [text]:
 fn shared_artifact_statuses(dump: text, run_id: i64, fixture_name: text) -> [text]:
     val paths = shared_artifact_paths(dump, run_id, fixture_name)
     [
-        artifact_status(paths[0], "fn identity<T>", "select_value(true)"),
+        artifact_status(paths[0], "fn identity(value: i64)", "select_value(true)"),
         artifact_status(paths[1], "\"stage\":\"ast\"", "select_value"),
         artifact_status(paths[2], "\"stage\":\"hir\"", "select_value"),
-        artifact_status(paths[3], "\"stage\":\"monomorphized-hir\"", "identity"),
-        artifact_status(paths[4], "\"functions\":[", "select_value"),
-        artifact_status(paths[5], "\"functions\":[", "select_value")
+        artifact_status(paths[3], "\"functions\":[", "select_value"),
+        artifact_status(paths[4], "\"functions\":[", "select_value")
     ]
 
 fn unsupported_backend_stage_status(path: text) -> text:
@@ -185,8 +183,8 @@ describe "backend debug dump driver integration":
         expect_all_statuses(backend_artifact_statuses(dump, run_id, "probe"), "FAIL")
         if option_error == "":
             val paths = shared_artifact_paths(dump, run_id, "probe")
-            val mir = file_read(paths[4])
-            val optimized_mir = file_read(paths[5])
+            val mir = file_read(paths[3])
+            val optimized_mir = file_read(paths[4])
             expect(mir).to_contain("\"If\":")
             expect(mir).to_contain("select_value")
             expect(optimized_mir).to_contain("\"If\":")
@@ -218,9 +216,9 @@ describe "backend debug dump driver integration":
         expect_paths_absent(paths, 1)
         expect_all_statuses(backend_artifact_statuses(dump, run_id, "parse_failure"), "FAIL")
 
-    it "stops a HIR type error before monomorphized HIR MIR optimization and backend checkpoints":
+    it "stops a HIR type error before MIR optimization and backend checkpoints":
         # @req REQ-SSPEC-INTEGRATION
-        step("stops a HIR type error before monomorphized HIR MIR optimization and backend checkpoints")
+        step("stops a HIR type error before MIR optimization and backend checkpoints")
         step("fail the fixture at the HIR boundary")
         val run_id = getpid()
         val root = "build/backend_debug_dump_driver_{run_id}/hir_failure"

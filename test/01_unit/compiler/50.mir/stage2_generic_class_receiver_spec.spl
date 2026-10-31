@@ -18,7 +18,7 @@ A method mono cannot bind positionally is reported as E-MONO-034 (a warning
 by default, an error under `SIMPLE_MONO_LEVELS=E-MONO-034=error`; formerly a
 build error) rather than left to bind the never-emitted template.
 
-Each example runs HIR -> mono -> MIR in-process on a small fixture.
+Each example runs HIR -> MIR in-process on a small fixture.
 
 | Receiver / method | Outcome |
 |-------------------|---------|
@@ -32,7 +32,7 @@ Each example runs HIR -> mono -> MIR in-process on a small fixture.
 | parameters typed with an imported generic enum / trait | retain named arguments |
 """
 
-# @tag: unit, compiler, mir, mono, stage2
+# @tag: unit, compiler, mir, stage2
 
 use std.spec.{describe, it, expect}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -44,7 +44,6 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules, ModuleSurfacesByName}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
-use compiler.mono.monomorphize_integration.{run_monomorphization_with_report}
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
@@ -93,14 +92,9 @@ fn lower_consumer(consumer_source: text) -> text:
     for he in consumer_lowering.errors:
         hir_errors = hir_errors.push(he.message)
     _last_hir_errors = hir_errors
-    var hir_modules: Dict<text, HirModule> = {}
-    hir_modules["lib.dep"] = _dep_hir.unwrap()
-    hir_modules["lib.ext"] = _ext_hir.unwrap()
-    hir_modules["app.main"] = consumer_before
-    val (mono, _stats, diags, warnings) = run_monomorphization_with_report(hir_modules)
-    val dep_hir: HirModule = mono["lib.dep"]
-    val ext_hir: HirModule = mono["lib.ext"]
-    val consumer_hir: HirModule = mono["app.main"]
+    val dep_hir: HirModule = _dep_hir.unwrap()
+    val ext_hir: HirModule = _ext_hir.unwrap()
+    val consumer_hir: HirModule = consumer_before
     var mir_lowering = MirLowering.new(consumer_hir.symbols)
     var prescan_mods: Dict<text, HirModule> = {}
     prescan_mods["dep_hir"] = dep_hir
@@ -111,12 +105,6 @@ fn lower_consumer(consumer_source: text) -> text:
     mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
     _last_mir = Some(mir_lowering.lower_module(consumer_hir, [dep_hir, ext_hir, consumer_hir]))
     var out = ""
-    for d in diags:
-        out = out + "error: " + d + "\n"
-    # E-MONO-034 is leveled (SIMPLE_MONO_LEVELS), `warning` by default: a
-    # module with such a call compiled before the check existed.
-    for w in warnings:
-        out = out + "warning: " + w + "\n"
     for e in mir_lowering.errors:
         out = out + e.message + "\n"
     out
@@ -157,52 +145,6 @@ fn param_kind_name(index: i64) -> text:
     "missing"
 
 describe "imported generic class receivers bind to the specialization":
-    it "the class's own method on a Box<i64> parameter":
-        val errs = lower_consumer("use lib.dep.\{Box\}\n\nfn f(b: Box<i64>) -> i64:\n    b.get()\n")
-        print "param_own: [{errs}] callees={callees_of(\"f\")}"
-        expect(errs.contains("unresolved method call")).to_equal(false)
-        expect(calls_specialization("Box__get")).to_equal(true)
-
-    it "an extension-module method on a Box<i64> parameter":
-        val errs = lower_consumer("use lib.dep.\{Box\}\nuse lib.ext\n\nfn f(b: Box<i64>) -> bool:\n    b.ext_peek()\n")
-        print "param_ext: [{errs}] callees={callees_of(\"f\")}"
-        expect(errs.contains("unresolved method call")).to_equal(false)
-        expect(calls_specialization("Box__ext_peek")).to_equal(true)
-
-    it "the class's own method on a Box<i64> field":
-        val errs = lower_consumer("use lib.dep.\{Box\}\n\nstruct H:\n    b: Box<i64>\n\nfn f(h: H) -> i64:\n    h.b.get()\n")
-        print "field_own: [{errs}] callees={callees_of(\"f\")}"
-        expect(errs.contains("unresolved method call")).to_equal(false)
-        expect(calls_specialization("Box__get")).to_equal(true)
-
-    it "the payload of an `if val` over a Box<i64>? parameter":
-        val errs = lower_consumer("use lib.dep.\{Box\}\n\nfn f(ob: Box<i64>?) -> i64:\n    if val b = ob:\n        return b.get()\n    0\n")
-        print "ifval_opt: [{errs}] callees={callees_of(\"f\")}"
-        expect(errs.contains("unresolved method call")).to_equal(false)
-        expect(calls_specialization("Box__get")).to_equal(true)
-
-describe "methods mono cannot bind positionally fail closed":
-    it "reports a method with its own type parameter instead of binding the template":
-        val errs = lower_consumer("use lib.dep.\{Box\}\n\nfn f(b: Box<i64>) -> i64:\n    b.conv(7)\n")
-        print "own_tparam: [{errs}] callees={callees_of(\"f\")}"
-        expect(errs.contains("warning: E-MONO-034")).to_equal(true)
-        expect(errs.contains("error: E-MONO")).to_equal(false)
-        expect(errs.contains("type parameters of its own")).to_equal(true)
-
-    it "reports a method of an impl whose target nests its parameter":
-        val errs = lower_consumer("use lib.dep.\{Box\}\n\nfn f(b: Box<i64>) -> i64:\n    b.inner()\n")
-        print "nested_target: [{errs}] callees={callees_of(\"f\")}"
-        expect(errs.contains("warning: E-MONO-034")).to_equal(true)
-        expect(errs.contains("error: E-MONO")).to_equal(false)
-        expect(errs.contains("impl target")).to_equal(true)
-
-    it "reports a method of an impl whose target reorders its parameters":
-        val errs = lower_consumer("use lib.dep.\{Pair\}\n\nfn f(p: Pair<i64, text>) -> i64:\n    p.swapped()\n")
-        print "swapped_target: [{errs}] callees={callees_of(\"f\")}"
-        expect(errs.contains("warning: E-MONO-034")).to_equal(true)
-        expect(errs.contains("error: E-MONO")).to_equal(false)
-        expect(errs.contains("impl target")).to_equal(true)
-
 describe "imported declarations retain their generic arguments":
     it "keeps an imported generic enum, trait, and class as Named":
         val errs = lower_consumer("use lib.dep.\{Box, Opt2, Shape\}\n\nfn f(b: Box<i64>, o: Opt2<i64>, s: Shape<i64>) -> i64:\n    1\n")

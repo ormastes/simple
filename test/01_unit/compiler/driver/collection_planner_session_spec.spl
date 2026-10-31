@@ -1,4 +1,4 @@
-"""Driver-owned collection registry lifecycle and pre-monomorphization analysis.
+"""Driver-owned collection registry lifecycle and pre-MIR analysis.
 Authored against real parser/binder/analysis APIs; no runtime PASS is implied.
 """
 # @req REQ-003 REQ-007
@@ -25,7 +25,7 @@ describe "driver collection planning session":
     it "does not invent a default registry or analysis authority":
         var driver = CompilerDriver.create(driver_core_compile_options_default())
         expect(driver.collection_registry_configured).to_equal(false)
-        expect(driver.analyze_collections_before_monomorphize(true)).to_equal(true)
+        expect(driver.analyze_collections_before_mir(true)).to_equal(true)
         expect(driver.collection_registries.len()).to_equal(0)
         expect(driver.collection_analyses.len()).to_equal(0)
 
@@ -35,7 +35,7 @@ describe "driver collection planning session":
         driver.ctx.hir_modules["first"] = collection_session_module("first")
         driver.ctx.hir_modules["second"] = collection_session_module("second")
         driver.ctx.hir_module_count_value = 2
-        expect(driver.analyze_collections_before_monomorphize(true)).to_equal(true)
+        expect(driver.analyze_collections_before_mir(true)).to_equal(true)
         expect(driver.collection_analyses.len()).to_equal(2)
         expect(driver.collection_analyses["first"].facts.registry_version).to_equal("session-v1")
         expect(driver.collection_analyses["second"].facts.registry_structurally_valid).to_equal(true)
@@ -45,12 +45,12 @@ describe "driver collection planning session":
         var driver = CompilerDriver.create(driver_core_compile_options_default())
         expect(driver.configure_collection_registry(collection_session_source("old"), []).is_ok()).to_equal(true)
         driver.ctx.hir_modules["first"] = collection_session_module("first")
-        expect(driver.analyze_collections_before_monomorphize(true)).to_equal(true)
+        expect(driver.analyze_collections_before_mir(true)).to_equal(true)
         expect(driver.configure_collection_registry(collection_session_source("new"), []).is_ok()).to_equal(true)
         expect(driver.collection_analyses.len()).to_equal(0)
-        expect(driver.analyze_collections_before_monomorphize(true)).to_equal(true)
+        expect(driver.analyze_collections_before_mir(true)).to_equal(true)
         expect(driver.collection_analyses["first"].facts.registry_version).to_equal("new")
-        expect(driver.analyze_collections_before_monomorphize(false)).to_equal(false)
+        expect(driver.analyze_collections_before_mir(false)).to_equal(false)
         expect(driver.collection_analyses.len()).to_equal(0)
 
     it "invalid reconfiguration cannot reuse the previously admitted registry":
@@ -60,23 +60,19 @@ describe "driver collection planning session":
         expect(driver.collection_registries.len()).to_equal(0)
         expect(driver.collection_analyses.len()).to_equal(0)
         expect(driver.collection_registry_error.len()).to_be_greater_than(0)
-        expect(driver.analyze_collections_before_monomorphize(true)).to_equal(false)
+        expect(driver.analyze_collections_before_mir(true)).to_equal(false)
 
-    it "both monomorphization entrypoints enforce failed configuration first":
-        var ordinary = CompilerDriver.create(driver_core_compile_options_default())
-        var explicit = CompilerDriver.create(driver_core_compile_options_default())
-        expect(ordinary.configure_collection_registry("invalid", []).is_err()).to_equal(true)
-        expect(explicit.configure_collection_registry("invalid", []).is_err()).to_equal(true)
-        expect(ordinary.monomorphize_impl(true)).to_equal(false)
-        expect(explicit.monomorphize_for_explicit_compilation(true)).to_equal(false)
-        expect(ordinary.ctx.has_errors()).to_equal(true)
-        expect(explicit.ctx.has_errors()).to_equal(true)
+    it "collection analysis stage enforces failed configuration first":
+        var driver = CompilerDriver.create(driver_core_compile_options_default())
+        expect(driver.configure_collection_registry("invalid", []).is_err()).to_equal(true)
+        expect(driver.stage_collection_analysis("check").is_some()).to_equal(true)
+        expect(driver.ctx.has_errors()).to_equal(true)
 
     it "rejects an incomplete retained HIR map instead of claiming full analysis":
         var driver = CompilerDriver.create(driver_core_compile_options_default())
         expect(driver.configure_collection_registry(collection_session_source("valid"), []).is_ok()).to_equal(true)
         driver.ctx.hir_modules["first"] = collection_session_module("first")
         driver.ctx.hir_module_count_value = 2
-        expect(driver.analyze_collections_before_monomorphize(true)).to_equal(false)
+        expect(driver.analyze_collections_before_mir(true)).to_equal(false)
         expect(driver.collection_analyses.len()).to_equal(0)
         expect(driver.ctx.errors[0]).to_contain("collection-analysis-incomplete-hir")
