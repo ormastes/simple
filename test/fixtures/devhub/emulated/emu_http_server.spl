@@ -10,11 +10,11 @@
 #
 # Env: EMU_SCRIPT (rows, re-read per request so a spec swaps scenarios without
 # restarting), EMU_LOG (event log the spec verifies), EMU_PORTFILE (written once
-# listening), EMU_FIXTURES (root for @file bodies). The harness sets
-# SIMPLE_TIMEOUT_SECONDS so the runtime watchdog reaps an orphan after an aborted
-# spec. Uses blocking accept(): on Windows accept_timeout leaves the accepted socket
-# non-blocking (net_tcp.rs:426 sets the listener, which the stream inherits), so
-# reads fail at once with WSAEWOULDBLOCK.
+# listening), EMU_FIXTURES (root for @file bodies). Exits after EMU_IDLE_MS with no
+# connection, so an aborted spec leaves no process behind; the runtime watchdog does
+# NOT reap it (measured: two orphans outlived SIMPLE_TIMEOUT_SECONDS by 4 hours).
+# Each accepted stream is forced blocking: on Windows accept_timeout leaves it
+# non-blocking (doc/08_tracking/bug/tcp_accept_timeout_nonblocking_stream_windows_2026-10-31.md).
 #
 # Script row, tab separated:
 #   GEN <n>          (first line; a new n resets the cursor)
@@ -28,6 +28,7 @@
 
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.io.types.{Shutdown}
+use std.nogc_sync_mut.sffi.net.{io_tcp_set_nonblocking}
 use std.common.char_from_code_pure.{char_from_code}
 use std.io_runtime.{read_file_text_result, file_write, time_now_unix_micros}
 use std.env.{env_get}
@@ -35,6 +36,7 @@ use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
 use test.fixtures.devhub.emulated.emu_sigv4.{sigv4_verify_wire}
 
 val MAX_HEADER_LINE = 65536
+val EMU_IDLE_MS: i64 = 120000
 
 class Req:
     method: text
@@ -290,12 +292,13 @@ fn main():
     val _ = file_write(port_path, addr)
     var running = true
     while running:
-        val accepted = listener.accept()
+        val accepted = listener.accept_timeout(EMU_IDLE_MS)
         if accepted.is_err():
-            state.note("ACCEPT_FAILED")
+            state.note("IDLE_EXIT")
             running = false
         else:
             var stream = accepted.unwrap()
+            val _b = io_tcp_set_nonblocking(stream.fd, false)
             running = serve_one(stream, state, script_path, fixtures)
             val _s = stream.shutdown(Shutdown.Both)
             val _c = stream.close()
