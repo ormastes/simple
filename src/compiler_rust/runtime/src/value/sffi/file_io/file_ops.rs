@@ -1974,9 +1974,7 @@ pub unsafe extern "C" fn rt_file_rename(from_ptr: *const u8, from_len: u64, to_p
         // widening, same MAX_PATH-capped defect as rt_file_fsync above (and
         // the same reason fixing only the C-side rt_file_rename twin did not
         // clear the bootstrap blocker: this Rust definition is the one that
-        // links). Prefer the widened, extended-length-prefixed call with no
-        // replace flag -- matching std::fs::rename's Windows behavior of
-        // failing when the destination already exists -- falling back to the
+        // links). Prefer the widened, extended-length-prefixed call, falling back to the
         // original (possibly un-widened) path only when a path cannot be
         // widened.
         use windows::core::PCWSTR;
@@ -2006,7 +2004,12 @@ pub unsafe extern "C" fn rt_file_rename(from_ptr: *const u8, from_len: u64, to_p
                 PCWSTR(to_narrow.as_ptr())
             }
         };
-        return MoveFileExW(from_ptr, to_ptr, MOVE_FILE_FLAGS(0)).is_ok();
+        // Atomic replace of an existing FILE destination (POSIX rename(2),
+        // the C twin's rt_win_long_path_rename); a directory destination is
+        // never replaced, as on POSIX.
+        let to_is_dir = std::fs::metadata(to_str).map(|m| m.is_dir()).unwrap_or(false);
+        let flags = if to_is_dir { 0 } else { 0x1 /* MOVEFILE_REPLACE_EXISTING */ };
+        return MoveFileExW(from_ptr, to_ptr, MOVE_FILE_FLAGS(flags)).is_ok();
     }
     #[cfg(not(windows))]
     std::fs::rename(from_str, to_str).is_ok()
