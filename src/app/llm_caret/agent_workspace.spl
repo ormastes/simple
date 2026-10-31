@@ -9,7 +9,15 @@
 # ponytail: thin facade over `tmux`/`git` CLIs via process_run; no daemon, no
 # state file. Upgrade to os.apps.smux when an in-process multiplexer is needed.
 
-use app.io.mod.{process_run, dir_exists, file_exists, dir_create_all, current_time_ms, sleep_ms, env_get}
+use app.io.mod.{process_run, process_run_timeout, dir_exists, file_exists, file_read, file_delete, file_create_exclusive,
+    dir_create_all, current_time_ms, sleep_ms, env_get, env_set, get_args, cwd as _proc_cwd}
+use app.io.cli_ops.{cli_current_exe_path}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.nogc_async_mut.sosix.{sosix_platform, sosix_which}
+use std.common.string_core.{text_to_bytes}
+use os.apps.smux.server.{smux_server_request}
+use os.apps.smux.smux_remote.{smux_remote_reply_ok}
+use app.llm_caret.pane_backend.{pane_backend_name, windows_spawn_command_line, posix_quote_arg}
 
 # Recursion protection. Anything this module spawns (agent commands, the caret
 # suite) carries LLM_CARET_WORKSPACE_DEPTH=<n+1>; at MAX_DEPTH a launch is
@@ -35,7 +43,10 @@ pub fn with_depth(command: text) -> text:
     DEPTH_ENV + "=" + (workspace_depth() + 1).to_text() + " " + command
 
 # The pane this process itself runs in (tmux sets TMUX_PANE), or "".
+# On smux, the owner gives each pane SMUX_PANE=<window id> at spawn.
 fn _own_pane_id() -> text:
+    if _smux():
+        return env_get("SMUX_PANE")
     env_get("TMUX_PANE")
 
 struct AgentWorkspace:
@@ -87,23 +98,379 @@ pub fn tmux_available() -> bool:
     val (_o, _e, code) = process_run("tmux", ["-V"])
     code == 0
 
+# tmux stays the backend on every POSIX host. Windows has no tmux, and
+# pane_backend selects smux there; the workspace then talks to a persistent
+# smux owner process (one per workspace id), so separate CLI processes share
+# one session.
+fn _smux() -> bool:
+    sosix_platform() == "windows" and pane_backend_name() == "smux"
+
+pub fn workspace_backend() -> text:
+    if _smux():
+        return "smux"
+    "tmux"
+
+# Real availability, fail closed: tmux on POSIX; on Windows the pane shell
+# (`sh`, which every agent pane runs) must be on PATH.
+pub fn workspace_available() -> bool:
+    if _smux():
+        return sosix_which("sh") != ""
+    tmux_available()
+
+# --- smux owner client --------------------------------------------------------
+val SMUX_FIRST_WINDOW = "main"      # the session's first window; not an agent name
+val SMUX_PANE_COLS = 500            # a line longer than this wraps in capture
+val SMUX_PANE_ROWS = 50
+val SMUX_CLIENT = "src/app/hosted_apps/smux_client.spl"
+
+struct WsPane:
+    window_id: text
+    pane_id: text
+    title: text
+    pid: i64
+    target: text
+
+# One owner per workspace: its address, pid and a per-owner CSPRNG token, read from
+# a file only the current user can open. The id in the file is checked, so an
+# owner file never answers for another workspace.
+struct SmuxOwner:
+    addr: text
+    token: text
+    pid: i64
+
+fn _hash(s: text) -> i64:
+    var h = 7
+    for b in text_to_bytes(s):
+        h = (h * 31 + b.to_i64()) % 1000000007
+    h
+
+fn _norm_path(path: text) -> text:
+    var p = path.replace("\\", "/").lower()
+    while p.len() > 1 and p.ends_with("/"):
+        p = p[0:p.len() - 1]
+    p
+
+fn _dir_of(path: text) -> text:
+    val parts = path.replace("\\", "/").split("/")
+    if parts.len() <= 1:
+        return ""
+    parts.slice(0, parts.len() - 1).join("/")
+
+# Per-user state directory (Windows: under LOCALAPPDATA); nil when unknown.
+fn _smux_state_dir() -> text?:
+    val base = env_get("LOCALAPPDATA")
+    if base == "":
+        return nil
+    base.replace("\\", "/") + "/simple/caret_smux"
+
+fn _smux_owner_path(ws: AgentWorkspace) -> text?:
+    val dir = _smux_state_dir()
+    if dir == nil:
+        return nil
+    (dir ?? "") + "/" + ws.session + "-" + _hash(_norm_path(ws.repo)).to_text() + ".owner"
+
+fn _smux_owner(ws: AgentWorkspace) -> SmuxOwner?:
+    val path = _smux_owner_path(ws) ?? ""
+    if path == "" or not file_exists(path):
+        return nil
+    # `<id> <addr> <token> <pid>`, written by the owner once it has bound.
+    val f = file_read(path).trim().split(" ")
+    if f.len() != 4 or f[0] != ws.session:
+        return nil
+    val pid = int(f[3]) ?? 0
+    if pid <= 0:
+        return nil
+    SmuxOwner(addr: f[1], token: f[2], pid: pid)
+
+# The listener on `addr` belongs to `pid` (Windows: netstat's owning process).
+# Checked before every request, so the token never reaches a process that
+# took the port after the owner died.
+fn _smux_listener_is(addr: text, pid: i64) -> bool:
+    val (out, _e, code) = process_run_timeout("netstat", ["-ano", "-p", "TCP"], 10000)
+    if code != 0:
+        return false
+    for line in out.split("\n"):
+        val f = _words(line)
+        if f.len() == 5 and f[1] == addr and f[3] == "LISTENING":
+            return (int(f[4]) ?? 0) == pid
+    false
+
+fn _words(line: text) -> [text]:
+    var out: [text] = []
+    for part in line.trim().split(" "):
+        if part != "":
+            out.push(part)
+    out
+
+# The owner reply, or nil when no owner holding this workspace's token answers.
+fn _smux_req(ws: AgentWorkspace, command: text) -> text?:
+    val owner = _smux_owner(ws)
+    if owner == nil:
+        return nil
+    val o = owner ?? SmuxOwner(addr: "", token: "", pid: 0)
+    if not _smux_listener_is(o.addr, o.pid):
+        return nil
+    val r = smux_server_request(o.addr, o.token, command)
+    if r.is_err():
+        return nil
+    val body = r.unwrap()
+    if body == "smux: unauthorized":
+        return nil
+    body
+
+# Drops the owner file once its owner no longer answers.
+fn _smux_owner_forget(ws: AgentWorkspace):
+    val path = _smux_owner_path(ws) ?? ""
+    if path == "":
+        return
+    val deadline = current_time_ms() + 3000
+    while current_time_ms() < deadline:
+        if _smux_req(ws, "list-sessions") == nil:
+            val _gone = file_delete(path)
+            return
+        sleep_ms(100)
+
+fn _smux_req_ok(ws: AgentWorkspace, command: text) -> bool:
+    val r = _smux_req(ws, command)
+    r != nil and smux_remote_reply_ok(r ?? "")
+
+# Removes inherited ACEs and grants the current user alone; files created in
+# the directory afterwards inherit that.
+fn _smux_private_dir(dir: text) -> bool:
+    dir_create_all(dir)
+    val user = env_get("USERNAME")
+    if user == "":
+        return false
+    val domain = env_get("USERDOMAIN")
+    val who = if domain == "": user else: domain + "\\" + user
+    val (_o, _e, code) = process_run("icacls", [dir.replace("/", "\\"), "/inheritance:r", "/grant:r", who + ":(OI)(CI)F"])
+    code == 0
+
+# The Simple checkout that holds the smux client: walked up from the running
+# entry script, the running binary, then this process's directory.
+fn _simple_root() -> text?:
+    var starts: [text] = []
+    for a in get_args():
+        if a.ends_with(".spl"):
+            val abs = if a.starts_with("/") or (a.len() > 1 and a[1:2] == ":"): a else: _proc_cwd() + "/" + a
+            starts.push(_dir_of(abs))
+    starts.push(_dir_of(cli_current_exe_path()))
+    starts.push(_proc_cwd())
+    for s in starts:
+        var d = s.replace("\\", "/")
+        var hops = 0
+        while d != "" and hops < 12:
+            if file_exists(d + "/" + SMUX_CLIENT):
+                return d
+            d = _dir_of(d)
+            hops = hops + 1
+    nil
+
+fn _ps_quote(s: text) -> text:
+    "'" + s.replace("'", "''") + "'"
+
+# Start the owner when none holding this workspace's token answers: a fresh
+# CSPRNG token goes into the private owner file, which only the owner and this
+# workspace's CLI processes read (the token is never on a command line). The
+# owner binds an OS-chosen port itself and records it with its pid; nothing
+# probes ports, so the token is sent only to a listener verified as that pid.
+# SIMPLE_BINARY is cleared for it so panes that run `bin/simple test` are not
+# pinned to the spec runner binary.
+#
+# Start-Process (ShellExecute) inherits NO handles. A plain process_spawn_async
+# hands the owner this process's stdout/stderr, so a caller reading this CLI
+# through a pipe (process_run) never sees EOF while the owner lives.
+fn _smux_owner_up(ws: AgentWorkspace) -> bool:
+    if _smux_req(ws, "list-sessions") != nil:
+        return true
+    val path = _smux_owner_path(ws) ?? ""
+    val root = _simple_root() ?? ""
+    val exe = cli_current_exe_path()
+    val token = random_hex(16) ?? ""
+    if path == "" or root == "" or exe == "" or token.len() != 32:
+        return false
+    if not _smux_private_dir(_dir_of(path)):
+        return false
+    val _gone = file_delete(path)
+    if not file_create_exclusive(path, ws.session + " " + token + "\n"):
+        return false
+    # Start-Process joins -ArgumentList with spaces, so each element is double-quoted.
+    var arglist: [text] = []
+    for a in ["run", root + "/" + SMUX_CLIENT, "--serve-owner-file", path]:
+        arglist.push(_ps_quote("\"" + a + "\""))
+    val start = "Start-Process -WindowStyle Hidden -WorkingDirectory " + _ps_quote(root) +
+        " -FilePath " + _ps_quote(exe) + " -ArgumentList " + arglist.join(",")
+    # The spawn inherits this process environment: clear SIMPLE_BINARY for it, then restore.
+    val pinned = env_get("SIMPLE_BINARY")
+    env_set("SIMPLE_BINARY", "")
+    val (_o, _e, code) = process_run_timeout("powershell", ["-NoProfile", "-NonInteractive", "-Command", start], 30000)
+    env_set("SIMPLE_BINARY", pinned)
+    if code == 0:
+        val deadline = current_time_ms() + 90000
+        while current_time_ms() < deadline:
+            if _smux_req(ws, "list-sessions") != nil:
+                return true
+            sleep_ms(500)
+    _smux_retire(path, token)
+    false
+
+# A start that failed or timed out must leave no owner behind. While the file
+# still carries this attempt's token: an owner that announced itself is
+# stopped over the protocol when its listener verifies, else ended by the pid
+# it recorded in the private file; the file is removed, so an owner that has
+# not announced yet exits at its own check. Repeated briefly, because an owner
+# can announce between two reads.
+fn _smux_retire(path: text, token: text):
+    val deadline = current_time_ms() + 5000
+    while current_time_ms() < deadline:
+        val now = file_read(path).trim().split(" ")
+        if now.len() == 4 and now[2] == token:
+            val pid = int(now[3]) ?? 0
+            if _smux_listener_is(now[1], pid):
+                val _stop = smux_server_request(now[1], token, "stop-server")
+            elif pid > 0:
+                val _kill = process_run_timeout("taskkill", ["/PID", pid.to_text(), "/T", "/F"], 10000)
+            val _gone = file_delete(path)
+        elif now.len() == 2 and now[1] == token:
+            val _gone = file_delete(path)
+        elif not file_exists(path):
+            sleep_ms(500)
+        else:
+            return
+
+fn _ws_panes(ws: AgentWorkspace) -> [WsPane]:
+    var out: [WsPane] = []
+    val r = _smux_req(ws, "pane-pids " + ws.session)
+    if r == nil:
+        return out
+    var seen: [text] = []
+    for line in (r ?? "").split("\n"):
+        val f = line.trim().split(" ")
+        if f.len() != 5 or f[4] != "1":
+            continue
+        var idx = 0
+        for t in seen:
+            if t == f[1]:
+                idx = idx + 1
+        seen.push(f[1])
+        out.push(WsPane(window_id: f[0], pane_id: f[2], title: f[1], pid: int(f[3]) ?? 0,
+            target: ws.session + ":" + f[1] + "." + idx.to_text()))
+    out
+
+# `session:name` means the first pane of `name`, as in tmux; nil when no such pane.
+fn _ws_pane(ws: AgentWorkspace, target: text) -> WsPane?:
+    for p in _ws_panes(ws):
+        if p.target == target or p.target == target + ".0":
+            return p
+    nil
+
+# Agent/window names go into targets and owner-protocol lines.
+fn _valid_name(name: text) -> bool:
+    if name == "" or name == SMUX_FIRST_WINDOW:
+        return false
+    for b in text_to_bytes(name):
+        val c = b.to_i64()
+        val ok = (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 45 or c == 95
+        if not ok:
+            return false
+    true
+
+# A pane whose shell starts in `cwd` and runs `command` (else stays
+# interactive). The owner gives it SMUX_PANE=<window id>, an id that stays
+# stable while other panes of the same name come and go.
+fn _smux_pane_spawn(ws: AgentWorkspace, title: text, cwd: text, command: text, reason: text) -> WorkspaceResult:
+    if not _smux_owner_up(ws):
+        return _err(reason: reason, out: "smux owner did not start")
+    var body = "exec sh -i"
+    if command != "":
+        body = command
+    # SIMPLE_BINARY unset: a pane `bin/simple test` must not be pinned to the
+    # binary of whatever process started the owner.
+    val script = "unset SIMPLE_BINARY; cd " + posix_quote_arg(cwd) + " && " + body
+    val line = windows_spawn_command_line("sh", ["-c", script])
+    val r = _smux_req(ws, "spawn-window " + ws.session + " " + title + " " + SMUX_PANE_COLS.to_text() + " " + SMUX_PANE_ROWS.to_text() + " " + line)
+    if r == nil or not smux_remote_reply_ok(r ?? ""):
+        return _err(reason: reason, out: r ?? "smux owner unavailable")
+    _ok(r ?? "")
+
 # --- sessions / windows / panes ---------------------------------------------
 
 pub fn session_alive(ws: AgentWorkspace) -> bool:
+    if _smux():
+        val r = _smux_req(ws, "has-session " + ws.session)
+        return r != nil and (r ?? "").starts_with("smux: session exists")
     _tmux(ws: ws, args: ["has-session", "-t", ws.session], reason: "no_session").status == "ok"
+
+# Whether the workspace's server still answers at all (smux owner process or the
+# private tmux server), independent of whether it holds the session.
+pub fn workspace_server_alive(ws: AgentWorkspace) -> bool:
+    if _smux():
+        return _smux_req(ws, "list-sessions") != nil
+    _tmux(ws: ws, args: ["list-sessions"], reason: "no_server").status == "ok"
+
+# smux only: the owner's loopback address and the private file holding its
+# token; nil on tmux or when no owner file exists.
+pub fn workspace_server_address(ws: AgentWorkspace) -> text?:
+    if not _smux():
+        return nil
+    val owner = _smux_owner(ws)
+    if owner == nil:
+        return nil
+    (owner ?? SmuxOwner(addr: "", token: "", pid: 0)).addr
+
+pub fn workspace_server_token_path(ws: AgentWorkspace) -> text?:
+    if not _smux():
+        return nil
+    _smux_owner_path(ws)
 
 pub fn session_ensure(ws: AgentWorkspace, cwd: text) -> WorkspaceResult:
     if session_alive(ws):
         return _ok("exists")
+    if _smux():
+        if not _smux_owner_up(ws):
+            return _err(reason: "new_session_failed", out: "smux owner did not start")
+        val r = _smux_req(ws, "new " + ws.session)
+        if r == nil or not smux_remote_reply_ok(r ?? ""):
+            return _err(reason: "new_session_failed", out: r ?? "smux owner unavailable")
+        # `new` runs the platform shell in the OWNER's directory. As tmux
+        # `new-session -c cwd` does, the first window must be `sh` in `cwd`:
+        # start that one, then close the owner-default shell.
+        var first = ""
+        for p in _ws_panes(ws):
+            if first == "":
+                first = p.window_id
+        val s = _smux_pane_spawn(ws, SMUX_FIRST_WINDOW, cwd, "", "new_session_failed")
+        if s.status != "ok":
+            return s
+        if first == "" or not _smux_req_ok(ws, "kill-window " + ws.session + " " + first):
+            return _err(reason: "new_session_failed", out: "could not close the owner-default shell")
+        return _ok(r ?? "")
     _tmux(ws: ws, args: ["new-session", "-d", "-s", ws.session, "-c", cwd], reason: "new_session_failed")
 
 pub fn session_kill(ws: AgentWorkspace) -> WorkspaceResult:
+    if _smux():
+        if not session_alive(ws):
+            # An owner with no session is still ours to stop.
+            val _stopped = _smux_req(ws, "stop-server")
+            _smux_owner_forget(ws)
+            return _err(reason: "kill_server_failed", out: ws.session)
+        val killed = _smux_req_ok(ws, "kill-session " + ws.session)
+        val _stop = _smux_req(ws, "stop-server")
+        _smux_owner_forget(ws)
+        if not killed:
+            return _err(reason: "kill_server_failed", out: ws.session)
+        return _ok("")
     # Only ever the private socket: `-L caret_ws_*` cannot name the user's server.
     _tmux(ws: ws, args: ["kill-server"], reason: "kill_server_failed")
 
 # Exact-name probe. tmux allows duplicate window names and `-t session:name`
 # matches by PREFIX, so neither new-window nor kill-window can tell us this.
 pub fn window_exists(ws: AgentWorkspace, name: text) -> bool:
+    if _smux():
+        for p in _ws_panes(ws):
+            if p.title == name:
+                return true
+        return false
     val r = _tmux(ws: ws, args: ["list-windows", "-t", ws.session, "-F", _fmt("window_name")], reason: "list_windows_failed")
     if r.status != "ok":
         return false
@@ -113,20 +480,39 @@ pub fn window_exists(ws: AgentWorkspace, name: text) -> bool:
     false
 
 pub fn window_open(ws: AgentWorkspace, name: text, cwd: text, command: text) -> WorkspaceResult:
+    if _smux():
+        if not _valid_name(name):
+            return _err(reason: "invalid_name", out: name)
+        return _smux_pane_spawn(ws, name, cwd, command, "new_window_failed")
     var args = ["new-window", "-d", "-t", ws.session, "-n", name, "-c", cwd]
     if command != "":
         args = args + [command]
     _tmux(ws: ws, args: args, reason: "new_window_failed")
 
 pub fn pane_split(ws: AgentWorkspace, window: text, cwd: text) -> WorkspaceResult:
+    if _smux():
+        # tmux window 0 is the owner first window.
+        var name = window
+        if name == "0":
+            name = SMUX_FIRST_WINDOW
+        if not window_exists(ws, name):
+            return _err(reason: "split_failed", out: window)
+        return _smux_pane_spawn(ws, name, cwd, "", "split_failed")
     _tmux(ws, ["split-window", "-d", "-t", ws.session + ":" + window, "-c", cwd],
         "split_failed")
 
 pub fn list_panes(ws: AgentWorkspace) -> [text]:
     list_panes_except(ws: ws, skip_pane_id: "")
 
-# Every pane target except the one whose tmux pane id is `skip_pane_id`.
+# Every pane target except the one whose id (tmux `%N`; smux window id or
+# `session:name.i` target) is `skip_pane_id`.
 pub fn list_panes_except(ws: AgentWorkspace, skip_pane_id: text) -> [text]:
+    if _smux():
+        var mine: [text] = []
+        for p in _ws_panes(ws):
+            if skip_pane_id == "" or (p.target != skip_pane_id and p.window_id != skip_pane_id):
+                mine.push(p.target)
+        return mine
     # `#{...}` inside a literal is string interpolation: build the tmux format by hand.
     val fmt = _fmt("session_name") + ":" + _fmt("window_name") + "." + _fmt("pane_index") + " " + _fmt("pane_id")
     val r = _tmux(ws, ["list-panes", "-s", "-t", ws.session, "-F", fmt], "list_panes_failed")
@@ -142,7 +528,30 @@ pub fn list_panes_except(ws: AgentWorkspace, skip_pane_id: text) -> [text]:
         panes.push(parts[0])
     panes
 
+# "<window> <pid>" per pane: the backend own report of each pane child pid
+# (smux: the owner spawn pid; tmux: `#{pane_pid}`).
+pub fn pane_pid_lines(ws: AgentWorkspace) -> [text]:
+    var lines: [text] = []
+    if _smux():
+        for p in _ws_panes(ws):
+            lines.push(p.title + " " + p.pid.to_text())
+        return lines
+    val fmt = _fmt("window_name") + " " + _fmt("pane_pid")
+    val r = _tmux(ws, ["list-panes", "-s", "-t", ws.session, "-F", fmt], "list_panes_failed")
+    for line in r.output.split("\n"):
+        if line.trim() != "":
+            lines.push(line.trim())
+    lines
+
 pub fn send_to_pane(ws: AgentWorkspace, target: text, command: text) -> WorkspaceResult:
+    if _smux():
+        val p = _ws_pane(ws, target)
+        if p == nil:
+            return _err(reason: "send_keys_failed", out: target)
+        val pane = p ?? WsPane(window_id: "", pane_id: "", title: "", pid: 0, target: "")
+        if not _smux_req_ok(ws, "send-pane " + ws.session + " " + pane.window_id + " " + pane.pane_id + " " + command):
+            return _err(reason: "send_keys_failed", out: target)
+        return _ok("")
     _tmux(ws, ["send-keys", "-t", target, command, "Enter"], "send_keys_failed")
 
 # Send one command to EVERY pane of the session except the pane this process
@@ -156,6 +565,20 @@ pub fn send_to_each_pane(ws: AgentWorkspace, command: text) -> [text]:
     reached
 
 pub fn capture_pane(ws: AgentWorkspace, target: text) -> text:
+    if _smux():
+        val p = _ws_pane(ws, target)
+        if p == nil:
+            return ""
+        val pane = p ?? WsPane(window_id: "", pane_id: "", title: "", pid: 0, target: "")
+        val _w = _smux_req(ws, "select-window " + ws.session + " " + pane.window_id)
+        val _p = _smux_req(ws, "select-pane " + ws.session + " " + pane.pane_id)
+        val h = _smux_req(ws, "history " + ws.session + " 2000")
+        if h == nil:
+            return ""
+        val lines = (h ?? "").split("\n")
+        if lines.len() > 0 and lines[0].starts_with("smux: history["):
+            return lines.slice(1, lines.len()).join("\n")
+        return h ?? ""
     _tmux(ws, ["capture-pane", "-p", "-J", "-S", "-", "-t", target], "capture_failed").output
 
 # Poll a pane until `marker` shows up (send-keys is async). Bounded.
@@ -202,6 +625,9 @@ pub fn worktree_list(ws: AgentWorkspace) -> [text]:
 # --- composite: one agent = one worktree + one pane --------------------------
 
 pub fn agent_attach(ws: AgentWorkspace, agent_id: text, command: text) -> WorkspaceResult:
+    # smux reserves the owner bootstrap window name, so it is never taken for an agent.
+    if _smux() and not _valid_name(agent_id):
+        return _err(reason: "invalid_name", out: agent_id)
     val wt = worktree_add(ws: ws, agent_id: agent_id)
     if wt.status != "ok":
         return wt
@@ -216,9 +642,14 @@ pub fn agent_attach(ws: AgentWorkspace, agent_id: text, command: text) -> Worksp
 pub fn agent_detach(ws: AgentWorkspace, agent_id: text) -> WorkspaceResult:
     if not window_exists(ws: ws, name: agent_id):
         return _err(reason: "kill_window_failed", out: ws.session + ":" + agent_id)
-    val k = _tmux(ws: ws, args: ["kill-window", "-t", ws.session + ":" + agent_id], reason: "kill_window_failed")
-    if k.status != "ok":
-        return k
+    if _smux():
+        for p in _ws_panes(ws):
+            if p.title == agent_id and not _smux_req_ok(ws, "kill-window " + ws.session + " " + p.window_id):
+                return _err(reason: "kill_window_failed", out: p.window_id)
+    else:
+        val k = _tmux(ws: ws, args: ["kill-window", "-t", ws.session + ":" + agent_id], reason: "kill_window_failed")
+        if k.status != "ok":
+            return k
     worktree_remove(ws: ws, agent_id: agent_id)
 
 # Launch a caret spec suite in its own tmux window; `output` is the pane target.
@@ -241,8 +672,8 @@ pub fn launch_caret_suite(ws: AgentWorkspace, cwd: text, spec: text) -> Workspac
     _ok(target)
 
 export AgentWorkspace, WorkspaceResult
-export agent_workspace, tmux_available, workspace_depth, depth_exceeded, with_depth,
-    session_alive, session_ensure, session_kill,
+export agent_workspace, tmux_available, workspace_backend, workspace_available, pane_pid_lines,workspace_depth, depth_exceeded, with_depth,
+    session_alive, session_ensure, session_kill, workspace_server_alive, workspace_server_address, workspace_server_token_path,
     window_exists, window_open, pane_split, list_panes, list_panes_except, send_to_pane, send_to_each_pane,
     capture_pane, wait_for_pane_text, worktree_path, worktree_add,
     worktree_remove, worktree_list, agent_attach, agent_detach, launch_caret_suite

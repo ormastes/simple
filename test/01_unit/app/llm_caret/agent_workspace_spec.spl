@@ -1,3 +1,4 @@
+# @timeout_secs 900 (each scenario starts its own smux owner process on Windows)
 # @tag: llm_caret, tmux, worktree, agent_workspace
 """
 ## Purpose and audience
@@ -37,9 +38,9 @@ reason — an absent tmux binary is an environment limitation, not a pass.
 # architecture doc/04_architecture/sspec_documentization_maintenance.md ;
 # design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-use std.spec.{describe, it, expect, step}
-use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, env_get, env_set, cwd}
-use app.llm_caret.agent_workspace.{agent_workspace, tmux_available,
+use std.spec.{describe, it, expect, step, pending}
+use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, env_get, env_set, cwd, current_time_ms, sleep_ms}
+use app.llm_caret.agent_workspace.{agent_workspace, tmux_available, workspace_available, workspace_backend, capture_pane,
     session_alive, session_ensure, session_kill, window_open, pane_split,
     list_panes, send_to_each_pane, wait_for_pane_text, worktree_add,
     worktree_remove, worktree_list, worktree_path, agent_attach, agent_detach,
@@ -102,8 +103,8 @@ describe "LLM Caret agent tmux sessions":
     it "broadcasts one command to every pane and each pane shows it":
         # @req REQ-APP-LLM-CARET-WORKSPACE-001
         # @capture(statistics): broadcast fan-out and per-pane marker rows
-        if not tmux_available():
-            step("Environmental guard: no tmux binary on PATH, live session work cannot run here")
+        if not workspace_available():
+            step("Environmental guard: no pane backend (tmux or smux), live session work cannot run here")
             return
         val root = _scratch("tmux")
         dir_remove_all(root)
@@ -135,8 +136,8 @@ describe "LLM Caret agent tmux sessions":
     it "attaches an agent as worktree plus window and detaches both":
         # @req REQ-APP-LLM-CARET-WORKSPACE-001
         # @capture(statistics): attach/detach window and worktree presence rows
-        if not tmux_available():
-            step("Environmental guard: no tmux binary on PATH, live window attach cannot run here")
+        if not workspace_available():
+            step("Environmental guard: no pane backend (tmux or smux), live window attach cannot run here")
             return
         val root = _scratch("attach")
         dir_remove_all(root)
@@ -186,8 +187,8 @@ describe "LLM Caret workspace recursion protection":
     it "never broadcasts into the pane it is running from":
         # @req REQ-APP-LLM-CARET-WORKSPACE-001
         # @capture(statistics): own-pane exclusion broadcast rows
-        if not tmux_available():
-            step("Environmental guard: no tmux binary on PATH, own-pane exclusion cannot run here")
+        if not workspace_available():
+            step("Environmental guard: no pane backend (tmux or smux), own-pane exclusion cannot run here")
             return
         val root = _scratch("ownpane")
         dir_remove_all(root)
@@ -197,18 +198,67 @@ describe "LLM Caret workspace recursion protection":
         expect(session_ensure(ws, root).status).to_equal("ok")
         expect(pane_split(ws, "0", root).status).to_equal("ok")
 
-        step("Pretend this process lives in the first pane (tmux sets TMUX_PANE)")
-        val (ids, _e, _c) = process_run("tmux", ["-L", ws.socket, "list-panes", "-s",
-            "-t", ws.session, "-F", "#" + "{" + "pane_id" + "}"])
-        val own = ids.split("\n")[0].trim()
-        expect(own.starts_with("%")).to_be(true)
-        env_set("TMUX_PANE", own)
+        # tmux sets TMUX_PANE (`%N`); smux sets SMUX_PANE (`session:name.i`) at spawn.
+        var own_env = "TMUX_PANE"
+        var own = ""
+        if workspace_backend() == "smux":
+            step("Pretend this process lives in the first pane (smux sets SMUX_PANE)")
+            own_env = "SMUX_PANE"
+            own = list_panes(ws)[0]
+            expect(own).to_equal("caret-own:main.0")
+        else:
+            step("Pretend this process lives in the first pane (tmux sets TMUX_PANE)")
+            val (ids, _e, _c) = process_run("tmux", ["-L", ws.socket, "list-panes", "-s",
+                "-t", ws.session, "-F", "#" + "{" + "pane_id" + "}"])
+            own = ids.split("\n")[0].trim()
+            expect(own.starts_with("%")).to_be(true)
+        env_set(own_env, own)
 
         step("A broadcast reaches every OTHER pane only")
         val reached = send_to_each_pane(ws, "echo OWN_PANE_SKIPPED")
         expect(reached.len()).to_equal(1)  # oracle: of two panes, only the other one may receive the broadcast
+        expect(reached).not_to_contain(own)
         expect(list_panes(ws).len()).to_equal(2)  # oracle: the session still holds exactly two panes
         expect(list_panes_except(ws, own).len()).to_equal(1)  # oracle: excluding the own pane leaves exactly one recipient
-        env_set("TMUX_PANE", "")
+        env_set(own_env, "")
+        session_kill(ws)
+        dir_remove_all(root)
+
+    it "smux: a pane never receives the broadcast issued by the CLI running inside it":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        # @capture(statistics): own-pane exclusion across real processes on smux
+        if workspace_backend() != "smux":
+            pending("smux only: on tmux, tmux itself sets TMUX_PANE in every pane; the scenario above covers it")
+            return
+        if not workspace_available():
+            pending("BLOCKED: smux pane shell `sh` not on PATH")
+            return
+        val root = _scratch("ownpane_smux")
+        dir_remove_all(root)
+        val repo = _fixture_repo(root)
+        # Fixed id: the owner port derives from it, so a rerun reclaims a leaked owner.
+        val id = "own-smux"
+        val ws = agent_workspace(id, repo, root + "/trees")
+        session_kill(ws)
+
+        step("A bystander pane, and a pane whose own child process runs the CLI broadcast")
+        expect(agent_attach(ws, "other", "").status).to_equal("ok")
+        # Single-quoted so the pane shell passes `$(...)` through: the typed text
+        # differs from what the receiving shell prints.
+        val cli = "cd '" + cwd().replace("\\", "/") + "' && bin/simple.exe run src/app/llm_caret/main.spl workspace " + id +
+            " broadcast 'echo OWN_$(echo SKIPPED)' --repo '" + repo.replace("\\", "/") + "'"
+        expect(agent_attach(ws, "owner", cli + "; exec sleep 300").status).to_equal("ok")
+
+        step("The bystander shows the executed output (typed text differs from output)")
+        expect(wait_for_pane_text(ws, id + ":other", "OWN_SKIPPED", 180000)).to_be(true)
+
+        step("The pane the CLI ran in never received it: SMUX_PANE named it as the pane to skip")
+        sleep_ms(3000)
+        expect(capture_pane(ws, id + ":owner").contains("OWN_SKIPPED")).to_be(false)
+        expect(capture_pane(ws, id + ":owner")).to_contain("sent " + id + ":other.0")
+        # The owner pane's child is `sleep`, which never echoes typed input, so
+        # the CLI's own report is the only witness of a send into its own pane.
+        expect(capture_pane(ws, id + ":owner")).not_to_contain("sent " + id + ":owner.0")
+
         session_kill(ws)
         dir_remove_all(root)
