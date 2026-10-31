@@ -356,19 +356,27 @@ fn _blank_page(page_size: i64) -> [u8]:
         i = i + 1
     page
 
-fn _put_u16(page: [u8], off: i64, v: i64):
-    page[off] = ((v >> 8) & 0xFF) as u8
-    page[off + 1] = (v & 0xFF) as u8
+# The seed interpreter loses element writes made through a parameter, so these
+# helpers RETURN the updated buffer and callers assign it back
+# (`page = _put_u16(page, ...)`). Each call copies the buffer, so use them only
+# for a bounded number of header-sized writes, never in per-cell loops.
+fn _put_u16(page: [u8], off: i64, v: i64) -> [u8]:
+    var p = page
+    p[off] = ((v >> 8) & 0xFF) as u8
+    p[off + 1] = (v & 0xFF) as u8
+    p
 
-fn _put_u32(page: [u8], off: i64, v: i64):
-    page[off] = ((v >> 24) & 0xFF) as u8
-    page[off + 1] = ((v >> 16) & 0xFF) as u8
-    page[off + 2] = ((v >> 8) & 0xFF) as u8
-    page[off + 3] = (v & 0xFF) as u8
+fn _put_u32(page: [u8], off: i64, v: i64) -> [u8]:
+    var p = page
+    p[off] = ((v >> 24) & 0xFF) as u8
+    p[off + 1] = ((v >> 16) & 0xFF) as u8
+    p[off + 2] = ((v >> 8) & 0xFF) as u8
+    p[off + 3] = (v & 0xFF) as u8
+    p
 
 # Serialize one table-leaf page (type 0x0d) at the given header displacement.
 fn _serialize_leaf(cells: [_WCell], usable: i64, page_size: i64, base: i64) -> [u8]:
-    val page = _blank_page(page_size)
+    var page = _blank_page(page_size)
     val n = cells.len()
     var content = page_size
     var ptrs: [i64] = []
@@ -388,24 +396,25 @@ fn _serialize_leaf(cells: [_WCell], usable: i64, page_size: i64, base: i64) -> [
             p = p + 1
             i = i + 1
         if local < cell.payload.len():
-            _put_u32(page, p, cell.overflow[0])
+            page = _put_u32(page, p, cell.overflow[0])
         ptrs.push(start)
         content = start
 
     page[base] = SQLITE_PAGE_TABLE_LEAF as u8
-    _put_u16(page, base + 1, 0)
-    _put_u16(page, base + 3, n)
-    _put_u16(page, base + 5, content & 0xFFFF)
+    page = _put_u16(page, base + 1, 0)
+    page = _put_u16(page, base + 3, n)
+    page = _put_u16(page, base + 5, content & 0xFFFF)
     page[base + 7] = 0u8
     var i: i64 = 0
     while i < n:
-        _put_u16(page, base + 8 + 2 * i, ptrs[i])
+        page[base + 8 + 2 * i] = ((ptrs[i] >> 8) & 0xFF) as u8
+        page[base + 9 + 2 * i] = (ptrs[i] & 0xFF) as u8
         i = i + 1
     page
 
 # Serialize one overflow page (chain index `idx` of the cell's chain).
 fn _serialize_overflow_page(cell: _WCell, usable: i64, page_size: i64, idx: i64) -> [u8]:
-    val page = _blank_page(page_size)
+    var page = _blank_page(page_size)
     val cap = usable - 4
     val local = local_payload_len(cell.payload.len(), usable, false)
     val from = local + idx * cap
@@ -413,9 +422,9 @@ fn _serialize_overflow_page(cell: _WCell, usable: i64, page_size: i64, idx: i64)
     if take > cap:
         take = cap
     if idx + 1 < cell.overflow.len():
-        _put_u32(page, 0, cell.overflow[idx + 1])
+        page = _put_u32(page, 0, cell.overflow[idx + 1])
     else:
-        _put_u32(page, 0, 0)
+        page = _put_u32(page, 0, 0)
     var i: i64 = 0
     while i < take:
         page[4 + i] = cell.payload[from + i]
@@ -424,7 +433,7 @@ fn _serialize_overflow_page(cell: _WCell, usable: i64, page_size: i64, idx: i64)
 
 # Serialize one table-interior page (type 0x05).
 fn _serialize_interior(node: _WInterior, page_size: i64, base: i64) -> [u8]:
-    val page = _blank_page(page_size)
+    var page = _blank_page(page_size)
     val n = node.children.len()
     var content = page_size
     var ptrs: [i64] = []
@@ -432,7 +441,11 @@ fn _serialize_interior(node: _WInterior, page_size: i64, base: i64) -> [u8]:
     while i < n:
         val key = node.keys[i]
         val start = content - (4 + _vlen(key))
-        _put_u32(page, start, node.children[i])
+        val child = node.children[i]
+        page[start] = ((child >> 24) & 0xFF) as u8
+        page[start + 1] = ((child >> 16) & 0xFF) as u8
+        page[start + 2] = ((child >> 8) & 0xFF) as u8
+        page[start + 3] = (child & 0xFF) as u8
         var p = start + 4
         for b in sqlite_varint_encode(key as u64):
             page[p] = b
@@ -442,14 +455,15 @@ fn _serialize_interior(node: _WInterior, page_size: i64, base: i64) -> [u8]:
         i = i + 1
 
     page[base] = SQLITE_PAGE_TABLE_INTERIOR as u8
-    _put_u16(page, base + 1, 0)
-    _put_u16(page, base + 3, n)
-    _put_u16(page, base + 5, content & 0xFFFF)
+    page = _put_u16(page, base + 1, 0)
+    page = _put_u16(page, base + 3, n)
+    page = _put_u16(page, base + 5, content & 0xFFFF)
     page[base + 7] = 0u8
-    _put_u32(page, base + 8, node.rightmost)
+    page = _put_u32(page, base + 8, node.rightmost)
     i = 0
     while i < n:
-        _put_u16(page, base + 12 + 2 * i, ptrs[i])
+        page[base + 12 + 2 * i] = ((ptrs[i] >> 8) & 0xFF) as u8
+        page[base + 13 + 2 * i] = (ptrs[i] & 0xFF) as u8
         i = i + 1
     page
 
@@ -675,22 +689,25 @@ fn sqlite_format_create_image(schema_sql: text, tables: [SqliteTableData]) -> Re
     if schema.overflow.len() != schema_overflow:
         return Err(SqliteError.UnsupportedFeature( what: "sqlite_schema layout changed during final build"))
 
-    var image: [u8] = []
-    for b in schema.page1:
-        image.push(b)
+    # 5. The 100-byte header replaces the first 100 bytes of page 1 (built as
+    # its own buffer and spliced in, so no write goes through a parameter).
+    val page_count = 1 + schema.overflow.len() + file_pages.len()
+    var image: [u8] = _build_header(page_count, page_size)
+    var hi: i64 = 100
+    while hi < schema.page1.len():
+        image.push(schema.page1[hi])
+        hi = hi + 1
     for page in schema.overflow:
         for b in page:
             image.push(b)
     for page in file_pages:
         for b in page:
             image.push(b)
-
-    # 5. Write the 100-byte header into page 1.
-    _write_header(image, image.len() / page_size, page_size)
     Ok(image)
 
-# Write the SQLite database header into image[0..100].
-fn _write_header(image: [u8], page_count: i64, page_size: i64):
+# Build the 100-byte SQLite database header.
+fn _build_header(page_count: i64, page_size: i64) -> [u8]:
+    var image = _blank_page(100)
     # "SQLite format 3" as raw bytes (literal, not text.bytes(): the seed's
     # rt_array_bytes_* externs are not all linked yet — see
     # doc/08_tracking/bug/seed_rt_process_run_bounded_rejects_unlimited_output_2026-10-22.md).
@@ -701,29 +718,30 @@ fn _write_header(image: [u8], page_count: i64, page_size: i64):
         i = i + 1
     # Page size: bytes 16..18, big-endian; 65536 is stored as 1.
     if page_size == 65536:
-        _put_u16(image, 16, 1)
+        image = _put_u16(image, 16, 1)
     else:
-        _put_u16(image, 16, page_size)
+        image = _put_u16(image, 16, page_size)
     image[18] = 1u8   # file format write version: legacy (rollback journal)
     image[19] = 1u8   # file format read version: legacy
     image[20] = 0u8   # reserved bytes per page
     image[21] = 64u8  # max embedded payload fraction
     image[22] = 32u8  # min embedded payload fraction
     image[23] = 32u8  # leaf payload fraction
-    _put_u32(image, 24, 1)              # file change counter
-    _put_u32(image, 28, page_count)     # database size in pages
-    _put_u32(image, 32, 0)              # first freelist trunk page
-    _put_u32(image, 36, 0)              # total freelist pages
-    _put_u32(image, 40, 1)              # schema cookie
-    _put_u32(image, 44, WRITER_SCHEMA_FORMAT)
-    _put_u32(image, 48, 0)              # default page cache size
-    _put_u32(image, 52, 0)              # largest root b-tree page (auto-vacuum)
-    _put_u32(image, 56, SQLITE_ENCODING_UTF8)
-    _put_u32(image, 60, 0)              # user version
-    _put_u32(image, 64, 0)              # incremental-vacuum mode
-    _put_u32(image, 68, 0)              # application id
+    image = _put_u32(image, 24, 1)              # file change counter
+    image = _put_u32(image, 28, page_count)     # database size in pages
+    image = _put_u32(image, 32, 0)              # first freelist trunk page
+    image = _put_u32(image, 36, 0)              # total freelist pages
+    image = _put_u32(image, 40, 1)              # schema cookie
+    image = _put_u32(image, 44, WRITER_SCHEMA_FORMAT)
+    image = _put_u32(image, 48, 0)              # default page cache size
+    image = _put_u32(image, 52, 0)              # largest root b-tree page (auto-vacuum)
+    image = _put_u32(image, 56, SQLITE_ENCODING_UTF8)
+    image = _put_u32(image, 60, 0)              # user version
+    image = _put_u32(image, 64, 0)              # incremental-vacuum mode
+    image = _put_u32(image, 68, 0)              # application id
     # 72..92 stay zero (reserved for expansion)
-    _put_u32(image, 92, 1)              # version-valid-for (== change counter)
-    _put_u32(image, 96, WRITER_SQLITE_VERSION_NUMBER)
+    image = _put_u32(image, 92, 1)              # version-valid-for (== change counter)
+    image = _put_u32(image, 96, WRITER_SQLITE_VERSION_NUMBER)
 
 
+    image

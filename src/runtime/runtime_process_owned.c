@@ -38,44 +38,14 @@ static int64_t* owned_tuple3_value(int64_t stdout_value, int64_t stderr_value, S
 #define RT_OWNED_FREE_VALUE(v) rt_free_deep(v)
 #endif
 
-#if defined(__APPLE__) && !defined(__unix__) && !defined(_WIN32)
-#include <errno.h>
-#include <fcntl.h>
-#include <limits.h>
-#include <pthread.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#ifndef RT_OWNED_HOST_MALLOC
-#define RT_OWNED_HOST_MALLOC malloc
-#define RT_OWNED_HOST_CALLOC calloc
-#define RT_OWNED_HOST_FREE free
-#endif
-#ifndef RT_OWNED_TOKEN_FILL
-#define RT_OWNED_TOKEN_FILL(dst, len) (arc4random_buf((dst), (len)), (ssize_t)(len))
-#endif
-#define POV4_DIGEST_BYTES 32
-#define POV4_MAX_TEXT_BYTES (1024U * 1024U)
-#define POV4_CWD_PINS 16
-#include "runtime_process_owned_sha256_private.h"
-static SplArray* owned_adapter_bytes(const char* bytes, uint64_t count) {
-    if (count > INT64_MAX) return NULL;
-    SplArray* result = rt_array_new((int64_t)count);
-    if (!result) return NULL;
-    for (uint64_t i = 0; i < count; i++) {
-        if (!rt_array_push(result, rt_value_int((unsigned char)bytes[i]))) {
-            rt_array_free(result);
-            return NULL;
-        }
-    }
-    return result;
-}
-#include "runtime_process_owned_cwd_private.h"
+/* Darwin compiles the POSIX owner below. Only the observation V4 family has
+ * Darwin arms there (`RT_OWNED_DARWIN_V4`); every other owned-process family
+ * keeps its explicit ENOTSUP answer on Darwin. */
+#if defined(__APPLE__) && !defined(_WIN32)
+#define RT_OWNED_DARWIN_V4 1
 #endif
 
-#if !defined(_WIN32) && defined(__unix__)
+#if !defined(_WIN32) && (defined(__unix__) || defined(__APPLE__))
 
 #include <errno.h>
 #include <fcntl.h>
@@ -98,6 +68,22 @@ static SplArray* owned_adapter_bytes(const char* bytes, uint64_t count) {
 #include <ctype.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
+#endif
+#ifdef RT_OWNED_DARWIN_V4
+#include <CommonCrypto/CommonDigest.h>
+#include <libproc.h>
+#include <spawn.h>
+#include <sys/proc_info.h>
+#include <sys/sysctl.h>
+#endif
+#if defined(__GNUC__) || defined(__clang__)
+#define RT_OWNED_MAYBE_UNUSED __attribute__((unused))
+#else
+#define RT_OWNED_MAYBE_UNUSED
+#endif
+#ifdef RT_OWNED_DARWIN_V4
+static uint64_t owned_darwin_pin_retain(int fd);
+static void owned_darwin_pin_release(uint64_t ref);
 #endif
 
 #define RT_OWNED_PROCESS_SLOTS 16
@@ -258,6 +244,12 @@ typedef struct RtOwnedSlot {
     int retired;
     int op_refs;
     int collecting;
+    /* V4 ProcessGroup policy (Darwin only): the leader is reaped only after a
+     * zero-live sample of its still-pinned process group. */
+    int group_retire;
+    int group_incomplete;    /* cleanup deadline passed with live members */
+    int group_sample_error;  /* transient sampling error owned by retirement */
+    uint64_t darwin_pin_ref; /* executable snapshot kept alive for this child */
     pthread_mutex_t* state_lock;
 } RtOwnedSlot;
 
@@ -334,7 +326,7 @@ static int64_t owned_clock_resolution_ns(clockid_t clock_id) {
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
-static int owned_deadline_reached_ns(int64_t deadline_ns) {
+RT_OWNED_MAYBE_UNUSED static int owned_deadline_reached_ns(int64_t deadline_ns) {
     int64_t now = owned_now_ns();
     return now < 0 || now >= deadline_ns;
 }
@@ -357,7 +349,7 @@ static uint64_t owned_add_sat(uint64_t a, uint64_t b) {
     return UINT64_MAX - a < b ? UINT64_MAX : a + b;
 }
 
-static int64_t owned_timeval_ms(struct timeval value) {
+RT_OWNED_MAYBE_UNUSED static int64_t owned_timeval_ms(struct timeval value) {
     if (value.tv_sec > INT64_MAX / 1000) return INT64_MAX;
     return (int64_t)value.tv_sec * 1000 + value.tv_usec / 1000;
 }
@@ -380,7 +372,7 @@ static uint64_t owned_start_identity(pid_t pid) {
     return identity > 0 ? (uint64_t)identity : 0;
 }
 
-static int owned_pidfd_open(pid_t pid) {
+RT_OWNED_MAYBE_UNUSED static int owned_pidfd_open(pid_t pid) {
 #if defined(__linux__) && defined(SYS_pidfd_open)
     return (int)syscall(SYS_pidfd_open, pid, 0);
 #else
@@ -418,7 +410,7 @@ static int owned_pipe_cloexec(int fds[2]) {
     return 0;
 }
 
-static int owned_child_close_inherited_except2(int keep_a, int keep_b) {
+RT_OWNED_MAYBE_UNUSED static int owned_child_close_inherited_except2(int keep_a, int keep_b) {
 #if defined(__linux__) && defined(SYS_close_range)
     int low = keep_a < keep_b ? keep_a : keep_b;
     int high = keep_a < keep_b ? keep_b : keep_a;
@@ -437,7 +429,7 @@ static int owned_child_close_inherited_except2(int keep_a, int keep_b) {
 #endif
 }
 
-static void owned_child_exec_failed(int error_fd, int error) {
+RT_OWNED_MAYBE_UNUSED static void owned_child_exec_failed(int error_fd, int error) {
     ssize_t written;
     do written = write(error_fd, &error, sizeof(error));
     while (written < 0 && errno == EINTR);
@@ -518,7 +510,7 @@ static int owned_signal_group_pinned(pid_t pid, pid_t pgid, int pidfd, int sig) 
     return 0;
 }
 
-static int owned_signal_leader_pinned(pid_t pid, int pidfd, int sig) {
+RT_OWNED_MAYBE_UNUSED static int owned_signal_leader_pinned(pid_t pid, int pidfd, int sig) {
 #ifdef __linux__
     if (pid <= 0 || pidfd < 0 || !owned_pidfd_valid(pidfd)) {
         errno = ESTALE; return 0;
@@ -535,6 +527,7 @@ static int owned_signal_leader_pinned(pid_t pid, int pidfd, int sig) {
     return 0;
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
 bool rt_process_owned_cancel(uint64_t requested_slot, uint64_t requested_generation,
                              int64_t requested_pid, uint64_t identity,
                              RtOwnedProcessCancelReceipt* receipt) {
@@ -580,6 +573,8 @@ bool rt_process_owned_cancel_value(uint64_t slot, uint64_t generation,
     return rt_process_owned_cancel(slot, generation, pid, identity, &receipt);
 }
 
+#endif /* !RT_OWNED_DARWIN_V4 */
+
 static int owned_set_nonblocking(int fd) {
     int flags;
     do flags = fcntl(fd, F_GETFL); while (flags < 0 && errno == EINTR);
@@ -589,7 +584,7 @@ static int owned_set_nonblocking(int fd) {
     return rc == 0;
 }
 
-static void owned_capture(int fd, char* dst, uint64_t capacity, uint64_t limit,
+RT_OWNED_MAYBE_UNUSED static void owned_capture(int fd, char* dst, uint64_t capacity, uint64_t limit,
                           uint64_t* seen, uint64_t* kept, int32_t* truncated,
                           int* open_flag) {
     char chunk[4096];
@@ -617,7 +612,7 @@ static void owned_capture(int fd, char* dst, uint64_t capacity, uint64_t limit,
     }
 }
 
-static void owned_cleanup(void* opaque) {
+RT_OWNED_MAYBE_UNUSED static void owned_cleanup(void* opaque) {
     RtOwnedCleanup* c = (RtOwnedCleanup*)opaque;
     if (c->pid > 0 && !c->reaped) {
         (void)owned_signal_group_pinned(c->pid, c->pgid, c->pidfd, SIGKILL);
@@ -655,6 +650,9 @@ static int owned_token_random(RtOwnedProcessTokenV2* token) {
         if (n < 0 && errno == EINTR) continue;
         return 0;
     }
+    return token->high != 0 || token->low != 0;
+#elif defined(RT_OWNED_DARWIN_V4)
+    arc4random_buf(token, sizeof(*token));
     return token->high != 0 || token->low != 0;
 #else
     (void)token;
@@ -731,12 +729,23 @@ static ssize_t owned_write_no_sigpipe(int fd, const uint8_t* data, size_t len) {
     sigset_t block, prior;
     sigemptyset(&block); sigaddset(&block, SIGPIPE);
     if (pthread_sigmask(SIG_BLOCK, &block, &prior) != 0) { errno = EIO; return -1; }
+#ifdef __APPLE__
+    /* Darwin has no sigtimedwait. F_SETNOSIGPIPE makes this descriptor report
+     * EPIPE without generating SIGPIPE, so no pending signal must be consumed. */
+    if (fcntl(fd, F_SETNOSIGPIPE, 1) != 0) {
+        int failed = errno; (void)pthread_sigmask(SIG_SETMASK, &prior, NULL);
+        errno = failed; return -1;
+    }
+    ssize_t result = write(fd, data, len);
+    int saved = errno;
+#else
     ssize_t result = write(fd, data, len);
     int saved = errno;
     if (result < 0 && saved == EPIPE && !sigismember(&prior, SIGPIPE)) {
         struct timespec zero = {0, 0};
         while (sigtimedwait(&block, NULL, &zero) < 0 && errno == EINTR) {}
     }
+#endif
     (void)pthread_sigmask(SIG_SETMASK, &prior, NULL);
     errno = saved;
     return result;
@@ -1130,7 +1139,7 @@ static int owned_confirm_exec_v4(pid_t pid, int exec_error_fd,
     }
 }
 #else
-static int owned_confirm_exec_v4(pid_t pid, int exec_error_fd,
+RT_OWNED_MAYBE_UNUSED static int owned_confirm_exec_v4(pid_t pid, int exec_error_fd,
                                  int64_t deadline_ns, int64_t* confirmed_ns,
                                  uint64_t* eintr_retries, int* child_reaped,
                                  int* exec_error, int* failure_class,
@@ -1144,7 +1153,7 @@ static int owned_confirm_exec_v4(pid_t pid, int exec_error_fd,
 }
 #endif
 
-static bool owned_process_start(const char* cmd, const char* const* argv,
+RT_OWNED_MAYBE_UNUSED static bool owned_process_start(const char* cmd, const char* const* argv,
                                const uint8_t* input, uint64_t input_len, int pipe_stdin,
                                int pinned_executable_fd,
                                const RtOwnedProcessStartConfigV4* v4,
@@ -1162,6 +1171,7 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
     receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION;
 #ifndef __linux__
     (void)cmd; (void)argv; (void)timeout_ms; (void)term_grace_ms; (void)max_output_bytes;
+    (void)input; (void)input_len; (void)pipe_stdin;
     if (pinned_executable_fd >= 0) close(pinned_executable_fd);
     if (configured_cwd_fd >= 0) close(configured_cwd_fd);
     receipt->runtime_error = ENOTSUP; return false;
@@ -1408,6 +1418,7 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
 #endif
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
 bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
                                int64_t timeout_ms, int64_t term_grace_ms,
                                uint64_t max_output_bytes, RtOwnedProcessTokenV2* token,
@@ -1452,13 +1463,87 @@ bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
     return ok;
 }
 
-bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
-                              char* out, uint64_t out_cap, char* err,
-                              uint64_t err_cap,
-                              RtOwnedProcessPollReceiptV2* receipt) {
+#endif /* !RT_OWNED_DARWIN_V4 */
+
+#ifdef RT_OWNED_DARWIN_V4
+/* Live members of `group`, excluding zombies (they cannot run or hold capture
+ * descriptors). Same rule as sosix_darwin_process_group_live, which lives in a
+ * header this translation unit includes only after the owner. A sampling
+ * failure never means absence. */
+static int owned_darwin_group_live(pid_t group, size_t* live) {
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PGRP, group};
+    for (int attempt = 0; attempt < 3; attempt++) {
+        size_t bytes = 0;
+        if (sysctl(mib, 4, NULL, &bytes, NULL, 0) != 0) return errno ? errno : EIO;
+        if (bytes > 16U * 1024U * 1024U) return EOVERFLOW;
+        size_t capacity = bytes + 32 * sizeof(struct kinfo_proc);
+        struct kinfo_proc* processes = (struct kinfo_proc*)RT_OWNED_HOST_MALLOC(capacity);
+        if (!processes) return ENOMEM;
+        bytes = capacity;
+        if (sysctl(mib, 4, processes, &bytes, NULL, 0) != 0) {
+            int error = errno ? errno : EIO;
+            RT_OWNED_HOST_FREE(processes);
+            if (error == ENOMEM) continue;
+            return error;
+        }
+        if (bytes % sizeof(*processes) != 0) { RT_OWNED_HOST_FREE(processes); return EPROTO; }
+        size_t count = 0;
+        for (size_t i = 0; i < bytes / sizeof(*processes); i++)
+            if (processes[i].kp_proc.p_stat != SZOMB) count++;
+        RT_OWNED_HOST_FREE(processes);
+        *live = count;
+        return 0;
+    }
+    return EAGAIN;
+}
+#endif
+
+/* Called with the slot lock held, only after waitid(WNOWAIT) observed the
+ * exited but unreaped leader. Leader-only slots are always ready. A
+ * ProcessGroup slot is ready only when its pinned group has no live member;
+ * otherwise every remaining member is sent SIGKILL and the caller retries. */
+static int owned_group_retire_ready(RtOwnedSlot* slot) {
+    if (!slot->group_retire) return 1;
+#ifdef RT_OWNED_DARWIN_V4
+    int64_t now = owned_now_ns();
+    if (now < 0) { slot->clock_failed = 1; return 0; }
+    owned_arm_unlimited_cleanup(slot, now, 0);
+    /* Bounded: a member that cannot be killed or that joined the group must
+     * not strand the leader. Reap it, but never claim an empty tree. */
+    if (slot->cleanup_deadline_ns > 0 && now >= slot->cleanup_deadline_ns) {
+        slot->group_incomplete = 1;
+        if (slot->runtime_error == 0 || slot->runtime_error == slot->group_sample_error)
+            slot->runtime_error = ETIMEDOUT;
+        return 1;
+    }
+    size_t live = 1;
+    int error = owned_darwin_group_live(slot->pgid, &live);
+    if (error) {
+        if (slot->runtime_error == 0) { slot->runtime_error = error; slot->group_sample_error = error; }
+        return 0;
+    }
+    if (slot->group_sample_error && slot->runtime_error == slot->group_sample_error)
+        slot->runtime_error = 0;
+    slot->group_sample_error = 0;
+    if (live == 0) return 1;
+    if (kill(-slot->pgid, SIGKILL) != 0 && errno != ESRCH && errno != EPERM &&
+        slot->runtime_error == 0)
+        slot->runtime_error = errno;
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+/* The V2 poll engine. On Darwin only the observation V4 owner reaches it; the
+ * public V2 entry point below keeps its explicit ENOTSUP answer there. */
+static bool owned_poll_v2_core(RtOwnedProcessTokenV2 token, int64_t wait_ms,
+                               char* out, uint64_t out_cap, char* err,
+                               uint64_t err_cap,
+                               RtOwnedProcessPollReceiptV2* receipt) {
     if (!receipt || (out_cap && !out) || (err_cap && !err) || wait_ms < 0 || wait_ms > 1000) return false;
     memset(receipt, 0, sizeof(*receipt)); receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(RT_OWNED_DARWIN_V4)
     (void)token; (void)wait_ms; (void)out; (void)out_cap; (void)err; (void)err_cap;
     receipt->runtime_error = ENOTSUP; return false;
 #else
@@ -1556,7 +1641,15 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
         slot->clock_failed = 1;
         now = before_poll;
     }
-    if (wr == 0 && info.si_pid == slot->pid && !slot->reaped) {
+    /* Side-effecting (may SIGKILL surviving group members); evaluated only
+     * for an exited, still-unreaped leader. */
+    int leader_retire_pending = wr == 0 && info.si_pid == slot->pid && !slot->reaped &&
+        !owned_group_retire_ready(slot);
+    if (leader_retire_pending) {
+        /* ProcessGroup policy: the exited but unreaped leader still pins the
+         * group id. Its surviving members were signalled; keep the leader
+         * unreaped until a zero-live sample, bounded by the cleanup deadline. */
+    } else if (wr == 0 && info.si_pid == slot->pid && !slot->reaped) {
         /* waitid observed the same pidfd-pinned leader before exact reap. */
         slot->identity_revalidated = 1;
         if (slot->request_started_ns < 0)
@@ -1623,8 +1716,17 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
 #endif
 }
 
-bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
-                                       RtOwnedProcessInputReceiptV3* receipt) {
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
+bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
+                              char* out, uint64_t out_cap, char* err,
+                              uint64_t err_cap,
+                              RtOwnedProcessPollReceiptV2* receipt) {
+    return owned_poll_v2_core(token, wait_ms, out, out_cap, err, err_cap, receipt);
+}
+#endif /* !RT_OWNED_DARWIN_V4 */
+
+static bool owned_input_receipt_v3_core(RtOwnedProcessTokenV2 token,
+                                        RtOwnedProcessInputReceiptV3* receipt) {
     if (!receipt) return false;
     memset(receipt, 0, sizeof(*receipt)); receipt->version = RT_OWNED_PROCESS_INPUT_VERSION;
     RtOwnedSlot* slot = owned_token_acquire(token, NULL);
@@ -1643,6 +1745,12 @@ bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
     receipt->runtime_error = slot->runtime_error;
     pthread_mutex_unlock(slot->state_lock); owned_token_release(slot);
     return receipt->runtime_error == 0;
+}
+
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
+bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
+                                       RtOwnedProcessInputReceiptV3* receipt) {
+    return owned_input_receipt_v3_core(token, receipt);
 }
 
 bool rt_process_owned_cancel_v2(RtOwnedProcessTokenV2 token,
@@ -1750,12 +1858,14 @@ bool rt_process_owned_observation_v1(RtOwnedProcessTokenV2 token,
 #endif
 }
 
-bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
-                                 RtOwnedProcessResultV2* result) {
+#endif /* !RT_OWNED_DARWIN_V4 */
+
+static bool owned_collect_v2_core(RtOwnedProcessTokenV2 token,
+                                  RtOwnedProcessResultV2* result) {
     if (!result) return false;
     memset(result, 0, sizeof(*result));
     result->version = RT_OWNED_PROCESS_ASYNC_VERSION;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(RT_OWNED_DARWIN_V4)
     (void)token; result->runtime_error = ENOTSUP; return false;
 #else
     pthread_mutex_lock(&rt_owned_lock);
@@ -1790,18 +1900,32 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
      * registry -> slot, never the inverse.  Collecting excludes new tokens
      * and the earlier op-ref check excludes already-running operations. */
     pthread_mutex_t* keep_lock = slot->state_lock;
+#ifdef RT_OWNED_DARWIN_V4
+    uint64_t pin_ref = slot->darwin_pin_ref; slot->darwin_pin_ref = 0;
+#endif
     pthread_mutex_unlock(keep_lock);
     pthread_mutex_lock(&rt_owned_lock);
     uint64_t keep_generation = slot->generation; int keep_retired = slot->retired;
     memset(slot, 0, sizeof(*slot)); slot->generation = keep_generation;
     slot->retired = keep_retired; slot->state_lock = keep_lock;
     pthread_mutex_unlock(&rt_owned_lock);
+#ifdef RT_OWNED_DARWIN_V4
+    owned_darwin_pin_release(pin_ref);
+#endif
     (void)pidfd;
     (void)index;
     return result->runtime_error == 0;
 #endif
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
+bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
+                                 RtOwnedProcessResultV2* result) {
+    return owned_collect_v2_core(token, result);
+}
+#endif /* !RT_OWNED_DARWIN_V4 */
+
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
 /* The language ABI never receives the V2 token.  This small registry maps a
  * separately minted random positive handle to that token and serializes the
  * one operation that can consume a core lease.  `closing` prevents a release
@@ -1822,6 +1946,8 @@ typedef struct RtOwnedAdapterSlot {
 static RtOwnedAdapterSlot rt_owned_adapter_slots[RT_OWNED_ADAPTER_SLOTS];
 static pthread_mutex_t rt_owned_adapter_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#endif /* !RT_OWNED_DARWIN_V4 */
+
 static SplArray* owned_adapter_values(const int64_t* values, int64_t count) {
     SplArray* result = rt_array_new(count);
     if (!result) return NULL;
@@ -1834,7 +1960,7 @@ static SplArray* owned_adapter_values(const int64_t* values, int64_t count) {
     return result;
 }
 
-static int owned_adapter_fill_reserved_values(SplArray* result,
+RT_OWNED_MAYBE_UNUSED static int owned_adapter_fill_reserved_values(SplArray* result,
                                               const int64_t* values,
                                               int64_t count) {
     if (!result || rt_array_len(result) != 0) return 0;
@@ -1856,6 +1982,7 @@ static SplArray* owned_adapter_bytes(const char* bytes, uint64_t count) {
     return result;
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
 static SplArray* owned_adapter_poll_error(int error) {
     const int64_t fields[] = { RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, error };
@@ -2356,6 +2483,8 @@ int rt_process_owned_v3_release_value(int64_t handle) {
     return consumed;
 }
 
+#endif /* !RT_OWNED_DARWIN_V4 */
+
 /* ===== Process observation V4 Linux host =====
  *
  * The Simple common module owns the semantic 64-word schema and request
@@ -2432,10 +2561,11 @@ enum {
     POV4_STREAM_ERROR = 3, POV4_STREAM_DEADLINE = 4,
     POV4_TREE_CHILD_DIRECT = 1, POV4_ENFORCEMENT_NONE = 1,
     POV4_ENFORCEMENT_CGROUP = 2, POV4_ENFORCEMENT_RLIMIT_AS = 3,
-    POV4_DESCENDANT_LEADER = 1,
+    POV4_DESCENDANT_LEADER = 1, POV4_DESCENDANT_PROCESS_GROUP = 2,
     POV4_CLOCK_MONOTONIC = 1,
     POV4_VALID_REQUEST = 1, POV4_VALID_EXEC = 2, POV4_VALID_CLOCK = 4,
-    POV4_VALID_DIRECT_RSS = 8, POV4_VALID_FROZEN = 128
+    POV4_VALID_DIRECT_RSS = 8, POV4_VALID_TREE_CONTROL = 64,
+    POV4_VALID_FROZEN = 128
 };
 
 enum {
@@ -2443,12 +2573,30 @@ enum {
     POV4_CAP_PTRACE_EXEC = 1 << 2, POV4_CAP_EXACT_ENV = 1 << 3,
     POV4_CAP_ABSOLUTE_DEADLINE = 1 << 4, POV4_CAP_WAIT4 = 1 << 5,
     POV4_CAP_RLIMIT_AS = 1 << 6, POV4_CAP_TWO_PHASE_COLLECT = 1 << 7,
-    POV4_CAP_LEADER_ONLY = 1 << 8
+    POV4_CAP_LEADER_ONLY = 1 << 8,
+    /* Darwin-only, weaker than PINNED_EXEC: a private snapshot (0700 dir,
+     * 0500 file, caller-owned) launched by pathname. Same-UID processes are
+     * trusted not to rewrite it; there is no kernel seal. */
+    POV4_CAP_DARWIN_SNAPSHOT_EXEC = 1 << 9,
+    /* Darwin-only exec proof: posix_spawn returned success for a
+     * START_SUSPENDED child, and before it ran an instruction its main image
+     * vnode (PROC_PIDREGIONPATHINFO) matched the snapshot dev/ino and the
+     * snapshot bytes still matched the bound digest. Not PTRACE_EXEC. */
+    POV4_CAP_DARWIN_SPAWN_EXEC_PROOF = 1 << 10,
+    /* ProcessGroup descendant policy: the unreaped leader pins its group; the
+     * leader is reaped only after a zero-live (non-zombie) group sample.
+     * Members that leave the group (setsid/setpgid) are not contained. */
+    POV4_CAP_PROCESS_GROUP_RETIRE = 1 << 11
 };
 #define POV4_CAPABILITIES (POV4_CAP_PINNED_EXEC | POV4_CAP_PINNED_CWD | \
     POV4_CAP_PTRACE_EXEC | POV4_CAP_EXACT_ENV | POV4_CAP_ABSOLUTE_DEADLINE | \
     POV4_CAP_WAIT4 | POV4_CAP_RLIMIT_AS | POV4_CAP_TWO_PHASE_COLLECT | \
     POV4_CAP_LEADER_ONLY)
+/* Darwin clears PINNED_EXEC, PTRACE_EXEC and RLIMIT_AS (no memory cap). */
+#define POV4_DARWIN_CAPABILITIES (POV4_CAP_PINNED_CWD | POV4_CAP_EXACT_ENV | \
+    POV4_CAP_ABSOLUTE_DEADLINE | POV4_CAP_WAIT4 | POV4_CAP_TWO_PHASE_COLLECT | \
+    POV4_CAP_LEADER_ONLY | POV4_CAP_DARWIN_SNAPSHOT_EXEC | \
+    POV4_CAP_DARWIN_SPAWN_EXEC_PROOF | POV4_CAP_PROCESS_GROUP_RETIRE)
 
 typedef struct Pov4Request {
     uint64_t capability_bits;
@@ -2698,9 +2846,20 @@ enum Pov4SignalOutcome {
     POV4_SIGNAL_SENT = 1
 };
 
+/* Callers hold the slot lock and signal only an unreaped leader, which pins
+ * both its PID and (ProcessGroup policy) its process-group id. */
 static enum Pov4SignalOutcome pov4_signal_owned_child(
-        pid_t pid, int pidfd, int sig) {
+        pid_t pid, int pidfd, int sig, int group) {
     if (pid <= 0) { errno = ESTALE; return POV4_SIGNAL_ERROR; }
+    if (group) {
+        (void)pidfd;
+        if (kill(-pid, sig) == 0) return POV4_SIGNAL_SENT;
+        /* EPERM: no remaining member accepted the signal (Darwin reports it
+         * for dying members). GONE only triggers the gated reconcile, which
+         * still requires a zero-live group sample before any reap. */
+        if (errno == ESRCH || errno == EPERM) return POV4_SIGNAL_GONE;
+        return POV4_SIGNAL_ERROR;
+    }
 #ifdef RT_PROCESS_OBSERVATION_V4_TESTING
     if (pov4_test_signal_gone_count > 0) {
         pov4_test_signal_gone_count--;
@@ -2730,6 +2889,14 @@ static enum Pov4SignalOutcome pov4_signal_owned_child(
  * nonblocking wait before any later signal decision. */
 static void pov4_reconcile_gone_child_locked(
         RtOwnedSlot* slot, pid_t pid, int64_t deadline_ns) {
+    if (slot->group_retire) {
+        /* Never consume the group-pinning leader before retirement. */
+        siginfo_t info; memset(&info, 0, sizeof(info));
+        int rc;
+        do rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+        while (rc < 0 && errno == EINTR);
+        if (rc != 0 || info.si_pid != pid || !owned_group_retire_ready(slot)) return;
+    }
     for (int turn = 0; turn < 1000; turn++) {
         int status = 0;
         pid_t waited;
@@ -2747,6 +2914,7 @@ static void pov4_reconcile_gone_child_locked(
             slot->reaped = 1;
             slot->status = status;
             slot->leader_waited_ns = waited_ns;
+            if (slot->group_retire) slot->tree_empty_ns = waited_ns;
             slot->finished_ms = waited_ns >= 0 ? waited_ns / 1000000 : -1;
             owned_arm_unlimited_cleanup(slot, waited_ns, 0);
             if (slot->execution_deadline_ns == 0) deadline_ns = slot->cleanup_deadline_ns;
@@ -2761,6 +2929,272 @@ static void pov4_reconcile_gone_child_locked(
     }
 }
 
+#ifdef RT_OWNED_DARWIN_V4
+/* A launched child keeps its snapshot pathname alive: AMFI/syspolicyd evaluate
+ * the image asynchronously after exec, and an unlinked snapshot gets the child
+ * SIGKILLed (exec reason SECURITY_POLICY). Closing a pin with live children
+ * only retires its handle; the files go when the last child is collected. */
+static int pov4_darwin_hash_fd(int fd, uint8_t digest[32]) {
+    CC_SHA256_CTX context; uint8_t buffer[16384]; off_t offset = 0;
+    CC_SHA256_Init(&context);
+    for (;;) {
+        ssize_t count = pread(fd, buffer, sizeof(buffer), offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) return 0;
+        if (count == 0) break;
+        CC_SHA256_Update(&context, buffer, (CC_LONG)count);
+        offset += count;
+    }
+    CC_SHA256_Final(digest, &context);
+    return 1;
+}
+
+/* The snapshot descriptor still names the pinned inode, and its bytes still
+ * match the digest the request bound. Same-UID rewrite is a trusted-caller
+ * precondition; this check narrows, but does not close, that window. */
+static int pov4_darwin_snapshot_matches(int fd, const struct stat* pinned,
+                                        const uint8_t digest[32]) {
+    struct stat now; uint8_t actual[32];
+    if (fstat(fd, &now) != 0 || !S_ISREG(now.st_mode) ||
+        now.st_dev != pinned->st_dev || now.st_ino != pinned->st_ino ||
+        now.st_size != pinned->st_size || !pov4_darwin_hash_fd(fd, actual))
+        return 0;
+    unsigned different = 0;
+    for (int i = 0; i < 32; i++) different |= (unsigned)(actual[i] ^ digest[i]);
+    return different == 0;
+}
+
+/* The lowest file-backed mapping of a START_SUSPENDED child is its main image
+ * (dyld and the shared cache map above it). Compare its vnode identity. */
+static int pov4_darwin_main_image_is(pid_t pid, dev_t device, ino_t inode) {
+    uint64_t address = 0;
+    for (int turn = 0; turn < 64; turn++) {
+        struct proc_regionwithpathinfo region;
+        memset(&region, 0, sizeof(region));
+        int count = proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, address,
+                                 &region, (int)sizeof(region));
+        if (count != (int)sizeof(region)) return 0;
+        if (region.prp_vip.vip_path[0] != '\0')
+            return (dev_t)region.prp_vip.vip_vi.vi_stat.vst_dev == device &&
+                   (ino_t)region.prp_vip.vip_vi.vi_stat.vst_ino == inode;
+        uint64_t next = region.prp_prinfo.pri_address + region.prp_prinfo.pri_size;
+        if (next <= address) return 0;
+        address = next;
+    }
+    return 0;
+}
+
+static int pov4_darwin_spawn_suspended(pid_t* pid, const char* image_path,
+        int cwd_fd, int stdin_fd, int stdout_fd, int stderr_fd,
+        char* const* argv, char* const* environment) {
+    posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;
+    int actions_ready = 0, attributes_ready = 0;
+    int error = posix_spawn_file_actions_init(&actions);
+    actions_ready = error == 0;
+    if (!error) { error = posix_spawnattr_init(&attributes); attributes_ready = error == 0; }
+    if (!error) error = stdin_fd >= 0
+        ? posix_spawn_file_actions_adddup2(&actions, stdin_fd, STDIN_FILENO)
+        : posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (!error) error = posix_spawn_file_actions_adddup2(&actions, stdout_fd, STDOUT_FILENO);
+    if (!error) error = posix_spawn_file_actions_adddup2(&actions, stderr_fd, STDERR_FILENO);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (!error) error = posix_spawn_file_actions_addfchdir_np(&actions, cwd_fd);
+#pragma clang diagnostic pop
+    if (!error) error = posix_spawnattr_setpgroup(&attributes, 0);
+    sigset_t mask, defaults; sigemptyset(&mask); sigemptyset(&defaults);
+    static const int reset[] = {SIGHUP, SIGINT, SIGQUIT, SIGPIPE, SIGALRM, SIGTERM,
+        SIGCHLD, SIGUSR1, SIGUSR2, SIGTSTP, SIGTTIN, SIGTTOU};
+    for (size_t i = 0; i < sizeof(reset) / sizeof(reset[0]); i++) sigaddset(&defaults, reset[i]);
+    if (!error) error = posix_spawnattr_setsigmask(&attributes, &mask);
+    if (!error) error = posix_spawnattr_setsigdefault(&attributes, &defaults);
+    /* CLOEXEC_DEFAULT: only the three dup2/open targets reach the image. */
+    if (!error) error = posix_spawnattr_setflags(&attributes, (short)(
+        POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK |
+        POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_START_SUSPENDED));
+    if (!error) error = posix_spawn(pid, image_path, &actions, &attributes, argv, environment);
+    if (actions_ready) (void)posix_spawn_file_actions_destroy(&actions);
+    if (attributes_ready) (void)posix_spawnattr_destroy(&attributes);
+    return error;
+}
+
+/* Darwin arm of pov4_start_exact. Exec proof is posix_spawn success for a
+ * START_SUSPENDED child whose main image vnode is the pinned snapshot inode
+ * and whose snapshot bytes still match the bound digest; only then is it
+ * resumed. Weaker than Linux: the snapshot is launched by pathname and is not
+ * kernel-sealed, so same-UID processes are trusted (see the capability bits).
+ * There is no memory cap: memory_limit must be zero. */
+static enum Pov4StartOutcome pov4_start_exact_darwin(
+    int executable_fd, int cwd_fd, Pov4Request* request,
+    int64_t request_started_ns, int64_t prepared_ns,
+    int64_t execution_deadline_ns, int64_t kill_deadline_ns,
+    int64_t cleanup_deadline_ns, RtOwnedProcessTokenV2* token,
+    int* exec_error_out, int* exec_failure_class_out) {
+    struct stat pinned, named; char image_path[MAXPATHLEN];
+    if (request->memory_limit != 0) {
+        close(executable_fd); close(cwd_fd); errno = ENOTSUP; return POV4_START_NO_CHILD;
+    }
+    if (fstat(executable_fd, &pinned) != 0 || !S_ISREG(pinned.st_mode) ||
+        fcntl(executable_fd, F_GETPATH, image_path) != 0 ||
+        lstat(image_path, &named) != 0 || !S_ISREG(named.st_mode) ||
+        named.st_dev != pinned.st_dev || named.st_ino != pinned.st_ino ||
+        !pov4_darwin_snapshot_matches(executable_fd, &pinned, request->executable_digest)) {
+        close(executable_fd); close(cwd_fd); errno = ESTALE; return POV4_START_NO_CHILD;
+    }
+    uint64_t output_limit = request->stdout_limit + request->stderr_limit;
+    RtOwnedCapturedByte* retained = NULL;
+    if (output_limit) {
+        retained = (RtOwnedCapturedByte*)RT_OWNED_HOST_MALLOC(
+            (size_t)output_limit * sizeof(*retained));
+        if (!retained) { close(executable_fd); close(cwd_fd); errno = ENOMEM; return POV4_START_NO_CHILD; }
+    }
+    uint32_t index = 0; uint64_t generation = 0;
+    if (!owned_reserve(&index, &generation)) {
+        close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
+        errno = EAGAIN; return POV4_START_NO_CHILD;
+    }
+    RtOwnedProcessTokenV2 minted = {0, 0};
+    if (!owned_token_mint_install_reserved(index, generation, &minted)) {
+        int saved = errno; owned_release(index, generation);
+        close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
+        errno = saved; return POV4_START_NO_CHILD;
+    }
+    int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1}, in_pipe[2] = {-1, -1};
+    if (owned_pipe_cloexec(out_pipe) != 0 || owned_pipe_cloexec(err_pipe) != 0 ||
+        (request->atomic_input_bound && owned_pipe_cloexec(in_pipe) != 0) ||
+        !owned_set_nonblocking(out_pipe[0]) || !owned_set_nonblocking(err_pipe[0]) ||
+        (request->atomic_input_bound && !owned_set_nonblocking(in_pipe[1]))) {
+        int saved = errno;
+        if (out_pipe[0] >= 0) { close(out_pipe[0]); close(out_pipe[1]); }
+        if (err_pipe[0] >= 0) { close(err_pipe[0]); close(err_pipe[1]); }
+        if (in_pipe[0] >= 0) { close(in_pipe[0]); close(in_pipe[1]); }
+        close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
+        owned_release(index, generation); errno = saved; return POV4_START_NO_CHILD;
+    }
+    /* Take the snapshot reference before the child exists, so a concurrent
+     * close can only retire the pin, never unlink the image it launches. */
+    uint64_t pin_ref = owned_darwin_pin_retain(executable_fd);
+#ifndef RT_OWNED_EXTERNAL_PIN
+    if (pin_ref == 0) {
+        close(out_pipe[0]); close(out_pipe[1]); close(err_pipe[0]); close(err_pipe[1]);
+        if (request->atomic_input_bound) { close(in_pipe[0]); close(in_pipe[1]); }
+        close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
+        owned_release(index, generation); errno = ESTALE; return POV4_START_NO_CHILD;
+    }
+#endif
+    pid_t pid = -1;
+    int spawn_error = pov4_darwin_spawn_suspended(&pid, image_path, cwd_fd,
+        request->atomic_input_bound ? in_pipe[0] : -1, out_pipe[1], err_pipe[1],
+        request->argv, request->environment);
+    close(out_pipe[1]); close(err_pipe[1]);
+    if (request->atomic_input_bound) close(in_pipe[0]);
+    close(cwd_fd);
+    if (spawn_error != 0) {
+        owned_darwin_pin_release(pin_ref);
+        close(out_pipe[0]); close(err_pipe[0]);
+        if (request->atomic_input_bound) close(in_pipe[1]);
+        close(executable_fd); RT_OWNED_HOST_FREE(retained);
+        owned_release(index, generation); errno = spawn_error;
+        return POV4_START_NO_CHILD;
+    }
+    /* From here the suspended child is owned by the slot and never dropped. */
+    int64_t process_started_ns = owned_now_ns();
+    pthread_mutex_lock(&rt_owned_lock);
+    RtOwnedSlot* slot = &rt_owned_slots[index];
+    slot->pid = pid; slot->pgid = pid; slot->pidfd = -1; slot->start_identity = 0;
+    slot->group_retire = request->descendant_policy == POV4_DESCENDANT_PROCESS_GROUP;
+    slot->token_high = minted.high; slot->token_low = minted.low; slot->state = 1;
+    slot->out_fd = out_pipe[0]; slot->err_fd = err_pipe[0]; slot->out_open = 1; slot->err_open = 1;
+    slot->in_fd = request->atomic_input_bound ? in_pipe[1] : -1;
+    slot->in_open = request->atomic_input_bound;
+    slot->input = request->atomic_input;
+    slot->input_len = request->atomic_input_len;
+    slot->input_written = 0;
+    slot->input_contract_v3 = request->atomic_input_bound;
+    if (request->atomic_input_bound)
+        memcpy(slot->input_sha256, request->atomic_input_digest, 32);
+    request->atomic_input = NULL;
+    if (slot->in_open && slot->input_len == 0) owned_async_close_input(slot);
+    slot->started_ms = request_started_ns / 1000000;
+    slot->finished_ms = -1; slot->request_started_ns = request_started_ns;
+    slot->prepared_ns = prepared_ns; slot->process_started_ns = process_started_ns;
+    slot->exec_confirmed_ns = -1; slot->leader_waited_ns = -1; slot->tree_empty_ns = -1;
+    slot->execution_deadline_ns = execution_deadline_ns;
+    slot->kill_deadline_ns = kill_deadline_ns; slot->cleanup_deadline_ns = cleanup_deadline_ns;
+    slot->unlimited_term_grace_ns = request->term_grace_ns;
+    slot->unlimited_cleanup_budget_ns = request->cleanup_budget_ns;
+    slot->timeout_ms = request->wall_budget_ns == 0 ? 0 : RT_OWNED_ABI_MAX_TIMEOUT_MS;
+    slot->term_grace_ms = 0;
+    slot->term_at_ms = -1; slot->drain_deadline_ms = -1;
+    slot->output_limit = output_limit; slot->stdout_limit = request->stdout_limit;
+    slot->stderr_limit = request->stderr_limit; slot->retained = retained;
+    pthread_mutex_unlock(&rt_owned_lock);
+    *token = minted;
+
+    int failure = 0, failure_class = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+    if (process_started_ns < prepared_ns) {
+        failure = EIO; failure_class = RT_OWNED_EXEC_FAILURE_CLOCK_V4;
+    }
+    pthread_mutex_lock(slot->state_lock);
+    slot->darwin_pin_ref = pin_ref;
+    pthread_mutex_unlock(slot->state_lock);
+    if (!failure && getpgid(pid) != pid) failure = EPERM;
+    uint64_t identity = 0;
+    if (!failure && (identity = owned_start_identity(pid)) == 0) failure = errno ? errno : ESRCH;
+    if (!failure && (!pov4_darwin_main_image_is(pid, pinned.st_dev, pinned.st_ino) ||
+                     !pov4_darwin_snapshot_matches(executable_fd, &pinned,
+                                                   request->executable_digest)))
+        failure = ESTALE;
+    close(executable_fd);
+    int64_t confirm_deadline_ns = execution_deadline_ns > 0
+        ? execution_deadline_ns : request_started_ns + 30000000000LL;
+    int64_t confirmed_ns = -1;
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+    if (!failure && pov4_test_exec_failure_count > 0) {
+        pov4_test_exec_failure_count--;
+        failure = pov4_test_exec_failure_errno;
+    }
+#endif
+    if (!failure) {
+        confirmed_ns = owned_now_ns();
+        if (confirmed_ns < 0) { failure = EIO; failure_class = RT_OWNED_EXEC_FAILURE_CLOCK_V4; }
+        else if (confirmed_ns > confirm_deadline_ns) {
+            failure = ETIMEDOUT; failure_class = RT_OWNED_EXEC_FAILURE_DEADLINE_V4;
+        }
+    }
+    if (!failure && kill(pid, SIGCONT) != 0) failure = errno ? errno : EIO;
+    pthread_mutex_lock(slot->state_lock);
+    slot->start_identity = identity;
+    if (!failure) {
+        slot->exec_confirmed_ns = confirmed_ns;
+        pthread_mutex_unlock(slot->state_lock);
+        return POV4_START_CONFIRMED;
+    }
+    slot->runtime_error = failure;
+    owned_arm_unlimited_cleanup(slot, owned_now_ns(), 1);
+    cleanup_deadline_ns = slot->cleanup_deadline_ns;
+    /* A suspended child cannot act on SIGTERM; KILL always follows. */
+    slot->term_attempted = 1;
+    enum Pov4SignalOutcome term =
+        pov4_signal_owned_child(pid, -1, SIGTERM, slot->group_retire);
+    if (term == POV4_SIGNAL_SENT) slot->term_sent = 1;
+    else if (term == POV4_SIGNAL_GONE)
+        pov4_reconcile_gone_child_locked(slot, pid, cleanup_deadline_ns);
+    if (!slot->reaped) {
+        slot->kill_attempted = 1;
+        enum Pov4SignalOutcome killed =
+            pov4_signal_owned_child(pid, -1, SIGKILL, slot->group_retire);
+        if (killed == POV4_SIGNAL_SENT) slot->kill_sent = 1;
+        else if (killed == POV4_SIGNAL_GONE)
+            pov4_reconcile_gone_child_locked(slot, pid, cleanup_deadline_ns);
+    }
+    pthread_mutex_unlock(slot->state_lock);
+    *exec_error_out = failure;
+    *exec_failure_class_out = failure_class;
+    return POV4_START_CLEANUP;
+}
+#endif
+
 static enum Pov4StartOutcome pov4_start_exact(
     int executable_fd, int cwd_fd, Pov4Request* request,
     int64_t request_started_ns, int64_t prepared_ns,
@@ -2770,7 +3204,12 @@ static enum Pov4StartOutcome pov4_start_exact(
     *exec_error_out = 0;
     *exec_failure_class_out = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
     memset(token, 0, sizeof(*token));
-#ifndef __linux__
+#if defined(RT_OWNED_DARWIN_V4)
+    return pov4_start_exact_darwin(executable_fd, cwd_fd, request,
+        request_started_ns, prepared_ns, execution_deadline_ns,
+        kill_deadline_ns, cleanup_deadline_ns, token,
+        exec_error_out, exec_failure_class_out);
+#elif !defined(__linux__)
     (void)request; (void)request_started_ns; (void)prepared_ns;
     (void)execution_deadline_ns; (void)kill_deadline_ns;
     (void)cleanup_deadline_ns;
@@ -2929,14 +3368,14 @@ static enum Pov4StartOutcome pov4_start_exact(
     if(!slot->reaped){
         slot->term_attempted=1;
         enum Pov4SignalOutcome term =
-            pov4_signal_owned_child(pid,pidfd,SIGTERM);
+            pov4_signal_owned_child(pid,pidfd,SIGTERM,slot->group_retire);
         if(term==POV4_SIGNAL_SENT) slot->term_sent=1;
         else if(term==POV4_SIGNAL_GONE)
             pov4_reconcile_gone_child_locked(slot,pid,cleanup_deadline_ns);
         if(!slot->reaped){
             slot->kill_attempted=1;
             enum Pov4SignalOutcome kill =
-                pov4_signal_owned_child(pid,pidfd,SIGKILL);
+                pov4_signal_owned_child(pid,pidfd,SIGKILL,slot->group_retire);
             if(kill==POV4_SIGNAL_SENT) slot->kill_sent=1;
             else if(kill==POV4_SIGNAL_GONE)
                 pov4_reconcile_gone_child_locked(slot,pid,cleanup_deadline_ns);
@@ -3161,6 +3600,16 @@ static void pov4_snapshot(Pov4Slot* owner, const RtOwnedProcessPollReceiptV2* po
     w[POV4_TREE_EMPTY] = 0;
     w[POV4_LEADER_WAITED_NS] = core->leader_waited_ns;
     w[POV4_TREE_EMPTY_NS] = -1;
+    if (core->group_retire && !owner->cleanup_only) {
+        /* Group control is a promise of the admitted ProcessGroup lease;
+         * startup-cleanup receipts never carry tree authority. */
+        w[POV4_TREE_CONTROL_AVAILABLE] = 1;
+        w[POV4_VALIDITY] |= POV4_VALID_TREE_CONTROL;
+        if (core->reaped && core->tree_empty_ns >= 0 && !core->group_incomplete) {
+            w[POV4_TREE_EMPTY] = 1;
+            w[POV4_TREE_EMPTY_NS] = core->tree_empty_ns;
+        }
+    }
     if (core->clock_failed ||
             (owner->cleanup_only &&
              (w[POV4_PROCESS_STARTED_NS] < 0 ||
@@ -3235,7 +3684,7 @@ static int pov4_apply_deadlines(Pov4Slot* owner, int cancel_requested) {
     if (!core->reaped && due_term && !core->term_attempted) {
         core->term_attempted = 1;
         enum Pov4SignalOutcome signal_outcome =
-            pov4_signal_owned_child(core->pid, core->pidfd, SIGTERM);
+            pov4_signal_owned_child(core->pid, core->pidfd, SIGTERM, core->group_retire);
         if (signal_outcome == POV4_SIGNAL_SENT) {
             core->identity_revalidated = 1; core->term_sent = 1; core->term_at_ms = now_ms;
         } else if (signal_outcome == POV4_SIGNAL_GONE) {
@@ -3252,7 +3701,7 @@ static int pov4_apply_deadlines(Pov4Slot* owner, int cancel_requested) {
         now_ns >= core->kill_deadline_ns && !core->kill_attempted) {
         core->kill_attempted = 1;
         enum Pov4SignalOutcome signal_outcome =
-            pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL);
+            pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL, core->group_retire);
         if (signal_outcome == POV4_SIGNAL_SENT) {
             core->identity_revalidated = 1; core->kill_sent = 1;
         } else if (signal_outcome == POV4_SIGNAL_GONE) {
@@ -3290,7 +3739,7 @@ static SplArray* pov4_drive(Pov4Slot* owner, int64_t wait_ns, int cancel_request
     uint64_t err_cap = err_room < POV4_MAX_POLL_BYTES ? err_room : POV4_MAX_POLL_BYTES;
     uint8_t out[POV4_MAX_POLL_BYTES + 1], err[POV4_MAX_POLL_BYTES + 1];
     RtOwnedProcessPollReceiptV2 poll;
-    (void)rt_process_owned_poll_v2(owner->core, wait_ms,
+    (void)owned_poll_v2_core(owner->core, wait_ms,
         (char*)out, out_cap ? out_cap + 1 : 0,
         (char*)err, err_cap ? err_cap + 1 : 0, &poll);
     (void)pov4_apply_deadlines(owner, cancel_requested);
@@ -3369,7 +3818,7 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
         uint64_t out_cap = out_room < POV4_MAX_POLL_BYTES ? out_room : POV4_MAX_POLL_BYTES;
         uint64_t err_cap = err_room < POV4_MAX_POLL_BYTES ? err_room : POV4_MAX_POLL_BYTES;
         uint8_t out[POV4_MAX_POLL_BYTES + 1], err[POV4_MAX_POLL_BYTES + 1];
-        (void)rt_process_owned_poll_v2(owner->core, 0, (char*)out,
+        (void)owned_poll_v2_core(owner->core, 0, (char*)out,
             out_cap ? out_cap + 1 : 0, (char*)err,
             err_cap ? err_cap + 1 : 0, &poll);
         if (!pov4_append(owner->stdout_bytes, &owner->stdout_count, owner->stdout_limit,
@@ -3395,7 +3844,7 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
         errno = EAGAIN; return NULL;
     }
     if (owner->atomic_input_bound) {
-        (void)rt_process_owned_input_receipt_v3(
+        (void)owned_input_receipt_v3_core(
             owner->core, &owner->atomic_input_receipt);
         const RtOwnedProcessInputReceiptV3* input = &owner->atomic_input_receipt;
         if (input->input_bytes_accepted != owner->atomic_input_len ||
@@ -3433,7 +3882,7 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
         return NULL;
     }
     RtOwnedProcessResultV2 result;
-    int collected = rt_process_owned_collect_v2(owner->core, &result);
+    int collected = owned_collect_v2_core(owner->core, &result);
     if (!collected && !(result.reaped && result.runtime_error != EAGAIN &&
                          result.runtime_error != EBUSY)) {
         pov4_tuple4_free(tuple);
@@ -3463,7 +3912,7 @@ static void pov4_abandon_unpublished(uint32_t index) {
         owner->words[POV4_CLEANUP_DEADLINE_NS] = core->cleanup_deadline_ns;
         core->kill_attempted = 1;
         enum Pov4SignalOutcome signal_outcome =
-            pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL);
+            pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL, core->group_retire);
         if (signal_outcome == POV4_SIGNAL_SENT)
             core->kill_sent = 1;
         else if (signal_outcome == POV4_SIGNAL_GONE)
@@ -3477,7 +3926,7 @@ static void pov4_abandon_unpublished(uint32_t index) {
         int64_t now = owned_now_ns();
         int64_t deadline = owner->words[POV4_CLEANUP_DEADLINE_NS];
         int64_t wait_ms = now >= 0 && deadline > now ? 1 : 0;
-        (void)rt_process_owned_poll_v2(owner->core, wait_ms, (char*)out, sizeof(out),
+        (void)owned_poll_v2_core(owner->core, wait_ms, (char*)out, sizeof(out),
             (char*)err, sizeof(err), &poll);
         if (poll.terminal && poll.stdout_bytes_delivered == 0 &&
             poll.stderr_bytes_delivered == 0) break;
@@ -3485,7 +3934,7 @@ static void pov4_abandon_unpublished(uint32_t index) {
         if (now < 0 || deadline < 0 || now >= deadline) break;
     }
     RtOwnedProcessResultV2 result;
-    int collected = rt_process_owned_collect_v2(owner->core, &result);
+    int collected = owned_collect_v2_core(owner->core, &result);
     if (!collected && !(result.reaped && result.runtime_error != EAGAIN &&
                          result.runtime_error != EBUSY)) {
         pthread_mutex_lock(&pov4_slots_lock);
@@ -3600,6 +4049,9 @@ SplArray* rt_process_observation_v4_capabilities_value(void) {
 #ifdef __linux__
     const int64_t values[8] = {POV4_VERSION_VALUE, 8, 1, POV4_CAPABILITIES,
         POV4_SLOTS, RT_OWNED_ABI_MAX_OUTPUT_BYTES, POV4_MAX_WAIT_NS, 0};
+#elif defined(RT_OWNED_DARWIN_V4)
+    const int64_t values[8] = {POV4_VERSION_VALUE, 8, 1, POV4_DARWIN_CAPABILITIES,
+        POV4_SLOTS, RT_OWNED_ABI_MAX_OUTPUT_BYTES, POV4_MAX_WAIT_NS, 0};
 #else
     const int64_t values[8] = {POV4_VERSION_VALUE, 8, 0, 0, 0, 0, 0, ENOTSUP};
 #endif
@@ -3671,11 +4123,22 @@ static SplArray* pov4_start_pinned_impl(
         memcpy(bound + 48, request.atomic_input_digest, 32);
         owned_sha256(bound, sizeof(bound), request.request_digest);
     }
+#ifdef RT_OWNED_DARWIN_V4
+    /* Darwin has no memory cap (RLIMIT_AS is not enforced there): only the
+     * monitor policy (no enforcement, zero limit) is admitted. */
+    if ((request.descendant_policy != POV4_DESCENDANT_LEADER &&
+         request.descendant_policy != POV4_DESCENDANT_PROCESS_GROUP) ||
+        request.enforcement_kind != POV4_ENFORCEMENT_NONE ||
+        request.memory_limit != 0) {
+        int memory_unavailable = request.enforcement_kind != POV4_ENFORCEMENT_NONE ||
+            request.memory_limit != 0;
+#else
     if (request.descendant_policy != POV4_DESCENDANT_LEADER ||
         (request.enforcement_kind != POV4_ENFORCEMENT_NONE &&
          request.enforcement_kind != POV4_ENFORCEMENT_RLIMIT_AS)) {
         int memory_unavailable = request.enforcement_kind != POV4_ENFORCEMENT_NONE &&
             request.enforcement_kind != POV4_ENFORCEMENT_RLIMIT_AS;
+#endif
         SplArray* rejected = pov4_rejected(ENOTSUP, POV4_FAIL_ADMISSION,
             memory_unavailable ? POV4_REASON_MEMORY : POV4_REASON_PROVIDER,
             started, 1, &request);
@@ -3876,6 +4339,13 @@ SplArray* rt_process_observation_v4_start_pinned_value(
 SplArray* rt_process_inspection_v1_start_pinned_value(
     int64_t executable_handle, int64_t cwd_handle, SplArray* binding,
     SplArray* atomic_input, SplArray* expected_input_digest) {
+#ifdef RT_OWNED_DARWIN_V4
+    /* Inspection V1 (atomic stdin) is not part of the approved Darwin scope. */
+    (void)executable_handle; (void)cwd_handle; (void)binding;
+    (void)atomic_input; (void)expected_input_digest;
+    return pov4_rejected(ENOTSUP, POV4_FAIL_ADMISSION, POV4_REASON_PROVIDER,
+                         owned_now_ns(), 0, NULL);
+#endif
     return pov4_start_pinned_impl(
         executable_handle, cwd_handle, binding, atomic_input,
         expected_input_digest, 1);
@@ -3885,6 +4355,10 @@ SplArray* rt_process_inspection_v1_start_pinned_value(
  * live. Its request digest includes the V4 binding and copied input digest. */
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
     int64_t values[75] = {1};
+#ifdef RT_OWNED_DARWIN_V4
+    (void)ticket; values[10] = ENOTSUP;
+    return owned_adapter_values(values, 75);
+#endif
     uint32_t index = 0;
     Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) { values[10] = errno ? errno : ESTALE; return owned_adapter_values(values, 75); }
@@ -3894,7 +4368,7 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
     }
     RtOwnedProcessInputReceiptV3 receipt = owner->atomic_input_receipt;
     if (!owner->frozen)
-        (void)rt_process_owned_input_receipt_v3(owner->core, &receipt);
+        (void)owned_input_receipt_v3_core(owner->core, &receipt);
     values[1] = (int64_t)owner->request_high;
     values[2] = (int64_t)owner->request_low;
     values[3] = (int64_t)owner->ticket_high;
@@ -3913,6 +4387,7 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
     return owned_adapter_values(values, 75);
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin: shared ENOTSUP stubs below. */
 static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
                                    int64_t timeout_ms, uint64_t max_output_bytes,
                                    char* out, uint64_t out_cap,
@@ -3936,6 +4411,7 @@ static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
     if (out_cap) out[0] = '\0';
     if (err_cap) err[0] = '\0';
 #ifndef __linux__
+    (void)max_output_bytes;
     receipt->runtime_error = ENOTSUP;
     if (observation) observation->runtime_error = ENOTSUP;
     return false;
@@ -4256,8 +4732,258 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
     return owned_run_bounded_value_impl(cmd_data, cmd_len, args, timeout_ms, max_output_bytes, 1);
 }
 #endif
+#endif /* !RT_OWNED_DARWIN_V4 */
 
-#else
+#if defined(RT_OWNED_DARWIN_V4) && !defined(RT_OWNED_EXTERNAL_PIN)
+/* Darwin executable pin for observation V4 (POV4_CAP_DARWIN_SNAPSHOT_EXEC).
+ * Darwin has no memfd, file seals or fexecve, so a pin is a private snapshot:
+ * a fresh mkdtemp directory (0700) holding a copy of the image (0500, one
+ * link, owned by the effective uid). The V4 owner launches it by pathname,
+ * re-checks dev/ino and digest, and proves the suspended child's main-image
+ * vnode. Weaker than the Linux sealed memfd: a same-UID process can still
+ * chmod and rewrite the snapshot, so same-UID processes are trusted. Every
+ * acquisition re-validates the snapshot identity and permissions. Rewriting a
+ * snapshot that already ran also invalidates its vnode's code-signing state,
+ * so the next exec is SIGKILLed: denial on tamper, not a seal. Lives here, not
+ * in runtime_process.c, so the seed runtime links the same C owner. */
+#define OWNED_DARWIN_PIN_SLOTS 16
+#define OWNED_DARWIN_PIN_MAX_BYTES ((off_t)512 * 1024 * 1024)
+typedef struct OwnedDarwinPin {
+    uint64_t handle;
+    uint64_t refs;    /* launched children not yet collected */
+    int retired;      /* closed by its owner; files kept for the children */
+    int fd;
+    dev_t device;
+    ino_t inode;
+    char directory[PATH_MAX];
+    char path[PATH_MAX];
+} OwnedDarwinPin;
+static OwnedDarwinPin owned_darwin_pins[OWNED_DARWIN_PIN_SLOTS];
+static pthread_mutex_t owned_darwin_pins_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int owned_darwin_pin_is_macho(int fd) {
+    uint32_t magic = 0;
+    if (pread(fd, &magic, sizeof(magic), 0) != (ssize_t)sizeof(magic)) return 0;
+    /* Thin 64-bit Mach-O, or a big-endian fat header (32/64-bit offsets). */
+    return magic == 0xfeedfacfU || magic == 0xbebafecaU || magic == 0xbfbafecaU;
+}
+
+static int owned_darwin_pin_valid(const OwnedDarwinPin* pin, int fd) {
+    struct stat held, named, directory;
+    return fstat(fd, &held) == 0 && S_ISREG(held.st_mode) &&
+        held.st_dev == pin->device && held.st_ino == pin->inode &&
+        held.st_uid == geteuid() && (held.st_mode & 07777) == 0500 &&
+        held.st_nlink == 1 && held.st_size > 0 &&
+        lstat(pin->path, &named) == 0 && S_ISREG(named.st_mode) &&
+        named.st_dev == pin->device && named.st_ino == pin->inode &&
+        lstat(pin->directory, &directory) == 0 && S_ISDIR(directory.st_mode) &&
+        directory.st_uid == geteuid() && (directory.st_mode & 07777) == 0700;
+}
+
+static void owned_darwin_pin_discard(OwnedDarwinPin* pin) {
+    if (pin->fd >= 0) close(pin->fd);
+    if (pin->path[0]) (void)unlink(pin->path);
+    if (pin->directory[0]) (void)rmdir(pin->directory);
+    memset(pin, 0, sizeof(*pin));
+    pin->fd = -1;
+}
+
+/* Copies the image into a fresh snapshot. A source that changes size while
+ * copying is refused: the snapshot is exactly the bytes then digested. */
+static int64_t owned_darwin_pin_create(const char* canonical_path) {
+    if (!canonical_path || canonical_path[0] != '/') return -1;
+    OwnedDarwinPin pin;
+    memset(&pin, 0, sizeof(pin)); pin.fd = -1;
+    int source = open(canonical_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (source < 0) return -1;
+    struct stat st;
+    if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        st.st_size > OWNED_DARWIN_PIN_MAX_BYTES ||
+        (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 ||
+        !owned_darwin_pin_is_macho(source)) {
+        close(source); return -1;
+    }
+    const char* base = getenv("TMPDIR");
+    if (!base || !*base) base = "/tmp";
+    char physical[PATH_MAX];
+    if (!realpath(base, physical) ||
+        snprintf(pin.directory, sizeof(pin.directory), "%s/simple-pin-XXXXXXXX",
+                 physical) >= (int)sizeof(pin.directory) ||
+        !mkdtemp(pin.directory)) {
+        pin.directory[0] = '\0'; close(source); return -1;
+    }
+    if (snprintf(pin.path, sizeof(pin.path), "%s/image", pin.directory) >= (int)sizeof(pin.path)) {
+        pin.path[0] = '\0'; close(source); owned_darwin_pin_discard(&pin); return -1;
+    }
+    int writer = open(pin.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int ok = writer >= 0;
+    uint8_t buffer[16384]; off_t copied = 0;
+    while (ok && copied < st.st_size) {
+        size_t want = (size_t)(st.st_size - copied);
+        if (want > sizeof(buffer)) want = sizeof(buffer);
+        ssize_t count = pread(source, buffer, want, copied);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { ok = 0; break; }
+        ssize_t done = 0;
+        while (ok && done < count) {
+            ssize_t written = write(writer, buffer + done, (size_t)(count - done));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) ok = 0; else done += written;
+        }
+        copied += count;
+    }
+    uint8_t probe;
+    if (ok && pread(source, &probe, 1, copied) != 0) ok = 0;
+    close(source);
+    if (ok && fchmod(writer, 0500) != 0) ok = 0;
+    if (writer >= 0 && close(writer) != 0) ok = 0;
+    if (ok) pin.fd = open(pin.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat snapshot;
+    if (!ok || pin.fd < 0 || fstat(pin.fd, &snapshot) != 0 || snapshot.st_size != copied) {
+        owned_darwin_pin_discard(&pin); return -1;
+    }
+    pin.device = snapshot.st_dev; pin.inode = snapshot.st_ino;
+    if (!owned_darwin_pin_valid(&pin, pin.fd) || !owned_darwin_pin_is_macho(pin.fd)) {
+        owned_darwin_pin_discard(&pin); return -1;
+    }
+    if (pthread_mutex_lock(&owned_darwin_pins_lock) != 0) { owned_darwin_pin_discard(&pin); return -1; }
+    int free_slot = -1;
+    for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS; i++)
+        if (owned_darwin_pins[i].handle == 0) { free_slot = i; break; }
+    uint64_t candidate = 0;
+    for (int attempt = 0; free_slot >= 0 && attempt < 16 && candidate == 0; attempt++) {
+        arc4random_buf(&candidate, sizeof(candidate));
+        candidate &= UINT64_C(0x0fffffffffffffff);
+        for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS && candidate; i++)
+            if (owned_darwin_pins[i].handle == candidate) candidate = 0;
+    }
+    if (free_slot < 0 || candidate == 0) {
+        pthread_mutex_unlock(&owned_darwin_pins_lock);
+        owned_darwin_pin_discard(&pin); errno = EAGAIN; return -1;
+    }
+    pin.handle = candidate;
+    owned_darwin_pins[free_slot] = pin;
+    pthread_mutex_unlock(&owned_darwin_pins_lock);
+    return (int64_t)candidate;
+}
+
+int64_t rt_process_pin_executable_owned(const char* canonical_path) {
+    return owned_darwin_pin_create(canonical_path);
+}
+
+int64_t rt_process_pin_executable_owned_value(const uint8_t* path, uint64_t path_len) {
+    if (!path || path_len == 0 || path_len >= PATH_MAX || path[0] != '/' ||
+        memchr(path, '\0', (size_t)path_len)) return -1;
+    char copied[PATH_MAX];
+    memcpy(copied, path, (size_t)path_len); copied[path_len] = '\0';
+    return owned_darwin_pin_create(copied);
+}
+
+int64_t rt_process_acquire_pinned_executable(int64_t handle) {
+    if (handle <= 0 || pthread_mutex_lock(&owned_darwin_pins_lock) != 0) return -1;
+    int duplicate = -1;
+    OwnedDarwinPin copy;
+    memset(&copy, 0, sizeof(copy));
+    for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS; i++) {
+        if (owned_darwin_pins[i].handle == (uint64_t)handle && !owned_darwin_pins[i].retired) {
+            duplicate = fcntl(owned_darwin_pins[i].fd, F_DUPFD_CLOEXEC, 3);
+            copy = owned_darwin_pins[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&owned_darwin_pins_lock);
+    if (duplicate < 0) return -1;
+    if (!owned_darwin_pin_valid(&copy, duplicate)) {
+        close(duplicate); errno = ESTALE; return -1;
+    }
+    return duplicate;
+}
+
+SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
+    int fd = (int)rt_process_acquire_pinned_executable(handle);
+    if (fd < 0) return NULL;
+    uint8_t digest[32];
+    int hashed = pov4_darwin_hash_fd(fd, digest);
+    close(fd);
+    if (!hashed) return NULL;
+    SplArray* result = rt_array_new(32);
+    if (!result) return NULL;
+    for (int i = 0; i < 32; i++)
+        if (!rt_array_push(result, rt_value_int(digest[i]))) { rt_array_free(result); return NULL; }
+    return result;
+}
+
+bool rt_process_close_pinned_executable_owned(int64_t handle) {
+    if (handle <= 0 || pthread_mutex_lock(&owned_darwin_pins_lock) != 0) return false;
+    OwnedDarwinPin pin;
+    memset(&pin, 0, sizeof(pin)); pin.fd = -1;
+    for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS; i++) {
+        if (owned_darwin_pins[i].handle == (uint64_t)handle && !owned_darwin_pins[i].retired) {
+            if (owned_darwin_pins[i].refs > 0) {
+                owned_darwin_pins[i].retired = 1;
+                pthread_mutex_unlock(&owned_darwin_pins_lock);
+                return true;
+            }
+            pin = owned_darwin_pins[i];
+            memset(&owned_darwin_pins[i], 0, sizeof(owned_darwin_pins[i]));
+            break;
+        }
+    }
+    pthread_mutex_unlock(&owned_darwin_pins_lock);
+    if (pin.handle == 0) return false;
+    int ok = close(pin.fd) == 0;
+    ok = unlink(pin.path) == 0 && ok;
+    ok = rmdir(pin.directory) == 0 && ok;
+    return ok;
+}
+
+int rt_process_close_pinned_executable_owned_value(int64_t handle) {
+    return rt_process_close_pinned_executable_owned(handle) ? 1 : 0;
+}
+
+static uint64_t owned_darwin_pin_retain(int fd) {
+    struct stat held;
+    if (fd < 0 || fstat(fd, &held) != 0) return 0;
+    uint64_t ref = 0;
+    if (pthread_mutex_lock(&owned_darwin_pins_lock) != 0) return 0;
+    for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS; i++) {
+        OwnedDarwinPin* pin = &owned_darwin_pins[i];
+        if (pin->handle && !pin->retired && pin->device == held.st_dev &&
+            pin->inode == held.st_ino) {
+            pin->refs++; ref = pin->handle; break;
+        }
+    }
+    pthread_mutex_unlock(&owned_darwin_pins_lock);
+    return ref;
+}
+
+static void owned_darwin_pin_release(uint64_t ref) {
+    if (ref == 0 || pthread_mutex_lock(&owned_darwin_pins_lock) != 0) return;
+    OwnedDarwinPin pin;
+    memset(&pin, 0, sizeof(pin)); pin.fd = -1;
+    for (int i = 0; i < OWNED_DARWIN_PIN_SLOTS; i++) {
+        if (owned_darwin_pins[i].handle == ref && owned_darwin_pins[i].refs > 0) {
+            if (--owned_darwin_pins[i].refs == 0 && owned_darwin_pins[i].retired) {
+                pin = owned_darwin_pins[i];
+                memset(&owned_darwin_pins[i], 0, sizeof(owned_darwin_pins[i]));
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&owned_darwin_pins_lock);
+    if (pin.handle) owned_darwin_pin_discard(&pin);
+}
+#elif defined(RT_OWNED_DARWIN_V4)
+/* Harnesses with RT_OWNED_EXTERNAL_PIN own their snapshot lifetime. */
+static uint64_t owned_darwin_pin_retain(int fd) { (void)fd; return 0; }
+static void owned_darwin_pin_release(uint64_t ref) { (void)ref; }
+#endif
+
+#endif /* POSIX owner */
+
+/* Non-POSIX hosts, plus Darwin for every family except observation V4. */
+#if !(!defined(_WIN32) && (defined(__unix__) || defined(__APPLE__))) || \
+    defined(RT_OWNED_DARWIN_V4)
 
 /* --- Win32 synchronous bounded and asynchronous V2 owned families ------
  * Everything this branch does NOT implement (the V3 atomic-input family,
@@ -5270,6 +5996,7 @@ int rt_process_owned_v3_release_value(int64_t handle) {
     (void)handle; return 0;
 }
 
+#ifndef RT_OWNED_DARWIN_V4 /* Darwin implements V4 in the POSIX owner. */
 static SplArray* pov4_unavailable_tuple(void) {
     SplArray* out = rt_array_new(0), *err = rt_array_new(0), *binding = rt_array_new(0);
     SplArray* words = rt_array_new(64), *tuple = rt_array_new(4);
@@ -5353,6 +6080,7 @@ SplArray* rt_process_observation_v4_collect_value(SplArray* ticket, int64_t wait
 SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray* digest) {
     (void)ticket; (void)digest; return pov4_unavailable_tuple();
 }
+#endif
 #endif
 
 #endif

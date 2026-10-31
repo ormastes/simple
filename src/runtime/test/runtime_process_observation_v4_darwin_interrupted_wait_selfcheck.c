@@ -1,5 +1,5 @@
 /* Run from the repository root:
- * cc -std=c11 -Wall -Wextra -Werror -pthread src/runtime/test/runtime_process_observation_v4_darwin_interrupted_wait_selfcheck.c -o /tmp/pov4-darwin-interrupted-wait
+ * cc -std=c11 -Wall -Wextra -Werror -pthread src/runtime/test/runtime_process_observation_v4_darwin_interrupted_wait_selfcheck.c src/runtime/runtime_process_tree.c -o /tmp/pov4-darwin-interrupted-wait
  * /tmp/pov4-darwin-interrupted-wait
  * Build and run as the Darwin cwd selfcheck, but interrupt its first wait.
  * This reproduces the EINTR observed when stepping the selfcheck in LLDB. */
