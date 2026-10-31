@@ -872,7 +872,7 @@ pub fn handle_array_methods(
         }
         "group_by" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let mut groups: HashMap<String, Vec<Value>> = HashMap::new();
+            let mut groups: HashMap<String, (Value, Vec<Value>)> = HashMap::new();
             if let Value::Lambda {
                 params,
                 body,
@@ -885,11 +885,17 @@ pub fn handle_array_methods(
                         local_env.insert(param.clone(), item.clone());
                     }
                     let key = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
-                    let key_str = key.to_key_string();
-                    groups.entry(key_str).or_default().push(item.clone());
+                    groups
+                        .entry(key.to_key_string())
+                        .or_insert_with(|| (key, Vec::new()))
+                        .1
+                        .push(item.clone());
                 }
             }
-            let result: HashMap<String, Value> = groups.into_iter().map(|(k, v)| (k, Value::array(v))).collect();
+            let result: HashMap<String, Value> = groups
+                .into_iter()
+                .map(|(k, (key, v))| (k, Value::wrap_dict_entry(&key, Value::array(v))))
+                .collect();
             Value::Dict(Arc::new(result))
         }
         "compact" => {
