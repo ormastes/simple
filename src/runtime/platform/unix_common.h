@@ -138,9 +138,16 @@ const char** rt_dir_list_cpath(const char* path, int64_t* out_count) {
     }
     
     if (count == 0) {
+        const char** empty = malloc(sizeof(char*));
+        if (!empty) {
+            closedir(dir);
+            *out_count = 0;
+            return NULL;
+        }
+        empty[0] = NULL;
         closedir(dir);
         *out_count = 0;
-        return NULL;
+        return empty;
     }
     
     /* Allocate array (null-terminated) */
