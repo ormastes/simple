@@ -9,7 +9,7 @@
 # Note: These require @concurrency_mode(lock_base) or @unsafe
 
 # Extern SFFI declarations for runtime primitives
-extern fn rt_atomic_new(initial: i64) -> Any
+extern fn rt_atomic_new(initial: i64) -> Any?
 extern fn rt_atomic_load(atomic: Any) -> i64
 extern fn rt_atomic_store(atomic: Any, value: i64) -> ()
 extern fn rt_atomic_swap(atomic: Any, value: i64) -> i64
@@ -24,16 +24,16 @@ extern fn rt_atomic_fetch_sub(atomic: Any, delta: i64) -> i64
 extern fn rt_atomic_fetch_and(atomic: Any, mask: i64) -> i64
 extern fn rt_atomic_fetch_or(atomic: Any, mask: i64) -> i64
 
-extern fn rt_mutex_new(value: Any) -> Any
-extern fn rt_mutex_lock(mutex: Any) -> Any
-extern fn rt_mutex_try_lock(mutex: Any) -> Any
+extern fn rt_mutex_new(value: Any) -> Any?
+extern fn rt_mutex_lock(mutex: Any) -> Any?
+extern fn rt_mutex_try_lock(mutex: Any) -> Any?
 extern fn rt_mutex_unlock(mutex: Any, new_value: Any) -> i64
 
-extern fn rt_rwlock_new(value: Any) -> Any
-extern fn rt_rwlock_read(lock: Any) -> Any
-extern fn rt_rwlock_try_read(lock: Any) -> Any
-extern fn rt_rwlock_write(lock: Any) -> Any
-extern fn rt_rwlock_try_write(lock: Any) -> Any
+extern fn rt_rwlock_new(value: Any) -> Any?
+extern fn rt_rwlock_read(lock: Any) -> Any?
+extern fn rt_rwlock_try_read(lock: Any) -> Any?
+extern fn rt_rwlock_write(lock: Any) -> Any?
+extern fn rt_rwlock_try_write(lock: Any) -> Any?
 extern fn rt_rwlock_set(lock: Any, new_value: Any) -> i64
 
 # Atomic < T > - Lock - free atomic operations (#1101)
@@ -53,7 +53,10 @@ class Atomic < T >:
     """
 
     fn __init__(initial_value: T):
-        self._handle = rt_atomic_new(initial_value)
+        val handle = rt_atomic_new(initial_value)
+        if handle == nil:
+            panic("E-SFFI-ATOMIC-001: rt_atomic_new returned no handle")
+        self._handle = handle.unwrap()
         self._value = initial_value
 
     fn load() -> i64:
@@ -136,7 +139,10 @@ class Mutex < T >:
     """
 
     fn __init__(initial_value: T):
-        self._handle = rt_mutex_new(initial_value)
+        val handle = rt_mutex_new(initial_value)
+        if handle == nil:
+            panic("E-SFFI-MUTEX-001: rt_mutex_new returned no handle")
+        self._handle = handle.unwrap()
         self._value = initial_value
 
     fn lock() -> MutexGuard < T >:
@@ -147,9 +153,11 @@ class Mutex < T >:
                 and automatically releases the lock when dropped.
         """
         val value = rt_mutex_lock(self._handle)
-        return MutexGuard(self, value)
+        if value == nil:
+            panic("E-SFFI-MUTEX-002: rt_mutex_lock returned no value (invalid handle)")
+        return MutexGuard(self, value.unwrap())
 
-    fn try_lock() -> Option < MutexGuard < T > >:
+    fn try_lock() -> MutexGuard<T>?:
         """
         Attempt to acquire the lock without blocking.
 
@@ -158,7 +166,7 @@ class Mutex < T >:
         val value = rt_mutex_try_lock(self._handle)
         if value == nil:
             return nil
-        return Some(MutexGuard(self, value))
+        return Some(MutexGuard(self, value.unwrap()))
 
     fn unlock(new_value: T):
         """Internal: Release the lock and update the value."""
@@ -213,7 +221,10 @@ class RwLock < T >:
     """
 
     fn __init__(initial_value: T):
-        self._handle = rt_rwlock_new(initial_value)
+        val handle = rt_rwlock_new(initial_value)
+        if handle == nil:
+            panic("E-SFFI-RWLOCK-001: rt_rwlock_new returned no handle")
+        self._handle = handle.unwrap()
         self._value = initial_value
 
     fn read() -> RwLockReadGuard < T >:
@@ -223,9 +234,11 @@ class RwLock < T >:
         Multiple readers can hold locks simultaneously.
         """
         val value = rt_rwlock_read(self._handle)
-        return RwLockReadGuard(self, value)
+        if value == nil:
+            panic("E-SFFI-RWLOCK-002: rt_rwlock_read returned no value (invalid handle)")
+        return RwLockReadGuard(self, value.unwrap())
 
-    fn try_read() -> Option < RwLockReadGuard < T > >:
+    fn try_read() -> RwLockReadGuard<T>?:
         """
         Attempt to acquire a read lock without blocking.
 
@@ -234,7 +247,7 @@ class RwLock < T >:
         val value = rt_rwlock_try_read(self._handle)
         if value == nil:
             return nil
-        return Some(RwLockReadGuard(self, value))
+        return Some(RwLockReadGuard(self, value.unwrap()))
 
     fn write() -> RwLockWriteGuard < T >:
         """
@@ -243,9 +256,11 @@ class RwLock < T >:
         Write locks are exclusive - only one writer, no readers.
         """
         val value = rt_rwlock_write(self._handle)
-        return RwLockWriteGuard(self, value)
+        if value == nil:
+            panic("E-SFFI-RWLOCK-003: rt_rwlock_write returned no value (invalid handle)")
+        return RwLockWriteGuard(self, value.unwrap())
 
-    fn try_write() -> Option < RwLockWriteGuard < T > >:
+    fn try_write() -> RwLockWriteGuard<T>?:
         """
         Attempt to acquire a write lock without blocking.
 
@@ -254,7 +269,7 @@ class RwLock < T >:
         val value = rt_rwlock_try_write(self._handle)
         if value == nil:
             return nil
-        return Some(RwLockWriteGuard(self, value))
+        return Some(RwLockWriteGuard(self, value.unwrap()))
 
     fn release_read():
         """Internal: Release a read lock (no - op, handled by Rust)."""

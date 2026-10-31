@@ -59,7 +59,6 @@ pub mod mir;
 pub mod pattern_case_naming;
 pub mod mock;
 pub mod module_resolver;
-pub mod monomorphize;
 pub mod native_build_sffi;
 pub mod optimizations;
 pub mod parallel;
@@ -77,7 +76,6 @@ pub mod semantics;
 pub mod security;
 pub mod short_grammar;
 pub mod smf_builder;
-pub mod smf_writer;
 pub mod spec_coverage;
 pub mod stdlib_variant;
 pub mod symbol_analyzer;
@@ -153,10 +151,6 @@ pub use lint::{LintChecker, LintConfig, LintDiagnostic, LintLevel, LintName};
 pub use mcp::{ExpandWhat, McpGenerator, McpMetadata, McpMode, McpOutput, McpTools};
 pub use mir::ContractMode;
 pub use module_resolver::{DirectoryManifest, ModuleResolver, ResolvedModule};
-pub use monomorphize::{
-    monomorphize_module, CallSiteAnalyzer, ConcreteType, MonomorphizationTable, Monomorphizer, PointerKind,
-    SpecializationKey, TypeBindings,
-};
 pub use parallel::{
     load_module_parallel, parse_all_parallel, parse_files_parallel, ParallelConfig, ParallelParseCache, ParsedFile,
 };

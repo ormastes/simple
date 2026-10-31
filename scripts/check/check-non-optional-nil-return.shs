@@ -497,6 +497,18 @@ scan_alias() {
 # `extern<TAB>type`. A row with no written reason is an error (rc 1, rows on
 # stderr): an opt-out is a statement that a decl may stay non-optional, and a
 # statement needs its justification.
+# drop_opted_out_wrappers <optout_tsv> <wrappers> <out> -- class (b) inherits a
+# class (a) opt-out: a wrapper forwarding extern X with return type T is the
+# same raw-ABI surface as an `X T` opt-out row (whose written reason already
+# covers every declaration of that pair), so it is not a new offender. The
+# match is on BOTH extern and type: a typed wrapper (`-> text`) over an
+# `i64`-opted-out extern is still flagged.
+drop_opted_out_wrappers() {
+    awk -F: 'NR==FNR { split($0,f,"\t"); oo[f[1] "\t" f[2]]=1; next }
+             { body=$NF; t=$4; gsub(/[ \t]/,"",t); c=""
+               if (match(body,/rt_[a-z0-9_]+/)) c=substr(body,RSTART,RLENGTH)
+               if (!((c "\t" t) in oo)) print }' "$1" "$2" > "$3" 2>/dev/null
+}
 load_optout() {
     : > "$2"
     [ -f "$1" ] || return 0
@@ -899,6 +911,12 @@ SPEOF
     st_has "$_sd/off2.txt" ':w_colon_arg:' "wrapper: a body containing a colon was lost to the colon-separated row format"
     st_not "$_sd/off2.txt" ':w_two_statements:' "wrapper: a two-statement unsafe block was treated as a thin wrapper"
     st_not "$_sd/off2.txt" ':w_unsafe_optional:' "wrapper: an optional return was flagged"
+    # class (b) inherits a class (a) opt-out only for the same (extern, type)
+    printf 'x.spl:1:w_raw:i64:rt_via_free(k)\nx.spl:2:w_typed:text:rt_via_free(k)\n' > "$_sd/wrap_oo.txt"
+    printf 'rt_via_free\ti64\n' > "$_sd/oo_b.tsv"
+    drop_opted_out_wrappers "$_sd/oo_b.tsv" "$_sd/wrap_oo.txt" "$_sd/off_oo.txt"
+    st_not "$_sd/off_oo.txt" ':w_raw:' "class (b): a raw wrapper of an opted-out (extern,type) was flagged"
+    st_has "$_sd/off_oo.txt" ':w_typed:' "class (b): a typed wrapper of an extern opted out only as i64 was not flagged"
 
     # ---- class (a) fixtures --------------------------------------------------
     mkdir -p "$_sd/ext"
@@ -1018,7 +1036,10 @@ if [ "$WRAP_N" -eq 0 ]; then
 fi
 
 match_nil_callee "$TMP/nil.txt" "$TMP/wrap.txt" "$TMP/off_raw.txt"
-drop_locally_defined "$TMP/off_raw.txt" "$TMP/off_all.txt"
+drop_locally_defined "$TMP/off_raw.txt" "$TMP/off_local.txt"
+# Errors in the opt-out file are reported (and fail) by the class (a) leg below.
+load_optout "$SCRIPT_DIR/non_optional_nil_return_classa_optout.txt" "$TMP/optout_b.tsv" 2>/dev/null || :
+drop_opted_out_wrappers "$TMP/optout_b.tsv" "$TMP/off_local.txt" "$TMP/off_all.txt"
 
 # Baseline ratchet, same convention/mechanism as the class (c) leg below: the
 # one-hop transitive nil-capability closure (added 2026-08-21, see
