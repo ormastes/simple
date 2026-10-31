@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-09-06
 - **Severity:** blocker (release critical path — `native-build` could not build a three-line hello world)
-- **Status:** call site in `driver_aot_native_output.spl` FIXED; the stdlib mock itself and 11 other product-code importers remain OPEN
+- **Status:** RESOLVED 2026-10-31 — every mock in both `std.*.file_system` families removed; driver importers migrated to `std.io_runtime` (see below)
 - **Host:** aarch64-unknown-linux-gnu, Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`
 
 ## Symptom
@@ -153,7 +153,59 @@ the remaining identical-signature mocks (`file_write_text`, `file_read_text`,
   checks filesystem state for sync and async `dir_walk_dirs` / `dir_copy`:
   0/2 before, 2/2 after.
 
-## Still open
+## Resolved 2026-10-31 (all remaining mocks, both families)
+
+Follow-up to the section above, on the same branch. Every function in
+`src/lib/{nogc_sync_mut,nogc_async_mut}/file_system/` is now a re-export of a
+real owner or a real wrapper over a runtime primitive. `file_exists_mock` is
+gone.
+
+| Name | Was | Now |
+|---|---|---|
+| `file_read_text` | `text?`, "mock file content: <path>" | re-export `io.file_ops.file_read_text` (`text`, "" when unreadable) |
+| `file_read_lines` | wrapper over the mock read | re-export `io.file_ops.file_read_lines` |
+| `file_write_text` | `true`, nothing written | re-export `sffi.io.file_write_text` |
+| `file_move` | copy+delete over mocks | re-export `sffi.io.file_move` (`rt_file_move`) |
+| `file_create` | `true`, nothing created | `file_create_exclusive(path, "")` (O_EXCL) |
+| `file_write_lines` / `file_append_lines` | over the mock write | over the real write/append |
+| `dir_delete` | `true`, nothing deleted | re-export `sffi.fs.dir_delete`, which now calls `rt_dir_remove(path, false)`: the `rt_dir_delete` it declared exists in neither runtime |
+| `dir_delete_all` | `true` | `dir_remove_all` |
+| `file_modified_time` | `Some(1700000000)` | re-export `io.file_ops.file_modified_time` (`i64`, 0 = unavailable); `watch_*` adapted |
+| `file_created_time` / `file_accessed_time` | `Some(1700000000)` | `nil`: no runtime primitive, so fail closed |
+| `file_is_file` | "has an extension" | `file_exists and not dir_exists` (stat) |
+| `file_is_symlink` | `false` | exists and lstat sees neither a regular file nor a directory |
+| `file_is_readable/writable/executable` | exists / extension | owner bits from `rt_file_mode` |
+| `file_info` | size 1024, mtime 1700000000, mode 755 | real size, mtime and mode |
+| `file_get_permissions` | decimal 755 | `rt_file_mode` |
+| `file_set_mode/_permissions`, `file_make_*` | `true`, nothing changed; decimal 755/644/444 | chmod via `rt_package_chmod`; octal 0o755/0o644/0o444 |
+| `glob_match` | own copy taking `(pattern, path)` | re-export `std.glob.glob_match(path, pattern)`. Same parameter types in the opposite order, so name binding swapped the arguments silently |
+| `glob_find(pattern, root)` | collided with `fs.glob_find(pattern)` | renamed `glob_find_under` (it had no callers) |
+| `symlink_create` / `symlink_read` | `true` / "/mock/target" | `false` / `nil`: no symlink(2)/readlink(2) primitive, so fail closed |
+| `symlink_resolve` | the path itself | `sffi.fs.file_canonicalize` (realpath) |
+| `random_suffix` | "abc123" | `{pid}_{unix micros}` |
+
+Callers adapted:
+- `src/app/itf/*`: `file_read_text` changed to `io_runtime.file_read_nullable`, so the `== nil` checks keep their meaning.
+- All "Still open" item-2 driver importers, plus `driver_vhdl_artifacts` and `driver_compile_vhdl_source_map`, migrated off `std.file_system`:
+  - writes go to `io_runtime.file_write`, which creates a missing parent directory, so a real write cannot start failing where the mock said `true`;
+  - reads go to `file_read_nullable`;
+  - `shb_writer`'s tmp-to-final step uses `file_rename`.
+- `driver_api_interpret`'s redundant `unsafe` wrappers are dropped. That makes
+  `interpreter_cache_io_facade_contract_spec` pass (it failed 0/1 before).
+
+Test: `test/01_unit/lib/io/file_system_dir_walk_dirs_copy_real_spec.spl` now
+has 6 examples: 2/6 against the parent commit e32f8326dbb (the 4 new examples fail), 6/6 after. It covers `dir_walk_dirs`, `dir_copy`, `dir_walk_files` with an
+extensionless file, real `file_write_text`/`file_read_text`/`file_modified_time`,
+`file_create`/`file_move`/`dir_delete`/`file_set_mode` on disk, and the
+`glob_match` argument order. No `compiler_cross_module_private_symbol_collision`
+warning names a file_system function any more.
+
+Residual risk:
+- The `path_ops` wrappers (`path_join`, `path_basename`, ...) are real, but their names are reused by about 40 helpers across the tree.
+- `dir_delete_all` and `dir_is_empty` share a name and signature with `std.nogc_*.fs`, and do the same thing.
+- The seed's name-only binding is unchanged (`interpreter_bare_fn_name_collision_file_read_text_at_2026-10-30.md`).
+
+## Previously open (now addressed above)
 
 1. **The mock itself.** `src/lib/nogc_async_mut/file_system/file_ops.spl` still
    exports `file_write_text`, `file_write_bytes`, `file_write_lines`,

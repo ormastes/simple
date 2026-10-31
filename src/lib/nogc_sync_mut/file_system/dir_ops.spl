@@ -2,12 +2,13 @@
 #
 # Directory operations: create, list, delete, walk, copy, move, size.
 # Includes recursive operations for tree walking and directory copying.
-# Uses Option/nil pattern for error handling.
+# Every function is real: either a re-export of the host owner or a wrapper
+# over one (see file_ops.spl for why no mocks may live here).
 
 use std.path.{join2}
 use std.nogc_sync_mut.file_system.types.{DirEntry}
 use std.nogc_sync_mut.file_system.file_ops.{file_copy}
-use std.nogc_sync_mut.file_system.metadata.{file_is_directory, file_is_file, file_size}
+use std.nogc_sync_mut.file_system.metadata.{file_is_file, file_size}
 
 # `dir_create` and `dir_list` intentionally do NOT live here: this module
 # re-exports the real io_runtime implementations (`dir_create(path, recursive)`,
@@ -20,7 +21,7 @@ use std.nogc_sync_mut.file_system.metadata.{file_is_directory, file_is_file, fil
 # callers and broke `dir_copy`/`dir_walk_dirs` here.
 # See doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
 export use std.nogc_sync_mut.io_runtime.{dir_create, dir_list}
-use std.nogc_sync_mut.io_runtime.{dir_list_optional}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional, dir_remove_all}
 
 fn dir_list_detailed(path: text) -> [DirEntry]?:
     """List directory with detailed entry information.
@@ -52,34 +53,18 @@ fn dir_list_detailed(path: text) -> [DirEntry]?:
         entries.push(entry)
     Some(entries)
 
-fn dir_delete(path: text) -> bool:
-    """Delete an empty directory.
-
-    Args:
-        path: Directory path
-
-    Returns:
-        true on success, false on error
-    """
-    if path == "" or not dir_exists(path):
-        return false
-    true
+# `dir_delete` (non-recursive; fails on a non-empty directory) is the real
+# sffi owner. The mock that used to sit here returned true without deleting.
+export use std.nogc_sync_mut.sffi.fs.{dir_delete}
 
 fn dir_delete_all(path: text) -> bool:
     """Delete directory and all contents recursively.
-
-    Args:
-        path: Directory path
-
-    Returns:
-        true on success, false on error
 
     Warning: Recursive deletion. Use with caution.
     """
     if path == "" or not dir_exists(path):
         return false
-    # Mock: simulate recursive deletion
-    true
+    dir_remove_all(path)
 
 # `dir_exists` intentionally does NOT live here: this module re-exports the
 # real host implementation. The mock that used to sit here answered true for

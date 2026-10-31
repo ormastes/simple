@@ -1,14 +1,24 @@
 # Regression (root-cause item 4, 2026-10-31): std.{nogc_sync_mut,nogc_async_mut}
-# .file_system still carried mock `dir_create`, `dir_list`, `file_size` and
-# `file_write_bytes` whose SIGNATURES differ from the real io_runtime owners.
-# The seed's flat function registry binds by NAME ALONE, so the mocks
-# hijacked the real functions (compiler_cross_module_private_symbol_collision
-# warnings) and `dir_walk_dirs` / `dir_copy` never saw the real tree.
-# These cases check FILESYSTEM STATE, not return values.
+# .file_system was full of mocks (`dir_create`, `dir_list`, `file_size`,
+# `file_write_bytes`, `file_write_text`, `file_read_text`, `file_create`,
+# `file_move`, `dir_delete`, `file_modified_time`, `file_is_file`, permission
+# setters, ...). The seed's flat function registry binds by NAME ALONE, so a
+# mock and its real owner took over each other's callers
+# (compiler_cross_module_private_symbol_collision for differing signatures,
+# silently for identical ones), and `dir_walk_dirs` / `dir_copy` never saw the
+# real tree. These cases check FILESYSTEM STATE, not return values.
 use std.spec
 use std.nogc_sync_mut.file_system.dir_ops.{dir_walk_dirs as sync_fs_dir_walk_dirs, dir_copy as sync_fs_dir_copy}
 use std.nogc_async_mut.file_system.dir_ops.{dir_walk_dirs as async_fs_dir_walk_dirs, dir_copy as async_fs_dir_copy}
-use std.nogc_sync_mut.io_runtime.{dir_exists, file_read, file_write, dir_create_all, dir_remove_all, getpid}
+use std.nogc_sync_mut.file_system.dir_ops.{dir_walk_files as sync_fs_dir_walk_files, dir_delete as sync_fs_dir_delete}
+use std.nogc_async_mut.file_system.dir_ops.{dir_walk_files as async_fs_dir_walk_files}
+use std.nogc_sync_mut.file_system.file_ops.{file_write_text as sync_fs_file_write_text, file_read_text as sync_fs_file_read_text, file_create as sync_fs_file_create, file_move as sync_fs_file_move}
+use std.nogc_async_mut.file_system.file_ops.{file_write_text as async_fs_file_write_text}
+use std.nogc_sync_mut.file_system.metadata.{file_is_file as sync_fs_file_is_file, file_modified_time as sync_fs_file_modified_time}
+use std.nogc_sync_mut.file_system.permissions.{file_set_mode as sync_fs_file_set_mode}
+use std.nogc_sync_mut.file_system.utilities.{glob_match as sync_fs_glob_match}
+use std.nogc_sync_mut.io_runtime.{dir_exists, file_exists, file_read, file_write, dir_create_all, dir_remove_all, getpid}
+use std.nogc_sync_mut.sffi.fs.{file_mode}
 
 fn fs_walk_copy_root(tag: text) -> text:
     "/tmp/simple_fs_walk_copy_spec_{getpid()}_{tag}"
@@ -48,3 +58,50 @@ describe "file_system dir_walk_dirs and dir_copy use the real filesystem":
         expect(file_read("{root}/async_dst/top.txt")).to_equal("top")
         expect(file_read("{root}/async_dst/sub/inner.txt")).to_equal("inner")
         val _done = dir_remove_all(root)
+
+    it "dir_walk_files keeps files without an extension":
+        val root = fs_walk_copy_root("walkfiles")
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/d")).to_equal(true)
+        expect(file_write("{root}/d/Makefile", "m")).to_equal(true)
+        expect(file_write("{root}/d/a.txt", "a")).to_equal(true)
+        expect(sync_fs_dir_walk_files(root).len()).to_equal(2)
+        expect(async_fs_dir_walk_files(root).len()).to_equal(2)
+        expect(sync_fs_file_is_file("{root}/d/Makefile")).to_equal(true)
+        expect(sync_fs_file_is_file("{root}/d")).to_equal(false)
+        expect(sync_fs_file_is_file("{root}/missing.txt")).to_equal(false)
+        val _done = dir_remove_all(root)
+
+    it "file_write_text writes and file_read_text reads real bytes":
+        val root = fs_walk_copy_root("writetext")
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all(root)).to_equal(true)
+        expect(sync_fs_file_write_text("{root}/s.txt", "sync body")).to_equal(true)
+        expect(file_read("{root}/s.txt")).to_equal("sync body")
+        expect(async_fs_file_write_text("{root}/a.txt", "async body")).to_equal(true)
+        expect(file_read("{root}/a.txt")).to_equal("async body")
+        expect(sync_fs_file_read_text("{root}/s.txt")).to_equal("sync body")
+        expect(sync_fs_file_read_text("{root}/missing.txt")).to_equal("")
+        expect(sync_fs_file_modified_time("{root}/s.txt") > 0).to_equal(true)
+        val _done = dir_remove_all(root)
+
+    it "file_create, file_move, dir_delete and file_set_mode act on disk":
+        val root = fs_walk_copy_root("mutate")
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/empty")).to_equal(true)
+        expect(sync_fs_file_create("{root}/new.txt")).to_equal(true)
+        expect(file_exists("{root}/new.txt")).to_equal(true)
+        expect(sync_fs_file_create("{root}/new.txt")).to_equal(false)
+        expect(sync_fs_file_move("{root}/new.txt", "{root}/moved.txt")).to_equal(true)
+        expect(file_exists("{root}/new.txt")).to_equal(false)
+        expect(file_exists("{root}/moved.txt")).to_equal(true)
+        expect(sync_fs_file_set_mode("{root}/moved.txt", 0o600)).to_equal(true)
+        expect(file_mode("{root}/moved.txt")).to_equal(0o600)
+        expect(sync_fs_file_set_mode("{root}/missing.txt", 0o600)).to_equal(false)
+        expect(sync_fs_dir_delete("{root}/empty")).to_equal(true)
+        expect(dir_exists("{root}/empty")).to_equal(false)
+        val _done = dir_remove_all(root)
+
+    it "glob_match takes (path, pattern)":
+        expect(sync_fs_glob_match("src/a.spl", "*.spl")).to_equal(true)
+        expect(sync_fs_glob_match("*.spl", "src/a.spl")).to_equal(false)

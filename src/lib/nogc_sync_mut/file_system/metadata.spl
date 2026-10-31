@@ -1,169 +1,110 @@
 # File Metadata and Information
 #
-# File metadata operations: size, timestamps, file info, type checks.
-# Uses Option/nil pattern for operations that may fail.
-# Mock implementations return simulated values.
+# File metadata: size, timestamps, file info, type checks. All answers come
+# from the host filesystem; nothing is simulated. Where the runtime exposes no
+# primitive (creation / access time), the function fails closed with nil.
 
 use std.nogc_sync_mut.file_system.types.{FileInfo}
 use std.nogc_sync_mut.file_system.file_ops.{file_exists}
 use std.nogc_sync_mut.file_system.dir_ops.{dir_exists}
-use std.nogc_sync_mut.file_system.path_ops.{path_basename, path_extension}
+use std.nogc_sync_mut.file_system.path_ops.{path_basename}
 
-# `file_size` intentionally does NOT live here: this module re-exports the
-# real io_runtime implementation (`-> i64`, 0 for a missing file). The mock
-# that used to sit here returned `i64?` (Some(1024) for every existing path);
-# with its different signature it hijacked real `file_size` callers through the
+# `file_size` (`-> i64`, 0 for a missing file) and `file_modified_time`
+# (`-> i64`, mtime seconds, 0 when unavailable) intentionally do NOT live here:
+# this module re-exports the real owners. The mocks that used to sit here
+# returned `i64?` (Some(1024) / Some(1700000000) for every existing path) and,
+# with their different signatures, collided with the real owners through the
 # seed's by-name binding ([compiler_cross_module_private_symbol_collision]).
 export use std.nogc_sync_mut.io_runtime.{file_size}
+export use std.nogc_sync_mut.io.file_ops.{file_modified_time}
 
-fn file_modified_time(path: text) -> i64?:
-    """Get last modified time as Unix timestamp.
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.sffi.fs.{file_mode}
 
-    Args:
-        path: File path
-
-    Returns:
-        Some(timestamp) or nil on error
-    """
-    if not file_exists(path):
-        return nil
-    Some(1700000000)
+fn file_mode_bits(path: text) -> i64:
+    """Permission bits of `path` (st_mode & 0o7777), or -1 when unreadable."""
+    if path == "":
+        return -1
+    file_mode(path)
 
 fn file_created_time(path: text) -> i64?:
     """Get creation time as Unix timestamp.
 
-    Args:
-        path: File path
-
-    Returns:
-        Some(timestamp) or nil on error
+    The runtime exposes no birth-time primitive, so this always fails closed
+    with nil rather than inventing a value.
     """
-    if not file_exists(path):
-        return nil
-    Some(1700000000)
+    nil
 
 fn file_accessed_time(path: text) -> i64?:
     """Get last access time as Unix timestamp.
 
-    Args:
-        path: File path
-
-    Returns:
-        Some(timestamp) or nil on error
+    The runtime exposes no atime primitive, so this always fails closed with
+    nil rather than inventing a value.
     """
-    if not file_exists(path):
-        return nil
-    Some(1700000000)
+    nil
 
 fn file_info(path: text) -> FileInfo?:
-    """Get comprehensive file information.
-
-    Args:
-        path: File path
-
-    Returns:
-        Some(FileInfo) or nil on error
-    """
-    if not file_exists(path):
+    """Get comprehensive file information, or nil when the path is missing."""
+    if not file_exists(path) and not dir_exists(path):
         return nil
-
+    val mode = file_mode_bits(path)
+    if mode < 0:
+        return nil
+    val is_dir = dir_exists(path)
+    var size = 0
+    if not is_dir:
+        size = file_size(path)
     val info = FileInfo(
         path: path,
-        size: 1024,
-        modified_time: 1700000000,
+        size: size,
+        modified_time: file_modified_time(path),
         is_file: file_is_file(path),
-        is_directory: file_is_directory(path),
+        is_directory: is_dir,
         is_symlink: file_is_symlink(path),
-        permissions: 755
+        permissions: mode
     )
     Some(info)
 
 fn file_is_file(path: text) -> bool:
-    """Check if path is a regular file.
-
-    Args:
-        path: Path
-
-    Returns:
-        true if regular file
-    """
-    if not file_exists(path):
+    """True when `path` exists and is not a directory (stat(2), follows links)."""
+    if path == "":
         return false
-    # Mock: check if has extension
-    path_extension(path) != ""
+    file_exists(path) and not dir_exists(path)
 
 fn file_is_directory(path: text) -> bool:
-    """Check if path is a directory.
-
-    Args:
-        path: Path
-
-    Returns:
-        true if directory
-    """
+    """True when `path` is a directory."""
     dir_exists(path)
 
 fn file_is_symlink(path: text) -> bool:
-    """Check if path is a symbolic link.
-
-    Args:
-        path: Path
-
-    Returns:
-        true if symlink
-    """
-    # Mock: return false
-    false
+    """True when `path` exists but lstat(2) sees neither a regular file nor a
+    directory under it -- i.e. a symbolic link (or another special entry such
+    as a socket/FIFO; the runtime has no dedicated S_ISLNK probe)."""
+    if path == "":
+        return false
+    if not file_exists(path) and not dir_exists(path):
+        return false
+    not file_is_regular_no_follow(path) and not dir_is_real_no_follow(path)
 
 fn file_is_readable(path: text) -> bool:
-    """Check if file is readable.
-
-    Args:
-        path: File path
-
-    Returns:
-        true if readable
-    """
-    file_exists(path)
+    """True when the owner read bit (0o400) is set. Owner bits only: the
+    runtime has no access(2) probe for the calling user."""
+    val mode = file_mode_bits(path)
+    mode >= 0 and (mode & 256) != 0
 
 fn file_is_writable(path: text) -> bool:
-    """Check if file is writable.
-
-    Args:
-        path: File path
-
-    Returns:
-        true if writable
-    """
-    file_exists(path)
+    """True when the owner write bit (0o200) is set. Owner bits only."""
+    val mode = file_mode_bits(path)
+    mode >= 0 and (mode & 128) != 0
 
 fn file_is_executable(path: text) -> bool:
-    """Check if file is executable.
-
-    Args:
-        path: File path
-
-    Returns:
-        true if executable
-    """
-    if not file_exists(path):
+    """True for a non-directory whose owner execute bit (0o100) is set."""
+    if dir_exists(path):
         return false
-    # Mock: check for common executable extensions
-    val ext = path_extension(path)
-    ext == "sh" or ext == "exe" or ext == "bin"
+    val mode = file_mode_bits(path)
+    mode >= 0 and (mode & 64) != 0
 
 fn file_is_hidden(path: text) -> bool:
-    """Check if file is hidden (starts with dot).
-
-    Args:
-        path: File path
-
-    Returns:
-        true if hidden
-    """
+    """Check if file is hidden (basename starts with dot)."""
     val name = path_basename(path)
     name.starts_with(".")
-
-# ============================================================================
-# Exports
-# ============================================================================
