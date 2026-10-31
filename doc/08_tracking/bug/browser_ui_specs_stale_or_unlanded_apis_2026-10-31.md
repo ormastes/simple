@@ -1,13 +1,22 @@
 # Browser/UI system specs: remaining RED after relfix (2026-10-31)
 
-Root cause of the largest group: merge e5b290e42a0 (release_phase3 convergence)
-resolved `simple_web_html_layout_renderer.spl`, `..._paint_layout.spl` and
-`hosted_browser_renderer_policy.spl` to the first parent, dropping the second
-parent's fractional box lane integration and the first parent's
-`hosted_browser_canonical_navigation_url` / `hosted_browser_network_error`.
-Re-merged in this branch. The same merge also took the first parent for
-`..._style`, `..._core`, `..._foundation`, `layout*.spl`, `simple_web_engine2d_renderer.spl`
-(three-way merge of the second parent's changes still conflicts there; not redone).
+Root cause of the largest group: merge e5b290e42a0 (release_phase3 convergence).
+- `simple_web_html_layout_renderer.spl` and `..._paint_layout.spl` were resolved to the
+  first parent, dropping the second parent's fractional box lane integration. Re-done as a
+  three-way merge of those two files.
+- `hosted_browser_renderer_policy.spl`: the merge applied the second parent's stale
+  deletions, undoing 5ae337c915d (`hosted_browser_canonical_navigation_url`,
+  `hosted_browser_network_error`, form-action fields). The restored file is byte-identical
+  to the first parent: a restore, not a three-way merge. The restore moved Origin and
+  preflight ownership to FetchEngine/CorsChecker (cors.spl `prepare_actual_request`,
+  `build_cors_preflight`), so three examples in
+  test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl were updated to the new
+  contract: "requires cors for simple cross-origin resources", "admits sanitized
+  cross-origin author headers for broker preflight", "loads ordinary cross-origin images
+  without exposing a CORS fetch".
+- Other files the merge took from the first parent (`style`, `core`, `foundation`,
+  `layout*`, `simple_web_engine2d_renderer`) still conflict against the second parent's
+  changes and were not redone.
 
 Still RED, spec ahead of source (symbol exists in neither parent, nor origin/main):
 - `BrowserRuntimeState.dom_bridge_generation` (browser_css_animation_equal_replacement)
