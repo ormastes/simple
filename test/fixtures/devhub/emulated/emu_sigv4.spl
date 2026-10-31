@@ -1,0 +1,110 @@
+# Server-side AWS SigV4 check for the DevHub emulator: rebuilds the canonical
+# request from what actually crossed the wire, exactly as S3 does, instead of
+# trusting the client's own string-to-sign. It only shares the SHA-256/HMAC
+# primitives with the client, not std.aws_sigv4's canonicalisation, so a client
+# path, query or signed-header defect shows up as a signature mismatch.
+#
+# Procedure: AWS "Signature Calculations for the Authorization Header"
+# https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+# (sigv4_verify_wire is itself checked against that page's published GET Object
+# example by devhub_minio_emulated_spec.)
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.hmac.{hmac_sha256_bytes}
+
+fn _to_bytes(s: text) -> [i64]:
+    var out: [i64] = []
+    for b in s.bytes():
+        out = out + [b as i64]
+    out
+
+fn _hex(bytes: [i64]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for b in bytes:
+        out = out + digits[(b >> 4) & 15] + digits[b & 15]
+    out
+
+fn _sha_hex(s: text) -> text:
+    _hex(sha256_bytes(_to_bytes(s)))
+
+fn _header(headers: [text], name: text) -> text:
+    val prefix = name.lower() + ":"
+    for line in headers:
+        if line.lower().starts_with(prefix):
+            return line[prefix.len():].trim()
+    ""
+
+fn _auth_field(auth: text, key: text) -> text:
+    val at = auth.find(key + "=")
+    if at < 0:
+        return ""
+    val rest = auth[at + key.len() + 1:]
+    val comma = rest.find(",")
+    if comma < 0:
+        return rest.trim()
+    rest[0:comma].trim()
+
+fn _sorted(items: [text]) -> [text]:
+    var out = items
+    var i = 1
+    while i < out.len():
+        var j = i
+        while j > 0 and out[j - 1] > out[j]:
+            val tmp = out[j - 1]
+            out[j - 1] = out[j]
+            out[j] = tmp
+            j = j - 1
+        i = i + 1
+    out
+
+fn _canonical_query(query: text) -> text:
+    if query == "":
+        return ""
+    var pairs: [text] = []
+    for part in query.split("&"):
+        pairs = pairs + [if part.contains("="): part else: part + "="]
+    var out = ""
+    for pair in _sorted(pairs):
+        out = if out == "": pair else: out + "&" + pair
+    out
+
+fn sigv4_verify_wire(method: text, target: text, headers: [text], body: text, access_key: text, secret: text, region: text) -> text:
+    """Empty when the Authorization matches one recomputed from the wire;
+    otherwise what is wrong."""
+    val auth = _header(headers, "Authorization")
+    if not auth.starts_with("AWS4-HMAC-SHA256 "):
+        return "sigv4: Authorization not AWS4-HMAC-SHA256: [{auth}]"
+    val credential = _auth_field(auth, "Credential")
+    val signed_headers = _auth_field(auth, "SignedHeaders")
+    val signature = _auth_field(auth, "Signature")
+    val scope_parts = credential.split("/")
+    if scope_parts.len() != 5 or scope_parts[0] != access_key or scope_parts[2] != region or scope_parts[3] != "s3" or scope_parts[4] != "aws4_request":
+        return "sigv4: bad credential scope [{credential}]"
+    val amz_date = _header(headers, "x-amz-date")
+    if amz_date.len() != 16 or not amz_date.starts_with(scope_parts[1]):
+        return "sigv4: x-amz-date [{amz_date}] does not match scope date {scope_parts[1]}"
+    val payload_hash = _header(headers, "x-amz-content-sha256")
+    if payload_hash == "":
+        return "sigv4: x-amz-content-sha256 missing"
+    if payload_hash != "UNSIGNED-PAYLOAD" and payload_hash != _sha_hex(body):
+        return "sigv4: x-amz-content-sha256 [{payload_hash}] is not the SHA-256 of the body"
+    if not signed_headers.contains("host") or not signed_headers.contains("x-amz-date"):
+        return "sigv4: SignedHeaders must cover host and x-amz-date, got [{signed_headers}]"
+    val question = target.find("?")
+    val path = if question >= 0: target[0:question] else: target
+    val query = if question >= 0: target[question + 1:] else: ""
+    var canonical_headers = ""
+    for name in signed_headers.split(";"):
+        canonical_headers = canonical_headers + name + ":" + _header(headers, name) + "\n"
+    val canonical = method + "\n" + path + "\n" + _canonical_query(query) + "\n" + canonical_headers + "\n" + signed_headers + "\n" + payload_hash
+    val scope = scope_parts[1] + "/" + region + "/s3/aws4_request"
+    val to_sign = "AWS4-HMAC-SHA256\n" + amz_date + "\n" + scope + "\n" + _sha_hex(canonical)
+    val k_date = hmac_sha256_bytes(_to_bytes("AWS4" + secret), _to_bytes(scope_parts[1]))
+    val k_region = hmac_sha256_bytes(k_date, _to_bytes(region))
+    val k_service = hmac_sha256_bytes(k_region, _to_bytes("s3"))
+    val k_signing = hmac_sha256_bytes(k_service, _to_bytes("aws4_request"))
+    val expected = _hex(hmac_sha256_bytes(k_signing, _to_bytes(to_sign)))
+    if signature != expected:
+        return "sigv4: signature mismatch, wanted {expected} got {signature}"
+    ""
