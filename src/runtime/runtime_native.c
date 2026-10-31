@@ -16476,9 +16476,8 @@ int64_t rt_file_mode(int64_t path_value) {
     return (int64_t)(st.st_mode & 07777);
 }
 
-/* fs.spl:106 `extern fn rt_file_list_dir(path: text) -> [text]` -- entry
- * NAMES (not full paths), "." and ".." skipped, empty array on error so the
- * `[text]` (non-optional) return is always a real array.
+/* fs.spl:106 `extern fn rt_file_list_dir(path: text) -> [text]?` -- entry
+ * NAMES (not full paths), "." and ".." skipped, nil on error.
  *
  * The Windows branch deliberately uses FindFirstFileW/FindNextFileW where
  * the neighbouring rt_dir_list uses the ...A variants: Simple `text` is
@@ -16487,16 +16486,12 @@ int64_t rt_file_mode(int64_t path_value) {
  * follows the in-file precedent (MultiByteToWideChar with CP_UTF8 /
  * MB_ERR_INVALID_CHARS, as used by rt_mmap_raw's path handling). */
 int64_t rt_file_list_dir(int64_t path_value) {
-    SplArray* out = rt_array_new(0);
     char* path = rt_core_string_to_cpath(path_value);
-    if (!path || !out) {
-        if (path) free(path);
-        return (int64_t)(uintptr_t)out;
-    }
+    if (!path) return rt_core_nil();
 #if defined(_WIN32)
     size_t path_len = strlen(path);
     char* pattern = (char*)rt_observed_malloc_v1(path_len + 3);
-    if (!pattern) { free(path); return (int64_t)(uintptr_t)out; }
+    if (!pattern) { free(path); return rt_core_nil(); }
     memcpy(pattern, path, path_len);
     /* Tolerate a trailing separator so "dir\" and "dir" behave alike. */
     if (path_len > 0 && (path[path_len - 1] == '\\' || path[path_len - 1] == '/')) path_len--;
@@ -16511,14 +16506,19 @@ int64_t rt_file_list_dir(int64_t path_value) {
         !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, wide_pattern, wide_len)) {
         if (wide_pattern) free(wide_pattern);
         free(pattern);
-        return (int64_t)(uintptr_t)out;
+        return rt_core_nil();
     }
     free(pattern);
 
     WIN32_FIND_DATAW data;
     HANDLE find = FindFirstFileW(wide_pattern, &data);
     free(wide_pattern);
-    if (find == INVALID_HANDLE_VALUE) return (int64_t)(uintptr_t)out;
+    if (find == INVALID_HANDLE_VALUE) return rt_core_nil();
+    SplArray* out = rt_array_new(0);
+    if (!out) {
+        FindClose(find);
+        return rt_core_nil();
+    }
     do {
         if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
         int utf8_len = WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, NULL, 0, NULL, NULL);
@@ -16534,7 +16534,12 @@ int64_t rt_file_list_dir(int64_t path_value) {
 #else
     DIR* dir = opendir(path);
     free(path);
-    if (!dir) return (int64_t)(uintptr_t)out;
+    if (!dir) return rt_core_nil();
+    SplArray* out = rt_array_new(0);
+    if (!out) {
+        closedir(dir);
+        return rt_core_nil();
+    }
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
         const char* name = entry->d_name;
@@ -17415,20 +17420,22 @@ int64_t rt_sosix_directory_pair_close_v1(int64_t token) {
  * ---------------------------------------------------------------- */
 
 /* Entry NAMES (not full paths), `.`/`..` excluded. An unreadable directory
- * yields an EMPTY array, matching runtime.c's copy and the `[text]`
- * (non-optional) Simple signature; the Rust runtime's nil is the outlier.
- * Order is whatever the OS yields. */
+ * yields nil. Order is whatever the OS yields. */
 int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return (int64_t)(uintptr_t)rt_array_new(0);
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_core_nil();
 #if defined(_WIN32)
     char pattern[RT_TEXT_PATH_MAX + 4];
     int n = snprintf(pattern, sizeof(pattern), "%s\\*", path);
-    SplArray* out = rt_array_new(0);
-    if (n < 0 || (size_t)n >= sizeof(pattern)) return (int64_t)(uintptr_t)out;
+    if (n < 0 || (size_t)n >= sizeof(pattern)) return rt_core_nil();
     WIN32_FIND_DATAA data;
     HANDLE find = FindFirstFileA(pattern, &data);
-    if (find == INVALID_HANDLE_VALUE) return (int64_t)(uintptr_t)out;
+    if (find == INVALID_HANDLE_VALUE) return rt_core_nil();
+    SplArray* out = rt_array_new(0);
+    if (!out) {
+        FindClose(find);
+        return rt_core_nil();
+    }
     do {
         const char* name = data.cFileName;
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
@@ -17437,9 +17444,13 @@ int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
     FindClose(find);
     return (int64_t)(uintptr_t)out;
 #else
-    SplArray* out = rt_array_new(0);
     DIR* dir = opendir(path);
-    if (!dir) return (int64_t)(uintptr_t)out;
+    if (!dir) return rt_core_nil();
+    SplArray* out = rt_array_new(0);
+    if (!out) {
+        closedir(dir);
+        return rt_core_nil();
+    }
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
         const char* name = entry->d_name;
