@@ -1,6 +1,6 @@
 # Native Result text payload loses its MIR text representation
 
-Status: focused native regression PASS with rebuilt producer; private-daemon
+Status: resolved 2026-10-31 (see below). Focused native regression PASS with rebuilt producer; private-daemon
 acceptance and broader compiler checks remain separate pending gates.
 
 Producer SHA-256: `c978ab12656b7bf67d4bf9b6cc6450d08181c9140b19266863e93b3eba57e5f4`.
@@ -55,3 +55,38 @@ This validates heap-built and literal text extraction, equality, length,
 concatenation, and Err propagation in the fixture. Shared nested and multi-slot
 enum callers were source-reviewed, not independently exercised here. These
 receipts do not establish private-daemon startup or broad compiler acceptance.
+
+
+## Resolved 2026-10-31
+
+Root cause: `lower_try_expr`
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`, Result
+branch) read the Ok payload with `rt_enum_payload` as a raw `i64` and never
+restored the declared `ok_type`, so text methods (`trim`, `index_of`) were
+unresolved and concatenation stringified the handle.
+
+Fix (already on release/1.0.0 before this resolution; no new compiler change):
+`265252279c9` routes the static Result payload through
+`decode_declared_enum_payload_slot`; its `Str` arm
+(`src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl`) restores
+text via `option_text_value` (`rt_interp_cstr`) with `bootstrap_text_type`.
+`3aa79ca1610` applies the same decoder when the static base type is unknown but
+the lowered call remembered its declared Result return. Type aliases need no
+MIR handling: HIR expands `type R = Result<text, E>` to the underlying shape
+(`src/compiler/20.hir/hir_lowering/type_aliases.spl`).
+
+Test: `test/01_unit/compiler/mir/result_try_text_payload_spec.spl` lowers a
+direct and an aliased `Result<text, text>` callee through HIR/MIR and asserts
+zero MIR errors, one `rt_string_trim` dispatch, no `rt_raw_i64_to_string`, and
+that every `rt_enum_payload` word feeds `rt_interp_cstr`; it also executes the
+same shapes in the interpreter (text equality, length, Err propagation). It is
+red with the decoder `Str` arm disabled and green with it.
+
+Workarounds removed: the tagged `val ...: text = ...?` annotations in
+`src/app/bug/workaround_store.spl` (`load_workarounds_at`,
+`workaround_bug_snapshot`, `workaround_refresh_locked`).
+
+Not verified here: native execution of the fixture or of `workaround_store`
+with a freshly built stage2 producer (only the Rust seed was available; its
+JIT falls back to the interpreter). The 2026-10-30 native receipts above remain
+the native evidence.
