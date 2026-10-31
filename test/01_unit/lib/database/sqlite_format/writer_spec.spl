@@ -17,9 +17,21 @@ use std.nogc_sync_mut.database.sqlite_format.{
 use std.nogc_sync_mut.database.sqlite_format.types.{SqliteError}
 use std.nogc_sync_mut.database.sql.types.{DbValue, DbRow}
 use std.nogc_sync_mut.fs.{file_write_text}
-use std.io_runtime.{process_run_bounded}
+use std.io_runtime.{process_run_bounded, env_get_opt, dir_create_all}
 
-val TMP: text = "C:/Users/user/AppData/Local/Temp/sqls"
+# Writable scratch directory derived from the environment (TEMP, TMP, TMPDIR),
+# falling back to build/sqlite_format_oracle under the working directory.
+fn tmp_dir() -> text:
+    var base = env_get_opt("TEMP") ?? ""
+    if base == "":
+        base = env_get_opt("TMP") ?? ""
+    if base == "":
+        base = env_get_opt("TMPDIR") ?? ""
+    if base == "":
+        base = "build"
+    val dir = base.replace("\\", "/") + "/sqlite_format_oracle"
+    val _ = dir_create_all(dir)
+    dir
 
 fn small_schema() -> text:
     "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, r REAL, s TEXT, b BLOB);"
@@ -68,12 +80,17 @@ fn write_oracle_script() -> bool:
         + "got = [(a, b, c, d, bytes(e) if e is not None else None) for (a, b, c, d, e) in rows]\n"
         + "assert got == expected, got\n"
         + "print('ORACLE PASS')\n"
-    file_write_text("{TMP}/sqlite_format_oracle.py", script)
+    file_write_text("{tmp_dir()}/sqlite_format_oracle.py", script)
 
-fn run_oracle(image: [u8]) -> (text, text, i64):
-    val _ = write_oracle_script()
-    val _ = file_write_text("{TMP}/sqlite_format_image.hex", to_hex(image))
-    process_run_bounded("python", ["{TMP}/sqlite_format_oracle.py", "{TMP}/sqlite_format_image.hex", "{TMP}/sqlite_format_oracle.sqlite"], 60000, 65536)
+# Writes the oracle inputs; false means a write failed (the spec asserts on it).
+fn prepare_oracle(image: [u8]) -> bool:
+    val script_ok = write_oracle_script()
+    val hex_ok = file_write_text("{tmp_dir()}/sqlite_format_image.hex", to_hex(image))
+    script_ok and hex_ok
+
+fn run_oracle() -> (text, text, i64):
+    val d = tmp_dir()
+    process_run_bounded("python", ["{d}/sqlite_format_oracle.py", "{d}/sqlite_format_image.hex", "{d}/sqlite_format_oracle.sqlite"], 60000, 65536)
 
 describe "sqlite_format writer":
 
@@ -133,7 +150,10 @@ describe "sqlite_format writer":
         if oracle_available():
             match sqlite_format_create_image(small_schema(), small_tables()):
                 Ok(image):
-                    val (out, ora_err, code) = run_oracle(image)
+                    expect(prepare_oracle(image)).to_equal(true)
+                    val (out, ora_err, code) = run_oracle()
+                    if code != 0:
+                        print "ORACLE STDERR: {ora_err}"
                     expect(code).to_equal(0)
                     expect(out.contains("ORACLE PASS")).to_equal(true)
                 Err(e):

@@ -49,3 +49,15 @@ Do not cite a Phase 1 run as evidence that secrets or plaintext were erased.
 seed with `bad magic`. The writer fills its image through parameters
 (`page[off] = ... as u8`), which fits this cause but was not confirmed. The Messenger
 read path does not use the writer.
+
+### Confirmed (2026-10-31): sqlite_format writer
+
+Confirmed with a probe on the Phase 1 seed: an element write made through an array
+parameter (`fn put(page: [u8], ...): page[off] = ...`) is lost for the caller, for
+both `val` and `var` arguments; a returned buffer (`c = put2(c, ...)`) and local
+writes work. This was the cause of the `writer_spec.spl` `bad magic` failures:
+`_put_u16`, `_put_u32` and `_write_header` in
+`src/lib/nogc_sync_mut/database/sqlite_format/wimage.spl` wrote nothing into the
+caller's buffer. Fixed by returning the updated buffer from the helpers. After the
+fix `writer_spec.spl` is 7/7 on the seed, including the Python sqlite3 oracle
+(integrity_check ok and exact rows).

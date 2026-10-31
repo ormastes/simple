@@ -17,11 +17,12 @@ sites kept the old name.
 Results are from the Phase 1 seed interpreter. A native build resolves names
 differently, so these need a Phase 2 run too.
 
-## Still open
+## Timing
 
-`fe_cswap` in `curve25519_smalllimb.spl` branches on `if swap == 0`, and that bit comes
-from the private scalar, so the X25519 ladder is not constant-time. This predates the
-fix and was not changed.
+The X25519 small-limb ladder's swap (`fe_cswap`) and bit extraction (`_bit_is_set`) no
+longer branch or loop on key-derived values, in source. Compiled timing was not
+measured, so this is not a proof of constant-time execution. `_x25519_bit_div` in
+`src/lib/common/crypto/x25519.spl` extracts key bits by division and was not checked.
 
 ## How it was found
 
