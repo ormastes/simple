@@ -4193,6 +4193,7 @@ const char* rt_hex_to_wire(const char* hex_str) {
     return (const char*)result;
 }
 
+#include "runtime_utf8_lossy_private.h"
 #if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
 /* Standalone core-C instead selects runtime_native.c's tagged text/array ABI.
  * Keep these legacy hosted byte-buffer helpers out of that composition. */
@@ -4239,6 +4240,6 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
     const uint8_t* data =
         (const uint8_t*)(uintptr_t)rt_array_data_ptr((SplArray*)(uintptr_t)bytes_value);
     if (!data) return rt_string_new(NULL, 0);
-    return rt_string_new(data, (uint64_t)len);
+    return spl_text_from_utf8_lossy(data, (size_t)len);
 }
 #endif
