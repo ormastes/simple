@@ -305,21 +305,38 @@ fn _smux_owner_up(ws: AgentWorkspace) -> bool:
     env_set("SIMPLE_BINARY", "")
     val (_o, _e, code) = process_run_timeout("powershell", ["-NoProfile", "-NonInteractive", "-Command", start], 30000)
     env_set("SIMPLE_BINARY", pinned)
-    if code != 0:
-        return false
-    val deadline = current_time_ms() + 90000
-    while current_time_ms() < deadline:
-        if _smux_req(ws, "list-sessions") != nil:
-            return true
-        sleep_ms(500)
-    # Timed out: retire this attempt so no owner keeps serving a token nobody
-    # holds. A bound owner is stopped; one still starting finds the file gone.
-    val now = file_read(path).trim().split(" ")
-    if now.len() == 4 and now[2] == token and _smux_listener_is(now[1], int(now[3]) ?? 0):
-        val _stop = smux_server_request(now[1], token, "stop-server")
-    if (now.len() == 2 and now[1] == token) or (now.len() == 4 and now[2] == token):
-        val _gone = file_delete(path)
+    if code == 0:
+        val deadline = current_time_ms() + 90000
+        while current_time_ms() < deadline:
+            if _smux_req(ws, "list-sessions") != nil:
+                return true
+            sleep_ms(500)
+    _smux_retire(path, token)
     false
+
+# A start that failed or timed out must leave no owner behind. While the file
+# still carries this attempt's token: an owner that announced itself is
+# stopped over the protocol when its listener verifies, else ended by the pid
+# it recorded in the private file; the file is removed, so an owner that has
+# not announced yet exits at its own check. Repeated briefly, because an owner
+# can announce between two reads.
+fn _smux_retire(path: text, token: text):
+    val deadline = current_time_ms() + 5000
+    while current_time_ms() < deadline:
+        val now = file_read(path).trim().split(" ")
+        if now.len() == 4 and now[2] == token:
+            val pid = int(now[3]) ?? 0
+            if _smux_listener_is(now[1], pid):
+                val _stop = smux_server_request(now[1], token, "stop-server")
+            elif pid > 0:
+                val _kill = process_run_timeout("taskkill", ["/PID", pid.to_text(), "/T", "/F"], 10000)
+            val _gone = file_delete(path)
+        elif now.len() == 2 and now[1] == token:
+            val _gone = file_delete(path)
+        elif not file_exists(path):
+            sleep_ms(500)
+        else:
+            return
 
 fn _ws_panes(ws: AgentWorkspace) -> [WsPane]:
     var out: [WsPane] = []
