@@ -1278,6 +1278,27 @@ impl MirLowering:
                                             # this is safe to call unconditionally
                                             # here.
                                             init_local = self.box_runtime_value(init_local)
+                                        case HirTypeKind.Named(_, _):
+                                            # `val p: Pt = ident(Pt(..))`: the erased
+                                            # `T` result carries the record handle
+                                            # through untouched but no struct
+                                            # identity, so every later `p.y` fell
+                                            # to resolve_field_index's default
+                                            # index 0 (p.y == p.x). The explicit
+                                            # annotation is the only evidence of
+                                            # the layout; bind it to the init local
+                                            # exactly like a typed call result,
+                                            # gated on a layout this lowering knows
+                                            # (generics = one erased body, 2026-11-01).
+                                            if not self.struct_value_syms.contains(init_local.id):
+                                                var erased_init = false
+                                                if val erased_init_hir = self.find_local_hir_type(init_local.id):
+                                                    erased_init = self.local_needs_erased_decode(init_local.id, erased_init_hir)
+                                                if erased_init:
+                                                    val declared_record = self.optional_payload_struct_name(declared_type)
+                                                    if declared_record != "":
+                                                        self.struct_value_syms[init_local.id] = declared_record
+                                                        self.remember_local_hir_type(init_local.id, declared_type, 0, 0)
                                         case _:
                                             ()
                         # Bug (any?/any receiver-type erasure, 2026-09-01):
