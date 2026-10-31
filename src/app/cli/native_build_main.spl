@@ -1181,8 +1181,8 @@ fn native_build_mir_shard_parallel(args: [text]) -> i64:
     if (env_get("SIMPLE_MIR_SHARD") ?? "") != "" or (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
             (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
         return 0      # already a shard child; never recurse
-    # The selective MIR lane was removed together with monomorphization
-    # (2026-10-31): it only emitted/consumed the specialization placement
+    # The selective MIR lane was removed (2026-10-31): it only
+    # emitted/consumed the specialization placement
     # bundle. Refuse the flag explicitly instead of silently sharding.
     if (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1":
         eprint "[mir-shard] SIMPLE_MIR_SELECTIVE=1: the selective MIR lane was removed (no specialization pass exists); unset it"
@@ -1481,7 +1481,7 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
 # Worker side of `--file-worker=i/n` (bootstrap_main.spl dispatch). Claims
 # one module (SIMPLE_FILE_WORKER_BATCH, default 1) per round through a HIR
 # child, then lowers + emits objects through a MIR child once the HIR ledger is
-# complete (global mono gate -- see native_file_worker_v1.spl). Exit 0 only
+# complete (whole-program HIR gate -- see native_file_worker_v1.spl). Exit 0 only
 # when every child succeeded and the MIR ledger has no unclaimed row.
 pub fn run_native_file_worker_v1(args: [text]) -> i64:
     val spec = native_file_worker_spec_from_args_v1(args)
@@ -1518,7 +1518,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
             val passed = native_file_worker_terminal_state_v1(hir_queue, path) == "PASS"
             val _published = native_file_worker_receipt_publish_v1(hir_queue, NativeFileWorkerReceiptV1(
                 module: path, hir_start_ms: hir_start, hir_done_ms: hir_done, deps_ready_ms: -1, mir_done_ms: -1,
-                obj_done_ms: -1, status: if passed: "MONO-PENDING" else: "FAILED", object: ""))
+                obj_done_ms: -1, status: if passed: "OBJECT-PENDING" else: "FAILED", object: ""))
         if code != 0:
             native_file_worker_note_error_v1(mir_queue, owner, "HIR child exit={code} claimed={claimed.len()}")
             return 1
@@ -1526,7 +1526,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
         if claimed.len() == 0 and not hir_drained:
             native_file_worker_note_error_v1(mir_queue, owner, "HIR child claimed nothing with rows unclaimed")
             return 1
-    # Mono gate: global mono needs every module's HIR (P4 removes this wait).
+    # HIR gate: whole-program HIR needs every module's HIR (P4 removes this wait).
     var state = native_file_worker_hir_ledger_state_v1(hir_queue)
     while state == 0:
         thread_sleep(SHARD_POOL_POLL_MS)
@@ -1567,7 +1567,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
     print "[file-worker] done owner={owner} hir_rounds={round} mir_rounds={mir_round}"
     0
 
-# Opt-in SIMPLE_MIR_SHARD_EXPORT_SUMMARIES=1: one process runs through mono and
+# Opt-in SIMPLE_MIR_SHARD_EXPORT_SUMMARIES=1: one process runs through HIR and
 # writes per-module declaration summaries
 # (compiler/80.driver/driver_build/native_mir_shard_export_v1.spl). Returns the
 # bundle directory for workers, or "" -- every failure is a worker-side

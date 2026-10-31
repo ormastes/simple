@@ -72,7 +72,7 @@ fn hir_lower_diag_enabled() -> bool:
         return true
     diag == "1"
 
-# Single source of truth for "this generic FUNCTION is an unmonomorphized
+# Single source of truth for "this generic FUNCTION is an erased
 # TEMPLATE" (#158 Phase B). Currently the Phase A loud gate below is its only
 # caller; it exists as a named predicate because the sibling struct/class
 # tiers RECORD template-ness on the HIR node
@@ -273,21 +273,17 @@ impl HirLowering:
             eprint("[hir-lower] lower_function:type_params {fn_.name}")
 
         # Phase A gate (#158): generic functions (`fn id<T>(x: T) -> T`) are
-        # NOT monomorphized on the native --entry build path -- the erased
+        # not specialized on the native --entry build path -- the erased
         # `T` parameter/return type silently degrades to `Infer`/ANY, which
         # previously made calls to generic functions return 0 instead of the
         # real argument (silent-wrong, no diagnostic). Now that
         # `ParserFunction.type_params` is threaded through from the frontend
         # (convert_decl_fn in the flat-AST bridge), fail loudly here instead
-        # of proceeding into codegen with an unmonomorphized generic. Real
-        # monomorphization is tracked separately (#158 Phase B) -- this is a
+        # of proceeding into codegen with an erased template. This is a
         # deliberate hard stop, not a workaround.
         # Phase B (2026-08-22): the gate is OPEN. A generic fn now lowers to a
-        # HirFunction marked `is_generic_template` (below), and the 40.mono
-        # pass specializes it per call-site type args, repoints the calls and
-        # drops the template (monomorphize_integration.spl). Any call site the
-        # pass cannot rewrite is a hard E-MONO-033 error in the driver, so an
-        # unmonomorphized generic still never reaches MIR.
+        # HirFunction marked `is_generic_template` (below). MIR never emits a
+        # template and refuses a direct call to one (E-GEN-001).
 
         # Lower parameters
         # NOTE(#133): lowered unconditionally, including under SIMPLE_BOOTSTRAP.
@@ -557,7 +553,7 @@ impl HirLowering:
 
         # Generic predeclarations are untyped until their binders are lowered.
         # Publish their semantic signature independently of the bootstrap ABI;
-        # mono needs the declared result even when a binder occurs only there.
+        # generic callers need the declared result even when a binder occurs only there.
         if fn_.has_return_type and type_params.len() > 0:
             if val declared_symbol = self.symbols.get_symbol_raw(fn_symbol_id.id):
                 var semantic_symbol = declared_symbol
@@ -660,10 +656,9 @@ impl HirLowering:
         #
         # The old Phase A fatal's reasoning (a `T`-typed field degrades to an
         # opaque pointer-width slot at MIR, truncating a fat value) is about
-        # EMITTING an unmonomorphized template. That risk is unchanged and is
+        # EMITTING an erased template. That risk is unchanged and is
         # still fenced -- but at the USE site, where it belongs: a reachable
-        # instantiation fails loudly as an unrewritten generic call in 40.mono
-        # (E-MONO-030/032, then E-MONO-033 refuses MIR lowering) and as
+        # instantiation fails loudly as E-GEN-001 in MIR lowering and as
         # HWIR-E-GENERIC in strict MIR. Declaring a template nobody
         # instantiates is not a defect; emitting one is.
         #
@@ -854,8 +849,8 @@ impl HirLowering:
         # `ExprKind.Block(Block)` / `StmtKind.Expr(Expr)` (lowered here for
         # local AND imported enums) used to rebind bare `Block`/`Expr` to an
         # untyped EnumVariant symbol, so a later `val b: Block` or
-        # `f<Block>(..)` lowered to Named(<variant>) and 40.mono refused it
-        # with E-MONO-041 (no proven declaration owner). Variants stay
+        # `f<Block>(..)` lowered to Named(<variant>), which has no proven
+        # declaration owner. Variants stay
         # reachable through their enum; only the bare spelling is kept.
         # bug: mono_tuple_get_nominal_owner_e_mono_041_2026_10_19
         val bind_variant_name = not self.scope_binds_type_symbol(v.name)
