@@ -78,7 +78,8 @@ extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_env_cwd() -> text
 extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 
 fn get_all_targets() -> [OsTarget]:
     """Returns all 6 architecture targets."""
@@ -379,9 +380,12 @@ fn _objcopy_path_prefix() -> text:
     ""
 
 fn _candidate_identity_env_args(candidate: text) -> [text]:
-    var pinned_candidate = rt_path_absolute(candidate)
-    if pinned_candidate == "":
-        pinned_candidate = candidate
+    var pinned_candidate = candidate
+    # Unresolvable (cwd unreadable): the child is spawned from this same cwd
+    # with this exact spelling, so that spelling is the identity we pin.
+    if val resolved = rt_path_absolute(candidate):
+        if resolved != "":
+            pinned_candidate = resolved
     [
         "SIMPLE_BINARY={pinned_candidate}",
         "SIMPLE_BIN={pinned_candidate}",
@@ -479,8 +483,11 @@ This capability helper alone is not an artifact admission authority.
     var seen: [text] = []
     for candidate in candidates:
         if candidate == "": continue
-        var identity = rt_path_absolute(candidate)
-        if identity == "": identity = candidate
+        # Dedupe key only: an unresolvable candidate is keyed by its spelling
+        # and still goes through full backend admission below.
+        var identity = candidate
+        if val resolved = rt_path_absolute(candidate):
+            if resolved != "": identity = resolved
         if seen.contains(identity): continue
         seen.push(identity)
         if simpleos_compiler_candidate_supports_backend(candidate, backend_name):
