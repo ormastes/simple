@@ -25,7 +25,14 @@ val RISCV_GEN2_QUALIFICATION_EXCLUSIONS = [
     "legacy V1 generators",
     "separate architectural retirement producer"]
 
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
+
+# Absence is a mismatch: an unreadable file never matches any expected digest.
+fn _sha256_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false
 
 class RiscvGen2QualificationRow:
     architecture: text
@@ -194,7 +201,7 @@ fn riscv_gen2_owned_file_manifest_matches(encoded: text,
         if (not _g2_hex64(digest) or path != changed_files[index] or
                 not _g2_safe_relative_path(path) or
                 not file_is_regular_no_follow(path) or
-                file_hash_sha256(path) != digest):
+                not _sha256_matches(path, digest)):
             return false
         index = index + 1
     true
@@ -394,10 +401,13 @@ fn riscv_gen2_parse_qualification_manifest(
         exclusions: exclusions, rows: [rv32, rv64]))
 
 fn _g2_bound_file(path: text, expected_sha256: text) -> bool:
-    val canonical = rt_path_absolute(path) ?? ""
-    val expected = (rt_path_absolute(cwd()) ?? "") + "/" + path
-    file_is_regular_no_follow(path) and canonical == expected and
-        file_hash_sha256(path) == expected_sha256
+    val canonical = rt_path_absolute(path)
+    val workspace = rt_path_absolute(cwd())
+    if canonical == nil or workspace == nil:
+        # An unresolvable path cannot be proven bound to the workspace.
+        return false
+    file_is_regular_no_follow(path) and canonical.unwrap() == workspace.unwrap() + "/" + path and
+        _sha256_matches(path, expected_sha256)
 
 fn _g2_json_text(object: any, key: text) -> text:
     val value = json_to_string(json_object_get(object, key))
@@ -576,8 +586,7 @@ fn _g2_inputs_bound(manifest: RiscvGen2QualificationManifest) -> bool:
     if (not riscv_gen2_owned_file_manifest_matches(
                 file_read(manifest.owned_file_manifest_path),
                 manifest.changed_files) or
-            file_hash_sha256(manifest.owned_file_manifest_path) !=
-                manifest.owned_file_manifest_sha256):
+            not _sha256_matches(manifest.owned_file_manifest_path, manifest.owned_file_manifest_sha256)):
         return false
     if not _g2_coverage_report_matches(file_read(
             manifest.branch_coverage_log_path), manifest):
@@ -624,7 +633,7 @@ fn _g2_inputs_bound(manifest: RiscvGen2QualificationManifest) -> bool:
 fn _g2_copy_bound(source: text, expected_sha256: text, destination: text) -> bool:
     if file_exists(destination) or not file_copy(source, destination): return false
     file_is_regular_no_follow(destination) and
-        file_hash_sha256(destination) == expected_sha256
+        _sha256_matches(destination, expected_sha256)
 
 fn _g2_retained_inputs_bound(run_dir: text, manifest_path: text,
         manifest_sha: text, manifest: RiscvGen2QualificationManifest) -> bool:
@@ -642,8 +651,7 @@ fn _g2_retained_inputs_bound(run_dir: text, manifest_path: text,
     if (not riscv_gen2_owned_file_manifest_matches(
                 file_read(run_dir + "/owned-files.list"),
                 manifest.changed_files) or
-            file_hash_sha256(run_dir + "/owned-files.list") !=
-                manifest.owned_file_manifest_sha256):
+            not _sha256_matches(run_dir + "/owned-files.list", manifest.owned_file_manifest_sha256)):
         return false
     var index: i64 = 0
     while index < manifest.rows.len():
@@ -661,7 +669,7 @@ fn _g2_retained_inputs_bound(run_dir: text, manifest_path: text,
                 not _g2_bound_file(prefix + ".run.log", row.run_log_sha256)):
             return false
         index = index + 1
-    file_hash_sha256(manifest_path) == manifest_sha
+    _sha256_matches(manifest_path, manifest_sha)
 
 fn _g2_render_row(row: RiscvGen2QualificationRow, retained_prefix: text) -> text:
     "    {\"architecture\":\"{_g2_json_escape(row.architecture)}\",\n" +
@@ -715,7 +723,9 @@ fn riscv_gen2_write_qualification_receipt(
     if not file_is_regular_no_follow(manifest_path):
         return Err("qualification-manifest-not-regular-no-follow")
     val manifest_text = file_read(manifest_path)
-    val manifest_sha = file_hash_sha256(manifest_path)
+    val manifest_sha_opt = file_hash_sha256(manifest_path)
+    if manifest_sha_opt == nil: return Err("qualification-manifest-sha256-unreadable")
+    val manifest_sha = manifest_sha_opt.unwrap()
     if not _g2_hex64(manifest_sha): return Err("qualification-manifest-sha256-invalid")
     val manifest = riscv_gen2_parse_qualification_manifest(manifest_text)?
     if not _g2_inputs_bound(manifest):
@@ -724,10 +734,14 @@ fn riscv_gen2_write_qualification_receipt(
     # existing root before creating or removing anything through it; otherwise
     # a symlinked parent could redirect publication and cleanup outside the
     # repository.
-    val workspace = rt_path_absolute(cwd()) ?? ""
+    val workspace_abs = rt_path_absolute(cwd())
+    if workspace_abs == nil:
+        return Err("qualification-workspace-unresolvable")
+    val workspace = workspace_abs.unwrap()
+    val evidence_root_abs = rt_path_absolute(RISCV_GEN2_QUALIFICATION_ROOT)
     if (not file_exists(RISCV_GEN2_QUALIFICATION_ROOT) or workspace == "" or
-            (rt_path_absolute(RISCV_GEN2_QUALIFICATION_ROOT) ?? "") !=
-                workspace + "/" + RISCV_GEN2_QUALIFICATION_ROOT):
+            evidence_root_abs == nil or
+            evidence_root_abs.unwrap() != workspace + "/" + RISCV_GEN2_QUALIFICATION_ROOT):
         return Err("qualification-evidence-root-noncanonical")
     val run_dir = RISCV_GEN2_QUALIFICATION_ROOT + "/" + run_id
     val receipt_path = run_dir + "/qualification_receipt.json"
@@ -735,7 +749,8 @@ fn riscv_gen2_write_qualification_receipt(
         return Err("qualification-run-directory-exists")
     if not dir_create_all(run_dir):
         return Err("qualification-run-directory-create-failed")
-    if (rt_path_absolute(run_dir) ?? "") != workspace + "/" + run_dir:
+    val run_dir_abs = rt_path_absolute(run_dir)
+    if run_dir_abs == nil or run_dir_abs.unwrap() != workspace + "/" + run_dir:
         if not dir_remove(run_dir, true):
             return Err("qualification-partial-run-cleanup-failed")
         return Err("qualification-run-directory-noncanonical")
@@ -782,7 +797,7 @@ fn riscv_gen2_write_qualification_receipt(
                 return Err("qualification-partial-run-cleanup-failed")
             return Err("qualification-evidence-copy-failed")
         row_index = row_index + 1
-    if (file_hash_sha256(manifest_path) != manifest_sha or
+    if (not _sha256_matches(manifest_path, manifest_sha) or
             not _g2_inputs_bound(manifest) or
             not _g2_retained_inputs_bound(run_dir, manifest_path,
                 manifest_sha, manifest)):
@@ -801,11 +816,12 @@ fn riscv_gen2_write_qualification_receipt(
         if not dir_remove(run_dir, true):
             return Err("qualification-partial-run-cleanup-failed")
         return Err("qualification-receipt-postwrite-invalid")
-    val receipt_sha = file_hash_sha256(receipt_path)
-    if not _g2_hex64(receipt_sha):
+    val receipt_sha_opt = file_hash_sha256(receipt_path)
+    if receipt_sha_opt == nil or not _g2_hex64(receipt_sha_opt.unwrap()):
         if not dir_remove(run_dir, true):
             return Err("qualification-partial-run-cleanup-failed")
         return Err("qualification-receipt-postwrite-invalid")
+    val receipt_sha = receipt_sha_opt.unwrap()
     Ok(RiscvGen2QualificationArtifacts(
         run_dir: run_dir, receipt_path: receipt_path, receipt_sha256: receipt_sha,
         branch_coverage_basis_points: manifest.branch_coverage_basis_points))

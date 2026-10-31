@@ -34,6 +34,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
+#include "runtime_utf8_lossy_private.h"
 #include "platform/runtime_windows_private_atomic.h"
 #include "simple_gui_html_provider_abi_v1.h"
 #include "simple_gui_event_provider_abi_v1.h"
@@ -3614,8 +3615,12 @@ int8_t rt_transient_heap_adopt(int64_t value) {
 
 static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap);
 
+#include "runtime_console_utf8_private.h"
 static void rt_core_write_bytes(FILE* stream, const uint8_t* ptr, uint64_t len) {
     if (!ptr || len == 0) return;
+#if defined(_WIN32)
+    if (rt_console_write_utf8(stream, ptr, (size_t)len)) return;
+#endif
     fwrite(ptr, 1, (size_t)len, stream);
 }
 
@@ -3862,7 +3867,7 @@ void (__cdecl *rt_win_set_binary_stdio_ptr)(void) = rt_win_set_binary_stdio_ctor
 int64_t rt_stdout_write_text(const char* s) {
     if (!s) return 0;
     int64_t len = (int64_t)strlen(s);
-    fputs(s, stdout);
+    rt_core_write_bytes(stdout, (const uint8_t*)s, (uint64_t)len);
     return len;
 }
 
@@ -10256,8 +10261,8 @@ cleanup:
     return result;
 }
 
-/* `[u8]` -> text, bytes copied verbatim (the interpreter's
- * Value::text_from_bytes; also the native lowering of `text.from_bytes`).
+/* `[u8]` -> text, UTF-8 repaired like Rust String::from_utf8_lossy (malformed
+ * sequences become U+FFFD; the interpreter's Value::text_from_bytes; also the native lowering of `text.from_bytes`).
  * A `[u8]` arrives in one of two layouts: byte-packed
  * (RT_CORE_ARRAY_FLAG_BYTES, one byte per element) or generic i64 slots
  * holding tagged ints (e.g. a `[u8]` literal the backend built slot by slot).
@@ -10271,14 +10276,14 @@ int64_t rt_bytes_to_text(int64_t bytes_value) {
         return rt_string_new(NULL, 0);
     }
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
-        return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
+        return spl_text_from_utf8_lossy((const uint8_t*)array->data, (size_t)array->len);
     }
     int64_t length = rt_array_bytes_validate(bytes_value);
     if (length <= 0) return rt_string_new(NULL, 0);
     uint8_t* narrowed = (uint8_t*)rt_observed_malloc_v1((size_t)length);
     if (!narrowed) return rt_string_new(NULL, 0);
     int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
-    int64_t result = rt_string_new(narrowed, copied > 0 ? (uint64_t)copied : 0);
+    int64_t result = copied > 0 ? spl_text_from_utf8_lossy(narrowed, (size_t)copied) : rt_string_new(NULL, 0);
     free(narrowed);
     return result;
 }
@@ -14769,7 +14774,8 @@ int64_t rt_path_absolute(const uint8_t* path_ptr, uint64_t path_len) {
         }
     }
     free(path);
-    if (!absolute) return rt_string_new(path_ptr, path_len);
+    /* cwd (or allocation) failure: nil, never the relative input. RT_NIL == 3. */
+    if (!absolute) return 3; /* RT_NIL (runtime_value.h); this file does not include it */
     int64_t result = rt_string_new((const uint8_t*)absolute, strlen(absolute));
     free(absolute);
     return result;

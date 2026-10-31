@@ -44,7 +44,7 @@ pub fn managed_suite_summary_v1(output: text) -> Result<(i64, i64), text>:
 
 fn managed_suite_pin_v1(path: text, digest: text) -> bool:
     builder_digest_valid_v1(digest) and file_is_regular_no_follow(path) and
-        file_hash_sha256(path) == digest
+        _managed_suite_sha_matches(path, digest)
 
 pub fn managed_suite_main_v1(args: [text]) -> i64:
     # --managed-suite SUITE BACKEND SOURCE CLI CLI_SHA INTERPRETER INTERPRETER_SHA
@@ -65,7 +65,9 @@ pub fn managed_suite_main_v1(args: [text]) -> i64:
             not managed_suite_pin_v1(args[14], args[15]): return 2
     val spec = source + "/test/03_system/app/bootstrap_builder/feature/phase4_" + suite + "_acceptance_spec.spl"
     if not file_is_regular_no_follow(spec): return 2
-    val spec_sha = file_hash_sha256(spec)
+    val spec_sha_opt = file_hash_sha256(spec)
+    if spec_sha_opt == nil: return 2
+    val spec_sha = spec_sha_opt.unwrap()
     val evidence = cwd().replace("\\", "/") + "/suite"
     if not dir_create_all(evidence): return 2
     if not file_atomic_write(evidence + "/invocations.log", ""): return 2
@@ -116,6 +118,8 @@ pub fn managed_suite_main_v1(args: [text]) -> i64:
     if total != 3: return 2
     if (code == 0 and failed != 0) or (code == 1 and failed == 0) or
             (code != 0 and code != 1): return 2
+    val invocations_sha = file_hash_sha256(evidence + "/invocations.log")
+    if invocations_sha == nil: return 2
     val receipt = "format=SIMPLE-MANAGED-PHASE4-SUITE-1\n" +
         "suite={suite}\nbackend={backend}\nstatus={if code == 0: "PASS" else: "FAIL"}\n" +
         "expected=3\ntotal={total}\npassed={total - failed}\nfailed={failed}\nexit_code={code}\n" +
@@ -124,6 +128,12 @@ pub fn managed_suite_main_v1(args: [text]) -> i64:
         "tool_authority_sha256={args[15]}\n" +
         "environment_identity={environment_binding.identity}\n" +
         "stdout_sha256=" + sha256_text(stdout) + "\nstderr_sha256=" + sha256_text(stderr) + "\n" +
-        "invocations_sha256=" + file_hash_sha256(evidence + "/invocations.log") + "\n"
+        "invocations_sha256=" + invocations_sha.unwrap() + "\n"
     if not file_atomic_write(args[10], receipt): return 2
     code
+
+# Absent digest (missing/unreadable file) never matches.
+fn _managed_suite_sha_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false

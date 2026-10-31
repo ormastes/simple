@@ -15,6 +15,12 @@ use lib.common.crypto.x25519_mlkem768.evidence_contract.{
 val X25519_MLKEM768_GPU_BINDING_SCHEMA =
     "x25519mlkem768-runner-gpu-binary-binding-v1"
 
+# Absence is a mismatch: an unreadable file never matches any expected digest.
+fn _sha256_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false
+
 struct X25519MlKem768GpuBinding:
     backend: X25519MlKem768EvidenceBackend
     compiler_artifact_sha256: text
@@ -294,20 +300,40 @@ fn x25519_mlkem768_produce_gpu_binding(
     elif (request.accelerator_source_aux != "" or
             request.accelerator_binary_aux != ""):
         return Err("gpu-binding-unexpected-aux-input")
-    val manifest_sha256 = file_hash_sha256(request.fixture_manifest)
-    val compiler_sha256 = file_hash_sha256(request.compiler_artifact)
-    val provenance_sha256 = file_hash_sha256(request.compiler_provenance)
-    val runner_sha256 = file_hash_sha256(request.runner_artifact)
-    val source_sha256 = file_hash_sha256(request.accelerator_source)
-    val binary_sha256 = file_hash_sha256(request.accelerator_binary)
-    val source_aux_sha256 = if vulkan:
-        file_hash_sha256(request.accelerator_source_aux)
-    else:
-        ""
-    val binary_aux_sha256 = if vulkan:
-        file_hash_sha256(request.accelerator_binary_aux)
-    else:
-        ""
+    val manifest_sha256_opt = file_hash_sha256(request.fixture_manifest)
+    if manifest_sha256_opt == nil:
+        return Err("gpu-binding-input-sha256-unavailable")
+    val manifest_sha256 = manifest_sha256_opt.unwrap()
+    val compiler_sha256_opt = file_hash_sha256(request.compiler_artifact)
+    if compiler_sha256_opt == nil:
+        return Err("gpu-binding-input-sha256-unavailable")
+    val compiler_sha256 = compiler_sha256_opt.unwrap()
+    val provenance_sha256_opt = file_hash_sha256(request.compiler_provenance)
+    if provenance_sha256_opt == nil:
+        return Err("gpu-binding-input-sha256-unavailable")
+    val provenance_sha256 = provenance_sha256_opt.unwrap()
+    val runner_sha256_opt = file_hash_sha256(request.runner_artifact)
+    if runner_sha256_opt == nil:
+        return Err("gpu-binding-input-sha256-unavailable")
+    val runner_sha256 = runner_sha256_opt.unwrap()
+    val source_sha256_opt = file_hash_sha256(request.accelerator_source)
+    if source_sha256_opt == nil:
+        return Err("gpu-binding-input-sha256-unavailable")
+    val source_sha256 = source_sha256_opt.unwrap()
+    val binary_sha256_opt = file_hash_sha256(request.accelerator_binary)
+    if binary_sha256_opt == nil:
+        return Err("gpu-binding-input-sha256-unavailable")
+    val binary_sha256 = binary_sha256_opt.unwrap()
+    # Non-Vulkan backends carry no aux inputs; "" there means "no aux file".
+    var source_aux_sha256 = ""
+    var binary_aux_sha256 = ""
+    if vulkan:
+        val source_aux_opt = file_hash_sha256(request.accelerator_source_aux)
+        val binary_aux_opt = file_hash_sha256(request.accelerator_binary_aux)
+        if source_aux_opt == nil or binary_aux_opt == nil:
+            return Err("gpu-binding-input-sha256-unavailable")
+        source_aux_sha256 = source_aux_opt.unwrap()
+        binary_aux_sha256 = binary_aux_opt.unwrap()
     val fixture_manifest = file_read(request.fixture_manifest)
     val provenance_text = file_read(request.compiler_provenance)
     val provenance = stage4_compiler_provenance_from_text(provenance_text)
@@ -343,18 +369,16 @@ fn x25519_mlkem768_produce_gpu_binding(
         device_capability: request.device_capability,
         device_name: request.device_name)
     val encoded = x25519_mlkem768_render_gpu_binding(binding)?
-    if (manifest_sha256 != file_hash_sha256(request.fixture_manifest) or
+    if (not _sha256_matches(request.fixture_manifest, manifest_sha256) or
             fixture_manifest != file_read(request.fixture_manifest) or
-            compiler_sha256 != file_hash_sha256(request.compiler_artifact) or
-            provenance_sha256 != file_hash_sha256(request.compiler_provenance) or
+            not _sha256_matches(request.compiler_artifact, compiler_sha256) or
+            not _sha256_matches(request.compiler_provenance, provenance_sha256) or
             provenance_text != file_read(request.compiler_provenance) or
-            runner_sha256 != file_hash_sha256(request.runner_artifact) or
-            source_sha256 != file_hash_sha256(request.accelerator_source) or
-            binary_sha256 != file_hash_sha256(request.accelerator_binary) or
-            (vulkan and (source_aux_sha256 !=
-                file_hash_sha256(request.accelerator_source_aux) or
-                binary_aux_sha256 !=
-                    file_hash_sha256(request.accelerator_binary_aux)))):
+            not _sha256_matches(request.runner_artifact, runner_sha256) or
+            not _sha256_matches(request.accelerator_source, source_sha256) or
+            not _sha256_matches(request.accelerator_binary, binary_sha256) or
+            (vulkan and (not _sha256_matches(request.accelerator_source_aux, source_aux_sha256) or
+                not _sha256_matches(request.accelerator_binary_aux, binary_aux_sha256)))):
         return Err("gpu-binding-input-changed-during-hash")
     val write_ok = if request.overwrite:
         file_atomic_write(request.output, encoded)
@@ -363,7 +387,10 @@ fn x25519_mlkem768_produce_gpu_binding(
     if not write_ok: return Err("gpu-binding-output-write-failed")
     if not file_is_regular_no_follow(request.output):
         return Err("gpu-binding-output-not-regular-after-write")
-    val output_sha256 = file_hash_sha256(request.output)
+    val output_sha256_opt = file_hash_sha256(request.output)
+    if output_sha256_opt == nil:
+        return Err("gpu-binding-output-sha256-mismatch")
+    val output_sha256 = output_sha256_opt.unwrap()
     if file_read(request.output) != encoded or output_sha256 != sha256_text(encoded):
         return Err("gpu-binding-output-sha256-mismatch")
     Ok(X25519MlKem768GpuBindingReceipt(

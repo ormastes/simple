@@ -65,7 +65,8 @@ use std.io_runtime.{env_set}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
 @unsafe(reason: "raw procfs path-resolution ABI", capabilities: [ffi])
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 extern fn sys_get_args() -> [text]
 
 # --- Legacy word-infix matcher preprocessing (self-contained; this file is kept
@@ -393,12 +394,16 @@ fn find_simple_binary() -> text:
     val current_raw = cli_current_exe_path()
     var current = ""
     if current_raw != "" and file_exists(current_raw):
-        current = unsafe(capabilities: [ffi]): rt_path_absolute(current_raw) ?? ""
+        val current_abs = unsafe(capabilities: [ffi]): rt_path_absolute(current_raw)
+        if current_abs != nil:
+            current = current_abs.unwrap()
     if current == "":
         val raw = sys_get_args()
         # A source-mode argv[0] is a `.spl` path: never a binary candidate.
         if raw.len() > 0 and not raw[0].ends_with(".spl") and file_exists(raw[0]):
-            current = unsafe(capabilities: [ffi]): rt_path_absolute(raw[0]) ?? ""
+            val argv_abs = unsafe(capabilities: [ffi]): rt_path_absolute(raw[0])
+            if argv_abs != nil:
+                current = argv_abs.unwrap()
         elif raw.len() > 0 and raw[0].ends_with(".spl"):
             print "error: test-runner: argv[0] is a source file ({raw[0]}), not a binary"
             print "error: this platform has no /proc; set SIMPLE_BINARY to the invoking compiler binary"
@@ -419,7 +424,11 @@ fn find_simple_binary() -> text:
         return current
     if not file_exists(configured_raw):
         return ""
-    val configured = unsafe(capabilities: [ffi]): rt_path_absolute(configured_raw) ?? ""
+    val configured_abs = unsafe(capabilities: [ffi]): rt_path_absolute(configured_raw)
+    if configured_abs == nil:
+        print "error: test-runner: SIMPLE_BINARY ({configured_raw}) cannot be made absolute: current directory unreadable"
+        return ""
+    val configured = configured_abs.unwrap()
     if configured == "" or not file_exists(configured) or configured != current:
         return ""
     configured

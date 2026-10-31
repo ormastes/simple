@@ -357,7 +357,9 @@ pub class FlatPoolReader:
     # unescaping. Canonical readers accept only the two producer escape forms,
     # charge both validation and decode scans, and reserve the append arena plus
     # joined output before either can be materialized.
-    me decode_text(raw: text) -> text:
+    # nil is the wire nil `\N` (a lowered module's `text` field can be nil) or
+    # a rejected read; `self.ok` tells the two apart.
+    me decode_text(raw: text) -> text?:
         if raw == "\\N":
             return nil
         if not self.bounded:
@@ -394,6 +396,16 @@ pub class FlatPoolReader:
         if not self.reserve(byte_count * 34 + 64):
             return nil
         flat_pool_unescape(raw)
+
+    # A record field declared `text` cannot carry the wire nil: reject it as
+    # malformed. Like `next()`, a rejected read yields "" with `self.ok` false,
+    # so callers check `ok` once after the record.
+    me decode_required_text(raw: text) -> text:
+        if val decoded = self.decode_text(raw):
+            return decoded
+        if self.ok:
+            self.reject_malformed("nil_in_required_text")
+        ""
 
     # Preflight the temporary UTF-8 images used by canonical adjacent text-key
     # comparison. The ordering helper performs the allocation only after this

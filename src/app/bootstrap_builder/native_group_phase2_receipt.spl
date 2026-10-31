@@ -265,7 +265,7 @@ fn phase2_native_authority_receipt_decode_v1(
 
 fn _phase2_artifact_readback_v1(value: Phase2ReceiptArtifactV1) -> bool:
     file_is_regular_no_follow(value.path) and
-        file_hash_sha256(value.path) == value.digest
+        _native_group_phase2_receipt_sha_matches(value.path, value.digest)
 
 fn phase2_native_authority_receipt_open_v1(
     receipt_path: text, expected_digest: text
@@ -276,7 +276,7 @@ fn phase2_native_authority_receipt_open_v1(
         return Err("Phase2 native authority receipt unavailable")
     val payload = file_read_regular_no_follow_bounded(receipt_path, 32768)?
     if sha256_text(payload) != expected_digest or
-            file_hash_sha256(receipt_path) != expected_digest:
+            _native_group_phase2_receipt_sha_mismatch(receipt_path, expected_digest):
         return Err("Phase2 native authority receipt digest differs")
     val value = phase2_native_authority_receipt_decode_v1(payload)?
     if receipt_path != value.output_root + "/authority.receipt" or
@@ -302,9 +302,8 @@ fn phase2_native_authority_receipt_open_v1(
             not _phase2_artifact_readback_v1(value.scv.receipt) or
             not file_is_regular_no_follow(value.scv.snapshot_root +
                 "/src/package_ownership/simple.sdn") or
-            file_hash_sha256(value.scv.snapshot_root +
-                "/src/package_ownership/simple.sdn") !=
-                    value.scv.package_policy_digest or
+            _native_group_phase2_receipt_sha_mismatch(value.scv.snapshot_root +
+                "/src/package_ownership/simple.sdn", value.scv.package_policy_digest) or
             not _phase2_artifact_readback_v1(value.llvm_index_config) or
             not _phase2_artifact_readback_v1(value.cranelift_index_config) or
             not _phase2_artifact_readback_v1(value.phase3_llvm_index_config) or
@@ -407,3 +406,15 @@ export phase2_native_authority_receipt_decode_v1
 export phase2_native_authority_receipt_open_v1
 export phase2_native_authority_receipt_publish_v1
 export phase2_native_authority_field_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _native_group_phase2_receipt_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true
+
+# Absent digest (missing/unreadable file) never matches.
+fn _native_group_phase2_receipt_sha_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false

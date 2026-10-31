@@ -35,7 +35,10 @@ fn _hello_runtime_collect_v2(root: text, relative: text, depth: i64,
         elif file_is_regular_no_follow(physical):
             if result.len() >= 4096:
                 return Err("provisional hello runtime inventory limit")
-            val digest = file_hash_sha256(physical)
+            val digest_opt = file_hash_sha256(physical)
+            if digest_opt == nil:
+                return Err("provisional hello runtime hash failed")
+            val digest = digest_opt.unwrap()
             if not builder_digest_valid_v1(digest):
                 return Err("provisional hello runtime hash failed")
             result = result.push(digest + " " + child)
@@ -52,7 +55,7 @@ fn native_group_provisional_hello_runtime_verify_v2(
             root.ends_with("/.") or root.ends_with("/..") or root.ends_with("/") or
             not builder_digest_valid_v1(digest) or
             not file_is_regular_no_follow(manifest) or
-            file_hash_sha256(manifest) != digest:
+            _native_group_provisional_hello_runtime_sha_mismatch(manifest, digest):
         return Err("provisional hello runtime manifest pin differs")
     # Reject ancestor aliases too; a regular leaf beneath a linked directory
     # is not an independently owned runtime profile.
@@ -81,3 +84,9 @@ fn native_group_provisional_hello_runtime_verify_v2(
     Ok(root)
 
 export native_group_provisional_hello_runtime_verify_v2
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _native_group_provisional_hello_runtime_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

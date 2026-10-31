@@ -1,0 +1,90 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# rt_path_absolute is declared optional
+
+`rt_path_absolute` used to hand back the RELATIVE input when the current
+directory could not be read: a silent default. The Rust interpreter, the Rust
+native runtime and the C runtime now return nil in that case, so every Simple
+declaration under src/lib, src/app, src/compiler and src/os must say `-> text?`
+and every caller must handle the absence explicitly.
+
+The source block pins each declaration. A `bin/simple test` run executes the
+deployed binary, so a behavioural test alone would also pass against reverted
+source. The behaviour block checks that a present result is still absolute.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file_text}
+use std.nogc_sync_mut.ffi.io.{path_absolute}
+
+val OPTIONAL_DECL = "extern fn rt_path_absolute(path: text) -> text?"
+val PLAIN_DECL = "extern fn rt_path_absolute(path: text) -> text"
+
+val DECLARING_FILES = [
+    "src/app/test/riscv_gen2_qualification_receipt.spl",
+    "src/app/io/_CliCompile/native_build_closure.spl",
+    "src/app/io/_CliCompile/compile_targets.spl",
+    "src/app/io/source_discovery.spl",
+    "src/app/cli/cli_helpers.spl",
+    "src/app/test_daemon/main.spl",
+    "src/app/test_runner_new/test_runner_single.spl",
+    "src/app/test_runner_new/test_runner_client.spl",
+    "src/lib/nogc_sync_mut/storage_roots/path_policy.spl",
+    "src/lib/nogc_sync_mut/sffi/io.spl",
+    "src/lib/editor/extensions/runtime.spl",
+    "src/os/_QemuRunner/os_build_run.spl",
+    "src/compiler/00.common/cache/phase_compatibility_path_io.spl",
+    "src/compiler/70.backend/backend/runtime_compiler.spl",
+    "src/compiler/80.driver/cache/cold_hir_semantic_action_emission_v1.spl",
+    "src/compiler/80.driver/smf/runtime_std_hir_emission_v1.spl",
+    "src/compiler/80.driver/smf/runtime_std_mir_emission_v1.spl",
+    "src/compiler/80.driver/smf/runtime_std_compiled_publication.spl",
+    "src/compiler/80.driver/driver_public_shared.spl",
+    "src/compiler/80.driver/driver_entry_closure_core.spl",
+    "src/compiler/90.tools/duplicate_check/detector_files.spl"
+]
+
+fn _count_lines(path: text, decl: text) -> i64:
+    val src = read_file_text(path)
+    var n = 0
+    for line in src.split("\n"):
+        if line.trim() == decl:
+            n = n + 1
+    n
+
+fn _files_missing_optional() -> [text]:
+    var bad: [text] = []
+    for path in DECLARING_FILES:
+        if _count_lines(path, OPTIONAL_DECL) != 1 or _count_lines(path, PLAIN_DECL) != 0:
+            bad.push(path)
+    bad
+
+fn _files_with_relative_fallback() -> [text]:
+    var bad: [text] = []
+    for path in DECLARING_FILES:
+        val src = read_file_text(path)
+        if src.contains("rt_path_absolute(path) ?? path"):
+            bad.push(path)
+    bad
+
+describe "rt_path_absolute declarations":
+    it "every in-scope declaration is text? and none is plain text":
+        # @req REQ-SSPEC-UNIT
+        step("Read every declaring file")
+        expect(_files_missing_optional()).to_equal([])
+
+    it "no caller substitutes the relative input for a missing result":
+        # @req REQ-SSPEC-UNIT
+        step("Scan declaring files for a relative-path fallback")
+        expect(_files_with_relative_fallback()).to_equal([])
+
+describe "path_absolute behaviour":
+    it "a present result for a relative path is absolute":
+        # @req REQ-SSPEC-UNIT
+        step("Resolve a relative path through the std wrapper")
+        val got = path_absolute("test/01_unit")
+        val absolute = got.starts_with("/") or (got.len() > 2 and got[1:2] == ":")
+        expect(absolute).to_equal(true)
+        expect(got.ends_with("01_unit")).to_equal(true)

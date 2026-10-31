@@ -10,7 +10,7 @@ extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "copies a regular source without following links into an exclusive staging file", capabilities: [ffi])
 extern fn rt_file_copy_create_excl_no_follow(source: text, destination: text) -> bool
 @unsafe(reason: "hashes the staged regular file for caller-supplied evidence verification", capabilities: [ffi])
-extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_file_hash_sha256(path: text) -> text?
 @unsafe(reason: "reads staged file size for caller-supplied evidence verification", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
 @unsafe(reason: "durably synchronizes staged data and destination directory entries", capabilities: [ffi])
@@ -57,8 +57,11 @@ fn _parse_hex_word(value: text, start: i64) -> u64:
 pub fn artifact_evidence_for_storage_file(path: CanonicalPath) -> Result<ArtifactEvidence, PublishError>:
     val size = unsafe(capabilities: [ffi]):
         rt_file_size(path.value)
-    val digest = unsafe(capabilities: [ffi]):
+    val digest_opt = unsafe(capabilities: [ffi]):
         rt_file_hash_sha256(path.value)
+    if digest_opt == nil:
+        return Err(PublishError.EvidenceMismatch)
+    val digest = digest_opt.unwrap()
     if size < 0 or digest.len() != 64:
         return Err(PublishError.EvidenceMismatch)
     Ok(ArtifactEvidence(
@@ -79,9 +82,11 @@ fn _evidence_matches(path: text, evidence: ArtifactEvidence) -> bool:
         rt_file_size(path)
     if size < 0 or size.to_u64() != evidence.byte_count:
         return false
-    val digest = unsafe(capabilities: [ffi]):
+    val digest_opt = unsafe(capabilities: [ffi]):
         rt_file_hash_sha256(path)
-    digest == _digest_text(evidence.digest)
+    if val digest = digest_opt:
+        return digest == _digest_text(evidence.digest)
+    false
 
 fn _root(roots: StorageRoots, kind: StorageRootKind) -> CanonicalPath:
     match kind:

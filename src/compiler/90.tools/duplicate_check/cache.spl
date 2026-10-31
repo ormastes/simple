@@ -27,7 +27,12 @@ impl TokenCacheManager:
         ""
 
     me tokens(file_path: text, tokenize_fn: fn(text) -> [SimpleToken]) -> [SimpleToken]:
-        val current_hash = file_hash_sha256(file_path)
+        val current_hash_opt = file_hash_sha256(file_path)
+        if current_hash_opt == nil:
+            # Unhashable file: cache miss, and nothing is cached for it.
+            self.invalidate(file_path)
+            return tokenize_fn(file_path)
+        val current_hash = current_hash_opt.unwrap()
         val cached_tokens = self.fresh_tokens(file_path, current_hash)
         if cached_tokens != nil:
             return cached_tokens
@@ -45,24 +50,35 @@ impl TokenCacheManager:
     fn cached_tokens(file_path: text) -> [SimpleToken]?:
         if self.cache.has(file_path):
             val cached = self.cache[file_path]
-            if cached.source_hash == file_hash_sha256(file_path):
-                return cached.tokens
+            if val current_hash = file_hash_sha256(file_path):
+                if cached.source_hash == current_hash:
+                    return cached.tokens
         nil
 
     me store(file_path: text, tokens: [SimpleToken]):
+        val source_hash_opt = file_hash_sha256(file_path)
+        if source_hash_opt == nil:
+            # Unhashable file: never cache it under an absent digest.
+            self.invalidate(file_path)
+            return
         self.cache[file_path] = TokenCache(
             file_path: file_path,
             mtime: get_file_mtime(file_path),
-            source_hash: file_hash_sha256(file_path),
+            source_hash: source_hash_opt.unwrap(),
             tokens: tokens,
             content: self.content(file_path)
         )
 
     me store_with_content(file_path: text, tokens: [SimpleToken], content: text):
+        val source_hash_opt = file_hash_sha256(file_path)
+        if source_hash_opt == nil:
+            # Unhashable file: never cache it under an absent digest.
+            self.invalidate(file_path)
+            return
         self.cache[file_path] = TokenCache(
             file_path: file_path,
             mtime: get_file_mtime(file_path),
-            source_hash: file_hash_sha256(file_path),
+            source_hash: source_hash_opt.unwrap(),
             tokens: tokens,
             content: content
         )
