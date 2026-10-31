@@ -14775,7 +14775,7 @@ int64_t rt_path_absolute(const uint8_t* path_ptr, uint64_t path_len) {
     }
     free(path);
     /* cwd (or allocation) failure: nil, never the relative input. RT_NIL == 3. */
-    if (!absolute) return 3;
+    if (!absolute) return 3; /* RT_NIL (runtime_value.h); this file does not include it */
     int64_t result = rt_string_new((const uint8_t*)absolute, strlen(absolute));
     free(absolute);
     return result;
