@@ -4,7 +4,8 @@ use std.common.storage_roots.*
 use std.common.crypto.sha256.{sha256_text}
 
 @unsafe(reason: "resolves existing path components so storage containment cannot cross a symlink", capabilities: [ffi])
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 @unsafe(reason: "checks whether an existing path component must be resolved", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 
@@ -106,7 +107,8 @@ pub fn validate_storage_containment(root: CanonicalPath, candidate: CanonicalPat
 
     val resolved_root = unsafe(capabilities: [ffi]):
         rt_path_absolute(normalized_root.value)
-    if _canonical_lexical(resolved_root) != Some(normalized_root.value):
+    # An unresolvable root cannot be proven symlink-free: fail closed.
+    if resolved_root == nil or _canonical_lexical(resolved_root.unwrap()) != Some(normalized_root.value):
         return Err(StoragePathError.SymlinkEscape)
 
     val relative = normalized_candidate.value.substring(normalized_root.value.len() + 1)
@@ -119,7 +121,9 @@ pub fn validate_storage_containment(root: CanonicalPath, candidate: CanonicalPat
         if exists:
             val resolved = unsafe(capabilities: [ffi]):
                 rt_path_absolute(prefix)
-            val canonical_resolved = _canonical_lexical(resolved)
+            if resolved == nil:
+                return Err(StoragePathError.SymlinkEscape)
+            val canonical_resolved = _canonical_lexical(resolved.unwrap())
             if canonical_resolved == nil:
                 return Err(StoragePathError.SymlinkEscape)
             val resolved_path = CanonicalPath(value: canonical_resolved!)

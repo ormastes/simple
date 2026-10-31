@@ -2,7 +2,8 @@
 # production readers and writers use this boundary before touching artifacts.
 
 @unsafe(reason: "canonical filesystem path resolution", capabilities: [ffi])
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 @unsafe(reason: "filesystem path classification", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "filesystem path classification", capabilities: [ffi])
@@ -133,7 +134,10 @@ fn phase_compatibility_canonical_directory_io_v1(
     # only) so the admission below compares canonical spellings, never raw
     # platform surface forms.
     root = phase_compatibility_path_spelling_io_v1(root)
-    val canonical_root = phase_compatibility_path_spelling_io_v1(rt_path_absolute(root) ?? "")
+    val canonical_root_abs = rt_path_absolute(root)
+    if canonical_root_abs == nil:
+        return phase_compatibility_path_reject_io_v1("root-unresolved")
+    val canonical_root = phase_compatibility_path_spelling_io_v1(canonical_root_abs.unwrap())
     if canonical_root == "":
         return phase_compatibility_path_reject_io_v1("root-unresolved")
     if root != canonical_root:
@@ -155,7 +159,10 @@ fn phase_compatibility_existing_artifact_io_v1(
     # Same lexical spelling normalization as the root admission: compare
     # canonical spellings, never raw platform surface forms.
     path = phase_compatibility_path_spelling_io_v1(path)
-    val canonical_path = phase_compatibility_path_spelling_io_v1(rt_path_absolute(path) ?? "")
+    val canonical_path_abs = rt_path_absolute(path)
+    if canonical_path_abs == nil:
+        return phase_compatibility_path_reject_io_v1("artifact-unresolved")
+    val canonical_path = phase_compatibility_path_spelling_io_v1(canonical_path_abs.unwrap())
     if canonical_path == "":
         return phase_compatibility_path_reject_io_v1("artifact-unresolved")
     if path != canonical_path:
@@ -178,7 +185,10 @@ fn phase_compatibility_destination_io_v1(
     val parent = phase_compatibility_path_parent_io_v1(spelling)
     if parent == "" or not rt_dir_exists(parent):
         return phase_compatibility_path_reject_io_v1("destination-parent-unavailable")
-    val canonical_parent = phase_compatibility_path_spelling_io_v1(rt_path_absolute(parent) ?? "")
+    val canonical_parent_abs = rt_path_absolute(parent)
+    if canonical_parent_abs == nil:
+        return phase_compatibility_path_reject_io_v1("destination-parent-not-canonical")
+    val canonical_parent = phase_compatibility_path_spelling_io_v1(canonical_parent_abs.unwrap())
     if canonical_parent == "" or not phase_compatibility_path_canonical_spelling_io_v1(parent, canonical_parent):
         return phase_compatibility_path_reject_io_v1("destination-parent-not-canonical")
     if not phase_compatibility_directory_chain_io_v1(canonical_parent):
@@ -203,7 +213,10 @@ fn phase_compatibility_existing_manifest_io_v1(
     if not rt_file_is_regular_no_follow(path):
         return phase_compatibility_path_reject_io_v1("manifest-not-regular-no-follow")
     val spelling = phase_compatibility_path_spelling_io_v1(path)
-    val canonical_path = phase_compatibility_path_spelling_io_v1(rt_path_absolute(path) ?? "")
+    val canonical_path_abs = rt_path_absolute(path)
+    if canonical_path_abs == nil:
+        return phase_compatibility_path_reject_io_v1("manifest-unresolved")
+    val canonical_path = phase_compatibility_path_spelling_io_v1(canonical_path_abs.unwrap())
     if canonical_path == "":
         return phase_compatibility_path_reject_io_v1("manifest-unresolved")
     if not phase_compatibility_path_canonical_spelling_io_v1(spelling, canonical_path):

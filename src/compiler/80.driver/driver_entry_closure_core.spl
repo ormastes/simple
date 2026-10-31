@@ -29,7 +29,8 @@ extern fn rt_transient_array_scope_end() -> bool
 @unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "raw canonical-path lookup; empty text is the unresolved or provider-failure sentinel", capabilities: [ffi])
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 @unsafe(reason: "raw directory listing; empty data conflates empty, inaccessible, and provider failure", capabilities: [ffi])
 extern fn rt_dir_list(path: text) -> [text]?
 @unsafe(reason: "raw recursive directory walk; empty data conflates empty, inaccessible, and provider failure", capabilities: [ffi])
@@ -264,17 +265,20 @@ pub fn _driver_canonical_source_path(path: text) -> text:
 
 pub fn _driver_physical_source_key(path: text) -> text:
     """Return the platform-canonical source identity, with lexical fallback."""
-    var physical = ""
-    unsafe(capabilities: [ffi]):
-        physical = rt_path_absolute(path) ?? ""
+    val resolved = unsafe(capabilities: [ffi]): rt_path_absolute(path)
+    # Documented contract (see docstring): unresolved -> lexical spelling.
+    if resolved == nil:
+        return _driver_canonical_source_path(path)
+    val physical = resolved.unwrap()
     _driver_canonical_source_path(if physical != "": physical else: path)
 
 pub fn _driver_physical_source_key_strict_v1(path: text) -> text:
     # Full-inventory authority must not fall back to a lexical spelling when
     # the host cannot resolve a reparse/symlink path.
-    var physical = ""
-    unsafe(capabilities: [ffi]):
-        physical = rt_path_absolute(path) ?? ""
+    val resolved = unsafe(capabilities: [ffi]): rt_path_absolute(path)
+    # "" is this fn's documented "unresolved" result (no lexical fallback).
+    if resolved == nil: return ""
+    val physical = resolved.unwrap()
     if physical == "": "" else: _driver_canonical_source_path(physical)
 
 pub fn _driver_text_bucket_index(key: text, bucket_count: i64) -> i64:
@@ -343,14 +347,12 @@ pub fn _driver_module_name_collision(sources: [SourceFile]) -> text:
         if first_paths.contains_key(source.module_name):
             val first = first_paths[source.module_name]
             if first != path:
-                var first_absolute = ""
-                var path_absolute = ""
-                unsafe(capabilities: [ffi]):
-                    first_absolute = rt_path_absolute(first) ?? ""
-                unsafe(capabilities: [ffi]):
-                    path_absolute = rt_path_absolute(path) ?? ""
-                val first_physical = _driver_canonical_source_path(first_absolute)
-                val path_physical = _driver_canonical_source_path(path_absolute)
+                val first_resolved = unsafe(capabilities: [ffi]): rt_path_absolute(first)
+                val path_resolved = unsafe(capabilities: [ffi]): rt_path_absolute(path)
+                if first_resolved == nil or path_resolved == nil:
+                    return "native module name collision check failed: cannot resolve '{first}' or '{path}' (current directory unreadable)"
+                val first_physical = _driver_canonical_source_path(first_resolved.unwrap())
+                val path_physical = _driver_canonical_source_path(path_resolved.unwrap())
                 if first_physical != path_physical:
                     return "native module name collision after path sanitization: '{first}' and '{path}' both map to '{source.module_name}'; rename one file or directory"
         else:
@@ -477,9 +479,11 @@ fn _driver_physical_module_identity(path: text, fallback: text) -> (text, bool):
     existing names. Return that root-membership decision with the name so
     alias folding cannot mistake an external `/src/` substring for a repo
     tier. Both values come from this one physical-root proof."""
-    var resolved = ""
-    unsafe(capabilities: [ffi]):
-        resolved = rt_path_absolute(path) ?? ""
+    val resolved_abs = unsafe(capabilities: [ffi]): rt_path_absolute(path)
+    # Documented contract: an unresolvable file keeps its lexical name.
+    if resolved_abs == nil:
+        return (fallback, false)
+    var resolved = resolved_abs.unwrap()
     if resolved == "":
         return (fallback, false)
     var root = ""
@@ -487,8 +491,10 @@ fn _driver_physical_module_identity(path: text, fallback: text) -> (text, bool):
         root = driver_admitted_epoch_root_v1()
         resolved = driver_admitted_epoch_normalize_v1(resolved, host_is_windows_host())
     else:
-        unsafe(capabilities: [ffi]):
-            root = rt_path_absolute(".") ?? ""
+        val root_abs = unsafe(capabilities: [ffi]): rt_path_absolute(".")
+        if root_abs == nil:
+            return (fallback, false)
+        root = root_abs.unwrap()
     if root == "":
         return (fallback, false)
     if not resolved.starts_with(root + "/"):
