@@ -6,12 +6,13 @@
 `rt_path_absolute` used to hand back the RELATIVE input when the current
 directory could not be read: a silent default. The Rust interpreter, the Rust
 native runtime and the C runtime now return nil in that case, so every Simple
-declaration under src/lib, src/app, src/compiler and src/os must say `-> text?`
-and every caller must handle the absence explicitly.
+declaration under src/lib, src/app, src/compiler, src/compiler_rust/lib and
+src/os must say `-> text?` and every caller must handle the absence explicitly.
 
 The source block pins each declaration. A `bin/simple test` run executes the
 deployed binary, so a behavioural test alone would also pass against reverted
-source. The behaviour block checks that a present result is still absolute.
+source. The behaviour block checks that a present result is still absolute and
+that the 20.hir canonical-path caller fails closed instead of using the input.
 """
 
 use std.spec.step
@@ -36,6 +37,7 @@ val DECLARING_FILES = [
     "src/lib/editor/extensions/runtime.spl",
     "src/os/_QemuRunner/os_build_run.spl",
     "src/compiler/00.common/cache/phase_compatibility_path_io.spl",
+    "src/compiler/20.hir/hir_lowering/module_surface_source_identity.spl",
     "src/compiler/70.backend/backend/runtime_compiler.spl",
     "src/compiler/80.driver/cache/cold_hir_semantic_action_emission_v1.spl",
     "src/compiler/80.driver/smf/runtime_std_hir_emission_v1.spl",
@@ -43,7 +45,10 @@ val DECLARING_FILES = [
     "src/compiler/80.driver/smf/runtime_std_compiled_publication.spl",
     "src/compiler/80.driver/driver_public_shared.spl",
     "src/compiler/80.driver/driver_entry_closure_core.spl",
-    "src/compiler/90.tools/duplicate_check/detector_files.spl"
+    "src/compiler/90.tools/duplicate_check/detector_files.spl",
+    "src/compiler_rust/lib/std/src/infra/file_io.spl",
+    "src/compiler_rust/lib/std/src/shell.spl",
+    "src/compiler_rust/lib/std/src/sys/sffi/io.spl"
 ]
 
 fn _count_lines(path: text, decl: text) -> i64:
@@ -88,3 +93,10 @@ describe "path_absolute behaviour":
         val absolute = got.starts_with("/") or (got.len() > 2 and got[1:2] == ":")
         expect(absolute).to_equal(true)
         expect(got.ends_with("01_unit")).to_equal(true)
+
+    it "20.hir canonical path fails closed instead of using the relative input":
+        # @req REQ-SSPEC-UNIT
+        step("Read the 20.hir caller and verify its nil guard")
+        val src = read_file_text("src/compiler/20.hir/hir_lowering/module_surface_source_identity.spl")
+        expect(src.contains("if physical == nil or physical == \"\":")).to_equal(true)
+        expect(src.contains("(if physical != \"\": physical else: path)")).to_equal(false)
