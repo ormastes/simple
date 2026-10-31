@@ -91,21 +91,35 @@ fn bootstrap_adhoc_compiler_error(compiler: text) -> text:
         return "unrecognized compiler identity: {identity}"
     ""
 
-fn bootstrap_adhoc_authority(config: BootstrapAdhocConfig, lane: text) -> text:
+# The first input whose sha256 cannot be read, or "" when every input hashes.
+fn bootstrap_adhoc_unhashable_input(config: BootstrapAdhocConfig) -> text:
+    var inputs: [text] = [config.compiler, config.positive_fixture, config.negative_fixture]
+    for path in config.changed_paths:
+        inputs.push(path)
+    for path in inputs:
+        if bootstrap_adhoc_file_hash(path) == nil:
+            return path
+    ""
+
+# Callers must check bootstrap_adhoc_unhashable_input first; an authority is
+# never written with a missing digest.
+fn bootstrap_adhoc_authority(config: BootstrapAdhocConfig, lane: text) -> text?:
+    if bootstrap_adhoc_unhashable_input(config) != "":
+        return nil
     var authority = "schema=bootstrap-adhoc-authority-v1\n"
     authority = authority + "lane={lane}\n"
     authority = authority + "backend={config.backend}\n"
     authority = authority + "jobs={config.jobs}\n"
     authority = authority + "compiler={config.compiler}\n"
-    authority = authority + "compiler_sha256={bootstrap_adhoc_file_hash(config.compiler)}\n"
+    authority = authority + "compiler_sha256={bootstrap_adhoc_file_hash(config.compiler).unwrap()}\n"
     authority = authority + "positive={config.positive_fixture}\n"
-    authority = authority + "positive_sha256={bootstrap_adhoc_file_hash(config.positive_fixture)}\n"
+    authority = authority + "positive_sha256={bootstrap_adhoc_file_hash(config.positive_fixture).unwrap()}\n"
     authority = authority + "negative={config.negative_fixture}\n"
-    authority = authority + "negative_sha256={bootstrap_adhoc_file_hash(config.negative_fixture)}\n"
+    authority = authority + "negative_sha256={bootstrap_adhoc_file_hash(config.negative_fixture).unwrap()}\n"
     authority = authority + "negative_expect={config.negative_expect}\n"
     for path in config.changed_paths:
         authority = authority + "changed={path}\n"
-        authority = authority + "changed_sha256={bootstrap_adhoc_file_hash(path)}\n"
+        authority = authority + "changed_sha256={bootstrap_adhoc_file_hash(path).unwrap()}\n"
     authority
 
 fn bootstrap_adhoc_compile_args(
@@ -140,7 +154,15 @@ fn bootstrap_adhoc_check(config: BootstrapAdhocConfig, decision: BootstrapAdhocD
         print "error: {compiler_error}"
         return 2
 
-    val authority = bootstrap_adhoc_authority(config, decision.lane)
+    val unhashable = bootstrap_adhoc_unhashable_input(config)
+    if unhashable != "":
+        print "error: cannot hash authority input: {unhashable}"
+        return 2
+    val authority_opt = bootstrap_adhoc_authority(config, decision.lane)
+    if authority_opt == nil:
+        print "error: cannot build authority"
+        return 2
+    val authority: text = authority_opt.unwrap()
     val authority_sha = bootstrap_adhoc_hash_text(config.output_root, authority)
     if authority_sha == "":
         print "error: cannot hash authority"
@@ -200,10 +222,14 @@ fn bootstrap_adhoc_check(config: BootstrapAdhocConfig, decision: BootstrapAdhocD
         print "error: negative capsule missed expected diagnostic: {config.negative_expect}"
         return 1
 
+    val positive_artifact_sha = bootstrap_adhoc_file_hash(positive_artifact)
+    if positive_artifact_sha == nil:
+        print "error: cannot hash positive artifact: {positive_artifact}"
+        return 1
     val receipt = authority +
         "authority_sha256={authority_sha}\n" +
         "positive_artifact={positive_artifact}\n" +
-        "positive_artifact_sha256={bootstrap_adhoc_file_hash(positive_artifact)}\n" +
+        "positive_artifact_sha256={positive_artifact_sha.unwrap()}\n" +
         "positive_marker={bootstrap_adhoc_pass_marker(decision.lane)}\n" +
         "negative_compile_exit={negative.exit_code}\n" +
         "release_admissible=false\n" +
