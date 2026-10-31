@@ -12,8 +12,9 @@
 # surfaces), the frozen capsule (own MIR + storage snapshot) and object
 # emission. The link consumes object paths only. So the lowering loop flushes
 # a full batch through those stages, records what the final link/verdict
-# needs in this summary, and releases the batch's MirModules. The final
-# `compile_to_native` call handles the tail batch and merges this summary.
+# needs in this summary, and releases the batch's MirModules. Successful builds
+# send the tail through final `compile_to_native`; after a lowering failure,
+# the driver flushes it with its own verdict so later good modules still emit.
 #
 # What must persist across batches (and therefore lives here, not in MIR):
 # object paths, per-module outcomes (so ONE build still names every bad
@@ -69,6 +70,13 @@ pub class NativeStagedCodegenStateV1:
     module_objects: {text: text}
 
 impl NativeStagedCodegenStateV1:
+    # The lowering verdict is per batch: a batch holding a failed module (whose
+    # broken MIR is still in ctx.mir_modules outside go-to-end) emits nothing,
+    # but must not withhold later batches. The build still fails at the end
+    # from the collected MIR errors, so the link stays blocked.
+    me record_batch_lowering_v1(batch_failed: bool):
+        self.lowering_failed = batch_failed
+
     static fn inactive() -> NativeStagedCodegenStateV1:
         NativeStagedCodegenStateV1.begin(0)
 
@@ -118,8 +126,14 @@ pub fn native_staged_codegen_batch_size_v1() -> i64:
         env_get_nullable(NATIVE_STAGED_CODEGEN_BATCH_ENV_V1) ?? "")
 
 # A batch is flushed only when it is full AND more modules remain to be
-# lowered, so the tail batch is always non-empty and goes through the
-# ordinary aot_compile pass chain + final compile_to_native (verdict, link).
+# lowered. A successful tail stays non-empty for the ordinary aot_compile
+# pass chain + final compile_to_native (verdict, link).
 pub fn native_staged_codegen_flush_due_v1(pending: i64, batch_size: i64,
         lowered: i64, scheduled: i64) -> bool:
     batch_size > 0 and pending >= batch_size and lowered < scheduled
+
+# Failure recovery must release the pending tail before the global MIR error
+# stops stage_emit_object. The tail still uses its own lowering verdict.
+pub fn native_staged_codegen_recovery_flush_due_v1(
+        active: bool, go_to_end: bool, pending: i64, failed_modules: i64) -> bool:
+    active and not go_to_end and pending > 0 and failed_modules > 0

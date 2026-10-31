@@ -37,7 +37,10 @@ pub enum DynlibAdmissionErrorV1:
 pub fn dynlib_artifact_digest_hex_v1(path: text) -> text:
     if path == "" or not file_exists(path):
         return ""
-    rt_file_hash_sha256(path) ?? ""
+    # Contract: failure == empty (documented above).
+    if val digest = rt_file_hash_sha256(path):
+        return digest
+    ""
 
 # Size in bytes, or -1 when the artifact cannot be sized. Carried alongside the
 # digest because the two are read in one pass and a size change is the cheapest
@@ -77,13 +80,10 @@ pub fn dynlib_admit_exact_v1(
     val fd_i32 = fd.to_i32()
     val descriptor_path = "/proc/self/fd/{fd}"
     val actual_opt = rt_file_hash_sha256(descriptor_path)
-    if actual_opt == nil:
+    if actual_opt == nil or actual_opt.unwrap().len() != 64:
         rt_file_close(fd_i32)
         return Err(DynlibAdmissionErrorV1.DigestUnreadable)
-    val actual: text = actual_opt ?? ""
-    if actual.len() != 64:
-        rt_file_close(fd_i32)
-        return Err(DynlibAdmissionErrorV1.DigestUnreadable)
+    val actual = actual_opt.unwrap()
     if actual != expected_digest_hex:
         rt_file_close(fd_i32)
         return Err(DynlibAdmissionErrorV1.DigestMismatch)

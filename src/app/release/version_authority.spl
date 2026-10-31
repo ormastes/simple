@@ -2,7 +2,7 @@
 # Repository-backed release version authority.  This module reads and plans;
 # callers must apply plans through an isolated, approval-gated mutation layer.
 
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_atomic_write, file_hash_sha256, file_hash_sha256_optional}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_atomic_write, file_hash_sha256}
 use app.io.mod.{process_run_bounded}
 use app.devhub.version_manifest.{VersionManifest, parse_version_manifest, render_version_manifest}
 use app.release.policy.{ReleaseVersion, ReleaseSession, parse_release_version, check_version_channel}
@@ -427,6 +427,12 @@ fn _target_manifest(current: VersionManifest, target: ReleaseVersion, channel: t
         projections: current.projections, valid: true, error: ""
     )
 
+# Absence is a mismatch: an unreadable file never matches any expected digest.
+fn _sha256_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false
+
 fn _projection_edits(root: text, current: VersionManifest, target: text) -> [VersionProjectionEdit]:
     var edits: [VersionProjectionEdit] = []
     for projection in current.projections:
@@ -436,8 +442,11 @@ fn _projection_edits(root: text, current: VersionManifest, target: text) -> [Ver
         else:
             val payload = file_read(path)
             val observed = _projection_version(projection, payload)
-            if observed != current.semver:
-                edits.push(VersionProjectionEdit(path: projection, original_sha256: file_hash_sha256(path), observed_version: observed, target_version: target, rendered_content: "", changed: false, valid: false, error: "projection is stale or ambiguous"))
+            val original_opt = file_hash_sha256(path)
+            if original_opt == nil:
+                edits.push(VersionProjectionEdit(path: projection, original_sha256: "", observed_version: observed, target_version: target, rendered_content: "", changed: false, valid: false, error: "declared projection could not be hashed"))
+            elif observed != current.semver:
+                edits.push(VersionProjectionEdit(path: projection, original_sha256: original_opt.unwrap(), observed_version: observed, target_version: target, rendered_content: "", changed: false, valid: false, error: "projection is stale or ambiguous"))
             else:
                 var rendered_lines: [text] = []
                 var replacements = 0
@@ -513,7 +522,7 @@ fn _projection_edits(root: text, current: VersionManifest, target: text) -> [Ver
                 val rendered = rendered_lines.join("\n")
                 val roundtrip_version = _projection_version(projection, rendered)
                 val valid_render = expected_replacements > 0 and replacements == expected_replacements and roundtrip_version == target
-                edits.push(VersionProjectionEdit(path: projection, original_sha256: file_hash_sha256(path), observed_version: observed, target_version: target, rendered_content: rendered, changed: rendered != payload, valid: valid_render, error: if valid_render: "" else: "projection renderer did not update exactly one authoritative field"))
+                edits.push(VersionProjectionEdit(path: projection, original_sha256: original_opt.unwrap(), observed_version: observed, target_version: target, rendered_content: rendered, changed: rendered != payload, valid: valid_render, error: if valid_render: "" else: "projection renderer did not update exactly one authoritative field"))
     edits
 
 fn _plan_repository_version_bump_from_report(root: text, report: RepositoryVersionReport, target_version: text, target_channel: text, proposed_compatibility: CompatibilitySnapshot) -> VersionBumpPlan:
@@ -604,7 +613,7 @@ fn _apply_repository_version_plan_locked(trusted_root: text, expected_manifest_s
     if not _sha256_valid(expected_manifest_sha256):
         return _apply_fail("version apply requires an exact lowercase SHA-256 manifest identity")
     val manifest_path = _root_path(trusted_root, "release/version.sdn")
-    if not file_exists(manifest_path) or file_hash_sha256_optional(manifest_path) != expected_manifest_sha256:
+    if not file_exists(manifest_path) or not _sha256_matches(manifest_path, expected_manifest_sha256):
         return _apply_fail("canonical version manifest changed after planning")
     # Capture one complete, trusted repository snapshot after session
     # verification and manifest CAS.  The plan is derived internally from that
@@ -631,7 +640,7 @@ fn _apply_repository_version_plan_locked(trusted_root: text, expected_manifest_s
             return _apply_fail("version plan contains an invalid or undeclared projection edit")
         val path = _root_path(trusted_root, edit.path)
         val current_content = file_read(path)
-        if file_hash_sha256_optional(path) != edit.original_sha256 or _projection_version(edit.path, current_content) != plan.current_version or _projection_version(edit.path, edit.rendered_content) != plan.target_version:
+        if not _sha256_matches(path, edit.original_sha256) or _projection_version(edit.path, current_content) != plan.current_version or _projection_version(edit.path, edit.rendered_content) != plan.target_version:
             if not _rollback_projection_writes(trusted_root, original_paths, original_contents, written):
                 return _apply_recovery("rollback failed after a stale projection was detected", applied_paths)
             return _apply_fail("projection content changed after planning: " + edit.path)

@@ -47,6 +47,39 @@ class LaneLayoutTests(unittest.TestCase):
                 h.prepare_private_roots(state)
 
 
+class RuntimeStagingTests(unittest.TestCase):
+    """The attempt has no repository root, so every header src/runtime
+    includes from outside itself must be staged with it."""
+    def test_external_includes_are_staged(self):
+        import os, re
+        root = Path(__file__).resolve().parents[3]
+        runtime = root / "src/runtime"
+        found = set()
+        for path in runtime.rglob("*"):
+            if path.suffix not in {".c", ".h", ".m"} or not path.is_file() or "vendor" in path.parts:
+                continue
+            for name in re.findall(r'#\s*include\s+"([^"]+)"', path.read_text(errors="replace")):
+                target = Path(os.path.normpath(path.parent / name))
+                if target.is_file() and runtime not in target.parents:
+                    found.add(target.relative_to(root).as_posix())
+        self.assertEqual(found, set(h.RUNTIME_EXTERNAL_HEADERS))
+
+
+class TaskBudgetTests(unittest.TestCase):
+    """The BuildRunner task budget must fit the V4 wall cap on every host:
+    the default 900 s command timeout used to request 7230 s and V4 refused
+    it before the compiler started (EINVAL, InvalidSchema)."""
+    def test_default_timeout_fits_v4_cap(self):
+        self.assertEqual(h.task_budget_seconds(900), 3600)
+
+    def test_small_timeout_keeps_eight_commands_plus_margin(self):
+        self.assertEqual(h.task_budget_seconds(60), 510)
+
+    def test_never_exceeds_cap(self):
+        for seconds in (1, 446, 447, 3600, 86400):
+            self.assertLessEqual(h.task_budget_seconds(seconds), h.V4_MAX_WALL_SECONDS)
+
+
 class ReceiptTests(unittest.TestCase):
     def setUp(self):
         self.work = Path(tempfile.mkdtemp(prefix="hello-buildrunner-receipt-"))

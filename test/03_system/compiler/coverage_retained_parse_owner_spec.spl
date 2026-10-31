@@ -39,8 +39,13 @@ fn prepare_coverage_owner_probe() -> text:
         return ""
     val producer = admit_source_matched_pure_simple_runtime()
     if producer == "": return ""
-    val producer_digest = file_hash_sha256(producer)
-    val source_digest = file_hash_sha256(PROBE_SOURCE)
+    val producer_digest_opt = file_hash_sha256(producer)
+    val source_digest_opt = file_hash_sha256(PROBE_SOURCE)
+    if producer_digest_opt == nil or source_digest_opt == nil:
+        fail("cannot hash producer or probe source")
+        return ""
+    val producer_digest = producer_digest_opt.unwrap()
+    val source_digest = source_digest_opt.unwrap()
     val artifacts = "build/test-artifacts/coverage-retained-parse-owner-{getpid()}-{time_now_unix_micros()}"
     if not dir_create_all(artifacts):
         fail("cannot create private native probe artifacts")
@@ -59,11 +64,15 @@ fn prepare_coverage_owner_probe() -> text:
         fail("native probe compile failed; retained logs: " + artifacts)
         return ""
     if producer_digest.len() != 64 or source_digest.len() != 64 or
-            file_hash_sha256(producer) != producer_digest or
-            file_hash_sha256(PROBE_SOURCE) != source_digest:
+            file_hash_sha256(producer).unwrap() != producer_digest or
+            file_hash_sha256(PROBE_SOURCE).unwrap() != source_digest:
         fail("producer or probe source changed during native compilation")
         return ""
-    val digest = file_hash_sha256(candidate)
+    val digest_opt = file_hash_sha256(candidate)
+    if digest_opt == nil:
+        fail("cannot hash actual native probe")
+        return ""
+    val digest = digest_opt.unwrap()
     if digest.len() != 64:
         fail("cannot hash actual native probe")
         return ""
@@ -82,7 +91,7 @@ fn check_coverage_owner_policy(mode: text):
     val candidate = prepare_coverage_owner_probe()
     expect(candidate.len()).to_be_greater_than(0)
     if candidate == "": return
-    expect(file_hash_sha256(candidate)).to_equal(coverage_probe_digest)
+    expect(file_hash_sha256(candidate).unwrap()).to_equal(coverage_probe_digest)
     val (out, err, code) = process_run_bounded(candidate, [mode], 120000, 1048576)
     val label = mode.substring(2, mode.len())
     expect(file_write(coverage_probe_artifacts + "/" + label + ".stdout.log", out)).to_equal(true)
@@ -93,7 +102,7 @@ fn check_coverage_owner_policy(mode: text):
     expect(code).to_equal(0)
     expect(out).to_contain("coverage_retained_parse_owner=PASS mode={mode} modules=4 replay=1")
     expect(out.contains("coverage_retained_parse_owner=FAIL")).to_equal(false)
-    expect(file_hash_sha256(candidate)).to_equal(coverage_probe_digest)
+    expect(file_hash_sha256(candidate).unwrap()).to_equal(coverage_probe_digest)
 
 describe "Coverage-aware retained parser ownership":
     it "should retain coverage evidence and bodies after each source scope closes":

@@ -34,6 +34,8 @@ struct Pane:
     pid: i64
     active: bool
     zoomed: bool
+    # Why the backend produced no pane; "" on every pane that exists.
+    error: text
 
 fn windows_quote_arg(arg: text) -> text:
     """Quote one CreateProcess command-line argument using Windows CRT rules."""
@@ -174,7 +176,7 @@ fn pane_parse_line(line: text) -> [Pane]:
             title = title + " " + cols[idx]
         idx = idx + 1
     [Pane(pane_id: cols[0], title: title, pid: cols[1].to_i64() ?? 0,
-        active: cols[2] == "1", zoomed: cols[3] == "1")]
+        active: cols[2] == "1", zoomed: cols[3] == "1", error: "")]
 
 fn pane_parse_lines(raw: text) -> [Pane]:
     var out: [Pane] = []
@@ -262,7 +264,7 @@ fn _smux_list(session: text) -> [Pane]:
         if alive.is_ok() and alive.unwrap():
             out = out + [Pane(pane_id: p.id, title: _smux_title(p.id),
                 pid: _smux_pid(p.id), active: p.id == focused_id,
-                zoomed: p.id == smux_zoomed_pane(scope.session_id, scope.window_id))]
+                zoomed: p.id == smux_zoomed_pane(scope.session_id, scope.window_id), error: "")]
     out
 
 # smux panes carry no title or pid field; the backend remembers both.
@@ -288,30 +290,33 @@ fn _smux_pid(pane_id: text) -> i64:
 
 # A free pane slot for a new child: the session's first pane while it is still
 # empty, otherwise a fresh split.
-fn _smux_free_pane(scope: SmuxScope) -> text:
+fn _smux_free_pane(scope: SmuxScope) -> Result<text, text>:
     val panes = smux_list_panes(scope.session_id, scope.window_id)
     for p in panes:
         val alive = smux_pane_alive(scope.session_id, scope.window_id, p.id)
         if alive.is_ok() and not alive.unwrap() and _smux_pid(p.id) == 0:
-            return p.id
+            return Ok(p.id)
     if panes.len() == 0:
-        return ""
+        return Err("smux window has no pane to split")
     val split = smux_split_pane(scope.session_id, scope.window_id, panes[0].id, "vertical")
     if split.is_err():
-        return ""
-    split.unwrap().id
+        return Err(split.unwrap_err())
+    Ok(split.unwrap().id)
+
+fn _no_pane(title: text, reason: text) -> Pane:
+    Pane(pane_id: "", title: title, pid: 0, active: false, zoomed: false, error: reason)
 
 fn _smux_spawn(session: text, title: text, cmd: text, args: [text], cols: i64,
         rows: i64, stderr_path: text) -> Pane:
-    val empty = Pane(pane_id: "", title: title, pid: 0, active: false, zoomed: false)
     var scope = _smux_scope(session)
     if scope.session_id == "":
         if smux_create_session(session).id == "":
-            return empty
+            return _no_pane(title, "smux could not create session: " + session)
         scope = _smux_scope(session)
-    val pane_id = _smux_free_pane(scope)
-    if pane_id == "":
-        return empty
+    val free = _smux_free_pane(scope)
+    if free.is_err():
+        return _no_pane(title, free.unwrap_err())
+    val pane_id = free.unwrap()
     # POSIX PTY spawn accepts one executable without argv. A private script
     # preserves argv/env/redirection without reading launch text from stdin.
     var line = windows_spawn_command_line(cmd, args)
@@ -319,7 +324,7 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text], cols: i64,
     if not _is_windows():
         launcher_dir = _posix_launcher_create(cmd, args, stderr_path)
         if launcher_dir == "":
-            return empty
+            return _no_pane(title, "could not create the POSIX pane launcher")
         line = launcher_dir + "/launch"
     # The ConPTY spawn inherits this process environment (pty_spawn takes no
     # env parameter), and TUIs such as Codex refuse to start when TERM is
@@ -335,11 +340,11 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text], cols: i64,
     val spawned = smux_pane_spawn_pty(scope.session_id, scope.window_id, pane_id, line)
     if spawned.is_err():
         _posix_launcher_remove(launcher_dir)
-        return empty
+        return _no_pane(title, spawned.unwrap_err())
     _smux_info = _smux_info + [SmuxPaneInfo(pane_id: pane_id, title: title,
         pid: spawned.unwrap(), launcher_dir: launcher_dir)]
     val _f = smux_focus_pane(scope.session_id, scope.window_id, pane_id)
-    Pane(pane_id: pane_id, title: title, pid: spawned.unwrap(), active: true, zoomed: false)
+    Pane(pane_id: pane_id, title: title, pid: spawned.unwrap(), active: true, zoomed: false, error: "")
 
 # ---------------------------------------------------------------------------
 # Public surface
@@ -518,7 +523,7 @@ fn _pane_capture(session: text, pane_id: text, lines: i64, styled: bool) -> [tex
         out = out + [line]
     out
 
-# Returns a Pane with an empty pane_id when the backend cannot spawn - callers
+# Returns a Pane with an empty pane_id and the reason in `error` when the backend cannot spawn - callers
 # check `pane_id != ""`. Nothing fabricated.
 fn pane_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
     pane_spawn_at(session, title, cmd, args, 0, 0, "")
@@ -528,9 +533,8 @@ fn pane_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
 # file. Windows children keep their stderr on the console.
 fn pane_spawn_at(session: text, title: text, cmd: text, args: [text], cols: i64,
         rows: i64, stderr_path: text) -> Pane:
-    val empty = Pane(pane_id: "", title: title, pid: 0, active: false, zoomed: false)
     if session == "" or cmd == "":
-        return empty
+        return _no_pane(title, "pane spawn needs a session and a command")
     if not _use_tmux():
         return _smux_spawn(session, title, cmd, args, cols, rows, stderr_path)
     var argv: [text] = []
@@ -544,10 +548,10 @@ fn pane_spawn_at(session: text, title: text, cmd: text, args: [text], cols: i64,
         argv = argv + [cmd] + args
     val result = sosix_run("tmux", argv)
     if result.exit_code != 0:
-        return empty
+        return _no_pane(title, "tmux exited {result.exit_code}: {result.stderr.trim()}")
     val pane_id = result.stdout.trim()
     if not pane_id.starts_with("%"):
-        return empty
+        return _no_pane(title, "tmux returned no pane id: " + pane_id)
     if title != "":
         sosix_run("tmux", ["select-pane", "-t", pane_id, "-T", title])
     if cols > 0 and rows > 0:
@@ -555,7 +559,7 @@ fn pane_spawn_at(session: text, title: text, cmd: text, args: [text], cols: i64,
     for pane in pane_list(session):
         if pane.pane_id == pane_id:
             return pane
-    empty
+    _no_pane(title, "tmux does not list the new pane: " + pane_id)
 
 export Pane, PANE_FORMAT
 export pane_parse_line, pane_parse_lines

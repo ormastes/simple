@@ -141,13 +141,15 @@ fn native_group_index_manager_context_v1(work_root: text,
     if task.memory_limit_bytes < 1 or
             task.memory_limit_bytes > BUILDER_MEMORY_LIMIT_MAX_V2:
         return Err("index generic manager memory cap invalid")
-    val config_digest = file_hash_sha256(config_path)
+    val config_digest_opt = file_hash_sha256(config_path)
+    if config_digest_opt == nil: return Err("cannot hash index config: " + config_path)
+    val config_digest = config_digest_opt.unwrap()
     val invalid = native_group_index_manager_task_valid_v1(task,
         config_relative, receipt_template, config_digest, diagnostic_partition, diagnostic_partitions)
     if invalid != "": return Err(invalid)
     val staged_image = attempt_root + "/producer.exe"
     if not file_is_regular_no_follow(staged_image) or
-            file_hash_sha256(staged_image) != task.producer_digest:
+            _native_group_index_build_sha_mismatch(staged_image, task.producer_digest):
         return Err("index generic manager staged image differs")
     Ok(RuntimeStdNativeActionBudgetV2(
         sha256_text(request_bytes), task.memory_limit_bytes))
@@ -165,14 +167,13 @@ fn native_group_source_admit_v1(config: NativeGroupIndexConfigV1,
             not artifact_root.replace("\\", "/").contains("/work/private/runtime-std-hir-artifacts"):
         return Err("index private roots were not resolved by manager adapter")
     if not file_is_regular_no_follow(config.producer_path) or
-            file_hash_sha256(config.producer_path) != config.producer_digest:
+            _native_group_index_build_sha_mismatch(config.producer_path, config.producer_digest):
         return Err("index producer image differs from pinned Phase2 executable")
     if not file_is_regular_no_follow(config.full_source_authority_path) or
-            file_hash_sha256(config.full_source_authority_path) !=
-                config.full_source_authority_digest:
+            _native_group_index_build_sha_mismatch(config.full_source_authority_path, config.full_source_authority_digest):
         return Err("index Stage2 full-source authority differs")
     if not file_is_regular_no_follow(config.scv_receipt_path) or
-            file_hash_sha256(config.scv_receipt_path) != config.scv_receipt_digest:
+            _native_group_index_build_sha_mismatch(config.scv_receipt_path, config.scv_receipt_digest):
         return Err("index SCV receipt differs")
     val snapshot = scv_compile_snapshot_open_v1(config.source_root,
         config.snapshot_root, config.scv_revision_id, config.scv_commit_id,
@@ -327,3 +328,9 @@ export native_group_index_manager_task_valid_v1
 
 export native_group_source_admit_v1, native_group_index_work_root_v1
 export native_group_index_resolve_private_v1, native_group_index_manager_context_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _native_group_index_build_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

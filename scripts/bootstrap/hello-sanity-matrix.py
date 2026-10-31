@@ -163,6 +163,17 @@ def inherited_build_settings(environ):
                 len(value) > 19 or int(value) > 2**63 - 1):
             raise ValueError(key + " must be a canonical positive i64 decimal")
         kept[key] = value
+    # The inherited watchdog session contract. A lane inside an admitted
+    # session (the BuildRunner worker's nested hello lane) must keep it so its
+    # own watchdog can join that session instead of escaping it. Both keys or
+    # neither; a malformed contract is refused, never dropped.
+    sid, exe = "SIMPLE_BOOTSTRAP_SESSION_ID", "SIMPLE_BOOTSTRAP_SESSION_EXEC"
+    if os.name != "nt" and (sid in environ or exe in environ):
+        sid_value, exe_value = environ.get(sid, ""), environ.get(exe, "")
+        if (not sid_value.isascii() or not sid_value.isdigit() or sid_value[0] == "0" or
+                len(sid_value) > 19 or not os.path.isabs(exe_value)):
+            raise ValueError("inherited watchdog session contract is incomplete or malformed")
+        kept[sid], kept[exe] = sid_value, exe_value
     return kept
 
 
@@ -230,6 +241,19 @@ def phase1_linker_proxy(directory, linker, capture):
     proxy.chmod(0o755)
     return proxy
 
+
+
+def nested_session(env, windows):
+    """True when this lane already runs inside an admitted watchdog session.
+
+    The BuildRunner worker runs a hello lane inside the manager's watchdog
+    session and passes SIMPLE_BOOTSTRAP_SESSION_ID/EXEC through. A fresh
+    session there escapes the owner (bootstrap-session-escaped, exit 90), so
+    the lane's own watchdog joins the inherited session instead. Windows has
+    no POSIX session contract: sanitization drops these keys there.
+    """
+    return not windows and bool(env.get("SIMPLE_BOOTSTRAP_SESSION_ID")) and \
+        bool(env.get("SIMPLE_BOOTSTRAP_SESSION_EXEC"))
 
 class Matrix:
     def __init__(self, args):
@@ -339,6 +363,7 @@ class Matrix:
         if shutil.disk_usage(self.out).free < self.args.min_free_disk_bytes:
             raise ValueError("disk reserve reached before command launch")
         env = self.command_environment(lane, extra)
+        nested = nested_session(env, self.windows)
         for child in ["tmp", "storage", "native-state", "cache/user", "cache/project", "cache/xdg"]:
             (lane / child).mkdir(parents=True, exist_ok=True)
         timeout = seconds or self.args.timeout_seconds
@@ -348,7 +373,8 @@ class Matrix:
         watchdog = self.root / "scripts/resource/process-tree-rss-watchdog.pl"
         command = ["perl", str(watchdog), f"--max-rss-kib={self.args.max_rss_kib}",
                    "--interval-ms=100", f"--timeout-seconds={timeout}",
-                   "--session-mode=new", "--budget-scope=compiler", "--compiler-jobs=1",
+                   "--session-mode=" + ("inherit" if nested else "new"),
+                   "--budget-scope=compiler", "--compiler-jobs=1",
                    f"--receipt={lane / (name + '.rss.env')}", "--"] + list(map(str, argv))
         if self.windows:
             owner = self.root / "scripts/bootstrap/run-process-group-bounded-log-windows.py"
@@ -365,7 +391,12 @@ class Matrix:
         with (lane / (name + ".supervisor.stdout")).open("xb") if self.windows else stdout.open("xb") as out, \
              (lane / (name + ".supervisor.stderr")).open("xb") if self.windows else stderr.open("xb") as err:
             process = subprocess.Popen(command, cwd=cwd or self.root, env=env,
-                                       stdout=out, stderr=err, start_new_session=not self.windows)
+                                       stdout=out, stderr=err,
+                                       # Nested: same session, own group, so the
+                                       # owner's group retirement cannot kill this
+                                       # watchdog before it cleans up its workload.
+                                       **({"process_group": 0} if nested else
+                                          {"start_new_session": not self.windows}))
             with self.lock:
                 self.children.add(process.pid)
             print(f"LAUNCHED {lane.name}/{name} pid={process.pid}", flush=True)

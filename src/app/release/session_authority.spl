@@ -2,7 +2,7 @@
 # Trusted release-session observation. Caller-supplied session fields are only
 # claims until this boundary binds them to canonical Git/worktree state.
 
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_hash_sha256_optional, file_read}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_hash_sha256, file_read}
 use app.io.mod.{
     process_run_bounded, dir_create_all, file_atomic_write, file_lock,
     file_unlock, time_now_unix_micros, getpid
@@ -43,6 +43,12 @@ fn _registration_rejected(reason: text) -> ReleaseSessionRegistration:
         valid: false, reason: reason, registry_path: "", output_root: "",
         cache_root: "", registry_sha256: ""
     )
+
+# Absence is a mismatch: an unreadable file never matches any expected digest.
+fn _sha256_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false
 
 fn _run(command: text, arguments: [text]) -> (text, text, i64):
     process_run_bounded(command, arguments, 5000, 262144)
@@ -198,7 +204,7 @@ fn _observe_release_session(root: text, claimed: ReleaseSession, require_base_he
         return _rejected("release target identity does not match fetched Git state")
 
     val policy_path = canonical_root + "/.spipe/policy/vcs.sdn"
-    if not file_exists(policy_path) or file_hash_sha256_optional(policy_path) != claimed.policy_sha256:
+    if not file_exists(policy_path) or not _sha256_matches(policy_path, claimed.policy_sha256):
         return _rejected("release policy identity does not match the workspace policy")
 
     ReleaseSessionVerification(
@@ -260,14 +266,13 @@ fn register_release_session(root: text, claimed: ReleaseSession) -> ReleaseSessi
 
     # These roots are private because registry uniqueness binds the containing
     # workspace and session id to exactly one active owner.
-    val registry_sha_opt = file_hash_sha256_optional(registry_path)
+    val registry_sha_opt = file_hash_sha256(registry_path)
     if registry_sha_opt == nil:
-        return _registration_rejected("release session registry digest is unavailable")
-    val registry_sha: text = registry_sha_opt ?? ""
+        return _registration_rejected("release session registry could not be hashed")
     ReleaseSessionRegistration(
         valid: true, reason: "", registry_path: registry_path,
         output_root: output_root, cache_root: cache_root,
-        registry_sha256: registry_sha
+        registry_sha256: registry_sha_opt.unwrap()
     )
 
 fn verify_registered_release_session(root: text, claimed: ReleaseSession) -> ReleaseSessionRegistration:
@@ -295,14 +300,13 @@ fn verify_registered_release_session(root: text, claimed: ReleaseSession) -> Rel
         return _registration_rejected("release session is not the active registered owner")
     if _realpath(output_root) != output_root or _realpath(cache_root) != cache_root:
         return _registration_rejected("release session private roots are missing or aliased")
-    val registry_sha_opt = file_hash_sha256_optional(registry_path)
+    val registry_sha_opt = file_hash_sha256(registry_path)
     if registry_sha_opt == nil:
-        return _registration_rejected("release session registry digest is unavailable")
-    val registry_sha: text = registry_sha_opt ?? ""
+        return _registration_rejected("release session registry could not be hashed")
     ReleaseSessionRegistration(
         valid: true, reason: "", registry_path: registry_path,
         output_root: output_root, cache_root: cache_root,
-        registry_sha256: registry_sha
+        registry_sha256: registry_sha_opt.unwrap()
     )
 
 fn begin_release_session_mutation(root: text, claimed: ReleaseSession) -> ReleaseMutationLease:
@@ -344,14 +348,14 @@ fn advance_release_session_head(
         return _registration_rejected("release session HEAD advance is not a descendant of its registered head")
 
     val registry_path = _registry_path(root)
-    if expected_registry_sha256.len() != 64 or file_hash_sha256_optional(registry_path) != expected_registry_sha256:
+    if expected_registry_sha256.len() != 64 or not _sha256_matches(registry_path, expected_registry_sha256):
         return _registration_rejected("release session registry changed before HEAD advance")
     val registry_lock = file_lock(registry_path + ".lock", 10)
     if registry_lock < 0:
         return _registration_rejected("release session registry lock is unavailable")
     var reason = ""
     val current = file_read(registry_path)
-    if file_hash_sha256_optional(registry_path) != expected_registry_sha256:
+    if not _sha256_matches(registry_path, expected_registry_sha256):
         reason = "release session registry changed during HEAD advance"
     else:
         val output_root = _private_output_root(root, claimed.session_id)
@@ -377,15 +381,14 @@ fn advance_release_session_head(
         return _registration_rejected("release session registry lock release failed")
     if reason != "":
         return _registration_rejected(reason)
-    val registry_sha_opt = file_hash_sha256_optional(registry_path)
+    val registry_sha_opt = file_hash_sha256(registry_path)
     if registry_sha_opt == nil:
-        return _registration_rejected("release session registry digest is unavailable")
-    val registry_sha: text = registry_sha_opt ?? ""
+        return _registration_rejected("release session registry could not be hashed")
     ReleaseSessionRegistration(
         valid: true, reason: "", registry_path: registry_path,
         output_root: _private_output_root(root, claimed.session_id),
         cache_root: _private_cache_root(root, claimed.session_id),
-        registry_sha256: registry_sha
+        registry_sha256: registry_sha_opt.unwrap()
     )
 
 fn end_release_session_mutation(lease: ReleaseMutationLease) -> bool:
@@ -419,7 +422,7 @@ fn close_release_session(root: text, claimed: ReleaseSession, expected_registry_
     val trusted_root = mutation.verification.canonical_root
     val registry_path = _registry_path(trusted_root)
     var result = ReleaseCheck(valid: true, reason: "")
-    if expected_registry_sha256.len() != 64 or file_hash_sha256_optional(registry_path) != expected_registry_sha256:
+    if expected_registry_sha256.len() != 64 or not _sha256_matches(registry_path, expected_registry_sha256):
         result = ReleaseCheck(valid: false, reason: "release session registry changed after cleanup planning")
     elif _git_value(trusted_root, ["status", "--porcelain"]) != "":
         result = ReleaseCheck(valid: false, reason: "release session close is forbidden while the worktree is dirty")
@@ -429,7 +432,7 @@ fn close_release_session(root: text, claimed: ReleaseSession, expected_registry_
             result = ReleaseCheck(valid: false, reason: "release session registry lock is unavailable")
         else:
             val current = file_read(registry_path)
-            if file_hash_sha256_optional(registry_path) != expected_registry_sha256:
+            if not _sha256_matches(registry_path, expected_registry_sha256):
                 result = ReleaseCheck(valid: false, reason: "release session registry changed during close")
             else:
                 val output_root = _private_output_root(trusted_root, claimed.session_id)

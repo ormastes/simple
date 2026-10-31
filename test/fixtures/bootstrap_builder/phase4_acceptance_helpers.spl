@@ -48,9 +48,9 @@ fn verify_phase4_binding(binding: Phase4Binding):
     assert(binding.cli_sha256.len() == 64)
     assert(binding.interpreter_sha256.len() == 64)
     assert(binding.source_authority_sha256.len() == 64)
-    assert(file_hash_sha256(binding.cli) == binding.cli_sha256)
-    assert(file_hash_sha256(binding.interpreter) == binding.interpreter_sha256)
-    assert(file_hash_sha256(binding.source_authority_path) == binding.source_authority_sha256)
+    assert(file_hash_sha256(binding.cli).unwrap() == binding.cli_sha256)
+    assert(file_hash_sha256(binding.interpreter).unwrap() == binding.interpreter_sha256)
+    assert(file_hash_sha256(binding.source_authority_path).unwrap() == binding.source_authority_sha256)
 
 # @inline
 fn phase4_output(binding: Phase4Binding, kind: text) -> text:
@@ -70,11 +70,13 @@ fn run_bound_tool(binding: Phase4Binding, kind: text, args: [text]) -> (text, te
         assert(kind == "compiled-positive" or kind == "compiled-edge" or kind == "loaded-positive" or kind == "loaded-edge")
         program = phase4_output(binding, kind)
     assert(file_is_regular_no_follow(program))
-    val program_sha = file_hash_sha256(program)
+    val program_sha_opt = file_hash_sha256(program)
+    assert(program_sha_opt != nil)
+    val program_sha = program_sha_opt.unwrap()
     assert(program_sha.len() == 64)
     val result = process_run_timeout(program, args, 120000)
     verify_phase4_binding(binding)
-    assert(file_hash_sha256(program) == program_sha)
+    assert(file_hash_sha256(program).unwrap() == program_sha)
     val arguments = args.join("\n")
     val trace = "tool={kind}\npath={program}\nsha256={program_sha}\nbackend={binding.backend}\nargs:\n{arguments}\nexit={result.2}\nstdout:\n{result.0}\nstderr:\n{result.1}\n"
     assert(file_append("{binding.evidence_root}/invocations.log", trace))
@@ -95,7 +97,9 @@ fn compile_phase4_fixture(binding: Phase4Binding, fixture: text, output_kind: te
     var input_hashes: [text] = []
     for path in inputs:
         assert(file_is_regular_no_follow(path))
-        val digest = file_hash_sha256(path)
+        val digest_opt = file_hash_sha256(path)
+        assert(digest_opt != nil)
+        val digest = digest_opt.unwrap()
         assert(digest.len() == 64)
         input_hashes = input_hashes.push(digest)
     val output = phase4_output(binding, output_kind)
@@ -107,7 +111,7 @@ fn compile_phase4_fixture(binding: Phase4Binding, fixture: text, output_kind: te
         "--output", output
     ])
     for index in 0..inputs.len():
-        assert(file_hash_sha256(inputs[index]) == input_hashes[index])
+        assert(file_hash_sha256(inputs[index]).unwrap() == input_hashes[index])
     result
 
 # @inline
@@ -115,11 +119,11 @@ fn eval_phase4_fixture(binding: Phase4Binding, fixture: text) -> (text, text, i3
     assert(fixture == "interpreter_positive" or fixture == "interpreter_edge" or fixture == "interpreter_invalid")
     val path = "{binding.fixture_root}/{fixture}/main.spl"
     assert(file_is_regular_no_follow(path))
-    val before = file_hash_sha256(path)
+    val before = file_hash_sha256(path).unwrap()
     val source = file_read_text(path).trim()
     assert(source != "")
     val result = run_bound_tool(binding, "interpreter", ["--eval", source])
-    assert(file_hash_sha256(path) == before)
+    assert(file_hash_sha256(path).unwrap() == before)
     result
 
 # @inline

@@ -233,12 +233,12 @@ fn file_unlock(fd: i64) -> bool:
 
 # --- Memory-Mapped Files ---
 
-@unsafe(reason: "raw filesystem mmap-backed read and runtime-owned text ABI; empty text is ambiguous", capabilities: [ffi])
-extern fn rt_file_mmap_read_text(path: text) -> text
+@unsafe(reason: "raw filesystem mmap-backed read and runtime-owned text ABI; nil means mapping or read failure", capabilities: [ffi])
+extern fn rt_file_mmap_read_text(path: text) -> text?
 
-@unsafe(reason: "raw runtime-owned text or array result has no represented failure/ownership state", capabilities: [ffi])
+@unsafe(reason: "raw runtime-owned text result; nil means mapping or read failure", capabilities: [ffi])
 @always_inline
-fn file_mmap_read_text(path: text) -> text:
+fn file_mmap_read_text(path: text) -> text?:
     rt_file_mmap_read_text(path)
 
 @unsafe(reason: "raw nullable mmap byte-array ABI; nil means mapping or read failure", capabilities: [ffi])
@@ -271,21 +271,13 @@ fn dir_exists(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dir_exists(path)
 
-@unsafe(reason: "raw nullable directory-path and owned entry-array ABI; nil means the directory could not be read, an empty array is an empty directory", capabilities: [ffi])
+@unsafe(reason: "raw filesystem directory-path and owned entry-array ABI; nil means the directory could not be read", capabilities: [ffi])
 extern fn rt_dir_list(path: text) -> [text]?
 
-# Exact nullable listing: nil = unreadable, [] = empty directory.
-@unsafe(reason: "raw nullable directory listing", capabilities: [ffi])
+@unsafe(reason: "raw runtime-owned entry array; nil means the directory could not be read", capabilities: [ffi])
 @always_inline
-fn dir_list_optional(path: text) -> [text]?:
+fn dir_list(path: text) -> [text]?:
     rt_dir_list(path)
-
-# Legacy [text] signature (called from src/compiler lint). Unreadable lists as
-# empty; callers that must tell the two apart use dir_list_optional.
-@unsafe(reason: "legacy empty-on-failure listing; see dir_list_optional", capabilities: [ffi])
-@always_inline
-fn dir_list(path: text) -> [text]:
-    rt_dir_list(path) ?? []
 
 @unsafe(reason: "raw filesystem recursive directory walk and owned path-array ABI", capabilities: [ffi])
 extern fn rt_dir_walk(path: text) -> [text]
@@ -362,12 +354,17 @@ fn path_join2(a: text, b: text) -> text:
     host_path_canonical(rt_path_join(a, b))
 
 @unsafe(reason: "raw path text and runtime-owned absolute-path ABI", capabilities: [ffi])
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 
 @unsafe(reason: "raw runtime-owned text or array result has no represented failure/ownership state", capabilities: [ffi])
-@always_inline
+# Total by contract (~170 callers rely on `-> text`): an unreadable cwd is an
+# explicit fatal error, never the relative input passed back as "absolute".
 fn path_absolute(path: text) -> text:
-    rt_path_absolute(path)
+    val resolved = rt_path_absolute(path)
+    if resolved == nil:
+        panic("path_absolute: cannot make '{path}' absolute: current directory unreadable")
+    resolved.unwrap()
 
 @unsafe(reason: "raw path text and runtime-owned basename ABI", capabilities: [ffi])
 extern fn rt_path_basename(path: text) -> text

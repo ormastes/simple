@@ -1,0 +1,452 @@
+# NIL-RET-001: nil must not flow into a non-optional return.
+#
+# Rule: "all null return able must be option". A function that can return nil
+# declares `T?` (or `Option<T>`); a non-optional return type never yields nil.
+# The interpreter enforces this at run time ("nil is forbidden by the
+# non-optional return contract of '<fn>'"); this lint catches it statically.
+#
+# Return contract (the interpreter's sffi_return_contract(), plus `has_T`):
+#   no `->`, `()`, `unit`, `void`          -> unit (not checked)
+#   `T?`, `Option<T>`, `Optional<T>`,
+#   `has_T` (optional sugar; HIR type_resolver lowers it to `T?` and the
+#   interpreter admits nil there) -> optional (nil allowed)
+#   anything else, incl. `any` and `nil`   -> non-optional (checked)
+#
+# In a non-optional function this flags:
+#   - `return nil`, `return ... else: nil`, one-line `if c: return nil`
+#   - a bare `return` (it yields nil), also one-line `if c: return`
+#   - a `nil` value or a `case ...: nil` / `else: nil` branch that is the
+#     function's result: the last value of every enclosing block, reached only
+#     through if/elif/else/match arms (not a loop, a `val x = match`
+#     initializer, a lambda or a call block)
+#   - `return f(...)` or a tail `f(...)` where every declaration of `f` in the
+#     same file (fn or extern fn) has an optional return type
+#
+# Limits: callees are resolved within one file only, so an extern declared
+# `-> T` whose runtime returns nil is not visible here
+# (scripts/check/check-non-optional-nil-return.shs class (b) covers that).
+# Comments, strings and docstrings are skipped.
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+
+fn nrl_indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len():
+        val ch = line.substring(n, n + 1)
+        if ch != " " and ch != "\t": break
+        n = n + 1
+    n
+
+fn nrl_is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn nrl_triple_quote_count(line: text) -> i64:
+    var count = 0
+    var i = 0
+    while i + 3 <= line.len():
+        if line.substring(i, i + 3) == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+fn nrl_blank_triple_spans(line: text) -> text:
+    var out = ""
+    var inside = false
+    var i = 0
+    while i < line.len():
+        if i + 3 <= line.len() and line.substring(i, i + 3) == "\"\"\"":
+            # Keep the delimiters so `return """..."""` still reads as a value.
+            inside = not inside
+            out = out + "\"\"\""
+            i = i + 3
+            continue
+        out = out + (if inside: " " else: line.substring(i, i + 1))
+        i = i + 1
+    out
+
+fn nrl_code_of(line: text) -> text:
+    # Blank string bodies and drop a trailing comment, keeping columns.
+    var out = ""
+    var quote = ""
+    var i = 0
+    while i < line.len():
+        val ch = line.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                out = out + "  "
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+                out = out + ch
+            else:
+                out = out + " "
+        elif ch == "\"" or ch == "'":
+            quote = ch
+            out = out + ch
+        elif ch == "#":
+            return out
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn nrl_strip_modifiers(trimmed: text) -> text:
+    var s = trimmed
+    var changed = true
+    while changed:
+        changed = false
+        for kw in ["pub ", "export ", "static ", "async ", "extern ", "inline ", "override ", "unsafe ", "public ", "private "]:
+            if s.starts_with(kw):
+                s = s.substring(kw.len(), s.len()).trim()
+                changed = true
+    s
+
+fn nrl_is_extern_header(trimmed: text) -> bool:
+    trimmed.starts_with("extern fn ") or trimmed.contains(" extern fn ")
+
+fn nrl_header_name(trimmed: text) -> text:
+    # Name of a `fn name(` / `me name(` header, or "" when not a header.
+    val s = nrl_strip_modifiers(trimmed)
+    var rest = ""
+    if s.starts_with("fn "):
+        rest = s.substring(3, s.len()).trim()
+    elif s.starts_with("me "):
+        rest = s.substring(3, s.len()).trim()
+    else:
+        return ""
+    var n = 0
+    while n < rest.len() and nrl_is_word_char(rest.substring(n, n + 1)):
+        n = n + 1
+    if n == 0: return ""
+    val after = rest.substring(n, rest.len())
+    if not (after.starts_with("(") or after.starts_with("<")): return ""
+    rest.substring(0, n)
+
+fn nrl_paren_balance(code: text) -> i64:
+    var depth = 0
+    var i = 0
+    while i < code.len():
+        val ch = code.substring(i, i + 1)
+        if ch == "(" or ch == "[": depth = depth + 1
+        if ch == ")" or ch == "]": depth = depth - 1
+        i = i + 1
+    depth
+
+fn nrl_return_type(header: text) -> text:
+    # Text after the first depth-0 `->`, without the trailing `:` / `where`.
+    var depth = 0
+    var at = -1
+    var i = 0
+    while i + 1 < header.len():
+        val ch = header.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "<": depth = depth + 1
+        if ch == ")" or ch == "]": depth = depth - 1
+        if ch == ">" and depth > 0 and not (i > 0 and header.substring(i - 1, i) == "-"): depth = depth - 1
+        # First depth-0 `->`: in `-> fn(i64) -> text?` the second arrow belongs to the type.
+        if depth == 0 and at < 0 and header.substring(i, i + 2) == "->": at = i + 2
+        i = i + 1
+    if at < 0: return ""
+    var ty = header.substring(at, header.len()).trim()
+    if ty.ends_with(":"): ty = ty.substring(0, ty.len() - 1).trim()
+    val w = ty.index_of(" where ", 0)
+    if w >= 0: ty = ty.substring(0, w).trim()
+    # Same-line body: `fn f() -> i64: 0`; a `:` inside `{text: T}` is a type.
+    var d = 0
+    var k = 0
+    while k < ty.len():
+        val ch = ty.substring(k, k + 1)
+        if ch == "(" or ch == "[" or ch == "{" or ch == "<": d = d + 1
+        if ch == ")" or ch == "]" or ch == "}" or ch == ">": d = d - 1
+        if ch == ":" and d == 0: return ty.substring(0, k).trim()
+        k = k + 1
+    ty
+
+fn nrl_inline_body(header: text, ty: text) -> text:
+    # Same-line body of `fn f() -> T: body`, or "".
+    var depth = 0
+    var at = -1
+    var i = 0
+    while i + 1 < header.len():
+        val ch = header.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "<": depth = depth + 1
+        if ch == ")" or ch == "]": depth = depth - 1
+        if ch == ">" and depth > 0 and not (i > 0 and header.substring(i - 1, i) == "-"): depth = depth - 1
+        if depth == 0 and header.substring(i, i + 2) == "->":
+            at = i + 2
+            break
+        i = i + 1
+    if at < 0: return ""
+    val rest = header.substring(at, header.len()).trim()
+    if not rest.starts_with(ty): return ""
+    val after = rest.substring(ty.len(), rest.len()).trim()
+    if not after.starts_with(":"): return ""
+    after.substring(1, after.len()).trim()
+
+fn nrl_contract(ty: text) -> text:
+    # "unit" | "optional" | "required"
+    if ty == "" or ty == "()" or ty == "unit" or ty == "void": return "unit"
+    # A function type: its trailing `?` belongs to the function's own result.
+    if ty.starts_with("fn("): return "required"
+    if ty.ends_with("?"): return "optional"
+    if ty.starts_with("Option<") or ty.starts_with("Optional<"): return "optional"
+    # `has_X` is the optional sugar for `X?`.
+    if ty.starts_with("has_") and ty.len() > 4: return "optional"
+    "required"
+
+fn nrl_has_word(code: text, word: text) -> bool:
+    var start = 0
+    while start < code.len():
+        val at = code.index_of(word, start)
+        if at < 0: return false
+        val before_ok = at == 0 or (not nrl_is_word_char(code.substring(at - 1, at)) and code.substring(at - 1, at) != ".")
+        val end = at + word.len()
+        val after_ok = end >= code.len() or not nrl_is_word_char(code.substring(end, end + 1))
+        if before_ok and after_ok: return true
+        start = end
+    false
+
+fn nrl_leading_call(expr: text) -> text:
+    # `name(...)` as the whole expression -> name, else "".
+    var n = 0
+    while n < expr.len() and nrl_is_word_char(expr.substring(n, n + 1)):
+        n = n + 1
+    if n == 0 or n >= expr.len(): return ""
+    if expr.substring(n, n + 1) != "(": return ""
+    if not expr.ends_with(")"): return ""
+    # The first `(` must close at the very end.
+    var depth = 0
+    var i = n
+    while i < expr.len():
+        val ch = expr.substring(i, i + 1)
+        if ch == "(": depth = depth + 1
+        if ch == ")":
+            depth = depth - 1
+            if depth == 0 and i != expr.len() - 1: return ""
+        i = i + 1
+    expr.substring(0, n)
+
+fn nrl_inline_return(t: text) -> text:
+    # One-line `if c: return nil` / `else: return`: "nil", "bare" or "".
+    if not (t.starts_with("if ") or t.starts_with("elif ") or t.starts_with("else:") or t.starts_with("case ")): return ""
+    if t.ends_with(": return nil"): return "nil"
+    if t.ends_with(": return"): return "bare"
+    ""
+
+fn nrl_branch_yields_nil(t: text) -> bool:
+    if not t.ends_with(": nil"): return false
+    # One-line tail `if c: v else: nil`.
+    if t.starts_with("if ") and t.ends_with("else: nil"): return true
+    if t.starts_with("case ") or t.starts_with("else:") or t.starts_with("elif ") or t.starts_with("| "): return true
+    false
+
+fn nrl_finding(line_num: i64, col: i64, fn_name: text, ty: text, what: text) -> StaticLintFinding:
+    StaticLintFinding(
+        "NIL-RET-001", StaticLintLevel.Warn, StaticLintCategory.Correctness,
+        "{what} in '{fn_name}', whose return type `{ty}` is not optional",
+        "declare the return type `{ty}?` and handle None at the callers, or return a real value",
+        line_num, col)
+
+fn nrl_is_continuation(t: text) -> bool:
+    t.starts_with("case ") or t.starts_with("elif ") or t.starts_with("else:") or t == "else" or t.starts_with("| ")
+
+fn nrl_is_tail(codes: [text], k: i64, fn_indent: i64) -> bool:
+    # True when line k is the last value of every block up to the fn body:
+    # each later line either sits deeper, continues a branch (case/elif/else)
+    # or closes the function.
+    var cur = nrl_indent_of(codes[k])
+    var m = k + 1
+    while m < codes.len():
+        val t = codes[m].trim()
+        if t != "":
+            val im = nrl_indent_of(codes[m])
+            if im <= fn_indent: return true
+            if im <= cur:
+                if not nrl_is_continuation(t): return false
+                cur = im
+        m = m + 1
+    true
+
+fn nrl_is_match_opener(o: text) -> bool:
+    o.starts_with("match ") or o.starts_with("return match ")
+
+fn nrl_is_flow_opener(o: text) -> bool:
+    o.starts_with("if ") or o.starts_with("elif ") or o.starts_with("else:") or o == "else" or nrl_is_match_opener(o) or o.starts_with("return if ") or o.starts_with("case ") or o == "unsafe:" or o == "danger:"
+
+fn nrl_openers(codes: [text], k: i64, body_start: i64) -> [text]:
+    # Enclosing block openers of line k, innermost first, inside the fn body.
+    var out: [text] = []
+    var level = nrl_indent_of(codes[k])
+    var j = k - 1
+    while j >= body_start:
+        val t = codes[j].trim()
+        if t != "":
+            val ind = nrl_indent_of(codes[j])
+            if ind < level:
+                out.push(t)
+                level = ind
+        j = j - 1
+    out
+
+fn nrl_flows_to_return(codes: [text], k: i64, body_start: i64) -> bool:
+    # Every enclosing opener is control flow (if/elif/else/match arm), not a
+    # loop, an assignment initializer, a lambda or a call block.
+    val ops = nrl_openers(codes, k, body_start)
+    var i = 0
+    while i < ops.len():
+        val o = ops[i]
+        val parent_is_match = i + 1 < ops.len() and nrl_is_match_opener(ops[i + 1])
+        if not (nrl_is_flow_opener(o) or parent_is_match): return false
+        i = i + 1
+    true
+
+fn nrl_in_lambda(codes: [text], k: i64, body_start: i64) -> bool:
+    for o in nrl_openers(codes, k, body_start):
+        if o.contains("\\") or o.starts_with("fn(") or o.contains(" fn(") or o.contains("(fn(") or o.contains("=fn("): return true
+    false
+
+struct NrlFrame:
+    indent: i64
+    name: text
+    ty: text
+    required: bool
+    body_start: i64
+    body_indent: i64
+    tail_code: text
+    tail_line: i64
+
+fn nrl_collect_optional_fns(codes: [text]) -> [text]:
+    # Names whose every declaration in the file is optional (a name declared
+    # both ways, e.g. two nested `traverse` helpers, is ambiguous and skipped).
+    var names: [text] = []
+    var required: [text] = []
+    var i = 0
+    while i < codes.len():
+        val t = codes[i].trim()
+        val name = nrl_header_name(t)
+        if name != "":
+            var header = t
+            var j = i
+            while nrl_paren_balance(header) > 0 and j + 1 < codes.len():
+                j = j + 1
+                header = header + " " + codes[j].trim()
+            val contract = nrl_contract(nrl_return_type(header))
+            if contract == "optional": names.push(name)
+            else: required.push(name)
+        i = i + 1
+    var out: [text] = []
+    for n in names:
+        if not required.contains(n): out.push(n)
+    out
+
+fn nrl_check_tail(frame: NrlFrame, optional_fns: [text], findings: [StaticLintFinding]) -> [StaticLintFinding]:
+    var out = findings
+    if not frame.required or frame.tail_line <= 0: return out
+    val callee = nrl_leading_call(frame.tail_code)
+    if callee != "" and optional_fns.contains(callee):
+        out.push(nrl_finding(frame.tail_line, 1, frame.name, frame.ty, "tail value of optional `{callee}(...)`"))
+    out
+
+pub fn check_nil_return_non_optional(content: text) -> [StaticLintFinding]:
+    # Pass 1: strip strings, comments and docstrings, keeping line numbers.
+    var codes: [text] = []
+    var in_doc = false
+    for line in content.split("\n"):
+        val quotes = if line.contains("\""): nrl_triple_quote_count(line) else: 0
+        if in_doc:
+            if quotes % 2 == 1: in_doc = false
+            codes.push("")
+            continue
+        if quotes % 2 == 1:
+            in_doc = true
+            codes.push("")
+            continue
+        val unquoted = if quotes > 0: nrl_blank_triple_spans(line) else: line
+        codes.push(nrl_code_of(unquoted))
+    val optional_fns = nrl_collect_optional_fns(codes)
+
+    # Pass 2: walk function bodies.
+    var findings: [StaticLintFinding] = []
+    var stack: [NrlFrame] = []
+    var i = 0
+    while i < codes.len():
+        val code = codes[i]
+        val line_num = i + 1
+        val t = code.trim()
+        if t == "":
+            i = i + 1
+            continue
+        val indent = nrl_indent_of(code)
+        while stack.len() > 0 and indent <= stack[stack.len() - 1].indent:
+            findings = nrl_check_tail(stack[stack.len() - 1], optional_fns, findings)
+            stack.pop()
+        val name = nrl_header_name(t)
+        if name != "":
+            var header = t
+            var j = i
+            while nrl_paren_balance(header) > 0 and j + 1 < codes.len():
+                j = j + 1
+                header = header + " " + codes[j].trim()
+            if nrl_is_extern_header(t):
+                i = j + 1
+                continue
+            val ty = nrl_return_type(header)
+            # A nested fn at the outer body level is not the outer tail value.
+            if stack.len() > 0:
+                var outer = stack[stack.len() - 1]
+                if outer.body_indent < 0 or indent == outer.body_indent:
+                    outer.body_indent = indent
+                    outer.tail_code = ""
+                    outer.tail_line = 0
+                    stack[stack.len() - 1] = outer
+            if not header.ends_with(":"):
+                # Same-line body: `fn f() -> T: nil`.
+                val body = nrl_inline_body(header, ty)
+                if nrl_contract(ty) == "required" and (body == "nil" or body == "return nil" or body == "return"):
+                    findings.push(nrl_finding(j + 1, indent + 1, name, ty, "same-line body yields nil"))
+                i = j + 1
+                continue
+            stack.push(NrlFrame(indent, name, ty, nrl_contract(ty) == "required", j + 1, -1, "", 0))
+            i = j + 1
+            continue
+        if stack.len() == 0:
+            i = i + 1
+            continue
+        var top = stack[stack.len() - 1]
+        if top.body_indent < 0: top.body_indent = indent
+        if indent == top.body_indent:
+            top.tail_code = t
+            top.tail_line = line_num
+        stack[stack.len() - 1] = top
+        if top.required:
+            val col = indent + 1
+            val explicit = t == "return" or t.starts_with("return ") or nrl_inline_return(t) != ""
+            if explicit and nrl_in_lambda(codes, i, top.body_start):
+                pass
+            elif t == "return" or nrl_inline_return(t) == "bare":
+                findings.push(nrl_finding(line_num, col, top.name, top.ty, "bare `return` yields nil"))
+            elif t == "return nil" or (t.starts_with("return ") and t.ends_with("else: nil")) or nrl_inline_return(t) == "nil":
+                findings.push(nrl_finding(line_num, col, top.name, top.ty, "`return nil`"))
+            elif t.starts_with("return "):
+                val callee = nrl_leading_call(t.substring(7, t.len()).trim())
+                if callee != "" and optional_fns.contains(callee):
+                    findings.push(nrl_finding(line_num, col, top.name, top.ty, "returns optional `{callee}(...)`"))
+            elif t == "nil" or nrl_branch_yields_nil(t):
+                if nrl_is_tail(codes, i, top.indent) and nrl_flows_to_return(codes, i, top.body_start):
+                    val what = if t == "nil": "`nil` value" else: "branch yields `nil`"
+                    findings.push(nrl_finding(line_num, col, top.name, top.ty, what))
+        i = i + 1
+    while stack.len() > 0:
+        findings = nrl_check_tail(stack[stack.len() - 1], optional_fns, findings)
+        stack.pop()
+    findings
+
+# Unique name: several rule files define a private `check_rule`, and a
+# co-compiled duplicate can dispatch to the wrong one.
+fn nil_return_non_optional_check_rule(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+    val _ = params
+    check_nil_return_non_optional(unit.content)
+
+pub fn nil_return_non_optional_lint_rule() -> StaticLintRule:
+    static_lint_rule("nil_return_non_optional", lint_rule_provider_iface("nil_return_non_optional"), nil_return_non_optional_check_rule)

@@ -22,3 +22,19 @@ gui_low_res_readability); gpu_tutorial (submodule absent, skip() arity); native-
 
 Seed suspects: `variable os not found` in mixed_language_kpf_conformance (use os.tooling... imports);
 `variable GdbBreakpoint not found` in gdb_mi_transport (imported, static call across modules).
+
+## test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl (0/3, seed on Windows, 2026-10-31)
+
+Run with `build/fix/seed.exe test <spec> --no-session-daemon`: 0 of 3 pass. Three distinct failures:
+
+1. "should submit selected Web text and ordered advances as readable glyphs" fails with
+   `semantic: nil is forbidden by the non-optional return contract of 'file_hash_sha256'`.
+   `src/lib/nogc_sync_mut/io/file_ops.spl:292` `file_hash_sha256` is declared `-> text` but the seed's
+   `rt_file_hash_sha256` (interpreter_extern/file_io.rs:449) returns nil on this host; the
+   io_runtime.spl:345 variant falls back to `sha256sum`, file_ops.spl does not. Not a small fix: needs
+   an `_or_empty` fallback decision (the comment at io_runtime.spl:~350 says the one-call form must never shell out).
+2. "should fail closed when HTML parsing yields no element surface": expected 4608 to equal 0.
+3. "should deliver correlated browser focus keyboard pointer timing and animation events":
+   `wm_browser_event_routing_reason=missing-simple-web-font-run-id` (a downstream effect of 1, no font run id recorded).
+
+Not fixed here; 2 is unexamined.

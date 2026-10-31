@@ -156,11 +156,11 @@ fn _staged_worker_capability_ok_v1(config: DistBuildConfigV1,
 fn _staged_capture_v1(source: text, digest: text, destination: text) -> bool:
     file_is_regular_no_follow(source) and file_size_raw(source) > 0 and
         file_size_raw(source) <= TWO_NODE_STAGED_NATIVE_MAX_BYTES_V1 and
-        file_hash_sha256(source) == digest and file_copy(source, destination) and
+        _file_sha256_matches_v1(source, digest) and file_copy(source, destination) and
         file_is_regular_no_follow(destination) and
         file_size_raw(destination) > 0 and
         file_size_raw(destination) <= TWO_NODE_STAGED_NATIVE_MAX_BYTES_V1 and
-        file_hash_sha256(destination) == digest and
+        _file_sha256_matches_v1(destination, digest) and
         set_permissions(destination, TWO_NODE_STAGED_CAPTURE_MODE_V1) and
         file_fsync(destination)
 
@@ -276,8 +276,8 @@ fn _staged_verify_executable_v1(fixture: TwoNodeStagedFixtureV1,
         artifact_path: text, artifact_digest: text,
         captured_verifier: text) -> bool:
     if not file_is_regular_no_follow(artifact_path) or
-       file_hash_sha256(artifact_path) != artifact_digest or
-       file_hash_sha256(captured_verifier) != fixture.verifier_digest:
+       not _file_sha256_matches_v1(artifact_path, artifact_digest) or
+       not _file_sha256_matches_v1(captured_verifier, fixture.verifier_digest):
         return false
     val (stdout, stderr, code) = process_run_bounded(captured_verifier,
         ["--artifact", artifact_path, "--artifact-sha256", artifact_digest,
@@ -290,9 +290,9 @@ fn _staged_verify_executable_v1(fixture: TwoNodeStagedFixtureV1,
         "\nisolation=linux-oci-v1\n"
     code == 0 and stdout == expected and stderr == "" and
         stdout.len() <= TWO_NODE_STAGED_EXEC_RESULT_MAX_BYTES_V1 and
-        file_hash_sha256(captured_verifier) == fixture.verifier_digest and
+        _file_sha256_matches_v1(captured_verifier, fixture.verifier_digest) and
         file_is_regular_no_follow(artifact_path) and
-        file_hash_sha256(artifact_path) == artifact_digest
+        _file_sha256_matches_v1(artifact_path, artifact_digest)
 
 fn qualify_issued_two_node_staged_v1(
         fixture: TwoNodeStagedFixtureV1) -> TwoNodeStagedQualificationV1:
@@ -509,7 +509,7 @@ fn qualify_issued_two_node_staged_v1(
         link_config.unwrap().export_root, audit_link_output.unwrap())
     if not exported.published or not exported.durable or
        exported.output_digest == "" or exported.destination == "" or
-       file_hash_sha256(exported.destination) != exported.output_digest:
+       not _file_sha256_matches_v1(exported.destination, exported.output_digest):
         dir_remove_all(stage)
         val export_reason = if exported.reason == "executable-format-unsupported":
             "protected-executable-format-rejected" else:
@@ -554,7 +554,7 @@ fn qualify_issued_two_node_staged_v1(
         dir_remove_all(stage)
         return _staged_blocked_v1("repeat-changed-ledger-or-resolved-link")
     if not file_is_regular_no_follow(exported.destination) or
-       file_hash_sha256(exported.destination) != exported.output_digest:
+       not _file_sha256_matches_v1(exported.destination, exported.output_digest):
         dir_remove_all(stage)
         return _staged_blocked_v1("exported-executable-changed")
     if not dir_remove_all(stage):
@@ -571,3 +571,9 @@ fn qualify_issued_two_node_staged_v1(
 
 export TwoNodeStagedFixtureV1, TwoNodeStagedQualificationV1
 export qualify_issued_two_node_staged_v1
+
+# Absent/unreadable file == mismatch: a missing digest never matches.
+fn _file_sha256_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

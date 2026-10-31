@@ -91,35 +91,35 @@ fn bootstrap_adhoc_compiler_error(compiler: text) -> text:
         return "unrecognized compiler identity: {identity}"
     ""
 
-# nil when any input cannot be hashed: a partial authority record (with a
-# missing digest line) must never be written or hashed.
+# The first input whose sha256 cannot be read, or "" when every input hashes.
+fn bootstrap_adhoc_unhashable_input(config: BootstrapAdhocConfig) -> text:
+    var inputs: [text] = [config.compiler, config.positive_fixture, config.negative_fixture]
+    for path in config.changed_paths:
+        inputs.push(path)
+    for path in inputs:
+        if bootstrap_adhoc_file_hash(path) == nil:
+            return path
+    ""
+
+# Callers must check bootstrap_adhoc_unhashable_input first; an authority is
+# never written with a missing digest.
 fn bootstrap_adhoc_authority(config: BootstrapAdhocConfig, lane: text) -> text?:
-    val compiler_sha = bootstrap_adhoc_file_hash(config.compiler)
-    val positive_sha = bootstrap_adhoc_file_hash(config.positive_fixture)
-    val negative_sha = bootstrap_adhoc_file_hash(config.negative_fixture)
-    if compiler_sha == nil or positive_sha == nil or negative_sha == nil:
+    if bootstrap_adhoc_unhashable_input(config) != "":
         return nil
-    val compiler_sha_text: text = compiler_sha ?? ""
-    val positive_sha_text: text = positive_sha ?? ""
-    val negative_sha_text: text = negative_sha ?? ""
     var authority = "schema=bootstrap-adhoc-authority-v1\n"
     authority = authority + "lane={lane}\n"
     authority = authority + "backend={config.backend}\n"
     authority = authority + "jobs={config.jobs}\n"
     authority = authority + "compiler={config.compiler}\n"
-    authority = authority + "compiler_sha256={compiler_sha_text}\n"
+    authority = authority + "compiler_sha256={bootstrap_adhoc_file_hash(config.compiler).unwrap()}\n"
     authority = authority + "positive={config.positive_fixture}\n"
-    authority = authority + "positive_sha256={positive_sha_text}\n"
+    authority = authority + "positive_sha256={bootstrap_adhoc_file_hash(config.positive_fixture).unwrap()}\n"
     authority = authority + "negative={config.negative_fixture}\n"
-    authority = authority + "negative_sha256={negative_sha_text}\n"
+    authority = authority + "negative_sha256={bootstrap_adhoc_file_hash(config.negative_fixture).unwrap()}\n"
     authority = authority + "negative_expect={config.negative_expect}\n"
     for path in config.changed_paths:
-        val changed_sha = bootstrap_adhoc_file_hash(path)
-        if changed_sha == nil:
-            return nil
-        val changed_sha_text: text = changed_sha ?? ""
         authority = authority + "changed={path}\n"
-        authority = authority + "changed_sha256={changed_sha_text}\n"
+        authority = authority + "changed_sha256={bootstrap_adhoc_file_hash(path).unwrap()}\n"
     authority
 
 fn bootstrap_adhoc_compile_args(
@@ -154,16 +154,19 @@ fn bootstrap_adhoc_check(config: BootstrapAdhocConfig, decision: BootstrapAdhocD
         print "error: {compiler_error}"
         return 2
 
+    val unhashable = bootstrap_adhoc_unhashable_input(config)
+    if unhashable != "":
+        print "error: cannot hash authority input: {unhashable}"
+        return 2
     val authority_opt = bootstrap_adhoc_authority(config, decision.lane)
     if authority_opt == nil:
-        print "error: cannot hash authority input (missing or unreadable file)"
+        print "error: cannot build authority"
         return 2
-    val authority: text = authority_opt ?? ""
-    val authority_sha_opt = bootstrap_adhoc_hash_text(config.output_root, authority)
-    if authority_sha_opt == nil or authority_sha_opt == "":
+    val authority: text = authority_opt.unwrap()
+    val authority_sha = bootstrap_adhoc_hash_text(config.output_root, authority)
+    if authority_sha == "":
         print "error: cannot hash authority"
         return 2
-    val authority_sha: text = authority_sha_opt ?? ""
     val session_dir = "{config.output_root}/{decision.lane}-{authority_sha}"
     val cache_dir = "{session_dir}/cache"
     if not bootstrap_adhoc_dir_create(cache_dir):
@@ -223,11 +226,10 @@ fn bootstrap_adhoc_check(config: BootstrapAdhocConfig, decision: BootstrapAdhocD
     if positive_artifact_sha == nil:
         print "error: cannot hash positive artifact: {positive_artifact}"
         return 1
-    val positive_artifact_sha_text: text = positive_artifact_sha ?? ""
     val receipt = authority +
         "authority_sha256={authority_sha}\n" +
         "positive_artifact={positive_artifact}\n" +
-        "positive_artifact_sha256={positive_artifact_sha_text}\n" +
+        "positive_artifact_sha256={positive_artifact_sha.unwrap()}\n" +
         "positive_marker={bootstrap_adhoc_pass_marker(decision.lane)}\n" +
         "negative_compile_exit={negative.exit_code}\n" +
         "release_admissible=false\n" +

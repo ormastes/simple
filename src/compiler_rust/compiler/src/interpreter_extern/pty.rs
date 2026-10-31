@@ -65,6 +65,14 @@ pub fn rt_pty_is_running(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(pty_is_running_impl(handle)))
 }
 
+/// `rt_pty_resize(handle: i64, rows: i32, cols: i32) -> bool`
+pub fn rt_pty_resize(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1) as i32;
+    let rows = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0) as i32;
+    let cols = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0) as i32;
+    Ok(Value::Bool(pty_resize_impl(handle, rows, cols)))
+}
+
 // -------------------------------------------------------------------------
 // Platform implementations
 // -------------------------------------------------------------------------
@@ -241,6 +249,29 @@ mod unix_impl {
         unsafe { libc::close(fd) == 0 }
     }
 
+    /// TIOCSWINSZ makes the kernel signal the foreground group; the direct
+    /// SIGWINCH covers a child that is not (yet) that group.
+    pub(super) fn pty_resize(fd: i32, rows: i32, cols: i32) -> bool {
+        if fd < 0 || !(1..=u16::MAX as i32).contains(&rows) || !(1..=u16::MAX as i32).contains(&cols) {
+            return false;
+        }
+        let ws = libc::winsize {
+            ws_row: rows as libc::c_ushort,
+            ws_col: cols as libc::c_ushort,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ as _, &ws as *const libc::winsize) } != 0 {
+            return false;
+        }
+        if let Some(pid) = CHILD_TABLE.lock().ok().and_then(|table| table.get(&fd).copied()) {
+            unsafe {
+                libc::kill(pid, libc::SIGWINCH);
+            }
+        }
+        true
+    }
+
     pub(super) fn pty_is_running(fd: i32) -> bool {
         let mut table = match CHILD_TABLE.lock() {
             Ok(value) => value,
@@ -287,6 +318,11 @@ fn pty_close_impl(handle: i32) -> bool {
 #[cfg(unix)]
 fn pty_is_running_impl(handle: i32) -> bool {
     unix_impl::pty_is_running(handle)
+}
+
+#[cfg(unix)]
+fn pty_resize_impl(handle: i32, rows: i32, cols: i32) -> bool {
+    unix_impl::pty_resize(handle, rows, cols)
 }
 
 #[cfg(windows)]
@@ -638,6 +674,11 @@ fn pty_is_running_impl(handle: i32) -> bool {
     simple_runtime::value::pty::host_pty_is_running(handle as i64)
 }
 
+#[cfg(windows)]
+fn pty_resize_impl(handle: i32, rows: i32, cols: i32) -> bool {
+    simple_runtime::value::pty::host_pty_resize(handle as i64, rows, cols)
+}
+
 #[cfg(not(any(unix, windows)))]
 fn pty_open_impl(_rows: i32, _cols: i32) -> i32 {
     -1
@@ -663,6 +704,11 @@ fn pty_is_running_impl(_handle: i32) -> bool {
     false
 }
 
+#[cfg(not(any(unix, windows)))]
+fn pty_resize_impl(_handle: i32, _rows: i32, _cols: i32) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,6 +725,10 @@ mod tests {
         assert_eq!(rt_pty_read(&[Value::Int(-1), Value::Int(0)]).unwrap(), Value::text(""));
         assert_eq!(rt_pty_close(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
         assert_eq!(rt_pty_is_running(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
+        assert_eq!(
+            rt_pty_resize(&[Value::Int(-1), Value::Int(24), Value::Int(80)]).unwrap(),
+            Value::Bool(false)
+        );
     }
     #[test]
     fn empty_write_is_safe_for_invalid_handle() {

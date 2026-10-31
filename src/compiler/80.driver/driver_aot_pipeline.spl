@@ -517,7 +517,7 @@ impl CompilerDriver:
         mir_verify, borrow_check, optimize_mir, weave_aop, debug_trace --
         emit their objects into the native cache via compile_to_native in
         flushing mode, then release their MIR. Gates keep the unstaged
-        order: nothing is verified after a lowering failure, nothing is
+        order: a batch with a lowering failure is not verified, nothing is
         borrow-checked after a verify failure, and no object is emitted for a
         batch that recorded an error of its own (the batch is still released;
         later batches keep emitting and the build fails at the end, naming
@@ -526,8 +526,7 @@ impl CompilerDriver:
         var batch_names: [text] = []
         for held_name in self.ctx.mir_modules.keys():
             batch_names = batch_names.push(held_name)
-        if lowering_failed:
-            self.native_staged_codegen.lowering_failed = true
+        self.native_staged_codegen.record_batch_lowering_v1(lowering_failed)
         val batch_index = self.native_staged_codegen.batches_flushed + 1
         log_phase("aot:staged_codegen:batch:start index={batch_index} modules={batch_names.len()}")
         val go_to_end = go_to_end_enabled_v1()
@@ -551,7 +550,9 @@ impl CompilerDriver:
                     self.go_to_end_withhold_staged_batch_v1(batch_names, batch_index)
         if not self.native_staged_codegen.lowering_failed and
                 not self.native_staged_codegen.verify_failed:
-            if not self.borrow_check():
+            # borrow_check answers with the global error state; only errors
+            # from this batch's own check are a borrow failure.
+            if not self.borrow_check() and self.ctx.error_count_value > errors_at_batch_start:
                 self.native_staged_codegen.borrow_failed = true
         # `verify_failed` is part of both gates: under go-to-end the verify
         # errors were absorbed above, so the error count alone no longer

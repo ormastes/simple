@@ -117,7 +117,7 @@ fn native_prepare_pin_v1(fields: {text: text}, prefix: text) -> Result<text, tex
     if not native_prepare_absolute_v1(path) or not builder_digest_valid_v1(expected) or
             not file_is_regular_no_follow(path):
         return Err("invalid or missing native group " + prefix + " pin")
-    if file_hash_sha256(path) != expected:
+    if _native_group_prepare_sha_mismatch(path, expected):
         return Err("native group " + prefix + " digest differs")
     Ok(expected)
 
@@ -128,7 +128,7 @@ fn native_prepare_inventory_v1(fields: {text: text}) -> Result<[text], text>:
             not file_is_regular_no_follow(path):
         return Err("invalid native group inventory pin")
     val payload = file_read_regular_no_follow_bounded(path, NATIVE_PREPARE_INVENTORY_MAX_V1)?
-    if file_hash_sha256(path) != expected or not payload.ends_with("\n") or payload.contains("\r") or
+    if _native_group_prepare_sha_mismatch(path, expected) or not payload.ends_with("\n") or payload.contains("\r") or
             payload.contains("\0"):
         return Err("native group inventory digest or framing differs")
     val lines = payload.split("\n")
@@ -237,7 +237,7 @@ fn native_prepare_groups_v1(fields: {text: text}, paths: [text], indexed: Native
             if seen.contains_key(path): return Err("compiler SCC inventory duplicates module")
             seen[path] = true
             if not file_is_regular_no_follow(fields["source_root"] + "/" + member.source_path) or
-                    file_hash_sha256(fields["source_root"] + "/" + member.source_path) != member.source_digest:
+                    _native_group_prepare_sha_mismatch(fields["source_root"] + "/" + member.source_path, member.source_digest):
                 return Err("frozen module source differs from compiler SCC pin: " + member.source_path)
             val output_path = if fields["output_kind"] == "SMF":
                 "smf/" + fields["backend"] + "/" + member.module_id + ".smf"
@@ -435,3 +435,9 @@ export native_group_prepare_v1, native_prepare_config_v1, native_prepare_invento
     native_prepare_policy_v1, native_prepare_scc_conflicts_v1,
     native_prepare_group_boundary_v1, native_prepare_absolute_v1,
     native_prepare_shared_parse_root_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _native_group_prepare_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

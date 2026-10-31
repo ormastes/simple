@@ -14,7 +14,7 @@ use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use app.io.env_ops.{env_vars}
 use app.io.time_ops.{sleep_ms}
 use std.common.build_manager.memory_policy.{builder_memory_enforcement_bytes_v1, builder_memory_receipt_for_task_v1}
-use std.common.process.observation_v4.{ProcessObservationTreeMetricKindV4, POV4_VALID_DIRECT_RSS, process_observation_monitor_group_gap_v4}
+use std.common.process.observation_v4.{ProcessObservationTreeMetricKindV4, POV4_VALID_DIRECT_RSS, process_observation_monitor_group_gap_v4, PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS}
 use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
 use std.common.build_manager.capacity_request.{BuilderCapacitySettlementV1, builder_capacity_settlement_encode_v1}
 use std.nogc_sync_mut.io.process_observation_v4.{OwnedCwdPinV4, ProcessObservationLeaseV4, process_observation_capabilities_v4}
@@ -28,13 +28,13 @@ pub fn builder_worker_verify_inputs_v1(task: BuildTaskV1, root: text) -> text:
         val path = root + "/work/" + item.path
         if not file_is_regular_no_follow(path):
             return "input is not a regular file: " + item.path
-        if file_hash_sha256(path) != item.digest:
+        if _worker_sha_mismatch(path, item.digest):
             return "input digest mismatch: " + item.path
     val link_error = builder_link_inputs_match_v1(task, root + "/work")
     if link_error != "": return link_error
     if not file_is_regular_no_follow(root + "/producer.exe"):
         return "producer is not a regular file"
-    if file_hash_sha256(root + "/producer.exe") != task.producer_digest:
+    if _worker_sha_mismatch(root + "/producer.exe", task.producer_digest):
         return "producer digest mismatch"
     ""
 
@@ -44,7 +44,10 @@ pub fn builder_worker_outputs_v1(task: BuildTaskV1, root: text) -> Result<[Build
         val full = root + "/work/" + path
         if not file_is_regular_no_follow(full):
             return Err("missing regular output: " + path)
-        val digest = file_hash_sha256(full)
+        val digest_opt = file_hash_sha256(full)
+        if digest_opt == nil:
+            return Err("cannot hash output: " + path)
+        val digest = digest_opt.unwrap()
         if digest.len() != 64:
             return Err("cannot hash output: " + path)
         outputs = outputs.push(BuildInputV1(path: path, digest: digest))
@@ -177,6 +180,9 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text, trace_sta
     if capability_gap != "":
         return Err(builder_worker_reject_before_start_v1(task, root, host_id,
             "process observation V4 lacks " + capability_gap))
+    if task.timeout_ms > PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS / 1000000:
+        return Err(builder_worker_reject_before_start_v1(task, root, host_id,
+            "task timeout exceeds the process observation V4 wall budget of 3600 s"))
     build_runner_stage_trace_v1(trace_stages, "worker", "environment-admission", "begin", task)
     val environment = builder_worker_environment_v1(root)?
     for input in task.inputs:
@@ -361,3 +367,9 @@ fn builder_worker_environment_digest_v1() -> Result<text, text>:
     build_runner_environment_digest_v1(builder_worker_environment_v1(root)?, root)
 
 export builder_worker_environment_digest_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _worker_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

@@ -53,6 +53,12 @@ val X25519_MLKEM768_EVIDENCE_FIXTURE_SOURCE_SHA256 =
 val X25519_MLKEM768_ACCELERATOR_BINDING_SCHEMA =
     "x25519mlkem768-runner-accelerator-binding-v1"
 
+# Absence is a mismatch: an unreadable file never matches any expected digest.
+fn _sha256_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false
+
 struct X25519MlKem768EvidenceRunnerCli:
     evidence: X25519MlKem768EvidenceCli
     compiler_artifact: text
@@ -185,19 +191,31 @@ fn _specialized_admission(
             not file_is_regular_no_follow(cli.runner_artifact) or
             not file_is_regular_no_follow(cli.accelerator_binding)):
         return Err("specialized-admission-input-not-regular-no-follow")
-    val compiler_sha256 = file_hash_sha256(cli.compiler_artifact)
-    val provenance_sha256 = file_hash_sha256(cli.compiler_provenance)
-    val runner_artifact_sha256 = file_hash_sha256(cli.runner_artifact)
-    val binding_sha256 = file_hash_sha256(cli.accelerator_binding)
+    val compiler_sha256_opt = file_hash_sha256(cli.compiler_artifact)
+    if compiler_sha256_opt == nil:
+        return Err("specialized-admission-sha256-unavailable")
+    val compiler_sha256 = compiler_sha256_opt.unwrap()
+    val provenance_sha256_opt = file_hash_sha256(cli.compiler_provenance)
+    if provenance_sha256_opt == nil:
+        return Err("specialized-admission-sha256-unavailable")
+    val provenance_sha256 = provenance_sha256_opt.unwrap()
+    val runner_artifact_sha256_opt = file_hash_sha256(cli.runner_artifact)
+    if runner_artifact_sha256_opt == nil:
+        return Err("specialized-admission-sha256-unavailable")
+    val runner_artifact_sha256 = runner_artifact_sha256_opt.unwrap()
+    val binding_sha256_opt = file_hash_sha256(cli.accelerator_binding)
+    if binding_sha256_opt == nil:
+        return Err("specialized-admission-sha256-unavailable")
+    val binding_sha256 = binding_sha256_opt.unwrap()
     if (compiler_sha256.len() != 64 or provenance_sha256.len() != 64 or
             runner_artifact_sha256.len() != 64 or binding_sha256.len() != 64):
         return Err("specialized-admission-sha256-unavailable")
     val provenance = file_read(cli.compiler_provenance)
     val binding = file_read(cli.accelerator_binding)
-    if (compiler_sha256 != file_hash_sha256(cli.compiler_artifact) or
-            provenance_sha256 != file_hash_sha256(cli.compiler_provenance) or
-            runner_artifact_sha256 != file_hash_sha256(cli.runner_artifact) or
-            binding_sha256 != file_hash_sha256(cli.accelerator_binding)):
+    if (not _sha256_matches(cli.compiler_artifact, compiler_sha256) or
+            not _sha256_matches(cli.compiler_provenance, provenance_sha256) or
+            not _sha256_matches(cli.runner_artifact, runner_artifact_sha256) or
+            not _sha256_matches(cli.accelerator_binding, binding_sha256)):
         return Err("specialized-admission-input-changed-during-read")
     if binding.trim().split("\n").len() != 5:
         return Err("accelerator-binding-field-count-invalid")
@@ -269,9 +287,18 @@ fn _input_hashes(cli: X25519MlKem768EvidenceCli
         return Err("missing-fixture-source")
     if not file_is_regular_no_follow(cli.runner_source):
         return Err("missing-runner-source")
-    val manifest_sha256 = file_hash_sha256(cli.fixture_manifest)
-    val fixture_sha256 = file_hash_sha256(cli.fixture_source)
-    val runner_sha256 = file_hash_sha256(cli.runner_source)
+    val manifest_sha256_opt = file_hash_sha256(cli.fixture_manifest)
+    if manifest_sha256_opt == nil:
+        return Err("input-sha256-unavailable")
+    val manifest_sha256 = manifest_sha256_opt.unwrap()
+    val fixture_sha256_opt = file_hash_sha256(cli.fixture_source)
+    if fixture_sha256_opt == nil:
+        return Err("input-sha256-unavailable")
+    val fixture_sha256 = fixture_sha256_opt.unwrap()
+    val runner_sha256_opt = file_hash_sha256(cli.runner_source)
+    if runner_sha256_opt == nil:
+        return Err("input-sha256-unavailable")
+    val runner_sha256 = runner_sha256_opt.unwrap()
     if manifest_sha256.len() != 64 or fixture_sha256.len() != 64 or
             runner_sha256.len() != 64:
         return Err("input-sha256-unavailable")
@@ -281,9 +308,9 @@ fn _input_hashes(cli: X25519MlKem768EvidenceCli
     if (not file_is_regular_no_follow(cli.fixture_manifest) or
             not file_is_regular_no_follow(cli.fixture_source) or
             not file_is_regular_no_follow(cli.runner_source) or
-            manifest_sha256 != file_hash_sha256(cli.fixture_manifest) or
-            fixture_sha256 != file_hash_sha256(cli.fixture_source) or
-            runner_sha256 != file_hash_sha256(cli.runner_source)):
+            not _sha256_matches(cli.fixture_manifest, manifest_sha256) or
+            not _sha256_matches(cli.fixture_source, fixture_sha256) or
+            not _sha256_matches(cli.runner_source, runner_sha256)):
         return Err("runner-input-changed-during-read")
     if not manifest.contains(
             "implementation_version: \"" +

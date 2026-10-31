@@ -85,12 +85,12 @@ fn builder_transport_ssh_v1(host: BuildHostV1, command: text) -> (text, text, i3
     process_run_timeout("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", host.endpoint, command], 30000)
 
 fn builder_transport_copy_v1(source: text, destination: text, digest: text) -> text:
-    if not file_is_regular_no_follow(source) or file_hash_sha256(source) != digest:
+    if not file_is_regular_no_follow(source) or _transport_sha_mismatch(source, digest):
         return "source digest mismatch: " + source
     if not dir_create_all(builder_transport_parent_v1(destination)):
         return "cannot create staging directory"
     if not file_copy(source, destination): return "cannot stage: " + source
-    if not file_is_regular_no_follow(destination) or file_hash_sha256(destination) != digest:
+    if not file_is_regular_no_follow(destination) or _transport_sha_mismatch(destination, digest):
         return "staged digest mismatch: " + destination
     ""
 
@@ -126,7 +126,9 @@ fn builder_transport_retry_cache_v1(task: BuildTaskV1, host: BuildHostV1, run_ro
         if not normalized.starts_with(cache_root): return "cache walk escaped attempt directory"
         if file_is_regular_no_follow(normalized):
             val relative = normalized[cache_root.len():]
-            val error = builder_transport_copy_v1(normalized, target + "/work/.builder-cache/" + relative, file_hash_sha256(normalized))
+            val cache_digest = file_hash_sha256(normalized)
+            if cache_digest == nil: return "cannot hash cache file: " + normalized
+            val error = builder_transport_copy_v1(normalized, target + "/work/.builder-cache/" + relative, cache_digest.unwrap())
             if error != "": return error
     ""
 
@@ -170,7 +172,7 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
         result.error = "typed links require local no-follow staging"
         return result
     if host.transport == "local":
-        if not file_is_regular_no_follow(host.worker_program) or file_hash_sha256(host.worker_program) != host.worker_digest:
+        if not file_is_regular_no_follow(host.worker_program) or _transport_sha_mismatch(host.worker_program, host.worker_digest):
             result.error = "configured worker image digest mismatch"
             return result
     else:
@@ -303,7 +305,7 @@ pub fn builder_transport_collect_v1(attempt: BuilderAttemptV1) -> Result<BuildRe
             if copied.2 != 0: return Err("remote output unavailable: " + output.path)
     for output in result.outputs:
         val path = attempt.local_root + "/work/" + output.path
-        if not file_is_regular_no_follow(path) or file_hash_sha256(path) != output.digest:
+        if not file_is_regular_no_follow(path) or _transport_sha_mismatch(path, output.digest):
             return Err("transport output digest mismatch: " + output.path)
     Ok(result)
 
@@ -494,7 +496,7 @@ pub fn builder_transport_prune_terminal_inputs_v1(task: BuildTaskV1,
     for output in admitted.outputs:
         val published = output_root + "/" + output.path
         if not file_is_regular_no_follow(published) or
-                file_hash_sha256(published) != output.digest:
+                _transport_sha_mismatch(published, output.digest):
             return Err("input prune requires verified published output: " + output.path)
     # Preflight every existing copy before deleting any. Missing copies are
     # legal only for an interrupted earlier prune of this terminal attempt.
@@ -506,7 +508,7 @@ pub fn builder_transport_prune_terminal_inputs_v1(task: BuildTaskV1,
             return Err("input prune path crosses a symlink or reparse directory")
         val path = attempt.local_root + "/work/" + input.path
         if file_exists(path) and (not file_is_regular_no_follow(path) or
-                file_hash_sha256(path) != input.digest):
+                _transport_sha_mismatch(path, input.digest)):
             return Err("input prune copy differs: " + input.path)
     # A successful task will not retry, and its source authority remains in
     # the original source root. Reclaim the private cache's file bytes too;
@@ -554,7 +556,7 @@ pub fn builder_transport_prune_terminal_inputs_v1(task: BuildTaskV1,
                     not builder_transport_input_parent_safe_v1(work, input.path,
                         attempt.process) or
                     not file_is_regular_no_follow(path) or
-                    file_hash_sha256(path) != input.digest or not file_delete(path):
+                    _transport_sha_mismatch(path, input.digest) or not file_delete(path):
                 return Err("input prune failed: " + input.path)
             deleted = deleted + 1
     for path in cache_paths:
@@ -626,10 +628,10 @@ pub fn builder_transport_prune_failed_inputs_v1(task: BuildTaskV1,
         val source = source_root + "/" + input.path
         val copied = work + "/" + input.path
         if not file_is_regular_no_follow(source) or
-                file_hash_sha256(source) != input.digest or
+                _transport_sha_mismatch(source, input.digest) or
                 (file_exists(copied) and
                     (not file_is_regular_no_follow(copied) or
-                        file_hash_sha256(copied) != input.digest)):
+                        _transport_sha_mismatch(copied, input.digest))):
             return Err("failed input prune source/copy digest differs: " + input.path)
     # Only regular declared inputs are deleted. A previous partial prune may
     # leave a valid staged link whose target file was already removed, so the
@@ -644,7 +646,7 @@ pub fn builder_transport_prune_failed_inputs_v1(task: BuildTaskV1,
                     not builder_transport_input_parent_safe_v1(work,
                         input.path, attempt.process) or
                     not file_is_regular_no_follow(copied) or
-                    file_hash_sha256(copied) != input.digest or
+                    _transport_sha_mismatch(copied, input.digest) or
                     not file_delete(copied):
                 return Err("failed input prune delete refused: " + input.path)
             deleted = deleted + 1
@@ -695,3 +697,9 @@ export builder_transport_recover_v1, builder_transport_reaped_v1
 export builder_transport_no_child_started_v1, builder_transport_terminal_v1
 export builder_transport_prune_terminal_inputs_v1
 export builder_transport_prune_failed_inputs_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _transport_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

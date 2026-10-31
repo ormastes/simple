@@ -1323,6 +1323,7 @@ bool     rt_process_kill(int64_t pid);
    fd and answers from POLLHUP; Windows cannot resolve the Rust lane's session
    handle and answers false. See runtime_process.c for the full contract. */
 bool     rt_pty_is_running(int64_t handle);
+bool     rt_pty_resize(int64_t handle, int32_t rows, int32_t cols);
 bool     rt_process_owned_cancel(uint64_t slot, uint64_t generation,
                                  int64_t pid, uint64_t start_identity,
                                  RtOwnedProcessCancelReceipt* receipt);
