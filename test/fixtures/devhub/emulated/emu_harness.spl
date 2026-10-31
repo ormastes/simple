@@ -10,6 +10,8 @@ use std.io_runtime.{host_os, getpid}
 use std.io.process_ops.{process_run_bounded}
 use std.common.http_curl.{curl_request_text}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.process.run
+use std.common.json.value.{JsonValue, json_value_parse_or_null, json_value_field, json_value_has, json_value_serialize}
 
 val FIXTURE_ROOT = "test/fixtures/devhub/emulated"
 val START_TIMEOUT_MS: i64 = 90000
@@ -143,3 +145,64 @@ fn emu_stop() -> bool:
 fn emu_refused_after_stop(addr: text) -> bool:
     """True when nothing accepts on addr any more."""
     TcpStream.connect_timeout(addr, 1000).is_err()
+
+class DevhubRun:
+    rc: i64
+    out: text
+    err: text
+
+    fn combined() -> text:
+        """Output with the runtime's compile warnings removed."""
+        var kept = ""
+        for line in (self.out + "\n" + self.err).split("\n"):
+            val noise = line.contains("warning") or line.contains("WARNING") or line.contains("export use") or line.contains("-->") or line.trim() == "|" or line.contains("pure-Simple") or line.contains("explicit export") or line.contains("Example:") or line.contains("import")
+            if not noise and line.trim() != "":
+                kept = kept + line + "\n"
+        kept
+
+fn emu_home(config_sdn: text, auth_sdn: text) -> text:
+    """A scratch HOME holding only synthetic config, so no real credential is read."""
+    val home = emu_script_path() + "_home"
+    val _d = dir_create_all(home + "/.config/devhub")
+    val _c = file_write(home + "/.config/devhub/config.sdn", config_sdn)
+    val _a = file_write(home + "/.config/devhub/auth.sdn", auth_sdn)
+    env_set("HOME", home)
+    env_set("USERPROFILE", home)
+    home
+
+fn emu_real_gh_env(home: text):
+    """Aim the real gh at the emulator. github.localhost is gh's plain-HTTP host and
+    Go only skips a proxy for literal localhost, so every call goes to HTTP_PROXY.
+    If that ever failed the name would not resolve to a real service, and the token
+    and config dir are synthetic either way."""
+    env_set("GH_TOKEN", "syn-gh-token")
+    env_set("GH_HOST", "github.localhost")
+    env_set("HTTP_PROXY", "http://" + env_get("EMU_ADDR"))
+    env_set("NO_PROXY", "")
+    env_set("GH_CONFIG_DIR", home + "/ghcfg")
+    env_set("GH_PROMPT_DISABLED", "1")
+
+fn emu_devhub(args: [text]) -> DevhubRun:
+    """Run the production DevHub CLI as a child process, as a user would."""
+    val result = run(_seed(), ["run", "src/app/devhub/main.spl"] + args)
+    DevhubRun(rc: result.exit_code, out: result.stdout, err: result.stderr)
+
+fn emu_json(stdout: text) -> JsonValue:
+    """Parse the JSON document printed on stdout (from its first { or [)."""
+    val brace = stdout.find("\{")
+    val bracket = stdout.find("[")
+    var start = brace
+    if start < 0 or (bracket >= 0 and bracket < start):
+        start = bracket
+    if start < 0:
+        return json_value_parse_or_null("null")
+    json_value_parse_or_null(stdout[start:])
+
+fn emu_field(obj: JsonValue, key: text) -> text:
+    """A JSON field as text without its quotes; "" when absent."""
+    if not json_value_has(obj, key):
+        return ""
+    val s = json_value_serialize(json_value_field(obj, key))
+    if s.len() >= 2 and s.starts_with("\"") and s.ends_with("\""):
+        return s[1:s.len() - 1]
+    s

@@ -27,6 +27,7 @@
 # POST /__emu/shutdown ends the process.
 
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.io.types.{Shutdown}
 use std.io_runtime.{read_file_text_result, file_write, time_now_unix_micros}
 use std.env.{env_get}
 use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
@@ -188,12 +189,15 @@ fn load_body(field: text, fixtures: text, origin: text) -> text:
             Err(_): return "EMU-MISSING-FIXTURE {field}"
     body.replace("__EMU_BASE__", origin)
 
-fn serve_one(stream: TcpStream, state: State, script_path: text, fixtures: text, origin: text) -> bool:
+fn serve_one(stream: TcpStream, state: State, script_path: text, fixtures: text) -> bool:
     val req_opt = read_request(stream)
     if req_opt == nil:
         state.note("BADREQ")
         return true
     val req: Req = req_opt
+    # From the request, as a real service does: local_addr() text picks up an
+    # Option::Some(...) wrapper when concatenated on the seed.
+    val origin = "http://" + header_value(req, "Host")
     if req.target == "/__emu/shutdown":
         send_response(stream, 200, [], "bye", "-")
         state.note("SHUTDOWN")
@@ -252,7 +256,6 @@ fn main():
         return
     var listener = bound.unwrap()
     val addr = listener.local_addr().unwrap()
-    val origin = "http://" + addr
     # Written last: its presence proves the socket is already listening.
     val _ = file_write(port_path, addr)
     var running = true
@@ -263,7 +266,8 @@ fn main():
             running = false
         else:
             var stream = accepted.unwrap()
-            running = serve_one(stream, state, script_path, fixtures, origin)
+            running = serve_one(stream, state, script_path, fixtures)
+            val _s = stream.shutdown(Shutdown.Both)
             val _c = stream.close()
     val _l = listener.close()
 
