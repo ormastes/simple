@@ -1,7 +1,7 @@
 # Seed: rt_file_sync and rt_file_rename misbehave on Windows (2026-10-31)
 
-Seed (Rust) interpreter externs; src/compiler_rust not edited. Product-side guard in
-src/lib/nogc_sync_mut/database/atomic.spl (host_is_windows_host only; POSIX unchanged).
+Seed (Rust) interpreter externs. A product-side guard in atomic.spl was rejected in review: it deleted
+the destination before retrying rename, losing data on any rename failure. The fix belongs in the seed.
 
 1. `rt_file_sync(path)` returns false for a freshly written file.
    `rt_file_fsync` (interpreter_extern/file_io.rs:797) opens read-only, then `sync_all()`;
@@ -11,7 +11,7 @@ src/lib/nogc_sync_mut/database/atomic.spl (host_is_windows_host only; POSIX unch
    Repro: write r1.txt and r2.txt; `file_rename("r2.txt","r1.txt")` -> false; after
    `file_delete("r1.txt")` the rename succeeds.
 
-Effect before the guard: atomic_write always false, so `scv init` failed with
+Effect: atomic_write is always false on the Windows seed, so `scv init` fails with
 "cannot initialize status index".
 
 Related, deliberately not loosened: `directory_fsync` (io/file_ops.spl:395) fails closed where
