@@ -1,0 +1,196 @@
+"""
+## Purpose and audience
+Near-system scenarios for DevHub maintainers: `devhub jira` runs as a child process
+against a scripted Jira emulator on a real loopback socket, on both Cloud (REST v3,
+Basic) and Data Center (REST v2, Bearer) deployment shapes.
+## Operator workflow
+From the repo root:
+`SIMPLE_BINARY=<simple> SIMPLE_EXECUTION_MODE=interpret <simple> run test/03_system/app/devhub/feature/devhub_jira_emulated_spec.spl`
+then read the `SPEC FILE VERDICT:` line.
+## Compatibility and limitations
+Responses are synthetic and labelled in `test/fixtures/devhub/emulated/index.sdn`.
+Unsupported behavior covered: reopen-style verbs that `gh issue` has are listed in the
+interface survey, not here. Data Center `startAt` paging is not followed or exercised.
+## Verification guidance and troubleshooting
+The emulator checks path, query, Authorization and body. A client defect appears as
+`MISMATCH` text in the assertion message; the raw log is the `EMU_LOG` file.
+"""
+# Lifecycle: doc/01_research/app/devhub/service_interface_survey_2026-10-31.md ;
+# doc/03_plan/app/tools/devhub_multi_target_gateway_plan.md ;
+# doc/04_architecture/app/tools/devhub_multi_target_gateway.md ;
+# doc/05_design/app/devhub/devhub_overview.md
+# @manual_section: issues-jira
+
+use std.spec.*
+use std.spec.step
+use std.common.json.value.{json_value_len, json_value_field, json_value_at}
+use test.fixtures.devhub.emulated.emu_harness.{emu_start, emu_base, emu_row, emu_load, emu_problems, emu_stop, emu_refused_after_stop, emu_request_times_ms, emu_home, emu_devhub, emu_json, emu_field}
+
+# base64("syn@example.test:syn-jira-token"), computed outside the product.
+val BASIC = "Authorization=Basic c3luQGV4YW1wbGUudGVzdDpzeW4tamlyYS10b2tlbg=="
+val BEARER = "Authorization=Bearer syn-jira-token"
+val JSON_CT = "Content-Type: application/json"
+val VIEW_V3 = "/rest/api/3/issue/ACME-42?fields=summary,status,issuetype,priority,assignee,description"
+val VIEW_V2 = "/rest/api/2/issue/ACME-42?fields=summary,status,issuetype,priority,assignee,description"
+
+fn setup_cloud() -> text:
+    val addr = emu_start("jira")
+    val _h = emu_home("jira:\n    url: {emu_base()}\n    deployment: cloud\n    auth: basic\n    email: syn@example.test\n", "jira:\n    token: syn-jira-token\n")
+    addr
+
+fn setup_datacenter():
+    val _h = emu_home("jira:\n    url: {emu_base()}/jira\n    deployment: datacenter\n    auth: bearer\n", "jira:\n    token: syn-jira-token\n")
+
+fn assert_view_failure(status: i64, fixture: text, wanted: text, mode: text = "-"):
+    val gen_id = emu_load([emu_row("GET", VIEW_V3, BASIC, "none", status, JSON_CT, fixture, mode)])
+    val result = emu_devhub(["jira", "view", "ACME-42"])
+    expect(result.combined()).to_contain(wanted)
+    expect(result.rc == 0).to_equal(false)
+    expect(emu_problems(gen_id, 1)).to_equal("")
+
+describe "devhub jira over an emulated Jira":
+    it "views a Cloud issue and flattens its ADF description":
+        # @req REQ-DEVHUB-EMU-JIRA-001
+        step("Configure Cloud Basic auth and view ACME-42")
+        expect(setup_cloud()).to_contain("127.0.0.1:")
+        val gen_id = emu_load([emu_row("GET", VIEW_V3, BASIC + " ;; Accept=application/json", "none", 200, JSON_CT, "@jira/issue_cloud_v3.json")])
+        # @capture(protocol): GET issue request and text rendering
+        val result = emu_devhub(["jira", "view", "ACME-42"])
+        step("Check the rendering carries parsed fields, not raw ADF")
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(result.rc).to_equal(0)
+        expect(result.combined()).to_contain("ACME-42: Widget cache evicts early")
+        expect(result.combined()).to_contain("Status: In Progress | Type: Bug | Priority: High")
+        expect(result.combined()).to_contain("Entries leave the cache before their TTL.")
+        expect(result.combined().contains("paragraph")).to_equal(false)
+
+    it "searches with the JQL and limit in the POST body":
+        # @req REQ-DEVHUB-EMU-JIRA-002
+        step("Search with an explicit JQL")
+        val body = "eq:\{\"jql\":\"project = ACME\",\"maxResults\":2,\"fields\":[\"summary\",\"status\"]\}"
+        val gen_id = emu_load([emu_row("POST", "/rest/api/3/search/jql", BASIC + " ;; Content-Type=application/json", body, 200, JSON_CT, "@jira/search_page2.json")])
+        # @capture(protocol): POST search/jql body
+        val result = emu_devhub(["jira", "search", "project = ACME", "--limit", "2", "--fields", "summary,status", "--json"])
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(result.rc).to_equal(0)
+        expect(json_value_len(json_value_field(emu_json(result.out), "issues"))).to_equal(1)  # oracle: fixture has one issue
+
+    it "follows nextPageToken to collect every issue the limit allows":
+        # @req REQ-DEVHUB-EMU-JIRA-003
+        step("Serve two pages and ask for more than the first holds")
+        val first = emu_row("POST", "/rest/api/3/search/jql", BASIC, "has:\"maxResults\":5", 200, JSON_CT, "@jira/search_page1.json")
+        val second = emu_row("POST", "/rest/api/3/search/jql", BASIC, "has:\"nextPageToken\":\"CAEaAggD\"", 200, JSON_CT, "@jira/search_page2.json")
+        val gen_id = emu_load([first, second])
+        # @capture(protocol): both POST bodies
+        val result = emu_devhub(["jira", "search", "project = ACME", "--limit", "5"])
+        step("Check the third issue arrived")
+        expect(result.combined()).to_contain("ACME-3")
+        expect(emu_problems(gen_id, 2)).to_equal("")
+
+    it "reports no issues for an empty result":
+        # @req REQ-DEVHUB-EMU-JIRA-004
+        step("Answer an empty result set")
+        val gen_id = emu_load([emu_row("POST", "/rest/api/3/search/jql", BASIC, "any", 200, JSON_CT, "@jira/search_empty.json")])
+        # @capture(terminal): the empty-result line
+        val result = emu_devhub(["jira", "search", "project = NONE"])
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(result.rc).to_equal(0)
+        expect(result.combined()).to_contain("No issues found.")
+
+    it "creates an issue with an ADF description on Cloud":
+        # @req REQ-DEVHUB-EMU-JIRA-005
+        step("Create an issue and check the v3 body")
+        val body = "has:\"project\":\{\"key\":\"ACME\"\} ;; \"issuetype\":\{\"name\":\"Bug\"\} ;; \"summary\":\"New bug\" ;; \"type\":\"doc\" ;; \"text\":\"Synthetic text\""
+        val gen_id = emu_load([emu_row("POST", "/rest/api/3/issue", BASIC, body, 201, JSON_CT, "@jira/created.json")])
+        # @capture(protocol): POST issue body
+        val result = emu_devhub(["jira", "create", "--project", "ACME", "--summary", "New bug", "--type", "Bug", "--description", "Synthetic text"])
+        expect(emu_problems(gen_id, 1)).to_equal("")
+        expect(result.rc).to_equal(0)
+        expect(result.combined()).to_contain("ACME-99")
+
+    it "posts a comment and retries a 429 with backoff":
+        # @req REQ-DEVHUB-EMU-JIRA-006
+        step("Answer 429 once with Retry-After, then accept the comment")
+        val url = "/rest/api/3/issue/ACME-42/comment"
+        val limited = emu_row("POST", url, BASIC, "has:\"text\":\"Synthetic comment\"", 429, JSON_CT + " ;; Retry-After: 1", "@jira/error_429.json")
+        val accepted = emu_row("POST", url, BASIC, "has:\"text\":\"Synthetic comment\"", 201, JSON_CT, "@jira/comment.json")
+        val gen_id = emu_load([limited, accepted])
+        # @capture(protocol): two POSTs with server receipt times
+        val result = emu_devhub(["jira", "comment", "ACME-42", "--body", "Synthetic comment"])
+        step("Check both attempts arrived and backoff elapsed between them")
+        expect(emu_problems(gen_id, 2)).to_equal("")
+        expect(result.rc).to_equal(0)
+        val times = emu_request_times_ms(gen_id)
+        expect(times[1] - times[0] >= 1000).to_equal(true)
+
+    it "transitions an issue by resolving the status name":
+        # @req REQ-DEVHUB-EMU-JIRA-007
+        step("List transitions, then post the id for the named one")
+        val url = "/rest/api/3/issue/ACME-42/transitions"
+        val gen_id = emu_load([
+            emu_row("GET", url, BASIC, "none", 200, JSON_CT, "@jira/transitions.json"),
+            emu_row("POST", url, BASIC, "has:\"id\":\"31\"", 204, "", "")
+        ])
+        # @capture(protocol): GET then POST transitions
+        val result = emu_devhub(["jira", "transition", "ACME-42", "Done"])
+        expect(emu_problems(gen_id, 2)).to_equal("")
+        expect(result.rc).to_equal(0)
+
+    it "rejects an expired token on 401":
+        # @req REQ-DEVHUB-EMU-JIRA-008
+        step("Answer 401")
+        # @capture(terminal): the failure line
+        assert_view_failure(401, "Unauthorized", "authentication required (HTTP 401)")
+
+    it "rejects a forbidden issue on 403":
+        # @req REQ-DEVHUB-EMU-JIRA-008
+        step("Answer 403")
+        # @capture(terminal): the failure line
+        assert_view_failure(403, "@jira/error_403.json", "authentication required (HTTP 403)")
+
+    it "reports a missing issue on 404":
+        # @req REQ-DEVHUB-EMU-JIRA-008
+        step("Answer 404")
+        # @capture(terminal): the failure line
+        assert_view_failure(404, "@jira/error_404.json", "not found (HTTP 404)")
+
+    it "reports a server error on 500":
+        # @req REQ-DEVHUB-EMU-JIRA-008
+        step("Answer 500")
+        # @capture(terminal): the failure line
+        assert_view_failure(500, "boom", "server error (HTTP 500)")
+
+    it "rejects malformed JSON":
+        # @req REQ-DEVHUB-EMU-JIRA-009
+        step("Answer 200 with a broken document")
+        # @capture(terminal): the failure line
+        assert_view_failure(200, "\{\"key\":", "invalid JSON from Jira")
+
+    it "rejects a truncated body":
+        # @req REQ-DEVHUB-EMU-JIRA-009
+        step("Close the socket before Content-Length bytes arrive")
+        # @capture(terminal): the failure line
+        assert_view_failure(200, "@jira/issue_cloud_v3.json", "curl exit 18", "truncate")
+
+    it "uses REST v2, Bearer and a plain-text body on Data Center":
+        # @req REQ-DEVHUB-EMU-JIRA-010
+        step("Reconfigure for Data Center with a context path")
+        setup_datacenter()
+        val gen_id = emu_load([
+            emu_row("GET", "/jira" + VIEW_V2, BEARER, "none", 200, JSON_CT, "@jira/issue_dc_v2.json"),
+            emu_row("POST", "/jira/rest/api/2/issue", BEARER, "has:\"description\":\"Plain DC text\"", 201, JSON_CT, "@jira/created.json")
+        ])
+        # @capture(protocol): v2 GET and POST
+        val viewed = emu_devhub(["jira", "view", "ACME-42"])
+        val created = emu_devhub(["jira", "create", "--project", "ACME", "--summary", "S", "--type", "Bug", "--description", "Plain DC text"])
+        expect(emu_problems(gen_id, 2)).to_equal("")
+        expect(viewed.combined()).to_contain("Entries leave the cache before their TTL.")
+        expect(created.rc).to_equal(0)
+
+    it "stops the emulator and leaves no process listening":
+        # @req REQ-DEVHUB-EMU-JIRA-011
+        step("Shut the emulator down and prove nothing accepts")
+        val addr = emu_base()[7:]
+        # @capture(protocol): the final SHUTDOWN log line
+        expect(emu_stop()).to_equal(true)
+        expect(emu_refused_after_stop(addr)).to_equal(true)

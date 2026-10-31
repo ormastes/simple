@@ -245,3 +245,16 @@ Run these in order; the system test is last and runs only after the first two la
 Shared fixture: `test/fixtures/database/sqlcipher4/dense_multipage.sqlcipher4` and its variants, produced deterministically by `gen_dense_messenger_fixture.py` (reuses the `provision.py` builders) with a PUBLIC synthetic passphrase, fixed salt and fixed IVs. `dense_ground_truth.json` holds every expected value, computed by Python sqlite3, hashlib and json.dumps, never by the code under test. Regenerate with `python test/fixtures/database/sqlcipher4/gen_dense_messenger_fixture.py`; the encrypted bytes must come out identical. Helpers: `test/support/devhub_messenger_dense.spl`.
 
 Cost model on the Phase 1 seed (measured 2026-10-31): the key session costs under a second, a page HMAC rejection about 0.35 s, but a successful page decryption about 45 s because AES runs interpreted. A full nine-page open therefore costs about seven minutes and one spec file can afford exactly one. Rejections that fail at an HMAC are cheap, so the negative families share files and one key session; every success-path production verb call gets its own file. Run each with `SIMPLE_TIMEOUT_SECONDS=550 SIMPLE_EXECUTION_MODE=interpret <phase1 seed> run <spec>` and read the `SPEC FILE VERDICT` line. `run` of a spec file is interpreted even without `SIMPLE_EXECUTION_MODE`; only a plain `fn main` script is JIT-compiled (30 ms per page).
+## Handoff Notes (2026-10-31) — emulated near-system specs
+
+`test/03_system/app/devhub/feature/devhub_*_emulated_spec.spl` drive production DevHub over
+a real loopback socket to `test/fixtures/devhub/emulated/emu_http_server.spl`, a separate
+process that checks method, target, headers and body per scripted row. Survey and gaps:
+[service interface survey](../../../01_research/app/devhub/service_interface_survey_2026-10-31.md).
+
+- Run one spec at a time with `SIMPLE_BINARY` set, stdout to a FILE. The emulator inherits
+  stdout, so a pipe stays open until it exits (it idles out after 120 s).
+- The runtime watchdog does not reap the emulator; only `emu_stop` or its idle exit does.
+- Only the last failed `expect` in an `it` is printed. Check the emulator log before
+  concluding which one failed.
+- Real gh reaches the emulator through `GH_HOST=github.localhost` plus `HTTP_PROXY`.
