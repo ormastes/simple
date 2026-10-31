@@ -33,6 +33,13 @@ fn firmware_new_for_target(target_id: i64) -> Firmware:
     Firmware(hil: hil_new(), ticks: 0, target: nvme_fw_target_config(target_id),
         map_owner: MAP_OWNER_NONE, fg_ticks: 0, bg_ticks: 0, owner_conflicts: 0)
 
+fn counter_next(v: i64) -> i64:
+    if v < 0:
+        return 1
+    if v >= FIRMWARE_COUNTER_MAX:
+        return FIRMWARE_COUNTER_MAX
+    v + 1
+
 impl Firmware:
     me submit(c: NvmeCmd) -> bool:
         me.hil.submit(c)
@@ -66,7 +73,7 @@ impl Firmware:
         if me.map_owner == MAP_OWNER_NONE:
             me.map_owner = owner
             return true
-        me.owner_conflicts = me.owner_conflicts + 1
+        me.owner_conflicts = counter_next(me.owner_conflicts)
         false
 
     me release_map_owner(owner: i64):
@@ -80,17 +87,19 @@ impl Firmware:
         idle
 
     me conflict_count() -> i64:
+        if me.owner_conflicts < 0:
+            return 0
         me.owner_conflicts
 
     # One cooperative scheduler tick: at most one foreground command, then at most
     # one background GC step. The owner token serializes FTL-map access.
     me service_tick() -> i64:
-        me.ticks = me.ticks + 1
+        me.ticks = counter_next(me.ticks)
         var processed: i64 = 0
         if me.acquire_map_owner(MAP_OWNER_FG):
             processed = me.hil.tick()
             if processed > 0:
-                me.fg_ticks = me.fg_ticks + 1
+                me.fg_ticks = counter_next(me.fg_ticks)
             me.release_map_owner(MAP_OWNER_FG)
         if me.hil.free_blocks() < GC_LOW_WATERMARK:
             if me.acquire_map_owner(MAP_OWNER_BG):
@@ -131,7 +140,7 @@ impl Firmware:
                     k = GC_SWEEP_MAX
                 else:
                     reclaimed = reclaimed + 1
-                    me.bg_ticks = me.bg_ticks + 1
+                    me.bg_ticks = counter_next(me.bg_ticks)
                     k = k + 1
                 me.release_map_owner(MAP_OWNER_BG)
             else:
