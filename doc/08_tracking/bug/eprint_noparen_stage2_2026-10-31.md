@@ -12,6 +12,14 @@ reason=pinned-stage2-predates-#5567` on the line above. Behaviour is identical.
 
 Removal condition: stage2 rebuilt from a tree containing #5567; then drop the parens and tags.
 
+## Traceability
+
+- Workaround change: PR #5574, reviewed head `900224c8abf1146efbbd32e88bbe3c3a2daf73be`, merged as `8470b969c15cf29b675345a4c361a604002b62fa`.
+- Affected producer: the pinned stage2 identified in #5574 by SHA-256 prefix `adef5db249e4f2c2…`; the affected source locations are enumerated below.
+- Reproducing check: the pinned-stage2 no-paren/parenthesized `eprint` probe recorded in #5574.
+- Prevention check: `test/01_unit/app/bug/workaround_annotation_format_spec.spl` validates all 31 annotations and this canonical registration.
+- Background repair owner: the stage2 rebuild lane; retirement still requires actual rebuilt-producer verification, not merely the presence of #5567 in source.
+
 Workaround sites (eprint( call line; the @workaround tag is the line above):
 - src/app/cli/bootstrap_main.spl (1)
 - src/app/cli/check_entry.spl (3)
