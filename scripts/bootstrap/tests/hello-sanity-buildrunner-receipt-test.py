@@ -30,6 +30,12 @@ IDENTITY = "a" * 64
 OUTPUT = "hello-result.zip"
 
 
+class LaneLayoutTests(unittest.TestCase):
+    def test_job_manifest_is_not_a_command_status_record(self):
+        # Matrix.run writes <lane>/<command>.sdn for every lane command.
+        self.assertNotIn(h.JOB_MANIFEST, {name + ".sdn" for name in h.LANE_COMMANDS})
+
+
 class ReceiptTests(unittest.TestCase):
     def setUp(self):
         self.work = Path(tempfile.mkdtemp(prefix="hello-buildrunner-receipt-"))
