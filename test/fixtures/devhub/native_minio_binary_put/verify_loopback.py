@@ -28,7 +28,7 @@ def main():
                 assert body == expected, "request body changed binary octets"
                 digest = hashlib.sha256(body).hexdigest()
                 assert self.headers["x-amz-content-sha256"] == digest
-                content_type = "application/x-fixture" if self.path == "/bucket/dir/../direct.bin" else "application/octet-stream"
+                content_type = "application/x-fixture" if self.path == "/bucket/direct.bin" else "application/octet-stream"
                 assert self.headers["Content-Type"] == content_type
                 timestamp = self.headers["x-amz-date"]
                 signed = "content-length;content-type;host;x-amz-content-sha256;x-amz-date"
@@ -73,7 +73,7 @@ def main():
                 print(f"loopback native_exit={result.returncode} request_attempts={attempts} verified_requests={observations} failures={failures}")
                 assert result.returncode == 0, f"native provider exited {result.returncode}"
                 assert not failures, failures
-                assert [p for p, _, _ in observations] == ["/bucket/dir/../direct.bin", "/bucket/file.bin", "/bucket/empty.bin"], observations
+                assert [p for p, _, _ in observations] == ["/bucket/direct.bin", "/bucket/file.bin", "/bucket/empty.bin"], observations
                 assert not list(root.glob("simple-http-*")), "private HTTP staging was not cleaned"
                 print("PASS independent loopback byte-exact payload, SHA256, SigV4 and request-count checks")
         finally:
