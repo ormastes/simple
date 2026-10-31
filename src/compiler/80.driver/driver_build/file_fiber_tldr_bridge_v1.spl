@@ -5,7 +5,7 @@ use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, TldrAsyncErrorV1}
 use std.nogc_async_mut.concurrent.lockless_map_i64.{MapError}
 use std.common.contracts.execution.simple_ring_async_v1.{RingToken, RingTerminalKind, RingCompletion, TaskPollResult}
 use std.nogc_async_mut.async_ring.simple_ring.{
-    SimpleRing, SimpleRingError, RingReservation, RingCancelOutcome}
+    SimpleRing, SimpleRingError, RingReservation, RingCancelOutcome, RingSubmission}
 use std.nogc_async_mut.async_ring.async_ref.{
     AsyncRefI64, AsyncRefError, AsyncSubscriptionI64, AsyncWakeCursorI64, AsyncWakeI64,
     AsyncWakeScanI64, AsyncRefStateI64, async_ref_deliver_wake_i64}
@@ -61,7 +61,9 @@ pub class FileFiberTldrBridgeV1:
         if fiber_count < 0 or waiter_capacity < 0:
             return Err(FileFiberTldrBridgeErrorV1.Capacity)
         val capacity = if fiber_count > 0: fiber_count else: 1
-        match SimpleRing<i64, i64>.create(ring_id, owner_id, capacity):
+        # @workaround bug=ctor-mir-20261031 reason=stage2 leaves generic static-call Result unsubstituted; annotate binder
+        val created: Result<SimpleRing<i64, i64>, SimpleRingError> = SimpleRing<i64, i64>.create(ring_id, owner_id, capacity)
+        match created:
             case Err(error): Err(FileFiberTldrBridgeErrorV1.Ring(error))
             case Ok(ring):
                 Ok(FileFiberTldrBridgeV1(ring: ring, owner_id: owner_id,
@@ -172,7 +174,9 @@ pub class FileFiberTldrBridgeV1:
             return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
         self.waits[index].reservation = nil
         self.waits[index].state = _FF_WAIT_ARMED
-        match self.ring.provider_take(1):
+        # @workaround bug=ctor-mir-20261031 reason=annotate binder; stage2 leaves Op unsubstituted in generic-self method Result
+        val taken: Result<RingSubmission<i64>?, SimpleRingError> = self.ring.provider_take(1)
+        match taken:
             case Err(error):
                 match self._cancel_and_release(index, "provider admission failed"):
                     case Err(cleanup_error): return Err(cleanup_error)
@@ -181,14 +185,6 @@ pub class FileFiberTldrBridgeV1:
                     case Err(cleanup_error): return Err(cleanup_error)
                     case Ok(_): ()
                 return Err(FileFiberTldrBridgeErrorV1.Ring(error))
-            case Ok(nil):
-                match self._cancel_and_release(index, "provider admission returned no work"):
-                    case Err(error): return Err(error)
-                    case Ok(_): ()
-                match self._drain_completions(table):
-                    case Err(error): return Err(error)
-                    case Ok(_): ()
-                return Err(FileFiberTldrBridgeErrorV1.Busy)
             case Ok(Some(submission)):
                 if not self._same_token(submission.token, self.waits[index].token) or submission.task_key != (fiber + 1).to_u64():
                     match self._cancel_and_release(index, "provider returned a foreign token"):
@@ -198,6 +194,15 @@ pub class FileFiberTldrBridgeV1:
                         case Err(error): return Err(error)
                         case Ok(_): ()
                     return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
+            # @workaround bug=ctor-mir-20261031 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
+            case Ok(_):
+                match self._cancel_and_release(index, "provider admission returned no work"):
+                    case Err(error): return Err(error)
+                    case Ok(_): ()
+                match self._drain_completions(table):
+                    case Err(error): return Err(error)
+                    case Ok(_): ()
+                return Err(FileFiberTldrBridgeErrorV1.Busy)
         match subscription.poll():
             case TaskPollResult.Ready(_):
                 match self.notice_terminal(self.waits[index].key):
@@ -247,7 +252,8 @@ pub class FileFiberTldrBridgeV1:
             if val cursor = self.cursors[i]:
                 match cursor.next_pending(1):
                     case AsyncWakeScanI64.Wake(wake):
-                        match async_ref_deliver_wake_i64(self.ring, wake):
+                        # @workaround bug=ctor-mir-20261031 reason=explicit type arg; stage2 cannot infer Op from SimpleRing<i64,i64> field
+                        match async_ref_deliver_wake_i64<i64>(self.ring, wake):
                             # @workaround bug=enumowner-mir-20261031 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
                             case Result.Ok(next): self.cursors[i] = Some(next)
                             # @workaround bug=enumowner-mir-20261031 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
@@ -282,12 +288,15 @@ pub class FileFiberTldrBridgeV1:
             val completion = if val retained = self.pending_completion:
                 retained
             else:
-                match self.ring.take_completion_retained(self.owner_id):
+                # @workaround bug=ctor-mir-20261031 reason=annotate binder; stage2 leaves Cpl unsubstituted in generic-self method Result
+                val taken_completion: Result<RingCompletion<i64>?, SimpleRingError> = self.ring.take_completion_retained(self.owner_id)
+                match taken_completion:
                     case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
-                    case Ok(nil): return Ok(())
                     case Ok(Some(value)):
                         self.pending_completion = Some(value)
                         value
+                    # @workaround bug=ctor-mir-20261031 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
+                    case Ok(_): return Ok(())
             var found = -1
             for i in 0..self.waits.len():
                 if self._same_token(self.waits[i].token, completion.token):
@@ -307,8 +316,9 @@ pub class FileFiberTldrBridgeV1:
                 match table.resolve_async(table.handle(self.waits[found].key, ""), self.waits[found].reference):
                     case Err(TldrAsyncErrorV1.Source(message)): error_text = message
                     case Err(error): return Err(FileFiberTldrBridgeErrorV1.Table(error))
-                    case Ok(nil): return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
                     case Ok(Some(_)): ()
+                    # @workaround bug=ctor-mir-20261031 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
+                    case Ok(_): return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
             match self.ring.release_retained_completion(self.owner_id, completion.token):
                 case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
                 case Ok(_): ()
