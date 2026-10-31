@@ -1,0 +1,123 @@
+# @cover src/app/llm_caret/pane_backend.spl 80%
+# @cover src/lib/sys/pty.spl 80%
+"""
+## Purpose and audience
+For smux and caret maintainers: two live shells must share one smux window, each
+answering for itself, and a layout change must reach the child's real viewport.
+## Host and evidence boundary
+Run on native Windows with ConPTY; the children are real `cmd.exe` processes and
+the viewport is what `mode con` reports from inside the child. This spec fails on
+another host; no conditional body silently passes it. Sessions are disposable and
+every pane this spec starts is killed by this spec.
+# @manual: primary
+# @capture: text
+Bug: doc/08_tracking/bug/smux_live_pty_multi_pane_needs_native_resize_2026-10-31.md
+"""
+
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use std.sosix.time.{sosix_sleep_ms}
+use std.sys.pty.{can_resize}
+use app.llm_caret.pane_backend.{pane_spawn, pane_send, pane_capture, pane_list,
+    pane_kill, pane_zoom, pane_resize}
+
+# pane_capture answers rows; these checks are about the text anywhere on them.
+fn screen(session: text, pane: text) -> text:
+    pane_capture(session, pane, 200).join("\n")
+
+fn await_text(session: text, pane: text, want: text) -> bool:
+    var i = 0
+    while i < 100:
+        if screen(session, pane).contains(want):
+            return true
+        sosix_sleep_ms(100)
+        i = i + 1
+    false
+
+# Digits after `label` on the LAST row holding it; -1 when absent.
+fn reported(rows: [text], label: text) -> i64:
+    var value = -1
+    for row in rows:
+        if row.contains(label):
+            val after = row.split(label)[1].trim()
+            var digits = ""
+            for c in after.chars():
+                if c < "0" or c > "9":
+                    break
+                digits = digits + c
+            value = if digits == "": -1 else: digits.to_i64() ?? -1
+    value
+
+# The child computes a fresh sum after `mode con`, so seeing it as a whole row
+# proves this reading is complete. The typed line holds only the operands.
+fn child_columns(session: text, pane: text, base: i64) -> i64:
+    expect(pane_send(session, pane, "mode con & set /a {base}+1")).to_equal(true)
+    val done = (base + 1).to_text()
+    var i = 0
+    while i < 100 and not pane_capture(session, pane, 200).contains(done):
+        sosix_sleep_ms(100)
+        i = i + 1
+    expect(pane_capture(session, pane, 200).contains(done)).to_equal(true)
+    reported(pane_capture(session, pane, 200), "Columns:")
+
+describe "smux live multi-pane terminals":
+    it "reports a real resize capability":
+        expect(can_resize()).to_equal(true)
+
+    it "runs two live shells side by side, each computing its own answer":
+        val session = "smux-live-multi-pane-spec"
+        step("Spawn two real shells in one session")
+        val a = pane_spawn(session, "a", "cmd.exe", [])
+        expect(a.error).to_equal("")
+        val b = pane_spawn(session, "b", "cmd.exe", [])
+        expect(b.error).to_equal("")
+        expect(a.pid).to_be_greater_than(0)
+        expect(b.pid).to_be_greater_than(0)
+        expect(b.pid).to_not_equal(a.pid)
+        expect(b.pane_id).to_not_equal(a.pane_id)
+        expect(pane_list(session).len()).to_equal(2)
+
+        step("Each child computes a product only that pane was asked for")
+        expect(pane_send(session, a.pane_id, "set /a 4711*3")).to_equal(true)
+        expect(await_text(session, a.pane_id, "14133")).to_equal(true)
+        expect(pane_send(session, b.pane_id, "set /a 1234*2")).to_equal(true)
+        expect(await_text(session, b.pane_id, "2468")).to_equal(true)
+        expect(screen(session, a.pane_id).contains("2468")).to_equal(false)
+        expect(screen(session, b.pane_id).contains("14133")).to_equal(false)
+
+        expect(pane_kill(session, a.pane_id)).to_equal(true)
+        expect(pane_kill(session, b.pane_id)).to_equal(true)
+
+    it "changes the viewport the child reports when a pane is resized and zoomed":
+        val session = "smux-live-zoom-spec"
+        val a = pane_spawn(session, "a", "cmd.exe", [])
+        val b = pane_spawn(session, "b", "cmd.exe", [])
+        expect(b.error).to_equal("")
+        expect(await_text(session, a.pane_id, ">")).to_equal(true)
+
+        step("Splitting left the first child narrower than a full window")
+        val split_cols = child_columns(session, a.pane_id, 71000)
+        expect(split_cols).to_be_greater_than(0)
+
+        step("An explicit resize reaches the child")
+        val target = split_cols - 7
+        expect(pane_resize(session, a.pane_id, target, 20)).to_equal(true)
+        expect(child_columns(session, a.pane_id, 72000)).to_equal(target)
+
+        step("Zoom widens the child; toggling back narrows it again")
+        expect(pane_zoom(session, a.pane_id)).to_equal(true)
+        val zoomed_cols = child_columns(session, a.pane_id, 73000)
+        expect(zoomed_cols).to_be_greater_than(target)
+        expect(pane_zoom(session, a.pane_id)).to_equal(true)
+        val restored_cols = child_columns(session, a.pane_id, 74000)
+        expect(restored_cols).to_be_less_than(zoomed_cols)
+
+        expect(pane_kill(session, b.pane_id)).to_equal(true)
+        expect(pane_kill(session, a.pane_id)).to_equal(true)
+
+    it "says why when a child cannot be started":
+        val session = "smux-live-refusal-spec"
+        val refused = pane_spawn(session, "bad", "no-such-program-20261031.exe", [])
+        expect(refused.pane_id).to_equal("")
+        expect(refused.pid).to_equal(0)
+        expect(refused.error).to_not_equal("")
