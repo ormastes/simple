@@ -1,24 +1,20 @@
-# Phase 1 seed: table read after a successful sqlcipher4 open fails in interpreted specs
+# Phase 1 seed: `case Ok(value): value` mis-binds when a spec imports `std.common.json.value` (FIXED)
 
-Observed 2026-10-31 with `D:/dev/simple-phase2-rebuild-20261028/src/compiler_rust/target/bootstrap/simple.exe`,
-`SIMPLE_EXECUTION_MODE=interpret`, running a `*_spec.spl` file.
+Symptom (2026-10-31, Phase 1 seed, `SIMPLE_EXECUTION_MODE=interpret`, any `*_spec.spl`): a table read
+(`DatabaseStoragePortV1.read_table` / `sqlite_format_read_table_bytes`) aborts the whole file with
+`error: semantic: invalid operation: tuple index access on non-tuple type i64` (`executed=0`).
+Production Messenger verbs hit it too.
 
-Symptom: after `storage_backend_sqlcipher4_open` (or `port.open`) of
-`test/fixtures/database/sqlcipher4/dense_multipage.sqlcipher4` succeeds (all nine pages decrypt, about 7 minutes),
-the first `read_table` on the returned view aborts the whole file with
-`error: semantic: invalid operation: tuple index access on non-tuple type i64`
-(`executed=0`). Production verbs (`messenger_sqlcipher4_list_rooms`) fail the same way.
+Isolation (all seconds-long, on plaintext images; the slow decrypt was irrelevant):
+- Read of a file-read or push-built `[u8]` image works, direct and through `port.read_table`.
+- The same spec fails as soon as it has `use std.common.json.value.{JsonValue}` or `{json_value_field}`
+  (either item alone); removing the import makes it pass. The module is named `value`.
+- Site: `src/lib/nogc_sync_mut/database/sqlite_format/btree.spl` leaf branch,
+  `val cell: (i64, [u8]) = match parse_table_leaf_cell(...): case Ok(value): value` then `cell.0`.
+  The match-arm binding `value` resolves to the imported `value` module namespace instead of the payload,
+  so `cell` is not the tuple. Renaming the binding to `decoded_pair` in btree.spl makes the read pass.
+  The identical `Ok(value): value` pattern in cell.spl and record.spl was renamed too (same exposure).
+  `cell` and `hdr` collisions: ruled out (renaming only the `value` binding fixes it).
 
-Isolation so far:
-- The decrypted `view.image` is byte-identical to the generator's plaintext (0 diffs of 36864).
-- `sqlite_format_read_table_bytes` on a push-built copy of that image returns the 2 room rows.
-- The same read on a plaintext copy of the image, opened through the sqlite3 backend in an interpreted spec, returns 2/3/46 rows.
-- In the same run, after the copy read, the module-level `val v` holding the view had become an `i64`
-  (`undefined field 'image': cannot access field on value of type 'i64'`), so module-level names appear to be
-  clobbered by callee locals in interpreted spec mode. Renaming spec globals with a `dn_` prefix did not cure the table read.
-- The same sequence in a plain `fn main` script (JIT) works: 2 room rows, 46 message rows.
-
-Affected, left failing/unrun: `test/02_integration/app/devhub/messenger/dense_storage_rows_spec.spl`,
-`dense_pager_corruption_spec.spl`, and all `test/03_system/app/devhub/messenger/dense_messenger_*` success-path specs
-except `dense_messenger_policy_and_config_spec.spl`.
-Unblock: fix the interpreter defect, or run those specs on a binary that evaluates them natively.
+Fix: the three renames above. Verified: `dense_storage_rows_spec.spl` 8/8 on the seed.
+Class of bug: any `case Ok(value): value` in `src/lib` is exposed when a program also imports a module named `value`.

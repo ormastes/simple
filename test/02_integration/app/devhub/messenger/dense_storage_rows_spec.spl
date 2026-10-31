@@ -35,24 +35,10 @@ val dn_sha_before = dense_file_sha256(DENSE_BASE)
 val dn_view: StorageReadView? = dense_open_view(dn_base_path)
 val dn_port: DatabaseStoragePortV1 = database_storage_port_v1()
 
-# The seed interpreter mis-evaluates a table read on the view struct that the
-# open returned (see doc/08_tracking/bug/seed_interpreter_opened_view_read_tuple_index_2026_10_31.md),
-# but reads the same bytes correctly from a push-built copy: read through a copy.
-fn copied_view() -> StorageReadView:
-    val original = dn_view.?
-    var bytes: [u8] = []
-    var i = 0
-    while i < original.image.len():
-        bytes.push(original.image[i])
-        i = i + 1
-    StorageReadView(format: original.format, source_path: original.source_path, image: bytes,
-        page_size: original.page_size, page_count: original.page_count,
-        reserved_bytes: original.reserved_bytes, text_encoding: original.text_encoding)
-
 fn read_rows(table: text) -> [DbRow]:
     if dn_view == nil:
         return []
-    match dn_port.read_table(copied_view(), table):
+    match dn_port.read_table(dn_view.?, table):
         case Ok(rows): rows
         case Err(_): []
 
@@ -60,7 +46,7 @@ val dn_room_rows: [DbRow] = read_rows("room")
 val dn_member_rows: [DbRow] = read_rows("room_member")
 val dn_message_rows: [DbRow] = read_rows("messages")
 
-fn tables() -> JsonValue:
+fn dn_tables() -> JsonValue:
     json_value_field(truth, "tables")
 
 describe "geometry and page structure":
@@ -99,7 +85,7 @@ describe "exact rows and cells of every table":
         # @req REQ-MSGR-DENSE-ROWS-003
         step("Read table room and compare columns, rows and cells with ground truth")
         # @capture(statistics): row count, cell count and mismatches for table room
-        val want = json_value_field(tables(), "room")
+        val want = json_value_field(dn_tables(), "room")
         expect(column_names(dn_room_rows)).to_equal(truth_columns(want))
         expect(table_diff(dn_room_rows, want)).to_equal("rows={rows_in(want)} cells={rows_in(want) * cols_in(want)} bad=")
 
@@ -107,7 +93,7 @@ describe "exact rows and cells of every table":
         # @req REQ-MSGR-DENSE-ROWS-004
         step("Read table room_member and compare columns, rows and cells with ground truth")
         # @capture(statistics): row count, cell count and mismatches for table room_member
-        val want = json_value_field(tables(), "room_member")
+        val want = json_value_field(dn_tables(), "room_member")
         expect(column_names(dn_member_rows)).to_equal(truth_columns(want))
         expect(table_diff(dn_member_rows, want)).to_equal("rows={rows_in(want)} cells={rows_in(want) * cols_in(want)} bad=")
 
@@ -115,7 +101,7 @@ describe "exact rows and cells of every table":
         # @req REQ-MSGR-DENSE-ROWS-005
         step("Read table messages across its interior page and leaf pages")
         # @capture(statistics): row count, cell count and mismatches for table messages
-        val want = json_value_field(tables(), "messages")
+        val want = json_value_field(dn_tables(), "messages")
         expect(column_names(dn_message_rows)).to_equal(truth_columns(want))
         # every cell except the one overflow body, which the next scenario checks
         expect(table_diff(dn_message_rows, want)).to_equal("rows={rows_in(want)} cells={rows_in(want) * cols_in(want) - 1} bad=")
@@ -136,7 +122,7 @@ describe "adverse reads on the dn_view view":
         step("Read a table name absent from the schema")
         # @capture(protocol_json): storage-dn_port error code for the unknown table
         val view = dn_view.?
-        val code = match dn_port.read_table(copied_view(), "no_such_table"):
+        val code = match dn_port.read_table(dn_view.?, "no_such_table"):
             case Ok(rows): "OK:{rows.len()}"
             case Err(problem): problem.code()
         expect(code.starts_with("STORAGE_PORT_")).to_equal(true)
