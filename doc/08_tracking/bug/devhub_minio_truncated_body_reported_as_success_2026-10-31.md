@@ -1,6 +1,6 @@
 # MinIO GET reports a truncated body as success
 
-Status: fixed 2026-10-31, found by the emulated specs. On Windows a v2 transport failure still falls back to curl, capped at 1 MiB.
+Status: fixed 2026-10-31, found by the emulated specs. The curl fallback, capped at 1 MiB, now fires only when native HTTP is unavailable.
 
 When a server closes the socket before `Content-Length` bytes arrive,
 `minio_get_object` (`src/app/devhub/adapter_minio.spl:457`) returns `ok=true` after one
