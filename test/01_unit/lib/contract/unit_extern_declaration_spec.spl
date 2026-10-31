@@ -1,0 +1,73 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/nil_return_non_optional_deferred_2026-10-31.md
+"""
+# Unit-returning externs are declared without a return type
+
+The Rust interpreter handlers of `rt_stdout_write_text`, `rt_stdout_flush`,
+`rt_stderr_write`, `rt_thread_yield` and `rt_free` all end in
+`Ok(Value::Nil)`: they return no value. Five declarations claimed an integer
+result (`-> i64` / `-> i32`). Two callers then used that "result": the
+`Stderr.write` byte count and the MIR interpreter's `__simple_runtime_yield`
+hook. Both handed nil on through an `i64` contract.
+
+The source block pins each declaration. A `bin/simple test` run executes the
+deployed binary, so a behavioural test alone would also pass against reverted
+source. The behaviour block checks the two callers that used the result.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file_text}
+use std.nogc_sync_mut.io.pipe.{Stderr}
+use compiler.interp.mir_interp_runtime.{mir_interp_call_runtime_fn}
+
+fn _declares(path: text, decl: text) -> bool:
+    val src = read_file_text(path)
+    for line in src.split("\n"):
+        if line.trim() == decl:
+            return true
+    false
+
+describe "unit-returning extern declarations":
+    it "scv and md_lsp declare rt_stdout_write_text without a return type":
+        # @req REQ-SSPEC-UNIT
+        step("Read both declaring files")
+        expect(_declares("src/app/scv/main.spl", "extern fn rt_stdout_write_text(s: text)")).to_equal(true)
+        expect(_declares("src/app/md_lsp/md_lsp_main.spl", "extern fn rt_stdout_write_text(s: text)")).to_equal(true)
+
+    it "ui_shared_mdi declares rt_stdout_flush without a return type":
+        # @req REQ-SSPEC-UNIT
+        step("Read the declaring file")
+        expect(_declares("src/app/ui_shared_mdi/main.spl", "extern fn rt_stdout_flush()")).to_equal(true)
+
+    it "pipe declares rt_stderr_write without a return type":
+        # @req REQ-SSPEC-UNIT
+        step("Read the declaring file")
+        expect(_declares("src/lib/nogc_sync_mut/io/pipe.spl", "extern fn rt_stderr_write(data: [u8])")).to_equal(true)
+
+    it "the MIR interpreter declares rt_thread_yield without a return type":
+        # @req REQ-SSPEC-UNIT
+        step("Read the declaring file")
+        expect(_declares("src/compiler/95.interp/mir_interp_runtime.spl", "extern fn rt_thread_yield()")).to_equal(true)
+
+    it "the Metal font backend declares rt_free without a return type":
+        # @req REQ-SSPEC-UNIT
+        step("Read the declaring file")
+        expect(_declares("src/lib/gc_async_mut/gpu/engine2d/backend_metal_font.spl", "extern fn rt_free(ptr: i64)")).to_equal(true)
+
+describe "callers of unit-returning externs":
+    it "Stderr.write reports the buffer length, not the extern's nil":
+        # @req REQ-SSPEC-UNIT
+        step("Write three bytes through Stderr.write")
+        val err = Stderr.new()
+        val res = err.write([110u8, 105u8, 10u8])
+        expect(res.is_ok()).to_equal(true)
+        expect(res.unwrap()).to_equal(3)
+
+    it "the MIR runtime yield hook returns the unit word 0":
+        # @req REQ-SSPEC-UNIT
+        step("Call __simple_runtime_yield through the MIR interpreter runtime table")
+        val r = mir_interp_call_runtime_fn("__simple_runtime_yield", [])
+        expect(r == nil).to_equal(false)
+        expect(r).to_equal(0)
