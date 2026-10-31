@@ -41,3 +41,10 @@ would affect all interpreted code. Wipe guarantees are judged natively.
   `DEVHUB_FRESH_SEED_INTERPRETER=1`. Native runs always enforce the checks.
 
 Do not cite a Phase 1 run as evidence that secrets or plaintext were erased.
+
+## Also seen in
+
+`test/01_unit/lib/database/sqlite_format/writer_spec.spl` fails 4 scenarios on the
+seed with `bad magic`. The writer fills its image through parameters
+(`page[off] = ... as u8`), which fits this cause but was not confirmed. The Messenger
+read path does not use the writer.
