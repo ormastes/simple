@@ -4,7 +4,7 @@
 //! RuntimeValue is passed as Value::Int containing the raw u64 representation.
 
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::value::Value;
+use crate::value::{enum_names, Value};
 use simple_runtime::value::RuntimeValue;
 
 // Import actual SFFI functions from runtime
@@ -208,8 +208,8 @@ fn probe_arg<'a>(args: &'a [Value], name: &str) -> Result<&'a Value, CompileErro
 /// historical contract). Any other argument is a concrete carrier (a
 /// struct/class record, enum, string, collection, ...) passed to a generic
 /// `extern fn rt_value_is_*<T>(value: T)` without reboxing. Compiled code
-/// receives that as a heap pointer, so it is classified as heap, except
-/// `Option::None`, which is nil (matching `rt_value_is_nil_fn`).
+/// receives that as a heap pointer, so it is classified as heap. Only the
+/// distinct `Value::Nil` singleton is nil.
 enum ProbeCarrier {
     Word(RuntimeValue),
     /// An interpreter float. Native `rt_value_float` boxes a HeapFloat, so it
@@ -238,9 +238,9 @@ fn classify_probe(value: &Value) -> ProbeCarrier {
         Value::Unit { value, .. } => classify_probe(value),
         Value::Borrow(b) => classify_probe(&*b.inner()),
         Value::BorrowMut(b) => classify_probe(&*b.inner()),
-        // `Option::None` is nil; every other carrier (Str, Array, Dict,
-        // Object incl. single-`value` records, Enum, Unique/Shared/Weak/
-        // Handle, ...) is a heap object in compiled code.
+        // Native Option::None is an enum object, not the nil singleton.
+        Value::Enum { enum_name, variant, .. }
+            if enum_name == enum_names::OPTION && variant == enum_names::NONE => ProbeCarrier::Heap,
         _ if value.is_nil_like() => ProbeCarrier::Nil,
         _ => ProbeCarrier::Heap,
     }
@@ -265,8 +265,8 @@ pub fn rt_value_is_bool_fn(args: &[Value]) -> Result<Value, CompileError> {
     }))
 }
 
-/// Check if value is heap pointer. A record carrier is a heap object, as in
-/// compiled code; `Option::None` is nil, not heap.
+/// Check if value is heap pointer. A record carrier and Option::None are heap
+/// objects in compiled code; only the nil singleton is not heap.
 pub fn rt_value_is_heap_fn(args: &[Value]) -> Result<Value, CompileError> {
     let value = probe_arg(args, "rt_value_is_heap")?;
     Ok(Value::Bool(match classify_probe(value) {
@@ -509,13 +509,14 @@ mod carrier_probe_tests {
     }
 
     #[test]
-    fn option_none_carrier_is_not_heap() {
+    fn option_none_carrier_is_heap() {
         let none = Value::none();
-        assert!(matches!(rt_value_is_heap_fn(&[none.clone()]).unwrap(), Value::Bool(false)));
+        assert!(matches!(rt_value_is_heap_fn(&[none.clone()]).unwrap(), Value::Bool(true)));
         assert!(matches!(rt_value_is_float_fn(&[none.clone()]).unwrap(), Value::Bool(false)));
         assert!(matches!(rt_value_is_bool_fn(&[none.clone()]).unwrap(), Value::Bool(false)));
-        let nil_tag = rt_value_type_tag(rt_value_nil()) as i64;
-        assert!(matches!(rt_value_type_tag_fn(&[none]).unwrap(), Value::Int(t) if t == nil_tag));
+        assert!(matches!(rt_value_is_nil_fn(&[none.clone()]).unwrap(), Value::Bool(false)));
+        let heap_tag = simple_runtime::value::tags::TAG_HEAP as i64;
+        assert!(matches!(rt_value_type_tag_fn(&[none]).unwrap(), Value::Int(t) if t == heap_tag));
     }
 
     #[test]
