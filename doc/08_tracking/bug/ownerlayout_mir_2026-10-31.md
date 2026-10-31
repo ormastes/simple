@@ -13,3 +13,7 @@
 - `src/compiler/70.backend/bitfield.spl`, `src/compiler/50.mir/mir_bitfield.spl`: `bitfield_symbol_key(symbol)` ("sym#<id>") replaces the nonexistent `symbol.name` (this one is a real source fix; callers: none, `is_bitfield_type`/`get_bitfield_info` are only re-exported).
 
 A typed parameter / annotated binding gives MIR the exact imported CompileError provenance (verified with pinned stage2 on probes build/probe/ol/*.spl).
+
+## Known effect
+
+`bitfield_symbol_key` returns `sym#<id>`. A custom primitive alias used as a bitfield field or backing type in `70.backend/bitfield.spl` now resolves as unknown (`UnknownFieldType` / `InvalidBackingType`) until a real symbol-name lookup exists. That module is re-export-disabled (`70.backend/__init__.spl:20`), and the old `symbol.name` read could never have worked.
