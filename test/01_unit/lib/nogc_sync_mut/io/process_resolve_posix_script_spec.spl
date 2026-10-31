@@ -9,11 +9,12 @@ POSIX shell; a missing script must keep failing at spawn.
 use std.spec.*
 use std.sffi.io.{file_write_text}
 use std.nogc_sync_mut.io.process_ops.{_resolve_posix_tool, process_spawn_piped,
-    process_write_stdin, process_read_stdout, process_close_piped, process_pid_exists}
+    process_write_stdin, process_read_stdout, process_close_piped, process_pid_exists, process_exists}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
 use std.platform.{is_windows}
 
 val STUB: text = "test/fixtures/caret_workbench/agent_pane_stub.shs"
+val FOREIGN: text = "build/process_resolve_posix_script_fixture"
 
 describe "process spawning of POSIX shell scripts":
     it "routes an existing script through the POSIX shell on Windows only":
@@ -56,8 +57,7 @@ describe "process spawning of POSIX shell scripts":
         expect(process_close_piped(pid)).to_equal(true)
 
     it "reports a dead pid as gone through process_pid_exists":
-        step("Probe a pid no live process holds, and a child after closing it")
-        expect(process_pid_exists(999983)).to_equal(false)
+        step("Probe a child after closing it; its pid is known to have been reaped")
         val pid = process_spawn_piped(STUB, [])
         expect(process_pid_exists(pid)).to_equal(true)
         expect(process_close_piped(pid)).to_equal(true)
@@ -72,3 +72,39 @@ describe "process spawning of POSIX shell scripts":
             expect(resolved.1[0]).to_equal("bin/caret")
         else:
             expect(resolved.0).to_equal("bin/caret")
+
+    it "does not run a script for another interpreter as shell commands":
+        step("Resolve a python shebang, directly and through env")
+        for line in ["#!/usr/bin/env python3", "#!/usr/bin/python3"]:
+            expect(file_write_text(FOREIGN, line + "\nprint('x')\n")).to_equal(true)
+            val resolved = _resolve_posix_tool(FOREIGN, ["a"])
+            expect(resolved.0).to_equal(FOREIGN)
+            expect(resolved.1.len()).to_equal(1)
+            expect(resolved.1[0]).to_equal("a")
+
+    it "routes an env-named shell through the POSIX shell on Windows only":
+        step("Resolve a #!/usr/bin/env sh script")
+        expect(file_write_text(FOREIGN, "#!/usr/bin/env sh\necho x\n")).to_equal(true)
+        val resolved = _resolve_posix_tool(FOREIGN, ["a"])
+        if is_windows():
+            expect(resolved.0.ends_with("sh.exe")).to_equal(true)
+            expect(resolved.1[0]).to_equal(FOREIGN)
+        else:
+            expect(resolved.0).to_equal(FOREIGN)
+
+    it "passes quoted arguments to a script byte for byte, in the spawned process":
+        if is_windows():
+            step("Spawn an argv-echoing script with quotes, spaces and backslashes")
+            expect(file_write_text(FOREIGN, "#!/bin/sh\nfor a; do printf '[%s]\\n' \"$a\"; done\nread line\n")).to_equal(true)
+            val pid = process_spawn_piped(FOREIGN, ["it's", "say \"x\" y", "C:\\dir with space\\f", "a*b", "e\\"])
+            expect(pid > 0).to_equal(true)
+            val want = "[it's]\n[say \"x\" y]\n[C:\\dir with space\\f]\n[a*b]\n[e\\]\n"
+            var seen = ""
+            var tries = 0
+            while tries < 60 and not seen.contains("[e\\]"):
+                thread_sleep_ms(50)
+                seen = seen + process_read_stdout(pid)
+                tries = tries + 1
+            expect(seen).to_equal(want)
+            expect(process_exists(pid)).to_equal(true)
+            expect(process_close_piped(pid)).to_equal(true)

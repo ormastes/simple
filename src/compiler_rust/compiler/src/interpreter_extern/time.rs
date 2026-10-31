@@ -341,11 +341,16 @@ pub fn rt_timestamp_oracle_diff_days(args: &[Value]) -> Result<Value, CompileErr
 /// Shared process-start monotonic baseline for the interpreter's
 /// `rt_time_now_nanos` / `rt_time_now_micros`. Both MUST read the same
 /// baseline, otherwise the two names sit on two different epochs.
-fn interp_monotonic_nanos() -> i64 {
+///
+/// Readings start one second after that baseline: the native contract is a
+/// nonzero monotonic reading (0 means "never" to SOSIX deadlines), and the first
+/// call would otherwise read 0 at every unit. Differences are unaffected.
+pub(super) fn interp_monotonic_nanos() -> i64 {
     use std::sync::OnceLock;
     use std::time::Instant;
+    const EPOCH_NANOS: i64 = 1_000_000_000;
     static BASELINE: OnceLock<Instant> = OnceLock::new();
-    BASELINE.get_or_init(Instant::now).elapsed().as_nanos() as i64
+    BASELINE.get_or_init(Instant::now).elapsed().as_nanos() as i64 + EPOCH_NANOS
 }
 
 /// Get monotonic time in nanoseconds.
@@ -378,12 +383,7 @@ pub fn rt_time_now_micros(_args: &[Value]) -> Result<Value, CompileError> {
 /// Only DIFFERENCES between two readings are meaningful; callers wanting a
 /// wall-clock timestamp must use `rt_time_now_unix_micros`.
 pub fn rt_time_monotonic_ns(_args: &[Value]) -> Result<Value, CompileError> {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static BASELINE: OnceLock<Instant> = OnceLock::new();
-    Ok(Value::Int(
-        BASELINE.get_or_init(Instant::now).elapsed().as_nanos() as i64
-    ))
+    Ok(Value::Int(interp_monotonic_nanos()))
 }
 
 /// Get ISO-8601 timestamp string

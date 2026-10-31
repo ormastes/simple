@@ -48,37 +48,37 @@ class PaneRecord:
     child_incarnation: u64
 
     fn with_input(input: PaneInput) -> PaneRecord:
-        return PaneRecord(content_revision: me.content_revision, ingestion_sequence: me.ingestion_sequence, child_incarnation: me.child_incarnation, input: input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, tail_truncated: me.tail_truncated, screen: me.screen)
+        return PaneRecord(content_revision: self.content_revision, ingestion_sequence: self.ingestion_sequence, child_incarnation: self.child_incarnation, input: input, pane: self.pane, focus: self.focus, child_pid: self.child_pid, pty_fd: self.pty_fd, tail: self.tail, tail_truncated: self.tail_truncated, screen: self.screen)
 
     fn feed_screen(raw: text) -> PaneRecord:
-        var out = me
-        out.screen = vt_feed(me.screen, raw)
-        out.ingestion_sequence = me.ingestion_sequence + (text_to_bytes(raw).len() as u64)
+        var out = self
+        out.screen = vt_feed(self.screen, raw)
+        out.ingestion_sequence = self.ingestion_sequence + (text_to_bytes(raw).len() as u64)
         if out.screen.capture_dirty:
-            out.content_revision = me.content_revision + 1
+            out.content_revision = self.content_revision + 1
         return out
 
     # Pipe output uses the same terminal model for shared capture; legacy tail
     # remains available. Count UTF-8 bytes delivered by the text-read provider.
     fn ingest_pipe(raw: text, cleaned: text) -> PaneRecord:
-        var out = me
+        var out = self
         # A pipe's LF starts a new text line (there is no terminal OPOST).
         # Account delivered text bytes, not native syscall bytes or inserted CR.
-        out.screen = vt_feed(me.screen, raw.replace("\n", "\r\n"))
-        out.ingestion_sequence = me.ingestion_sequence + (text_to_bytes(raw).len() as u64)
-        if out.screen.capture_dirty: out.content_revision = me.content_revision + 1
-        val retained = vt_tail_retain(me.tail, cleaned)
+        out.screen = vt_feed(self.screen, raw.replace("\n", "\r\n"))
+        out.ingestion_sequence = self.ingestion_sequence + (text_to_bytes(raw).len() as u64)
+        if out.screen.capture_dirty: out.content_revision = self.content_revision + 1
+        val retained = vt_tail_retain(self.tail, cleaned)
         out.tail = retained.content
-        out.tail_truncated = me.tail_truncated or retained.truncated
-        if retained.content != me.tail: out.content_revision = me.content_revision + 1
+        out.tail_truncated = self.tail_truncated or retained.truncated
+        if retained.content != self.tail: out.content_revision = self.content_revision + 1
         return out
 
     fn feed(output: text) -> PaneRecord:
-        return me.ingest_pipe(output, output)
+        return self.ingest_pipe(output, output)
 
     fn resize(c: int, r: int) -> PaneRecord:
-        if me.pane.cols == c and me.pane.rows == r: return me
-        val p = me.pane
+        if self.pane.cols == c and self.pane.rows == r: return self
+        val p = self.pane
         val np = MuxPane(
             id: p.id,
             window_id: p.window_id,
@@ -88,79 +88,79 @@ class PaneRecord:
             cols: c,
             rows: r
         )
-        var out = me
+        var out = self
         out.pane = np
-        out.screen = vt_resize(me.screen, r, c)
-        if out.screen.capture_dirty: out.content_revision = me.content_revision + 1
+        out.screen = vt_resize(self.screen, r, c)
+        if out.screen.capture_dirty: out.content_revision = self.content_revision + 1
         return out
 
     fn with_focus(f: bool) -> PaneRecord:
-        return PaneRecord(content_revision: me.content_revision, ingestion_sequence: me.ingestion_sequence, child_incarnation: me.child_incarnation, input: me.input, pane: me.pane, focus: f, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, tail_truncated: me.tail_truncated, screen: me.screen)
+        return PaneRecord(content_revision: self.content_revision, ingestion_sequence: self.ingestion_sequence, child_incarnation: self.child_incarnation, input: self.input, pane: self.pane, focus: f, child_pid: self.child_pid, pty_fd: self.pty_fd, tail: self.tail, tail_truncated: self.tail_truncated, screen: self.screen)
 
     fn with_child(pid: i64) -> PaneRecord:
-        var out = me
+        var out = self
         out.input = pane_input_new()
         out.child_pid = pid
-        if pid > 0 and pid != me.child_pid:
-            out.child_incarnation = me.child_incarnation + 1
+        if pid > 0 and pid != self.child_pid:
+            out.child_incarnation = self.child_incarnation + 1
         return out
 
     fn with_pty(pid: i64, fd: i64) -> PaneRecord:
-        var out = me
+        var out = self
         out.input = pane_input_new()
         out.child_pid = pid
         out.pty_fd = fd
-        if fd >= 0 and fd != me.pty_fd:
-            out.child_incarnation = me.child_incarnation + 1
+        if fd >= 0 and fd != self.pty_fd:
+            out.child_incarnation = self.child_incarnation + 1
             # A failed spawn may still own a deferred-close native handle.
             # Retain the last screen until a real child was attached.
             if pid > 0:
-                out.screen = vt_new(me.pane.rows, me.pane.cols)
+                out.screen = vt_new(self.pane.rows, self.pane.cols)
                 out.tail = ""
                 out.tail_truncated = false
-                if me.tail != "" or not vt_view_equal(me.screen, out.screen):
-                    out.content_revision = me.content_revision + 1
+                if self.tail != "" or not vt_view_equal(self.screen, out.screen):
+                    out.content_revision = self.content_revision + 1
         return out
 
     fn can_attach() -> bool:
-        return me.child_incarnation < 18446744073709551615u64 and me.content_revision < 18446744073709551615u64
+        return self.child_incarnation < 18446744073709551615u64 and self.content_revision < 18446744073709551615u64
 
     fn can_ingest() -> bool:
         # Native reads are bounded; reserve ample counter space before I/O.
-        return me.ingestion_sequence <= 18446744073708503039u64 and me.content_revision < 18446744073709551615u64
+        return self.ingestion_sequence <= 18446744073708503039u64 and self.content_revision < 18446744073709551615u64
 
     fn uses_tail_capture() -> bool:
-        return me.pty_fd < 0 and (me.child_pid > 0 or me.tail != "")
+        return self.pty_fd < 0 and (self.child_pid > 0 or self.tail != "")
 
     fn capture(max_lines: int) -> MuxCapture:
         # A PTY child's output lives on its screen (only a PTY feeds it); a
         # piped child's in the tail. Trailing blank lines (the newline that
         # ended the last output line, an idle prompt's padding) are not content.
-        val shown = vt_text(me.screen)
-        var lines = if me.uses_tail_capture(): me.tail.split("\n") else: shown.split("\n")
+        val shown = vt_text(self.screen)
+        var lines = if self.uses_tail_capture(): self.tail.split("\n") else: shown.split("\n")
         while lines.len() > 0 and lines[lines.len() - 1].trim() == "":
             lines = lines[0:lines.len() - 1]
         if max_lines > 0 and lines.len() > max_lines:
             lines = lines[lines.len() - max_lines:]
-        return MuxCapture.create(me.pane.id, lines.join("\n"), lines.len())
+        return MuxCapture.create(self.pane.id, lines.join("\n"), lines.len())
 
     # A PTY history capture uses one frozen history+grid snapshot. Never fall
     # back to the live output tail when that complete snapshot happens empty.
     fn capture_history(max_lines: int) -> MuxCapture:
         if max_lines <= 0:
-            return MuxCapture.create(me.pane.id, "", 0)
-        if me.uses_tail_capture():
-            return me.capture(max_lines)
-        var content = vt_history_text(me.screen, max_lines as i64)
-        if me.pty_fd < 0 and me.child_pid > 0 and not me.screen.alt.on and me.screen.frozen.len() == 0 and content == "":
-            content = me.capture(max_lines).content
+            return MuxCapture.create(self.pane.id, "", 0)
+        if self.uses_tail_capture():
+            return self.capture(max_lines)
+        var content = vt_history_text(self.screen, max_lines as i64)
+        if self.pty_fd < 0 and self.child_pid > 0 and not self.screen.alt.on and self.screen.frozen.len() == 0 and content == "":
+            content = self.capture(max_lines).content
         val rows = if content == "": 0 else: content.split("\n").len()
-        return MuxCapture.create(me.pane.id, content, rows)
+        return MuxCapture.create(self.pane.id, content, rows)
 
     # Rows of the PTY screen with styling as ANSI SGR runs (the piped tail has
     # no styling, so it is returned plain).
     fn styled_capture(max_lines: int) -> text:
-        var lines = if me.uses_tail_capture(): me.tail.split("\n") else: vt_styled_text(me.screen).split("\n")
+        var lines = if self.uses_tail_capture(): self.tail.split("\n") else: vt_styled_text(self.screen).split("\n")
         while lines.len() > 0 and lines[lines.len() - 1].trim() == "":
             lines = lines[0:lines.len() - 1]
         if max_lines > 0 and lines.len() > max_lines:
@@ -169,13 +169,13 @@ class PaneRecord:
 
     # Query replies the screen owes the child (DSR, DA, colours, ...).
     fn replies() -> text:
-        return vt_replies(me.screen)
+        return vt_replies(self.screen)
 
     fn without_replies() -> PaneRecord:
-        return PaneRecord(content_revision: me.content_revision, ingestion_sequence: me.ingestion_sequence, child_incarnation: me.child_incarnation, input: me.input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, tail_truncated: me.tail_truncated, screen: vt_clear_replies(me.screen))
+        return PaneRecord(content_revision: self.content_revision, ingestion_sequence: self.ingestion_sequence, child_incarnation: self.child_incarnation, input: self.input, pane: self.pane, focus: self.focus, child_pid: self.child_pid, pty_fd: self.pty_fd, tail: self.tail, tail_truncated: self.tail_truncated, screen: vt_clear_replies(self.screen))
 
     fn bracketed_paste() -> bool:
-        return me.pty_fd >= 0 and vt_bracketed_paste(me.screen)
+        return self.pty_fd >= 0 and vt_bracketed_paste(self.screen)
 
     static fn create(p: MuxPane) -> PaneRecord:
         return PaneRecord(content_revision: 0, ingestion_sequence: 0, child_incarnation: 0, input: pane_input_new(), pane: p, focus: false, child_pid: -1, pty_fd: -1, tail: "", tail_truncated: false, screen: vt_new(p.rows, p.cols))
@@ -233,254 +233,254 @@ class ServiceState:
     # --- session helpers ---
 
     fn find_session_idx(sid: text) -> int:
-        if me.session_count > 0:
-            if me.s0.id == sid:
+        if self.session_count > 0:
+            if self.s0.id == sid:
                 return 0
-        if me.session_count > 1:
-            if me.s1.id == sid:
+        if self.session_count > 1:
+            if self.s1.id == sid:
                 return 1
-        if me.session_count > 2:
-            if me.s2.id == sid:
+        if self.session_count > 2:
+            if self.s2.id == sid:
                 return 2
-        if me.session_count > 3:
-            if me.s3.id == sid:
+        if self.session_count > 3:
+            if self.s3.id == sid:
                 return 3
-        if me.session_count > 4:
-            if me.s4.id == sid:
+        if self.session_count > 4:
+            if self.s4.id == sid:
                 return 4
-        if me.session_count > 5:
-            if me.s5.id == sid:
+        if self.session_count > 5:
+            if self.s5.id == sid:
                 return 5
-        if me.session_count > 6:
-            if me.s6.id == sid:
+        if self.session_count > 6:
+            if self.s6.id == sid:
                 return 6
-        if me.session_count > 7:
-            if me.s7.id == sid:
+        if self.session_count > 7:
+            if self.s7.id == sid:
                 return 7
         return -1
 
     fn get_session(idx: int) -> MuxSession:
         if idx == 0:
-            return me.s0
+            return self.s0
         if idx == 1:
-            return me.s1
+            return self.s1
         if idx == 2:
-            return me.s2
+            return self.s2
         if idx == 3:
-            return me.s3
+            return self.s3
         if idx == 4:
-            return me.s4
+            return self.s4
         if idx == 5:
-            return me.s5
+            return self.s5
         if idx == 6:
-            return me.s6
+            return self.s6
         if idx == 7:
-            return me.s7
-        return me.s0
+            return self.s7
+        return self.s0
 
     fn add_session(s: MuxSession) -> ServiceState:
-        var st = me
-        val n = me.session_count
+        var st = self
+        val n = self.session_count
         if n == 0:
-            st = ServiceState(s0: s, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: n + 1, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: s, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: n + 1, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 1:
-            st = ServiceState(s0: me.s0, s1: s, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: n + 1, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: s, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: n + 1, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 2:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: s, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: n + 1, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: s, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: n + 1, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 3:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: s, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: n + 1, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: s, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: n + 1, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 4:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: s, s5: me.s5, s6: me.s6, s7: me.s7, session_count: n + 1, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: s, s5: self.s5, s6: self.s6, s7: self.s7, session_count: n + 1, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 5:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: s, s6: me.s6, s7: me.s7, session_count: n + 1, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: s, s6: self.s6, s7: self.s7, session_count: n + 1, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 6:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: s, s7: me.s7, session_count: n + 1, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: s, s7: self.s7, session_count: n + 1, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 7:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: s, session_count: n + 1, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: s, session_count: n + 1, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         return st
 
     # --- window helpers ---
 
     fn find_window_idx(wid: text) -> int:
-        if me.window_count > 0:
-            if me.w0.id == wid:
+        if self.window_count > 0:
+            if self.w0.id == wid:
                 return 0
-        if me.window_count > 1:
-            if me.w1.id == wid:
+        if self.window_count > 1:
+            if self.w1.id == wid:
                 return 1
-        if me.window_count > 2:
-            if me.w2.id == wid:
+        if self.window_count > 2:
+            if self.w2.id == wid:
                 return 2
-        if me.window_count > 3:
-            if me.w3.id == wid:
+        if self.window_count > 3:
+            if self.w3.id == wid:
                 return 3
-        if me.window_count > 4:
-            if me.w4.id == wid:
+        if self.window_count > 4:
+            if self.w4.id == wid:
                 return 4
-        if me.window_count > 5:
-            if me.w5.id == wid:
+        if self.window_count > 5:
+            if self.w5.id == wid:
                 return 5
-        if me.window_count > 6:
-            if me.w6.id == wid:
+        if self.window_count > 6:
+            if self.w6.id == wid:
                 return 6
-        if me.window_count > 7:
-            if me.w7.id == wid:
+        if self.window_count > 7:
+            if self.w7.id == wid:
                 return 7
         return -1
 
     fn get_window(idx: int) -> MuxWindow:
         if idx == 0:
-            return me.w0
+            return self.w0
         if idx == 1:
-            return me.w1
+            return self.w1
         if idx == 2:
-            return me.w2
+            return self.w2
         if idx == 3:
-            return me.w3
+            return self.w3
         if idx == 4:
-            return me.w4
+            return self.w4
         if idx == 5:
-            return me.w5
+            return self.w5
         if idx == 6:
-            return me.w6
+            return self.w6
         if idx == 7:
-            return me.w7
-        return me.w0
+            return self.w7
+        return self.w0
 
     fn add_window(w: MuxWindow) -> ServiceState:
-        var st = me
-        val n = me.window_count
+        var st = self
+        val n = self.window_count
         if n == 0:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: w, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: n + 1, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: w, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: n + 1, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 1:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: w, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: n + 1, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: w, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: n + 1, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 2:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: w, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: n + 1, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: w, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: n + 1, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 3:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: w, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: n + 1, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: w, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: n + 1, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 4:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: w, w5: me.w5, w6: me.w6, w7: me.w7, window_count: n + 1, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: w, w5: self.w5, w6: self.w6, w7: self.w7, window_count: n + 1, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 5:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: w, w6: me.w6, w7: me.w7, window_count: n + 1, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: w, w6: self.w6, w7: self.w7, window_count: n + 1, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 6:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: w, w7: me.w7, window_count: n + 1, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: w, w7: self.w7, window_count: n + 1, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if n == 7:
-            st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: w, window_count: n + 1, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            st = ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: w, window_count: n + 1, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         return st
 
     fn replace_window(idx: int, w: MuxWindow) -> ServiceState:
         if idx == 0:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: w, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: w, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 1:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: w, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: w, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 2:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: w, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: w, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 3:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: w, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: w, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 4:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: w, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: w, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 5:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: w, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: w, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 6:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: w, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: w, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 7:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: w, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
-        return me
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: w, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
+        return self
 
     # --- pane helpers ---
 
     fn find_pane_idx(pid: text) -> int:
-        if me.pane_count > 0:
-            if me.p0.pane.id == pid:
+        if self.pane_count > 0:
+            if self.p0.pane.id == pid:
                 return 0
-        if me.pane_count > 1:
-            if me.p1.pane.id == pid:
+        if self.pane_count > 1:
+            if self.p1.pane.id == pid:
                 return 1
-        if me.pane_count > 2:
-            if me.p2.pane.id == pid:
+        if self.pane_count > 2:
+            if self.p2.pane.id == pid:
                 return 2
-        if me.pane_count > 3:
-            if me.p3.pane.id == pid:
+        if self.pane_count > 3:
+            if self.p3.pane.id == pid:
                 return 3
-        if me.pane_count > 4:
-            if me.p4.pane.id == pid:
+        if self.pane_count > 4:
+            if self.p4.pane.id == pid:
                 return 4
-        if me.pane_count > 5:
-            if me.p5.pane.id == pid:
+        if self.pane_count > 5:
+            if self.p5.pane.id == pid:
                 return 5
-        if me.pane_count > 6:
-            if me.p6.pane.id == pid:
+        if self.pane_count > 6:
+            if self.p6.pane.id == pid:
                 return 6
-        if me.pane_count > 7:
-            if me.p7.pane.id == pid:
+        if self.pane_count > 7:
+            if self.p7.pane.id == pid:
                 return 7
         return -1
 
     fn get_pane(idx: int) -> PaneRecord:
         if idx == 0:
-            return me.p0
+            return self.p0
         if idx == 1:
-            return me.p1
+            return self.p1
         if idx == 2:
-            return me.p2
+            return self.p2
         if idx == 3:
-            return me.p3
+            return self.p3
         if idx == 4:
-            return me.p4
+            return self.p4
         if idx == 5:
-            return me.p5
+            return self.p5
         if idx == 6:
-            return me.p6
+            return self.p6
         if idx == 7:
-            return me.p7
-        return me.p0
+            return self.p7
+        return self.p0
 
     fn replace_pane(idx: int, pr: PaneRecord) -> ServiceState:
         if idx == 0:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: pr, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: pr, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 1:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: pr, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: pr, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 2:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: pr, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: pr, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 3:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: pr, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: pr, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 4:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: pr, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: pr, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 5:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: pr, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: pr, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 6:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: pr, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: pr, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
         if idx == 7:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: pr, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
-        return me
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: pr, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
+        return self
 
     fn add_pane(pr: PaneRecord) -> ServiceState:
-        val n = me.pane_count
+        val n = self.pane_count
         if n == 0:
-            val stp0: ServiceState = me.replace_pane(0, pr)
+            val stp0: ServiceState = self.replace_pane(0, pr)
             return stp0.with_pane_count(n + 1)
         if n == 1:
-            val stp1: ServiceState = me.replace_pane(1, pr)
+            val stp1: ServiceState = self.replace_pane(1, pr)
             return stp1.with_pane_count(n + 1)
         if n == 2:
-            val stp2: ServiceState = me.replace_pane(2, pr)
+            val stp2: ServiceState = self.replace_pane(2, pr)
             return stp2.with_pane_count(n + 1)
         if n == 3:
-            val stp3: ServiceState = me.replace_pane(3, pr)
+            val stp3: ServiceState = self.replace_pane(3, pr)
             return stp3.with_pane_count(n + 1)
         if n == 4:
-            val stp4: ServiceState = me.replace_pane(4, pr)
+            val stp4: ServiceState = self.replace_pane(4, pr)
             return stp4.with_pane_count(n + 1)
         if n == 5:
-            val stp5: ServiceState = me.replace_pane(5, pr)
+            val stp5: ServiceState = self.replace_pane(5, pr)
             return stp5.with_pane_count(n + 1)
         if n == 6:
-            val stp6: ServiceState = me.replace_pane(6, pr)
+            val stp6: ServiceState = self.replace_pane(6, pr)
             return stp6.with_pane_count(n + 1)
         if n == 7:
-            val stp7: ServiceState = me.replace_pane(7, pr)
+            val stp7: ServiceState = self.replace_pane(7, pr)
             return stp7.with_pane_count(n + 1)
-        return me
+        return self
 
     # remove_pane — compact on removal.
     #
@@ -489,81 +489,81 @@ class ServiceState:
     # every LATER pane above the new count and therefore undiscoverable and
     # unwritable. Shift survivors down, blank the vacated tail, then decrement.
     fn remove_pane(idx: int) -> ServiceState:
-        if idx < 0 or idx >= me.pane_count:
-            return me
+        if idx < 0 or idx >= self.pane_count:
+            return self
         val blank = PaneRecord.create(MuxPane.create("", "", ""))
-        var st = me
-        val removed = me.get_pane(idx).pane
+        var st = self
+        val removed = self.get_pane(idx).pane
         val wi = st.find_window_idx(removed.window_id)
         if wi >= 0:
             st = st.replace_window(wi, st.get_window(wi).without_pane_presentation(removed.id))
         var i = idx
-        while i < me.pane_count - 1:
+        while i < self.pane_count - 1:
             st = st.replace_pane(i, st.get_pane(i + 1))
             i = i + 1
-        st = st.replace_pane(me.pane_count - 1, blank)
-        return st.with_pane_count(me.pane_count - 1)
+        st = st.replace_pane(self.pane_count - 1, blank)
+        return st.with_pane_count(self.pane_count - 1)
 
     fn with_pane_count(n: int) -> ServiceState:
-        return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: n, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+        return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: n, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: self.metrics)
 
     fn with_metrics(m: SmuxMetrics) -> ServiceState:
-        return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: m)
+        return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: self.next_id, metrics: m)
 
     fn with_next_id(n: int) -> ServiceState:
-        return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: n, metrics: me.metrics)
+        return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: self.c3, client_count: self.client_count, next_id: n, metrics: self.metrics)
 
     # --- client helpers ---
 
     fn find_client_idx(cid: text) -> int:
-        if me.client_count > 0:
-            if me.c0.client_id == cid:
+        if self.client_count > 0:
+            if self.c0.client_id == cid:
                 return 0
-        if me.client_count > 1:
-            if me.c1.client_id == cid:
+        if self.client_count > 1:
+            if self.c1.client_id == cid:
                 return 1
-        if me.client_count > 2:
-            if me.c2.client_id == cid:
+        if self.client_count > 2:
+            if self.c2.client_id == cid:
                 return 2
-        if me.client_count > 3:
-            if me.c3.client_id == cid:
+        if self.client_count > 3:
+            if self.c3.client_id == cid:
                 return 3
         return -1
 
     fn get_client(idx: int) -> MuxClientAttachment:
         if idx == 0:
-            return me.c0
+            return self.c0
         if idx == 1:
-            return me.c1
+            return self.c1
         if idx == 2:
-            return me.c2
-        return me.c3
+            return self.c2
+        return self.c3
 
     fn add_client(c: MuxClientAttachment) -> ServiceState:
-        val n = me.client_count
+        val n = self.client_count
         if n == 0:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: c, c1: me.c1, c2: me.c2, c3: me.c3, client_count: n + 1, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: c, c1: self.c1, c2: self.c2, c3: self.c3, client_count: n + 1, next_id: self.next_id, metrics: self.metrics)
         if n == 1:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: c, c2: me.c2, c3: me.c3, client_count: n + 1, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: c, c2: self.c2, c3: self.c3, client_count: n + 1, next_id: self.next_id, metrics: self.metrics)
         if n == 2:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: c, c3: me.c3, client_count: n + 1, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: c, c3: self.c3, client_count: n + 1, next_id: self.next_id, metrics: self.metrics)
         if n == 3:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: c, client_count: n + 1, next_id: me.next_id, metrics: me.metrics)
-        return me
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: c, client_count: n + 1, next_id: self.next_id, metrics: self.metrics)
+        return self
 
     fn remove_client(idx: int) -> ServiceState:
         val detached = MuxClientAttachment(client_id: "", session_id: "", attached: false, cols: 0, rows: 0)
         # Compact on removal: find_client_idx only scans the first
         # client_count slots, so leaving a hole would orphan live clients.
         if idx == 0:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c1, c1: me.c2, c2: me.c3, c3: detached, client_count: me.client_count - 1, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c1, c1: self.c2, c2: self.c3, c3: detached, client_count: self.client_count - 1, next_id: self.next_id, metrics: self.metrics)
         if idx == 1:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c2, c2: me.c3, c3: detached, client_count: me.client_count - 1, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c2, c2: self.c3, c3: detached, client_count: self.client_count - 1, next_id: self.next_id, metrics: self.metrics)
         if idx == 2:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c3, c3: detached, client_count: me.client_count - 1, next_id: me.next_id, metrics: me.metrics)
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c3, c3: detached, client_count: self.client_count - 1, next_id: self.next_id, metrics: self.metrics)
         if idx == 3:
-            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: detached, client_count: me.client_count - 1, next_id: me.next_id, metrics: me.metrics)
-        return me
+            return ServiceState(s0: self.s0, s1: self.s1, s2: self.s2, s3: self.s3, s4: self.s4, s5: self.s5, s6: self.s6, s7: self.s7, session_count: self.session_count, w0: self.w0, w1: self.w1, w2: self.w2, w3: self.w3, w4: self.w4, w5: self.w5, w6: self.w6, w7: self.w7, window_count: self.window_count, p0: self.p0, p1: self.p1, p2: self.p2, p3: self.p3, p4: self.p4, p5: self.p5, p6: self.p6, p7: self.p7, pane_count: self.pane_count, c0: self.c0, c1: self.c1, c2: self.c2, c3: detached, client_count: self.client_count - 1, next_id: self.next_id, metrics: self.metrics)
+        return self
 
     static fn empty() -> ServiceState:
         val dummy_session = MuxSession.create("", "")

@@ -3596,23 +3596,24 @@ pub fn rt_process_exists(args: &[Value]) -> Result<Value, CompileError> {
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, WAIT_TIMEOUT};
         use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         };
         if pid <= 0 || pid > u32::MAX as i64 {
             return Ok(Value::Bool(false));
         }
         let exists = unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+            let handle = OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
             if handle.is_null() {
                 // A live process we may not inspect still exists.
                 GetLastError() == ERROR_ACCESS_DENIED
             } else {
-                let mut code = 0u32;
-                let queried = GetExitCodeProcess(handle, &mut code) != 0;
+                // Not the exit code: a process that exits with 259 would read
+                // as STILL_ACTIVE forever.
+                let alive = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
                 CloseHandle(handle);
-                queried && code == STILL_ACTIVE as u32
+                alive
             }
         };
         Ok(Value::Bool(exists))
@@ -3659,17 +3660,13 @@ pub fn rt_system_cpu_count(_args: &[Value]) -> Result<Value, CompileError> {
 /// duration measured across a clock correction was wrong (and could be
 /// negative), corrupting every latency measurement taken through this extern.
 ///
-/// `Instant` has no absolute epoch, so the returned value is milliseconds since
-/// a process-start baseline captured on first call. Only DIFFERENCES between
-/// two readings are meaningful — which is all a monotonic clock ever promised.
-/// Callers that need a wall-clock timestamp must use `rt_time_now_ms` /
-/// `rt_time_now_unix_micros` instead.
+/// `Instant` has no absolute epoch, so the returned value is milliseconds on the
+/// interpreter's shared nonzero monotonic scale (`interp_monotonic_nanos`). Only
+/// DIFFERENCES between two readings are meaningful — which is all a monotonic
+/// clock ever promised. Callers that need a wall-clock timestamp must use
+/// `rt_time_now_ms` / `rt_time_now_unix_micros` instead.
 pub fn rt_time_now_monotonic_ms(_args: &[Value]) -> Result<Value, CompileError> {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static BASELINE: OnceLock<Instant> = OnceLock::new();
-    let baseline = BASELINE.get_or_init(Instant::now);
-    Ok(Value::Int(baseline.elapsed().as_millis() as i64))
+    Ok(Value::Int(super::time::interp_monotonic_nanos() / 1_000_000))
 }
 
 // ========================================================================
