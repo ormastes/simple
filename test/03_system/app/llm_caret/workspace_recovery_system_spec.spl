@@ -42,7 +42,7 @@ real broadcast-on-dead-session contract gap — keep it red until fixed.
 use std.spec.{describe, it, expect, step}
 use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists,
     file_write, file_exists, cwd, current_time_ms}
-use app.llm_caret.agent_workspace.{AgentWorkspace, agent_workspace, tmux_available,
+use app.llm_caret.agent_workspace.{AgentWorkspace, agent_workspace, workspace_available, workspace_backend,
     session_alive, session_ensure, session_kill, list_panes, send_to_each_pane,
     worktree_path, worktree_add, worktree_list, agent_attach, agent_detach}
 
@@ -69,10 +69,16 @@ fn _contains(items: [text], needle: text) -> bool:
     false
 
 # Windows in the session whose name is `name` (tmux allows duplicate names).
+# smux has no window per agent: its equivalent is the panes titled `name`.
 fn _windows_named(ws: AgentWorkspace, name: text) -> i64:
+    var n = 0
+    if workspace_backend() == "smux":
+        for target in list_panes(ws):
+            if target.starts_with(ws.session + ":" + name + "."):
+                n = n + 1
+        return n
     val fmt = "#" + "{" + "window_name" + "}"
     val (out, _e, _c) = process_run("tmux", ["-L", ws.socket, "list-windows", "-t", ws.session, "-F", fmt])
-    var n = 0
     for line in out.split("\n"):
         if line.trim() == name:
             n = n + 1
@@ -84,8 +90,8 @@ describe "LLM Caret workspace recovery and idempotency":
     it "session_ensure twice yields one session and no second window":
         # @req REQ-LLM-CARET-WS-001
         # @capture(statistics): pane counts after first ensure, second ensure and kill
-        step("Confirm tmux drives the scenarios; an absent tmux is an environment failure")
-        expect(tmux_available()).to_equal(true)  # oracle: the workspace layer needs a real tmux socket, so a missing binary is a host defect, not a skip
+        step("Confirm a real pane backend drives the scenarios; an absent one is an environment failure")
+        expect(workspace_available()).to_equal(true)  # oracle: the workspace layer needs a real pane backend (tmux or smux), so an unavailable one is a host defect, not a skip
         val root = _scratch("ensure")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
@@ -110,8 +116,8 @@ describe "LLM Caret workspace recovery and idempotency":
     it "attaching the same agent twice keeps one worktree and one window":
         # @req REQ-LLM-CARET-WS-002
         # @capture(statistics): worktree/window/pane counts across double attach and double detach
-        step("Confirm tmux drives the scenarios; an absent tmux is an environment failure")
-        expect(tmux_available()).to_equal(true)  # oracle: the workspace layer needs a real tmux socket, so a missing binary is a host defect, not a skip
+        step("Confirm a real pane backend drives the scenarios; an absent one is an environment failure")
+        expect(workspace_available()).to_equal(true)  # oracle: the workspace layer needs a real pane backend (tmux or smux), so an unavailable one is a host defect, not a skip
         val root = _scratch("double")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
@@ -216,8 +222,8 @@ describe "LLM Caret workspace recovery and idempotency":
     it "detaching an unknown agent is an error and leaves the session and its agents intact":
         # @req REQ-LLM-CARET-WS-006
         # @capture(statistics): ghost and prefix detach verdicts plus untouched survivor counts
-        step("Confirm tmux drives the scenarios; an absent tmux is an environment failure")
-        expect(tmux_available()).to_equal(true)  # oracle: the workspace layer needs a real tmux socket, so a missing binary is a host defect, not a skip
+        step("Confirm a real pane backend drives the scenarios; an absent one is an environment failure")
+        expect(workspace_available()).to_equal(true)  # oracle: the workspace layer needs a real pane backend (tmux or smux), so an unavailable one is a host defect, not a skip
         val root = _scratch("unknown")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
@@ -250,8 +256,8 @@ describe "LLM Caret workspace recovery and idempotency":
     it "broadcast on a dead session reaches no pane and the CLI exits 1 with error no_panes":
         # @req REQ-LLM-CARET-WS-007
         # @capture(statistics): zero-delivery library result plus the CLI's exit code and message
-        step("Confirm tmux drives the scenarios; an absent tmux is an environment failure")
-        expect(tmux_available()).to_equal(true)  # oracle: the workspace layer needs a real tmux socket, so a missing binary is a host defect, not a skip
+        step("Confirm a real pane backend drives the scenarios; an absent one is an environment failure")
+        expect(workspace_available()).to_equal(true)  # oracle: the workspace layer needs a real pane backend (tmux or smux), so an unavailable one is a host defect, not a skip
         val root = _scratch("dead")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
