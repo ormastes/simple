@@ -25,6 +25,7 @@ use common.ui.access_cli_grammar.{
 }
 use common.ui.access.{
     UiAccessEvent,
+    UiAccessNode,
     UiAccessSnapshot,
     WinTextSnapshot,
     ui_access_events_to_json,
@@ -115,7 +116,9 @@ pub fn wm_access_execute(command: text, args: [text], output_mode: AccessOutputM
     if descriptor.operation == ACCESS_OPERATION_LIST:
         result = access_result_from_snapshot(ACCESS_OPERATION_LIST, WM_ACCESS_SOURCE, "", snapshot.access, WM_ACCESS_LIMIT)
     elif descriptor.operation == ACCESS_OPERATION_SNAPSHOT:
-        result = AccessResult.document(ACCESS_OPERATION_SNAPSHOT, WM_ACCESS_SOURCE, "", snapshot.access.snapshot_revision, ui_access_snapshot_to_json(snapshot.access), snapshot.access.nodes.len().to_i64(), false)
+        # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR loses the receiver type of the deep field-chain snapshot.access.nodes in dynload mode; rebind to a typed local
+        val snapshot_nodes: [UiAccessNode] = snapshot.access.nodes
+        result = AccessResult.document(ACCESS_OPERATION_SNAPSHOT, WM_ACCESS_SOURCE, "", snapshot.access.snapshot_revision, ui_access_snapshot_to_json(snapshot.access), snapshot_nodes.len().to_i64(), false)
     elif descriptor.operation == ACCESS_OPERATION_FIND:
         result = _wm_access_find(snapshot, args[1])
     elif descriptor.operation == ACCESS_OPERATION_ACT:
@@ -253,7 +256,8 @@ fn _wm_access_history(output_mode: AccessOutputMode) -> Result<text, AccessError
     var store: UiAccessStore? = ui_access_store_runtime_open("wm_access", WM_ACCESS_SOURCE)
     if store == nil:
         return Err(AccessError.create("source_unavailable", "WM access history store is unavailable"))
-    val events = match store.list_events("", 64):
+    # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR loses the receiver type of enum-payload match-expression results in dynload mode; annotate the binding
+    val events: [UiAccessEvent] = match store.list_events("", 64):
         Err(_):
             store.close()
             return Err(AccessError.create("source_unavailable", "WM access history read failed"))

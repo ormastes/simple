@@ -22,8 +22,8 @@ fn cosine_scan_files(files: [text], config: DuplicationConfig) -> [text]:
 
 fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> SimilarityPrep:
     log_progress(config, "Pre-computing features for {blocks_to_analyze.len()} blocks...")
-    var file_token_cache = {}
-    var file_line_index_cache = {}
+    var file_token_cache: {text: [SimpleToken]} = {}
+    var file_line_index_cache: {text: {text: i64}} = {}
     var feature_vectors = []
     var low_signal_flags = []
     var block_idx = 0
@@ -45,13 +45,15 @@ fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: Du
                 tokens = tokenize(content, config)
                 set_cached_tokens_with_content(cache_manager, block.file, tokens, content)
             file_token_cache[block.file] = tokens
+            # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR loses the element type of `tokens` after the cache if/else reassignment; read back through the typed cache dict
+            val cached_tokens: [SimpleToken] = file_token_cache[block.file]
 
             # Build line-to-token-index map once per file for O(1) lookups
-            var line_index = {}
+            var line_index: {text: i64} = {}
             var li = 0
             var last_line = -1
-            while li < tokens.len():
-                val tline = tokens[li].line
+            while li < cached_tokens.len():
+                val tline = cached_tokens[li].line
                 if tline != last_line:
                     val line_key = "{tline}"
                     line_index[line_key] = li
@@ -69,11 +71,13 @@ fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: Du
                 token_start = cached_line_index[line_key]
                 found_start = true
 
+        # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR loses the element type of `tokens` after the cache if/else reassignment (typed rebind of the local did not stick); re-read through the typed cache dict, which both branches populate
+        val cur_tokens: [SimpleToken] = file_token_cache[block.file]
         if not found_start:
             # Fallback to linear scan
             var ti = 0
-            while ti < tokens.len():
-                if tokens[ti].line == block.line_start:
+            while ti < cur_tokens.len():
+                if cur_tokens[ti].line == block.line_start:
                     token_start = ti
                     found_start = true
                     break
@@ -81,7 +85,8 @@ fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: Du
 
         var feature_vec = FeatureVec(block_id: block_idx, features: {}, magnitude: 0.0)
         if found_start:
-            val token_end = (token_start + block.token_count).min(tokens.len())
+            # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR cannot resolve .min on the parenthesized i64 expression; equivalent if/else clamp
+            val token_end = if token_start + block.token_count < cur_tokens.len(): token_start + block.token_count else: cur_tokens.len()
             val freq_map = extract_token_frequencies(tokens, token_start, token_end)
             feature_vec = build_feature_vector(block_idx, freq_map)
 
@@ -129,7 +134,7 @@ fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -
                         token_to_indices[tok] = [gi]
         gi = gi + 1
 
-    var adjacency = {}
+    var adjacency: {text: [i64]} = {}
     var comparison_count = 0
     var match_count = 0
     var dropped_bucket_blocks = 0

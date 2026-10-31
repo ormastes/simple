@@ -10,7 +10,7 @@
 # load-time registration and unload-time cleanup.
 
 use .object_mapper.{SharedExecMapper}
-use .smf_cache_manager.{SmfCacheManager, smfcachemanager_force_clear}
+use .smf_cache_manager.{SmfCacheManager, smfcachemanager_force_clear, smfcachemanager_ref_count_inc, smfcachemanager_ref_count_dec}
 use .generation_sweeper.{
     GenerationSweeper, SweeperConfig, SweeperStats,
     sweeperconfig_default, sweeper_new, sweeper_with_defaults,
@@ -148,7 +148,8 @@ fn lifecycle_on_jit_triggered(self: ResourceLifecycleManager, triggering_module:
 
 fn lifecycle_on_smf_accessed(self: ResourceLifecycleManager, module_path: text, smf_path: text):
     """Track SMF cache usage per module (ref-counted)."""
-    self.smf_cache_mgr.ref_count_inc(smf_path)
+    # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR cannot resolve the ref_count_inc method on the imported SmfCacheManager receiver; call the module-scope free function of the same module
+    smfcachemanager_ref_count_inc(self.smf_cache_mgr, smf_path)
     if self.registry.owner_resources.has(module_path):
         var owned = self.registry.owner_resources[module_path]
         owned.smf_cache_paths = owned.smf_cache_paths.push(smf_path)
@@ -204,7 +205,8 @@ fn lifecycle_unload_module(self: ResourceLifecycleManager, exec_mapper: SharedEx
 
     # 3. Decrement SMF cache ref counts.
     for smf_path in owned.smf_cache_paths:
-        self.smf_cache_mgr.ref_count_dec(smf_path)
+        # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 MIR cannot resolve the ref_count_dec method on the imported SmfCacheManager receiver; call the module-scope free function of the same module
+        smfcachemanager_ref_count_dec(self.smf_cache_mgr, smf_path)
 
     # 4. Remove ownership record.
     # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
