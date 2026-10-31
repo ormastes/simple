@@ -31,12 +31,13 @@ use std.scv.compile_snapshot.{
     scv_compile_snapshot_open_v1
 }
 @unsafe(reason: "raw path expansion; empty text is the invalid-or-expansion-failure sentinel", capabilities: [ffi])
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 
 fn _nb_file_exists_raw(path: text) -> bool:
     file_exists(path)
 
-fn _nb_path_absolute_raw(path: text) -> text:
+fn _nb_path_absolute_raw(path: text) -> text?:
     unsafe(capabilities: [ffi]):
         rt_path_absolute(path)
 
@@ -125,9 +126,13 @@ pub fn native_build_closure_release_snapshot_memo_v1():
     _nb_scv_snapshot_inventory_v1 = ""
 
 fn _nb_scv_relative_path_v1(path: text) -> text:
-    val root = _nb_trim_trailing_slashes(
-        _nb_path_absolute_raw(".").replace("\\", "/"))
-    val absolute = _nb_path_absolute_raw(path).replace("\\", "/")
+    val root_abs = _nb_path_absolute_raw(".")
+    val path_abs = _nb_path_absolute_raw(path)
+    if root_abs == nil or path_abs == nil:
+        # "" is this fn's documented "not under the checkout" result.
+        return ""
+    val root = _nb_trim_trailing_slashes(root_abs.unwrap().replace("\\", "/"))
+    val absolute = path_abs.unwrap().replace("\\", "/")
     if root == "" or absolute == "":
         return ""
     if absolute == root:
@@ -138,17 +143,24 @@ fn _nb_scv_relative_path_v1(path: text) -> text:
     absolute.substring(prefix.len(), absolute.len())
 
 fn _nb_scv_snapshot_path_v1(path: text) -> text:
-    val absolute = _nb_path_absolute_raw(path).replace("\\", "/")
-    val snapshot_absolute = _nb_path_absolute_raw(
-        _nb_scv_snapshot_root_v1).replace("\\", "/")
-    if snapshot_absolute != "" and (absolute == snapshot_absolute or
-            absolute.starts_with(snapshot_absolute + "/")):
-        return absolute
+    val path_abs = _nb_path_absolute_raw(path)
+    if path_abs == nil:
+        # "" is this fn's documented "no snapshot path" result.
+        return ""
+    val absolute = path_abs.unwrap().replace("\\", "/")
+    val snapshot_abs = _nb_path_absolute_raw(_nb_scv_snapshot_root_v1)
+    if snapshot_abs != nil:
+        val snapshot_absolute = snapshot_abs.unwrap().replace("\\", "/")
+        if snapshot_absolute != "" and (absolute == snapshot_absolute or
+                absolute.starts_with(snapshot_absolute + "/")):
+            return absolute
     val relative = _nb_scv_relative_path_v1(path)
     if relative == "" or _nb_scv_snapshot_root_v1 == "":
         return ""
     if relative.starts_with("build/"):
-        val checkout = _nb_trim_trailing_slashes(_nb_path_absolute_raw(".").replace("\\", "/"))
+        val checkout_abs = _nb_path_absolute_raw(".")
+        if checkout_abs == nil: return ""
+        val checkout = _nb_trim_trailing_slashes(checkout_abs.unwrap().replace("\\", "/"))
         val derived = compiler_cuda_composition_root_v1(
             checkout, _nb_scv_snapshot_root_v1, path, false)
         if derived.is_err(): return ""
@@ -210,7 +222,11 @@ fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
             var inventory_roots = effective_roots
             if not inventory_roots.contains(entry):
                 inventory_roots = inventory_roots.push(entry)
-            val root = compile_source_inventory_plain_checkout_v1(_nb_path_absolute_raw("."))
+            val checkout_abs = _nb_path_absolute_raw(".")
+            if checkout_abs == nil:
+                _cli_eprint("SCV-E-SOURCE-AUTHORITY: checkout root unresolvable (current directory unreadable)")
+                return (false, "", [])
+            val root = compile_source_inventory_plain_checkout_v1(checkout_abs.unwrap())
             val cache_root = compile_source_inventory_checkout_cache_root_v1(root)
             val authority = compiler_source_authority_acquire_v1(
                 root, cache_root, inventory_roots,
