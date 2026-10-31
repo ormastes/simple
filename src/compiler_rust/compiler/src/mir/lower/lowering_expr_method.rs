@@ -2443,6 +2443,7 @@ impl<'a> MirLowerer<'a> {
                             method, vtable_slot
                         );
                     }
+                    self.coerce_args_for_param_slots(&param_types, args, &mut arg_regs, false)?;
                     let dest = self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();

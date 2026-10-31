@@ -6,7 +6,7 @@
 //! boundaries decode it into a raw slot; the CALL-ARGUMENT boundary into a
 //! declared scalar parameter did not (`double_it(a.value)` got `21 << 3`).
 //! `coerce_args_for_param_slots` now mirrors `box_arg_for_any_param` in the
-//! tagged->raw direction for direct and method calls.
+//! tagged->raw direction for direct, indirect, static, and virtual calls.
 
 use super::common::*;
 use crate::mir::function::MirFunction;
@@ -23,8 +23,8 @@ fn instructions(func: &MirFunction) -> Vec<&MirInst> {
     func.blocks.iter().flat_map(|b| &b.instructions).collect()
 }
 
-/// The `Call`/`MethodCallStatic` to `callee` must receive, as argument
-/// `arg_index`, a vreg produced by `UnboxInt`.
+/// The call to `callee` must receive, as argument `arg_index`, a vreg produced
+/// by `UnboxInt`. An empty callee matches indirect and virtual calls.
 fn call_arg_is_unboxed_int(func: &MirFunction, callee: &str, arg_index: usize) -> bool {
     let insts = instructions(func);
     let unboxed: Vec<_> = insts
@@ -39,6 +39,11 @@ fn call_arg_is_unboxed_int(func: &MirFunction, callee: &str, arg_index: usize) -
             args.get(arg_index).is_some_and(|a| unboxed.contains(a))
         }
         MirInst::MethodCallStatic { func_name, args, .. } if func_name == callee => {
+            args.get(arg_index).is_some_and(|a| unboxed.contains(a))
+        }
+        MirInst::IndirectCall { args, .. } | MirInst::MethodCallVirtual { args, .. }
+            if callee.is_empty() =>
+        {
             args.get(arg_index).is_some_and(|a| unboxed.contains(a))
         }
         _ => false,
@@ -144,4 +149,28 @@ fn erased_float_field_into_f64_param_is_unboxed() {
         .iter()
         .any(|inst| matches!(inst, MirInst::Call { target, args, .. }
         if target.name() == "half" && args.first().is_some_and(|a| unboxed.contains(a)))));
+}
+
+#[test]
+fn erased_field_into_indirect_i64_param_is_unboxed() {
+    let source = format!(
+        "{PRELUDE}fn probe(callable: fn(i64) -> i64) -> i64:\n    val a: Box<i64> = Box(value: 21)\n    callable(a.value)\n"
+    );
+    let mir = compile_to_mir(&source).expect("lower");
+    assert!(
+        call_arg_is_unboxed_int(function(&mir, "probe"), "", 0),
+        "known-signature indirect calls must untag erased arguments"
+    );
+}
+
+#[test]
+fn erased_field_into_virtual_i64_param_is_unboxed() {
+    let source = format!(
+        "{PRELUDE}trait Doubler:\n    fn apply(x: i64) -> i64\n\nstruct Impl:\n    base: i64\n\nimpl Doubler for Impl:\n    fn apply(self, x: i64) -> i64:\n        self.base + x\n\nfn probe(doubler: Doubler) -> i64:\n    val a: Box<i64> = Box(value: 21)\n    doubler.apply(a.value)\n"
+    );
+    let mir = compile_to_mir(&source).expect("lower");
+    assert!(
+        call_arg_is_unboxed_int(function(&mir, "probe"), "", 0),
+        "virtual trait calls must untag erased arguments"
+    );
 }

@@ -1021,6 +1021,8 @@ impl<'a> MirLowerer<'a> {
             let callee_reg = self.lower_expr(callee)?;
 
             let (param_types, return_type) = self.function_signature_for_callee(callee, args);
+            self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
+            self.coerce_args_for_param_slots(&param_types, args, &mut arg_regs, true)?;
 
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();

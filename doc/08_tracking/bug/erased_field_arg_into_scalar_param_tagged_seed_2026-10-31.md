@@ -45,7 +45,8 @@ rest.
   declared parameter list that boxes raw->tagged (as before) AND unboxes
   tagged->raw through `unbox_scalar_for_raw_slot` (int/float/u64), skipping
   ANY-typed raw literals. Used by direct calls (`box_args_for_any_params`),
-  method calls (`box_method_args_for_any_params`) and callable fields.
+  method calls (`box_method_args_for_any_params`), callable fields, known-signature
+  indirect calls, and virtual trait calls.
 - `present_any_as_bool_arg`: `rt_value_is_bool(v) ? rt_value_truthy(v) :
   rt_is_some(v)` for a dynamic argument bound to `bool`.
 - Not touched: HIR typing of erased field reads (the slot stores tagged by
