@@ -404,7 +404,7 @@ fn values_to_runtime_dict<'a>(entries: impl IntoIterator<Item = (&'a String, &'a
     }
     for (key, value) in entries {
         let key_rv = simple_runtime::value::rt_string_new(key.as_ptr(), key.len() as u64);
-        let value_rv = value_to_runtime(value);
+        let value_rv = value_to_runtime(Value::dict_entry_value_ref(value));
         if !simple_runtime::value::rt_dict_set(dict, key_rv, value_rv) {
             return RuntimeValue::NIL;
         }

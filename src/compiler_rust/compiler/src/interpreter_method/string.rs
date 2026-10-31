@@ -690,7 +690,7 @@ if let Value::Str(ref s) = recv_val {
                 let mut result = s.as_ref().clone();
                 for (key, value) in data.iter() {
                     let placeholder = format!("{{{}}}", key);
-                    let replacement = value.to_display_string();
+                    let replacement = Value::dict_entry_value_ref(value).to_display_string();
                     result = result.replace(&placeholder, &replacement);
                 }
                 return Ok(Value::text(result));
