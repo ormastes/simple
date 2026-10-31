@@ -6,14 +6,14 @@
 
 | Metric | Count |
 |--------|-------|
-| Total | 1343 |
+| Total | 1405 |
 | Passed | 31 |
 | Failed | 484 |
 | Skipped (host-unavailable) | 0 |
 | In Development | 0 |
 | Feature-gated (build feature off) | 0 |
 
-| Other | 828 |
+| Other | 890 |
 
 In-development backlog: `bin/simple tags --tag in-development` (source-derived, independent of this DB).
 

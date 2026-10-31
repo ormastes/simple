@@ -92,3 +92,49 @@ analysed; per-module status is in the commit body. Summary of patterns:
 
 Retire (revert the tagged workarounds) when a stage2 that resolves these
 shapes bootstraps and compiles the full CLI without them.
+
+## Round-4 addendum (2026-10-31, dynload full-CLI gate)
+
+Second-pass census from the phase-1 full-CLI build at head 080b8d0ba7a
+(same pinned compiler, entry src/app/cli/main.spl, --mode dynload): 29
+modules / ~230 fatal errors. All new sites tagged with the same
+`bug=mir-unresolved-method-20261031` marker; the round-4 commit body lists
+per-module status. New shapes worked around in round 4:
+
+- E-RTI-004 'X is not a nominal type with a defining module' on non-pub
+  methods/fns referenced through dynload interface rows: visibility
+  widening to `pub` at the declaring module (tldr_table_v1, io/types
+  is_would_block, sffi/dynamic DynLib raw-call pair, database/sql/types
+  DbValue/DbRow impl methods, database/checker check_* fns). All are
+  behavior-preserving visibility-only changes.
+- E-MIR-TYPE-TypeParam unsubstituted 'T' at every
+  `Future.from_value(...)` call in lib.nogc_async_mut.io.buffer/tcp:
+  pinned MIR lowers the generic callee body with T unsubstituted even
+  with explicit call-site type args; worked around by constructing the
+  `Future(state: [], poll_result: Poll.Ready(v))` record directly
+  (identical to from_value's own body).
+- 'tuple index 0 is out of range for a 0-element tuple': bare `-> tuple`
+  return annotations erased the arity; spelled the tuple types at the
+  three parse helpers in lib.editor.backend.gui_backend.
+- 'unsupported Result unwrap payload type' (scalar payload):
+  unwrap() -> tagged Ok/Err match helpers in
+  os.drivers.nvme.nvme_performance_contract.
+- 'enum match expression and retained Result/Optional declarations
+  conflict': Option-typed vals initialized from match expressions
+  rewritten as var + if-val / statement-arm matches
+  (compiler.semantics.resolve); unannotated Optional match subjects
+  annotated (app.mcp_t32.dialog_tools).
+- E-RTI-007 'declared return is Any; not representable in an interface
+  row' on tuples containing the erased element type `list`: retyped the
+  callee and inlined the header-attach helper
+  (app.devhub.adapter_outlook).
+- Dynload-only `len`/`parse_i64`/`set_prop` receiver-type losses:
+  same round-1..3 rebind/index/annotation patterns at the new sites
+  (formula, access_controller, wm_access_cli, llvm_target,
+  frontend_parse_cache, zip, semver_old, environment_variant_policy_
+  sources_v1 with Result.Ok/Result.Err qualification).
+
+Still not fixed from earlier rounds: app.build.submodule_cli and
+compiler.hir.archive.tldr_function_header_v1 (operator-overload errors
+naming structs the modules do not reference; no span; mono-attribution
+artifact — see NOT fixed above).
