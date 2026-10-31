@@ -97,13 +97,15 @@ OFFENDERS_OUT=""
 # --closure-entry FILE (repo-relative .spl, requires --critical): restrict the
 # scan to the static top-level `use` closure of one binary entry, e.g. the
 # stage3 compiler (src/app/cli/bootstrap_main.spl) or the test runner
-# (src/app/test_runner_new/main.spl). The closure is computed by the existing
-# check-no-free-generic-fn-in-bootstrap-closure.shs --print-closure (one BFS
-# implementation, not two). Critical-only because the tracked baseline is a
+# (src/app/test_runner_new/main.spl). The closure is computed by the sourced
+# lib/bootstrap-closure.shs (one BFS implementation, not two; it was the body
+# of the retired check-no-free-generic-fn-in-bootstrap-closure.shs ratchet,
+# see its header). Critical-only because the tracked baseline is a
 # whole-roots number and is meaningless for a closure subset.
 CLOSURE_ENTRY=""
 RT_CLOSURE_LIST=""
 RT_SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$RT_SELF_DIR/lib/bootstrap-closure.shs" || { echo "ERROR — nothing was checked: cannot load lib/bootstrap-closure.shs"; exit 2; }
 # Every value-taking option is read through require_value(). Writing the old
 # `shift; VAR="$1"` inline meant that a value-taking option given LAST (the
 # dispatcher builds these command lines from a manifest row, so a row that
@@ -671,7 +673,10 @@ selftest() {
   if [ "$st_fb" != "ERR" ]; then echo "ERROR — selftest failed: grep fallback did not fail closed on a missing root (got '$st_fb')"; rm -rf "$st_dir"; exit 2; fi
   # fixture 23: --closure-entry counts ONLY the entry's import closure — the
   # reachable call site fails critical mode, the unreachable one is not seen —
-  # and refuses to run outside --critical (no closure baseline exists).
+  # and refuses to run outside --critical (no closure baseline exists). The
+  # BFS itself (numbered compiler layer dirs, __init__.spl, local use lines
+  # not followed) is pinned by the lib's own fixtures first.
+  bootstrap_closure_selftest >/dev/null || { echo "ERROR — selftest failed: lib/bootstrap-closure.shs fixtures"; rm -rf "$st_dir"; exit 2; }
   mkdir -p "$st_dir/n/src/app" "$st_dir/n/src/lib/x"
   printf 'use std.x.a\nfn main(): pass_do_nothing()\n' > "$st_dir/n/src/app/main.spl"
   printf 'fn f(): rt_in()\n' > "$st_dir/n/src/lib/x/a.spl"
@@ -710,7 +715,7 @@ if [ ! -d "$ROOT/src" ]; then echo "ERROR — nothing was checked: no src/ under
 if [ -n "$CLOSURE_ENTRY" ]; then
   RT_CLOSURE_LIST=$(mktemp) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
   trap 'rm -f "$RT_CLOSURE_LIST"' EXIT INT TERM
-  sh "$RT_SELF_DIR/check-no-free-generic-fn-in-bootstrap-closure.shs" --root "$ROOT" --entry "$CLOSURE_ENTRY" --print-closure > "$RT_CLOSURE_LIST" 2>/dev/null
+  bootstrap_closure "$ROOT" "$CLOSURE_ENTRY" > "$RT_CLOSURE_LIST" 2>/dev/null
   rt_cl_rc=$?
   if [ "$rt_cl_rc" -ne 0 ] || [ ! -s "$RT_CLOSURE_LIST" ]; then
     echo "ERROR — nothing was checked: could not compute the closure of $CLOSURE_ENTRY (rc=$rt_cl_rc)"
