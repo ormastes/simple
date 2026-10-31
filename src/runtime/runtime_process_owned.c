@@ -2220,11 +2220,11 @@ SplArray* rt_process_owned_v3_observation_value(int64_t handle) {
     RtOwnedProcessTokenV2 token;
     uint32_t adapter_index;
     if (!owned_adapter_acquire(handle, &token, &adapter_index))
-        return owned_adapter_values(values, 15);
+        return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", owned_adapter_values(values, 15));
     RtOwnedSlot* slot = owned_token_acquire(token, NULL);
     if (!slot) {
         owned_adapter_release_ref(adapter_index);
-        return owned_adapter_values(values, 15);
+        return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", owned_adapter_values(values, 15));
     }
     pthread_mutex_lock(slot->state_lock);
     values[1] = slot->pid;
@@ -2252,7 +2252,7 @@ SplArray* rt_process_owned_v3_observation_value(int64_t handle) {
     pthread_mutex_unlock(slot->state_lock);
     owned_token_release(slot);
     owned_adapter_release_ref(adapter_index);
-    return owned_adapter_values(values, 15);
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", owned_adapter_values(values, 15));
 }
 
 /* Start publishes no authority until the adapter token map is installed.  A
@@ -2277,7 +2277,7 @@ SplArray* rt_process_owned_v3_start_value(const char* command_data, uint64_t com
                                           int64_t max_output_bytes) {
     int64_t values[4] = {0, RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, EINVAL};
     SplArray* projected = rt_array_new(4);
-    if (!projected) return NULL;
+    if (!projected) return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value", NULL);
     int64_t argc = -1, input_len = -1; int copy_error = EINVAL;
     char** argv = owned_adapter_copy_argv(command_data, command_len, args, &argc, &copy_error);
     uint8_t* input_copy = NULL;
@@ -2286,7 +2286,7 @@ SplArray* rt_process_owned_v3_start_value(const char* command_data, uint64_t com
     if (!argv) {
         values[3] = copy_error;
         (void)owned_adapter_fill_reserved_values(projected, values, 4);
-        return projected;
+        return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value", projected);
     }
     input_len = input ? rt_array_len(input) : -1;
     if (input_len < 0 || (uint64_t)input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES ||
@@ -2318,9 +2318,9 @@ done:
         /* The fixed-size projection was fully allocated before any authority
          * existed, so replacement cannot require allocation. */
         rt_array_free(projected);
-        return NULL;
+        return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value", NULL);
     }
-    return projected;
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value", projected);
 }
 
 SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
@@ -2335,7 +2335,7 @@ SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
     uint8_t* input_copy = NULL; char** argv = NULL;
     uint32_t adapter_index = 0; uint64_t handle = 0;
     RtOwnedProcessTokenV2 token = {0, 0}; RtOwnedProcessStartReceiptV2 receipt;
-    if (!projected) return NULL;
+    if (!projected) return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", NULL);
     argv = owned_adapter_copy_argv(argv0, sizeof(argv0) - 1, args, &argc, &copy_error);
     if (!argv) { values[3] = copy_error; goto done; }
     input_len = input ? rt_array_len(input) : -1;
@@ -2361,18 +2361,18 @@ SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
     values[0] = (int64_t)handle; values[2] = 1; values[3] = 0;
 done:
     RT_OWNED_HOST_FREE(input_copy); owned_adapter_free_argv(argv, argc);
-    if (!owned_adapter_fill_reserved_values(projected, values, 4)) { rt_array_free(projected); return NULL; }
-    return projected;
+    if (!owned_adapter_fill_reserved_values(projected, values, 4)) { rt_array_free(projected); return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", NULL); }
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", projected);
 }
 
 SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
                                          int64_t stdout_capacity, int64_t stderr_capacity) {
     RtOwnedProcessTokenV2 token; uint32_t index;
-    if (wait_ms < 0 || wait_ms > 1000) return owned_adapter_poll_error(EINVAL);
-    if (!owned_adapter_acquire(handle, &token, &index)) return owned_adapter_poll_error(ESTALE);
+    if (wait_ms < 0 || wait_ms > 1000) return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", owned_adapter_poll_error(EINVAL));
+    if (!owned_adapter_acquire(handle, &token, &index)) return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", owned_adapter_poll_error(ESTALE));
     if (stdout_capacity < 0 || stderr_capacity < 0 || stdout_capacity > RT_OWNED_ADAPTER_MAX_POLL_BYTES ||
         stderr_capacity > RT_OWNED_ADAPTER_MAX_POLL_BYTES) {
-        owned_adapter_release_ref(index); return owned_adapter_poll_error(EINVAL);
+        owned_adapter_release_ref(index); return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", owned_adapter_poll_error(EINVAL));
     }
     char* out = NULL; char* err = NULL;
     if (stdout_capacity) { out = (char*)RT_OWNED_HOST_MALLOC((size_t)stdout_capacity + 1); if (!out) goto oom; }
@@ -2414,13 +2414,13 @@ SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
     for (int i = 0; i < 17; i++)
         projection_ok = projection_ok && rt_array_push(field_value, rt_value_int(fields[i]));
     if (projection_ok) {
-        RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index); return tuple;
+        RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index); return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", tuple);
     }
     rt_array_free(tuple); rt_array_free(out_value); rt_array_free(err_value); rt_array_free(field_value);
-    RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index); return NULL;
+    RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index); return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", NULL);
 oom:
     RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err); owned_adapter_release_ref(index);
-    return owned_adapter_poll_error(ENOMEM);
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", owned_adapter_poll_error(ENOMEM));
 }
 
 SplArray* rt_process_owned_v3_input_value(int64_t handle) {
@@ -5935,12 +5935,12 @@ SplArray* rt_process_owned_v3_observation_value(int64_t handle) {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ENOTSUP,
     };
     SplArray* values = rt_array_new(15);
-    if (!values) return NULL;
+    if (!values) return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", NULL);
     for (int i = 0; i < 15; i++)
         if (!rt_array_push(values, rt_value_int(fields[i]))) {
-            rt_array_free(values); return NULL;
+            rt_array_free(values); return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", NULL);
         }
-    return values;
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_observation_value", values);
 }
 
 SplArray* rt_process_owned_v3_start_value(const char* command_data,
@@ -5954,7 +5954,7 @@ SplArray* rt_process_owned_v3_start_value(const char* command_data,
         (void)rt_array_set(values, 1,
             rt_value_int(RT_OWNED_PROCESS_OPAQUE_V3_VERSION));
     }
-    return values;
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_value", values);
 }
 
 SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
@@ -5963,10 +5963,10 @@ SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
     (void)executable_handle; (void)args; (void)input; (void)timeout_ms;
     (void)term_grace_ms; (void)max_output_bytes;
     SplArray* values = rt_array_new(4);
-    if (!values) return NULL;
+    if (!values) return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", NULL);
     const int64_t fields[] = {0, RT_OWNED_PROCESS_OPAQUE_V3_VERSION, 0, ENOTSUP};
-    for (int i = 0; i < 4; i++) if (!rt_array_push(values, rt_value_int(fields[i]))) { rt_array_free(values); return NULL; }
-    return values;
+    for (int i = 0; i < 4; i++) if (!rt_array_push(values, rt_value_int(fields[i]))) { rt_array_free(values); return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", NULL); }
+    return SIMPLE_RT_NONNULL("rt_process_owned_v3_start_pinned_value", values);
 }
 
 SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
@@ -5978,9 +5978,9 @@ SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
     if (out && err && receipt && tuple &&
         rt_array_push(tuple, (int64_t)(uintptr_t)out) &&
         rt_array_push(tuple, (int64_t)(uintptr_t)err) &&
-        rt_array_push(tuple, (int64_t)(uintptr_t)receipt)) return tuple;
+        rt_array_push(tuple, (int64_t)(uintptr_t)receipt)) return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", tuple);
     rt_array_free(tuple); rt_array_free(out); rt_array_free(err);
-    rt_array_free(receipt); return NULL;
+    rt_array_free(receipt); return SIMPLE_RT_NONNULL("rt_process_owned_v3_poll_value", NULL);
 }
 
 SplArray* rt_process_owned_v3_input_value(int64_t handle) {
