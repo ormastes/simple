@@ -167,9 +167,15 @@ const char** rt_dir_list_cpath(const char* path, int64_t* out_count) {
     FindClose(hFind);
 
     if (count == 0) {
+        const char** empty = malloc(sizeof(char*));
         free(search_pattern);
+        if (!empty) {
+            *out_count = 0;
+            return NULL;
+        }
+        empty[0] = NULL;
         *out_count = 0;
-        return NULL;
+        return empty;
     }
 
     /* Second pass: collect entries */

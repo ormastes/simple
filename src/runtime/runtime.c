@@ -2874,17 +2874,23 @@ bool rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len) {
  * and for a missing one alike. The worker is now rt_dir_list_cpath and this is
  * the entry point the compiler actually calls. */
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
-    int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
+    const int64_t rt_nil = 3;
     char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return result;
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_nil;
     int64_t count = 0;
     const char** entries = rt_dir_list_cpath(path, &count);
+    if (!entries) return rt_nil;
+    int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
+    if (result == 0) {
+        rt_dir_list_free(entries, count);
+        return rt_nil;
+    }
     for (int64_t i = 0; i < count; i++) {
         const char* e = entries[i] ? entries[i] : "";
         rt_array_push((SplArray*)(uintptr_t)result,
                       rt_string_new((const uint8_t*)e, (uint64_t)strlen(e)));
     }
-    if (entries) rt_dir_list_free(entries, count);
+    rt_dir_list_free(entries, count);
     return result;
 }
 

@@ -368,11 +368,8 @@ int main(void) {
     CHECK(listed_n == 3 && saw_a && saw_b && saw_other,
           "rt_file_list_dir returns every entry NAME in the directory");
     CHECK(!saw_dot, "rt_file_list_dir skips \".\" and \"..\"");
-    /* Non-optional [text] return: an error must still be a real array. */
-    SplArray* missing_dir = (SplArray*)(uintptr_t)
-        rt_file_list_dir(TEXT_VALUE("/tmp/rt_selfcheck_definitely_absent"));
-    CHECK(missing_dir != NULL && rt_array_len(missing_dir) == 0,
-          "rt_file_list_dir returns an empty array (never nil) for a missing directory");
+    CHECK(rt_file_list_dir(TEXT_VALUE("/tmp/rt_selfcheck_definitely_absent")) == RT_TEST_NIL,
+          "rt_file_list_dir returns nil for a missing directory");
 
     if (failures == 0) {
         fprintf(stderr, "PASS: bootstrap core-C lane fs/env additions behave correctly\n");
