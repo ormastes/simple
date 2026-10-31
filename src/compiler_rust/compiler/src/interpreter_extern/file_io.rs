@@ -2244,6 +2244,15 @@ pub fn rt_file_publish_noreplace(args: &[Value]) -> Result<Value, CompileError> 
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn process_exists_sees_the_current_process_without_proc() {
+        let me = Value::Int(std::process::id() as i64);
+        assert!(matches!(rt_process_exists(&[me]).unwrap(), Value::Bool(true)));
+        assert!(matches!(rt_process_exists(&[Value::Int(0)]).unwrap(), Value::Bool(false)));
+        assert!(matches!(rt_process_exists(&[Value::Int(-1)]).unwrap(), Value::Bool(false)));
+    }
+
     #[test]
     fn fs_read_text_returns_exact_file_bytes_like_the_c_runtime() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -3586,11 +3595,18 @@ pub fn rt_process_exists(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::semantic("rt_process_exists() expects i64 argument")),
     };
 
-    // On Unix systems, check /proc/<pid> directory
+    // kill(pid, 0), as the runtime's rt_process_exists does. `/proc/<pid>`
+    // does not exist on macOS or the BSDs, so the old probe reported every
+    // live process as absent there. EPERM means the process exists but
+    // belongs to another user.
     #[cfg(unix)]
     {
-        let proc_path = format!("/proc/{}", pid);
-        let exists = std::path::Path::new(&proc_path).exists();
+        if pid <= 0 || pid > libc::pid_t::MAX as i64 {
+            return Ok(Value::Bool(false));
+        }
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let exists =
+            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
         Ok(Value::Bool(exists))
     }
 
