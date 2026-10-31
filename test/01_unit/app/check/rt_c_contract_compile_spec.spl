@@ -1,0 +1,52 @@
+# Purpose and audience: executable specification evidence for the runtime and SFFI maintainers.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/compiler/rt_mapping_pointer_contract_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/compiler/rt_mapping_pointer_contract_design.md
+"""
+# rt C contract compile (R2, C side)
+
+## Purpose and audience
+
+Runtime and SFFI maintainers read this for what the compile check proves per rt_ extern
+on this host, and what it leaves UNTESTED.
+
+## Operator workflow
+
+Run `python3 -I scripts/check/check-rt-c-contract-compile.py --tu <path>` for one
+translation unit, or with no `--tu` for the default set. The last stdout line is the
+summary. Run `--selftest` for the built-in checks.
+
+## Compatibility and limitations
+
+Verdicts are for this host only. Compile is PASS, FAIL or UNTESTED. Link is always
+UNTESTED. A TU that does not compile without the prototypes is UNTESTED, never PASS.
+
+## Verification guidance and troubleshooting
+
+A compiler that cannot run must never produce a PASS row. A wrong prototype must FAIL.
+"""
+
+use std.spec.step
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn check_cmd(args: text) -> i64:
+    val (_out, _err, code) = rt_process_run("sh", ["-c", "python3 -I scripts/check/check-rt-c-contract-compile.py " + args])
+    return code
+
+describe "rt C contract compile":
+    it "passes the built-in selftest":
+        step("Run the selftest: PASS, wrong-prototype FAIL, and UNTESTED cases")
+        expect(check_cmd("--selftest")).to_equal(0)
+
+    it "never reports a PASS when the compiler cannot run":
+        step("Run the dispatch TU with a compiler that always fails and look for a PASS row")
+        val script = "python3 -I scripts/check/check-rt-c-contract-compile.py --tu src/runtime/runtime_simd_dispatch.c --cc false | grep -q '^RT_C_CONTRACT compile=PASS symbol='"
+        val (_out, _err, code) = rt_process_run("sh", ["-c", script])
+        expect(code).to_equal(1)
+
+    it "checks the dispatch TU and prints the summary line":
+        step("Run the check on runtime_simd_dispatch.c and read the last line")
+        val script = "python3 -I scripts/check/check-rt-c-contract-compile.py --tu src/runtime/runtime_simd_dispatch.c | tail -1 | grep -q '^RT_C_CONTRACT_COMPILE .* link=UNTESTED$'"
+        val (_out, _err, code) = rt_process_run("sh", ["-c", script])
+        expect(code).to_equal(0)
