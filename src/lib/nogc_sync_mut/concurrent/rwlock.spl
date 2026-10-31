@@ -12,13 +12,13 @@ use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock_keepin
 @unsafe(reason: "raw runtime rwlock allocation ABI; contract: returned handle is runtime-owned", capabilities: [ffi])
 extern fn rt_rwlock_new<T>(initial: T) -> i64
 @unsafe(reason: "raw runtime rwlock read ABI; contract: nil means stale or foreign handle", capabilities: [ffi])
-extern fn rt_rwlock_read<T>(rwlock: i64) -> T
+extern fn rt_rwlock_read<T>(rwlock: i64) -> T?
 @unsafe(reason: "raw runtime rwlock write ABI; contract: nil means stale or foreign handle", capabilities: [ffi])
-extern fn rt_rwlock_write<T>(rwlock: i64) -> T
+extern fn rt_rwlock_write<T>(rwlock: i64) -> T?
 @unsafe(reason: "raw runtime rwlock try-read ABI; contract: nil means contended or invalid handle", capabilities: [ffi])
-extern fn rt_rwlock_try_read<T>(rwlock: i64) -> T
+extern fn rt_rwlock_try_read<T>(rwlock: i64) -> T?
 @unsafe(reason: "raw runtime rwlock try-write ABI; contract: nil means contended or invalid handle", capabilities: [ffi])
-extern fn rt_rwlock_try_write<T>(rwlock: i64) -> T
+extern fn rt_rwlock_try_write<T>(rwlock: i64) -> T?
 @unsafe(reason: "raw runtime rwlock set ABI; contract: one means stored and zero means invalid handle", capabilities: [ffi])
 extern fn rt_rwlock_set<T>(rwlock: i64, new_value: T) -> i64
 
@@ -51,7 +51,9 @@ class RwLock:
     fn with_read<T>(f: fn(T) -> T) -> T:
         val current = unsafe(capabilities: [ffi]):
             rt_rwlock_read(self._handle)
-        f(current)
+        if current == nil:
+            panic("E-SFFI-RWLOCK-002: rt_rwlock_read failed on a stale or foreign handle")
+        f(current.unwrap())
 
     # Guard-pattern exclusive write: atomic read-modify-write.
     # Serializes against other with_write callers via the writer gate,
@@ -75,7 +77,9 @@ class RwLock:
         mutex_with_lock_keeping(self._write_gate, 0, \:
             val current = unsafe(capabilities: [ffi]):
                 rt_rwlock_read(self._handle)
-            val updated = f(current)
+            if current == nil:
+                panic("E-SFFI-RWLOCK-002: rt_rwlock_read failed on a stale or foreign handle")
+            val updated = f(current.unwrap())
             unsafe(capabilities: [ffi]):
                 rt_rwlock_set(self._handle, updated)
             updated
@@ -145,13 +149,17 @@ fn rwlock_new<T>(initial: T) -> RwLock:
 fn rwlock_with_read<T>(rwlock: RwLock, f: fn(T) -> T) -> T:
     val current = unsafe(capabilities: [ffi]):
         rt_rwlock_read(rwlock._handle)
-    f(current)
+    if current == nil:
+        panic("E-SFFI-RWLOCK-002: rt_rwlock_read failed on a stale or foreign handle")
+    f(current.unwrap())
 
 fn rwlock_with_write<T>(rwlock: RwLock, f: fn(T) -> T) -> T:
     mutex_with_lock_keeping(rwlock._write_gate, 0, \:
         val current = unsafe(capabilities: [ffi]):
             rt_rwlock_read(rwlock._handle)
-        val updated = f(current)
+        if current == nil:
+            panic("E-SFFI-RWLOCK-002: rt_rwlock_read failed on a stale or foreign handle")
+        val updated = f(current.unwrap())
         unsafe(capabilities: [ffi]):
             rt_rwlock_set(rwlock._handle, updated)
         updated

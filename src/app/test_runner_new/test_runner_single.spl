@@ -58,7 +58,7 @@ use std.test_runner.test_runner_mcdc_report.{test_runner_mcdc_run_gate}
 
 use std.io_runtime.{file_exists, file_read_nullable}
 @unsafe(reason: "raw test-source/coverage text ABI; helper return types cannot carry I/O errors", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{env_set}
@@ -190,9 +190,11 @@ fn _single_last_slash(s: text) -> i64:
 fn preprocess_infix_for_child(file_path: text) -> text:
     if not file_path.ends_with("_spec.spl"):
         return file_path
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
-    if content == "":
+    val content_opt = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
+    # absent: an unreadable spec is passed through unchanged, as an empty one is
+    if content_opt == nil or content_opt.unwrap() == "":
         return file_path
+    val content = content_opt.unwrap()
     val lines = content.split("\n")
     var joined = ""
     var first = true
@@ -439,8 +441,11 @@ fn file_has_di_test_tag(file_path: text) -> bool:
     Mirrors std.test_runner.test_runner_files.file_has_di_test_tag. Duplicated
     here (rather than imported) so this child runner stays independent of
     std.test_runner.* per the file-level design note above."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
-    content.contains("# @di_test")
+    val content_opt = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
+    if val content = content_opt:
+        return content.contains("# @di_test")
+    # absent: an unreadable spec carries no tag
+    false
 
 fn spec_exec_limit_directive(file_path: text) -> i64:
     """Parse `# @exec_limit <N>` from a spec header (0 when absent/invalid).
@@ -449,7 +454,11 @@ fn spec_exec_limit_directive(file_path: text) -> i64:
     10M-operation cap declare the cap they need; run_spec forwards it into
     the child env (raise-only) because the driver reads
     SIMPLE_EXECUTION_LIMIT once at startup and in-process arming is inert."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
+    val content_opt = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
+    if content_opt == nil:
+        # absent: an unreadable spec declares no limit (the documented 0)
+        return 0
+    val content = content_opt.unwrap()
     val idx = find_raw(content, "# @exec_limit ")
     if idx < 0:
         return 0
@@ -478,7 +487,11 @@ fn spec_timeout_secs_directive(file_path: text) -> i64:
     outer runner printed "Process timed out" with NO verdict line at all — a
     fail-open hole, because a spec that cannot report a verdict can never
     report a failure either. Raise-only, same shape as @exec_limit."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
+    val content_opt = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
+    if content_opt == nil:
+        # absent: an unreadable spec declares no timeout (the documented 0)
+        return 0
+    val content = content_opt.unwrap()
     val idx = find_raw(content, "# @timeout_secs ")
     if idx < 0:
         return 0
@@ -744,7 +757,11 @@ fn parse_child_example_summary(output: text) -> (i64, i64, i64):
 fn read_test_result_evidence(path: text) -> (i64, i64, i64):
     if path == "" or not file_exists(path):
         return (0, 0, 0)
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
+    val content_opt = unsafe(capabilities: [ffi]): rt_file_read_text(path)
+    if content_opt == nil:
+        # absent: unreadable evidence is no evidence, like a missing file
+        return (0, 0, 0)
+    val content = content_opt.unwrap()
     val parts = content.split("\n")
     if parts.len() < 3 or parts[0] != "simple-bdd-v1":
         return (0, 0, 0)
@@ -1053,7 +1070,10 @@ fn _cov_recorded_file_for_target(path: text, files: [text]) -> text:
 
 fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, bool>,
                         files: [text]) -> text:
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
+    val content_opt = unsafe(capabilities: [ffi]): rt_file_read_text(path)
+    if content_opt == nil:
+        return "coverage: {path} unreadable"
+    val content = content_opt.unwrap()
     if content == "":
         return "coverage: {path} 0% (0/0 lines)"
     # Resolve which recorded module path denotes this target once, up front; a
@@ -1187,10 +1207,11 @@ fn _cov_print_report(spec_path: text, sdn: text):
                 if not seen_dec_files.contains_key(f):
                     seen_dec_files[f] = true
                     dec_files.push(f)
-    val spec_src = unsafe(capabilities: [ffi]): rt_file_read_text(spec_path)
-    if spec_src == "":
+    val spec_src_opt = unsafe(capabilities: [ffi]): rt_file_read_text(spec_path)
+    # absent: an unreadable spec names no coverage targets
+    if spec_src_opt == nil or spec_src_opt.unwrap() == "":
         return
-    val targets = _cov_targets(spec_src)
+    val targets = _cov_targets(spec_src_opt.unwrap())
     if targets.len() == 0:
         return
     print ""
