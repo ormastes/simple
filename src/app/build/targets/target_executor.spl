@@ -154,7 +154,10 @@ fn target_dependency_manifest_path(
         val prefix = repo_root + "/"
         if not output.starts_with(prefix):
             return "target-error: dependency-output-outside-repo: " + dep_name
-        val digest = file_hash_sha256(output)
+        val digest_opt = file_hash_sha256(output)
+        if digest_opt == nil:
+            return "target-error: dependency-output-missing: " + dep_name
+        val digest = digest_opt.unwrap()
         if not digest_is_sha256(digest):
             return "target-error: dependency-output-missing: " + dep_name
         inputs.push(DependencyArtifactInputV1(
@@ -288,7 +291,7 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
                 "target-error: action-failed: " + target.name + ": exit=" + rc.to_text())
         # A successful action without a fresh nonempty candidate and SHA-256
         # identity is not success. Publish only after these checks pass.
-        if not file_exists(candidate_path) or file_size_raw(candidate_path) <= 0 or file_hash_sha256(candidate_path).len() != 64:
+        if not file_exists(candidate_path) or file_size_raw(candidate_path) <= 0 or not _file_sha256_present_v1(candidate_path):
             file_delete(candidate_path)
             return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
                 "target-error: fresh-output-invalid: " + target.name + ": " + candidate_path)
@@ -307,3 +310,9 @@ fn format_target_execution(name: text, plan: ResolvePlan, summary: TargetExecuti
         " reused=" + summary.reused_count.to_text() +
         " unknown-digests=" + summary.unknown_digest_count.to_text() +
         " closure-digest=unknown executor-reuse=disabled bootstrap=none"
+
+# Absent/unreadable file == no identity: nil never counts as a digest.
+fn _file_sha256_present_v1(path: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest.len() == 64
+    false

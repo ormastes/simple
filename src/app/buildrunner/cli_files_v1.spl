@@ -13,6 +13,12 @@ use app.bootstrap_builder.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1}
 use app.bootstrap_builder.link_inputs.{builder_link_inputs_match_v1, builder_regular_input_parents_safe_v1}
 use app.buildrunner.runner.{build_runner_output_error}
 
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _builder_cli_sha_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false
+
 fn builder_cli_hash_outputs_v1(task: BuildTaskV1, root: text,
         process: BuilderProcessPortV1) -> [BuildInputV1]:
     var observed: [BuildInputV1] = []
@@ -20,7 +26,9 @@ fn builder_cli_hash_outputs_v1(task: BuildTaskV1, root: text,
         val absolute = root + "/" + path
         if not builder_cli_output_parent_safe_v1(root, path, process): return []
         if not file_is_regular_no_follow(absolute): return []
-        val digest = file_hash_sha256(absolute)
+        val digest_opt = file_hash_sha256(absolute)
+        if digest_opt == nil: return []
+        val digest = digest_opt.unwrap()
         if digest.len() != 64: return []
         observed = observed.push(BuildInputV1(path: path, digest: digest))
     observed
@@ -35,13 +43,13 @@ fn builder_cli_input_error_v1(task: BuildTaskV1, root: text,
     if not program.starts_with("/") and not program.contains(":"): program = root + "/" + program
     if not file_is_regular_no_follow(program):
         return "producer is missing or not a no-follow regular file"
-    if file_hash_sha256(program) != task.producer_digest:
+    if not _builder_cli_sha_matches_v1(program, task.producer_digest):
         return "producer hash differs from task producer digest"
     for input in task.inputs:
         val path = root + "/" + input.path
         if not file_is_regular_no_follow(path):
             return "declared input is missing or not a no-follow regular file: " + input.path
-        if file_hash_sha256(path) != input.digest:
+        if not _builder_cli_sha_matches_v1(path, input.digest):
             return "declared input hash differs: " + input.path
     builder_link_inputs_match_v1(task, root)
 
@@ -112,21 +120,21 @@ fn builder_cli_create_output_parents_v1(root: text, relative: text,
 
 fn builder_cli_publish_one_v1(source: text, output_root: text, relative: text,
         digest: text, process: BuilderProcessPortV1) -> bool:
-    if not file_is_regular_no_follow(source) or file_hash_sha256(source) != digest: return false
+    if not file_is_regular_no_follow(source) or not _builder_cli_sha_matches_v1(source, digest): return false
     val destination = output_root + "/" + relative
     val parent = builder_cli_parent_directory_v1(destination)
     if not builder_cli_create_output_parents_v1(output_root, relative, process) or
             not builder_cli_output_parent_safe_v1(output_root, relative, process):
         return false
     if file_exists(destination):
-        return file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest and
-            builder_cli_output_mode_v1(source, destination, true) and file_hash_sha256(destination) == digest
+        return file_is_regular_no_follow(destination) and _builder_cli_sha_matches_v1(destination, digest) and
+            builder_cli_output_mode_v1(source, destination, true) and _builder_cli_sha_matches_v1(destination, digest)
     val stage_root = match secure_temp_dir(parent, "builder-publish"):
         case Ok(value): value
         case Err(_reason): return false
     val stage = stage_root + "/output"
     var ready = file_copy(source, stage)
-    if ready: ready = file_is_regular_no_follow(stage) and file_hash_sha256(stage) == digest
+    if ready: ready = file_is_regular_no_follow(stage) and _builder_cli_sha_matches_v1(stage, digest)
     if ready: ready = builder_cli_output_mode_v1(source, stage, true)
     # Recheck the full parent chain immediately before the no-replace move.
     if ready: ready = builder_cli_output_parent_safe_v1(output_root, relative, process)
@@ -137,8 +145,8 @@ fn builder_cli_publish_one_v1(source: text, output_root: text, relative: text,
             case Err(_reason): ()
     if not published: file_delete(stage)
     if not dir_remove(stage_root, false): return false
-    file_is_regular_no_follow(destination) and file_hash_sha256(destination) == digest and
-        builder_cli_output_mode_v1(source, destination, true) and file_hash_sha256(destination) == digest
+    file_is_regular_no_follow(destination) and _builder_cli_sha_matches_v1(destination, digest) and
+        builder_cli_output_mode_v1(source, destination, true) and _builder_cli_sha_matches_v1(destination, digest)
 
 fn builder_cli_publish_v1(task: BuildTaskV1, receipt: BuildResultV1, attempt_root: text,
         output_root: text, process: BuilderProcessPortV1) -> bool:

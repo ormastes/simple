@@ -61,6 +61,12 @@ val SCENE_CORPUS_CASE06: i64 = 6
 val SCENE_CORPUS_CASE02: i64 = 7
 val SCENE_CORPUS_CASE31: i64 = 8
 
+# Absence is a mismatch: an unreadable file never matches any expected digest.
+fn _sha256_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false
+
 struct WebWorkerScene:
     admitted: WebOpaqueBoxGpuScene
     gpu_draw_ir_sha256: text
@@ -196,12 +202,11 @@ fn web_worker_scene(kind: i64) -> Result<WebWorkerScene, text>:
     val source_path = scene_fixture_path(kind)
     val expected_sha = scene_fixture_sha(kind)
     if not file_is_regular_no_follow(source_path) or
-        file_hash_sha256(source_path) != expected_sha:
+        not _sha256_matches(source_path, expected_sha):
         return Err("web-fixture-missing-or-digest-mismatch")
     if scene_reference_path(kind) != "" and
         (not file_is_regular_no_follow(scene_reference_path(kind)) or
-        file_hash_sha256(scene_reference_path(kind)) !=
-            scene_reference_sha(kind)):
+        not _sha256_matches(scene_reference_path(kind), scene_reference_sha)(kind)):
         return Err("corpus-reference-missing-or-digest-mismatch")
     val html = match file_read_regular_no_follow_bounded(
         source_path, 4096):
@@ -315,7 +320,10 @@ fn prepared_scene(kind: i64) -> Result<PreparedRenderScene, text>:
     val expected_sha = scene_fixture_sha(kind)
     if not file_is_regular_no_follow(source_path):
         return Err("controlled-fixture-missing-or-symlink")
-    val source_sha = file_hash_sha256(source_path)
+    val source_sha_opt = file_hash_sha256(source_path)
+    if source_sha_opt == nil:
+        return Err("controlled-fixture-digest-mismatch")
+    val source_sha = source_sha_opt.unwrap()
     if source_sha != expected_sha or
         sha256_text(read_file(source_path)) != source_sha:
         return Err("controlled-fixture-digest-mismatch")

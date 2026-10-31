@@ -178,11 +178,11 @@ fn linux_process_start_with_memory_v1(request: LinuxProcessRequestV1,
     val invalid = linux_process_request_valid_v1(request, root, identity, memory_limit_bytes)
     if invalid != "": return Err(invalid)
     if not file_is_regular_no_follow(request.program) or
-            file_hash_sha256(request.program) != request.producer_digest:
+            not _file_sha256_matches(request.program, request.producer_digest):
         return Err("Linux process executable differs from pinned digest")
     for input in request.inputs:
         if not file_is_regular_no_follow(input.path) or
-                file_hash_sha256(input.path) != input.digest:
+                not _file_sha256_matches(input.path, input.digest):
             return Err("Linux process input differs from pinned digest: " + input.path)
     val started = unsafe(capabilities: [ffi]):
         rt_linux_group_start_v1(request.program, request.producer_digest,
@@ -227,7 +227,7 @@ fn linux_process_launch_broker_v1(program: text, digest: text,
     if not linux_process_absolute_v1(program) or not builder_digest_valid_v1(digest) or
             args.len() != 4:
         return Err("Linux broker launch request invalid")
-    if not file_is_regular_no_follow(program) or file_hash_sha256(program) != digest:
+    if not file_is_regular_no_follow(program) or not _file_sha256_matches(program, digest):
         return Err("Linux broker image differs from pinned digest")
     val fields = unsafe(capabilities: [ffi]):
         rt_linux_group_launch_broker_v1(program, digest, args)
@@ -245,3 +245,9 @@ export LinuxCgroupParentV1, linux_cgroup_parent_acquire_v1, linux_cgroup_parent_
 export LinuxCgroupParentAdmissionV1, linux_cgroup_parent_admit_v1
 export linux_cgroup_parent_acquire_at_v2, linux_cgroup_parent_admit_at_v2
 export linux_cgroup_parent_decode_at_v2
+
+# Absent digest (missing or unreadable file) is an explicit mismatch.
+fn _file_sha256_matches(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

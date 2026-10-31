@@ -76,7 +76,7 @@ fn admit_full_cli_for_routes() -> bool:
         return missing_cli_evidence("canonical full-CLI Stage4 provenance did not admit the selected binary; see full-cli-admission.txt")
     step("Require production selection to honor the explicit admitted compiler")
     val selected = qemu_compiler_select_v1(cli, "/unselected/compiler-alias", cwd())
-    if selected == "" or file_hash_sha256(selected) != file_hash_sha256(cli):
+    if selected == "" or file_hash_sha256(selected).unwrap() != file_hash_sha256(cli).unwrap():
         return missing_cli_evidence("production OS compiler selection did not preserve the explicit admitted candidate")
     step("Refuse a missing explicit compiler even when its alias is admitted")
     val missing_primary = route_evidence_root + "/absent-explicit-compiler"
@@ -85,7 +85,7 @@ fn admit_full_cli_for_routes() -> bool:
     expect(qemu_compiler_select_v1(missing_primary, cli, cwd())).to_equal("")
     step("Use the admitted alias only when the primary override is absent")
     val selected_alias = qemu_compiler_select_v1("", cli, cwd())
-    if selected_alias == "" or file_hash_sha256(selected_alias) != file_hash_sha256(cli):
+    if selected_alias == "" or file_hash_sha256(selected_alias).unwrap() != file_hash_sha256(cli).unwrap():
         fail("CompilerSelectionFailed: an admitted alias was not selected with no primary override")
         return false
     step("Reject an existing noncompiler artifact instead of falling back to an admitted alias")
@@ -93,8 +93,13 @@ fn admit_full_cli_for_routes() -> bool:
     if not file_exists(noncompiler): return missing_cli_evidence("canonical version authority is absent")
     expect(qemu_compiler_select_v1(noncompiler, cli, cwd())).to_equal("")
     admitted_cli = selected
-    admitted_cli_digest = file_hash_sha256(cli)
-    admitted_provenance_digest = file_hash_sha256(cli + ".provenance.env")
+    val cli_digest_opt = file_hash_sha256(cli)
+    val provenance_digest_opt = file_hash_sha256(cli + ".provenance.env")
+    if cli_digest_opt == nil or provenance_digest_opt == nil:
+        admitted_cli = ""
+        return missing_cli_evidence("could not hash the admitted full CLI and its provenance")
+    admitted_cli_digest = cli_digest_opt.unwrap()
+    admitted_provenance_digest = provenance_digest_opt.unwrap()
     if admitted_cli_digest.len() != 64 or admitted_provenance_digest.len() != 64:
         admitted_cli = ""
         return missing_cli_evidence("could not hash the admitted full CLI and its provenance")
@@ -127,9 +132,9 @@ fn cli_output_field(output: text, prefix: text) -> text:
 # @inline
 fn run_live_cli_route(arch: text, scenario_name: text) -> bool:
     if admitted_cli == "": return missing_cli_evidence("full CLI admission is unavailable")
-    if file_hash_sha256(admitted_cli) != admitted_cli_digest:
+    if file_hash_sha256(admitted_cli).unwrap() != admitted_cli_digest:
         return missing_cli_evidence("admitted CLI changed before route execution")
-    if file_hash_sha256(admitted_cli + ".provenance.env") != admitted_provenance_digest:
+    if file_hash_sha256(admitted_cli + ".provenance.env").unwrap() != admitted_provenance_digest:
         return missing_cli_evidence("admitted CLI provenance changed before route execution")
     var target: OsTarget = get_qemu_target(arch_from_name(arch).unwrap())
     var kernel = target.output
@@ -146,7 +151,9 @@ fn run_live_cli_route(arch: text, scenario_name: text) -> bool:
     if not file_exists(kernel): return missing_cli_evidence("prepare the real catalog kernel " + kernel)
     if not fs_wrapper_artifact_admitted(target.entry, kernel):
         return missing_cli_evidence("production filesystem artifact admission rejected " + kernel)
-    val kernel_digest = file_hash_sha256(kernel)
+    val kernel_digest_opt = file_hash_sha256(kernel)
+    if kernel_digest_opt == nil: return missing_cli_evidence("kernel digest is unavailable")
+    val kernel_digest = kernel_digest_opt.unwrap()
     if kernel_digest.len() != 64: return missing_cli_evidence("kernel digest is unavailable")
     val prepared = if scenario_name == "":
         qemu_cli_inspect_plan_v1(arch, kernel, target.qemu_memory, target.qemu_bios, target.qemu_extra, false)
@@ -158,7 +165,9 @@ fn run_live_cli_route(arch: text, scenario_name: text) -> bool:
     val plan = prepared.launch_plan().unwrap()
     val command = qemu_cli_dispatch_command_v1(plan)
     if command.len() == 0: return missing_cli_evidence("prepared plan has no admitted sealed command")
-    val qemu_digest = file_hash_sha256(plan.executable_path())
+    val qemu_digest_opt = file_hash_sha256(plan.executable_path())
+    if qemu_digest_opt == nil: return missing_cli_evidence("real QEMU identity could not be hashed")
+    val qemu_digest = qemu_digest_opt.unwrap()
     if qemu_digest.len() != 64: return missing_cli_evidence("real QEMU identity could not be hashed")
 
     step("Admit real QEMU by the canonical host and accelerator probe")
@@ -200,10 +209,10 @@ fn run_live_cli_route(arch: text, scenario_name: text) -> bool:
     val (stdout, stderr, status) = run_admitted_cli(args, 600000)
     if not retain_cli_result(route + ".run", stdout, stderr, status): return false
     expect(status).to_equal(0)
-    expect(file_hash_sha256(admitted_cli)).to_equal(admitted_cli_digest)
-    expect(file_hash_sha256(admitted_cli + ".provenance.env")).to_equal(admitted_provenance_digest)
-    expect(file_hash_sha256(plan.executable_path())).to_equal(qemu_digest)
-    expect(file_hash_sha256(kernel)).to_equal(kernel_digest)
+    expect(file_hash_sha256(admitted_cli).unwrap()).to_equal(admitted_cli_digest)
+    expect(file_hash_sha256(admitted_cli + ".provenance.env").unwrap()).to_equal(admitted_provenance_digest)
+    expect(file_hash_sha256(plan.executable_path()).unwrap()).to_equal(qemu_digest)
+    expect(file_hash_sha256(kernel).unwrap()).to_equal(kernel_digest)
     expect(fs_wrapper_artifact_admitted(target.entry, kernel)).to_equal(true)
     val label = if scenario_name == "": arch else: scenario_name
     expect(stdout).to_contain("[run] " + label + ": " + command.join(" "))

@@ -225,7 +225,7 @@ fn dependency_manifest_error_v1(
         val absolute = repo_root + "/" + item.artifact_path
         if not file_exists(absolute) or file_size_raw(absolute) <= 0:
             return "target-receipt-error: dependency-artifact-missing: " + item.producer_target
-        if file_hash_sha256(absolute) != item.artifact_digest:
+        if not _file_sha256_matches_v1(absolute, item.artifact_digest):
             return "target-receipt-error: dependency-artifact-digest-mismatch: " + item.producer_target
         i = i + 1
     ""
@@ -287,7 +287,7 @@ fn imported_closure_receipt_error_v1(
         if item.path == entry:
             entry_present = true
         val absolute = repo_root + "/" + item.path
-        if not file_exists(absolute) or file_hash_sha256(absolute) != item.digest:
+        if not file_exists(absolute) or not _file_sha256_matches_v1(absolute, item.digest):
             return "target-receipt-error: closure-input-digest-mismatch: " + item.path
         i = i + 1
     if not entry_present:
@@ -487,7 +487,13 @@ fn target_reuse_evidence_v1(
             "unknown", false, "artifact-missing", expected.action_key, "",
             action_receipt_path, expected.cas_path
         )
-    val artifact_digest = file_hash_sha256(output_path)
+    val artifact_digest_opt = file_hash_sha256(output_path)
+    if artifact_digest_opt == nil:
+        return TargetReuseEvidenceV1(
+            "unknown", false, "artifact-unreadable", expected.action_key, "",
+            action_receipt_path, expected.cas_path
+        )
+    val artifact_digest = artifact_digest_opt.unwrap()
     if artifact_digest != expected.artifact_digest:
         return TargetReuseEvidenceV1(
             "incompatible", false, "published-artifact-digest-mismatch",
@@ -504,7 +510,7 @@ fn target_reuse_evidence_v1(
             artifact_digest, action_receipt_path, expected.cas_path
         )
     if not file_exists(expected.cas_path) or
-            file_hash_sha256(expected.cas_path) != artifact_digest:
+            not _file_sha256_matches_v1(expected.cas_path, artifact_digest):
         return TargetReuseEvidenceV1(
             "incompatible", false, "cas-artifact-missing-or-mismatched",
             expected.action_key, artifact_digest, action_receipt_path, expected.cas_path
@@ -638,7 +644,7 @@ fn publish_target_action_evidence_v1(
     val receipt_error = target_action_receipt_error_v1(receipt)
     if receipt_error.len() > 0:
         return receipt_error
-    if not file_exists(output_path) or file_hash_sha256(output_path) != receipt.artifact_digest:
+    if not file_exists(output_path) or not _file_sha256_matches_v1(output_path, receipt.artifact_digest):
         return "target-receipt-error: output-digest-mismatch"
     val cas_path = target_cas_path_v1(repo_root, receipt.artifact_digest)
     if cas_path != receipt.cas_path:
@@ -648,13 +654,13 @@ fn publish_target_action_evidence_v1(
     if not file_exists(cas_path):
         val candidate = cas_path + ".candidate-" + getpid().to_text()
         file_delete(candidate)
-        if not file_copy(output_path, candidate) or file_hash_sha256(candidate) != receipt.artifact_digest:
+        if not file_copy(output_path, candidate) or not _file_sha256_matches_v1(candidate, receipt.artifact_digest):
             file_delete(candidate)
             return "target-receipt-error: cas-copy-failed"
         if not file_rename(candidate, cas_path):
             file_delete(candidate)
             return "target-receipt-error: cas-publish-failed"
-    elif file_hash_sha256(cas_path) != receipt.artifact_digest:
+    elif not _file_sha256_matches_v1(cas_path, receipt.artifact_digest):
         return "target-receipt-error: cas-collision"
     val slash = action_receipt_path.rfind("/")
     val parent = if slash > 0: action_receipt_path[0:slash] else: "."
@@ -707,3 +713,9 @@ export target_action_receipt_text_v1, parse_target_action_receipt_v1
 export target_action_receipt_error_v1
 export target_reuse_evidence_v1, target_layered_reuse_evidence_from_files_v1
 export publish_target_action_evidence_v1, publish_target_action_evidence_layers_v1
+
+# Absent/unreadable file == mismatch: a missing digest never matches.
+fn _file_sha256_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

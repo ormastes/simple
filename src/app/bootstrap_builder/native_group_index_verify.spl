@@ -63,7 +63,7 @@ fn native_group_index_verify_same_v1(left: text, right: text) -> bool:
 fn native_group_index_pruned_config_valid_v1(original: text, staged: text,
         digest: text, reaped_path: text, expected_reaped: text) -> bool:
     if not file_is_regular_no_follow(original) or
-            file_hash_sha256(original) != digest or
+            _native_group_index_verify_sha_mismatch(original, digest) or
             not file_is_regular_no_follow(reaped_path):
         return false
     val reaped = match file_read_regular_no_follow_bounded(reaped_path, 4096):
@@ -72,7 +72,7 @@ fn native_group_index_pruned_config_valid_v1(original: text, staged: text,
     if reaped != expected_reaped: return false
     if file_exists(staged):
         return file_is_regular_no_follow(staged) and
-            file_hash_sha256(staged) == digest
+            _native_group_index_verify_sha_matches(staged, digest)
     true
 
 fn native_group_index_v2_budget_matches_v1(
@@ -123,7 +123,7 @@ fn native_group_index_archive_receipts_v1(index_root: text,
             canonical_identity_sort_texts(dependency_digests))
         if not loaded.valid or loaded.receipt == nil or
                 not file_is_regular_no_follow(loaded.archive_path) or
-                file_hash_sha256(loaded.archive_path) != loaded.receipt!.archive_digest:
+                _native_group_index_verify_sha_mismatch(loaded.archive_path, loaded.receipt!.archive_digest):
             return Err("index package archive receipt or bytes differ: " + package_identity)
         receipts = receipts.push(ColdHirCompilerArchiveReceiptV1(
             package_identity, loaded.receipt!.receipt_digest))
@@ -155,7 +155,7 @@ fn native_group_index_verify_v1(config_path: text, receipt_path: text,
     val config_payload = file_read_regular_no_follow_bounded(config_path, 65536)?
     val config = native_group_index_config_decode_v1(config_payload)?
     if not file_is_regular_no_follow(config.producer_path) or
-            file_hash_sha256(config.producer_path) != config.producer_digest:
+            _native_group_index_verify_sha_mismatch(config.producer_path, config.producer_digest):
         return Err("index Phase2 producer pin differs")
     val receipt_payload = file_read_regular_no_follow_bounded(receipt_path, 16384)?
     val receipt = native_group_index_receipt_decode_v1(receipt_payload)?
@@ -203,10 +203,9 @@ fn native_group_index_verify_v1(config_path: text, receipt_path: text,
             builder_encode_task_v1(request) != request_bytes or
             builder_task_identity_v1(request) != builder_task_identity_v1(task) or
             not file_is_regular_no_follow(attempt_root + "/producer.exe") or
-            file_hash_sha256(attempt_root + "/producer.exe") != task.producer_digest or
+            _native_group_index_verify_sha_mismatch(attempt_root + "/producer.exe", task.producer_digest) or
             not file_is_regular_no_follow(work_root + "/index-output/receipt.sdn") or
-            file_hash_sha256(work_root + "/index-output/receipt.sdn") !=
-                result.outputs[0].digest or
+            _native_group_index_verify_sha_mismatch(work_root + "/index-output/receipt.sdn", result.outputs[0].digest) or
             not file_is_regular_no_follow(attempt_root + "/compiler.reaped"):
         return Err("index retained manager attempt evidence differs")
     if not native_group_index_pruned_config_valid_v1(config_path,
@@ -279,8 +278,11 @@ fn native_group_index_verify_v1(config_path: text, receipt_path: text,
     if archive_count != receipt.archive_count or
             archive_digest != receipt.archive_receipts_digest:
         return Err("index full package archive set differs")
+    val manager_receipt_digest = file_hash_sha256(manager_receipt_path)
+    if manager_receipt_digest == nil:
+        return Err("cannot hash index manager receipt: " + manager_receipt_path)
     val handoff = NativeGroupIndexHandoffV1(config_digest,
-        sha256_text(receipt_payload), file_hash_sha256(manager_receipt_path),
+        sha256_text(receipt_payload), manager_receipt_digest.unwrap(),
         config.phase, config.backend, config.target, config.producer_digest,
         config.snapshot_inventory_digest, config.source_inventory_digest,
         config.expected_spl_count, config.variant_digest, indexed.index_digest,
@@ -302,3 +304,15 @@ export native_group_index_archive_receipts_v1, native_group_index_verify_v1
 export native_group_index_v2_budget_matches_v1
 export native_group_index_v2_authority_path_v1
 export native_group_index_pruned_config_valid_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _native_group_index_verify_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true
+
+# Absent digest (missing/unreadable file) never matches.
+fn _native_group_index_verify_sha_matches(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual == expected
+    false
