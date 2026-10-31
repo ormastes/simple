@@ -16272,7 +16272,7 @@ int64_t rt_dir_glob(const uint8_t* pattern_ptr, uint64_t pattern_len) {
  * world-readable. That security requirement is why this function was
  * factored out of rt_file_atomic_write rather than the mode variant being
  * written as a wrapper around it. */
-static int64_t rt_file_atomic_write_data(int64_t path_value, const uint8_t* content_data,
+static int64_t spl_file_atomic_write_data(int64_t path_value, const uint8_t* content_data,
                                          size_t content_len, int64_t mode, int have_mode) {
     static atomic_uint_fast64_t sequence = 0;
     RtCoreString* path_string = rt_core_as_string(path_value);
@@ -16404,7 +16404,7 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
                                          int64_t mode, int have_mode) {
     RtCoreString* content_string = rt_core_as_string(content_value);
     if (!content_string) return 0;
-    return rt_file_atomic_write_data(path_value, (const uint8_t*)content_string->data,
+    return spl_file_atomic_write_data(path_value, (const uint8_t*)content_string->data,
                                      (size_t)content_string->len, mode, have_mode);
 }
 
@@ -16429,7 +16429,7 @@ int8_t rt_file_atomic_write_bytes_array(int64_t path, int64_t data) {
         }
         buf[i] = (unsigned char)(v & 0xFF);
     }
-    int8_t ok = rt_file_atomic_write_data(path, buf, (size_t)n, 0, 0) != 0;
+    int8_t ok = spl_file_atomic_write_data(path, buf, (size_t)n, 0, 0) != 0;
     free(buf);
     return ok;
 }
