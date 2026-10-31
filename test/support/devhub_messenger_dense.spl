@@ -264,3 +264,122 @@ fn leaks_none(haystack: text, needles: [text]) -> bool:
 
 export port_verdict, verdict_code, verdict_message
 export port_verdict_with_secret, port_verdict_without_secret, leaks_none
+
+# ---- opened-view helpers (one full decrypt serves a whole spec) --------------
+
+use std.database.server.storage_port.{StorageReadView}
+use std.database.sql.types.{DbRow}
+
+# Open the dense database through the storage port; nil when rejected.
+fn dense_open_view(path: text) -> StorageReadView?:
+    val port: DatabaseStoragePortV1 = database_storage_port_v1()
+    match port.open(path, "sqlcipher4", DENSE_REF):
+        case Ok(opened):
+            match opened:
+                case StorageOpenResult.SqliteView(view): Some(view)
+                case StorageOpenResult.NativeStore(_): nil
+        case Err(_): nil
+
+# Compare typed rows with a ground-truth table cell by cell and column by
+# column.  The overflow placeholder cell is checked separately.  Returns
+# "rows=R cells=C bad=<list>".
+fn table_diff(rows: [DbRow], table: JsonValue) -> text:
+    var bad = ""
+    var cells = 0
+    var r = 0
+    if rows.len() != rows_in(table):
+        bad = bad + "row-count {rows.len()}!={rows_in(table)};"
+    while r < rows.len() and r < rows_in(table):
+        if rows[r].values.len() != cols_in(table):
+            bad = bad + "r{r}-width;"
+        var c = 0
+        while c < rows[r].values.len() and c < cols_in(table):
+            val want = cell_at(table, r, c)
+            if want != "<overflow>":
+                cells = cells + 1
+                val got = rows[r].values[c].to_text()
+                if got != want:
+                    bad = bad + "r{r}c{c}:{got}!={want};"
+            c = c + 1
+        r = r + 1
+    "rows={rows.len()} cells={cells} bad={bad}"
+
+fn column_names(rows: [DbRow]) -> text:
+    if rows.len() == 0:
+        return ""
+    rows[0].columns.join(",")
+
+fn truth_columns(table: JsonValue) -> text:
+    var names: [text] = []
+    var i = 0
+    while i < cols_in(table):
+        names.push(json_value_text_or(json_value_at(json_value_field(table, "columns"), i), ""))
+        i = i + 1
+    names.join(",")
+
+# The overflow body the generator built: head then unit repeated.
+fn expected_overflow_body(overflow: JsonValue) -> text:
+    var out = tf(overflow, "body_head")
+    var i = 0
+    while i < tn(overflow, "repeat"):
+        out = out + tf(overflow, "unit")
+        i = i + 1
+    out
+
+export dense_open_view, table_diff, column_names, truth_columns, expected_overflow_body
+
+# ---- payload helpers (acceptance layer) ----------------------------------------
+
+fn payload_json(payload: text) -> JsonValue:
+    match json_parse_value(payload):
+        case Ok(value): value
+        case Err(_): JsonValue.Null
+
+fn payload_is_json(payload: text) -> bool:
+    match json_parse_value(payload):
+        case Ok(_): true
+        case Err(_): false
+
+# Comma-joined ids of payload.messages in payload order.
+fn history_ids(payload: text) -> text:
+    val items = json_value_items(json_value_field(payload_json(payload), "messages"))
+    var ids: [text] = []
+    for item in items:
+        ids.push(tf(item, "id"))
+    ids.join(",")
+
+# Comma-joined ids the ground truth orders first for `room`, at most `limit`.
+fn expected_ids(truth: JsonValue, room: text, limit: i64) -> text:
+    val orders = json_value_field(truth, "history_order")
+    val order = json_value_field(orders, room)
+    var ids: [text] = []
+    var i = 0
+    while i < json_value_len(order) and i < limit:
+        ids.push("{list_int(orders, room, i)}")
+        i = i + 1
+    ids.join(",")
+
+# Decoded body of message `id` inside a history payload, "" when absent.
+fn history_body(payload: text, id: text) -> text:
+    for item in json_value_items(json_value_field(payload_json(payload), "messages")):
+        if tf(item, "id") == id:
+            return tf(item, "body")
+    ""
+
+fn payload_count(payload: text) -> i64:
+    tn(payload_json(payload), "count")
+
+export payload_json, payload_is_json, history_ids, expected_ids, history_body, payload_count
+
+# "true", "false" or "absent" for a boolean member of a JSON payload.
+fn payload_flag(payload: text, key: text) -> text:
+    match json_value_field(payload_json(payload), key):
+        case JsonValue.Bool(flag):
+            if flag:
+                "true"
+            else:
+                "false"
+        case _:
+            "absent"
+
+export payload_flag

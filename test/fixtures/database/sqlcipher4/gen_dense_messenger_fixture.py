@@ -139,6 +139,15 @@ def main():
     assert struct.unpack_from(">I", image, geometry["pointer_image_offset"])[0] == geometry["first_overflow_page"]
     assert len(geometry["overflow_chain"]) >= 2
 
+    # The messages root page must be an interior page; its rightmost child pointer
+    # (4 bytes at header offset 8) is the cycle injection point for pager tests.
+    assert image[3 * PAGE] == 5
+    geometry["interior_root_page"] = 4
+    geometry["interior_rightmost_image_offset"] = 3 * PAGE + 8
+    assert struct.unpack_from(">I", image, 3 * PAGE + 8)[0] != 4
+    leaf = geometry["leaf_page"]
+    geometry["leaf_cell_count_image_offset"] = (leaf - 1) * PAGE + 3
+
     # Expected product payloads, serialised by json.dumps (not by the Simple code).
     rooms_payload = "{\"rooms\":[" + ",".join(
         "{\"id\":" + jstr(str(r[0])) + ",\"name\":" + jstr(r[1]) + "}" for r in tables["room"]["rows"]) + \
@@ -155,7 +164,7 @@ def main():
     assert full15 == full15[:cut] + unit * 700 + full15[len(full15) - suffix_len:]
     overflow = {"row_id": 15, "body_utf8_bytes": len(overflow_body.encode("utf-8")),
                 "body_sha256": hashlib.sha256(overflow_body.encode("utf-8")).hexdigest(),
-                "unit": unit, "repeat": 700,
+                "unit": unit, "repeat": 700, "body_head": head,
                 "object_head": full15[:cut], "object_tail": full15[len(full15) - suffix_len:],
                 "payload_utf8_bytes": len(full15.encode("utf-8")), **geometry}
 
@@ -224,6 +233,7 @@ def main():
         "missing_message_payload": "{\"found\":false,\"id\":\"999999\"}",
         "unicode_message_id": 14,
         "escaped_body_json": jstr(messages[14][3]),
+        "unicode_body": messages[14][3],
     }
     with open(os.path.join(HERE, "dense_ground_truth.json"), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(truth, handle, indent=1, ensure_ascii=False)
