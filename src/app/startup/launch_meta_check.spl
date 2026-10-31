@@ -28,7 +28,7 @@ use os.kernel.loader.artifact_manifest.{
 }
 
 use std.io_runtime.{file_exists}
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 
 fn _print_help():
@@ -61,15 +61,18 @@ fn _metadata_for_check(path: text, target: text, metadata_path: text) -> LaunchM
     val simpleos_baremetal = target == "simpleos-baremetal"
     val fallback_kind = startup_detect_launch_kind(path)
     if metadata_path != "":
-        val content = rt_file_read_text(metadata_path)
-        return parse_launch_metadata_sidecar(content, fallback_kind)
+        if val content = rt_file_read_text(metadata_path):
+            return parse_launch_metadata_sidecar(content, fallback_kind)
+        # absent: an unreadable sidecar carries no metadata; fall through to detection
     if not simpleos_baremetal and fallback_kind == "native":
         val bytes = rt_file_read_bytes(path) ?? []
         if has_native_launch_metadata_trailer(bytes):
             return parse_launch_metadata_from_native_bytes(bytes, fallback_kind)
     val default_sidecar = launch_metadata_sidecar_path(path)
     if not simpleos_baremetal and file_exists(default_sidecar):
-        return parse_launch_metadata_sidecar(rt_file_read_text(default_sidecar), fallback_kind)
+        if val sidecar = rt_file_read_text(default_sidecar):
+            return parse_launch_metadata_sidecar(sidecar, fallback_kind)
+        # absent: unreadable default sidecar; fall through to path-based detection
     if simpleos_baremetal:
         return launch_metadata_for_simpleos_baremetal_path(path)
     if target == "simpleos-host":

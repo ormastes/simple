@@ -23,13 +23,13 @@ use os.tools.archive.tar_tool.{tar_create, TarHeader, TarEntry, BLOCK_SIZE, TYPE
 # merely loading it poisoned the interpreter's global function registry so
 # image_builder's read_text/write_text resolved into guest VFS calls
 # (rt_x86_syscall) and crashed host release builds.
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_dir_list(path: text) -> [text]?
 
-fn read_text(path: text) -> text:
-    rt_file_read_text(path) ?? ""
+fn read_text(path: text) -> text?:
+    rt_file_read_text(path)
 
 fn write_text(path: text, content: text):
     val _ok = rt_file_write_text(path, content)
@@ -37,8 +37,8 @@ fn write_text(path: text, content: text):
 fn mkdir(path: text):
     val _ok = rt_dir_create_all(path)
 
-fn readdir(path: text) -> [text]:
-    rt_dir_list(path) ?? []
+fn readdir(path: text) -> [text]?:
+    rt_dir_list(path)
 
 # === Build Context ===
 
@@ -57,7 +57,10 @@ fn build_package(source_dir: text, output_dir: text) -> Result<text, text>:
     """
     # Step 1: Read and validate manifest
     val manifest_path = "{source_dir}/manifest.sdn"
-    val manifest_content = read_text(manifest_path)
+    val manifest_opt = read_text(manifest_path)
+    if manifest_opt == nil:
+        return Result.Err("No manifest.sdn found in {source_dir}")
+    val manifest_content = manifest_opt.unwrap()
     if manifest_content == "":
         return Result.Err("No manifest.sdn found in {source_dir}")
 
@@ -82,13 +85,17 @@ fn build_package(source_dir: text, output_dir: text) -> Result<text, text>:
     var total_size: u64 = 0
     for file_path in file_list:
         val full_path = "{source_dir}/{file_path}"
-        val content = read_text(full_path)
-        total_size = total_size + content.len().to_u64()
+        val content_opt = read_text(full_path)
+        if content_opt == nil:
+            return Result.Err("Cannot read package file: {full_path}")
+        total_size = total_size + content_opt.unwrap().len().to_u64()
     manifest.installed_size = total_size
 
     # Step 4: Compute checksum (simple hash of all file contents)
-    val checksum = _compute_checksum(source_dir, file_list)
-    manifest.base.checksum = checksum
+    val checksum_opt = _compute_checksum(source_dir, file_list)
+    if checksum_opt == nil:
+        return Result.Err("Checksum failed: a package file became unreadable")
+    manifest.base.checksum = checksum_opt.unwrap()
 
     # Step 5: Create the .spk tar archive
     val spk_name = spk_filename(manifest.base.name, manifest.base.version, manifest.arch)
@@ -184,8 +191,10 @@ fn _collect_files(source_dir: text, manifest: ExtendedManifest) -> Result<[text]
 
     if manifest.base.files.len() == 0:
         # Auto-discover: include all files in source directory (excluding manifest.sdn)
-        val entries = readdir(source_dir)
-        for entry in entries:
+        val entries_opt = readdir(source_dir)
+        if entries_opt == nil:
+            return Result.Err("Cannot list source directory: {source_dir}")
+        for entry in entries_opt.unwrap():
             if entry != "manifest.sdn" and entry != "." and entry != "..":
                 collected.push(entry)
     else:
@@ -199,7 +208,7 @@ fn _collect_files(source_dir: text, manifest: ExtendedManifest) -> Result<[text]
 
     return Result.Ok(collected)
 
-fn _compute_checksum(source_dir: text, files: [text]) -> text:
+fn _compute_checksum(source_dir: text, files: [text]) -> text?:
     """Compute a simple checksum over all file contents.
 
     Uses a basic additive hash. For production, use SHA-256.
@@ -207,7 +216,10 @@ fn _compute_checksum(source_dir: text, files: [text]) -> text:
     var hash: u64 = 0x811C9DC5  # FNV offset basis
     for file_path in files:
         val full_path = "{source_dir}/{file_path}"
-        val content = read_text(full_path)
+        val content_opt = read_text(full_path)
+        if content_opt == nil:
+            return nil
+        val content = content_opt.unwrap()
         var j = 0
         while j < content.len():
             hash = hash ^ content[j].to_u64()
@@ -228,7 +240,10 @@ fn _create_spk_archive(source_dir: text, manifest: ExtendedManifest, files: [tex
     # Entry 2+: data/<file> for each payload file
     for file_path in files:
         val full_path = "{source_dir}/{file_path}"
-        val content = read_text(full_path)
+        val content_opt = read_text(full_path)
+        if content_opt == nil:
+            return Result.Err("Cannot read package file: {full_path}")
+        val content = content_opt.unwrap()
         val archive_path = "{SPK_DATA_PREFIX}{file_path}"
         archive = archive + _make_header(archive_path, content.len())
         archive = archive + _pad_block(content)

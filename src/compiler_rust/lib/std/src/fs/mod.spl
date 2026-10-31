@@ -9,16 +9,16 @@
 
 # File operations
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_copy(src: text, dest: text) -> bool
 extern fn rt_file_remove(path: text) -> bool
 extern fn rt_file_rename(source: text, dest: text) -> bool
-extern fn rt_file_canonicalize(path: text) -> RuntimeValue
+extern fn rt_file_canonicalize(path: text) -> RuntimeValue?
 
 # Directory operations
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
-extern fn rt_dir_list(path: text) -> RuntimeValue
+extern fn rt_dir_list(path: text) -> RuntimeValue?
 extern fn rt_dir_remove(path: text, recursive: bool) -> bool
 extern fn rt_file_find(dir: text, pattern: text, recursive: bool) -> RuntimeValue
 extern fn rt_dir_glob(dir: text, pattern: text) -> RuntimeValue
@@ -27,7 +27,7 @@ extern fn rt_dir_glob(dir: text, pattern: text) -> RuntimeValue
 extern fn rt_path_basename(path: text) -> RuntimeValue
 extern fn rt_path_dirname(path: text) -> RuntimeValue
 extern fn rt_path_ext(path: text) -> RuntimeValue
-extern fn rt_path_absolute(path: text) -> RuntimeValue
+extern fn rt_path_absolute(path: text) -> RuntimeValue?
 extern fn rt_path_separator() -> RuntimeValue
 
 # ============================================================================
@@ -46,8 +46,9 @@ fn read_text(path: text) -> Result<text, text>:
     if not exist(path):
         return Err("File not found: {path}")
 
-    val result = rt_file_read_text(path)
-    Ok(result.as_text())
+    if val content = rt_file_read_text(path):
+        return Ok(content)
+    Err("Failed to read file: {path}")
 
 # Write text to a file
 #
@@ -99,10 +100,10 @@ fn rename(source: text, dest: text) -> Result<(), text>:
 # Get canonical absolute path
 fn canonicalize(path: text) -> Result<text, text>:
     val result = rt_file_canonicalize(path)
-    if result.is_nil():
+    if result == nil or result.unwrap().is_nil():
         Err("Failed to canonicalize path: {path}")
     else:
-        Ok(result.as_text())
+        Ok(result.unwrap().as_text())
 
 # ============================================================================
 # Directory Operations
@@ -125,7 +126,9 @@ fn list_dir(path: text) -> Result<List<text>, text>:
         return Err("Directory not found: {path}")
 
     val result = rt_dir_list(path)
-    Ok(result.as_list())
+    if result == nil:
+        return Err("Failed to list directory: {path}")
+    Ok(result.unwrap().as_list())
 
 # Remove a directory
 #
@@ -183,10 +186,10 @@ fn extension(path: text) -> text:
 # Convert to absolute path
 fn absolute(path: text) -> Result<text, text>:
     val result = rt_path_absolute(path)
-    if result.is_nil():
+    if result == nil or result.unwrap().is_nil():
         Err("Failed to get absolute path: {path}")
     else:
-        Ok(result.as_text())
+        Ok(result.unwrap().as_text())
 
 # Get path separator for current OS
 #
@@ -224,7 +227,10 @@ fn is_file(path: text) -> bool:
 
     # Try to list as directory - if it fails, it's a file
     val result = rt_dir_list(path)
-    result.as_list().len() == 0 and exist(path)
+    if result == nil:
+        # absent: the path cannot be listed, so it is not a directory
+        return true
+    result.unwrap().as_list().len() == 0 and exist(path)
 
 # Check if path is a directory
 fn is_dir(path: text) -> bool:
@@ -233,8 +239,8 @@ fn is_dir(path: text) -> bool:
 
     # Try to list directory - if successful and has entries or is empty dir, it's a directory
     val result = rt_dir_list(path)
-    val entries = result.as_list()
-    true  # If rt_dir_list succeeded, it's a directory
+    # absent: listing failed, so the existing path is not a directory
+    result != nil  # If rt_dir_list succeeded, it's a directory
 
 # Walk directory tree
 #

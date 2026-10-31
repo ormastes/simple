@@ -19,7 +19,7 @@
 # Usage:
 #   Can be run as standalone script, or imported and called directly
 
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{getpid}
@@ -190,7 +190,12 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
         val cpp_size = file_size(temp_cpp)
         debug("compile", "Generated C++ (" + str(cpp_size) + " bytes)")
 
-    var generated_source = rt_file_read_text(temp_cpp) ?? ""
+    val generated_opt = rt_file_read_text(temp_cpp)
+    if generated_opt == nil:
+        error("compile", "failed to read generated C source: " + temp_cpp)
+        file_delete(temp_cpp)
+        return 1
+    var generated_source = generated_opt.unwrap()
     if not llvm_direct_generated_c_is_textual(generated_source):
         generated_source = llvm_direct_minimal_c_source_from_simple(source_file)
         if not file_write(temp_cpp, generated_source):
@@ -220,7 +225,12 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
             error("compile", "Simple layout section map not found: " + opts.simple_layout_section_map_path)
             file_delete(temp_cpp)
             return 1
-        val section_map_text = rt_file_read_text(opts.simple_layout_section_map_path) ?? ""
+        val section_map_opt = rt_file_read_text(opts.simple_layout_section_map_path)
+        if section_map_opt == nil:
+            error("compile", "Simple layout section map could not be read: " + opts.simple_layout_section_map_path)
+            file_delete(temp_cpp)
+            return 1
+        val section_map_text = section_map_opt.unwrap()
         val applied = native_layout_apply_c_section_map(generated_source, section_map_text, true)
         if applied.diagnostic_count > 0:
             error("compile", "Simple layout section map failed: " + applied.diagnostics.join(","))

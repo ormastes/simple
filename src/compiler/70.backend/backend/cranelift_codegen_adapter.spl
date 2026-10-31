@@ -31,7 +31,9 @@ extern fn rt_file_read_bytes(path: text) -> [u8]?
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text?  # nil when unset; callers here use `?? ""` because unset == empty is the intended semantics
 extern fn rt_enum_discriminant(value: MirInstKind) -> i64
+@unsafe(reason: "raw tagged-value payload ABI; nil only for a payload-less variant, never projected here", capabilities: [ffi])
 extern fn rt_enum_payload(value: MirInstKind) -> i64
+@unsafe(reason: "raw tuple projection ABI; callers project only slots their variant defines", capabilities: [ffi])
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 
 fn cranelift_file_read_bytes(path: text) -> [u8]:
@@ -602,10 +604,15 @@ fn cl_translate_instruction(
     val inst_kind = inst.kind
     val const_disc = rt_enum_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
     if rt_enum_discriminant(inst_kind) == const_disc:
-        val payload = rt_enum_payload(inst_kind)
-        val dest: LocalId = rt_tuple_get(payload, 0)
-        val value: MirConstValue = rt_tuple_get(payload, 1)
-        val type_: MirType = rt_tuple_get(payload, 2)
+        # Const always carries (dest, value, type_), so every slot is present.
+        val payload = unsafe(capabilities: [ffi]):
+            rt_enum_payload(inst_kind)
+        val dest: LocalId = unsafe(capabilities: [ffi]):
+            rt_tuple_get(payload, 0)
+        val value: MirConstValue = unsafe(capabilities: [ffi]):
+            rt_tuple_get(payload, 1)
+        val type_: MirType = unsafe(capabilities: [ffi]):
+            rt_tuple_get(payload, 2)
         val cl_val = cl_translate_const_value(ctx, cl_module, value, type_)
         value_map[dest.id] = cl_val
         if slot_map.has(dest.id):
@@ -615,9 +622,13 @@ fn cl_translate_instruction(
 
     val copy_disc = rt_enum_discriminant(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 0)))
     if rt_enum_discriminant(inst_kind) == copy_disc:
-        val payload = rt_enum_payload(inst_kind)
-        val dest: LocalId = rt_tuple_get(payload, 0)
-        val src: LocalId = rt_tuple_get(payload, 1)
+        # Copy always carries (dest, src), so both slots are present.
+        val payload = unsafe(capabilities: [ffi]):
+            rt_enum_payload(inst_kind)
+        val dest: LocalId = unsafe(capabilities: [ffi]):
+            rt_tuple_get(payload, 0)
+        val src: LocalId = unsafe(capabilities: [ffi]):
+            rt_tuple_get(payload, 1)
         val src_val = load_local(ctx, src.id, value_map, slot_map, func)
         value_map[dest.id] = src_val
         if slot_map.has(dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):

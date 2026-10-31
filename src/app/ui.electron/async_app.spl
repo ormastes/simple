@@ -21,7 +21,7 @@ use common.window_protocol.geometry.{Size}
 use os.compositor.host_compositor_entry.{
     HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
 
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{file_exists}
 use std.io_runtime.{get_args}
 
@@ -81,10 +81,11 @@ class AsyncElectronApp:
                 val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "electron")
                 if store != nil:
                     session.attach_access_store(store)
-                val content = if file_exists(file_path):
-                    rt_file_read_text(file_path)
-                else:
-                    ""
+                var content = ""
+                if file_exists(file_path):
+                    if val read_text = rt_file_read_text(file_path):
+                        content = read_text
+                # absent: no baseline yet; the watcher reports the first readable version as a change
 
                 val evt_ch = channel_new()
                 val rnd_ch = channel_new()
@@ -124,10 +125,11 @@ class AsyncElectronApp:
             var last_content = initial_content
             while not file_ch.is_closed():
                 if file_exists(path):
-                    val current = rt_file_read_text(path)
-                    if current != last_content:
-                        last_content = current
-                        file_ch.send(UIEvent.FileChanged)
+                    if val current = rt_file_read_text(path):
+                        if current != last_content:
+                            last_content = current
+                            file_ch.send(UIEvent.FileChanged)
+                    # absent: an unreadable poll is not a change
                 thread_sleep(200)
         )
 
@@ -159,7 +161,10 @@ class AsyncElectronApp:
         """Reload the .ui.sdn file and update the tree."""
         if not file_exists(self.file_path):
             return
-        val current_content = rt_file_read_text(self.file_path)
+        val current_opt = rt_file_read_text(self.file_path)
+        if current_opt == nil:
+            return
+        val current_content = current_opt.unwrap()
         if current_content != self.last_file_content:
             self.last_file_content = current_content
             val tree_result = parse_ui_to_tree(self.file_path)

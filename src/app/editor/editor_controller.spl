@@ -59,7 +59,7 @@ use app.editor.editor_extension_roots.*
 use app.editor.editor_controller_types.*
 
 use std.io_runtime.{file_exists}
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_write_exact}
 extern fn rt_file_read_bytes(path: text) -> [u8]?
@@ -663,8 +663,15 @@ impl EditorController:
         if template_path == "" or target_path == "":
             me.status_msg = "missing template or target path"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val rendered = _editor_apply_template_text(rt_file_read_text(template_path) ?? "", title, date)
-        val existing = rt_file_read_text(target_path) ?? ""
+        val template_text = rt_file_read_text(template_path)
+        if template_text == nil:
+            me.status_msg = "failed to read template: " + template_path
+            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        val rendered = _editor_apply_template_text(template_text.unwrap(), title, date)
+        var existing = ""
+        if val target_text = rt_file_read_text(target_path):
+            existing = target_text
+        # absent: a target that does not exist yet starts empty
         val sep = if existing == "" or existing.ends_with("\n") then "" else: "\n"
         if not file_write_exact(target_path, existing + sep + rendered):
             me.status_msg = "failed to insert template"
@@ -995,7 +1002,11 @@ impl EditorController:
         if launch_path == "":
             me.status_msg = "debug compound source not found: " + editor_debug_launch_config_name(compound_config)
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val content = rt_file_read_text(launch_path) ?? ""
+        val content_opt = rt_file_read_text(launch_path)
+        if content_opt == nil:
+            me.status_msg = "debug compound source unreadable: " + launch_path
+            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
+        val content = content_opt.unwrap()
         val workspace = _editor_workspace_dir_from_launch_json(launch_path)
         val doc = me.session.active_document()
         val program = if doc == nil then "" else: doc.path()
@@ -1606,7 +1617,10 @@ impl EditorController:
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
-            val existing = rt_file_read_text(file) ?? ""
+            val existing_opt = rt_file_read_text(file)
+            if existing_opt == nil:
+                continue
+            val existing = existing_opt.unwrap()
             val next = md_tasks_set_checked(existing, checked)
             if next != existing:
                 if file_write_exact(file, next):
@@ -1666,7 +1680,10 @@ impl EditorController:
                 continue
             if not _editor_vault_property_path_selected(file, parsed.selected_paths):
                 continue
-            val existing = rt_file_read_text(file) ?? ""
+            val existing_opt = rt_file_read_text(file)
+            if existing_opt == nil:
+                continue
+            val existing = existing_opt.unwrap()
             val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
             if next != existing:
                 if file_write_exact(file, next):
@@ -1691,7 +1708,10 @@ impl EditorController:
                 continue
             if not _editor_vault_property_path_selected(file, parsed.selected_paths):
                 continue
-            val existing = rt_file_read_text(file) ?? ""
+            val existing_opt = rt_file_read_text(file)
+            if existing_opt == nil:
+                continue
+            val existing = existing_opt.unwrap()
             val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
             if next != existing:
                 rows.push(WikiPanelRow(icon: "review", label: _editor_path_basename(file), detail: parsed.key + " -> " + parsed.value, path: file, line: 0))
@@ -2622,7 +2642,11 @@ impl EditorController:
             return LspResponse(id: 0, ok: false, result_json: "", error_text: "no active language server")
 
     me _notify_lsp_file_changed(path: text, change_type: i64) -> EditorAction:
-        me.vault_search_index = md_vault_search_index_apply_file_change(me.vault_search_index, path, rt_file_read_text(path) ?? "", change_type)
+        var changed_text = ""
+        if val read_text = rt_file_read_text(path):
+            changed_text = read_text
+        # absent: a deleted or unreadable file contributes no indexed text
+        me.vault_search_index = md_vault_search_index_apply_file_change(me.vault_search_index, path, changed_text, change_type)
         var notified = false
         if me.md_lsp_state.running:
             me.md_lsp_state = md_lsp_notify_watched_file(me.md_lsp_state, path, change_type)
@@ -2856,9 +2880,10 @@ impl EditorController:
         while i < events.len():
             val event = events[i]
             val path = event.path
-            val content = rt_file_read_text(path) ?? ""
             if event.change_type != 3:
-                me._refresh_open_document_from_disk_batch(path, content)
+                if val content = rt_file_read_text(path):
+                    me._refresh_open_document_from_disk_batch(path, content)
+                # absent: an unreadable file leaves the open buffer unchanged
             me._notify_lsp_file_changed(path, event.change_type)
             i = i + 1
         me.status_msg = "file changes notified: " + events.len().to_text()

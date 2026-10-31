@@ -30,7 +30,7 @@ use std.nogc_sync_mut.composition.provider_contract.{
 use std.nogc_sync_mut.composition.cli_command_wire.{CliCommandResultViewV1}
 
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_read_bytes(path: text) -> [u8]?
 
 val SIMPLE_PROVIDER_QUERY_V1_SYMBOL: text = "simple_provider_query_v1"
 val SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL: text = "simple_cli_command_invoke_v1"
@@ -267,8 +267,10 @@ fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDyn
         val path_policy = _provider_admission_policy_v1(request, false, "")
         val path_denied = _provider_policy_refusal_v1(path_policy)
         return ProviderDynamicAdmissionV1(admission: path_denied, session: _closed_provider_session(path_denied))
-    val exists = rt_file_exists(request.artifact_path)
-    val bytes = if exists: rt_file_read_bytes(request.artifact_path) ?? [] else: []
+    val read_bytes = if rt_file_exists(request.artifact_path): rt_file_read_bytes(request.artifact_path) else: nil
+    # absent: a missing or unreadable artifact is refused as not existing.
+    val exists = read_bytes != nil
+    val bytes: [u8] = if exists: read_bytes.unwrap() else: []
     val digest = provider_artifact_digest_v1(bytes)
     val policy = _provider_admission_policy_v1(request, exists, if exists: digest else: "")
     if policy.status != PROVIDER_ADMISSION_OK:
@@ -277,7 +279,9 @@ fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDyn
     val library = dynlib_open(request.artifact_path, 2)
     # This is cold admission work. Re-read after open and fail closed if the
     # path changed. The library generation stays retained by the session.
-    val loaded_digest = provider_artifact_digest_v1(rt_file_read_bytes(request.artifact_path))
+    val reloaded = rt_file_read_bytes(request.artifact_path)
+    # absent: an unreadable re-read cannot match, so it fails closed as unstable.
+    val loaded_digest = if reloaded == nil: "" else: provider_artifact_digest_v1(reloaded.unwrap())
     if loaded_digest != digest:
         val unstable = _provider_admission_result(
             PROVIDER_ADMISSION_DIGEST_UNSTABLE, 0, loaded_digest, false,

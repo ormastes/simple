@@ -6,11 +6,11 @@
 # the guest VFS-IPC library (rt_x86_syscall) which cannot run on the build
 # host and poisoned the interpreter's global function registry.
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
-fn read_text(path: text) -> text:
-    rt_file_read_text(path) ?? ""
+fn read_text(path: text) -> text?:
+    rt_file_read_text(path)
 
 fn write_text(path: text, content: text):
     val _ok = rt_file_write_text(path, content)
@@ -86,7 +86,11 @@ fn run_tar(args: [text]) -> i32:
         if archive_path == "":
             print "Error: -f ARCHIVE required for extract"
             return 1
-        val data = read_text(archive_path)
+        val data_opt = read_text(archive_path)
+        if data_opt == nil:
+            print "Error: cannot read archive {archive_path}"
+            return 1
+        val data = data_opt.unwrap()
         val result = tar_extract(data, ".")
         if val Ok(count) = result:
             print "Extracted {count} files"
@@ -98,7 +102,11 @@ fn run_tar(args: [text]) -> i32:
         if archive_path == "":
             print "Error: -f ARCHIVE required for list"
             return 1
-        val data = read_text(archive_path)
+        val data_opt = read_text(archive_path)
+        if data_opt == nil:
+            print "Error: cannot read archive {archive_path}"
+            return 1
+        val data = data_opt.unwrap()
         val result = tar_list(data)
         if val Ok(headers) = result:
             for h in headers:
@@ -119,7 +127,10 @@ fn tar_create(files: [text]) -> Result<text, text>:
     for path in files:
         if not rt_file_exists(path):
             return Result.Err("File not found: {path}")
-        val content = read_text(path)
+        val content_opt = read_text(path)
+        if content_opt == nil:
+            return Result.Err("Cannot read file: {path}")
+        val content = content_opt.unwrap()
         val header = TarHeader(
             name: path,
             size: content.len().to_u64(),
