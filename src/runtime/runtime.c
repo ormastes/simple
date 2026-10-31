@@ -1248,7 +1248,7 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
-SPL_RUNTIME_NATIVE_TWIN int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
     char path_buf[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
     const char* path = path_buf;
@@ -2014,7 +2014,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded(
 }
 /* (ptr, len): see rt_text_arg_to_path above -- a Simple `text` is not
  * NUL-terminated and the compiler passes it as a pair. */
-SPL_RUNTIME_NATIVE_TWIN int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN bool         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     uint_fast64_t lease = rt_file_exists_probe_lease_admit();
     char path[RT_TEXT_PATH_MAX];
     int exists = 0;
@@ -2100,7 +2100,7 @@ SPL_RUNTIME_NATIVE_TWIN int         rt_file_copy(const uint8_t* src_ptr, uint64_
     if (fclose(in) != 0) ok = 0;
     return ok;
 }
-SPL_RUNTIME_NATIVE_TWIN int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return spl_file_delete(path);

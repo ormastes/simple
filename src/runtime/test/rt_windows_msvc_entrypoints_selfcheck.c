@@ -103,8 +103,8 @@ extern int     rt_file_truncate(const char* path, uint64_t size);
 extern int64_t rt_file_size(const uint8_t* path_ptr, uint64_t path_len);
 extern int     rt_file_write_bytes(const uint8_t* path_ptr, uint64_t path_len,
                                    const uint8_t* data, uint64_t len);
-extern int     rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
-extern int     rt_file_delete(const char* path);
+extern _Bool   rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
+extern _Bool   rt_file_delete(const char* path);
 
 /* --- directories ------------------------------------------------------ */
 extern unsigned char rt_dir_create_cpath(const char* path, unsigned char recursive);
