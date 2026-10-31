@@ -549,7 +549,7 @@ fn atomic_write_staging_file(temp_path: &Path, content: &[u8], mode: Option<i32>
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    options.mode(0o600);
+    options.mode(if mode.is_some() { 0o600 } else { 0o666 }); // plain writes take the umask
     // A failed exclusive open never transfers ownership of an existing path.
     let mut file = options.open(temp_path)?;
     let write_result = (|| -> std::io::Result<()> {
@@ -601,7 +601,11 @@ unsafe fn rt_file_atomic_write_impl(path: RuntimeValue, content: RuntimeValue, m
         Some(b) => b,
         None => return 0,
     };
-    let path_str = match std::str::from_utf8(&path_bytes) {
+    atomic_write_path_bytes(&path_bytes, &content_bytes, mode)
+}
+
+unsafe fn atomic_write_path_bytes(path_bytes: &[u8], content_bytes: &[u8], mode: Option<i32>) -> i64 {
+    let path_str = match std::str::from_utf8(path_bytes) {
         Ok(s) => s.to_string(),
         Err(_) => return 0,
     };
@@ -637,7 +641,7 @@ unsafe fn rt_file_atomic_write_impl(path: RuntimeValue, content: RuntimeValue, m
         SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
 
-    if atomic_write_staging_file(&temp_path, &content_bytes, mode).is_err() {
+    if atomic_write_staging_file(&temp_path, content_bytes, mode).is_err() {
         return 0;
     }
 
@@ -650,11 +654,42 @@ unsafe fn rt_file_atomic_write_impl(path: RuntimeValue, content: RuntimeValue, m
         }
     }
 
-    if std::fs::rename(&temp_path, &target).is_err() {
+    // Uncoordinated same-path writers are allowed; a Windows replace can fail
+    // transiently while the target is held, so retry here, never in callers.
+    let attempts = if cfg!(windows) { 8 } else { 1 };
+    let mut moved = false;
+    for attempt in 0..attempts {
+        moved = std::fs::rename(&temp_path, &target).is_ok();
+        if moved {
+            break;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(std::time::Duration::from_millis(1 << attempt));
+        }
+    }
+    if !moved {
         let _ = std::fs::remove_file(&temp_path);
         return 0;
     }
     1
+}
+
+/// Byte twin of `rt_file_atomic_write`; C twin in `runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_file_atomic_write_bytes_array(path: RuntimeValue, data: RuntimeValue) -> bool {
+    let path_ptr = rt_string_data(path);
+    let path_len = rt_string_len(path);
+    if path_ptr.is_null() || path_len <= 0 {
+        return false;
+    }
+    let Some(bytes) = crate::value::collections::byte_array_bytes(data) else {
+        return false;
+    };
+    let path_bytes = unsafe { std::slice::from_raw_parts(path_ptr, path_len as usize) };
+    if path_bytes.contains(&0) {
+        return false;
+    }
+    unsafe { atomic_write_path_bytes(path_bytes, &bytes, None) != 0 }
 }
 
 /// Write text to file

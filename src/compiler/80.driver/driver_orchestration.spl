@@ -21,6 +21,9 @@ use compiler.driver.driver_aot_pipeline.*
 use compiler.driver.driver_collection_native_receipt.{collection_native_clear_v1, collection_native_validate_v1, collection_native_copy_v1}
 use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
 use compiler.driver.driver_log_helpers.{
+    build_trace_enabled,
+    log_build_trace,
+    build_trace_list,
     log_debug,
     log_trace,
     log_warn,
@@ -157,6 +160,11 @@ impl CompilerDriver:
         if env_get("SIMPLE_COMPILER_TRACE") == "1":
             eprint("[vhdl-driver] captured-metadata={metadata_rows.len()}")
 
+    fn build_trace_first_error() -> text:
+        """First recorded diagnostic for a `[build-trace] ...:failed` line, or an
+        empty text; the count is reported beside it by the caller."""
+        if self.ctx.error_count_value > 0: self.ctx.error_message_at(0) else: ""
+
     me compile() -> CompileResult:
         if not reverse_reference_owner_begin_v1():
             return CompileResult.RuntimeError(
@@ -278,6 +286,9 @@ impl CompilerDriver:
             if cleared != "":
                 return CompileResult.CodegenError("native collection receipt cleanup failed: {cleared}")
         log_phase("compile:start")
+        if build_trace_enabled():
+            val traced_output = self.ctx.options.output_file ?? "(none)"
+            log_build_trace("driver:compile:start mode={compile_mode_text} backend={self.ctx.options.backend} inputs={self.ctx.options.input_files.len()} input_files={build_trace_list(self.ctx.options.input_files)} output={traced_output}")
         log_build_progress("load_sources", "files", -1, -1,
             "starting", 0, 6, 0, 0, "running")
         log_phase("phase1:load_sources:start")
@@ -296,6 +307,7 @@ impl CompilerDriver:
             self.ctx = loaded_ctx
         if not load_ok:
             log_error("phase 1 FAILED")
+            log_build_trace("driver:load_sources:failed errors={self.ctx.error_count_value} first={self.build_trace_first_error()}")
             log_build_progress("load_sources", "files", -1, -1,
                 "failed", 0, 6, 1, 0, "failed")
             return CompileResult.ParseError(self.ctx.errors)
@@ -331,6 +343,13 @@ impl CompilerDriver:
             val reclaimed_preparse_sources = self.ctx.reclaim_streaming_preparse_source_records()
             log_phase("phase1:streaming_preparse_source_reclaim:done sources={reclaimed_preparse_sources} owners={self.ctx.source_contents_owner.len()}")
         log_phase("phase1:load_sources:done n_sources={self.ctx.sources.len()}")
+        if build_trace_enabled():
+            var traced_source_paths: [text] = []
+            var traced_source_bytes = 0
+            for traced_source in self.ctx.sources:
+                traced_source_paths = traced_source_paths.push(traced_source.path)
+                traced_source_bytes = traced_source_bytes + traced_source.content.len()
+            log_build_trace("driver:load_sources:done n_sources={self.ctx.sources.len()} bytes={traced_source_bytes} paths={build_trace_list(traced_source_paths)}")
         log_build_progress("load_sources", "files", self.ctx.sources.len(),
             self.ctx.sources.len(), "complete", 1, 6, 0, 0, "running")
 
@@ -425,6 +444,7 @@ impl CompilerDriver:
                 phase2_err_idx = phase2_err_idx + 1
             log_build_progress("parse", "files", -1, self.ctx.sources.len(),
                 "failed", 1, 6, 1, 0, "failed")
+            log_build_trace("driver:parse:failed errors={self.ctx.error_count_value} first={self.build_trace_first_error()}")
             return Some(CompileResult.ParseError(self.ctx.errors))
         if self.ctx.config.contains_key("coverage") or mcdc_enabled:
             if not compiler_coverage_inventory_valid():
@@ -454,6 +474,8 @@ impl CompilerDriver:
         val parsed_module_count = self.ctx.modules.keys().len()
         val parsed_module_carrier = if parse_streaming_carrier: "surfaces" else: "modules"
         log_phase("phase2:parse:done n_modules={parsed_module_count} carrier={parsed_module_carrier}")
+        if build_trace_enabled():
+            log_build_trace("driver:parse:done n_modules={parsed_module_count} carrier={parsed_module_carrier} modules={build_trace_list(self.ctx.modules.keys())}")
         log_build_progress("parse", "modules", parsed_module_count,
             parsed_module_count, "complete", 2, 6, 0, 0, "running")
 
@@ -499,6 +521,7 @@ impl CompilerDriver:
                 return Some(self.go_to_end_finish_v1(0, []))
         if not analyze_ok_effective:
             log_error("phase 3 FAILED")
+            log_build_trace("driver:hir:failed errors={self.ctx.error_count_value} first={self.build_trace_first_error()}")
             if env_get("SIMPLE_BOOTSTRAP_DEBUG") == "1":
                 val phase3_error_count = self.ctx.errors.len()
                 eprint("[bootstrap-phase3-errors] count={phase3_error_count}")
@@ -575,6 +598,8 @@ impl CompilerDriver:
             return Some(CompileResult.TypeError([]))
         log_debug("phase 3 done")
         log_phase("phase3:hir_typecheck:done")
+        if build_trace_enabled():
+            log_build_trace("driver:hir:done n_hir_modules={self.ctx.hir_modules.len()} modules={build_trace_list(self.ctx.hir_modules.keys())}")
         log_build_progress("hir", "modules", -1, -1,
             "complete", 3, 6, 0, 0, "running")
 

@@ -45,7 +45,8 @@ use std.platform.{get_host_os, get_host_arch}
 use std.nogc_async_mut.sosix.host_facade.{sosix_run}
 use compiler.driver.native_relocatable_link.{native_relocatable_link_plan,
     native_relocatable_linker_version_admissible, NativeRelocatableLink}
-use compiler.driver.driver_log_helpers.{log_phase, log_error}
+use compiler.driver.driver_log_helpers.{log_phase, log_error, build_trace_enabled,
+    log_build_trace, build_trace_list, build_trace_detail}
 use compiler.driver.native_aot_artifacts.{
     native_aot_object_path_v1, native_aot_finish_diagnostics_v1}
 use compiler.driver.driver_collection_native_receipt.{
@@ -2231,6 +2232,8 @@ impl CompilerDriver:
         if trace:
             print "[NATIVE] compiling {total_modules} modules..."
             _sffi_stdout_flush()
+        if build_trace_enabled():
+            log_build_trace("driver:codegen:start backend={effective_backend} target={native_target} output={output} total_modules={total_modules} modules={build_trace_list(module_names)}")
 
         # Guard (bug #119): refuse empty mir_modules. A requested --entry that
         # produces no modules is likely a misconfiguration (isolated entry with
@@ -2544,6 +2547,8 @@ impl CompilerDriver:
         log_build_progress("native_compile", "modules",
             total_modules - uncached_names.len(), total_modules,
             native_compile_current, 5, 6, 0, cache_hit_count, "running")
+        if build_trace_enabled():
+            log_build_trace("driver:codegen:plan cached={cache_hit_count} uncached={uncached_names.len()} uncached_modules={build_trace_list(uncached_names)}")
         if uncached_names.len() > 0:
             if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
                 for emitted_name in uncached_names:
@@ -2752,6 +2757,7 @@ impl CompilerDriver:
                         cache_hit_count + build_result.stats.completed,
                         total_modules, first_err[0], 5, 6,
                         build_result.stats.failed, cache_hit_count, "failed")
+                    log_build_trace("driver:codegen:failed completed={build_result.stats.completed} failed={build_result.stats.failed} first_module={first_err[0]} detail={build_trace_detail(first_err[1])}")
 
             # Post-process: update cache and collect object paths. Do not rely
             # on BuildResult.outputs here: stage1-generated compilers can lose
@@ -3256,6 +3262,8 @@ impl CompilerDriver:
 
         if trace:
             print "[NATIVE] linking {object_files.len()} object files..."
+        if build_trace_enabled():
+            log_build_trace("driver:link:start backend={effective_backend} objects={object_files.len()} output={output} inputs={build_trace_list(object_files)}")
         log_build_progress("link", "objects", object_files.len(),
             object_files.len(), output, 5, 6, 0, cache_hit_count, "running")
         if effective_backend == "llvm" or effective_backend == "llvm-lib":
@@ -3290,9 +3298,12 @@ impl CompilerDriver:
                     log_build_progress("link", "objects", object_files.len(),
                         object_files.len(), output, 6, 6, 0,
                         cache_hit_count, "succeeded")
+                    if build_trace_enabled():
+                        log_build_trace("driver:link:done rc=0 output={output} output_bytes={file_size_raw(output)}")
                     driver_log_info(log, "Native executable written to {output} (backend: LLVM)")
                     return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
                 case Err(e):
+                    log_build_trace("driver:link:failed output={output} detail={build_trace_detail(e)}")
                     driver_native_collection_link_cleanup_error_v1(
                         collection_link_input_dir,
                         driver_native_link_failure_result(ctx, "LLVM native linking failed", e))
@@ -3324,9 +3335,12 @@ impl CompilerDriver:
                     log_build_progress("link", "objects", object_files.len(),
                         object_files.len(), output, 6, 6, 0,
                         cache_hit_count, "succeeded")
+                    if build_trace_enabled():
+                        log_build_trace("driver:link:done rc=0 output={output} output_bytes={file_size_raw(output)}")
                     driver_log_info(log, "Native executable written to {output} (backend: {effective_backend})")
                     driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
                 case Err(e):
+                    log_build_trace("driver:link:failed output={output} detail={build_trace_detail(e)}")
                     driver_native_collection_link_cleanup_error_v1(
                         collection_link_input_dir,
                         driver_native_link_failure_result(ctx, "Hosted native linking failed", e))
@@ -3668,6 +3682,7 @@ fn _compile_frozen_module_capsule(
         case Err(error):
             if group_member_id != "":
                 log_phase("native_group:codegen:error member={group_member_id} backend={backend_name}")
+            log_build_trace("driver:codegen:module:failed module={name} source={capsule.cache_source} backend={backend_name} detail={build_trace_detail(error)}")
             val _ice_line = ice_boundary_fail(name, capsule.cache_source, "codegen", backend_name, error)
             return Err(error)
         case Ok(object_path):
@@ -3695,6 +3710,8 @@ fn _compile_frozen_module_capsule(
             # would otherwise be recorded as a size of -1 and only surface far
             # away as an opaque `receipt-content-mismatch`.
             val object_size = file_size_raw(object_path)
+            if build_trace_enabled():
+                log_build_trace("driver:codegen:module:done module={name} source={capsule.cache_source} backend={backend_name} object={object_path} object_bytes={object_size}")
             if object_size < 0:
                 return _aot_compile_failure(name,
                     "capsule-object-size-unreadable:{object_path}")
