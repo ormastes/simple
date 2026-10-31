@@ -53,8 +53,8 @@ fn native_group_linux_main_v1() -> i64:
             print "native groups: {reason}"
             return 2
     if not file_is_regular_no_follow(run.manager_program) or
-            file_hash_sha256(run.manager_program) != run.manager_digest or
-            file_hash_sha256("/proc/self/exe") != run.manager_digest:
+            _native_group_linux_main_sha_mismatch(run.manager_program, run.manager_digest) or
+            _native_group_linux_main_sha_mismatch("/proc/self/exe", run.manager_digest):
         print "native groups: running Linux manager image differs from admitted digest"
         return 2
     if not group_process_set_launcher_v1(native_linux_group_broker_launch_v1, "linux"):
@@ -66,7 +66,11 @@ fn native_group_linux_main_v1() -> i64:
         return outcome.exit_code
     # The validated, pinned local run explicitly acquires its own measurement
     # parent. Brokers acquire distinct parents bound to their launch identities.
-    val parent = match linux_cgroup_parent_acquire_v1(run.state_root, file_hash_sha256(args[3])):
+    val manifest_digest = file_hash_sha256(args[3])
+    if manifest_digest == nil:
+        print "native groups capacity admission: cannot hash manifest {args[3]}"
+        return 2
+    val parent = match linux_cgroup_parent_acquire_v1(run.state_root, manifest_digest.unwrap()):
         Ok(value): value
         Err(reason):
             print "native groups capacity admission: {reason}"
@@ -85,3 +89,9 @@ fn main() -> i64:
     native_group_linux_main_v1()
 
 export native_group_linux_main_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _native_group_linux_main_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

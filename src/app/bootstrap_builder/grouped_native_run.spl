@@ -207,7 +207,7 @@ fn native_group_source_bytes_v1(run: NativeGroupRunV1, manifest: NativeGroupMani
     var bytes: i64 = 0
     for member in manifest.members:
         val path = run.source_root + "/" + member.source_path
-        if not file_is_regular_no_follow(path) or file_hash_sha256(path) != member.source_digest:
+        if not file_is_regular_no_follow(path) or _grouped_native_run_sha_mismatch(path, member.source_digest):
             return Err("frozen group source differs: " + member.source_path)
         val size = file_size(path)
         if size < 0 or size > 1073741824: return Err("group source size outside bound")
@@ -226,12 +226,12 @@ fn native_group_pins_v1(run: NativeGroupRunV1) -> text:
         run.scv_receipt_digest]
     for i in 0..paths.len():
         if not file_is_regular_no_follow(paths[i]) or
-                file_hash_sha256(paths[i]) != digests[i]:
+                _grouped_native_run_sha_mismatch(paths[i], digests[i]):
             return "admitted native input differs: " + paths[i]
     val index_path = run.index_read_root + "/package-module-index-v1/" +
         run.index_digest + ".index"
     if not file_is_regular_no_follow(index_path) or
-            file_hash_sha256(index_path) != run.index_digest:
+            _grouped_native_run_sha_mismatch(index_path, run.index_digest):
         return "admitted immutable package index differs"
     ""
 
@@ -284,7 +284,7 @@ fn native_group_request_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV
     val root = native_group_attempt_root_v1(run, manifest)
     val cache_root = native_group_cache_root_v1(run, manifest)
     if not file_is_regular_no_follow(manifest.group_route_path) or
-            file_hash_sha256(manifest.group_route_path) != manifest.group_route_digest:
+            _grouped_native_run_sha_mismatch(manifest.group_route_path, manifest.group_route_digest):
         return Err("group warm route differs from pinned digest")
     val group_payload = native_group_manifest_encode_v1(manifest)
     if group_payload == "" or not native_group_install_v1(root, root + "/group.manifest.sdn", group_payload):
@@ -377,7 +377,7 @@ fn native_group_smf_receipt_valid_v1(run: NativeGroupRunV1,
     val receipt = native_group_attempt_root_v1(run, manifest) +
         "/qualification/" + sha256_text(row.module_id) + ".sdn"
     if not file_is_regular_no_follow(receipt) or
-            file_hash_sha256(receipt) != row.diagnostic_digest:
+            _grouped_native_run_sha_mismatch(receipt, row.diagnostic_digest):
         return false
     match file_read_regular_no_follow_bounded(receipt, 4096):
         Ok(payload): payload == expected
@@ -390,7 +390,7 @@ fn native_group_files_valid_v1(run: NativeGroupRunV1, manifest: NativeGroupManif
     for row in result.modules:
         if row.status == "OK":
             val path = native_group_output_path_v1(run, manifest, row.output_path)
-            if not file_is_regular_no_follow(path) or file_hash_sha256(path) != row.output_digest:
+            if not file_is_regular_no_follow(path) or _grouped_native_run_sha_mismatch(path, row.output_digest):
                 return "group output digest differs: " + row.module_id
             if row.output_kind == "SMF":
                 if not native_group_smf_receipt_valid_v1(run, manifest, row):
@@ -657,10 +657,14 @@ fn native_group_check_compiler_evidence_v1(run: NativeGroupRunV1,
         if not file_is_regular_no_follow(root + "/" + name):
             return Err("compiler observation log is not regular")
     val payload = file_read_regular_no_follow_bounded(path, 2048)?
+    val stdout_digest = file_hash_sha256(root + "/compiler.stdout.log")
+    val stderr_digest = file_hash_sha256(root + "/compiler.stderr.log")
+    if stdout_digest == nil or stderr_digest == nil:
+        return Err("cannot hash compiler observation log")
     val _evidence = build_runner_process_evidence_bind_v1(payload,
         native_group_manifest_identity_v1(manifest),
-        file_hash_sha256(root + "/compiler.stdout.log"),
-        file_hash_sha256(root + "/compiler.stderr.log"), code, true)?
+        stdout_digest.unwrap(),
+        stderr_digest.unwrap(), code, true)?
     Ok(true)
 
 fn native_group_run_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1,
@@ -738,7 +742,7 @@ fn native_group_scc_payload_v1(run: NativeGroupRunV1, scc: text,
         val attempt = latest.attempts[member.module_id]
         val path = native_group_output_path_v1(run, attempt, row.output_path)
         if not file_is_regular_no_follow(path) or
-                file_hash_sha256(path) != row.output_digest:
+                _grouped_native_run_sha_mismatch(path, row.output_digest):
             return Err("SCC member output differs: " + member.module_id)
         if row.output_kind == "SMF":
             if not native_group_smf_receipt_valid_v1(run, attempt, row):
@@ -760,7 +764,7 @@ fn native_group_promote_scc_v1(run: NativeGroupRunV1, scc: text,
         val target = run.output_root + "/" + row.output_path
         if file_exists(target):
             if not file_is_regular_no_follow(target) or
-                    file_hash_sha256(target) != row.output_digest:
+                    _grouped_native_run_sha_mismatch(target, row.output_digest):
                 return Err("existing promoted output differs: " + row.output_path)
         else:
             val temporary = run.output_root + "/.native-staging/" +
@@ -769,10 +773,10 @@ fn native_group_promote_scc_v1(run: NativeGroupRunV1, scc: text,
                     not dir_create(native_group_parent_v1(target), true) or
                     not file_copy(source, temporary):
                 return Err("cannot stage SCC output: " + row.output_path)
-            if file_hash_sha256(temporary) != row.output_digest or
+            if _grouped_native_run_sha_mismatch(temporary, row.output_digest) or
                     not file_rename(temporary, target):
                 return Err("cannot atomically install SCC output: " + row.output_path)
-        if file_hash_sha256(target) != row.output_digest:
+        if _grouped_native_run_sha_mismatch(target, row.output_digest):
             return Err("promoted SCC output digest differs")
     if not native_group_write_v1(marker, payload): return Err("cannot commit complete SCC")
     Ok(true)
@@ -854,7 +858,7 @@ fn native_group_dependencies_ready_v1(run: NativeGroupRunV1,
             checked_sccs[dependency.scc_id] = true
         val path = run.output_root + "/" + dependency.smf_path
         if not file_exists(path): return Ok(false)
-        if not file_is_regular_no_follow(path) or file_hash_sha256(path) != row.output_digest:
+        if not file_is_regular_no_follow(path) or _grouped_native_run_sha_mismatch(path, row.output_digest):
             return Err("promoted dependency SMF differs")
     Ok(true)
 
@@ -875,7 +879,7 @@ fn native_group_promotions_valid_v1(run: NativeGroupRunV1) -> bool:
             val row = latest.rows[member.module_id]
             val target = run.output_root + "/" + row.output_path
             if not file_is_regular_no_follow(target) or
-                    file_hash_sha256(target) != row.output_digest:
+                    _grouped_native_run_sha_mismatch(target, row.output_digest):
                 return false
     true
 
@@ -1325,3 +1329,9 @@ export native_group_normalize_crashed_sccs_v1
 export native_group_demote_unqualified_smf_v1
 export native_group_blocked_payload_v1, native_group_blocked_marker_matches_v1
 export native_group_attempt_root_v1, native_group_cache_root_v1, native_group_environment_v1
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _grouped_native_run_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

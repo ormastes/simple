@@ -584,14 +584,14 @@ fn managed_phase_verify_task_v2(owner: ManagedPhaseAdmissionV1, i: i64,
         return Err("phase source parent is unsafe")
     for input in task.inputs:
         val path = owner.source_root + "/" + input.path
-        if not file_is_regular_no_follow(path) or file_hash_sha256(path) != input.digest:
+        if not file_is_regular_no_follow(path) or _phase_admission_sha_mismatch(path, input.digest):
             return Err("phase source input changed: " + input.path)
     val links = builder_link_inputs_match_v1(task, owner.source_root)
     if links != "": return Err(links)
     val program = if task.program.starts_with("/") or task.program.contains(":"):
         task.program
     else: owner.source_root + "/" + task.program
-    if not file_is_regular_no_follow(program) or file_hash_sha256(program) != task.producer_digest:
+    if not file_is_regular_no_follow(program) or _phase_admission_sha_mismatch(program, task.producer_digest):
         return Err("phase program differs from pinned producer")
     val phase_root = managed_phase_task_root_v2(owner.root, owner.tasks, i)
     val root = phase_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + owner.host.id
@@ -615,7 +615,9 @@ fn managed_phase_verify_task_v2(owner: ManagedPhaseAdmissionV1, i: i64,
             if not dir_is_real_no_follow(parent): return Err("phase output parent is unsafe")
         val path = root + "/work/" + output
         if not file_is_regular_no_follow(path): return Err("phase expected output is missing")
-        observed = observed.push(BuildInputV1(output, file_hash_sha256(path)))
+        val output_digest = file_hash_sha256(path)
+        if output_digest == nil: return Err("cannot hash phase output: " + output)
+        observed = observed.push(BuildInputV1(output, output_digest.unwrap()))
     val outputs = managed_phase_barrier_result_error_v1(task, result, published, observed, allow_test_failure)
     if outputs != "": return Err(outputs)
     Ok(true)
@@ -688,7 +690,9 @@ fn managed_phase_factory_publish_v1(owner: ManagedPhaseAdmissionV1,
     for output in task.outputs:
         val path = attempt_root + "/work/" + output
         if not file_is_regular_no_follow(path): return Err("producer output disappeared")
-        observed = observed.push(BuildInputV1(output, file_hash_sha256(path)))
+        val output_digest = file_hash_sha256(path)
+        if output_digest == nil: return Err("cannot hash producer output: " + output)
+        observed = observed.push(BuildInputV1(output, output_digest.unwrap()))
     val template_path = values["--next-template"]
     val template_digest = values["--next-template-sha256"]
     val template = builder_read_run_v1(template_path)?
@@ -713,7 +717,7 @@ fn managed_phase_factory_publish_v1(owner: ManagedPhaseAdmissionV1,
             child.program
         else: owner.source_root + "/" + child.program
         if not file_is_regular_no_follow(callback_program) or
-                file_hash_sha256(callback_program) != child.producer_digest:
+                _phase_admission_sha_mismatch(callback_program, child.producer_digest):
             return Err("Hello callback executable changed")
     # Context/source members are already source-generation bound. Validate
     # only new declarations. The retained owner just authenticated the parent
@@ -731,7 +735,7 @@ fn managed_phase_factory_publish_v1(owner: ManagedPhaseAdmissionV1,
             if verified_inputs[input.path] != input.digest: return Err("next input changes the source generation")
         else:
             val path = owner.source_root + "/" + input.path
-            if not file_is_regular_no_follow(path) or file_hash_sha256(path) != input.digest:
+            if not file_is_regular_no_follow(path) or _phase_admission_sha_mismatch(path, input.digest):
                 return Err("next input changed: " + input.path)
     val links = builder_link_inputs_match_v1(child, owner.source_root)
     if links != "": return Err(links)
@@ -758,7 +762,7 @@ fn managed_phase_factory_publish_v1(owner: ManagedPhaseAdmissionV1,
     val encoded = builder_encode_run_v1(run)
     if encoded == "" or not file_create_exclusive(destination, encoded):
         return Err("next manifest already exists or exclusive publication failed")
-    if not file_is_regular_no_follow(destination) or file_hash_sha256(destination) != sha256_text(encoded):
+    if not file_is_regular_no_follow(destination) or _phase_admission_sha_mismatch(destination, sha256_text(encoded)):
         return Err("next manifest publication differs")
     Ok(true)
 
@@ -810,7 +814,7 @@ fn managed_phase_cli_v1(args: [text], process: BuilderProcessPortV1,
     for pair in [("--phase3-manifest", "--phase3-sha256"),
             ("--phase4-manifest", "--phase4-sha256"), ("--policy", "--policy-sha256")]:
         if not file_is_regular_no_follow(values[pair.0]) or
-                file_hash_sha256(values[pair.0]) != values[pair.1]: return 2
+                _phase_admission_sha_mismatch(values[pair.0], values[pair.1]): return 2
     val first = match builder_read_run_v1(values["--phase3-manifest"]):
         Ok(value): value
         Err(_): return 2
@@ -907,7 +911,7 @@ fn managed_phase_inventory_cli_v2(args: [text], process: BuilderProcessPortV1,
                 not (path.starts_with("/") or (path.len() > 2 and path[1:2] == ":")): return 2
     for pair in [("--manifest", "--manifest-sha256"), ("--policy", "--policy-sha256")]:
         if not builder_digest_valid_v1(values[pair.1]) or not file_is_regular_no_follow(values[pair.0]) or
-                file_hash_sha256(values[pair.0]) != values[pair.1]: return 2
+                _phase_admission_sha_mismatch(values[pair.0], values[pair.1]): return 2
     val run = match builder_read_run_v1(values["--manifest"]):
         Ok(value): value
         Err(_): return 2
@@ -931,7 +935,7 @@ fn managed_phase_inventory_cli_v2(args: [text], process: BuilderProcessPortV1,
         values["factory-kind"] = if args[0] == "managed-tasks-next-hello": "hello" else: "producer"
         if not builder_digest_valid_v1(values["--next-template-sha256"]) or
                 not file_is_regular_no_follow(values["--next-template"]) or
-                file_hash_sha256(values["--next-template"]) != values["--next-template-sha256"]: return 2
+                _phase_admission_sha_mismatch(values["--next-template"], values["--next-template-sha256"]): return 2
         match managed_phase_factory_v1(values["--state"], values["--source-root"], decoded.0,
                 run.tasks, decoded.1, run.hosts[0], process, capacity, authority, values):
             Ok(_): return 0
@@ -995,3 +999,9 @@ fn managed_phase_inventory_cli_v2(args: [text], process: BuilderProcessPortV1,
     outcome.unwrap()
 
 export managed_phase_dependency_state_v2, managed_phase_task_root_v2
+
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _phase_admission_sha_mismatch(path: text, expected: text) -> bool:
+    if val actual = file_hash_sha256(path):
+        return actual != expected
+    true

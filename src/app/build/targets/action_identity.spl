@@ -128,7 +128,9 @@ fn darwin_sdk_identity_v1(sdk_root: text) -> text:
     var settings_path = sdk_root + "/SDKSettings.json"
     if not file_exists(settings_path): settings_path = sdk_root + "/SDKSettings.plist"
     if not file_exists(settings_path): return ""
-    val settings_digest = file_hash_sha256(settings_path)
+    val settings_digest_opt = file_hash_sha256(settings_path)
+    if settings_digest_opt == nil: return ""
+    val settings_digest = settings_digest_opt.unwrap()
     if not digest_is_sha256(settings_digest): return ""
     sha256_text("simple-apple-sdk-identity-v1|settings=64:" + settings_digest)
 
@@ -150,7 +152,7 @@ fn darwin_link_tool_identity_v1(cache_dir: text) -> text:
     if not native_identity_value_valid_v1(tool_path) or
             not digest_is_sha256(artifact) or not digest_is_sha256(behavior) or
             not digest_is_sha256(identity) or not file_exists(tool_path) or
-            file_hash_sha256(tool_path) != artifact:
+            not _file_sha256_matches_v1(tool_path, artifact):
         return ""
     val expected_behavior = sha256_text(
         "simple-darwin-link-tool-behavior-v1|artifact=64:" + artifact +
@@ -374,7 +376,7 @@ fn native_action_input_error_v1(
                 return "target-identity-error: darwin-target-identity-mismatch"
     val tool_absolute = native_tool_absolute_path_v1(repo_root, identity.tool_path)
     if tool_absolute == "" or not file_exists(tool_absolute) or
-            file_hash_sha256(tool_absolute) != identity.tool_artifact_digest or
+            not _file_sha256_matches_v1(tool_absolute, identity.tool_artifact_digest) or
             current_tool_digest != identity.tool_artifact_digest:
         return "target-identity-error: current-tool-artifact-mismatch"
     val manifest_path = cache_dir + "/manifests/" +
@@ -503,3 +505,9 @@ export canonical_darwin_target_triple_v1, canonical_darwin_deployment_target_v1
 export canonical_darwin_cpu_features_v1, darwin_sdk_identity_v1
 export darwin_link_tool_identity_v1
 export aggregate_action_identity_text_v1, aggregate_action_identity_digest_v1
+
+# Absent/unreadable file == mismatch: a missing digest never matches.
+fn _file_sha256_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

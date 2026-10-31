@@ -24,7 +24,7 @@ use std.io_runtime.{file_write}
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{file_delete}
-extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_file_hash_sha256(path: text) -> text?
 extern fn rt_file_size(path: text) -> i64
 use std.io_runtime.{dir_create}
 
@@ -112,7 +112,11 @@ pub fn artifact_put(content: text, run_id: text) -> ArtifactPutOutcome:
     if not file_write(staging, content):
         return put_failed("cannot stage artifact at " + staging)
 
-    val digest = rt_file_hash_sha256(staging)
+    val digest_opt = rt_file_hash_sha256(staging)
+    if digest_opt == nil:
+        file_delete(staging)
+        return put_failed("runtime could not hash staged artifact " + staging)
+    val digest = digest_opt.unwrap()
     if not is_sha256_ref(digest):
         file_delete(staging)
         return put_failed("runtime returned a non-sha256 digest: '" + digest + "'")
@@ -125,7 +129,10 @@ pub fn artifact_put(content: text, run_id: text) -> ArtifactPutOutcome:
     # the existing blob is confirmed to still hash to its own name.
     if file_exists(final_path):
         file_delete(staging)
-        val existing = rt_file_hash_sha256(final_path)
+        val existing_opt = rt_file_hash_sha256(final_path)
+        if existing_opt == nil:
+            return put_failed("stored artifact " + digest + " is unreadable: store is corrupt")
+        val existing = existing_opt.unwrap()
         if existing != digest:
             return put_failed("stored artifact " + digest + " hashes to " + existing + ": store is corrupt")
         return ArtifactPutOutcome(
@@ -141,7 +148,10 @@ pub fn artifact_put(content: text, run_id: text) -> ArtifactPutOutcome:
 
     # Read-back verification. Writing and then trusting the write is how a
     # truncated artifact becomes a green run.
-    val verified = rt_file_hash_sha256(final_path)
+    val verified_opt = rt_file_hash_sha256(final_path)
+    if verified_opt == nil:
+        return put_failed("read-back of " + final_path + " failed")
+    val verified = verified_opt.unwrap()
     if verified != digest:
         return put_failed("read-back hash " + verified + " != ref " + digest)
 
@@ -161,7 +171,10 @@ pub fn artifact_get(reference: text) -> ArtifactGetOutcome:
     val path = artifact_path(reference)
     if not file_exists(path):
         return ArtifactGetOutcome(ok: false, content: "", error: "artifact " + reference + " is not in the store")
-    val actual = rt_file_hash_sha256(path)
+    val actual_opt = rt_file_hash_sha256(path)
+    if actual_opt == nil:
+        return ArtifactGetOutcome(ok: false, content: "", error: "artifact at " + path + " is unreadable")
+    val actual = actual_opt.unwrap()
     if actual != reference:
         return ArtifactGetOutcome(
             ok: false,
@@ -230,7 +243,9 @@ pub fn artifact_manifest_unverifiable(records: [ArtifactRecord]) -> [text]:
             bad.push("record with non-sha256 ref '" + record.sha256 + "'")
         elif not file_exists(record.path):
             bad.push("missing blob for " + record.sha256)
-        elif rt_file_hash_sha256(record.path) != record.sha256:
+        elif rt_file_hash_sha256(record.path) == nil:
+            bad.push("unreadable blob for " + record.sha256)
+        elif rt_file_hash_sha256(record.path).unwrap() != record.sha256:
             bad.push("content mismatch for " + record.sha256)
         if record.retention_class == "":
             bad.push("record " + record.sha256 + " has no retention class")

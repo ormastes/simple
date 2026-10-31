@@ -1,0 +1,200 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/nil_return_non_optional_deferred_2026-10-31.md
+
+# Filesystem and DB-bitmap externs that can return nil declare `T?`
+#
+# The Rust interpreter handlers for rt_file_read_lines, rt_file_read_bytes,
+# rt_dir_list / rt_file_list_dir, rt_file_hash_sha256, rt_file_read_text_rv
+# and rt_db_bitmap_{and,or,andnot}_u32 return Value::Nil on failure
+# (file_io.rs, simd.rs). Every Simple declaration of those externs must say
+# `T?`, and the thin wrappers that forward them must report absence as nil.
+#
+# The runtime check alone can pass before the fix because the seed returns
+# nil regardless of the declared type, so the declarations are also pinned in
+# source.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file_text}
+use std.nogc_sync_mut.sffi.fs.{file_list_dir, file_read_bytes_raw, file_read_lines_raw}
+use std.nogc_sync_mut.db.accel.{row_bitmap_and_words, row_bitmap_or_words, row_bitmap_andnot_words}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.io_runtime.{process_run}
+use compiler.driver.driver_build.incremental.{native_build_spl_tree_fingerprint}
+
+val MISSING = "/nonexistent/simple-nil-ret-fs-probe/zz"
+val SELF = "test/01_unit/lib/contract/fs_extern_optional_spec.spl"
+
+fn _declares(path: text, decl: text) -> bool:
+    val src = read_file_text(path)
+    for line in src.split("\n"):
+        if line.trim() == decl:
+            return true
+    false
+
+describe "fs extern wrappers return nil for an absent result":
+    """
+    ## Each fixed wrapper reports absence as nil
+
+    The wrapper is called on a path that does not exist, so the runtime
+    handler takes its nil branch.
+    """
+
+    it "sffi.fs file_list_dir reports a missing directory as nil":
+        # @req REQ-SSPEC-UNIT
+        step("List a directory that does not exist")
+        expect(file_list_dir(MISSING) == nil).to_equal(true)
+
+    it "sffi.fs file_read_bytes_raw reports a missing file as nil":
+        # @req REQ-SSPEC-UNIT
+        step("Read bytes of a file that does not exist")
+        expect(file_read_bytes_raw(MISSING) == nil).to_equal(true)
+
+    it "sffi.fs file_read_lines_raw reports a missing file as nil":
+        # @req REQ-SSPEC-UNIT
+        step("Read lines of a file that does not exist")
+        expect(file_read_lines_raw(MISSING) == nil).to_equal(true)
+
+    it "sffi.fs declares the externs and wrappers optional":
+        # @req REQ-SSPEC-UNIT
+        val p = "src/lib/nogc_sync_mut/sffi/fs.spl"
+        expect(_declares(p, "extern fn rt_file_list_dir(path: text) -> [text]?")).to_equal(true)
+        expect(_declares(p, "extern fn rt_file_read_bytes(path: text) -> [u8]?")).to_equal(true)
+        expect(_declares(p, "extern fn rt_file_read_lines(path: text) -> [text]?")).to_equal(true)
+        expect(_declares(p, "fn file_list_dir(path: text) -> [text]?:")).to_equal(true)
+        expect(_declares(p, "fn file_read_bytes_raw(path: text) -> [u8]?:")).to_equal(true)
+        expect(_declares(p, "fn file_read_lines_raw(path: text) -> [text]?:")).to_equal(true)
+
+    it "db accel declares the bitmap kernels optional":
+        # @req REQ-SSPEC-UNIT
+        val p = "src/lib/nogc_sync_mut/db/accel.spl"
+        expect(_declares(p, "extern fn rt_db_bitmap_and_u32(lhs: [u32], rhs: [u32], limit: i64) -> [u32]?")).to_equal(true)
+        expect(_declares(p, "extern fn rt_db_bitmap_or_u32(lhs: [u32], rhs: [u32], limit: i64, lhs_words: i64, rhs_words: i64) -> [u32]?")).to_equal(true)
+        expect(_declares(p, "extern fn rt_db_bitmap_andnot_u32(lhs: [u32], rhs: [u32], limit: i64, rhs_words: i64) -> [u32]?")).to_equal(true)
+
+    it "file_ops and io_runtime declare the fs externs optional":
+        # @req REQ-SSPEC-UNIT
+        expect(_declares("src/lib/nogc_sync_mut/io/file_ops.spl", "extern fn rt_file_hash_sha256(path: text) -> text?")).to_equal(true)
+        val p = "src/lib/nogc_sync_mut/io_runtime.spl"
+        expect(_declares(p, "extern fn rt_file_hash_sha256(path: text) -> text?")).to_equal(true)
+        expect(_declares(p, "extern fn rt_dir_list(path: text) -> [text]?")).to_equal(true)
+        expect(_declares(p, "extern fn rt_file_read_bytes(path: text) -> [u8]?")).to_equal(true)
+
+    it "no in-scope file keeps a non-optional fs extern declaration":
+        # @req REQ-SSPEC-UNIT
+        val hash = "extern fn rt_file_hash_sha256(path: text) -> text"
+        val bytes = "extern fn rt_file_read_bytes(path: text) -> [u8]"
+        val dirs = "extern fn rt_dir_list(path: text) -> [text]"
+        val lsdir = "extern fn rt_file_list_dir(path: text) -> [text]"
+        val pins = [
+            ["src/lib/nogc_sync_mut/storage_roots/publisher.spl", hash],
+            ["src/lib/nogc_sync_mut/js/node/fs_module.spl", lsdir],
+            ["src/lib/nogc_sync_mut/spec/evidence/counterpart/artifact_store.spl", hash],
+            ["src/lib/nogc_sync_mut/sffi/dynlib_exact_admission_v1.spl", hash],
+            ["src/lib/nogc_sync_mut/sffi/dynamic.spl", hash],
+            ["src/lib/common/encoding/font_registry.spl", bytes],
+            ["src/lib/common/encoding/font_registry.spl", hash],
+            ["src/app/office/odf_ooxml.spl", bytes],
+            ["src/app/office/pptx_export.spl", bytes],
+            ["src/app/io/_CliCompile/native_build.spl", dirs],
+            ["src/app/io/_CliCompile/build_intermediate_policy.spl", dirs],
+            ["src/app/io/file_discovery.spl", dirs],
+            ["src/app/snpm/cache.spl", lsdir],
+            ["src/app/snpm/workspace.spl", lsdir],
+            ["src/app/svllm_pack/core.spl", bytes],
+            ["src/app/semihost/reader.spl", dirs],
+            ["src/app/simpleos_tool/focused_pipeline.spl", "extern fn rt_file_read_text_rv(path: text) -> text"],
+            ["src/compiler/70.backend/linker/swa_zip.spl", bytes],
+            ["src/compiler/70.backend/backend/group_native_thread_capability.spl", bytes],
+            ["src/compiler/70.backend/backend/llvm_backend.spl", bytes],
+            ["src/compiler/70.backend/backend/llvm_backend_tools.spl", bytes],
+            ["src/compiler/80.driver/driver_hir_cache.spl", hash],
+            ["src/compiler/80.driver/driver_build/incremental.spl", hash],
+            ["src/compiler/80.driver/driver_helpers.spl", dirs],
+            ["src/compiler/80.driver/driver_aot_native_output.spl", hash],
+            ["src/compiler/80.driver/driver_entry_closure_core.spl", dirs]
+        ]
+        var stale: [text] = []
+        var missing: [text] = []
+        for pin in pins:
+            if _declares(pin[0], pin[1]):
+                stale = stale.push(pin[0])
+            if not _declares(pin[0], pin[1] + "?"):
+                missing = missing.push(pin[0])
+        expect(stale.len()).to_equal(0)
+        expect(missing.len()).to_equal(0)
+
+describe "fs extern wrappers keep present results intact":
+    """
+    ## The optional type does not change a present result
+    """
+
+    it "file_list_dir returns the entries of a readable directory":
+        # @req REQ-SSPEC-UNIT
+        val listed = file_list_dir("test/01_unit/lib/contract")
+        expect(listed == nil).to_equal(false)
+        expect(listed.unwrap().len() > 0).to_equal(true)
+
+    it "file_read_bytes_raw returns the bytes of a readable file":
+        # @req REQ-SSPEC-UNIT
+        val bytes = file_read_bytes_raw(SELF)
+        expect(bytes == nil).to_equal(false)
+        expect(bytes.unwrap().len() > 0).to_equal(true)
+
+    it "file_read_lines_raw returns the lines of a readable file":
+        # @req REQ-SSPEC-UNIT
+        val lines = file_read_lines_raw(SELF)
+        expect(lines == nil).to_equal(false)
+        expect(lines.unwrap().len() > 10).to_equal(true)
+
+    it "row bitmap wrappers return full-length results":
+        # @req REQ-SSPEC-UNIT
+        val lhs: [u32] = [12u32, 10u32, 255u32]
+        val rhs: [u32] = [10u32, 6u32, 15u32]
+        val a = row_bitmap_and_words(lhs, rhs, 3)
+        expect(a.len()).to_equal(3)
+        expect(a[0] == 8u32).to_equal(true)
+        val o = row_bitmap_or_words(lhs, rhs, 3, 3, 2)
+        expect(o.len()).to_equal(3)
+        expect(o[2] == 255u32).to_equal(true)
+        val n = row_bitmap_andnot_words(lhs, rhs, 3, 3)
+        expect(n.len()).to_equal(3)
+        expect(n[2] == 240u32).to_equal(true)
+
+describe "file digests never report absence as an empty digest":
+    """
+    ## A missing file has no digest, and nothing built on it is fresh
+
+    An empty digest compares equal to every other failed digest, so the
+    absent case must be nil (or an always-unique "unfingerprintable" marker).
+    """
+
+    it "file_ops file_hash_sha256 reports a missing file as nil":
+        # @req REQ-SSPEC-UNIT
+        step("Hash a file that does not exist through std.nogc_sync_mut.io.file_ops")
+        expect(file_hash_sha256(MISSING) == nil).to_equal(true)
+
+    it "file_ops file_hash_sha256 returns a 64-char digest for a readable file":
+        # @req REQ-SSPEC-UNIT
+        val digest = file_hash_sha256(SELF)
+        expect(digest == nil).to_equal(false)
+        expect(digest.unwrap().len()).to_equal(64)
+
+    it "file_ops and incremental declare the digest helpers without an empty fallback":
+        # @req REQ-SSPEC-UNIT
+        expect(_declares("src/lib/nogc_sync_mut/io/file_ops.spl", "fn file_hash_sha256(path: text) -> text?:")).to_equal(true)
+        val inc = read_file_text("src/compiler/80.driver/driver_build/incremental.spl")
+        expect(inc.contains("_incremental_file_sha256_or_empty")).to_equal(false)
+
+    it "an spl tree fingerprint over an unreadable file is never fresh":
+        # @req REQ-SSPEC-UNIT
+        step("Build a tree whose only .spl entry is a dangling symlink")
+        val root = "build/fs_extern_optional_probe_tree"
+        val (_o, _e, code) = process_run("/bin/sh", ["-c", "rm -rf {root} && mkdir -p {root} && ln -s /nonexistent/simple-nil-ret-fs-probe/zz {root}/gone.spl"])
+        expect(code).to_equal(0)
+        val first = native_build_spl_tree_fingerprint(root)
+        val second = native_build_spl_tree_fingerprint(root)
+        process_run("/bin/sh", ["-c", "rm -rf {root}"])
+        expect(first.starts_with("unfingerprintable-")).to_equal(true)
+        expect(first == second).to_equal(false)
