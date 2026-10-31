@@ -8,7 +8,8 @@
 # Return contract (the interpreter's sffi_return_contract(), plus `has_T`):
 #   no `->`, `()`, `unit`, `void`          -> unit (not checked)
 #   `T?`, `Option<T>`, `Optional<T>`,
-#   `has_T` (optional sugar, as HIR lowers it) -> optional (nil allowed)
+#   `has_T` (optional sugar; HIR type_resolver lowers it to `T?` and the
+#   interpreter admits nil there) -> optional (nil allowed)
 #   anything else, incl. `any` and `nil`   -> non-optional (checked)
 #
 # In a non-optional function this flags:
@@ -134,7 +135,7 @@ fn nrl_paren_balance(code: text) -> i64:
     depth
 
 fn nrl_return_type(header: text) -> text:
-    # Text after the last depth-0 `->`, without the trailing `:` / `where`.
+    # Text after the first depth-0 `->`, without the trailing `:` / `where`.
     var depth = 0
     var at = -1
     var i = 0
@@ -143,7 +144,8 @@ fn nrl_return_type(header: text) -> text:
         if ch == "(" or ch == "[" or ch == "<": depth = depth + 1
         if ch == ")" or ch == "]": depth = depth - 1
         if ch == ">" and depth > 0 and not (i > 0 and header.substring(i - 1, i) == "-"): depth = depth - 1
-        if depth == 0 and header.substring(i, i + 2) == "->": at = i + 2
+        # First depth-0 `->`: in `-> fn(i64) -> text?` the second arrow belongs to the type.
+        if depth == 0 and at < 0 and header.substring(i, i + 2) == "->": at = i + 2
         i = i + 1
     if at < 0: return ""
     var ty = header.substring(at, header.len()).trim()
@@ -161,9 +163,32 @@ fn nrl_return_type(header: text) -> text:
         k = k + 1
     ty
 
+fn nrl_inline_body(header: text, ty: text) -> text:
+    # Same-line body of `fn f() -> T: body`, or "".
+    var depth = 0
+    var at = -1
+    var i = 0
+    while i + 1 < header.len():
+        val ch = header.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "<": depth = depth + 1
+        if ch == ")" or ch == "]": depth = depth - 1
+        if ch == ">" and depth > 0 and not (i > 0 and header.substring(i - 1, i) == "-"): depth = depth - 1
+        if depth == 0 and header.substring(i, i + 2) == "->":
+            at = i + 2
+            break
+        i = i + 1
+    if at < 0: return ""
+    val rest = header.substring(at, header.len()).trim()
+    if not rest.starts_with(ty): return ""
+    val after = rest.substring(ty.len(), rest.len()).trim()
+    if not after.starts_with(":"): return ""
+    after.substring(1, after.len()).trim()
+
 fn nrl_contract(ty: text) -> text:
     # "unit" | "optional" | "required"
     if ty == "" or ty == "()" or ty == "unit" or ty == "void": return "unit"
+    # A function type: its trailing `?` belongs to the function's own result.
+    if ty.starts_with("fn("): return "required"
     if ty.ends_with("?"): return "optional"
     if ty.starts_with("Option<") or ty.starts_with("Optional<"): return "optional"
     # `has_X` is the optional sugar for `X?`.
@@ -211,6 +236,8 @@ fn nrl_inline_return(t: text) -> text:
 
 fn nrl_branch_yields_nil(t: text) -> bool:
     if not t.ends_with(": nil"): return false
+    # One-line tail `if c: v else: nil`.
+    if t.starts_with("if ") and t.ends_with("else: nil"): return true
     if t.starts_with("case ") or t.starts_with("else:") or t.starts_with("elif ") or t.starts_with("| "): return true
     false
 
@@ -245,7 +272,7 @@ fn nrl_is_match_opener(o: text) -> bool:
     o.starts_with("match ") or o.starts_with("return match ")
 
 fn nrl_is_flow_opener(o: text) -> bool:
-    o.starts_with("if ") or o.starts_with("elif ") or o.starts_with("else") or nrl_is_match_opener(o) or o.starts_with("return if ") or o.starts_with("case ") or o == "unsafe:" or o == "danger:"
+    o.starts_with("if ") or o.starts_with("elif ") or o.starts_with("else:") or o == "else" or nrl_is_match_opener(o) or o.starts_with("return if ") or o.starts_with("case ") or o == "unsafe:" or o == "danger:"
 
 fn nrl_openers(codes: [text], k: i64, body_start: i64) -> [text]:
     # Enclosing block openers of line k, innermost first, inside the fn body.
@@ -276,7 +303,7 @@ fn nrl_flows_to_return(codes: [text], k: i64, body_start: i64) -> bool:
 
 fn nrl_in_lambda(codes: [text], k: i64, body_start: i64) -> bool:
     for o in nrl_openers(codes, k, body_start):
-        if o.contains("\\") or o.contains("fn("): return true
+        if o.contains("\\") or o.starts_with("fn(") or o.contains(" fn(") or o.contains("(fn(") or o.contains("=fn("): return true
     false
 
 struct NrlFrame:
@@ -361,10 +388,25 @@ pub fn check_nil_return_non_optional(content: text) -> [StaticLintFinding]:
             while nrl_paren_balance(header) > 0 and j + 1 < codes.len():
                 j = j + 1
                 header = header + " " + codes[j].trim()
-            if nrl_is_extern_header(t) or not header.ends_with(":"):
+            if nrl_is_extern_header(t):
                 i = j + 1
                 continue
             val ty = nrl_return_type(header)
+            # A nested fn at the outer body level is not the outer tail value.
+            if stack.len() > 0:
+                var outer = stack[stack.len() - 1]
+                if outer.body_indent < 0 or indent == outer.body_indent:
+                    outer.body_indent = indent
+                    outer.tail_code = ""
+                    outer.tail_line = 0
+                    stack[stack.len() - 1] = outer
+            if not header.ends_with(":"):
+                # Same-line body: `fn f() -> T: nil`.
+                val body = nrl_inline_body(header, ty)
+                if nrl_contract(ty) == "required" and (body == "nil" or body == "return nil" or body == "return"):
+                    findings.push(nrl_finding(j + 1, indent + 1, name, ty, "same-line body yields nil"))
+                i = j + 1
+                continue
             stack.push(NrlFrame(indent, name, ty, nrl_contract(ty) == "required", j + 1, -1, "", 0))
             i = j + 1
             continue

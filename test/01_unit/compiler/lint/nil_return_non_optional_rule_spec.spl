@@ -58,8 +58,11 @@ describe "nil_return_non_optional lint":
 
     it "treats has_T sugar and optional tuples with dict types as optional":
         expect(ret_findings("fn f() -> has_Warning:\n    return nil\n").len()).to_equal(0)
-        expect(ret_findings("fn f(d: [u8]) -> ({text: text}, i64)?:\n    return nil\n").len()).to_equal(0)
-        expect(ret_findings("fn f(d: [u8]) -> ({text: text}, i64):\n    return nil\n").len()).to_equal(1)
+        # Built by concatenation: a `{...}` inside a string literal interpolates.
+        val dict_ty = "(" + "{" + "text: text" + "}" + ", i64)"
+        expect(dict_ty.contains("text: text")).to_equal(true)
+        expect(ret_findings("fn f(d: [u8]) -> " + dict_ty + "?:\n    return nil\n").len()).to_equal(0)
+        expect(ret_findings("fn f(d: [u8]) -> " + dict_ty + ":\n    return nil\n").len()).to_equal(1)
 
     it "skips nil that initializes a local or ends a non-tail block":
         val init = "fn f(o: i64?) -> i64:\n    val x: i64? = match o:\n        case Some(v): v\n        case nil: nil\n    0\n"
@@ -82,3 +85,20 @@ describe "nil_return_non_optional lint":
         expect(ret_findings("fn f(k: bool) -> text:\n    if k: return nil\n    \"x\"\n").len()).to_equal(1)
         expect(ret_findings("fn f(k: bool) -> text:\n    if k: return\n    \"x\"\n").len()).to_equal(1)
         expect(ret_findings("fn f(k: bool) -> text?:\n    if k: return nil\n    \"x\"\n").len()).to_equal(0)
+
+    it "checks any, nil and function-typed returns as non-optional":
+        expect(ret_findings("fn f() -> any:\n    nil\n").len()).to_equal(1)
+        expect(ret_findings("fn f() -> nil:\n    return\n").len()).to_equal(1)
+        expect(ret_findings("fn f() -> fn(i64) -> text?:\n    return nil\n").len()).to_equal(1)
+
+    it "checks me methods and multi-line headers":
+        expect(ret_findings("class C:\n    me get(k: i64) -> text:\n        return nil\n").len()).to_equal(1)
+        expect(ret_findings("fn f(\n    a: i64,\n    b: i64\n) -> text:\n    return nil\n").len()).to_equal(1)
+
+    it "checks same-line bodies and one-line tail if":
+        expect(ret_findings("fn f() -> i64: nil\n").len()).to_equal(1)
+        expect(ret_findings("fn f() -> i64?: nil\n").len()).to_equal(0)
+        expect(ret_findings("fn f(k: bool) -> text:\n    if k: \"a\" else: nil\n").len()).to_equal(1)
+
+    it "exempts returns inside a lambda block":
+        expect(ret_findings("fn f(xs: [i64]) -> i64:\n    xs.each(fn(x):\n        return\n    )\n    0\n").len()).to_equal(0)
