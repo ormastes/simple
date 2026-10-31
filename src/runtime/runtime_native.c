@@ -16272,12 +16272,11 @@ int64_t rt_dir_glob(const uint8_t* pattern_ptr, uint64_t pattern_len) {
  * world-readable. That security requirement is why this function was
  * factored out of rt_file_atomic_write rather than the mode variant being
  * written as a wrapper around it. */
-static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_value,
-                                         int64_t mode, int have_mode) {
+static int64_t rt_file_atomic_write_data(int64_t path_value, const uint8_t* content_data,
+                                         size_t content_len, int64_t mode, int have_mode) {
     static atomic_uint_fast64_t sequence = 0;
     RtCoreString* path_string = rt_core_as_string(path_value);
-    RtCoreString* content_string = rt_core_as_string(content_value);
-    if (!path_string || !content_string || path_string->len == 0 ||
+    if (!path_string || (!content_data && content_len != 0) || path_string->len == 0 ||
         memchr(path_string->data, '\0', (size_t)path_string->len) != NULL) return 0;
 
     char* path = rt_core_string_to_cpath(path_value);
@@ -16311,8 +16310,8 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
     free(parent);
 #if defined(_WIN32)
     if (have_mode && (mode & 0077) == 0) {
-        int ok = rt_win_private_atomic_write(path, content_string->data,
-            (size_t)content_string->len, (int)mode);
+        int ok = rt_win_private_atomic_write(path, content_data,
+            content_len, (int)mode);
         free(path);
         return ok ? 1 : 0;
     }
@@ -16335,7 +16334,11 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
         int temp_len = snprintf(temp_path, path_len + 64, "%s.tmp.%ld.%llu", path,
                                 (long)getpid(), (unsigned long long)atomic_fetch_add(&sequence, 1));
         if (temp_len >= 0 && (size_t)temp_len < path_len + 64)
-            fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+            /* An explicit mode stages at 0600 and narrows before the rename. A
+             * plain write stages at 0666 so the kernel applies the umask: a new
+             * file gets the same mode as file_write, with no umask() call
+             * (process-global, so not thread-safe). */
+            fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL, have_mode ? 0600 : 0666);
 #endif
         if (fd < 0 && errno != EEXIST) break;
     }
@@ -16346,7 +16349,7 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
 #endif
     int created = fd >= 0;
     int ok = file != NULL;
-    if (ok) ok = fwrite(content_string->data, 1, (size_t)content_string->len, file) == (size_t)content_string->len;
+    if (ok && content_len > 0) ok = fwrite(content_data, 1, content_len, file) == content_len;
     if (ok) ok = fflush(file) == 0;
 #if !defined(_WIN32)
     if (ok && preserve_mode) ok = fchmod(fd, existing_stat.st_mode & 07777) == 0;
@@ -16377,7 +16380,17 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
      * never-wider-than-requested reason as the fchmod above. A failure here
      * is NOT fatal to the write: the bytes are still published atomically. */
     if (ok && have_mode) _chmod(temp_path, _S_IREAD | ((mode & 0200) ? _S_IWRITE : 0));
-    if (ok) ok = MoveFileExA(temp_path, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    /* Uncoordinated same-path writers are allowed, and a replace can transiently
+     * fail while another writer or reader holds the target: bounded retry here
+     * so callers need no lock or retry of their own. Wide/long-path capable. */
+    if (ok) {
+        int moved = 0;
+        for (int attempt = 0; attempt < 8 && !moved; attempt++) {
+            moved = rt_win_long_path_rename(temp_path, path) != 0;
+            if (!moved) Sleep((DWORD)1 << attempt);
+        }
+        ok = moved;
+    }
 #else
     if (ok) ok = rename(temp_path, path) == 0;
 #endif
@@ -16387,8 +16400,38 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
     return ok ? 1 : 0;
 }
 
+static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_value,
+                                         int64_t mode, int have_mode) {
+    RtCoreString* content_string = rt_core_as_string(content_value);
+    if (!content_string) return 0;
+    return rt_file_atomic_write_data(path_value, (const uint8_t*)content_string->data,
+                                     (size_t)content_string->len, mode, have_mode);
+}
+
 int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     return rt_file_atomic_write_impl(path_value, content_value, 0, 0);
+}
+
+/* Byte twin of rt_file_atomic_write. Same element decoding as
+ * rt_file_write_bytes_array: raw for packed arrays, untagged for boxed. */
+int8_t rt_file_atomic_write_bytes_array(int64_t path, int64_t data) {
+    SplArray* a = (SplArray*)(intptr_t)data;
+    if (a == NULL) return 0;
+    int64_t n = rt_array_len(a);
+    unsigned char* buf = (unsigned char*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1));
+    if (buf == NULL) return 0;
+    int packed = rt_array_is_byte_packed(a);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t v = rt_array_get(a, i);
+        if (!packed) {
+            if (!rt_core_is_int(v)) { free(buf); return 0; }
+            v = rt_core_as_int(v);
+        }
+        buf[i] = (unsigned char)(v & 0xFF);
+    }
+    int8_t ok = rt_file_atomic_write_data(path, buf, (size_t)n, 0, 0) != 0;
+    free(buf);
+    return ok;
 }
 
 /* ================================================================

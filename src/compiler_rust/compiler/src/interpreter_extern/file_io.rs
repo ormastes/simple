@@ -1142,19 +1142,28 @@ fn atomic_write_file(path: &Path, content: &[u8]) -> bool {
         return false;
     }
     let permissions = fs::metadata(path).ok().map(|metadata| metadata.permissions());
-    let Ok(mut temp) = tempfile::NamedTempFile::new_in(parent) else {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut temp_name = path.as_os_str().to_os_string();
+    temp_name.push(format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let temp_path = std::path::PathBuf::from(temp_name);
+    // Not tempfile::NamedTempFile: its 0600 would reach new files. create_new
+    // uses 0666 & ~umask, matching file_write and the native runtimes.
+    let Ok(mut temp) = fs::OpenOptions::new().write(true).create_new(true).open(&temp_path) else {
         return false;
     };
-    if temp.write_all(content).is_err() {
-        return false;
+    let staged = temp.write_all(content).is_ok()
+        && permissions.map_or(true, |permissions| temp.set_permissions(permissions).is_ok())
+        && temp.sync_all().is_ok();
+    drop(temp);
+    if staged && fs::rename(&temp_path, path).is_ok() {
+        return true;
     }
-    if permissions.is_some_and(|permissions| temp.as_file().set_permissions(permissions).is_err()) {
-        return false;
-    }
-    if temp.as_file().sync_all().is_err() {
-        return false;
-    }
-    temp.persist(path).is_ok()
+    let _ = fs::remove_file(&temp_path);
+    false
 }
 
 /// Atomically write text to a file through a same-directory unique temp file.
@@ -1162,6 +1171,28 @@ pub fn rt_file_atomic_write(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let content = extract_content(args, 1)?;
     Ok(Value::Bool(atomic_write_file(Path::new(&path), content.as_bytes())))
+}
+
+/// Atomically write bytes to a file; same provider as `rt_file_atomic_write`.
+pub fn rt_file_atomic_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    if let Some(bytes) = args.get(1).and_then(Value::byte_array_view) {
+        return Ok(Value::Bool(atomic_write_file(Path::new(&path), bytes)));
+    }
+    let items = match args.get(1) {
+        Some(Value::Array(items)) => items.clone(),
+        Some(Value::FrozenArray(items)) => items.iter().cloned().collect(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let mut bytes = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        match item {
+            Value::Int(value) => bytes.push(*value as u8),
+            Value::UInt { value, .. } => bytes.push(*value as u8),
+            _ => return Ok(Value::Bool(false)),
+        }
+    }
+    Ok(Value::Bool(atomic_write_file(Path::new(&path), &bytes)))
 }
 
 /// Atomically write text to a file with an EXPLICIT permission mode.
