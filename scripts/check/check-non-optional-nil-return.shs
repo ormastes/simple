@@ -55,7 +55,7 @@ cat > "$TMP/wrap.awk" <<'AWKEOF'
 function flush() {
   if (nb==1 && curr!="" && curr !~ /\?[ \t]*$/ && curr !~ /^(Option|Optional)</ && curr!="()" && curr!="void" && curr!="unit" && curr!="Unit" && body ~ /^(return[ \t]+)?rt_[a-z0-9_]+\(.*\)$/ && body !~ /\?\?/ && body !~ /!/)
     printf "%s:%d:%s:%s:%s\n", pf, bline, curf, curr, body
-  curf=""; nb=0
+  curf=""; nb=0; un=0
 }
 FNR==1 { flush(); curf="" }
 /^[ \t]*(pub[ \t]+)?fn[ \t]+[A-Za-z_]/ {
@@ -64,7 +64,7 @@ FNR==1 { flush(); curf="" }
   fname=""; rtype=""
   if (match($0,/fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) { fname=substr($0,RSTART,RLENGTH); sub(/fn[ \t]+/,"",fname) }
   if (match($0,/->[ \t]*[^:]+/)) { rtype=substr($0,RSTART,RLENGTH); sub(/->[ \t]*/,"",rtype); gsub(/[ \t]+$/,"",rtype) }
-  curf=fname; curr=rtype; nb=0; body=""; bline=0; pf=FILENAME; next
+  curf=fname; curr=rtype; nb=0; un=0; body=""; bline=0; pf=FILENAME; next
 }
 {
   if (curf=="") next
@@ -72,6 +72,9 @@ FNR==1 { flush(); curf="" }
   if ($0 ~ /^[ \t]*$/) next
   match($0,/^[ \t]*/); i=RLENGTH
   if (i<=curind) { flush(); next }
+  # A body wrapped in one `unsafe(capabilities: [...]):` block is still a
+  # thin wrapper: look through the block header to the forwarded call.
+  if (nb==0 && !un && $0 ~ /^[ \t]*unsafe(\(.*\))?:[ \t]*$/) { un=1; next }
   if (nb==0) { bline=FNR; body=$0; gsub(/^[ \t]+|[ \t]+$/,"",body) }
   nb++
 }
@@ -99,7 +102,11 @@ FNR==1 { cur="" }
   # such as `classify_probe` was derived nil-capable and convicted every
   # `rt_value_is_*` wrapper.
   s=$0
-  gsub(/Value::Nil[ \t]*(=>|\|)/,"",s); gsub(/\|[ \t]*Value::Nil/,"",s)
+  # The alternation `|` of a pattern has whitespace before it
+  # (`Value::Int(_) | Value::Nil`); a closure's closing `|` does not
+  # (`.map(|_| Value::Nil)`, `|| Value::Nil`), and a closure body IS a
+  # production, so it must stay counted.
+  gsub(/Value::Nil[ \t]*(=>|\|[^|])/,"",s); gsub(/[)}A-Za-z0-9_][ \t]+\|[ \t]*Value::Nil/,"X",s)
   gsub(/[!=]=[ \t]*Value::Nil/,"",s); gsub(/matches!\([^,]*,[ \t]*Value::Nil/,"",s)
   if (s ~ /Value::Nil/) { if(!found){print cur; found=1} }
 }
@@ -130,13 +137,19 @@ FNR==1 { cur="" }
   # in-tree `fn collect` / `fn write` happens to return nil. Those two shapes
   # alone convicted 110 total externs (rt_file_write_text, rt_vulkan_init,
   # rt_text_to_lower_ascii, ...) on 2026-10-31.
+  # Known residual, accepted: an in-tree helper reached ONLY as a method
+  # (`registry.lookup(..)` returning a nil Value) is no longer followed. The
+  # direct `Value::Nil` scan still convicts the method's own body.
   n=$0
   while (match(n,/[A-Za-z_][A-Za-z0-9_]*\(/)) {
     callee=substr(n,RSTART,RLENGTH-1)
     pre=substr(n,1,RSTART-1)
     n=substr(n,RSTART+RLENGTH)
     if (pre ~ /\.[ \t]*$/) continue
-    if (pre ~ /(^|[^A-Za-z0-9_])(std|core|alloc|fs|io|env|process|thread|mem|ptr|str|slice|iter|fmt|time|net|sync|String|Vec|Box|Arc|Rc|Path|PathBuf|File|OpenOptions|Command|HashMap|BTreeMap|HashSet|Option|Result|Cell|RefCell|Mutex)::$/) continue
+    # Only qualifiers that name std/core items and NO module of this tree:
+    # `io::`, `process::`, `time::`, `net::` are in-tree modules here, so a
+    # call through them stays an edge.
+    if (pre ~ /(^|[^A-Za-z0-9_])(std|core|alloc|fs|env|thread|mem|ptr|str|slice|iter|fmt|sync|String|Vec|Box|Arc|Rc|Path|PathBuf|File|OpenOptions|Command|HashMap|BTreeMap|HashSet|Option|Result|Cell|RefCell|Mutex)::$/) continue
     print cur, callee
   }
 }
@@ -356,6 +369,10 @@ fn helper_maybe_nil(rv: u64) -> Value {
 pub fn rt_delegates_nil(args: &[Value]) -> Result<Value, CompileError> {
     Ok(helper_maybe_nil(0))
 }
+// Nil produced ONLY inside a closure body: nil-capable.
+pub fn rt_closure_nil(args: &[Value]) -> Result<Value, CompileError> {
+    read(args).map(|_| Value::Nil).or_else(|_| Ok(Value::Int(0)))
+}
 RSEOF
     cat > "$_sd/rust/reg.rs" <<'RSEOF'
     insert_simple!("rt_maybe_nil", impls::rt_maybe_nil);
@@ -363,6 +380,7 @@ RSEOF
     insert_simple!("rt_total_std_calls", impls::rt_total_std_calls);
     insert_simple!("rt_total_nil_pattern", impls::rt_total_nil_pattern);
     insert_simple!("rt_delegates_nil", impls::rt_delegates_nil);
+    insert_simple!("rt_closure_nil", impls::rt_closure_nil);
 RSEOF
     derive_nil_externs "$_sd/rust" "$_sd/nil.txt"
     if ! grep -qx 'rt_maybe_nil' "$_sd/nil.txt" 2>/dev/null; then
@@ -380,6 +398,9 @@ RSEOF
     if ! grep -qx 'rt_delegates_nil' "$_sd/nil.txt" 2>/dev/null; then
         echo "selftest FAIL: rt_delegates_nil (bare call to a nil-capable helper) was not derived"; _fail=1
     fi
+    if ! grep -qx 'rt_closure_nil' "$_sd/nil.txt" 2>/dev/null; then
+        echo "selftest FAIL: rt_closure_nil (Value::Nil produced in a closure body) was not derived"; _fail=1
+    fi
 
     # fixture 1: the incident shape — must be flagged
     cat > "$_sd/spl/bad.spl" <<'SPEOF'
@@ -387,6 +408,14 @@ extern fn rt_maybe_nil(k: text) -> text
 
 fn bad_wrapper(k: text) -> text:
     rt_maybe_nil(k)
+SPEOF
+    # fixture: the same forward inside an `unsafe(...)` block — must be flagged
+    cat > "$_sd/spl/bad_unsafe.spl" <<'SPEOF'
+extern fn rt_maybe_nil(k: text) -> text
+
+fn bad_unsafe_wrapper(k: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_maybe_nil(k)
 SPEOF
     # fixture 2: optional return — must NOT be flagged
     cat > "$_sd/spl/opt.spl" <<'SPEOF'
@@ -435,6 +464,7 @@ SPEOF
     grep -q ':local_def_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: a wrapper calling a same-file Simple fn definition was wrongly flagged as forwarding the extern"; _fail=1; }
 
     grep -q ':bad_wrapper:' "$_sd/off.txt" 2>/dev/null || { echo "selftest FAIL: bad_wrapper not flagged"; _fail=1; }
+    grep -q ':bad_unsafe_wrapper:' "$_sd/off.txt" 2>/dev/null || { echo "selftest FAIL: a wrapper forwarding inside an unsafe(...) block was not flagged"; _fail=1; }
     grep -q ':opt_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: opt_wrapper wrongly flagged"; _fail=1; }
     grep -q ':total_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: total_wrapper wrongly flagged"; _fail=1; }
     grep -q ':fine_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: fine_wrapper wrongly flagged"; _fail=1; }
@@ -517,7 +547,7 @@ if ! selftest; then
     exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — selftest only, 22 fixture(s) checked, 0 failures"
+    echo "PASS — selftest only, 24 fixture(s) checked, 0 failures"
     exit 0
 fi
 
