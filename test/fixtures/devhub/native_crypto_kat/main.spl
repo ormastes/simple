@@ -1,0 +1,106 @@
+# External known-answer vectors for the SQLCipher read path's native crypto.
+# Round trips cannot catch a self-consistent wrong cipher, so every expected value
+# comes from a published vector or an independent implementation.
+# Vectors: FIPS 197 C.1-C.3, NIST SP 800-38A F.2.5, RFC 4231 case 1; hashlib for keys.
+use std.io_runtime.{exit}
+use std.common.crypto.aes_gcm.{
+    aes128_key_expansion, aes192_key_expansion, aes256_key_expansion,
+    aes128_encrypt_block, aes192_encrypt_block, aes256_encrypt_block,
+    aes128_decrypt_block, aes192_decrypt_block, aes256_decrypt_block
+}
+use std.common.aes.modes.{aes_cbc_encrypt_blocks_no_padding, aes_cbc_decrypt_blocks_no_padding}
+use std.common.crypto.hmac.{hmac_sha512_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use nogc_sync_mut.database.codec.sqlcipher4_keys.{sqlcipher4_key_session_open}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn hex_digit(n: i64) -> text:
+    val digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+    digits[n]
+
+fn hex_u8(bytes: [u8], n: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        val b = rt_bytes_u8_at(bytes, i)
+        out = out + hex_digit(b >> 4) + hex_digit(b & 15)
+        i = i + 1
+    out
+
+fn hex_i64(bytes: [i64], n: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        val b = bytes[i] & 255
+        out = out + hex_digit(b >> 4) + hex_digit(b & 15)
+        i = i + 1
+    out
+
+fn seq_u8(n: i64, start: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push((i + start).to_u8())
+        i = i + 1
+    out
+
+fn fips_plain() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 16:
+        out.push((i * 17).to_u8())
+        i = i + 1
+    out
+
+fn check(name: text, got: text, want: text) -> i64:
+    if got == want:
+        print "PASS {name}"
+        return 0
+    print "FAIL {name} got={got} want={want}"
+    1
+
+fn main() -> i64:
+    var bad = 0
+    val plain = fips_plain()
+    val plain_hex = "00112233445566778899aabbccddeeff"
+    val s128 = aes128_key_expansion(seq_u8(16, 0))
+    val c128 = aes128_encrypt_block(plain, s128)
+    bad = bad + check("aes128 encrypt", hex_u8(c128, 16), "69c4e0d86a7b0430d8cdb78070b4c55a")
+    bad = bad + check("aes128 decrypt", hex_u8(aes128_decrypt_block(c128, s128), 16), plain_hex)
+    val s192 = aes192_key_expansion(seq_u8(24, 0))
+    val c192 = aes192_encrypt_block(plain, s192)
+    bad = bad + check("aes192 encrypt", hex_u8(c192, 16), "dda97ca4864cdfe06eaf70a0ec0d7191")
+    bad = bad + check("aes192 decrypt", hex_u8(aes192_decrypt_block(c192, s192), 16), plain_hex)
+    val s256 = aes256_key_expansion(seq_u8(32, 0))
+    val c256 = aes256_encrypt_block(plain, s256)
+    bad = bad + check("aes256 encrypt", hex_u8(c256, 16), "8ea2b7ca516745bfeafc49904b496089")
+    bad = bad + check("aes256 decrypt", hex_u8(aes256_decrypt_block(c256, s256), 16), plain_hex)
+    val key: [i64] = [0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe, 0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81, 0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7, 0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4]
+    val iv: [i64] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    val pt: [i64] = [0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a]
+    match aes_cbc_encrypt_blocks_no_padding(key, pt, iv):
+        case Err(_):
+            print "FAIL cbc encrypt rejected"
+            bad = bad + 1
+        case Ok(ct):
+            bad = bad + check("cbc256 encrypt", hex_i64(ct, 16), "f58c4c04d6e5f1ba779eabfb5f7bfbd6")
+            match aes_cbc_decrypt_blocks_no_padding(key, ct, iv):
+                case Err(_):
+                    print "FAIL cbc decrypt rejected"
+                    bad = bad + 1
+                case Ok(back):
+                    bad = bad + check("cbc256 decrypt", hex_i64(back, 16), "6bc1bee22e409f96e93d7e117393172a")
+    val mac = hmac_sha512_bytes([11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11], [72, 105, 32, 84, 104, 101, 114, 101])
+    bad = bad + check("hmac sha512", hex_i64(mac, 64), "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854")
+    match sqlcipher4_key_session_open(text_to_utf8_bytes("messenger-fixture-passphrase"), seq_u8(16, 48)):
+        case Err(_):
+            print "FAIL key session rejected"
+            bad = bad + 1
+        case Ok(session):
+            bad = bad + check("sqlcipher page key", hex_u8(session.page_key, 32), "6e7ab6030c736d59494617eb704ca41436645430560fbdc6ed86ccc2ea6a7868")
+            bad = bad + check("sqlcipher hmac key", hex_u8(session.hmac_key, 32), "b03abb2395ca0ce13afa69b26f76c76f77192659e7f7ec36d760d6bffc929a1d")
+    print "KAT FAILURES {bad}"
+    if bad > 0:
+        exit(1)
+    0

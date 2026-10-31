@@ -16,9 +16,16 @@ use std.nogc_sync_mut.database.sqlite_format.cell.{
     parse_table_leaf_cell, parse_table_interior_cell
 }
 
-# Append (rowid, record payload) pairs of the subtree rooted at page_no to
-# `acc`, in ascending rowid order.
-fn _scan_table_page(pager: SqlitePager, page_no: i64, depth: i64, acc: [(i64, [u8])]) -> Result<[(i64, [u8])], SqliteError>:
+# One table b-tree row. A struct, not a tuple: array elements of `(i64, [u8])`
+# reach consumers as invalid pointers on the pinned Phase 2 producer
+# (bug=phase2_result_tuple_try_binding_metadata_2026_10_27).
+struct SqliteTableCell:
+    rowid: i64
+    payload: [u8]
+
+# Append the rows of the subtree rooted at page_no to `acc`, in ascending rowid
+# order.
+fn _scan_table_page(pager: SqlitePager, page_no: i64, depth: i64, acc: [SqliteTableCell]) -> Result<[SqliteTableCell], SqliteError>:
     if depth > pager.page_count:
         return Err(SqliteError.CorruptPage( message: "table b-tree depth {depth} exceeds page count {pager.page_count} (cycle?)"))
     val page = pager.get_page(page_no)?
@@ -34,7 +41,7 @@ fn _scan_table_page(pager: SqlitePager, page_no: i64, depth: i64, acc: [(i64, [u
             val cell: (i64, [u8]) = match parse_table_leaf_cell(pager, page, ptr):
                 case Ok(value): value
                 case Err(error): return Err(error)
-            out.push(cell)
+            out.push(SqliteTableCell(rowid: cell.0, payload: cell.1))
             i = i + 1
         Ok(out)
     else:
@@ -46,13 +53,16 @@ fn _scan_table_page(pager: SqlitePager, page_no: i64, depth: i64, acc: [(i64, [u
         var i: i64 = 0
         while i < n:
             val ptr = cell_ptr(page, base, 12, i)
-            val cell = parse_table_interior_cell(pager, page, ptr)?
+            # @workaround bug=phase2_result_tuple_try_binding_metadata_2026_10_27 reason=Bind native Result tuple payloads explicitly until deployed P2 preserves integer and byte metadata through propagation
+            val cell: (i64, i64) = match parse_table_interior_cell(pager, page, ptr):
+                case Ok(value): value
+                case Err(error): return Err(error)
             out = _scan_table_page(pager, cell.0, depth + 1, out)?
             i = i + 1
         _scan_table_page(pager, rightmost, depth + 1, out)
 
 # Full in-order scan of a table b-tree rooted at `root_page`.
-fn table_btree_scan(pager: SqlitePager, root_page: i64) -> Result<[(i64, [u8])], SqliteError>:
-    var empty: [(i64, [u8])] = []
+fn table_btree_scan(pager: SqlitePager, root_page: i64) -> Result<[SqliteTableCell], SqliteError>:
+    var empty: [SqliteTableCell] = []
     _scan_table_page(pager, root_page, 0, empty)
 

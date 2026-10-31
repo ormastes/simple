@@ -102,7 +102,8 @@ fn fresh_direct_codec(path: text):
     print "STAGE fresh direct first-page authenticated decode"
     val first_body: [u8] = match sqlcipher4_page_decode_with_session(1, first, session):
         case Ok(value): value
-        case Err(_):
+        case Err(problem):
+            print "DIAGNOSTIC first-page decode: {sqlcipher4_error_code(problem)}"
             val _closed = sqlcipher4_page_close(session)
             require_fresh(false, "direct first-page decode")
             return
@@ -129,17 +130,26 @@ fn fresh_direct_codec(path: text):
     print "PASS fresh direct codec boundaries"
 
 fn fresh_read_storage(opened: StorageOpenResult):
+    print "STAGE fresh read storage entered"
     val port: DatabaseStoragePortV1 = database_storage_port_v1()
+    print "STAGE fresh read storage port built"
     match opened:
         case StorageOpenResult.SqliteView(view):
+            print "STAGE fresh storage view page_size={view.page_size} page_count={view.page_count} reserved={view.reserved_bytes} encoding={view.text_encoding} image={view.image.len()}"
             require_fresh(view.page_size == 4096 and view.page_count > 5 and view.reserved_bytes == 80 and view.text_encoding == 1, "storage view field values")
             val rows: [DbRow] = match port.read_table(view, "messages"):
                 case Ok(value): value
-                case Err(_):
+                case Err(problem):
+                    print "DIAGNOSTIC storage read: {problem.code()}"
                     val _closed = port.close_view(view)
                     require_fresh(false, "storage schema/interior/overflow rows")
                     return
-            require_fresh(rows.len() == 46 and rows[0].values[0].to_text() == "11" and rows[4].values[3].to_text().len() > 11000, "storage exact row values and overflow")
+            print "STAGE fresh storage rows={rows.len()}"
+            require_fresh(rows.len() == 46, "storage row count")
+            print "STAGE fresh storage row zero cells={rows[0].values.len()}"
+            require_fresh(rows[0].values[0].to_text() == "11", "storage first row value")
+            print "STAGE fresh storage overflow cell"
+            require_fresh(rows[4].values[3].to_text().len() > 11000, "storage overflow value")
             require_fresh(port.close_view(view), "storage close")
             var i = 0
             if wipe_checks_enforced():
@@ -164,11 +174,15 @@ fn main() -> i64:
     require_fresh(before.len() == 64, "source hash provider")
     fresh_direct_codec(path)
     print "STAGE fresh direct storage control"
-    val direct: StorageOpenResult = match storage_backend_sqlcipher4_open(path, FRESH_SECRET_REF):
+    val direct_outcome = storage_backend_sqlcipher4_open(path, FRESH_SECRET_REF)
+    print "STAGE fresh direct storage open returned"
+    val direct: StorageOpenResult = match direct_outcome:
         case Ok(value): value
-        case Err(_):
+        case Err(problem):
+            print "DIAGNOSTIC direct storage open: {problem.code()}"
             require_fresh(false, "direct secured snapshot storage open")
             return 1
+    print "STAGE fresh direct storage result bound"
     fresh_read_storage(direct)
     print "STAGE fresh configured registered storage dispatch"
     val port: DatabaseStoragePortV1 = database_storage_port_v1()
