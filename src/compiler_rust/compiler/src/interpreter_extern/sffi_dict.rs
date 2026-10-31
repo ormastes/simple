@@ -93,7 +93,7 @@ pub fn rt_dict_get_fn(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(key_value
             .as_text_str()
             .and_then(|key| map.get(key))
-            .cloned()
+            .map(Value::dict_entry_value_for_iteration)
             .unwrap_or(Value::Nil));
     }
 
@@ -173,9 +173,11 @@ pub fn rt_dict_keys_fn(args: &[Value]) -> Result<Value, CompileError> {
         )
     })?;
     if let Value::Dict(map) | Value::FrozenDict(map) = dict_value {
-        let mut keys: Vec<_> = map.keys().cloned().collect();
-        keys.sort();
-        return Ok(Value::array(keys.into_iter().map(Value::text).collect::<Vec<Value>>()));
+        return Ok(Value::array(
+            crate::value::dict_entries_sorted(map)
+                .into_iter()
+                .map(|(key, stored)| Value::dict_entry_key_for_iteration(stored, key))
+                .collect::<Vec<Value>>()));
     }
 
     let dict = RuntimeValue::from_raw(dict_value.as_int()? as u64);
@@ -195,7 +197,7 @@ pub fn rt_dict_values_fn(args: &[Value]) -> Result<Value, CompileError> {
         let mut entries: Vec<_> = map.iter().collect();
         entries.sort_by(|(left, _), (right, _)| left.cmp(right));
         return Ok(Value::array(
-            entries.into_iter().map(|(_, value)| value.clone()).collect::<Vec<Value>>(),
+            entries.into_iter().map(|(_, value)| Value::dict_entry_value_for_iteration(value)).collect::<Vec<Value>>(),
         ));
     }
 

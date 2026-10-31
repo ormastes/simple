@@ -173,7 +173,12 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         Value::FrozenDict(map) => {
             let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
                 .into_iter()
-                .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
+                .map(|(k, v)| {
+                    Value::Tuple(vec![
+                        Value::dict_entry_key_for_iteration(v, k),
+                        Value::dict_entry_value_for_iteration(v),
+                    ])
+                })
                 .collect();
             Ok(entries)
         }
@@ -184,7 +189,12 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
             let map = flat.as_ref().unwrap_or(map);
             let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
                 .into_iter()
-                .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
+                .map(|(k, v)| {
+                    Value::Tuple(vec![
+                        Value::dict_entry_key_for_iteration(v, k),
+                        Value::dict_entry_value_for_iteration(v),
+                    ])
+                })
                 .collect();
             Ok(entries)
         }

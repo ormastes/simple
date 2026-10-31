@@ -160,14 +160,12 @@ fn step_mut<'a>(slot: &'a mut Value, projection: &Projection) -> Option<&'a mut 
             items.get_mut(idx)
         }
         (Value::Dict(entries), Projection::Index(key)) => {
-            // Composite dict keys are stored wrapped by `Value::wrap_dict_entry`
-            // (a marker tuple). Projecting through that wrapper is not modelled
-            // here, so only scalar keys are treated as places.
-            if !key.dict_key_is_scalar() {
-                return None;
-            }
+            // Non-text keys are stored wrapped by `Value::wrap_dict_entry`; the
+            // place is the value slot inside that wrapper.
             let key_string = key.to_key_string();
-            crate::interpreter::module_dict_make_mut(entries).get_mut(&key_string)
+            crate::interpreter::module_dict_make_mut(entries)
+                .get_mut(&key_string)
+                .map(Value::dict_entry_value_mut)
         }
         _ => None,
     }
@@ -233,10 +231,8 @@ fn store_last(container: &mut Value, projection: &Projection, value: Value) -> b
             None => false,
         },
         (Value::Dict(entries), Projection::Index(key)) => {
-            if !key.dict_key_is_scalar() {
-                return false;
-            }
-            crate::interpreter::module_dict_make_mut(entries).insert(key.to_key_string(), value);
+            crate::interpreter::module_dict_make_mut(entries)
+                .insert(key.to_key_string(), Value::wrap_dict_entry(key, value));
             true
         }
         _ => false,
@@ -368,10 +364,7 @@ fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
         (Value::FixedSizeArray { data, .. }, Projection::Index(index)) => data.get(normalize_index(data.len(), index)?),
         (Value::Tuple(items), Projection::Index(index)) => items.get(normalize_index(items.len(), index)?),
         (Value::Dict(entries), Projection::Index(key)) => {
-            if !key.dict_key_is_scalar() {
-                return None;
-            }
-            entries.get(&key.to_key_string())
+            entries.get(&key.to_key_string()).map(Value::dict_entry_value_ref)
         }
         _ => None,
     }
