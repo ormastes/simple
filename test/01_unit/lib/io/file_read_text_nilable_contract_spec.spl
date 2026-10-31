@@ -1,0 +1,60 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# rt_file_read_text / rt_file_read_text_rv return nil on an unreadable path on
+# every engine (C runtime, Rust runtime, interpreter), so every extern decl in
+# src/lib, src/app and src/os must say `-> text?`, and every caller must handle
+# the nil (2026-10-31). Before this change ~70 decls claimed `-> text`; callers
+# that bound the result bare then hit nil.split / nil.trim, or interpolated it
+# into the literal text "nil" (exp/storage.spl file_read).
+
+use std.spec.step
+use std.spec.*
+
+use std.io_runtime.{shell, file_exists}
+use std.sffi.io.{file_read_text_nilable}
+use std.sffi.fs.{file_read_text_unchecked}
+
+fn missing_path() -> text:
+    "/definitely/not/a/path/file_read_text_nilable/missing.txt"
+
+describe "rt_file_read_text nil contract":
+    context "extern declarations":
+        it "finds the declarations it scans for (cwd control)":
+            # @req REQ-SSPEC-UNIT
+            step("finds the declarations it scans for (cwd control)")
+            # Positive control: a wrong cwd or a broken grep must not pass vacuously.
+            val ok = shell("grep -rE 'extern fn rt_file_read_text(_rv)?\\(path: text\\) -> text\\?' src/lib src/app src/os | wc -l")
+            expect(ok.exit_code).to_equal(0)
+            expect(ok.stdout.trim().to_int() > 40).to_equal(true)
+
+        it "declares no non-optional rt_file_read_text decl in src/lib, src/app or src/os":
+            # @req REQ-SSPEC-UNIT
+            step("declares no non-optional rt_file_read_text decl in src/lib, src/app or src/os")
+            # src/app/js/main.spl is held by another session; src/compiler is Phase 3.
+            # grep exits 1 for "no match" (the pass case) and 2 for a real error.
+            val scan = shell("grep -rnE 'extern fn rt_file_read_text(_rv)?\\(path: text\\) -> text[[:space:]]*(#.*)?$' src/lib src/app src/os | grep -v '^src/app/js/main.spl'")
+            expect(scan.stdout.trim()).to_equal("")
+            expect(scan.exit_code == 1).to_equal(true)
+
+    context "wrappers":
+        it "file_read_text_nilable is nil for a missing file and text for a present one":
+            # @req REQ-SSPEC-UNIT
+            step("file_read_text_nilable is nil for a missing file and text for a present one")
+            expect(file_read_text_nilable(missing_path()) == nil).to_equal(true)
+            val mk = shell("mktemp 2>/dev/null || mktemp -t spl_frt")
+            val path = mk.stdout.trim()
+            shell("printf 'hello' > '{path}'")
+            val hit = file_read_text_nilable(path)
+            shell(": > '{path}'")
+            val empty = file_read_text_nilable(path)
+            shell("rm -f '{path}'")
+            expect(hit == nil).to_equal(false)
+            expect(hit ?? "<nil>").to_equal("hello")
+            # an empty file is "", never nil
+            expect(empty == nil).to_equal(false)
+            expect(empty ?? "<nil>").to_equal("")
+
+        it "file_read_text_unchecked keeps nil for a missing file":
+            # @req REQ-SSPEC-UNIT
+            step("file_read_text_unchecked keeps nil for a missing file")
+            expect(file_read_text_unchecked(missing_path()) == nil).to_equal(true)
