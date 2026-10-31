@@ -23,12 +23,12 @@ FNR == 1 { flush() }
 {
   ind = match($0, /[^ \t]/) ? RSTART - 1 : 0
   s = substr($0, ind + 1)
-  if (s ~ /^(pub |export )?(static )?(me )?fn [A-Za-z_0-9]+.*\) *-> *[^:]+: *$/) {
+  if (s ~ /^(pub |export )?(static )?(fn|me) [A-Za-z_0-9]+.*\) *-> *[^:]+: *$/) {
     flush()
     ret = s; sub(/^.*\) *-> */, "", ret); sub(/: *$/, "", ret); sub(/ +$/, "", ret)
     o = gsub(/\(/, "(", ret); c = gsub(/\)/, ")", ret)
     if (ret !~ /\?$/ && ret != "nil" && s !~ /-> *Option</ && ret != "()" && c <= o) {
-      nm = s; sub(/^.*fn /, "", nm); sub(/[(<].*$/, "", nm)
+      nm = s; sub(/^(pub |export )?(static )?(fn|me) /, "", nm); sub(/[(<].*$/, "", nm)
       infn = 1; findent = ind; fname = nm; ffile = FILENAME
     }
     next
@@ -36,11 +36,14 @@ FNR == 1 { flush() }
   if (infn) {
     if (s == "" || s ~ /^#/) next
     if (ind <= findent) { flush(); next }
-    if (s ~ /^return nil *(#.*)?$/) hit = 1
+    if (s ~ /(^|: )return nil *(#.*)?$/) hit = 1
     if (s !~ /^(else|elif)/) lastbody = (s ~ /^nil *(#.*)?$/) ? "nil" : s
   }
 }
-END { flush() }' < "$TMPD/files.txt" ) | sort -u
+END { flush() }' < "$TMPD/files.txt" ) > "$TMPD/raw.txt"
+  _rc=$?
+  [ "$_rc" = 0 ] || { echo "ERROR - nothing was checked (scan exited $_rc)" >&2; return 9; }
+  sort -u "$TMPD/raw.txt"
 }
 
 fixture() { # $1 dir
@@ -50,6 +53,19 @@ fn finds(x: i64) -> text:
     if x == 0:
         return nil
     "ok"
+
+fn oneline(x: i64) -> text:
+    if x == 0: return nil
+    "ok"
+
+class Holder:
+    items: [text]
+
+impl Holder:
+    me pick(x: i64) -> text:
+        if x == 0:
+            return nil
+        "ok"
 
 fn trailing(x: i64) -> i64:
     if x > 0:
@@ -67,6 +83,12 @@ fn total(x: i64) -> text:
         return ""
     "ok"
 
+impl Holder:
+    me pick_ok(x: i64) -> text?:
+        if x == 0:
+            return nil
+        "ok"
+
 fn takes(p: fn(i64) -> bool):
     nil
 EOF
@@ -74,11 +96,18 @@ EOF
 
 selftest() {
   _t=$(mktemp -d); TMPD=$_t
-  fixture "$_t/f"; scan "$_t/f" > "$_t/out.txt"
-  grep -qx 'src/app/bad.spl:finds' "$_t/out.txt" && grep -qx 'src/app/bad.spl:trailing' "$_t/out.txt" || { echo "ERROR - selftest: bad fixture not flagged"; return 2; }
+  fixture "$_t/f"; scan "$_t/f" > "$_t/out.txt" || { echo "ERROR - selftest: scan failed on fixture"; return 2; }
+  for _k in finds trailing oneline pick; do
+    grep -qx "src/app/bad.spl:$_k" "$_t/out.txt" || { echo "ERROR - selftest: bad fixture fn $_k not flagged"; return 2; }
+  done
   grep -q 'good.spl' "$_t/out.txt" && { echo "ERROR - selftest: good fixture flagged"; return 2; }
-  mkdir -p "$_t/empty"; scan "$_t/empty" > "$_t/e.txt"
-  [ "$(cat "$TMPD/nfiles.txt")" = "0" ] || { echo "ERROR - selftest: empty tree must scan 0 files"; return 2; }
+  mkdir -p "$_t/empty"; scan "$_t/empty" > "$_t/e.txt"; _nf=$(cat "$TMPD/nfiles.txt")
+  mkdir -p "$_t/bin"; printf '#!/bin/sh
+exit 2
+' > "$_t/bin/awk"; chmod +x "$_t/bin/awk"
+  PATH="$_t/bin:$PATH" scan "$_t/f" > "$_t/m.txt" 2>/dev/null; _mrc=$?
+  [ "$_mrc" = 9 ] || { echo "ERROR - selftest: a failed scan must not be masked (rc=$_mrc)"; return 2; }
+  [ "$_nf" = "0" ] || { echo "ERROR - selftest: empty tree must scan 0 files"; return 2; }
   rm -rf "$_t"; return 0
 }
 
@@ -93,10 +122,10 @@ done
 
 selftest; rc=$?
 [ "$rc" = 0 ] || exit 2
-[ "$SELFTEST" = 2 ] && { echo "PASS - selftest ok (2 fixtures)"; exit 0; }
+[ "$SELFTEST" = 2 ] && { echo "PASS - selftest ok (4 bad + good fixtures, masked-failure case)"; exit 0; }
 
 TMPD=$(mktemp -d)
-scan "$ROOT" > "$TMPD/cur.txt"
+scan "$ROOT" > "$TMPD/cur.txt" || { echo "ERROR - nothing was checked (scan failed)"; exit 2; }
 N=$(cat "$TMPD/nfiles.txt")
 [ "$N" -gt 0 ] || { echo "ERROR - nothing was checked (0 files under $ROOT)"; exit 2; }
 if [ "$GEN" = 1 ]; then cp "$TMPD/cur.txt" "$BASELINE"; echo "PASS - baseline written: $(wc -l < "$BASELINE" | tr -d ' ') entries, $N file(s) scanned"; exit 0; fi
