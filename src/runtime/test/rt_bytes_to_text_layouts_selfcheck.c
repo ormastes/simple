@@ -58,6 +58,20 @@ int main(void) {
     rt_array_push(bad, rt_value_int(300));
     expect_text(rt_bytes_to_text((int64_t)(uintptr_t)bad), "", 0, "out-of-range slot rejected -> \"\"");
 
+    /* Malformed UTF-8 follows Rust from_utf8_lossy: one U+FFFD per maximal bad subsequence. */
+    {
+        const uint8_t bad1[] = {0x61, 0xFF, 0x62};            /* invalid lead */
+        const uint8_t bad2[] = {0x61, 0xE2, 0x82};            /* truncated 3-byte */
+        const uint8_t bad3[] = {0xE2, 0x82, 0x41};            /* bad continuation, resync */
+        const uint8_t bad4[] = {0xED, 0xA0, 0x80};            /* surrogate: 3 bad bytes */
+        const uint8_t good[] = {0xF0, 0x9F, 0x98, 0x80};      /* valid 4-byte stays */
+        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad1, 3)), "a�" "b", 5, "malformed lead -> U+FFFD");
+        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad2, 3)), "a�", 4, "truncated sequence -> one U+FFFD");
+        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad3, 3)), "�" "A", 4, "bad continuation resyncs");
+        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad4, 3)), "���", 9, "encoded surrogate -> 3 U+FFFD");
+        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)good, 4)), "😀", 4, "valid 4-byte preserved");
+    }
+
     expect_text(rt_char_from_code(65), "A", 1, "rt_char_from_code ASCII");
     expect_text(rt_char_from_code(0xE9), "\xC3\xA9", 2, "rt_char_from_code 2-byte UTF-8");
     expect_text(rt_char_from_code(0x1F600), "\xF0\x9F\x98\x80", 4, "rt_char_from_code 4-byte UTF-8");
