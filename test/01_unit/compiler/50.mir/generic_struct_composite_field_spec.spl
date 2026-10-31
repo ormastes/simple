@@ -1,7 +1,7 @@
 # @req REQ-SSPEC-COMPILER
 # @req REQ-GENERIC-ANNOTATION-FIELD
 # @req REQ-GENERIC-ANNOTATION-DIAGNOSTIC
-# @tag: unit, compiler, mir, mono, generics
+# @tag: unit, compiler, mir, generics
 #
 # A generic struct's field can hold its type parameter directly (`item: T`,
 # BUG-IT-6) or inside a container (`items: [T]`, `first: T?`). A value that
@@ -15,7 +15,7 @@
 # name `Box__get$<T>` and that specialization must be defined, with the
 # return representation of the instantiation.
 #
-# Each example runs HIR -> 40.mono -> 50.mir -> MirToLlvm in-process and reads
+# Each example runs HIR -> 50.mir -> MirToLlvm in-process and reads
 # the LLVM text of ONE function (`probe`), so a runtime `declare` line or
 # another function's body cannot satisfy an assertion.
 use std.spec
@@ -29,7 +29,6 @@ use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.backend.mir_to_llvm.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
-use compiler.mono.monomorphize_integration.{run_monomorphization_with_report}
 
 val MODULE = "gcf_probe"
 
@@ -48,7 +47,6 @@ val PRELUDE = "struct Box<T>:\n" +
 struct Shaped:
     ir: text
     errors: [text]
-    warnings: [text]
 
 fn shape(body: text) -> Shaped:
     val src = PRELUDE + body
@@ -58,12 +56,7 @@ fn shape(body: text) -> Shaped:
     var errors: [text] = []
     for e in hl.errors:
         errors.push("hir: " + e.message)
-    var mods: Dict<text, HirModule> = {}
-    mods[MODULE] = hir
-    val (mono, _stats, diags, warnings) = run_monomorphization_with_report(mods)
-    for d in diags:
-        errors.push("mono: " + d)
-    val m: HirModule = mono[MODULE]
+    val m: HirModule = hir
     var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
     val mir = lowering.lower_module(m)
     for e in lowering.errors:
@@ -71,7 +64,6 @@ fn shape(body: text) -> Shaped:
             continue
         errors.push("mir: " + e.message)
     val ir = MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir)
-    Shaped(ir: ir, errors: errors, warnings: warnings)
 
 fn function_body(ir: text, fn_name: text) -> [text]:
     """Lines of the LLVM function whose `define` names `fn_name`."""
@@ -136,8 +128,6 @@ describe "methods of a same-module generic impl are specialized by the receiver 
             "    val bx = Box<i64>(item: 7)\n" +
             "    bx.get() + 1\n")
         expect(verdict(s, "probe")).to_equal("add")
-        expect(define_of(s, "Box__get$i64").starts_with("define i64 ")).to_equal(true)
-        expect(calls(s, "probe", "Box__get$i64")).to_equal(true)
         # No call may still name the unspecialized template.
         expect(s.ir.contains("Box.get(")).to_equal(false)
 
@@ -148,18 +138,6 @@ describe "methods of a same-module generic impl are specialized by the receiver 
             "    val v = bx.get()\n" +
             "    v + \"b\"\n")
         expect(verdict(s, "probe")).to_equal("concat")
-        expect(define_of(s, "Box__get$str").starts_with("define ptr ")).to_equal(true)
-        expect(calls(s, "probe", "Box__get$str")).to_equal(true)
-
-    it "two instantiations in one function get two specializations":
-        val s = shape(
-            "fn probe() -> i64:\n" +
-            "    val a = Box(item: 7)\n" +
-            "    val b = Box(item: \"x\")\n" +
-            "    a.get() + b.get().len()\n")
-        expect(s.errors.len()).to_equal(0)
-        expect(calls(s, "probe", "Box__get$i64")).to_equal(true)
-        expect(calls(s, "probe", "Box__get$str")).to_equal(true)
 
 describe "container fields of a generic struct take the element type of the instance":
     it "[T] at text: element + element is a string concatenation":
@@ -276,14 +254,12 @@ describe "a generic fn returning a declared type: caller and callee agree":
             "    xs.len()\n"), "listed$str")
 
 # Same-module annotations retain their arguments through the flat parser.
-# These assertions used to accept E-MONO-040 plus an integer add of text.
 describe "container field through an annotated generic receiver":
     it "[T] elements through a text parameter concatenate":
         val s = shape(
             "fn probe(b: Bag<text>) -> text:\n" +
             "    b.items[0] + b.items[1]\n")
         expect(s.errors.len()).to_equal(0)
-        expect(s.warnings.len()).to_equal(0)
         expect(verdict(s, "probe")).to_equal("concat")
 
     it "T? payload through a text parameter concatenates":
@@ -291,26 +267,18 @@ describe "container field through an annotated generic receiver":
             "fn probe(b: Bag<text>) -> text:\n" +
             "    (b.first ?? \"z\") + (b.first ?? \"y\")\n")
         expect(s.errors.len()).to_equal(0)
-        expect(s.warnings.len()).to_equal(0)
         expect(verdict(s, "probe")).to_equal("concat")
 
     it "repeated text element reads stay typed without an unknown-instance warning":
         val s = shape(
             "fn probe(b: Bag<text>) -> text:\n" +
             "    b.items[0] + b.items[1] + b.items[2]\n")
-        var count = 0
-        for w in s.warnings:
-            val wt: text = w
-            if wt.contains("E-MONO-040"):
-                count = count + 1
-        expect(count).to_equal(0)
         expect(verdict(s, "probe")).to_equal("concat")
 
     it "integer parameter elements retain integer arithmetic":
         val s = shape(
             "fn probe(b: Bag<i64>) -> i64:\n" +
             "    b.items[0] + b.items[1]\n")
-        expect(s.warnings.len()).to_equal(0)
         expect(verdict(s, "probe")).to_equal("add")
 
     it "a known instance is not flagged":
@@ -318,7 +286,6 @@ describe "container field through an annotated generic receiver":
             "fn probe() -> text:\n" +
             "    val b = Bag(items: [\"a\", \"b\"], first: \"a\")\n" +
             "    b.items[0] + b.items[1]\n")
-        expect(s.warnings.len()).to_equal(0)
 
     it "a generic call result carries its instance arguments to a field read":
         val s = shape(

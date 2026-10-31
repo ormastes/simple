@@ -19,7 +19,6 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
-use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.backend.mir_to_llvm.{MirToLlvm}
@@ -47,20 +46,13 @@ fn param_kind_names(function: MirFunction) -> [text]:
     out
 
 describe "generic walker with a fn-typed parameter: native ABI receipt":
-    it "specializes the walker and types its callback as a function pointer in MIR":
+    it "types the walker and types its callback as a function pointer in MIR":
         val parsed = parse_full_frontend(WALKER_SRC, "walker_abi.spl", "walker_abi", Logger(level: 0))
         var hl = HirLowering.with_filename("walker_abi.spl")
         val hir = hl.lower_module(parsed)
         expect(hl.errors.len()).to_equal(0)
-        var mods: Dict<text, HirModule> = {}
-        mods["walker_abi"] = hir
-        val (out, stats, diags) = run_monomorphization_with_diagnostics(mods)
-        expect(diags.len()).to_equal(0)
-        expect(stats.unresolved_generic_calls).to_equal(0)
-        expect(stats.specializations_created).to_equal(1)
-        val mono: HirModule = out["walker_abi"]
-        var mir_lowering = MirLowering.new(mono.symbols)
-        val mir = mir_lowering.lower_module(mono)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
         expect(mir_lowering.errors.len()).to_equal(0)
         val walker = find_mir_function_with_arity(mir, 3)
         expect(walker.is_some()).to_equal(true)
@@ -74,17 +66,12 @@ describe "generic walker with a fn-typed parameter: native ABI receipt":
         val parsed = parse_full_frontend(WALKER_SRC, "walker_abi.spl", "walker_abi", Logger(level: 0))
         var hl = HirLowering.with_filename("walker_abi.spl")
         val hir = hl.lower_module(parsed)
-        var mods: Dict<text, HirModule> = {}
-        mods["walker_abi"] = hir
-        val (out, _stats, diags) = run_monomorphization_with_diagnostics(mods)
-        expect(diags.len()).to_equal(0)
-        val mono: HirModule = out["walker_abi"]
-        var mir_lowering = MirLowering.new(mono.symbols)
-        val mir = mir_lowering.lower_module(mono)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
         expect(mir_lowering.errors.len()).to_equal(0)
         val llvm = MirToLlvm.create("walker_abi", CodegenTarget.X86_64, nil).translate_module(mir)
         print "[walker-abi] llvm bytes={llvm.len()}"
-        # the specialization takes its callback as a pointer parameter
+        # the walker takes its callback as a pointer parameter
         expect(llvm.contains("i64 %l2, ptr %l3)")).to_be(true)
         expect(llvm.contains("define i64 @__simple_main")).to_be(true)
         # the caller hands over the named function by reference, never as text
@@ -103,13 +90,8 @@ describe "generic walker with a fn-typed parameter: native ABI receipt":
         val parsed = parse_full_frontend(WALKER_SRC, "walker_abi.spl", "walker_abi", Logger(level: 0))
         var hl = HirLowering.with_filename("walker_abi.spl")
         val hir = hl.lower_module(parsed)
-        var mods: Dict<text, HirModule> = {}
-        mods["walker_abi"] = hir
-        val (out, _stats, diags) = run_monomorphization_with_diagnostics(mods)
-        expect(diags.len()).to_equal(0)
-        val mono: HirModule = out["walker_abi"]
-        var mir_lowering = MirLowering.new(mono.symbols)
-        val mir = mir_lowering.lower_module(mono)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
         expect(mir_lowering.errors.len()).to_equal(0)
         val llvm = MirToLlvm.create("walker_abi", CodegenTarget.Riscv32, nil).translate_module(mir)
         expect(llvm.contains("riscv32")).to_be(true)

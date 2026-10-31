@@ -241,7 +241,7 @@ fn fb_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
 extern fn rt_engine2d_blend_const_span_pct_u32(dst: [u32], offset: i64, count: i64, color: u32, opacity_pct: i64) -> [u32]
 
 @unsafe(reason: "soft box-shadow coverage-span blend kernel", capabilities: [ffi])
-extern fn rt_engine2d_blend_cov_span_u32(dst: [u32], offset: i64, colcov: [i32], count: i64, cov_y_and_alpha: i64, color: u32) -> [u32]
+extern fn rt_engine2d_blend_cov_span_u32(dst: [u32], offset: i64, colcov: [i32], count: i64, cov_y_and_alpha: i64, color: u32) -> [u32]?
 
 fn fb_blend_const_row_opacity(fb: [u32], offset: i32, count: i32, color: u32, opacity_pct: i32) -> [u32]:
     """Blend one constant colour across a row span at an integer percent opacity.
@@ -642,12 +642,17 @@ fn fb_blend_cov_row(fb: [u32], offset: i32, colcov: [i32], count: i32, cov_y: i3
     # bounded well below 1024 by construction (cov_y <= 256 from _phi256,
     # alpha <= 255).
     val packed = (cov_y.to_i64() * 1024) + alpha.to_i64()
-    val span = rt_engine2d_blend_cov_span_u32(
+    val kernel = rt_engine2d_blend_cov_span_u32(
         out, offset.to_i64(), colcov, n.to_i64(), packed, color)
-    if span.len() != n:
-        return _scalar_blend_cov_row(fb, offset, colcov, count, cov_y, alpha, color)
-    out.write_span(span, offset.to_i64(), 0, n.to_i64())
-    out
+    if val span = kernel:
+        if span.len() != n:
+            return _scalar_blend_cov_row(fb, offset, colcov, count, cov_y, alpha, color)
+        out.write_span(span, offset.to_i64(), 0, n.to_i64())
+        return out
+    # Kernel nil: the native span was refused (allocation or invalid input). This
+    # is the explicit scalar-twin path, not a silent default: the scalar blend
+    # computes the same pixels, and the nil is visible in this branch.
+    _scalar_blend_cov_row(fb, offset, colcov, count, cov_y, alpha, color)
 
 fn _scalar_blend_cov_row(fb: [u32], offset: i32, colcov: [i32], count: i32, cov_y: i32, alpha: i32, color: u32) -> [u32]:
     """Scalar reference — the exact arithmetic fb_soft_box_shadow used inline.
