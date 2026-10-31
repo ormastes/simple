@@ -1,0 +1,79 @@
+#!/bin/sh
+# check-no-monomorphization.shs — monomorphization stays removed.
+#
+# Owner order: generics are type-erased, generic objects are exists-or-generate
+# through the build-runner location, and the compiler holds no instance cache.
+# Scans committed .spl content under src/compiler, src/app and src/lib for names
+# of the deleted pass. Hindley-Milner vocabulary (`monomorphic`, `TypeScheme.mono`)
+# is deliberately not matched; @workaround bug ids name tracking records and do
+# not match either.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> file(s) checked, 0 references   exit 0
+#   FAIL  — <n> file(s) checked, <k> reference(s): <locations>  exit 1
+#   ERROR — nothing was checked                 exit 2
+#
+#   --rev <rev>  commit to scan (default HEAD)
+#   --selftest   run the fatal selftest only
+
+set -u
+
+PATTERN='40\.mono|[Mm]onomorphi[sz]|_from_mono_v1|generic_instance_cache_v1|concrete_instance_reader_v1|MONO-PENDING|E-MONO-|(^|[^A-Za-z0-9_])mono_(cache|specialize|function|class|complete|generate|instances|list)'
+
+scan() { # <git-dir-root> <rev>
+    _n=$(git -C "$1" ls-tree -r --name-only "$2" -- src/compiler src/app src/lib | grep -c '\.spl$')
+    if [ "$_n" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        return 2
+    fi
+    _hits=$(git -C "$1" grep -nE "$PATTERN" "$2" -- 'src/compiler/*.spl' 'src/app/*.spl' 'src/lib/*.spl' | cut -d: -f2,3)
+    if [ -n "$_hits" ]; then
+        _k=$(printf '%s\n' "$_hits" | wc -l | tr -d ' ')
+        echo "FAIL — $_n file(s) checked, $_k reference(s): $(printf '%s\n' "$_hits" | head -20 | tr '\n' ' ')"
+        return 1
+    fi
+    echo "PASS — $_n file(s) checked, 0 references"
+    return 0
+}
+
+selftest() {
+    _t=$(mktemp -d) || return 1
+    _f=0
+    git -C "$_t" init -q
+    git -C "$_t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m empty
+    _out=$(scan "$_t" HEAD); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest: empty tree must be ERROR" >&2; _f=1; }
+    mkdir -p "$_t/src/compiler"
+    printf 'fn f(s: Scheme):\n    s.is_monomorphic()\n' > "$_t/src/compiler/a.spl"
+    git -C "$_t" add -A
+    git -C "$_t" -c user.name=t -c user.email=t@t commit -q -m clean
+    _out=$(scan "$_t" HEAD); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest: type-theory word must PASS" >&2; _f=1; }
+    printf 'fn g():\n    mono_cache_lookup("k")\n' > "$_t/src/compiler/b.spl"
+    git -C "$_t" add -A
+    git -C "$_t" -c user.name=t -c user.email=t@t commit -q -m dirty
+    _out=$(scan "$_t" HEAD); _rc=$?
+    [ "$_rc" -eq 1 ] || { echo "selftest: revived name must FAIL" >&2; _f=1; }
+    rm -rf "$_t"
+    return "$_f"
+}
+
+REV=HEAD
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rev) REV="$2"; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+if ! selftest; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — selftest"; exit 0; }
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scan "$ROOT" "$REV"
+exit $?
