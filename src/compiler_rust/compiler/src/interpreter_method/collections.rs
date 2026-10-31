@@ -1641,7 +1641,7 @@ pub fn handle_dict_methods(
             // Remove nil/None entries, unwrap Some values
             let result: HashMap<String, Value> = map
                 .iter()
-                .filter_map(|(k, v)| match v {
+                .filter_map(|(k, stored)| match Value::dict_entry_value_ref(stored) {
                     Value::Nil => None,
                     Value::Enum {
                         ref enum_name,
@@ -1649,12 +1649,14 @@ pub fn handle_dict_methods(
                         ref payload,
                     } if enum_name == "Option" => {
                         if variant == "Some" {
-                            payload.as_ref().map(|p| (k.clone(), p.as_ref().clone()))
+                            payload
+                                .as_ref()
+                                .map(|p| (k.clone(), Value::rewrap_dict_entry(stored, p.as_ref().clone())))
                         } else {
                             None
                         }
                     }
-                    other => Some((k.clone(), other.clone())),
+                    _ => Some((k.clone(), stored.clone())),
                 })
                 .collect();
             Value::Dict(Arc::new(result))
@@ -1671,10 +1673,13 @@ pub fn handle_dict_methods(
         }
         "setdefault" => {
             // Get value if key exists, otherwise set and return default
-            let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+            let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let mut new_map = map.clone();
-            let value = new_map.entry(key).or_insert(default.clone()).clone();
+            let stored = new_map
+                .entry(key_val.to_key_string())
+                .or_insert_with(|| Value::wrap_dict_entry(&key_val, default.clone()));
+            let value = Value::dict_entry_value_for_iteration(stored);
             // Return tuple of [value, new_dict]
             Value::Tuple(vec![value, Value::Dict(Arc::new(new_map))])
         }
