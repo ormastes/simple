@@ -175,6 +175,15 @@ def inherited_build_settings(environ):
     return kept
 
 
+def llvm_bin_identity(environ):
+    """Record a kept SIMPLE_LLVM_BIN and the llc it supplies (unpinned tool)."""
+    value = environ.get("SIMPLE_LLVM_BIN")
+    if not value:
+        return {}
+    llc = Path(value) / ("llc.exe" if os.name == "nt" else "llc")
+    return {"llvm_bin": value, "llvm_bin_llc_sha256": digest(llc) if llc.is_file() else "absent"}
+
+
 def phase_capabilities(phase):
     """Required cases by compiler generation; skips are not passes."""
     return {1: (True, False), 2: (False, True), 3: (True, True)}[phase]
@@ -744,6 +753,7 @@ class Matrix:
             "source_root": self.root, "source_revision": revision, "runtime": self.runtime,
             "linker": self.linker, "linker_sha256": self.linker_sha,
             **({"driver": self.driver, "driver_sha256": self.driver_sha, "sdk": self.sdk} if self.darwin else {}),
+            **llvm_bin_identity(self.base),
             **{name.replace(".", "_") + "_sha256": sha for name, sha in fixture_hashes.items()}})
         sdn(self.out / "runtime-inputs.sdn", self.runtime_hashes)
         setup = self.out / "setup"
