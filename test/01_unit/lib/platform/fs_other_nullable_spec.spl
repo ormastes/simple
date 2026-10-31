@@ -1,0 +1,49 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Nil-path contract for rt_file_read_bytes / rt_file_hash_sha256 / rt_dir_list /
+# rt_file_list_dir / rt_file_read_lines: every one returns T? and nil means
+# "could not read"; an empty directory/file is a real (non-nil) value.
+
+use std.spec.step
+use std.spec.*
+
+use std.io_runtime.{shell, dir_list_optional, file_hash_sha256_or_empty}
+use std.sffi.fs.{file_list_dir, file_read_bytes_raw, file_read_lines_raw}
+use std.nogc_sync_mut.sffi.io.{file_hash_sha256, dir_list, dir_list_optional as sffi_dir_list_optional}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256_optional}
+
+describe "fs-other externs widened to T?":
+    it "unreadable directory is nil, empty directory is []":
+        step("unreadable vs empty directory")
+        val mk = shell("mktemp -d 2>/dev/null || mktemp -d -t spl_fsother")
+        val d = mk.stdout.trim()
+        val missing = d + "/does-not-exist"
+        val listed_missing = sffi_dir_list_optional(missing)
+        expect(listed_missing == nil).to_equal(true)
+        val listed_empty = sffi_dir_list_optional(d)
+        expect(listed_empty == nil).to_equal(false)
+        val empty_items: [text] = listed_empty ?? ["sentinel"]
+        expect(empty_items.len()).to_equal(0)
+        expect(file_list_dir(missing) == nil).to_equal(true)
+        val legacy: [text] = dir_list(missing)
+        expect(legacy.len()).to_equal(0)
+        shell("rmdir '" + d + "'")
+
+    it "unreadable file bytes/lines are nil":
+        step("bytes and lines")
+        expect(file_read_bytes_raw("/nonexistent/spl-fsother") == nil).to_equal(true)
+        expect(file_read_lines_raw("/nonexistent/spl-fsother") == nil).to_equal(true)
+
+    it "hash of unreadable file is nil, never a digest":
+        step("digest nil")
+        expect(file_hash_sha256("/nonexistent/spl-fsother") == nil).to_equal(true)
+        expect(file_hash_sha256_optional("/nonexistent/spl-fsother") == nil).to_equal(true)
+        expect(file_hash_sha256_or_empty("/nonexistent/spl-fsother")).to_equal("")
+
+    it "hash of a readable file is 64 hex":
+        step("digest ok")
+        val mk = shell("mktemp 2>/dev/null || mktemp -t spl_fsother")
+        val f = mk.stdout.trim()
+        val h: text = file_hash_sha256_optional(f) ?? ""
+        expect(h.len()).to_equal(64)
+        shell("rm -f '" + f + "'")
