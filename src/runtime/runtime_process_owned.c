@@ -2474,7 +2474,7 @@ SplArray* rt_process_owned_v3_collect_value(int64_t handle) {
     return owned_adapter_result_values(&result);
 }
 
-int rt_process_owned_v3_release_value(int64_t handle) {
+bool rt_process_owned_v3_release_value(int64_t handle) {
     RtOwnedProcessTokenV2 token; uint32_t index; RtOwnedProcessResultV2 result;
     if (!owned_adapter_begin_consume(handle, &token, &index)) return 0;
     int consumed = rt_process_owned_collect_v2(token, &result) ? 1 : 0;
@@ -5996,7 +5996,7 @@ SplArray* rt_process_owned_v3_result_value(int64_t handle) {
 SplArray* rt_process_owned_v3_collect_value(int64_t handle) {
     (void)handle; return owned_v3_unsupported_words(15, 14);
 }
-int rt_process_owned_v3_release_value(int64_t handle) {
+bool rt_process_owned_v3_release_value(int64_t handle) {
     (void)handle; return 0;
 }
 
