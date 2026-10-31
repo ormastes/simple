@@ -131,10 +131,12 @@ int64_t rt_file_stat(const uint8_t* path, uint64_t path_len) {
 bool rt_process_exists(int64_t pid) {
     if (pid <= 0) return false;
 #if defined(_WIN32)
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
     if (!process) return GetLastError() == ERROR_ACCESS_DENIED;
+    /* Not the exit code: exit 259 would read as STILL_ACTIVE forever. */
+    DWORD status = WaitForSingleObject(process, 0);
     CloseHandle(process);
-    return true;
+    return status == WAIT_TIMEOUT;
 #else
     return kill((pid_t)pid, 0) == 0 || errno == EPERM;
 #endif

@@ -85,6 +85,7 @@
 #endif
 
 #include "runtime.h"
+#include "runtime_utf8_lossy_private.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -601,7 +602,7 @@ int64_t rt_string_from_byte_array(int64_t array_value) {
         if (byte < 0 || byte > 255) { free(buf); return core_io_empty_text(); }
         buf[i] = (uint8_t)byte;
     }
-    int64_t result = rt_string_new(buf, (uint64_t)len);
+    int64_t result = spl_text_from_utf8_lossy(buf, (size_t)len);
     free(buf);
     return result;
 }
