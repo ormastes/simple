@@ -16,6 +16,7 @@
 # needed) since they're the part unique to this file.
 
 use app.devhub.cmd_tasks.{handle_tasks, _jira_build_list_jql, _looks_like_jira_key, _parse_limit, _strip_first_positional, _tasks_github_rows_from_json}
+use test.fixtures.devhub.fake_bin.{fake_bin_install, fake_bin_invocation, fake_bin_is_windows}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -23,23 +24,15 @@ extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 val FIXTURE_DIR = "build/test-itf-tasks-fixture"
 val ARGV_LOG = "{FIXTURE_DIR}/argv.log"
 val FIXTURE_HOME = "build/test-itf-tasks-fixture/home"
 
 
-fn shell_ok(cmd: text) -> bool:
-    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
-    exit_code == 0
-
-
 fn install_fake_bin(name: text, script_body: text):
-    """Write build/test-itf-tasks-fixture/<name> (chmod +x)."""
-    val path = "{FIXTURE_DIR}/{name}"
-    val _write = rt_file_write_text(path, script_body)
-    shell_ok("/bin/chmod +x \"{path}\"")
+    """Install the fake `name` into build/test-itf-tasks-fixture (shared installer)."""
+    val _bin = fake_bin_install(FIXTURE_DIR, name, script_body)
 
 
 fn write_fixture_config(backend: text, jira_done_status: text, jira_url: text, jira_email: text, jira_token: text):
@@ -52,7 +45,8 @@ fn write_fixture_config(backend: text, jira_done_status: text, jira_url: text, j
     through real ItfConfig fields (gap G6, both resolved)."""
     val dir = "{FIXTURE_HOME}/.config/devhub"
     val _mk = rt_dir_create_all(dir)
-    var config_body = "jira:\n    url: {jira_url}\n    acli_path: acli\n    email: {jira_email}\n"
+    val acli_path = fake_bin_invocation(FIXTURE_DIR, "acli")
+    var config_body = "jira:\n    url: {jira_url}\n    acli_path: {acli_path}\n    email: {jira_email}\n"
     config_body = config_body + "\ntasks:\n"
     if backend != "":
         config_body = config_body + "    default_backend: {backend}\n"
@@ -83,11 +77,19 @@ fn run_tasks(args: [text]) -> (i64, text):
     PATH/HOME afterward. Returns (exit_code, argv_log_contents)."""
     val original_path = rt_env_get("PATH") ?? ""
     val original_home = rt_env_get("HOME") ?? ""
-    val _set_path = rt_env_set("PATH", "{FIXTURE_DIR}:{original_path}")
+    val original_real = rt_env_get("DEVHUB_REAL_GH") ?? ""
+    val sep = if fake_bin_is_windows(): ";" else: ":"
+    val _set_path = rt_env_set("PATH", "{FIXTURE_DIR}{sep}{original_path}")
     val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+    # Windows only: point gh at the fake trampoline. A missing fake then fails
+    # closed (the path does not exist) instead of reaching the real gh on PATH.
+    if fake_bin_is_windows():
+        val _set_real = rt_env_set("DEVHUB_REAL_GH", fake_bin_invocation(FIXTURE_DIR, "gh"))
     val code = handle_tasks(args)
     val _restore_path = rt_env_set("PATH", original_path)
     val _restore_home = rt_env_set("HOME", original_home)
+    if fake_bin_is_windows():
+        val _restore_real = rt_env_set("DEVHUB_REAL_GH", original_real)
     val log = rt_file_read_text(ARGV_LOG) ?? ""
     (code, log)
 
