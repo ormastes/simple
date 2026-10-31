@@ -29,5 +29,29 @@ impl MirLowering:
                                 # Metadata only: never re-decode the loaded word
                                 # or turn an erased i64 into a claimed record.
                                 self.remember_local_hir_type(destination.id, member, 0, 0)
+                        case HirTypeKind.Dict(_, _):
+                            # A container member keeps its declared (or
+                            # call-site inferred) shape: `val (removed,
+                            # remaining) = partition(values, ..)` must hand
+                            # `remaining: Dict<text, (text, Record)>` on to
+                            # the next generic call's inference. Metadata
+                            # only; the handle word is untouched.
+                            self.remember_local_hir_type(destination.id, member, 0, 0)
+                            self.runtime_dict_locals[destination.id] = true
+                            self.mark_runtime_value_local(destination.id)
+                        case HirTypeKind.Array(array_member, _) | HirTypeKind.Slice(array_member):
+                            self.remember_local_hir_type(destination.id, member, 0, 0)
+                            self.runtime_array_locals[destination.id] = true
+                            self.mark_runtime_value_local(destination.id)
+                            match array_member.kind:
+                                case HirTypeKind.Named(element_symbol, element_arguments):
+                                    if element_arguments.len() == 0 and self.symbols.symbols.contains_key(element_symbol.id):
+                                        val element_declaration: HirSymbol = self.symbols.symbols[element_symbol.id]
+                                        match element_declaration.kind:
+                                            case SymbolKind.Struct:
+                                                if self.struct_field_order.contains(element_declaration.name):
+                                                    self.array_element_struct_syms[destination.id] = element_declaration.name
+                                            case _: pass
+                                case _: pass
                         case _: pass
                 case _: pass

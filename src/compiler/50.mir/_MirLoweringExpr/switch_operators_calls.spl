@@ -7613,6 +7613,26 @@ impl MirLowering:
                             conflicted = conflicted.push(binder_name)
                         elif not bindings.contains(binder_name):
                             bindings[binder_name] = record
+                else:
+                    # Any other shape (`Dict<text, (text, T)>`, `T?`, `(A, T)`,
+                    # `Result<T, E>`): walk the declared and actual types
+                    # together and bind every binder that meets a record.
+                    var actual: HirType? = nil
+                    val arg_expr: HirExpr = call_arg.value
+                    if arg_expr.has_type_ and arg_expr.type_ != nil:
+                        actual = Some(arg_expr.type_)
+                    if actual == nil and index < lowered.len():
+                        val lowered_operand: MirOperand = lowered[index]
+                        match lowered_operand.kind:
+                            case MirOperandKind.Copy(lowered_local) | MirOperandKind.Move(lowered_local):
+                                actual = self.find_local_hir_type(lowered_local.id)
+                            case _: ()
+                    if trace:
+                        print "[erased-callback-binding] arg={index} structural actual={actual != nil} has_type={arg_expr.has_type_}"
+                    if val actual_type = actual:
+                        val (walked, walked_conflicts) = self.bind_record_binders(declared_param, actual_type, bindings, conflicted)
+                        bindings = walked
+                        conflicted = walked_conflicts
             index = index + 1
         # Dict.remove differs between lanes (see mir_lowering_types.spl):
         # rebuild without the conflicted binders instead.
@@ -7621,6 +7641,157 @@ impl MirLowering:
             if not conflicted.contains(binder_name):
                 agreed[binder_name] = bindings[binder_name]
         agreed
+
+    me bind_record_binders(declared: HirType, actual: HirType, bindings: Dict<text, text>, conflicted: [text]) -> (Dict<text, text>, [text]):
+        """Structural walk of a declared parameter type against the actual
+        argument type: a binder meeting a known record layout is bound;
+        a second, different record for the same binder conflicts it."""
+        var out = bindings
+        var out_conflicts = conflicted
+        match declared.kind:
+            case HirTypeKind.TypeParam(binder_name, _):
+                val record = self.optional_payload_struct_name(actual)
+                if record != "":
+                    if out.contains(binder_name) and out[binder_name] != record:
+                        out_conflicts = out_conflicts.push(binder_name)
+                    elif not out.contains(binder_name):
+                        out[binder_name] = record
+            case HirTypeKind.Array(declared_member, _) | HirTypeKind.Slice(declared_member):
+                match actual.kind:
+                    case HirTypeKind.Array(actual_member, _) | HirTypeKind.Slice(actual_member):
+                        val (walked, walked_conflicts) = self.bind_record_binders(declared_member, actual_member, out, out_conflicts)
+                        out = walked
+                        out_conflicts = walked_conflicts
+                    case _: ()
+            case HirTypeKind.Optional(declared_member):
+                match actual.kind:
+                    case HirTypeKind.Optional(actual_member):
+                        val (walked, walked_conflicts) = self.bind_record_binders(declared_member, actual_member, out, out_conflicts)
+                        out = walked
+                        out_conflicts = walked_conflicts
+                    case _: ()
+            case HirTypeKind.Dict(declared_key, declared_value):
+                match actual.kind:
+                    case HirTypeKind.Dict(actual_key, actual_value):
+                        val (walked_key, key_conflicts) = self.bind_record_binders(declared_key, actual_key, out, out_conflicts)
+                        val (walked, walked_conflicts) = self.bind_record_binders(declared_value, actual_value, walked_key, key_conflicts)
+                        out = walked
+                        out_conflicts = walked_conflicts
+                    case _: ()
+            case HirTypeKind.Result(declared_ok, declared_err):
+                match actual.kind:
+                    case HirTypeKind.Result(actual_ok, actual_err):
+                        val (walked_ok, ok_conflicts) = self.bind_record_binders(declared_ok, actual_ok, out, out_conflicts)
+                        val (walked, walked_conflicts) = self.bind_record_binders(declared_err, actual_err, walked_ok, ok_conflicts)
+                        out = walked
+                        out_conflicts = walked_conflicts
+                    case _: ()
+            case HirTypeKind.Tuple(declared_members):
+                match actual.kind:
+                    case HirTypeKind.Tuple(actual_members):
+                        var member_index = 0
+                        while member_index < declared_members.len() and member_index < actual_members.len():
+                            val declared_member: HirType = declared_members[member_index]
+                            val actual_member: HirType = actual_members[member_index]
+                            val (walked, walked_conflicts) = self.bind_record_binders(declared_member, actual_member, out, out_conflicts)
+                            out = walked
+                            out_conflicts = walked_conflicts
+                            member_index = member_index + 1
+                    case _: ()
+            case _: ()
+        (out, out_conflicts)
+
+    me infer_erased_call_result_records(result: LocalId, callee: SymbolId, args: [HirCallArg], call_param_types: [HirType], lowered: [MirOperand]):
+        """Call-site inference for a generic call's RESULT, type information
+        only: `sorted = array_sort_by(records, cmp)` returns `[T]`, and the
+        caller already knows which record `T` is from its own arguments.
+        Re-record the result local's HIR type with the RECORD binders
+        substituted (`[T]` -> `[Record]`, `Dict<K, (text, T)>` -> `Dict<K,
+        (text, Record)>`), so the existing element/member/value projections
+        recover the layout. Scalar binders stay `TypeParam`: their words are
+        tagged and the erased decode arms own them. The callee stays one
+        erased body; nothing is duplicated or renamed (generics = one erased
+        body, 2026-11-01)."""
+        val declared_return: HirType? = self.resolved_call_hir_return_type(callee)
+        val trace = (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1"
+        if val return_hir = declared_return:
+            if not self.hir_type_mentions_type_param(return_hir, self.symbols): return
+            val bindings = self.erased_callback_record_bindings_for_call(args, call_param_types, lowered)
+            if trace:
+                print "[erased-result-inference] result={result.id} bindings={bindings.len()} params={call_param_types.len()} args={args.len()}"
+            if bindings.len() == 0: return
+            val inferred = self.substitute_record_binders(return_hir, bindings)
+            if trace:
+                print "[erased-result-inference] result={result.id} substituted={inferred != nil}"
+            if inferred == nil: return
+            val inferred_type: HirType = inferred ?? return_hir
+            self.remember_local_hir_type(result.id, inferred_type, 0, 0)
+            match inferred_type.kind:
+                case HirTypeKind.Named(_, _):
+                    val record = self.optional_payload_struct_name(inferred_type)
+                    if record != "": self.struct_value_syms[result.id] = record
+                case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                    self.runtime_array_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
+                    val record = self.optional_payload_struct_name(element)
+                    if record != "": self.array_element_struct_syms[result.id] = record
+                case HirTypeKind.Dict(_, _):
+                    self.runtime_dict_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
+                case _: ()
+
+    me substitute_record_binders(ty: HirType, bindings: Dict<text, text>) -> HirType?:
+        """`ty` with every bound RECORD binder replaced by its `Named`
+        symbol; nil when nothing in `ty` changed. A binder bound to a
+        layout whose bare symbol is not in scope is left erased."""
+        match ty.kind:
+            case HirTypeKind.TypeParam(binder_name, _):
+                if not bindings.contains(binder_name): return nil
+                val record_symbol = self.symbols.lookup_or_invalid(layout_key_bare_name(bindings[binder_name]))
+                if not record_symbol.is_valid(): return nil
+                val named = HirType(kind: HirTypeKind.Named(record_symbol, []), span: ty.span)
+                # The binding carries a layout key (module-qualified for a
+                # local struct); the symbol answers its own layout name. Both
+                # must name a known layout, and agree on the bare name.
+                val resolved_layout = self.optional_payload_struct_name(named)
+                if resolved_layout == "": return nil
+                if layout_key_bare_name(resolved_layout) != layout_key_bare_name(bindings[binder_name]): return nil
+                return Some(named)
+            case HirTypeKind.Array(element, size):
+                if val inner = self.substitute_record_binders(element, bindings):
+                    return Some(HirType(kind: HirTypeKind.Array(inner, size), span: ty.span))
+                nil
+            case HirTypeKind.Slice(element):
+                if val inner = self.substitute_record_binders(element, bindings):
+                    return Some(HirType(kind: HirTypeKind.Slice(inner), span: ty.span))
+                nil
+            case HirTypeKind.Optional(element):
+                if val inner = self.substitute_record_binders(element, bindings):
+                    return Some(HirType(kind: HirTypeKind.Optional(inner), span: ty.span))
+                nil
+            case HirTypeKind.Dict(key, value):
+                val new_key = self.substitute_record_binders(key, bindings)
+                val new_value = self.substitute_record_binders(value, bindings)
+                if new_key == nil and new_value == nil: return nil
+                return Some(HirType(kind: HirTypeKind.Dict(new_key ?? key, new_value ?? value), span: ty.span))
+            case HirTypeKind.Result(ok, err):
+                val new_ok = self.substitute_record_binders(ok, bindings)
+                val new_err = self.substitute_record_binders(err, bindings)
+                if new_ok == nil and new_err == nil: return nil
+                return Some(HirType(kind: HirTypeKind.Result(new_ok ?? ok, new_err ?? err), span: ty.span))
+            case HirTypeKind.Tuple(members):
+                var changed = false
+                var new_members: [HirType] = []
+                for member in members:
+                    val member_type: HirType = member
+                    if val inner = self.substitute_record_binders(member_type, bindings):
+                        new_members = new_members.push(inner)
+                        changed = true
+                    else:
+                        new_members = new_members.push(member_type)
+                if not changed: return nil
+                return Some(HirType(kind: HirTypeKind.Tuple(new_members), span: ty.span))
+            case _: nil
 
     me lower_lambda_value_for_type(lam: HirExpr, declared: HirType?, runtime_any_abi: bool = false) -> MirOperand?:
         if runtime_any_abi and declared != nil:
@@ -8772,6 +8943,7 @@ impl MirLowering:
                 result = abi_builder.emit_binop(MirBinOp.Ne, mir_operand_copy(wide_result), mir_operand_copy(zero_result), MirType.bool())
                 self.builder = abi_builder
             self.remember_call_hir_return(result, direct_symbol)
+            self.infer_erased_call_result_records(result, direct_symbol, args, call_param_types, arg_operands)
             if stamped_struct_name != "" and not self.struct_value_syms.contains(result.id):
                 self.struct_value_syms[result.id] = stamped_struct_name
             if stamped_return != nil:
