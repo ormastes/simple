@@ -35,10 +35,24 @@ val dn_sha_before = dense_file_sha256(DENSE_BASE)
 val dn_view: StorageReadView? = dense_open_view(dn_base_path)
 val dn_port: DatabaseStoragePortV1 = database_storage_port_v1()
 
+# The seed interpreter mis-evaluates a table read on the view struct that the
+# open returned (see doc/08_tracking/bug/seed_interpreter_opened_view_read_tuple_index_2026_10_31.md),
+# but reads the same bytes correctly from a push-built copy: read through a copy.
+fn copied_view() -> StorageReadView:
+    val original = dn_view.?
+    var bytes: [u8] = []
+    var i = 0
+    while i < original.image.len():
+        bytes.push(original.image[i])
+        i = i + 1
+    StorageReadView(format: original.format, source_path: original.source_path, image: bytes,
+        page_size: original.page_size, page_count: original.page_count,
+        reserved_bytes: original.reserved_bytes, text_encoding: original.text_encoding)
+
 fn read_rows(table: text) -> [DbRow]:
     if dn_view == nil:
         return []
-    match dn_port.read_table(dn_view.?, table):
+    match dn_port.read_table(copied_view(), table):
         case Ok(rows): rows
         case Err(_): []
 
@@ -122,7 +136,7 @@ describe "adverse reads on the dn_view view":
         step("Read a table name absent from the schema")
         # @capture(protocol_json): storage-dn_port error code for the unknown table
         val view = dn_view.?
-        val code = match dn_port.read_table(view, "no_such_table"):
+        val code = match dn_port.read_table(copied_view(), "no_such_table"):
             case Ok(rows): "OK:{rows.len()}"
             case Err(problem): problem.code()
         expect(code.starts_with("STORAGE_PORT_")).to_equal(true)
