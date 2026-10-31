@@ -9,7 +9,7 @@
 # ponytail: thin facade over `tmux`/`git` CLIs via process_run; no daemon, no
 # state file. Upgrade to os.apps.smux when an in-process multiplexer is needed.
 
-use app.io.mod.{process_run, dir_exists, file_exists, dir_create_all, current_time_ms, sleep_ms, env_get, env_set, process_spawn_async}
+use app.io.mod.{process_run, dir_exists, file_exists, dir_create_all, current_time_ms, sleep_ms, env_get, env_set}
 use std.nogc_async_mut.sosix.{sosix_platform, sosix_which}
 use std.common.string_core.{text_to_bytes}
 use os.apps.smux.server.{smux_server_request}
@@ -39,12 +39,11 @@ pub fn with_depth(command: text) -> text:
         return ""
     DEPTH_ENV + "=" + (workspace_depth() + 1).to_text() + " " + command
 
-# The pane this process itself runs in: smux panes export SMUX_PANE (their
-# `session:name.i` target), tmux sets TMUX_PANE (`%N`). "" outside a pane.
+# The pane this process itself runs in (tmux sets TMUX_PANE), or "".
+# On smux, panes export SMUX_PANE (their `session:name.i` target) at spawn.
 fn _own_pane_id() -> text:
-    val smux_pane = env_get("SMUX_PANE")
-    if smux_pane != "":
-        return smux_pane
+    if _smux():
+        return env_get("SMUX_PANE")
     env_get("TMUX_PANE")
 
 struct AgentWorkspace:
@@ -151,16 +150,21 @@ fn _smux_req_ok(ws: AgentWorkspace, command: text) -> bool:
 # Start the owner (`smux_client --serve`) detached when none answers. SIMPLE_BINARY
 # is cleared for it so panes that run `bin/simple test` are not pinned to the
 # spec runner binary.
+#
+# Start-Process (ShellExecute) inherits NO handles. A plain process_spawn_async
+# hands the owner this process's stdout/stderr, so a caller reading this CLI
+# through a pipe (process_run) never sees EOF while the owner lives.
 fn _smux_owner_up(ws: AgentWorkspace) -> bool:
     if _smux_req(ws, "list-sessions") != nil:
         return true
     # The spawn inherits this process environment: clear SIMPLE_BINARY for it, then restore.
     val pinned = env_get("SIMPLE_BINARY")
     env_set("SIMPLE_BINARY", "")
-    val pid = process_spawn_async("bin/simple.exe",
-        ["run", "src/app/hosted_apps/smux_client.spl", "--serve", _smux_addr(ws), SMUX_TOKEN])
+    val start = "Start-Process -WindowStyle Hidden -FilePath 'bin/simple.exe' -ArgumentList " +
+        "'run','src/app/hosted_apps/smux_client.spl','--serve','" + _smux_addr(ws) + "','" + SMUX_TOKEN + "'"
+    val (_o, _e, code) = process_run("powershell", ["-NoProfile", "-NonInteractive", "-Command", start])
     env_set("SIMPLE_BINARY", pinned)
-    if pid <= 0:
+    if code != 0:
         return false
     val deadline = current_time_ms() + 90000
     while current_time_ms() < deadline:
@@ -218,7 +222,9 @@ fn _smux_pane_spawn(ws: AgentWorkspace, title: text, cwd: text, command: text, r
     var body = "exec sh -i"
     if command != "":
         body = command
-    val script = "export SMUX_PANE=" + ws.session + ":" + title + "." + idx.to_text() + "; cd " + posix_quote_arg(cwd) + " && " + body
+    # SIMPLE_BINARY unset: a pane `bin/simple test` must not be pinned to the
+    # binary of whatever process started the owner.
+    val script = "unset SIMPLE_BINARY; export SMUX_PANE=" + ws.session + ":" + title + "." + idx.to_text() + "; cd " + posix_quote_arg(cwd) + " && " + body
     val line = windows_spawn_command_line("sh", ["-c", script])
     val r = _smux_req(ws, "spawn-window " + ws.session + " " + title + " " + SMUX_PANE_COLS.to_text() + " " + SMUX_PANE_ROWS.to_text() + " " + line)
     if r == nil or not smux_remote_reply_ok(r ?? ""):
@@ -232,6 +238,13 @@ pub fn session_alive(ws: AgentWorkspace) -> bool:
         val r = _smux_req(ws, "has-session " + ws.session)
         return r != nil and (r ?? "").starts_with("smux: session exists")
     _tmux(ws: ws, args: ["has-session", "-t", ws.session], reason: "no_session").status == "ok"
+
+# Whether the workspace's server still answers at all (smux owner process or the
+# private tmux server), independent of whether it holds the session.
+pub fn workspace_server_alive(ws: AgentWorkspace) -> bool:
+    if _smux():
+        return _smux_req(ws, "list-sessions") != nil
+    _tmux(ws: ws, args: ["list-sessions"], reason: "no_server").status == "ok"
 
 pub fn session_ensure(ws: AgentWorkspace, cwd: text) -> WorkspaceResult:
     if session_alive(ws):
@@ -256,7 +269,7 @@ pub fn session_kill(ws: AgentWorkspace) -> WorkspaceResult:
         if not killed:
             return _err(reason: "kill_server_failed", out: ws.session)
         return _ok("")
-    # Only ever the private socket: `-L caret_ws_*` cannot name the user server.
+    # Only ever the private socket: `-L caret_ws_*` cannot name the user's server.
     _tmux(ws: ws, args: ["kill-server"], reason: "kill_server_failed")
 
 # Exact-name probe. tmux allows duplicate window names and `-t session:name`
@@ -421,18 +434,16 @@ pub fn worktree_list(ws: AgentWorkspace) -> [text]:
 # --- composite: one agent = one worktree + one pane --------------------------
 
 pub fn agent_attach(ws: AgentWorkspace, agent_id: text, command: text) -> WorkspaceResult:
+    # smux reserves the owner bootstrap window name, so it is never taken for an agent.
     if _smux() and not _valid_name(agent_id):
         return _err(reason: "invalid_name", out: agent_id)
-    # Probed BEFORE session_ensure: the session's own bootstrap window must not
-    # be mistaken for an already-attached agent of the same name.
-    val attached = session_alive(ws) and window_exists(ws: ws, name: agent_id)
     val wt = worktree_add(ws: ws, agent_id: agent_id)
     if wt.status != "ok":
         return wt
     val s = session_ensure(ws: ws, cwd: worktree_path(ws: ws, agent_id: agent_id))
     if s.status != "ok":
         return s
-    if attached:
+    if window_exists(ws: ws, name: agent_id):
         return _ok("exists")
     window_open(ws: ws, name: agent_id, cwd: worktree_path(ws: ws, agent_id: agent_id), command: with_depth(command))
 
@@ -471,7 +482,7 @@ pub fn launch_caret_suite(ws: AgentWorkspace, cwd: text, spec: text) -> Workspac
 
 export AgentWorkspace, WorkspaceResult
 export agent_workspace, tmux_available, workspace_backend, workspace_available, pane_pid_lines,workspace_depth, depth_exceeded, with_depth,
-    session_alive, session_ensure, session_kill,
+    session_alive, session_ensure, session_kill, workspace_server_alive,
     window_exists, window_open, pane_split, list_panes, list_panes_except, send_to_pane, send_to_each_pane,
     capture_pane, wait_for_pane_text, worktree_path, worktree_add,
     worktree_remove, worktree_list, agent_attach, agent_detach, launch_caret_suite

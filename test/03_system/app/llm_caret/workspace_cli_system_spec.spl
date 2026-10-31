@@ -32,7 +32,7 @@ workspace-launched child from relaunching the suite.
 
 use std.spec.{describe, it, expect, step}
 use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, file_exists, cwd, env_set, current_time_ms, sleep_ms}
-use app.llm_caret.agent_workspace.{agent_workspace, workspace_available, session_kill, session_alive, pane_pid_lines}
+use app.llm_caret.agent_workspace.{agent_workspace, workspace_available, session_kill, session_alive, pane_pid_lines, workspace_server_alive}
 use std.nogc_async_mut.sosix.{sosix_platform}
 
 val CLI = "src/app/llm_caret/main.spl"
@@ -75,6 +75,15 @@ fn _agent_pids(lines: [text]) -> [i64]:
     for line in lines:
         val f = line.trim().split(" ")
         if f.len() == 2 and f[0].starts_with("agent-"):
+            pids.push(int(f[1]) ?? 0)
+    pids
+
+# Pids of every pane, the session's own first pane included.
+fn _all_pids(lines: [text]) -> [i64]:
+    var pids: [i64] = []
+    for line in lines:
+        val f = line.trim().split(" ")
+        if f.len() == 2:
             pids.push(int(f[1]) ?? 0)
     pids
 
@@ -157,9 +166,12 @@ describe "LLM Caret workspace CLI":
 
         step("detach removes window and worktree; kill leaves no session and no live pane child")
         val ws_here = agent_workspace(id, repo, "")
-        val pids = _agent_pids(pane_pid_lines(ws_here))
+        val pid_lines = pane_pid_lines(ws_here)
+        val pids = _agent_pids(pid_lines)
         expect(pids.len()).to_equal(3)  # oracle: the owner/tmux reports one child pid per agent pane
-        for pid in pids:
+        val every_pid = _all_pids(pid_lines)
+        expect(every_pid.len()).to_equal(4)  # oracle: three agent panes plus the session's own first pane
+        for pid in every_pid:
             expect(_pid_alive(pid)).to_be(true)  # oracle: each reported pid is a live OS process before teardown
         val d = _cli(id, repo, ["detach", "agent-1"])
         expect(d.code).to_equal(0)  # oracle: detach succeeds
@@ -167,7 +179,8 @@ describe "LLM Caret workspace CLI":
         expect(_lines_with(_cli(id, repo, ["panes"]).out, id + ":").len()).to_equal(3)  # oracle: two agents remain after one detach
         expect(_cli(id, repo, ["kill"]).code).to_equal(0)  # oracle: teardown succeeds
         expect(session_alive(ws_here)).to_be(false)
-        for pid in pids:
+        expect(workspace_server_alive(ws_here)).to_be(false)  # oracle: kill stops the server it started; none is leaked
+        for pid in every_pid:
             expect(_wait_for_exit(pid, 15000)).to_be(true)  # oracle: killing the session ends every pane child in the OS process table
         dir_remove_all(root)
 
