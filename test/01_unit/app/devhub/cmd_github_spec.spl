@@ -22,42 +22,40 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 use app.devhub.cmd_github.{handle_github, _gh_field, _gh_login, _default_fields, _github_author_approval_rejected, _self_review_steps, _github_review_selector, _github_review_repo_args, _github_pr_repository}
 use std.common.json.value.{json_value_parse_or_null}
+use test.fixtures.devhub.fake_bin.{fake_bin_install, fake_bin_invocation, fake_bin_is_windows, fake_bin_ready}
 
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 val FIXTURE_DIR = "build/test-itf-github-fixture"
 val ARGV_LOG = "{FIXTURE_DIR}/argv.log"
 
 
-fn shell_ok(cmd: text) -> bool:
-    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
-    exit_code == 0
-
-
 fn install_fake_gh(script_body: text) -> text:
-    """Write build/test-itf-github-fixture/gh (chmod +x) and return its dir."""
-    val _mk = rt_dir_create_all(FIXTURE_DIR)
+    """Install the fake gh into build/test-itf-github-fixture; return its dir."""
     val _rm = rt_file_delete(ARGV_LOG)
-    val path = "{FIXTURE_DIR}/gh"
-    val _write = rt_file_write_text(path, script_body)
-    val _chmod = shell_ok("/bin/chmod +x \"{path}\"")
+    val _gh = fake_bin_install(FIXTURE_DIR, "gh", script_body)
     FIXTURE_DIR
 
 
 fn run_github_with_fake_gh(dir: text, args: [text]) -> (i64, text):
-    """Run handle_github(args) with `dir` prepended to PATH; always restores
-    PATH afterward. Returns (exit_code, argv_log_contents)."""
+    """Run handle_github(args) with `dir` first on PATH and restore the env
+    afterward. On Windows DEVHUB_REAL_GH also points at the fake trampoline,
+    so the real gh is never reached. A missing fake returns -1 (the test
+    fails) instead of falling through to the real CLI."""
     val original_path = rt_env_get("PATH") ?? ""
-    val _set = rt_env_set("PATH", "{dir}:{original_path}")
-    val code = handle_github(args)
+    val original_real = rt_env_get("DEVHUB_REAL_GH") ?? ""
+    val sep = if fake_bin_is_windows(): ";" else: ":"
+    val _set = rt_env_set("PATH", "{dir}{sep}{original_path}")
+    if fake_bin_is_windows():
+        val _real = rt_env_set("DEVHUB_REAL_GH", fake_bin_invocation(dir, "gh"))
+    val code = if fake_bin_ready(dir, "gh"): handle_github(args) else: -1
     val _restore = rt_env_set("PATH", original_path)
-    val log = rt_file_read_text(ARGV_LOG)
+    if fake_bin_is_windows():
+        val _restore_real = rt_env_set("DEVHUB_REAL_GH", original_real)
+    val log = rt_file_read_text(ARGV_LOG) ?? ""
     (code, log)
 
 

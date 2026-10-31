@@ -1,0 +1,52 @@
+"""Shared fake-binary installer for the devhub specs.
+
+Off Windows: writes `<dir>/<name>` as a chmod +x sh script and returns the bare
+`<name>`, so PATH lookup is unchanged.
+
+On Windows: the seed resolves a bare command only to `<name>.exe`, never to a
+`.cmd` or an extensionless script. A bare name would therefore fall through to
+the real binary on PATH. We write `<dir>/<name>.cmd`, a trampoline that runs the
+sh shim (`sh "%~dp0<name>" %*`), and return its path. Callers pass that path to
+the adapter: DEVHUB_REAL_GH for gh, and the acli_path config key for acli.
+Verified on the seed: args with spaces, `|`, quotes and `--jq` pipes arrive
+unchanged.
+
+Callers set DEVHUB_REAL_GH on Windows even when no fake is installed. A missing
+trampoline then fails closed instead of reaching the real gh.
+"""
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+
+fn fake_bin_is_windows() -> bool:
+    (rt_env_get("OS") ?? "").lower().contains("windows")
+
+
+fn fake_bin_invocation(dir: text, name: text) -> text:
+    """The text to hand the adapter for the fake `name` in `dir`."""
+    if fake_bin_is_windows():
+        return "{dir}/{name}.cmd"
+    name
+
+
+fn fake_bin_ready(dir: text, name: text) -> bool:
+    """True when the fake `name` is on disk. Callers fail the test when false."""
+    if fake_bin_is_windows():
+        return rt_file_exists("{dir}/{name}.cmd")
+    rt_file_exists("{dir}/{name}")
+
+
+fn fake_bin_install(dir: text, name: text, sh_body: text) -> text:
+    """Write the sh shim for `name` into `dir` and return its invocation text."""
+    val _mk = rt_dir_create_all(dir)
+    val path = "{dir}/{name}"
+    val _write = rt_file_write_text(path, sh_body)
+    if fake_bin_is_windows():
+        val _cmd = rt_file_write_text("{path}.cmd", "@echo off\r\nsh \"%~dp0{name}\" %*\r\n")
+    else:
+        val (_stdout, _stderr, _chmod) = rt_process_run_timeout("/bin/sh", ["-c", "/bin/chmod +x \"{path}\""], 5000)
+    fake_bin_invocation(dir, name)
