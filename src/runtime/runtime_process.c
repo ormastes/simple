@@ -1656,7 +1656,10 @@ bool rt_process_close_pinned_executable_owned(int64_t handle) {
 }
 #endif
 
-#ifndef __linux__
+/* Darwin's executable pin (a private snapshot) lives in
+ * runtime_process_owned.c beside the observation V4 owner, so the seed runtime,
+ * which compiles that file but not this one, links the same C implementation. */
+#if !defined(__linux__) && !defined(__APPLE__)
 int64_t rt_process_acquire_pinned_executable(int64_t handle) {
     (void)handle;
     return -1;
@@ -1740,6 +1743,7 @@ int64_t rt_process_pin_executable(const char* canonical_path) {
 #endif
 }
 
+#ifndef __APPLE__ /* Darwin: runtime_process_owned.c. */
 int64_t rt_process_pin_executable_owned(const char* canonical_path) {
 #ifndef __linux__
     (void)canonical_path;
@@ -1770,6 +1774,7 @@ int64_t rt_process_pin_executable_owned_value(const uint8_t* path, uint64_t path
 int rt_process_close_pinned_executable_owned_value(int64_t handle) {
     return rt_process_close_pinned_executable_owned(handle) ? 1 : 0;
 }
+#endif
 
 bool rt_process_close_pinned_executable(int64_t handle) {
 #ifndef __linux__

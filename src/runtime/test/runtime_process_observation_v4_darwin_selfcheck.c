@@ -1,14 +1,17 @@
 /* Run from the repository root:
- * cc -std=c11 -O0 -pthread src/runtime/test/runtime_process_observation_v4_darwin_selfcheck.c -o /tmp/runtime_process_observation_v4_darwin_selfcheck
  * /tmp/runtime_process_observation_v4_darwin_selfcheck
- * Native macOS check for the V4 cwd pin foundation. Full process V4 remains
- * intentionally unavailable on Darwin; this exercises only directory pins. */
+ * cc -std=c11 -O0 -Wall -Wextra -Werror -pthread src/runtime/test/runtime_process_observation_v4_darwin_selfcheck.c src/runtime/runtime_process_tree.c -o /tmp/runtime_process_observation_v4_darwin_selfcheck
+ * Native macOS check for the V4 cwd pin foundation, the partial Darwin V4
+ * capability mask, and V4 rejection without child authority. Every other
+ * owned-process family stays ENOTSUP on Darwin. The live Darwin V4 owner is
+ * exercised by runtime_process_observation_v4_darwin_live_selfcheck.c. */
 #if !defined(__APPLE__)
 #include <stdio.h>
 int main(void) { puts("runtime_process_observation_v4_darwin_selfcheck: SKIP (requires macOS)"); return 77; }
 #else
 #define _DARWIN_C_SOURCE
 #define RT_PROCESS_OBSERVATION_V4_TESTING 1
+#define RT_OWNED_EXTERNAL_PIN 1 /* This harness stubs the executable pin. */
 #include "../runtime.h"
 #include <assert.h>
 #include <errno.h>
@@ -158,20 +161,24 @@ static void must_reject_path(const char* bytes, size_t len) {
 }
 static void assert_words_exact(SplArray* words, const int64_t* expected, int64_t count) {
     assert(rt_array_len(words) == count);
-    for (int64_t i = 0; i < count; i++) assert(rt_array_get(words, i) == expected[i]);
+    for (int64_t i = 0; i < count; i++) {
+        if (rt_array_get(words, i) != expected[i])
+            fprintf(stderr, "word %lld: got %lld expected %lld\n", (long long)i,
+                    (long long)rt_array_get(words, i), (long long)expected[i]);
+        assert(rt_array_get(words, i) == expected[i]);
+    }
 }
-static void assert_v4_unavailable(SplArray* result) {
+/* A rejection owns no child: status REJECTED, zero ticket and pid, and a
+ * positive errno (exactly `error` when non-zero). */
+static void assert_v4_rejected(SplArray* result, int error) {
     assert(rt_array_len(result) == 4);
-    assert(rt_array_len(tuple_item(result, 0)) == 0);
-    assert(rt_array_len(tuple_item(result, 1)) == 0);
-    assert(rt_array_len(tuple_item(result, 2)) == 0);
-    int64_t expected[64] = {0};
-    expected[0] = 4; expected[1] = 1; expected[2] = 64; expected[3] = 3;
-    expected[8] = 9; expected[10] = 1; expected[11] = 10; expected[12] = ENOTSUP;
-    expected[13] = 4; expected[16] = -1; expected[17] = -1;
-    for (int i = 21; i <= 27; i++) expected[i] = -1;
-    expected[42] = 1; expected[49] = 2; expected[54] = 2;
-    assert_words_exact(tuple_item(result, 3), expected, 64);
+    SplArray* words = tuple_item(result, 3);
+    assert(rt_array_len(words) == 64);
+    assert(rt_array_get(words, POV4_STATUS) == POV4_STATUS_REJECTED);
+    assert(rt_array_get(words, POV4_TICKET_HIGH) == 0 && rt_array_get(words, POV4_TICKET_LOW) == 0);
+    assert(rt_array_get(words, POV4_PID) == 0);
+    assert(rt_array_get(words, POV4_ERRNO) > 0);
+    if (error) assert(rt_array_get(words, POV4_ERRNO) == error);
 }
 static void check_unavailable_process_apis(SplArray* request) {
     const int64_t caps_expected[] = {RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION, 0, 0};
@@ -205,21 +212,29 @@ static void check_unavailable_process_apis(SplArray* request) {
     assert_words_exact(rt_process_owned_v3_set_capture_limits_value(1, 1, 1),
                        capture_limits_expected, 3);
 
-    const int64_t v4_caps_expected[] = {4, 8, 0, 0, 0, 0, 0, ENOTSUP};
+    /* Darwin V4 is available with its own, weaker capability mask: no sealed
+     * executable, no ptrace exec proof, no memory cap. */
+    const int64_t v4_caps_expected[] = {4, 8, 1, POV4_DARWIN_CAPABILITIES,
+        POV4_SLOTS, RT_OWNED_ABI_MAX_OUTPUT_BYTES, POV4_MAX_WAIT_NS, 0};
     assert_words_exact(rt_process_observation_v4_capabilities_value(), v4_caps_expected, 8);
-    assert_v4_unavailable(rt_process_observation_v4_start_value(request));
-    assert_v4_unavailable(rt_process_observation_v4_start_pinned_value(77, 1, request));
-    assert_v4_unavailable(rt_process_observation_v4_start_pinned_value(77, 1, NULL));
+    assert((POV4_DARWIN_CAPABILITIES & (POV4_CAP_PINNED_EXEC | POV4_CAP_PTRACE_EXEC |
+                                        POV4_CAP_RLIMIT_AS)) == 0);
+    /* The unpinned start family stays refused; mismatched pins and unknown
+     * tickets are rejected before any executable is acquired. */
+    assert_v4_rejected(rt_process_observation_v4_start_value(request), ENOTSUP);
+    assert_v4_rejected(rt_process_observation_v4_start_pinned_value(77, 1, request), ESTALE);
+    assert_v4_rejected(rt_process_observation_v4_start_pinned_value(77, 1, NULL), 0);
     SplArray* ticket = rt_array_new(0), *receipt = rt_array_new(0), *digest = rt_array_new(0);
-    assert_v4_unavailable(rt_process_observation_v4_poll_value(ticket, 0));
-    assert_v4_unavailable(rt_process_observation_v4_cancel_value(ticket, 0));
-    assert_v4_unavailable(rt_process_observation_v4_collect_value(ticket, 0));
-    assert_v4_unavailable(rt_process_observation_v4_ack_collect_value(ticket, digest));
-    assert_v4_unavailable(rt_process_inspection_v1_start_pinned_value(
-        77, 1, request, receipt, digest));
-    int64_t input_receipt_expected[75] = {1}; input_receipt_expected[10] = ENOTSUP;
-    assert_words_exact(rt_process_inspection_v1_input_receipt_value(ticket),
-                       input_receipt_expected, 75);
+    assert_v4_rejected(rt_process_observation_v4_poll_value(ticket, 0), 0);
+    assert_v4_rejected(rt_process_observation_v4_cancel_value(ticket, 0), 0);
+    assert_v4_rejected(rt_process_observation_v4_collect_value(ticket, 0), 0);
+    assert_v4_rejected(rt_process_observation_v4_ack_collect_value(ticket, digest), 0);
+    /* Inspection V1 (atomic stdin) stays outside the Darwin scope. */
+    assert_v4_rejected(rt_process_inspection_v1_start_pinned_value(
+        77, 1, request, receipt, digest), ENOTSUP);
+    SplArray* input_receipt = rt_process_inspection_v1_input_receipt_value(ticket);
+    assert(rt_array_len(input_receipt) == 75 && rt_array_get(input_receipt, 0) == 1 &&
+           rt_array_get(input_receipt, 10) == ENOTSUP);
     assert(executable_acquisitions == 0);
 }
 static void check_direct_unsupported_receipts(void) {
