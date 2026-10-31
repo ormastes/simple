@@ -148,12 +148,17 @@ describe "return-type interface v1":
         expect(err_message(unbound)).to_equal(
             "E-RTI-007: type parameter 'T' is not bound by the callable or its owner")
 
-    it "reports the exact unsupported-Any diagnostic for an actual HIR return term":
+    it "represents Any as a builtin interface term and binds it back":
         val term = HirType(kind: HirTypeKind.Any, span: Span.empty())
         val result = rti_term_of_hir_type(term, SymbolTable.new(), [])
-        expect(err_code(result)).to_equal("E-RTI-007")
-        expect(err_message(result)).to_equal(
-            "E-RTI-007: declared return is Any; not representable in an interface row")
+        match result:
+            case Ok(term):
+                expect(rti_term_canonical_text(term)).to_equal("b:any")
+                val bound = ReturnTypeInterfaceTable.new().bind(term, SymbolTable.new()).unwrap()
+                match bound.kind:
+                    case HirTypeKind.Any: pass
+                    case _: fail("Any did not round-trip through the interface")
+            case Err(error): fail(error.message)
 
     it "reports the exact missing nominal declaration diagnostic from an empty symbol table":
         val result = rti_type_decl_ref(SymbolTable.new(), 9)
@@ -272,11 +277,12 @@ describe "return-type interface v1":
         expect(table.register_module_rows("m.d", [first]).unwrap()).to_equal(0)
         expect(err_code(table.register_module_rows("m.d", [decided_row("m.d", "f", RtType.Builtin("bool"), 0)]))).to_equal("E-RTI-006")
 
-    it "refuses an Any return at export":
+    it "publishes an Any return as a builtin interface term":
         val hir = path_spelled_hir("fn loose() -> Any:\n    0\n", "src/rti_any/mod.spl")
-        val rows = rti_rows_from_hir_v1(hir)
-        expect(err_code(rows)).to_equal("E-RTI-007")
-        expect(err_message(rows).contains("loose")).to_equal(true)
+        val rows = rti_rows_from_hir_v1(hir).unwrap()
+        expect(rows.rows.len()).to_equal(1)
+        expect(rti_term_canonical_text(
+            ReturnTypeInterfaceTable.new().require_concrete(rows.rows[0].entry).unwrap())).to_equal("b:any")
 
     it "counts unannotated functions":
         val hirs = fixture_hirs()
