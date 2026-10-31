@@ -546,13 +546,14 @@ impl MethodResolver:
                     case _:
                         MethodResolution.Unresolved
 
-                val resolved_method_raw_id: i64? = match new_resolution:
-                    case InstanceMethod(_, method_id): method_id.id
-                    case TraitMethod(_, method_id): method_id.id
-                    case FreeFunction(func_id): func_id.id
-                    case StaticMethod(_, method_id): method_id.id
-                    case Unresolved: nil
-                    case BuiltinCollection(_): nil
+                var resolved_method_raw_id: i64? = nil
+                match new_resolution:
+                    case InstanceMethod(_, method_id): resolved_method_raw_id = method_id.id
+                    case TraitMethod(_, method_id): resolved_method_raw_id = method_id.id
+                    case FreeFunction(func_id): resolved_method_raw_id = func_id.id
+                    case StaticMethod(_, method_id): resolved_method_raw_id = method_id.id
+                    case Unresolved: pass
+                    case BuiltinCollection(_): pass  # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload MIR rejects an Option-typed val initialized from a match expression (E: enum match expression and retained Result/Optional declarations conflict); statement-arm form is equivalent
 
                 var fallback_type: HirType? = nil
                 # `!= nil` cannot screen this slot: the nil sentinel is raw 3,
@@ -686,11 +687,9 @@ impl MethodResolver:
             # Control flow
             case If(cond, then_, else_):
                 # @workaround bug=enum_payload_type_mismatch_untyped_option_match_2026-10-24 reason=untyped Option-valued match initializer reaches the enum payload slot as mismatched type
-                val resolved_else: HirBlock? = match else_:
-                    case Some(else_block):
-                        Some(self.resolve_block(else_block))
-                    case nil:
-                        nil
+                var resolved_else: HirBlock? = nil
+                if val else_block = else_:
+                    resolved_else = Some(self.resolve_block(else_block))  # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload MIR rejects an Option-typed val initialized from a match expression (E: enum match expression and retained Result/Optional declarations conflict); if-val form is equivalent
                 HirExprKind.If(self.resolve_expr(cond), self.resolve_block(then_), resolved_else)
 
             case IfChain(arms, else_):
@@ -703,9 +702,9 @@ impl MethodResolver:
                         span: typed_arm.span
                     ))
                 # @workaround bug=enum_payload_type_mismatch_untyped_option_match_2026-10-24 reason=untyped Option-valued match initializer reaches the enum payload slot as mismatched type
-                val resolved_else: HirBlock? = match else_:
-                    case Some(else_block): Some(self.resolve_block(else_block))
-                    case nil: nil
+                var resolved_else: HirBlock? = nil
+                if val else_block = else_:
+                    resolved_else = Some(self.resolve_block(else_block))  # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload MIR rejects an Option-typed val initialized from a match expression (E: enum match expression and retained Result/Optional declarations conflict); if-val form is equivalent
                 HirExprKind.IfChain(resolved_arms, resolved_else)
 
             case MatchCase(scrutinee, arms):
@@ -752,20 +751,16 @@ impl MethodResolver:
             # Control transfer
             case Return(value):
                 # @workaround bug=enum_payload_type_mismatch_untyped_option_match_2026-10-24 reason=untyped Option-valued match initializer reaches the enum payload slot as mismatched type
-                val resolved_value: HirExpr? = match value:
-                    case Some(expr_):
-                        Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                var resolved_value: HirExpr? = nil
+                if val expr_ = value:
+                    resolved_value = Some(self.resolve_expr(expr_))  # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload MIR rejects an Option-typed val initialized from a match expression (E: enum match expression and retained Result/Optional declarations conflict); if-val form is equivalent
                 HirExprKind.Return(resolved_value)
 
             case Break(label, value):
                 # @workaround bug=enum_payload_type_mismatch_untyped_option_match_2026-10-24 reason=untyped Option-valued match initializer reaches the enum payload slot as mismatched type
-                val resolved_value: HirExpr? = match value:
-                    case Some(expr_):
-                        Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                var resolved_value: HirExpr? = nil
+                if val expr_ = value:
+                    resolved_value = Some(self.resolve_expr(expr_))  # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload MIR rejects an Option-typed val initialized from a match expression (E: enum match expression and retained Result/Optional declarations conflict); if-val form is equivalent
                 HirExprKind.Break(label, resolved_value)
 
             case Continue(label):
@@ -783,11 +778,9 @@ impl MethodResolver:
 
             case Yield(value):
                 # @workaround bug=enum_payload_type_mismatch_untyped_option_match_2026-10-24 reason=untyped Option-valued match initializer reaches the enum payload slot as mismatched type
-                val resolved_value: HirExpr? = match value:
-                    case Some(expr_):
-                        Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                var resolved_value: HirExpr? = nil
+                if val expr_ = value:
+                    resolved_value = Some(self.resolve_expr(expr_))  # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload MIR rejects an Option-typed val initialized from a match expression (E: enum match expression and retained Result/Optional declarations conflict); if-val form is equivalent
                 HirExprKind.Yield(resolved_value)
 
             # Construction
@@ -799,23 +792,21 @@ impl MethodResolver:
 
             case EnumLit(type_, variant, payload):
                 # @workaround bug=enum_payload_type_mismatch_untyped_option_match_2026-10-24 reason=untyped Option-valued match initializer reaches the enum payload slot as mismatched type
-                val resolved_payload: HirEnumPayload? = match payload:
-                    case Some(value):
-                        match value:
-                            # @workaround bug=enumowner-mir-20261031 reason=bare Tuple/Struct payload variant ambiguous in pinned stage2; qualify with enum
-                            case HirEnumPayload.Tuple(values):
-                                var resolved: [HirExpr] = []
-                                for v in values:
-                                    resolved = resolved.push(self.resolve_expr(v))
-                                Some(HirEnumPayload.Tuple(resolved))
-                            # @workaround bug=enumowner-mir-20261031 reason=bare Tuple/Struct payload variant ambiguous in pinned stage2; qualify with enum
-                            case HirEnumPayload.Struct(fields):
-                                var resolved: [(text, HirExpr)] = []
-                                for (name, value) in fields:
-                                    resolved = resolved.push((name, self.resolve_expr(value)))
-                                Some(HirEnumPayload.Struct(resolved))
-                    case nil:
-                        nil
+                var resolved_payload: HirEnumPayload? = nil
+                if val payload_value = payload:
+                    match payload_value:
+                        # @workaround bug=enumowner-mir-20261031 reason=bare Tuple/Struct payload variant ambiguous in pinned stage2; qualify with enum
+                        case HirEnumPayload.Tuple(values):
+                            var resolved: [HirExpr] = []
+                            for v in values:
+                                resolved = resolved.push(self.resolve_expr(v))
+                            resolved_payload = Some(HirEnumPayload.Tuple(resolved))
+                        # @workaround bug=enumowner-mir-20261031 reason=bare Tuple/Struct payload variant ambiguous in pinned stage2; qualify with enum
+                        case HirEnumPayload.Struct(fields):
+                            var resolved: [(text, HirExpr)] = []
+                            for (name, value) in fields:
+                                resolved = resolved.push((name, self.resolve_expr(value)))
+                            resolved_payload = Some(HirEnumPayload.Struct(resolved))  # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload MIR rejects an Option-typed val initialized from a match expression (E: enum match expression and retained Result/Optional declarations conflict); var + statement-arm form is equivalent
                 HirExprKind.EnumLit(type_, variant, resolved_payload)
 
             # Casts
@@ -831,23 +822,17 @@ impl MethodResolver:
             # Range
             case Range(start, end, inclusive, step):
                 # @workaround bug=enum_payload_type_mismatch_untyped_option_match_2026-10-24 reason=untyped Option-valued match initializer reaches the enum payload slot as mismatched type
-                val resolved_start: HirExpr? = match start:
-                    case Some(expr_):
-                        Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                var resolved_start: HirExpr? = nil
+                if val expr_ = start:
+                    resolved_start = Some(self.resolve_expr(expr_))  # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload MIR rejects an Option-typed val initialized from a match expression (E: enum match expression and retained Result/Optional declarations conflict); if-val form is equivalent
                 # @workaround bug=enum_payload_type_mismatch_untyped_option_match_2026-10-24 reason=untyped Option-valued match initializer reaches the enum payload slot as mismatched type
-                val resolved_end: HirExpr? = match end:
-                    case Some(expr_):
-                        Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                var resolved_end: HirExpr? = nil
+                if val expr_ = end:
+                    resolved_end = Some(self.resolve_expr(expr_))  # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload MIR rejects an Option-typed val initialized from a match expression (E: enum match expression and retained Result/Optional declarations conflict); if-val form is equivalent
                 # @workaround bug=enum_payload_type_mismatch_untyped_option_match_2026-10-24 reason=untyped Option-valued match initializer reaches the enum payload slot as mismatched type
-                val resolved_step: HirExpr? = match step:
-                    case Some(expr_):
-                        Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                var resolved_step: HirExpr? = nil
+                if val expr_ = step:
+                    resolved_step = Some(self.resolve_expr(expr_))  # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload MIR rejects an Option-typed val initialized from a match expression (E: enum match expression and retained Result/Optional declarations conflict); if-val form is equivalent
                 HirExprKind.Range(resolved_start, resolved_end, inclusive, resolved_step)
 
             # Comprehension

@@ -122,13 +122,8 @@ fn _outlook_user_path(client: OutlookClient, suffix: text) -> text:
     "{client.base_url}/users/{url_encode(client.mailbox_upn)}{suffix}"
 
 
-fn _outlook_attach_auth(req: (text, text, list, text), client: OutlookClient) -> (text, text, list, text):
-    """Add Authorization, Accept, and Content-Type headers."""
-    var r = req
-    r = request_add_header(r, "Authorization", "Bearer {client.access_token}")
-    r = request_add_header(r, "Accept", "application/json")
-    r = request_add_header(r, "Content-Type", "application/json")
-    r
+# @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload interface-row generation rejects a declared return containing the erased element type `list` (Any); _outlook_attach_auth was inlined at its 4 call sites as the identical request_add_header sequence below
+# (former fn _outlook_attach_auth: Add Authorization, Accept, and Content-Type headers.)
 
 
 # Throttle handling and retry loop are scaffolded below. The http_* constructors
@@ -158,29 +153,35 @@ fn _outlook_throttle_should_retry(status: i64, attempt: i64) -> bool:
     status == 429 and attempt < OUTLOOK_MAX_RETRIES
 
 
-fn _outlook_send(req: (text, text, list, text)) -> (i64, text, list, text):
+# @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload interface-row generation rejects a declared return containing the erased element type `list` (Any); return only the (status, body) pair callers consume — callers needing response headers call send_request directly
+fn _outlook_send(req: (text, text, list, text)) -> (i64, text):
     """Send a request once over http_client.send_request (headers attached by
-    _outlook_attach_auth go on the wire). Transport failure is status -1 with
+    the attach-auth step go on the wire). Transport failure is status -1 with
     the error text. Retry/backoff is a follow-up; see _outlook_compute_backoff
     and _outlook_throttle_should_retry for the policy that will drive it."""
     val _ = sleep_secs  # keep import live until the retry loop is wired
-    send_request(req)
+    val resp = send_request(req)
+    (response_get_status_code(resp), response_get_body(resp))
 
 
 fn _outlook_get(client: OutlookClient, url: text) -> (i64, text):
     """GET an absolute URL, returning (status, body)."""
     var req = http_get(url)
-    req = _outlook_attach_auth(req, client)
-    val resp = _outlook_send(req)
-    (response_get_status_code(resp), response_get_body(resp))
+    # @workaround bug=mir-unresolved-method-20261031 reason=inlined _outlook_attach_auth (erased `list` return element is not dynload-row representable); identical request_add_header sequence
+    req = request_add_header(req, "Authorization", "Bearer {client.access_token}")
+    req = request_add_header(req, "Accept", "application/json")
+    req = request_add_header(req, "Content-Type", "application/json")
+    _outlook_send(req)
 
 
 fn _outlook_post(client: OutlookClient, url: text, payload: text) -> (i64, text):
     """POST an absolute URL with a JSON payload."""
     var req = http_post(url, payload)
-    req = _outlook_attach_auth(req, client)
-    val resp = _outlook_send(req)
-    (response_get_status_code(resp), response_get_body(resp))
+    # @workaround bug=mir-unresolved-method-20261031 reason=inlined _outlook_attach_auth (erased `list` return element is not dynload-row representable); identical request_add_header sequence
+    req = request_add_header(req, "Authorization", "Bearer {client.access_token}")
+    req = request_add_header(req, "Accept", "application/json")
+    req = request_add_header(req, "Content-Type", "application/json")
+    _outlook_send(req)
 
 
 fn _outlook_patch(client: OutlookClient, url: text, payload: text) -> (i64, text):
@@ -188,9 +189,11 @@ fn _outlook_patch(client: OutlookClient, url: text, payload: text) -> (i64, text
     construct the request manually with METHOD_PATCH."""
     var req = create_request(METHOD_PATCH, url)
     req = request_set_body(req, payload)
-    req = _outlook_attach_auth(req, client)
-    val resp = _outlook_send(req)
-    (response_get_status_code(resp), response_get_body(resp))
+    # @workaround bug=mir-unresolved-method-20261031 reason=inlined _outlook_attach_auth (erased `list` return element is not dynload-row representable); identical request_add_header sequence
+    req = request_add_header(req, "Authorization", "Bearer {client.access_token}")
+    req = request_add_header(req, "Accept", "application/json")
+    req = request_add_header(req, "Content-Type", "application/json")
+    _outlook_send(req)
 
 
 # ============================================================================
@@ -405,8 +408,12 @@ fn outlook_get_attachment_value(client: OutlookClient, msg_id: text, att_id: tex
     """
     val url = _outlook_user_path(client, "/messages/{url_encode(msg_id)}/attachments/{url_encode(att_id)}/$value")
     var req = http_get(url)
-    req = _outlook_attach_auth(req, client)
-    val resp = _outlook_send(req)
+    # @workaround bug=mir-unresolved-method-20261031 reason=pinned stage2 dynload interface-row generation rejects _outlook_send's erased `list` response element; this caller needs response headers, so send directly and project here
+    # @workaround bug=mir-unresolved-method-20261031 reason=inlined _outlook_attach_auth (erased `list` return element is not dynload-row representable); identical request_add_header sequence
+    req = request_add_header(req, "Authorization", "Bearer {client.access_token}")
+    req = request_add_header(req, "Accept", "application/json")
+    req = request_add_header(req, "Content-Type", "application/json")
+    val resp = send_request(req)
     val status = response_get_status_code(resp)
     val body = response_get_body(resp)
     val ctype = response_get_header(resp, "Content-Type")
