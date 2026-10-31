@@ -1,5 +1,5 @@
 # BuildRunner worker cannot run on macOS: process observation V4 is Linux-only
-## Open 2026-10-31 — partial Darwin provider implemented, hello rerun pending
+## Resolved for the positional route 2026-10-31
 
 - Severity: blocks every BuildRunner task on macOS, including the Phase 2 BuildRunner Hello
   (`--memory-policy monitor`).
@@ -33,9 +33,9 @@ C only, in `runtime_process_owned.c` (Darwin arms gated by `RT_OWNED_DARWIN_V4`)
 - **Exec proof**: `posix_spawn` with `POSIX_SPAWN_START_SUSPENDED | CLOEXEC_DEFAULT | SETPGROUP`;
   before the child runs an instruction, its lowest file-backed mapping
   (`PROC_PIDREGIONPATHINFO`) must be the snapshot dev/ino and the snapshot bytes must still match
-  the bound digest; only then `SIGCONT`. DEVIATION from the approved "kqueue NOTE_EXEC": a
-  kevent needs a pid, which `posix_spawn` returns only after the exec; a fork-based pre-exec
-  registration would lose `CLOEXEC_DEFAULT` and race-free image verification. Pending owner ack.
+  the bound digest; only then `SIGCONT`. Owner-accepted 2026-10-31 as the Darwin exec proof,
+  with its own capability bit (`DARWIN_SPAWN_EXEC_PROOF`); kqueue `NOTE_EXEC` cannot observe a
+  `posix_spawn` exec because the pid exists only after it.
 - **ProcessGroup retirement**: the exited leader stays unreaped (it pins the group id); every
   live non-zombie member is sent SIGKILL until a zero-live `KERN_PROC_PGRP` sample, then the
   leader is reaped and the packet reports `tree_control_available`, `tree_empty` and
@@ -80,11 +80,26 @@ monitor ProcessGroup request (`process_observation_monitor_group_gap_v4`), not j
 The compiler task now starts under Darwin V4: the snapshot pin, cwd pin, suspended-spawn exec
 proof, group retirement, reap and `compiler.process` / `compiler.memory` evidence all work. The
 lane still does not reach FUNCTIONAL, for reasons outside the V4 owner:
-1. The task budget `timeout_seconds * 8 + 30` exceeds the V4 wall cap (3600 s) at the default
-   900 s; runs used `--timeout-seconds 440`.
+1. FIXED: the task budget `timeout_seconds * 8 + 30` exceeded the V4 wall cap (3600 s) at the
+   default 900 s. `hello-sanity-buildrunner.py` now clamps the task total to 3600 s
+   (`task_budget_seconds`), and the worker refuses an over-cap task before start with an exact
+   reason instead of the opaque InvalidSchema rejection.
 2. The producer (`hello-sanity-buildrunner-worker.py`) runs a nested hello lane whose watchdog
    uses `--session-mode=new`; the manager's outer watchdog reports
-   `exit_status=90 unexpected_session_pids=...` (bootstrap-session-escaped). The inherited
-   session contract (`SIMPLE_BOOTSTRAP_SESSION_ID/EXEC`) does not reach the nested lane, so it
-   cannot join with `--session-mode=inherit`. Needs an owner decision on nested supervision.
+   `exit_status=90 unexpected_session_pids=...` (bootstrap-session-escaped). FIXED: the contract
+   (`SIMPLE_BOOTSTRAP_SESSION_ID/EXEC`) does reach the producer; `hello-sanity-matrix.py` dropped
+   it in its `SIMPLE_*` sanitization. It now keeps exactly those two keys (validated) and a lane
+   holding them runs its watchdog with `--session-mode=inherit` and no new session
+   (`nested_session`). Owner decision 2026-10-31: join the outer session.
 3. This lane was never runnable on Linux either (leader-only V4 rejects ProcessGroup).
+4. FIXED: the isolated attempt had no `src/runtime`, but the compiler builds core C runtime objects
+   from it. The lane now stages it plus `RUNTIME_EXTERNAL_HEADERS`.
+
+## Verified 2026-10-31
+Four sequential monitor runs, stage2 `adef5db2…`: `buildrunner_status: "FUNCTIONAL"`, stdout
+`Hello, World!\n`. Run conditions: `--compile-route positional`, and a local uncommitted matrix
+edit keeping `SIMPLE_LLVM_BIN`, because that stage2 predates the llc PATH fix.
+
+## Open
+- The default `coordinator` route still fails in the attempt:
+  `SCV-E-ADMISSION: git-event-source-unavailable` (no git repository in the staged tree).
