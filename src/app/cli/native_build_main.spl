@@ -59,6 +59,8 @@ use std.nogc_sync_mut.sffi.process_memory.{host_commit_avail_kib}
 use app.io.sysinfo_ops.{process_peak_rss_kb, cpu_count}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
+use compiler.driver.driver_log_helpers.{build_trace_enabled, log_build_trace,
+    build_trace_list, build_trace_detail}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_closure_walk_check_v1}
 use app.cli.native_build_streaming_request_owner.{native_build_streaming_surfaces}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1}
@@ -198,7 +200,7 @@ fn abs_if_needed(p: text) -> text:
 # Keep the gate independent of broader compiler/profile traces so normal
 # native-build output remains unchanged.
 fn native_build_worker_spawn_trace_enabled() -> bool:
-    (env_get("SIMPLE_NATIVE_BUILD_WORKER_SPAWN_TRACE") ?? "") == "1"
+    (env_get("SIMPLE_NATIVE_BUILD_WORKER_SPAWN_TRACE") ?? "") == "1" or build_trace_enabled()
 
 # Resolve the compiler binary used to run the native-build worker. The old
 # `SIMPLE_BINARY -> SIMPLE_BIN -> "bin/simple"` chain handed an empty/relative
@@ -1936,19 +1938,26 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     if request.refresh or (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") == "":
         val scv_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
         val source_roots = native_build_authority_source_roots_v1(args, scv_root)
+        if build_trace_enabled():
+            val selection = native_build_entry_and_sources_v1(args)
+            log_build_trace("coordinator:admission root={scv_root} selection={build_trace_list(selection)} source_roots={build_trace_list(source_roots)}")
         if source_roots.len() == 0:
             eprint "SCV-E-ADMISSION: source-inventory-scope-unsupported"
+            log_build_trace("coordinator:admission:refused reason=source-inventory-scope-unsupported (entry and --source dirs must live under root)")
             return 1
         val cold_init = (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1"
         val authority = compiler_source_authority_acquire_v1(scv_root,
             compile_source_inventory_checkout_cache_root_v1(scv_root), source_roots, cold_init)
         if not authority.valid:
             eprint "SCV-E-ADMISSION: " + authority.reason
+            log_build_trace("coordinator:admission:refused reason={authority.reason}")
             return 1
         if not compiler_source_authority_publish_v1(authority):
             eprint "SCV-E-ADMISSION: snapshot-authority-env-publish-failed"
             return 1
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
+    if build_trace_enabled():
+        log_build_trace("coordinator:worker:select bin={simple_bin} compiled_route={compiled_bootstrap_route} output={output_path_arg(args)} timeout_ms={native_build_timeout_ms(args)}")
     val mode = env_get("SIMPLE_EXECUTION_MODE")
     # A compiled bootstrap capsule can route the two internal `run` targets
     # itself. Do not label that native subprocess lane as interpreted: doing so
@@ -2025,6 +2034,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     # its parse phase is all hits. SIMPLE_NATIVE_BUILD_WORKER is already 1
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
+    log_build_trace("coordinator:shards parse={shard_count} hir={native_build_hir_shard_count(args)}")
     # --refresh-source-authority replaced the authority above, so a request
     # prepublished (bootstrap_main) under the pre-refresh authority can no
     # longer admit. Drop it; this coordinator republishes after the refresh.
@@ -2077,6 +2087,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     val old_mir_link = env_get("SIMPLE_MIR_SHARD_LINK") ?? ""
     val old_mir_export_dir = env_get("SIMPLE_MIR_SHARD_EXPORT_DIR") ?? ""
     val mir_shard_parallel = native_build_mir_shard_parallel(args)
+    log_build_trace("coordinator:shards mir_parallel={mir_shard_parallel}")
     if mir_shard_parallel < 0:
         env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
         env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
@@ -2146,6 +2157,12 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     ice_boundary_release_run(ice_owned)
     if worker_spawn_trace:
         eprint "[native-build-trace] worker_spawn:returned status={code} stdout_len={stdout.len()} stderr_len={stderr.len()}"
+    if build_trace_enabled():
+        val traced_output = requested_output
+        val traced_size = if file_exists(traced_output): file_size_raw(traced_output) else: -1
+        log_build_trace("coordinator:worker:returned rc={code} raw_status={code_raw} ice_relaunched={ice_relaunched} output={traced_output} output_bytes={traced_size} stdout_len={stdout.len()} stderr_len={stderr.len()}")
+        if code != 0:
+            log_build_trace("coordinator:worker:failed last_diag={build_trace_detail(native_build_last_diagnostic_line(stderr))}")
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
     env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
