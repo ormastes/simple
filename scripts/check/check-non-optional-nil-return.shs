@@ -93,7 +93,15 @@ FNR==1 { cur="" }
   # which is how the total `rt_vulkan_free_buffer` was derived as nil-capable.
   if ($0 ~ /^[ \t]*\}/ && i<=ci) { cur=""; next }
   if ($0 !~ /^[ \t]*$/ && i<=ci && $0 !~ /^[ \t]*[})]/) { cur=""; next }
-  if ($0 ~ /Value::Nil/) { if(!found){print cur; found=1} }
+  # `Value::Nil` as a match PATTERN (`Value::Nil =>`, `A | Value::Nil`) or a
+  # comparison (`== Value::Nil`, `matches!(x, Value::Nil`) does not PRODUCE a
+  # nil; only a remaining occurrence does. Without this, a total classifier
+  # such as `classify_probe` was derived nil-capable and convicted every
+  # `rt_value_is_*` wrapper.
+  s=$0
+  gsub(/Value::Nil[ \t]*(=>|\|)/,"",s); gsub(/\|[ \t]*Value::Nil/,"",s)
+  gsub(/[!=]=[ \t]*Value::Nil/,"",s); gsub(/matches!\([^,]*,[ \t]*Value::Nil/,"",s)
+  if (s ~ /Value::Nil/) { if(!found){print cur; found=1} }
 }
 AWKEOF
 
@@ -116,11 +124,20 @@ FNR==1 { cur="" }
   match($0,/^[ \t]*/); i=RLENGTH
   if ($0 ~ /^[ \t]*\}/ && i<=ci) { cur=""; next }
   if ($0 !~ /^[ \t]*$/ && i<=ci && $0 !~ /^[ \t]*[})]/) { cur=""; next }
+  # Callees are joined BY BARE NAME across the whole tree, so a method call
+  # (`.collect()`, `.write(..)`, `.take()`) or a std path call (`fs::write`)
+  # must not be an edge: it resolves to std, not to whichever unrelated
+  # in-tree `fn collect` / `fn write` happens to return nil. Those two shapes
+  # alone convicted 110 total externs (rt_file_write_text, rt_vulkan_init,
+  # rt_text_to_lower_ascii, ...) on 2026-10-31.
   n=$0
   while (match(n,/[A-Za-z_][A-Za-z0-9_]*\(/)) {
     callee=substr(n,RSTART,RLENGTH-1)
-    print cur, callee
+    pre=substr(n,1,RSTART-1)
     n=substr(n,RSTART+RLENGTH)
+    if (pre ~ /\.[ \t]*$/) continue
+    if (pre ~ /(^|[^A-Za-z0-9_])(std|core|alloc|fs|io|env|process|thread|mem|ptr|str|slice|iter|fmt|time|net|sync|String|Vec|Box|Arc|Rc|Path|PathBuf|File|OpenOptions|Command|HashMap|BTreeMap|HashSet|Option|Result|Cell|RefCell|Mutex)::$/) continue
+    print cur, callee
   }
 }
 AWKEOF
@@ -303,10 +320,49 @@ pub fn rt_always_total(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 const SOME_TABLE: &[Value] = &[Value::Nil];
+
+// An unrelated fn that happens to be NAMED like a std method and CAN return
+// nil. Only a bare free call `collect(...)` reaches it; `.collect()` and
+// `fs::write(...)` resolve to std, never to this.
+pub fn collect(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Nil)
+}
+pub fn write(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Nil)
+}
+pub fn rt_total_std_calls(args: &[Value]) -> Result<Value, CompileError> {
+    let v: Vec<u8> = args.iter().map(|_| 0u8).collect();
+    match fs::write("/x", &v) {
+        Ok(_) => Ok(Value::Bool(true)),
+        Err(_) => Ok(Value::Bool(false)),
+    }
+}
+// Value::Nil only as a match PATTERN / comparison: total.
+pub fn rt_total_nil_pattern(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(match &args[0] {
+        Value::Nil => true,
+        Value::Int(_) | Value::Nil => false,
+        other => *other == Value::Nil,
+    }))
+}
+// A delegator through a bare free call to a nil-capable helper: nil-capable.
+fn helper_maybe_nil(rv: u64) -> Value {
+    if rv == 0 {
+        Value::Nil
+    } else {
+        Value::Int(rv as i64)
+    }
+}
+pub fn rt_delegates_nil(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(helper_maybe_nil(0))
+}
 RSEOF
     cat > "$_sd/rust/reg.rs" <<'RSEOF'
     insert_simple!("rt_maybe_nil", impls::rt_maybe_nil);
     insert_simple!("rt_always_total", impls::rt_always_total);
+    insert_simple!("rt_total_std_calls", impls::rt_total_std_calls);
+    insert_simple!("rt_total_nil_pattern", impls::rt_total_nil_pattern);
+    insert_simple!("rt_delegates_nil", impls::rt_delegates_nil);
 RSEOF
     derive_nil_externs "$_sd/rust" "$_sd/nil.txt"
     if ! grep -qx 'rt_maybe_nil' "$_sd/nil.txt" 2>/dev/null; then
@@ -314,6 +370,15 @@ RSEOF
     fi
     if grep -qx 'rt_always_total' "$_sd/nil.txt" 2>/dev/null; then
         echo "selftest FAIL: total extern rt_always_total was wrongly derived as nil-capable"; _fail=1
+    fi
+    if grep -qx 'rt_total_std_calls' "$_sd/nil.txt" 2>/dev/null; then
+        echo "selftest FAIL: rt_total_std_calls convicted through a .method()/std:: call sharing a name with an unrelated nil-capable fn"; _fail=1
+    fi
+    if grep -qx 'rt_total_nil_pattern' "$_sd/nil.txt" 2>/dev/null; then
+        echo "selftest FAIL: rt_total_nil_pattern convicted by Value::Nil used only as a match pattern / comparison"; _fail=1
+    fi
+    if ! grep -qx 'rt_delegates_nil' "$_sd/nil.txt" 2>/dev/null; then
+        echo "selftest FAIL: rt_delegates_nil (bare call to a nil-capable helper) was not derived"; _fail=1
     fi
 
     # fixture 1: the incident shape — must be flagged
@@ -452,7 +517,7 @@ if ! selftest; then
     exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — selftest only, 19 fixture(s) checked, 0 failures"
+    echo "PASS — selftest only, 22 fixture(s) checked, 0 failures"
     exit 0
 fi
 
