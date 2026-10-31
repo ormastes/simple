@@ -1,0 +1,60 @@
+use std.spec
+
+# Regression spec for the Phase 2 hello-world `cold-hir-object-identity-invalid`
+# blocker. Classes are value types (owner ruling,
+# doc/07_guide/language/capability_library_authoring.md): `val ctx =
+# _extract_driver_ctx(self)` is a copy in the interpreter lane. The MIR shard
+# worker recorded each verified object's capsule identity into that local copy,
+# then published from `self.ctx`, which still had no identity. The recorders in
+# `_compile_to_native_with_backend_session` now take `self.ctx` directly, the
+# same shape `driver_aot_pipeline.spl` already uses for its replay.
+
+class WritebackCtx:
+    receipts: [text]
+    identities: Dict<text, text>
+
+class WritebackDriver:
+    ctx: WritebackCtx
+
+    me record_through_local_copy():
+        val ctx: WritebackCtx = writeback_extract_ctx(self)
+        for name in ["a", "b"]:
+            if ctx.receipts.len() > 0:
+                writeback_record(ctx, name, "id-" + name)
+
+    me record_through_owner() -> text:
+        val ctx: WritebackCtx = writeback_extract_ctx(self)
+        for name in ["a", "b"]:
+            if ctx.receipts.len() > 0:
+                val reason = writeback_record(self.ctx, name, "id-" + name)
+                if reason != "":
+                    return reason
+        writeback_record(self.ctx, "a", "again")
+
+fn writeback_extract_ctx(driver: WritebackDriver) -> WritebackCtx:
+    driver.ctx
+
+fn writeback_record(ctx: WritebackCtx, name: text, identity: text) -> text:
+    if ctx.identities.has(name):
+        return "duplicate:{name}"
+    ctx.identities[name] = identity
+    ""
+
+fn writeback_new_driver() -> WritebackDriver:
+    WritebackDriver(ctx: WritebackCtx(receipts: ["r"], identities: {}))
+
+describe "driver ctx owner write-back":
+    it "publishes recorder writes to the driver's own ctx":
+        var driver = writeback_new_driver()
+        val reason = driver.record_through_owner()
+        expect(driver.ctx.identities.len()).to_equal(2)
+        expect(driver.ctx.identities["b"]).to_equal("id-b")
+        expect(reason).to_equal("duplicate:a")
+
+    # Copy semantics per the owner ruling; the JIT lane still aliases
+    # (doc/08_tracking/bug/jit_class_instances_alias_instead_of_copy_2026-09-27.md),
+    # so this case is interpreter-lane only, like the spec harness.
+    it "does not publish writes made through an extracted local copy":
+        var driver = writeback_new_driver()
+        driver.record_through_local_copy()
+        expect(driver.ctx.identities.len()).to_equal(0)
