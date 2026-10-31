@@ -1,3 +1,4 @@
+# @timeout_secs 900 (owner start + nested CLI processes per command on smux)
 # @cover src/app/llm_caret/main.spl 80%
 # @cover src/app/llm_caret/agent_workspace.spl 80%
 """
@@ -30,9 +31,9 @@ workspace-launched child from relaunching the suite.
 # doc/05_design/app/tools/llm_caret_agent_teams.md
 
 use std.spec.{describe, it, expect, step}
-use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, file_exists, cwd, env_set}
-use app.llm_caret.agent_workspace.{agent_workspace, workspace_available, workspace_backend, session_kill, session_alive, list_panes, worktree_list, capture_pane}
-use app.llm_caret.workspace_cli.{run_workspace_cli}
+use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, file_exists, cwd, env_set, current_time_ms, sleep_ms}
+use app.llm_caret.agent_workspace.{agent_workspace, workspace_available, session_kill, session_alive, pane_pid_lines}
+use std.nogc_async_mut.sosix.{sosix_platform}
 
 val CLI = "src/app/llm_caret/main.spl"
 
@@ -67,48 +68,33 @@ fn _lines_with(out: text, prefix: text) -> [text]:
             hits = hits + [line]
     hits
 
-fn _cli_here(id: text, repo: text, args: [text]) -> i64:
-    run_workspace_cli(["workspace", id] + args + ["--repo", repo])
 
-fn _smux_team(id: text, repo: text, root: text):
-    val ws = agent_workspace(id, repo, repo + "/build/caret_worktrees/" + id)
-    step("Attach agent-1, agent-2, agent-3 through the CLI entry")
-    for agent in ["agent-1", "agent-2", "agent-3"]:
-        expect(_cli_here(id, repo, ["attach", agent])).to_equal(0)  # oracle: each attach succeeds
-        expect(list_panes(ws)).to_contain(id + ":" + agent + ".0")  # oracle: the window line the CLI prints names this pane
+# Pids of the agent panes from "<window> <pid>" lines.
+fn _agent_pids(lines: [text]) -> [i64]:
+    var pids: [i64] = []
+    for line in lines:
+        val f = line.trim().split(" ")
+        if f.len() == 2 and f[0].starts_with("agent-"):
+            pids.push(int(f[1]) ?? 0)
+    pids
 
-    step("status lists one worktree and one pane per agent")
-    expect(_cli_here(id, repo, ["status"])).to_equal(0)  # oracle: status succeeds while the session is alive
-    expect(session_alive(ws)).to_be(true)
-    expect(worktree_list(ws).len()).to_equal(4)  # oracle: repo worktree plus three agent worktrees
-    expect(list_panes(ws).len()).to_equal(4)  # oracle: one pane per agent window plus the session owner
+# Real OS process identity: the process table, not the pane backend.
+fn _pid_alive(pid: i64) -> bool:
+    if pid <= 1:
+        return false
+    if sosix_platform() == "windows":
+        val (out, _e, _c) = process_run("tasklist", ["/FI", "PID eq " + pid.to_text(), "/NH", "/FO", "CSV"])
+        return out.contains("," + "\"" + pid.to_text() + "\"")
+    val (_o, _e, code) = process_run("kill", ["-0", pid.to_text()])
+    code == 0
 
-    step("Each worktree is a real detached checkout and edits do not leak between them")
-    val wt1 = repo + "/build/caret_worktrees/" + id + "/agent-1"
-    val wt2 = repo + "/build/caret_worktrees/" + id + "/agent-2"
-    expect(file_exists(wt1 + "/README.md")).to_be(true)
-    file_write(wt1 + "/only_in_agent_1.txt", "x\n")
-    expect(file_exists(wt2 + "/only_in_agent_1.txt")).to_be(false)
-    val (head1, _e1, _c1) = process_run("git", ["-C", wt1, "symbolic-ref", "-q", "HEAD"])
-    expect(head1.trim()).to_equal("")  # oracle: detached checkout has no symbolic branch ref
-
-    step("broadcast reaches every pane and every agent pane shows the marker")
-    expect(_cli_here(id, repo, ["broadcast", "echo", "TEAM_BCAST_OK"])).to_equal(0)  # oracle: broadcast succeeds
-    for agent in ["agent-1", "agent-2", "agent-3"]:
-        expect(_cli_here(id, repo, ["wait", id + ":" + agent, "TEAM_BCAST_OK", "8000"])).to_equal(0)  # oracle: every agent pane observed the marker
-
-    step("capture returns the pane's scrollback")
-    expect(_cli_here(id, repo, ["capture", id + ":agent-2"])).to_equal(0)  # oracle: capture succeeds on a live pane
-    expect(capture_pane(ws, id + ":agent-2")).to_contain("TEAM_BCAST_OK")
-
-    step("detach removes window and worktree; kill leaves no session")
-    expect(_cli_here(id, repo, ["detach", "agent-1"])).to_equal(0)  # oracle: detach succeeds
-    expect(dir_exists(wt1)).to_be(false)
-    expect(list_panes(ws).len()).to_equal(3)  # oracle: two agents plus the session owner remain after one detach
-    expect(_cli_here(id, repo, ["kill"])).to_equal(0)  # oracle: teardown succeeds
-    expect(session_alive(ws)).to_be(false)
-    dir_remove_all(root)
-
+fn _wait_for_exit(pid: i64, timeout_ms: i64) -> bool:
+    val deadline = current_time_ms() + timeout_ms
+    while current_time_ms() < deadline:
+        if not _pid_alive(pid):
+            return true
+        sleep_ms(250)
+    false
 
 # @manual_section: workspace-cli
 describe "LLM Caret workspace CLI":
@@ -130,13 +116,6 @@ describe "LLM Caret workspace CLI":
         dir_remove_all(root)
         val repo = _fixture_repo(root)
         val id = "cli-team"
-        if workspace_backend() == "smux":
-            # smux panes live in the creating process, so one `bin/simple run`
-            # per command cannot share a session. Run the same CLI entry
-            # (`run_workspace_cli`, the code behind every command) in THIS
-            # process and assert exit codes plus the real pane/worktree state.
-            _smux_team(id, repo, root)
-            return
         session_kill(agent_workspace(id, repo, ""))
 
         step("Attach agent-1, agent-2, agent-3 through the CLI")
@@ -176,13 +155,20 @@ describe "LLM Caret workspace CLI":
         expect(cap.code).to_equal(0)  # oracle: capture succeeds on a live pane
         expect(cap.out).to_contain("TEAM_BCAST_OK")
 
-        step("detach removes window and worktree; kill leaves no session")
+        step("detach removes window and worktree; kill leaves no session and no live pane child")
+        val ws_here = agent_workspace(id, repo, "")
+        val pids = _agent_pids(pane_pid_lines(ws_here))
+        expect(pids.len()).to_equal(3)  # oracle: the owner/tmux reports one child pid per agent pane
+        for pid in pids:
+            expect(_pid_alive(pid)).to_be(true)  # oracle: each reported pid is a live OS process before teardown
         val d = _cli(id, repo, ["detach", "agent-1"])
         expect(d.code).to_equal(0)  # oracle: detach succeeds
         expect(dir_exists(wt1)).to_be(false)
         expect(_lines_with(_cli(id, repo, ["panes"]).out, id + ":").len()).to_equal(3)  # oracle: two agents remain after one detach
         expect(_cli(id, repo, ["kill"]).code).to_equal(0)  # oracle: teardown succeeds
-        expect(session_alive(agent_workspace(id, repo, ""))).to_be(false)
+        expect(session_alive(ws_here)).to_be(false)
+        for pid in pids:
+            expect(_wait_for_exit(pid, 15000)).to_be(true)  # oracle: killing the session ends every pane child in the OS process table
         dir_remove_all(root)
 
     it "reports a failing worktree operation with a non-zero exit":

@@ -15,7 +15,7 @@ use os.apps.smux.api.{
     smux_list_sessions,
     smux_list_windows,
     smux_list_panes,
-    smux_pane_spawn_pty,
+    smux_pane_spawn_pty, smux_pane_alive, smux_resize,
     smux_send_command,
     smux_capture, smux_capture_history,
     smux_active_window, smux_focused_pane, smux_focus_window, smux_focus_pane,
@@ -44,6 +44,9 @@ use os.apps.smux.client_leases.{client_lease_token_valid}
 # empty tagged string, which already matches the service loop's stop rule.
 
 pub val SMUX_APP_ID: text = "smux"
+
+# "<window_id> <pid>" for every spawn-window this owner process made.
+var _spawned_pids: [text] = []
 
 pub fn smux_ready_marker(version: int) -> text:
     return SMUX_APP_ID + "-v" + version.to_text()
@@ -78,6 +81,7 @@ fn _open_shell_session(name: text) -> text:
     val spawned = smux_pane_spawn_pty(s.id, w.id, p.id, platform_default_shell())
     if spawned.is_err():
         return "smux: created session " + name + " (no shell: " + spawned.unwrap_err() + ")"
+    _spawned_pids.push(w.id + " " + spawned.unwrap().to_text())
     return "smux: created session " + name + " shell pid=" + spawned.unwrap().to_text()
 
 # smux_remote_main — entry point for the hosted smux client binary
@@ -253,6 +257,40 @@ pub fn smux_remote_dispatch(line: text) -> text:
             return "smux: created window " + window.id + " (no shell: " + spawned.unwrap_err() + ")"
         val _focused = smux_focus_window(sid, window.id)
         return "smux: created window " + window.id
+    if verb == "spawn-window":
+        # spawn-window SESSION NAME COLS ROWS COMMAND-LINE...: a window whose pane
+        # runs COMMAND-LINE on a PTY at COLS x ROWS. The pid is recorded for pane-pids.
+        if parts.len() < 6:
+            return "smux: spawn-window requires session name cols rows command"
+        val cols = parts[3].parse_int() ?? 0
+        val rows = parts[4].parse_int() ?? 0
+        if cols <= 0 or rows <= 0 or cols > 512 or rows > 256:
+            return "smux: spawn-window geometry out of range"
+        val window = smux_new_window(sid, parts[2])
+        if window.id == "":
+            return "smux: window capacity reached"
+        val pane = smux_list_panes(sid, window.id)[0]
+        val _sized = smux_resize(sid, window.id, pane.id, cols, rows)
+        val spawned = smux_pane_spawn_pty(sid, window.id, pane.id, parts[5:].join(" "))
+        if spawned.is_err():
+            return "smux: spawn-window failed: " + spawned.unwrap_err()
+        _spawned_pids.push(window.id + " " + spawned.unwrap().to_text())
+        val _focused = smux_focus_window(sid, window.id)
+        return "smux: created window " + window.id
+    if verb == "pane-pids":
+        # One line per live-or-dead pane: WINDOW_ID WINDOW_NAME PANE_ID PID ALIVE.
+        var reply = "smux: panes[" + name + "]:\n"
+        for window in smux_list_windows(sid):
+            for pane in smux_list_panes(sid, window.id):
+                var pid = "0"
+                for rec in _spawned_pids:
+                    val f = rec.split(" ")
+                    if f[0] == window.id:
+                        pid = f[1]
+                val alive = smux_pane_alive(sid, window.id, pane.id)
+                val up = alive.is_ok() and alive.unwrap()
+                reply = reply + window.id + " " + window.name + " " + pane.id + " " + pid + " " + (if up: "1" else: "0") + "\n"
+        return reply
     val active = smux_active_window(sid)
     if active.is_err():
         return "smux: no active window: " + name
