@@ -721,14 +721,10 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
 bool rt_process_is_running(int64_t pid) {
     if (pid <= 0) return false;
 
+    /* pid is the spawn handle. Not GetExitCodeProcess: a child that exits
+     * with code 259 (STILL_ACTIVE) would read as alive forever. */
     HANDLE hProcess = (HANDLE)pid;
-    DWORD exit_code = 0;
-
-    if (!GetExitCodeProcess(hProcess, &exit_code)) {
-        return false;
-    }
-
-    return exit_code == STILL_ACTIVE;
+    return WaitForSingleObject(hProcess, 0) == WAIT_TIMEOUT;
 }
 
 int64_t rt_process_start_identity(int64_t pid) {
