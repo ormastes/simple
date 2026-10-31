@@ -28,7 +28,6 @@ use std.io_runtime.{file_rename}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.path.{dirname}
-use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 extern fn rt_file_create_excl(path: text, content: text) -> bool
 extern fn rt_file_sync(path: text) -> bool
 extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
@@ -198,18 +197,6 @@ fn atomic_read(path: text) -> text?:
     lock.release()
     content
 
-# Windows only: the seed's rt_file_rename fails when the destination exists and
-# its rt_file_sync (read-only handle) always fails, so atomic writes never
-# succeeded or never replaced. The sync result is ignored on Windows (guards
-# above); a failed rename over an existing file is retried after removing the
-# destination. POSIX rename already replaces atomically and is not touched.
-fn atomic_rename_windows_replace(src: text, dst: text) -> bool:
-    if not host_is_windows_host() or not file_exists(dst):
-        return false
-    if not rt_file_delete(dst):
-        return false
-    file_rename(src, dst)
-
 fn atomic_temp_path(path: text) -> text:
     if path == "/SERVER.DB":
         return "/SERVER.TMP"
@@ -228,12 +215,12 @@ fn atomic_write(path: text, content: text) -> bool:
         return false
 
     # Flush to durable storage before rename (crash safety)
-    if not rt_file_sync(temp_path) and not host_is_windows_host():
+    if not rt_file_sync(temp_path):
         lock.release()
         return false
 
     # Rename temp to actual (atomic on Unix)
-    val success = file_rename(temp_path, path) or atomic_rename_windows_replace(temp_path, path)
+    val success = file_rename(temp_path, path)
 
     lock.release()
     success
@@ -258,7 +245,7 @@ fn atomic_write_exclusive(path: text, content: text) -> bool:
         rt_file_delete(staged_path)
         rt_dir_remove(stage_dir, false)
         return false
-    if not rt_file_sync(staged_path) and not host_is_windows_host():
+    if not rt_file_sync(staged_path):
         rt_file_delete(staged_path)
         rt_dir_remove(stage_dir, false)
         return false
@@ -289,11 +276,11 @@ fn atomic_write_bytes(path: text, content: [u8]) -> bool:
         file_delete(temp_path)
         dir_remove(staging, false)
         return false
-    if not rt_file_sync(temp_path) and not host_is_windows_host():
+    if not rt_file_sync(temp_path):
         file_delete(temp_path)
         dir_remove(staging, false)
         return false
-    val success = file_rename(temp_path, path) or atomic_rename_windows_replace(temp_path, path)
+    val success = file_rename(temp_path, path)
     if not success:
         file_delete(temp_path)
     dir_remove(staging, false)
@@ -356,7 +343,7 @@ fn atomic_write_batch(paths: [text], contents: [text]) -> bool:
     # Flush all temp files to durable storage before rename (crash safety)
     for idx in sorted_indices:
         val temp_path = atomic_temp_path(paths[idx])
-        if not rt_file_sync(temp_path) and not host_is_windows_host():
+        if not rt_file_sync(temp_path):
             var ri: i64 = 0
             while ri < locks.len():
                 locks[ri].release()
@@ -368,7 +355,7 @@ fn atomic_write_batch(paths: [text], contents: [text]) -> bool:
     var all_ok = true
     for idx in sorted_indices:
         val temp_path = atomic_temp_path(paths[idx])
-        if not (file_rename(temp_path, paths[idx]) or atomic_rename_windows_replace(temp_path, paths[idx])):
+        if not file_rename(temp_path, paths[idx]):
             all_ok = false
         renamed = renamed + 1
 
@@ -402,12 +389,12 @@ fn atomic_append(path: text, content: text) -> bool:
         return false
 
     # Flush to durable storage before rename (crash safety)
-    if not rt_file_sync(temp_path) and not host_is_windows_host():
+    if not rt_file_sync(temp_path):
         lock.release()
         return false
 
     # Rename temp to actual
-    val success = file_rename(temp_path, path) or atomic_rename_windows_replace(temp_path, path)
+    val success = file_rename(temp_path, path)
 
     lock.release()
     success
@@ -431,9 +418,9 @@ fn atomic_append_framed(path: text, content: text, header: text) -> bool:
     if not file_write(temp_path, existing + content):
         lock.release()
         return false
-    if not rt_file_sync(temp_path) and not host_is_windows_host():
+    if not rt_file_sync(temp_path):
         lock.release()
         return false
-    val success = file_rename(temp_path, path) or atomic_rename_windows_replace(temp_path, path)
+    val success = file_rename(temp_path, path)
     lock.release()
     success
