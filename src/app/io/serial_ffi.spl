@@ -12,11 +12,11 @@
 # --- Port Management ---
 
 extern fn rt_serial_open(path: text, baud: i32) -> i64
-extern fn rt_serial_close(fd: i64) -> bool
+extern fn rt_serial_close(fd: i64) -> bool?
 
 # --- Data Transfer ---
 
-extern fn rt_serial_read(fd: i64, max_bytes: i32) -> text
+extern fn rt_serial_read(fd: i64, max_bytes: i32) -> text?
 extern fn rt_serial_write(fd: i64, data: text) -> i64
 
 # --- Configuration ---
@@ -25,12 +25,12 @@ extern fn rt_serial_set_baud(fd: i64, baud: i32) -> bool
 extern fn rt_serial_set_parity(fd: i64, parity: text) -> bool
 extern fn rt_serial_set_databits(fd: i64, bits: i32) -> bool
 extern fn rt_serial_set_stopbits(fd: i64, bits: i32) -> bool
-extern fn rt_serial_set_timeout(fd: i64, timeout_ms: i64) -> bool
+extern fn rt_serial_set_timeout(fd: i64, timeout_ms: i64) -> bool?
 
 # --- Status ---
 
 extern fn rt_serial_available(fd: i64) -> i32
-extern fn rt_serial_flush(fd: i64) -> bool
+extern fn rt_serial_flush(fd: i64) -> bool?
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
@@ -116,7 +116,11 @@ fn serial_close(port: SerialPort) -> bool:
     if _fd_already_closed(port.fd):
         return false
     _mark_fd_closed(port.fd)
-    rt_serial_close(port.fd)
+    val closed = rt_serial_close(port.fd)
+    if closed == nil:
+        # absent: the runtime reported no close status; report a failed close.
+        return false
+    closed.unwrap()
 
 fn serial_is_closed(port: SerialPort) -> bool:
     """True when this port's descriptor has already been released."""
@@ -138,19 +142,24 @@ fn serial_configure(port: SerialPort, config: SerialConfig) -> bool:
     if not rt_serial_set_parity(port.fd, config.parity):
         ok = false
     if config.timeout_ms > 0:
-        if not rt_serial_set_timeout(port.fd, config.timeout_ms):
+        val timeout_set = rt_serial_set_timeout(port.fd, config.timeout_ms)
+        if timeout_set == nil:
+            # absent: the runtime reported no status; the timeout is not known set.
+            ok = false
+        elif not timeout_set.unwrap():
             ok = false
     ok
 
 # --- Data Transfer ---
 
-fn serial_read(port: SerialPort, max_bytes: i32) -> text:
+fn serial_read(port: SerialPort, max_bytes: i32) -> text?:
     """Read data from serial port
 
-    Returns: Received text data (empty if nothing available)
+    Returns: Received text data (empty if nothing available), or nil when the
+    port is invalid or the runtime read failed.
     """
     if not port.is_valid:
-        return ""
+        return nil
     rt_serial_read(port.fd, max_bytes)
 
 fn serial_write(port: SerialPort, data: text) -> i64:
@@ -172,7 +181,11 @@ fn serial_flush(port: SerialPort) -> bool:
     """Flush serial port buffers"""
     if not port.is_valid:
         return false
-    rt_serial_flush(port.fd)
+    val flushed = rt_serial_flush(port.fd)
+    if flushed == nil:
+        # absent: the runtime reported no flush status; report a failed flush.
+        return false
+    flushed.unwrap()
 
 # --- Default Config ---
 

@@ -19,8 +19,6 @@ fn test_as_cast_in_func_args() {
         "src/compiler/90.tools/aop_proceed.spl",
         "src/compiler/55.borrow/gc_analysis/roots.spl",
         "src/compiler/60.mir_opt/optimization_passes.spl",
-        "src/compiler/40.mono/monomorphize/deferred_deserialize.spl",
-        "src/compiler/40.mono/monomorphize/deferred.spl",
         "src/compiler/00.common/predicate_parser.spl",
     ];
     for f in &test_files {
@@ -116,7 +114,6 @@ fn debug_specific_files() {
         "src/compiler/99.loader/loader/compiler_sffi.spl",
         "src/compiler/35.semantics/error_formatter.spl",
         "src/compiler/90.tools/fix/rules/rules.spl",
-        "src/compiler/40.mono/monomorphize/deferred.spl",
         "src/compiler/90.tools/fix/main.spl",
         "src/compiler/90.tools/fix/rules/helpers.spl",
         "src/compiler/90.tools/fix/rules/impl/lint_spec.spl",
@@ -134,7 +131,6 @@ fn debug_specific_files() {
         "src/compiler/70.backend/codegen_enhanced.spl",
         "src/compiler/55.borrow/gc_analysis/roots.spl",
         "src/compiler/60.mir_opt/optimization_passes.spl",
-        "src/compiler/40.mono/monomorphize/deferred_deserialize.spl",
     ];
 
     for f in &files {
@@ -167,7 +163,6 @@ fn debug_timeout_files() {
     use simple_compiler::codegen::Codegen;
     use simple_compiler::hir::Lowerer;
     use simple_compiler::module_resolver::ModuleResolver;
-    use simple_compiler::monomorphize::monomorphize_module;
 
     let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -202,12 +197,7 @@ fn debug_timeout_files() {
         };
         let parse_ms = t0.elapsed().as_millis();
 
-        eprintln!("  {f}: parse done ({parse_ms}ms), starting mono...");
-        let t1 = Instant::now();
-        let ast = monomorphize_module(&ast);
-        let mono_ms = t1.elapsed().as_millis();
-
-        eprintln!("  {f}: mono done ({mono_ms}ms), starting hir...");
+        eprintln!("  {f}: parse done ({parse_ms}ms), starting hir...");
         let t2 = Instant::now();
         let source_root = base.join("src");
         let resolver = ModuleResolver::new(base.clone(), source_root);
@@ -217,7 +207,7 @@ fn debug_timeout_files() {
         let hir = match lowerer.lower_module(&ast) {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("  {f}: parse={parse_ms}ms mono={mono_ms}ms HIR ERROR: {e}");
+                eprintln!("  {f}: parse={parse_ms}ms HIR ERROR: {e}");
                 continue;
             }
         };
@@ -228,7 +218,7 @@ fn debug_timeout_files() {
         let mir = match simple_compiler::mir::lower_to_mir(&hir) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("  {f}: parse={parse_ms}ms mono={mono_ms}ms hir={hir_ms}ms MIR ERROR: {e}");
+                eprintln!("  {f}: parse={parse_ms}ms hir={hir_ms}ms MIR ERROR: {e}");
                 continue;
             }
         };
@@ -247,13 +237,13 @@ fn debug_timeout_files() {
         let codegen_ms = t4.elapsed().as_millis();
 
         match obj {
-            Ok(Ok(bytes)) => eprintln!("  {f}: parse={parse_ms}ms mono={mono_ms}ms hir={hir_ms}ms mir={mir_ms}ms codegen={codegen_ms}ms obj={}KB OK", bytes.len()/1024),
-            Ok(Err(e)) => eprintln!("  {f}: parse={parse_ms}ms mono={mono_ms}ms hir={hir_ms}ms mir={mir_ms}ms codegen={codegen_ms}ms ERROR: {e}"),
+            Ok(Ok(bytes)) => eprintln!("  {f}: parse={parse_ms}ms hir={hir_ms}ms mir={mir_ms}ms codegen={codegen_ms}ms obj={}KB OK", bytes.len()/1024),
+            Ok(Err(e)) => eprintln!("  {f}: parse={parse_ms}ms hir={hir_ms}ms mir={mir_ms}ms codegen={codegen_ms}ms ERROR: {e}"),
             Err(e) => {
                 let msg = if let Some(s) = e.downcast_ref::<String>() { s.clone() }
                     else if let Some(s) = e.downcast_ref::<&str>() { s.to_string() }
                     else { "unknown panic".to_string() };
-                eprintln!("  {f}: parse={parse_ms}ms mono={mono_ms}ms hir={hir_ms}ms mir={mir_ms}ms codegen={codegen_ms}ms PANIC: {msg}");
+                eprintln!("  {f}: parse={parse_ms}ms hir={hir_ms}ms mir={mir_ms}ms codegen={codegen_ms}ms PANIC: {msg}");
             }
         }
     }

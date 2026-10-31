@@ -13,7 +13,6 @@ use crate::hir::{BinOp, HirType, Signedness, TypeRegistry, UnaryOp};
 use crate::import_loader::load_module_with_imports;
 use crate::mir;
 use crate::mir::{CallTarget, MirFunction, MirInst, GpuMemoryScope, Terminator};
-use crate::monomorphize::monomorphize_module;
 use crate::optimizations::NativeOptimizationLevel;
 use crate::CompileError;
 use simple_parser::ast;
@@ -90,9 +89,6 @@ impl CompilerPipeline {
         // Load module with import resolution
         let ast_module = load_module_with_imports(source, &mut HashSet::new())?;
 
-        // Monomorphize generics
-        let ast_module = monomorphize_module(&ast_module);
-
         // Type check and lower to MIR (with module resolution for imports)
         let project_hint = native_single_file_project_hint(source);
         let mir_module =
@@ -123,7 +119,6 @@ impl CompilerPipeline {
         dialect: GpuSourceDialect,
     ) -> Result<(), CompileError> {
         let ast_module = load_module_with_imports(source, &mut HashSet::new())?;
-        let ast_module = monomorphize_module(&ast_module);
         let project_hint = native_single_file_project_hint(source);
         let mir_module =
             self.type_check_and_lower_with_context_and_project_hint(&ast_module, source, project_hint.as_deref())?;
@@ -140,8 +135,7 @@ impl CompilerPipeline {
         let result = (|| {
             let ast_module = load_module_with_imports(source, &mut HashSet::new())?;
             let vhdl_metadata = collect_vhdl_source_metadata(&ast_module);
-            let ast_module = monomorphize_module(&ast_module);
-            let project_hint = native_single_file_project_hint(source);
+                let project_hint = native_single_file_project_hint(source);
             let mir_module =
                 self.type_check_and_lower_with_context_and_project_hint(&ast_module, source, project_hint.as_deref())?;
             let vhdl = generate_vhdl_with_metadata(&mir_module, &vhdl_metadata)?;

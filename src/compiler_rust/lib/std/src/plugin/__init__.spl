@@ -9,7 +9,7 @@ use app.plugin.registry.{PluginEntry, plugin_manifest_path, parse_plugin_manifes
 @unsafe(reason: "raw file predicate; false conflates absence with provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "raw manifest read; empty text conflates empty data with provider failure", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 @unsafe(reason: "status/out plugin provider loader ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64
 @unsafe(reason: "status/out plugin symbol resolver ABI", capabilities: [ffi, raw_ptr])
@@ -72,9 +72,12 @@ fn use_plugin_from(manifest_path: text, name: text) -> bool:
         rt_file_exists(manifest_path)
     if not manifest_exists:
         return false
-    val manifest_text = unsafe(capabilities: [ffi]):
-        rt_file_read_text(manifest_path) ?? ""
-    val entries = parse_plugin_manifest_text(manifest_text)
+    val manifest_opt = unsafe(capabilities: [ffi]):
+        rt_file_read_text(manifest_path)
+    if manifest_opt == nil:
+        # absent: an unreadable manifest lists no plugin, like a missing one
+        return false
+    val entries = parse_plugin_manifest_text(manifest_opt.unwrap())
     for entry in entries:
         if entry.name == name:
             val library_exists = unsafe(capabilities: [ffi]):
