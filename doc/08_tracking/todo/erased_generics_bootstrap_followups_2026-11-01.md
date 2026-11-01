@@ -18,9 +18,14 @@ phases are not verified.
 - [ ] Parallel native codegen shards; see
   `doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md`.
   Sequential codegen measured about 39s per module, about 15 hours in total.
-- [ ] Replace the O(n^2) `reverse_reference_sorted_v1` in
-  `src/compiler/80.driver/cache/reverse_reference_receipt.spl`. A 20s sample of
-  the worker had 51% of samples there, and cost does not track module size.
+- [ ] Land the receipt save fix, commit 8ba03f0c10c on local branch
+  work/native-codegen-fixed-cost; not compiled or reviewed. About 95% of a 20s
+  worker sample was in the O(n^2) `reverse_reference_sorted_v1`, and real
+  codegen is about 1s per module, so shards may not be needed after it.
+- [ ] Per-batch cache scope dirs can be evicted before the final link
+  (`disk_bound_keep_newest_dirs`, keep 6, 6h). Set
+  `SIMPLE_NATIVE_CACHE_SCOPES_KEEP` or fix; code-read inference, not observed.
+- [ ] Receipts under `build_cache.sdn.reverse-references/sha256/` are never evicted.
 
 ## Erased generics coverage gaps
 
@@ -29,6 +34,10 @@ phases are not verified.
   the emitted body is called instead of inlined.
 - [ ] No adapter thunks: a concrete `fn(..) -> i64` passed into `fn(.., T) -> T`
   has a raw ABI, wrong for scalars.
+
+- [ ] `T`-typed struct fields are stored raw by instance, but a read inside an
+  erased body has HIR type `T` and decodes as tagged. User enum `T` payloads
+  are the same class.
 
 ## Specs and gates
 
