@@ -32,6 +32,10 @@ use compiler.driver.cache.cas.verified_cas_store.{
 use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
     L78BoundaryErrorV4, L78LimitsV4, L78OwnedResultV4, L78OwnerTokenV4
 }
+use compiler.common.cache_contract.generic_tldr_view_v1.{
+    GenericFacetChangeV1, GENERIC_FACET_DIMENSION_V1, GENERIC_FACET_SIGNATURE_V1,
+    GENERIC_FACET_BOUND_V1, GENERIC_FACET_BODY_V1
+}
 
 pub const AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1: i64 = 65536
 pub const AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1: i64 = 16777216
@@ -645,6 +649,197 @@ fn _reject_plan_v1(reason: text) -> AffectedQueryPlanV1:
         ordered_query_ids: [], owner_modules: [], changed_dimensions: [],
         conservative_domain_receipt: "", scc_group_identities: [])
 
+# Shared pre-authority validation of the scheduling inputs.  Returns "" when
+# every input is well-formed, complete and domain-proven; otherwise the
+# rejection reason the planner reports.  `dimensions` receives the unique
+# changed dimensions in first-seen order.
+struct AffectedInputCheckV1:
+    reason: text
+    dimensions: [text]
+
+fn _affected_inputs_check_v1(
+    changed_facets: [ChangedSemanticFacetV1],
+    old_new_membership: [OldNewMembershipV1],
+    verified_forward_manifests: [VerifiedForwardManifestV1],
+    rr_shards: [ReverseReferenceShardV1],
+) -> AffectedInputCheckV1:
+    var dimensions: [text] = []
+    for change in changed_facets:
+        if not _query_valid_v1(change.producer) or change.facet == "" or change.dimension == "":
+            return AffectedInputCheckV1(reason: "invalid_changed_facet", dimensions: [])
+        match change.old_fingerprint:
+            case Some(digest):
+                if not three_payload_contract_digest_valid_v1(digest):
+                    return AffectedInputCheckV1(reason: "invalid_changed_fingerprint", dimensions: [])
+            case nil: pass
+        match change.new_fingerprint:
+            case Some(digest):
+                if not three_payload_contract_digest_valid_v1(digest):
+                    return AffectedInputCheckV1(reason: "invalid_changed_fingerprint", dimensions: [])
+            case nil: pass
+        dimensions = _push_text_unique_v1(dimensions, change.dimension)
+    for membership in old_new_membership:
+        if not _query_valid_v1(membership.owner) or membership.dimension == "" or
+                not three_payload_contract_digest_valid_v1(membership.absence_witness_digest) or
+                not _coverage_usable_v1(membership.coverage):
+            return AffectedInputCheckV1(reason: "membership_or_absence_incomplete", dimensions: [])
+        for candidate in membership.old_candidates:
+            if not _query_valid_v1(candidate):
+                return AffectedInputCheckV1(reason: "membership_candidate_invalid", dimensions: [])
+        for candidate in membership.new_candidates:
+            if not _query_valid_v1(candidate):
+                return AffectedInputCheckV1(reason: "membership_candidate_invalid", dimensions: [])
+        dimensions = _push_text_unique_v1(dimensions, membership.dimension)
+    for verified in verified_forward_manifests:
+        if not _forward_valid_v1(verified):
+            return AffectedInputCheckV1(reason: "forward_manifest_unverified", dimensions: [])
+    for shard in rr_shards:
+        if not reverse_reference_shard_valid_v1(shard) or not _coverage_usable_v1(shard.coverage):
+            return AffectedInputCheckV1(reason: "rr_shard_incomplete", dimensions: [])
+    if (changed_facets.len() > 0 or old_new_membership.len() > 0) and
+            verified_forward_manifests.len() == 0:
+        return AffectedInputCheckV1(reason: "affected_evidence_incomplete", dimensions: [])
+    for dimension in dimensions:
+        if not _dimension_proven_v1(dimension, verified_forward_manifests):
+            return AffectedInputCheckV1(reason: "affected_domain_incomplete", dimensions: [])
+    AffectedInputCheckV1(reason: "", dimensions: dimensions)
+
+# Exact directly-affected (consumer, partition) pairs: a pair is present iff an
+# RR edge or a verified forward read names a changed (producer, facet).  No
+# SCC expansion, no authority: this is the exactness seam the generic facet
+# specs assert (no over- or under-invalidation).
+fn _affected_pairs_v1(
+    changed_facets: [ChangedSemanticFacetV1],
+    old_new_membership: [OldNewMembershipV1],
+    verified_forward_manifests: [VerifiedForwardManifestV1],
+    rr_shards: [ReverseReferenceShardV1],
+) -> [AffectedQueryPartitionV1]:
+    var affected_pairs: [AffectedQueryPartitionV1] = []
+    # Existing reverse edges cover prior consumers and deletion/update cases.
+    for shard in rr_shards:
+        for edge in shard.sorted_edges:
+            if _changed_match_v1(edge.producer, edge.facet, changed_facets) or
+                    _membership_match_v1(edge.producer, edge.facet, old_new_membership):
+                affected_pairs = _push_query_partition_unique_v1(affected_pairs,
+                    edge.consumer, edge.partition_id)
+    # Verified forward reads cover newly added candidate/membership/absence
+    # cases where no old reverse edge can exist yet.
+    for verified in verified_forward_manifests:
+        for read in verified.manifest.ordered_reads:
+            if _changed_match_v1(read.producer, read.facet, changed_facets) or
+                    _membership_match_v1(read.producer, read.facet, old_new_membership):
+                affected_pairs = _push_query_partition_unique_v1(affected_pairs,
+                    verified.manifest.consumer, read.partition_id)
+    affected_pairs
+
+pub struct AffectedConsumerV1:
+    consumer: SemanticQueryKeyV1
+    partition_id: text
+
+pub struct AffectedConsumersV1:
+    accepted: bool
+    rejection_reason: text
+    affected: [AffectedConsumerV1]   # sorted by canonical consumer, then partition
+
+pub struct GenericInvalidationPlanV1:
+    accepted: bool
+    rejection_reason: text
+    changed_facets: [text]
+    affected: [AffectedConsumerV1]
+    affected_partitions: [text]
+
+fn _affected_consumer_rank_v1(value: AffectedConsumerV1) -> text:
+    _frame_v1("consumer", _query_text_v1(value.consumer)) +
+        _frame_v1("partition", value.partition_id)
+
+fn _sort_affected_consumers_v1(values: [AffectedConsumerV1]) -> [AffectedConsumerV1]:
+    array_sort_by(values, \left, right:
+        val left_key = _affected_consumer_rank_v1(left)
+        val right_key = _affected_consumer_rank_v1(right)
+        if left_key < right_key: -1
+        elif left_key > right_key: 1
+        else: 0
+    )
+
+pub fn affected_consumers_v1(
+    changed_facets: [ChangedSemanticFacetV1],
+    old_new_membership: [OldNewMembershipV1],
+    verified_forward_manifests: [VerifiedForwardManifestV1],
+    rr_shards: [ReverseReferenceShardV1],
+) -> AffectedConsumersV1:
+    """Pure exact affected set over validated evidence.  Empty changes with
+    valid evidence are an accepted empty result (an unrelated edit).  Any
+    malformed, incomplete or unverified input fails closed with the same
+    reason the authenticated planner reports."""
+    if not _affected_query_domain_bounded_v1(changed_facets, old_new_membership,
+            verified_forward_manifests, rr_shards):
+        return AffectedConsumersV1(accepted: false,
+            rejection_reason: "affected_domain_bounds_exceeded", affected: [])
+    # Row-bounded above, so per-shard validation is bounded work; a corrupt
+    # edge (bad digest) is reported as the shard defect it is, not as a budget
+    # overflow.
+    for shard in rr_shards:
+        if not reverse_reference_shard_valid_v1(shard) or not _coverage_usable_v1(shard.coverage):
+            return AffectedConsumersV1(accepted: false,
+                rejection_reason: "rr_shard_incomplete", affected: [])
+    if not _affected_query_domain_budget_valid_v1(changed_facets,
+            old_new_membership, verified_forward_manifests, rr_shards):
+        return AffectedConsumersV1(accepted: false,
+            rejection_reason: "affected_domain_bounds_exceeded", affected: [])
+    val check = _affected_inputs_check_v1(changed_facets, old_new_membership,
+        verified_forward_manifests, rr_shards)
+    if check.reason != "":
+        return AffectedConsumersV1(accepted: false, rejection_reason: check.reason, affected: [])
+    var out: [AffectedConsumerV1] = []
+    for pair in _affected_pairs_v1(changed_facets, old_new_membership,
+            verified_forward_manifests, rr_shards):
+        out.push(AffectedConsumerV1(consumer: pair.query, partition_id: pair.partition_id))
+    AffectedConsumersV1(accepted: true, rejection_reason: "",
+        affected: _sort_affected_consumers_v1(out))
+
+fn _generic_facet_known_v1(facet: text) -> bool:
+    facet == GENERIC_FACET_SIGNATURE_V1 or facet == GENERIC_FACET_BOUND_V1 or
+        facet == GENERIC_FACET_BODY_V1
+
+pub fn generic_changed_semantic_facets_v1(template: SemanticQueryKeyV1,
+        changes: [GenericFacetChangeV1]) -> [ChangedSemanticFacetV1]:
+    """Map generic facet changes onto the coordinator's change rows.  The
+    dimension is always GENERIC_FACET_DIMENSION_V1; an unknown facet name is
+    passed through unchanged so the planner rejects it (fail closed)."""
+    var out: [ChangedSemanticFacetV1] = []
+    for change in changes:
+        out.push(ChangedSemanticFacetV1(producer: template, facet: change.facet,
+            dimension: GENERIC_FACET_DIMENSION_V1,
+            old_fingerprint: change.old_fingerprint,
+            new_fingerprint: change.new_fingerprint))
+    out
+
+fn _reject_generic_plan_v1(reason: text) -> GenericInvalidationPlanV1:
+    GenericInvalidationPlanV1(accepted: false, rejection_reason: reason,
+        changed_facets: [], affected: [], affected_partitions: [])
+
+pub fn plan_generic_invalidation_v1(template: SemanticQueryKeyV1,
+        changes: [GenericFacetChangeV1],
+        verified_forward_manifests: [VerifiedForwardManifestV1],
+        rr_shards: [ReverseReferenceShardV1]) -> GenericInvalidationPlanV1:
+    """Exact dependents of a generic template edit (REQ-GRR-001..006)."""
+    var facets: [text] = []
+    for change in changes:
+        if not _generic_facet_known_v1(change.facet):
+            return _reject_generic_plan_v1("invalid_changed_facet")
+        facets = _push_text_unique_v1(facets, change.facet)
+    val result = affected_consumers_v1(
+        generic_changed_semantic_facets_v1(template, changes), [],
+        verified_forward_manifests, rr_shards)
+    if not result.accepted:
+        return _reject_generic_plan_v1(result.rejection_reason)
+    var partitions: [text] = []
+    for value in result.affected:
+        partitions = _push_text_unique_v1(partitions, value.partition_id)
+    GenericInvalidationPlanV1(accepted: true, rejection_reason: "",
+        changed_facets: _sort_texts_v1(facets), affected: result.affected,
+        affected_partitions: _sort_texts_v1(partitions))
+
 fn _plan_affected_queries_authenticated_v1(
     changed_facets: [ChangedSemanticFacetV1],
     old_new_membership: [OldNewMembershipV1],
@@ -652,42 +847,10 @@ fn _plan_affected_queries_authenticated_v1(
     rr_shards: [ReverseReferenceShardV1],
     authority: AuthenticatedAffectedDomainV1?,
 ) -> AffectedQueryPlanV1:
-    var dimensions: [text] = []
-    for change in changed_facets:
-        if not _query_valid_v1(change.producer) or change.facet == "" or change.dimension == "":
-            return _reject_plan_v1("invalid_changed_facet")
-        match change.old_fingerprint:
-            case Some(digest):
-                if not three_payload_contract_digest_valid_v1(digest):
-                    return _reject_plan_v1("invalid_changed_fingerprint")
-            case nil: pass
-        match change.new_fingerprint:
-            case Some(digest):
-                if not three_payload_contract_digest_valid_v1(digest):
-                    return _reject_plan_v1("invalid_changed_fingerprint")
-            case nil: pass
-        dimensions = _push_text_unique_v1(dimensions, change.dimension)
-    for membership in old_new_membership:
-        if not _query_valid_v1(membership.owner) or membership.dimension == "" or
-                not three_payload_contract_digest_valid_v1(membership.absence_witness_digest) or
-                not _coverage_usable_v1(membership.coverage):
-            return _reject_plan_v1("membership_or_absence_incomplete")
-        for candidate in membership.old_candidates:
-            if not _query_valid_v1(candidate): return _reject_plan_v1("membership_candidate_invalid")
-        for candidate in membership.new_candidates:
-            if not _query_valid_v1(candidate): return _reject_plan_v1("membership_candidate_invalid")
-        dimensions = _push_text_unique_v1(dimensions, membership.dimension)
-    for verified in verified_forward_manifests:
-        if not _forward_valid_v1(verified): return _reject_plan_v1("forward_manifest_unverified")
-    for shard in rr_shards:
-        if not reverse_reference_shard_valid_v1(shard) or not _coverage_usable_v1(shard.coverage):
-            return _reject_plan_v1("rr_shard_incomplete")
-    if (changed_facets.len() > 0 or old_new_membership.len() > 0) and
-            verified_forward_manifests.len() == 0:
-        return _reject_plan_v1("affected_evidence_incomplete")
-    for dimension in dimensions:
-        if not _dimension_proven_v1(dimension, verified_forward_manifests):
-            return _reject_plan_v1("affected_domain_incomplete")
+    val check = _affected_inputs_check_v1(changed_facets, old_new_membership,
+        verified_forward_manifests, rr_shards)
+    if check.reason != "": return _reject_plan_v1(check.reason)
+    val dimensions = check.dimensions
     # Even an empty affected set is a semantic claim (the zero-match case).
     # It must be bound to the admitted generation; absence of change rows is
     # never authority to skip complete-domain validation.
@@ -708,22 +871,8 @@ fn _plan_affected_queries_authenticated_v1(
         case nil:
             return _reject_plan_v1("affected_domain_authority_unavailable")
 
-    var affected_pairs: [AffectedQueryPartitionV1] = []
-    # Existing reverse edges cover prior consumers and deletion/update cases.
-    for shard in rr_shards:
-        for edge in shard.sorted_edges:
-            if _changed_match_v1(edge.producer, edge.facet, changed_facets) or
-                    _membership_match_v1(edge.producer, edge.facet, old_new_membership):
-                affected_pairs = _push_query_partition_unique_v1(affected_pairs,
-                    edge.consumer, edge.partition_id)
-    # Verified forward reads cover newly added candidate/membership/absence
-    # cases where no old reverse edge can exist yet.
-    for verified in verified_forward_manifests:
-        for read in verified.manifest.ordered_reads:
-            if _changed_match_v1(read.producer, read.facet, changed_facets) or
-                    _membership_match_v1(read.producer, read.facet, old_new_membership):
-                affected_pairs = _push_query_partition_unique_v1(affected_pairs,
-                    verified.manifest.consumer, read.partition_id)
+    val affected_pairs = _affected_pairs_v1(changed_facets, old_new_membership,
+        verified_forward_manifests, rr_shards)
 
     # Select the SCC by both partition and directly affected consumer.  A
     # partition can contain several disjoint SCCs; conflating them over-invalidates

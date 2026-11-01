@@ -35,6 +35,30 @@ pub val GENERIC_CLOSURE_UNRESOLVED = "Unresolved"
 
 pub val GENERIC_INSTANTIATION_DEPTH_LIMIT = 32
 
+# Generic dependency facets (plan section 8.3; design
+# doc/05_design/generic_rr_hir_variant_obj.md). Under the erased model a
+# type-arg-bearing caller consumes signature + bound only; the single erased
+# body is consumed by the template's own object action.
+pub val GENERIC_FACET_DIMENSION_V1 = "generic"
+pub val GENERIC_FACET_SIGNATURE_V1 = "generic.signature"
+pub val GENERIC_FACET_BOUND_V1 = "generic.bound"
+pub val GENERIC_FACET_BODY_V1 = "generic.body"
+
+pub struct GenericBoundV1:
+    param_index: i64
+    bound_key: text   # structural key of the bound (trait/type); never display text
+
+pub struct GenericTemplateFacetsV1:
+    template_id: text
+    signature_fingerprint: text   # 64-hex sha256
+    bound_fingerprint: text
+    body_fingerprint: text
+
+pub struct GenericFacetChangeV1:
+    facet: text
+    old_fingerprint: text?   # nil at genesis
+    new_fingerprint: text?   # nil when the template is removed
+
 pub struct GenericParamV1:
     index: i64
     kind: text
@@ -54,6 +78,10 @@ pub struct GenericTemplateEntryV1:
     language_schema: text
     params: [GenericParamV1]
     fields: [GenericTemplateFieldV1]
+    # Trailing defaulted fields (the seed fills partial named constructions
+    # positionally, so only a trailing addition is slot-safe).
+    bounds: [GenericBoundV1] = []
+    body_digest: text = ""   # sha256 hex of the single erased body; "" = no body
 
 pub struct GenericTemplateSectionV1:
     entries: [GenericTemplateEntryV1]   # sorted by symbol_id, unique (indexed)
@@ -151,6 +179,130 @@ pub fn concrete_tldr_key_v1(template_id: text, args_id: text, constraint_root: t
         _frame_v1(active_guard_root))
 
 # ----------------------------------------------------------------------------
+# Generic facets and fingerprints
+# ----------------------------------------------------------------------------
+
+pub fn generic_bounds_valid_v1(entry: GenericTemplateEntryV1) -> bool:
+    """Every bound names an existing binder index and a non-empty key."""
+    for b in entry.bounds:
+        val bb: GenericBoundV1 = b
+        if bb.param_index < 0 or bb.param_index >= entry.params.len() or bb.bound_key == "":
+            return false
+    true
+
+fn _bound_rank_v1(b: GenericBoundV1) -> text:
+    # Fixed-width index so text order equals numeric order (indices < 10^9).
+    var digits = "{b.param_index}"
+    while digits.len() < 9:
+        digits = "0" + digits
+    digits + ":" + b.bound_key
+
+fn _sorted_unique_bounds_v1(bounds: [GenericBoundV1]) -> [GenericBoundV1]:
+    """Insertion sort by (param_index, bound_key); duplicates dropped."""
+    var out: [GenericBoundV1] = []
+    for b in bounds:
+        val bb: GenericBoundV1 = b
+        val rank = _bound_rank_v1(bb)
+        var placed: [GenericBoundV1] = []
+        var inserted = false
+        var duplicate = false
+        for o in out:
+            val oo: GenericBoundV1 = o
+            val orank = _bound_rank_v1(oo)
+            if orank == rank:
+                duplicate = true
+            if not inserted and not duplicate and rank < orank:
+                placed = placed.push(bb)
+                inserted = true
+            placed = placed.push(oo)
+        if duplicate:
+            continue
+        if not inserted:
+            placed = placed.push(bb)
+        out = placed
+    out
+
+pub fn generic_template_signature_fingerprint_v1(entry: GenericTemplateEntryV1) -> text:
+    """Signature facet: symbol, binder-indexed params and fields (alpha-invariant)."""
+    sha256_text(_frame_v1("generic-facet-signature/v1") +
+        _frame_v1(generic_template_summary_digest_v1(entry)))
+
+pub fn generic_template_bound_fingerprint_v1(entry: GenericTemplateEntryV1) -> text:
+    """Bound facet: canonical (index, key) set; "no bounds" is a distinct value."""
+    val sorted = _sorted_unique_bounds_v1(entry.bounds)
+    var acc = _frame_v1("generic-facet-bound/v1") + _frame_v1("{sorted.len()}")
+    for b in sorted:
+        val bb: GenericBoundV1 = b
+        acc = acc + _frame_v1("{bb.param_index}") + _frame_v1(bb.bound_key)
+    sha256_text(acc)
+
+pub fn generic_template_body_fingerprint_v1(entry: GenericTemplateEntryV1) -> text:
+    """Body facet: the single erased body digest ("" = no body, still a value)."""
+    sha256_text(_frame_v1("generic-facet-body/v1") + _frame_v1(entry.body_digest))
+
+pub fn generic_template_facets_v1(entry: GenericTemplateEntryV1) -> GenericTemplateFacetsV1:
+    GenericTemplateFacetsV1(template_id: generic_template_id_v1(entry),
+        signature_fingerprint: generic_template_signature_fingerprint_v1(entry),
+        bound_fingerprint: generic_template_bound_fingerprint_v1(entry),
+        body_fingerprint: generic_template_body_fingerprint_v1(entry))
+
+pub fn generic_caller_consumed_facets_v1() -> [text]:
+    """Facets a type-arg-bearing caller reads (sorted). Never the body."""
+    [GENERIC_FACET_BOUND_V1, GENERIC_FACET_SIGNATURE_V1]
+
+pub fn generic_template_consumed_facets_v1() -> [text]:
+    """Facets the template's own object action reads (sorted)."""
+    [GENERIC_FACET_BODY_V1, GENERIC_FACET_BOUND_V1, GENERIC_FACET_SIGNATURE_V1]
+
+fn _facet_fingerprint_v1(facets: GenericTemplateFacetsV1, facet: text) -> text:
+    if facet == GENERIC_FACET_BODY_V1: return facets.body_fingerprint
+    if facet == GENERIC_FACET_BOUND_V1: return facets.bound_fingerprint
+    facets.signature_fingerprint
+
+fn _facet_change_v1(facet: text, old_facets: GenericTemplateFacetsV1?,
+                    new_facets: GenericTemplateFacetsV1?) -> [GenericFacetChangeV1]:
+    """Zero or one change row for `facet`: emitted only when the texts differ."""
+    var old_text = ""
+    var has_old = false
+    match old_facets:
+        case Some(f):
+            old_text = _facet_fingerprint_v1(f, facet)
+            has_old = true
+        case nil: pass
+    var new_text = ""
+    var has_new = false
+    match new_facets:
+        case Some(f):
+            new_text = _facet_fingerprint_v1(f, facet)
+            has_new = true
+        case nil: pass
+    if has_old == has_new and old_text == new_text:
+        return []
+    var old_value: text? = nil
+    if has_old:
+        old_value = Some(old_text)
+    var new_value: text? = nil
+    if has_new:
+        new_value = Some(new_text)
+    [GenericFacetChangeV1(facet: facet, old_fingerprint: old_value, new_fingerprint: new_value)]
+
+pub fn generic_template_changed_facets_v1(old_entry: GenericTemplateEntryV1?,
+        new_entry: GenericTemplateEntryV1?) -> [GenericFacetChangeV1]:
+    """Exactly the facets whose fingerprint differs, in sorted facet order.
+    (nil, nil) -> []; (nil, e) -> genesis rows with old nil; (e, nil) -> removal rows."""
+    val old_facets: GenericTemplateFacetsV1? = match old_entry:
+        case Some(e): Some(generic_template_facets_v1(e))
+        case nil: nil
+    val new_facets: GenericTemplateFacetsV1? = match new_entry:
+        case Some(e): Some(generic_template_facets_v1(e))
+        case nil: nil
+    var out: [GenericFacetChangeV1] = []
+    for facet in generic_template_consumed_facets_v1():
+        for c in _facet_change_v1(facet, old_facets, new_facets):
+            out = out.push(c)
+    out
+
+# ----------------------------------------------------------------------------
 # Indexed section
 # ----------------------------------------------------------------------------
 
@@ -166,7 +318,13 @@ fn _entry_body_v1(e: GenericTemplateEntryV1) -> text:
         val ff: GenericTemplateFieldV1 = f
         val g = if ff.generic: "1" else: "0"
         acc = acc + _frame_v1(ff.name) + _frame_v1(ff.type_key) + _frame_v1(g)
-    acc
+    # Facet payload (design generic_rr_hir_variant_obj.md section 1): bounds
+    # as written (the fingerprint canonicalizes), then the erased-body digest.
+    acc = acc + _frame_v1("{e.bounds.len()}")
+    for b in e.bounds:
+        val bb: GenericBoundV1 = b
+        acc = acc + _frame_v1("{bb.param_index}") + _frame_v1(bb.bound_key)
+    acc + _frame_v1(e.body_digest)
 
 fn _section_body_v1(entries: [GenericTemplateEntryV1]) -> text:
     var acc = _frame_v1(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + _frame_v1("{entries.len()}")
@@ -292,10 +450,26 @@ pub fn generic_template_section_decode_v1(data: text) -> GenericTemplateSectionD
             val b = fc_at + 1 + j * 3
             fields = fields.push(GenericTemplateFieldV1(name: toks[b], type_key: toks[b + 1], generic: toks[b + 2] == "1"))
             j = j + 1
+        val bc_at = fc_at + 1 + nf * 3
+        if bc_at >= toks.len():
+            return _decode_fail_v1("truncated entry")
+        val nb = _count_v1(toks[bc_at])
+        if nb < 0 or bc_at + 1 + nb * 2 + 1 > toks.len():
+            return _decode_fail_v1("bad bound count")
+        var bounds: [GenericBoundV1] = []
+        j = 0
+        while j < nb:
+            val b = bc_at + 1 + j * 2
+            val index = _count_v1(toks[b])
+            if index < 0 or index >= np or toks[b + 1] == "":
+                return _decode_fail_v1("bad bound")
+            bounds = bounds.push(GenericBoundV1(param_index: index, bound_key: toks[b + 1]))
+            j = j + 1
+        val body_at = bc_at + 1 + nb * 2
         entries = entries.push(GenericTemplateEntryV1(symbol_id: toks[k], source_digest: toks[k + 1],
             visibility_root: toks[k + 2], active_guard_root: toks[k + 3], language_schema: toks[k + 4],
-            params: params, fields: fields))
-        k = fc_at + 1 + nf * 3
+            params: params, fields: fields, bounds: bounds, body_digest: toks[body_at]))
+        k = body_at + 1
         e = e + 1
     if k != toks.len():
         return _decode_fail_v1("trailing data")
