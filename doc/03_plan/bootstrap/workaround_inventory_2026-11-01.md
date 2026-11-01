@@ -15,6 +15,7 @@ Status values: `fixed-in-source (<evidence>)`, `fixed (PR #n)`,
 
 | id | sites | real-fix owner file | status |
 |---|---|---|---|
+| native_object_cache_keyed_on_tree_scv_revision_2026-11-02 | process (phase-3 tip pinned at df3a14d194b) | src/compiler/80.driver (per-module object key; see #5745) | open (P1) |
 | eprint-noparen-stage2-20261031 | 32 (src/app/cli, src/app/verify, src/app/test) | src/compiler/10.frontend (parser, PR #5567) | fixed-in-source (50b383280c3; eprint_noparen_call_spec 3/3 seed; status PR #5769) |
 | methods-mir-20261031 | 31 (lib/common/serialization, nogc_sync_mut/io, linker) | src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl (method receiver typing) | spec+design only (PR #5771, 7/7 seed): shapes 1-3 (untyped param substring/slice, no-return-type result .len, narrowed text?) still fail; 4-6 full-closure only. NOT revert-ready |
 | enumowner-mir-20261031 | 25 (35.semantics/param_effects, async_ring, driver_build, backend) | src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl (bare-variant resolution) | spec only (PR #5772, 3/3 seed): all 3 shapes compile clean in reduced closure; full-closure only. revert-ready pending full stage3 build |
