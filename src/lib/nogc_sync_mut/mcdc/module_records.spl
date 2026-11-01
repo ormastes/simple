@@ -1,0 +1,194 @@
+# std.mcdc.module_records — SDN table codec for the module-coverage manifest
+# and evaluation records.
+#
+# All files are SDN tables (header `|h1, h2|`, one comma-joined row per line;
+# text cells quoted with \\ \" \n \t \r escapes — the same form
+# std.common.sdn.encode emits):
+#
+#   decisions.sdn   |id, file, line, col, kind, conditions, tree, expr|
+#   conditions.sdn  |decision, index, line, col, expr|
+#   records/*.sdn   |decision, values, evaluated, outcome|     (written by probe)
+#   files.sdn       |file, shadow, decisions, conditions|
+#
+# `tree` is the and/or/not tree in postfix ("c0 c1 c2 | &", see
+# module_decisions.mcdc_tree_to_postfix).
+
+use std.nogc_sync_mut.mcdc.module_decisions.{McdcDecisionInfo, McdcCondition, McdcTreeNode, mcdc_tree_to_postfix, mcdc_tree_from_postfix}
+use std.nogc_sync_mut.mcdc.module_analyzer.{McdcEvalRecord}
+
+val MCDC_DECISIONS_HEADER: text = "|id, file, line, col, kind, conditions, tree, expr|"
+val MCDC_CONDITIONS_HEADER: text = "|decision, index, line, col, expr|"
+val MCDC_FILES_HEADER: text = "|file, shadow, decisions, conditions|"
+
+fn _mr_is_numbered_component(c: text) -> bool:
+    var i = 0
+    val n = c.len()
+    while i < n and c.byte_at(i) >= 48 and c.byte_at(i) <= 57:
+        i = i + 1
+    i > 0 and i < n and c.byte_at(i) == 46
+
+fn _mr_strip_number(c: text) -> text:
+    var i = 0
+    while i < c.len() and c.byte_at(i) != 46:
+        i = i + 1
+    c.slice(i + 1, c.len())
+
+# Shadow-relative paths (under <run>/src) where the module loader will find
+# this source when SIMPLE_LIB points at <run>/src. The loader joins SIMPLE_LIB
+# with the dotted module path verbatim (`compiler.types.x` ->
+# `compiler/types/x.spl`), so numbered directories (`30.types`) are
+# de-numbered; `std.<family>.x` and `std.x` both resolve lib files, so those
+# are mirrored with and without the family directory.
+pub fn mcdc_shadow_rel_paths(src_rel: text) -> [text]:
+    val parts = src_rel.replace("\\", "/").split("/")
+    if parts.len() < 2 or parts[0] != "src": return []
+    var dirs: [text] = []
+    var i = 1
+    while i < parts.len() - 1:
+        val c = parts[i]
+        dirs.push(if _mr_is_numbered_component(c): _mr_strip_number(c) else: c)
+        i = i + 1
+    val file = parts[parts.len() - 1]
+    var out: [text] = []
+    out.push((dirs + [file]).join("/"))
+    if dirs.len() >= 2 and dirs[0] == "lib":
+        var short: [text] = ["lib"]
+        var k = 2
+        while k < dirs.len():
+            short.push(dirs[k])
+            k = k + 1
+        out.push((short + [file]).join("/"))
+    out
+
+pub fn mcdc_sdn_quote(s: text) -> text:
+    var out = "\""
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s.byte_at(i)
+        if c == 92:
+            out = out + "\\\\"
+        elif c == 34:
+            out = out + "\\\""
+        elif c == 10:
+            out = out + "\\n"
+        elif c == 9:
+            out = out + "\\t"
+        elif c == 13:
+            out = out + "\\r"
+        else:
+            out = out + s.slice(i, i + 1)
+        i = i + 1
+    out + "\""
+
+fn _mr_unquote(cell: text) -> text:
+    val n = cell.len()
+    if n < 2 or cell.byte_at(0) != 34: return cell
+    var out = ""
+    var i = 1
+    while i < n - 1:
+        val c = cell.byte_at(i)
+        if c == 92 and i + 1 < n - 1:
+            val e = cell.byte_at(i + 1)
+            if e == 110: out = out + "\n"
+            elif e == 116: out = out + "\t"
+            elif e == 114: out = out + "\r"
+            else: out = out + cell.slice(i + 1, i + 2)
+            i = i + 2
+        else:
+            out = out + cell.slice(i, i + 1)
+            i = i + 1
+    out
+
+# Split one SDN row into cells (commas inside quotes are kept).
+pub fn mcdc_sdn_split_row(line: text) -> [text]:
+    var cells: [text] = []
+    var cur = ""
+    var in_q = false
+    var i = 0
+    val n = line.len()
+    while i < n:
+        val c = line.byte_at(i)
+        if in_q:
+            cur = cur + line.slice(i, i + 1)
+            if c == 92 and i + 1 < n:
+                cur = cur + line.slice(i + 1, i + 2)
+                i = i + 1
+            elif c == 34:
+                in_q = false
+        elif c == 34:
+            in_q = true
+            cur = cur + "\""
+        elif c == 44:
+            cells.push(_mr_unquote(cur.trim()))
+            cur = ""
+        else:
+            cur = cur + line.slice(i, i + 1)
+        i = i + 1
+    cells.push(_mr_unquote(cur.trim()))
+    cells
+
+fn _mr_int(cell: text) -> i64:
+    cell.trim().parse_int() ?? -1
+
+# --- encode ------------------------------------------------------------------
+
+pub fn mcdc_manifest_encode(decisions: [McdcDecisionInfo]) -> text:
+    var out = MCDC_DECISIONS_HEADER
+    for d in decisions:
+        out = out + "\n" + d.id.to_text() + ", " + mcdc_sdn_quote(d.file) + ", " + d.line.to_text() + ", " + d.col.to_text() + ", " + mcdc_sdn_quote(d.kind) + ", " + d.conditions.len().to_text() + ", " + mcdc_sdn_quote(mcdc_tree_to_postfix(d)) + ", " + mcdc_sdn_quote(d.expr)
+    out + "\n"
+
+pub fn mcdc_conditions_encode(decisions: [McdcDecisionInfo]) -> text:
+    var out = MCDC_CONDITIONS_HEADER
+    for d in decisions:
+        for c in d.conditions:
+            out = out + "\n" + d.id.to_text() + ", " + c.index.to_text() + ", " + c.line.to_text() + ", " + c.col.to_text() + ", " + mcdc_sdn_quote(c.expr)
+    out + "\n"
+
+pub fn mcdc_files_encode_row(file: text, shadow: text, decisions: i64, conditions: i64) -> text:
+    mcdc_sdn_quote(file) + ", " + mcdc_sdn_quote(shadow) + ", " + decisions.to_text() + ", " + conditions.to_text()
+
+pub fn mcdc_files_header() -> text:
+    MCDC_FILES_HEADER
+
+# --- decode ------------------------------------------------------------------
+
+fn _mr_data_lines(content: text) -> [text]:
+    var out: [text] = []
+    for raw in content.split("\n"):
+        val line = raw.trim()
+        if line != "" and not line.starts_with("|") and not line.starts_with("#"):
+            out.push(line)
+    out
+
+pub fn mcdc_manifest_decode(decisions_text: text, conditions_text: text) -> [McdcDecisionInfo]:
+    var conds_by_decision: Dict<i64, [McdcCondition]> = {}
+    for line in _mr_data_lines(conditions_text):
+        val cells = mcdc_sdn_split_row(line)
+        if cells.len() >= 5:
+            val d = _mr_int(cells[0])
+            val cond = McdcCondition(index: _mr_int(cells[1]), expr: cells[4], line: _mr_int(cells[2]), col: _mr_int(cells[3]))
+            if conds_by_decision.has(d):
+                var existing = conds_by_decision[d]
+                existing.push(cond)
+                conds_by_decision[d] = existing
+            else:
+                conds_by_decision[d] = [cond]
+    var out: [McdcDecisionInfo] = []
+    for line in _mr_data_lines(decisions_text):
+        val cells = mcdc_sdn_split_row(line)
+        if cells.len() >= 8:
+            val id = _mr_int(cells[0])
+            val nodes = mcdc_tree_from_postfix(cells[6])
+            val conds: [McdcCondition] = if conds_by_decision.has(id): conds_by_decision[id] else: []
+            out.push(McdcDecisionInfo(id: id, file: cells[1], line: _mr_int(cells[2]), col: _mr_int(cells[3]), kind: cells[4], expr: cells[7], conditions: conds, nodes: nodes, root: nodes.len() - 1))
+    out
+
+pub fn mcdc_records_decode(content: text) -> [McdcEvalRecord]:
+    var out: [McdcEvalRecord] = []
+    for line in _mr_data_lines(content):
+        val cells = mcdc_sdn_split_row(line)
+        if cells.len() >= 4:
+            out.push(McdcEvalRecord(decision: _mr_int(cells[0]), values: _mr_int(cells[1]), evaluated: _mr_int(cells[2]), outcome: cells[3].trim() == "true"))
+    out

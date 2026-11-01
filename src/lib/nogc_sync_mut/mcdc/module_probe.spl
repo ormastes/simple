@@ -1,0 +1,147 @@
+# std.mcdc.module_probe — runtime recorder called by instrumented module
+# copies (see module_decisions.spl for the rewrite shape).
+#
+# Protocol per decision evaluation (LIFO, re-entrant):
+#   mcdc_mod_begin(id)            pushes an empty frame {values=0, evaluated=0}
+#   mcdc_mod_probe(id, k, v)      sets evaluated bit k (and value bit k if v)
+#                                 on the TOP frame; returns v unchanged
+#   mcdc_mod_commit(id, outcome)  pops the frame for `id` (discarding stale
+#                                 frames above it, e.g. after an early `?`
+#                                 return inside a condition), records the
+#                                 (values, evaluated, outcome) vector once per
+#                                 distinct vector, returns outcome unchanged
+#
+# Because probes run AFTER their operand is evaluated and nested decisions
+# are fully begun/committed inside that operand, the top frame at probe time
+# always belongs to the innermost in-progress decision; a mismatch is counted
+# as an anomaly instead of corrupting data.
+#
+# Sink: distinct vectors are appended immediately to
+#   $SIMPLE_MCDC_RECORDS/records.sdn
+# as rows of an SDN table `|decision, values, evaluated, outcome|` (the header
+# row is written by the CLI when it creates the file; the decoder ignores
+# header lines, so rows appended without one still parse). Writing on first
+# sight of a vector (not per evaluation) keeps the file complete without an
+# at-exit hook and bounds I/O by the number of distinct vectors (<= 2^n per
+# n-condition decision); one short append per new vector is also safe when
+# several spec processes share the file. With the env var unset, rows stay in
+# memory only.
+#
+# Only facade names with a single definition in the tree (or identical
+# signatures everywhere) are imported: the seed's cross-module dispatch can
+# bind an ambiguous name such as `file_read` to the wrong copy.
+
+use std.io_runtime.{env_get_opt, file_append_text}
+
+val MCDC_MOD_RECORDS_ENV: text = "SIMPLE_MCDC_RECORDS"
+val MCDC_MOD_RECORDS_FILE: text = "records.sdn"
+val MCDC_MOD_RECORDS_HEADER: text = "|decision, values, evaluated, outcome|"
+val MCDC_MOD_MAX_CONDITIONS: i64 = 62
+
+var _mm_frame_d: [i64] = []
+var _mm_frame_v: [i64] = []
+var _mm_frame_e: [i64] = []
+var _mm_seen: Dict<text, bool> = {}
+var _mm_rows: [text] = []
+var _mm_memory_only: bool = false
+var _mm_sink_resolved: bool = false
+var _mm_sink_path: text = ""
+var _mm_anomalies: i64 = 0
+var _mm_eval_count: i64 = 0
+
+fn _mm_bit(index: i64) -> i64:
+    var b = 1
+    var k = 0
+    while k < index:
+        b = b * 2
+        k = k + 1
+    b
+
+pub fn mcdc_mod_row(decision: i64, values: i64, evaluated: i64, outcome: bool) -> text:
+    val o = if outcome: "true" else: "false"
+    decision.to_text() + ", " + values.to_text() + ", " + evaluated.to_text() + ", " + o
+
+fn _mm_resolve_sink():
+    _mm_sink_resolved = true
+    val dir = env_get_opt(MCDC_MOD_RECORDS_ENV) ?? ""
+    if dir == "":
+        _mm_memory_only = true
+        return
+    _mm_sink_path = dir + "/" + MCDC_MOD_RECORDS_FILE
+
+fn _mm_emit(row: text):
+    if not _mm_sink_resolved:
+        _mm_resolve_sink()
+    if _mm_memory_only:
+        return
+    if not file_append_text(_mm_sink_path, row + "\n"):
+        _mm_anomalies = _mm_anomalies + 1
+
+pub fn mcdc_mod_begin(decision: i64) -> bool:
+    _mm_frame_d.push(decision)
+    _mm_frame_v.push(0)
+    _mm_frame_e.push(0)
+    true
+
+pub fn mcdc_mod_probe(decision: i64, index: i64, value: bool) -> bool:
+    val top = _mm_frame_d.len() - 1
+    if top < 0 or _mm_frame_d[top] != decision or index < 0 or index >= MCDC_MOD_MAX_CONDITIONS:
+        _mm_anomalies = _mm_anomalies + 1
+        return value
+    val bit = _mm_bit(index)
+    _mm_frame_e[top] = _mm_frame_e[top] | bit
+    if value:
+        _mm_frame_v[top] = _mm_frame_v[top] | bit
+    value
+
+pub fn mcdc_mod_commit(decision: i64, outcome: bool) -> bool:
+    var top = _mm_frame_d.len() - 1
+    while top >= 0 and _mm_frame_d[top] != decision:
+        top = top - 1
+    if top < 0:
+        _mm_anomalies = _mm_anomalies + 1
+        return outcome
+    val values = _mm_frame_v[top]
+    val evaluated = _mm_frame_e[top]
+    while _mm_frame_d.len() > top:
+        _mm_frame_d.pop()
+        _mm_frame_v.pop()
+        _mm_frame_e.pop()
+    _mm_eval_count = _mm_eval_count + 1
+    val o = if outcome: "1" else: "0"
+    val key = decision.to_text() + ":" + values.to_text() + ":" + evaluated.to_text() + ":" + o
+    if not _mm_seen.has(key):
+        _mm_seen[key] = true
+        val row = mcdc_mod_row(decision, values, evaluated, outcome)
+        _mm_rows.push(row)
+        _mm_emit(row)
+    outcome
+
+# --- inspection / test support ---------------------------------------------
+
+pub fn mcdc_mod_reset(memory_only: bool):
+    _mm_frame_d = []
+    _mm_frame_v = []
+    _mm_frame_e = []
+    _mm_seen = {}
+    _mm_rows = []
+    _mm_memory_only = memory_only
+    _mm_sink_resolved = memory_only
+    _mm_sink_path = ""
+    _mm_anomalies = 0
+    _mm_eval_count = 0
+
+pub fn mcdc_mod_rows() -> [text]:
+    _mm_rows
+
+pub fn mcdc_mod_anomalies() -> i64:
+    _mm_anomalies
+
+pub fn mcdc_mod_eval_count() -> i64:
+    _mm_eval_count
+
+pub fn mcdc_mod_frame_depth() -> i64:
+    _mm_frame_d.len()
+
+pub fn mcdc_mod_sink_path() -> text:
+    _mm_sink_path

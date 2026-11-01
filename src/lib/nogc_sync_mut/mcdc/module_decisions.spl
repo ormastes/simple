@@ -1,0 +1,555 @@
+# std.mcdc.module_decisions — decision extraction + source rewriting for
+# MC/DC module coverage.
+#
+# A DECISION is one of:
+#   * the condition of an `if` / `elif` / `while` statement header,
+#   * the condition of an `if` expression (`val x = if c: a else: b`),
+#   * a `match` arm guard (`case Pat if g:`),
+#   * any other expression that contains a top-level `and` / `or`
+#     (return values, `val`/`var` initializers, call arguments, ...).
+# Header decisions count even with a single condition; expression decisions
+# need at least one `and`/`or`.
+#
+# A CONDITION is a leaf operand of the and/or/not tree: everything between two
+# boolean operators at the same bracket depth, including call expressions,
+# comparisons and parenthesized groups that contain no boolean operator.
+# A parenthesized group that DOES contain a boolean operator is a sub-tree.
+#
+# Rewrite (semantics-preserving, short-circuit preserving):
+#   if a and (b or f(x)):
+# becomes
+#   if mcdc_mod_commit(ID, mcdc_mod_begin(ID) and ((mcdc_mod_probe(ID, 0, (a))
+#        and (mcdc_mod_probe(ID, 1, (b)) or mcdc_mod_probe(ID, 2, (f(x))))))):
+# Each probe records the value of ONE evaluated condition into the frame opened
+# by `begin`; conditions skipped by short-circuit are never probed and are
+# therefore recorded as masked. `commit` records the outcome and pops the
+# frame. Nested decisions (e.g. inside `f(x)`) open their own frames, so
+# recursion into the same decision is safe (LIFO frames).
+#
+# Line fidelity: a rewritten logical line keeps its physical line count (lost
+# newlines are padded at the end), so manifest line numbers stay original
+# except for the ONE injected `use` line, which is placed before the first
+# existing `use` and accounted for in `McdcInstrumentResult.use_line`.
+
+use std.nogc_sync_mut.mcdc.module_tokenizer.*
+
+val MNODE_LEAF: i64 = 0
+val MNODE_NOT: i64 = 1
+val MNODE_AND: i64 = 2
+val MNODE_OR: i64 = 3
+
+val MCDC_MAX_CONDITIONS: i64 = 62
+val MCDC_MAX_JOIN_LINES: i64 = 64
+
+struct McdcCondition:
+    index: i64
+    expr: text
+    line: i64
+    col: i64
+
+struct McdcTreeNode:
+    kind: i64
+    cond: i64
+    left: i64
+    right: i64
+
+struct McdcDecisionInfo:
+    id: i64
+    file: text
+    line: i64
+    col: i64
+    kind: text
+    expr: text
+    conditions: [McdcCondition]
+    nodes: [McdcTreeNode]
+    root: i64
+
+struct McdcInstrumentResult:
+    decisions: [McdcDecisionInfo]
+    source: text
+    skipped: [text]
+    next_id: i64
+    lines_in: i64
+    lines_out: i64
+    use_line: i64
+
+val MCDC_PROBE_USE_LINE: text = r"use std.nogc_sync_mut.mcdc.module_probe.{mcdc_mod_begin, mcdc_mod_probe, mcdc_mod_commit}"
+
+fn _md_is_kw_boundary(word: text) -> bool:
+    word == "if" or word == "elif" or word == "while" or word == "else" or word == "return" or word == "val" or word == "var" or word == "for" or word == "match" or word == "case" or word == "fn" or word == "me" or word == "pub" or word == "use" or word == "import" or word == "yield" or word == "assert" or word == "with" or word == "where" or word == "export" or word == "extern" or word == "static"
+
+fn _md_is_assign_op(op: text) -> bool:
+    op == "=" or op == "+=" or op == "-=" or op == "*=" or op == "/=" or op == "->" or op == "=>"
+
+fn _md_count_newlines(s: text) -> i64:
+    var n = 0
+    var i = 0
+    val len = s.len()
+    while i < len:
+        if s.byte_at(i) == 10:
+            n = n + 1
+        i = i + 1
+    n
+
+# Count occurrences of `"""` in a physical line.
+fn _md_triple_quote_count(line: text) -> i64:
+    var n = 0
+    var i = 0
+    val len = line.len()
+    while i + 2 < len:
+        if line.byte_at(i) == 34 and line.byte_at(i + 1) == 34 and line.byte_at(i + 2) == 34:
+            n = n + 1
+            i = i + 3
+        else:
+            i = i + 1
+    n
+
+# ---------------------------------------------------------------------------
+# Per logical line rewriter
+# ---------------------------------------------------------------------------
+
+class McdcRewriter:
+    src: text
+    toks: [McdcTok]
+    file: text
+    base_line: i64
+    next_id: i64
+    decisions: [McdcDecisionInfo]
+    skipped: [text]
+    cur_conds: [McdcCondition]
+    cur_nodes: [McdcTreeNode]
+    cur_leaf_lo: [i64]
+    cur_leaf_hi: [i64]
+    parse_ok: bool
+    pos: i64
+    found: i64
+
+    fn gap(i: i64) -> text:
+        val prev_end = if i > 0: self.toks[i - 1].end else: 0
+        self.src.slice(prev_end, self.toks[i].pos)
+
+    fn line_of(pos: i64) -> i64:
+        self.base_line + _md_count_newlines(self.src.slice(0, pos))
+
+    fn col_of(pos: i64) -> i64:
+        var i = pos
+        while i > 0 and self.src.byte_at(i - 1) != 10:
+            i = i - 1
+        pos - i + 1
+
+    fn is_boundary(i: i64, after_for: bool) -> bool:
+        val t = self.toks[i]
+        if t.kind == MTOK_COMMA or t.kind == MTOK_COLON: return true
+        if t.kind == MTOK_OP: return _md_is_assign_op(t.text)
+        if t.kind == MTOK_IDENT:
+            if after_for and t.text == "in": return true
+            return _md_is_kw_boundary(t.text)
+        false
+
+    fn has_bool_binary(a: i64, b: i64) -> bool:
+        var i = a
+        while i < b:
+            val k = self.toks[i].kind
+            if k == MTOK_AND or k == MTOK_OR: return true
+            if mcdc_tok_is_opener(k):
+                val j = mcdc_tok_match(self.toks, i)
+                if j < 0 or j >= b: return false
+                i = j + 1
+            else:
+                i = i + 1
+        false
+
+    fn has_boundary(a: i64, b: i64) -> bool:
+        var i = a
+        var after_for = false
+        while i < b:
+            val k = self.toks[i].kind
+            if mcdc_tok_is_opener(k):
+                val j = mcdc_tok_match(self.toks, i)
+                if j < 0 or j >= b: return true
+                i = j + 1
+            else:
+                if self.is_boundary(i, after_for): return true
+                if self.toks[i].text == "for": after_for = true
+                i = i + 1
+        false
+
+    fn header_kind(kw_idx: i64) -> text:
+        val kw = self.toks[kw_idx].text
+        if kw == "elif" or kw == "while": return kw
+        if kw_idx == 0: return "if"
+        if self.toks[0].text == "case": return "guard"
+        "if_expr"
+
+    # --- boolean tree parser over [a, b) ---------------------------------
+    me node(kind: i64, cond: i64, left: i64, right: i64) -> i64:
+        self.cur_nodes.push(McdcTreeNode(kind: kind, cond: cond, left: left, right: right))
+        self.cur_nodes.len() - 1
+
+    me parse_or(b: i64) -> i64:
+        var n = self.parse_and(b)
+        while self.parse_ok and self.pos < b and self.toks[self.pos].kind == MTOK_OR:
+            self.pos = self.pos + 1
+            val r = self.parse_and(b)
+            n = self.node(MNODE_OR, -1, n, r)
+        n
+
+    me parse_and(b: i64) -> i64:
+        var n = self.parse_not(b)
+        while self.parse_ok and self.pos < b and self.toks[self.pos].kind == MTOK_AND:
+            self.pos = self.pos + 1
+            val r = self.parse_not(b)
+            n = self.node(MNODE_AND, -1, n, r)
+        n
+
+    me parse_not(b: i64) -> i64:
+        if self.pos < b and self.toks[self.pos].kind == MTOK_NOT:
+            self.pos = self.pos + 1
+            val c = self.parse_not(b)
+            return self.node(MNODE_NOT, -1, c, -1)
+        self.parse_primary(b)
+
+    me parse_primary(b: i64) -> i64:
+        if self.pos >= b:
+            self.parse_ok = false
+            return -1
+        val t = self.toks[self.pos]
+        if t.kind == MTOK_LPAREN:
+            val j = mcdc_tok_match(self.toks, self.pos)
+            if j < 0 or j >= b:
+                self.parse_ok = false
+                return -1
+            val whole_operand = j + 1 == b or self.toks[j + 1].kind == MTOK_AND or self.toks[j + 1].kind == MTOK_OR
+            if whole_operand and self.has_bool_binary(self.pos + 1, j) and not self.has_boundary(self.pos + 1, j):
+                self.pos = self.pos + 1
+                val n = self.parse_or(j)
+                if self.pos != j:
+                    self.parse_ok = false
+                    return -1
+                self.pos = j + 1
+                return n
+        # leaf: everything up to the next and/or at this depth
+        val start = self.pos
+        var cont = true
+        while cont and self.pos < b:
+            val k = self.toks[self.pos].kind
+            if k == MTOK_AND or k == MTOK_OR:
+                cont = false
+            elif mcdc_tok_is_opener(k):
+                val j = mcdc_tok_match(self.toks, self.pos)
+                if j < 0 or j >= b:
+                    self.parse_ok = false
+                    return -1
+                self.pos = j + 1
+            elif mcdc_tok_is_closer(k):
+                self.parse_ok = false
+                return -1
+            else:
+                self.pos = self.pos + 1
+        if self.pos == start:
+            self.parse_ok = false
+            return -1
+        val idx = self.cur_conds.len()
+        val first = self.toks[start]
+        val expr = self.src.slice(first.pos, self.toks[self.pos - 1].end)
+        self.cur_conds.push(McdcCondition(index: idx, expr: expr, line: self.line_of(first.pos), col: self.col_of(first.pos)))
+        self.cur_leaf_lo.push(start)
+        self.cur_leaf_hi.push(self.pos)
+        self.node(MNODE_LEAF, idx, -1, -1)
+
+    me parse_decision(a: i64, b: i64) -> i64:
+        self.cur_conds = []
+        self.cur_nodes = []
+        self.cur_leaf_lo = []
+        self.cur_leaf_hi = []
+        self.parse_ok = true
+        self.pos = a
+        val root = self.parse_or(b)
+        if not self.parse_ok or self.pos != b or self.cur_conds.len() == 0:
+            return -1
+        if self.cur_conds.len() > MCDC_MAX_CONDITIONS:
+            return -1
+        root
+
+    # --- text generation -------------------------------------------------
+    me node_text(n: i64, leaf_lo: [i64], leaf_hi: [i64], nodes: [McdcTreeNode], id: i64) -> text:
+        val nd = nodes[n]
+        if nd.kind == MNODE_LEAF:
+            val body = self.gen_plain(leaf_lo[nd.cond], leaf_hi[nd.cond], false)
+            return "mcdc_mod_probe(" + id.to_text() + ", " + nd.cond.to_text() + ", (" + body + "))"
+        if nd.kind == MNODE_NOT:
+            val c = self.node_text(nd.left, leaf_lo, leaf_hi, nodes, id)
+            if nodes[nd.left].kind == MNODE_LEAF or nodes[nd.left].kind == MNODE_NOT:
+                return "not " + c
+            return "not (" + c + ")"
+        val l = self.node_text(nd.left, leaf_lo, leaf_hi, nodes, id)
+        val r = self.node_text(nd.right, leaf_lo, leaf_hi, nodes, id)
+        val op = if nd.kind == MNODE_AND: " and " else: " or "
+        val lw = if nodes[nd.left].kind == MNODE_AND or nodes[nd.left].kind == MNODE_OR: "(" + l + ")" else: l
+        val rw = if nodes[nd.right].kind == MNODE_AND or nodes[nd.right].kind == MNODE_OR: "(" + r + ")" else: r
+        lw + op + rw
+
+    me gen_decision(a: i64, b: i64, kind: text) -> text:
+        val root = self.parse_decision(a, b)
+        if root < 0:
+            val first = self.toks[a]
+            self.skipped.push(self.file + ":" + self.line_of(first.pos).to_text() + ": unparsed " + kind + " decision: " + self.src.slice(first.pos, self.toks[b - 1].end))
+            return self.gen_plain(a, b, false)
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val conds = self.cur_conds
+        val nodes = self.cur_nodes
+        val leaf_lo = self.cur_leaf_lo
+        val leaf_hi = self.cur_leaf_hi
+        val first = self.toks[a]
+        val expr = self.src.slice(first.pos, self.toks[b - 1].end)
+        self.decisions.push(McdcDecisionInfo(id: id, file: self.file, line: self.line_of(first.pos), col: self.col_of(first.pos), kind: kind, expr: expr, conditions: conds, nodes: nodes, root: root))
+        self.found = self.found + 1
+        # Leaves may contain nested decisions; generating them mutates the
+        # scratch arrays, so the tree copies above are used from here on.
+        val tree = self.node_text(root, leaf_lo, leaf_hi, nodes, id)
+        "mcdc_mod_commit(" + id.to_text() + ", mcdc_mod_begin(" + id.to_text() + ") and (" + tree + "))"
+
+    me gen_segment(a: i64, b: i64, prev_kw_idx: i64, followed_by_colon: bool) -> text:
+        if a >= b: return ""
+        var kind = ""
+        if followed_by_colon and prev_kw_idx >= 0:
+            val kw = self.toks[prev_kw_idx].text
+            if kw == "if" or kw == "elif" or kw == "while":
+                kind = self.header_kind(prev_kw_idx)
+        if kind == "" and self.has_bool_binary(a, b):
+            kind = "expr"
+        if kind != "":
+            return self.gap(a) + self.gen_decision(a, b, kind)
+        self.gen_plain(a, b, true)
+
+    me gen_plain(a: i64, b: i64, leading_gap: bool) -> text:
+        var out = ""
+        var i = a
+        while i < b:
+            if i > a or leading_gap:
+                out = out + self.gap(i)
+            val t = self.toks[i]
+            if mcdc_tok_is_opener(t.kind):
+                val j = mcdc_tok_match(self.toks, i)
+                if j < 0 or j >= b:
+                    out = out + t.text
+                    i = i + 1
+                else:
+                    out = out + t.text + self.gen(i + 1, j)
+                    if j > i + 1:
+                        out = out + self.gap(j)
+                    out = out + self.toks[j].text
+                    i = j + 1
+            else:
+                out = out + t.text
+                i = i + 1
+        out
+
+    me gen(lo: i64, hi: i64) -> text:
+        var out = ""
+        var seg_start = lo
+        var i = lo
+        var prev_kw_idx = -1
+        var after_for = false
+        while i < hi:
+            val t = self.toks[i]
+            if mcdc_tok_is_opener(t.kind):
+                val j = mcdc_tok_match(self.toks, i)
+                if j < 0 or j >= hi:
+                    i = hi
+                else:
+                    i = j + 1
+            elif self.is_boundary(i, after_for):
+                out = out + self.gen_segment(seg_start, i, prev_kw_idx, t.kind == MTOK_COLON)
+                out = out + self.gap(i) + t.text
+                prev_kw_idx = if t.kind == MTOK_IDENT: i else: -1
+                if t.kind == MTOK_IDENT and t.text == "for":
+                    after_for = true
+                elif t.kind == MTOK_IDENT and t.text == "in":
+                    after_for = false
+                seg_start = i + 1
+                i = i + 1
+            else:
+                i = i + 1
+        out + self.gen_segment(seg_start, hi, prev_kw_idx, false)
+
+    me rewrite_line() -> text:
+        self.found = 0
+        val n = self.toks.len()
+        if n == 0: return self.src
+        if self.toks[0].kind == MTOK_AT: return self.src
+        var out = self.gen(0, n)
+        if self.found == 0: return self.src
+        out = out + self.src.slice(self.toks[n - 1].end, self.src.len())
+        val missing = _md_count_newlines(self.src) - _md_count_newlines(out)
+        var k = 0
+        while k < missing:
+            out = out + "\n"
+            k = k + 1
+        out
+
+fn _md_new_rewriter(file: text, next_id: i64) -> McdcRewriter:
+    McdcRewriter(src: "", toks: [], file: file, base_line: 1, next_id: next_id, decisions: [], skipped: [], cur_conds: [], cur_nodes: [], cur_leaf_lo: [], cur_leaf_hi: [], parse_ok: true, pos: 0, found: 0)
+
+# Parse a standalone boolean expression (used by specs and by the report to
+# explain a decision). Returns a decision with id 0 / file "<expr>".
+pub fn mcdc_parse_decision_expr(expr: text) -> McdcDecisionInfo:
+    var rw = _md_new_rewriter("<expr>", 0)
+    val tl = mcdc_tokenize_line(expr)
+    rw.src = expr
+    rw.toks = tl.tokens
+    val root = if tl.ok: rw.parse_decision(0, tl.tokens.len()) else: -1
+    if root < 0:
+        return McdcDecisionInfo(id: 0, file: "<expr>", line: 1, col: 1, kind: "invalid", expr: expr, conditions: [], nodes: [], root: -1)
+    McdcDecisionInfo(id: 0, file: "<expr>", line: 1, col: 1, kind: "expr", expr: expr, conditions: rw.cur_conds, nodes: rw.cur_nodes, root: root)
+
+# Rewrite ONE logical line (no `use` injection). Exposed for specs.
+pub fn mcdc_rewrite_logical_line(line: text, file: text, base_line: i64, first_id: i64) -> McdcInstrumentResult:
+    var rw = _md_new_rewriter(file, first_id)
+    val tl = mcdc_tokenize_line(line)
+    if not tl.ok:
+        return McdcInstrumentResult(decisions: [], source: line, skipped: [file + ":" + base_line.to_text() + ": " + tl.error], next_id: first_id, lines_in: 1, lines_out: 1, use_line: 0)
+    rw.src = line
+    rw.toks = tl.tokens
+    rw.base_line = base_line
+    val out = rw.rewrite_line()
+    McdcInstrumentResult(decisions: rw.decisions, source: out, skipped: rw.skipped, next_id: rw.next_id, lines_in: 1, lines_out: 1, use_line: 0)
+
+# Instrument a whole module source. Decision ids start at `first_id`.
+pub fn mcdc_instrument_source(source: text, file: text, first_id: i64) -> McdcInstrumentResult:
+    val lines = source.split("\n")
+    var rw = _md_new_rewriter(file, first_id)
+    var out_lines: [text] = []
+    var in_doc = false
+    var i = 0
+    val n = lines.len()
+    while i < n:
+        val line = lines[i]
+        if in_doc:
+            out_lines.push(line)
+            if _md_triple_quote_count(line) % 2 == 1: in_doc = false
+            i = i + 1
+            continue
+        if _md_triple_quote_count(line) % 2 == 1:
+            out_lines.push(line)
+            in_doc = true
+            i = i + 1
+            continue
+        # join physical lines while a bracket stays open
+        var logical = line
+        var depth = mcdc_line_depth_delta(line)
+        var j = i
+        var joined_ok = depth != -1000
+        while joined_ok and depth > 0 and j + 1 < n and (j - i) < MCDC_MAX_JOIN_LINES:
+            j = j + 1
+            logical = logical + "\n" + lines[j]
+            val d = mcdc_line_depth_delta(lines[j])
+            if d == -1000:
+                joined_ok = false
+            else:
+                depth = depth + d
+        if not joined_ok or depth != 0:
+            var k = i
+            while k <= j:
+                out_lines.push(lines[k])
+                k = k + 1
+            if logical.trim() != "":
+                rw.skipped.push(file + ":" + (i + 1).to_text() + ": unbalanced or multi-line string; left verbatim")
+            i = j + 1
+            continue
+        val tl = mcdc_tokenize_line(logical)
+        if not tl.ok:
+            var k = i
+            while k <= j:
+                out_lines.push(lines[k])
+                k = k + 1
+            rw.skipped.push(file + ":" + (i + 1).to_text() + ": " + tl.error)
+            i = j + 1
+            continue
+        rw.src = logical
+        rw.toks = tl.tokens
+        rw.base_line = i + 1
+        val rewritten = rw.rewrite_line()
+        val parts = rewritten.split("\n")
+        for p in parts:
+            out_lines.push(p)
+        i = j + 1
+    var use_line = 0
+    if rw.decisions.len() > 0:
+        # before the first `use`, else after the leading comment/blank block
+        var insert_at = -1
+        var k = 0
+        while insert_at < 0 and k < out_lines.len():
+            if out_lines[k].starts_with("use ") or out_lines[k].starts_with("export use "):
+                insert_at = k
+            k = k + 1
+        if insert_at < 0:
+            k = 0
+            var doc = false
+            while insert_at < 0 and k < out_lines.len():
+                val t = out_lines[k].trim()
+                if doc:
+                    if _md_triple_quote_count(t) % 2 == 1: doc = false
+                elif _md_triple_quote_count(t) % 2 == 1:
+                    doc = true
+                elif t != "" and not t.starts_with("#") and not t.starts_with("@"):
+                    insert_at = k
+                k = k + 1
+            if insert_at < 0: insert_at = out_lines.len()
+        var with_use: [text] = []
+        k = 0
+        while k < out_lines.len():
+            if k == insert_at:
+                with_use.push(MCDC_PROBE_USE_LINE)
+            with_use.push(out_lines[k])
+            k = k + 1
+        if insert_at == out_lines.len():
+            with_use.push(MCDC_PROBE_USE_LINE)
+        out_lines = with_use
+        use_line = insert_at + 1
+    McdcInstrumentResult(decisions: rw.decisions, source: out_lines.join("\n"), skipped: rw.skipped, next_id: rw.next_id, lines_in: n, lines_out: out_lines.len(), use_line: use_line)
+
+# ---------------------------------------------------------------------------
+# Tree <-> postfix text ("c0 c1 c2 | &")
+# ---------------------------------------------------------------------------
+
+fn _md_postfix(nodes: [McdcTreeNode], n: i64) -> text:
+    val nd = nodes[n]
+    if nd.kind == MNODE_LEAF: return "c" + nd.cond.to_text()
+    if nd.kind == MNODE_NOT: return _md_postfix(nodes, nd.left) + " !"
+    val op = if nd.kind == MNODE_AND: "&" else: "|"
+    _md_postfix(nodes, nd.left) + " " + _md_postfix(nodes, nd.right) + " " + op
+
+pub fn mcdc_tree_to_postfix(info: McdcDecisionInfo) -> text:
+    if info.root < 0: return ""
+    _md_postfix(info.nodes, info.root)
+
+# Returns nodes; root is the last node. Empty on malformed input.
+pub fn mcdc_tree_from_postfix(postfix: text) -> [McdcTreeNode]:
+    var nodes: [McdcTreeNode] = []
+    var stack: [i64] = []
+    for raw in postfix.split(" "):
+        val tok = raw.trim()
+        if tok == "": continue
+        if tok.starts_with("c"):
+            val idx = tok.slice(1, tok.len()).parse_int() ?? -1
+            if idx < 0: return []
+            nodes.push(McdcTreeNode(kind: MNODE_LEAF, cond: idx, left: -1, right: -1))
+            stack.push(nodes.len() - 1)
+        elif tok == "!":
+            if stack.len() < 1: return []
+            val c = stack.pop()
+            nodes.push(McdcTreeNode(kind: MNODE_NOT, cond: -1, left: c, right: -1))
+            stack.push(nodes.len() - 1)
+        elif tok == "&" or tok == "|":
+            if stack.len() < 2: return []
+            val r = stack.pop()
+            val l = stack.pop()
+            val kind = if tok == "&": MNODE_AND else: MNODE_OR
+            nodes.push(McdcTreeNode(kind: kind, cond: -1, left: l, right: r))
+            stack.push(nodes.len() - 1)
+        else:
+            return []
+    if stack.len() != 1: return []
+    nodes

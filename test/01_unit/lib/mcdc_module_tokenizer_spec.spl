@@ -1,0 +1,58 @@
+"""Paren/call-aware tokenizer used by MC/DC module coverage instrumentation."""
+# @req REQ-MCDC-MOD-001
+# design: doc/05_design/generics_coverage_mcdc.md
+
+use std.spec
+use std.nogc_sync_mut.mcdc.module_tokenizer.*
+
+describe "mcdc module tokenizer":
+    it "keeps calls, parens and strings as units with byte offsets":
+        step("Tokenize a decision with a call whose string argument contains keywords")
+        val tl = mcdc_tokenize_line("a and (b or f(x, \"s and t\"))  # c and d")
+        expect(tl.ok).to_equal(true)
+        expect(tl.tokens.len()).to_equal(12)
+        expect(tl.tokens[0].kind).to_equal(MTOK_IDENT)
+        expect(tl.tokens[1].kind).to_equal(MTOK_AND)
+        expect(tl.tokens[2].kind).to_equal(MTOK_LPAREN)
+        expect(tl.tokens[2].pos).to_equal(6)
+        expect(tl.tokens[4].kind).to_equal(MTOK_OR)
+        expect(tl.tokens[8].kind).to_equal(MTOK_COMMA)
+        expect(tl.tokens[9].kind).to_equal(MTOK_STRING)
+        expect(tl.tokens[9].text).to_equal("\"s and t\"")
+        expect(mcdc_tok_match(tl.tokens, 2)).to_equal(11)
+        expect(mcdc_tok_match(tl.tokens, 6)).to_equal(10)
+
+    it "splits two-char operators, numbers with suffixes and ranges":
+        step("Tokenize comparisons, a typed literal and a range")
+        val tl = mcdc_tokenize_line("x == 1i64 and 0..n != y")
+        expect(tl.ok).to_equal(true)
+        expect(tl.tokens.len()).to_equal(9)
+        expect(tl.tokens[1].text).to_equal("==")
+        expect(tl.tokens[2].kind).to_equal(MTOK_NUMBER)
+        expect(tl.tokens[2].text).to_equal("1i64")
+        expect(tl.tokens[4].text).to_equal("0")
+        expect(tl.tokens[5].text).to_equal("..")
+        expect(tl.tokens[7].text).to_equal("!=")
+
+    it "classifies not, colon, attribute marker and raw strings":
+        val tl = mcdc_tokenize_line("if not r\"a or b\": @x")
+        expect(tl.ok).to_equal(true)
+        expect(tl.tokens.len()).to_equal(6)
+        expect(tl.tokens[1].kind).to_equal(MTOK_NOT)
+        expect(tl.tokens[2].kind).to_equal(MTOK_STRING)
+        expect(tl.tokens[2].text).to_equal("r\"a or b\"")
+        expect(tl.tokens[3].kind).to_equal(MTOK_COLON)
+        expect(tl.tokens[4].kind).to_equal(MTOK_AT)
+
+    it "reports unterminated strings instead of guessing":
+        val tl = mcdc_tokenize_line("x = \"abc")
+        expect(tl.ok).to_equal(false)
+        expect(tl.error).to_contain("unterminated")
+        expect(tl.tokens.len()).to_equal(0)
+
+    it "computes bracket depth deltas ignoring strings and comments":
+        step("Depth deltas drive logical-line joining in the instrumenter")
+        expect(mcdc_line_depth_delta("f(a, [b,")).to_equal(2)
+        expect(mcdc_line_depth_delta("    \")\" ) # (")).to_equal(-1)
+        expect(mcdc_line_depth_delta("\"\"\"doc")).to_equal(-1000)
+        expect(mcdc_line_depth_delta(r"x = {k: (1)}")).to_equal(0)
