@@ -1,0 +1,81 @@
+# @cover src/compiler/50.mir/_MirLowering/transient_owner.spl 5%
+extern fn rt_file_read_text(path: text) -> text?
+
+# Regression for doc/08_tracking/bug/mir_transient_scope_unpromoted_rti_av_2026-11-01.md:
+# `MirLowering.rti` (RTI PR1, 2026-10-27) was added after promote_transient_owner's
+# root list was last reconciled, so the ReturnTypeRows that #5709's scoped
+# prescan registered into it were freed at scope end and read dangling
+# (E-MIR-TYPE-Transport "invalid HirType kind carrier", E-RTI-003, or an access
+# violation inside the MIR worker). Source-shape gate: every declared field of
+# `struct MirLowering` must be a promote_and_release_transient_owner_roots root.
+
+fn mir_lowering_struct_fields(source: text) -> [text]:
+    var fields: [text] = []
+    var in_struct = false
+    for line in source.split("\n"):
+        if line.starts_with("struct MirLowering:"):
+            in_struct = true
+            continue
+        if not in_struct:
+            continue
+        # The struct body ends at the first non-indented, non-blank line.
+        if line.len() > 0 and not line.starts_with(" "):
+            break
+        if not line.starts_with("    ") or line.starts_with("     "):
+            continue
+        val body = line.substring(4, line.len())
+        if body.starts_with("#") or body.starts_with("fn ") or body.starts_with("me ") or body.starts_with("\"\"\""):
+            continue
+        val colon = body.index_of(":")
+        if colon <= 0:
+            continue
+        val name = body.substring(0, colon)
+        if name.contains(" ") or name.contains("("):
+            continue
+        fields = fields.push(name)
+    fields
+
+fn promote_transient_owner_body(source: text) -> text:
+    """Only the non-comment lines of `me promote_transient_owner()`: a root
+    named in a comment or in another method must not count as promoted."""
+    var body = ""
+    var in_body = false
+    for line in source.split("\n"):
+        if line.starts_with("    me promote_transient_owner()"):
+            in_body = true
+            continue
+        if in_body and line.starts_with("    me "):
+            break
+        if in_body and not line.trim().starts_with("#"):
+            body = body + line + "\n"
+    body
+
+describe "MirLowering transient owner promotion roots":
+    val types_source = rt_file_read_text("src/compiler/50.mir/mir_lowering_types.spl") ?? ""
+    val owner_file = rt_file_read_text("src/compiler/50.mir/_MirLowering/transient_owner.spl") ?? ""
+    val owner_source = promote_transient_owner_body(owner_file)
+
+    it "reads both sources and finds the struct":
+        expect(types_source.len()).to_be_greater_than(0)
+        expect(owner_source.len()).to_be_greater_than(0)
+        expect(types_source.contains("struct MirLowering:")).to_equal(true)
+        expect(owner_file.contains("me promote_transient_owner()")).to_equal(true)
+        expect(owner_source.contains("promote_and_release_transient_owner_roots([self.builder])")).to_equal(true)
+
+    it "extracts a non-trivial field list including the late-added roots":
+        val fields = mir_lowering_struct_fields(types_source)
+        expect(fields.len()).to_be_greater_than(100)
+        expect(fields.contains("rti")).to_equal(true)
+        expect(fields.contains("erased_callback_record_bindings")).to_equal(true)
+
+    it "promotes every declared MirLowering field as a transient owner root":
+        val fields = mir_lowering_struct_fields(types_source)
+        var missing: [text] = []
+        for field in fields:
+            if not owner_source.contains("promote_and_release_transient_owner_roots([self.{field}])"):
+                missing = missing.push(field)
+        expect(missing).to_equal([])
+
+    it "promotes the four roots that were freed by the scoped prescan":
+        for field in ["rti", "rti_last_error", "runtime_value_extern_abis", "erased_callback_record_bindings"]:
+            expect(owner_source.contains("promote_and_release_transient_owner_roots([self.{field}])")).to_equal(true)
