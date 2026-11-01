@@ -1,0 +1,259 @@
+# std.mcdc.module_tokenizer — paren/call-aware tokenizer for MC/DC module
+# coverage instrumentation.
+#
+# Tokenizes ONE logical Simple source line (physical lines joined while a
+# bracket is open) into a flat token list that keeps byte offsets, so the
+# decision extractor can (a) find `and`/`or`/`not` operators at any nesting
+# depth, (b) treat call arguments and parenthesized groups as opaque units,
+# and (c) rebuild the line text byte-exactly around the spans it rewrites.
+#
+# Why not `compiler.frontend.core.lexer`: that lexer is a global-state stream
+# (lex_init / lex_next over module registers), carries indentation tracking and
+# AST-module dependencies, and emits no byte spans for rebuild. The subset that
+# decision extraction needs (identifiers, keywords, strings with interpolation
+# and escapes, numbers with suffixes, bracket pairs, operators, comments) is
+# small enough to own here with byte-offset fidelity. Character classes follow
+# `compiler.frontend.core.lexer_chars`.
+#
+# All offsets are BYTE offsets, consistent with `text.len()`, `text.byte_at()`
+# and `text.slice()` (see interpreter `slice` contract).
+
+val MTOK_IDENT: i64 = 1
+val MTOK_NUMBER: i64 = 2
+val MTOK_STRING: i64 = 3
+val MTOK_OP: i64 = 4
+val MTOK_LPAREN: i64 = 5
+val MTOK_RPAREN: i64 = 6
+val MTOK_LBRACKET: i64 = 7
+val MTOK_RBRACKET: i64 = 8
+val MTOK_LBRACE: i64 = 9
+val MTOK_RBRACE: i64 = 10
+val MTOK_COMMA: i64 = 11
+val MTOK_COLON: i64 = 12
+val MTOK_AND: i64 = 13
+val MTOK_OR: i64 = 14
+val MTOK_NOT: i64 = 15
+val MTOK_AT: i64 = 16
+
+struct McdcTok:
+    kind: i64
+    text: text
+    pos: i64
+    end: i64
+
+struct McdcTokLine:
+    tokens: [McdcTok]
+    ok: bool
+    error: text
+
+fn _mt_is_digit(c: i64) -> bool:
+    c >= 48 and c <= 57
+
+fn _mt_is_alpha(c: i64) -> bool:
+    (c >= 97 and c <= 122) or (c >= 65 and c <= 90)
+
+fn _mt_is_ident_start(c: i64) -> bool:
+    _mt_is_alpha(c) or c == 95 or c >= 128
+
+fn _mt_is_ident_char(c: i64) -> bool:
+    _mt_is_ident_start(c) or _mt_is_digit(c)
+
+fn _mt_is_space(c: i64) -> bool:
+    c == 32 or c == 9 or c == 10 or c == 13
+
+fn _mt_is_op_char(c: i64) -> bool:
+    # + - * / % = < > ! ? . & | ^ ~ \ $
+    c == 43 or c == 45 or c == 42 or c == 47 or c == 37 or c == 61 or c == 60 or c == 62 or c == 33 or c == 63 or c == 46 or c == 38 or c == 124 or c == 94 or c == 126 or c == 92 or c == 36
+
+# Scan a quoted string starting at `start` (which points at the opening quote).
+# Returns the byte offset just past the closing quote, or -1 when the string
+# does not terminate on this logical line. Triple quotes are supported when
+# they close on the same logical line.
+fn mcdc_scan_string(src: text, start: i64) -> i64:
+    val n = src.len()
+    val q = src.byte_at(start)
+    val triple = start + 2 < n and src.byte_at(start + 1) == q and src.byte_at(start + 2) == q
+    var i = if triple: start + 3 else: start + 1
+    while i < n:
+        val c = src.byte_at(i)
+        if c == 92:
+            i = i + 2
+        elif c == q:
+            if triple:
+                if i + 2 < n and src.byte_at(i + 1) == q and src.byte_at(i + 2) == q:
+                    return i + 3
+                i = i + 1
+            else:
+                return i + 1
+        else:
+            i = i + 1
+    -1
+
+fn _mt_two_char_op(a: i64, b: i64) -> bool:
+    # == != <= >= -> => ?? ?. .. ** |> >> << += -= *= /= && || :: ~>
+    if a == 61 and b == 61: return true
+    if a == 33 and b == 61: return true
+    if a == 60 and b == 61: return true
+    if a == 62 and b == 61: return true
+    if a == 45 and b == 62: return true
+    if a == 61 and b == 62: return true
+    if a == 63 and b == 63: return true
+    if a == 63 and b == 46: return true
+    if a == 46 and b == 46: return true
+    if a == 42 and b == 42: return true
+    if a == 124 and b == 62: return true
+    if a == 62 and b == 62: return true
+    if a == 60 and b == 60: return true
+    if a == 43 and b == 61: return true
+    if a == 45 and b == 61: return true
+    if a == 42 and b == 61: return true
+    if a == 47 and b == 61: return true
+    if a == 38 and b == 38: return true
+    if a == 124 and b == 124: return true
+    if a == 126 and b == 62: return true
+    false
+
+fn _mt_keyword_kind(word: text) -> i64:
+    if word == "and": return MTOK_AND
+    if word == "or": return MTOK_OR
+    if word == "not": return MTOK_NOT
+    MTOK_IDENT
+
+fn _mt_fail(msg: text) -> McdcTokLine:
+    McdcTokLine(tokens: [], ok: false, error: msg)
+
+# Tokenize one logical line. Comments (`#` to end of physical line) are
+# dropped. Newlines inside the logical line are whitespace.
+pub fn mcdc_tokenize_line(src: text) -> McdcTokLine:
+    var toks: [McdcTok] = []
+    val n = src.len()
+    var i = 0
+    while i < n:
+        val c = src.byte_at(i)
+        if _mt_is_space(c):
+            i = i + 1
+        elif c == 35:
+            # comment to end of physical line
+            while i < n and src.byte_at(i) != 10:
+                i = i + 1
+        elif c == 34 or c == 39:
+            val e = mcdc_scan_string(src, i)
+            if e < 0:
+                return _mt_fail("unterminated string")
+            toks.push(McdcTok(kind: MTOK_STRING, text: src.slice(i, e), pos: i, end: e))
+            i = e
+        elif _mt_is_ident_start(c):
+            val start = i
+            while i < n and _mt_is_ident_char(src.byte_at(i)):
+                i = i + 1
+            # string prefixes: r"..." b"..." f"..."
+            if i < n and (i - start) == 1 and (src.byte_at(i) == 34 or src.byte_at(i) == 39):
+                val p = src.byte_at(start)
+                if p == 114 or p == 98 or p == 102:
+                    val e = mcdc_scan_string(src, i)
+                    if e < 0:
+                        return _mt_fail("unterminated string")
+                    toks.push(McdcTok(kind: MTOK_STRING, text: src.slice(start, e), pos: start, end: e))
+                    i = e
+                    continue
+            val word = src.slice(start, i)
+            toks.push(McdcTok(kind: _mt_keyword_kind(word), text: word, pos: start, end: i))
+        elif _mt_is_digit(c):
+            val start = i
+            i = i + 1
+            var cont = true
+            while cont and i < n:
+                val d = src.byte_at(i)
+                if _mt_is_ident_char(d):
+                    i = i + 1
+                elif d == 46 and i + 1 < n and _mt_is_digit(src.byte_at(i + 1)):
+                    i = i + 1
+                else:
+                    cont = false
+            toks.push(McdcTok(kind: MTOK_NUMBER, text: src.slice(start, i), pos: start, end: i))
+        elif c == 40:
+            toks.push(McdcTok(kind: MTOK_LPAREN, text: "(", pos: i, end: i + 1))
+            i = i + 1
+        elif c == 41:
+            toks.push(McdcTok(kind: MTOK_RPAREN, text: ")", pos: i, end: i + 1))
+            i = i + 1
+        elif c == 91:
+            toks.push(McdcTok(kind: MTOK_LBRACKET, text: "[", pos: i, end: i + 1))
+            i = i + 1
+        elif c == 93:
+            toks.push(McdcTok(kind: MTOK_RBRACKET, text: "]", pos: i, end: i + 1))
+            i = i + 1
+        elif c == 123:
+            toks.push(McdcTok(kind: MTOK_LBRACE, text: "{", pos: i, end: i + 1))
+            i = i + 1
+        elif c == 125:
+            toks.push(McdcTok(kind: MTOK_RBRACE, text: "}", pos: i, end: i + 1))
+            i = i + 1
+        elif c == 44:
+            toks.push(McdcTok(kind: MTOK_COMMA, text: ",", pos: i, end: i + 1))
+            i = i + 1
+        elif c == 58:
+            if i + 1 < n and src.byte_at(i + 1) == 58:
+                toks.push(McdcTok(kind: MTOK_OP, text: "::", pos: i, end: i + 2))
+                i = i + 2
+            else:
+                toks.push(McdcTok(kind: MTOK_COLON, text: ":", pos: i, end: i + 1))
+                i = i + 1
+        elif c == 64:
+            toks.push(McdcTok(kind: MTOK_AT, text: "@", pos: i, end: i + 1))
+            i = i + 1
+        elif _mt_is_op_char(c):
+            if i + 1 < n and _mt_two_char_op(c, src.byte_at(i + 1)):
+                toks.push(McdcTok(kind: MTOK_OP, text: src.slice(i, i + 2), pos: i, end: i + 2))
+                i = i + 2
+            else:
+                toks.push(McdcTok(kind: MTOK_OP, text: src.slice(i, i + 1), pos: i, end: i + 1))
+                i = i + 1
+        else:
+            return _mt_fail("unexpected byte " + c.to_text() + " at " + i.to_text())
+    McdcTokLine(tokens: toks, ok: true, error: "")
+
+pub fn mcdc_tok_is_opener(kind: i64) -> bool:
+    kind == MTOK_LPAREN or kind == MTOK_LBRACKET or kind == MTOK_LBRACE
+
+pub fn mcdc_tok_is_closer(kind: i64) -> bool:
+    kind == MTOK_RPAREN or kind == MTOK_RBRACKET or kind == MTOK_RBRACE
+
+# Index of the closer matching the opener at `open_idx`, or -1 when unbalanced.
+pub fn mcdc_tok_match(toks: [McdcTok], open_idx: i64) -> i64:
+    var depth = 0
+    var i = open_idx
+    while i < toks.len():
+        val k = toks[i].kind
+        if mcdc_tok_is_opener(k):
+            depth = depth + 1
+        elif mcdc_tok_is_closer(k):
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+# Net bracket depth change over a text (strings/comments excluded). Used by the
+# file splitter to join physical lines into logical lines. Returns -1000 when
+# the line holds an unterminated (multi-line) string.
+pub fn mcdc_line_depth_delta(src: text) -> i64:
+    val n = src.len()
+    var depth = 0
+    var i = 0
+    while i < n:
+        val c = src.byte_at(i)
+        if c == 35:
+            return depth
+        if c == 34 or c == 39:
+            val e = mcdc_scan_string(src, i)
+            if e < 0:
+                return -1000
+            i = e
+        else:
+            if c == 40 or c == 91 or c == 123:
+                depth = depth + 1
+            elif c == 41 or c == 93 or c == 125:
+                depth = depth - 1
+            i = i + 1
+    depth
