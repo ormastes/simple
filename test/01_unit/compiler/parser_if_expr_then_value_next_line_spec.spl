@@ -1,0 +1,79 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+# `if` expression whose then-value and `else:` sit on the continuation line
+
+**Category:** Language / Parser
+**Status:** Regression guard (bug stage2_if_expr_then_value_next_line_parse_2026-11-01)
+
+The frozen Windows stage2 rejected this file shape with
+`unexpected token in expression: ':'` at the `else:` on the second line:
+
+    val h = if cond:
+        value else: ""
+
+It broke the phase 3 per-file parse of
+src/compiler/80.driver/driver_build/incremental.spl. The site now carries a
+tagged workaround; this spec pins the shape so the real parser fix can be
+proven and the workaround removed afterwards.
+
+Whole-file parse failures cannot be in-process examples, so every example
+drives a subprocess. SIMPLE_BIN selects the binary under test.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+fn run_source(name: text, source: text) -> text:
+    val path = "build/test-artifacts/if_expr_next_line_" + name + ".spl"
+    file_write(path, source)
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val out = process_run("sh", ["-c", bin + " run " + path + " 2>&1"])
+    out.0
+
+# Incident shape: then-value and `else:` on the continuation line.
+val INCIDENT_SOURCE: text = "fn pick(ok: bool) -> text:\n" +
+    "    val h = if ok:\n" +
+    "        \"yes\" else: \"\"\n" +
+    "    h\n" +
+    "\n" +
+    "fn main():\n" +
+    "    print(\"[\" + pick(true) + \"|\" + pick(false) + \"]\")\n"
+
+# Neighbour: block form with `else:` on its own line (known to parse).
+val BLOCK_SOURCE: text = "fn pick(ok: bool) -> text:\n" +
+    "    val h = if ok:\n" +
+    "        \"yes\"\n" +
+    "    else:\n" +
+    "        \"\"\n" +
+    "    h\n" +
+    "\n" +
+    "fn main():\n" +
+    "    print(\"[\" + pick(true) + \"|\" + pick(false) + \"]\")\n"
+
+# Workaround shape applied at the incident site.
+val WORKAROUND_SOURCE: text = "fn pick(ok: bool) -> text:\n" +
+    "    var h = \"\"\n" +
+    "    if ok:\n" +
+    "        h = \"yes\"\n" +
+    "    h\n" +
+    "\n" +
+    "fn main():\n" +
+    "    print(\"[\" + pick(true) + \"|\" + pick(false) + \"]\")\n"
+
+describe "if expression with then-value on the next line":
+    it "parses and evaluates the incident shape":
+        step("`if c:\n    v else: \"\"` yields v or the else value")
+        val out = run_source("incident", INCIDENT_SOURCE)
+        expect(out.contains("unexpected token")).to_equal(false)
+        expect(out).to_contain("[yes|]")
+
+    it "keeps the block form working":
+        step("Neighbour: else on its own line")
+        expect(run_source("block", BLOCK_SOURCE)).to_contain("[yes|]")
+
+    it "keeps the workaround shape equivalent":
+        step("The tagged workaround must give the same values")
+        expect(run_source("workaround", WORKAROUND_SOURCE)).to_contain("[yes|]")
