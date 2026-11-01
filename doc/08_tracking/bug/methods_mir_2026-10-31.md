@@ -36,3 +36,19 @@ workarounds there add explicit annotations of the declared type, which is the kn
 
 ## Removal condition
 Remove once the root fix (MIR receiver typing for shapes above) is in a stage2 used for bootstrapping.
+
+## Status (2026-11-01 re-check)
+
+**Status:** open (root bug present in current source; workarounds required).
+Seed-hosted in-process pure-Simple HIR+MIR re-check
+(`test/01_unit/compiler/50.mir/methods_mir_receiver_shapes_spec.spl`):
+- Shapes 1-3 still fail closed with `unresolved method call` (shape 1: substring/slice; `.len()` on an untyped param now lowers).
+- Shapes 4-6 lower clean in a single module (full-closure-only reproduction).
+- The annotated workaround form lowers clean.
+
+Design note (not attempted here, risky): shape 1 needs either a type-check error for
+untyped params used with builtin methods or receiver typing from call-site
+instantiation; shape 2 needs MIR to read the inferred return type of an un-annotated
+function (30.types result) instead of only the declared type; shape 3 needs flow
+narrowing of `T?` after an early-return nil guard to reach MIR's receiver type.
+Revert-ready: no.
