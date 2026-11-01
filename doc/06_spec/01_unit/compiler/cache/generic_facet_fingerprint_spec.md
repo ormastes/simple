@@ -1,6 +1,6 @@
 # Generic template facet fingerprints (lane generic-rr-hir-variant-obj)
 
-> A generic template entry exposes three reverse-reference facets:
+> A generic template entry exposes three reverse-reference facets: `generic.signature`, `generic.bound` and `generic.body`. This unit spec checks the fingerprint laws (alpha invariance, bound order/duplicate insensitivity, body tracking), the changed-facet diff for body, signature, bound and unrelated edits, the caller/template consumed facet sets, and the fail-closed section codec for bounds and body_digest.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Generic template facet fingerprints (lane generic-rr-hir-variant-obj)
 
-A generic template entry exposes three reverse-reference facets:
+A generic template entry exposes three reverse-reference facets: `generic.signature`, `generic.bound` and `generic.body`. This unit spec checks the fingerprint laws (alpha invariance, bound order/duplicate insensitivity, body tracking), the changed-facet diff for body, signature, bound and unrelated edits, the caller/template consumed facet sets, and the fail-closed section codec for bounds and body_digest.
 
 ## At a Glance
 
@@ -27,6 +27,8 @@ A generic template entry exposes three reverse-reference facets:
 | Updated | 2026-11-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+## Overview
+
 A generic template entry exposes three reverse-reference facets:
 `generic.signature`, `generic.bound` and `generic.body`. This unit spec
 checks the fingerprint laws (alpha invariance, bound order/duplicate
@@ -34,8 +36,8 @@ insensitivity, body tracking), the changed-facet diff for body, signature,
 bound and unrelated edits, the caller/template consumed facet sets, and the
 fail-closed section codec for bounds and body_digest.
 
-UNRUN: no self-hosted binary is available on the authoring host; this is the
-RED guide for the implementation in generic_tldr_view_v1.spl.
+Evidence: Rust-seed interpreter runs only (attributed to the seed); no self-hosted
+binary exists on the authoring host. Owner: generic_tldr_view_v1.spl.
 
 ## Scenarios
 

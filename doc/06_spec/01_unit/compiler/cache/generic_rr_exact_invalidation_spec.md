@@ -1,6 +1,6 @@
 # Exact generic reverse-reference invalidation (lane generic-rr-hir-variant-obj)
 
-> Drives `affected_consumers_v1` and `plan_generic_invalidation_v1` over an
+> Drives `affected_consumers_v1` and `plan_generic_invalidation_v1` over an in-memory fixture: template producer T, its template object O (edges on all three generic facets), callers C1/C2 (signature + bound only), a dependent D of C1, and an unrelated consumer U. Over- and under-invalidation are both asserted, plus every rejection string and canonical ordering/dedup. A second partition (windows variant) proves per-variant isolation.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Exact generic reverse-reference invalidation (lane generic-rr-hir-variant-obj)
 
-Drives `affected_consumers_v1` and `plan_generic_invalidation_v1` over an
+Drives `affected_consumers_v1` and `plan_generic_invalidation_v1` over an in-memory fixture: template producer T, its template object O (edges on all three generic facets), callers C1/C2 (signature + bound only), a dependent D of C1, and an unrelated consumer U. Over- and under-invalidation are both asserted, plus every rejection string and canonical ordering/dedup. A second partition (windows variant) proves per-variant isolation.
 
 ## At a Glance
 
@@ -27,6 +27,8 @@ Drives `affected_consumers_v1` and `plan_generic_invalidation_v1` over an
 | Updated | 2026-11-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+## Overview
+
 Drives `affected_consumers_v1` and `plan_generic_invalidation_v1` over an
 in-memory fixture: template producer T, its template object O (edges on all
 three generic facets), callers C1/C2 (signature + bound only), a dependent D
@@ -34,8 +36,8 @@ of C1, and an unrelated consumer U. Over- and under-invalidation are both
 asserted, plus every rejection string and canonical ordering/dedup. A second
 partition (windows variant) proves per-variant isolation.
 
-UNRUN: no self-hosted binary is available on the authoring host; RED guide
-for reverse_reference_coordinator_v1.spl.
+Evidence: Rust-seed interpreter runs only (attributed to the seed); no self-hosted
+binary exists on the authoring host. Owner: reverse_reference_coordinator_v1.spl.
 
 ## Scenarios
 

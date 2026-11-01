@@ -1,6 +1,6 @@
 # Generic RR exactness and HIR-variant objects (system)
 
-> End-to-end over the public owners only: one target-neutral `HirCfgDeclV1`
+> End-to-end over the public owners only: one target-neutral `HirCfgDeclV1` list projected for linux and windows yields per-target object keys, RR partitions and RR producers; generic template edits flow through facet diffing, forward manifests, rebuilt RR shards and the generic invalidation plan. Each scenario (body, signature, bound, caller, cfg-variant, unrelated, concurrent rebuild, cache corruption, two keys per module) asserts the full chain.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Generic RR exactness and HIR-variant objects (system)
 
-End-to-end over the public owners only: one target-neutral `HirCfgDeclV1`
+End-to-end over the public owners only: one target-neutral `HirCfgDeclV1` list projected for linux and windows yields per-target object keys, RR partitions and RR producers; generic template edits flow through facet diffing, forward manifests, rebuilt RR shards and the generic invalidation plan. Each scenario (body, signature, bound, caller, cfg-variant, unrelated, concurrent rebuild, cache corruption, two keys per module) asserts the full chain.
 
 ## At a Glance
 
@@ -27,6 +27,8 @@ End-to-end over the public owners only: one target-neutral `HirCfgDeclV1`
 | Updated | 2026-11-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+## Overview
+
 End-to-end over the public owners only: one target-neutral `HirCfgDeclV1`
 list projected for linux and windows yields per-target object keys, RR
 partitions and RR producers; generic template edits flow through facet
@@ -35,7 +37,8 @@ plan. Each scenario (body, signature, bound, caller, cfg-variant, unrelated,
 concurrent rebuild, cache corruption, two keys per module) asserts the full
 chain.
 
-UNRUN on the self-hosted binary: none is available on the authoring host.
+Evidence: Rust-seed interpreter runs only (attributed to the seed; the positive RRS1
+decode control is seed-RED because the seed misreads the envelope).
 NFR-GRR-001 (first object within 10 s) is a live worker measurement and is
 deliberately not asserted here; see the test plan for its command.
 
