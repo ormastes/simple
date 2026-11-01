@@ -1,0 +1,363 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# Regression: src/lib/nogc_async_mut/io/buffer.spl used the static generic
+# factories `Future.from_value(..)` / `Future.pending<R>()` at 26 sites. In the
+# frozen stage2 bootstrap compiler a static method of a generic class reaches
+# MIR lowering with the owner's `T` unsubstituted
+# (E-MIR-TYPE-TypeParam, bug doc/08_tracking/bug/typeparam_mir_2026-10-31.md),
+# so the std.io closure could not be built natively. Every site now goes
+# through a file-private helper that constructs the Future directly under a
+# concrete declared return type (tag `@workaround bug=typeparam-mir-20261031`).
+# This spec pins the behaviour of every rewritten site: Ready/Ok, Ready/Err and
+# Pending for each of the four result element types ([u8], text, (), i64).
+
+use std.spec.step
+use std.io.types.{IoError, IoErrorKind}
+use std.async.future.{Future}
+use std.async.poll.{Poll}
+use std.common.io.async_traits.{AsyncRead, AsyncWrite}
+use std.nogc_async_mut.io.buffer.{AsyncBufferedReader, AsyncBufferedWriter}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+# ---------------------------------------------------------------------------
+# Mocks. Futures are built by direct construction so the mocks themselves do
+# not depend on the generic static factories under test.
+# ---------------------------------------------------------------------------
+
+fn _bytes_ready(v: Result<[u8], IoError>) -> Future<Result<[u8], IoError>>:
+    Future(state: [], poll_result: Poll.Ready(v))
+
+fn _bytes_pending() -> Future<Result<[u8], IoError>>:
+    Future(state: [], poll_result: Poll.Pending)
+
+fn _text_ready(v: Result<text, IoError>) -> Future<Result<text, IoError>>:
+    Future(state: [], poll_result: Poll.Ready(v))
+
+fn _unit_ready(v: Result<(), IoError>) -> Future<Result<(), IoError>>:
+    Future(state: [], poll_result: Poll.Ready(v))
+
+fn _unit_pending() -> Future<Result<(), IoError>>:
+    Future(state: [], poll_result: Poll.Pending)
+
+fn _count_ready(v: Result<i64, IoError>) -> Future<Result<i64, IoError>>:
+    Future(state: [], poll_result: Poll.Ready(v))
+
+fn _bytes_text(b: [u8]) -> text:
+    var out = ""
+    var i = 0
+    while i < b.len():
+        if i > 0:
+            out = out + ","
+        out = out + (b[i] as i64).to_string()
+        i = i + 1
+    out
+
+# In-memory AsyncRead source; every call completes immediately.
+class MemReader with AsyncRead:
+    data: [u8]
+    pos: i64
+    reads: i64
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        self.reads = self.reads + 1
+        val end = if self.pos + size > self.data.len(): self.data.len() else: self.pos + size
+        val chunk = self.data.slice(self.pos, end)
+        self.pos = end
+        _bytes_ready(Ok(chunk))
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        self.read(size)
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        self.read(self.data.len() - self.pos)
+    fn read_text() -> Future<Result<text, IoError>>:
+        _text_ready(Ok(""))
+    fn read_line() -> Future<Result<text, IoError>>:
+        _text_ready(Ok(""))
+
+# AsyncRead source whose every operation stays pending.
+class PendingReader with AsyncRead:
+    label: text
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        _bytes_pending()
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        _bytes_pending()
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        _bytes_pending()
+    fn read_text() -> Future<Result<text, IoError>>:
+        Future(state: [], poll_result: Poll.Pending)
+    fn read_line() -> Future<Result<text, IoError>>:
+        Future(state: [], poll_result: Poll.Pending)
+
+# AsyncRead source whose reads fail.
+class FailingReader with AsyncRead:
+    label: text
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        _bytes_ready(Err(IoError.new(IoErrorKind.Other, "read boom")))
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        self.read(size)
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        self.read(0)
+    fn read_text() -> Future<Result<text, IoError>>:
+        _text_ready(Err(IoError.new(IoErrorKind.Other, "read boom")))
+    fn read_line() -> Future<Result<text, IoError>>:
+        _text_ready(Err(IoError.new(IoErrorKind.Other, "read boom")))
+
+# In-memory AsyncWrite sink; records everything that reaches it.
+class MemWriter with AsyncWrite:
+    written: [u8]
+    flushes: i64
+
+    fn write(data: [u8]) -> Future<Result<i64, IoError>>:
+        self.written = self.written + data
+        _count_ready(Ok(data.len()))
+    fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
+        self.written = self.written + data
+        _unit_ready(Ok(()))
+    fn write_text(s: text) -> Future<Result<(), IoError>>:
+        _unit_ready(Ok(()))
+    fn flush() -> Future<Result<(), IoError>>:
+        self.flushes = self.flushes + 1
+        _unit_ready(Ok(()))
+
+# AsyncWrite sink whose write_all stays pending.
+class PendingWriter with AsyncWrite:
+    label: text
+
+    fn write(data: [u8]) -> Future<Result<i64, IoError>>:
+        Future(state: [], poll_result: Poll.Pending)
+    fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
+        _unit_pending()
+    fn write_text(s: text) -> Future<Result<(), IoError>>:
+        _unit_pending()
+    fn flush() -> Future<Result<(), IoError>>:
+        _unit_pending()
+
+# AsyncWrite sink whose write_all fails.
+class FailingWriter with AsyncWrite:
+    label: text
+
+    fn write(data: [u8]) -> Future<Result<i64, IoError>>:
+        _count_ready(Err(IoError.new(IoErrorKind.Other, "write boom")))
+    fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
+        _unit_ready(Err(IoError.new(IoErrorKind.Other, "write boom")))
+    fn write_text(s: text) -> Future<Result<(), IoError>>:
+        _unit_ready(Err(IoError.new(IoErrorKind.Other, "write boom")))
+    fn flush() -> Future<Result<(), IoError>>:
+        _unit_ready(Err(IoError.new(IoErrorKind.Other, "write boom")))
+
+# Poll observers: render the poll outcome as one comparable text.
+fn _show_bytes(f: Future<Result<[u8], IoError>>) -> text:
+    match f.poll():
+        Poll.Ready(result):
+            match result:
+                Ok(bytes):
+                    "ok:" + _bytes_text(bytes)
+                Err(err):
+                    "err:" + err.message
+        Poll.Pending:
+            "pending"
+
+fn _show_text(f: Future<Result<text, IoError>>) -> text:
+    match f.poll():
+        Poll.Ready(result):
+            match result:
+                Ok(value):
+                    "ok:" + value
+                Err(err):
+                    "err:" + err.message
+        Poll.Pending:
+            "pending"
+
+fn _show_unit(f: Future<Result<(), IoError>>) -> text:
+    match f.poll():
+        Poll.Ready(result):
+            match result:
+                Ok(_):
+                    "ok"
+                Err(err):
+                    "err:" + err.message
+        Poll.Pending:
+            "pending"
+
+fn _show_count(f: Future<Result<i64, IoError>>) -> text:
+    match f.poll():
+        Poll.Ready(result):
+            match result:
+                Ok(n):
+                    "ok:" + n.to_string()
+                Err(err):
+                    "err:" + err.message
+        Poll.Pending:
+            "pending"
+
+# ============================================================================
+# AsyncBufferedReader sites ([u8] and text helpers)
+# ============================================================================
+
+describe "AsyncBufferedReader typeparam workaround sites":
+    # @manual scenario evidence
+
+    it "serves a refill and then the buffer as ready Ok futures":
+        # @req REQ-SSPEC-UNIT
+        step("read refills from inner, second read serves from buffer")
+        val raw = MemReader(data: [1u8, 2u8, 3u8, 4u8, 5u8], pos: 0, reads: 0)
+        val reader = AsyncBufferedReader.with_capacity(raw, 4)
+        expect(_show_bytes(reader.read(2))).to_equal("ok:1,2")
+        expect(raw.reads).to_equal(1)
+        expect(_show_bytes(reader.read(2))).to_equal("ok:3,4")
+        expect(raw.reads).to_equal(1)
+        expect(_show_bytes(reader.read(2))).to_equal("ok:5")
+        expect(raw.reads).to_equal(2)
+
+    it "propagates an inner read error as a ready Err future":
+        # @req REQ-SSPEC-UNIT
+        step("read on a failing source")
+        val reader = AsyncBufferedReader.new(FailingReader(label: "failing"))
+        expect(_show_bytes(reader.read(3))).to_equal("err:read boom")
+
+    it "stays pending while the inner refill is pending":
+        # @req REQ-SSPEC-UNIT
+        step("read on a pending source")
+        val reader = AsyncBufferedReader.new(PendingReader(label: "pending"))
+        expect(_show_bytes(reader.read(3))).to_equal("pending")
+
+    it "read_all joins the buffered prefix with the inner remainder":
+        # @req REQ-SSPEC-UNIT
+        step("read_all with buffered prefix")
+        val raw = MemReader(data: [7u8, 8u8, 9u8, 10u8], pos: 0, reads: 0)
+        val reader = AsyncBufferedReader.with_capacity(raw, 2)
+        expect(_show_bytes(reader.read(1))).to_equal("ok:7")
+        expect(_show_bytes(reader.read_all())).to_equal("ok:8,9,10")
+
+    it "read_all surfaces inner Err and Pending after draining the prefix":
+        # @req REQ-SSPEC-UNIT
+        step("read_all with buffered prefix over failing and pending sources")
+        val failing = AsyncBufferedReader(inner: FailingReader(label: "failing"), closer: nil, buf: [1u8, 2u8], buf_size: 2, pos: 0, filled: 2)
+        expect(_show_bytes(failing.read_all())).to_equal("err:read boom")
+        val pending = AsyncBufferedReader(inner: PendingReader(label: "pending"), closer: nil, buf: [1u8, 2u8], buf_size: 2, pos: 0, filled: 2)
+        expect(_show_bytes(pending.read_all())).to_equal("pending")
+
+    it "read_text decodes a ready result and forwards Err and Pending":
+        # @req REQ-SSPEC-UNIT
+        step("read_text over ready, failing and pending sources")
+        val raw = MemReader(data: [104u8, 105u8, 10u8], pos: 0, reads: 0)
+        expect(_show_text(AsyncBufferedReader.new(raw).read_text())).to_equal("ok:hi\n")
+        expect(_show_text(AsyncBufferedReader.new(FailingReader(label: "failing")).read_text())).to_equal("err:read boom")
+        expect(_show_text(AsyncBufferedReader.new(PendingReader(label: "pending")).read_text())).to_equal("pending")
+
+    it "read_line returns the buffered line as a ready text future":
+        # @req REQ-SSPEC-UNIT
+        step("read_line from buffer")
+        val reader = AsyncBufferedReader(inner: PendingReader(label: "pending"), closer: nil, buf: [97u8, 98u8, 10u8, 99u8], buf_size: 4, pos: 0, filled: 4)
+        expect(_show_text(reader.read_line())).to_equal("ok:ab\n")
+        expect(reader.buffered_bytes()).to_equal(1)
+
+    it "close without a closer view completes Ok":
+        # @req REQ-SSPEC-UNIT
+        step("reader close with no closer")
+        val reader = AsyncBufferedReader.new(PendingReader(label: "pending"))
+        expect(_show_unit(reader.close())).to_equal("ok")
+
+# ============================================================================
+# AsyncBufferedWriter sites (i64 and () helpers)
+# ============================================================================
+
+describe "AsyncBufferedWriter typeparam workaround sites":
+    # @manual scenario evidence
+
+    it "buffers a small write and reports the accepted count":
+        # @req REQ-SSPEC-UNIT
+        step("small write stays in the buffer")
+        val sink = MemWriter(written: [], flushes: 0)
+        val writer = AsyncBufferedWriter.with_capacity(sink, 4)
+        expect(_show_count(writer.write([1u8, 2u8]))).to_equal("ok:2")
+        expect(sink.written.len()).to_equal(0)
+
+    it "flushes the buffer before a write that would overflow it":
+        # @req REQ-SSPEC-UNIT
+        step("overflowing write flushes buffered bytes first")
+        val sink = MemWriter(written: [], flushes: 0)
+        val writer = AsyncBufferedWriter.with_capacity(sink, 4)
+        expect(_show_count(writer.write([1u8, 2u8, 3u8]))).to_equal("ok:3")
+        expect(_show_count(writer.write([4u8, 5u8]))).to_equal("ok:2")
+        expect(_bytes_text(sink.written)).to_equal("1,2,3")
+        expect(_show_unit(writer.flush())).to_equal("ok")
+        expect(_bytes_text(sink.written)).to_equal("1,2,3,4,5")
+        expect(sink.flushes).to_equal(1)
+
+    it "bypasses the buffer for a large write after flushing what was buffered":
+        # @req REQ-SSPEC-UNIT
+        step("large write goes straight to inner")
+        val sink = MemWriter(written: [], flushes: 0)
+        val writer = AsyncBufferedWriter.with_capacity(sink, 4)
+        expect(_show_count(writer.write([9u8]))).to_equal("ok:1")
+        expect(_show_count(writer.write([1u8, 2u8, 3u8, 4u8, 5u8]))).to_equal("ok:5")
+        expect(_bytes_text(sink.written)).to_equal("9,1,2,3,4,5")
+
+    it "reports the inner flush failure from write as a ready Err":
+        # @req REQ-SSPEC-UNIT
+        step("overflowing and large writes over a failing sink")
+        val overflow = AsyncBufferedWriter(inner: FailingWriter(label: "failing"), closer: nil, buf: [1u8, 2u8, 3u8], buf_size: 4, pos: 3)
+        expect(_show_count(overflow.write([4u8, 5u8]))).to_equal("err:write boom")
+        val large = AsyncBufferedWriter(inner: FailingWriter(label: "failing"), closer: nil, buf: [1u8], buf_size: 4, pos: 1)
+        expect(_show_count(large.write([1u8, 2u8, 3u8, 4u8]))).to_equal("err:write boom")
+
+    it "stays pending while the inner flush from write is pending":
+        # @req REQ-SSPEC-UNIT
+        step("overflowing and large writes over a pending sink")
+        val overflow = AsyncBufferedWriter(inner: PendingWriter(label: "pending"), closer: nil, buf: [1u8, 2u8, 3u8], buf_size: 4, pos: 3)
+        expect(_show_count(overflow.write([4u8, 5u8]))).to_equal("pending")
+        val large = AsyncBufferedWriter(inner: PendingWriter(label: "pending"), closer: nil, buf: [1u8], buf_size: 4, pos: 1)
+        expect(_show_count(large.write([1u8, 2u8, 3u8, 4u8]))).to_equal("pending")
+
+    it "write_all maps the write outcome to a unit result":
+        # @req REQ-SSPEC-UNIT
+        step("write_all over ready, failing and pending sinks")
+        val sink = MemWriter(written: [], flushes: 0)
+        val writer = AsyncBufferedWriter.with_capacity(sink, 4)
+        expect(_show_unit(writer.write_all([1u8, 2u8]))).to_equal("ok")
+        val failing = AsyncBufferedWriter(inner: FailingWriter(label: "failing"), closer: nil, buf: [1u8, 2u8, 3u8], buf_size: 4, pos: 3)
+        expect(_show_unit(failing.write_all([4u8, 5u8]))).to_equal("err:write boom")
+        val pending = AsyncBufferedWriter(inner: PendingWriter(label: "pending"), closer: nil, buf: [1u8, 2u8, 3u8], buf_size: 4, pos: 3)
+        expect(_show_unit(pending.write_all([4u8, 5u8]))).to_equal("pending")
+
+    it "flush forwards inner Err and Pending":
+        # @req REQ-SSPEC-UNIT
+        step("flush over failing and pending sinks")
+        val failing = AsyncBufferedWriter(inner: FailingWriter(label: "failing"), closer: nil, buf: [1u8], buf_size: 4, pos: 1)
+        expect(_show_unit(failing.flush())).to_equal("err:write boom")
+        val pending = AsyncBufferedWriter(inner: PendingWriter(label: "pending"), closer: nil, buf: [1u8], buf_size: 4, pos: 1)
+        expect(_show_unit(pending.flush())).to_equal("pending")
+
+    it "close flushes then completes Ok, Err or Pending like the flush":
+        # @req REQ-SSPEC-UNIT
+        step("close over ready, failing and pending sinks")
+        val sink = MemWriter(written: [], flushes: 0)
+        val writer = AsyncBufferedWriter(inner: sink, closer: nil, buf: [5u8, 6u8], buf_size: 4, pos: 2)
+        expect(_show_unit(writer.close())).to_equal("ok")
+        expect(_bytes_text(sink.written)).to_equal("5,6")
+        val failing = AsyncBufferedWriter(inner: FailingWriter(label: "failing"), closer: nil, buf: [1u8], buf_size: 4, pos: 1)
+        expect(_show_unit(failing.close())).to_equal("err:write boom")
+        val pending = AsyncBufferedWriter(inner: PendingWriter(label: "pending"), closer: nil, buf: [1u8], buf_size: 4, pos: 1)
+        expect(_show_unit(pending.close())).to_equal("pending")
+
+# ============================================================================
+# Source guard: the workaround must stay in place until the root fix lands
+# ============================================================================
+
+describe "buffer.spl avoids Future static generic factories":
+    # @manual scenario evidence
+
+    it "contains no Future.from_value or Future.pending call":
+        # @req REQ-SSPEC-UNIT
+        step("no static generic Future factory call remains in buffer.spl")
+        val src = rt_file_read_text("src/lib/nogc_async_mut/io/buffer.spl") ?? ""
+        expect(src.len() > 0).to_equal(true)
+        expect(src.contains("Future.from_value(")).to_equal(false)
+        expect(src.contains("Future.pending<")).to_equal(false)
+        expect(src.contains("@workaround bug=typeparam-mir-20261031")).to_equal(true)
+        expect(src.contains("fn _ready_bytes_result_future(")).to_equal(true)
+        expect(src.contains("fn _pending_unit_result_future(")).to_equal(true)
