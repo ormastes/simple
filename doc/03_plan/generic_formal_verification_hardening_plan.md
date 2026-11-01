@@ -1,5 +1,7 @@
 # Generic formal verification hardening plan
 
+> **SUPERSEDED (2026-11-01)** by `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md`. Every `40.mono` owner cited here (G1–G7 owners, `mono_archive_types_v1.spl`, `nominal_type_identity.spl`, `mono_key.spl`, `cache.spl`, `post_mono_verify.spl`) was deleted by commit `200a05f5bc8`. Still-valid non-mono items (trust/failure policy, profile/collection/dynload/aspect identity binding, negative controls) are merged into that plan's §1A.6 with a citation to this file.
+
 <!-- codex-architecture -->
 Date: 2026-10-18 (status updated 2026-10-19, see §12). Status: implementation and qualification plan; production refinement NOT PROVEN.
 Destination: `doc/03_plan/generic_formal_verification_hardening_plan.md` on `release_phase3`.

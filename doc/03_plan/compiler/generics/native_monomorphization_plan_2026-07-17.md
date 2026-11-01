@@ -1,5 +1,7 @@
 # Native-Path Monomorphization — Staged Plan (#158 Phase B)
 
+> **SUPERSEDED (2026-11-01):** generics are type-erased; `src/compiler/40.mono/` was deleted by commit `200a05f5bc8`. The seven gates are kept only as `main`-baseline specification in `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md` §1.4; the release roadmap is its §1A.
+
 Status: Phase A (loud fail-closed) COMPLETE for all reached tiers. Phase B
 (actual monomorphization) NOT attempted — deferred with this plan. Written by
 lane S48, 2026-07-17.
