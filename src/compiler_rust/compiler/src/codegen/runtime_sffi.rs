@@ -1697,7 +1697,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_owned_v3_cancel_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_owned_v3_result_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_owned_v3_collect_value", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_process_owned_v3_release_value", &[I64], &[I32]),
+    RuntimeFuncSpec::new("rt_process_owned_v3_release_value", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_process_owned_v3_capabilities_value", &[], &[I64]),
     RuntimeFuncSpec::new("rt_process_owned_v3_set_capture_limits_value", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_owned_v3_observation_value", &[I64], &[I64]),
@@ -2891,7 +2891,7 @@ mod tests {
         }
         let release = spec_for("rt_process_owned_v3_release_value").expect("owned V3 release runtime spec");
         assert_eq!(release.params, [I64]);
-        assert_eq!(release.returns, [I32]);
+        assert_eq!(release.returns, [I8]);
         let capabilities =
             spec_for("rt_process_owned_v3_capabilities_value").expect("owned V3 capability runtime spec");
         assert!(capabilities.params.is_empty());

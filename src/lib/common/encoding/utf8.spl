@@ -314,25 +314,14 @@ fn text_codepoints(s: text) -> [i64]:
 
 fn text_from_codepoints(cps: [i64]) -> text:
     """Create a text string from an array of codepoints.
-    Uses the runtime char_from_code for each codepoint."""
-    var parts: [text] = []
+    Encodes everything once and converts the bytes in one runtime call."""
+    val encoded = utf8_encode_all(cps)
+    var byte_arr: [u8] = []
     var i: i64 = 0
-    while i < cps.len():
-        val bytes = utf8_encode_one(cps[i])
-        # Build text from bytes — use runtime conversion
-        var j: i64 = 0
-        var char_bytes: [i64] = []
-        while j < bytes.len():
-            char_bytes.push(bytes[j])
-            j = j + 1
-        # For single-byte ASCII, use direct conversion
-        if char_bytes.len() == 1 and char_bytes[0] < 128:
-            parts.push(char_from_code(char_bytes[0]))
-        else:
-            # Multi-byte: build string from codepoint using runtime
-            parts.push(char_from_codepoint(cps[i]))
+    while i < encoded.len():
+        byte_arr.push(encoded[i] as u8)
         i = i + 1
-    parts.join("")
+    rt_bytes_to_text(byte_arr)
 
 fn char_from_codepoint(cp: i64) -> text:
     """Convert a Unicode codepoint to a single-character text string.
@@ -373,7 +362,9 @@ fn char_from_code(code: i64) -> text:
     Invalid input (negative, surrogates, > U+10FFFF) yields U+FFFD, matching
     utf8_encode_one; string_core returns "" for those."""
     if code >= 0 and code <= 127:
-        # ASCII range — use string literal table for common chars
-        val table = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\x0c\r\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\x7f"
-        return table[code:code+1]
+        # From bytes, not a string table: a table literal starting with NUL sliced
+        # to "" on the pinned Phase 2 producer, so every decoded text was empty.
+        var byte_arr: [u8] = []
+        byte_arr.push(code as u8)
+        return rt_bytes_to_text(byte_arr)
     char_from_codepoint(code)

@@ -797,7 +797,7 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
     return n > 0 && n < (int)sizeof(line) && rt_mem_snapshot_append_flush_raw(fd, line, n);
 }
 
-int rt_mem_snapshot_close(int64_t fd) {
+bool rt_mem_snapshot_close(int64_t fd) {
 #if defined(_WIN32)
     return fd != -1 && CloseHandle((HANDLE)(intptr_t)fd) != 0;
 #else
