@@ -1,0 +1,109 @@
+"""
+## Purpose and audience
+
+Wave-2 MC/DC driver for the three reachable `occurs` conditions in
+`src/compiler/30.types/type_infer/core.spl` that wave 1 left uncovered:
+the `Throws(T)` effect payload (line 51), `Union` members (line 57) and
+`TypeParam` bounds (line 66). Each single-condition decision is driven to
+both outcomes. For compiler engineers changing HM unification.
+
+## Operator workflow
+
+Run `bin/simple test test/01_unit/compiler/type_infer/coverage/core_occurs_wave2_mcdc_spec.spl`.
+Numbers measured so far are seed-binary numbers only.
+
+| Line | Decision | Vectors (it) |
+|---|---|---|
+| 51 | `if self.occurs(var_id, thrown)` | T "51 c1 true", F "51 c1 false", non-Throws effect skip |
+| 57 | `if self.occurs(var_id, m)` (Union loop) | T "57 c1 true", F "57 c1 false" |
+| 66 | `if self.occurs(var_id, b)` (TypeParam bounds) | T "66 c1 true", F "66 c1 false" |
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:generics
+# @manual_section: generics-coverage-mcdc-core
+
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+use std.spec.step
+
+fn cw2_sp() -> Span:
+    lex_span_empty()
+
+fn cw2_mk(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: cw2_sp())
+
+fn cw2_i64() -> HirType:
+    cw2_mk(HirTypeKind.Int(64, true))
+
+fn cw2_str() -> HirType:
+    cw2_mk(HirTypeKind.Str)
+
+fn cw2_id(ty: HirType) -> i64:
+    match ty.kind:
+        case Infer(id, _): id
+        case _: -1
+
+fn cw2_fn_with(effects: [Effect]) -> HirType:
+    cw2_mk(HirTypeKind.Function([], cw2_i64(), effects))
+
+fn cw2_throws(ty: HirType) -> Effect:
+    Effect(kind: EffectKind.Throws(ty), span: cw2_sp())
+
+describe "core.spl occurs wave 2":
+    it "core.spl:51 c1 true: variable hidden only in a Throws effect occurs":
+        # @req REQ-GEN-COV-CORE-W2-001
+        step("Build fn() -> i64 throws ?v and check ?v occurs in it")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cw2_sp())
+        expect(ctx.occurs(cw2_id(v), cw2_fn_with([cw2_throws(v)]))).to_equal(true)
+
+    it "core.spl:51 c1 false: concrete Throws payload falls through to the return type":
+        # @req REQ-GEN-COV-CORE-W2-002
+        step("Build fn() -> i64 throws str and check ?v does not occur")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cw2_sp())
+        expect(ctx.occurs(cw2_id(v), cw2_fn_with([cw2_throws(cw2_str())]))).to_equal(false)
+
+    it "core.spl:51 non-Throws effect is skipped and the return type decides":
+        # @req REQ-GEN-COV-CORE-W2-003
+        step("Build fn() -> ?v with an IO effect and check ?v occurs via the return type")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cw2_sp())
+        val io = Effect(kind: EffectKind.IO, span: cw2_sp())
+        val f = cw2_mk(HirTypeKind.Function([], v, [io]))
+        expect(ctx.occurs(cw2_id(v), f)).to_equal(true)
+
+    it "core.spl:57 c1 true: variable occurs in a later union member":
+        # @req REQ-GEN-COV-CORE-W2-004
+        step("Build str | ?v and check ?v occurs")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cw2_sp())
+        expect(ctx.occurs(cw2_id(v), cw2_mk(HirTypeKind.Union([cw2_str(), v])))).to_equal(true)
+
+    it "core.spl:57 c1 false: concrete union has no occurrence":
+        # @req REQ-GEN-COV-CORE-W2-005
+        step("Build str | i64 and check ?v does not occur")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cw2_sp())
+        expect(ctx.occurs(cw2_id(v), cw2_mk(HirTypeKind.Union([cw2_str(), cw2_i64()])))).to_equal(false)
+
+    it "core.spl:66 c1 true: variable occurs in a type-parameter bound":
+        # @req REQ-GEN-COV-CORE-W2-006
+        step("Build T: ?v and check ?v occurs")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cw2_sp())
+        expect(ctx.occurs(cw2_id(v), cw2_mk(HirTypeKind.TypeParam("T", [v])))).to_equal(true)
+
+    it "core.spl:66 c1 false: concrete bounds have no occurrence":
+        # @req REQ-GEN-COV-CORE-W2-007
+        step("Build T: str and check ?v does not occur")
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cw2_sp())
+        expect(ctx.occurs(cw2_id(v), cw2_mk(HirTypeKind.TypeParam("T", [cw2_str()])))).to_equal(false)
