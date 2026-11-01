@@ -108,3 +108,17 @@ Not verified by running a stage3 binary (none was available in this session); tr
   and instantiate (or erase) the static template; or at minimum route the static branch through
   `refuse_generic_template_call` so the failure is E-GEN-001 at the call site rather than
   E-MIR-TYPE-TypeParam deep in type lowering.
+
+## Update 2026-11-01: re-probe on current source -- FIXED IN SOURCE (factory part)
+
+Status: FIXED IN SOURCE for the static-factory root bug; still present in the frozen stage2,
+so every `@workaround bug=typeparam-mir-20261031` tag stays until the stage2 refresh (phase 3
+owner reverts). Revert-ready: yes for the factory helpers; the `buffer.spl` `slice` sub-site
+(nested pattern binding) was not re-probed and must be checked at revert time.
+
+Evidence (seed `bin/simple.exe` v1.0.0-rc.1 running the CURRENT pure-Simple `src/compiler` in-process: parse -> HIR -> MIR lowering of a provider `lib.fut` + consumer `app.main` fixture, release/1.0.0 @ 4de6127c67d, 2026-11-01). The new spec assertions were written after a coordinator memory HOLD on test runs and are UNRUN in their final `expect` form; the same fixtures ran green in the probe.
+
+Original shapes WITHOUT the workaround -- `Fut.from_value(true)` under `-> Fut<bool>`,
+`Fut.pending()` under `-> Fut<i64>`, `Fut.from_value(x)` with `x: Result<[u8], RErr>` --
+produce zero consumer HIR/MIR diagnostics (no `E-MIR-TYPE-TypeParam`).
+Regression spec: `test/01_unit/compiler/50.mir/static_generic_factory_typeparam_spec.spl`.
