@@ -1,5 +1,7 @@
 # rti007: declared returns that lower to `Any` get no RTI row in the frozen stage2 (2026-11-01)
 
+Status: OPEN in the frozen stage2 bootstrap compiler; tagged source workarounds stay until the stage2 refresh.
+
 Bug id: `rti007_any_return_rows_2026-11-01` (every `@workaround` tag of this family
 references it). Successor of `rti007_mir_2026-10-31.md` (bare `-> Result` in the linker
 modules, same root bug, different producers).
