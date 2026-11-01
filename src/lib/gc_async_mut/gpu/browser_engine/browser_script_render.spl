@@ -1,10 +1,50 @@
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
 use std.gc_async_mut.gpu.browser_engine.browser_script_execute.{execute_scripts_in_html}
 
-extern fn rt_bytes_alloc(n: i64) -> [u8]
+extern fn rt_bytes_alloc(n: i64) -> [u8]?
 
-fn browser_script_render_alloc_bytes(n: i64) -> [u8]:
+# Largest pixel buffer a public render entry will request. Sizes that are
+# negative or would exceed this bound are refused before any allocation.
+val BROWSER_SCRIPT_RENDER_MAX_BYTES: i64 = 268435456
+
+# True when width/height give a non-negative RGBA byte count within the bound.
+fn browser_script_render_size_ok(width: i32, height: i32) -> bool:
+    val w = width.to_i64()
+    val h = height.to_i64()
+    if w < 0 or h < 0:
+        return false
+    if w > 0 and h > (BROWSER_SCRIPT_RENDER_MAX_BYTES / 4) / w:
+        return false
+    true
+
+# nil means the runtime refused the allocation (n < 0); callers must handle it.
+fn browser_script_render_alloc_bytes(n: i64) -> [u8]?:
     rt_bytes_alloc(n)
+
+fn browser_script_render_pixels(width: i32, height: i32) -> [u8]:
+    if browser_script_render_size_ok(width, height):
+        val n = width.to_i64() * height.to_i64() * 4
+        if val buf = browser_script_render_alloc_bytes(n):
+            return buf
+    []
+
+fn browser_script_render_refused(width: i32, height: i32, reason: text) -> BeScriptRenderResult:
+    val px: [u8] = []
+    var co: [text] = []
+    var diagnostics: [text] = []
+    BeScriptRenderResult(
+        pixels: px,
+        width: width,
+        height: height,
+        title: "",
+        ok: false,
+        error: reason,
+        scripts_collected: 0,
+        scripts_executed: 0,
+        scripts_denied: 0,
+        console_output: co,
+        diagnostics: diagnostics
+    )
 
 pub class BeScriptParseResult:
     scripts: [text]        # inline script bodies
@@ -103,8 +143,7 @@ pub class BeScriptRenderResult:
 
 impl BeScriptRenderResult:
     static fn empty(width: i32, height: i32) -> BeScriptRenderResult:
-        val n = width.to_i64() * height.to_i64() * 4
-        val px = browser_script_render_alloc_bytes(n)
+        val px = browser_script_render_pixels(width, height)
         var co: [text] = []
         var diagnostics: [text] = []
         BeScriptRenderResult(
@@ -112,7 +151,7 @@ impl BeScriptRenderResult:
             width: width,
             height: height,
             title: "",
-            ok: true,
+            ok: browser_script_render_size_ok(width, height),
             error: "",
             scripts_collected: 0,
             scripts_executed: 0,
@@ -122,6 +161,8 @@ impl BeScriptRenderResult:
         )
 
 pub fn render_html_to_pixels_with_scripts(html: text, width: i32, height: i32) -> BeScriptRenderResult:
+    if not browser_script_render_size_ok(width, height):
+        return browser_script_render_refused(width, height, "invalid render size")
     var renderer = BrowserRenderer.create(width, height)
     val render = renderer.render_html(html)
 
