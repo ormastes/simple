@@ -1,0 +1,160 @@
+#!/bin/sh
+#
+# Manually link a phase-3 (stage3) one-binary build from the aot-*.o objects a
+# frozen stage2 `native-build --mode one-binary` left in its cwd.
+#
+# Usage: sh scripts/bootstrap/p3-manual-link-stage3.shs <obj_dir> <checkout> <out_exe>
+#
+# Object selection (no double-counting of stale aot-*.o from earlier runs):
+#   1. $P3_OBJ_LIST: file with one object path/basename per line, if set.
+#   2. $P3_LINK_COMMAND, else the newest *.link-command.txt in <obj_dir> or in
+#      dirname(<out_exe>): the aot-*.o basenames it names (resolved in obj_dir).
+#      This is the builder's own record of the objects it linked.
+#   3. Otherwise ALL aot-*.o in obj_dir (warned: stale objects from earlier
+#      runs in the same cwd are linked too; clean the dir or supply 1/2).
+#
+# Runtime: generates the #5760 shadow (runtime_process_owned.c #includes
+# runtime_process_tree.c, so the process-tree definitions ship inside
+# runtime_process_owned.o exactly as a shadowed stage2 build would; compiling
+# runtime_process_tree.c separately too would double-define them) and compiles
+# the runtime C list with stage2's flags (runtime_compiler.spl
+# compile_runtime_objects, core-c-bootstrap clang arm, default opt_level 3):
+#   -c --target=x86_64-w64-windows-gnu -DSIMPLE_ABI_VERSION=1
+#   -DSIMPLE_ABI_VERSION_DEFERRED=0 -O3 -ffunction-sections -fdata-sections
+#   -std=gnu11 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1
+#   -DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1 -DSIMPLE_CORE_C_STANDALONE=1
+#   -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 (when runtime_dynload is listed)
+#   -DSIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1 (only when runtime_legacy_core is absent)
+#   -I <rt> -I <rt>/platform
+# The source list is the link-command's simple_rt_<pid>_<target>_<name>.o
+# entries when one exists, else the frozen stage2 core-c-bootstrap list below.
+# The entry shim (simple_entry.c) is regenerated as in
+# llvm_native_link_hosted_support.spl compile_entry_point_c, with the defined
+# (non-weak) __module_init* symbols found by llvm-nm, sorted.
+# Toolchain: llvm-mingw UCRT clang + lld only ($SIMPLE_LLVM_MINGW_ROOT).
+set -eu
+
+if [ "$#" -ne 3 ]; then
+    echo "usage: $0 <obj_dir> <checkout> <out_exe>" >&2
+    exit 2
+fi
+obj_dir=${1%/}
+checkout=${2%/}
+out_exe=$3
+here=$(cd "$(dirname "$0")" && pwd)
+lm=${SIMPLE_LLVM_MINGW_ROOT:-C:/Users/user/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64}
+cc="$lm/bin/clang.exe"; [ -x "$cc" ] || cc="$lm/bin/clang"
+nm="$lm/bin/llvm-nm.exe"; [ -x "$nm" ] || nm="$lm/bin/llvm-nm"
+[ -x "$cc" ] || { echo "error: llvm-mingw clang not found under $lm" >&2; exit 1; }
+jobs=${P3_LINK_JOBS:-4}
+out_dir=$(dirname "$out_exe")
+mkdir -p "$out_dir"
+work="$out_exe.p3link"
+rm -rf "$work"
+mkdir -p "$work/rt"
+
+# ---- object selection -------------------------------------------------------
+link_cmd=${P3_LINK_COMMAND:-}
+if [ -z "$link_cmd" ]; then
+    link_cmd=$(ls -t "$obj_dir"/*.link-command.txt "$out_dir"/*.link-command.txt 2>/dev/null |
+        grep -v -F -x "$out_exe.link-command.txt" | head -n 1 || true)
+fi
+: > "$work/objs.txt"
+if [ -n "${P3_OBJ_LIST:-}" ]; then
+    src_desc="object list $P3_OBJ_LIST"
+    tr -d '\r' < "$P3_OBJ_LIST" | while IFS= read -r o; do
+        [ -n "$o" ] && echo "$obj_dir/$(basename "$o")"
+    done > "$work/objs.txt"
+elif [ -n "$link_cmd" ]; then
+    src_desc="link-command $link_cmd"
+    tr -d '\r' < "$link_cmd" | tr ' ' '\n' | sed 's#.*[/\\]##' | grep -E '^aot-.*\.o$' |
+        sort -u | sed "s#^#$obj_dir/#" > "$work/objs.txt" || true
+else
+    src_desc="ALL aot-*.o in $obj_dir (no ledger/link-command; stale objects included)"
+    echo "warning: no object list or link-command found; linking every aot-*.o in $obj_dir" >&2
+    ls "$obj_dir"/aot-*.o > "$work/objs.txt" 2>/dev/null || true
+fi
+nobj=$(wc -l < "$work/objs.txt" | tr -d ' ')
+[ "$nobj" -gt 0 ] || { echo "error: no aot objects selected ($src_desc)" >&2; exit 1; }
+while IFS= read -r o; do
+    [ -f "$o" ] || { echo "error: selected object missing: $o" >&2; exit 1; }
+done < "$work/objs.txt"
+total=$(ls "$obj_dir"/aot-*.o 2>/dev/null | wc -l | tr -d ' ')
+echo "objects: $nobj selected of $total aot-*.o in obj_dir (source: $src_desc)"
+
+# ---- runtime source list ----------------------------------------------------
+frozen_list="runtime_native runtime_alloc_observer runtime_core_intrinsics runtime_file_view
+runtime_disk_headroom runtime_memory_headroom runtime_cache_host_authority_v1 runtime_framebuffer
+runtime_directx_core runtime_legacy_core runtime_core_io_exports runtime_core_host_services
+runtime_fork runtime_memtrack runtime_process runtime_memory runtime_process_owned
+runtime_coverage_core runtime_contracts runtime_font runtime_thread runtime_simd_utf8
+runtime_simd_case runtime_simd_search runtime_simd_dispatch runtime_packed_span runtime_terminal
+runtime_prof_sample runtime_core_exports runtime_backend_plugin runtime_rocm runtime_renderdoc
+runtime_timestamp runtime_glfw runtime_sdl2 runtime_sdl3 runtime_audio runtime_image
+runtime_socket_nonblock counterpart_abi_runtime runtime_dynload"
+names=""
+if [ -n "$link_cmd" ]; then
+    names=$(tr -d '\r' < "$link_cmd" | tr ' ' '\n' |
+        sed -n 's#.*simple_rt_[0-9]*_x86_64-pc-windows-gnu_\(.*\)\.o$#\1#p')
+fi
+[ -n "$names" ] || names=$frozen_list
+names=$(echo " $(echo $names) " | sed 's/ runtime_process_tree / /; s/^ *//; s/ *$//')
+case " $names " in
+    *" runtime_process_owned "*) ;;
+    *) echo "error: runtime list lacks runtime_process_owned" >&2; exit 1 ;;
+esac
+
+shadow="$work/shadow"
+sh "$here/workarounds/stage2-runtime-process-tree-shadow.shs" "$checkout" "$shadow" >/dev/null
+rt="$shadow/src/runtime"
+defs="-DSIMPLE_ABI_VERSION=1 -DSIMPLE_ABI_VERSION_DEFERRED=0 -O3 -ffunction-sections -fdata-sections -std=gnu11 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1 -DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1 -DSIMPLE_CORE_C_STANDALONE=1"
+case " $names " in *" runtime_dynload "*) defs="$defs -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1" ;; esac
+case " $names " in *" runtime_legacy_core "*) ;; *) defs="$defs -DSIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1" ;; esac
+echo "runtime: $(echo $names | wc -w | tr -d ' ') C sources from shadow (runtime_process_tree.c via runtime_process_owned.c)"
+echo "runtime cflags: -c --target=x86_64-w64-windows-gnu $defs -I <shadow>/src/runtime -I <shadow>/src/runtime/platform"
+for n in $names; do
+    [ -f "$rt/$n.c" ] || { echo "error: runtime source missing: $rt/$n.c" >&2; exit 1; }
+    echo "$n"
+done > "$work/rt-names.txt"
+# shellcheck disable=SC2086
+if ! xargs -P "$jobs" -I{} "$cc" -c --target=x86_64-w64-windows-gnu $defs -I "$rt" -I "$rt/platform" \
+        -o "$work/rt/{}.o" "$rt/{}.c" < "$work/rt-names.txt" 2> "$work/rt-compile.err"; then
+    echo "error: runtime compile failed:" >&2
+    head -n 40 "$work/rt-compile.err" >&2
+    exit 1
+fi
+
+# ---- entry shim -------------------------------------------------------------
+# shellcheck disable=SC2046
+inits=$("$nm" --defined-only $(cat "$work/objs.txt") 2>/dev/null |
+    awk 'NF>=3 && $2 !~ /^[UuWwVv]$/ {print $3}' | sed 's/^___module_init/__module_init/' |
+    grep -E '^__module_init(_.*)?$' | LC_ALL=C sort -u || true)
+entry_c="$work/simple_entry.c"
+{
+    echo 'extern void spl_init_args(int argc, char** argv);'
+    echo 'int __attribute__((weak)) __simple_startup_before_main(int argc, char** argv) { (void)argc; (void)argv; return 0; }'
+    echo 'extern void __simple_runtime_init(void);'
+    echo 'extern long long __simple_main(void);'
+    echo 'extern void __simple_runtime_shutdown(void);'
+    for s in $inits; do echo "extern void $s(void);"; done
+    echo 'int main(int argc, char** argv) {'
+    echo '    spl_init_args(argc, argv);'
+    echo '    if (__simple_startup_before_main(argc, argv) != 0) return 125;'
+    echo '    __simple_runtime_init();'
+    for s in $inits; do echo "    $s();"; done
+    echo '    long long result = __simple_main();'
+    echo '    __simple_runtime_shutdown();'
+    echo '    return (int)result;'
+    echo '}'
+} > "$entry_c"
+"$cc" -c --target=x86_64-w64-windows-gnu -O3 -ffunction-sections -fdata-sections -o "$work/simple_entry.o" "$entry_c"
+echo "entry: $(echo $inits | wc -w | tr -d ' ') module init symbols"
+
+# ---- link -------------------------------------------------------------------
+rt_objs=""
+for n in $names; do rt_objs="$rt_objs $work/rt/$n.o"; done
+cmd="$cc --target=x86_64-w64-windows-gnu -fuse-ld=lld -lkernel32 -lws2_32 -lmswsock -lbcrypt -luserenv -lntdll -lole32 -lsynchronization -ld3d11 -ldxgi --rtlib=compiler-rt --unwindlib=libunwind -Wl,--gc-sections -o $out_exe $(echo $(cat "$work/objs.txt"))$rt_objs $work/simple_entry.o"
+echo "$cmd" > "$out_exe.link-command.txt"
+# shellcheck disable=SC2086
+$cmd
+echo "linked: $out_exe ($(wc -c < "$out_exe" | tr -d ' ') bytes); link command: $out_exe.link-command.txt"

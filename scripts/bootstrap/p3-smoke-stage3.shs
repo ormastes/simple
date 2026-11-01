@@ -1,0 +1,90 @@
+#!/bin/sh
+# Smoke a phase-3 (stage3) compiler binary: `--version`, then have the binary
+# itself native-build a hello world and run it, expecting exactly "hello".
+#
+# Usage: sh scripts/bootstrap/p3-smoke-stage3.shs <exe>
+# Prints PASS or FAIL as the last line; exit 0 on PASS, 1 on FAIL.
+#
+# The build invocation is the `--entry` form of
+# scripts/check/check-stage2-hello-world-native-build.shs (--entry-closure is
+# mandatory: without it the compiler scans every default source root).
+# Env: P3_SMOKE_ROOT (cwd for the build, default this checkout),
+#      P3_SMOKE_BACKEND (default llvm), P3_SMOKE_THREADS (default 4),
+#      P3_RUNTIME_DLL_DIR (default C:/msys64/clang64/bin, as in r11/run.ps1),
+#      P3_SMOKE_TIMEOUT (build seconds, default 900), P3_SMOKE_WORK (scratch dir).
+# Toolchain: llvm-mingw UCRT clang + lld ($SIMPLE_LLVM_MINGW_ROOT); never GCC/MSVC.
+set -u
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: $0 <exe>" >&2
+    exit 2
+fi
+exe=$1
+here=$(cd "$(dirname "$0")" && pwd)
+root=${P3_SMOKE_ROOT:-$(cd "$here/../.." && pwd)}
+backend=${P3_SMOKE_BACKEND:-llvm}
+threads=${P3_SMOKE_THREADS:-4}
+build_timeout=${P3_SMOKE_TIMEOUT:-900}
+lm=${SIMPLE_LLVM_MINGW_ROOT:-C:/Users/user/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64}
+if [ -d "$lm/bin" ]; then
+    lm_bin=$(cygpath -u "$lm/bin" 2>/dev/null || echo "$lm/bin")
+    PATH="$lm_bin:$PATH"; CC="$lm/bin/clang.exe"; SIMPLE_LLVM_MINGW_ROOT=$lm
+    export PATH CC SIMPLE_LLVM_MINGW_ROOT
+fi
+# Phase-3 launchers (r11/run.ps1) put the clang64 runtime DLL dir first; the
+# frozen stage2 fails 0xC0000139 (entry point not found) without it.
+dll_dir=${P3_RUNTIME_DLL_DIR:-C:/msys64/clang64/bin}
+if [ -d "$dll_dir" ]; then PATH="$(cygpath -u "$dll_dir" 2>/dev/null || echo "$dll_dir"):$PATH"; export PATH; fi
+unset LIB 2>/dev/null || true
+# Same SCV admission knobs as the phase-3 launcher (r11/run.ps1).
+SIMPLE_SCV_INVENTORY_COLD_INIT=${SIMPLE_SCV_INVENTORY_COLD_INIT:-1}
+SIMPLE_SCV_FREEZE_FALLBACK=${SIMPLE_SCV_FREEZE_FALLBACK:-1}
+export SIMPLE_SCV_INVENTORY_COLD_INIT SIMPLE_SCV_FREEZE_FALLBACK
+# A one-module entry with 2 MIR shards leaves one shard empty, and the frozen
+# stage2 fails that empty shard ("empty mir_modules"); one shard is enough here.
+SIMPLE_MIR_SHARD_COUNT=${SIMPLE_MIR_SHARD_COUNT:-1}
+export SIMPLE_MIR_SHARD_COUNT
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) ext=.exe; target=${P3_SMOKE_TARGET:-x86_64-pc-windows-gnu} ;;
+    *) ext=; target=${P3_SMOKE_TARGET:-} ;;
+esac
+
+fail() { echo "FAIL: $*"; exit 1; }
+
+[ -f "$exe" ] || fail "no such binary: $exe"
+work=${P3_SMOKE_WORK:-$exe.smoke}
+rm -rf "$work"
+mkdir -p "$work/cache"
+
+# 1. --version
+ver=$(timeout 60 "$exe" --version 2>&1); rc=$?
+echo "version: rc=$rc $(printf '%s' "$ver" | head -n 1)"
+[ "$rc" -eq 0 ] && [ -n "$ver" ] || fail "--version rc=$rc"
+
+# 2. self-compile hello world
+# In-tree fixture shared with scripts/check/check-stage2-hello-world-native-build.shs
+# (prints exactly "hello"). SCV admits only entries in the frozen inventory, so
+# a generated file outside the tracked families is refused (SCV-E-ENTRY).
+fix=${P3_SMOKE_FIXTURE:-test/04_smoke/bootstrap_hello_world.spl}
+[ -f "$root/$fix" ] || fail "missing fixture $root/$fix"
+hw="$work/hello$ext"
+(
+    cd "$root" || exit 1
+    timeout -k 10 "$build_timeout" "$exe" native-build --backend "$backend" \
+        --runtime-bundle core-c-bootstrap --entry-closure --mode one-binary \
+        --threads "$threads" --cache-dir "$work/cache" \
+        ${target:+--target "$target"} --entry "$fix" --output "$hw"
+) > "$work/build.log" 2>&1
+rc=$?
+echo "build: rc=$rc log=$work/build.log"
+if [ "$rc" -ne 0 ] || [ ! -f "$hw" ]; then
+    tail -n 15 "$work/build.log"
+    fail "hello native-build rc=$rc"
+fi
+
+# 3. run it
+out=$(timeout 60 "$hw" 2>&1 | tr -d '\r'); rc=$?
+echo "run: rc=$rc stdout='$out'"
+[ "$rc" -eq 0 ] || fail "hello exited rc=$rc"
+[ "$out" = "hello" ] || fail "hello printed '$out', expected 'hello'"
+echo "PASS"

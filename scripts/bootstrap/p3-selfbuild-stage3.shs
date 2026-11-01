@@ -1,0 +1,89 @@
+#!/bin/sh
+# Self-build: rebuild the compiler with a phase-3 (stage3) binary as the
+# compiler, per-file, with a cache, and admit the result only after
+# p3-smoke-stage3.shs passes on it.
+#
+# Usage: sh scripts/bootstrap/p3-selfbuild-stage3.shs <stage3_exe> <checkout> <out>
+#
+# native-build arguments are those of the phase-3 launcher
+# (C:/dev/p3new/r11/run.ps1), with the stage3 binary as the compiler and
+# per-file workers (SIMPLE_FILE_WORKERS=1, SIMPLE_BOOTSTRAP_WHOLE_PROGRAM unset).
+# Stage3 is built from a source containing runtime_process_tree in its runtime
+# list, so no #5760 shadow is applied.
+#
+# Layout under <out>:
+#   simple.exe               admitted current binary
+#   simple.<sha12>.exe       lineage-named fallback of each prior simple.exe
+#                            (sha12 = first 12 hex of its sha256)
+#   candidate.exe            the freshly built binary (kept on rejection)
+#   cache/                   native-build --cache-dir (persists across runs)
+#   build.log, smoke/        evidence
+# Env: P3_SELFBUILD_THREADS (default 80), P3_SELFBUILD_EXTRA (extra args).
+# Toolchain: llvm-mingw UCRT clang + lld only ($SIMPLE_LLVM_MINGW_ROOT).
+set -u
+
+if [ "$#" -ne 3 ]; then
+    echo "usage: $0 <stage3_exe> <checkout> <out>" >&2
+    exit 2
+fi
+stage3=$1
+checkout=$2
+out=${3%/}
+here=$(cd "$(dirname "$0")" && pwd)
+threads=${P3_SELFBUILD_THREADS:-80}
+[ -f "$stage3" ] || { echo "error: no stage3 binary: $stage3" >&2; exit 1; }
+[ -f "$checkout/src/app/cli/bootstrap_main.spl" ] || { echo "error: not a checkout: $checkout" >&2; exit 1; }
+mkdir -p "$out/cache"
+case "$out" in /*|[A-Za-z]:*) ;; *) out="$(pwd)/$out" ;; esac
+
+lm=${SIMPLE_LLVM_MINGW_ROOT:-C:/Users/user/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64}
+lm_bin=$(cygpath -u "$lm/bin" 2>/dev/null || echo "$lm/bin")
+PATH="$lm_bin:$PATH"; CC="$lm/bin/clang.exe"; SIMPLE_LLVM_MINGW_ROOT=$lm
+export PATH CC SIMPLE_LLVM_MINGW_ROOT
+# Phase-3 launchers (r11/run.ps1) put the clang64 runtime DLL dir first; the
+# frozen stage2 fails 0xC0000139 (entry point not found) without it.
+dll_dir=${P3_RUNTIME_DLL_DIR:-C:/msys64/clang64/bin}
+if [ -d "$dll_dir" ]; then PATH="$(cygpath -u "$dll_dir" 2>/dev/null || echo "$dll_dir"):$PATH"; export PATH; fi
+unset LIB SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_PROJECT_ROOT 2>/dev/null || true
+KEEP_CACHE=1 SIMPLE_FILE_WORKERS=1 SIMPLE_FILE_FIBERS=0 SIMPLE_COMPILE_FAIL_FAST=0
+SIMPLE_NATIVE_BUILD_THREADS=$threads SIMPLE_NATIVE_INCREMENTAL=1
+SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_SCV_FREEZE_FALLBACK=1
+export KEEP_CACHE SIMPLE_FILE_WORKERS SIMPLE_FILE_FIBERS SIMPLE_COMPILE_FAIL_FAST \
+    SIMPLE_NATIVE_BUILD_THREADS SIMPLE_NATIVE_INCREMENTAL \
+    SIMPLE_SCV_INVENTORY_COLD_INIT SIMPLE_SCV_FREEZE_FALLBACK
+
+candidate="$out/candidate.exe"
+rm -f "$candidate"
+echo "selfbuild: compiler=$stage3 checkout=$checkout out=$out threads=$threads"
+# shellcheck disable=SC2086
+(
+    cd "$checkout" || exit 1
+    "$stage3" native-build --entry-closure --entry src/app/cli/bootstrap_main.spl \
+        --runtime-bundle core-c-bootstrap \
+        --source src/compositions/cuda_static --source src/compositions/kernel_llvm_cranelift \
+        --source src/compiler --source src/app --source src/lib --source src/plugins \
+        --target x86_64-pc-windows-gnu --backend llvm --threads "$threads" \
+        --mode one-binary --keep-going --go-to-end \
+        --cache-dir "$out/cache" -o "$candidate" ${P3_SELFBUILD_EXTRA:-}
+) > "$out/build.log" 2>&1
+rc=$?
+echo "build: rc=$rc log=$out/build.log"
+if [ "$rc" -ne 0 ] || [ ! -f "$candidate" ]; then
+    tail -n 20 "$out/build.log"
+    echo "REJECTED: build failed; $out/simple.exe unchanged"
+    exit 1
+fi
+
+if ! P3_SMOKE_ROOT="$checkout" P3_SMOKE_WORK="$out/smoke" sh "$here/p3-smoke-stage3.shs" "$candidate"; then
+    echo "REJECTED: smoke failed on $candidate; $out/simple.exe unchanged"
+    exit 1
+fi
+
+# Admit: keep the prior binary under its lineage name, then swap in.
+if [ -f "$out/simple.exe" ]; then
+    sha12=$(sha256sum "$out/simple.exe" | cut -c1-12)
+    [ -f "$out/simple.$sha12.exe" ] || cp -p "$out/simple.exe" "$out/simple.$sha12.exe"
+    echo "fallback: $out/simple.$sha12.exe"
+fi
+cp -p "$candidate" "$out/simple.exe.new" && mv -f "$out/simple.exe.new" "$out/simple.exe"
+echo "ADMITTED: $out/simple.exe sha256=$(sha256sum "$out/simple.exe" | cut -c1-12)"
