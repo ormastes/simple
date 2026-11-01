@@ -26,3 +26,17 @@ instead of `init.? ... init ?? fallback`.
 
 ## Removal condition
 Remove once the root fix (generic lambda slot ABI resolution / record-owner check for aliased record) is in a stage2 used for bootstrapping.
+
+## Update 2026-11-01: re-probe on current source -- FIXED IN SOURCE
+
+Status: FIXED IN SOURCE; still present in the frozen stage2, so every
+`@workaround bug=lambdaabi-mir-20261031` tag stays until the stage2 refresh (phase 3 owner
+reverts). Revert-ready: yes.
+
+Evidence: seed `bin/simple.exe` v1.0.0-rc.1 running the CURRENT pure-Simple `src/compiler` in-process (parse -> HIR -> MIR lowering of a provider `lib.fut` + consumer fixture), release/1.0.0, 2026-11-01. Final spec assertion form is UNRUN (coordinator memory HOLD on test runs); the same fixtures ran green in the probe.
+
+Original shapes WITHOUT the workaround produce zero consumer HIR/MIR diagnostics:
+- `f.then(<lambda x>: Fut.from_value("{x}"))` on `f: Fut<i64>` returning `Fut<text>` (no
+  "lambda function slot has an unresolved ABI type");
+- `val r = init ?? Rec(v: 0)` with `init: Rec?` (no record owner mismatch).
+Regression spec: `test/01_unit/compiler/50.mir/generic_then_lambda_slot_coalesce_spec.spl`.
