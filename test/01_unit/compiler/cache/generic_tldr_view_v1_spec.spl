@@ -102,3 +102,85 @@ describe "generic TLDR view: active guard root (guard_id_v1)":
         var b = a
         b.active_guard_root = guard_root(true, true).root_digest
         expect(generic_template_id_v1(a) == generic_template_id_v1(b)).to_equal(false)
+
+# ----------------------------------------------------------------------------
+# E3 negative controls (generics formal-verification plan §1A.4 / §5.7)
+# ----------------------------------------------------------------------------
+#
+# Seam note for (b): release/1.0.0 has no acquisition table and no injectable
+# bucket-hash function — the file header's "XXH3 bucket index + full-key
+# verify" is a stated contract only (tracked in
+# doc/08_tracking/bug/generic_tldr_acquisition_table_missing.md). These
+# controls therefore drive the real key path (`concrete_tldr_key_v1`) through
+# a spec-local bucket whose hash is deliberately constant, and verify a hit by
+# comparing the full canonical key exactly as the contract requires.
+#
+# The XXH3-is-not-identity control is NOT duplicated here; it is owned by
+# test/01_unit/compiler/driver/cache_xxh3_identity_gate_spec.spl
+# (`digest_admits_identity_v1(HASH_ALGO_XXH3_128_V1)` is false).
+
+struct BucketEntryE3:
+    full_key: text
+    payload: text
+
+fn constant_bucket_hash_e3(key: text) -> i64:
+    0
+
+fn bucket_lookup_e3(bucket: [BucketEntryE3], key: text) -> text:
+    """Every entry shares bucket 0; only a full-key match is a hit."""
+    for e in bucket:
+        val ee: BucketEntryE3 = e
+        if constant_bucket_hash_e3(ee.full_key) == constant_bucket_hash_e3(key) and ee.full_key == key:
+            return ee.payload
+    ""
+
+fn pair_template_id_e3() -> text:
+    generic_template_id_v1(project_generic_template_v1(pair_decl()).unwrap())
+
+fn concrete_key_e3(args: [text]) -> text:
+    val g = active_guard_root_empty_v1("").root_digest
+    concrete_tldr_key_v1(pair_template_id_e3(),
+        generic_args_id_v1([GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_TYPE], args),
+        "constraints:none", "profile:default", g)
+
+describe "generic TLDR view: E3 identity negative controls":
+    # @req REQ-GENERIC-TLDR-E3-001
+    it "same display name in a different declaring module gives a different TemplateId":
+        step("Project Box<T> declared in pkg_a and Box<T> declared in pkg_b")
+        val a = project_generic_template_v1(box_decl("pkg_a")).unwrap()
+        val b = project_generic_template_v1(box_decl("pkg_b")).unwrap()
+        step("Confirm both share the display name Box and differ only by module")
+        expect(a.symbol_id).to_end_with(".Box")
+        expect(b.symbol_id).to_end_with(".Box")
+        expect(a.symbol_id == b.symbol_id).to_equal(false)
+        step("Confirm the TemplateIds differ")
+        expect(generic_template_id_v1(a) == generic_template_id_v1(b)).to_equal(false)
+
+    # @req REQ-GENERIC-TLDR-E3-002
+    it "two ConcreteTldrKeys colliding under a constant bucket hash stay distinct":
+        step("Build ConcreteTldrKeys for Pair<i64, f64> and Pair<f64, i64>")
+        val k1 = concrete_key_e3(["i64", "f64"])
+        val k2 = concrete_key_e3(["f64", "i64"])
+        step("Confirm the deliberately constant bucket hash collides them")
+        expect(constant_bucket_hash_e3(k1)).to_equal(constant_bucket_hash_e3(k2))
+        step("Confirm the full canonical keys are distinct SHA-256 identities")
+        expect(k1 == k2).to_equal(false)
+        expect(k1).to_start_with("sha256:")
+        expect(digest_v1_identity_ok(digest_v1_parse(k1).unwrap())).to_equal(true)
+        expect(digest_v1_identity_ok(digest_v1_parse(k2).unwrap())).to_equal(true)
+
+    # @req REQ-GENERIC-TLDR-E3-003
+    it "full-key verification rejects the wrong entry in a shared bucket":
+        step("Place only the Pair<i64, f64> view in the shared bucket")
+        val k1 = concrete_key_e3(["i64", "f64"])
+        val k2 = concrete_key_e3(["f64", "i64"])
+        val bucket = [BucketEntryE3(full_key: k1, payload: "view:pair_i64_f64")]
+        step("Look up the colliding Pair<f64, i64> key and expect a miss")
+        expect(bucket_lookup_e3(bucket, k2)).to_equal("")
+        step("Look up the matching key and expect the stored view")
+        expect(bucket_lookup_e3(bucket, k1)).to_equal("view:pair_i64_f64")
+        step("Add the second view and confirm each key returns its own entry")
+        val both = [BucketEntryE3(full_key: k1, payload: "view:pair_i64_f64"),
+            BucketEntryE3(full_key: k2, payload: "view:pair_f64_i64")]
+        expect(bucket_lookup_e3(both, k2)).to_equal("view:pair_f64_i64")
+        expect(bucket_lookup_e3(both, k1)).to_equal("view:pair_i64_f64")
