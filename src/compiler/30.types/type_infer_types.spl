@@ -115,11 +115,21 @@ impl Substitution:
                 else:
                     ty
             case Function(params, ret, effects):
+                # A `Throws(T)` effect carries a type: resolve it like a
+                # parameter (instantiate_type already does), else a variable
+                # bound only through a thrown type stays unresolved
+                # (generics plan packet E2, F05).
+                var new_effects: [Effect] = []
+                for effect in effects:
+                    val applied_kind = match effect.kind:
+                        case Throws(thrown): EffectKind.Throws(self.apply(thrown))
+                        case _: effect.kind
+                    new_effects = new_effects.push(Effect(kind: applied_kind, span: effect.span))
                 var new_params: [HirType] = []
                 for p in params:
                     new_params = new_params.push(self.apply(p))
                 HirType(
-                    kind: HirTypeKind.Function(new_params, self.apply(ret), effects),
+                    kind: HirTypeKind.Function(new_params, self.apply(ret), new_effects),
                     span: ty.span
                 )
             case Tuple(elements):
@@ -127,6 +137,22 @@ impl Substitution:
                 for e in elements:
                     new_elements = new_elements.push(self.apply(e))
                 HirType(kind: HirTypeKind.Tuple(new_elements), span: ty.span)
+            case Union(members):
+                var new_members: [HirType] = []
+                for m in members:
+                    new_members = new_members.push(self.apply(m))
+                HirType(kind: HirTypeKind.Union(new_members), span: ty.span)
+            case Isolated(inner):
+                HirType(kind: HirTypeKind.Isolated(self.apply(inner)), span: ty.span)
+            case Projection(base, assoc_name):
+                HirType(kind: HirTypeKind.Projection(self.apply(base), assoc_name), span: ty.span)
+            case TypeParam(name, bounds):
+                # The binder itself is not a variable, but its bounds are
+                # ordinary types that may mention one.
+                var new_bounds: [HirType] = []
+                for b in bounds:
+                    new_bounds = new_bounds.push(self.apply(b))
+                HirType(kind: HirTypeKind.TypeParam(name, new_bounds), span: ty.span)
             case Array(element, size):
                 HirType(kind: HirTypeKind.Array(self.apply(element), size), span: ty.span)
             case Slice(element):

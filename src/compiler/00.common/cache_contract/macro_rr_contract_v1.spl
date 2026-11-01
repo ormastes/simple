@@ -1,0 +1,295 @@
+# Macro reverse-reference contract (lane macro-rr-invalidation, 2026-11-01).
+#
+# Pure folds over the macro forward facts of macro_reference_manifest_v1 that
+# every RR consumer shares:
+#   - root-free subjects for the legacy source-path receipt
+#     ("macro-def:<MacroDefId canonical>", "macro-name:<requested name>");
+#     the v2 semantic projection keeps the full SemanticQueryKeyV1 identities,
+#     both are bindings of the same MacroUseV1 fact (architecture ADR-MRR-1);
+#   - MacroInputRootV1: what one file's expansion sites consume (its own
+#     per-file cache facet), fail closed on conservative or invalid uses;
+#   - the macro effect surface: what a DEPENDENT of a file observes
+#     (generated public items + exported macro contracts), never the bodies;
+#   - changed-subject diff of two definition states (old vs new forward
+#     manifest, plan 2026-10-31 §8.4), fact derivation, and the bounded
+#     dependents closure for macro-uses-macro chains.
+# No I/O: companions, receipts and BuildCache live in compiler.driver.
+#
+# Design: doc/05_design/compiler/macro_rr_invalidation.md §1.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroUseV1,
+    MacroDefinitionTableV1, MacroDefinitionEntryV1, macro_hash_v1,
+    macro_def_id_canonical_v1, macro_use_valid_v1, macro_use_status_tag_v1}
+
+pub val MACRO_RR_FAMILY_DEFINITION_V1: text = "macro-definition-consumer"
+pub val MACRO_RR_FAMILY_RESOLUTION_V1: text = "macro-name-resolution"
+pub val MACRO_RR_FAMILY_ABSENCE_V1: text = "macro-name-absence"
+pub val MACRO_RR_DEFINITION_PREFIX_V1: text = "macro-def:"
+pub val MACRO_RR_NAME_PREFIX_V1: text = "macro-name:"
+
+pub fn macro_rr_family_definition_v1() -> text: MACRO_RR_FAMILY_DEFINITION_V1
+pub fn macro_rr_family_resolution_v1() -> text: MACRO_RR_FAMILY_RESOLUTION_V1
+pub fn macro_rr_family_absence_v1() -> text: MACRO_RR_FAMILY_ABSENCE_V1
+
+pub fn macro_rr_families_v1() -> [text]:
+    [MACRO_RR_FAMILY_DEFINITION_V1, MACRO_RR_FAMILY_RESOLUTION_V1, MACRO_RR_FAMILY_ABSENCE_V1]
+
+pub fn macro_rr_definition_subject_v1(def_id_canonical: text) -> text:
+    MACRO_RR_DEFINITION_PREFIX_V1 + def_id_canonical
+
+pub fn macro_rr_name_subject_v1(requested_name: text) -> text:
+    MACRO_RR_NAME_PREFIX_V1 + requested_name
+
+# "definition" | "name" | "" for any other text.
+pub fn macro_rr_subject_kind_v1(subject: text) -> text:
+    if subject.starts_with(MACRO_RR_DEFINITION_PREFIX_V1) and
+            subject.len() > MACRO_RR_DEFINITION_PREFIX_V1.len():
+        return "definition"
+    if subject.starts_with(MACRO_RR_NAME_PREFIX_V1) and
+            subject.len() > MACRO_RR_NAME_PREFIX_V1.len():
+        return "name"
+    ""
+
+# ---------------------------------------------------------------------------
+# Helpers (sorted-unique text sets)
+# ---------------------------------------------------------------------------
+
+fn _sorted_unique_v1(values: [text]) -> [text]:
+    val sorted = canonical_identity_sort_texts(values)
+    var out: [text] = []
+    for v in sorted:
+        if out.len() == 0 or out[out.len() - 1] != v:
+            out.push(v)
+    out
+
+fn _contains_v1(values: [text], v: text) -> bool:
+    for x in values:
+        if x == v: return true
+    false
+
+# ---------------------------------------------------------------------------
+# Per-file input root (own cache facet)
+# ---------------------------------------------------------------------------
+
+pub struct MacroInputRootV1:
+    known: bool
+    complete: bool
+    root: text
+    reason: text
+
+fn _input_row_v1(u: MacroUseV1) -> text:
+    val tag = macro_use_status_tag_v1(u.status)
+    val resolved = if tag == "resolved": u.resolved_def_key
+        elif tag == "unresolved": u.absence_witness
+        else: ""
+    u.stable_invocation_id + "|" + tag + "|" + u.requested_scoped_name + "|" + resolved + "|" +
+        u.expand_key + "|" + u.generated_symbols_digest
+
+# Fold of every expansion input one file consumes. Rows are sorted so the
+# parser's invocation order cannot move the root. A conservative or invalid
+# use yields no root: the facet is unknown and the per-file gate fails closed.
+pub fn macro_input_root_v1(uses: [MacroUseV1]) -> MacroInputRootV1:
+    var rows: [text] = []
+    for u in uses:
+        if not macro_use_valid_v1(u):
+            return MacroInputRootV1(known: false, complete: false, root: "", reason: "invalid-use")
+        rows.push(_input_row_v1(u))
+    for u in uses:
+        if u.coverage != "complete":
+            return MacroInputRootV1(known: true, complete: false, root: "", reason: "conservative-use")
+    MacroInputRootV1(known: true, complete: true,
+        root: macro_hash_v1("macro-input-root/v1", _sorted_unique_v1(rows)), reason: "ok")
+
+# ---------------------------------------------------------------------------
+# Effect surface (what a dependent observes)
+# ---------------------------------------------------------------------------
+
+# Generated public items plus the exported macro contracts; bodies are NOT
+# part of it, so a body-only macro edit stops at the defining module's
+# dependents (plan 2026-10-24 §6.5 item 4, green cutoff).
+pub fn macro_effect_surface_v1(def_table: MacroDefinitionTableV1,
+        generated_public_names: [text]) -> text:
+    var defs: [text] = []
+    for e in def_table.entries:
+        val visibility = if e.is_public: "public" else: "private"
+        defs.push(macro_def_id_canonical_v1(e.def_id) + "|" + e.exported_surface_digest + "|" + visibility)
+    macro_hash_v1("macro-effect-surface/v1",
+        ["names"] + _sorted_unique_v1(generated_public_names) + ["defs"] + _sorted_unique_v1(defs))
+
+# ---------------------------------------------------------------------------
+# Definition state, changed subjects, facts
+# ---------------------------------------------------------------------------
+
+pub struct MacroRrDefinitionStateV1:
+    def_id: text
+    macro_name: text
+    key: text
+    dependent_macros: [text]
+    source_path: text
+
+pub struct MacroRrChangedSubjectsV1:
+    complete: bool
+    reason: text
+    definition_subjects: [text]
+    name_subjects: [text]
+
+pub fn macro_rr_changed_subjects_empty_v1() -> MacroRrChangedSubjectsV1:
+    MacroRrChangedSubjectsV1(complete: true, reason: "ok", definition_subjects: [], name_subjects: [])
+
+pub fn macro_rr_changed_subjects_incomplete_v1(reason: text) -> MacroRrChangedSubjectsV1:
+    MacroRrChangedSubjectsV1(complete: false, reason: reason, definition_subjects: [], name_subjects: [])
+
+fn _state_index_v1(states: [MacroRrDefinitionStateV1], def_id: text) -> i64:
+    var i = 0
+    while i < states.len():
+        if states[i].def_id == def_id: return i
+        i = i + 1
+    -1
+
+fn _names_of_v1(states: [MacroRrDefinitionStateV1]) -> [text]:
+    var out: [text] = []
+    for s in states:
+        out.push(s.macro_name)
+    _sorted_unique_v1(out)
+
+# Old vs new definition state of ONE module (plan §8.4: complete old and new
+# forward manifests). A definition subject changes when its key changed or it
+# exists on one side only; a name subject changes only when the module's
+# defined-name set changed (added / removed / renamed), so a body-only edit
+# never touches name consumers.
+pub fn macro_rr_changed_subjects_v1(old: [MacroRrDefinitionStateV1], old_complete: bool,
+        new: [MacroRrDefinitionStateV1], new_complete: bool) -> MacroRrChangedSubjectsV1:
+    if not old_complete:
+        return macro_rr_changed_subjects_incomplete_v1("old-forward-incomplete")
+    if not new_complete:
+        return macro_rr_changed_subjects_incomplete_v1("new-forward-incomplete")
+    var defs: [text] = []
+    for o in old:
+        val ni = _state_index_v1(new, o.def_id)
+        if ni < 0 or new[ni].key != o.key:
+            defs.push(macro_rr_definition_subject_v1(o.def_id))
+    for n in new:
+        if _state_index_v1(old, n.def_id) < 0:
+            defs.push(macro_rr_definition_subject_v1(n.def_id))
+    val old_names = _names_of_v1(old)
+    val new_names = _names_of_v1(new)
+    var names: [text] = []
+    for n in old_names:
+        if not _contains_v1(new_names, n): names.push(macro_rr_name_subject_v1(n))
+    for n in new_names:
+        if not _contains_v1(old_names, n): names.push(macro_rr_name_subject_v1(n))
+    MacroRrChangedSubjectsV1(complete: true, reason: "ok",
+        definition_subjects: _sorted_unique_v1(defs), name_subjects: _sorted_unique_v1(names))
+
+pub struct MacroRrFactV1:
+    family: text
+    subject: text
+    consumer: text
+    evidence: text
+
+fn _fact_key_v1(f: MacroRrFactV1) -> text:
+    f.family + "\u0000" + f.subject + "\u0000" + f.consumer + "\u0000" + f.evidence
+
+fn _facts_sorted_unique_v1(facts: [MacroRrFactV1]) -> [MacroRrFactV1]:
+    var keys: [text] = []
+    for f in facts:
+        keys.push(_fact_key_v1(f))
+    val ordered = _sorted_unique_v1(keys)
+    var out: [MacroRrFactV1] = []
+    for k in ordered:
+        for f in facts:
+            if _fact_key_v1(f) == k:
+                out.push(f)
+                break
+    out
+
+# Forward facts of one module as legacy-receipt rows (consumer = source path).
+# Mirrors macro_use_forward_read_manifest_v1: a resolved use reads the
+# definition and the name membership; an unresolved use reads the absence and
+# the membership; an inactive use keeps the membership read (a guard flip may
+# activate it). Every direct nested-macro dependency of a definition makes the
+# defining module a consumer of that dependency.
+pub fn macro_rr_facts_of_module_v1(source_path: text, defs: [MacroRrDefinitionStateV1],
+        uses: [MacroUseV1]) -> [MacroRrFactV1]:
+    var out: [MacroRrFactV1] = []
+    for u in uses:
+        val tag = macro_use_status_tag_v1(u.status)
+        val name_subject = macro_rr_name_subject_v1(u.requested_scoped_name)
+        if tag == "resolved":
+            out.push(MacroRrFactV1(family: MACRO_RR_FAMILY_DEFINITION_V1,
+                subject: macro_rr_definition_subject_v1(u.resolved_def_id),
+                consumer: source_path, evidence: u.resolved_def_key))
+        elif tag == "unresolved":
+            out.push(MacroRrFactV1(family: MACRO_RR_FAMILY_ABSENCE_V1, subject: name_subject,
+                consumer: source_path, evidence: u.absence_witness))
+        out.push(MacroRrFactV1(family: MACRO_RR_FAMILY_RESOLUTION_V1, subject: name_subject,
+            consumer: source_path, evidence: u.resolution_candidate_root))
+    for d in defs:
+        for dep in d.dependent_macros:
+            out.push(MacroRrFactV1(family: MACRO_RR_FAMILY_DEFINITION_V1,
+                subject: macro_rr_definition_subject_v1(dep), consumer: source_path,
+                evidence: d.key))
+    _facts_sorted_unique_v1(out)
+
+# Transitive closure over dependent_macros: a definition that expands a changed
+# definition is itself changed. Worklist with a visited set; bounded by
+# all_defs.len() iterations; cycles terminate (every member of a cycle is
+# reported once any member changes, matching the macro-cycle/v1 key marker).
+pub fn macro_rr_dependents_closure_v1(changed_definition_subjects: [text],
+        all_defs: [MacroRrDefinitionStateV1]) -> [text]:
+    var visited: [text] = []
+    var work: [text] = []
+    for s in changed_definition_subjects:
+        if macro_rr_subject_kind_v1(s) == "definition" and not _contains_v1(work, s):
+            work.push(s)
+    var guard = 0
+    val bound = all_defs.len() + changed_definition_subjects.len() + 1
+    while work.len() > 0 and guard <= bound:
+        guard = guard + 1
+        val subject = work[work.len() - 1]
+        work.pop()
+        if _contains_v1(visited, subject): continue
+        visited.push(subject)
+        val changed_id = subject.substring(MACRO_RR_DEFINITION_PREFIX_V1.len())
+        for d in all_defs:
+            if _contains_v1(d.dependent_macros, changed_id):
+                val dependent = macro_rr_definition_subject_v1(d.def_id)
+                if not _contains_v1(visited, dependent) and not _contains_v1(work, dependent):
+                    work.push(dependent)
+    _sorted_unique_v1(visited)
+
+# Definition states straight from a decoded definition table plus the module's
+# `macro-key|` rows (def id -> MacroDefKey). A definition without a key row is
+# reported with key "" so callers can refuse it as incomplete.
+pub fn macro_rr_definition_states_v1(source_path: text, table: MacroDefinitionTableV1,
+        key_ids: [text], keys: [text]) -> [MacroRrDefinitionStateV1]:
+    var out: [MacroRrDefinitionStateV1] = []
+    for e in table.entries:
+        val id = macro_def_id_canonical_v1(e.def_id)
+        var key = ""
+        var i = 0
+        while i < key_ids.len() and i < keys.len():
+            if key_ids[i] == id: key = keys[i]
+            i = i + 1
+        out.push(MacroRrDefinitionStateV1(def_id: id, macro_name: e.macro_name, key: key,
+            dependent_macros: e.dependent_macros, source_path: source_path))
+    out
+
+pub fn macro_rr_definition_states_complete_v1(states: [MacroRrDefinitionStateV1]) -> bool:
+    for s in states:
+        if s.key == "" or s.def_id == "" or s.macro_name == "": return false
+    true
+
+export MACRO_RR_FAMILY_DEFINITION_V1, MACRO_RR_FAMILY_RESOLUTION_V1, MACRO_RR_FAMILY_ABSENCE_V1
+export MACRO_RR_DEFINITION_PREFIX_V1, MACRO_RR_NAME_PREFIX_V1
+export macro_rr_family_definition_v1, macro_rr_family_resolution_v1, macro_rr_family_absence_v1
+export macro_rr_families_v1
+export macro_rr_definition_subject_v1, macro_rr_name_subject_v1, macro_rr_subject_kind_v1
+export MacroInputRootV1, macro_input_root_v1
+export macro_effect_surface_v1
+export MacroRrDefinitionStateV1, MacroRrChangedSubjectsV1, MacroRrFactV1
+export macro_rr_changed_subjects_empty_v1, macro_rr_changed_subjects_incomplete_v1
+export macro_rr_changed_subjects_v1
+export macro_rr_facts_of_module_v1, macro_rr_dependents_closure_v1
+export macro_rr_definition_states_v1, macro_rr_definition_states_complete_v1
