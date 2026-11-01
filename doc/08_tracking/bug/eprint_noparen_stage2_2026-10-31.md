@@ -1,5 +1,8 @@
 # eprint no-paren fails in pinned stage2 (2026-10-31)
 
+- **Status:** root fix in source; workaround revert-ready after stage3 self-build
+- **Confirmed 2026-11-01:** #5567 (50b383280c3) present: `parser_stmts.spl` `if ident_text == "print" or ident_text == "eprint":` and `_ParserDecls/enum_module_body.spl` module-level twin; `test/01_unit/compiler/frontend/eprint_noparen_call_spec.spl` 3/3 pass (seed, pure-Simple frontend).
+
 Root bug: `eprint <expr>` (no parentheses, non-string-literal argument) is rejected by the
 pinned stage2 compiler with `undefined variable eprint` during MIR lowering of stage3 modules
 (app.cli.bootstrap_main, app.cli.parse_shard_main, app.cli.native_build_main, ...).
