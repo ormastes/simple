@@ -1,5 +1,14 @@
 # Simple Traceability, SDN Evidence, Fast Admission Gates, and Slop Viewer
 
+> 2026-11-01 additive extension: [selected extreme typing, trace/code/API,
+> LSP and Caret scope](../02_requirements/feature/extreme_typing_traceability.md),
+> [architecture](../04_architecture/extreme_typing_traceability.md), and
+> [implementation plan](../03_plan/agent_tasks/extreme_typing_traceability.md).
+> This roadmap's 20 REQ-TRC and 40 AC-TRC identities and selected baseline NFRs
+> remain unchanged; extension IDs continue at REQ-TRC-021 and AC-TRC-041.
+> Source foundations and this design addendum do not establish execution or
+> qualification. Native graph interfaces remain SDN-only.
+
 ## Final research, architecture, detailed design, and implementation plan
 
 **Date:** 2026-10-03  
