@@ -208,3 +208,32 @@ Drop the typed binders once the bootstrap stage2 is rebuilt from a source that
 either has no specialization pass (current `release/1.0.0`) or registers
 specialization symbols in every importing module's table before MIR consults
 RTI. The `Result.Ok` / `Result.Err` qualification in `simple_ring.spl` can stay.
+
+## Re-check at release/1.0.0 (2026-11-01)
+
+Status: FIXED IN SOURCE (failure shape removed); OPEN only for the frozen stage2.
+
+- `src/compiler/40.mono` is absent; 200a05f5bc8 ("delete monomorphization") is an
+  ancestor of release/1.0.0. No `MONO_SYMBOL_BASE` / 2^50 id producer remains in
+  `src/compiler` (grep for `1125899906842`, `1 << 50`, `SYMBOL_BASE`).
+- The only other high-range id scheme, structural-union synth symbols (900M lane,
+  `35.semantics/union_normalize/synth_enum.spl`), is allocated through
+  `SymbolTable.structural_union_symbol` in the module's own table
+  (`20.hir/hir_symbol_table_methods.spl`), so `decl_ref_of` / `rti_type_decl_ref`
+  find it; it cannot produce the importer-side miss.
+- `rti_enum_match_subject_type` (`50.mir/_MirLoweringExpr/switch_operators_calls.spl`)
+  is unchanged and still treats any non-`E-RTI-001` RTI error as fatal; this is correct
+  as long as every receiver type id is in the importer's table.
+
+Latent gap (design note, no code change): `ReturnTypeInterface.decl_ref_of` and
+`rti_type_decl_ref` consult only the importing module's `SymbolTable`. Any future
+specialization scheme must register its symbols in each importer's table (or key RTI by
+`DeclRef` of the generic owner) before MIR consults RTI; otherwise this bug returns.
+
+Not run: the two-module repro above was not re-lowered with a current-source compiler
+(no pure-Simple binary built from release/1.0.0 is available on this host; seed MIR runs
+crash in its JIT and runs were held for phase-3 memory). The existing regression spec
+`test/01_unit/lib/nogc_async_mut/async_ring/simple_ring_rti004_wa_spec.spl` stays.
+
+Revert-ready: yes, once the bootstrap stage2 is rebuilt from a revision at or after
+200a05f5bc8.
