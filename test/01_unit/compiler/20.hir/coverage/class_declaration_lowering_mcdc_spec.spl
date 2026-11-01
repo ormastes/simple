@@ -1,0 +1,293 @@
+# @req REQ-GEN-COV-HIRDECL
+"""
+# MC/DC coverage: class_declaration_lowering.spl
+
+Target: src/compiler/20.hir/hir_lowering/_Items/class_declaration_lowering.spl
+(`lower_param`, `receiver_with_impl_arguments`, `lower_class`).
+Every compound decision drives each condition to independently flip the
+outcome; every single-condition decision takes both outcomes. Lowering runs
+through the real pipeline (parse_full_frontend -> HirLowering.lower_module)
+except where a decision needs inputs the parser cannot produce; those call
+the method directly on a fresh HirLowering.
+
+## Decision inventory
+
+| Line | Decision | Conditions | Covering its |
+|------|----------|------------|--------------|
+| 19 | `p.has_default` (if expr) | c1 | L19 T / F |
+| 32 | `p.has_type_` | c1 | L32 T / F |
+| 44 | `p.name == "self" or p.name == "me"` | c1 self, c2 me | L44 c1 T / c2 T / FF |
+| 46 | `p.has_default` (untyped) | c1 | L46 T / F |
+| 51 | `not p.has_type_ and not p.has_default` | c1, c2 | L51 TT / c1 F / c2 F |
+| 52 | `not declared_receiver.is_some()` | c1 | L52 T (free fn) / F (class method self) |
+| 81 | `count != 0 or not owner.is_valid()` | c1, c2 | L81 c1 T / c2 T / FF |
+| 90 | `count == 0 or not owner.is_valid()` | c1, c2 | L90 c1 T / c2 T / FF |
+| 92 | `parsed_owner.id == bound_owner.id` | c1 | L92 T / F |
+| 94 | `pattern_enum_same_owner(...)` | c1 | L94 T (same-module enum alias) / F |
+| 117 | `local_class_id >= 0` | c1 | L117 T (lower_module) / F (direct lower_class) |
+| 163 | `class_type_params.len() > 0` | c1 | L163 T / F |
+| 174 | `kind != Simple or explicit_align or is_packed` | c1, c2, c3 | L174 c1 T / c2 T / FF; c3 gap |
+
+Documented gap: L174 c3 (`layout.is_packed`) can only be true together with
+`layout_kind == Packed` (`parse_layout_attrs` sets both for `@packed` and
+`@repr("packed")`), so c1 always masks it; the true value of c3 is never
+probed. Same shape as declaration_lowering.spl:697.
+
+Harness notes: the flat frontend bridge builds ParserClass with
+`attributes: []` and routes class method bodies through impls, so the L163
+and L174 examples attach methods / attributes to the parsed ParserClass and
+call `lower_class` directly.
+Bug suspects: class layout decorators written in source never reach
+`lower_class` through the flat bridge (see declaration_lowering spec).
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{ParserModule, Attribute}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolKind, ScopeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirClass}
+
+fn cov_parse(src: text) -> ParserModule:
+    parse_full_frontend(src, "cdl_cov.spl", "cdl_cov", Logger(level: 0))
+
+fn lower(src: text) -> HirModule:
+    var hl = HirLowering.with_filename("cdl_cov.spl")
+    hl.lower_module(cov_parse(src))
+
+fn func(m: HirModule, name: text) -> HirFunction:
+    for f in m.functions.values():
+        if f.name == name:
+            return f
+    fail("missing lowered function " + name)
+    nil
+
+fn class_of(m: HirModule, name: text) -> HirClass:
+    for c in m.classes.values():
+        if c.name == name:
+            return c
+    fail("missing lowered class " + name)
+    nil
+
+fn class_with_attrs(attrs: [Attribute]) -> HirClass:
+    """The flat frontend bridge builds ParserClass with `attributes: []`, so
+    source decorators never reach lower_class. Attach them to the parsed
+    class and lower it directly."""
+    val pm = cov_parse("class Host:\n    v: i64\n")
+    var host = pm.classes["Host"]
+    host.attributes = attrs
+    var hl = HirLowering.with_filename("cdl_attrs.spl")
+    hl.lower_class(host)
+
+fn attr_str(name: text, arg: text) -> Attribute:
+    Attribute(name: name, args: [Expr(kind: ExprKind.StringLit(arg, None), span: Span.empty())], span: Span.empty())
+
+fn attr_int(name: text, arg: i64) -> Attribute:
+    Attribute(name: name, args: [Expr(kind: ExprKind.IntLit(arg), span: Span.empty())], span: Span.empty())
+
+fn class_method_template_flag(class_src: text, class_name: text) -> text:
+    """Lower `class_name` directly with one attached method `peek` and
+    report `<class>:<is_generic_template>/<method>:<is_generic_template>`."""
+    val pm = cov_parse(class_src + "\nfn peek() -> i64:\n    0\n")
+    var host = pm.classes[class_name]
+    var peek = pm.functions["peek"]
+    peek.is_method = true
+    host.methods = {"peek": peek}
+    var hl = HirLowering.with_filename("cdl_methods.spl")
+    val c = hl.lower_class(host)
+    var method_flag = "missing"
+    for f in hl.lowered_impl_functions.values():
+        if f.name == "peek":
+            method_flag = "{f.is_generic_template}"
+    "{c.name}:{c.is_generic_template}/peek:{method_flag}"
+
+fn kind_name(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Int(_, _): "int"
+        case HirTypeKind.Str: "str"
+        case HirTypeKind.Named(_, args): "named/{args.len()}"
+        case HirTypeKind.Error: "error"
+        case HirTypeKind.Unit: "unit"
+        case HirTypeKind.Function(_, _, _): "fn"
+        case _: "other"
+
+fn int_t() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+fn named(id: i64, args: [HirType]) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: id), args), span: Span.empty())
+
+fn rwia(parsed: HirType, bound: HirType) -> text:
+    var hl = HirLowering.with_filename("cdl_rwia.spl")
+    kind_name(hl.receiver_with_impl_arguments(parsed, bound))
+
+describe "MC/DC lower_param":
+    # @req REQ-GEN-COV-HIRDECL-001
+    it "class_declaration_lowering.spl:19 c1 default present lowers the default expression":
+        step("A typed parameter with a default keeps has_default")
+        val p = func(lower("fn f(x: i64 = 5) -> i64:\n    x\n"), "f").params[0]
+        expect(p.has_default).to_equal(true)
+        expect(kind_name(p.type_)).to_equal("int")
+
+    # @req REQ-GEN-COV-HIRDECL-002
+    it "class_declaration_lowering.spl:19 c1 no default synthesizes a unit nil default":
+        val p = func(lower("fn f(x: i64) -> i64:\n    x\n"), "f").params[0]
+        expect(p.has_default).to_equal(false)
+        expect(kind_name(p.default.type_)).to_equal("unit")
+
+    # @req REQ-GEN-COV-HIRDECL-003
+    it "class_declaration_lowering.spl:32 c1 annotated type wins and unannotated is any":
+        val m = lower("fn f(x: text, y) -> i64:\n    0\n")
+        expect(kind_name(func(m, "f").params[0].type_)).to_equal("str")
+        expect(kind_name(func(m, "f").params[1].type_)).to_equal("any")
+
+    # @req REQ-GEN-COV-HIRDECL-004
+    it "class_declaration_lowering.spl:44 c1 untyped free-function self lowers through lower_type":
+        step("self outside a method has no declared receiver")
+        val p = func(lower("fn f(self) -> i64:\n    0\n"), "f").params[0]
+        expect(p.name).to_equal("self")
+        expect(kind_name(p.type_) == "any").to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-005
+    it "class_declaration_lowering.spl:44 c2 untyped free-function me lowers through lower_type":
+        var pm = cov_parse("fn f(q) -> i64:\n    0\n")
+        var pf = pm.functions["f"]
+        var ps = pf.params
+        var p0 = ps[0]
+        p0.name = "me"
+        ps[0] = p0
+        pf.params = ps
+        var hl = HirLowering.with_filename("cdl_me.spl")
+        val lowered = hl.lower_function(pf)
+        expect(lowered.params[0].name).to_equal("me")
+        expect(kind_name(lowered.params[0].type_) == "any").to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-006
+    it "class_declaration_lowering.spl:46 c1 untyped default takes the default's type":
+        val m = lower("fn f(x = 5) -> i64:\n    x\n")
+        expect(kind_name(func(m, "f").params[0].type_)).to_equal("int")
+
+    # @req REQ-GEN-COV-HIRDECL-007
+    it "class_declaration_lowering.spl:46 c1 F and :51 TT untyped plain name stays any":
+        val m = lower("fn f(x) -> i64:\n    0\n")
+        expect(kind_name(func(m, "f").params[0].type_)).to_equal("any")
+
+    # @req REQ-GEN-COV-HIRDECL-008
+    it "class_declaration_lowering.spl:51 c1 F typed param skips the callable fallback":
+        val m = lower("fn f(x: text) -> i64:\n    0\n")
+        expect(kind_name(func(m, "f").params[0].type_)).to_equal("str")
+
+    # @req REQ-GEN-COV-HIRDECL-009
+    it "class_declaration_lowering.spl:51 c2 F untyped param with default skips the fallback":
+        val p = func(lower("fn f(x = \"s\") -> i64:\n    0\n"), "f").params[0]
+        expect(p.has_default).to_equal(true)
+        expect(kind_name(p.type_)).to_equal("str")
+
+    # @req REQ-GEN-COV-HIRDECL-010
+    it "class_declaration_lowering.spl:52 c1 F class method self keeps the owner receiver":
+        step("An untyped self in a class method takes the class's applied type")
+        val m = lower("class Box:\n    v: i64\n    fn get(self) -> i64:\n        0\n")
+        val p = func(m, "get").params[0]
+        expect(p.name).to_equal("self")
+        expect(kind_name(p.type_)).to_equal("named/0")
+
+describe "MC/DC receiver_with_impl_arguments":
+    # @req REQ-GEN-COV-HIRDECL-011
+    it "class_declaration_lowering.spl:81 c1 T non-nominal parsed receiver is kept":
+        expect(rwia(int_t(), named(3, [int_t()]))).to_equal("int")
+
+    # @req REQ-GEN-COV-HIRDECL-012
+    it "class_declaration_lowering.spl:81 c1 T parsed receiver that already has arguments is kept":
+        expect(rwia(named(3, [int_t(), int_t()]), named(3, [int_t()]))).to_equal("named/2")
+
+    # @req REQ-GEN-COV-HIRDECL-013
+    it "class_declaration_lowering.spl:81 c2 T bare receiver with invalid owner is kept":
+        expect(rwia(named(-1, []), named(3, [int_t()]))).to_equal("named/0")
+
+    # @req REQ-GEN-COV-HIRDECL-014
+    it "class_declaration_lowering.spl:81 FF and :92 T same bare owner adopts the bound arguments":
+        expect(rwia(named(3, []), named(3, [int_t()]))).to_equal("named/1")
+
+    # @req REQ-GEN-COV-HIRDECL-015
+    it "class_declaration_lowering.spl:90 c1 T bound without arguments keeps parsed":
+        expect(rwia(named(3, []), named(3, []))).to_equal("named/0")
+
+    # @req REQ-GEN-COV-HIRDECL-016
+    it "class_declaration_lowering.spl:90 c1 T non-nominal bound keeps parsed":
+        expect(rwia(named(3, []), int_t())).to_equal("named/0")
+
+    # @req REQ-GEN-COV-HIRDECL-017
+    it "class_declaration_lowering.spl:90 c2 T bound with invalid owner keeps parsed":
+        expect(rwia(named(3, []), named(-1, [int_t()]))).to_equal("named/0")
+
+    # @req REQ-GEN-COV-HIRDECL-018
+    it "class_declaration_lowering.spl:92 F and :94 F unrelated owners keep parsed":
+        expect(rwia(named(3, []), named(4, [int_t()]))).to_equal("named/0")
+
+    # @req REQ-GEN-COV-HIRDECL-019
+    it "class_declaration_lowering.spl:94 T same-module enum aliases adopt the bound":
+        step("Two Enum symbols with one name and one defining module are the same owner")
+        var hl = HirLowering.with_filename("cdl_alias.spl")
+        val a = hl.symbols.define("CovOpt", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("cov.mod"))
+        hl.symbols.push_scope(ScopeKind.Class)
+        val b = hl.symbols.define("CovOpt", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("cov.mod"))
+        expect(a.id == b.id).to_equal(false)
+        val out = hl.receiver_with_impl_arguments(named(a.id, []), named(b.id, [int_t()]))
+        expect(kind_name(out)).to_equal("named/1")
+
+describe "MC/DC lower_class":
+    # @req REQ-GEN-COV-HIRDECL-021
+    it "class_declaration_lowering.spl:117 c1 T module-registered class keeps its symbol":
+        val c = class_of(lower("class Cell:\n    v: i64\n"), "Cell")
+        expect(c.symbol.is_valid()).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRDECL-022
+    it "class_declaration_lowering.spl:117 c1 F unregistered class falls back to an invalid symbol":
+        step("Direct lower_class on a fresh lowering has no qualified binding")
+        val pm = cov_parse("class Lone:\n    v: i64\n")
+        var hl = HirLowering.with_filename("cdl_lone.spl")
+        val c = hl.lower_class(pm.classes["Lone"])
+        expect(c.name).to_equal("Lone")
+        expect(c.symbol.is_valid()).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-023
+    it "class_declaration_lowering.spl:163 c1 T generic class methods are templates":
+        step("The flat bridge lowers class bodies through impls; attach a method to ParserClass.methods")
+        val out = class_method_template_flag("class Gen<T>:\n    v: T\n", "Gen")
+        expect(out).to_equal("Gen:true/peek:true")
+
+    # @req REQ-GEN-COV-HIRDECL-024
+    it "class_declaration_lowering.spl:163 c1 F plain class methods are not templates":
+        val out = class_method_template_flag("class Plain:\n    v: i64\n", "Plain")
+        expect(out).to_equal("Plain:false/peek:false")
+
+    # @req REQ-GEN-COV-HIRDECL-025
+    it "class_declaration_lowering.spl:174 c1 T non-simple layout kind sets has_layout_attr":
+        step("Attach the decorator directly: the frontend bridge drops class attributes")
+        val c = class_with_attrs([attr_str("repr", "transparent")])
+        expect(c.has_layout_attr).to_equal(true)
+        expect(c.layout_attr.has_explicit_align).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-026
+    it "class_declaration_lowering.spl:174 c2 T explicit align alone sets has_layout_attr":
+        val c = class_with_attrs([attr_int("align", 8)])
+        expect(c.has_layout_attr).to_equal(true)
+        expect(c.layout_attr.has_explicit_align).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRDECL-027
+    it "class_declaration_lowering.spl:174 FFF no layout attributes":
+        val c = class_of(lower("class Bare:\n    v: i64\n"), "Bare")
+        expect(c.has_layout_attr).to_equal(false)

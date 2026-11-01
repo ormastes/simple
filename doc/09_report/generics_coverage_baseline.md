@@ -91,3 +91,20 @@ Bug found (not fixed; 50.mir frozen this wave): `ghost_erasure.spl:79`
 "unknown property or method 'locals' on Tuple" for any non-empty module.
 Parser note: the flat-AST bridge drops trait type params and associated types
 (`_FlatAstBridge/module_assembly.spl:411,415`), so those trait lowering arms are driven directly.
+
+## Wave 2 — `class_declaration_lowering.spl`, `declaration_lowering.spl` (seed)
+
+Baseline specs: `hir/enum_lowering_end_to_end_spec.spl`, `hir/unannotated_method_receiver_owner_spec.spl`, `hir/class_method_bodies_reachable_spec.spl`, `20.hir/hir_lowering_desugared_has_flags_spec.spl`, `hir/enum_attributes_spec.spl`, `test/03_system/compiler/bitfield_reorder_spec.spl`.
+New specs: `test/01_unit/compiler/20.hir/coverage/{class_declaration_lowering,declaration_lowering}_mcdc_spec.spl` (87 examples, REQ-GEN-COV-HIRDECL-001..161). 232 vectors.
+
+| File | Decisions | Conditions | CD % baseline → final | MC/DC % baseline → final |
+|---|---:|---:|---:|---:|
+| `hir_lowering/_Items/class_declaration_lowering.spl` | 13 | 19 | 18.8 → 96.9 | 15.8 → 94.7 |
+| `hir_lowering/_Items/declaration_lowering.spl` | 63 | 86 | 15.4 → 98.0 | 14.0 → 97.7 |
+| **Total** | 76 | 105 | 16.0 → 97.8 | 14.3 → 97.1 |
+
+Remaining gaps:
+- `class_declaration_lowering.spl:174` and `declaration_lowering.spl:697` c3 `layout.is_packed`: `parse_layout_attrs` sets `layout_kind = Packed` whenever it sets `is_packed`, so c1 always masks c3.
+- `declaration_lowering.spl:244` true outcome: `found_symbol` is bound by `if val` on a `SymbolId?`, so it is never nil.
+
+Frontend note: the flat-AST bridge (`_FlatAstBridge/module_assembly.spl`) builds ParserStruct/ParserClass with `attributes: []`, so source `@repr` / `@align` / `@packed` on structs and classes never reach HIR; it also gives every bitfield field `has_bits` and always attaches `@preserve_order`. The affected examples attach attributes or reset flags on the parsed declaration and call the lowering method directly. `lower_bootstrap_flat_function` has no in-tree caller.
