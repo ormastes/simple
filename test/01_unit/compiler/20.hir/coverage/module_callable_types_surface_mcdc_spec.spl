@@ -1,0 +1,541 @@
+# @req REQ-GEN-COV-HIRCALL
+"""
+# MC/DC coverage: module_callable_types.spl (surface + imported projection half)
+
+Target: src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl
+Companion: module_callable_types_scan_mcdc_spec.spl covers the parser-AST half
+(declared_callable_type, untyped-return inference, dynamic callbacks, return
+scan). Match arms are not instrumented decisions; only if/elif/while are.
+
+## Decision inventory (this file)
+
+| Line | Decision | Conditions | Covering its |
+|------|----------|------------|--------------|
+| 54 | `kind == nil` | c1 | T via unsafe nil (HIRCALL-101); F by L60 its |
+| 60 | `disc < 0 or disc != Expr` | c1, c2 | c2 T (Return stmt) / FF (Expr stmt); c1 T is a documented gap |
+| 64 | `expr == nil` | c1 | T via unsafe nil payload / F |
+| 84 | `field_type == nil` | c1 | T via unsafe nil field type / F |
+| 104 | `prescan_field_i < fields.len()` | c1 | zero fields / two fields |
+| 148 | `self.module_filename != ""` | c1 | named / empty filename |
+| 170 | `self.module_filename != ""` | c1 | named / empty filename |
+| 275 | `callable.type_params.len() > 0` | c1 | generic / plain surface callable |
+| 280 | `not has_return_type and not is_extern` | c1, c2 | TT nil / c1 F / c2 F |
+| 282 | `self.registering_import_symbols` | c1 | T nil / F |
+| 288 | `not callable.is_static` | c1 | method / static |
+| 290 | `callable.params.len() > 0` | c1 | no-param method / with receiver |
+| 292 | `name == "self" or name == "me"` | c1, c2 | self / me / other |
+| 296 | `param_idx < params.len()` | c1 | loop |
+| 297 | `not has_type_` | c1 | untyped nil / typed |
+| 321 | `param valid and prescan has id` | c1, c2 | TT binder / c2 F local / c1 F unknown |
+| 343 | `singleton_owners.len() == 1` | c1 | T unique declarer / F unknown |
+| 350 | `singleton_symbol.is_valid()` | c1 | T only; F needs registration to fail (gap) |
+| 355 | `retry_symbol_id >= 0` | c1 | T only; F needs bind to fail (gap) |
+| 365 | trace env `== "1"` | c1 | trace on / off |
+| 392 | `tuple_elements.len() > 0` | c1 | tuple / other |
+| 423 | `is_reference` | c1 | ref / other |
+| 435 | `unique or shared or weak` | c1, c2, c3 | each sigil / pointer (FFF) |
+| 436 | `self.nogc_strict` | c1 | strict / legacy importer |
+| 438 | `owner_index < 0 or >= len` | c1, c2 | c1 T missing owner / FF; c2 T is a documented gap |
+| 441 | `not owner surface nogc_strict` | c1 | legacy owner / strict owner |
+| 446 | `is_unique` | c1 | unique / shared, weak |
+| 448 | `is_shared` | c1 | shared / weak |
+| 451 | `is_pointer` | c1 | pointer / other |
+| 459 | `union_members.len() > 0` | c1 | union / other |
+| 466 | `array_element_name != ""` | c1 | `[Named]` / nested array |
+| 479 | `is_array` | c1 | `[[T]]` / function |
+| 486 | `is_function` | c1 | function / infer catch-all |
+| 503 | trace env `== "1"` | c1 | trace on / off |
+| 518 | `param valid and prescan has id` | c1, c2 | TT / c2 F / c1 F |
+| 531 | `starts_with("has_") and len > 4` | c1, c2 | TT / c1 F / c2 F (`has_`) |
+| 533 | `opt valid and prescan has id` | c1, c2 | TT / c2 F / c1 F |
+| 538 | `has_symbol_id >= 0` | c1 | qualified has_ / miss |
+| 540 | trace env `== "1"` | c1 | trace on / off |
+| 543 | `array_element_name != ""` | c1 | element name / neither |
+| 553 | `owner_type_params.len() == 0` | c1 | plain owner / generic owner |
+| 614 | `callable.type_params.len() > 0` | c1 | generic / plain imported callable |
+| 631 | `not has_return_type and not is_extern` | c1, c2 | TT / c1 F / c2 F |
+| 636 | `not callable.is_static` | c1 | method / static |
+| 638 | `callable.params.len() > 0` | c1 | none / receiver |
+| 640 | `name == "self" or name == "me"` | c1, c2 | self / me / other |
+| 643 | `not has_type_` | c1 | untyped nil / typed |
+| 665 | `shape != "named" and != "named_array"` | c1, c2 | other / named / named_array |
+| 670 | `raw_symbol_id >= 0` | c1 | qualified / unqualified |
+| 678 | `shape == "named_array"` | c1 | T / F |
+
+Gaps: L60 c1 (`disc < 0` needs a non-enum StmtKind value), L350/L355 F
+(registration of a unique declarer always binds), L438 c2 (index_by_name
+always points inside `surfaces`), L409 T and L587 T (Optional payloads and
+binder defaults are exercised by the existing
+imported_optional_owner_projection_spec / prescan specs, not here). Bug suspects: none.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{ParserTypeParam, ParserField}
+use compiler.frontend.parser_types_expr.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirStruct, HirTypeParam}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceCallable, ModuleSurfaceParam}
+use compiler.hir.hir_lowering.type_aliases.*
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Items.module_callable_types.*
+use compiler.types.type_layout.{layoutattr_default_}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn sp() -> Span:
+    Span.empty()
+
+fn ty(kind: TypeKind) -> Type:
+    Type(kind: kind, span: sp())
+
+fn nm(name: text) -> Type:
+    ty(TypeKind.Named(name, []))
+
+fn tags(ts: [HirType]) -> text:
+    var parts: [text] = []
+    for t in ts:
+        parts.push(tag(t))
+    parts.join(",")
+
+fn tag(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Int(bits, signed): if signed: "i{bits}" else: "u{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Unit: "unit"
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Error: "error"
+        case HirTypeKind.Infer(_, _): "infer"
+        case HirTypeKind.Named(_, _): "named"
+        case HirTypeKind.TypeParam(name, _): "tp:{name}"
+        case HirTypeKind.Tuple(es): "tuple(" + tags(es) + ")"
+        case HirTypeKind.Array(e, _): "[" + tag(e) + "]"
+        case HirTypeKind.Optional(i): tag(i) + "?"
+        case HirTypeKind.Ref(i, _): "ref(" + tag(i) + ")"
+        case HirTypeKind.Ptr(i, _): "ptr(" + tag(i) + ")"
+        case HirTypeKind.Unique(i): "unique(" + tag(i) + ")"
+        case HirTypeKind.Shared(i): "shared(" + tag(i) + ")"
+        case HirTypeKind.Weak(i): "weak(" + tag(i) + ")"
+        case HirTypeKind.Union(ms): "union(" + tags(ms) + ")"
+        case HirTypeKind.Function(ps, r, _): "fn(" + tags(ps) + ")->" + tag(r)
+        case _: "other"
+
+fn otag(t: HirType?) -> text:
+    if val v = t:
+        return tag(v)
+    "nil"
+
+fn lw() -> HirLowering:
+    hirlowering_for_module("cov.spl", ModuleSurfacesByName.empty())
+
+# Provider-qualified `Payload` that is NOT visible under its bare name.
+fn lw_provider() -> HirLowering:
+    var l = lw()
+    val provider = l.symbols.define_with_binding(
+        "provider::Payload", SymbolKind.Struct, nil, sp(),
+        Visibility.Public, false, Some("provider"), false)
+    l.symbols.bind_qualified_type("provider", "Payload", provider)
+    l
+
+fn lw_binder(name: text) -> HirLowering:
+    var l = lw()
+    l.symbols.push_scope(ScopeKind.Class)
+    l.project_imported_owner_type_parameters([tparam(name)], "provider")
+    l
+
+fn lw_local(name: text) -> HirLowering:
+    var l = lw()
+    l.symbols.define(name, SymbolKind.Struct, nil, sp(), Visibility.Public, false, nil)
+    l
+
+fn tparam(name: text) -> ParserTypeParam:
+    ParserTypeParam(name: name, bounds: [], has_default: false,
+        default: ty(TypeKind.Infer), span: sp())
+
+fn sparam(name: text, has_type: bool, t: Type, type_name: text = "") -> ModuleSurfaceParam:
+    ModuleSurfaceParam(name: name, has_type_: has_type, type_: t,
+        type_name: type_name, array_element_name: "", has_default: false,
+        is_mutable: false, span: sp())
+
+fn callable(params: [ModuleSurfaceParam], has_ret: bool, is_static: bool = false,
+        is_extern: bool = false, type_params: [ParserTypeParam] = [],
+        ret: Type = nm("i64"), ret_name: text = "") -> ModuleSurfaceCallable:
+    ModuleSurfaceCallable(name: "c", type_params: type_params, params: params,
+        has_return_type: has_ret, return_type: ret, return_type_name: ret_name,
+        return_array_element_name: "", visibility: Visibility.Public,
+        is_async: false, is_static: is_static, is_public: true, is_method: false,
+        is_mutable: false, is_const: false, is_kernel: false,
+        is_extern: is_extern, span: sp())
+
+fn i64p(name: text) -> ModuleSurfaceParam:
+    sparam(name, true, nm("i64"))
+
+fn owner() -> SymbolId?:
+    Some(SymbolId(id: 5))
+
+fn field(name: text, t: Type) -> ParserField:
+    ParserField(name: name, type_: t, has_default: false,
+        default: Expr(kind: ExprKind.NilLit, span: sp()),
+        visibility: Visibility.Public, is_public: true, is_volatile: false,
+        has_bits: false, bits: 0, has_fixed_address: false, fixed_address: 0,
+        span: sp())
+
+fn hstruct(name: text) -> HirStruct:
+    HirStruct(symbol: SymbolId(id: 1), name: name, type_params: [],
+        fields: [], visibility: Visibility.Public, is_public: true,
+        has_doc_comment: false, doc_comment: "", span: sp(),
+        has_layout_attr: false, layout_attr: layoutattr_default_(),
+        has_platform_attr: false, platform_has_error: false,
+        platform_has_warning: false, platform_diagnostic_message: "",
+        platform_diagnostic_line: 0, is_generic_template: false,
+        has_specialization_of: false, specialization_of: "",
+        type_bindings: {})
+
+fn registry(owner_strict: bool, source: text) -> ModuleSurfacesByName:
+    var module = parse_and_build_module(source, "provider.spl")
+    module.nogc_strict = owner_strict
+    module_surfaces_from_test_modules({"provider": module},
+        [SourceFile(path: "provider.spl", content: source, module_name: "provider")]).unwrap()
+
+fn owned_tag(importer_strict: bool, owner_strict: bool, owner_name: text, t: Type) -> text:
+    var l = HirLowering.with_filename("consumer.spl")
+    l.nogc_strict = importer_strict
+    l.module_surfaces = registry(owner_strict, "pub fn marker() -> i64:\n    0\n")
+    val out = tag(l.imported_surface_type(t, owner_name))
+    if l.errors.len() > 0:
+        return out + "!"
+    out
+
+describe "MC/DC hir_ast_expr_statement_payload_v1":
+    # @req REQ-GEN-COV-HIRCALL-101
+    it "module_callable_types.spl:54 c1 T: a nil statement kind has no payload":
+        step("Project a nil StmtKind")
+        unsafe:
+            val k: StmtKind = nil
+            expect(hir_ast_expr_statement_payload_v1(k) == nil).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRCALL-102
+    it "module_callable_types.spl:60 c2 T / FF: only the Expr variant projects its payload":
+        step("Project a Return statement and an Expr statement")
+        expect(hir_ast_expr_statement_payload_v1(StmtKind.Return(None)) == nil).to_equal(true)
+        val e = Expr(kind: ExprKind.IntLit(7), span: sp())
+        val got = hir_ast_expr_statement_payload_v1(StmtKind.Expr(e))
+        expect(got == nil).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRCALL-103
+    it "module_callable_types.spl:64 c1 T: an Expr statement with a nil payload projects nil":
+        step("Project StmtKind.Expr(nil)")
+        unsafe:
+            val n: Expr = nil
+            expect(hir_ast_expr_statement_payload_v1(StmtKind.Expr(n)) == nil).to_equal(true)
+
+describe "MC/DC field prescan and registration":
+    # @req REQ-GEN-COV-HIRCALL-104
+    it "module_callable_types.spl:84/104 c1 T/F: nil field types become Error, typed fields lower":
+        step("Prescan a two-field composite, one field with a nil declared type")
+        var l = lw()
+        var untyped = field("b", nm("i64"))
+        unsafe:
+            val n: Type = nil
+            untyped.type_ = n
+        l.prescan_composite_field_types("S", [field("a", nm("i64")), untyped], [])
+        expect(l.struct_field_order_by_name["S"]).to_equal(["a", "b"])
+        expect(tag(l.struct_field_types_by_name["S"]["a"])).to_equal("i64")
+        expect(tag(l.struct_field_types_by_name["S"]["b"])).to_equal("error")
+
+    # @req REQ-GEN-COV-HIRCALL-105
+    it "module_callable_types.spl:104 c1 F first / 148 c1 T: zero fields still register both keys":
+        step("Prescan an empty composite under a named module")
+        var l = lw()
+        l.prescan_composite_field_types("E", [], [])
+        expect(l.struct_field_order_by_name["E"].len()).to_equal(0)
+        expect(l.struct_field_order_by_name.contains_key("cov.spl.E")).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRCALL-106
+    it "module_callable_types.spl:148 c1 F: an empty module filename writes only the bare key":
+        step("Prescan with module_filename empty")
+        var l = lw()
+        l.module_filename = ""
+        l.prescan_composite_field_types("E", [field("a", nm("i64"))], [])
+        expect(l.struct_field_order_by_name.contains_key("E")).to_equal(true)
+        expect(l.struct_field_order_by_name.contains_key(".E")).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRCALL-107
+    it "module_callable_types.spl:170 c1 T/F: struct registration adds the qualified key only with a filename":
+        step("Register one struct with and without a module filename")
+        var named = lw()
+        named.register_struct_field_types(hstruct("R"))
+        expect(named.struct_field_types_by_name.contains_key("cov.spl.R")).to_equal(true)
+        var bare = lw()
+        bare.module_filename = ""
+        bare.register_struct_field_types(hstruct("R"))
+        expect(bare.struct_field_types_by_name.contains_key("R")).to_equal(true)
+        expect(bare.struct_field_types_by_name.contains_key(".R")).to_equal(false)
+
+describe "MC/DC declared_surface_callable_type":
+    # @req REQ-GEN-COV-HIRCALL-108
+    it "module_callable_types.spl:275 c1 T: a generic surface callable stays untyped":
+        step("Declare a generic surface callable")
+        var l = lw()
+        expect(otag(l.declared_surface_callable_type(callable([], true, type_params: [tparam("T")]), nil))).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-109
+    it "module_callable_types.spl:280 TT / c1 F / c2 F: only arrow-less non-extern callables bail":
+        step("Declare arrow-less, arrow-less extern and arrowed callables")
+        var l = lw()
+        expect(otag(l.declared_surface_callable_type(callable([], false), nil))).to_equal("nil")
+        expect(otag(l.declared_surface_callable_type(callable([], false, is_extern: true), nil))).to_equal("fn()->unit")
+        expect(otag(l.declared_surface_callable_type(callable([i64p("x")], true), nil))).to_equal("fn(i64)->i64")
+
+    # @req REQ-GEN-COV-HIRCALL-110
+    it "module_callable_types.spl:282 c1 T: import registration leaves surface callables untyped":
+        step("Declare while registering import symbols")
+        var l = lw()
+        l.registering_import_symbols = true
+        expect(otag(l.declared_surface_callable_type(callable([], true), nil))).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-111
+    it "module_callable_types.spl:288/290/292: receiver handling for methods":
+        step("Declare static, receiver-less, self, me and other-first-param methods")
+        var l = lw()
+        expect(otag(l.declared_surface_callable_type(callable([i64p("x")], true, is_static: true), owner()))).to_equal("fn(i64)->i64")
+        expect(otag(l.declared_surface_callable_type(callable([], true), owner()))).to_equal("fn(named)->i64")
+        expect(otag(l.declared_surface_callable_type(callable([sparam("self", false, nm("i64")), i64p("x")], true), owner()))).to_equal("fn(named,i64)->i64")
+        expect(otag(l.declared_surface_callable_type(callable([sparam("me", false, nm("i64")), i64p("x")], true), owner()))).to_equal("fn(named,i64)->i64")
+        expect(otag(l.declared_surface_callable_type(callable([i64p("other")], true), owner()))).to_equal("fn(named,i64)->i64")
+
+    # @req REQ-GEN-COV-HIRCALL-112
+    it "module_callable_types.spl:296/297 c1 T: an untyped parameter makes the surface signature incomplete":
+        step("Declare a callable with an untyped parameter")
+        var l = lw()
+        expect(otag(l.declared_surface_callable_type(callable([i64p("a"), sparam("b", false, nm("i64"))], true), nil))).to_equal("nil")
+
+describe "MC/DC imported_surface_type scalar names":
+    # @req REQ-GEN-COV-HIRCALL-113
+    it "module_callable_types.spl:321 TT: an owner binder lowers as a type parameter":
+        step("Project T inside a projected binder scope")
+        var l = lw_binder("T")
+        expect(tag(l.imported_surface_type(nm("T"), "provider"))).to_equal("tp:T")
+
+    # @req REQ-GEN-COV-HIRCALL-114
+    it "module_callable_types.spl:321 c2 F: a visible non-binder symbol is not a type parameter":
+        step("Project a locally defined struct name")
+        var l = lw_local("Local")
+        expect(tag(l.imported_surface_type(nm("Local"), "provider"))).to_equal("named")
+
+    # @req REQ-GEN-COV-HIRCALL-115
+    it "module_callable_types.spl:321 c1 F: a qualified provider type resolves through the owner":
+        step("Project provider::Payload")
+        var l = lw_provider()
+        expect(tag(l.imported_surface_type(nm("Payload"), "provider"))).to_equal("named")
+        expect(l.errors.len()).to_equal(0)
+
+    # @req REQ-GEN-COV-HIRCALL-116
+    it "module_callable_types.spl:343/350/355 c1 T: a unique declaring surface is materialized lazily":
+        step("Project a name only the provider surface declares, under an unrelated owner")
+        var l = HirLowering.with_filename("consumer.spl")
+        l.module_surfaces = registry(false, "pub struct Payload:\n    x: i64\n")
+        expect(tag(l.imported_surface_type(nm("Payload"), "elsewhere"))).to_equal("named")
+        expect(l.symbols.lookup_qualified_type_raw("provider", "Payload") >= 0).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRCALL-117
+    it "module_callable_types.spl:343 c1 F / 365 c1 T/F: an undeclared name falls through, traced only on request":
+        step("Project an unknown name with the trace flag off, then on")
+        var quiet = lw()
+        val off = tag(quiet.imported_surface_type(nm("NoSuchType"), "provider"))
+        rt_env_set("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE", "1")
+        var traced = lw()
+        val on = tag(traced.imported_surface_type(nm("NoSuchType"), "provider"))
+        rt_env_set("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE", "")
+        expect(off == "named").to_equal(false)
+        expect(on).to_equal(off)
+
+describe "MC/DC imported_surface_type composite shapes":
+    # @req REQ-GEN-COV-HIRCALL-118
+    it "module_callable_types.spl:392 c1 T: tuples project elementwise":
+        step("Project (i64, Payload)")
+        var l = lw_provider()
+        expect(tag(l.imported_surface_type(ty(TypeKind.Tuple([nm("i64"), nm("Payload")])), "provider"))).to_equal("tuple(i64,named)")
+
+    # @req REQ-GEN-COV-HIRCALL-119
+    it "module_callable_types.spl:423 c1 T: references keep the owner's referent":
+        step("Project &Payload as a reference")
+        var l = lw_provider()
+        expect(tag(l.imported_surface_type(ty(TypeKind.Reference(nm("Payload"), true)), "provider"))).to_equal("ref(named)")
+
+    # @req REQ-GEN-COV-HIRCALL-120
+    it "module_callable_types.spl:435 c1/c2/c3 T, 436 F, 446/448: legacy importers map sigils to unchecked forms":
+        step("Project unique, shared and weak sigils without nogc_strict")
+        val inner = nm("i64")
+        expect(owned_tag(false, false, "provider", ty(TypeKind.Unique(inner)))).to_equal("ref(i64)")
+        expect(owned_tag(false, false, "provider", ty(TypeKind.Shared(inner)))).to_equal("ptr(i64)")
+        expect(owned_tag(false, false, "provider", ty(TypeKind.Weak(inner)))).to_equal("infer")
+
+    # @req REQ-GEN-COV-HIRCALL-121
+    it "module_callable_types.spl:436 T / 438 c1 T / 441 T/F: strict importers require a strict owner":
+        step("Project a unique sigil from a missing, a legacy and a strict owner")
+        val u = ty(TypeKind.Unique(nm("i64")))
+        expect(owned_tag(true, false, "missing", u)).to_equal("error!")
+        expect(owned_tag(true, false, "provider", u)).to_equal("error!")
+        expect(owned_tag(true, true, "provider", u)).to_equal("unique(i64)")
+        expect(owned_tag(true, true, "provider", ty(TypeKind.Shared(nm("i64"))))).to_equal("shared(i64)")
+        expect(owned_tag(true, true, "provider", ty(TypeKind.Weak(nm("i64"))))).to_equal("weak(i64)")
+
+    # @req REQ-GEN-COV-HIRCALL-122
+    it "module_callable_types.spl:435 FFF / 451 c1 T: raw pointers project their pointee":
+        step("Project *mut Payload")
+        var l = lw_provider()
+        expect(tag(l.imported_surface_type(ty(TypeKind.Pointer(nm("Payload"), true)), "provider"))).to_equal("ptr(named)")
+
+    # @req REQ-GEN-COV-HIRCALL-123
+    it "module_callable_types.spl:459 c1 T: unions project each member":
+        step("Project i64 | Payload")
+        var l = lw_provider()
+        expect(tag(l.imported_surface_type(ty(TypeKind.Union([nm("i64"), nm("Payload")])), "provider"))).to_equal("union(i64,named)")
+
+    # @req REQ-GEN-COV-HIRCALL-124
+    it "module_callable_types.spl:466 c1 T/F, 479 c1 T: named and nested arrays project the element":
+        step("Project [Payload] and [[Payload]]")
+        var l = lw_provider()
+        val arr = ty(TypeKind.Array(nm("Payload"), nil))
+        expect(tag(l.imported_surface_type(arr, "provider"))).to_equal("[named]")
+        expect(tag(l.imported_surface_type(ty(TypeKind.Array(arr, nil)), "provider"))).to_equal("[[named]]")
+
+    # @req REQ-GEN-COV-HIRCALL-125
+    it "module_callable_types.spl:479 c1 F / 486 c1 T: function types project parameters and result":
+        step("Project fn(Payload) -> i64")
+        var l = lw_provider()
+        expect(tag(l.imported_surface_type(ty(TypeKind.Function([nm("Payload")], nm("i64"))), "provider"))).to_equal("fn(named)->i64")
+
+    # @req REQ-GEN-COV-HIRCALL-126
+    it "module_callable_types.spl:486 c1 F / 503 c1 T/F: other shapes fall back to lower_type, traced on request":
+        step("Project an Infer type with the trace flag off, then on")
+        var l = lw()
+        val off = tag(l.imported_surface_type(ty(TypeKind.Infer), "provider"))
+        rt_env_set("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE", "1")
+        val on = tag(l.imported_surface_type(ty(TypeKind.Infer), "provider"))
+        rt_env_set("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE", "")
+        expect(off).to_equal("infer")
+        expect(on).to_equal("infer")
+
+describe "MC/DC imported_surface_type_projected":
+    # @req REQ-GEN-COV-HIRCALL-127
+    it "module_callable_types.spl:518 TT / c2 F / c1 F: binder, local and qualified scalar names":
+        step("Project T as a binder, Local as a non-binder, Payload through provider")
+        var b = lw_binder("T")
+        expect(tag(b.imported_surface_type_projected(nm("T"), "T", "", "provider"))).to_equal("tp:T")
+        var loc = lw_local("Local")
+        expect(tag(loc.imported_surface_type_projected(nm("Local"), "Local", "", "provider"))).to_equal("named")
+        var p = lw_provider()
+        expect(tag(p.imported_surface_type_projected(nm("Payload"), "Payload", "", "provider"))).to_equal("named")
+
+    # @req REQ-GEN-COV-HIRCALL-128
+    it "module_callable_types.spl:531 TT / 533 TT: has_T over an owner binder is an optional type parameter":
+        step("Project has_T inside a binder scope")
+        var b = lw_binder("T")
+        expect(tag(b.imported_surface_type_projected(nm("has_T"), "has_T", "", "provider"))).to_equal("tp:T?")
+
+    # @req REQ-GEN-COV-HIRCALL-129
+    it "module_callable_types.spl:533 c1 F / 538 c1 T: has_Payload resolves through the owner as optional":
+        step("Project has_Payload with provider::Payload bound")
+        var p = lw_provider()
+        expect(tag(p.imported_surface_type_projected(nm("has_Payload"), "has_Payload", "", "provider"))).to_equal("named?")
+
+    # @req REQ-GEN-COV-HIRCALL-130
+    it "module_callable_types.spl:533 c2 F / 538 c1 F / 540 c1 T/F: a has_ local miss falls through":
+        step("Project has_Local (visible, not a binder, not qualified) with trace off and on")
+        var loc = lw_local("Local")
+        val off = tag(loc.imported_surface_type_projected(nm("has_Local"), "has_Local", "", "provider"))
+        rt_env_set("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE", "1")
+        var loc2 = lw_local("Local")
+        val on = tag(loc2.imported_surface_type_projected(nm("has_Local"), "has_Local", "", "provider"))
+        rt_env_set("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE", "")
+        expect(off).to_equal(on)
+        # The importer-scope fallback strips has_ itself and still yields an optional.
+        expect(off).to_equal("named?")
+
+    # @req REQ-GEN-COV-HIRCALL-131
+    it "module_callable_types.spl:531 c1 F / c2 F: names without a has_ base skip optional projection":
+        step("Project i64 and the bare spelling has_")
+        var l = lw()
+        expect(tag(l.imported_surface_type_projected(nm("i64"), "i64", "", "provider"))).to_equal("i64")
+        var h = lw()
+        val bare = tag(h.imported_surface_type_projected(nm("has_"), "has_", "", "provider"))
+        expect(bare.ends_with("?")).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRCALL-132
+    it "module_callable_types.spl:543 c1 T/F: an array element name projects; neither name defers to the shape walk":
+        step("Project [Payload] via its element name, then a tuple with no names")
+        var p = lw_provider()
+        val arr = ty(TypeKind.Array(nm("Payload"), nil))
+        expect(tag(p.imported_surface_type_projected(arr, "", "Payload", "provider"))).to_equal("[named]")
+        expect(tag(p.imported_surface_type_projected(ty(TypeKind.Tuple([nm("i64")])), "", "", "provider"))).to_equal("tuple(i64)")
+
+describe "MC/DC imported callable signatures":
+    # @req REQ-GEN-COV-HIRCALL-133
+    it "module_callable_types.spl:553 c1 T/F: owner binders are scoped only for generic owners":
+        step("Declare a method for a plain owner and for a generic owner")
+        var l = lw()
+        val plain = l.declared_imported_owner_callable_type(callable([i64p("x")], true), "provider", SymbolId(id: 5), [])
+        expect(otag(plain)).to_equal("fn(named,i64)->i64")
+        val generic = l.declared_imported_owner_callable_type(
+            callable([sparam("self", false, nm("i64")), sparam("x", true, nm("T"), "T")], false, is_extern: true),
+            "provider", SymbolId(id: 5), [tparam("T")])
+        expect(otag(generic)).to_equal("fn(named,tp:T)->unit")
+        expect(l.symbols.lookup_or_invalid("T").is_valid()).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRCALL-134
+    it "module_callable_types.spl:614 c1 T/F: a generic imported callable publishes its binders":
+        step("Declare fn id<T>(x: T) -> T and a plain imported callable")
+        var l = lw()
+        val gen = callable([sparam("x", true, nm("T"), "T")], true, type_params: [tparam("T")], ret: nm("T"), ret_name: "T")
+        expect(otag(l.declared_imported_surface_callable_type(gen, "provider", nil))).to_equal("fn(tp:T)->tp:T")
+        expect(otag(l.declared_imported_surface_callable_type(callable([i64p("x")], true), "provider", nil))).to_equal("fn(i64)->i64")
+
+    # @req REQ-GEN-COV-HIRCALL-135
+    it "module_callable_types.spl:631 TT / c1 F / c2 F: imported arrow-less non-extern callables bail":
+        step("Declare arrow-less, extern and arrowed imported callables")
+        var l = lw()
+        expect(otag(l.declared_imported_surface_callable_type(callable([], false), "provider", nil))).to_equal("nil")
+        expect(otag(l.declared_imported_surface_callable_type(callable([], false, is_extern: true), "provider", nil))).to_equal("fn()->unit")
+
+    # @req REQ-GEN-COV-HIRCALL-136
+    it "module_callable_types.spl:636/638/640/643: imported receiver and parameter handling":
+        step("Declare static, receiver-less, self, me, other and untyped imported methods")
+        var l = lw()
+        expect(otag(l.declared_imported_surface_callable_type(callable([i64p("x")], true, is_static: true), "provider", owner()))).to_equal("fn(i64)->i64")
+        expect(otag(l.declared_imported_surface_callable_type(callable([], true), "provider", owner()))).to_equal("fn(named)->i64")
+        expect(otag(l.declared_imported_surface_callable_type(callable([sparam("self", false, nm("i64")), i64p("x")], true), "provider", owner()))).to_equal("fn(named,i64)->i64")
+        expect(otag(l.declared_imported_surface_callable_type(callable([sparam("me", false, nm("i64"))], true), "provider", owner()))).to_equal("fn(named)->i64")
+        expect(otag(l.declared_imported_surface_callable_type(callable([i64p("other")], true), "provider", owner()))).to_equal("fn(named,i64)->i64")
+        expect(otag(l.declared_imported_surface_callable_type(callable([sparam("u", false, nm("i64"))], true), "provider", nil))).to_equal("nil")
+
+describe "MC/DC imported_surface_projected_name_type":
+    # @req REQ-GEN-COV-HIRCALL-137
+    it "module_callable_types.spl:665 c1 F / c2 F / TT: only named shapes project":
+        step("Project shapes named, named_array and tuple")
+        var p = lw_provider()
+        expect(otag(p.imported_surface_projected_name_type("named", "Payload", "provider", sp()))).to_equal("named")
+        expect(otag(p.imported_surface_projected_name_type("named_array", "Payload", "provider", sp()))).to_equal("[named]")
+        expect(otag(p.imported_surface_projected_name_type("tuple", "Payload", "provider", sp()))).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-138
+    it "module_callable_types.spl:670 c1 F / 678 c1 F: an unqualified name lowers in the importer scope":
+        step("Project i64 with no provider binding")
+        var l = lw()
+        expect(otag(l.imported_surface_projected_name_type("named", "i64", "provider", sp()))).to_equal("i64")
