@@ -116,3 +116,21 @@ the cachewp6 cache and a 16 GB tree cap. The entry imports `async.poll`, `async_
   (383:31) + 2x `CancelRejected` payload mismatch; io.buffer 36x E-MIR-TYPE-TypeParam. All gone.
 - The later `smf_package` step fails (rc=1); that is after MIR and outside this bug.
 - Regression spec for the poll site: `test/01_unit/lib/nogc_async_mut/async/poll_rti007_wa_spec.spl`.
+
+## Run-12 lib module MIR verification at eb72b5c9fde (2026-11-01)
+
+Run 12 (`C:/dev/p3new/r11/run12/build.log.err`) failed MIR on four lib modules. Each was
+re-lowered with the frozen stage2 (`C:/dev/p3new/stage2.exe compile <entry> --format=smf
+--source src/lib --source src/compiler --source src/app --keep-going --go-to-end`, entry =
+a 5-line importer of the module) on a tip checkout; negative control = the same entry with
+the module reverted to its pre-`99a45712909` source.
+
+| Module | Run-12 error (callee) | Tip MIR | Pre-fix control |
+|---|---|---|---|
+| `lib.common.serialization.__init__` | `fn:char_to_digit_safe` | 2/2 modules, failed=0 | fixed by `99a45712909`, `e1cb3bd38b0` |
+| `lib.nogc_sync_mut.concurrent.mutex` | `fn:rt_mutex_lock` | 2/2, failed=0 | E-RTI-007 `fn:rt_mutex_lock` reproduced |
+| `lib.nogc_sync_mut.sffi.enum_wire` | `fn:rt_enum_new` | 2/2, failed=0 | not run |
+| `lib.nogc_sync_mut.src.map` | `struct:Map::map_values` | 8/8, failed=0 | E-RTI-007 `struct:Map::map_values` reproduced |
+
+No further source change was needed. `test/01_unit/lib/nogc_sync_mut/rti007_lib_mir_modules_spec.spl`
+pins the observable behaviour of the mutex gate and `Map::map_values<U>` signatures.
