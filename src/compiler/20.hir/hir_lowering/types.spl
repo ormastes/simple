@@ -1562,12 +1562,30 @@ impl HirLowering:
 
     me lower_type_param(tp: ParserTypeParam) -> HirTypeParam:
         val symbol = self.symbols.define(tp.name, SymbolKind.TypeParam, nil, tp.span, Visibility.Private, false, nil)
+        # ONE spelling for a type parameter: `HirTypeKind.TypeParam`. An
+        # imported binder is published this way
+        # (module_callable_types.spl project_imported_owner_type_parameters),
+        # but a declaration in its OWN module only defined the symbol, so
+        # every in-module reference to `T` (parameter, return, field,
+        # local annotation) lowered through lower_named_symbol_kind as
+        # `Named(T-symbol)`. Downstream that spelling is indistinguishable
+        # from a user struct named `T`: 50.mir lower_type made it
+        # `Struct(T)`, the function prescan registered "T" as a struct
+        # return shape, and the erased-generic boundary arms (`Any |
+        # TypeParam`) never fired ("operator overload for struct T",
+        # raw handles in tagged slots). Publish the binder before its
+        # bounds lower (a self-referential bound sees `TypeParam`), then
+        # again with the lowered bounds, exactly like the imported path.
+        self.prescan_type_parameters[symbol.id] = HirType(
+            kind: HirTypeKind.TypeParam(tp.name, []), span: tp.span)
 
         var bounds: [HirType] = []
         for b in tp.bounds:
             if self.bound_is_undeclared_builtin_trait(b):
                 continue
             bounds = bounds.push(self.lower_type(b))
+        self.prescan_type_parameters[symbol.id] = HirType(
+            kind: HirTypeKind.TypeParam(tp.name, bounds), span: tp.span)
 
         # Parser/HIR defaults are desugared payloads, not Optional values.
         # An absent parser payload can be Infer; never lower that sentinel.
