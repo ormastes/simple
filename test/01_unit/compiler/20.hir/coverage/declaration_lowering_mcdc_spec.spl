@@ -1,0 +1,655 @@
+# @req REQ-GEN-COV-HIRDECL
+"""
+# MC/DC coverage: declaration_lowering.spl
+
+Target: src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+(`hir_lower_diag_enabled`, `hir_generic_fn_is_template`,
+`declaration_span_for`, `lower_bootstrap_flat_function`, `lower_function`,
+`lower_struct`, `lower_field_with_type`, `lower_enum_with_symbol`,
+`lower_variant_declared_type`, `scope_binds_type_symbol`, `lower_variant`,
+`lower_bitfield`, `fn_has_untyped_value_param`).
+Every compound decision drives each condition to independently flip the
+outcome; every single-condition decision takes both outcomes. Env-gated
+decisions (SIMPLE_BOOTSTRAP, SIMPLE_COMPILER_TRACE, SIMPLE_BOOTSTRAP_DIAG)
+set the variable for one example and restore the previous value.
+
+## Decision inventory
+
+| Line | Decision | Conditions | Covering its |
+|------|----------|------------|--------------|
+| 71 | `trace == "1"` | c1 | L71 T (trace) / F (diag only, neither) |
+| 92 | `type_param_count == 0` | c1 | L92 T / F |
+| 101 | `not span_is_valid(span_id)` | c1 | L101 T (span 0) / F |
+| 124 | `pi < param_count` | c1 | L124 zero / two params |
+| 126 | `pi < param_types.len()` | c1 | L126 T / F (short type list) |
+| 138 | `decl_is_gpu_kernel_at(idx) != 0` | c1 | L138 T / F |
+| 187, 189 | reserved `__simple_rt_string_char_code_at` / owner file | c1 | L187 T+L189 T / L189 F; L187 F by all others |
+| 191, 193 | reserved `__simple_rt_string_byte_at` / owner file | c1 | L191 T+L193 T / L193 F |
+| 195 | `ambient_bootstrap_enabled() and hir_lower_diag_enabled()` | c1, c2 | L195 TT / c1 F / c2 F |
+| 196, 263, 272, 361, 441, 510 | `bootstrap_diag` | c1 | follow L195 TT / F |
+| 204 | `is_method or is_static` | c1, c2 | L204 c1 T / c2 T / FF |
+| 210, 328 | `is_method and not is_static` | c1, c2 | L210 TT / c1 F / c2 F |
+| 232 | `fn_.is_static` | c1 | L232 T / F |
+| 244 | `found_symbol == nil` | c1 | F by every lookup hit; T gap (see below) |
+| 269 | `tpi < type_params.len()` | c1 | L269 zero / one |
+| 331 | `fn_params.len() == 0` | c1 | L331 T / F |
+| 333 | `name != "self" and name != "me"` | c1, c2 | L333 TT / c1 F / c2 F |
+| 335 | `needs_implicit_self` | c1 | L331/L333 T / F |
+| 348 | `pi < fn_params.len()` | c1 | loop 0 / n |
+| 356 | `pi == 0 and is_method and not is_static` | c1, c2, c3 | L356 TTT / c1 F / c2 F / c3 F |
+| 357 | `name == "self" or name == "me"` | c1, c2 | L357 c1 T / c2 T / FF |
+| 391 | `fn_.has_return_type` | c1 | L391 T / F |
+| 394 | `ambient_bootstrap_enabled()` | c1 | L394 T / F |
+| 431 | `ambient_bootstrap_enabled() and name != "main"` | c1, c2 | L431 TT / c1 F / c2 F |
+| 438 | `return_scan.found_value_return` | c1 | L438 T / F |
+| 468 | `not has_return_type and not bootstrap and name != "main"` | c1, c2, c3 | L468 TTT / c1 F / c2 F / c3 F |
+| 491 | `not untyped_value_return and fn_has_untyped_value_param` | c1, c2 | L491 TT / c1 F / c2 F |
+| 493 | `dynamic_return_scan.found_value_return` | c1 | L493 T / F |
+| 506 | `has_return_type or untyped_value_return` | c1, c2 | L506 c1 T / c2 T / FF |
+| 531 | `fa.rt_hal_error != ""` | c1 | L531 T / F |
+| 533 | `fa.placement_error != ""` | c1 | L533 T / F |
+| 535 | `fa.is_global and not is_valid_asm_symbol_name(name)` | c1, c2 | L535 TT / c1 F / c2 F |
+| 537 | `fn_.is_kernel` | c1 | L537 T / F |
+| 564, 628 | `fn_.is_async` | c1 | L564 T / F |
+| 570 | `has_return_type and type_params.len() > 0` | c1, c2 | L570 TT / c1 F / c2 F |
+| 651 | `custom_primitive_is_name(struct_name)` | c1 | L651 T / F |
+| 697 | `kind != Simple or explicit_align or is_packed` | c1, c2, c3 | L697 c1 T / c2 T / FFF; c3 gap |
+| 760 | `fld_has_default` | c1 | L760 T / F |
+| 798 | `project_imported and imported_ids.contains_key(name)` | c1, c2 | L798 TT / c1 F / c2 F |
+| 800 | `project_imported and not symbol.is_valid()` | c1, c2 | L800 TT / c1 F / c2 F |
+| 823 | `owner_module != ""` | c1 | L823 T / F |
+| 845 | `project_imported_payloads` | c1 | L845 T / F |
+| 853 | `bound < 0` | c1 | L853 T / F |
+| 896 | `v.has_discriminant` | c1 | L896 T / F |
+| 932, 934 | `f.has_bits` / `f.is_reserved` | c1 | L932 T / L934 T / L934 F |
+| 943 | `idx < fields.len()` | c1 | loop 0 / n |
+| 948 | `not is_preserve_order` | c1 | L948 T / F |
+| 950 | `i < indices.len()` | c1 | one field (F at entry) / several |
+| 952 | `j > 0 and widths[j-1] < widths[j]` | c1, c2 | L952 TT / c1 F / c2 F |
+| 967 | `not compactq and w > 0 and w < word_bits` | c1, c2, c3 | L967 TTT / c1 F / c2 F / c3 F |
+| 969 | `(bit_offset + w) > word_end` | c1 | L969 T / F |
+| 996 | `name == "self" or name == "me"` | c1, c2 | L996 c1 T / c2 T / FF |
+| 998 | `not param_.has_type_` | c1 | L998 T / F |
+
+Documented gaps:
+- L244 true outcome: `found_symbol` is bound by `if val` on a `SymbolId?`,
+  so it is never nil inside that branch.
+- L697 c3 (`layout.is_packed`) true: `parse_layout_attrs` sets
+  `layout_kind = Packed` whenever it sets `is_packed`, so c1 masks c3.
+
+Harness notes: the flat frontend bridge
+(`10.frontend/_FlatAstBridge/module_assembly.spl`) builds every ParserStruct
+and ParserClass with `attributes: []`, gives every bitfield field `has_bits`,
+and always attaches `@preserve_order` to bitfields. The L697 and L932-L969
+examples that need other inputs attach attributes / reset field flags on the
+parsed declaration and call `lower_struct` / `lower_bitfield` directly.
+`lower_bootstrap_flat_function` has no in-tree caller; it is driven with
+`decl_fn` arena declarations.
+Bug suspects: struct/class layout decorators (`@repr`, `@align`, `@packed`)
+written in source never reach HIR through the flat bridge (see final report).
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use std.io_runtime.{env_get, env_set}
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{ParserModule, ParserFunction, Param, Attribute, BitfieldField}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind}
+use compiler.frontend.core.ast.{decl_fn, decl_is_gpu_kernel_set_at}
+use compiler.frontend.core.types.{flat_span_new, TYPE_I64, custom_primitive_register, custom_primitive_bind_symbol, custom_primitive_underlying_type_tag_by_symbol}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_lowering._Items.declaration_lowering.{fn_has_untyped_value_param}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolKind, ScopeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirStruct, HirEnum, HirBitfield, HirVariantKind}
+
+fn cov_parse(src: text) -> ParserModule:
+    parse_full_frontend(src, "dl_cov.spl", "dl_cov", Logger(level: 0))
+
+fn lower_in(src: text, file: text) -> HirModule:
+    var hl = HirLowering.with_filename(file)
+    hl.lower_module(cov_parse(src))
+
+fn lower(src: text) -> HirModule:
+    lower_in(src, "dl_cov.spl")
+
+fn diags_in(src: text, file: text) -> text:
+    var hl = HirLowering.with_filename(file)
+    hl.lower_module(cov_parse(src))
+    hl.diagnostic_messages.join("\n")
+
+fn diags(src: text) -> text:
+    diags_in(src, "dl_cov.spl")
+
+fn func(m: HirModule, name: text) -> HirFunction:
+    for f in m.functions.values():
+        if f.name == name:
+            return f
+    fail("missing lowered function " + name)
+    nil
+
+fn struct_of(m: HirModule, name: text) -> HirStruct:
+    for s in m.structs.values():
+        if s.name == name:
+            return s
+    fail("missing lowered struct " + name)
+    nil
+
+fn bitfield_of(m: HirModule, name: text) -> HirBitfield:
+    for b in m.bitfields.values():
+        if b.name == name:
+            return b
+    fail("missing lowered bitfield " + name)
+    nil
+
+fn kind_name(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Int(_, _): "int"
+        case HirTypeKind.Str: "str"
+        case HirTypeKind.Named(_, args): "named/{args.len()}"
+        case HirTypeKind.Error: "error"
+        case HirTypeKind.Unit: "unit"
+        case HirTypeKind.Infer(_, _): "infer"
+        case _: "other"
+
+fn param_names(f: HirFunction) -> text:
+    var names: [text] = []
+    for p in f.params:
+        names.push(p.name)
+    names.join(",")
+
+fn with_env(key: text, value: text) -> text:
+    val old = env_get(key)
+    env_set(key, value)
+    old
+
+fn lower_env(src: text, bootstrap: text, trace: text, diag: text) -> HirModule:
+    """Parse with the caller's env, then lower with SIMPLE_BOOTSTRAP /
+    SIMPLE_COMPILER_TRACE / SIMPLE_BOOTSTRAP_DIAG set; always restore."""
+    val parsed = cov_parse(src)
+    val old_b = with_env("SIMPLE_BOOTSTRAP", bootstrap)
+    val old_t = with_env("SIMPLE_COMPILER_TRACE", trace)
+    val old_d = with_env("SIMPLE_BOOTSTRAP_DIAG", diag)
+    var hl = HirLowering.with_filename("dl_env.spl")
+    val m = hl.lower_module(parsed)
+    env_set("SIMPLE_BOOTSTRAP_DIAG", old_d)
+    env_set("SIMPLE_COMPILER_TRACE", old_t)
+    env_set("SIMPLE_BOOTSTRAP", old_b)
+    m
+
+fn bit_offsets(b: HirBitfield) -> text:
+    var parts: [text] = []
+    for f in b.fields:
+        parts.push("{f.name}@{f.bit_offset}")
+    parts.join(",")
+
+fn attr_str(name: text, arg: text) -> Attribute:
+    Attribute(name: name, args: [Expr(kind: ExprKind.StringLit(arg, None), span: Span.empty())], span: Span.empty())
+
+fn attr_int(name: text, arg: i64) -> Attribute:
+    Attribute(name: name, args: [Expr(kind: ExprKind.IntLit(arg), span: Span.empty())], span: Span.empty())
+
+fn plain_attr(name: text) -> Attribute:
+    Attribute(name: name, args: [], span: Span.empty())
+
+fn struct_with_attrs(attrs: [Attribute]) -> HirStruct:
+    val pm = cov_parse("struct Host:\n    v: i64\n")
+    var st = pm.structs["Host"]
+    st.attributes = attrs
+    var hl = HirLowering.with_filename("dl_attrs.spl")
+    hl.lower_struct(st)
+
+fn bf_direct(src: text, name: text, attrs: [Attribute], has_bits: [bool], reserved: [bool]) -> HirBitfield:
+    """Lower a parsed bitfield directly after replacing its attributes and
+    each field's has_bits / is_reserved flags (fields beyond the flag list
+    are dropped)."""
+    val pm = cov_parse(src)
+    var bf = pm.bitfields[name]
+    var fs: [BitfieldField] = []
+    var i = 0
+    while i < has_bits.len():
+        var fld = bf.fields[i]
+        fld.has_bits = has_bits[i]
+        fld.is_reserved = reserved[i]
+        fs.push(fld)
+        i = i + 1
+    bf.fields = fs
+    bf.attributes = attrs
+    var hl = HirLowering.with_filename("dl_bf.spl")
+    hl.lower_bitfield(bf)
+
+fn direct_fn(src: text, name: text) -> ParserFunction:
+    val pm = cov_parse(src)
+    pm.functions[name]
+
+fn method_direct(src: text, name: text) -> HirFunction:
+    """Lower a parsed top-level fn as a nonstatic method of owner symbol 3."""
+    var pf = direct_fn(src, name)
+    pf.is_method = true
+    var hl = HirLowering.with_filename("dl_method.spl")
+    hl.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(SymbolId(id: 3), []), span: Span.empty()))
+    hl.lower_function(pf)
+
+describe "MC/DC lower_function name, owner and receiver decisions":
+    # @req REQ-GEN-COV-HIRDECL-110
+    it "declaration_lowering.spl:187 T :189 T reserved char_code_at alias outside its owner is rejected":
+        expect(diags("fn __simple_rt_string_char_code_at(s: text, i: i64) -> i64:\n    0\n")).to_contain("is reserved for compiler-generated text calls")
+
+    # @req REQ-GEN-COV-HIRDECL-111
+    it "declaration_lowering.spl:189 F reserved char_code_at alias inside core_string is allowed":
+        expect(diags_in("fn __simple_rt_string_char_code_at(s: text, i: i64) -> i64:\n    0\n", "src/runtime/simple_core/core_string.spl")).to_equal("")
+
+    # @req REQ-GEN-COV-HIRDECL-112
+    it "declaration_lowering.spl:191 T :193 T reserved byte_at alias outside its owner is rejected":
+        expect(diags("fn __simple_rt_string_byte_at(s: text, i: i64) -> i64:\n    0\n")).to_contain("'__simple_rt_string_byte_at' is reserved")
+
+    # @req REQ-GEN-COV-HIRDECL-113
+    it "declaration_lowering.spl:193 F reserved byte_at alias inside core_string is allowed":
+        expect(diags_in("fn __simple_rt_string_byte_at(s: text, i: i64) -> i64:\n    0\n", "src\\runtime\\simple_core\\core_string.spl")).to_equal("")
+
+    # @req REQ-GEN-COV-HIRDECL-114
+    it "declaration_lowering.spl:204 FF, :210 c1 F, :232 F free function is a plain Function symbol":
+        val f = func(lower("fn free_fn() -> i64:\n    1\n"), "free_fn")
+        expect(f.is_method).to_equal(false)
+        expect(f.params.len()).to_equal(0)
+
+    # @req REQ-GEN-COV-HIRDECL-115
+    it "declaration_lowering.spl:204 c1 T, :210 TT, :331 T, :335 T method with no params gets implicit self":
+        step("The flat bridge already inserts `self`; lower a bare ParserFunction flagged as a method")
+        val f = method_direct("fn get() -> i64:\n    0\n", "get")
+        expect(param_names(f)).to_equal("self")
+        expect(kind_name(f.params[0].type_)).to_equal("named/0")
+
+    # @req REQ-GEN-COV-HIRDECL-116
+    it "declaration_lowering.spl:204 c2 T, :210 c2 F, :232 T static method has no receiver":
+        val f = func(lower("class Box:\n    v: i64\n    static fn make(x: i64) -> i64:\n        x\n"), "make")
+        expect(f.is_static).to_equal(true)
+        expect(param_names(f)).to_equal("x")
+
+    # @req REQ-GEN-COV-HIRDECL-117
+    it "declaration_lowering.spl:331 F, :333 TT, :335 T, :356 TTT then c1 F, :357 FF first non-self param gets implicit self":
+        val f = method_direct("fn put(x: i64, y: i64) -> i64:\n    x\n", "put")
+        expect(param_names(f)).to_equal("self,x,y")
+        expect(kind_name(f.params[1].type_)).to_equal("int")
+
+    # @req REQ-GEN-COV-HIRDECL-118
+    it "declaration_lowering.spl:333 c1 F, :335 F, :357 c1 T explicit self is not duplicated":
+        val f = func(lower("class Box:\n    v: i64\n    fn take(self, x: i64) -> i64:\n        x\n"), "take")
+        expect(param_names(f)).to_equal("self,x")
+        expect(kind_name(f.params[0].type_)).to_equal("named/0")
+
+    # @req REQ-GEN-COV-HIRDECL-119
+    it "declaration_lowering.spl:333 c2 F, :357 c2 T explicit me receiver is not duplicated":
+        step("The parser spells receivers `self`; rename the first param to `me` and lower as a method")
+        var pf = direct_fn("fn take(self, x: i64) -> i64:\n    x\n", "take")
+        var ps = pf.params
+        var p0 = ps[0]
+        p0.name = "me"
+        ps[0] = p0
+        pf.params = ps
+        pf.is_method = true
+        var hl = HirLowering.with_filename("dl_me.spl")
+        hl.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(SymbolId(id: 3), []), span: Span.empty()))
+        val f = hl.lower_function(pf)
+        expect(param_names(f)).to_equal("me,x")
+        expect(kind_name(f.params[0].type_)).to_equal("named/0")
+
+    # @req REQ-GEN-COV-HIRDECL-120
+    it "declaration_lowering.spl:356 c2 F free function first param is never a receiver":
+        val f = func(lower("fn first(self: i64) -> i64:\n    self\n"), "first")
+        expect(kind_name(f.params[0].type_)).to_equal("int")
+
+    # @req REQ-GEN-COV-HIRDECL-121
+    it "declaration_lowering.spl:356 c3 F static method first param is never a receiver":
+        step("A static ParserFunction flagged is_method too must still skip the receiver path")
+        var pf = direct_fn("fn smake(self: i64) -> i64:\n    self\n", "smake")
+        pf.is_method = true
+        pf.is_static = true
+        var hl = HirLowering.with_filename("dl_static.spl")
+        val f = hl.lower_function(pf)
+        expect(param_names(f)).to_equal("self")
+        expect(kind_name(f.params[0].type_)).to_equal("int")
+
+    # @req REQ-GEN-COV-HIRDECL-122
+    it "declaration_lowering.spl:269 one type param, :92 F, :570 TT generic function is a template":
+        val f = func(lower("fn ident<T>(x: T) -> T:\n    x\n"), "ident")
+        expect(f.type_params.len()).to_equal(1)
+        expect(f.is_generic_template).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRDECL-123
+    it "declaration_lowering.spl:570 c1 F generic function without return type":
+        val f = func(lower("fn sink<T>(x: T):\n    pass\n"), "sink")
+        expect(f.is_generic_template).to_equal(true)
+        expect(kind_name(f.return_type)).to_equal("unit")
+
+    # @req REQ-GEN-COV-HIRDECL-124
+    it "declaration_lowering.spl:570 c2 F and :92 T plain function is not a template":
+        val f = func(lower("fn plain(x: i64) -> i64:\n    x\n"), "plain")
+        expect(f.is_generic_template).to_equal(false)
+
+describe "MC/DC lower_function return typing":
+    # @req REQ-GEN-COV-HIRDECL-125
+    it "declaration_lowering.spl:391 T, :468 c1 F, :506 c1 T declared return":
+        val f = func(lower("fn r() -> text:\n    \"a\"\n"), "r")
+        expect(kind_name(f.return_type)).to_equal("str")
+
+    # @req REQ-GEN-COV-HIRDECL-126
+    it "declaration_lowering.spl:468 c3 F non-bootstrap untyped main keeps unit":
+        val f = func(lower("fn main():\n    pass\n"), "main")
+        expect(kind_name(f.return_type)).to_equal("unit")
+
+    # @req REQ-GEN-COV-HIRDECL-127
+    it "declaration_lowering.spl:468 TTT, :491 TT, :493 T, :506 c2 T untyped param value return is any":
+        val f = func(lower("fn echo(x):\n    return x\n"), "echo")
+        expect(kind_name(f.return_type)).to_equal("any")
+
+    # @req REQ-GEN-COV-HIRDECL-128
+    it "declaration_lowering.spl:493 F and :506 FF untyped param without value return stays unit":
+        val f = func(lower("fn eat(x):\n    pass\n"), "eat")
+        expect(kind_name(f.return_type)).to_equal("unit")
+
+    # @req REQ-GEN-COV-HIRDECL-129
+    it "declaration_lowering.spl:491 c2 F typed params skip the dynamic return scan":
+        val f = func(lower("fn typed_noop(x: i64):\n    pass\n"), "typed_noop")
+        expect(kind_name(f.return_type)).to_equal("unit")
+
+    # @req REQ-GEN-COV-HIRDECL-130
+    it "declaration_lowering.spl:491 c1 F registered value-returning signature skips the scan":
+        step("Pre-register the function symbol with an i64-returning Function type")
+        var pf = direct_fn("fn pre(x):\n    pass\n", "pre")
+        var hl = HirLowering.with_filename("dl_pre.spl")
+        val ret = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        hl.symbols.define("pre", SymbolKind.Function, Some(HirType(kind: HirTypeKind.Function([], ret, []), span: Span.empty())), Span.empty(), Visibility.Public, false, nil)
+        val f = hl.lower_function(pf)
+        expect(kind_name(f.return_type)).to_equal("int")
+
+describe "MC/DC lower_function attributes":
+    # @req REQ-GEN-COV-HIRDECL-131
+    it "declaration_lowering.spl:531 T bad @rt hal provider is reported":
+        expect(diags("@rt(\"hal\", \"bogus\")\nfn hal_fn() -> i64:\n    0\n")).to_contain("E-RT-HAL-PROVIDER")
+
+    # @req REQ-GEN-COV-HIRDECL-132
+    it "declaration_lowering.spl:533 T bad @align on a function is reported":
+        expect(diags("@align(3)\nfn odd_align() -> i64:\n    0\n")).to_contain("E-ALIGN-RANGE")
+
+    # @req REQ-GEN-COV-HIRDECL-133
+    it "declaration_lowering.spl:531 F, :533 F, :535 c2 F valid @global name is accepted":
+        val text_out = diags("@global\nfn good_name() -> i64:\n    0\n")
+        expect(text_out.contains("E-GLOBAL-MANGLE")).to_equal(false)
+        expect(text_out.contains("E-ALIGN-RANGE")).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-134
+    it "declaration_lowering.spl:535 TT invalid @global symbol name is reported":
+        step("The parser only produces identifier names; rename the parsed function")
+        var pf = direct_fn("@global\nfn good() -> i64:\n    0\n", "good")
+        pf.name = "bad-name"
+        var hl = HirLowering.with_filename("dl_global.spl")
+        hl.lower_function(pf)
+        expect(hl.diagnostic_messages.join("\n")).to_contain("E-GLOBAL-MANGLE")
+
+    # @req REQ-GEN-COV-HIRDECL-135
+    it "declaration_lowering.spl:535 c1 F and :537 F plain function is not global or kernel":
+        val f = func(lower("fn calm() -> i64:\n    0\n"), "calm")
+        expect(f.func_attr.is_global).to_equal(false)
+        expect(f.is_gpu_kernel).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-136
+    it "declaration_lowering.spl:537 T kernel function is a gpu kernel":
+        var pf = direct_fn("fn k() -> i64:\n    0\n", "k")
+        pf.is_kernel = true
+        var hl = HirLowering.with_filename("dl_kernel.spl")
+        val f = hl.lower_function(pf)
+        expect(f.is_gpu_kernel).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRDECL-137
+    it "declaration_lowering.spl:564 T and :628 T async function gets the Async effect":
+        var pf = direct_fn("fn later() -> i64:\n    1\n", "later")
+        pf.is_async = true
+        var hl = HirLowering.with_filename("dl_async.spl")
+        val f = hl.lower_function(pf)
+        expect(f.is_async).to_equal(true)
+        expect(f.effects.len()).to_equal(1)
+
+    # @req REQ-GEN-COV-HIRDECL-138
+    it "declaration_lowering.spl:564 F sync function has no effects":
+        val f = func(lower("fn now() -> i64:\n    1\n"), "now")
+        expect(f.effects.len()).to_equal(0)
+
+describe "MC/DC lower_struct and lower_field_with_type":
+    # @req REQ-GEN-COV-HIRDECL-139
+    it "declaration_lowering.spl:651 T custom primitive struct rebinds its symbol":
+        step("Parse first (a fresh parse resets the primitive registry), then seed a sentinel symbol id; lower_struct must replace it")
+        val pm = cov_parse("struct CovPrimWord:\n    v: i64\n")
+        custom_primitive_register("CovPrimWord", TYPE_I64)
+        custom_primitive_bind_symbol("CovPrimWord", 424242)
+        expect(custom_primitive_underlying_type_tag_by_symbol(424242)).to_equal(TYPE_I64)
+        var hl = HirLowering.with_filename("dl_prim.spl")
+        val s = hl.lower_struct(pm.structs["CovPrimWord"])
+        expect(s.name).to_equal("CovPrimWord")
+        expect(custom_primitive_underlying_type_tag_by_symbol(424242)).to_equal(-1)
+
+    # @req REQ-GEN-COV-HIRDECL-140
+    it "declaration_lowering.spl:651 F, :697 FFF, :760 F plain struct":
+        val s = struct_of(lower("struct Pt:\n    x: i64\n"), "Pt")
+        expect(custom_primitive_underlying_type_tag_by_symbol(s.symbol.id)).to_equal(-1)
+        expect(s.has_layout_attr).to_equal(false)
+        expect(s.fields[0].has_default).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-141
+    it "declaration_lowering.spl:697 c1 T repr C layout":
+        step("The flat frontend bridge builds ParserStruct with `attributes: []`; attach the decorator")
+        val s = struct_with_attrs([attr_str("repr", "C")])
+        expect(s.has_layout_attr).to_equal(true)
+        expect(s.layout_attr.has_explicit_align).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-142
+    it "declaration_lowering.spl:697 c2 T explicit align alone":
+        val s = struct_with_attrs([attr_int("align", 16)])
+        expect(s.has_layout_attr).to_equal(true)
+        expect(s.layout_attr.has_explicit_align).to_equal(true)
+
+    # @req REQ-GEN-COV-HIRDECL-143
+    it "declaration_lowering.spl:760 T field default is lowered":
+        val s = struct_of(lower("struct Df:\n    x: i64 = 3\n"), "Df")
+        expect(s.fields[0].has_default).to_equal(true)
+
+describe "MC/DC lower_enum_with_symbol and lower_variant":
+    # @req REQ-GEN-COV-HIRDECL-144
+    it "declaration_lowering.spl:798 c1 F, :800 c1 F, :823 T, :845 F, :896 T local enum":
+        var hl = HirLowering.with_filename("dl_enum.spl")
+        val pm = cov_parse("enum Lvl:\n    Lo = 1\n    Hi(i64)\n")
+        val e = hl.lower_enum(pm.enums["Lvl"], "cov.mod")
+        expect(e.runtime_name).to_equal("cov.mod.Lvl")
+        expect(e.variants[0].has_discriminant).to_equal(true)
+        expect(e.variants[1].has_discriminant).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-145
+    it "declaration_lowering.spl:823 F empty owner keeps the bare runtime name":
+        var hl = HirLowering.with_filename("dl_enum.spl")
+        val pm = cov_parse("enum Bare:\n    One\n")
+        val e = hl.lower_enum(pm.enums["Bare"], "")
+        expect(e.runtime_name).to_equal("Bare")
+
+    # @req REQ-GEN-COV-HIRDECL-146
+    it "declaration_lowering.spl:798 TT, :800 c2 F, :845 T imported enum uses the materialized id":
+        var hl = HirLowering.with_filename("dl_imp.spl")
+        hl.imported_enum_symbol_ids["Imp"] = 5
+        val pm = cov_parse("enum Imp:\n    A(i64)\n")
+        val e = hl.lower_enum_with_symbol(pm.enums["Imp"], "cov.other", "Imp", true)
+        expect(e.symbol.id).to_equal(5)
+        expect(hl.diagnostic_messages.join("\n").contains("no materialized symbol")).to_equal(false)
+        match e.variants[0].kind:
+            case HirVariantKind.Tuple(tys): expect(tys.len()).to_equal(1)
+            case _: fail("imported tuple variant lost its payload")
+
+    # @req REQ-GEN-COV-HIRDECL-147
+    it "declaration_lowering.spl:798 c2 F and :800 TT imported enum without a symbol is reported":
+        var hl = HirLowering.with_filename("dl_imp.spl")
+        val pm = cov_parse("enum Ghost:\n    G\n")
+        val e = hl.lower_enum_with_symbol(pm.enums["Ghost"], "cov.other", "Ghost", true)
+        expect(e.symbol.is_valid()).to_equal(false)
+        expect(hl.diagnostic_messages.join("\n")).to_contain("imported enum `Ghost` has no materialized symbol")
+
+    # @req REQ-GEN-COV-HIRDECL-148
+    it "declaration_lowering.spl:853 T unbound name is not a type binding":
+        var hl = HirLowering.with_filename("dl_scope.spl")
+        expect(hl.scope_binds_type_symbol("Nobody")).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-149
+    it "declaration_lowering.spl:853 F bound struct is a type binding, bound variable is not":
+        var hl = HirLowering.with_filename("dl_scope.spl")
+        hl.symbols.define("Shape", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, nil)
+        hl.symbols.define("count", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+        expect(hl.scope_binds_type_symbol("Shape")).to_equal(true)
+        expect(hl.scope_binds_type_symbol("count")).to_equal(false)
+
+describe "MC/DC lower_bitfield":
+    # The flat frontend bridge gives every parsed bitfield field `has_bits`
+    # (from its uN/bool type) and always attaches `@preserve_order`. Examples
+    # that need the width-sorting path or inferred widths reset those on the
+    # parsed Bitfield and lower it directly.
+
+    # @req REQ-GEN-COV-HIRDECL-150
+    it "declaration_lowering.spl:932 F inferred width, :948 T, :950 several, :952 TT and c1 F, :967 TTT, :969 F widest first":
+        step("The inferred-width field (bool type, has_bits reset) is narrower than the explicit 3-bit field, so it sorts last")
+        val b = bf_direct("bitfield Fl(u32):\n    on: bool\n    mode: u3\n", "Fl", [], [false, true], [false, false])
+        expect(bit_offsets(b)).to_equal("mode@0,on@3")
+
+    # @req REQ-GEN-COV-HIRDECL-151
+    it "declaration_lowering.spl:952 c2 F already-sorted fields keep order":
+        val b = bf_direct("bitfield So(u32):\n    wide: u5\n    narrow: u2\n", "So", [], [true, true], [false, false])
+        expect(bit_offsets(b)).to_equal("wide@0,narrow@5")
+
+    # @req REQ-GEN-COV-HIRDECL-152
+    it "declaration_lowering.spl:932 T and :948 F parsed bitfield keeps declaration order":
+        val b = bitfield_of(lower("bitfield Po(u32):\n    on: bool\n    mode: u3\n"), "Po")
+        expect(bit_offsets(b)).to_equal("on@0,mode@1")
+
+    # @req REQ-GEN-COV-HIRDECL-153
+    it "declaration_lowering.spl:943 zero fields and :950 F empty bitfield":
+        val b = bf_direct("bitfield Em(u32):\n    only: u3\n", "Em", [], [], [])
+        expect(b.fields.len()).to_equal(0)
+        expect(b.total_bits).to_equal(0)
+
+    # @req REQ-GEN-COV-HIRDECL-154
+    it "declaration_lowering.spl:950 F single field skips sorting":
+        val b = bf_direct("bitfield One(u32):\n    only: u3\n", "One", [], [true], [false])
+        expect(bit_offsets(b)).to_equal("only@0")
+
+    # @req REQ-GEN-COV-HIRDECL-155
+    it "declaration_lowering.spl:969 T field crossing a 32-bit word moves to the next word":
+        val b = bitfield_of(lower("bitfield Cross(u64):\n    a: u20\n    b: u20\n"), "Cross")
+        expect(bit_offsets(b)).to_equal("a@0,b@32")
+        expect(b.total_bits).to_equal(52)
+
+    # @req REQ-GEN-COV-HIRDECL-156
+    it "declaration_lowering.spl:967 c1 F compactq packs across the word boundary":
+        val b = bf_direct("bitfield Cq(u64):\n    a: u20\n    b: u20\n", "Cq", [plain_attr("preserve_order"), plain_attr("compactq")], [true, true], [false, false])
+        expect(bit_offsets(b)).to_equal("a@0,b@20")
+
+    # @req REQ-GEN-COV-HIRDECL-157
+    it "declaration_lowering.spl:967 c3 F full-word field is not word-aligned again":
+        val b = bitfield_of(lower("bitfield Wd(u64):\n    w: u32\n    t: u4\n"), "Wd")
+        expect(bit_offsets(b)).to_equal("w@0,t@32")
+
+    # @req REQ-GEN-COV-HIRDECL-158
+    it "declaration_lowering.spl:934 T and :967 c2 F reserved field without bits is zero width":
+        val b = bf_direct("bitfield Rs(u32):\n    a: u3\n    pad: u2\n", "Rs", [plain_attr("preserve_order")], [true, false], [false, true])
+        expect(bit_offsets(b)).to_equal("a@0,pad@3")
+        expect(b.total_bits).to_equal(3)
+
+describe "MC/DC fn_has_untyped_value_param":
+    # @req REQ-GEN-COV-HIRDECL-159
+    it "declaration_lowering.spl:996 c1 T and :998 F self is skipped and typed params are not untyped":
+        val pf = direct_fn("fn u(self, x: i64) -> i64:\n    x\n", "u")
+        expect(fn_has_untyped_value_param(pf.params)).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-160
+    it "declaration_lowering.spl:996 c2 T me is skipped":
+        var pf = direct_fn("fn u(self) -> i64:\n    0\n", "u")
+        var ps = pf.params
+        var p0 = ps[0]
+        p0.name = "me"
+        ps[0] = p0
+        expect(fn_has_untyped_value_param(ps)).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-161
+    it "declaration_lowering.spl:996 FF and :998 T untyped value param is detected":
+        val pf = direct_fn("fn u(x) -> i64:\n    0\n", "u")
+        expect(fn_has_untyped_value_param(pf.params)).to_equal(true)
+
+describe "MC/DC lower_bootstrap_flat_function":
+    # @req REQ-GEN-COV-HIRDECL-108
+    it "declaration_lowering.spl:101 T and :124 zero params invalid span falls back to empty":
+        var hl = HirLowering.with_filename("dl_flat.spl")
+        val idx = decl_fn("flat_zero", [], [], TYPE_I64, [], 0, [], 0)
+        val f = hl.lower_bootstrap_flat_function(idx)
+        expect(f.name).to_equal("flat_zero")
+        expect(f.params.len()).to_equal(0)
+        expect(f.span.line).to_equal(0)
+        expect(f.is_gpu_kernel).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-109
+    it "declaration_lowering.spl:101 F, :124 n, :126 T/F and :138 T real span, short type list, gpu kernel":
+        var hl = HirLowering.with_filename("dl_flat.spl")
+        val span_id = flat_span_new(4, 20, 7, 3)
+        val idx = decl_fn("flat_two", ["a", "b"], [TYPE_I64], TYPE_I64, [], 0, [], span_id)
+        decl_is_gpu_kernel_set_at(idx, 1)
+        val f = hl.lower_bootstrap_flat_function(idx)
+        expect(f.span.line).to_equal(7)
+        expect(param_names(f)).to_equal("a,b")
+        expect(kind_name(f.params[0].type_)).to_equal("int")
+        expect(kind_name(f.params[1].type_)).to_equal("infer")
+        expect(f.is_gpu_kernel).to_equal(true)
+
+describe "MC/DC env-gated bootstrap diagnostics":
+    # Parsing happens before the env change: the frontend itself switches
+    # paths under SIMPLE_BOOTSTRAP, and only HIR lowering is under test.
+
+    # @req REQ-GEN-COV-HIRDECL-101
+    it "declaration_lowering.spl:195 c1 F without SIMPLE_BOOTSTRAP diag stays off and :394 F keeps declared return":
+        val f = func(lower_env("fn f() -> [i64]:\n    [1]\n", "0", "0", "0"), "f")
+        expect(kind_name(f.return_type) == "int").to_equal(false)
+
+    # @req REQ-GEN-COV-HIRDECL-102
+    it "declaration_lowering.spl:195 TT and :71 T SIMPLE_COMPILER_TRACE enables the diag trace":
+        step("Bootstrap on, trace on: every bootstrap_diag site prints and lowering still succeeds")
+        val f = func(lower_env("fn traced(a: i64) -> text:\n    \"x\"\n", "1", "1", "0"), "traced")
+        expect(f.name).to_equal("traced")
+        expect(kind_name(f.return_type)).to_equal("str")
+
+    # @req REQ-GEN-COV-HIRDECL-103
+    it "declaration_lowering.spl:71 F SIMPLE_BOOTSTRAP_DIAG alone enables the diag trace":
+        val f = func(lower_env("fn diagged() -> bool:\n    true\n", "1", "0", "1"), "diagged")
+        expect(f.name).to_equal("diagged")
+        expect(kind_name(f.return_type)).to_equal("other")
+
+    # @req REQ-GEN-COV-HIRDECL-104
+    it "declaration_lowering.spl:195 c2 F bootstrap without trace or diag and :394 T erases non-primitive returns":
+        val f = func(lower_env("fn quiet() -> [i64]:\n    [1]\n", "1", "0", "0"), "quiet")
+        expect(kind_name(f.return_type)).to_equal("int")
+
+    # @req REQ-GEN-COV-HIRDECL-105
+    it "declaration_lowering.spl:431 TT and :438 T bootstrap untyped value return gets the builtin type":
+        val f = func(lower_env("fn helper(a: i64):\n    return a\n", "1", "0", "0"), "helper")
+        expect(kind_name(f.return_type)).to_equal("int")
+
+    # @req REQ-GEN-COV-HIRDECL-106
+    it "declaration_lowering.spl:438 F and :468 c2 F bootstrap untyped body without value return stays unit":
+        val f = func(lower_env("fn noop(a: i64):\n    pass\n", "1", "0", "0"), "noop")
+        expect(kind_name(f.return_type)).to_equal("unit")
+
+    # @req REQ-GEN-COV-HIRDECL-107
+    it "declaration_lowering.spl:431 c2 F bootstrap main is not return-scanned":
+        val f = func(lower_env("fn main():\n    return 0\n", "1", "0", "0"), "main")
+        expect(kind_name(f.return_type)).to_equal("unit")
