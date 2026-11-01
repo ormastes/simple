@@ -1207,7 +1207,8 @@ fn incremental_propagate_dependency_changes(changes: IncrChangeSet,
     # Macro families are bound to source paths through the committed companion
     # inventory (macro_rr_inventory_v1), so schema 2 is required: a schema-1
     # receipt has no macro family and cannot prove an exact empty result.
-    if receipt_read.receipt!.schema_version != REVERSE_REFERENCE_RECEIPT_SCHEMA_V2:
+    if result.changes.len() > 0 and
+            receipt_read.receipt!.schema_version != REVERSE_REFERENCE_RECEIPT_SCHEMA_V2:
         _incremental_reverse_reference_fallback_reason_v1 =
             "receipt-schema-without-macro-families"
         for src in entry_sources:
@@ -1224,6 +1225,8 @@ fn incremental_propagate_dependency_changes(changes: IncrChangeSet,
     var macro_paths: [text] = []
     var macro_changed: [MacroRrChangedSubjectsV1] = []
     var macro_scope: [text] = []
+    # The changed-subject step re-emits every changed path's companion.
+    incremental_macro_inventory_epoch_bump_v1()
     for src in entry_sources:
         macro_scope.push(src)
     for change in result.changes:
@@ -1812,21 +1815,19 @@ pub fn dep_iface_gate_valid(recorded: text, dep_paths: [text]) -> bool:
 # caught because source_interface_parts captures `macro ` headers.
 # ---------------------------------------------------------------------------
 
-fn incremental_source_declares_macro_v1(source: text) -> bool:
-    for line in source.split("\n"):
-        val t = line.trim()
-        if t.starts_with("macro ") or t.starts_with("pub macro "):
-            return true
-    false
-
 # Surface of one dependency as a fold row suffix: "" with no companion root
 # (a legacy row stays legacy), ";macro=" when the surface is unknown, else
 # ";macro=<effect surface>".
 fn _incremental_macro_surface_row_v1(path: text, tldr_root: text, refresh: bool) -> text:
     if tldr_root == "":
         return ""
-    val state = if refresh: macro_rr_module_state_refresh_v1(path, tldr_root)
-        else: macro_rr_module_state_v1(path, tldr_root)
+    var state = macro_rr_module_state_v1(path, tldr_root)
+    if refresh and not macro_rr_module_state_complete_v1(state):
+        # A real re-emission changes committed companions: every inventory
+        # memo built before it is stale (watch/LSP processes validate many
+        # times per lifetime).
+        incremental_macro_inventory_epoch_bump_v1()
+        state = macro_rr_module_state_refresh_v1(path, tldr_root)
     if not macro_rr_module_state_complete_v1(state):
         return ";macro="
     ";macro=" + state.effect_surface

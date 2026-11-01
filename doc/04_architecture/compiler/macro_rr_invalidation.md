@@ -92,7 +92,9 @@ Not touched: `macro_reference_projector.spl` (forward facts), `reverse_reference
 - At validation a requested name with more than one current definition, or an unresolved name that is now defined, makes the input root unknown → entry invalid.
 - A consumer source named by the receipt that is not a BuildCache entry → exact=false (receipt/inventory disagreement) → widen.
 - `tldr_root == ""` (no companions configured) → macro facet unknown: receipt macro families `@unknown-family`; BuildCache macro gate: entry valid only if no dependency in the closure declares a `macro ` (textual, companion-free); otherwise invalid.
-- Deleted files keep the pre-existing whole-scope widening of the legacy caller (all families); a macro removed from a surviving file is a `Modified` edit and is exact.
+- Deleted files keep the pre-existing whole-scope widening of the legacy caller (all families); a macro removed from a surviving file is a `Modified` edit and is exact. The macro path still computes the deleted definer's subjects (kind `deleted`) so the receipt consumers are named for diagnostics.
+- The validation gate's inventory memo is keyed by (epoch, companion root, scope); every companion re-emission (record step, validation refresh, changed-subject refresh) bumps the epoch, so a long-lived watch/LSP process never validates against a pre-edit inventory.
+- Formal model: `DependencyEntry.macro_input_root` is a validation-gate input, not yet a LiveKey schema field (`src/verification/cache_protocol/macro_input_root_source_review_2026-11-01.txt`); the `entry_macro_input_root_live_change_visible` obligation is a filed follow-up that needs the generator run on a self-hosted binary.
 
 ## 7. Performance envelope
 
