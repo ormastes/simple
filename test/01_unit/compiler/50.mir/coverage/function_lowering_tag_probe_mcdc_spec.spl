@@ -1,0 +1,58 @@
+# @req REQ-GEN-COV-MIRERASED
+"""
+# MC/DC coverage: function_lowering.spl — SIMPLE_MIR_TAG_PROBE gate
+
+Target: src/compiler/50.mir/_MirLowering/function_lowering.spl
+`_mir_tag_probe_enabled()` caches SIMPLE_MIR_TAG_PROBE on its first call in
+the process, so this file sets it before its first lowering. The probe only
+adds `[mir-tag-probe]` / `[mir-type-invariant]` stderr receipts; the lowered
+MIR must be the same as without it.
+
+## Decision inventory (this file)
+
+| Line | Decision | Covering its |
+|------|----------|--------------|
+| 65/66 | gate first read, env on | MIRERASED-401 (T); other specs (F) |
+| 366/370/399 | per-param / return probe sites | MIRERASED-401 |
+| 368 | zero-or-nil kind at caller | F only (valid carriers); gap |
+| 1119 | `probe and receipts < limit` | MIRERASED-401 (TT) |
+| 1125 | `callee_disc < 0` under the probe | F only; gap (no corrupt carrier on the interpreter) |
+
+Bug suspects: none.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+# @tag:coverage
+
+use std.spec.*
+use std.io_runtime.{env_set}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn lower_probed(src: text) -> MirLowering:
+    val file = "testdata/fl_tag_probe_cov.spl"
+    val parsed = parse_full_frontend(src, file, "fl_tag_probe_cov", Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir)
+    lowering
+
+describe "tag-probe gated lowering":
+    # @req REQ-GEN-COV-MIRERASED-401
+    it "function_lowering.spl:66/366/370/399/1119 T the tag probe adds receipts but no errors":
+        step("enable the probe before the first gate read in this process")
+        env_set("SIMPLE_MIR_TAG_PROBE", "1")
+        val l = lower_probed("fn p(a: i64, b: bool) -> i64:\n    a\nfn q<T>(x: T) -> T:\n    x\n")
+        env_set("SIMPLE_MIR_TAG_PROBE", "")
+        expect(l.errors.len()).to_equal(0)
+        expect(l.type_transport_receipts).to_equal(0)
+        expect(l.mir_tag_probe_active_function).to_equal("")

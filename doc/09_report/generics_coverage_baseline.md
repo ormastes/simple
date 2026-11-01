@@ -108,3 +108,25 @@ Remaining gaps:
 - `declaration_lowering.spl:244` true outcome: `found_symbol` is bound by `if val` on a `SymbolId?`, so it is never nil.
 
 Frontend note: the flat-AST bridge (`_FlatAstBridge/module_assembly.spl`) builds ParserStruct/ParserClass with `attributes: []`, so source `@repr` / `@align` / `@packed` on structs and classes never reach HIR; it also gives every bitfield field `has_bits` and always attaches `@preserve_order`. The affected examples attach attributes or reset flags on the parsed declaration and call the lowering method directly. `lower_bootstrap_flat_function` has no in-tree caller.
+
+## Wave 2 — `50.mir/mir_lowering_types.spl`, `50.mir/_MirLowering/function_lowering.spl` (seed)
+
+**Binary: seed** (`C:/dev/wt/mcdc-tool/build/cargo-target/bootstrap/simple.exe`), base `origin/release/1.0.0@1bd42d8dc0c`. Baseline specs: `50.mir/any_index_read_spec.spl`, `50.mir/generic_return_owner_spec.spl`, `50.mir/stage2_generic_class_receiver_spec.spl`. Final adds 5 spec files under `test/01_unit/compiler/50.mir/coverage/` (`mir_lowering_types_mcdc`, `function_lowering_types_fields_mcdc`, `function_lowering_body_mcdc`, `function_lowering_trace_mcdc`, `function_lowering_tag_probe_mcdc`; 86 examples, req tag `REQ-GEN-COV-MIRERASED`). 3 measure/fix cycles; 1288 vectors.
+
+| File | Decisions | Conditions | CD % base → final | MC/DC % base → final |
+|---|---:|---:|---:|---:|
+| `mir_lowering_types.spl` | 64 | 73 | 23.4 → 94.2 | 21.9 → 93.2 |
+| `_MirLowering/function_lowering.spl` | 198 | 235 | 8.5 → 84.1 | 8.1 → 83.8 |
+| **Total** | 262 | 308 | 12.1 → 86.5 | 11.4 → 86.0 |
+
+Generic-relevant subsets (final, decisions fully covered / total): `hir_type_mentions_type_param` + erased-decode/runtime-value marks in `mir_lowering_types.spl` 11/11; `function_lowering.spl` tail-return block (801-866, incl. the 839 erased `T` decode) 4/6 and `lower_type` (1113-1482, incl. the `TypeParam` erasure arm) 25/37. Every remaining generic-subset gap is structural (below).
+
+`function_lowering.spl` stays below 90/90; remaining gaps (documented in each spec docstring):
+- Process-cached diagnostic gates: `SIMPLE_MIR_TAG_PROBE` corrupt-carrier receipts (1125-1131, 368), the 50000-record probe cap (1160 c1, 1166), stmt-probe gate first read (1529).
+- Unreachable by construction: `Named` match arm 1324-1332 (shadowed by the 1193 predispatch), `Any` match arm 1448 (shadowed by the 1212 predispatch, see bug), 812/866 F, 481 F, 1906 T (demand-on-read materializes first), 1921 T, 1968 F.
+- Trace receipts inside the statement loop (1515/1517/1534/1546/1548/1620) abort on the seed (see bug).
+- Not driven: resource-direct params (516/526), native trait params (561 F), driver manifest (922 T), inline-asm writeback (1754), typed-array nil/zero sentinels (`mir_lowering_types.spl` 1011/1039 T), nominal profile receipt (889 T, env cached at first read).
+
+Bug suspects (not fixed in this lane; 50.mir is owned by phase-3 work):
+1. `function_lowering.spl:1212` returns `MirType.i64()` for every `Any` before the `case HirTypeKind.Any` arm (~1446) runs, so the profile-gated `E-MIR-TYPE-Any` diagnostic (fatal under `critical`) never fires. Repro: `function_lowering_types_fields_mcdc_spec.spl` MIRERASED-121.
+2. `function_lowering.spl:1534-1540` `[mir-lower-stmt-probe]`: with `SIMPLE_COMPILER_TRACE=1`, lowering the first statement of a block aborts on the seed with `semantic: type mismatch: cannot convert tuple to int` right after the `[mir-lower] block:stmt 0` receipt (suspected `_sffi_hir_type_discriminant(stmt.kind)` on a `HirStmtKind`). Trace-only. Repro noted in `function_lowering_trace_mcdc_spec.spl`.
