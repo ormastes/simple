@@ -48,31 +48,40 @@ All agents and implementation phases work against this contract. Public document
 
 ## 2. Verification State Model
 
-Every proof unit uses exactly one of these six states:
+> **Updated 2026-11-01 (packet E1 of
+> `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md`).**
+> The earlier six-state list (`verified`/`failed`/`admitted`/`trusted`/`stale`/`not_checked`)
+> is superseded. The authoritative state set is the `FormalStatus` enum in
+> `src/compiler/00.common/assurance/formal_status.spl` (alias `FormalStatusV1`).
 
-| State | Meaning | Invariant |
-|-------|---------|-----------|
-| `verified` | All obligations checked by Lean, no admits/trust | Never includes admitted or trusted obligations |
-| `failed` | Proof check ran, at least one obligation failed | At least one theorem failed |
-| `admitted` | Obligations remain via `sorry`/`admit` | Proof debt must be visible in reports |
-| `trusted` | Obligations bypassed via `@trusted`/`assume` | Trust markers must be visible in reports |
-| `stale` | Cached result exists but inputs changed | Overrides any previous state until re-check |
-| `not_checked` | Lean artifacts may exist, proof check not run | Default state for new/unverified units |
+Every proof unit carries exactly one `FormalStatus`:
 
-### State Transition Rules
+| `FormalStatus` | `name()` | `refinement_rank()` | Meaning |
+|----------------|----------|--------------------:|---------|
+| `NotChecked` | `not_checked` | 0 | Lean artifacts may exist; no proof check has run |
+| `Specified` | `specified` | 1 | Specification/obligations exist; no qualifying checked proof |
+| `ModelProven` | `model_proven` | 2 | Formal model/theorem root checked by Lean; says nothing yet about the production SPL |
+| `SourceRefined` | `source_refined` | 3 | Checked correspondence to the selected actual SPL source semantics |
+| `BackendRefined` | `backend_refined` | 4 | Required source/IR/backend transformation edges connected |
+| `ArtifactVerified` | `artifact_verified` | 5 | Exact final artifact plus trust/replay closure admitted |
+| `TrustedBoundary` | `trusted_boundary` | 0 | Explicit external assumption or approved boundary remains |
+| `AdmittedDevelopment` | `admitted_development` | 0 | Proof holes (`sorry`/`admit`) remain; development only |
+| `Unsupported` | `unsupported` | 0 | Construct outside the admitted subset |
+| `Failed` | `failed` | 0 | Proof check ran and at least one obligation failed |
+| `Stale` | `stale` | 0 | Cached result exists but inputs changed |
 
-- `not_checked` -> `verified` | `failed` | `admitted` | `trusted` (after proof check)
-- `verified` -> `stale` (on source/dep change)
-- `failed` -> `stale` (on source/dep change)
-- `admitted` -> `stale` (on source/dep change)
-- `trusted` -> `stale` (on source/dep change)
-- `stale` -> `verified` | `failed` | `admitted` | `trusted` (after re-check)
-- Any state -> `not_checked` (on cache clear)
+Rules taken from the source file:
 
-### Aggregation Rules
-
-When rolling up states (file -> project), the most severe state wins:
-`failed` > `admitted` > `trusted` > `stale` > `not_checked` > `verified`
+- Only `ArtifactVerified` returns `true` from `permits_verified_release()`.
+- A successful Lean run establishes `ModelProven` only; `formal_status_from_legacy_verified(true)`
+  returns `ModelProven`, `formal_status_from_legacy_verified(false)` returns `Failed`. Callers must
+  never infer promotion beyond `ModelProven` from Lean's exit status.
+- Promotion along `Specified` -> `ModelProven` -> `SourceRefined` -> `BackendRefined` ->
+  `ArtifactVerified` requires separate source, backend, trust and artifact evidence.
+- Any input change moves a unit to `Stale`; a cache clear returns it to `NotChecked`.
+- Do not compress states into a "percent verified" figure. Roll-ups must keep non-success
+  states (`Failed`, `AdmittedDevelopment`, `TrustedBoundary`, `Unsupported`, `Stale`,
+  `NotChecked`) visible; a roll-up is release-eligible only when every unit is `ArtifactVerified`.
 
 ## 3. Proof Unit Model
 

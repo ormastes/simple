@@ -1,5 +1,7 @@
 # Generic instantiation and the generic flow rule (40.mono / 50.mir)
 
+> **PARTLY SUPERSEDED (2026-11-01):** `40.mono` was deleted by commit `200a05f5bc8`. The H-NAMED and H-ANNOT holes and their "repair candidate" sections (which cite `E-MONO-041`/`E-MONO-040` and `_k<n>` keys) describe deleted code and are superseded by the erased-generics model in `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md` §1A (packets E0, E2, E3).
+
 Status: 2026-10-10, lane `work/rel-generics-complete-20261010`. This note states the rule,
 what the code does today, what is checked and how, and every hole found. Nothing here is a
 machine-checked proof; §7 says exactly what kind of evidence each claim has.
@@ -266,6 +268,8 @@ instance-registry layout under the v4 and the v5 label; purge dev caches from th
 
 ## H-ANNOT repair candidate, 2026-10-11 — verification pending
 
+> **SUPERSEDED (2026-11-01):** describes deleted `40.mono` code; see `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md` §1A.
+
 The implementation candidate retains `Name<args>` for registered local names
 and forward references, using the existing named-instance flat-pool layout.
 The `List<T>` array alias and explicitly imported class precedence remain in the
@@ -289,6 +293,8 @@ self-hosted test runtime or rebuilt native compiler. No formal proof of this
 parser-to-native path is claimed.
 
 ## H-NAMED key repair candidate, 2026-10-11 — verification pending
+
+> **SUPERSEDED (2026-11-01):** describes deleted `40.mono` code; see `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md` §1A.
 
 Specialization identity now includes each nominal type's canonical declaration
 module and original name, with length-delimited boundaries. Display mangling is
@@ -393,6 +399,8 @@ the distinct-owner proof reports no axioms. This is reduced-model evidence only.
 
 ## H-ANNOT repair candidate, 2026-10-11 — verification pending
 
+> **SUPERSEDED (2026-11-01):** describes deleted `40.mono` code; see `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md` §1A.
+
 The implementation candidate retains `Name<args>` for registered local names
 and forward references, using the existing named-instance flat-pool layout.
 The `List<T>` array alias and explicitly imported class precedence remain in the
@@ -416,6 +424,8 @@ self-hosted test runtime or rebuilt native compiler. No formal proof of this
 parser-to-native path is claimed.
 
 ## H-NAMED key repair candidate, 2026-10-11 — verification pending
+
+> **SUPERSEDED (2026-11-01):** describes deleted `40.mono` code; see `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md` §1A.
 
 Specialization identity now includes each nominal type's canonical declaration
 module and original name, with length-delimited boundaries. Display mangling is

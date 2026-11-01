@@ -1,5 +1,7 @@
 # Standalone monomorphization removal
 
+> **SUPERSEDED (2026-11-01):** monomorphization was deleted by commit `200a05f5bc8` (`src/compiler/40.mono/` no longer exists on `origin/release/1.0.0`); the statement below that the engine "is NOT removed" is obsolete. Current plan: `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md` (§1A).
+
 Status: design and two dependency-removal slices; runtime qualification blocked.
 Source baseline: `6a44812d73d6`. User requests removal, retaining valid generics.
 Astra owns design and final source review; Luna owns implementation/specs.
