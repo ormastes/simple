@@ -1,0 +1,338 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/04_architecture/compiler/macro_rr_invalidation.md ; plan: doc/03_plan/sys_test/macro_rr_invalidation.md ; design: doc/05_design/compiler/macro_rr_invalidation.md
+
+"""
+## Purpose and audience
+
+Purpose: drive the macro reverse-reference invalidation matrix over a real
+companion fixture tree and a real schema-2 receipt: each edit kind must
+invalidate exactly the expected sources. Audience: compiler cache engineers.
+
+## Operator workflow
+
+1. Run `bin/simple test test/02_integration/compiler/cache/macro_rr_invalidation_edit_rebuild_spec.spl --mode=interpreter`.
+2. Every scenario must pass; a failure is over- or under-invalidation for that edit kind.
+
+## Compatibility and limitations
+
+Writes fixtures under `build/test_tmp/`. The concurrency scenario models two
+sequential publishers; native concurrency qualification is out of scope.
+Failing-first: the macro RR inventory/invalidation modules do not exist yet.
+"""
+
+# doc-path: doc/03_plan/sys_test/macro_rr_invalidation.md
+# doc-path: doc/04_architecture/compiler/macro_rr_invalidation.md
+# doc-path: doc/05_design/compiler/macro_rr_invalidation.md
+# doc-path: doc/03_plan/agent_tasks/macro_rr_invalidation.md
+# @manual: primary
+# @tag:in-development
+# @tag:integration
+# @tag:compiler
+# @tag:cache
+# @tag:macros
+
+"""
+# Macro RR invalidation: edit then rebuild
+
+Fixture: helper (fn), provider (twice uses helper_value, plus other), nested
+(quad expands twice), site_a (twice!), site_b (quad!), site_c (other!),
+unrelated (no macros), importer_of_a (imports site_a).
+"""
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{file_write, file_read, file_exists}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.time_ops.{time_now_unix_micros}
+use compiler.driver.cache.module_artifacts_v1.{module_artifacts_emit_v1,
+    module_tldr_companion_path_v1}
+use compiler.driver.cache.action_key.{interface_digest_of_source}
+use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1}
+use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceProjectionV1,
+    ReverseReferenceGenerationReceiptV1, ReverseReferenceReceiptReadV1,
+    reverse_reference_receipt_encode_v1, reverse_reference_receipt_decode_v1,
+    reverse_reference_receipt_digest_v1, reverse_reference_consumers_v1,
+    reverse_reference_publish_generation_v1, reverse_reference_read_current_v1}
+use compiler.driver.cache.reverse_reference_projection_v2.{SealedForwardManifestV2,
+    reverse_reference_project_generation_v2}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    semantic_query_key_canonical_v1}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefIdV1,
+    MacroDefinitionEntryV1, MacroDefinitionTableV1, macro_use_status_tag_v1,
+    macro_use_forward_read_manifest_v1, macro_content_digest_v1}
+use compiler.common.cache_contract.macro_rr_contract_v1.{MacroRrFactV1,
+    macro_effect_surface_v1}
+use compiler.driver.cache.macro_rr_inventory_v1.{MacroRrInventoryV1, macro_rr_inventory_v1,
+    macro_rr_module_state_v1, macro_rr_module_state_refresh_v1}
+use compiler.driver.cache.macro_rr_invalidation_v1.{MacroRrAffectedV1,
+    macro_rr_changed_subjects_for_path_v1, macro_rr_affected_sources_v1}
+
+struct MacroRrScopeFixtureV1:
+    root: text
+    tldr: text
+    helper: text
+    provider: text
+    nested: text
+    site_a: text
+    site_b: text
+    site_c: text
+    unrelated: text
+    importer_of_a: text
+    all: [text]
+    facts: [MacroRrFactV1]
+    receipt: ReverseReferenceReceiptReadV1
+    # SHA-256 hex of every source as recorded at setup (the BuildCache's
+    # fingerprint): the pre-edit companion is admitted only for that source.
+    hashes: {text: text}
+
+fn recorded_hash_v1(fixture: MacroRrScopeFixtureV1, path: text) -> text:
+    if fixture.hashes.contains_key(path): fixture.hashes[path] else: ""
+
+fn macro_def_text_v1(name: text, body: text) -> text:
+    "macro " + name + "(x: Int) -> (returns result: Int):\n    emit result:\n        " + body + "\n"
+
+fn provider_text_v1() -> text:
+    "use helper.{helper_value}\n\n" + macro_def_text_v1("twice", "x + x + helper_value()") + "\n" +
+        macro_def_text_v1("other", "x - 1")
+
+fn nested_text_v1() -> text:
+    "use provider.{twice}\n\n" + macro_def_text_v1("quad", "twice!(x) + twice!(x)")
+
+fn receipt_from_facts_v1(facts: [MacroRrFactV1], owner: text, root: text) -> ReverseReferenceGenerationReceiptV1:
+    var projections: [ReverseReferenceProjectionV1] = []
+    for fact in facts:
+        projections.push(ReverseReferenceProjectionV1(key: ReverseReferenceKeyV1(
+            registry_kind: "semantic", owner_generation: owner, root_generation: root,
+            subject_identity: fact.subject, projection_kind: fact.family,
+            projection_digest: sha256_text(fact.evidence), schema_version: 1),
+            consumer_identity: fact.consumer))
+    ReverseReferenceGenerationReceiptV1(schema_version: 2, owner_generation: owner,
+        root_generation: root, projections: projections)
+
+fn setup_macro_rr_scope_v1() -> MacroRrScopeFixtureV1:
+    val root = "build/test_tmp/macro_rr_scope_{time_now_unix_micros()}"
+    val src = root + "/src"
+    val tldr = root + "/tldr"
+    val _created = dir_create_all(src)
+    val helper = src + "/helper.spl"
+    val provider = src + "/provider.spl"
+    val nested = src + "/nested.spl"
+    val site_a = src + "/site_a.spl"
+    val site_b = src + "/site_b.spl"
+    val site_c = src + "/site_c.spl"
+    val unrelated = src + "/unrelated.spl"
+    val importer_of_a = src + "/importer_of_a.spl"
+    val _w1 = file_write(helper, "pub fn helper_value() -> i64:\n    1\n")
+    val _w2 = file_write(provider, provider_text_v1())
+    val _w3 = file_write(nested, nested_text_v1())
+    val _w4 = file_write(site_a, "use provider.{twice}\n\npub fn first() -> i64:\n    twice!(1)\n")
+    val _w5 = file_write(site_b, "use nested.{quad}\n\nfn second() -> i64:\n    quad!(2)\n")
+    val _w6 = file_write(site_c, "use provider.{other}\n\nfn third() -> i64:\n    other!(3)\n")
+    val _w7 = file_write(unrelated, "fn lonely() -> i64:\n    7\n")
+    val _w8 = file_write(importer_of_a, "use site_a.{first}\n\nfn again() -> i64:\n    first()\n")
+    val all = [helper, provider, nested, site_a, site_b, site_c, unrelated, importer_of_a]
+    var hashes: {text: text} = {}
+    for path in all:
+        val _e = module_artifacts_emit_v1(path, tldr)
+        hashes[path] = sha256_text(file_read(path))
+    val inventory = macro_rr_inventory_v1(all, tldr)
+    val receipt = reverse_reference_receipt_decode_v1(reverse_reference_receipt_encode_v1(
+        receipt_from_facts_v1(inventory.facts, "owner-g1", "root-g1")))
+    MacroRrScopeFixtureV1(root: root, tldr: tldr, helper: helper, provider: provider,
+        nested: nested, site_a: site_a, site_b: site_b, site_c: site_c, unrelated: unrelated,
+        importer_of_a: importer_of_a, all: all, facts: inventory.facts, receipt: receipt,
+        hashes: hashes)
+
+fn edit_source_v1(path: text, new_text: text) -> bool:
+    file_write(path, new_text)
+
+fn check_affected_v1(fixture: MacroRrScopeFixtureV1, changed_path: text,
+        expected_sorted_paths: [text]) -> MacroRrAffectedV1:
+    val changed = macro_rr_changed_subjects_for_path_v1(changed_path, "modified", fixture.tldr,
+        recorded_hash_v1(fixture, changed_path))
+    val inventory = macro_rr_inventory_v1(fixture.all, fixture.tldr)
+    val affected = macro_rr_affected_sources_v1(fixture.receipt, changed, inventory, fixture.all)
+    expect(affected.exact).to_equal(true)
+    expect(affected.sources).to_equal(expected_sorted_paths)
+    affected
+
+fn surface_entry_v1(name: text, surface: text, members: [text]) -> MacroDefinitionEntryV1:
+    MacroDefinitionEntryV1(def_id: MacroDefIdV1(package: "pkg", module: "provider",
+        namespace: "macro", binder: name), macro_name: name, generation: 1,
+        contract_digest: macro_content_digest_v1("contract:" + surface),
+        body_digest: macro_content_digest_v1("body"), hygiene_schema: "h1",
+        declared_effects: [], dependent_macros: [], guard_ids: [], is_public: true,
+        generated_member_names: members, generated_member_root: macro_content_digest_v1("members"),
+        exported_surface_digest: macro_content_digest_v1(surface))
+
+describe "macro RR edit then rebuild":
+    # @req REQ-MACRO-RR-001
+    it "invalidates the sites and the nested definer for a twice body edit":
+        step("Edit only the body of twice; quad in nested.spl expands twice")
+        val fx = setup_macro_rr_scope_v1()
+        expect(fx.receipt.valid).to_equal(true)
+        expect(edit_source_v1(fx.provider, provider_text_v1().replace("x + x + helper_value()",
+            "x * 2 + helper_value()"))).to_equal(true)
+        val affected = check_affected_v1(fx, fx.provider, [fx.nested, fx.site_a, fx.site_b].sorted())
+        expect(affected.sources.contains(fx.site_c)).to_equal(false)
+        expect(affected.sources.contains(fx.unrelated)).to_equal(false)
+        expect(affected.sources.contains(fx.importer_of_a)).to_equal(false)
+
+    # @req REQ-MACRO-RR-002
+    it "stops a helper body edit at the helper interface and propagates a signature edit":
+        step("Body-only helper edit: interface digest equal, macro affected set exact-empty")
+        val fx = setup_macro_rr_scope_v1()
+        val original = file_read(fx.helper)
+        val body_edit = "pub fn helper_value() -> i64:\n    2\n"
+        expect(edit_source_v1(fx.helper, body_edit)).to_equal(true)
+        expect(interface_digest_of_source(body_edit)).to_equal(interface_digest_of_source(original))
+        check_affected_v1(fx, fx.helper, [])
+        step("Signature edit changes the helper interface digest (deps_iface path)")
+        val signature_edit = "pub fn helper_value(scale: i64) -> i64:\n    scale\n"
+        expect(interface_digest_of_source(signature_edit) == interface_digest_of_source(original))
+            .to_equal(false)
+
+    # @req REQ-MACRO-RR-003
+    it "rebuilds only the site for an expansion argument edit":
+        step("twice!(1) becomes twice!(5)")
+        val fx = setup_macro_rr_scope_v1()
+        val before = macro_rr_module_state_v1(fx.site_a, fx.tldr)
+        expect(edit_source_v1(fx.site_a, file_read(fx.site_a).replace("twice!(1)", "twice!(5)")))
+            .to_equal(true)
+        check_affected_v1(fx, fx.site_a, [])
+        val after = macro_rr_module_state_v1(fx.site_a, fx.tldr)
+        expect(after.fresh).to_equal(true)
+        expect(after.input_root.root == before.input_root.root).to_equal(false)
+
+    # @req REQ-MACRO-RR-004
+    it "changes the effect surface for a generated public member but not for a body edit":
+        step("Generated members are not reachable from contract source text here; assert on hand-built def tables")
+        val base = MacroDefinitionTableV1(schema: 1, module_id: "pkg.provider",
+            entries: [surface_entry_v1("twice", "surface-1", [])])
+        val grown = MacroDefinitionTableV1(schema: 1, module_id: "pkg.provider",
+            entries: [surface_entry_v1("twice", "surface-2", ["gen_twice"])])
+        expect(macro_effect_surface_v1(grown, ["gen_twice"]) == macro_effect_surface_v1(base, []))
+            .to_equal(false)
+        step("A real body-only edit leaves the provider's effect surface unchanged")
+        val fx = setup_macro_rr_scope_v1()
+        val before = macro_rr_module_state_v1(fx.provider, fx.tldr)
+        expect(edit_source_v1(fx.provider, provider_text_v1().replace("x - 1", "x - 2"))).to_equal(true)
+        val after = macro_rr_module_state_refresh_v1(fx.provider, fx.tldr)
+        expect(after.effect_surface).to_equal(before.effect_surface)
+
+    # @req REQ-MACRO-RR-005
+    it "invalidates old-name consumers on rename and records the site's absence":
+        step("Rename twice to thrice in provider.spl")
+        val fx = setup_macro_rr_scope_v1()
+        expect(edit_source_v1(fx.provider, provider_text_v1().replace("macro twice", "macro thrice")))
+            .to_equal(true)
+        val changed = macro_rr_changed_subjects_for_path_v1(fx.provider, "modified", fx.tldr,
+            recorded_hash_v1(fx, fx.provider))
+        expect(changed.name_subjects).to_equal(["macro-name:thrice", "macro-name:twice"])
+        val inventory = macro_rr_inventory_v1(fx.all, fx.tldr)
+        val affected = macro_rr_affected_sources_v1(fx.receipt, changed, inventory, fx.all)
+        expect(affected.sources).to_contain(fx.site_a)
+        expect(affected.sources).to_contain(fx.site_b)
+        step("After re-emitting site_a its use is unresolved with an absence witness")
+        val site = macro_rr_module_state_refresh_v1(fx.site_a, fx.tldr)
+        expect(site.uses.len()).to_equal(1)
+        expect(macro_use_status_tag_v1(site.uses[0].status)).to_equal("unresolved")
+        expect(site.uses[0].has_absence_witness).to_equal(true)
+
+    # @req REQ-MACRO-RR-006
+    it "invalidates only quad's site for a nested definition body edit":
+        step("Edit quad's body; twice and other are untouched")
+        val fx = setup_macro_rr_scope_v1()
+        expect(edit_source_v1(fx.nested, nested_text_v1().replace("twice!(x) + twice!(x)",
+            "twice!(twice!(x))"))).to_equal(true)
+        check_affected_v1(fx, fx.nested, [fx.site_b])
+
+    # @req REQ-MACRO-RR-007
+    it "reports exact-empty for an unrelated edit":
+        step("Edit a macro-free body; no incremental BuildCache is involved at this layer")
+        val fx = setup_macro_rr_scope_v1()
+        expect(edit_source_v1(fx.unrelated, "fn lonely() -> i64:\n    8\n")).to_equal(true)
+        val changed = macro_rr_changed_subjects_for_path_v1(fx.unrelated, "modified", fx.tldr,
+            recorded_hash_v1(fx, fx.unrelated))
+        expect(changed.complete).to_equal(true)
+        expect(changed.definition_subjects).to_equal([])
+        expect(changed.name_subjects).to_equal([])
+        check_affected_v1(fx, fx.unrelated, [])
+
+    # @req REQ-MACRO-RR-008
+    it "never exposes a mixed receipt across two sequential publishers":
+        step("Publish G1 then G2 to one cache path and read the current generation")
+        val fx = setup_macro_rr_scope_v1()
+        val cache_path = fx.root + "/build_cache.sdn"
+        val g1 = receipt_from_facts_v1(fx.facts, "owner-g1", "root-g1")
+        val g2 = receipt_from_facts_v1(fx.facts, "owner-g2", "root-g2")
+        expect(reverse_reference_publish_generation_v1(cache_path, g1)).to_equal(true)
+        expect(reverse_reference_publish_generation_v1(cache_path, g2)).to_equal(true)
+        val current = reverse_reference_read_current_v1(cache_path)
+        expect(current.valid).to_equal(true)
+        if val receipt = current.receipt:
+            expect(reverse_reference_receipt_digest_v1(receipt)).to_equal(reverse_reference_receipt_digest_v1(g2))
+            expect(receipt.root_generation).to_equal("root-g2")
+        step("A truncated encoding never decodes as valid")
+        val encoded = reverse_reference_receipt_encode_v1(g2)
+        val truncated = reverse_reference_receipt_decode_v1(encoded.substring(0, encoded.len() / 2))
+        expect(truncated.valid).to_equal(false)
+
+    # @req REQ-MACRO-RR-009
+    it "fails closed when a site companion is corrupt":
+        step("Overwrite site_a's companion with garbage")
+        val fx = setup_macro_rr_scope_v1()
+        expect(file_write(module_tldr_companion_path_v1(fx.tldr, fx.site_a), "corrupt\n")).to_equal(true)
+        val inventory = macro_rr_inventory_v1(fx.all, fx.tldr)
+        expect(inventory.complete).to_equal(false)
+        expect(edit_source_v1(fx.provider, provider_text_v1().replace("x + x + helper_value()",
+            "x * 3 + helper_value()"))).to_equal(true)
+        val changed = macro_rr_changed_subjects_for_path_v1(fx.provider, "modified", fx.tldr,
+            recorded_hash_v1(fx, fx.provider))
+        val affected = macro_rr_affected_sources_v1(fx.receipt, changed,
+            macro_rr_inventory_v1(fx.all, fx.tldr), fx.all)
+        expect(affected.exact).to_equal(false)
+
+    # @req REQ-MACRO-RR-010
+    it "round trips a schema 2 receipt and matches the v2 semantic consumer count":
+        step("The legacy receipt is schema 2 and binds macro-def:<id> subjects")
+        val fx = setup_macro_rr_scope_v1()
+        expect(fx.receipt.valid).to_equal(true)
+        var schema = 0
+        if val receipt = fx.receipt.receipt:
+            schema = receipt.schema_version
+        expect(schema).to_equal(2)
+        val provider_state = macro_rr_module_state_v1(fx.provider, fx.tldr)
+        var twice_id = ""
+        for def in provider_state.defs:
+            if def.macro_name == "twice": twice_id = def.def_id
+        val legacy = reverse_reference_consumers_v1(fx.receipt, "macro-def:" + twice_id,
+            "macro-definition-consumer")
+        expect(legacy.exact).to_equal(true)
+        step("v2 projects only expansion uses; the nested definer edge is legacy-only, so compare use-site consumers")
+        var legacy_use_sites: [text] = []
+        for consumer in legacy.consumers:
+            if consumer != fx.nested: legacy_use_sites.push(consumer)
+        var manifests: [SealedForwardManifestV2] = []
+        for path in fx.all:
+            val state = macro_rr_module_state_v1(path, fx.tldr)
+            for use in state.uses:
+                val manifest = macro_use_forward_read_manifest_v1(use, macro_content_digest_v1("profile"))
+                manifests.push(SealedForwardManifestV2(
+                    consumer_identity: semantic_query_key_canonical_v1(manifest.consumer),
+                    sealed: true, manifest: manifest))
+        val built = reverse_reference_project_generation_v2("fixture-owner", "fixture-root",
+            manifests, ReverseReferenceReceiptReadV1(valid: false, reason: "missing-generation",
+                receipt: fx.receipt.receipt))
+        expect(built.ok).to_equal(true)
+        var semantic_users: [text] = []
+        if val semantic = built.receipt:
+            for projection in semantic.projections:
+                if projection.key.projection_kind == "macro-definition-consumer" and
+                        projection.key.subject_identity.contains(twice_id) and
+                        not semantic_users.contains(projection.consumer_identity):
+                    semantic_users.push(projection.consumer_identity)
+        expect(semantic_users.len()).to_equal(legacy_use_sites.len())
+        expect(legacy_use_sites).to_equal([fx.site_a])
