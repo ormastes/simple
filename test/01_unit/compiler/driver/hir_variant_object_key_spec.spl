@@ -7,18 +7,19 @@
 **Design:** doc/05_design/generic_rr_hir_variant_obj.md
 **Research:** doc/01_research/local/generic_rr_hir_variant_obj.md
 
+## Overview
+
 One target-neutral HIR (a list of `HirCfgDeclV1`) is projected per MIR
 target: plain `@cfg` items and numbered cfg groups (with an else arm) select
 the kept declarations, which seal a per-target `variant_digest`. The object
 key, RR partition, RR producer and sidecar path all derive from that
 projection, so a windows-only edit moves only the windows key.
 
-UNRUN: no self-hosted binary is available on the authoring host; RED guide
-for src/compiler/80.driver/driver_build/hir_variant_object_key_v1.spl.
+Evidence: Rust-seed interpreter runs only (attributed to the seed); no self-hosted
+binary exists on the authoring host. Owner: hir_variant_object_key_v1.spl.
 """
 
 # @tag:unit
-# @tag:in-development
 # @tag:compiler
 # @tag:cache
 # @tag:generics
@@ -118,6 +119,30 @@ describe "HIR variant projection: fail-closed inputs":
         val p = proj([d("g0", [], 5, 0, "g0-v1"), d("g1", ["linux"], 5, 1, "g1-v1")], linux())
         expect(p.ok).to_equal(false)
         expect(p.error).to_equal("malformed_cfg_group")
+
+    it "rejects two records of one group arm that disagree on the condition":
+        step("Project a group whose arm 0 is declared with two different conditions")
+        val p = proj([d("x", ["windows"], 6, 0, "x-v1"), d("y", ["linux"], 6, 0, "y-v1"),
+            d("z", [], 6, -1, "z-v1")], linux())
+        expect(p.ok).to_equal(false)
+        expect(p.error).to_equal("malformed_cfg_group")
+        val agree = proj([d("x", ["windows"], 6, 0, "x-v1"), d("y", ["windows"], 6, 0, "y-v1"),
+            d("z", [], 6, -1, "z-v1")], linux())
+        expect(agree.ok).to_equal(true)
+        expect(agree.kept).to_equal(["fn:z"])
+
+    it "seals build-context inputs that are not part of the target id (REQ-GRR-009)":
+        step("Change features and collection policy and compare variant digests (REQ-GRR-009)")
+        val base = hir_variant_projection_v1(decls(), linux(), [])
+        val with_feature = hir_variant_projection_v1(decls(), linux(), ["simd"])
+        expect(with_feature.target_id).to_equal(base.target_id)
+        expect(with_feature.variant_digest == base.variant_digest).to_equal(false)
+        expect(hir_variant_projection_v1(decls(), linux(), ["simd"]).variant_digest).to_equal(with_feature.variant_digest)
+        val strict = MirTargetContext(arch: "x86_64", os: "linux", abi: "gnu", backend: "llvm",
+            collection_policy: "strict", version: 1)
+        val with_policy = hir_variant_projection_v1(decls(), strict, [])
+        expect(with_policy.target_id).to_equal(base.target_id)
+        expect(with_policy.variant_digest == base.variant_digest).to_equal(false)
 
 describe "HIR variant object key, partition, producer and sidecar":
     it "formats the target id":
