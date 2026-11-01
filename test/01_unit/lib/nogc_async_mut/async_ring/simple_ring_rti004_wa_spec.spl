@@ -1,0 +1,127 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+
+# Regression: the frozen stage2 bootstrap compiler (2026-10-27, monomorphization
+# still present) rewrites every call on a `SimpleRing<i64, i64>` instance to a
+# specialization symbol allocated at MONO_SYMBOL_BASE (2^50). When such a call
+# is the *subject* of a `match`, MIR asks the ReturnTypeInterface for the
+# scrutinee type and RTI looks the callee up in the module SymbolTable, which
+# never holds specialization ids -> `E-RTI-004: no local symbol for id 2^50+n`
+# (bug doc/08_tracking/bug/rti004_mono_specialization_match_subject_2026-11-01.md).
+# Inside the specialization itself (`SimpleRing__cancel$i64_i64`) the same gap
+# leaves an untyped local `unresolved`, so a bare `Ok` arm is ambiguous and the
+# `Err` payload cannot type `RingCancelOutcome.CancelRejected`.
+#
+# Every affected site now binds the call to a typed local before matching
+# (tag `@workaround bug=rti004-mono-20261101`). This spec pins the behaviour of
+# the rewritten `SimpleRing.cancel` arms and guards that no call-shaped match
+# subject on a ring instance returns to the three touched modules. The
+# bridge and async_ref sites are behaviourally pinned by
+# test/01_unit/compiler/driver/file_fiber_tldr_bridge_v1_spec.spl and
+# test/01_unit/lib/nogc_async_mut/async_ref_*_spec.spl.
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.async_ring.simple_ring.{
+    SimpleRing, SimpleRingError, RingCancelOutcome
+}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn ring(capacity: i64) -> SimpleRing<i64, i64>:
+    match SimpleRing<i64, i64>.create(99u64, 7u64, capacity):
+        case Ok(value): value
+        case Err(_): fail("ring construction failed")
+
+fn reservation(ring: SimpleRing<i64, i64>, task_key: u64):
+    match ring.reserve(7u64, task_key):
+        case Ok(value): value
+        case Err(_): fail("reservation failed")
+
+fn _source(path: text) -> text:
+    val src = rt_file_read_text(path) ?? ""
+    expect(src.len() > 0).to_equal(true)
+    src
+
+fn _count(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+describe "SimpleRing.cancel typed release_result arms":
+    # @manual scenario evidence
+
+    it "cancels a reserved slot before commit and counts the cancellation":
+        # @req REQ-SSPEC-LIB
+        step("the typed Result.Ok arm releases the slot and bumps telemetry")
+        val value = ring(2)
+        val reserved = reservation(value, 10u64)
+        expect(value.telemetry().cancellations).to_equal(0u64)
+        match value.cancel(7u64, reserved.token):
+            case RingCancelOutcome.CancelledBeforeCommit(token):
+                expect(token.slot).to_equal(reserved.token.slot)
+                expect(token.generation.value).to_equal(reserved.token.generation.value)
+            case _: fail("reserved cancellation had wrong outcome")
+        expect(value.telemetry().cancellations).to_equal(1u64)
+        expect(value.occupancy()).to_equal(0u64)
+        step("the released slot is reusable with a new generation")
+        val reused = reservation(value, 11u64)
+        expect(reused.token.slot).to_equal(reserved.token.slot)
+        expect(reused.token.generation.value).to_equal(reserved.token.generation.value + 1u64)
+
+    it "rejects a cancellation from a foreign owner before touching the slot":
+        # @req REQ-SSPEC-LIB
+        step("CancelRejected carries the SimpleRingError payload")
+        val value = ring(1)
+        val reserved = reservation(value, 10u64)
+        match value.cancel(8u64, reserved.token):
+            case RingCancelOutcome.CancelRejected(error): expect(error).to_equal(SimpleRingError.WrongOwner)
+            case _: fail("foreign owner cancellation was accepted")
+        expect(value.telemetry().cancellations).to_equal(0u64)
+        expect(value.occupancy()).to_equal(1u64)
+
+    it "reports a stale token after the cancelled slot was reused":
+        # @req REQ-SSPEC-LIB
+        step("the old generation no longer resolves to the reused slot")
+        val value = ring(1)
+        val reserved = reservation(value, 10u64)
+        match value.cancel(7u64, reserved.token):
+            case RingCancelOutcome.CancelledBeforeCommit(_): ()
+            case _: fail("reserved cancellation had wrong outcome")
+        val reused = reservation(value, 11u64)
+        match value.cancel(7u64, reserved.token):
+            case RingCancelOutcome.UnknownOrStale(token): expect(token.slot).to_equal(reused.token.slot)
+            case _: fail("stale token cancellation was accepted")
+        expect(value.telemetry().cancellations).to_equal(1u64)
+
+describe "ring call results are bound to typed locals before matching":
+    # @manual scenario evidence
+
+    it "keeps every SimpleRing match subject in file_fiber_tldr_bridge_v1.spl a typed local":
+        # @req REQ-SSPEC-LIB
+        step("no `match self.ring.<call>(` subject remains in the bridge")
+        val src = _source("src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl")
+        expect(src.contains("match self.ring.")).to_equal(false)
+        expect(src.contains("match async_ref_deliver_wake_i64")).to_equal(false)
+        expect(_count(src, "@workaround bug=rti004-mono-20261101")).to_equal(8)
+        expect(src.contains("val reserve_result: Result<RingReservation, SimpleRingError> = self.ring.reserve(")).to_equal(true)
+        expect(src.contains("val commit_result: Result<RingToken, SimpleRingError> = self.ring.commit(")).to_equal(true)
+        expect(src.contains("val cancel_outcome: RingCancelOutcome = self.ring.cancel(")).to_equal(true)
+
+    it "keeps both ring completion match subjects in async_ref.spl typed locals":
+        # @req REQ-SSPEC-LIB
+        step("no `match ring.<call>(` subject remains in async_ref_deliver_wake_i64")
+        val src = _source("src/lib/nogc_async_mut/async_ring/async_ref.spl")
+        expect(src.contains("match ring.complete_success(")).to_equal(false)
+        expect(src.contains("match ring.complete_failure(")).to_equal(false)
+        expect(_count(src, "@workaround bug=rti004-mono-20261101")).to_equal(2)
+        expect(src.contains("val completed: Result<(), SimpleRingError> = ring.complete_success(")).to_equal(true)
+        expect(src.contains("val failed: Result<(), SimpleRingError> = ring.complete_failure(")).to_equal(true)
+
+    it "keeps the cancel release_result binder typed and its arms qualified in simple_ring.spl":
+        # @req REQ-SSPEC-LIB
+        step("the Reserved arm of cancel matches a typed Result with qualified variants")
+        val src = _source("src/lib/nogc_async_mut/async_ring/simple_ring.spl")
+        expect(src.contains("val release_result: Result<(), SimpleRingError> = self._release_slot(slot)")).to_equal(true)
+        expect(src.contains("case Result.Err(error): RingCancelOutcome.CancelRejected(error)")).to_equal(true)
+        expect(src.contains("val release_result = self._release_slot(slot)")).to_equal(false)
+        expect(_count(src, "@workaround bug=rti004-mono-20261101")).to_equal(1)

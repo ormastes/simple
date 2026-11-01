@@ -16,8 +16,8 @@ Per (symbol, signature) row, compile is one of:
   UNTESTED  anything else, with the reason: tu-baseline-failed (the TU does not preprocess or
             compile without the prototypes, e.g. a missing system header), tu-missing,
             not-defined-on-host (defined only behind a preprocessor branch that is off here),
-            unmapped-spl-type:T (no single C spelling for T: text, arrays, optionals, classes,
-            tuples), unattributed-error (an error that cannot be pinned to a symbol, so the
+            unmapped-spl-type:T (no single C ABI type for T: generics, tuples, unknown names),
+            unattributed-error (an error that cannot be pinned to a symbol, so the
             rest of the batch stays UNTESTED).
 Rows are per (symbol, .spl signature, .spl file). Two .spl files that declare one symbol
 differently are two rows, each tested against the C definition.
@@ -25,7 +25,13 @@ differently are two rows, each tested against the C definition.
 Scope: this host only (cc and preprocessor conditions as they are here). Compile evidence
 only: link is never tested here, and parameters are checked only through the C prototype.
 Mapped types: i8..i64, u8..u64 to the stdint typedefs, f32/f64 to float/double, bool to bool,
-void as a return. Nothing else is guessed. Run on demand, not wired into CI.
+void as a return. Handles cross the seed codegen's i64-everything extern ABI as one tagged
+int64_t: text (except the (ptr, len) pairs listed for the symbol in text_extern_abi.spl, which
+become const uint8_t* + uint64_t), [T] arrays, T? optionals, Vec* SIMD values, and class/struct/
+enum names declared under src/. A scalar alias (type X = i64) takes its target's C type. Tuples,
+generic T, and unlisted names stay UNTESTED. A C pointer-typed definition (const char*, SplArray*)
+against an int64_t handle is a real mismatch and reports FAIL; the checker never adapts to it.
+Run on demand, not wired into CI.
 
 Exit codes: 0 rows produced (FAIL rows do not change the exit), 2 nothing checked,
 1 selftest failure. The last stdout line is the summary.
@@ -52,6 +58,30 @@ SCALAR = {
 }
 NONNULL_INCLUDE = re.compile(r'#\s*include\s*"runtime_nonnull\.h"')
 SIG = re.compile(r'^\((.*)\) -> (.+)$')
+NOMINAL_DECL = re.compile(r'^[ \t]*(?:pub[ \t]+)?(?:class|struct|enum)[ \t]+([A-Za-z_]\w*)', re.M)
+ALIAS_DECL = re.compile(r'^[ \t]*(?:pub[ \t]+)?type[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*([A-Za-z_]\w*)[ \t]*$', re.M)
+VEC_TYPE = re.compile(r'^Vec\d+[fdiu]\d*$')
+
+
+TEXT_ABI_SPL = 'src/compiler/50.mir/text_extern_abi.spl'
+TEXT_CASE = re.compile(r'case\s+((?:"[^"\n]*"\s*\|?\s*)+):\s*(?:#[^\n]*\n\s*)*return\s+Some\(\[([0-9,\s]*)\]\)')
+NAME = re.compile(r'"([^"\n]*)"')
+
+
+def text_split_table(root):
+    """symbol -> param indices passed as (ptr, len). Read from the Simple table that mirrors the
+    compiler's text_arg_indices (text_extern_abi.spl), the same source the backends use."""
+    path = os.path.join(root, TEXT_ABI_SPL)
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding='utf-8', errors='replace') as f:
+        body = f.read()
+    out = {}
+    for m in TEXT_CASE.finditer(body):
+        idx = tuple(int(x) for x in m[2].replace(' ', '').split(',') if x)
+        for name in NAME.findall(m[1]):
+            out[name] = idx
+    return out
 
 
 def load(name, rel):
@@ -92,19 +122,76 @@ def parse_sig(sig):
     return params, m[2].strip()
 
 
-def unmapped(params, ret):
+def c_type(t, types):
+    """C spelling of one .spl type, or None when no single C type is the real ABI.
+
+    Scalars map to their stdint/float spelling. Every other value that the seed codegen passes
+    as a tagged RuntimeValue crosses as int64_t: text (default ABI), arrays [T], optionals T?,
+    SIMD vectors (Vec4f, Vec16u8, ...), and nominal class/struct/enum refs. Scalar aliases
+    (type X = i64) resolve to their target. Tuples, generics and anything undeclared stay None.
+    """
+    if t in SCALAR:
+        return SCALAR[t]
+    if t in types.alias:
+        return SCALAR[types.alias[t]]
+    if t == 'text' or types.is_handle(t):
+        return 'int64_t'
+    if t.endswith('?') and c_type(t[:-1], types):
+        return 'int64_t'  # nullable: a tagged RuntimeValue, nil included
+    return None
+
+
+def unmapped(params, ret, types):
     for t in params:
-        if t not in SCALAR:
+        if c_type(t, types) is None:
             return t
-    if ret != 'void' and ret not in SCALAR:
+    if ret != 'void' and c_type(ret, types) is None:
         return ret
     return None
 
 
-def prototype(sym, params, ret):
-    ret_c = 'void' if ret == 'void' else SCALAR[ret]
-    ps = ', '.join(SCALAR[p] for p in params) or 'void'
-    return '%s %s(%s);' % (ret_c, sym, ps)
+def prototype(sym, params, ret, types, split):
+    """One C prototype. A text parameter listed in the text ABI table for sym is a raw
+    (const uint8_t* ptr, uint64_t len) pair; every other text is one tagged int64_t."""
+    ret_c = 'void' if ret == 'void' else c_type(ret, types)
+    ps = []
+    for i, p in enumerate(params):
+        if p == 'text' and i in split.get(sym, ()):
+            ps.extend(['const uint8_t*', 'uint64_t'])
+        else:
+            ps.append(c_type(p, types))
+    return '%s %s(%s);' % (ret_c, sym, ', '.join(ps) if ps else 'void')
+
+
+class TypeNames:
+    """Nominal reference types and scalar aliases declared anywhere under src/*.spl."""
+
+    def __init__(self, root):
+        self.alias = {}
+        self.nominal = set()
+        base = os.path.join(root, 'src')
+        for dirpath, _, names in os.walk(base):
+            for name in names:
+                if not name.endswith('.spl'):
+                    continue
+                with open(os.path.join(dirpath, name), encoding='utf-8', errors='replace') as f:
+                    text = f.read()
+                self.nominal.update(m[1] for m in NOMINAL_DECL.finditer(text))
+                for m in ALIAS_DECL.finditer(text):
+                    if m[2] in SCALAR:
+                        self.alias[m[1]] = m[2]
+        # A name that is both an alias and a nominal decl is ambiguous: not mapped.
+        for name in list(self.alias):
+            if name in self.nominal:
+                del self.alias[name]
+                self.nominal.discard(name)
+
+    def is_handle(self, t):
+        if t.startswith('[') and t.endswith(']') and len(t) > 2:
+            return True
+        if VEC_TYPE.match(t):
+            return True
+        return t in self.nominal
 
 
 def cc_argv(cc, rt_dir):
@@ -115,7 +202,7 @@ def defined_symbols(text):
     return {m[1] for m in HM.DEF.finditer(PM.ATTR.sub('', text))}
 
 
-def judge_tu(root, cc, tu_rel, by_sym):
+def judge_tu(root, cc, tu_rel, by_sym, types, split):
     """Rows for one TU. Each row: symbol, sig, spl, tu, compile, reason, diag."""
     rt_dir = os.path.join(root, RT_DIR)
     tu_abs = os.path.join(root, tu_rel)
@@ -145,17 +232,18 @@ def judge_tu(root, cc, tu_rel, by_sym):
         return rows
 
     active = defined_symbols(pp)
-    testable = {}  # (symbol, sig) -> (spl path, prototype)
+    testable = {}  # (symbol, sig) -> (prototype, [spl paths])
     for s in cands:
         for sig, spl in sorted(by_sym[s]):
             params, ret = parse_sig(sig)
-            bad = unmapped(params, ret)
+            bad = unmapped(params, ret, types)
             if bad:
                 row(s, sig, spl, 'UNTESTED', 'unmapped-spl-type:%s' % bad)
             elif s not in active:
                 row(s, sig, spl, 'UNTESTED', 'not-defined-on-host')
             else:
-                testable[(s, sig)] = (spl, prototype(s, params, ret))
+                proto = prototype(s, params, ret, types, split)
+                testable.setdefault((s, sig), (proto, []))[1].append(spl)
 
     # Each symbol's k-th distinct testable signature goes in pass k, so one header never
     # holds two prototypes for one symbol. Conflicting .spl declarations are each tested.
@@ -165,16 +253,16 @@ def judge_tu(root, cc, tu_rel, by_sym):
             rank[(s, sig)] = k
     for k in range(max(rank.values(), default=-1) + 1):
         keys = sorted(key for key in testable if rank[key] == k)
-        results = judge_protos(cc, rt_dir, tu_abs, {s: testable[(s, sig)][1] for s, sig in keys})
+        results = judge_protos(cc, rt_dir, tu_abs, {s: testable[(s, sig)][0] for s, sig in keys})
         for s, sig in keys:
-            spl = testable[(s, sig)][0]
             verdict, diag = results[s]
-            if verdict == 'PASS':
-                row(s, sig, spl, 'PASS', 'compiles-with-prototype')
-            elif verdict == 'FAIL':
-                row(s, sig, spl, 'FAIL', 'prototype-rejected', diag)
-            else:
-                row(s, sig, spl, 'UNTESTED', diag)
+            for spl in sorted(testable[(s, sig)][1]):
+                if verdict == 'PASS':
+                    row(s, sig, spl, 'PASS', 'compiles-with-prototype')
+                elif verdict == 'FAIL':
+                    row(s, sig, spl, 'FAIL', 'prototype-rejected', diag)
+                else:
+                    row(s, sig, spl, 'UNTESTED', diag)
     return rows
 
 
@@ -234,9 +322,11 @@ def index_by_symbol(root):
 
 def check(root, tus, cc):
     by_sym, nrec = index_by_symbol(root)
+    types = TypeNames(root)
+    split = text_split_table(root)
     rows = []
     for tu in tus:
-        rows.extend(judge_tu(root, cc, tu, by_sym))
+        rows.extend(judge_tu(root, cc, tu, by_sym, types, split))
     rows.sort(key=lambda r: (r['tu'], r['symbol'], r['sig']))
     return rows, nrec
 
@@ -281,16 +371,42 @@ def selftest():
            'extern fn rt_wrong(a: i64) -> f64\n'
            'extern fn rt_win_only() -> i64\n'
            'extern fn rt_textual(s: text) -> i64\n'
-           'extern fn rt_dup(a: i64) -> i64\n')
+           'extern fn rt_dup(a: i64) -> i64\n'
+           'extern fn rt_split(s: text, n: i64) -> i64\n'
+           'extern fn rt_split_wrong(s: text, n: i64) -> i64\n'
+           'extern fn rt_arr(a: [u8]) -> i64\n'
+           'extern fn rt_opt(a: i64) -> i64?\n'
+           'extern fn rt_vec(v: Vec4f) -> Vec4f\n'
+           'extern fn rt_obj(w: Widget) -> i64\n'
+           'extern fn rt_alias(h: Handle) -> i64\n'
+           'extern fn rt_tuple(t: (i64, i64)) -> i64\n'
+           'extern fn rt_generic(x: T) -> i64\n')
     spl_b = 'extern fn rt_dup(a: i64) -> f64\n'
+    types_spl = ('class Widget:\n    id: i64\n'
+                 'type Handle = i64\n')
+    table_spl = ('fn text_arg_indices(func_name: text) -> [i64]?:\n'
+                 '    match func_name:\n'
+                 '        case "rt_split" | "rt_split_wrong":\n'
+                 '            return Some([0])\n'
+                 '        case _:\n'
+                 '            return None\n')
     good_c = (
-        '#include <stdint.h>\n#include <stdbool.h>\n'
+        '#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n'
         'int64_t rt_good(int64_t a) { return a; }\n'
         'bool rt_flag(void) { return true; }\n'
         'int64_t rt_wrong(int64_t a) { return a; }\n'
         '#ifdef _WIN32\nint64_t rt_win_only(void) { return 1; }\n#endif\n'
         'int64_t rt_textual(int64_t v) { return v; }\n'
-        'int64_t rt_dup(int64_t a) { return a; }\n')
+        'int64_t rt_dup(int64_t a) { return a; }\n'
+        'int64_t rt_split(const uint8_t* p, uint64_t len, int64_t n) { return n + (int64_t)len + p[0]; }\n'
+        'int64_t rt_split_wrong(int64_t s, int64_t n) { return s + n; }\n'
+        'int64_t rt_arr(int64_t a) { return a; }\n'
+        'int64_t rt_opt(int64_t a) { return a; }\n'
+        'int64_t rt_vec(int64_t v) { return v; }\n'
+        'int64_t rt_obj(int64_t w) { return w; }\n'
+        'int64_t rt_alias(int64_t h) { return h; }\n'
+        'int64_t rt_tuple(int64_t t) { return t; }\n'
+        'int64_t rt_generic(int64_t x) { return x; }\n')
     broken_c = (
         '#include "no_such_rt_header_for_selftest.h"\n'
         'int64_t rt_broken(int64_t a) { return a; }\n')
@@ -308,14 +424,28 @@ def selftest():
             fails.append('%s compile=%s reason=%s, wanted %s %s' % (
                 sym, r['compile'], r['reason'], compile_v, reason_prefix))
 
-    root = tree({'src/runtime/good.c': good_c, 'src/lib/a.spl': spl, 'src/lib/b.spl': spl_b})
+    root = tree({'src/runtime/good.c': good_c, 'src/lib/a.spl': spl, 'src/lib/b.spl': spl_b,
+                 'src/lib/types.spl': types_spl,
+                 'src/compiler/50.mir/text_extern_abi.spl': table_spl})
     try:
         rows, _ = check(root, ['src/runtime/good.c'], 'cc')
         want(rows, 'rt_good', 'PASS', 'compiles-with-prototype')
         want(rows, 'rt_flag', 'PASS', 'compiles-with-prototype')
         want(rows, 'rt_wrong', 'FAIL', 'prototype-rejected')
         want(rows, 'rt_win_only', 'UNTESTED', 'not-defined-on-host')
-        want(rows, 'rt_textual', 'UNTESTED', 'unmapped-spl-type:text')
+        # text is one tagged int64_t by default; a text-ABI row splits into (ptr, len).
+        want(rows, 'rt_textual', 'PASS', 'compiles-with-prototype')
+        want(rows, 'rt_split', 'PASS', 'compiles-with-prototype')
+        want(rows, 'rt_split_wrong', 'FAIL', 'prototype-rejected')
+        # Arrays, optionals, SIMD vectors, declared classes and scalar aliases are int64 handles.
+        want(rows, 'rt_arr', 'PASS', 'compiles-with-prototype')
+        want(rows, 'rt_opt', 'PASS', 'compiles-with-prototype')
+        want(rows, 'rt_vec', 'PASS', 'compiles-with-prototype')
+        want(rows, 'rt_obj', 'PASS', 'compiles-with-prototype')
+        want(rows, 'rt_alias', 'PASS', 'compiles-with-prototype')
+        # Tuples and bare generic parameters have no single C ABI type: never guessed.
+        want(rows, 'rt_tuple', 'UNTESTED', 'unmapped-spl-type:')
+        want(rows, 'rt_generic', 'UNTESTED', 'unmapped-spl-type:T')
         dup = {(r['sig'], r['spl'].rsplit('/', 1)[-1]): r['compile'] for r in rows if r['symbol'] == 'rt_dup'}
         if dup != {('(i64) -> i64', 'a.spl'): 'PASS', ('(i64) -> f64', 'b.spl'): 'FAIL'}:
             fails.append('rt_dup rows %s, wanted a.spl PASS and b.spl FAIL' % sorted(dup.items()))
@@ -348,8 +478,9 @@ def selftest():
             print('SELFTEST FAIL: ' + f)
         print('ERROR — selftest %d failure(s)' % len(fails))
         return 1
-    print('PASS — selftest: PASS, FAIL (wrong prototype), UNTESTED (ifdef, text, dup, broken TU, '
-          'failing cc) all as expected')
+    print('PASS — selftest: PASS, FAIL (wrong prototype, wrong text-ABI split), UNTESTED (ifdef, tuple, '
+          'bare generic, broken TU, failing cc) all as expected; text, arrays, optionals, vectors, '
+          'declared classes and aliases map to their C ABI')
     return 0
 
 

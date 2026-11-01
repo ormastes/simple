@@ -10,9 +10,11 @@ declaring duplicate lock hooks.
 @unsafe(reason: "raw runtime mutex allocation ABI; contract: returned handle is runtime-owned", capabilities: [ffi])
 extern fn rt_mutex_new<T>(initial: T) -> i64
 @unsafe(reason: "raw runtime mutex lock ABI; contract: nil means stale or foreign handle", capabilities: [ffi])
-extern fn rt_mutex_lock<T>(mutex: i64) -> T?
+# @workaround bug=rti007_any_return_rows_2026-11-01 reason=frozen-stage2-RTI-lowers-this-declared-return-to-Any-(E-RTI-007); see doc/08_tracking/bug/rti007_any_return_rows_2026-11-01.md
+extern fn rt_mutex_lock(mutex: i64) -> i64
 @unsafe(reason: "raw runtime mutex try-lock ABI; contract: nil means contended or invalid handle", capabilities: [ffi])
-extern fn rt_mutex_try_lock<T>(mutex: i64) -> T?
+# @workaround bug=rti007_any_return_rows_2026-11-01 reason=frozen-stage2-RTI-lowers-this-declared-return-to-Any-(E-RTI-007); see doc/08_tracking/bug/rti007_any_return_rows_2026-11-01.md
+extern fn rt_mutex_try_lock(mutex: i64) -> i64
 @unsafe(reason: "raw runtime mutex unlock ABI; contract: one means released and zero means invalid handle", capabilities: [ffi])
 extern fn rt_mutex_unlock<T>(mutex: i64, new_value: T) -> i64
 
@@ -45,8 +47,8 @@ class Mutex:
     # `<T>` round-trips correctly; `Any` does not.
     # @tag:api
     fn with_lock<T>(f: fn(T) -> T) -> T:
-        val current = unsafe(capabilities: [ffi]):
-            rt_mutex_lock<T>(self._handle)
+        val current: T? = unsafe(capabilities: [ffi]):
+            rt_mutex_lock(self._handle)
         if current == nil:
             panic("E-SFFI-MUTEX-002: rt_mutex_lock failed on a stale or foreign handle")
         val updated = f(current.unwrap())
@@ -69,7 +71,7 @@ class Mutex:
     # @tag:api
     fn lock<T>() -> T?:
         unsafe(capabilities: [ffi]):
-            rt_mutex_lock<T>(self._handle)
+            rt_mutex_lock(self._handle)
 
     # Non-blocking lock attempt - returns nil if lock held (or the handle is
     # not a live runtime mutex). Optional return: nil is the contended case,
@@ -79,7 +81,7 @@ class Mutex:
     # @tag:api
     fn try_lock<T>() -> T?:
         unsafe(capabilities: [ffi]):
-            rt_mutex_try_lock<T>(self._handle)
+            rt_mutex_try_lock(self._handle)
 
     # DEPRECATED: prefer with_lock(f) — see lock().
     # Releases lock and updates protected value atomically.
@@ -119,8 +121,8 @@ fn mutex_new<T>(initial: T) -> Mutex:
 #
 # Generic over `T` — see with_lock above for why `Any` is rejected here.
 fn mutex_with_lock<T>(mutex: Mutex, f: fn(T) -> T) -> T:
-    val current = unsafe(capabilities: [ffi]):
-        rt_mutex_lock<T>(mutex._handle)
+    val current: T? = unsafe(capabilities: [ffi]):
+        rt_mutex_lock(mutex._handle)
     if current == nil:
         panic("E-SFFI-MUTEX-002: rt_mutex_lock failed on a stale or foreign handle")
     val updated = f(current.unwrap())
@@ -142,7 +144,7 @@ fn mutex_with_lock<T>(mutex: Mutex, f: fn(T) -> T) -> T:
 # sentinel, never real data, so it never round-trips through user code.
 fn mutex_with_lock_keeping<T, K>(mutex: Mutex, keep_value: K, f: fn() -> T) -> T:
     val held = unsafe(capabilities: [ffi]):
-        rt_mutex_lock<K>(mutex._handle)
+        rt_mutex_lock(mutex._handle)
     if held == nil:
         panic("E-SFFI-MUTEX-002: rt_mutex_lock failed on a stale or foreign handle")
     val result = f()
@@ -154,7 +156,7 @@ fn mutex_with_lock_keeping<T, K>(mutex: Mutex, keep_value: K, f: fn() -> T) -> T
 # Optional for the same reason as Mutex.lock() above.
 fn mutex_lock<T>(mutex: Mutex) -> T?:
     unsafe(capabilities: [ffi]):
-        rt_mutex_lock<T>(mutex._handle)
+        rt_mutex_lock(mutex._handle)
 
 # Non-generic gate lock for the exclusion-guard shape: callers that only test
 # nil vs non-nil and pair it with mutex_unlock(m, <integer sentinel>). The
@@ -166,12 +168,12 @@ fn mutex_lock<T>(mutex: Mutex) -> T?:
 # predate this finding). Same runtime contract as mutex_lock<i64>.
 fn mutex_lock_gate(mutex: Mutex) -> i64?:
     unsafe(capabilities: [ffi]):
-        rt_mutex_lock<i64>(mutex._handle)
+        rt_mutex_lock(mutex._handle)
 
 # Optional: nil means the lock was already held (or the handle is not live).
 fn mutex_try_lock<T>(mutex: Mutex) -> T?:
     unsafe(capabilities: [ffi]):
-        rt_mutex_try_lock<T>(mutex._handle)
+        rt_mutex_try_lock(mutex._handle)
 
 # DEPRECATED: prefer mutex_with_lock — see mutex_lock.
 fn mutex_unlock<T>(mutex: Mutex, new_value: T) -> i64:

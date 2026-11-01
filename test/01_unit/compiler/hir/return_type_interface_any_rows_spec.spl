@@ -1,0 +1,136 @@
+"""
+Return-type interface (RTI) rows for declared returns that the stage-2
+(2026-10-27, ef0681fc0e1) compiler lowered to `HirTypeKind.Any` and then
+rejected with `E-RTI-007: declared return is Any; not representable in an
+interface row` while self-compiling (phase-3 Windows bootstrap, bug
+doc/08_tracking/bug/rti007_mir_2026-10-31.md).
+
+One `it` per distinct producer pattern seen in that build:
+  - bare `-> Result` (linker `link_native_cc`, `_link_shared_unix`, ...)
+  - generic extern `-> T?` / `-> T` (`rt_tuple_get<T>`, `rt_mutex_lock<T>`, `rt_enum_new<T>`)
+  - nested array `-> [[i64]]` (`lz77_compress`)
+  - array of tuple `-> [(text, text)]` (`parse_query_string`)
+  - postfix-optional tuple `-> (i64, i64)?` (`resource_scope_systemd_metrics_v1`)
+  - untyped recursive helper with an untyped parameter (`tree_print_recursive`)
+  - untyped parameters with a value return (`gzip_analyze_data`)
+  - owner binder returned by a generic enum method (`Poll<T>::unwrap`)
+  - unbound single-letter type name in a method return (`Map::map_values -> Map<K, U>`)
+
+Contract (doc/05_design/compiler/types/return_type_interface_design.md,
+"erased rows"): a declared return that is genuinely dynamic lowers to the
+opaque builtin term `b:any`, which binds back to `HirTypeKind.Any` in the
+consumer; it never raises E-RTI-007. A declared concrete shape must keep its
+shape in the row.
+"""
+# @cover src/compiler/20.hir/return_type_interface_v1.spl
+
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.return_type_interface_v1.*
+use testing.{describe, it, expect}
+
+fn lowered(label: text, source: text) -> HirModule:
+    val path = "rti_any_rows_" + label + ".spl"
+    val ast = parse_full_frontend(source, path, "rti_any_rows." + label, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(ast)
+
+fn row_entries(module: HirModule) -> Dict<text, text>:
+    """DeclRef display -> `<type_param_count>|<entry>`; `!error` -> message."""
+    var out: Dict<text, text> = {}
+    match rti_rows_from_hir_v1(module):
+        case Ok(rows):
+            for row in rows.rows:
+                out[row.decl.display] = entry_text(rti_row_canonical_text_v1(row))
+        case Err(e):
+            out["!error"] = e.message
+    out
+
+fn entry_text(full: text) -> text:
+    """`rti|<decl_id>|<params>|<entry>` -> `<params>|<entry>`."""
+    var bars = 0
+    var i = 0
+    while i < full.len():
+        if full.char_code_at(i) == 124:
+            bars = bars + 1
+            if bars == 2:
+                return full.substring(i + 1)
+        i = i + 1
+    full
+
+fn entry_of(rows: Dict<text, text>, display: text) -> text:
+    if rows.has("!error"):
+        return "!error " + rows["!error"]
+    if not rows.has(display):
+        return "<no row>"
+    rows[display]
+
+fn kind_is_any(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Any: true
+        case _: false
+
+describe "RTI rows for Any-prone declared returns":
+    it "publishes an opaque Result<any, any> row for a bare `-> Result`":
+        val rows = row_entries(lowered("bare_result", "fn f_bare(x: text) -> Result:\n    Ok(x)\n"))
+        expect(entry_of(rows, "fn:f_bare")).to_equal("0|decided|result(b:any,b:any)")
+
+    it "keeps the binder of a generic extern `-> T?`":
+        val rows = row_entries(lowered("extern_opt", "extern fn rt_probe_get<T>(tuple: i64, index: i64) -> T?\n"))
+        expect(entry_of(rows, "fn:rt_probe_get")).to_equal("1|decided|opt(p0)")
+
+    it "keeps the binder of a generic extern `-> T`":
+        val rows = row_entries(lowered("extern_param", "extern fn rt_probe_new<T>(enum_id: i32, discriminant: i32, payload: i64) -> T\n"))
+        expect(entry_of(rows, "fn:rt_probe_new")).to_equal("1|decided|p0")
+
+    it "keeps a nested array shape `-> [[i64]]`":
+        val rows = row_entries(lowered("nested_array", "fn f_nested(xs: [i64]) -> [[i64]]:\n    [xs]\n"))
+        expect(entry_of(rows, "fn:f_nested")).to_equal("0|decided|array(array(b:i64,?),?)")
+
+    it "keeps an array-of-tuple shape `-> [(text, text)]`":
+        val rows = row_entries(lowered("tuple_array", "fn f_pairs(q: text) -> [(text, text)]:\n    []\n"))
+        expect(entry_of(rows, "fn:f_pairs")).to_equal("0|decided|array(tuple(b:text,b:text),?)")
+
+    it "keeps a postfix-optional tuple shape `-> (i64, i64)?`":
+        val rows = row_entries(lowered("opt_tuple", "fn f_metrics(a: i64) -> (i64, i64)?:\n    Some((a, a))\n"))
+        expect(entry_of(rows, "fn:f_metrics")).to_equal("0|decided|opt(tuple(b:i64,b:i64))")
+
+    it "keeps a declared return next to untyped parameters `fn lz(data, level) -> [[i64]]`":
+        val rows = row_entries(lowered("untyped_params_declared", "fn lz(data, level) -> [[i64]]:\n    []\n"))
+        expect(entry_of(rows, "fn:lz")).to_equal("0|decided|array(array(b:i64,?),?)")
+
+    it "publishes unit for an untyped recursive helper with an untyped parameter":
+        val source = "fn walk(path: text, indent: text, output):\n    output.push(path)\n    walk(path, indent, output)\n"
+        val rows = row_entries(lowered("untyped_recursive", source))
+        expect(entry_of(rows, "fn:walk")).to_equal("0|decided|b:unit")
+
+    it "never raises E-RTI-007 for untyped parameters with a value return":
+        val source = "fn analyze(data):\n    if data.len() == 0:\n        return 0\n    data.len()\n"
+        val rows = row_entries(lowered("untyped_value", source))
+        expect(rows.has("!error")).to_equal(false)
+
+    it "binds the owner binder returned by a generic enum method":
+        val source = "enum Poll<T>:\n    Ready(value: T)\n    Pending(fallback: T)\n\nimpl Poll<T>:\n    fn unwrap() -> T:\n        match self:\n            case Poll.Ready(value): value\n            case Poll.Pending(fallback): fallback\n"
+        val rows = row_entries(lowered("enum_owner_binder", source))
+        expect(entry_of(rows, "enum:Poll::unwrap")).to_equal("1|decided|p0")
+
+    it "publishes an opaque payload for an unbound single-letter type name in a method return":
+        val source = "struct Box<K, V>:\n    key: K\n    value: V\n\nimpl Box<K, V>:\n    fn map_values(self, mapper: fn(V) -> U) -> Box<K, U>:\n        Box(key: self.key, value: mapper(self.value))\n"
+        val rows = row_entries(lowered("unbound_letter", source))
+        val entry = entry_of(rows, "struct:Box::map_values")
+        expect(entry.starts_with("2|decided|n:")).to_equal(true)
+        expect(entry.ends_with("[p0,b:any]")).to_equal(true)
+
+    it "represents a genuinely dynamic return as `b:any` and binds it back to Any":
+        val module = lowered("dynamic_term", "fn f_unit(x: i64):\n    pass\n")
+        val term = rti_term_of_hir_type(HirType(kind: HirTypeKind.Any, span: Span.empty()), module.symbols, [])
+        expect(term.is_ok()).to_equal(true)
+        expect(rti_term_canonical_text(term.unwrap())).to_equal("b:any")
+        val bound = ReturnTypeInterfaceTable.new().bind(term.unwrap(), module.symbols)
+        expect(bound.is_ok()).to_equal(true)
+        expect(kind_is_any(bound.unwrap())).to_equal(true)
