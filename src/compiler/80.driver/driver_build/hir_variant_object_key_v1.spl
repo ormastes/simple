@@ -57,6 +57,39 @@ pub fn hir_variant_target_id_v1(target: MirTargetContext) -> text:
     arch + "-" + target.os + "-" + target.abi + "-" + target.backend + "/" +
         target.build_profile + "/" + tier
 
+fn _sorted_texts_v1(values: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        val vv: text = v
+        var placed: [text] = []
+        var inserted = false
+        for o in out:
+            val oo: text = o
+            if not inserted and vv < oo:
+                placed = placed.push(vv)
+                inserted = true
+            placed = placed.push(oo)
+        if not inserted:
+            placed = placed.push(vv)
+        out = placed
+    out
+
+# Build-context inputs that change the emitted object but are not part of
+# the target id: they are sealed into the variant digest (and so into the
+# object key and the RR producer parameter) without widening the partition.
+fn _context_frame_v1(target: MirTargetContext, features: [text]) -> text:
+    val trace = if target.collection_trace_active: "1" else: "0"
+    val admitted = if target.collection_target_admitted: "1" else: "0"
+    var acc = _frame_v1("{target.version}") + _frame_v1(target.collection_policy) +
+        _frame_v1("{target.collection_memory_budget_bytes}") +
+        _frame_v1("{target.collection_opt_level}") + _frame_v1(trace) + _frame_v1(admitted)
+    val sorted = _sorted_texts_v1(features)
+    acc = acc + _frame_v1("{sorted.len()}")
+    for f in sorted:
+        val ff: text = f
+        acc = acc + _frame_v1(ff)
+    acc
+
 fn _projection_fail_v1(error: text, target_id: text) -> HirVariantProjectionV1:
     HirVariantProjectionV1(ok: false, error: error, target_id: target_id, kept: [],
         variant_digest: "")
@@ -104,11 +137,20 @@ fn _group_winners_v1(decls: [HirCfgDeclV1], target: MirTargetContext,
         var conds: [text] = []
         for o in decls:
             val oo: HirCfgDeclV1 = o
-            if oo.cfg_group != dd.cfg_group or arms.contains(oo.cfg_arm):
+            if oo.cfg_group != dd.cfg_group:
                 continue
+            # Every record of the group is checked (as MirLowering.cfg_rec_cond
+            # does), and the records of one arm must agree on the condition.
             if oo.cfg_arm != -1 and oo.cfg.len() == 0:
                 return GroupWinnersV1(ok: false, error: "malformed_cfg_group", winners: [])
             val cond = _arm_condition_v1(oo)
+            if arms.contains(oo.cfg_arm):
+                var seen_at = 0
+                while seen_at < arms.len() and arms[seen_at] != oo.cfg_arm:
+                    seen_at = seen_at + 1
+                if conds[seen_at] != cond:
+                    return GroupWinnersV1(ok: false, error: "malformed_cfg_group", winners: [])
+                continue
             var placed_arms: [i64] = []
             var placed_conds: [text] = []
             var inserted = false
@@ -146,7 +188,8 @@ pub fn hir_variant_projection_v1(decls: [HirCfgDeclV1], target: MirTargetContext
     if not groups.ok:
         return _projection_fail_v1(groups.error, target_id)
     var kept: [text] = []
-    var acc = _frame_v1(HIR_VARIANT_PROJECTION_SCHEMA_V1) + _frame_v1(target_id)
+    var acc = _frame_v1(HIR_VARIANT_PROJECTION_SCHEMA_V1) + _frame_v1(target_id) +
+        _context_frame_v1(target, features)
     var body = ""
     for d in decls:
         val dd: HirCfgDeclV1 = d

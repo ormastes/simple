@@ -1,17 +1,17 @@
 # HIR-variant object keys (lane generic-rr-hir-variant-obj)
 
-> One target-neutral HIR (a list of `HirCfgDeclV1`) is projected per MIR
+> One target-neutral HIR (a list of `HirCfgDeclV1`) is projected per MIR target: plain `@cfg` items and numbered cfg groups (with an else arm) select the kept declarations, which seal a per-target `variant_digest`. The object key, RR partition, RR producer and sidecar path all derive from that projection, so a windows-only edit moves only the windows key.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # HIR-variant object keys (lane generic-rr-hir-variant-obj)
 
-One target-neutral HIR (a list of `HirCfgDeclV1`) is projected per MIR
+One target-neutral HIR (a list of `HirCfgDeclV1`) is projected per MIR target: plain `@cfg` items and numbered cfg groups (with an else arm) select the kept declarations, which seal a per-target `variant_digest`. The object key, RR partition, RR producer and sidecar path all derive from that projection, so a windows-only edit moves only the windows key.
 
 ## At a Glance
 
@@ -27,14 +27,16 @@ One target-neutral HIR (a list of `HirCfgDeclV1`) is projected per MIR
 | Updated | 2026-11-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+## Overview
+
 One target-neutral HIR (a list of `HirCfgDeclV1`) is projected per MIR
 target: plain `@cfg` items and numbered cfg groups (with an else arm) select
 the kept declarations, which seal a per-target `variant_digest`. The object
 key, RR partition, RR producer and sidecar path all derive from that
 projection, so a windows-only edit moves only the windows key.
 
-UNRUN: no self-hosted binary is available on the authoring host; RED guide
-for src/compiler/80.driver/driver_build/hir_variant_object_key_v1.spl.
+Evidence: Rust-seed interpreter runs only (attributed to the seed); no self-hosted
+binary exists on the authoring host. Owner: hir_variant_object_key_v1.spl.
 
 ## Scenarios
 
@@ -250,6 +252,67 @@ expect(p.error).to_equal("malformed_cfg_group")
 
 </details>
 
+#### rejects two records of one group arm that disagree on the condition
+
+- Project a group whose arm 0 is declared with two different conditions
+   - Expected: p.ok is false
+   - Expected: p.error equals `malformed_cfg_group`
+   - Expected: agree.ok is true
+   - Expected: agree.kept equals `["fn:z"]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project a group whose arm 0 is declared with two different conditions")
+val p = proj([d("x", ["windows"], 6, 0, "x-v1"), d("y", ["linux"], 6, 0, "y-v1"),
+    d("z", [], 6, -1, "z-v1")], linux())
+expect(p.ok).to_equal(false)
+expect(p.error).to_equal("malformed_cfg_group")
+val agree = proj([d("x", ["windows"], 6, 0, "x-v1"), d("y", ["windows"], 6, 0, "y-v1"),
+    d("z", [], 6, -1, "z-v1")], linux())
+expect(agree.ok).to_equal(true)
+expect(agree.kept).to_equal(["fn:z"])
+```
+
+</details>
+
+#### seals build-context inputs that are not part of the target id (REQ-GRR-009)
+
+- Change features and collection policy and compare variant digests (REQ-GRR-009)
+   - Expected: with_feature.target_id equals `base.target_id`
+   - Expected: with_feature.variant_digest == base.variant_digest is false
+   - Expected: hir_variant_projection_v1(decls(), linux(), ["simd"]).variant_digest equals `with_feature.variant_digest`
+   - Expected: with_policy.target_id equals `base.target_id`
+   - Expected: with_policy.variant_digest == base.variant_digest is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Change features and collection policy and compare variant digests (REQ-GRR-009)")
+val base = hir_variant_projection_v1(decls(), linux(), [])
+val with_feature = hir_variant_projection_v1(decls(), linux(), ["simd"])
+expect(with_feature.target_id).to_equal(base.target_id)
+expect(with_feature.variant_digest == base.variant_digest).to_equal(false)
+expect(hir_variant_projection_v1(decls(), linux(), ["simd"]).variant_digest).to_equal(with_feature.variant_digest)
+val strict = MirTargetContext(arch: "x86_64", os: "linux", abi: "gnu", backend: "llvm",
+    collection_policy: "strict", version: 1)
+val with_policy = hir_variant_projection_v1(decls(), strict, [])
+expect(with_policy.target_id).to_equal(base.target_id)
+expect(with_policy.variant_digest == base.variant_digest).to_equal(false)
+```
+
+</details>
+
 ### HIR variant object key, partition, producer and sidecar
 
 #### formats the target id
@@ -441,8 +504,8 @@ expect(tl).to_end_with(".object")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

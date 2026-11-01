@@ -1,6 +1,6 @@
 # Generic RR edit -> rebuild loop (lane generic-rr-hir-variant-obj)
 
-> In-memory end-to-end loop: old/new `GenericTemplateEntryV1` ->
+> In-memory end-to-end loop: old/new `GenericTemplateEntryV1` -> `generic_template_changed_facets_v1` -> `generic_changed_semantic_facets_v1` -> forward manifests (reads named by the generic facet constants, consumed fingerprints taken from `generic_template_facets_v1`) -> `rebuild_reverse_shards_from_forward_v1` -> `plan_generic_invalidation_v1`. Covers body, signature, bound, caller, cfg-variant and unrelated edits, the concurrent rebuild / replay law and RR cache corruption.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Generic RR edit -> rebuild loop (lane generic-rr-hir-variant-obj)
 
-In-memory end-to-end loop: old/new `GenericTemplateEntryV1` ->
+In-memory end-to-end loop: old/new `GenericTemplateEntryV1` -> `generic_template_changed_facets_v1` -> `generic_changed_semantic_facets_v1` -> forward manifests (reads named by the generic facet constants, consumed fingerprints taken from `generic_template_facets_v1`) -> `rebuild_reverse_shards_from_forward_v1` -> `plan_generic_invalidation_v1`. Covers body, signature, bound, caller, cfg-variant and unrelated edits, the concurrent rebuild / replay law and RR cache corruption.
 
 ## At a Glance
 
@@ -27,6 +27,8 @@ In-memory end-to-end loop: old/new `GenericTemplateEntryV1` ->
 | Updated | 2026-11-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+## Overview
+
 In-memory end-to-end loop: old/new `GenericTemplateEntryV1` ->
 `generic_template_changed_facets_v1` -> `generic_changed_semantic_facets_v1`
 -> forward manifests (reads named by the generic facet constants, consumed
@@ -35,7 +37,8 @@ fingerprints taken from `generic_template_facets_v1`) ->
 Covers body, signature, bound, caller, cfg-variant and unrelated edits, the
 concurrent rebuild / replay law and RR cache corruption.
 
-UNRUN: no self-hosted binary is available on the authoring host. No disk is
+Evidence: Rust-seed interpreter runs only (attributed to the seed; the positive RRS1
+decode control is seed-RED because the seed misreads the envelope). No disk is
 touched; persistence is covered by the coordinator's own specs.
 
 ## Scenarios
