@@ -1,0 +1,93 @@
+# Presentation only: source facts, page exhaustion and qualification stay distinct.
+use std.common.traceability.model.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use app.traceability.extract.snapshot_pipeline.{TraceSnapshotBuild}
+use app.traceability.query_options_v1.{TraceQueryOptionsV1}
+
+fn query_table_text_v1(value: text) -> text:
+    var safe = ""
+    for ch in value.chars():
+        val first = ch.bytes()[0].to_i64()
+        if first < 32 or first == 127: safe = safe + "?"
+        else: safe = safe + ch
+    safe
+
+pub fn trace_query_error_v1(message: text, snapshot: text, format: text, captured: bool = false) -> text:
+    val separator = message.index_of(":") ?? -1
+    var code = "TRACE-QUERY-INFRASTRUCTURE"
+    var detail = message
+    if message.starts_with("TRACE-") and separator > 0:
+        code = message.substring(0, separator)
+        detail = message.substring(separator + 1, message.len()).trim()
+    if format == "sdn":
+        return sdn_encode_canonical(SdnValue.Dict({
+            "schema": SdnValue.String("simple.trace.node-query/v1"),
+            "status": SdnValue.String("error"), "requested_snapshot": SdnValue.String(snapshot),
+            "snapshot_available": SdnValue.Bool(captured), "query_complete": SdnValue.Bool(false),
+            "admission_eligible": SdnValue.Bool(false), "qualification": SdnValue.String("unverified"),
+            "code": SdnValue.String(code), "message": SdnValue.String(detail)}))
+    "ERROR " + query_table_text_v1(message) + "\nRequested snapshot: " + query_table_text_v1(snapshot) + "\n"
+
+pub fn trace_query_render_v1(build: TraceSnapshotBuild, page: TraceQueryResult, options: TraceQueryOptionsV1) -> text:
+    val graph = build.graph
+    val capture = if graph.subject.kind == "worktree_preview": "non-atomic-sequential-preview" else: "immutable-git-tree"
+    var rows: [SdnValue] = []
+    var selected: Dict<text, bool> = {}
+    for node in page.nodes:
+        selected[node.id] = true
+        rows.push(SdnValue.Dict({"id": SdnValue.String(node.id),
+            "kind": SdnValue.String(node_kind_name(node.kind)), "title": SdnValue.String(node.title)}))
+    var diagnostics: [SdnValue] = []
+    var shown = 0
+    for issue in page.diagnostics:
+        if shown >= 200: break
+        diagnostics.push(SdnValue.Dict({"code": SdnValue.String(issue.code),
+            "subject": SdnValue.String(issue.subject_id), "entity": SdnValue.String(issue.entity_id),
+            "rule": SdnValue.String(issue.rule_id), "origin": SdnValue.String(issue.origin_id),
+            "severity": SdnValue.String(issue.severity), "message": SdnValue.String(issue.message)}))
+        shown = shown + 1
+    var scope: [SdnValue] = []
+    for path in build.scope.selected_roots: scope.push(SdnValue.String(path))
+    var source_rows: [SdnValue] = []
+    for locator in graph.locators:
+        if selected.contains_key(locator.entity_id):
+            source_rows.push(SdnValue.Dict({"entity": SdnValue.String(locator.entity_id),
+                "path": SdnValue.String(locator.path), "blob": SdnValue.String(locator.blob_id),
+                "locator_kind": SdnValue.String(locator.locator_kind), "locator": SdnValue.String(locator.locator)}))
+    if options.format == "sdn":
+        return sdn_encode_canonical(SdnValue.Dict({
+            "schema": SdnValue.String("simple.trace.node-query/v1"),
+            "snapshot": SdnValue.String(graph.subject.snapshot_id),
+            "snapshot_kind": SdnValue.String(graph.subject.kind), "capture": SdnValue.String(capture),
+            "repository": SdnValue.String(graph.subject.repository_id),
+            "revision": SdnValue.String(graph.subject.revision_id), "tree": SdnValue.String(graph.subject.tree_id),
+            "generation": SdnValue.String(graph.generation_id), "input_manifest": SdnValue.String(graph.input_manifest_id),
+            "scope": SdnValue.Array(scope), "ingestion": SdnValue.String("registered-declarations-only"),
+            "legacy_database_ingestion": SdnValue.String("unavailable"),
+            "qualification": SdnValue.String("unverified"), "admission_eligible": SdnValue.Bool(false),
+            "operation": SdnValue.String(options.operation), "kind": SdnValue.String(options.kind),
+            "id_prefix": SdnValue.String(options.id_prefix), "limit": SdnValue.Int(options.limit),
+            "page_complete": SdnValue.Bool(page.complete), "graph_complete": SdnValue.Bool(graph.complete),
+            "total_count": SdnValue.Int(page.total_count), "next_cursor": SdnValue.String(page.next_cursor),
+            "projection": SdnValue.String("nodes-only; not a graph export"),
+            "nodes": SdnValue.Array(rows), "locators": SdnValue.Array(source_rows),
+            "diagnostics": SdnValue.Array(diagnostics), "diagnostic_count": SdnValue.Int(page.diagnostics.len()),
+            "diagnostics_truncated": SdnValue.Bool(page.diagnostics.len() > shown)}))
+    var output = "Snapshot: " + graph.subject.snapshot_id + "\nCapture: " + capture + "\n"
+    output = output + "Ingestion: registered declarations only; legacy database ingestion unavailable\n"
+    output = output + "Graph complete: " + graph.complete.to_text() + "; page complete: " + page.complete.to_text() + "\n"
+    output = output + "Qualification: unverified; admission eligible: false\n"
+    output = output + "Generation: " + graph.generation_id + "\nInput manifest: " + graph.input_manifest_id + "\n"
+    output = output + "KIND\tID\tTITLE\n"
+    for node in page.nodes:
+        output = output + node_kind_name(node.kind) + "\t" + query_table_text_v1(node.id) + "\t" + query_table_text_v1(node.title) + "\n"
+    output = output + "Total selected: " + page.total_count.to_text() + "\n"
+    if page.next_cursor != "": output = output + "Next cursor: " + page.next_cursor + "\n"
+    shown = 0
+    for issue in page.diagnostics:
+        if shown >= 200: break
+        output = output + query_table_text_v1(issue.code + ": " + issue.message) + "\n"
+        shown = shown + 1
+    if page.diagnostics.len() > shown: output = output + "Additional diagnostics omitted: " + (page.diagnostics.len() - shown).to_text() + "\n"
+    output

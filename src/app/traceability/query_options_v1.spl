@@ -1,0 +1,122 @@
+# Strict P0 query options; validate before any filesystem or Git operation.
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, trace_node_query_validate_v1}
+use std.common.traceability.schema.{trace_path_valid}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+pub struct TraceQueryOptionsV1:
+    operation: text = "list"
+    kind: text = "features"
+    selected_id: text = ""
+    snapshot: text = "worktree"
+    format: text = "table"
+    limit: i64 = 100
+    id_prefix: text = ""
+    cursor: text = ""
+    paths: [text] = []
+    declarations: [text] = []
+    help: bool = false
+
+pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1, text>:
+    if args.len() > 512: return Err("TRACE-QUERY-INVALID: too many arguments")
+    var bytes = 0
+    for arg in args:
+        bytes = bytes + arg.len()
+        if arg.len() > 4096 or bytes > 65536 or arg.bytes().contains(0u8):
+            return Err("TRACE-QUERY-INVALID: argument byte limit exceeded or NUL present")
+        validated_utf8_bytes_to_text_linear(arg.bytes())?
+    var options = TraceQueryOptionsV1()
+    if args.len() == 1 and (args[0] == "--help" or args[0] == "-h"):
+        options.help = true
+        return Ok(options)
+    if args.len() < 2: return Err("TRACE-QUERY-INVALID: expected list|show and a kind; use trace --help")
+    options.operation = args[0]
+    options.kind = args[1]
+    var index = 2
+    if options.operation == "show":
+        if args.len() < 3: return Err("TRACE-QUERY-INVALID: show requires a canonical identity")
+        options.selected_id = args[2]
+        if options.kind == "feature": options.kind = "features"
+        elif options.kind == "requirement": options.kind = "requirements"
+        elif options.kind == "bug": options.kind = "bugs"
+        elif options.kind == "feature-group": options.kind = "feature-groups"
+        elif options.kind == "requirement-group": options.kind = "requirement-groups"
+        index = 3
+    var seen: Dict<text, bool> = {}
+    while index < args.len():
+        val arg = args[index]
+        val split = arg.index_of("=") ?? -1
+        if not arg.starts_with("--") or arg.len() < 3:
+            return Err("TRACE-QUERY-INVALID: expected a named option")
+        var name = arg
+        var value = ""
+        if split >= 0:
+            if split < 3: return Err("TRACE-QUERY-INVALID: option name is empty")
+            name = arg.substring(0, split)
+            value = arg.substring(split + 1, arg.len())
+        else:
+            if index + 1 >= args.len() or args[index + 1].starts_with("--"):
+                return Err("TRACE-QUERY-INVALID: missing option value")
+            index = index + 1
+            value = args[index]
+        if value == "": return Err("TRACE-QUERY-INVALID: option value is empty")
+        if name != "--path" and name != "--declaration":
+            if seen.contains_key(name): return Err("TRACE-QUERY-INVALID: repeated option")
+            seen[name] = true
+        match name:
+            case "--snapshot": options.snapshot = value
+            case "--format": options.format = value
+            case "--prefix": options.id_prefix = value
+            case "--cursor": options.cursor = value
+            case "--limit":
+                if value.len() > 3: return Err("TRACE-QUERY-INVALID: limit must be 1..200")
+                for ch in value.chars():
+                    if not "0123456789".contains(ch): return Err("TRACE-QUERY-INVALID: limit must be numeric")
+                options.limit = value.to_int()
+            case "--path" | "--declaration":
+                if not trace_path_valid(value): return Err("TRACE-QUERY-INVALID: select safe repository-relative files")
+                if name == "--path":
+                    if options.paths.contains(value): return Err("TRACE-QUERY-INVALID: duplicate selected path")
+                    options.paths.push(value)
+                else:
+                    if options.declarations.contains(value): return Err("TRACE-QUERY-INVALID: duplicate declaration path")
+                    options.declarations.push(value)
+            case _: return Err("TRACE-QUERY-INVALID: unknown option " + name)
+        index = index + 1
+    if options.format != "table" and options.format != "sdn":
+        return Err("TRACE-QUERY-INVALID: native formats are table and sdn")
+    if options.snapshot != "worktree" and options.snapshot != "index" and
+        not (options.snapshot.starts_with("git:") and options.snapshot.len() > 4):
+        return Err("TRACE-QUERY-INVALID: snapshot must be worktree, index or git:REV")
+    if options.paths.len() > 128 or options.declarations.len() > 32:
+        return Err("TRACE-QUERY-BUDGET: too many selected files or declarations")
+    trace_node_query_validate_v1(TraceNodeQueryV1(snapshot_id: "", operation: options.operation,
+        kind: options.kind, selected_id: options.selected_id, id_prefix: options.id_prefix,
+        limit: options.limit, cursor: options.cursor))?
+    Ok(options)
+
+pub fn trace_query_sdn_requested_v1(args: [text]) -> bool:
+    # Error rendering must honor both supported forms even when validation fails.
+    # Inspect only the same bounded argv prefix as the strict parser, without I/O.
+    var index = 0
+    var bytes = 0
+    while index < args.len() and index < 512:
+        val arg = args[index]
+        bytes = bytes + arg.len()
+        if arg.len() > 4096 or bytes > 65536: return false
+        if arg == "--format=sdn": return true
+        if arg == "--format" and index + 1 < args.len() and index + 1 < 512:
+            if args[index + 1] == "sdn" and bytes + 3 <= 65536: return true
+        index = index + 1
+    false
+
+pub fn trace_query_help_v1() -> text:
+    "Usage: simple trace list features|requirements|bugs [options]\n" +
+    "       simple trace show feature|requirement|bug <canonical-id> [options]\n" +
+    "  --snapshot=worktree|index|git:REV  Default: worktree preview\n" +
+    "  --format=table|sdn                Human table or structured SDN\n" +
+    "  --limit=1..200 --prefix=<id-prefix> --cursor=<continuation>\n" +
+    "  --declaration=<file>              Repeat to replace canonical defaults\n" +
+    "  --path=<file>                     Add selected files to locator closure\n" +
+    "Options accept --name=value or --name value. Plural show kinds are aliases.\n" +
+    "Only registered declarations are indexed; no automatic legacy bug/feature DB ingestion.\n" +
+    "Groups require P1. All output is structural, unverified and admission-ineligible.\n"
