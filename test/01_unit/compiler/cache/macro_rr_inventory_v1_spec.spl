@@ -1,0 +1,208 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/04_architecture/compiler/macro_rr_invalidation.md ; plan: doc/03_plan/sys_test/macro_rr_invalidation.md ; design: doc/05_design/compiler/macro_rr_invalidation.md
+
+"""
+## Purpose and audience
+
+Purpose: pin the driver macro inventory that reads committed module TLDR
+companions into macro RR state. Audience: compiler cache engineers.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/cache/macro_rr_inventory_v1_spec.spl --mode=interpreter`.
+2. Every scenario must pass; a failure is a regression in companion freshness or fact collection.
+
+## Compatibility and limitations
+
+Writes a fixture tree under `build/test_tmp/`. Failing-first: the
+`macro_rr_inventory_v1` module does not exist until the implementation lands.
+"""
+
+# doc-path: doc/03_plan/sys_test/macro_rr_invalidation.md
+# doc-path: doc/04_architecture/compiler/macro_rr_invalidation.md
+# doc-path: doc/05_design/compiler/macro_rr_invalidation.md
+# doc-path: doc/03_plan/agent_tasks/macro_rr_invalidation.md
+# @manual: primary
+# @tag:in-development
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:macros
+
+"""
+# Macro RR inventory v1
+
+The inventory is rebuilt from committed companions (ADR-MRR-3); any missing,
+stale or corrupt companion makes it incomplete (fail closed).
+"""
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{file_write, file_read, file_exists}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use app.io.time_ops.{time_now_unix_micros}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.module_artifacts_v1.{module_artifacts_emit_v1,
+    module_tldr_companion_path_v1, module_tldr_companion_sections_v1,
+    module_tldr_companion_render_sections_v1, module_artifact_module_id_v1}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_use_status_tag_v1}
+use compiler.driver.cache.macro_rr_invalidation_v1.{macro_rr_current_input_root_v1}
+use compiler.driver.cache.macro_rr_inventory_v1.{MacroRrModuleStateV1, MacroRrInventoryV1,
+    macro_rr_module_state_v1, macro_rr_module_state_raw_v1, macro_rr_module_state_refresh_v1,
+    macro_rr_inventory_v1}
+
+struct MacroRrInventoryFixtureV1:
+    tldr: text
+    provider: text
+    user: text
+    provider_text: text
+
+fn provider_text_v1() -> text:
+    "macro twice(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\n"
+
+fn user_text_v1() -> text:
+    "fn first() -> i64:\n    twice!(1)\n"
+
+fn setup_macro_rr_inventory_v1() -> MacroRrInventoryFixtureV1:
+    val root = "build/test_tmp/macro_rr_inventory_{time_now_unix_micros()}"
+    val _created = dir_create_all(root + "/src")
+    val provider = root + "/src/provider.spl"
+    val user = root + "/src/user.spl"
+    val _p = file_write(provider, provider_text_v1())
+    val _u = file_write(user, user_text_v1())
+    val tldr = root + "/tldr"
+    val _ep = module_artifacts_emit_v1(provider, tldr)
+    val _eu = module_artifacts_emit_v1(user, tldr)
+    MacroRrInventoryFixtureV1(tldr: tldr, provider: provider, user: user,
+        provider_text: provider_text_v1())
+
+fn corrupt_macro_use_section_v1(source_path: text, tldr: text, source_text: text) -> bool:
+    val path = module_tldr_companion_path_v1(tldr, source_path)
+    val sections = module_tldr_companion_sections_v1(file_read(path), source_text)
+    var damaged: [text] = []
+    for section in sections:
+        if section.starts_with("macro-use|"):
+            damaged.push("macro-use|not-a-macro-use-table")
+        else:
+            damaged.push(section)
+    file_write(path, module_tldr_companion_render_sections_v1(
+        module_artifact_module_id_v1(source_path), source_text, damaged))
+
+describe "macro RR module state":
+    # @req REQ-MACRO-RR-010
+    it "reads a fresh companion into one definition and one resolved use":
+        step("Emit provider and user companions, then read both states")
+        val fx = setup_macro_rr_inventory_v1()
+        val provider = macro_rr_module_state_v1(fx.provider, fx.tldr)
+        expect(provider.fresh).to_equal(true)
+        expect(provider.defs.len()).to_equal(1)
+        expect(provider.defs[0].macro_name).to_equal("twice")
+        val user = macro_rr_module_state_v1(fx.user, fx.tldr)
+        expect(user.fresh).to_equal(true)
+        expect(user.uses.len()).to_equal(1)
+        expect(macro_use_status_tag_v1(user.uses[0].status)).to_equal("resolved")
+        expect(user.input_root.known).to_equal(true)
+        expect(user.input_root.complete).to_equal(true)
+        expect(user.input_root.root.len()).to_be_greater_than(0)
+
+    # @req REQ-MACRO-RR-009
+    it "is not fresh when the companion is missing":
+        step("Read a source that was never emitted")
+        val fx = setup_macro_rr_inventory_v1()
+        val lonely = fx.provider.replace("provider.spl", "lonely.spl")
+        expect(file_write(lonely, "fn lonely() -> i64: 1\n")).to_equal(true)
+        expect(file_exists(module_tldr_companion_path_v1(fx.tldr, lonely))).to_equal(false)
+        expect(macro_rr_module_state_v1(lonely, fx.tldr).fresh).to_equal(false)
+
+    # @req REQ-MACRO-RR-009
+    it "is stale after a source edit while the raw read keeps the pre-edit definitions":
+        step("Rewrite the provider body without re-emitting")
+        val fx = setup_macro_rr_inventory_v1()
+        val before = macro_rr_module_state_v1(fx.provider, fx.tldr)
+        expect(file_write(fx.provider, fx.provider_text.replace("x + x", "x * 2"))).to_equal(true)
+        expect(macro_rr_module_state_v1(fx.provider, fx.tldr).fresh).to_equal(false)
+        val raw = macro_rr_module_state_raw_v1(fx.provider, fx.tldr, sha256_text(fx.provider_text))
+        expect(raw.defs.len()).to_equal(1)
+        expect(raw.defs[0].key).to_equal(before.defs[0].key)
+
+    # @req REQ-MACRO-RR-009
+    it "is not fresh when the macro-use section is corrupt":
+        step("Damage the user's macro-use section in place")
+        val fx = setup_macro_rr_inventory_v1()
+        expect(corrupt_macro_use_section_v1(fx.user, fx.tldr, user_text_v1())).to_equal(true)
+        expect(macro_rr_module_state_v1(fx.user, fx.tldr).fresh).to_equal(false)
+
+    # @req REQ-MACRO-RR-001
+    it "refreshes a stale companion and exposes the new definition key":
+        step("Edit, refresh, compare keys")
+        val fx = setup_macro_rr_inventory_v1()
+        val before = macro_rr_module_state_v1(fx.provider, fx.tldr)
+        expect(file_write(fx.provider, fx.provider_text.replace("x + x", "x * 2"))).to_equal(true)
+        val after = macro_rr_module_state_refresh_v1(fx.provider, fx.tldr)
+        expect(after.fresh).to_equal(true)
+        expect(after.defs.len()).to_equal(1)
+        expect(after.defs[0].key == before.defs[0].key).to_equal(false)
+
+describe "macro RR inventory":
+    # @req REQ-MACRO-RR-010
+    it "collects the definition-consumer fact for the user over a complete inventory":
+        step("Inventory over provider and user")
+        val fx = setup_macro_rr_inventory_v1()
+        val inventory = macro_rr_inventory_v1([fx.provider, fx.user], fx.tldr)
+        expect(inventory.complete).to_equal(true)
+        expect(inventory.modules.len()).to_equal(2)
+        expect(inventory.all_defs.len()).to_equal(1)
+        val subject = "macro-def:" + inventory.all_defs[0].def_id
+        var users: [text] = []
+        for fact in inventory.facts:
+            if fact.family == "macro-definition-consumer" and fact.subject == subject:
+                users.push(fact.consumer)
+        expect(users).to_equal([fx.user])
+
+    # @req REQ-MACRO-RR-009
+    it "is incomplete when the tldr root is unset":
+        step("Empty tldr root")
+        val fx = setup_macro_rr_inventory_v1()
+        val inventory = macro_rr_inventory_v1([fx.provider, fx.user], "")
+        expect(inventory.complete).to_equal(false)
+        expect(inventory.reason).to_equal("tldr-root-unset")
+
+    # @req REQ-MACRO-RR-009
+    it "is incomplete and names the module when one companion is stale":
+        step("Stale provider makes the whole inventory incomplete")
+        val fx = setup_macro_rr_inventory_v1()
+        expect(file_write(fx.provider, fx.provider_text + "\n")).to_equal(true)
+        val inventory = macro_rr_inventory_v1([fx.provider, fx.user], fx.tldr)
+        expect(inventory.complete).to_equal(false)
+        expect(inventory.reason).to_start_with(fx.provider + ":")
+
+describe "macro RR inventory uncacheable definitions":
+    # @req REQ-MACRO-RR-009
+    it "keeps the key of an uncacheable definition but makes every expansion conservative":
+        step("Re-render the provider companion with the macro-key uncacheable flag set")
+        val fx = setup_macro_rr_inventory_v1()
+        val companion = module_tldr_companion_path_v1(fx.tldr, fx.provider)
+        val source = file_read(fx.provider)
+        var sections: [text] = []
+        for section in module_tldr_companion_sections_v1(file_read(companion), source):
+            if section.starts_with("macro-key|"):
+                sections.push(section.replace("\t0", "\t1"))
+            else:
+                sections.push(section)
+        expect(file_write(companion, module_tldr_companion_render_sections_v1(
+            module_artifact_module_id_v1(fx.provider), source, sections))).to_equal(true)
+        val state = macro_rr_module_state_v1(fx.provider, fx.tldr)
+        expect(state.fresh).to_equal(true)
+        expect(state.uncacheable_def_ids.len()).to_equal(1)
+        expect(state.uncacheable_def_ids[0]).to_equal(state.defs[0].def_id)
+        expect(state.defs[0].key.len()).to_be_greater_than(0)
+        step("The user's current input root against this inventory is conservative, never a reusable root")
+        val inventory = macro_rr_inventory_v1([fx.provider, fx.user], fx.tldr)
+        expect(inventory.complete).to_equal(true)
+        expect(inventory.uncacheable_def_ids).to_equal(state.uncacheable_def_ids)
+        val user_state = macro_rr_module_state_v1(fx.user, fx.tldr)
+        val current = macro_rr_current_input_root_v1(user_state, inventory)
+        expect(current.known).to_equal(true)
+        expect(current.complete).to_equal(false)
+        expect(current.root).to_equal("")

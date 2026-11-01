@@ -1,0 +1,51 @@
+# Macro forward manifests for the v2 semantic projection (restores the macro
+# half of the deleted generic_spec_rr_producer_v1, now macro-owned).
+#
+# One sealed SemanticQueryReadManifestV1 per macro use of a module, read from
+# its FRESH committed companion through macro_rr_inventory_v1. A module whose
+# companion is missing, stale, corrupt or conservative yields ONE unsealed
+# manifest: reverse_reference_project_generation_v2 then rejects the candidate
+# generation and keeps the prior edges (never "no dependents"). A complete
+# module with zero uses yields no manifests; its emptiness is proven by the
+# inventory's `complete`, not by absence.
+#
+# Design: doc/05_design/compiler/macro_rr_invalidation.md §1 (one RR model:
+# the legacy receipt binds root-free subjects, this path keeps the full
+# SemanticQueryKeyV1 identities of the same MacroUseV1 facts).
+
+use compiler.common.cache_contract.macro_reference_manifest_v1.{
+    macro_content_digest_v1, macro_use_forward_read_manifest_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    semantic_query_key_canonical_v1}
+use compiler.driver.cache.macro_rr_inventory_v1.{macro_rr_module_state_v1,
+    macro_rr_module_state_complete_v1}
+use compiler.driver.cache.reverse_reference_projection_v2.{SealedForwardManifestV2}
+
+pub fn macro_rr_semantic_profile_v1() -> text:
+    macro_content_digest_v1("macro-profile/host")
+
+pub fn macro_reference_sealed_manifests_for_module_v1(module_path: text,
+        tldr_root: text) -> [SealedForwardManifestV2]:
+    val state = macro_rr_module_state_v1(module_path, tldr_root)
+    if not macro_rr_module_state_complete_v1(state) or not state.input_root.complete:
+        return [SealedForwardManifestV2(consumer_identity: "macro-inventory:" + module_path,
+            sealed: false, manifest: None)]
+    val profile = macro_rr_semantic_profile_v1()
+    var out: [SealedForwardManifestV2] = []
+    for macro_use in state.uses:
+        val manifest = macro_use_forward_read_manifest_v1(macro_use, profile)
+        out.push(SealedForwardManifestV2(
+            consumer_identity: semantic_query_key_canonical_v1(manifest.consumer),
+            sealed: true, manifest: Some(manifest)))
+    out
+
+pub fn macro_reference_sealed_manifests_v1(module_paths: [text],
+        tldr_root: text) -> [SealedForwardManifestV2]:
+    var out: [SealedForwardManifestV2] = []
+    for path in module_paths:
+        for m in macro_reference_sealed_manifests_for_module_v1(path, tldr_root):
+            out.push(m)
+    out
+
+export macro_rr_semantic_profile_v1
+export macro_reference_sealed_manifests_for_module_v1, macro_reference_sealed_manifests_v1
