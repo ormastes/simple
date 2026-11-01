@@ -1,0 +1,106 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# ownerlayout-mir-20261031: two `struct CompileError` owners
+
+Bug: doc/08_tracking/bug/ownerlayout_mir_2026-10-31.md. Two provider modules
+declare `struct CompileError` with different field lists. Through pure-Simple
+HIR+MIR in-process (seed-hosted):
+
+- A field read on an `unwrap_err()` result still fails closed as an ambiguous
+  owner -- the open root bug (owner must come from the HIR-resolved symbol, not
+  the bare name). That example is a tripwire: invert it when the fix lands.
+- The match `Err(error)` binder and `var e = obj.method()` shapes lower clean
+  in current source.
+- The workaround form (typed parameter) lowers clean.
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn lower_closure(names: [text], srcs: [text]) -> text:
+    """Lower every module through HIR, prescan all, then MIR-lower the last one.
+    Returns the concatenated HIR/MIR diagnostics ("" when clean)."""
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        val ast = parse_full_frontend(srcs[i], path, names[i], log)
+        modules[names[i]] = ast
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        asts.push(ast)
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    var out = ""
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(names[i], surfaces)
+        hirs.push(hl.lower_module(asts[i]))
+        for e in hl.errors:
+            out = out + "hir: " + e.message + "\n"
+        i = i + 1
+    val last = hirs.len() - 1
+    var ml = MirLowering.new(hirs[last].symbols)
+    var pre: Dict<text, HirModule> = {}
+    i = 0
+    while i < names.len():
+        pre["m" + i.to_text()] = hirs[i]
+        i = i + 1
+    i = 0
+    while i < names.len():
+        ml.prescan_module_struct_names(pre, "m" + i.to_text())
+        i = i + 1
+    val mir = ml.lower_module(hirs[last], hirs)
+    for e in ml.errors:
+        # Exhaustiveness notes are advisory and unrelated to these bugs.
+        if not e.message.contains("non-exhaustive enum match"):
+            out = out + "mir: " + e.message + "\n"
+    print "diagnostics: [" + out + "]"
+    out
+
+fn lower_one(src: text) -> text:
+    lower_closure(["app.main"], [src])
+
+val FE = lines(["pub struct CompileError:", "    message: text", "    phase: text", "    location: i64"])
+val BE = lines(["pub struct CompileError:", "    message: text", "    phase: text", "    has_location: bool", "    location: i64", "", "pub fn compile(v: i64) -> Result<i64, CompileError>:", "    if v > 0:", "        return Ok(v)", "    Err(CompileError(message: \"bad\", phase: \"be\", has_location: false, location: 0))", "", "pub class Driver:", "    n: i64", "    pub fn last_error() -> CompileError:", "        CompileError(message: \"x\", phase: \"d\", has_location: false, location: self.n)"])
+
+fn lower_consumer(body: [text]) -> text:
+    var all: [text] = ["use lib.be.\{CompileError, compile, Driver\}", ""]
+    for l in body:
+        all.push(l)
+    lower_closure(["lib.fe", "lib.be", "app.main"], [FE, BE, lines(all)])
+
+describe "ownerlayout-mir-20261031 CompileError owner":
+    it "match Err(error) binder field read lowers clean":
+        val d = lower_consumer(["fn m() -> text:", "    match compile(0):", "        case Err(error):", "            error.message", "        case Ok(_):", "            \"\""])
+        expect(d).to_equal("")
+
+    it "unwrap_err() result field read still fails closed (open bug)":
+        val d = lower_consumer(["fn m() -> text:", "    compile(0).unwrap_err().message"])
+        expect(d).to_contain("ambiguous struct/class")
+
+    it "var result of a method call field read lowers clean":
+        val d = lower_consumer(["fn m(d: Driver) -> text:", "    var e = d.last_error()", "    e.message"])
+        expect(d).to_equal("")
+
+    it "workaround form (typed parameter) lowers clean":
+        val d = lower_consumer(["fn msg_of(e: CompileError) -> text:", "    e.message", "", "fn m(d: Driver) -> text:", "    msg_of(d.last_error())"])
+        expect(d).to_equal("")

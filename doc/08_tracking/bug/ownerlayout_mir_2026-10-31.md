@@ -17,3 +17,20 @@ A typed parameter / annotated binding gives MIR the exact imported CompileError 
 ## Known effect
 
 `bitfield_symbol_key` returns `sym#<id>`. A custom primitive alias used as a bitfield field or backing type in `70.backend/bitfield.spl` now resolves as unknown (`UnknownFieldType` / `InvalidBackingType`) until a real symbol-name lookup exists. That module is re-export-disabled (`70.backend/__init__.spl:20`), and the old `symbol.name` read could never have worked.
+
+## Status (2026-11-01 re-check)
+
+- Root bug 1: **open**. Seed-hosted in-process pure-Simple HIR+MIR re-check
+  (`test/01_unit/compiler/50.mir/compile_error_owner_layout_spec.spl`) still reports
+  `field 'message' on ambiguous struct/class owner 'CompileError'` for a field read on an
+  `unwrap_err()` result; the match `Err(error)` binder and `var e = d.method()` shapes
+  lower clean in a single closure (full-closure behaviour unverified); the
+  typed-parameter workaround lowers clean. Design note (not attempted here, risky: ~67
+  `struct_value_syms[...] =` writers): register value provenance with the
+  module-qualified `composite_layout_key` of the HIR-resolved symbol (call result
+  / Result payload type) instead of the bare name, so `resolve_field_index` and
+  `resolve_base_struct_name` hit the qualified tier.
+- Root bug 2 (`SymbolId.name`): **fixed in source** — no `symbol.name` reads remain in
+  `70.backend/bitfield.spl` / `50.mir/mir_bitfield.spl` (`bitfield_symbol_key`).
+  That site is a real fix, not a removable workaround.
+Revert-ready: no (driver_bootstrap / lean / vhdl helpers must stay).
