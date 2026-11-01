@@ -1,0 +1,50 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/incremental.spl
+#
+# Regression for bug stage2_ifexpr_continuation_else_parse_2026_11_01: the frozen
+# stage2 parser rejects `val x = if c:` followed by `value else: ""` on one
+# continuation line (phase-3 run 13 parse failure). The workaround spells the
+# recorded-hash lookup as a var plus block if. These checks pin that the
+# rewritten form keeps the original semantics and that the shape stays removed.
+#
+# tag: unit
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn _source(path: text) -> text:
+    val src = rt_file_read_text(path) ?? ""
+    expect(src.len() > 0).to_equal(true)
+    src
+
+fn recorded_hash_wa(entries: Dict<text, text>, path: text) -> text:
+    var recorded_hash = ""
+    if entries.contains_key(path):
+        recorded_hash = entries[path]
+    recorded_hash
+
+describe "stage2 if-expression continuation workaround":
+    it "returns the recorded hash when the path is cached":
+        # @req REQ-SSPEC-COMPILER
+        step("lookup of a present key")
+        var entries: Dict<text, text> = {}
+        entries["a.spl"] = "h1"
+        expect(recorded_hash_wa(entries, "a.spl")).to_equal("h1")
+
+    it "returns empty text when the path is not cached":
+        # @req REQ-SSPEC-COMPILER
+        step("lookup of a missing key fails closed to empty text")
+        var entries: Dict<text, text> = {}
+        entries["a.spl"] = "h1"
+        expect(recorded_hash_wa(entries, "b.spl")).to_equal("")
+
+    it "keeps the stage2-safe form in incremental.spl":
+        # @req REQ-SSPEC-COMPILER
+        step("the continued if-expression with trailing else is gone")
+        val src = _source("src/compiler/80.driver/driver_build/incremental.spl")
+        expect(src.contains("fingerprint.content_hash else: \"\"")).to_equal(false)
+        expect(src.contains("@workaround bug=stage2_ifexpr_continuation_else_parse_2026_11_01")).to_equal(true)
+        expect(src.contains("recorded_hash = entries[change.path].fingerprint.content_hash")).to_equal(true)
