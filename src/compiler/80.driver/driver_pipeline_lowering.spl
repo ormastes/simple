@@ -48,6 +48,12 @@ use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
 use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_build_admissible_v1,
     driver_native_prelower_module_keys_v1, driver_native_prelower_lookup_v1}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
+use compiler.mir._MirLowering.transient_owner_sffi.{
+    transient_array_scope_begin_v1, transient_array_scope_pause_v1,
+    transient_array_scope_end_v1
+}
+use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_registries_promote}
+use compiler.mir.mir_data.{bootstrap_fn_registries_promote}
 use compiler.common.module_path_naming.{module_logical_name_cache_warm}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_module_name_at}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
@@ -95,6 +101,16 @@ fn _driver_mcdc_budget(ctx: CompileContext, key: text, fallback: i64) -> i64:
         ctx.add_error("MCDC-E-BUFFER-CAP: {key} must be a positive integer, got '{raw}'")
         return 0
     fallback
+
+fn _driver_mir_inventory_scope_end(lowering: MirLowering) -> bool:
+    if not transient_array_scope_pause_v1():
+        val _ended = transient_array_scope_end_v1()
+        return false
+    var promoted = lowering.promote_transient_owner()
+    promoted = bootstrap_mir_registries_promote() and promoted
+    promoted = bootstrap_fn_registries_promote() and promoted
+    val ended = transient_array_scope_end_v1()
+    promoted and ended
 
 # Diagnostics-plumbing: MirLowering.errors was silently dropped on the
 # native-build worker path (nothing outside 70.backend read it), so a bare
@@ -1162,8 +1178,12 @@ impl CompilerDriver:
                 # param-only codec getters.
                 val prescan_owner_keys = self.ctx.hir_modules.keys()
                 while prescan_owner_i < prescan_owner_keys.len():
+                    val prescan_scope_active = transient_array_scope_begin_v1()
                     direct_lowering.prescan_module_struct_names(
                         self.ctx.hir_modules, prescan_owner_keys[prescan_owner_i])
+                    if prescan_scope_active and not _driver_mir_inventory_scope_end(direct_lowering):
+                        self.ctx.add_error("MIR struct prescan transient scope failed for {prescan_owner_keys[prescan_owner_i]}")
+                        return false
                     prescan_owner_i = prescan_owner_i + 1
                     if prescan_owner_i % 64 == 0:
                         log_phase("aot:mir_setup:struct_prescan visited={prescan_owner_i} total={prescan_owner_keys.len()}")
@@ -1176,8 +1196,12 @@ impl CompilerDriver:
                 while direct_prescan_idx < self.ctx.sources.len():
                     val prescan_key: text = self.ctx.sources[direct_prescan_idx].module_name
                     if self.ctx.hir_modules.has(prescan_key):
+                        val prescan_scope_active = transient_array_scope_begin_v1()
                         direct_lowering.prescan_module_struct_names(
                             self.ctx.hir_modules, prescan_key)
+                        if prescan_scope_active and not _driver_mir_inventory_scope_end(direct_lowering):
+                            self.ctx.add_error("MIR struct prescan transient scope failed for {prescan_key}")
+                            return false
                     direct_prescan_idx = direct_prescan_idx + 1
                     if direct_prescan_idx % 64 == 0:
                         log_phase("aot:mir_setup:struct_prescan visited={direct_prescan_idx} total={self.ctx.sources.len()}")
@@ -1205,7 +1229,14 @@ impl CompilerDriver:
                 if val present_enum_hir = enum_inventory_hir:
                     enum_inventory_modules = enum_inventory_modules.push(present_enum_hir)
                 enum_inventory_idx = enum_inventory_idx + 1
-            direct_lowering.register_module_enum_inventory_v1(enum_inventory_modules)
+            enum_inventory_idx = 0
+            while enum_inventory_idx < enum_inventory_modules.len():
+                val enum_scope_active = transient_array_scope_begin_v1()
+                direct_lowering.register_module_enum_inventory_v1([enum_inventory_modules[enum_inventory_idx]])
+                if enum_scope_active and not _driver_mir_inventory_scope_end(direct_lowering):
+                    self.ctx.add_error("MIR enum inventory transient scope failed for {enum_inventory_modules[enum_inventory_idx].name}")
+                    return false
+                enum_inventory_idx = enum_inventory_idx + 1
             log_phase("aot:mir_setup:enum_inventory:done")
             log_phase("aot:mir_setup:composite_inventory:start")
             log_build_progress("mir", "modules", 0, mir_source_indices.len(),
@@ -1217,7 +1248,14 @@ impl CompilerDriver:
             # under bare, layout, and identity keys) are written only by each
             # module's own lower_module pass -- after the entry has already
             # lowered. See register_module_composite_inventory_v1.
-            direct_lowering.register_module_composite_inventory_v1(enum_inventory_modules)
+            var composite_inventory_idx = 0
+            while composite_inventory_idx < enum_inventory_modules.len():
+                val composite_scope_active = transient_array_scope_begin_v1()
+                direct_lowering.register_module_composite_inventory_v1([enum_inventory_modules[composite_inventory_idx]])
+                if composite_scope_active and not _driver_mir_inventory_scope_end(direct_lowering):
+                    self.ctx.add_error("MIR composite inventory transient scope failed for {enum_inventory_modules[composite_inventory_idx].name}")
+                    return false
+                composite_inventory_idx = composite_inventory_idx + 1
             log_phase("aot:mir_setup:composite_inventory:done")
             # Staged native codegen (driver_build/native_staged_codegen.spl):
             # record the whole schedule's module names (the frozen storage
