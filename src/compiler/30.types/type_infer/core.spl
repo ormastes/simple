@@ -38,11 +38,34 @@ impl HmInferContext:
         match resolved.kind:
             case HirTypeKind.Infer(id, _):
                 id == var_id
-            case HirTypeKind.Function(params, ret, _):
+            case HirTypeKind.Function(params, ret, effects):
                 for p in params:
                     if self.occurs(var_id, p):
                         return true
+                # A `Throws(T)` effect is a type-bearing payload: a variable
+                # hidden only there must still fail the occurs check, else an
+                # infinite type binds through a thrown type (packet E2, F05).
+                for effect in effects:
+                    match effect.kind:
+                        case Throws(thrown):
+                            if self.occurs(var_id, thrown):
+                                return true
+                        case _: ()
                 self.occurs(var_id, ret)
+            case HirTypeKind.Union(members):
+                for m in members:
+                    if self.occurs(var_id, m):
+                        return true
+                false
+            case HirTypeKind.Isolated(inner):
+                self.occurs(var_id, inner)
+            case HirTypeKind.Projection(base, _):
+                self.occurs(var_id, base)
+            case HirTypeKind.TypeParam(_, bounds):
+                for b in bounds:
+                    if self.occurs(var_id, b):
+                        return true
+                false
             case HirTypeKind.Tuple(elements):
                 for e in elements:
                     if self.occurs(var_id, e):
