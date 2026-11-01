@@ -1,0 +1,184 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/04_architecture/compiler/macro_rr_invalidation.md ; plan: doc/03_plan/sys_test/macro_rr_invalidation.md ; design: doc/05_design/compiler/macro_rr_invalidation.md
+
+"""
+## Purpose and audience
+
+Purpose: end-to-end proof that the incremental BuildCache uses the schema-2
+macro reverse-reference receipt to mark exactly the macro expansion sites as
+`DependencyChanged`, reuses everything on a no-op, and fails closed on a
+corrupt receipt. Audience: compiler driver and cache engineers.
+
+## Operator workflow
+
+1. Run `bin/simple test test/03_system/compiler/feature/macro_rr_invalidation_spec.spl --mode=interpreter`.
+2. Every scenario must pass; a failure is a macro invalidation regression in `incremental.spl`.
+3. Regenerate the manual with `bin/simple spipe-docgen test/03_system/compiler/feature/macro_rr_invalidation_spec.spl --output doc/06_spec --no-index`.
+
+## Compatibility and limitations
+
+Writes fixtures under `build/test_tmp/`. Requires the design §4.1
+`build_cache_open_with_tldr_v1`. Failing-first until the lane lands.
+"""
+
+# doc-path: doc/03_plan/sys_test/macro_rr_invalidation.md
+# doc-path: doc/04_architecture/compiler/macro_rr_invalidation.md
+# doc-path: doc/05_design/compiler/macro_rr_invalidation.md
+# doc-path: doc/03_plan/agent_tasks/macro_rr_invalidation.md
+# @manual: primary
+# @tag:in-development
+# @tag:system
+# @tag:compiler
+# @tag:cache
+# @tag:macros
+
+"""
+# Macro reverse-reference invalidation (system)
+
+BuildCache record → persist (publishes the schema-2 receipt) → edit →
+detect changes → exact `DependencyChanged` set with an empty fallback reason.
+"""
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{file_write, file_read, file_exists}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use app.io.time_ops.{time_now_unix_micros}
+use compiler.driver.cache.module_artifacts_v1.{module_artifacts_emit_v1}
+# The legacy V1 families are published by their real owners during a compile;
+# this system fixture does not compile, so it declares them through the same
+# owner seams the receipt spec uses (reverse_reference_projection_receipt_spec).
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1,
+    reverse_reference_owner_mark_known_v1,
+    reverse_reference_register_generic_specialization_v1}
+use compiler.driver.cache.reverse_reference_receipt.{REVERSE_REFERENCE_FAMILIES_V1}
+use compiler.traits.trait_solver.{trait_solver_publish_trait_candidate_v1}
+use compiler.backend.linker.symbol_analysis.{symbol_analysis_publish_relocation_v1}
+use compiler.driver.cache.reverse_reference_receipt.{reverse_reference_read_current_v1}
+use compiler.driver.driver_build.incremental.{build_cache_open_with_tldr_v1,
+    build_cache_record_entry, build_cache_persist, incremental_detect_changes_at,
+    incremental_reverse_reference_fallback_reason_v1, ChangeKind, IncrChange}
+
+struct MacroRrSystemFixtureV1:
+    cache_path: text
+    tldr: text
+    provider: text
+    nested: text
+    site_a: text
+    site_b: text
+    site_c: text
+    unrelated: text
+    all: [text]
+    recorded: bool
+
+fn macro_def_text_v1(name: text, body: text) -> text:
+    "macro " + name + "(x: Int) -> (returns result: Int):\n    emit result:\n        " + body + "\n"
+
+fn provider_text_v1() -> text:
+    macro_def_text_v1("twice", "x + x") + "\n" + macro_def_text_v1("other", "x - 1")
+
+fn kind_tag_v1(kind: ChangeKind) -> text:
+    match kind:
+        case Added: "added"
+        case Modified: "modified"
+        case Deleted: "deleted"
+        case DependencyChanged: "dependency-changed"
+
+fn paths_of_kind_v1(changes: [IncrChange], tag: text) -> [text]:
+    var paths: [text] = []
+    for change in changes:
+        if kind_tag_v1(change.kind) == tag and not paths.contains(change.path):
+            paths.push(change.path)
+    paths.sorted()
+
+fn setup_macro_rr_system_v1() -> MacroRrSystemFixtureV1:
+    val root = "build/test_tmp/macro_rr_system_{time_now_unix_micros()}"
+    val src = root + "/src"
+    val tldr = root + "/tldr"
+    val _created = dir_create_all(src)
+    val provider = src + "/provider.spl"
+    val nested = src + "/nested.spl"
+    val site_a = src + "/site_a.spl"
+    val site_b = src + "/site_b.spl"
+    val site_c = src + "/site_c.spl"
+    val unrelated = src + "/unrelated.spl"
+    val _w1 = file_write(provider, provider_text_v1())
+    val _w2 = file_write(nested, "use provider.{twice}\n\n" + macro_def_text_v1("quad", "twice!(x) + twice!(x)"))
+    val _w3 = file_write(site_a, "use provider.{twice}\n\nfn first() -> i64:\n    twice!(1)\n")
+    val _w4 = file_write(site_b, "use nested.{quad}\n\nfn second() -> i64:\n    quad!(2)\n")
+    val _w5 = file_write(site_c, "use provider.{other}\n\nfn third() -> i64:\n    other!(3)\n")
+    val _w6 = file_write(unrelated, "fn lonely() -> i64:\n    7\n")
+    val all = [provider, nested, site_a, site_b, site_c, unrelated]
+    for path in all:
+        val _e = module_artifacts_emit_v1(path, tldr)
+    val cache_path = root + "/build_cache.sdn"
+    # Declare the legacy families through their real owner seams so the
+    # non-macro lookups are exact (known-empty), exactly as a compile would.
+    reverse_reference_owner_end_v1()
+    val _begun = reverse_reference_owner_begin_v1()
+    for family in REVERSE_REFERENCE_FAMILIES_V1:
+        reverse_reference_owner_mark_known_v1(family)
+    trait_solver_publish_trait_candidate_v1(provider, site_a, "trait-registry-v1")
+    reverse_reference_register_generic_specialization_v1(provider, site_a, "generic-record-v1")
+    symbol_analysis_publish_relocation_v1(provider, site_a, "symbol-relocation-v1")
+    val cache = build_cache_open_with_tldr_v1(cache_path, tldr)
+    var recorded = true
+    recorded = recorded and build_cache_record_entry(cache, provider, [], [])
+    recorded = recorded and build_cache_record_entry(cache, nested, [provider], [])
+    recorded = recorded and build_cache_record_entry(cache, site_a, [provider], [])
+    recorded = recorded and build_cache_record_entry(cache, site_b, [nested, provider], [])
+    recorded = recorded and build_cache_record_entry(cache, site_c, [provider], [])
+    recorded = recorded and build_cache_record_entry(cache, unrelated, [], [])
+    recorded = recorded and build_cache_persist(cache)
+    MacroRrSystemFixtureV1(cache_path: cache_path, tldr: tldr, provider: provider,
+        nested: nested, site_a: site_a, site_b: site_b, site_c: site_c, unrelated: unrelated,
+        all: all, recorded: recorded)
+
+describe "macro RR invalidation through BuildCache":
+    # @req REQ-MACRO-RR-010
+    it "publishes a schema 2 receipt on persist":
+        step("The receipt must be schema 2 so the macro families are exact")
+        val fx = setup_macro_rr_system_v1()
+        expect(fx.recorded).to_equal(true)
+        val current = reverse_reference_read_current_v1(fx.cache_path)
+        expect(current.valid).to_equal(true)
+        var schema = 0
+        if val receipt = current.receipt:
+            schema = receipt.schema_version
+        expect(schema).to_equal(2)
+
+    # @req REQ-MACRO-RR-001
+    it "marks exactly the expansion sites and the nested definer for a provider body edit":
+        step("Edit twice's body, then detect changes with the tldr-aware cache")
+        val fx = setup_macro_rr_system_v1()
+        expect(fx.recorded).to_equal(true)
+        expect(file_write(fx.provider, provider_text_v1().replace("x + x", "x * 2"))).to_equal(true)
+        val changes = build_cache_open_with_tldr_v1(fx.cache_path, fx.tldr).detect_changes(fx.all)
+        expect(paths_of_kind_v1(changes.changes, "modified")).to_equal([fx.provider])
+        expect(paths_of_kind_v1(changes.changes, "dependency-changed"))
+            .to_equal([fx.nested, fx.site_a, fx.site_b].sorted())
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+
+    # @req REQ-MACRO-RR-007
+    it "reports zero changes on a no-op run":
+        step("Detect without editing anything")
+        val fx = setup_macro_rr_system_v1()
+        expect(fx.recorded).to_equal(true)
+        val result = incremental_detect_changes_at(fx.cache_path, fx.all)
+        expect(result.changes.changes.len()).to_equal(0)
+
+    # @req REQ-MACRO-RR-009
+    it "fails closed on a corrupt receipt pointer":
+        step("Damage the CURRENT pointer, edit the provider, detect")
+        val fx = setup_macro_rr_system_v1()
+        expect(fx.recorded).to_equal(true)
+        expect(file_write(fx.cache_path + ".reverse-references/CURRENT", "not-a-digest")).to_equal(true)
+        expect(file_write(fx.provider, provider_text_v1().replace("x + x", "x * 3"))).to_equal(true)
+        val result = incremental_detect_changes_at(fx.cache_path, fx.all)
+        expect(incremental_reverse_reference_fallback_reason_v1().len()).to_be_greater_than(0)
+        var expected: [text] = []
+        for path in fx.all:
+            if path != fx.provider: expected.push(path)
+        expect(paths_of_kind_v1(result.changes.changes, "dependency-changed")).to_equal(expected.sorted())

@@ -87,7 +87,9 @@ Not touched: `macro_reference_projector.spl` (forward facts), `reverse_reference
 
 - Receipt missing / undecodable / schema 1 / generation mismatch → widen whole BuildCache scope, reason recorded in `incremental_reverse_reference_fallback_reason_v1`.
 - Companion missing / stale / corrupt / wrong section count for any entry → inventory incomplete → macro families `@unknown-family` in the next receipt; lookups answer `exact=false` and widen.
-- Changed path whose pre-edit companion cannot be read raw → changed subjects incomplete → widen.
+- Changed path whose pre-edit companion cannot be read raw, or whose companion's source-digest is not the fingerprint the BuildCache recorded (rewritten after the edit) → changed subjects incomplete → widen. The pre-edit manifest is admitted only for the recorded source.
+- A definition flagged uncacheable in `macro-key|` keeps its key; every expansion of it is conservative, so its sites never obtain a complete input root and are always rebuilt.
+- At validation a requested name with more than one current definition, or an unresolved name that is now defined, makes the input root unknown → entry invalid.
 - A consumer source named by the receipt that is not a BuildCache entry → exact=false (receipt/inventory disagreement) → widen.
 - `tldr_root == ""` (no companions configured) → macro facet unknown: receipt macro families `@unknown-family`; BuildCache macro gate: entry valid only if no dependency in the closure declares a `macro ` (textual, companion-free); otherwise invalid.
 - Deleted files keep the pre-existing whole-scope widening of the legacy caller (all families); a macro removed from a surviving file is a `Modified` edit and is exact.
