@@ -1,5 +1,18 @@
 # LLM Repository Wiki
 
+## rt_ mapping and pointer contract
+
+`.spl` declarations are authoritative for `rt_` bindings. A NULL-returnable C
+function must be `T?` in Simple; without an error channel it fails closed with
+`SIMPLE_RT_NONNULL`. Verify with `check-rt-pointer-ref-map.py`,
+`check-rt-host-map.py` and the on-demand `check-rt-c-contract-compile.py` in
+`scripts/check/`. Those results are mapping evidence: UNKNOWN and UNTESTED are
+not passes, and macOS clang results do not certify other hosts. Baselines only
+shrink. When changing a width, update every provider, Rust twin, codegen spec
+and LLVM declaration. Read the
+[design](../05_design/compiler/rt_mapping_pointer_contract_design.md) and
+[plan](../03_plan/compiler/rt_mapping_pointer_contract_plan.md) first.
+
 ## Simple linker: external mold/LLD and internal Simple engine
 
 The self-hosted Simple compiler can use external mold or LLVM LLD; that does
