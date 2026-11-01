@@ -149,16 +149,17 @@ def inherited_build_settings(environ):
     """Operator settings kept across the SIMPLE_* sanitization below.
 
     The build memory reserve is a host safety bound, not a compiler input.
-    Dropping it made the compiler fall back to its 24 GiB default and refuse
-    every Hello build on a smaller or shared host. A present but noncanonical
+    Dropping it made the compiler fall back to its default (then a fixed
+    24 GiB, now min(24 GiB, installed RAM / 2)) and refuse every Hello build
+    on a smaller or shared host. A present but noncanonical
     value is refused rather than silently ignored.
     """
     kept = {}
     key = "SIMPLE_BUILD_MEMORY_RESERVE_BYTES"
     if key in environ:
         value = environ[key]
-        # The compiler parses an out-of-range value as 0 and falls back to the
-        # 24 GiB default, so bound it to i64 here.
+        # The compiler parses an out-of-range value as 0 and falls back to its
+        # host-scaled default (24 GiB cap), so bound it to i64 here.
         if (not value.isascii() or not value.isdigit() or value[0] == "0" or
                 len(value) > 19 or int(value) > 2**63 - 1):
             raise ValueError(key + " must be a canonical positive i64 decimal")
