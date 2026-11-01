@@ -4175,11 +4175,11 @@ const char* rt_aes_gcm_decrypt_hex(const char* key_hex, const char* iv_hex,
 /* Convert wire text (may contain NUL) to hex string, given explicit length. */
 const char* rt_wire_to_hex(const char* wire, int64_t wire_len) {
     if (!wire || wire_len <= 0) {
-        char* empty = (char*)malloc(1);
-        if (empty) empty[0] = '\0';
-        return empty;
+        char* empty = SIMPLE_RT_NONNULL("rt_wire_to_hex", malloc(1));
+        empty[0] = '\0';
+        return SIMPLE_RT_NONNULL("rt_wire_to_hex", empty);
     }
-    return hex_encode((const uint8_t*)wire, wire_len);
+    return SIMPLE_RT_NONNULL("rt_wire_to_hex", hex_encode((const uint8_t*)wire, wire_len));
 }
 
 /* Convert hex string back to wire text (binary, may contain NUL).
