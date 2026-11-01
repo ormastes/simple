@@ -15,7 +15,7 @@ Lane `generic-rr-hir-variant-obj`. Design: `doc/05_design/generic_rr_hir_variant
 | REQ-GRR-007 | Two concurrent rebuilds staged from the same prior generation produce identical canonical shard sets; replay is idempotent. |
 | REQ-GRR-008 | Corrupt RR shard bytes or a corrupt generic section fail closed: decode rejects and no plan is produced. |
 | REQ-GRR-009 | One target-neutral HIR yields one object key per target; keys differ across targets and are stable for equal inputs. |
-| NFR-GRR-001 | First object of a unit is emitted within 10 s (`obj_done_ms - hir_start_ms <= 10000`). Verified only on the self-hosted binary. |
+| NFR-GRR-001 | First object of a unit is emitted within 10 s (`obj_done_ms - hir_start_ms <= 10000`). **Deferred**: a live measurement only — read a real `NativeFileWorkerReceiptV1` from a `SIMPLE_FILE_WORKERS=1` build on the self-hosted binary; no spec asserts it on synthetic receipts (that would be a hardcoded pass). |
 
 ## Spec files
 
@@ -39,6 +39,17 @@ Lane `generic-rr-hir-variant-obj`. Design: `doc/05_design/generic_rr_hir_variant
 | unrelated edit | no diff | accepted, empty | x |
 | concurrent rebuild | - | equal staged shards, idempotent replay | x |
 | cache corruption | section decode fails | shard decode fails, plan rejected | x |
+
+## Known gaps
+
+- REQ-GRR-008's on-disk path (`read_reverse_reference_shard_v1` -> `rr_shard_decode_rejected`
+  through the verified CAS) is not exercised: the verified CAS refuses to store
+  non-canonical bytes, so a corrupt stored shard needs a filesystem-level fixture. The
+  codec-level fail-closed control (`reverse_reference_shard_decode_v1`) and the plan-level
+  rejection (`rr_shard_incomplete`) are covered.
+- On the Rust seed the positive decode control of the RRS1 envelope fails (`wire_get_u32`
+  misreads on the seed; `three_payload_common_v2_contract_spec.spl` is 1/13 there), so one
+  `it` in the integration and system specs is seed-RED by construction.
 
 ## Evidence rule
 

@@ -86,9 +86,11 @@ pub fn plan_generic_invalidation_v1(template: SemanticQueryKeyV1,
 
 `affected_consumers_v1` runs exactly the validation of `_plan_affected_queries_authenticated_v1`
 up to (not including) the authority gate, with the same rejection strings
-(`invalid_changed_facet`, `invalid_changed_fingerprint`, `membership_or_absence_incomplete`,
-`forward_manifest_unverified`, `rr_shard_incomplete`, `affected_evidence_incomplete`,
-`affected_domain_incomplete`), then computes the `(consumer, partition)` pairs from RR edges
+(`affected_domain_bounds_exceeded` for the row/byte preflight, `invalid_changed_facet`,
+`invalid_changed_fingerprint`, `membership_or_absence_incomplete`,
+`forward_manifest_unverified`, `rr_shard_incomplete` — checked per shard right after the
+row bound so a corrupt edge digest is reported as the shard defect it is —
+`affected_evidence_incomplete`, `affected_domain_incomplete`), then computes the `(consumer, partition)` pairs from RR edges
 and verified forward reads matched on `(producer, facet)`. It is the exactness seam: no SCC
 expansion, no authority. It is pure and reads no disk.
 
@@ -122,7 +124,8 @@ pub struct HirVariantProjectionV1:
     variant_digest: text     # "" when not ok
 
 pub fn hir_variant_target_id_v1(target: MirTargetContext) -> text
-    # "<arch>-<os>-<abi>-<backend>/<build_profile>/<cpu_tier or 'baseline'>"
+    # "<arch>[.<subarch>]-<os>-<abi>-<backend>/<build_profile>/<cpu_tier or 'baseline'>"
+    # subarch is included because @cfg atoms (thumb, armv7, ...) select on it
 pub fn hir_variant_projection_v1(decls: [HirCfgDeclV1], target: MirTargetContext,
         features: [text]) -> HirVariantProjectionV1
 pub fn hir_variant_object_key_v1(module_path: text, projection: HirVariantProjectionV1,

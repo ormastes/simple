@@ -2,6 +2,11 @@
 """
 # Generic RR edit -> rebuild loop (lane generic-rr-hir-variant-obj)
 
+**Requirements:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md (REQ-GRR-001..009)
+**Plan:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md
+**Design:** doc/05_design/generic_rr_hir_variant_obj.md
+**Research:** doc/01_research/local/generic_rr_hir_variant_obj.md
+
 In-memory end-to-end loop: old/new `GenericTemplateEntryV1` ->
 `generic_template_changed_facets_v1` -> `generic_changed_semantic_facets_v1`
 -> forward manifests (reads named by the generic facet constants, consumed
@@ -20,6 +25,8 @@ touched; persistence is covered by the coordinator's own specs.
 # @tag:cache
 # @tag:generics
 # @cover src/compiler/80.driver/cache/reference/reverse_reference_coordinator_v1.spl 90%
+# @cover src/compiler/00.common/cache_contract/generic_tldr_view_v1.spl 90%
+# @cover src/compiler/80.driver/driver_build/hir_variant_object_key_v1.spl 90%
 
 use std.spec.*
 use std.spec.step
@@ -76,6 +83,14 @@ fn entry(second_type: text, bound_key: text, body: text) -> GenericTemplateEntry
         bounds: [GenericBoundV1(param_index: 0, bound_key: bound_key)], body_digest: digest(body))
 
 fn old_entry() -> GenericTemplateEntryV1: entry("Second", "trait:pkg_a.Eq", "body-v1")
+
+# A comment-only edit: the file digest moves, no facet does.
+fn unrelated_entry() -> GenericTemplateEntryV1:
+    val e = old_entry()
+    GenericTemplateEntryV1(symbol_id: e.symbol_id, source_digest: e.source_digest + "#comment-only",
+        visibility_root: e.visibility_root, active_guard_root: e.active_guard_root,
+        language_schema: e.language_schema, params: e.params, fields: e.fields,
+        bounds: e.bounds, body_digest: e.body_digest)
 
 fn fp(facets: GenericTemplateFacetsV1, facet: text) -> text:
     if facet == GENERIC_FACET_BODY_V1: return facets.body_fingerprint
@@ -207,13 +222,15 @@ describe "generic RR edit-rebuild loop: template edits":
         val plan = plan_edit(entry("Second", "trait:pkg_a.Ord", "body-v1"))
         expect(plan.accepted).to_equal(true)
         expect(plan.changed_facets).to_equal([GENERIC_FACET_BOUND_V1])
+        expect(plan.affected.len()).to_equal(3)
         expect(ids(plan.affected).contains("pkg_b.C1")).to_equal(true)
         expect(ids(plan.affected).contains("pkg_b.C2")).to_equal(true)
         expect(ids(plan.affected).contains("pkg_a.Pair#object")).to_equal(true)
+        expect(ids(plan.affected).contains("pkg_c.D")).to_equal(false)
 
     it "unrelated edit yields an accepted empty plan (REQ-GRR-006)":
-        step("Re-plan with an identical template entry (REQ-GRR-006)")
-        val plan = plan_edit(old_entry())
+        step("Re-plan after a comment-only edit that changes only the source digest (REQ-GRR-006)")
+        val plan = plan_edit(unrelated_entry())
         expect(plan.accepted).to_equal(true)
         expect(plan.changed_facets.len()).to_equal(0)
         expect(plan.affected.len()).to_equal(0)

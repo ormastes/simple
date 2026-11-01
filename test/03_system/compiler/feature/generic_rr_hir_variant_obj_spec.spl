@@ -1,6 +1,11 @@
-# @req REQ-GRR-001 REQ-GRR-002 REQ-GRR-003 REQ-GRR-004 REQ-GRR-005 REQ-GRR-006 REQ-GRR-007 REQ-GRR-008 REQ-GRR-009 NFR-GRR-001
+# @req REQ-GRR-001 REQ-GRR-002 REQ-GRR-003 REQ-GRR-004 REQ-GRR-005 REQ-GRR-006 REQ-GRR-007 REQ-GRR-008 REQ-GRR-009
 """
 # Generic RR exactness and HIR-variant objects (system)
+
+**Requirements:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md (REQ-GRR-001..009)
+**Plan:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md
+**Design:** doc/05_design/generic_rr_hir_variant_obj.md
+**Research:** doc/01_research/local/generic_rr_hir_variant_obj.md
 
 End-to-end over the public owners only: one target-neutral `HirCfgDeclV1`
 list projected for linux and windows yields per-target object keys, RR
@@ -10,9 +15,9 @@ plan. Each scenario (body, signature, bound, caller, cfg-variant, unrelated,
 concurrent rebuild, cache corruption, two keys per module) asserts the full
 chain.
 
-UNRUN: no self-hosted binary is available on the authoring host. NFR-GRR-001
-is asserted on an in-memory receipt here; the live first-object timing is
-measured only on the self-hosted binary.
+UNRUN on the self-hosted binary: none is available on the authoring host.
+NFR-GRR-001 (first object within 10 s) is a live worker measurement and is
+deliberately not asserted here; see the test plan for its command.
 """
 
 # @tag:system
@@ -43,7 +48,6 @@ use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
     verified_scc_group_receipt_v1, verified_affected_domain_receipt_v1,
     rebuild_reverse_shards_from_forward_v1, stage_reverse_shards_v1}
 use compiler.driver.driver_build.hir_variant_object_key_v1.*
-use compiler.driver.driver_build.native_file_worker_v1.{NativeFileWorkerReceiptV1}
 
 val MODULE: text = "pkg_a.main"
 val TOOLCHAIN: text = "simple-self-hosted/1.0.0"
@@ -86,6 +90,14 @@ fn entry(second_type: text, bound_key: text, body: text) -> GenericTemplateEntry
         bounds: [GenericBoundV1(param_index: 0, bound_key: bound_key)], body_digest: digest(body))
 
 fn old_entry() -> GenericTemplateEntryV1: entry("Second", "trait:pkg_a.Eq", "body-v1")
+
+# A comment-only edit: the file digest moves, no facet does.
+fn unrelated_entry() -> GenericTemplateEntryV1:
+    val e = old_entry()
+    GenericTemplateEntryV1(symbol_id: e.symbol_id, source_digest: e.source_digest + "#comment-only",
+        visibility_root: e.visibility_root, active_guard_root: e.active_guard_root,
+        language_schema: e.language_schema, params: e.params, fields: e.fields,
+        bounds: e.bounds, body_digest: e.body_digest)
 
 fn key(kind: text, label: text) -> SemanticQueryKeyV1:
     SemanticQueryKeyV1(kind: kind, stable_entity_id: label,
@@ -239,8 +251,10 @@ describe "system: cfg-variant edit":
 
 describe "system: unrelated edit":
     it "yields no changed facets and an accepted empty plan (REQ-GRR-006)":
-        step("Plan an edit that leaves the template semantics unchanged (REQ-GRR-006)")
-        val plan = plan_edit(old_entry())
+        step("Plan a comment-only edit that moves the source digest but no facet (REQ-GRR-006)")
+        val new_e = unrelated_entry()
+        expect(new_e.source_digest == old_entry().source_digest).to_equal(false)
+        val plan = plan_edit(new_e)
         expect(plan.accepted).to_equal(true)
         expect(plan.changed_facets.len()).to_equal(0)
         expect(plan.affected.len()).to_equal(0)
@@ -286,13 +300,3 @@ describe "system: one HIR, one object key per target":
         expect(hir_variant_object_key_v1(MODULE, projection(linux(), "w-v1"), TOOLCHAIN)).to_equal(kl)
         expect(hir_variant_object_key_v1(MODULE, projection(windows(), "w-v1"), TOOLCHAIN)).to_equal(kw)
         expect(part(linux()) == part(windows())).to_equal(false)
-
-describe "system: first object latency":
-    it "keeps first object within 10 s on a receipt (NFR-GRR-001)":
-        step("Assert obj_done_ms - hir_start_ms <= 10000 on an in-memory receipt; the live measurement is self-hosted-only (NFR-GRR-001)")
-        val receipt = NativeFileWorkerReceiptV1(module: MODULE, hir_start_ms: 1000, hir_done_ms: 1400,
-            deps_ready_ms: 1500, mir_done_ms: 2600, obj_done_ms: 4200, status: "ok",
-            object: "build/q/" + sha256_text(MODULE) + ".o")
-        expect(receipt.status).to_equal("ok")
-        expect(receipt.obj_done_ms - receipt.hir_start_ms).to_be_less_than(10001)
-        expect(receipt.obj_done_ms).to_be_greater_than(receipt.mir_done_ms)
