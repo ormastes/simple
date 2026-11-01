@@ -325,9 +325,8 @@ fn parse_db_row(line: text) -> TodoEntry:
     Returns the `_empty_entry()` sentinel (id -1) for the table header, blank
     lines, and anything that does not match; the reader drops those rows, so a
     hand-edited or older-format line degrades to being ignored instead of
-    crashing the scan. Descriptions cannot contain a double quote (the writer
-    escapes them), so the first quote after the description start is always
-    its terminator."""
+    crashing the scan. The writer maps `"` to `'`, but curated rows may still
+    hold inner quotes, so the terminator is the first `", ` whose tail parses."""
     val t = line.trim()
     if t.len() == 0:
         return _empty_entry()
@@ -340,37 +339,87 @@ fn parse_db_row(line: text) -> TodoEntry:
     val (keyword, r2) = _take_field(r1)
     val (area, r3) = _take_field(r2)
     val (priority, r4) = _take_field(r3)
-    if not r4.starts_with("\""):
-        return _empty_entry()
-    val desc_body = r4[1:]
-    val desc_end = desc_body.index_of("\"")
-    if desc_end < 0:
-        return _empty_entry()
-    val description = desc_body[0:desc_end]
-    val r5 = desc_body[desc_end + 1:]
-    if not r5.starts_with(", "):
-        return _empty_entry()
-    val (file, r6) = _take_field(r5[2:])
+    # The writer maps `"` to `'`, but hand-curated rows do carry inner quotes
+    # (e.g. `probe_error="..."`), and legacy rows have an unquoted description.
+    # Taking the FIRST quote as the terminator rejected such a row, and the
+    # rewrite then silently DELETED it from the db. Try each candidate end and
+    # keep the first whose tail parses.
+    var body = r4
+    var sep = ", "
+    if r4.starts_with("\""):
+        body = r4[1:]
+        sep = "\", "
+    var cut = body.index_of(sep)
+    while cut >= 0:
+        val tail = _parse_row_tail(body[cut + sep.len():])
+        if tail.line >= 0:
+            var description = body[0:cut]
+            # A triage note appended after the `valid` field is folded into
+            # the description rather than dropped with the row.
+            if tail.keyword.len() > 0:
+                description = description + " " + tail.keyword
+            return TodoEntry(id: id, keyword: keyword, area: area, priority: priority,
+                description: description, file: tail.file, line: tail.line,
+                issue: tail.issue, blocked: tail.blocked, status: tail.status,
+                valid: tail.valid)
+        val next_rel = body[cut + 1:].index_of(sep)
+        if next_rel < 0:
+            cut = -1
+        else:
+            cut = cut + 1 + next_rel
+    _empty_entry()
+
+fn _parse_row_tail(r: text) -> TodoEntry:
+    """Parse `file, line, issue, "blocked", status, valid[; note]`; line -1 = no match."""
+    val (file, r6) = _take_field(r)
     val (line_s, r7) = _take_field(r6)
+    if line_s.len() == 0 or _digit_value(line_s[0:1]) < 0:
+        return _empty_entry()
     val line = _to_i64(line_s)
     if line < 0:
         return _empty_entry()
     val (issue, r8) = _take_field(r7)
-    if not r8.starts_with("\""):
-        return _empty_entry()
-    val blocked_body = r8[1:]
-    val blocked_end = blocked_body.index_of("\"")
-    if blocked_end < 0:
-        return _empty_entry()
-    val blocked = blocked_body[0:blocked_end]
-    val r9 = blocked_body[blocked_end + 1:]
+    var blocked = ""
+    var r9 = ""
+    if r8.starts_with("\""):
+        val blocked_body = r8[1:]
+        val blocked_end = blocked_body.index_of("\"")
+        if blocked_end < 0:
+            return _empty_entry()
+        blocked = blocked_body[0:blocked_end]
+        r9 = blocked_body[blocked_end + 1:]
+    else:
+        # Legacy unquoted `blocked`: it runs up to the `, status, valid` pair,
+        # i.e. the second-to-last `, ` separator.
+        var seps: [i64] = []
+        var at = r8.index_of(", ")
+        while at >= 0:
+            seps.push(at)
+            val nxt = r8[at + 1:].index_of(", ")
+            if nxt < 0:
+                at = -1
+            else:
+                at = at + 1 + nxt
+        if seps.len() < 2:
+            return _empty_entry()
+        val bcut = seps[seps.len() - 2]
+        blocked = r8[0:bcut].trim()
+        r9 = r8[bcut:]
     if not r9.starts_with(", "):
         return _empty_entry()
     val (status, r10) = _take_field(r9[2:])
-    val valid = r10.trim() == "true"
-    TodoEntry(id: id, keyword: keyword, area: area, priority: priority,
-        description: description, file: file, line: line, issue: issue,
-        blocked: blocked, status: status, valid: valid)
+    var valid_s = r10.trim()
+    var note = ""
+    val semi = valid_s.index_of(";")
+    if semi >= 0:
+        note = valid_s[semi + 1:].trim()
+        valid_s = valid_s[0:semi].trim()
+    if valid_s != "true" and valid_s != "false":
+        return _empty_entry()
+    # `keyword` carries an appended `; note` back to parse_db_row.
+    TodoEntry(id: -1, keyword: note, area: "", priority: "", description: "",
+        file: file, line: line, issue: issue, blocked: blocked, status: status,
+        valid: valid_s == "true")
 
 fn read_todo_db(path: text) -> [TodoEntry]:
     var rows: [TodoEntry] = []
@@ -386,8 +435,10 @@ fn read_todo_db(path: text) -> [TodoEntry]:
 fn _normalize_description(s: text) -> text:
     """Trim and collapse whitespace runs so incidental hand-edits (double
     spaces, trailing space) cannot orphan a row from its marker."""
+    # The writer stores `"` as `'`, so compare in that form or every marker
+    # whose text holds a double quote never matches its own committed row.
     var parts: [text] = []
-    for p in s.split(" "):
+    for p in s.replace("\"", "'").split(" "):
         if p.len() > 0:
             parts.push(p)
     parts.join(" ")
@@ -428,6 +479,9 @@ fn merge_entries(existing: [TodoEntry], scanned: [TodoEntry]) -> MergeResult:
     var carried: i64 = 0
     var closed_count: i64 = 0
 
+    # Pass 1: exact key (file + normalized description) for every row first,
+    # so a prefix fallback below can never steal a marker another row owns.
+    var match_of: [i64] = []
     for row in existing:
         if row.id > max_id:
             max_id = row.id
@@ -441,6 +495,35 @@ fn merge_entries(existing: [TodoEntry], scanned: [TodoEntry]) -> MergeResult:
             si = si + 1
         if found >= 0:
             used[found] = true
+        match_of.push(found)
+
+    # Pass 2: curated rows carry text the marker does not (`... 2026-09-16
+    # note: ...` appended by triage). Exact-only matching closed those rows
+    # while the marker was still live and re-added the marker as a new row.
+    # Accept a same-file marker whose normalized text is a prefix of the row.
+    var ri: i64 = 0
+    while ri < existing.len():
+        if match_of[ri] < 0:
+            val row = existing[ri]
+            val rdesc = _normalize_description(row.description)
+            var si: i64 = 0
+            var found: i64 = -1
+            while si < scanned.len() and found < 0:
+                if used[si] == false and scanned[si].file.trim() == row.file.trim():
+                    val sdesc = _normalize_description(scanned[si].description)
+                    if sdesc.len() >= 16 and rdesc.starts_with(sdesc + " "):
+                        found = si
+                si = si + 1
+            if found >= 0:
+                used[found] = true
+                match_of[ri] = found
+        ri = ri + 1
+
+    ri = 0
+    while ri < existing.len():
+        val row = existing[ri]
+        val found = match_of[ri]
+        if found >= 0:
             carried = carried + 1
             val s = scanned[found]
             merged.push(TodoEntry(
@@ -450,7 +533,12 @@ fn merge_entries(existing: [TodoEntry], scanned: [TodoEntry]) -> MergeResult:
                 blocked: row.blocked, status: row.status, valid: row.valid))
         else:
             var status = row.status
-            if status == "open":
+            # Rows registered against a tracking record (doc/08_tracking/**)
+            # are hand-authored, not derived from a `# TODO:` marker, so a
+            # missing marker says nothing about them. Auto-closing them flipped
+            # open P0/P1 registry items to closed on every regeneration.
+            val registry_row = row.file.trim().starts_with("doc/08_tracking/")
+            if status == "open" and not registry_row:
                 status = "closed"
                 closed_count = closed_count + 1
             merged.push(TodoEntry(
@@ -458,6 +546,7 @@ fn merge_entries(existing: [TodoEntry], scanned: [TodoEntry]) -> MergeResult:
                 priority: row.priority, description: row.description,
                 file: row.file, line: row.line, issue: row.issue,
                 blocked: row.blocked, status: status, valid: row.valid))
+        ri = ri + 1
 
     var added: i64 = 0
     var si2: i64 = 0

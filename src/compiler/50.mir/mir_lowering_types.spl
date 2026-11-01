@@ -71,11 +71,6 @@ struct MirLowering:
     # rt_enum_payload on a payload-less variant), so a result local of such
     # a call must never be treated as a provably non-nil scalar.
     extern_fn_symbols: Dict<i64, bool>
-    # Symbol ids of this module's generic TEMPLATE functions (`fn f<T>`).
-    # There is no specialization pass: a template is never emitted, so a
-    # direct call to one is a hard E-GEN-001 lowering error, not a call to
-    # an undefined symbol. Filled by the per-module function prescan.
-    generic_template_fn_symbols: Dict<i64, bool>
     # Locals holding (a copy of) an extern call's result. Consulted by the
     # `== nil` scalar fold and by ensure_option_handle's static-Some path;
     # propagated through let/var copies like nil_locals.
@@ -219,6 +214,11 @@ struct MirLowering:
     struct_field_over_type_param: Dict<text, [bool]>
     generic_instance_field_types: Dict<i64, [MirType]>
     generic_instance_field_struct_names: Dict<i64, [text]>
+    # Call-site record identity of an erased callback binder: `T` ->
+    # struct layout key, bound from the sibling arguments of the call that
+    # passes a lambda into a `fn(T, ..)` slot (generics = one erased body:
+    # the generic callee stays erased, the lambda is the call site's own).
+    erased_callback_record_bindings: Dict<text, text>
     # Struct NAME -> ordered field representation markers. `"str"` marks a
     # declared `text` field whose projected MIR local must remain
     # Opaque("str"); leaving it as the generic i64 fallback breaks native
@@ -1102,6 +1102,21 @@ impl MirLowering:
                 return true
             i = i - 1
         false
+
+    fn local_needs_erased_decode(local_id: i64, hir: HirType) -> bool:
+        """A local that holds a TAGGED runtime word and is about to be used
+        as a declared scalar must be decoded (`decode_runtime_value`).
+
+        `Any` keeps its historical gate (the HIR type AND the runtime-value
+        mark, because legacy `Any` locals may still hold a raw literal).
+        An erased generic `T` fires on the HIR type ALONE: every producer
+        of a `T` value boxes (generics = one erased body, 2026-10-31), so a
+        `T`-typed local is tagged by contract and a missing mark must not
+        leak the tag into a scalar slot (the x8 class of PR #5661)."""
+        match hir.kind:
+            case HirTypeKind.TypeParam(_, _): true
+            case HirTypeKind.Any: self.is_runtime_value_local(local_id)
+            case _: false
 
     me unmark_runtime_value_local(local_id: i64):
         var ids: [i64] = []
