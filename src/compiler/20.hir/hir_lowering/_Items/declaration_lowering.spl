@@ -282,8 +282,12 @@ impl HirLowering:
         # of proceeding into codegen with an erased template. This is a
         # deliberate hard stop, not a workaround.
         # Phase B (2026-08-22): the gate is OPEN. A generic fn now lowers to a
-        # HirFunction marked `is_generic_template` (below). MIR never emits a
-        # template and refuses a direct call to one (E-GEN-001).
+        # HirFunction marked `is_generic_template` (below).
+        # 2026-10-31 (owner decision, final): generics = ONE ERASED BODY per
+        # generic fn. MIR emits the template once with every `T` slot as the
+        # tagged runtime word and boxes/decodes at each boundary
+        # (50.mir `local_needs_erased_decode`); a direct call is an ordinary
+        # call. No specialization, no substitution, no E-GEN-001 refusal.
 
         # Lower parameters
         # NOTE(#133): lowered unconditionally, including under SIMPLE_BOOTSTRAP.
@@ -408,8 +412,17 @@ impl HirLowering:
                 # `return vN: result 0 has type f64, must match function
                 # signature of i64` (lib.common.math.math, simd, ...). See
                 # cranelift_float_return_erased_to_i64_2026-10-24.
+                # `-> T` (erased generic) is a tagged-word ABI boundary, not a
+                # scalar: the one erased body boxes its tail into the slot
+                # and every caller decodes once (the `Any | TypeParam` arms
+                # of 50.mir function_lowering / lower_call). Collapsing it
+                # to the table's i64 default made the DEFINITION decode its
+                # already-tagged `T` tail (`rt_value_as_int_wide`) and return
+                # a raw word that the caller decoded again, so `ident(7)`
+                # read back as 0 while text handles passed through unharmed
+                # (generics = one erased body, 2026-11-01).
                 match declared_ret.kind:
-                    case HirTypeKind.Str | HirTypeKind.Bool | HirTypeKind.Float(_) | HirTypeKind.Unit:
+                    case HirTypeKind.Str | HirTypeKind.Bool | HirTypeKind.Float(_) | HirTypeKind.Unit | HirTypeKind.TypeParam(_, _):
                         return_type = declared_ret
                     case _:
                         return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
@@ -655,12 +668,12 @@ impl HirLowering:
         # below and never emitted.
         #
         # The old Phase A fatal's reasoning (a `T`-typed field degrades to an
-        # opaque pointer-width slot at MIR, truncating a fat value) is about
-        # EMITTING an erased template. That risk is unchanged and is
-        # still fenced -- but at the USE site, where it belongs: a reachable
-        # instantiation fails loudly as E-GEN-001 in MIR lowering and as
-        # HWIR-E-GENERIC in strict MIR. Declaring a template nobody
-        # instantiates is not a defect; emitting one is.
+        # opaque pointer-width slot at MIR, truncating a fat value) is
+        # answered since 2026-10-31 by the erased-body contract: a `T` slot is
+        # the TAGGED runtime word (f64 and wide i64 are heap-boxed, records
+        # pass as pointers), and 50.mir types a generic struct's `T` field
+        # from the INSTANCE's type arguments (`generic_instance_field_hir_arg`).
+        # HWIR-E-GENERIC still applies to hardware lowering only.
         #
         # Enumerated, not assumed (the 43ead88be55 precedent): `grep -rn
         # '^struct <Name><'` over src/compiler, src/runtime and src/app/cli
