@@ -1402,7 +1402,7 @@ SplArray* rt_process_owned_v3_input_value(int64_t handle);
 SplArray* rt_process_owned_v3_cancel_value(int64_t handle);
 SplArray* rt_process_owned_v3_result_value(int64_t handle);
 SplArray* rt_process_owned_v3_collect_value(int64_t handle);
-int       rt_process_owned_v3_release_value(int64_t handle);
+bool       rt_process_owned_v3_release_value(int64_t handle);
 
 /* Process Observation V4. The common Simple module owns the canonical request
  * codec and 64-word receipt schema. start_pinned is the sole spawning entry:
@@ -1732,7 +1732,7 @@ int         rt_mem_snapshot_record(int64_t fd, int64_t seq,
                     int64_t hir_functions, int64_t hir_constants,
                     int64_t hir_enums, int64_t hir_structs, int64_t hir_classes);
 int         rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_t message_len);
-int         rt_mem_snapshot_close(int64_t fd);
+bool         rt_mem_snapshot_close(int64_t fd);
 int64_t     rt_process_rss_kib(void);
 int64_t     rt_process_hwm_kib(void);
 int64_t     rt_heap_live_bytes(void);
