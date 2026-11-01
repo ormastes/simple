@@ -1,0 +1,103 @@
+# @req REQ-GEN-COV-MIRERASED
+"""
+# MC/DC coverage: function_lowering.spl — trace-gated decisions
+
+Target: src/compiler/50.mir/_MirLowering/function_lowering.spl
+`mir_lower_trace_enabled()` reads SIMPLE_COMPILER_TRACE on every call, while
+the `[mir-lower-type-probe]` / `[mir-optional-inner]` gates cache
+`mir_trace_enabled()` on first use. This file therefore sets the trace
+environment BEFORE its first lowering, so both kinds of gate are true here
+(the other coverage specs see them false).
+
+## Decision inventory (this file)
+
+| Line | Decision | Covering its |
+|------|----------|--------------|
+| 257 | `trace_enabled and ambient_bootstrap_enabled()` | MIRERASED-301 (TT), 302 (c1 F: policy off) |
+| 258..798, 885/890 | `if trace_enabled` / `if bootstrap_trace` receipts | MIRERASED-301 (T), other specs (F) |
+| 1155/1156/1160/1162 | lower_type probe gate, first call caches on | MIRERASED-301 |
+| 1160 c1 / 1166 T | probe sequence cap at 50000 | not driven (needs 50000 lower_type calls); gap |
+| 1236/1237/1242 | optional-inner trace gate on | MIRERASED-301 |
+| 1507..1620 | lower_block_expected receipts | MIRERASED-301 |
+| 1514/1515/1517 | statement loop receipts | F here (statement-free bodies, see bug below); T would crash |
+| 1529/1530/1534/1535 | statement probe gate | 1529/1530 T via the lower_type gate state; 1534 T crashes (bug below) |
+
+Bug suspects:
+- function_lowering.spl:1534-1540 (`[mir-lower-stmt-probe]` receipt): with
+  SIMPLE_COMPILER_TRACE=1 (so `mir_trace_enabled()` caches the probe on),
+  lowering the FIRST statement of any block aborts on the seed with
+  `semantic: type mismatch: cannot convert tuple to int`, right after the
+  `[mir-lower] block:stmt 0` receipt. Suspected cause:
+  `_sffi_hir_type_discriminant(stmt.kind)` applied to a `HirStmtKind`
+  carrier. Repro: replace TRACE_SRC's `t` body with `val b = a
+    b` and
+  run MIRERASED-301 on the seed. Trace-only path; default builds unaffected.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+# @tag:coverage
+
+use std.spec.*
+use std.io_runtime.{env_set}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.Span
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn lower_traced(src: text, trace: bool, ambient: bool) -> MirModule:
+    """Parse and lower to HIR with no trace env (HIR's own ambient-bootstrap
+    policy would otherwise drop non-main functions), then lower to MIR with
+    SIMPLE_COMPILER_TRACE / SIMPLE_BOOTSTRAP set as requested."""
+    val file = "testdata/fl_trace_cov.spl"
+    val parsed = parse_full_frontend(src, file, "fl_trace_cov", Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.allow_ambient_bootstrap_policy = ambient
+    if trace:
+        env_set("SIMPLE_COMPILER_TRACE", "1")
+        env_set("SIMPLE_BOOTSTRAP", "1")
+    val mir = lowering.lower_module(hir)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    env_set("SIMPLE_COMPILER_TRACE", "")
+    mir
+
+fn names(m: MirModule) -> [text]:
+    var out: [text] = []
+    for f in m.functions.values():
+        out.push(f.name)
+    out
+
+# Statement-free bodies: with the trace on, the first statement hits the
+# stmt-probe crash recorded under "Bug suspects" above.
+val TRACE_SRC = "fn t(a: i64) -> i64:\n    a\nfn op(a: i64) -> i64?:\n    a\n"
+
+describe "trace-gated lowering":
+    # @req REQ-GEN-COV-MIRERASED-301
+    it "function_lowering.spl:257 TT trace and ambient bootstrap receipts do not change the MIR":
+        env_set("SIMPLE_BOOTSTRAP", "")
+        env_set("SIMPLE_COMPILER_TRACE", "")
+        step("enable the compiler trace and the bootstrap policy before the first MIR lowering")
+        val traced = lower_traced(TRACE_SRC, true, true)
+        val plain = lower_traced(TRACE_SRC, false, true)
+        expect(names(traced).len()).to_equal(names(plain).len())
+        expect(names(traced).len()).to_equal(2)
+
+    # @req REQ-GEN-COV-MIRERASED-302
+    it "function_lowering.spl:257 c1 F trace on but the ambient policy is not allowed":
+        val traced = lower_traced(TRACE_SRC, true, false)
+        expect(names(traced).len()).to_equal(2)
+
+    # @req REQ-GEN-COV-MIRERASED-303
+    it "function_lowering.spl:1162 F a probed lower_type outside any function names <none>":
+        step("the probe gate is cached on by MIRERASED-301; a fresh lowering has no function names")
+        var l = MirLowering.new(SymbolTable.new())
+        val r = l.lower_type(HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()))
+        expect(r.kind == MirTypeKind.I64).to_equal(true)
