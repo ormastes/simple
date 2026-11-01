@@ -1,0 +1,413 @@
+# @req REQ-GEN-COV-PES
+"""
+# MC/DC coverage: pattern_enum_substitution.spl
+
+Target: src/compiler/20.hir/hir_lowering/pattern_enum_substitution.spl
+Every compound decision drives each condition to independently flip the
+outcome; every single-condition decision takes both outcomes.
+
+## Decision inventory
+
+| Line | Decision | Conditions | Covering its |
+|------|----------|------------|--------------|
+| 12 | `type_ == nil` | c1 | T via unsafe nil (PES-057); also L37/L125 nil guards; F by every L14 it |
+| 15 | arm Infer/Error/TypeParam/Any/Projection | c1..c5 | L15 c1..c5 |
+| 16 | arm Array/Slice/Optional/Isolated/Unique/Shared/Weak | arm, inner | L16 c1 (two its) |
+| 18 | arm Ref/Ptr | inner | L18 c1 |
+| 20 | `left and right` | c1 left, c2 right | L20 TT / c1 F / c2 F |
+| 21 | arm Tuple/Union | list | L21 c1 |
+| 22 | `owner.is_valid() and args` | c1 owner, c2 args | L22 TT / c1 F / c2 F |
+| 23 | `params and result` | c1 params, c2 result | L23 TT / c1 F / c2 F |
+| 24 | arm Tensor | inner | L24 c1 |
+| 25 | arm DynTrait `owner.is_valid()` | c1 | L25 c1 |
+| 26 | default arm | - | L26 |
+| 31 | `not concrete(t)` in loop | c1 | L31 empty / F / T |
+| 41-43 | discard match | Wildcard / Binding `_` / Binding other / other kind | L41, L42, L43 |
+| 51 | `if val = payload` | c1 | L51 F; T by all later payload its |
+| 55 | `slots.is_struct` (tuple payload) | c1 | L55 T / F |
+| 57 | arity `!=` | c1 | L57 T; F by L61 its |
+| 60 | `index < len` | c1 | L60 (zero iterations) + L61 (n iterations) |
+| 61 | `not discard and not concrete` | c1 discard, c2 concrete | L61 TT / c1 F / c2 F |
+| 66 | `not slots.is_struct` | c1 | L66 T / F |
+| 73 | field name match | c1 | L73 T / F |
+| 77 | `not found` | c1 | L77 T; F by L79 its |
+| 79 | `not discard and not field_concrete` | c1, c2 | L79 TT / c1 F / c2 F |
+| 92 | `template == nil` | c1 | T via unsafe nil (PES-057) |
+| 95 | `len != len or not concrete(actuals)` | c1 arity, c2 concrete | L95 c1 T / c2 T / FF |
+| 101 | duplicate formal names | c1 | L101 T / F |
+| 109 | formal name match | c1 | L101 F (found) / L109 F (absent) |
+| 145 (was 110) | `not resolved(actuals[i])` | c1 | UNREACHABLE T: L95 already returns Error when any actual is unresolved, so every actual reaching L145 is resolved |
+| 115-130 | structural arms | arm | L115, L118, L121, L124, L126, L129 |
+| 131 | Infer/Error/Any/Projection -> invalid | c1..c4 | L131 |
+| 132 | default keeps kind | - | L132 |
+
+Totals: 1 unreachable outcome (L145 T, redundant guard). L46/L48/L49 resolved-predicate arms covered by PES-058..066.
+Bug suspects: none.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types_expr.{Pattern, PatternKind, EnumPatternPayload}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_lowering.types.{HirDeclaredPatternEnumSlots}
+use compiler.hir.hir_lowering.pattern_enum_substitution.*
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn ok_t() -> HirType:
+    ty(HirTypeKind.Bool)
+
+fn bad_t() -> HirType:
+    ty(HirTypeKind.Error)
+
+fn tp(name: text) -> HirType:
+    ty(HirTypeKind.TypeParam(name, []))
+
+fn valid_owner() -> SymbolId:
+    SymbolId(id: 7)
+
+fn invalid_owner() -> SymbolId:
+    SymbolId(id: -1)
+
+fn concrete(t: HirType) -> bool:
+    declared_pattern_slot_type_is_concrete(t)
+
+fn bind(name: text) -> Pattern:
+    Pattern(kind: PatternKind.Binding(name, false), span: Span.empty())
+
+fn wild() -> Pattern:
+    Pattern(kind: PatternKind.Wildcard, span: Span.empty())
+
+fn tuple_slots(types: [HirType]) -> HirDeclaredPatternEnumSlots:
+    HirDeclaredPatternEnumSlots(tuple_types: types, field_names: [], field_types: [], is_struct: false)
+
+fn struct_slots(names: [text], types: [HirType]) -> HirDeclaredPatternEnumSlots:
+    HirDeclaredPatternEnumSlots(tuple_types: [], field_names: names, field_types: types, is_struct: true)
+
+fn avoids(slots: HirDeclaredPatternEnumSlots, payload: EnumPatternPayload?) -> bool:
+    declared_pattern_payload_avoids_type_parameters(slots, payload)
+
+fn sub(t: HirType, names: [text], actuals: [HirType]) -> HirType:
+    substitute_declared_pattern_type(t, names, actuals)
+
+describe "MC/DC declared_pattern_slot_type_is_concrete":
+    # @req REQ-GEN-COV-PES-001
+    it "pattern_enum_substitution.spl:15 c1 Infer is not concrete":
+        expect(concrete(ty(HirTypeKind.Infer(0, 0)))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-002
+    it "pattern_enum_substitution.spl:15 c2 Error is not concrete":
+        expect(concrete(bad_t())).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-003
+    it "pattern_enum_substitution.spl:15 c3 TypeParam is not concrete":
+        expect(concrete(tp("T"))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-004
+    it "pattern_enum_substitution.spl:15 c4 Any is not concrete":
+        expect(concrete(ty(HirTypeKind.Any))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-005
+    it "pattern_enum_substitution.spl:15 c5 Projection is not concrete":
+        expect(concrete(ty(HirTypeKind.Projection(ok_t(), "Item")))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-006
+    it "pattern_enum_substitution.spl:16 c1 wrapper follows inner concreteness both ways":
+        expect(concrete(ty(HirTypeKind.Optional(ok_t())))).to_equal(true)
+        expect(concrete(ty(HirTypeKind.Optional(bad_t())))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-007
+    it "pattern_enum_substitution.spl:16 c1 every wrapper arm rejects an Error inner":
+        expect(concrete(ty(HirTypeKind.Array(bad_t(), Some(2))))).to_equal(false)
+        expect(concrete(ty(HirTypeKind.Slice(bad_t())))).to_equal(false)
+        expect(concrete(ty(HirTypeKind.Isolated(bad_t())))).to_equal(false)
+        expect(concrete(ty(HirTypeKind.Unique(bad_t())))).to_equal(false)
+        expect(concrete(ty(HirTypeKind.Shared(bad_t())))).to_equal(false)
+        expect(concrete(ty(HirTypeKind.Weak(bad_t())))).to_equal(false)
+        expect(concrete(ty(HirTypeKind.Weak(ok_t())))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-008
+    it "pattern_enum_substitution.spl:18 c1 Ref and Ptr follow inner":
+        expect(concrete(ty(HirTypeKind.Ref(ok_t(), false)))).to_equal(true)
+        expect(concrete(ty(HirTypeKind.Ref(bad_t(), true)))).to_equal(false)
+        expect(concrete(ty(HirTypeKind.Ptr(ok_t(), false)))).to_equal(true)
+        expect(concrete(ty(HirTypeKind.Ptr(tp("T"), false)))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-009
+    it "pattern_enum_substitution.spl:20 c1c2 TT Dict of concrete parts is concrete":
+        expect(concrete(ty(HirTypeKind.Dict(ok_t(), ok_t())))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-010
+    it "pattern_enum_substitution.spl:20 c1 F left alone flips Dict to false":
+        expect(concrete(ty(HirTypeKind.Dict(bad_t(), ok_t())))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-011
+    it "pattern_enum_substitution.spl:20 c2 F right alone flips Result to false":
+        expect(concrete(ty(HirTypeKind.Result(ok_t(), bad_t())))).to_equal(false)
+        expect(concrete(ty(HirTypeKind.Result(ok_t(), ok_t())))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-012
+    it "pattern_enum_substitution.spl:21 c1 Tuple and Union follow every element":
+        expect(concrete(ty(HirTypeKind.Tuple([ok_t(), ok_t()])))).to_equal(true)
+        expect(concrete(ty(HirTypeKind.Tuple([ok_t(), bad_t()])))).to_equal(false)
+        expect(concrete(ty(HirTypeKind.Union([tp("U")])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-013
+    it "pattern_enum_substitution.spl:22 c1c2 TT valid owner with concrete args":
+        expect(concrete(ty(HirTypeKind.Named(valid_owner(), [ok_t()])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-014
+    it "pattern_enum_substitution.spl:22 c1 F invalid owner alone flips Named":
+        expect(concrete(ty(HirTypeKind.Named(invalid_owner(), [ok_t()])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-015
+    it "pattern_enum_substitution.spl:22 c2 F open arg alone flips Named":
+        expect(concrete(ty(HirTypeKind.Named(valid_owner(), [tp("T")])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-016
+    it "pattern_enum_substitution.spl:23 c1c2 TT Function with concrete params and result":
+        expect(concrete(ty(HirTypeKind.Function([ok_t()], ok_t(), [])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-017
+    it "pattern_enum_substitution.spl:23 c1 F open param alone flips Function":
+        expect(concrete(ty(HirTypeKind.Function([tp("T")], ok_t(), [])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-018
+    it "pattern_enum_substitution.spl:23 c2 F open result alone flips Function":
+        expect(concrete(ty(HirTypeKind.Function([ok_t()], tp("R"), [])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-019
+    it "pattern_enum_substitution.spl:24 c1 Tensor follows element":
+        expect(concrete(ty(HirTypeKind.Tensor(ok_t(), [], None)))).to_equal(true)
+        expect(concrete(ty(HirTypeKind.Tensor(bad_t(), [], None)))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-020
+    it "pattern_enum_substitution.spl:25 c1 DynTrait follows owner validity":
+        expect(concrete(ty(HirTypeKind.DynTrait(valid_owner())))).to_equal(true)
+        expect(concrete(ty(HirTypeKind.DynTrait(invalid_owner())))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-021
+    it "pattern_enum_substitution.spl:26 default arm is concrete for primitives":
+        expect(concrete(ok_t())).to_equal(true)
+        expect(concrete(ty(HirTypeKind.Int(64, true)))).to_equal(true)
+        expect(concrete(ty(HirTypeKind.Unit))).to_equal(true)
+
+describe "MC/DC declared_pattern_slot_types_are_concrete":
+    # @req REQ-GEN-COV-PES-022
+    it "pattern_enum_substitution.spl:31 c1 empty list is concrete (loop never enters)":
+        expect(declared_pattern_slot_types_are_concrete([])).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-023
+    it "pattern_enum_substitution.spl:31 c1 F all concrete returns true":
+        expect(declared_pattern_slot_types_are_concrete([ok_t(), ty(HirTypeKind.Str)])).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-024
+    it "pattern_enum_substitution.spl:31 c1 T one open element returns false":
+        expect(declared_pattern_slot_types_are_concrete([ok_t(), tp("T"), ok_t()])).to_equal(false)
+
+describe "MC/DC declared_pattern_is_discard":
+    # @req REQ-GEN-COV-PES-025
+    it "pattern_enum_substitution.spl:41 c1 Wildcard is a discard":
+        expect(declared_pattern_is_discard(wild())).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-026
+    it "pattern_enum_substitution.spl:42 c1 Binding underscore is a discard, named is not":
+        expect(declared_pattern_is_discard(bind("_"))).to_equal(true)
+        expect(declared_pattern_is_discard(bind("x"))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-027
+    it "pattern_enum_substitution.spl:43 c1 other pattern kinds are not discards":
+        expect(declared_pattern_is_discard(Pattern(kind: PatternKind.Tuple([]), span: Span.empty()))).to_equal(false)
+
+describe "MC/DC declared_pattern_payload_avoids_type_parameters":
+    # @req REQ-GEN-COV-PES-028
+    it "pattern_enum_substitution.spl:51 c1 F absent payload avoids type parameters":
+        expect(avoids(tuple_slots([tp("T")]), None)).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-029
+    it "pattern_enum_substitution.spl:55 c1 F tuple payload reads tuple_types":
+        expect(avoids(tuple_slots([ok_t()]), Some(EnumPatternPayload.Tuple([bind("v")])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-030
+    it "pattern_enum_substitution.spl:55 c1 T struct slots make a tuple payload read field_types":
+        val slots = HirDeclaredPatternEnumSlots(tuple_types: [tp("T")], field_names: ["a"], field_types: [ok_t()], is_struct: true)
+        expect(avoids(slots, Some(EnumPatternPayload.Tuple([bind("v")])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-031
+    it "pattern_enum_substitution.spl:57 c1 T arity mismatch rejects":
+        expect(avoids(tuple_slots([ok_t(), ok_t()]), Some(EnumPatternPayload.Tuple([bind("v")])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-032
+    it "pattern_enum_substitution.spl:60 c1 zero-length tuple payload exits loop immediately":
+        expect(avoids(tuple_slots([]), Some(EnumPatternPayload.Tuple([])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-033
+    it "pattern_enum_substitution.spl:61 c1c2 TT binder on open slot rejects":
+        expect(avoids(tuple_slots([tp("T")]), Some(EnumPatternPayload.Tuple([bind("v")])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-034
+    it "pattern_enum_substitution.spl:61 c1 F discard on open slot passes":
+        expect(avoids(tuple_slots([tp("T")]), Some(EnumPatternPayload.Tuple([wild()])))).to_equal(true)
+        expect(avoids(tuple_slots([tp("T")]), Some(EnumPatternPayload.Tuple([bind("_")])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-035
+    it "pattern_enum_substitution.spl:61 c2 F binder on concrete slot passes":
+        expect(avoids(tuple_slots([ok_t(), tp("T")]), Some(EnumPatternPayload.Tuple([bind("v"), wild()])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-036
+    it "pattern_enum_substitution.spl:66 c1 T struct payload on tuple slots rejects":
+        expect(avoids(tuple_slots([ok_t()]), Some(EnumPatternPayload.Struct([("a", bind("a"))])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-037
+    it "pattern_enum_substitution.spl:66 c1 F struct payload on struct slots proceeds":
+        expect(avoids(struct_slots(["a"], [ok_t()]), Some(EnumPatternPayload.Struct([("a", bind("a"))])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-038
+    it "pattern_enum_substitution.spl:73 c1 name scan reads only the matching field":
+        val slots = struct_slots(["a", "b"], [tp("T"), ok_t()])
+        expect(avoids(slots, Some(EnumPatternPayload.Struct([("b", bind("b"))])))).to_equal(true)
+        expect(avoids(slots, Some(EnumPatternPayload.Struct([("a", bind("a"))])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-039
+    it "pattern_enum_substitution.spl:77 c1 T unknown field name rejects":
+        expect(avoids(struct_slots(["a"], [ok_t()]), Some(EnumPatternPayload.Struct([("zz", wild())])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-040
+    it "pattern_enum_substitution.spl:79 c1c2 TT binder on open field rejects":
+        expect(avoids(struct_slots(["a"], [tp("T")]), Some(EnumPatternPayload.Struct([("a", bind("a"))])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-041
+    it "pattern_enum_substitution.spl:79 c1 F discard on open field passes":
+        expect(avoids(struct_slots(["a"], [tp("T")]), Some(EnumPatternPayload.Struct([("a", wild())])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-042
+    it "pattern_enum_substitution.spl:79 c2 F binder on concrete field passes":
+        expect(avoids(struct_slots(["a", "b"], [ok_t(), tp("T")]), Some(EnumPatternPayload.Struct([("a", bind("a"))])))).to_equal(true)
+
+describe "MC/DC substitute_declared_pattern_type":
+    # @req REQ-GEN-COV-PES-043
+    it "pattern_enum_substitution.spl:95 c1 T arity mismatch alone yields Error":
+        expect(sub(tp("T"), ["T", "U"], [ok_t()])).to_equal(bad_t())
+
+    # @req REQ-GEN-COV-PES-044
+    it "pattern_enum_substitution.spl:95 c2 T unresolved (Any) actual alone yields Error":
+        expect(sub(tp("T"), ["T"], [ty(HirTypeKind.Any)])).to_equal(bad_t())
+
+    # @req REQ-GEN-COV-PES-045
+    it "pattern_enum_substitution.spl:95 c1c2 FF proceeds and substitutes":
+        expect(sub(tp("T"), ["T"], [ok_t()])).to_equal(ok_t())
+
+    # @req REQ-GEN-COV-PES-046
+    it "pattern_enum_substitution.spl:101 c1 T duplicate formal names yield Error":
+        expect(sub(ok_t(), ["T", "U", "T"], [ok_t(), ok_t(), ok_t()])).to_equal(bad_t())
+
+    # @req REQ-GEN-COV-PES-047
+    it "pattern_enum_substitution.spl:101 c1 F distinct names pick the matching actual":
+        val s = ty(HirTypeKind.Str)
+        expect(sub(tp("U"), ["T", "U"], [ok_t(), s])).to_equal(s)
+
+    # @req REQ-GEN-COV-PES-048
+    it "pattern_enum_substitution.spl:109 c1 F unknown formal yields Error":
+        expect(sub(tp("Z"), ["T"], [ok_t()])).to_equal(bad_t())
+
+    # @req REQ-GEN-COV-PES-049
+    it "pattern_enum_substitution.spl:115 ownership wrappers substitute inner":
+        expect(sub(ty(HirTypeKind.Unique(tp("T"))), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Unique(ok_t())))
+        expect(sub(ty(HirTypeKind.Shared(tp("T"))), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Shared(ok_t())))
+        expect(sub(ty(HirTypeKind.Weak(tp("T"))), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Weak(ok_t())))
+        expect(sub(ty(HirTypeKind.Isolated(tp("T"))), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Isolated(ok_t())))
+
+    # @req REQ-GEN-COV-PES-050
+    it "pattern_enum_substitution.spl:118 Ref and Ptr keep mutability":
+        expect(sub(ty(HirTypeKind.Ref(tp("T"), true)), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Ref(ok_t(), true)))
+        expect(sub(ty(HirTypeKind.Ptr(tp("T"), false)), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Ptr(ok_t(), false)))
+
+    # @req REQ-GEN-COV-PES-051
+    it "pattern_enum_substitution.spl:121 Optional Array Slice substitute element":
+        expect(sub(ty(HirTypeKind.Optional(tp("T"))), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Optional(ok_t())))
+        expect(sub(ty(HirTypeKind.Array(tp("T"), Some(3))), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Array(ok_t(), Some(3))))
+        expect(sub(ty(HirTypeKind.Slice(tp("T"))), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Slice(ok_t())))
+
+    # @req REQ-GEN-COV-PES-052
+    it "pattern_enum_substitution.spl:124 Dict and Result substitute both sides":
+        val s = ty(HirTypeKind.Str)
+        expect(sub(ty(HirTypeKind.Dict(tp("K"), tp("V"))), ["K", "V"], [s, ok_t()])).to_equal(ty(HirTypeKind.Dict(s, ok_t())))
+        expect(sub(ty(HirTypeKind.Result(tp("V"), tp("K"))), ["K", "V"], [s, ok_t()])).to_equal(ty(HirTypeKind.Result(ok_t(), s)))
+
+    # @req REQ-GEN-COV-PES-053
+    it "pattern_enum_substitution.spl:126 Tuple Union Named substitute elements":
+        expect(sub(ty(HirTypeKind.Tuple([tp("T")])), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Tuple([ok_t()])))
+        expect(sub(ty(HirTypeKind.Union([tp("T")])), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Union([ok_t()])))
+        expect(sub(ty(HirTypeKind.Named(valid_owner(), [tp("T")])), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Named(valid_owner(), [ok_t()])))
+
+    # @req REQ-GEN-COV-PES-054
+    it "pattern_enum_substitution.spl:129 Function and Tensor substitute parts":
+        expect(sub(ty(HirTypeKind.Function([tp("T")], tp("T"), [])), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Function([ok_t()], ok_t(), [])))
+        expect(sub(ty(HirTypeKind.Tensor(tp("T"), [], None)), ["T"], [ok_t()])).to_equal(ty(HirTypeKind.Tensor(ok_t(), [], None)))
+
+    # @req REQ-GEN-COV-PES-055
+    it "pattern_enum_substitution.spl:131 c1..c4 unresolved template kinds yield Error":
+        expect(sub(ty(HirTypeKind.Infer(1, 0)), ["T"], [ok_t()])).to_equal(bad_t())
+        expect(sub(bad_t(), ["T"], [ok_t()])).to_equal(bad_t())
+        expect(sub(ty(HirTypeKind.Any), ["T"], [ok_t()])).to_equal(bad_t())
+        expect(sub(ty(HirTypeKind.Projection(tp("T"), "Item")), ["T"], [ok_t()])).to_equal(bad_t())
+
+    # @req REQ-GEN-COV-PES-056
+    it "pattern_enum_substitution.spl:132 default arm keeps a closed kind":
+        expect(sub(ty(HirTypeKind.Str), [], [])).to_equal(ty(HirTypeKind.Str))
+        expect(substitute_declared_pattern_types([ok_t(), tp("T")], ["T"], [ty(HirTypeKind.Char)])).to_equal([ok_t(), ty(HirTypeKind.Char)])
+
+describe "MC/DC nil guards (unsafe nil HirType)":
+    # @req REQ-GEN-COV-PES-057
+    it "pattern_enum_substitution.spl:12/37/125 c1 T a nil type is neither concrete nor resolved and substitutes to Error":
+        step("Pass a nil HirType (only constructible under unsafe:) to each guard")
+        unsafe:
+            val n: HirType = nil
+            expect(declared_pattern_slot_type_is_concrete(n)).to_equal(false)
+            expect(declared_pattern_slot_type_is_resolved(n)).to_equal(false)
+            expect(substitute_declared_pattern_type(n, [], [])).to_equal(bad_t())
+
+describe "MC/DC resolved predicate composite arms":
+    # @req REQ-GEN-COV-PES-058
+    it "pattern_enum_substitution.spl:46 c1c2 TT Dict of resolved parts is resolved":
+        expect(declared_pattern_slot_type_is_resolved(ty(HirTypeKind.Dict(ok_t(), tp("T"))))).to_equal(true)
+        expect(declared_pattern_slot_type_is_resolved(ty(HirTypeKind.Result(tp("T"), ok_t())))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-059
+    it "pattern_enum_substitution.spl:46 c1 F unresolved key makes Dict unresolved":
+        expect(declared_pattern_slot_type_is_resolved(ty(HirTypeKind.Dict(ty(HirTypeKind.Any), ok_t())))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-060
+    it "pattern_enum_substitution.spl:46 c2 F unresolved value makes Result unresolved":
+        expect(declared_pattern_slot_type_is_resolved(ty(HirTypeKind.Result(ok_t(), bad_t())))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-061
+    it "pattern_enum_substitution.spl:48 c1 F invalid owner is unresolved":
+        expect(declared_pattern_slot_type_is_resolved(ty(HirTypeKind.Named(invalid_owner(), [ok_t()])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-062
+    it "pattern_enum_substitution.spl:48 c2 F unresolved type argument is unresolved":
+        expect(declared_pattern_slot_type_is_resolved(ty(HirTypeKind.Named(valid_owner(), [ty(HirTypeKind.Infer(3, 0))])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-063
+    it "pattern_enum_substitution.spl:48 c1c2 TT binder argument is resolved":
+        expect(declared_pattern_slot_type_is_resolved(ty(HirTypeKind.Named(valid_owner(), [tp("T")])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-064
+    it "pattern_enum_substitution.spl:49 c1c2 TT function over binders is resolved":
+        expect(declared_pattern_slot_type_is_resolved(ty(HirTypeKind.Function([tp("T")], tp("T"), [])))).to_equal(true)
+
+    # @req REQ-GEN-COV-PES-065
+    it "pattern_enum_substitution.spl:49 c1 F unresolved parameter":
+        expect(declared_pattern_slot_type_is_resolved(ty(HirTypeKind.Function([ty(HirTypeKind.Any)], ok_t(), [])))).to_equal(false)
+
+    # @req REQ-GEN-COV-PES-066
+    it "pattern_enum_substitution.spl:49 c2 F unresolved result":
+        expect(declared_pattern_slot_type_is_resolved(ty(HirTypeKind.Function([ok_t()], ty(HirTypeKind.Projection(tp("T"), "Item")), [])))).to_equal(false)

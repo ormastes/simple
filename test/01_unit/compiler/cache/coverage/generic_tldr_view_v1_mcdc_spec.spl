@@ -1,0 +1,433 @@
+# @req REQ-GEN-COV-GTV
+"""
+# MC/DC coverage: generic_tldr_view_v1.spl
+
+Target: src/compiler/00.common/cache_contract/generic_tldr_view_v1.spl
+Every compound decision drives each condition to independently flip the
+outcome; every single-condition decision takes both outcomes. Private
+helpers (`_read_frame_v1`, `_count_v1`) are driven through
+`generic_template_section_decode_v1` with hand-framed inputs.
+
+## Decision inventory
+
+| Line | Decision | Conditions | Covering its |
+|------|----------|------------|--------------|
+| 97 | `oo.field_index == index` | c1 | L97 T / F |
+| 110-111 | `digest_v1_new` Some / nil | arm | Some by L139 its; nil = GAP (sha256 always well-formed) |
+| 139 | `i < value_keys.len()` | c1 | L139 (0 and n iterations) |
+| 167 | `ff.generic` | c1 | L167 T / F |
+| 187 | `not inserted and ee < oo` | c1 inserted, c2 less | L187 TT / c1 F / c2 F |
+| 191 | `not inserted` | c1 | L191 T / F |
+| 200 | `lo <= hi` | c1 | L200 (empty section, hits) |
+| 203 | `s == symbol_id` | c1 | L203 T / F |
+| 205 | `s < symbol_id` | c1 | L205 T / F |
+| 219 | `i < len and digits < 12` | c1, c2 | L219 c1 F / c2 F / TT |
+| 221 | `code == 58` | c1 | L221 T (every valid frame) / F (digit) |
+| 223 | `code < 48 or code > 57` | c1, c2 | L223 c1 T / c2 T / FF |
+| 228 | `digits==0 or i>=len or ch!=58 or end>len` | c1..c4 | L228 c1 / c2 / c3 / c4 / all F |
+| 242 | `len == 0 or len > 12` | c1, c2 | L242 c1 / c2 / FF |
+| 248 | `code < 48 or code > 57` | c1, c2 | L248 c1 / c2 / FF |
+| 259 | `pos < data.len()` | c1 | L259 (empty input, multi-frame) |
+| 261 | `t.len() != 2` | c1 | L261 T / F |
+| 265 | `toks.len() < 3 or toks[1] != MAGIC` | c1, c2 | L265 c1 / c2 / FF |
+| 268 | `n < 0` | c1 | L268 T / F |
+| 273 | `e < n` | c1 | L273 (n=0, n=2) |
+| 274 | `k + 6 > toks.len()` | c1 | L274 T / F |
+| 277 | `np < 0 or overflow` | c1, c2 | L277 c1 / c2 / FF |
+| 287 | `nf < 0 or overflow` | c1, c2 | L287 c1 / c2 / FF |
+| 293 | `toks[b+2] == "1"` | c1 | L167 T / F (round trip) |
+| 300 | `k != toks.len()` | c1 | L300 T / F |
+| 303 | `digest != toks[0]` | c1 | L303 T / F |
+| 306-307 | `not (prev < cur)` | c1 | L307 T (unsorted, duplicate) / F |
+
+Totals: 27 decisions, 41 conditions/arm outcomes; 1 gap (L111 nil arm).
+Bug suspects: none asserted. Note: `generic_args_id_v1` (L140) indexes
+`kinds[i]` without checking `kinds.len() == value_keys.len()`; a shorter
+`kinds` is an out-of-bounds read rather than a decision (not tested here).
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.generic_tldr_view_v1.*
+
+fn fr(v: text) -> text:
+    "{v.len()}:" + v
+
+fn param(index: i64, name: text, sym: text) -> GenericParamV1:
+    GenericParamV1(index: index, kind: GENERIC_PARAM_KIND_TYPE, binder_id: sym + "#{index}", display_name: name)
+
+fn field(name: text, type_key: text, generic: bool) -> GenericTemplateFieldV1:
+    GenericTemplateFieldV1(name: name, type_key: type_key, generic: generic)
+
+fn entry(sym: text) -> GenericTemplateEntryV1:
+    GenericTemplateEntryV1(symbol_id: sym, source_digest: "src:" + sym, visibility_root: "vis:pub",
+        active_guard_root: "guard:empty", language_schema: "lang/v1",
+        params: [param(0, "T", sym)], fields: [field("value", "T#0", true), field("count", "i64", false)])
+
+fn syms(section: GenericTemplateSectionV1) -> [text]:
+    var out: [text] = []
+    for e in section.entries:
+        val ee: GenericTemplateEntryV1 = e
+        out = out.push(ee.symbol_id)
+    out
+
+fn view_with(overrides: [ConcreteTldrOverrideV1]) -> ConcreteTldrAstViewV1:
+    ConcreteTldrAstViewV1(view_id: "v1", semantic_key: "k", template_id: "t", args_id: "a",
+        arg_keys: ["i64"], snapshot_pin: "pin", template: entry("pkg.Box"), overrides: overrides,
+        closure_status: GENERIC_CLOSURE_CONCRETE, error: "")
+
+fn decode(data: text) -> GenericTemplateSectionDecodeV1:
+    generic_template_section_decode_v1(data)
+
+fn empty_body() -> text:
+    fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("0")
+
+fn sealed(body: text) -> text:
+    fr(sha256_text(body)) + body
+
+# Raw entry header tokens (6): symbol, source, vis, guard, lang, param-count.
+fn head(sym: text, np: text) -> text:
+    fr(sym) + fr("s") + fr("v") + fr("g") + fr("l") + fr(np)
+
+fn unsealed_body(entries: [GenericTemplateEntryV1]) -> text:
+    val enc = generic_template_section_encode_v1(GenericTemplateSectionV1(entries: entries, digest: ""))
+    enc.substring(2, enc.len())
+
+describe "MC/DC concrete view accessors":
+    # @req REQ-GEN-COV-GTV-001
+    it "generic_tldr_view_v1.spl:97 c1 T override replaces the template field type":
+        val v = view_with([ConcreteTldrOverrideV1(field_index: 0, type_key: "i64")])
+        expect(concrete_tldr_field_type_key(v, 0)).to_equal("i64")
+
+    # @req REQ-GEN-COV-GTV-002
+    it "generic_tldr_view_v1.spl:97 c1 F non-matching override falls through to template":
+        val v = view_with([ConcreteTldrOverrideV1(field_index: 0, type_key: "i64")])
+        expect(concrete_tldr_field_type_key(v, 1)).to_equal("i64")
+        expect(concrete_tldr_field_type_key(view_with([]), 0)).to_equal("T#0")
+        expect(concrete_tldr_field_count(v)).to_equal(2)
+        expect(concrete_tldr_field_name(v, 1)).to_equal("count")
+
+describe "MC/DC canonical keys":
+    # @req REQ-GEN-COV-GTV-003
+    it "generic_tldr_view_v1.spl:139 c1 zero and n iterations give distinct tagged ids":
+        val none = generic_args_id_v1([], [])
+        val one = generic_args_id_v1([GENERIC_PARAM_KIND_TYPE], ["i64"])
+        expect(none).to_start_with("sha256:")
+        expect(one).to_start_with("sha256:")
+        expect(none == one).to_equal(false)
+
+    # @req REQ-GEN-COV-GTV-004
+    it "generic_tldr_view_v1.spl:139 c1 ordered loop distinguishes reversed arguments":
+        val k = [GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_TYPE]
+        expect(generic_args_id_v1(k, ["i64", "f64"]) == generic_args_id_v1(k, ["f64", "i64"])).to_equal(false)
+
+describe "MC/DC section build (insertion sort)":
+    # @req REQ-GEN-COV-GTV-005
+    it "generic_tldr_view_v1.spl:187 c1c2 TT smaller symbol inserts before larger":
+        expect(syms(build_generic_template_section_v1([entry("b"), entry("a")]))).to_equal(["a", "b"])
+
+    # @req REQ-GEN-COV-GTV-006
+    it "generic_tldr_view_v1.spl:187 c1 F already-inserted entry is not inserted twice":
+        expect(syms(build_generic_template_section_v1([entry("b"), entry("c"), entry("a")]))).to_equal(["a", "b", "c"])
+
+    # @req REQ-GEN-COV-GTV-007
+    it "generic_tldr_view_v1.spl:187 c2 F larger symbol is not inserted early":
+        expect(syms(build_generic_template_section_v1([entry("a"), entry("b")]))).to_equal(["a", "b"])
+
+    # @req REQ-GEN-COV-GTV-008
+    it "generic_tldr_view_v1.spl:191 c1 T appends at end and F skips append":
+        val tail = build_generic_template_section_v1([entry("a"), entry("z")])
+        expect(syms(tail)).to_equal(["a", "z"])
+        val front = build_generic_template_section_v1([entry("z"), entry("a")])
+        expect(front.entries.len()).to_equal(2)
+        expect(front.digest).to_equal(tail.digest)
+
+describe "MC/DC section lookup (binary search)":
+    # @req REQ-GEN-COV-GTV-009
+    it "generic_tldr_view_v1.spl:200 c1 F empty section returns -1 without probing":
+        expect(generic_template_section_lookup_v1(build_generic_template_section_v1([]), "a")).to_equal(-1)
+
+    # @req REQ-GEN-COV-GTV-010
+    it "generic_tldr_view_v1.spl:203 c1 T hits every index":
+        val s = build_generic_template_section_v1([entry("c"), entry("a"), entry("b")])
+        expect(generic_template_section_lookup_v1(s, "a")).to_equal(0)
+        expect(generic_template_section_lookup_v1(s, "b")).to_equal(1)
+        expect(generic_template_section_lookup_v1(s, "c")).to_equal(2)
+
+    # @req REQ-GEN-COV-GTV-011
+    it "generic_tldr_view_v1.spl:205 c1 T and F both steer to a miss":
+        val s = build_generic_template_section_v1([entry("b"), entry("d")])
+        expect(generic_template_section_lookup_v1(s, "e")).to_equal(-1)
+        expect(generic_template_section_lookup_v1(s, "a")).to_equal(-1)
+        expect(generic_template_section_lookup_v1(s, "c")).to_equal(-1)
+
+describe "MC/DC section decode: frame reader":
+    # @req REQ-GEN-COV-GTV-012
+    it "generic_tldr_view_v1.spl:167 c1 generic flag T and F survive round trip (L293)":
+        val s = build_generic_template_section_v1([entry("pkg.Box")])
+        val d = decode(generic_template_section_encode_v1(s))
+        expect(d.ok).to_equal(true)
+        expect(d.section.entries[0].fields[0].generic).to_equal(true)
+        expect(d.section.entries[0].fields[1].generic).to_equal(false)
+        expect(d.section.digest).to_equal(s.digest)
+
+    # @req REQ-GEN-COV-GTV-013
+    it "generic_tldr_view_v1.spl:219 c1 F input ends inside the length prefix":
+        expect(decode("12").error).to_equal("malformed frame")
+
+    # @req REQ-GEN-COV-GTV-014
+    it "generic_tldr_view_v1.spl:219 c2 F twelve-digit cap stops the scan (L228 c3)":
+        expect(decode("1234567890123:x").error).to_equal("malformed frame")
+
+    # @req REQ-GEN-COV-GTV-015
+    it "generic_tldr_view_v1.spl:223 c1 T byte below '0' is malformed":
+        expect(decode("/:x").error).to_equal("malformed frame")
+
+    # @req REQ-GEN-COV-GTV-016
+    it "generic_tldr_view_v1.spl:223 c2 T byte above '9' is malformed":
+        expect(decode("a:x").error).to_equal("malformed frame")
+
+    # @req REQ-GEN-COV-GTV-017
+    it "generic_tldr_view_v1.spl:228 c1 T empty length prefix is malformed":
+        expect(decode(":x").error).to_equal("malformed frame")
+
+    # @req REQ-GEN-COV-GTV-018
+    it "generic_tldr_view_v1.spl:228 c4 T declared length past end is malformed":
+        expect(decode("5:ab").error).to_equal("malformed frame")
+
+    # @req REQ-GEN-COV-GTV-019
+    it "generic_tldr_view_v1.spl:228 all F well-formed empty section decodes (L221 T, L259)":
+        val d = decode(sealed(empty_body()))
+        expect(d.ok).to_equal(true)
+        expect(d.section.entries.len()).to_equal(0)
+        expect(d.error).to_equal("")
+
+    # @req REQ-GEN-COV-GTV-020
+    it "generic_tldr_view_v1.spl:259 c1 F empty input fails closed":
+        val d = decode("")
+        expect(d.ok).to_equal(false)
+        expect(d.error).to_equal("bad magic")
+
+describe "MC/DC section decode: header and counts":
+    # @req REQ-GEN-COV-GTV-021
+    it "generic_tldr_view_v1.spl:265 c1 T fewer than three tokens is bad magic":
+        expect(decode(fr("d") + fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1)).error).to_equal("bad magic")
+
+    # @req REQ-GEN-COV-GTV-022
+    it "generic_tldr_view_v1.spl:265 c2 T wrong magic alone is bad magic":
+        expect(decode(fr("d") + fr("other/v1") + fr("0")).error).to_equal("bad magic")
+
+    # @req REQ-GEN-COV-GTV-023
+    it "generic_tldr_view_v1.spl:242 c1 T empty entry count is rejected (L268 T)":
+        expect(decode(fr("d") + fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("")).error).to_equal("bad entry count")
+
+    # @req REQ-GEN-COV-GTV-024
+    it "generic_tldr_view_v1.spl:242 c2 T thirteen-digit count is rejected":
+        expect(decode(fr("d") + fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("1234567890123")).error).to_equal("bad entry count")
+
+    # @req REQ-GEN-COV-GTV-025
+    it "generic_tldr_view_v1.spl:248 c1 T count byte below '0' is rejected":
+        expect(decode(fr("d") + fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("-1")).error).to_equal("bad entry count")
+
+    # @req REQ-GEN-COV-GTV-026
+    it "generic_tldr_view_v1.spl:248 c2 T count byte above '9' is rejected":
+        expect(decode(fr("d") + fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("1x")).error).to_equal("bad entry count")
+
+    # @req REQ-GEN-COV-GTV-027
+    it "generic_tldr_view_v1.spl:274 c1 T entry header shorter than six tokens":
+        val data = fr("d") + fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("1") + fr("a") + fr("s") + fr("v") + fr("g") + fr("l")
+        expect(decode(data).error).to_equal("truncated entry")
+
+    # @req REQ-GEN-COV-GTV-028
+    it "generic_tldr_view_v1.spl:277 c1 T non-numeric param count":
+        val data = fr("d") + fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("1") + head("a", "x") + fr("0")
+        expect(decode(data).error).to_equal("bad param count")
+
+    # @req REQ-GEN-COV-GTV-029
+    it "generic_tldr_view_v1.spl:277 c2 T param count exceeds remaining tokens":
+        val data = fr("d") + fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("1") + head("a", "1") + fr("0")
+        expect(decode(data).error).to_equal("bad param count")
+
+    # @req REQ-GEN-COV-GTV-030
+    it "generic_tldr_view_v1.spl:287 c1 T non-numeric field count":
+        val data = fr("d") + fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("1") + head("a", "0") + fr("x")
+        expect(decode(data).error).to_equal("bad field count")
+
+    # @req REQ-GEN-COV-GTV-031
+    it "generic_tldr_view_v1.spl:287 c2 T field count exceeds remaining tokens":
+        val data = fr("d") + fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("1") + head("a", "0") + fr("1") + fr("f")
+        expect(decode(data).error).to_equal("bad field count")
+
+    # @req REQ-GEN-COV-GTV-032
+    it "generic_tldr_view_v1.spl:277 c1c2 FF and L287 FF hand-framed entry decodes (L273 n iterations)":
+        val body = fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("1") + head("a", "1") + fr("type") + fr("a#0") + fr("T") + fr("1") + fr("f") + fr("a#0") + fr("0") + fr("0") + fr("")
+        val d = decode(sealed(body))
+        expect(d.ok).to_equal(true)
+        expect(d.section.entries[0].symbol_id).to_equal("a")
+        expect(d.section.entries[0].params[0].binder_id).to_equal("a#0")
+        expect(d.section.entries[0].fields[0].generic).to_equal(false)
+
+describe "MC/DC section decode: trailer, digest, order":
+    # @req REQ-GEN-COV-GTV-033
+    it "generic_tldr_view_v1.spl:300 c1 T trailing token after entries":
+        expect(decode(sealed(empty_body()) + fr("extra")).error).to_equal("trailing data")
+
+    # @req REQ-GEN-COV-GTV-034
+    it "generic_tldr_view_v1.spl:303 c1 T sealed digest mismatch":
+        expect(decode(fr("bogus") + empty_body()).error).to_equal("section digest mismatch")
+
+    # @req REQ-GEN-COV-GTV-035
+    it "generic_tldr_view_v1.spl:307 c1 T unsorted index with a valid digest":
+        expect(decode(sealed(unsealed_body([entry("b"), entry("a")]))).error).to_equal("section index not sorted/unique")
+
+    # @req REQ-GEN-COV-GTV-036
+    it "generic_tldr_view_v1.spl:307 c1 T duplicate symbol with a valid digest":
+        expect(decode(sealed(unsealed_body([entry("a"), entry("a")]))).error).to_equal("section index not sorted/unique")
+
+    # @req REQ-GEN-COV-GTV-037
+    it "generic_tldr_view_v1.spl:307 c1 F sorted multi-entry section decodes":
+        val s = build_generic_template_section_v1([entry("b"), entry("a")])
+        val d = decode(generic_template_section_encode_v1(s))
+        expect(d.ok).to_equal(true)
+        expect(syms(d.section)).to_equal(["a", "b"])
+
+fn bnd(index: i64, key: text) -> GenericBoundV1:
+    GenericBoundV1(param_index: index, bound_key: key)
+
+fn bentry(sym: text, bounds: [GenericBoundV1], body: text) -> GenericTemplateEntryV1:
+    GenericTemplateEntryV1(symbol_id: sym, source_digest: "src:" + sym, visibility_root: "vis:pub",
+        active_guard_root: "guard:empty", language_schema: "lang/v1",
+        params: [param(0, "T", sym)], fields: [field("value", "T#0", true)], bounds: bounds, body_digest: body)
+
+fn bfp(bounds: [GenericBoundV1]) -> text:
+    generic_template_bound_fingerprint_v1(bentry("a", bounds, ""))
+
+fn facet_names(rows: [GenericFacetChangeV1]) -> [text]:
+    var out: [text] = []
+    for r in rows:
+        val rr: GenericFacetChangeV1 = r
+        out = out.push(rr.facet)
+    out
+
+fn raw_entry_through_fields(sym: text) -> text:
+    head(sym, "1") + fr("type") + fr(sym + "#0") + fr("T") + fr("1") + fr("f") + fr(sym + "#0") + fr("0")
+
+fn raw_section(tail: text) -> text:
+    sealed(fr(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + fr("1") + raw_entry_through_fields("a") + tail)
+
+describe "MC/DC generic bounds validity":
+    # @req REQ-GEN-COV-GTV-038
+    it "generic_tldr_view_v1.spl:189 c1 T negative binder index is invalid":
+        expect(generic_bounds_valid_v1(bentry("a", [bnd(-1, "Eq")], ""))).to_equal(false)
+
+    # @req REQ-GEN-COV-GTV-039
+    it "generic_tldr_view_v1.spl:189 c2 T binder index past the params is invalid":
+        expect(generic_bounds_valid_v1(bentry("a", [bnd(1, "Eq")], ""))).to_equal(false)
+
+    # @req REQ-GEN-COV-GTV-040
+    it "generic_tldr_view_v1.spl:189 c3 T empty bound key is invalid":
+        expect(generic_bounds_valid_v1(bentry("a", [bnd(0, "")], ""))).to_equal(false)
+
+    # @req REQ-GEN-COV-GTV-041
+    it "generic_tldr_view_v1.spl:189 FFF in-range keyed bounds are valid":
+        expect(generic_bounds_valid_v1(bentry("a", [bnd(0, "Eq"), bnd(0, "Ord")], ""))).to_equal(true)
+
+describe "MC/DC bound fingerprint canonical order":
+    # @req REQ-GEN-COV-GTV-042
+    it "generic_tldr_view_v1.spl:196/214/220 bound order does not change the fingerprint":
+        step("[B, C, A]: A is inserted before B, C stays after it; [A, B, C] appends each bound")
+        expect(bfp([bnd(0, "B"), bnd(0, "C"), bnd(0, "A")])).to_equal(bfp([bnd(0, "A"), bnd(0, "B"), bnd(0, "C")]))
+
+    # @req REQ-GEN-COV-GTV-043
+    it "generic_tldr_view_v1.spl:212/218 T duplicate bounds collapse":
+        expect(bfp([bnd(0, "A"), bnd(0, "A"), bnd(0, "B")])).to_equal(bfp([bnd(0, "A"), bnd(0, "B")]))
+
+    # @req REQ-GEN-COV-GTV-044
+    it "generic_tldr_view_v1.spl:214 binder index orders before bound key":
+        expect(bfp([bnd(1, "A"), bnd(0, "Z")])).to_equal(bfp([bnd(0, "Z"), bnd(1, "A")]))
+
+    # @req REQ-GEN-COV-GTV-045
+    it "generic_tldr_view_v1.spl:232 no bounds is a distinct fingerprint":
+        expect(bfp([]) == bfp([bnd(0, "A")])).to_equal(false)
+
+describe "MC/DC changed facets":
+    # @req REQ-GEN-COV-GTV-046
+    it "generic_tldr_view_v1.spl:279 TT identical entries change nothing":
+        val e = bentry("a", [bnd(0, "Eq")], "body1")
+        expect(generic_template_changed_facets_v1(Some(e), Some(e)).len()).to_equal(0)
+
+    # @req REQ-GEN-COV-GTV-047
+    it "generic_tldr_view_v1.spl:258 T / 279 c2 F body-only edit changes only the body facet":
+        val rows = generic_template_changed_facets_v1(Some(bentry("a", [], "body1")), Some(bentry("a", [], "body2")))
+        expect(facet_names(rows)).to_equal([GENERIC_FACET_BODY_V1])
+
+    # @req REQ-GEN-COV-GTV-048
+    it "generic_tldr_view_v1.spl:259 T bound-only edit changes only the bound facet":
+        val rows = generic_template_changed_facets_v1(Some(bentry("a", [], "b")), Some(bentry("a", [bnd(0, "Eq")], "b")))
+        expect(facet_names(rows)).to_equal([GENERIC_FACET_BOUND_V1])
+
+    # @req REQ-GEN-COV-GTV-049
+    it "generic_tldr_view_v1.spl:259 F signature-only edit changes only the signature facet":
+        val old_e = bentry("a", [], "b")
+        val new_e = GenericTemplateEntryV1(symbol_id: "a", source_digest: "src:a", visibility_root: "vis:pub",
+            active_guard_root: "guard:empty", language_schema: "lang/v1",
+            params: [param(0, "T", "a")], fields: [field("value", "i64", false)], bounds: [], body_digest: "b")
+        expect(facet_names(generic_template_changed_facets_v1(Some(old_e), Some(new_e)))).to_equal([GENERIC_FACET_SIGNATURE_V1])
+
+    # @req REQ-GEN-COV-GTV-050
+    it "generic_tldr_view_v1.spl:279 c1 F / 282 F / 285 T genesis rows carry no old fingerprint":
+        val rows = generic_template_changed_facets_v1(nil, Some(bentry("a", [], "b")))
+        expect(facet_names(rows)).to_equal([GENERIC_FACET_BODY_V1, GENERIC_FACET_BOUND_V1, GENERIC_FACET_SIGNATURE_V1])
+        expect(rows[0].old_fingerprint.is_none()).to_equal(true)
+        expect(rows[0].new_fingerprint.is_some()).to_equal(true)
+
+    # @req REQ-GEN-COV-GTV-051
+    it "generic_tldr_view_v1.spl:282 T / 285 F removal rows carry no new fingerprint":
+        val rows = generic_template_changed_facets_v1(Some(bentry("a", [], "b")), nil)
+        expect(rows.len()).to_equal(3)
+        expect(rows[0].old_fingerprint.is_some()).to_equal(true)
+        expect(rows[0].new_fingerprint.is_none()).to_equal(true)
+
+    # @req REQ-GEN-COV-GTV-052
+    it "generic_tldr_view_v1.spl:279 absent on both sides changes nothing":
+        expect(generic_template_changed_facets_v1(nil, nil).len()).to_equal(0)
+
+describe "MC/DC section decode: bounds":
+    # @req REQ-GEN-COV-GTV-053
+    it "generic_tldr_view_v1.spl:461 T / 464 FFF entry with bounds round-trips":
+        val s = build_generic_template_section_v1([bentry("a", [bnd(0, "Eq"), bnd(0, "Ord")], "body")])
+        val d = decode(generic_template_section_encode_v1(s))
+        expect(d.ok).to_equal(true)
+        expect(d.section.entries[0].bounds.len()).to_equal(2)
+        expect(d.section.entries[0].bounds[1].bound_key).to_equal("Ord")
+        expect(d.section.entries[0].body_digest).to_equal("body")
+
+    # @req REQ-GEN-COV-GTV-054
+    it "generic_tldr_view_v1.spl:454 T entry ends before the bound count":
+        expect(decode(raw_section("")).error).to_equal("truncated entry")
+
+    # @req REQ-GEN-COV-GTV-055
+    it "generic_tldr_view_v1.spl:457 c1 T non-numeric bound count":
+        expect(decode(raw_section(fr("x") + fr(""))).error).to_equal("bad bound count")
+
+    # @req REQ-GEN-COV-GTV-056
+    it "generic_tldr_view_v1.spl:457 c2 T bound count exceeds remaining tokens":
+        expect(decode(raw_section(fr("2") + fr("0") + fr("Eq") + fr(""))).error).to_equal("bad bound count")
+
+    # @req REQ-GEN-COV-GTV-057
+    it "generic_tldr_view_v1.spl:464 c1 T negative bound index":
+        expect(decode(raw_section(fr("1") + fr("-1") + fr("Eq") + fr(""))).error).to_equal("bad bound")
+
+    # @req REQ-GEN-COV-GTV-058
+    it "generic_tldr_view_v1.spl:464 c2 T bound index past the params":
+        expect(decode(raw_section(fr("1") + fr("1") + fr("Eq") + fr(""))).error).to_equal("bad bound")
+
+    # @req REQ-GEN-COV-GTV-059
+    it "generic_tldr_view_v1.spl:464 c3 T empty bound key":
+        expect(decode(raw_section(fr("1") + fr("0") + fr("") + fr(""))).error).to_equal("bad bound")

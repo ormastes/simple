@@ -1,0 +1,262 @@
+"""
+## Purpose and audience
+
+MC/DC driver for `src/compiler/30.types/type_infer_types.spl`. Every decision
+(if guard, match arm) is driven to both outcomes and each condition is shown
+to flip the outcome independently. For compiler engineers changing the HM
+type definitions (`TypeScheme`, `Substitution`, `TypeInferError`, `InferMode`).
+
+## Operator workflow
+
+Run `bin/simple test test/01_unit/compiler/type_infer/coverage/type_infer_types_mcdc_spec.spl`
+with the pure-Simple self-hosted binary. Execution status: UNRUN (no
+self-hosted binary existed when written, 2026-11-01).
+
+## Decision inventory
+
+| Line | Decision | Conditions | Vectors (it) |
+|---|---|---|---|
+| 84 | `self.vars.is_empty()` (is_mono result) | c1 vars empty | T: "84 c1 true", F: "84 c1 false" |
+| 108 | `match ty.kind` in `Substitution.apply` (17 arms) | arm selector | one `it` per arm "108 arm <Kind>" |
+| 110 | `if self.map[id].?` | c1 binding present | T: "110 c1 true", F: "110 c1 false"; path compression "110 c1 true compresses" |
+| 178 | `match self` in `message` (6 arms) | arm selector | "178 arm <Variant>" x6 |
+| 194 | `match self` in `span` (6 arms) | arm selector | "194 arm <Variant>" x6 |
+| 280 | `match self` in `is_check` | Check vs other | "280 arm Check", "280 arm default" |
+| 286 | `match self` in `is_synthesize` | Synthesize vs other | "286 arm Synthesize", "286 arm default" |
+| 292 | `match self` in `expected` | Check vs other | "292 arm Check", "292 arm default" |
+
+Counts: 8 decisions, 1 boolean condition (line 110) + 1 (line 84), 39 match
+arms. Gaps: none. Bug suspects: none in this file (Union/Isolated/Projection
+traversal gaps of `apply` are owned by generic_traversal_coverage_spec.spl;
+this spec pins only the default arm for a leaf).
+"""
+
+# @tag:in-development
+# Tracks: doc/03_plan/compiler/generics/generics_coverage_mcdc_plan_2026-11-01.md step 3
+# @manual_section: generics-coverage-mcdc-type-infer-types
+
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.types.dim_constraints_types.{DimError, DimErrorKind}
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+use std.spec.step
+
+fn tit_sp() -> Span:
+    lex_span_empty()
+
+fn tit_line_sp(line: i64) -> Span:
+    Span.new(1, 2, line, 3)
+
+fn tit_mk(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: tit_sp())
+
+fn tit_i64() -> HirType:
+    tit_mk(HirTypeKind.Int(64, true))
+
+fn tit_str() -> HirType:
+    tit_mk(HirTypeKind.Str)
+
+fn tit_var(id: i64) -> HirType:
+    tit_mk(HirTypeKind.Infer(id, 0))
+
+fn tit_all(items: [HirType]) -> text:
+    var parts: [text] = []
+    for item in items:
+        parts = parts.push(tit_show(item))
+    parts.join(",")
+
+fn tit_show(ty: HirType) -> text:
+    match ty.kind:
+        case Int(bits, _): "i{bits}"
+        case Str: "str"
+        case Bool: "bool"
+        case Unit: "unit"
+        case Infer(id, _): "?{id}"
+        case Function(params, ret, _): "Fn[" + tit_all(params) + "->" + tit_show(ret) + "]"
+        case Tuple(elements): "Tup[" + tit_all(elements) + "]"
+        case Array(element, _): "Arr[" + tit_show(element) + "]"
+        case Slice(element): "Slice[" + tit_show(element) + "]"
+        case Dict(key, value): "Dict[" + tit_show(key) + "," + tit_show(value) + "]"
+        case Optional(inner): "Opt[" + tit_show(inner) + "]"
+        case Result(ok, err): "Res[" + tit_show(ok) + "," + tit_show(err) + "]"
+        case Ref(inner, m): "Ref{m}[" + tit_show(inner) + "]"
+        case Ptr(inner, m): "Ptr{m}[" + tit_show(inner) + "]"
+        case Unique(inner): "Uniq[" + tit_show(inner) + "]"
+        case Shared(inner): "Shr[" + tit_show(inner) + "]"
+        case Weak(inner): "Weak[" + tit_show(inner) + "]"
+        case Named(symbol, args): "N{symbol.id}[" + tit_all(args) + "]"
+        case Tensor(element, dims, _): "Tensor{dims.len()}[" + tit_show(element) + "]"
+        case Layer(input, output): "Layer{input.len()}x{output.len()}"
+        case _: "leaf"
+
+fn tit_bound_subst() -> Substitution:
+    var subst = Substitution.new()
+    subst.insert(7, tit_i64())
+    subst
+
+fn tit_apply(wrapped: HirType) -> text:
+    var subst = tit_bound_subst()
+    tit_show(subst.apply(wrapped))
+
+fn tit_dim(value: i64) -> DimExpr:
+    DimExpr(kind: DimExprKind.Literal(value), span: tit_sp())
+
+fn tit_dim_error(line: i64) -> DimError:
+    DimError(message: "dim boom", kind: DimErrorKind.Mismatch, span: tit_line_sp(line))
+
+describe "type_infer_types.spl TypeScheme.is_mono":
+    it "type_infer_types.spl:84 c1 true: empty vars is mono":
+        # @req REQ-GEN-COV-TYPES-001
+        step("Build a monomorphic scheme")
+        val scheme = TypeScheme.mono(tit_i64())
+        expect(scheme.is_mono()).to_equal(true)
+
+    it "type_infer_types.spl:84 c1 false: quantified vars is not mono":
+        # @req REQ-GEN-COV-TYPES-002
+        step("Build a polymorphic scheme over one variable")
+        val scheme = TypeScheme.poly([3], tit_var(3))
+        expect(scheme.is_mono()).to_equal(false)
+        expect(scheme.vars.len()).to_equal(1)
+
+describe "type_infer_types.spl Substitution.apply Infer binding":
+    it "type_infer_types.spl:110 c1 true: bound variable resolves":
+        # @req REQ-GEN-COV-TYPES-003
+        step("Apply a substitution that binds ?7 to i64")
+        expect(tit_apply(tit_var(7))).to_equal("i64")
+
+    it "type_infer_types.spl:110 c1 false: unbound variable is kept":
+        # @req REQ-GEN-COV-TYPES-004
+        step("Apply a substitution with no binding for ?8")
+        expect(tit_apply(tit_var(8))).to_equal("?8")
+
+    it "type_infer_types.spl:110 c1 true compresses the chain":
+        # @req REQ-GEN-COV-TYPES-005
+        step("Chain ?1 -> ?2 -> i64 and check the cached binding after apply")
+        var subst = Substitution.new()
+        subst.insert(1, tit_var(2))
+        subst.insert(2, tit_i64())
+        expect(tit_show(subst.apply(tit_var(1)))).to_equal("i64")
+        expect(tit_show(subst.get(1).unwrap())).to_equal("i64")
+
+describe "type_infer_types.spl Substitution.apply arms":
+    it "type_infer_types.spl:108 arm Function":
+        # @req REQ-GEN-COV-TYPES-006
+        step("Apply through function params and return")
+        expect(tit_apply(tit_mk(HirTypeKind.Function([tit_var(7)], tit_var(7), [])))).to_equal("Fn[i64->i64]")
+
+    it "type_infer_types.spl:108 arm Tuple":
+        # @req REQ-GEN-COV-TYPES-007
+        expect(tit_apply(tit_mk(HirTypeKind.Tuple([tit_var(7), tit_str()])))).to_equal("Tup[i64,str]")
+
+    it "type_infer_types.spl:108 arm Array":
+        # @req REQ-GEN-COV-TYPES-008
+        expect(tit_apply(tit_mk(HirTypeKind.Array(tit_var(7), nil)))).to_equal("Arr[i64]")
+
+    it "type_infer_types.spl:108 arm Slice":
+        # @req REQ-GEN-COV-TYPES-009
+        expect(tit_apply(tit_mk(HirTypeKind.Slice(tit_var(7))))).to_equal("Slice[i64]")
+
+    it "type_infer_types.spl:108 arm Dict":
+        # @req REQ-GEN-COV-TYPES-010
+        expect(tit_apply(tit_mk(HirTypeKind.Dict(tit_str(), tit_var(7))))).to_equal("Dict[str,i64]")
+
+    it "type_infer_types.spl:108 arm Optional":
+        # @req REQ-GEN-COV-TYPES-011
+        expect(tit_apply(tit_mk(HirTypeKind.Optional(tit_var(7))))).to_equal("Opt[i64]")
+
+    it "type_infer_types.spl:108 arm Result":
+        # @req REQ-GEN-COV-TYPES-012
+        expect(tit_apply(tit_mk(HirTypeKind.Result(tit_var(7), tit_str())))).to_equal("Res[i64,str]")
+
+    it "type_infer_types.spl:108 arm Ref keeps mutability":
+        # @req REQ-GEN-COV-TYPES-013
+        expect(tit_apply(tit_mk(HirTypeKind.Ref(tit_var(7), true)))).to_equal("Reftrue[i64]")
+
+    it "type_infer_types.spl:108 arm Ptr keeps mutability":
+        # @req REQ-GEN-COV-TYPES-014
+        expect(tit_apply(tit_mk(HirTypeKind.Ptr(tit_var(7), false)))).to_equal("Ptrfalse[i64]")
+
+    it "type_infer_types.spl:108 arm Unique":
+        # @req REQ-GEN-COV-TYPES-015
+        expect(tit_apply(tit_mk(HirTypeKind.Unique(tit_var(7))))).to_equal("Uniq[i64]")
+
+    it "type_infer_types.spl:108 arm Shared":
+        # @req REQ-GEN-COV-TYPES-016
+        expect(tit_apply(tit_mk(HirTypeKind.Shared(tit_var(7))))).to_equal("Shr[i64]")
+
+    it "type_infer_types.spl:108 arm Weak":
+        # @req REQ-GEN-COV-TYPES-017
+        expect(tit_apply(tit_mk(HirTypeKind.Weak(tit_var(7))))).to_equal("Weak[i64]")
+
+    it "type_infer_types.spl:108 arm Named":
+        # @req REQ-GEN-COV-TYPES-018
+        expect(tit_apply(tit_mk(HirTypeKind.Named(SymbolId.new(42), [tit_var(7)])))).to_equal("N42[i64]")
+
+    it "type_infer_types.spl:108 arm Tensor keeps dims":
+        # @req REQ-GEN-COV-TYPES-019
+        expect(tit_apply(tit_mk(HirTypeKind.Tensor(tit_var(7), [tit_dim(2), tit_dim(3)], nil)))).to_equal("Tensor2[i64]")
+
+    it "type_infer_types.spl:108 arm Layer keeps dims":
+        # @req REQ-GEN-COV-TYPES-020
+        expect(tit_apply(tit_mk(HirTypeKind.Layer([tit_dim(4)], [tit_dim(5), tit_dim(6)])))).to_equal("Layer1x2")
+
+    it "type_infer_types.spl:108 arm default returns leaf unchanged":
+        # @req REQ-GEN-COV-TYPES-021
+        expect(tit_apply(tit_mk(HirTypeKind.Bool))).to_equal("bool")
+
+describe "type_infer_types.spl TypeInferError.message and span":
+    it "type_infer_types.spl:178 arm Mismatch":
+        # @req REQ-GEN-COV-TYPES-022
+        val err = TypeInferError.Mismatch(tit_i64(), tit_str(), tit_line_sp(11))
+        expect(err.message()).to_start_with("type mismatch: expected ")
+        expect(err.span().line).to_equal(11)
+
+    it "type_infer_types.spl:178 arm OccursCheck":
+        # @req REQ-GEN-COV-TYPES-023
+        val err = TypeInferError.OccursCheck(5, tit_i64(), tit_line_sp(12))
+        expect(err.message()).to_start_with("infinite type: T5 occurs in ")
+        expect(err.span().line).to_equal(12)
+
+    it "type_infer_types.spl:178 arm Undefined":
+        # @req REQ-GEN-COV-TYPES-024
+        val err = TypeInferError.Undefined("zz", tit_line_sp(13))
+        expect(err.message()).to_equal("undefined: zz")
+        expect(err.span().line).to_equal(13)
+
+    it "type_infer_types.spl:178 arm DimensionError":
+        # @req REQ-GEN-COV-TYPES-025
+        val err = TypeInferError.DimensionError(tit_dim_error(14))
+        expect(err.message()).to_equal("dim boom")
+        expect(err.span().line).to_equal(14)
+
+    it "type_infer_types.spl:178 arm TraitNotImplemented":
+        # @req REQ-GEN-COV-TYPES-026
+        val err = TypeInferError.TraitNotImplemented(tit_i64(), "Show", tit_line_sp(15))
+        expect(err.message()).to_start_with("trait not implemented: ")
+        expect(err.message()).to_end_with(" does not implement Show")
+        expect(err.span().line).to_equal(15)
+
+    it "type_infer_types.spl:178 arm Other and 194 arm Other":
+        # @req REQ-GEN-COV-TYPES-027
+        val err = TypeInferError.Other("plain", tit_line_sp(16))
+        expect(err.message()).to_equal("plain")
+        expect(err.span().line).to_equal(16)
+
+describe "type_infer_types.spl InferMode":
+    it "type_infer_types.spl:280 arm Check, 286 arm default, 292 arm Check":
+        # @req REQ-GEN-COV-TYPES-028
+        val mode = InferMode.Check(tit_i64())
+        expect(mode.is_check()).to_equal(true)
+        expect(mode.is_synthesize()).to_equal(false)
+        expect(tit_show(mode.expected().unwrap())).to_equal("i64")
+
+    it "type_infer_types.spl:280 arm default, 286 arm Synthesize, 292 arm default":
+        # @req REQ-GEN-COV-TYPES-029
+        val mode = InferMode.Synthesize
+        expect(mode.is_check()).to_equal(false)
+        expect(mode.is_synthesize()).to_equal(true)
+        expect(mode.expected()).to_be_nil()
