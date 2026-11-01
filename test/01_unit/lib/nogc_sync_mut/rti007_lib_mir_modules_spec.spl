@@ -1,0 +1,44 @@
+# @covers src/lib/nogc_sync_mut/concurrent/mutex.spl
+# @covers src/lib/nogc_sync_mut/src/map.spl
+# @covers src/lib/nogc_sync_mut/sffi/enum_wire.spl
+"""
+## Purpose and audience
+# Phase-3 lib MIR modules free of E-RTI-007 declared-Any returns
+
+**Bug:** rti007_any_return_rows_2026-11-01
+**Status:** Workaround regression
+
+## Overview
+
+Run 12 of the Windows phase-3 bootstrap failed MIR lowering of
+`lib.nogc_sync_mut.concurrent.mutex`, `lib.nogc_sync_mut.sffi.enum_wire` and
+`lib.nogc_sync_mut.src.map` with E-RTI-007 (declared return is Any). The source
+workarounds spell non-generic `-> i64` runtime hooks and bind `Map::map_values<U>`.
+These checks pin the observable behaviour of those signatures.
+"""
+
+use std.spec.step
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock_gate, mutex_unlock_gate}
+use std.nogc_sync_mut.src.map.{Map}
+
+# @req: REQ-RTI007-LIB-001
+describe "phase-3 lib modules typed returns (rti007)":
+    it "keeps the i64 gate lock/unlock round trip":
+        # @req: REQ-RTI007-LIB-001
+        step("Lock a gate mutex and unlock it twice in sequence")
+        val m = mutex_new_gate(7)
+        val _ = mutex_lock_gate(m)
+        expect(mutex_unlock_gate(m, 8)).to_equal(1)
+        val _ = mutex_lock_gate(m)
+        expect(mutex_unlock_gate(m, 8)).to_equal(1)
+
+    it "keeps Map.map_values type-changing with its U binder":
+        # @req: REQ-RTI007-LIB-001
+        step("Map i64 values to text through map_values<U>")
+        var m: Map<text, i64> = Map.new()
+        m.insert("a", 1)
+        m.insert("b", 2)
+        val mapped: Map<text, text> = m.map_values(\v: "v{v}")
+        expect(mapped.len()).to_equal(2)
+        expect(mapped.get("a")).to_equal(Some("v1"))
+        expect(mapped.get("b")).to_equal(Some("v2"))
