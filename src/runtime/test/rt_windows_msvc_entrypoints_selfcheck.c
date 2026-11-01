@@ -103,8 +103,8 @@ extern int     rt_file_truncate(const char* path, uint64_t size);
 extern int64_t rt_file_size(const uint8_t* path_ptr, uint64_t path_len);
 extern int     rt_file_write_bytes(const uint8_t* path_ptr, uint64_t path_len,
                                    const uint8_t* data, uint64_t len);
-extern int     rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
-extern int     rt_file_delete(const char* path);
+extern _Bool   rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
+extern _Bool   rt_file_delete(const uint8_t* path_ptr, uint64_t path_len);
 
 /* --- directories ------------------------------------------------------ */
 extern unsigned char rt_dir_create_cpath(const char* path, unsigned char recursive);
@@ -363,11 +363,11 @@ int main(void) {
     /* ============ 9. delete / remove contracts + cleanup ================ */
     v = rt_dir_remove((const uint8_t*)sub, (uint64_t)strlen(sub), 0);
     check_i(v == 0, "non-recursive rt_dir_remove REFUSES a non-empty directory", v);
-    check(rt_file_delete(f1) != 0, "rt_file_delete removes a file");
+    check(rt_file_delete((const uint8_t*)f1, (uint64_t)strlen(f1)) != 0, "rt_file_delete removes a file");
     v = rt_file_exists((const uint8_t*)f1, (uint64_t)strlen(f1));
     check_i(v == 0, "rt_file_exists reports 0 for the deleted file", v);
-    rt_file_delete(f2);
-    rt_file_delete(f3);
+    rt_file_delete((const uint8_t*)f2, (uint64_t)strlen(f2));
+    rt_file_delete((const uint8_t*)f3, (uint64_t)strlen(f3));
     check(rt_dir_remove((const uint8_t*)sub, (uint64_t)strlen(sub), 0) != 0,
           "non-recursive rt_dir_remove succeeds once the directory is empty");
     rt_dir_remove((const uint8_t*)base, (uint64_t)strlen(base), 1);

@@ -14542,7 +14542,7 @@ int64_t rt_file_exists_probe_test_seed_counters(int64_t total, int64_t failed) {
 }
 #endif
 
-int rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+bool rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     uint_fast64_t lease = rt_file_exists_probe_lease_admit();
     char path[RT_TEXT_PATH_MAX];
     int exists = 0;
@@ -14567,7 +14567,7 @@ int rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     return exists;
 }
 
-int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+bool rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
     char path_buf[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
     const char* path = path_buf;
@@ -14610,7 +14610,7 @@ int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
-int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+bool rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return remove(path) == 0 ? 1 : 0;

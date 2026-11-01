@@ -46,7 +46,8 @@ and [native staging](../../../07_guide/tooling/bootstrap_native_staging.md).
 ### Sanity memory reserve preservation (2026-10-30)
 
 The canonical sanity scrub preserves an explicitly configured positive canonical
-i64 `SIMPLE_BUILD_MEMORY_RESERVE_BYTES`; absence retains the compiler default,
+i64 `SIMPLE_BUILD_MEMORY_RESERVE_BYTES`; absence retains the compiler default
+(min(24 GiB, installed RAM / 2); 24 GiB when the total is unknown),
 and malformed values refuse before candidate execution. This does not change
 hard memory enforcement or admit a previously rejected compiler. See
 [reserve scrub evidence](../../../08_tracking/bug/bootstrap_sanity_memory_reserve_scrub_2026_10_30.md).

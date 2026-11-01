@@ -24,11 +24,48 @@ use app.io.process_ops.{process_run_timeout}
 
 @when(os="windows"):
 use std.nogc_sync_mut.io.windows_process_owner.{windows_available_memory_headroom_v1}
+use app.io.process_ops.{process_run_bounded}
 
 pub fn shard_mem_available_kb() -> i64:
     match windows_available_memory_headroom_v1():
         case Ok(bytes): bytes / 1024
         case Err(_): 0
+
+# Installed RAM via a bounded PowerShell CIM query (TotalVisibleMemorySize is
+# kB), the same probe scripts/bootstrap/bootstrap-host-capacity.shs runs and
+# the same bounded runner cli_ops uses for PowerShell on the seed (the
+# unbounded direct call segfaults there). NOT the raw kernel32
+# GlobalMemoryStatusEx externs: the headroom helper only reaches them behind a
+# registered rt_ wrapper, and under the seed's pure interpreter an unresolved
+# extern is a hard abort, not an Err
+# (seed_interp_windows_memory_probe_2026_10_24.md). No rt_ host total exists
+# (owner-allowlisted C primitives). A timed-out or failed query is unknown ->
+# the reserve keeps its fixed 24 GiB cap, never admit-all.
+pub fn build_host_memory_total_kib() -> i64:
+    val (out, _err, code) = process_run_bounded("powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize"],
+        20000, 65536)
+    if code != 0:
+        return 0
+    shard_mem_available_kb_from_field(out.trim())
+@else:
+@when(os="freebsd"):
+# FreeBSD headroom: unchanged from before this branch existed -- it fell into
+# the Linux /proc/meminfo probe, which is absent without linprocfs, so the
+# headroom is unknown (0: sequential clamp, admitted start). A sysctl
+# free+inactive probe is a separate change.
+pub fn shard_mem_available_kb() -> i64:
+    val (out, _err, code) = process_run_timeout("awk", ["/^MemAvailable:/ {print $2}", "/proc/meminfo"], 2000)
+    if code != 0:
+        return 0
+    shard_mem_available_kb_from_field(out.trim())
+
+# FreeBSD: `sysctl -n hw.physmem` prints installed RAM in bytes.
+pub fn build_host_memory_total_kib() -> i64:
+    val (out, _err, code) = process_run_timeout("sysctl", ["-n", "hw.physmem"], 2000)
+    if code != 0:
+        return 0
+    build_host_memory_total_kib_from_bytes_field(out)
 @else:
 @when(os="macos"):
 # Darwin has no /proc/meminfo and no MemAvailable analogue. `vm_stat` reports
@@ -110,6 +147,14 @@ pub fn shard_macos_available_kb_from_vm_stat(output: text) -> i64:
     if pages > 9223372036854775807 / page_size:
         return 0
     (pages * page_size) / 1024
+
+# Installed RAM: `sysctl -n hw.memsize` prints bytes (25769803776 on the
+# 24 GB Apple-silicon shape). Subprocess, never file_read (NOTE above).
+pub fn build_host_memory_total_kib() -> i64:
+    val (out, _err, code) = process_run_timeout("sysctl", ["-n", "hw.memsize"], 2000)
+    if code != 0:
+        return 0
+    build_host_memory_total_kib_from_bytes_field(out)
 @else:
 # MemAvailable (kB) from /proc/meminfo; 0 when unavailable. Unknown memory
 # permits only the existing sequential path, never CPU-count fanout.
@@ -126,8 +171,27 @@ pub fn shard_mem_available_kb() -> i64:
     if code != 0:
         return 0
     shard_mem_available_kb_from_field(out.trim())
+
+# Installed RAM in kB (MemTotal is already kB), bounded by the enclosing
+# cgroup v2 memory.max when one is enforced: inside a 24 GiB scope on a
+# 121 GB host the scope, not the host, is the memory a build can ever get.
+pub fn build_host_memory_total_kib() -> i64:
+    val (out, _err, code) = process_run_timeout("awk", ["/^MemTotal:/ {print $2}", "/proc/meminfo"], 2000)
+    val meminfo_kib = if code != 0: 0 else: shard_mem_available_kb_from_field(out.trim())
+    build_host_memory_total_kib_bounded(meminfo_kib, shard_cgroup_memory_max_kb())
 @end
 @end
+@end
+
+# Pure: bytes field (sysctl hw.memsize / hw.physmem) to kB; 0 when junk.
+pub fn build_host_memory_total_kib_from_bytes_field(field: text) -> i64:
+    shard_mem_available_kb_from_field(field.trim()) / 1024
+
+# Pure: the smaller of a known host total and a known enclosing cap; an
+# unknown (<= 0) side is ignored, both unknown is 0.
+pub fn build_host_memory_total_kib_bounded(total_kib: i64, cap_kib: i64) -> i64:
+    if total_kib <= 0: return if cap_kib > 0: cap_kib else: 0
+    if cap_kib > 0 and cap_kib < total_kib: cap_kib else: total_kib
 
 # Split out so a spec can feed a fixture without a /proc dependency.
 pub fn shard_mem_available_kb_from_field(field: text) -> i64:
@@ -509,11 +573,42 @@ pub fn shard_pool_clamp_workers(estimate_kb: i64) -> i64:
     shard_pool_workers_v1(shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb), estimate_kb)
 
 # Host memory reserve a build must leave free (RAM and commit, whichever is
-# smaller on Windows): SIMPLE_BUILD_MEMORY_RESERVE_BYTES, default 24 GiB.
-# Also the floor the worker pool keeps when admitting more workers.
+# smaller on Windows): SIMPLE_BUILD_MEMORY_RESERVE_BYTES, else
+# min(24 GiB, installed RAM / 2). Also the floor the worker pool keeps when
+# admitting more workers.
+#
+# Why half, capped: 5b9b780b8a3 fixed the reserve at 24 GiB after a ~127 GiB
+# host filled up under concurrent builds; that figure is the tree-rss-policy
+# "one build at a time" ceiling, not a fraction of RAM. On a 24 GiB Mac the
+# fixed reserve equals physical RAM, so the start guard refused every
+# self-hosted build. The smallest host that builds at all must still reserve
+# the measured single-build footprint: stage3 peaks at ~10.4 GB tree RSS on
+# the 24 GiB host, so 1/2 (12 GiB) covers it with ~1.6 GiB to spare, which is
+# the explicit 12 GiB reserve the 2026-10-30 diagnostic lane ran with
+# (bootstrap_sanity_subkib_reserve_2026_10_30.md); 1/4 (6 GiB) would admit
+# builds that then die. Hosts of 48 GiB and above keep the exact old 24 GiB.
+# Below 24 GiB the guard is a "do not start into a full host" bound, not a
+# footprint predictor. An unknown total (probe unavailable) keeps the 24 GiB
+# cap: unknown must never shrink the reserve toward admit-all.
+pub const BUILD_MEMORY_RESERVE_CAP_KIB_V1: i64 = 25165824
+
+pub fn build_memory_reserve_default_kib_v1(total_kib: i64) -> i64:
+    if total_kib <= 0: return BUILD_MEMORY_RESERVE_CAP_KIB_V1
+    val half = total_kib / 2
+    if half <= 0 or half >= BUILD_MEMORY_RESERVE_CAP_KIB_V1: BUILD_MEMORY_RESERVE_CAP_KIB_V1 else: half
+
+# Pure composition: an explicit byte value wins unchanged (its sub-KiB range
+# is rejected at the shell boundary, not here), else the host-scaled default.
+pub fn build_memory_reserve_kib_for(reserve_bytes_field: text, total_kib: i64) -> i64:
+    val parsed = shard_mem_available_kb_from_field(reserve_bytes_field)
+    if parsed > 0: parsed / 1024 else: build_memory_reserve_default_kib_v1(total_kib)
+
 pub fn build_memory_reserve_kib() -> i64:
-    val parsed = shard_mem_available_kb_from_field(env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? "")
-    if parsed > 0: parsed / 1024 else: 25165824
+    val field = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
+    # An explicit value never probes the host.
+    if shard_mem_available_kb_from_field(field) > 0:
+        return build_memory_reserve_kib_for(field, 0)
+    build_memory_reserve_kib_for(field, build_host_memory_total_kib())
 
 # "" admits; otherwise the refusal message. Headroom <= 0 means it could not
 # be measured, which admits (same rule as disk admission).

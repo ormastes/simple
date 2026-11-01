@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The Hello matrix strips inherited SIMPLE_* settings, but must keep the
 operator's build memory reserve. Without it the compiler falls back to its
-24 GiB default and refuses every build on a smaller or shared host.
+default (min(24 GiB, installed RAM / 2)) and refuses every build on a
+smaller or shared host.
 
 Hosts: wherever CPython 3 runs (macOS, Linux, FreeBSD, Windows).
 """
