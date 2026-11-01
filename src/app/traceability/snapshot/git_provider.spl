@@ -18,6 +18,8 @@ pub struct GitSnapshotRequest:
     max_blob_bytes: i64
     max_total_bytes: i64
     snapshot_kind: text = "git_commit"
+    frozen_tree: text = ""
+    frozen_revision: text = ""
 
 fn git_u8_text(value: text) -> [u8]:
     var bytes: [u8] = []
@@ -128,6 +130,8 @@ fn git_find_entry(entries: [TraceGitTreeEntry], path: text) -> TraceGitTreeEntry
 pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput, text>:
     if request.snapshot_kind != "git_commit" and request.snapshot_kind != "git_index":
         return Err("TRACE-SNAPSHOT-INCOMPLETE: unsupported Git snapshot kind")
+    if request.frozen_revision != "" and (request.frozen_tree == "" or request.snapshot_kind == "git_index"):
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: frozen revision requires a frozen commit tree")
     if request.repository == "" or request.selector == "" or request.paths.len() == 0 or request.paths.len() > 256 or request.max_entries < 1 or request.max_entries > 40000 or request.max_blob_bytes < 1 or request.max_blob_bytes > 4194304 or request.max_total_bytes < 1 or request.max_total_bytes > 4194304:
         return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid snapshot scope")
     var seen: Dict<text, bool> = {}
@@ -143,7 +147,23 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
     var revision = ""
     var tree = ""
     var kind = request.snapshot_kind
-    if request.snapshot_kind == "git_index":
+    if request.frozen_tree != "":
+        # Continue a declaration/locator closure from the already frozen subject.
+        # Never resolve the moving ref/index again between closure captures.
+        if not git_oid_valid(request.frozen_tree, width):
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid frozen tree identity")
+        if request.snapshot_kind == "git_commit" and not git_oid_valid(request.frozen_revision, width):
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: frozen commit identity required")
+        if request.snapshot_kind == "git_commit":
+            val pinned_commit = git_capture_text(root, ["rev-parse", "--verify", "--end-of-options", "{request.frozen_revision}^{commit}"])?.trim()
+            if pinned_commit != request.frozen_revision:
+                return Err("TRACE-SNAPSHOT-INCOMPLETE: frozen revision is not the pinned commit object")
+            val pinned_tree = git_capture_text(root, ["rev-parse", "--verify", "--end-of-options", "{request.frozen_revision}^{tree}"])?.trim()
+            if pinned_tree != request.frozen_tree:
+                return Err("TRACE-SNAPSHOT-INCOMPLETE: frozen tree does not belong to the pinned commit")
+        tree = request.frozen_tree
+        revision = request.frozen_revision
+    elif request.snapshot_kind == "git_index":
         # Freeze the selected Git index, including an inherited alternate index.
         # write-tree refuses unresolved entries and never reads worktree bytes.
         kind = "git_index"
