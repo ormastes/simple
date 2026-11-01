@@ -749,18 +749,25 @@ impl RenderBackend for SoftwareBackend:
         val total = width.to_i64() * height.to_i64()
         if width > 0 and height > 0 and total > 0 and total <= 2147483647:
             region = [0u32; total.to_i32()]
+            # Clip the column range once; every row then copies one in-bounds
+            # span in bulk. Out-of-bounds columns stay 0u32 as before.
+            var col0 = 0
+            if x < 0:
+                col0 = 0 - x
+            var col1 = width
+            if self.w - x < col1:
+                col1 = self.w - x
             var row = 0
+            # cpu-lane-loop-ok: one iteration per region row; each row body is a
+            # single clipped write_span bulk copy, so the per-pixel work is bulk
             while row < height:
                 val source_y = y + row
-                if source_y >= 0 and source_y < self.h:
+                if source_y >= 0 and source_y < self.h and col1 > col0:
                     val row_base = source_y.to_i64() * self.w.to_i64()
-                    var col = 0
-                    while col < width:
-                        val source_x = x + col
-                        if source_x >= 0 and source_x < self.w:
-                            region[row.to_i64() * width.to_i64() + col.to_i64()] =
-                                self.buf[row_base + source_x.to_i64()]
-                        col = col + 1
+                    region.write_span(self.buf,
+                        row.to_i64() * width.to_i64() + col0.to_i64(),
+                        row_base + (x + col0).to_i64(),
+                        (col1 - col0).to_i64())
                 row = row + 1
         engine2d_readback(region, readback_source_label(ReadbackSource.CpuMirror))
 
@@ -1608,7 +1615,7 @@ impl SoftwareBackend:
         var bx1 = out[0] + out[2]
         var by1 = out[1] + out[3]
         var r = 1
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             if out[o] < bx0:
                 bx0 = out[o]
@@ -1687,14 +1694,14 @@ impl SoftwareBackend:
         val rects = self.damage_rects(max_rects)
         val rect_count = rects.len() / 4
         var r = 0
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             val rx = rects[o]
             val ry = rects[o + 1]
             val rw = rects[o + 2]
             val rh = rects[o + 3]
             var row = 0
-            while row < rh:
+            while row < rh:  # cpu-lane-loop-ok: one iteration per damaged-rect row; the per-row span copy is the annotated bulk body
                 val base = (ry + row) * self.w + rx
                 var c = 0
                 # cpu-lane-loop-ok: per-damaged-row span copy; this IS the bulk
@@ -1725,7 +1732,7 @@ impl SoftwareBackend:
         var total: i64 = 0
         var r = 0
         val rect_count = rects.len() / 4
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             val rx = rects[o]
             val ry = rects[o + 1]
@@ -1744,14 +1751,14 @@ impl SoftwareBackend:
         var packed: [u32] = [0u32; total.to_i32()]
         var write = 0
         r = 0
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             val rx = rects[o]
             val ry = rects[o + 1]
             val rw = rects[o + 2]
             val rh = rects[o + 3]
             var row = 0
-            while row < rh:
+            while row < rh:  # cpu-lane-loop-ok: one iteration per damaged-rect row; the per-row span copy is the annotated bulk body
                 val base = (ry + row) * self.w + rx
                 var col = 0
                 # cpu-lane-loop-ok: this is the packed sparse transport copy;
@@ -1789,7 +1796,7 @@ impl SoftwareBackend:
         # endpoint sums below cannot overflow i32.
         var total: i64 = 0
         var r = 0
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             val rx = rects[o]
             val ry = rects[o + 1]
@@ -1803,7 +1810,7 @@ impl SoftwareBackend:
                 return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
             total = total + area
             var q = 0
-            while q < r:
+            while q < r:  # cpu-lane-loop-ok: pairwise rect-overlap check, bounded by rect count squared, not pixels
                 val qo = q * 4
                 if (rx < rects[qo] + rects[qo + 2] and
                     rects[qo] < rx + rw and
@@ -1816,14 +1823,14 @@ impl SoftwareBackend:
         var packed: [u32] = [0u32; total.to_i32()]
         var write = 0
         r = 0
-        while r < rect_count:
+        while r < rect_count:  # cpu-lane-loop-ok: walks the damage-rect list (4 ints per rect), bounded by rect count, not pixels
             val o = r * 4
             val rx = rects[o]
             val ry = rects[o + 1]
             val rw = rects[o + 2]
             val rh = rects[o + 3]
             var row = 0
-            while row < rh:
+            while row < rh:  # cpu-lane-loop-ok: one iteration per damaged-rect row; the per-row span copy is the annotated bulk body
                 val base = (ry + row) * self.w + rx
                 var col = 0
                 # cpu-lane-loop-ok: packed sparse transport copy; boxed [u32]
