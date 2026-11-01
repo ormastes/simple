@@ -1,0 +1,161 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/generic_erased_body_boundary_spec.spl`
+   with `SIMPLE_BIN` pointing at a self-hosted `bin/simple` built FROM this
+   change (a binary that still carries the E-GEN-001 refusal fails every
+   scenario with a compile error, which is the intended loud signal).
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+The tagged-word ABI (int<<3, heap|0x1, 61-bit inline range) assumes a 64-bit
+host word; rv32 is not covered.
+
+## Execution status
+
+Authored 2026-10-31 against the self-hosted erased-body change
+(generics = ONE ERASED BODY per generic fn; `lower_type` TypeParam arm,
+`local_needs_erased_decode` in 50.mir). The
+fixture's ground truth was established by running it through the Rust seed
+(`boot/rt/simple run`, aarch64-apple-darwin): both printed lines matched
+the authored expectation. This spec file itself is UNEXECUTED on the
+self-hosted compiler until `bin/simple test` has been run on it with a
+binary built from this change and the result recorded here. Treat it as
+authored evidence, not as a passing run.
+"""
+
+# doc-path: doc/08_tracking/bug/monomorphization_deleted_2026-10-31.md
+# @manual: primary
+
+"""
+# Erased generic body: values crossing a `T` boundary are bit-exact
+
+A generic fn is emitted ONCE. Every `T` slot is the tagged runtime word:
+an int in the 61-bit range is `int << 3`, a wider i64 and every f64 are
+heap boxes (`rt_value_int_wide`, `rt_value_float`), a bool is 11/19, a
+record passes as its pointer. Callers box into the slot and typed
+consumers decode out of it. The scenarios below pin the exact values that
+a forgotten direction destroys: i64 min/max (heap box vs inline shift),
+f64 NaN and -0.0 (the float box must be lossless), struct field integrity,
+a `[T]` element, a `Box<T>` field, and the x8 class (PR #5661): a tagged
+`T` result reaching a declared scalar parameter or an arithmetic operand.
+
+**This spec must shell out.** `bin/simple test` overwrites
+SIMPLE_EXECUTION_MODE to "interpret" before every child spec, and the
+interpreter has no boxing -- an in-process assertion would be green on a
+broken native compiler. So it runs the fixture through `simple run`
+under the JIT/native engine and the interpreter, exactly like
+test/01_unit/compiler/jit_generic_return_scalar_boxing_spec.spl, and
+requires the compiled lane to agree with the interpreter AND with pinned
+ground truth. Set SIMPLE_BIN to target a specific binary; default
+`bin/simple`.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get}
+
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn fixture_path() -> text:
+    "test/fixtures/jit_differential/generic_erased_body_boundary.spl"
+
+fn run_engine(mode_env: text) -> text:
+    val command = mode_env + " " + simple_binary() + " run " + fixture_path()
+    val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", command])
+    stdout + stderr
+
+fn compiled_output() -> text:
+    # The compiled engine must be named EXPLICITLY (see the module doc).
+    run_engine("SIMPLE_EXECUTION_MODE=jit")
+
+fn interp_output() -> text:
+    run_engine("SIMPLE_EXECUTION_MODE=interpreter")
+
+val EXPECTED_SUMMARY = "summary=7|9223372036854775807|-9223372036854775808|-1|NaN|negzero|0.1|3|4|12|42|T|F|42"
+val EXPECTED_ARITH = "arith=6|1.5"
+val EXPECTED_CONTAINERS = "containers=1|2|5|6|omega|2.5"
+
+describe "erased generic body: values crossing a T boundary":
+    # @manual scenario evidence
+
+    it "compiles a direct call to a generic fn (no E-GEN-001 refusal)":
+        # @req REQ-SSPEC-UNIT
+        step("compiles a direct call to a generic fn (no E-GEN-001 refusal)")
+        val out = compiled_output()
+        expect(out).not_to_contain("E-GEN-001")
+        expect(out).to_contain("summary=")
+
+    it "returns a small i64 through T untagged (7, not 56)":
+        # @req REQ-SSPEC-UNIT
+        step("returns a small i64 through T untagged (7, not 56)")
+        expect(compiled_output()).to_contain("summary=7|")
+
+    it "round-trips i64 max and min through the wide heap box":
+        # @req REQ-SSPEC-UNIT
+        step("round-trips i64 max and min through the wide heap box")
+        val out = compiled_output()
+        expect(out).to_contain("|9223372036854775807|-9223372036854775808|-1|")
+
+    it "round-trips f64 NaN, -0.0 and 0.1 losslessly":
+        # @req REQ-SSPEC-UNIT
+        step("round-trips f64 NaN, -0.0 and 0.1 losslessly")
+        expect(compiled_output()).to_contain("|NaN|negzero|0.1|")
+
+    it "keeps every field of a by-value struct passed and returned as T":
+        # @req REQ-SSPEC-UNIT
+        step("keeps every field of a by-value struct passed and returned as T")
+        expect(compiled_output()).to_contain("|3|4|")
+
+    it "reads a [T] element and a Box<T> field as the stored numbers":
+        # @req REQ-SSPEC-UNIT
+        step("reads a [T] element and a Box<T> field as the stored numbers")
+        expect(compiled_output()).to_contain("|12|42|")
+
+    it "keeps bool identity through T (true stays T, false stays F)":
+        # @req REQ-SSPEC-UNIT
+        step("keeps bool identity through T (true stays T, false stays F)")
+        expect(compiled_output()).to_contain("|T|F|")
+
+    it "decodes a T result into a declared scalar parameter (x8 class)":
+        # @req REQ-SSPEC-UNIT
+        step("decodes a T result into a declared scalar parameter (x8 class)")
+        expect(compiled_output()).to_contain("|T|F|42")
+
+    it "decodes a T result used as an arithmetic operand (6, not 41)":
+        # @req REQ-SSPEC-UNIT
+        step("decodes a T result used as an arithmetic operand (6, not 41)")
+        expect(compiled_output()).to_contain(EXPECTED_ARITH)
+
+    it "passes records, text and f64 through a [T] element read undecoded":
+        # @req REQ-SSPEC-UNIT
+        step("passes records, text and f64 through a [T] element read undecoded")
+        expect(compiled_output()).to_contain(EXPECTED_CONTAINERS)
+
+    it "prints the complete pinned summary line":
+        # @req REQ-SSPEC-UNIT
+        step("prints the complete pinned summary line")
+        expect(compiled_output()).to_contain(EXPECTED_SUMMARY)
+
+    it "agrees with the interpreter, which has no boxing to get wrong":
+        # @req REQ-SSPEC-UNIT
+        step("agrees with the interpreter, which has no boxing to get wrong")
+        val out = interp_output()
+        expect(out).to_contain(EXPECTED_SUMMARY)
+        expect(out).to_contain(EXPECTED_ARITH)
+        expect(out).to_contain(EXPECTED_CONTAINERS)

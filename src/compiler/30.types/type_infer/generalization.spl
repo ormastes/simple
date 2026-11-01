@@ -65,13 +65,35 @@ impl HmInferContext:
         match ty.kind:
             case Infer(id, level):
                 vars = vars.push((id, level))
-            case Function(params, ret, _):
+            case Function(params, ret, effects):
                 for p in params:
                     self.collect_free_vars(p, vars)
                 self.collect_free_vars(ret, vars)
+                # A `Throws(T)` effect carries a type: a variable free only
+                # there must still be quantified (packet E2, F05). Walked
+                # after the return so quantifier order stays
+                # params, return, effects (first encounter).
+                for effect in effects:
+                    match effect.kind:
+                        case Throws(thrown): self.collect_free_vars(thrown, vars)
+                        case _: ()
             case Tuple(elements):
                 for e in elements:
                     self.collect_free_vars(e, vars)
+            case Union(members):
+                for m in members:
+                    self.collect_free_vars(m, vars)
+            case Isolated(inner):
+                self.collect_free_vars(inner, vars)
+            case Projection(base, _):
+                self.collect_free_vars(base, vars)
+            case TypeParam(_, bounds):
+                for b in bounds:
+                    self.collect_free_vars(b, vars)
+            case Tensor(element, _, _):
+                # `apply`, `occurs` and `instantiate_type` all walk the
+                # element; this walker dropped it to `case _`.
+                self.collect_free_vars(element, vars)
             case Array(element, _) | Slice(element):
                 self.collect_free_vars(element, vars)
             case Dict(key, value):

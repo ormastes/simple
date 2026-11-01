@@ -1,10 +1,27 @@
-extern fn rt_bytes_alloc(n: i64) -> [u8]
+extern fn rt_bytes_alloc(n: i64) -> [u8]?
 use std.io_runtime.{file_exists, file_read}
 
+# Largest RGBA buffer a public render entry will request. Sizes that are
+# negative or would exceed this bound are refused before any allocation.
+val SIMPLE_WEB_FILE_RENDER_MAX_BYTES: i64 = 268435456
+
+# True when width/height give a non-negative RGBA byte count within the bound.
+fn _rgba_size_ok(width: i64, height: i64) -> bool:
+    if width < 0 or height < 0:
+        return false
+    if width > 0 and height > (SIMPLE_WEB_FILE_RENDER_MAX_BYTES / 4) / width:
+        return false
+    true
+
+# Refused (nil) allocation yields [], which callers treat as a failed render.
 fn simple_web_file_renderer_alloc_bytes(n: i64) -> [u8]:
-    rt_bytes_alloc(n)
+    if val buf = rt_bytes_alloc(n):
+        return buf
+    []
 
 pub fn simple_web_file_render_url_to_pixels(url: text, width: i64, height: i64) -> [u8]:
+    if not _rgba_size_ok(width, height):
+        return []
     val n_bytes = width * height * 4
 
     if url.starts_with("about:"):
@@ -23,10 +40,14 @@ pub fn simple_web_render_url_to_pixels(url: text, width: i64, height: i64) -> [u
     simple_web_file_render_url_to_pixels(url, width, height)
 
 pub fn simple_web_render_html_to_rgba_bytes(html: text, width: i64, height: i64) -> [u8]:
+    if not _rgba_size_ok(width, height):
+        return []
     _render_static_html_to_rgba_bytes(html, width, height)
 
 fn _white_rgba_bytes(n_bytes: i64) -> [u8]:
     val pixels = simple_web_file_renderer_alloc_bytes(n_bytes)
+    if pixels.len().to_i64() < n_bytes:
+        return []
     _fill_white(pixels, n_bytes)
     pixels
 
@@ -39,6 +60,8 @@ fn _fill_white(mut pixels: [u8], n_bytes: i64):
 fn _render_static_html_to_rgba_bytes(html: text, width: i64, height: i64) -> [u8]:
     val n_bytes = width * height * 4
     var out = simple_web_file_renderer_alloc_bytes(n_bytes)
+    if out.len().to_i64() < n_bytes:
+        return []
     var dst: i64 = 0
     var pixel: i64 = 0
     val count = width * height

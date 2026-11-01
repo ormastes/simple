@@ -1251,10 +1251,17 @@ impl MirLowering:
                                     # payload, not the Option handle.
                                     if hir_type_is_plain_scalar(declared_type):
                                         init_local = self.option_scalar_payload_of(init_local)
+                                        # `val n: i64 = ident(5)` with an erased
+                                        # `T`/Any initializer: decode the tagged
+                                        # word into the declared scalar slot
+                                        # (binding-position x8 class, PR #5661).
+                                        if val init_hir = self.find_local_hir_type(init_local.id):
+                                            if self.local_needs_erased_decode(init_local.id, init_hir):
+                                                init_local = self.decode_runtime_value(init_local, self.lower_type(declared_type))
                                     match declared_type.kind:
                                         case HirTypeKind.Optional(_):
                                             init_local = self.ensure_option_handle(init_local, declared_type)
-                                        case HirTypeKind.Any:
+                                        case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                                             # any_slot_holds_untagged_scalar_2026-08-05
                                             # (pure-Simple parity gap): a scalar
                                             # (bool/i64/f64) stored into an
@@ -1271,6 +1278,27 @@ impl MirLowering:
                                             # this is safe to call unconditionally
                                             # here.
                                             init_local = self.box_runtime_value(init_local)
+                                        case HirTypeKind.Named(_, _):
+                                            # `val p: Pt = ident(Pt(..))`: the erased
+                                            # `T` result carries the record handle
+                                            # through untouched but no struct
+                                            # identity, so every later `p.y` fell
+                                            # to resolve_field_index's default
+                                            # index 0 (p.y == p.x). The explicit
+                                            # annotation is the only evidence of
+                                            # the layout; bind it to the init local
+                                            # exactly like a typed call result,
+                                            # gated on a layout this lowering knows
+                                            # (generics = one erased body, 2026-11-01).
+                                            if not self.struct_value_syms.contains(init_local.id):
+                                                var erased_init = false
+                                                if val erased_init_hir = self.find_local_hir_type(init_local.id):
+                                                    erased_init = self.local_needs_erased_decode(init_local.id, erased_init_hir)
+                                                if erased_init:
+                                                    val declared_record = self.optional_payload_struct_name(declared_type)
+                                                    if declared_record != "":
+                                                        self.struct_value_syms[init_local.id] = declared_record
+                                                        self.remember_local_hir_type(init_local.id, declared_type, 0, 0)
                                         case _:
                                             ()
                         # Bug (any?/any receiver-type erasure, 2026-09-01):
@@ -2657,7 +2685,7 @@ impl MirLowering:
             # slot raw. Refuse that ABI until named binding owns the order.
             for param_type in param_types:
                 match param_type.kind:
-                    case HirTypeKind.Any:
+                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                         self.error_fatal("named argument to Any-bearing method requires declared parameter binding", Some(arg.span))
                         return self.builder.emit_const_int(0)
                     case _: ()
@@ -2667,9 +2695,10 @@ impl MirLowering:
         val declared_param_type: HirType = param_types[param_index]
         var arg_local: LocalId = self.lower_expr_for_slot(arg.value, declared_param_type)
         match declared_param_type.kind:
-            case HirTypeKind.Any:
+            case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                 # Method parameters use the same RuntimeValue ABI as free
-                # functions. Already tagged arguments remain tagged once.
+                # functions (erased `T` included). Already tagged arguments
+                # remain tagged once.
                 arg_local = self.box_runtime_value(arg_local)
             case HirTypeKind.Optional(optional_inner):
                 val scalar_payload = match optional_inner.kind:
@@ -3239,7 +3268,7 @@ impl MirLowering:
                     match cond_hir_type.kind:
                         case HirTypeKind.Optional(_):
                             cond_is_optional = true
-                        case HirTypeKind.Any:
+                        case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                             # Assignment can replace HIR metadata without
                             # changing an existing local's MIR storage type.
                             # A native Bool slot is not a tagged Any word.
@@ -3291,7 +3320,7 @@ impl MirLowering:
                     match cond.type_.kind:
                         case HirTypeKind.Optional(_):
                             cond_is_optional = true
-                        case HirTypeKind.Any:
+                        case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                             # Expression annotations can outlive normalization
                             # to a native Bool. Only recover an absent local
                             # owner when the lowered slot still has Any's ABI.
@@ -4328,6 +4357,11 @@ impl MirLowering:
         var dict_key_hir: HirType? = nil
         var dict_value_hir: HirType? = nil
         var declared_element_type: HirType? = nil
+        # `for x in items` with `items: [T]` inside an erased generic body:
+        # the element word is tagged and its dynamic type unknown; bind it
+        # undecoded, marked runtime value, HIR type `T` (see the Index arm
+        # in expr_dispatch.spl for the same rule).
+        var erased_element_hir: HirType? = nil
         # Optional-typed collection binder (`case Some(xs)` / nullable variant
         # payload `[T]?`): the authored nil guard is the contract, so iterate
         # the payload array with the inner element type (#143, binder was I64).
@@ -4347,11 +4381,11 @@ impl MirLowering:
                 case HirTypeKind.Dict(dict_key_t, dict_value_t):
                     dict_key_hir = Some(dict_key_t)
                     dict_value_hir = Some(dict_value_t)
-                case HirTypeKind.Any:
+                case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
                     collection_hir_erased = true
                 case HirTypeKind.Optional(erased_inner):
                     match erased_inner.kind:
-                        case HirTypeKind.Any: collection_hir_erased = true
+                        case HirTypeKind.Any | HirTypeKind.TypeParam(_, _): collection_hir_erased = true
                         case _: ()
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
                     # `[Any]` / `[Infer]` / `[Error]` name NO element type. An
@@ -4371,6 +4405,9 @@ impl MirLowering:
                         case HirTypeKind.Error: elem_t_is_placeholder = true
                         case HirTypeKind.Infer(_, _): elem_t_is_placeholder = true
                         case HirTypeKind.Any: elem_t_is_placeholder = true
+                        case HirTypeKind.TypeParam(_, _):
+                            elem_t_is_placeholder = true
+                            erased_element_hir = Some(elem_t)
                         case _: ()
                     if not elem_t_is_placeholder:
                         declared_element_type = Some(elem_t)
@@ -4436,6 +4473,7 @@ impl MirLowering:
                     MirType(kind: MirTypeKind.Opaque("str")),
                     body,
                     source_span,
+                    nil,
                     nil
                 )
 
@@ -4454,7 +4492,7 @@ impl MirLowering:
                     case _: ()
 
         if self.local_is_runtime_array(collection_local) or ((collection_is_erased_word or array_iter_local.id != collection_local.id) and element_type_from_hir):
-            return self.lower_for_array_indexed(var_, array_iter_local, element_type, body, source_span, declared_element_type)
+            return self.lower_for_array_indexed(var_, array_iter_local, element_type, body, source_span, declared_element_type, erased_element_hir)
 
         # Erased-collection lane: `for x in v` where v's declared type is the
         # type-erasure slot (`Any` / `Optional(Any)` — the JSON facade's `any?`
@@ -4477,7 +4515,7 @@ impl MirLowering:
                         case MirTypeKind.Tuple(_):
                             erased_coll_local = self.option_payload_or_self(collection_local)
                         case _: ()
-            return self.lower_for_array_indexed(var_, erased_coll_local, MirType.i64(), body, source_span)
+            return self.lower_for_array_indexed(var_, erased_coll_local, MirType.i64(), body, source_span, nil, nil)
 
         # `for (k, v) in dict` / `for e in dict`: iterate the dict's
         # (key, value) 2-tuples, exactly the form the interpreter yields and
@@ -4503,7 +4541,7 @@ impl MirLowering:
                 self.builtin_dict_entry_field_type(dict_value_hir, entry_value_mir)
             ]
             val native_entries = self.builtin_dict_entries_array(collection_local, entry_fields)
-            return self.lower_for_array_indexed(var_, native_entries, MirType(kind: MirTypeKind.Tuple(entry_fields)), body, source_span, nil)
+            return self.lower_for_array_indexed(var_, native_entries, MirType(kind: MirTypeKind.Tuple(entry_fields)), body, source_span, nil, nil)
 
         # Non-array iterable: no supported lowering (#143). Fail loudly.
         # Diagnostics: `body.span` is frequently (0,0) on this pipeline, which
@@ -4531,7 +4569,7 @@ impl MirLowering:
                     match dict_keys_mir_type.kind:
                         case MirTypeKind.Array(key_elem_type, _): dict_key_elem_type = key_elem_type
                         case _: ()
-                return self.lower_for_array_indexed(var_, dict_keys_local, dict_key_elem_type, body, source_span, nil)
+                return self.lower_for_array_indexed(var_, dict_keys_local, dict_key_elem_type, body, source_span, nil, nil)
 
         val iter_coll_type_text = mir_type_probe_text(self.local_mir_type_of(collection_local))
         val iter_unsupported_msg = "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while (collection mir type: {iter_coll_type_text}; module: {self.current_module_id})"
@@ -4566,7 +4604,8 @@ impl MirLowering:
         element_type: MirType,
         body: HirBlock,
         source_span: Span,
-        declared_element_type: HirType?
+        declared_element_type: HirType?,
+        erased_element_hir: HirType?
     ) -> LocalId:
         """Lower `for x in arr` over a runtime array as a counted index loop.
 
@@ -4705,6 +4744,10 @@ impl MirLowering:
             var b_byte = self.builder
             decoded_elem = b_byte.emit_cast(mir_operand_copy(elem_local), element_type)
             self.builder = b_byte
+        elif erased_element_hir != nil and not for_has_real_struct_name:
+            # Erased `[T]` element: tagged word, no decode (see the
+            # erased_element_hir declaration above).
+            self.mark_runtime_value_local(elem_local.id)
         else:
             decoded_elem = self.decode_runtime_value(elem_local, decode_elem_type)
 
@@ -4729,6 +4772,10 @@ impl MirLowering:
             # the selected owner needed by function-field call lowering.
             if val bound_element_type = declared_element_type:
                 self.remember_local_hir_type(loop_var.id, bound_element_type, 0, 0)
+            if val erased_bound_t = erased_element_hir:
+                if not for_has_real_struct_name:
+                    self.remember_local_hir_type(loop_var.id, erased_bound_t, 0, 0)
+                    self.mark_runtime_value_local(loop_var.id)
             # Bug (array-of-structs field misread), CONFLICT-FLAG
             # (mir_lowering_stmts.spl is fenced): `for p in pts` over an
             # array of structs desugars to this counted-index loop, whose
