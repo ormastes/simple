@@ -1,0 +1,600 @@
+"""
+## Purpose and audience
+
+MC/DC driver for `src/compiler/30.types/type_infer/generic_calls.spl`
+(direct generic declaration calls: symbol recovery, instantiation, bound
+concreteness, caller bound assumptions, deferred bound solving). Each
+decision is driven to both outcomes and every condition of each compound
+expression is shown to flip the outcome independently. For compiler
+engineers changing generic call inference.
+
+## Operator workflow
+
+Run `bin/simple test test/01_unit/compiler/type_infer/coverage/generic_calls_mcdc_spec.spl`
+with the pure-Simple self-hosted binary. Execution status: UNRUN (no
+self-hosted binary existed when written, 2026-11-01). Fixtures build a
+`FunctionBoundContext` directly from a fresh `SymbolTable`; no parser runs.
+
+## Decision inventory
+
+| Line | Decision | Conditions | Vectors (it) |
+|---|---|---|---|
+| 17 | `match callee.kind` Var / NamedVar / other | arm | "17 arm Var", "17 arm NamedVar", "21 c1 true" (other) |
+| 21 | `symbol == nil or self.function_bound_context == nil` | c1 no symbol, c2 no context | TF "21 c1 true", FT "21 c2 true", FF "17 arm Var" |
+| 24 | `context.signatures.has(id.id)` | c1 | T "17 arm Var", F "24 c1 false" |
+| 25 | `parameters.len() > 0` | c1 | T "17 arm Var", F "25 c1 false" |
+| 31 | `explicit.len() > signature.parameters.len()` | c1 | T "31 c1 true", F "41 c1 true" |
+| 38 | `by_id.has(id) or by_name.has(name)` | c1 dup id, c2 dup name | TF "38 c1 true", FT "38 c2 true", FF "41 c1 true" |
+| 41 | `index < explicit.len()` | c1 | T "41 c1 true", F "41 c1 false" |
+| 42 | `case Err` of unify(fresh, explicit) | c1 | GAP (see below) |
+| 52/53 | Infer / TypeParam / Projection / Error arm | arm | "53 arm non-concrete" |
+| 55 | `function_bound_context == nil` | c1 | T "55 c1 true", F "60 Struct" |
+| 58 | `row == nil` | c1 | T "58 c1 true", F "60 Struct" |
+| 60 | `kind != Struct and kind != Class and kind != Enum` | c1 Struct, c2 Class, c3 Enum | TTT "60 Trait rejected", FTT "60 c1 Struct", TFT "60 c2 Class", TTF "60 c3 Enum" |
+| 62 | `not concrete(argument)` | c1 | T "62 c1 true", F "62 c1 false" |
+| 66 | `not concrete(element)` (Tuple/Union) | c1 | T "66 c1 true", F "66 c1 false" |
+| 68/70 | single-inner arms | arm | "68 arm inner", "70 arm inner" |
+| 73 | `concrete(left) and concrete(right)` | c1 left, c2 right | TT, FT, TF "73 ..." |
+| 76 | `not concrete(parameter)` | c1 | T "76 c1 true" |
+| 78/80 | Throws effect `not concrete(thrown)` | arm + c1 | "80 c1 true", "78 arm default" |
+| 82/83 | result / default arm | arm | "82 result decides", "83 arm default" |
+| 86 | `caller == nil or function_bound_context == nil` | c1, c2 | TF "86 c1 true", FT "86 c2 true", FF "93 c1 true" |
+| 88 | `not function_bounds.has(caller)` | c1 | T "88 c1 true", F "93 c1 true" |
+| 93 | `arguments.len() == 0` | c1 | T "93 c1 true", F "93 c1 false" |
+| 95 | `not signatures.has(caller)` | c1 | T "95 c1 true", F "97 c1 true" |
+| 97 | `parameter.name == name` | c1 | T "97 c1 true", F "97 c1 false" |
+| 98 | other argument kind | arm | "98 arm default" |
+| 101 | `assumption.type_param.id == parameter_id` | c1 | T "93 c1 true", F "101 c1 false" |
+| 102/105 | `(Named, Named)` vs other | arm | "105 arm default" |
+| 104 | `left.id == right.id and left_args == 0 and right_args == 0` | c1, c2, c3 | TTT "93 c1 true", FTT "104 c1 false", TFT "104 c2 false", TTF "104 c3 false" |
+| 115 | `function_bound_context == nil` | c1 | T "115 c1 true", F rest |
+| 126/128 | Infer arg and `parameter.has_default` | c1 | T "128 c1 true", F "128 c1 false" |
+| 130 | `case Err` of default unify | c1 | Err "130 c1 err", Ok "128 c1 true" |
+| 140 | `not function_bounds.has(fn)` | c1 | T "128 c1 true", F "148 ..." |
+| 148 | `not by_id.has(bound.type_param.id)` | c1 | T "148 c1 true", F "156 concrete" |
+| 152 | `caller_assumes_bound(...)` | c1 | T "152 c1 true", F "153 c1 true" |
+| 153 | `not bound_argument_is_concrete(argument)` | c1 | T "153 c1 true", F "156 concrete" |
+
+Counts: 35 decisions, 44 conditions (three 2-condition `or`, one 2-condition
+`and`, two 3-condition `and`).
+Gaps: line 42 `case Err(error)` in instantiate_declared_call is unreachable:
+the left side is always a fresh, unbound inference variable created on line
+40, so unify binds it unconditionally (the occurs check cannot fire because
+the fresh id cannot occur in the caller-supplied explicit type). Line 125
+`call.arguments[index]` with fewer arguments than parameters is an
+index-out-of-range, not a decision, and is not driven.
+Bug suspects: none found in this file.
+"""
+
+# @tag:in-development
+# Tracks: doc/03_plan/compiler/generics/generics_coverage_mcdc_plan_2026-11-01.md step 3
+# @manual_section: generics-coverage-mcdc-generic-calls
+
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.types.type_infer.traits.*
+use compiler.types.type_infer.generic_calls.*
+use compiler.hir.hir.*
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirTypeParam, HirTraitBound}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+use std.spec.step
+
+struct GccFixture:
+    symbols: SymbolTable
+    struct_id: SymbolId
+    class_id: SymbolId
+    enum_id: SymbolId
+    trait_id: SymbolId
+    other_trait_id: SymbolId
+    param_id: SymbolId
+    param2_id: SymbolId
+    generic_fn: SymbolId
+    plain_fn: SymbolId
+    pair_fn: SymbolId
+
+fn gcc_sp() -> Span:
+    lex_span_empty()
+
+fn gcc_mk(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: gcc_sp())
+
+fn gcc_i64() -> HirType:
+    gcc_mk(HirTypeKind.Int(64, true))
+
+fn gcc_str() -> HirType:
+    gcc_mk(HirTypeKind.Str)
+
+fn gcc_unit() -> HirType:
+    gcc_mk(HirTypeKind.Unit)
+
+fn gcc_named(id: SymbolId, args: [HirType]) -> HirType:
+    gcc_mk(HirTypeKind.Named(id, args))
+
+fn gcc_infer() -> HirType:
+    gcc_mk(HirTypeKind.Infer(900, 0))
+
+fn gcc_param(symbol: SymbolId, name: text) -> HirTypeParam:
+    HirTypeParam(symbol: symbol, name: name, bounds: [], has_default: false, default: gcc_unit(), span: gcc_sp())
+
+fn gcc_default_param(symbol: SymbolId, name: text, default: HirType) -> HirTypeParam:
+    HirTypeParam(symbol: symbol, name: name, bounds: [], has_default: true, default: default, span: gcc_sp())
+
+fn gcc_fixture() -> GccFixture:
+    var table = SymbolTable.new()
+    val struct_id = table.define("GccStruct", SymbolKind.Struct, nil, gcc_sp(), Visibility.Public, false, nil)
+    val class_id = table.define("GccClass", SymbolKind.Class, nil, gcc_sp(), Visibility.Public, false, nil)
+    val enum_id = table.define("GccEnum", SymbolKind.Enum, nil, gcc_sp(), Visibility.Public, false, nil)
+    val trait_id = table.define("GccTrait", SymbolKind.Trait, nil, gcc_sp(), Visibility.Public, false, nil)
+    val other_trait_id = table.define("GccOther", SymbolKind.Trait, nil, gcc_sp(), Visibility.Public, false, nil)
+    val param_id = table.define("T", SymbolKind.TypeParam, nil, gcc_sp(), Visibility.Public, false, nil)
+    val param2_id = table.define("U", SymbolKind.TypeParam, nil, gcc_sp(), Visibility.Public, false, nil)
+    val generic_fn = table.define("gcc_generic", SymbolKind.Function, nil, gcc_sp(), Visibility.Public, false, nil)
+    val plain_fn = table.define("gcc_plain", SymbolKind.Function, nil, gcc_sp(), Visibility.Public, false, nil)
+    val pair_fn = table.define("gcc_pair", SymbolKind.Function, nil, gcc_sp(), Visibility.Public, false, nil)
+    GccFixture(symbols: table, struct_id: struct_id, class_id: class_id, enum_id: enum_id,
+        trait_id: trait_id, other_trait_id: other_trait_id, param_id: param_id, param2_id: param2_id,
+        generic_fn: generic_fn, plain_fn: plain_fn, pair_fn: pair_fn)
+
+fn gcc_signatures(f: GccFixture) -> Dict<i64, HmGenericSignature>:
+    var signatures: Dict<i64, HmGenericSignature> = {}
+    val t = gcc_named(f.param_id, [])
+    val u = gcc_named(f.param2_id, [])
+    signatures[f.generic_fn.id] = HmGenericSignature(parameters: [gcc_param(f.param_id, "T")], type_: gcc_mk(HirTypeKind.Function([t], t, [])))
+    signatures[f.plain_fn.id] = HmGenericSignature(parameters: [], type_: gcc_mk(HirTypeKind.Function([], gcc_unit(), [])))
+    signatures[f.pair_fn.id] = HmGenericSignature(parameters: [gcc_param(f.param_id, "T"), gcc_param(f.param2_id, "U")], type_: gcc_mk(HirTypeKind.Function([t, u], u, [])))
+    signatures
+
+fn gcc_context_with(f: GccFixture, signatures: Dict<i64, HmGenericSignature>) -> HmInferContext:
+    var ctx = HmInferContext.new()
+    ctx.function_bound_context = Some(FunctionBoundContext(module_name: "gcc", symbols: f.symbols, parameters: {}, signatures: signatures))
+    ctx
+
+fn gcc_context(f: GccFixture) -> HmInferContext:
+    gcc_context_with(f, gcc_signatures(f))
+
+fn gcc_bound(param: SymbolId, trait_: HirType) -> HirTraitBound:
+    HirTraitBound(type_param: param, trait_: trait_, span: gcc_sp())
+
+fn gcc_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: gcc_unit(), span: gcc_sp())
+
+fn gcc_symbol_id(found: SymbolId?) -> i64:
+    if val id = found:
+        return id.id
+    -1
+
+fn gcc_show(ty: HirType) -> text:
+    match ty.kind:
+        case Int(bits, _): "i{bits}"
+        case Str: "str"
+        case Unit: "unit"
+        case Infer(_, _): "?"
+        case Optional(inner): "Opt[" + gcc_show(inner) + "]"
+        case Function(params, ret, _):
+            var parts: [text] = []
+            for p in params:
+                parts = parts.push(gcc_show(p))
+            "Fn[" + parts.join(",") + "->" + gcc_show(ret) + "]"
+        case _: "leaf"
+
+fn gcc_err_text(result: Result<(HirType, [HirType]), TypeInferError>) -> text:
+    match result:
+        case Ok(_): "ok"
+        case Err(error): error.message()
+
+fn gcc_error_kind(error: TypeInferError) -> text:
+    match error:
+        case TypeInferError.OccursCheck(_, _, _): "occurs"
+        case TypeInferError.TraitNotImplemented(_, name, _): "trait " + name
+        case TypeInferError.Other(message, _): message
+        case _: "other"
+
+fn gcc_call(function: SymbolId, arguments: [HirType], caller: SymbolId?) -> HmPendingBoundCall:
+    HmPendingBoundCall(function: function, arguments: arguments, caller: caller, span: gcc_sp())
+
+describe "generic_calls.spl direct_function_symbol":
+    it "generic_calls.spl:17 arm Var with 21 both false, 24 true, 25 true returns the symbol":
+        # @req REQ-GEN-COV-GENCALLS-001
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(gcc_symbol_id(ctx.direct_function_symbol(gcc_expr(HirExprKind.Var(f.generic_fn))))).to_equal(f.generic_fn.id)
+
+    it "generic_calls.spl:17 arm NamedVar returns the resolved symbol, not the spelling":
+        # @req REQ-GEN-COV-GENCALLS-002
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(gcc_symbol_id(ctx.direct_function_symbol(gcc_expr(HirExprKind.NamedVar(f.generic_fn, "gcc_plain"))))).to_equal(f.generic_fn.id)
+
+    it "generic_calls.spl:21 c1 true: non-variable callee yields nil":
+        # @req REQ-GEN-COV-GENCALLS-003
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.direct_function_symbol(gcc_expr(HirExprKind.IntLit(1, nil)))).to_be_nil()
+
+    it "generic_calls.spl:21 c2 true: missing bound context yields nil":
+        # @req REQ-GEN-COV-GENCALLS-004
+        val f = gcc_fixture()
+        var ctx = HmInferContext.new()
+        expect(ctx.direct_function_symbol(gcc_expr(HirExprKind.Var(f.generic_fn)))).to_be_nil()
+
+    it "generic_calls.spl:24 c1 false: symbol without signature yields nil":
+        # @req REQ-GEN-COV-GENCALLS-005
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.direct_function_symbol(gcc_expr(HirExprKind.Var(f.struct_id)))).to_be_nil()
+
+    it "generic_calls.spl:25 c1 false: non-generic signature yields nil":
+        # @req REQ-GEN-COV-GENCALLS-006
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.direct_function_symbol(gcc_expr(HirExprKind.Var(f.plain_fn)))).to_be_nil()
+
+describe "generic_calls.spl instantiate_declared_call":
+    it "generic_calls.spl:31 c1 true: too many explicit arguments is rejected":
+        # @req REQ-GEN-COV-GENCALLS-007
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        val result = ctx.instantiate_declared_call(f.generic_fn, [gcc_i64(), gcc_str()], gcc_sp())
+        expect(gcc_err_text(result)).to_equal("function type argument count exceeds declaration")
+
+    it "generic_calls.spl:38 c1 true: duplicate binder id is rejected":
+        # @req REQ-GEN-COV-GENCALLS-008
+        val f = gcc_fixture()
+        var signatures = gcc_signatures(f)
+        signatures[f.pair_fn.id] = HmGenericSignature(parameters: [gcc_param(f.param_id, "T"), gcc_param(f.param_id, "U")], type_: gcc_unit())
+        var ctx = gcc_context_with(f, signatures)
+        val result = ctx.instantiate_declared_call(f.pair_fn, [], gcc_sp())
+        expect(gcc_err_text(result)).to_equal("generic declaration has duplicate binder identity")
+
+    it "generic_calls.spl:38 c2 true: duplicate binder name is rejected":
+        # @req REQ-GEN-COV-GENCALLS-009
+        val f = gcc_fixture()
+        var signatures = gcc_signatures(f)
+        signatures[f.pair_fn.id] = HmGenericSignature(parameters: [gcc_param(f.param_id, "T"), gcc_param(f.param2_id, "T")], type_: gcc_unit())
+        var ctx = gcc_context_with(f, signatures)
+        val result = ctx.instantiate_declared_call(f.pair_fn, [], gcc_sp())
+        expect(gcc_err_text(result)).to_equal("generic declaration has duplicate binder identity")
+
+    it "generic_calls.spl:41 c1 true then false: explicit argument binds T, U stays fresh":
+        # @req REQ-GEN-COV-GENCALLS-010
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        val result = ctx.instantiate_declared_call(f.pair_fn, [gcc_i64()], gcc_sp())
+        expect(gcc_err_text(result)).to_equal("ok")
+        val pair = result.unwrap()
+        expect(pair.1.len()).to_equal(2)
+        expect(gcc_show(ctx.resolve(pair.1[0]))).to_equal("i64")
+        expect(gcc_show(ctx.resolve(pair.1[1]))).to_equal("?")
+        expect(gcc_show(ctx.resolve(pair.0))).to_equal("Fn[i64,?->?]")
+
+    it "generic_calls.spl:41 c1 false: no explicit arguments leaves every binder fresh":
+        # @req REQ-GEN-COV-GENCALLS-011
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        val result = ctx.instantiate_declared_call(f.generic_fn, [], gcc_sp())
+        expect(gcc_err_text(result)).to_equal("ok")
+        expect(gcc_show(ctx.resolve(result.unwrap().0))).to_equal("Fn[?->?]")
+
+describe "generic_calls.spl bound_argument_is_concrete":
+    it "generic_calls.spl:53 arm non-concrete: Infer, TypeParam, Projection, Error":
+        # @req REQ-GEN-COV-GENCALLS-012
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_infer())).to_equal(false)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.TypeParam("T", [])))).to_equal(false)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Projection(gcc_i64(), "Item")))).to_equal(false)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Error))).to_equal(false)
+
+    it "generic_calls.spl:55 c1 true: named type without context is not concrete":
+        # @req REQ-GEN-COV-GENCALLS-013
+        val f = gcc_fixture()
+        var ctx = HmInferContext.new()
+        expect(ctx.bound_argument_is_concrete(gcc_named(f.struct_id, []))).to_equal(false)
+
+    it "generic_calls.spl:58 c1 true: unknown symbol row is not concrete":
+        # @req REQ-GEN-COV-GENCALLS-014
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_named(SymbolId.new(99999), []))).to_equal(false)
+
+    it "generic_calls.spl:60 all true: Trait-kind named type is rejected":
+        # @req REQ-GEN-COV-GENCALLS-015
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_named(f.trait_id, []))).to_equal(false)
+
+    it "generic_calls.spl:60 c1 false: Struct is concrete":
+        # @req REQ-GEN-COV-GENCALLS-016
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_named(f.struct_id, []))).to_equal(true)
+
+    it "generic_calls.spl:60 c2 false: Class is concrete":
+        # @req REQ-GEN-COV-GENCALLS-017
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_named(f.class_id, []))).to_equal(true)
+
+    it "generic_calls.spl:60 c3 false: Enum is concrete":
+        # @req REQ-GEN-COV-GENCALLS-018
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_named(f.enum_id, []))).to_equal(true)
+
+    it "generic_calls.spl:62 c1 true: unresolved type argument is not concrete":
+        # @req REQ-GEN-COV-GENCALLS-019
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_named(f.struct_id, [gcc_infer()]))).to_equal(false)
+
+    it "generic_calls.spl:62 c1 false: concrete type argument stays concrete":
+        # @req REQ-GEN-COV-GENCALLS-020
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_named(f.struct_id, [gcc_i64()]))).to_equal(true)
+
+    it "generic_calls.spl:66 c1 true: tuple with an unresolved element is not concrete":
+        # @req REQ-GEN-COV-GENCALLS-021
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Tuple([gcc_i64(), gcc_infer()])))).to_equal(false)
+
+    it "generic_calls.spl:66 c1 false: union of concrete members is concrete":
+        # @req REQ-GEN-COV-GENCALLS-022
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Union([gcc_i64(), gcc_str()])))).to_equal(true)
+
+    it "generic_calls.spl:68 arm inner follows the wrapped type":
+        # @req REQ-GEN-COV-GENCALLS-023
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Optional(gcc_infer())))).to_equal(false)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Array(gcc_i64(), nil)))).to_equal(true)
+
+    it "generic_calls.spl:70 arm inner follows the owned pointee":
+        # @req REQ-GEN-COV-GENCALLS-024
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Unique(gcc_infer())))).to_equal(false)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Weak(gcc_i64())))).to_equal(true)
+
+    it "generic_calls.spl:73 both true: concrete dict is concrete":
+        # @req REQ-GEN-COV-GENCALLS-025
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Dict(gcc_str(), gcc_i64())))).to_equal(true)
+
+    it "generic_calls.spl:73 c1 false: unresolved key flips to not concrete":
+        # @req REQ-GEN-COV-GENCALLS-026
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Dict(gcc_infer(), gcc_i64())))).to_equal(false)
+
+    it "generic_calls.spl:73 c2 false: unresolved result error flips to not concrete":
+        # @req REQ-GEN-COV-GENCALLS-027
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Result(gcc_i64(), gcc_infer())))).to_equal(false)
+
+    it "generic_calls.spl:76 c1 true: unresolved function parameter is not concrete":
+        # @req REQ-GEN-COV-GENCALLS-028
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Function([gcc_infer()], gcc_i64(), [])))).to_equal(false)
+
+    it "generic_calls.spl:80 c1 true: unresolved thrown type is not concrete":
+        # @req REQ-GEN-COV-GENCALLS-029
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        val throws = Effect(kind: EffectKind.Throws(gcc_infer()), span: gcc_sp())
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Function([gcc_i64()], gcc_i64(), [throws])))).to_equal(false)
+
+    it "generic_calls.spl:78 arm default ignores non-throws effects; 82 result decides":
+        # @req REQ-GEN-COV-GENCALLS-030
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        val io = Effect(kind: EffectKind.IO, span: gcc_sp())
+        val thrown = Effect(kind: EffectKind.Throws(gcc_str()), span: gcc_sp())
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Function([gcc_i64()], gcc_i64(), [io, thrown])))).to_equal(true)
+        expect(ctx.bound_argument_is_concrete(gcc_mk(HirTypeKind.Function([gcc_i64()], gcc_infer(), [io])))).to_equal(false)
+
+    it "generic_calls.spl:83 arm default: primitive is concrete":
+        # @req REQ-GEN-COV-GENCALLS-031
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.bound_argument_is_concrete(gcc_i64())).to_equal(true)
+
+describe "generic_calls.spl caller_assumes_bound":
+    it "generic_calls.spl:93 c1 true with 86 both false, 88 false, 101 true, 104 all true: exact nominal bound is assumed":
+        # @req REQ-GEN-COV-GENCALLS-032
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        val wanted = gcc_bound(f.param_id, gcc_named(f.trait_id, []))
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_named(f.param_id, []), wanted)).to_equal(true)
+
+    it "generic_calls.spl:86 c1 true: no caller":
+        # @req REQ-GEN-COV-GENCALLS-033
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        expect(ctx.caller_assumes_bound(nil, gcc_named(f.param_id, []), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+    it "generic_calls.spl:86 c2 true: no bound context":
+        # @req REQ-GEN-COV-GENCALLS-034
+        val f = gcc_fixture()
+        var ctx = HmInferContext.new()
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_named(f.param_id, []), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+    it "generic_calls.spl:88 c1 true: caller has no bounds":
+        # @req REQ-GEN-COV-GENCALLS-035
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_named(f.param_id, []), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+    it "generic_calls.spl:93 c1 false: applied named argument is not a binder":
+        # @req REQ-GEN-COV-GENCALLS-036
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_named(f.param_id, [gcc_i64()]), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+    it "generic_calls.spl:95 c1 true: TypeParam argument with caller lacking signature":
+        # @req REQ-GEN-COV-GENCALLS-037
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.struct_id.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        expect(ctx.caller_assumes_bound(Some(f.struct_id), gcc_mk(HirTypeKind.TypeParam("T", [])), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+    it "generic_calls.spl:97 c1 true: TypeParam name maps to the caller binder":
+        # @req REQ-GEN-COV-GENCALLS-038
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_mk(HirTypeKind.TypeParam("T", [])), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(true)
+
+    it "generic_calls.spl:97 c1 false: unknown TypeParam name maps to nothing":
+        # @req REQ-GEN-COV-GENCALLS-039
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_mk(HirTypeKind.TypeParam("Z", [])), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+    it "generic_calls.spl:98 arm default: concrete primitive argument is never assumed":
+        # @req REQ-GEN-COV-GENCALLS-040
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_i64(), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+    it "generic_calls.spl:101 c1 false: assumption on a different binder":
+        # @req REQ-GEN-COV-GENCALLS-041
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param2_id, gcc_named(f.trait_id, []))]
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_named(f.param_id, []), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+    it "generic_calls.spl:104 c1 false: different trait identity":
+        # @req REQ-GEN-COV-GENCALLS-042
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.other_trait_id, []))]
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_named(f.param_id, []), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+    it "generic_calls.spl:104 c2 false: parameterized assumed trait":
+        # @req REQ-GEN-COV-GENCALLS-043
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, [gcc_i64()]))]
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_named(f.param_id, []), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+    it "generic_calls.spl:104 c3 false: parameterized required trait":
+        # @req REQ-GEN-COV-GENCALLS-044
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_named(f.param_id, []), gcc_bound(f.param_id, gcc_named(f.trait_id, [gcc_i64()])))).to_equal(false)
+
+    it "generic_calls.spl:105 arm default: non-named trait shape is never assumed":
+        # @req REQ-GEN-COV-GENCALLS-045
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_i64())]
+        expect(ctx.caller_assumes_bound(Some(f.generic_fn), gcc_named(f.param_id, []), gcc_bound(f.param_id, gcc_named(f.trait_id, [])))).to_equal(false)
+
+describe "generic_calls.spl finish_direct_function_bounds":
+    it "generic_calls.spl:115 c1 true: no context drains pending calls without errors":
+        # @req REQ-GEN-COV-GENCALLS-046
+        val f = gcc_fixture()
+        var ctx = HmInferContext.new()
+        ctx.pending_bound_calls = [gcc_call(f.generic_fn, [gcc_infer()], nil)]
+        ctx.finish_direct_function_bounds()
+        expect(ctx.pending_bound_calls.len()).to_equal(0)
+        expect(ctx.errors.len()).to_equal(0)
+        expect(ctx.trait_solver.obligations.len()).to_equal(0)
+
+    it "generic_calls.spl:128 c1 true and 140 c1 true: unresolved argument takes the declared default":
+        # @req REQ-GEN-COV-GENCALLS-047
+        val f = gcc_fixture()
+        var signatures = gcc_signatures(f)
+        signatures[f.generic_fn.id] = HmGenericSignature(parameters: [gcc_default_param(f.param_id, "T", gcc_i64())], type_: gcc_unit())
+        var ctx = gcc_context_with(f, signatures)
+        val v = ctx.fresh_var(gcc_sp())
+        ctx.pending_bound_calls = [gcc_call(f.generic_fn, [v], nil)]
+        ctx.finish_direct_function_bounds()
+        expect(gcc_show(ctx.resolve(v))).to_equal("i64")
+        expect(ctx.errors.len()).to_equal(0)
+
+    it "generic_calls.spl:128 c1 false: unresolved argument without default stays unresolved":
+        # @req REQ-GEN-COV-GENCALLS-048
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        val v = ctx.fresh_var(gcc_sp())
+        ctx.pending_bound_calls = [gcc_call(f.generic_fn, [v], nil)]
+        ctx.finish_direct_function_bounds()
+        expect(gcc_show(ctx.resolve(v))).to_equal("?")
+        expect(ctx.errors.len()).to_equal(0)
+
+    it "generic_calls.spl:130 c1 err: self-referential default records an occurs error":
+        # @req REQ-GEN-COV-GENCALLS-049
+        val f = gcc_fixture()
+        var signatures = gcc_signatures(f)
+        val fallback = gcc_mk(HirTypeKind.Optional(gcc_named(f.param_id, [])))
+        signatures[f.pair_fn.id] = HmGenericSignature(parameters: [gcc_param(f.param_id, "T"), gcc_default_param(f.param2_id, "U", fallback)], type_: gcc_unit())
+        var ctx = gcc_context_with(f, signatures)
+        val v = ctx.fresh_var(gcc_sp())
+        ctx.pending_bound_calls = [gcc_call(f.pair_fn, [v, v], nil)]
+        ctx.finish_direct_function_bounds()
+        expect(ctx.errors.len()).to_equal(1)
+        expect(gcc_error_kind(ctx.errors[0])).to_equal("occurs")
+
+    it "generic_calls.spl:148 c1 true: bound on an undeclared binder is reported":
+        # @req REQ-GEN-COV-GENCALLS-050
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param2_id, gcc_named(f.trait_id, []))]
+        ctx.pending_bound_calls = [gcc_call(f.generic_fn, [gcc_named(f.struct_id, [])], nil)]
+        ctx.finish_direct_function_bounds()
+        expect(ctx.errors.len()).to_equal(1)
+        expect(gcc_error_kind(ctx.errors[0])).to_equal("function bound parameter is absent from declaration")
+
+    it "generic_calls.spl:152 c1 true: caller-assumed bound adds no obligation and no error":
+        # @req REQ-GEN-COV-GENCALLS-051
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        ctx.pending_bound_calls = [gcc_call(f.generic_fn, [gcc_mk(HirTypeKind.TypeParam("T", []))], Some(f.generic_fn))]
+        ctx.finish_direct_function_bounds()
+        expect(ctx.errors.len()).to_equal(0)
+        expect(ctx.trait_solver.obligations.len()).to_equal(0)
+
+    it "generic_calls.spl:153 c1 true: unresolved argument without caller bound is reported":
+        # @req REQ-GEN-COV-GENCALLS-052
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        val v = ctx.fresh_var(gcc_sp())
+        ctx.pending_bound_calls = [gcc_call(f.generic_fn, [v], nil)]
+        ctx.finish_direct_function_bounds()
+        expect(ctx.errors.len()).to_equal(1)
+        expect(gcc_error_kind(ctx.errors[0])).to_equal("function bound requires a resolved argument or matching caller bound")
+
+    it "generic_calls.spl:153 c1 false and 156: concrete argument reaches the trait solver":
+        # @req REQ-GEN-COV-GENCALLS-053
+        step("No impl GccTrait for GccStruct exists, so the solver must reject the obligation")
+        val f = gcc_fixture()
+        var ctx = gcc_context(f)
+        ctx.function_bounds[f.generic_fn.id] = [gcc_bound(f.param_id, gcc_named(f.trait_id, []))]
+        ctx.pending_bound_calls = [gcc_call(f.generic_fn, [gcc_named(f.struct_id, [])], nil)]
+        ctx.finish_direct_function_bounds()
+        expect(ctx.errors.len()).to_equal(1)
+        expect(gcc_error_kind(ctx.errors[0])).to_equal("trait GccTrait")
+        expect(ctx.trait_solver.obligations.len()).to_equal(0)
+        expect(ctx.pending_bound_calls.len()).to_equal(0)
