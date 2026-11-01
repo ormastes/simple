@@ -390,6 +390,18 @@ fn parse_block_flat_body_can_start(kind: i64) -> bool:
     if kind == 211: return true       # new
     false
 
+# If-expression then-block that closes with a same-line `else`/`elif`:
+#     val v = if c:
+#         m[k] else: ""
+# parse_if_expr sets _ifexpr_block_else_allowed for its own colon block only
+# (parse_block_lexical_body clears it on entry, so nested blocks never see it).
+# When the indented body's statement is followed directly by `else`/`elif` on
+# the same line, the block returns with its INDENT still open and sets
+# _ifexpr_block_left_open; parse_if_expr closes it with its continued-indent
+# unwind (bug stage2_ifexpr_continuation_else_parse_2026_11_01).
+var _ifexpr_block_else_allowed: bool = false
+var _ifexpr_block_left_open: bool = false
+
 fn parse_block() -> [i64]:
     parser_lexical_scope_enter()
     val result = parse_block_lexical_body()
@@ -398,6 +410,8 @@ fn parse_block() -> [i64]:
 
 fn parse_block_lexical_body() -> [i64]:
     var stmts: [i64] = []
+    val else_allowed = _ifexpr_block_else_allowed
+    _ifexpr_block_else_allowed = false
     val crossed_newline = par_kind_get() == 180
     parser_skip_newlines()
     var kind = par_kind_get()
@@ -420,6 +434,9 @@ fn parse_block_lexical_body() -> [i64]:
                 eprint("[parser-block] stmt:start i={i} kind={trace_kind} text={trace_text} line={par_line_get()} col={par_col_get()}")
             val s = parse_statement()
             stmts.push(s)
+            if else_allowed and (par_kind_get() == 41 or par_kind_get() == 42):
+                _ifexpr_block_left_open = true
+                return stmts
             parser_skip_newlines_and_semicolons()
         return stmts
     # Flat body: the block body sits on a LATER line at the same column as its
@@ -2527,8 +2544,16 @@ fn parse_if_expr() -> i64:
             else:
                 parser_expect(161)
                 val inline_then = par_kind_get() != TOK_NEWLINE
+                _ifexpr_block_left_open = false
+                _ifexpr_block_else_allowed = not inline_then
                 val then_body = parse_block()
+                _ifexpr_block_else_allowed = false
                 then_expr = expr_block(then_body, -1, 0)
+                if _ifexpr_block_left_open:
+                    # Indented body ended on `else`/`elif`; its INDENT is
+                    # closed by the continued-indent unwind below.
+                    _ifexpr_block_left_open = false
+                    continued_indent = 1
                 parser_skip_newlines()
                 if inline_then and par_kind_get() == TOK_INDENT:
                     parser_advance()
