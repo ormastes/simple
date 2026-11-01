@@ -1,0 +1,202 @@
+# Per-target object identity from a target-neutral HIR (lane
+# generic-rr-hir-variant-obj; design doc/05_design/generic_rr_hir_variant_obj.md).
+#
+# HIR keeps every @cfg arm. For one target the VARIANT PROJECTION is the
+# ordered list of decls that MirLowering.decl_cfg_keep / cfg_group_winners
+# would keep, computed here with the same pure evaluators (mir_cfg_select) and
+# no lowering context. The object key for (module, target) is derived from that
+# projection, NOT from the whole-module HIR digest: editing an arm that a
+# target drops leaves that target's key unchanged, so only the objects of the
+# targets that keep the arm are invalidated.
+#
+# The RR side sees the variant through the partition id (base + "@" + target)
+# and through the producer's parameter_digest (= variant_digest).
+use std.common.crypto.sha256.{sha256_text}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.mir.mir_cfg_select.{mir_cfg_select_arm, mir_cfg_item_enabled}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticQueryKeyV1}
+
+pub val HIR_VARIANT_PROJECTION_SCHEMA_V1 = "hir-variant-projection/v1"
+pub val HIR_VARIANT_OBJECT_KEY_SCHEMA_V1 = "hir-variant-object/v1"
+pub val HIR_VARIANT_OBJECT_QUERY_KIND_V1 = "obj.emit"
+
+pub struct HirCfgDeclV1:
+    name: text
+    kind: text               # fn|struct|class|enum|trait|const|impl
+    cfg: [text]
+    cfg_group: i64
+    cfg_arm: i64
+    content_digest: text     # 64-hex sha256 of the decl's target-neutral HIR
+
+pub struct HirVariantProjectionV1:
+    ok: bool
+    error: text
+    target_id: text
+    kept: [text]             # "<kind>:<name>" in declaration order
+    variant_digest: text     # "" when not ok
+
+fn _frame_v1(value: text) -> text:
+    "{value.len()}:" + value
+
+fn _kind_known_v1(kind: text) -> bool:
+    kind == "fn" or kind == "struct" or kind == "class" or kind == "enum" or
+        kind == "trait" or kind == "const" or kind == "impl"
+
+fn _decl_valid_v1(d: HirCfgDeclV1) -> bool:
+    d.name != "" and _kind_known_v1(d.kind) and hash256_hex_valid(d.content_digest) and
+        d.cfg_arm >= -1
+
+pub fn hir_variant_target_id_v1(target: MirTargetContext) -> text:
+    """Stable text id of a target:
+    "<arch>[.<subarch>]-<os>-<abi>-<backend>/<profile>/<cpu_tier|baseline>".
+    The sub-arch is part of the id because @cfg atoms (`thumb`, `armv7`, ...)
+    select on it: armv7 and thumbv7em objects must never share a key."""
+    val tier = if target.cpu_tier == "": "baseline" else: target.cpu_tier
+    val arch = if target.subarch == "": target.arch else: target.arch + "." + target.subarch
+    arch + "-" + target.os + "-" + target.abi + "-" + target.backend + "/" +
+        target.build_profile + "/" + tier
+
+fn _projection_fail_v1(error: text, target_id: text) -> HirVariantProjectionV1:
+    HirVariantProjectionV1(ok: false, error: error, target_id: target_id, kept: [],
+        variant_digest: "")
+
+# Else arm (cfg_arm == -1) sorts after every numbered arm (hir_cfg_decl_select_design.md).
+fn _arm_sort_key_v1(arm: i64) -> i64:
+    if arm == -1: 2147483647 else: arm
+
+fn _arm_condition_v1(d: HirCfgDeclV1) -> text:
+    if d.cfg_arm == -1: "" else: d.cfg.join(" and ")
+
+struct GroupWinnerV1:
+    group: i64
+    arm: i64   # -99 = no arm survives
+
+fn _winner_of_v1(winners: [GroupWinnerV1], group: i64) -> i64:
+    for w in winners:
+        val ww: GroupWinnerV1 = w
+        if ww.group == group:
+            return ww.arm
+    -99
+
+fn _has_group_v1(winners: [GroupWinnerV1], group: i64) -> bool:
+    for w in winners:
+        val ww: GroupWinnerV1 = w
+        if ww.group == group:
+            return true
+    false
+
+struct GroupWinnersV1:
+    ok: bool
+    error: text
+    winners: [GroupWinnerV1]
+
+fn _group_winners_v1(decls: [HirCfgDeclV1], target: MirTargetContext,
+                     features: [text]) -> GroupWinnersV1:
+    """One winning arm per @cfg group, mirroring MirLowering.cfg_group_winners."""
+    var winners: [GroupWinnerV1] = []
+    for d in decls:
+        val dd: HirCfgDeclV1 = d
+        if dd.cfg_group == 0 or _has_group_v1(winners, dd.cfg_group):
+            continue
+        # Distinct arms of this group, sorted; a numbered arm needs a condition.
+        var arms: [i64] = []
+        var conds: [text] = []
+        for o in decls:
+            val oo: HirCfgDeclV1 = o
+            if oo.cfg_group != dd.cfg_group or arms.contains(oo.cfg_arm):
+                continue
+            if oo.cfg_arm != -1 and oo.cfg.len() == 0:
+                return GroupWinnersV1(ok: false, error: "malformed_cfg_group", winners: [])
+            val cond = _arm_condition_v1(oo)
+            var placed_arms: [i64] = []
+            var placed_conds: [text] = []
+            var inserted = false
+            var i = 0
+            while i < arms.len():
+                if not inserted and _arm_sort_key_v1(oo.cfg_arm) < _arm_sort_key_v1(arms[i]):
+                    placed_arms = placed_arms.push(oo.cfg_arm)
+                    placed_conds = placed_conds.push(cond)
+                    inserted = true
+                placed_arms = placed_arms.push(arms[i])
+                placed_conds = placed_conds.push(conds[i])
+                i = i + 1
+            if not inserted:
+                placed_arms = placed_arms.push(oo.cfg_arm)
+                placed_conds = placed_conds.push(cond)
+            arms = placed_arms
+            conds = placed_conds
+        val idx = mir_cfg_select_arm(conds, target, features)
+        if idx == -2:
+            return GroupWinnersV1(ok: false, error: "malformed_cfg", winners: [])
+        val won = if idx < 0: -99 else: arms[idx]
+        winners = winners.push(GroupWinnerV1(group: dd.cfg_group, arm: won))
+    GroupWinnersV1(ok: true, error: "", winners: winners)
+
+pub fn hir_variant_projection_v1(decls: [HirCfgDeclV1], target: MirTargetContext,
+                                 features: [text]) -> HirVariantProjectionV1:
+    """Decls kept for `target` (declaration order) and their sealed digest.
+    Any malformed guard or decl fails closed (ok = false, no digest)."""
+    val target_id = hir_variant_target_id_v1(target)
+    for d in decls:
+        val dd: HirCfgDeclV1 = d
+        if not _decl_valid_v1(dd):
+            return _projection_fail_v1("invalid_decl", target_id)
+    val groups = _group_winners_v1(decls, target, features)
+    if not groups.ok:
+        return _projection_fail_v1(groups.error, target_id)
+    var kept: [text] = []
+    var acc = _frame_v1(HIR_VARIANT_PROJECTION_SCHEMA_V1) + _frame_v1(target_id)
+    var body = ""
+    for d in decls:
+        val dd: HirCfgDeclV1 = d
+        var keep = false
+        if dd.cfg_group != 0:
+            keep = _winner_of_v1(groups.winners, dd.cfg_group) == dd.cfg_arm
+        elif dd.cfg.len() == 0:
+            keep = true
+        else:
+            val verdict = mir_cfg_item_enabled(dd.cfg, target, features)
+            if verdict == -2:
+                return _projection_fail_v1("malformed_cfg", target_id)
+            keep = verdict == 1
+        if keep:
+            kept = kept.push(dd.kind + ":" + dd.name)
+            body = body + _frame_v1(dd.kind) + _frame_v1(dd.name) + _frame_v1(dd.content_digest)
+    acc = acc + _frame_v1("{kept.len()}") + body
+    HirVariantProjectionV1(ok: true, error: "", target_id: target_id, kept: kept,
+        variant_digest: sha256_text(acc))
+
+pub fn hir_variant_object_key_v1(module_path: text, projection: HirVariantProjectionV1,
+                                 toolchain_identity: text) -> text:
+    """Build-action key of "emit the object of `module_path` for this variant".
+    "" when the projection failed or an input is empty (never a usable key)."""
+    if not projection.ok or projection.variant_digest == "" or module_path == "" or
+            toolchain_identity == "":
+        return ""
+    sha256_text(_frame_v1(HIR_VARIANT_OBJECT_KEY_SCHEMA_V1) + _frame_v1(module_path) +
+        _frame_v1(projection.variant_digest) + _frame_v1(projection.target_id) +
+        _frame_v1(toolchain_identity))
+
+pub fn hir_variant_object_partition_v1(base_partition: text,
+                                       projection: HirVariantProjectionV1) -> text:
+    """RR partition for one target: base + "@" + target id ("" when not ok)."""
+    if not projection.ok or base_partition == "":
+        return ""
+    base_partition + "@" + projection.target_id
+
+pub fn hir_variant_object_producer_v1(module_path: text, profile_digest: text,
+                                      projection: HirVariantProjectionV1) -> SemanticQueryKeyV1:
+    """Producer query of the per-target object: its parameter digest IS the
+    variant digest, so a change in one variant never matches another's edges."""
+    val parameter = if projection.ok: projection.variant_digest else: ""
+    SemanticQueryKeyV1(kind: HIR_VARIANT_OBJECT_QUERY_KIND_V1, stable_entity_id: module_path,
+        semantic_profile_digest: profile_digest, parameter_digest: parameter)
+
+pub fn hir_variant_object_sidecar_path_v1(queue: text, module_name: text, target_id: text) -> text:
+    """MIR-ledger .object sidecar per (module, target). An empty target id is
+    the legacy single-object path, byte-for-byte."""
+    if target_id == "":
+        return "{queue}/{sha256_text(module_name)}.object"
+    val keyed = module_name + "\u0000" + target_id
+    "{queue}/{sha256_text(keyed)}.object"
