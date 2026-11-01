@@ -1,0 +1,55 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# MIR: None-initialized optional module globals get a static slot
+
+`runtime_module_initializer_type_fallback` now admits Optional types, so a
+module `var G: T? = None` (or `Option<T> = None`) gets a runtime-initialized
+static and `G = Some(x)` in a function lowers. Bug
+stage2_module_global_assign_no_binding_2026-11-01 (real fix; the tagged `= nil`
+sites are reverted later by the workaround revert loop).
+"""
+
+use std.spec
+use std.io_runtime.{env_get, env_set}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+
+val opt_src = "struct Inv:\n    n: i64\n\nvar MEMO: Inv? = None\n\nfn put(k: i64):\n    MEMO = Some(Inv(n: k))\n"
+val opt_generic_src = "struct Inv:\n    n: i64\n\nvar MEMO: Option<Inv> = None\n\nfn put(k: i64):\n    MEMO = Some(Inv(n: k))\n\nfn clear():\n    MEMO = None\n"
+val unbound_src = "fn bad():\n    missing_name = 1\n"
+
+fn bootstrap_lower_errors(src: text) -> i64:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+    modules["app.memo"] = parse_full_frontend(src, "app/memo.spl", "app.memo", log)
+    sources.push(SourceFile(path: "app/memo.spl", content: src, module_name: "app.memo"))
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module("app/memo.spl", surfaces)
+    val hir = hir_lowering.lower_module(modules["app.memo"])
+    val providers: [HirModule] = []
+    val old_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target)
+    val mir = lowering.lower_bootstrap_closure_module(hir, providers)
+    env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+    lowering.errors.len() + (if mir.is_err(): 1 else: 0)
+
+describe "None-initialized optional module global static":
+    it "lowers Some(x) into a T? global initialized with None":
+        expect(bootstrap_lower_errors(opt_src)).to_equal(0)
+
+    it "lowers Some and None into an Option<T> global initialized with None":
+        expect(bootstrap_lower_errors(opt_generic_src)).to_equal(0)
+
+    it "still fails closed on a genuinely unbound assignment target":
+        expect(bootstrap_lower_errors(unbound_src)).to_be_greater_than(0)

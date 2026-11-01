@@ -30,6 +30,7 @@ Status values: `fixed-in-source (<evidence>)`, `fixed (PR #n)`,
 | stage2_ifexpr_continuation_else_parse_2026_11_01 | 3 (driver_build/incremental.spl, frontend spec, doc) | src/compiler/10.frontend expression parser | fixed (PR #5768, parser_stmts.spl; ifexpr_continuation_else_parse_spec 4/4 seed) |
 | stage2_runtime_list_missing_process_tree_2026_11_01 | 3 (scripts/bootstrap/workarounds) | src/compiler/70.backend/backend/runtime_compiler.spl | fixed-in-source (runtime_compiler.spl :647/:739 lists runtime_process_tree; status PR #5770) |
 | go_to_end_dynload_zero_objects_2026-11-01 | driver flag `--mode one-binary` (run scripts) | src/compiler/80.driver/driver_build/go_to_end.spl (go_to_end_emit_format_v1), driver_aot_pipeline.spl | fixed (PR #5766; seed spec 4/4; revert-ready after one phase-3 dynload go-to-end run shows objects) |
+| stage2_module_global_assign_no_binding_2026-11-01 | 3 (80.driver/driver_build/incremental.spl, nogc_sync_mut/replay/core/replay_engine.spl, replay/semantic/trace_writer.spl; `= None` spelled `= nil`, PR #5785) | src/compiler/50.mir/_MirLowering/module_lowering.spl (runtime_module_initializer_type_fallback admits Optional) | fixed-in-source (this PR; module_global_optional_none_static_spec UNRUN). Removal: revert to `= None` after the stage3 self-build |
 
 Bug files: `doc/08_tracking/bug/<id with _ and date>.md`. Rows exist in `bug_db.sdn` for
 rti007_any_return_rows, rti004_mono, typeparam_mir, enumowner_mir, go_to_end_dynload,
