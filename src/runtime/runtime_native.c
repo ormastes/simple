@@ -18933,13 +18933,13 @@ int64_t rt_event_loop_poll_get_fd(int64_t index) {
 }
 
 int64_t rt_kqueue_create(void) { return rt_event_loop_create(); }
-int64_t rt_kqueue_register(int64_t h, int64_t fd, int64_t m) { return rt_event_loop_register(h, fd, m, fd, 1); }
+int64_t rt_kqueue_register(int64_t h, int64_t fd, int64_t m, int64_t token, int64_t edge) { return rt_event_loop_register(h, fd, m, token, edge); }
 int64_t rt_kqueue_deregister(int64_t h, int64_t fd) { return rt_event_loop_deregister(h, fd); }
 int64_t rt_kqueue_poll(int64_t h, int64_t max, int64_t ms) { return rt_event_loop_poll(h, max, ms); }
 int64_t rt_kqueue_close(int64_t h) { return rt_event_loop_close(h); }
 
 int64_t rt_iocp_create(void) { return -1; }
-int64_t rt_iocp_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+int64_t rt_iocp_register(int64_t h, int64_t fd, int64_t m, int64_t token, int64_t edge) { (void)h; (void)fd; (void)m; (void)token; (void)edge; return -1; }
 /* Omitted when this family was written: create/register/poll/close were all
  * present but deregister was not, while the kqueue family above defines all
  * five. The gap is invisible until a NATIVE link -- the interpreter resolves
@@ -18953,7 +18953,7 @@ int64_t rt_iocp_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (
 int64_t rt_iocp_close(int64_t h) { (void)h; return -1; }
 
 int64_t rt_event_ports_create(void) { return -1; }
-int64_t rt_event_ports_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+int64_t rt_event_ports_register(int64_t h, int64_t fd, int64_t m, int64_t token, int64_t edge) { (void)h; (void)fd; (void)m; (void)token; (void)edge; return -1; }
 /* Same omission as the IOCP family above; referenced from
  * src/lib/nogc_async_mut/io/platform_event.spl:365. Returns -1 to match the
  * rest of this unavailable-backend family. */
