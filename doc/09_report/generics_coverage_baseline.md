@@ -43,3 +43,24 @@ Remaining gaps:
 - `core.spl` lines 51, 57, 66 (occurs-check loops over `Throws` effects, `Union` members, `TypeParam` bounds): reachable, not yet driven.
 - `core.spl:234` example fails on current code: `unify` has no `Union` arm (fixed by PR #5747; the example now passes).
 - The existing `type_infer/method_call_inference_spec.spl` fails 0/4 on the seed ("unsupported expression kind" for nested `MethodCall`); not triaged in this lane.
+
+## Wave 2 — module_callable_types.spl, hir_function_selection_v1.spl
+
+Lane HIRCALL. Baseline = existing specs exercising the files
+(`hir_function_selection_v1_spec`, `imported_optional_owner_projection_spec`,
+`prescan_type_parameter_module_lifetime_spec`,
+`imported_optional_argument_reexport_hop_regression_spec`,
+`module_surface_callable_live_path_spec`). Final = the new condition-targeted
+specs under `test/01_unit/compiler/20.hir/coverage/` alone
+(`module_callable_types_surface_mcdc_spec`, `module_callable_types_scan_mcdc_spec`,
+`hir_function_selection_v1_mcdc_spec`).
+
+| File | Decisions | Conditions | CD % base -> final | MC/DC % base -> final | Binary |
+|------|-----------|------------|--------------------|-----------------------|--------|
+| src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl | 96 | 117 | 6.1 -> 92.5 | 5.1 -> 91.5 | seed |
+| src/compiler/20.hir/hir_function_selection_v1.spl | 10 | 13 | 73.9 -> 91.3 | 76.9 -> 92.3 | seed |
+
+Documented gaps: see the spec docstrings. Bug suspect:
+`hir_prune_published_templates_v1` (hir_function_selection_v1.spl:55) returns a
+nil `module` from a non-optional `-> HirModule`; the runtime rejects that return,
+so the nil guard cannot do what it is written to do.

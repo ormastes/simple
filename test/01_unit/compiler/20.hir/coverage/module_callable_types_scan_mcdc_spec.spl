@@ -1,0 +1,342 @@
+# @req REQ-GEN-COV-HIRCALL
+"""
+# MC/DC coverage: module_callable_types.spl (parser-AST half)
+
+Target: src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl
+Companion: module_callable_types_surface_mcdc_spec.spl. Functions are parsed
+from source text so every decision sees real parser AST shapes.
+
+## Decision inventory (this file)
+
+| Line | Decision | Conditions | Covering its |
+|------|----------|------------|--------------|
+| 185 | `not scan.found_value_return` | c1 | no return / value return |
+| 189 | `scan.ambiguous or resolved_name == ""` | c1, c2 | c1 T (mixed and non-scalar returns both merge as ambiguous) / FF; c2 T alone is a gap |
+| 190 | `self.ambient_bootstrap_enabled()` | c1 | SIMPLE_BOOTSTRAP=1 / unset |
+| 194 | `not self.registering_import_symbols` | c1 | error / silent |
+| 201 | `fn_decl.type_params.len() > 0` | c1 | generic / plain |
+| 207 | `self.registering_import_symbols` | c1 | T / F |
+| 215 | `not fn_decl.is_static` | c1 | method / static |
+| 220 | `raw_params.len() > 0` | c1 | no params / params |
+| 222 | `name == "self" or name == "me"` | c1, c2 | self / me / other |
+| 226 | `first_raw_param < raw_params.len()` | c1 | loop |
+| 235 | `not raw_param.has_type_` | c1 | untyped / typed |
+| 239 | `dynamic_callback_function_type == nil` | c1 | T plain untyped / F callback |
+| 684 | `fn_decl.has_return_type` | c1 | T / F |
+| 686 | `dynamic_callback_function_type != nil` | c1 | T / F |
+| 691 | `param.has_type_ or param.has_default` | c1, c2 | typed / defaulted / neither |
+| 699 | `name == param.name` | c1 | callee / other param |
+| 708 | `ambient or stmts.len() != 1` | c1, c2 | ambient / two stmts / FF |
+| 712 | `not has_type_ and has_default` | c1, c2 | TT / c1 F / c2 F |
+| 714 | `fn_decl.has_return_type` | c1 | T / F |
+| 715 | `lower(return).kind == Unit` | c1 | `-> ()` / `-> i64` |
+| 719 | `scan.found_value_return` | c1 | T / F |
+| 729 | `fn_body_stmts.len() == 0` | c1 | F only: L708 already requires exactly one stmt (gap) |
+| 740 | `name match and not typed and not default` | c1, c2, c3 | TTT / c1 F / c2 F; c3 masked by L712 (gap) |
+| 744 | `arg.has_name` | c1 | named arg / positional |
+| 766 | `i < params.len()` | c1 | no params / params |
+| 768 | `param.name == name` | c1 | T / F |
+| 784 | `ast_binop_is_comparison(op)` | c1 | `<` / `+` |
+| 786 | `ast_binop_is_arith(op)` | c1 | `+` / `and` |
+| 792 | `lt == rt and known(lt)` | c1, c2 | TT / c1 F / c2 F |
+| 905 | `e == nil` | c1 | T via unsafe nil / F |
+| 916 | If discriminant | c1 | F only: the parser lowers `if` to IfChain/statement forms, never ExprKind.If here (gap) |
+| 986 | `arm.has_guard` | c1 | guarded / plain arm |
+
+Gaps: L189 c2 (a value return with an empty name is always also ambiguous),
+L729 T, L740 c3 (masked by L712) and L916 T are unreachable from parsed source (see
+rows). Bug suspects: none.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{ParserFunction, Param}
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Items.module_callable_types.*
+
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn tags(ts: [HirType]) -> text:
+    var parts: [text] = []
+    for t in ts:
+        parts.push(tag(t))
+    parts.join(",")
+
+fn tag(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Int(bits, signed): if signed: "i{bits}" else: "u{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Unit: "unit"
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Error: "error"
+        case HirTypeKind.Named(_, _): "named"
+        case HirTypeKind.Function(ps, r, _): "fn(" + tags(ps) + ")->" + tag(r)
+        case _: "other"
+
+fn otag(t: HirType?) -> text:
+    if val v = t:
+        return tag(v)
+    "nil"
+
+fn lw() -> HirLowering:
+    hirlowering_for_module("cov.spl", ModuleSurfacesByName.empty())
+
+
+# One shared fixture source, parsed once per lookup under one fixed path.
+# Re-parsing many distinct sources in one spec process made later parses
+# come back empty on the seed, so every fixture function lives here.
+fn fixture_source() -> text:
+    var s = ""
+    s = s + "fn r_unit():\n    pass\n"
+    s = s + "fn r_cb(cb):\n    cb(1)\n"
+    s = s + "fn r_add(a: i64, b: i64):\n    return a + b\n"
+    s = s + "fn r_second(a: text, b: i64):\n    return b\n"
+    s = s + "fn r_lt(a: i64, b: i64):\n    return a < b\n"
+    s = s + "fn r_mixed(b: bool):\n    if b:\n        return 1\n    return \"s\"\n"
+    s = s + "fn r_arr(xs: [i64]):\n    return xs\n"
+    s = s + "fn r_noparam():\n    return y\n"
+    s = s + "fn r_mismatch(a: i64, c: i32):\n    return a + c\n"
+    s = s + "fn r_unknown(p: bool, q: bool):\n    return p + q\n"
+    s = s + "fn r_shift(a: i64, b: i64):\n    return a << b\n"
+    s = s + "fn r_ifelse(b: bool):\n    if b:\n        return 1\n    else:\n        return 2\n"
+    s = s + "fn r_match(x: i64, b: bool):\n    match x:\n        case 1 if b:\n            return 1\n        case _:\n            return 2\n"
+    s = s + "fn d_id<T>(x: T) -> T:\n    x\n"
+    s = s + "fn d_plain(x: i64) -> i64:\n    x\n"
+    s = s + "fn d_noparam() -> i64:\n    0\n"
+    s = s + "fn d_self(self, x: i64) -> i64:\n    x\n"
+    s = s + "fn d_untyped(x) -> i64:\n    x\n"
+    s = s + "fn c_arrow(cb) -> i64:\n    cb(1)\n"
+    s = s + "fn c_unit_arrow(cb) -> ():\n    cb(1)\n"
+    s = s + "fn c_two(cb, z):\n    cb(z)\n"
+    s = s + "fn c_typed_default(t: i64, d = 1):\n    t\n"
+    s = s + "fn c_multi(cb):\n    val x = 1\n    cb(x)\n"
+    s = s + "fn c_untyped_default(cb, d = 1):\n    cb(1)\n"
+    s = s + "fn c_typed_def_ok(cb, d: i64 = 1):\n    cb(1)\n"
+    s = s + "fn c_return(cb):\n    return cb(1)\n"
+    s = s + "fn c_other(cb):\n    other(1)\n"
+    s = s + "fn c_typed_callee(cb: fn(i64) -> i64):\n    cb(1)\n"
+    s = s + "fn c_named_arg(cb):\n    cb(x: 1)\n"
+    s = s + "fn c_two_args(cb):\n    cb(1, 2)\n"
+    s
+
+var FIXTURE_FNS: Dict<text, ParserFunction> = {}
+
+fn pf(name: text) -> ParserFunction:
+    # Parse once per process: after about ten parses in one spec process the
+    # seed frontend started returning empty modules.
+    if FIXTURE_FNS.len() == 0:
+        val m = parse_full_frontend(fixture_source(), "testdata/cov_module_callable_scan.spl",
+            "cov_module_callable_scan", Logger(level: 0))
+        FIXTURE_FNS = m.functions
+    FIXTURE_FNS[name]
+
+fn untyped_errors(l: HirLowering) -> i64:
+    var n = 0
+    for e in l.errors:
+        if e.message.contains("untyped function returns a value"):
+            n = n + 1
+    n
+
+# Inferred return of an untyped function; "!" marks the untyped-return error.
+fn infer(name: text) -> text:
+    var l = lw()
+    val out = tag(l.infer_untyped_return_type(pf(name)))
+    if untyped_errors(l) > 0:
+        return out + "!"
+    out
+
+fn dyn(name: text) -> text:
+    var l = lw()
+    otag(l.dynamic_callback_function_type(pf(name)))
+
+fn rename_first(f: ParserFunction, name: text) -> ParserFunction:
+    var out = f
+    var p: Param = out.params[0]
+    p.name = name
+    out.params[0] = p
+    out
+
+fn owner() -> SymbolId?:
+    Some(SymbolId(id: 5))
+
+describe "MC/DC infer_untyped_return_type":
+    # @req REQ-GEN-COV-HIRCALL-201
+    it "module_callable_types.spl:185 c1 T / 686 c1 F: no value return and no callback tail is Unit":
+        step("Infer fn r_unit(): pass")
+        expect(infer("r_unit")).to_equal("unit")
+
+    # @req REQ-GEN-COV-HIRCALL-202
+    it "module_callable_types.spl:185 c1 T / 686 c1 T: a dynamic callback tail infers Any":
+        step("Infer fn r_cb(cb): cb(1)")
+        expect(infer("r_cb")).to_equal("any")
+
+    # @req REQ-GEN-COV-HIRCALL-203
+    it "module_callable_types.spl:189 FF / 766/768 / 784 F / 786 T / 792 TT: a scalar return resolves":
+        step("Infer return a + b over two i64 params and return of the second param")
+        expect(infer("r_add")).to_equal("i64")
+        expect(infer("r_second")).to_equal("i64")
+
+    # @req REQ-GEN-COV-HIRCALL-204
+    it "module_callable_types.spl:784 c1 T: a comparison return is bool":
+        step("Infer return a < b")
+        expect(infer("r_lt")).to_equal("bool")
+
+    # @req REQ-GEN-COV-HIRCALL-205
+    it "module_callable_types.spl:189 c1 T / 916 c1 T / 194 c1 T: mixed scalar returns are ambiguous and diagnosed":
+        step("Infer an if returning i64 then a text return")
+        expect(infer("r_mixed")).to_equal("unit!")
+
+    # @req REQ-GEN-COV-HIRCALL-206
+    it "module_callable_types.spl:189 c2 T: a non-scalar parameter return has no simple name":
+        step("Infer return xs for xs: [i64]")
+        expect(infer("r_arr")).to_equal("unit!")
+
+    # @req REQ-GEN-COV-HIRCALL-207
+    it "module_callable_types.spl:766 c1 F first: an identifier with no parameters is unresolved":
+        step("Infer return y with no parameters")
+        expect(infer("r_noparam")).to_equal("unit!")
+
+    # @req REQ-GEN-COV-HIRCALL-208
+    it "module_callable_types.spl:792 c1 F / c2 F / 786 c1 F: mismatched, unknown and shift operands do not resolve":
+        step("Infer i64 + i32, bool + bool and i64 << i64")
+        expect(infer("r_mismatch")).to_equal("unit!")
+        expect(infer("r_unknown")).to_equal("unit!")
+        expect(infer("r_shift")).to_equal("unit!")
+
+    # @req REQ-GEN-COV-HIRCALL-209
+    it "module_callable_types.spl:190 c1 T / 708 c1 T: the ambient bootstrap keeps an ambiguous value as Any":
+        step("Infer an ambiguous return with SIMPLE_BOOTSTRAP=1")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val got = infer("r_arr")
+        val cb = dyn("r_cb")
+        rt_env_set("SIMPLE_BOOTSTRAP", "")
+        expect(got).to_equal("any")
+        expect(cb).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-210
+    it "module_callable_types.spl:194 c1 F: import registration stays silent":
+        step("Infer an ambiguous return while registering import symbols")
+        var l = lw()
+        l.registering_import_symbols = true
+        expect(tag(l.infer_untyped_return_type(pf("r_arr")))).to_equal("unit")
+        expect(untyped_errors(l)).to_equal(0)
+
+describe "MC/DC declared_callable_type":
+    # @req REQ-GEN-COV-HIRCALL-211
+    it "module_callable_types.spl:201 c1 T / 207 c1 T: generic and import-registered functions stay untyped":
+        step("Declare a generic fn and a plain fn during import registration")
+        var l = lw()
+        expect(otag(l.declared_callable_type(pf("d_id"), nil))).to_equal("nil")
+        l.registering_import_symbols = true
+        expect(otag(l.declared_callable_type(pf("d_plain"), nil))).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-212
+    it "module_callable_types.spl:215/220/222: receiver handling for owned functions":
+        step("Declare static, no-param, self, me and other-first-param owned functions")
+        var l = lw()
+        var st = pf("d_plain")
+        st.is_static = true
+        expect(otag(l.declared_callable_type(st, owner()))).to_equal("fn(i64)->i64")
+        expect(otag(l.declared_callable_type(pf("d_noparam"), owner()))).to_equal("fn(named)->i64")
+        val selfish = pf("d_self")
+        expect(otag(l.declared_callable_type(selfish, owner()))).to_equal("fn(named,i64)->i64")
+        expect(otag(l.declared_callable_type(rename_first(selfish, "me"), owner()))).to_equal("fn(named,i64)->i64")
+        expect(otag(l.declared_callable_type(pf("d_plain"), owner()))).to_equal("fn(named,i64)->i64")
+
+    # @req REQ-GEN-COV-HIRCALL-213
+    it "module_callable_types.spl:235 c1 T / 239 c1 T: a plain untyped parameter keeps the inference path":
+        step("Declare fn d_untyped(x) -> i64")
+        var l = lw()
+        expect(otag(l.declared_callable_type(pf("d_untyped"), nil))).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-214
+    it "module_callable_types.spl:235 c1 T / 239 c1 F: a dynamic callback parameter publishes its Any signature":
+        step("Declare fn r_cb(cb): cb(1)")
+        var l = lw()
+        expect(otag(l.declared_callable_type(pf("r_cb"), nil))).to_equal("fn(fn(any)->any)->any")
+
+describe "MC/DC dynamic callback helpers":
+    # @req REQ-GEN-COV-HIRCALL-215
+    it "module_callable_types.spl:684 c1 T: an arrowed function has no dynamic tail":
+        step("Ask for the dynamic tail of an arrowed function")
+        var l = lw()
+        expect(otag(l.dynamic_callback_tail_type(pf("c_arrow")))).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-216
+    it "module_callable_types.spl:691 c1 T / c2 T / FF, 699 c1 T/F: only the untyped callee parameter is a callback":
+        step("Ask each parameter of c_two and c_typed_default for a callback type")
+        var l = lw()
+        val f = pf("c_two")
+        expect(otag(l.dynamic_callback_param_type(f, f.params[0]))).to_equal("fn(any)->any")
+        expect(otag(l.dynamic_callback_param_type(f, f.params[1]))).to_equal("nil")
+        val g = pf("c_typed_default")
+        expect(otag(l.dynamic_callback_param_type(g, g.params[0]))).to_equal("nil")
+        expect(otag(l.dynamic_callback_param_type(g, g.params[1]))).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-217
+    it "module_callable_types.spl:708 c2 T: a multi-statement body is not a callback tail":
+        step("Ask for the callback type of a two-statement body")
+        expect(dyn("c_multi")).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-218
+    it "module_callable_types.spl:712 TT / c1 F / c2 F: only an untyped defaulted parameter vetoes":
+        step("Callbacks with an untyped default and a typed default")
+        expect(dyn("c_untyped_default")).to_equal("nil")
+        expect(dyn("c_typed_def_ok")).to_equal("fn(any)->any")
+
+    # @req REQ-GEN-COV-HIRCALL-219
+    it "module_callable_types.spl:714 c1 T / 715 c1 T/F: a Unit arrow vetoes, a value arrow does not":
+        step("Callbacks declared -> () and -> i64")
+        expect(dyn("c_unit_arrow")).to_equal("nil")
+        expect(dyn("c_arrow")).to_equal("fn(any)->any")
+
+    # @req REQ-GEN-COV-HIRCALL-220
+    it "module_callable_types.spl:719 c1 T: an explicit value return vetoes":
+        step("Callback body return cb(1)")
+        expect(dyn("c_return")).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-221
+    it "module_callable_types.spl:740 c1 F / c2 F: other callees and typed callees are not dynamic":
+        step("Tail calls to a non-parameter and to a typed parameter")
+        expect(dyn("c_other")).to_equal("nil")
+        expect(dyn("c_typed_callee")).to_equal("nil")
+
+    # @req REQ-GEN-COV-HIRCALL-222
+    it "module_callable_types.spl:744 c1 T/F: a named argument vetoes, positional arguments are Any":
+        step("Tail calls cb(x: 1) and cb(1, 2)")
+        expect(dyn("c_named_arg")).to_equal("nil")
+        expect(dyn("c_two_args")).to_equal("fn(any,any)->any")
+
+describe "MC/DC return scan":
+    # @req REQ-GEN-COV-HIRCALL-223
+    it "module_callable_types.spl:905 c1 T: a nil expression scans as no return":
+        step("Scan an unsafe nil Expr")
+        var l = lw()
+        unsafe:
+            val n: Expr = nil
+            val scan = l.scan_ast_expr_for_returns(n, [])
+            expect(scan.found_value_return).to_equal(false)
+
+    # @req REQ-GEN-COV-HIRCALL-224
+    it "module_callable_types.spl:916 c1 T/F: returns nested in if/else branches are found":
+        step("Infer through an if/else whose branches both return i64")
+        expect(infer("r_ifelse")).to_equal("i64")
+
+    # @req REQ-GEN-COV-HIRCALL-225
+    it "module_callable_types.spl:986 c1 T/F: guarded and plain match arms are both scanned":
+        step("Infer through a match with a guarded arm and a plain arm")
+        expect(infer("r_match")).to_equal("i64")
