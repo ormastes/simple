@@ -1,0 +1,83 @@
+# Purpose and audience: executable specification evidence for the runtime and build maintainers.
+# @req REQ-SSPEC-APP
+# @cover scripts/check/run-rt-map-checks.shs 90%
+"""
+# Shared rt map checks entry
+
+## Purpose and audience
+
+Build maintainers read this for what the one shared rt map entry returns. The bootstrap
+must-check row and `buildrunner rt-map-checks` both run it, so they cannot disagree.
+
+## Operator workflow
+
+Run `sh scripts/check/run-rt-map-checks.shs` from the repository root; the last stdout line is the verdict.
+
+## Compatibility and limitations
+
+Only the pointer-return and host checkers block, and only on new findings. The C compile probe
+is report-only. A host without python3 or cc reports UNTESTED, never PASS, and exits 0.
+
+## Verification guidance and troubleshooting
+
+A nonzero exit means a new finding in a blocking checker; read the lines printed above the verdict.
+"""
+
+use std.spec.step
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn run_entry(env: text) -> (text, i64):
+    val script = env + " sh scripts/check/run-rt-map-checks.shs"
+    val (out, _err, code) = rt_process_run("sh", ["-c", script])
+    return (out, code)
+
+fn run_fixture(c: text, spl: text, env: text) -> (text, i64):
+    val script = "t=$(mktemp -d); mkdir -p $t/src/runtime $t/src/lib; printf '%b' \"$1\" > $t/src/runtime/a.c; printf '%b' \"$2\" > $t/src/lib/a.spl; " + env + " RT_MAP_ROOT=$t sh scripts/check/run-rt-map-checks.shs"
+    val (out, _err, code) = rt_process_run("sh", ["-c", script, "gate", c, spl])
+    return (out, code)
+
+val NIL_C = "char *rt_x(void) {\\n if (a) return NULL;\\n return b;\\n}\\n"
+val NIL_SPL = "extern fn rt_x() -> text\\n"
+val NIL_OPT_SPL = "extern fn rt_x() -> text?\\n"
+
+describe "shared rt map checks entry":
+    it "passes on this tree with the blocking checkers and exits 0":
+        step("Run the entry on the checked-out tree")
+        val (out, code) = run_entry("")
+        expect(code).to_equal(0)
+        expect(out).to_contain("RT_MAP_CHECKS pointer-ref=PASS")
+        expect(out).to_contain("RT_MAP_CHECKS host-map=PASS")
+
+    it "reports the compile probe as report-only":
+        step("Read the compile probe line")
+        val (out, _code) = run_entry("")
+        expect(out).to_contain("RT_MAP_CHECKS c-contract(report-only)")
+
+    it "reports UNTESTED and exits 0 without python3":
+        step("Point the entry at a missing interpreter")
+        val (out, code) = run_entry("RT_MAP_PYTHON=/nonexistent/python3")
+        expect(code).to_equal(0)
+        expect(out).to_contain("RT_MAP_CHECKS pointer-ref=UNTESTED")
+        expect(out).to_contain("RT_MAP_CHECKS verdict=UNTESTED")
+
+    it "reports UNTESTED for the compile probe without cc and exits 0":
+        step("Point the probe at a missing compiler")
+        val (out, code) = run_entry("RT_MAP_CC=/nonexistent/cc")
+        expect(code).to_equal(0)
+        expect(out).to_contain("UNTESTED reason=no-cc")
+        expect(out).to_contain("RT_MAP_CHECKS verdict=UNTESTED")
+
+    it "fails with exit 1 on a new pointer-return finding":
+        step("Seed a nullable C return declared as bare text")
+        val (out, code) = run_fixture(NIL_C, NIL_SPL, "")
+        expect(code).to_equal(1)
+        expect(out).to_contain("RT_MAP_CHECKS pointer-ref=FAIL")
+        expect(out).to_contain("RT_MAP_CHECKS verdict=FAIL")
+
+    it "passes the same nullable return when declared optional":
+        step("Declare the nullable return optional")
+        val (out, code) = run_fixture(NIL_C, NIL_OPT_SPL, "")
+        expect(code).to_equal(0)
+        expect(out).to_contain("RT_MAP_CHECKS pointer-ref=PASS")

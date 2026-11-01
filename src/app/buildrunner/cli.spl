@@ -13,6 +13,7 @@ use app.io.file_ops.{file_exists, file_read, file_read_regular_no_follow_bounded
     file_hash_sha256, file_is_regular_no_follow, file_publish_noreplace,
     secure_temp_dir, path_absolute}
 use std.nogc_sync_mut.io_runtime.{dir_exists, dir_remove}
+use app.io.process_ops.{process_run_timeout}
 use app.io.dir_ops.{dir_create_all}
 use app.io.time_ops.{sleep_ms}
 use app.bootstrap_builder.cli_args.{BuilderCliV1, builder_cli_parse_v1}
@@ -657,6 +658,18 @@ fn build_runner_cli_main_v1(process: BuilderProcessPortV1,
             Err(reason):
                 print "buildrunner: {reason}"
                 return 2
+    if args.len() == 1 and args[0] == "rt-map-checks":
+        # Same entry as the bootstrap must-check row; the script owns the verdict and exit status.
+        if not file_exists("scripts/check/run-rt-map-checks.shs"):
+            print "buildrunner: rt-map-checks entry missing (run from the repository root)"
+            return 2
+        val (rt_out, rt_err, rt_code) = process_run_timeout("sh", ["scripts/check/run-rt-map-checks.shs"], 900000)
+        print rt_out
+        if rt_err != "":
+            print rt_err
+        if rt_code == 0:
+            return 0
+        return 1
     val scv_options = match build_runner_scv_options_v1(args):
         case Ok(value): value
         case Err(reason):
@@ -672,6 +685,7 @@ fn build_runner_cli_main_v1(process: BuilderProcessPortV1,
         print "buildrunner verify-settled --manifest FILE --state DIR [--source-root DIR] [--output-root DIR]"
         print "source snapshot opt-in for run/verify/verify-settled: --scv-session FILE"
         print "buildrunner check --manifest FILE"
+        print "buildrunner rt-map-checks"
         print "buildrunner worker --request FILE --attempt-root DIR --host ID"
         return 0
     if config.command == "worker":
