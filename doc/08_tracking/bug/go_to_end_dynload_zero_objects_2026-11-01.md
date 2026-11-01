@@ -2,7 +2,7 @@
 
 - **ID:** go_to_end_dynload_zero_objects_2026-11-01
 - **Severity:** P1 (phase 3 diagnostics: no codegen evidence for passing modules)
-- **Status:** open (stage2 workaround: `--mode one-binary`)
+- **Status:** fixed (2026-11-01, work/go-to-end-dynload-objects-20261101): `stage_emit_object` downgrades Both to Native via `go_to_end_emit_format_v1` once go-to-end failures exist; regression spec `test/01_unit/compiler/driver/go_to_end_dynload_format_spec.spl` (seed: 4/4 pass). `--mode one-binary` workaround is revert-ready after a phase-3 confirm run; objects still go to cwd, not `--cache-dir` (separate follow-up).
 - **Component:** 80.driver (driver_aot_pipeline.spl), app/cli native_build_output_plan.spl
 
 ## Symptom
