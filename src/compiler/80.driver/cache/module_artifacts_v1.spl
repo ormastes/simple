@@ -155,6 +155,43 @@ pub fn module_tldr_companion_sections_v1(content: text, source: text) -> [text]:
     val (sections, body) = _module_tldr_companion_split_v1(content, source)
     if body == "": [] else: sections
 
+# Sections of a structurally valid companion WITHOUT the source-digest check:
+# the pre-edit forward manifest of a module whose source has since changed
+# (macro RR, plan 2026-10-31 §8.4 "complete old and new forward manifests").
+# Never a freshness authority: callers pair it with the recorded digest and
+# the re-emitted companion. (ok, sections); ok=false for a malformed file.
+pub fn module_tldr_companion_sections_raw_v1(content: text) -> (bool, [text]):
+    val prefix = MODULE_TLDR_COMPANION_HEADER_V1 + "\nsource-digest: "
+    if not content.starts_with(prefix):
+        return (false, [])
+    val after = content.substring(prefix.len())
+    val line_end = after.index_of("\n")
+    if line_end < 0 or digest_v1_parse(after.substring(0, line_end)) == nil:
+        return (false, [])
+    val rest = after.substring(line_end + 1)
+    val (sections, consumed) = module_tldr_sections_parse_v1(rest)
+    if consumed < 0:
+        return (false, [])
+    if not rest.substring(consumed).starts_with("sif:\n"):
+        return (false, [])
+    (true, sections)
+
+# The algorithm-tagged source digest a companion was written for ("" when
+# the header is malformed). Pairs with the raw sections: a pre-edit companion
+# is admitted only when this digest equals the source the cache recorded.
+pub fn module_tldr_companion_source_digest_raw_v1(content: text) -> text:
+    val prefix = MODULE_TLDR_COMPANION_HEADER_V1 + "\nsource-digest: "
+    if not content.starts_with(prefix):
+        return ""
+    val after = content.substring(prefix.len())
+    val line_end = after.index_of("\n")
+    if line_end < 0:
+        return ""
+    val recorded = after.substring(0, line_end)
+    if digest_v1_parse(recorded) == nil:
+        return ""
+    recorded
+
 pub fn module_tldr_companion_fresh_v1(path: text, source: text) -> bool:
     if not file_exists(path):
         return false
@@ -493,6 +530,7 @@ export MODULE_TLDR_COMPANION_HEADER_V1
 export module_artifact_module_id_v1, module_tldr_companion_path_v1
 export module_tldr_companion_render_v1, module_tldr_companion_body_v1
 export module_tldr_companion_sections_v1, module_tldr_companion_render_sections_v1
+export module_tldr_companion_sections_raw_v1, module_tldr_companion_source_digest_raw_v1
 export module_tldr_companion_fresh_v1, module_artifact_publish_atomic_v1
 export module_tldr_companion_view_sections_v1
 export module_tldr_macro_sections_v1, module_tldr_companion_view_sections_with_macros_v1

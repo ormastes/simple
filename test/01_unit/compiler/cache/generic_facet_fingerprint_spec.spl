@@ -1,0 +1,228 @@
+# @req REQ-GRR-001 REQ-GRR-002 REQ-GRR-003 REQ-GRR-006 REQ-GRR-008
+"""
+# Generic template facet fingerprints (lane generic-rr-hir-variant-obj)
+
+**Requirements:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md (REQ-GRR-001..009)
+**Plan:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md
+**Design:** doc/05_design/generic_rr_hir_variant_obj.md
+**Research:** doc/01_research/local/generic_rr_hir_variant_obj.md
+
+## Overview
+
+A generic template entry exposes three reverse-reference facets:
+`generic.signature`, `generic.bound` and `generic.body`. This unit spec
+checks the fingerprint laws (alpha invariance, bound order/duplicate
+insensitivity, body tracking), the changed-facet diff for body, signature,
+bound and unrelated edits, the caller/template consumed facet sets, and the
+fail-closed section codec for bounds and body_digest.
+
+Evidence: Rust-seed interpreter runs only (attributed to the seed); no self-hosted
+binary exists on the authoring host. Owner: generic_tldr_view_v1.spl.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+# @cover src/compiler/00.common/cache_contract/generic_tldr_view_v1.spl 90%
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.guard_id_v1.{active_guard_root_empty_v1}
+use compiler.common.cache_contract.generic_tldr_view_v1.*
+use compiler.frontend.cache_artifact.generic_tldr_projector.*
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+
+fn digest(value: text) -> text: sha256_text(value)
+
+fn field_in(name: text, type_text: text) -> GenericFieldInputV1:
+    GenericFieldInputV1(name: name, type_text: type_text)
+
+fn decl(name: text, params: [text], fields: [GenericFieldInputV1]) -> GenericDeclInputV1:
+    var kinds: [text] = []
+    for p in params:
+        kinds = kinds.push(GENERIC_PARAM_KIND_TYPE)
+    GenericDeclInputV1(module_path: "pkg_a", name: name, params: params,
+        param_kinds: kinds, fields: fields, visibility_root: "vis:pub",
+        active_guard_root: active_guard_root_empty_v1("").root_digest,
+        source_digest: "src:pkg_a." + name)
+
+fn pair_entry() -> GenericTemplateEntryV1:
+    project_generic_template_v1(decl("Pair", ["First", "Second"],
+        [field_in("first", "First"), field_in("second", "Second")])).unwrap()
+
+fn pair_entry_renamed() -> GenericTemplateEntryV1:
+    project_generic_template_v1(decl("Pair", ["A", "B"],
+        [field_in("first", "A"), field_in("second", "B")])).unwrap()
+
+fn pair_entry_retyped() -> GenericTemplateEntryV1:
+    project_generic_template_v1(decl("Pair", ["First", "Second"],
+        [field_in("first", "First"), field_in("second", "i64")])).unwrap()
+
+fn bound(index: i64, key: text) -> GenericBoundV1:
+    GenericBoundV1(param_index: index, bound_key: key)
+
+fn with_facets(e: GenericTemplateEntryV1, bounds: [GenericBoundV1], body: text) -> GenericTemplateEntryV1:
+    GenericTemplateEntryV1(symbol_id: e.symbol_id, source_digest: e.source_digest,
+        visibility_root: e.visibility_root, active_guard_root: e.active_guard_root,
+        language_schema: e.language_schema, params: e.params, fields: e.fields,
+        bounds: bounds, body_digest: body)
+
+fn with_source(e: GenericTemplateEntryV1, source: text) -> GenericTemplateEntryV1:
+    GenericTemplateEntryV1(symbol_id: e.symbol_id, source_digest: source,
+        visibility_root: e.visibility_root, active_guard_root: e.active_guard_root,
+        language_schema: e.language_schema, params: e.params, fields: e.fields,
+        bounds: e.bounds, body_digest: e.body_digest)
+
+fn base() -> GenericTemplateEntryV1:
+    with_facets(pair_entry(), [bound(0, "trait:pkg_a.Eq")], digest("body-v1"))
+
+fn facet_names(changes: [GenericFacetChangeV1]) -> [text]:
+    var out: [text] = []
+    for c in changes:
+        out = out.push(c.facet)
+    out
+
+fn is_none_text(value: text?) -> bool:
+    match value:
+        case Some(_): false
+        case nil: true
+
+describe "generic facet fingerprints":
+    it "signature fingerprint changes with a field type and is alpha-invariant (REQ-GRR-002)":
+        step("Compare signature fingerprints for retyped and binder-renamed Pair (REQ-GRR-002)")
+        val a = generic_template_signature_fingerprint_v1(pair_entry())
+        expect(generic_template_signature_fingerprint_v1(pair_entry_retyped()) == a).to_equal(false)
+        expect(generic_template_signature_fingerprint_v1(pair_entry_renamed())).to_equal(a)
+
+    it "bound fingerprint is order and duplicate insensitive (REQ-GRR-003)":
+        step("Fingerprint the same bound set in two orders with a duplicate (REQ-GRR-003)")
+        val e = pair_entry()
+        val one = with_facets(e, [bound(1, "trait:pkg_a.Ord"), bound(0, "trait:pkg_a.Eq")], "")
+        val two = with_facets(e, [bound(0, "trait:pkg_a.Eq"), bound(1, "trait:pkg_a.Ord"),
+            bound(0, "trait:pkg_a.Eq")], "")
+        expect(generic_template_bound_fingerprint_v1(one)).to_equal(generic_template_bound_fingerprint_v1(two))
+
+    it "bound fingerprint differs between no bound and one bound (REQ-GRR-003)":
+        step("Compare the no-bound and one-bound fingerprints (REQ-GRR-003)")
+        val none_fp = generic_template_bound_fingerprint_v1(with_facets(pair_entry(), [], ""))
+        val one_fp = generic_template_bound_fingerprint_v1(with_facets(pair_entry(), [bound(0, "trait:pkg_a.Eq")], ""))
+        expect(none_fp.len()).to_equal(64)
+        expect(none_fp == one_fp).to_equal(false)
+
+    it "body fingerprint tracks body_digest (REQ-GRR-001)":
+        step("Fingerprint two body digests and the same digest twice (REQ-GRR-001)")
+        val v1 = generic_template_body_fingerprint_v1(with_facets(pair_entry(), [], digest("body-v1")))
+        val v2 = generic_template_body_fingerprint_v1(with_facets(pair_entry(), [], digest("body-v2")))
+        expect(v1 == v2).to_equal(false)
+        expect(generic_template_body_fingerprint_v1(with_facets(pair_entry(), [], digest("body-v1")))).to_equal(v1)
+
+    it "generic_template_facets_v1 returns three 64-hex fingerprints":
+        step("Project the facets of a bounded Pair with a body")
+        val f = generic_template_facets_v1(base())
+        expect(f.template_id).to_equal(generic_template_id_v1(base()))
+        expect(three_payload_contract_digest_valid_v1(f.signature_fingerprint)).to_equal(true)
+        expect(three_payload_contract_digest_valid_v1(f.bound_fingerprint)).to_equal(true)
+        expect(three_payload_contract_digest_valid_v1(f.body_fingerprint)).to_equal(true)
+        expect(f.signature_fingerprint == f.body_fingerprint).to_equal(false)
+
+describe "generic changed-facet diff":
+    it "body-only edit yields exactly generic.body (REQ-GRR-001)":
+        step("Diff a template whose only change is body_digest (REQ-GRR-001)")
+        val changes = generic_template_changed_facets_v1(Some(base()),
+            Some(with_facets(pair_entry(), [bound(0, "trait:pkg_a.Eq")], digest("body-v2"))))
+        expect(facet_names(changes)).to_equal([GENERIC_FACET_BODY_V1])
+        expect(is_none_text(changes[0].old_fingerprint)).to_equal(false)
+        expect(is_none_text(changes[0].new_fingerprint)).to_equal(false)
+
+    it "signature edit yields exactly generic.signature (REQ-GRR-002)":
+        step("Diff a template whose field type changed (REQ-GRR-002)")
+        val changes = generic_template_changed_facets_v1(Some(base()),
+            Some(with_facets(pair_entry_retyped(), [bound(0, "trait:pkg_a.Eq")], digest("body-v1"))))
+        expect(facet_names(changes)).to_equal([GENERIC_FACET_SIGNATURE_V1])
+
+    it "bound edit yields exactly generic.bound (REQ-GRR-003)":
+        step("Diff a template whose bound key changed (REQ-GRR-003)")
+        val changes = generic_template_changed_facets_v1(Some(base()),
+            Some(with_facets(pair_entry(), [bound(0, "trait:pkg_a.Ord")], digest("body-v1"))))
+        expect(facet_names(changes)).to_equal([GENERIC_FACET_BOUND_V1])
+
+    it "unrelated edit changing only source_digest yields no facets (REQ-GRR-006)":
+        step("Diff identical semantics with a different source_digest (REQ-GRR-006)")
+        val changes = generic_template_changed_facets_v1(Some(base()),
+            Some(with_source(base(), "src:pkg_a.Pair:edited-comment")))
+        expect(changes.len()).to_equal(0)
+
+    it "genesis yields three changes with nil old fingerprints":
+        step("Diff nil against a new template")
+        val changes = generic_template_changed_facets_v1(nil, Some(base()))
+        expect(facet_names(changes)).to_equal([GENERIC_FACET_BODY_V1, GENERIC_FACET_BOUND_V1,
+            GENERIC_FACET_SIGNATURE_V1])
+        for c in changes:
+            expect(is_none_text(c.old_fingerprint)).to_equal(true)
+            expect(is_none_text(c.new_fingerprint)).to_equal(false)
+
+    it "removal yields three changes with nil new fingerprints":
+        step("Diff an existing template against nil")
+        val changes = generic_template_changed_facets_v1(Some(base()), nil)
+        expect(changes.len()).to_equal(3)
+        for c in changes:
+            expect(is_none_text(c.old_fingerprint)).to_equal(false)
+            expect(is_none_text(c.new_fingerprint)).to_equal(true)
+
+    it "nil to nil yields no changes":
+        step("Diff nil against nil")
+        expect(generic_template_changed_facets_v1(nil, nil).len()).to_equal(0)
+
+describe "generic consumed facet sets":
+    it "callers consume signature and bound but never body (REQ-GRR-001)":
+        step("Read the caller consumed facet set (REQ-GRR-001)")
+        val facets = generic_caller_consumed_facets_v1()
+        expect(facets).to_equal([GENERIC_FACET_BOUND_V1, GENERIC_FACET_SIGNATURE_V1])
+        expect(facets.contains(GENERIC_FACET_BODY_V1)).to_equal(false)
+
+    it "the template object consumes body, bound and signature":
+        step("Read the template consumed facet set")
+        val facets = generic_template_consumed_facets_v1()
+        expect(facets).to_equal([GENERIC_FACET_BODY_V1, GENERIC_FACET_BOUND_V1,
+            GENERIC_FACET_SIGNATURE_V1])
+
+describe "generic section codec with bounds and body (REQ-GRR-008)":
+    it "round-trips bounds and body_digest":
+        step("Encode and decode a section carrying bounds and a body digest (REQ-GRR-008)")
+        val s = build_generic_template_section_v1([with_facets(pair_entry(),
+            [bound(0, "trait:pkg_a.Eq"), bound(1, "trait:pkg_a.Ord")], digest("body-v1"))])
+        val d = generic_template_section_decode_v1(generic_template_section_encode_v1(s))
+        expect(d.ok).to_equal(true)
+        expect(d.section.digest).to_equal(s.digest)
+        expect(d.section.entries[0].bounds.len()).to_equal(2)
+        expect(d.section.entries[0].bounds[1].bound_key).to_equal("trait:pkg_a.Ord")
+        expect(d.section.entries[0].body_digest).to_equal(digest("body-v1"))
+
+    it "fails closed on an out-of-range bound index":
+        step("Decode a section whose bound index exceeds the parameter count (REQ-GRR-008)")
+        val s = build_generic_template_section_v1([with_facets(pair_entry(),
+            [bound(9, "trait:pkg_a.Eq")], digest("body-v1"))])
+        # The builder seals whatever it is given; the strict decoder is the gate.
+        expect(s.entries.len()).to_equal(1)
+        val d = generic_template_section_decode_v1(generic_template_section_encode_v1(s))
+        expect(d.ok).to_equal(false)
+        expect(d.error).to_equal("bad bound")
+        expect(d.section.entries.len()).to_equal(0)
+
+    it "fails closed when the encoded body digest is corrupted":
+        step("Corrupt the body digest frame and decode (REQ-GRR-008)")
+        val s = build_generic_template_section_v1([base()])
+        val encoded = generic_template_section_encode_v1(s)
+        expect(generic_template_section_decode_v1(encoded).ok).to_equal(true)
+        val bad = encoded.replace(digest("body-v1"), digest("body-xx"))
+        expect(bad == encoded).to_equal(false)
+        expect(generic_template_section_decode_v1(bad).ok).to_equal(false)
+
+    it "generic_bounds_valid_v1 rejects an out-of-range index and an empty key":
+        step("Validate in-range, out-of-range and empty-key bounds")
+        expect(generic_bounds_valid_v1(with_facets(pair_entry(), [bound(1, "trait:pkg_a.Eq")], ""))).to_equal(true)
+        expect(generic_bounds_valid_v1(with_facets(pair_entry(), [bound(2, "trait:pkg_a.Eq")], ""))).to_equal(false)
+        expect(generic_bounds_valid_v1(with_facets(pair_entry(), [bound(-1, "trait:pkg_a.Eq")], ""))).to_equal(false)
+        expect(generic_bounds_valid_v1(with_facets(pair_entry(), [bound(0, "")], ""))).to_equal(false)

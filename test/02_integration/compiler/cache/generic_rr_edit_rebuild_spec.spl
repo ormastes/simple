@@ -1,0 +1,327 @@
+# @req REQ-GRR-001 REQ-GRR-002 REQ-GRR-003 REQ-GRR-004 REQ-GRR-005 REQ-GRR-006 REQ-GRR-007 REQ-GRR-008
+"""
+# Generic RR edit -> rebuild loop (lane generic-rr-hir-variant-obj)
+
+**Requirements:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md (REQ-GRR-001..009)
+**Plan:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md
+**Design:** doc/05_design/generic_rr_hir_variant_obj.md
+**Research:** doc/01_research/local/generic_rr_hir_variant_obj.md
+
+## Overview
+
+In-memory end-to-end loop: old/new `GenericTemplateEntryV1` ->
+`generic_template_changed_facets_v1` -> `generic_changed_semantic_facets_v1`
+-> forward manifests (reads named by the generic facet constants, consumed
+fingerprints taken from `generic_template_facets_v1`) ->
+`rebuild_reverse_shards_from_forward_v1` -> `plan_generic_invalidation_v1`.
+Covers body, signature, bound, caller, cfg-variant and unrelated edits, the
+concurrent rebuild / replay law and RR cache corruption.
+
+Evidence: Rust-seed interpreter runs only (attributed to the seed; the positive RRS1
+decode control is seed-RED because the seed misreads the envelope). No disk is
+touched; persistence is covered by the coordinator's own specs.
+"""
+
+# @tag:integration
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+# @cover src/compiler/80.driver/cache/reference/reverse_reference_coordinator_v1.spl 90%
+# @cover src/compiler/00.common/cache_contract/generic_tldr_view_v1.spl 90%
+# @cover src/compiler/80.driver/driver_build/hir_variant_object_key_v1.spl 90%
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.common.cache_contract.guard_id_v1.{active_guard_root_empty_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1, semantic_query_read_manifest_encode_v1}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    ReverseReferenceEdgeV1, ReverseReferenceShardV1,
+    reverse_reference_shard_encode_v1, reverse_reference_shard_decode_v1}
+use compiler.common.cache_contract.generic_tldr_view_v1.*
+use compiler.frontend.cache_artifact.generic_tldr_projector.*
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    ChangedSemanticFacetV1, VerifiedSccGroupV1, VerifiedAffectedDomainV1,
+    VerifiedForwardManifestV1, AffectedConsumerV1, GenericInvalidationPlanV1,
+    affected_consumers_v1, plan_generic_invalidation_v1,
+    generic_changed_semantic_facets_v1, verified_scc_group_receipt_v1,
+    verified_affected_domain_receipt_v1, rebuild_reverse_shards_from_forward_v1,
+    stage_reverse_delta_v1, stage_reverse_shards_v1}
+use compiler.driver.driver_build.hir_variant_object_key_v1.*
+
+val BASE_PART: text = "p"
+
+fn digest(value: text) -> text: sha256_text(value)
+
+fn linux() -> MirTargetContext:
+    MirTargetContext(arch: "x86_64", os: "linux", abi: "gnu", backend: "llvm", version: 1)
+
+fn windows() -> MirTargetContext:
+    MirTargetContext(arch: "x86_64", os: "windows", abi: "msvc", backend: "llvm", version: 1)
+
+fn linux_part() -> text:
+    hir_variant_object_partition_v1(BASE_PART, hir_variant_projection_v1(cfg_decls("w-v1"), linux(), []))
+
+# ---- template entries -------------------------------------------------------
+
+fn field_in(name: text, type_text: text) -> GenericFieldInputV1:
+    GenericFieldInputV1(name: name, type_text: type_text)
+
+fn pair_entry(second_type: text) -> GenericTemplateEntryV1:
+    project_generic_template_v1(GenericDeclInputV1(module_path: "pkg_a", name: "Pair",
+        params: ["First", "Second"], param_kinds: [GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_TYPE],
+        fields: [field_in("first", "First"), field_in("second", second_type)],
+        visibility_root: "vis:pub", active_guard_root: active_guard_root_empty_v1("").root_digest,
+        source_digest: "src:pkg_a.Pair")).unwrap()
+
+fn entry(second_type: text, bound_key: text, body: text) -> GenericTemplateEntryV1:
+    val e = pair_entry(second_type)
+    GenericTemplateEntryV1(symbol_id: e.symbol_id, source_digest: e.source_digest,
+        visibility_root: e.visibility_root, active_guard_root: e.active_guard_root,
+        language_schema: e.language_schema, params: e.params, fields: e.fields,
+        bounds: [GenericBoundV1(param_index: 0, bound_key: bound_key)], body_digest: digest(body))
+
+fn old_entry() -> GenericTemplateEntryV1: entry("Second", "trait:pkg_a.Eq", "body-v1")
+
+# A comment-only edit: the file digest moves, no facet does.
+fn unrelated_entry() -> GenericTemplateEntryV1:
+    val e = old_entry()
+    GenericTemplateEntryV1(symbol_id: e.symbol_id, source_digest: e.source_digest + "#comment-only",
+        visibility_root: e.visibility_root, active_guard_root: e.active_guard_root,
+        language_schema: e.language_schema, params: e.params, fields: e.fields,
+        bounds: e.bounds, body_digest: e.body_digest)
+
+fn fp(facets: GenericTemplateFacetsV1, facet: text) -> text:
+    if facet == GENERIC_FACET_BODY_V1: return facets.body_fingerprint
+    if facet == GENERIC_FACET_BOUND_V1: return facets.bound_fingerprint
+    facets.signature_fingerprint
+
+# ---- queries and manifests ---------------------------------------------------
+
+fn key(kind: text, label: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: kind, stable_entity_id: label,
+        semantic_profile_digest: digest("profile"), parameter_digest: digest(label))
+
+fn template_t() -> SemanticQueryKeyV1: key("tldr.symbolic", "pkg_a.Pair")
+fn object_o() -> SemanticQueryKeyV1: key("obj.emit", "pkg_a.Pair#object")
+fn caller(name: text) -> SemanticQueryKeyV1: key("tldr.concrete", name)
+fn dependent_d() -> SemanticQueryKeyV1: key("obj.emit", "pkg_c.D")
+fn concrete_view() -> SemanticQueryKeyV1: key("tldr.concrete", "pkg_a.Pair<i64,f64>")
+
+fn read_at(producer: SemanticQueryKeyV1, consumer: SemanticQueryKeyV1, facet: text,
+           fingerprint: text, ordinal: i64, partition: text) -> SemanticQueryReadV1:
+    SemanticQueryReadV1(producer: producer, consumer: consumer, facet: facet, ordinal: ordinal,
+        consumed_fingerprint: fingerprint, witness_digest: digest("witness"),
+        partition_id: partition, completeness: SemanticCoverageV1.Complete)
+
+fn template_reads(consumer: SemanticQueryKeyV1, facets: [text], partition: text) -> [SemanticQueryReadV1]:
+    val f = generic_template_facets_v1(old_entry())
+    var out: [SemanticQueryReadV1] = []
+    var ordinal: i64 = 0
+    for facet in facets:
+        out = out.push(read_at(template_t(), consumer, facet, fp(f, facet), ordinal, partition))
+        ordinal = ordinal + 1
+    out
+
+fn manifest(consumer: SemanticQueryKeyV1, reads: [SemanticQueryReadV1]) -> SemanticQueryReadManifestV1:
+    SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: reads)
+
+fn c1_old() -> SemanticQueryReadManifestV1:
+    manifest(caller("pkg_b.C1"), template_reads(caller("pkg_b.C1"), generic_caller_consumed_facets_v1(), linux_part()))
+
+fn c1_new() -> SemanticQueryReadManifestV1:
+    var reads = template_reads(caller("pkg_b.C1"), generic_caller_consumed_facets_v1(), linux_part())
+    reads = reads.push(read_at(concrete_view(), caller("pkg_b.C1"), GENERIC_FACET_SIGNATURE_V1,
+        digest("view-args-i64-f64"), reads.len(), linux_part()))
+    manifest(caller("pkg_b.C1"), reads)
+
+fn manifests() -> [SemanticQueryReadManifestV1]:
+    [manifest(object_o(), template_reads(object_o(), generic_template_consumed_facets_v1(), linux_part())),
+     c1_old(),
+     manifest(caller("pkg_b.C2"), template_reads(caller("pkg_b.C2"), generic_caller_consumed_facets_v1(), linux_part())),
+     manifest(dependent_d(), [read_at(caller("pkg_b.C1"), dependent_d(), GENERIC_FACET_SIGNATURE_V1,
+        digest("c1-signature-v1"), 0, linux_part())])]
+
+fn generic_domain() -> VerifiedAffectedDomainV1:
+    var value = VerifiedAffectedDomainV1(dimension: GENERIC_FACET_DIMENSION_V1,
+        candidate_root_digest: digest("candidate"), membership_root_digest: digest("membership"),
+        absence_root_digest: digest("absence"), coverage: SemanticCoverageV1.Complete,
+        receipt_digest: "")
+    value.receipt_digest = verified_affected_domain_receipt_v1(value)
+    value
+
+fn verified_all(ms: [SemanticQueryReadManifestV1]) -> [VerifiedForwardManifestV1]:
+    var out: [VerifiedForwardManifestV1] = []
+    for m in ms:
+        val partition = m.ordered_reads[0].partition_id
+        val group_id = digest("group-" + m.consumer.stable_entity_id)
+        val group = VerifiedSccGroupV1(partition_id: partition, group_identity: group_id,
+            member_queries: [m.consumer],
+            receipt_digest: verified_scc_group_receipt_v1(partition, group_id, [m.consumer]))
+        out = out.push(VerifiedForwardManifestV1(
+            manifest_digest: sha256_u8_hex(semantic_query_read_manifest_encode_v1(m)),
+            manifest: m, scc_group: group, affected_domains: [generic_domain()]))
+    out
+
+fn shards() -> [ReverseReferenceShardV1]:
+    rebuild_reverse_shards_from_forward_v1(manifests()).shards
+
+fn plan_edit(new_entry: GenericTemplateEntryV1) -> GenericInvalidationPlanV1:
+    val changes = generic_template_changed_facets_v1(Some(old_entry()), Some(new_entry))
+    plan_generic_invalidation_v1(template_t(), changes, verified_all(manifests()), shards())
+
+fn ids(affected: [AffectedConsumerV1]) -> [text]:
+    var out: [text] = []
+    for a in affected:
+        out = out.push(a.consumer.stable_entity_id)
+    out
+
+fn encode_all(xs: [ReverseReferenceShardV1]) -> [[u8]]:
+    var out: [[u8]] = []
+    for s in xs:
+        out = out.push(reverse_reference_shard_encode_v1(s))
+    out
+
+# ---- cfg variants ------------------------------------------------------------
+
+fn cfg_decls(w_body: text) -> [HirCfgDeclV1]:
+    [HirCfgDeclV1(name: "a", kind: "fn", cfg: [], cfg_group: 0, cfg_arm: 0, content_digest: digest("a-v1")),
+     HirCfgDeclV1(name: "w", kind: "fn", cfg: ["windows"], cfg_group: 0, cfg_arm: 0, content_digest: digest(w_body)),
+     HirCfgDeclV1(name: "l", kind: "fn", cfg: ["linux"], cfg_group: 0, cfg_arm: 0, content_digest: digest("l-v1"))]
+
+describe "generic RR edit-rebuild loop: template edits":
+    it "rebuilds shards from the forward manifests":
+        step("Rebuild reverse shards from the four forward manifests")
+        val staged = rebuild_reverse_shards_from_forward_v1(manifests())
+        expect(staged.accepted).to_equal(true)
+        expect(staged.shards.len()).to_equal(1)
+        expect(staged.shards[0].partition_id).to_equal("p@x86_64-linux-gnu-llvm/debug/baseline")
+
+    it "body edit invalidates only the template object (REQ-GRR-001)":
+        step("Edit the body digest and plan the invalidation (REQ-GRR-001)")
+        val changes = generic_template_changed_facets_v1(Some(old_entry()),
+            Some(entry("Second", "trait:pkg_a.Eq", "body-v2")))
+        val rows = generic_changed_semantic_facets_v1(template_t(), changes)
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].facet).to_equal(GENERIC_FACET_BODY_V1)
+        val plan = plan_edit(entry("Second", "trait:pkg_a.Eq", "body-v2"))
+        expect(plan.accepted).to_equal(true)
+        expect(ids(plan.affected)).to_equal(["pkg_a.Pair#object"])
+
+    it "signature edit invalidates the template object and both callers (REQ-GRR-002)":
+        step("Retype a field and plan the invalidation (REQ-GRR-002)")
+        val plan = plan_edit(entry("i64", "trait:pkg_a.Eq", "body-v1"))
+        expect(plan.accepted).to_equal(true)
+        expect(plan.changed_facets).to_equal([GENERIC_FACET_SIGNATURE_V1])
+        expect(plan.affected.len()).to_equal(3)
+        expect(ids(plan.affected).contains("pkg_c.D")).to_equal(false)
+
+    it "bound edit invalidates the template object and both callers (REQ-GRR-003)":
+        step("Change the bound key and plan the invalidation (REQ-GRR-003)")
+        val plan = plan_edit(entry("Second", "trait:pkg_a.Ord", "body-v1"))
+        expect(plan.accepted).to_equal(true)
+        expect(plan.changed_facets).to_equal([GENERIC_FACET_BOUND_V1])
+        expect(plan.affected.len()).to_equal(3)
+        expect(ids(plan.affected).contains("pkg_b.C1")).to_equal(true)
+        expect(ids(plan.affected).contains("pkg_b.C2")).to_equal(true)
+        expect(ids(plan.affected).contains("pkg_a.Pair#object")).to_equal(true)
+        expect(ids(plan.affected).contains("pkg_c.D")).to_equal(false)
+
+    it "unrelated edit yields an accepted empty plan (REQ-GRR-006)":
+        step("Re-plan after a comment-only edit that changes only the source digest (REQ-GRR-006)")
+        val plan = plan_edit(unrelated_entry())
+        expect(plan.accepted).to_equal(true)
+        expect(plan.changed_facets.len()).to_equal(0)
+        expect(plan.affected.len()).to_equal(0)
+
+describe "generic RR edit-rebuild loop: caller and cfg-variant edits":
+    it "caller edit stages a delta only for C1 and invalidates only its dependent (REQ-GRR-004)":
+        step("Stage C1's old to new manifest delta and plan a C1 signature change (REQ-GRR-004)")
+        val delta = stage_reverse_delta_v1(Some(c1_old()), c1_new())
+        expect(delta.consumer).to_equal(caller("pkg_b.C1"))
+        # Edges are bound to their forward-manifest digest (plan 8.4), so C1's
+        # new manifest re-keys all three of its edges and retires the two old
+        # ones; no edge of any other consumer moves.
+        expect(delta.inserted.len()).to_equal(3)
+        expect(delta.removed.len()).to_equal(2)
+        var inserted_producers: [text] = []
+        for e in delta.inserted:
+            expect(e.consumer).to_equal(caller("pkg_b.C1"))
+            expect(e.forward_manifest_digest).to_equal(delta.new_manifest_digest)
+            inserted_producers = inserted_producers.push(e.producer.kind)
+        expect(inserted_producers.contains("tldr.concrete")).to_equal(true)
+        for e in delta.removed:
+            expect(e.consumer).to_equal(caller("pkg_b.C1"))
+            expect(e.producer).to_equal(template_t())
+        val result = affected_consumers_v1([ChangedSemanticFacetV1(producer: caller("pkg_b.C1"),
+            facet: GENERIC_FACET_SIGNATURE_V1, dimension: GENERIC_FACET_DIMENSION_V1,
+            old_fingerprint: Some(digest("c1-signature-v1")), new_fingerprint: Some(digest("c1-signature-v2")))],
+            [], verified_all(manifests()), shards())
+        expect(result.accepted).to_equal(true)
+        expect(ids(result.affected)).to_equal(["pkg_c.D"])
+
+    it "cfg-variant edit affects only the windows partition (REQ-GRR-005)":
+        step("Edit the windows-only decl and plan against linux and windows partitions (REQ-GRR-005)")
+        val pl = hir_variant_projection_v1(cfg_decls("w-v1"), linux(), [])
+        val pw_old = hir_variant_projection_v1(cfg_decls("w-v1"), windows(), [])
+        val pw_new = hir_variant_projection_v1(cfg_decls("w-v2"), windows(), [])
+        val pl_new = hir_variant_projection_v1(cfg_decls("w-v2"), linux(), [])
+        expect(pl_new.variant_digest).to_equal(pl.variant_digest)
+        expect(pw_new.variant_digest == pw_old.variant_digest).to_equal(false)
+        val part_l = hir_variant_object_partition_v1(BASE_PART, pl)
+        val part_w = hir_variant_object_partition_v1(BASE_PART, pw_old)
+        val prod_l = hir_variant_object_producer_v1("pkg_v.main", digest("profile"), pl)
+        val prod_w = hir_variant_object_producer_v1("pkg_v.main", digest("profile"), pw_old)
+        val ms = [manifest(key("obj.link", "app-linux"), [read_at(prod_l, key("obj.link", "app-linux"),
+                GENERIC_FACET_BODY_V1, digest("obj-l"), 0, part_l)]),
+            manifest(key("obj.link", "app-windows"), [read_at(prod_w, key("obj.link", "app-windows"),
+                GENERIC_FACET_BODY_V1, digest("obj-w"), 0, part_w)])]
+        val result = affected_consumers_v1([ChangedSemanticFacetV1(producer: prod_w,
+            facet: GENERIC_FACET_BODY_V1, dimension: GENERIC_FACET_DIMENSION_V1,
+            old_fingerprint: Some(pw_old.variant_digest), new_fingerprint: Some(pw_new.variant_digest))],
+            [], verified_all(ms), rebuild_reverse_shards_from_forward_v1(ms).shards)
+        expect(result.accepted).to_equal(true)
+        expect(ids(result.affected)).to_equal(["app-windows"])
+        expect(result.affected[0].partition_id).to_equal(part_w)
+
+describe "generic RR edit-rebuild loop: concurrency and corruption":
+    it "two concurrent rebuilds from the same prior stage identical shards and replay is idempotent (REQ-GRR-007)":
+        step("Stage C1's delta twice from the same prior and replay it once more (REQ-GRR-007)")
+        val prior = shards()
+        val first = stage_reverse_shards_v1(prior, Some(c1_old()), c1_new(), true)
+        val second = stage_reverse_shards_v1(prior, Some(c1_old()), c1_new(), true)
+        expect(first.accepted).to_equal(true)
+        expect(second.accepted).to_equal(true)
+        expect(encode_all(first.shards)).to_equal(encode_all(second.shards))
+        val replay = stage_reverse_shards_v1(first.shards, Some(c1_new()), c1_new(), true)
+        expect(replay.accepted).to_equal(true)
+        expect(encode_all(replay.shards)).to_equal(encode_all(first.shards))
+
+    it "a flipped shard byte fails decode closed (REQ-GRR-008)":
+        step("Flip the first byte of an encoded shard and decode it (REQ-GRR-008)")
+        val bytes = reverse_reference_shard_encode_v1(shards()[0])
+        expect(reverse_reference_shard_decode_v1(bytes).ok).to_equal(true)
+        var bad = bytes
+        if bytes[0] == 0:
+            bad[0] = 1
+        else:
+            bad[0] = 0
+        expect(reverse_reference_shard_decode_v1(bad).ok).to_equal(false)
+
+    it "a shard edge with an invalid consumed fingerprint rejects the plan (REQ-GRR-008)":
+        step("Plan a body edit against a shard whose edge fingerprint is zz (REQ-GRR-008)")
+        val good = shards()[0].sorted_edges[0]
+        val corrupt = ReverseReferenceShardV1(schema: 1, partition_id: good.partition_id,
+            coverage: SemanticCoverageV1.Complete,
+            sorted_edges: [ReverseReferenceEdgeV1(producer: good.producer, facet: good.facet,
+                consumer: good.consumer, consumed_fingerprint: "zz",
+                forward_manifest_digest: good.forward_manifest_digest, partition_id: good.partition_id)])
+        val changes = generic_template_changed_facets_v1(Some(old_entry()),
+            Some(entry("Second", "trait:pkg_a.Eq", "body-v2")))
+        val plan = plan_generic_invalidation_v1(template_t(), changes, verified_all(manifests()), [corrupt])
+        expect(plan.accepted).to_equal(false)
+        expect(plan.rejection_reason).to_equal("rr_shard_incomplete")
+        expect(plan.affected.len()).to_equal(0)

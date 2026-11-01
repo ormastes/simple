@@ -79,11 +79,15 @@ pub struct MacroRrModuleStateV1:
     uses: [MacroUseV1]
     def_table: MacroDefinitionTableV1
     generated_public_names: [text]
+    uncacheable_def_ids: [text]   # `macro-key|` flag 1: key kept, every expansion of it conservative
     input_root: MacroInputRootV1
     effect_surface: text
 pub fn macro_rr_module_state_v1(source_path: text, tldr_root: text) -> MacroRrModuleStateV1
-pub fn macro_rr_module_state_raw_v1(source_path: text, tldr_root: text) -> MacroRrModuleStateV1
-#   raw = pre-edit sections via module_tldr_companion_sections_raw_v1 (no source freshness check).
+pub fn macro_rr_module_state_raw_v1(source_path: text, tldr_root: text, recorded_source_hash: text) -> MacroRrModuleStateV1
+#   raw = pre-edit sections via module_tldr_companion_sections_raw_v1, admitted ONLY when the companion's
+#   source-digest equals `recorded_source_hash` (the BuildCache fingerprint of the pre-edit source);
+#   a companion rewritten after the edit is "pre-edit-companion-not-recorded" (fail closed).
+pub fn macro_rr_uses_with_uncacheable_v1(uses: [MacroUseV1], uncacheable_def_ids: [text]) -> [MacroUseV1]
 pub fn macro_rr_module_state_refresh_v1(source_path: text, tldr_root: text) -> MacroRrModuleStateV1
 #   module_artifacts_emit_v1 (no-op when fresh) then macro_rr_module_state_v1.
 
@@ -106,11 +110,13 @@ pub fn macro_rr_inventory_v1(source_paths: [text], tldr_root: text) -> MacroRrIn
 ## 3. Driver invalidation — `src/compiler/80.driver/cache/macro_rr_invalidation_v1.spl`
 
 ```simple
-pub fn macro_rr_changed_subjects_for_path_v1(path: text, kind: text, tldr_root: text) -> MacroRrChangedSubjectsV1
-#   kind "added":    old = [] complete;            new = refresh(path)
-#   kind "modified": old = raw(path) (pre-edit);   new = refresh(path)
-#   kind "deleted":  old = raw(path);              new = [] complete
-#   Order matters: raw is read BEFORE refresh overwrites the companion.
+pub fn macro_rr_changed_subjects_for_path_v1(path: text, kind: text, tldr_root: text,
+        recorded_source_hash: text) -> MacroRrChangedSubjectsV1
+#   kind "added":    old = [] complete;                          new = refresh(path)
+#   kind "modified": old = raw(path, recorded hash) (pre-edit);  new = refresh(path)
+#   kind "deleted":  old = raw(path, recorded hash);             new = [] complete
+#   Order matters: raw is read BEFORE refresh overwrites the companion. The recorded hash is the
+#   BuildCache entry's fingerprint; "" for modified/deleted is "pre-edit-source-hash-missing".
 
 pub struct MacroRrAffectedV1:
     exact: bool
@@ -148,6 +154,10 @@ pub fn macro_rr_current_input_root_v1(state: MacroRrModuleStateV1, inventory: Ma
 |---|---|---|
 | companion missing/stale/corrupt/section-count≠1 | inventory | module `fresh=false`, inventory incomplete |
 | receipt schema 1 | propagate | widen, reason `receipt-schema-without-macro-families` |
+| pre-edit companion's source-digest ≠ recorded fingerprint (rewritten after the edit) | inventory raw | `pre-edit-companion-not-recorded` → changed subjects incomplete → widen |
+| `macro-key|` uncacheable flag | inventory | definition key kept; every expansion of it conservative (no input root, site always rebuilt) |
+| requested name with > 1 current definition / unresolved name now defined | current input root | `name-ambiguous` / `name-now-defined` → unknown → entry invalid |
+| deleted definer | propagate | `deleted` kind: old = raw(recorded hash), new = empty; inventory over the surviving entries (the legacy caller still widens the whole scope for `Deleted`) |
 | generation mismatch | propagate (existing) | widen `stale-generation` |
 | lookup consumer not a BuildCache entry | invalidation | `exact=false` |
 | recorded macro facet `""` and a macro-bearing dependency | entry validity | entry invalid (no reuse) |

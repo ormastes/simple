@@ -23,3 +23,12 @@
 ## Evidence status
 
 Source regressions cover unsealed-manifest rejection, parser-produced macro forward reads, logical distinct-consumer aggregation (including 3,000 users), last-consumer demand removal, incomplete-scope no-drop behavior, and failed-run inventory retention. The 3,000-user case is a logical model, not concurrent compiler execution. Compiler builds, unit/integration specs, crash/fault tests, native publication gates, and warm-path measurements were not run in this worktree.
+
+## 2026-11-01 update — lane `macro-rr-invalidation` (macro half)
+
+Addresses blockers 1 (macro part), 3 (partly) and 4 above; the generic half is owned by the sibling `generic-rr` lane. Docs: `doc/01_research/local/macro_rr_invalidation.md`, `doc/04_architecture/compiler/macro_rr_invalidation.md`, `doc/05_design/compiler/macro_rr_invalidation.md`, `doc/03_plan/sys_test/macro_rr_invalidation.md`.
+
+- The macro→forward-manifest bridge deleted with `generic_spec_rr_producer_v1.spl` (`ab9305d783e`) is restored as the macro-owned `src/compiler/80.driver/cache/macro_rr_forward_manifests_v1.spl`; `test/02_integration/compiler/cache/reverse_reference_macro_generic_lifecycle_spec.spl` imports it again.
+- The legacy receipt is published as schema 2 with real macro projections built from the committed companions (`macro_rr_inventory_v1`), binding root-free subjects `macro-def:<id>` / `macro-name:<name>` to source-path consumers. The `macro-source-subject-unmapped` widening is replaced by an exact changed-subject lookup with a dependents closure (`macro_rr_invalidation_v1`); every unknown still widens with a recorded reason.
+- Per-file caches gain a macro facet: `DependencyEntry.macro_input_root` plus the dependencies' macro effect surface in `deps_iface`; `source_interface_parts` now captures `macro ` headers (stale object reuse on a macro contract edit, found 2026-11-01).
+- Still open: blocker 2 (committed-scope authority), blocker 3's CAS/fencing, blockers 5–6 (generic). With no companion root (`tldr_root == ""`) the macro families stay `@unknown-family` and the caller widens as before. Runtime qualification is UNRUN on this host (no self-hosted binary).

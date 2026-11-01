@@ -1,0 +1,210 @@
+# @req REQ-GRR-005 REQ-GRR-009
+"""
+# HIR-variant object keys (lane generic-rr-hir-variant-obj)
+
+**Requirements:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md (REQ-GRR-001..009)
+**Plan:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md
+**Design:** doc/05_design/generic_rr_hir_variant_obj.md
+**Research:** doc/01_research/local/generic_rr_hir_variant_obj.md
+
+## Overview
+
+One target-neutral HIR (a list of `HirCfgDeclV1`) is projected per MIR
+target: plain `@cfg` items and numbered cfg groups (with an else arm) select
+the kept declarations, which seal a per-target `variant_digest`. The object
+key, RR partition, RR producer and sidecar path all derive from that
+projection, so a windows-only edit moves only the windows key.
+
+Evidence: Rust-seed interpreter runs only (attributed to the seed); no self-hosted
+binary exists on the authoring host. Owner: hir_variant_object_key_v1.spl.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+# @cover src/compiler/80.driver/driver_build/hir_variant_object_key_v1.spl 90%
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.driver.driver_build.hir_variant_object_key_v1.*
+
+val TOOLCHAIN: text = "simple-self-hosted/1.0.0"
+val MODULE: text = "pkg_v.main"
+
+fn digest(value: text) -> text: sha256_text(value)
+
+fn linux() -> MirTargetContext:
+    MirTargetContext(arch: "x86_64", os: "linux", abi: "gnu", backend: "llvm", version: 1)
+
+fn windows() -> MirTargetContext:
+    MirTargetContext(arch: "x86_64", os: "windows", abi: "msvc", backend: "llvm", version: 1)
+
+fn d(name: text, cfg: [text], group: i64, arm: i64, body: text) -> HirCfgDeclV1:
+    HirCfgDeclV1(name: name, kind: "fn", cfg: cfg, cfg_group: group, cfg_arm: arm,
+        content_digest: digest(body))
+
+fn decls_with(w_body: text, a_body: text) -> [HirCfgDeclV1]:
+    [d("a", [], 0, 0, a_body),
+     d("w", ["windows"], 0, 0, w_body),
+     d("l", ["linux"], 0, 0, "l-v1"),
+     d("g_win", ["os = \"windows\""], 7, 0, "g_win-v1"),
+     d("g_else", [], 7, -1, "g_else-v1")]
+
+fn decls() -> [HirCfgDeclV1]: decls_with("w-v1", "a-v1")
+
+fn proj(ds: [HirCfgDeclV1], t: MirTargetContext) -> HirVariantProjectionV1:
+    hir_variant_projection_v1(ds, t, [])
+
+describe "HIR variant projection":
+    it "keeps the linux arms only for the linux target (REQ-GRR-005, REQ-GRR-009)":
+        step("Project the shared decl list for x86_64-linux (REQ-GRR-005, REQ-GRR-009)")
+        val p = proj(decls(), linux())
+        expect(p.ok).to_equal(true)
+        expect(p.error).to_equal("")
+        expect(p.kept).to_equal(["fn:a", "fn:l", "fn:g_else"])
+
+    it "keeps the windows arms only for the windows target (REQ-GRR-005, REQ-GRR-009)":
+        step("Project the shared decl list for x86_64-windows (REQ-GRR-005, REQ-GRR-009)")
+        val p = proj(decls(), windows())
+        expect(p.ok).to_equal(true)
+        expect(p.kept).to_equal(["fn:a", "fn:w", "fn:g_win"])
+
+    it "variant digests differ per target and are stable (REQ-GRR-009)":
+        step("Project twice per target and compare digests (REQ-GRR-009)")
+        val l1 = proj(decls(), linux()).variant_digest
+        val w1 = proj(decls(), windows()).variant_digest
+        expect(l1.len()).to_equal(64)
+        expect(l1 == w1).to_equal(false)
+        expect(proj(decls(), linux()).variant_digest).to_equal(l1)
+        expect(proj(decls(), windows()).variant_digest).to_equal(w1)
+
+    it "a windows-only edit changes only the windows digest (REQ-GRR-005)":
+        step("Edit w's content digest and reproject both targets (REQ-GRR-005)")
+        val edited = decls_with("w-v2", "a-v1")
+        expect(proj(edited, linux()).variant_digest).to_equal(proj(decls(), linux()).variant_digest)
+        expect(proj(edited, windows()).variant_digest == proj(decls(), windows()).variant_digest).to_equal(false)
+
+    it "a shared edit changes both digests (REQ-GRR-005)":
+        step("Edit a's content digest and reproject both targets (REQ-GRR-005)")
+        val edited = decls_with("w-v1", "a-v2")
+        expect(proj(edited, linux()).variant_digest == proj(decls(), linux()).variant_digest).to_equal(false)
+        expect(proj(edited, windows()).variant_digest == proj(decls(), windows()).variant_digest).to_equal(false)
+
+    it "a group with no matching arm and no else arm drops every arm":
+        step("Project a group whose only arm is aarch64 on x86_64")
+        val p = proj([d("a", [], 0, 0, "a-v1"), d("g_arm", ["aarch64"], 3, 0, "g_arm-v1")], linux())
+        expect(p.ok).to_equal(true)
+        expect(p.kept).to_equal(["fn:a"])
+
+describe "HIR variant projection: fail-closed inputs":
+    it "rejects a malformed cfg condition":
+        step("Project a decl whose cfg is the incomplete atom os =")
+        val p = proj([d("bad", ["os ="], 0, 0, "bad-v1")], linux())
+        expect(p.ok).to_equal(false)
+        expect(p.error).to_equal("malformed_cfg")
+        expect(p.variant_digest).to_equal("")
+
+    it "rejects an invalid content digest":
+        step("Project a decl whose content digest is not 64-hex")
+        val p = proj([HirCfgDeclV1(name: "x", kind: "fn", cfg: [], cfg_group: 0, cfg_arm: 0,
+            content_digest: "zz")], linux())
+        expect(p.ok).to_equal(false)
+        expect(p.error).to_equal("invalid_decl")
+
+    it "rejects a numbered group arm with an empty cfg":
+        step("Project a group whose numbered arm has no condition")
+        val p = proj([d("g0", [], 5, 0, "g0-v1"), d("g1", ["linux"], 5, 1, "g1-v1")], linux())
+        expect(p.ok).to_equal(false)
+        expect(p.error).to_equal("malformed_cfg_group")
+
+    it "rejects two records of one group arm that disagree on the condition":
+        step("Project a group whose arm 0 is declared with two different conditions")
+        val p = proj([d("x", ["windows"], 6, 0, "x-v1"), d("y", ["linux"], 6, 0, "y-v1"),
+            d("z", [], 6, -1, "z-v1")], linux())
+        expect(p.ok).to_equal(false)
+        expect(p.error).to_equal("malformed_cfg_group")
+        val agree = proj([d("x", ["windows"], 6, 0, "x-v1"), d("y", ["windows"], 6, 0, "y-v1"),
+            d("z", [], 6, -1, "z-v1")], linux())
+        expect(agree.ok).to_equal(true)
+        expect(agree.kept).to_equal(["fn:z"])
+
+    it "seals build-context inputs that are not part of the target id (REQ-GRR-009)":
+        step("Change features and collection policy and compare variant digests (REQ-GRR-009)")
+        val base = hir_variant_projection_v1(decls(), linux(), [])
+        val with_feature = hir_variant_projection_v1(decls(), linux(), ["simd"])
+        expect(with_feature.target_id).to_equal(base.target_id)
+        expect(with_feature.variant_digest == base.variant_digest).to_equal(false)
+        expect(hir_variant_projection_v1(decls(), linux(), ["simd"]).variant_digest).to_equal(with_feature.variant_digest)
+        val strict = MirTargetContext(arch: "x86_64", os: "linux", abi: "gnu", backend: "llvm",
+            collection_policy: "strict", version: 1)
+        val with_policy = hir_variant_projection_v1(decls(), strict, [])
+        expect(with_policy.target_id).to_equal(base.target_id)
+        expect(with_policy.variant_digest == base.variant_digest).to_equal(false)
+
+describe "HIR variant object key, partition, producer and sidecar":
+    it "formats the target id":
+        step("Format the linux and windows target ids")
+        expect(hir_variant_target_id_v1(linux())).to_equal("x86_64-linux-gnu-llvm/debug/baseline")
+        expect(hir_variant_target_id_v1(windows())).to_equal("x86_64-windows-msvc-llvm/debug/baseline")
+        expect(proj(decls(), linux()).target_id).to_equal("x86_64-linux-gnu-llvm/debug/baseline")
+
+    it "separates sub-arch variants of one arch (REQ-GRR-009)":
+        step("Derive ids and keys for armv7 and thumbv7em contexts sharing arch arm (REQ-GRR-009)")
+        val armv7 = MirTargetContext(arch: "arm", os: "none", abi: "eabi", backend: "llvm",
+            subarch: "armv7", version: 1)
+        val thumb = MirTargetContext(arch: "arm", os: "none", abi: "eabi", backend: "llvm",
+            subarch: "thumbv7em", version: 1)
+        expect(hir_variant_target_id_v1(armv7)).to_equal("arm.armv7-none-eabi-llvm/debug/baseline")
+        expect(hir_variant_target_id_v1(thumb)).to_equal("arm.thumbv7em-none-eabi-llvm/debug/baseline")
+        val pa = proj(decls(), armv7)
+        val pt = proj(decls(), thumb)
+        expect(pa.ok).to_equal(true)
+        expect(pt.ok).to_equal(true)
+        expect(pa.variant_digest == pt.variant_digest).to_equal(false)
+        expect(hir_variant_object_key_v1("pkg_v.main", pa, "tc") ==
+            hir_variant_object_key_v1("pkg_v.main", pt, "tc")).to_equal(false)
+        expect(hir_variant_object_sidecar_path_v1("q", "pkg_v.main", pa.target_id) ==
+            hir_variant_object_sidecar_path_v1("q", "pkg_v.main", pt.target_id)).to_equal(false)
+
+    it "derives one object key per target and is deterministic (REQ-GRR-009)":
+        step("Key the same module for linux and windows twice (REQ-GRR-009)")
+        val kl = hir_variant_object_key_v1(MODULE, proj(decls(), linux()), TOOLCHAIN)
+        val kw = hir_variant_object_key_v1(MODULE, proj(decls(), windows()), TOOLCHAIN)
+        expect(kl.len()).to_equal(64)
+        expect(kl == kw).to_equal(false)
+        expect(hir_variant_object_key_v1(MODULE, proj(decls(), linux()), TOOLCHAIN)).to_equal(kl)
+
+    it "returns an empty key for a bad projection, module path or toolchain":
+        step("Key a not-ok projection, an empty module path and an empty toolchain")
+        val bad = proj([d("bad", ["os ="], 0, 0, "bad-v1")], linux())
+        expect(hir_variant_object_key_v1(MODULE, bad, TOOLCHAIN)).to_equal("")
+        expect(hir_variant_object_key_v1("", proj(decls(), linux()), TOOLCHAIN)).to_equal("")
+        expect(hir_variant_object_key_v1(MODULE, proj(decls(), linux()), "")).to_equal("")
+
+    it "appends the target id to the RR partition (REQ-GRR-005)":
+        step("Derive the linux partition and a not-ok partition (REQ-GRR-005)")
+        val p = proj(decls(), linux())
+        expect(hir_variant_object_partition_v1("p", p)).to_equal("p@" + p.target_id)
+        expect(hir_variant_object_partition_v1("p", p)).to_equal("p@x86_64-linux-gnu-llvm/debug/baseline")
+        expect(hir_variant_object_partition_v1("p", proj([d("bad", ["os ="], 0, 0, "b")], linux()))).to_equal("")
+
+    it "builds an obj.emit RR producer keyed by the variant digest (REQ-GRR-005)":
+        step("Derive the RR producer for the windows projection (REQ-GRR-005)")
+        val p = proj(decls(), windows())
+        val producer = hir_variant_object_producer_v1(MODULE, digest("profile"), p)
+        expect(producer.kind).to_equal("obj.emit")
+        expect(producer.stable_entity_id).to_equal(MODULE)
+        expect(producer.semantic_profile_digest).to_equal(digest("profile"))
+        expect(producer.parameter_digest).to_equal(p.variant_digest)
+
+    it "keeps the legacy sidecar path for an empty target id and splits per target":
+        step("Compare legacy and per-target sidecar paths")
+        val legacy = hir_variant_object_sidecar_path_v1("build/q", MODULE, "")
+        expect(legacy).to_equal("build/q/" + sha256_text(MODULE) + ".object")
+        val tl = hir_variant_object_sidecar_path_v1("build/q", MODULE, "x86_64-linux-gnu-llvm/debug/baseline")
+        expect(tl == legacy).to_equal(false)
+        expect(tl).to_start_with("build/q/")
+        expect(tl).to_end_with(".object")

@@ -1,0 +1,260 @@
+# @req REQ-GRR-001 REQ-GRR-002 REQ-GRR-003 REQ-GRR-004 REQ-GRR-005 REQ-GRR-006
+"""
+# Exact generic reverse-reference invalidation (lane generic-rr-hir-variant-obj)
+
+**Requirements:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md (REQ-GRR-001..009)
+**Plan:** doc/03_plan/sys_test/generic_rr_hir_variant_obj.md
+**Design:** doc/05_design/generic_rr_hir_variant_obj.md
+**Research:** doc/01_research/local/generic_rr_hir_variant_obj.md
+
+## Overview
+
+Drives `affected_consumers_v1` and `plan_generic_invalidation_v1` over an
+in-memory fixture: template producer T, its template object O (edges on all
+three generic facets), callers C1/C2 (signature + bound only), a dependent D
+of C1, and an unrelated consumer U. Over- and under-invalidation are both
+asserted, plus every rejection string and canonical ordering/dedup. A second
+partition (windows variant) proves per-variant isolation.
+
+Evidence: Rust-seed interpreter runs only (attributed to the seed); no self-hosted
+binary exists on the authoring host. Owner: reverse_reference_coordinator_v1.spl.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+# @cover src/compiler/80.driver/cache/reference/reverse_reference_coordinator_v1.spl 90%
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1, semantic_query_read_manifest_encode_v1,
+    semantic_query_key_canonical_v1}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    ReverseReferenceEdgeV1, ReverseReferenceShardV1}
+use compiler.common.cache_contract.generic_tldr_view_v1.{
+    GENERIC_FACET_DIMENSION_V1, GENERIC_FACET_SIGNATURE_V1, GENERIC_FACET_BOUND_V1,
+    GENERIC_FACET_BODY_V1, GenericFacetChangeV1, generic_caller_consumed_facets_v1,
+    generic_template_consumed_facets_v1}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    ChangedSemanticFacetV1, VerifiedSccGroupV1, VerifiedAffectedDomainV1,
+    VerifiedForwardManifestV1, AffectedConsumerV1, AffectedConsumersV1,
+    GenericInvalidationPlanV1, affected_consumers_v1, plan_generic_invalidation_v1,
+    generic_changed_semantic_facets_v1, verified_scc_group_receipt_v1,
+    verified_affected_domain_receipt_v1, rebuild_reverse_shards_from_forward_v1}
+
+val LINUX_PART: text = "p@x86_64-linux-gnu-llvm/debug/baseline"
+val WIN_PART: text = "p@x86_64-windows-msvc-llvm/debug/baseline"
+
+fn digest(value: text) -> text: sha256_text(value)
+
+fn key(kind: text, label: text, param: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: kind, stable_entity_id: label,
+        semantic_profile_digest: digest("profile"), parameter_digest: digest(param))
+
+fn template_t() -> SemanticQueryKeyV1: key("tldr.symbolic", "pkg_a.Pair", "pkg_a.Pair")
+fn object_o() -> SemanticQueryKeyV1: key("obj.emit", "pkg_a.Pair#object", "pkg_a.Pair#object")
+fn caller(name: text) -> SemanticQueryKeyV1: key("tldr.concrete", name, name)
+fn dependent_d() -> SemanticQueryKeyV1: key("obj.emit", "pkg_c.D", "pkg_c.D")
+fn other_producer() -> SemanticQueryKeyV1: key("tldr.symbolic", "pkg_z.Other", "pkg_z.Other")
+fn unrelated_u() -> SemanticQueryKeyV1: key("obj.emit", "pkg_z.U", "pkg_z.U")
+fn linux_variant() -> SemanticQueryKeyV1: key("obj.emit", "pkg_v", "variant-linux")
+fn win_variant() -> SemanticQueryKeyV1: key("obj.emit", "pkg_v", "variant-windows")
+fn linux_user() -> SemanticQueryKeyV1: key("obj.link", "app-linux", "app-linux")
+fn win_user() -> SemanticQueryKeyV1: key("obj.link", "app-windows", "app-windows")
+
+fn reads_on(producer: SemanticQueryKeyV1, consumer: SemanticQueryKeyV1,
+            facets: [text], partition: text) -> [SemanticQueryReadV1]:
+    var out: [SemanticQueryReadV1] = []
+    var ordinal: i64 = 0
+    for facet in facets:
+        out = out.push(SemanticQueryReadV1(producer: producer, consumer: consumer,
+            facet: facet, ordinal: ordinal, consumed_fingerprint: digest(facet + "-old"),
+            witness_digest: digest("witness"), partition_id: partition,
+            completeness: SemanticCoverageV1.Complete))
+        ordinal = ordinal + 1
+    out
+
+fn manifest(consumer: SemanticQueryKeyV1, reads: [SemanticQueryReadV1]) -> SemanticQueryReadManifestV1:
+    SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: reads)
+
+fn generic_domain() -> VerifiedAffectedDomainV1:
+    var value = VerifiedAffectedDomainV1(dimension: GENERIC_FACET_DIMENSION_V1,
+        candidate_root_digest: digest("candidate"), membership_root_digest: digest("membership"),
+        absence_root_digest: digest("absence"), coverage: SemanticCoverageV1.Complete,
+        receipt_digest: "")
+    value.receipt_digest = verified_affected_domain_receipt_v1(value)
+    value
+
+fn verified(m: SemanticQueryReadManifestV1, partition: text) -> VerifiedForwardManifestV1:
+    val group_id = digest("group-" + m.consumer.stable_entity_id)
+    val group = VerifiedSccGroupV1(partition_id: partition, group_identity: group_id,
+        member_queries: [m.consumer],
+        receipt_digest: verified_scc_group_receipt_v1(partition, group_id, [m.consumer]))
+    VerifiedForwardManifestV1(manifest_digest: sha256_u8_hex(semantic_query_read_manifest_encode_v1(m)),
+        manifest: m, scc_group: group, affected_domains: [generic_domain()])
+
+fn linux_manifests() -> [SemanticQueryReadManifestV1]:
+    [manifest(object_o(), reads_on(template_t(), object_o(), generic_template_consumed_facets_v1(), LINUX_PART)),
+     manifest(caller("pkg_b.C1"), reads_on(template_t(), caller("pkg_b.C1"), generic_caller_consumed_facets_v1(), LINUX_PART)),
+     manifest(caller("pkg_b.C2"), reads_on(template_t(), caller("pkg_b.C2"), generic_caller_consumed_facets_v1(), LINUX_PART)),
+     manifest(dependent_d(), reads_on(caller("pkg_b.C1"), dependent_d(), [GENERIC_FACET_SIGNATURE_V1], LINUX_PART)),
+     manifest(unrelated_u(), reads_on(other_producer(), unrelated_u(), [GENERIC_FACET_SIGNATURE_V1], LINUX_PART))]
+
+fn variant_manifests() -> [SemanticQueryReadManifestV1]:
+    [manifest(linux_user(), reads_on(linux_variant(), linux_user(), [GENERIC_FACET_BODY_V1], LINUX_PART)),
+     manifest(win_user(), reads_on(win_variant(), win_user(), [GENERIC_FACET_BODY_V1], WIN_PART))]
+
+fn verified_all(ms: [SemanticQueryReadManifestV1]) -> [VerifiedForwardManifestV1]:
+    var out: [VerifiedForwardManifestV1] = []
+    for m in ms:
+        out = out.push(verified(m, m.ordered_reads[0].partition_id))
+    out
+
+fn shards_of(ms: [SemanticQueryReadManifestV1]) -> [ReverseReferenceShardV1]:
+    rebuild_reverse_shards_from_forward_v1(ms).shards
+
+fn change(producer: SemanticQueryKeyV1, facet: text) -> ChangedSemanticFacetV1:
+    ChangedSemanticFacetV1(producer: producer, facet: facet, dimension: GENERIC_FACET_DIMENSION_V1,
+        old_fingerprint: Some(digest(facet + "-old")), new_fingerprint: Some(digest(facet + "-new")))
+
+fn gchange(facet: text) -> GenericFacetChangeV1:
+    GenericFacetChangeV1(facet: facet, old_fingerprint: Some(digest(facet + "-old")),
+        new_fingerprint: Some(digest(facet + "-new")))
+
+fn plan_t(facets: [text]) -> GenericInvalidationPlanV1:
+    var changes: [GenericFacetChangeV1] = []
+    for f in facets:
+        changes = changes.push(gchange(f))
+    plan_generic_invalidation_v1(template_t(), changes, verified_all(linux_manifests()),
+        shards_of(linux_manifests()))
+
+fn ids(affected: [AffectedConsumerV1]) -> [text]:
+    var out: [text] = []
+    for a in affected:
+        out = out.push(a.consumer.stable_entity_id)
+    out
+
+describe "generic RR exact invalidation: per-facet consumer sets":
+    it "body change affects only the template object O (REQ-GRR-001)":
+        step("Plan a generic.body change on T and expect exactly [O] (REQ-GRR-001)")
+        val plan = plan_t([GENERIC_FACET_BODY_V1])
+        expect(plan.accepted).to_equal(true)
+        expect(plan.changed_facets).to_equal([GENERIC_FACET_BODY_V1])
+        expect(plan.affected.len()).to_equal(1)
+        expect(ids(plan.affected)).to_equal(["pkg_a.Pair#object"])
+        expect(ids(plan.affected).contains("pkg_b.C1")).to_equal(false)
+        expect(ids(plan.affected).contains("pkg_b.C2")).to_equal(false)
+        expect(ids(plan.affected).contains("pkg_z.U")).to_equal(false)
+        expect(plan.affected_partitions).to_equal([LINUX_PART])
+
+    it "signature change affects O, C1 and C2 but not U (REQ-GRR-002)":
+        step("Plan a generic.signature change on T (REQ-GRR-002)")
+        val plan = plan_t([GENERIC_FACET_SIGNATURE_V1])
+        expect(plan.accepted).to_equal(true)
+        expect(plan.affected.len()).to_equal(3)
+        expect(ids(plan.affected).contains("pkg_a.Pair#object")).to_equal(true)
+        expect(ids(plan.affected).contains("pkg_b.C1")).to_equal(true)
+        expect(ids(plan.affected).contains("pkg_b.C2")).to_equal(true)
+        expect(ids(plan.affected).contains("pkg_z.U")).to_equal(false)
+        expect(ids(plan.affected).contains("pkg_c.D")).to_equal(false)
+
+    it "bound change affects O, C1 and C2 but not U (REQ-GRR-003)":
+        step("Plan a generic.bound change on T (REQ-GRR-003)")
+        val plan = plan_t([GENERIC_FACET_BOUND_V1])
+        expect(plan.accepted).to_equal(true)
+        expect(plan.changed_facets).to_equal([GENERIC_FACET_BOUND_V1])
+        # Exact set: three distinct ids present and the length is three.
+        expect(plan.affected.len()).to_equal(3)
+        expect(ids(plan.affected).contains("pkg_a.Pair#object")).to_equal(true)
+        expect(ids(plan.affected).contains("pkg_b.C1")).to_equal(true)
+        expect(ids(plan.affected).contains("pkg_b.C2")).to_equal(true)
+        expect(ids(plan.affected).contains("pkg_z.U")).to_equal(false)
+
+    it "caller edit affects only the caller's dependents (REQ-GRR-004)":
+        step("Change generic.signature on producer C1 and expect only D (REQ-GRR-004)")
+        val result = affected_consumers_v1([change(caller("pkg_b.C1"), GENERIC_FACET_SIGNATURE_V1)], [],
+            verified_all(linux_manifests()), shards_of(linux_manifests()))
+        expect(result.accepted).to_equal(true)
+        expect(ids(result.affected)).to_equal(["pkg_c.D"])
+        expect(ids(result.affected).contains("pkg_a.Pair#object")).to_equal(false)
+        expect(ids(result.affected).contains("pkg_b.C2")).to_equal(false)
+
+    it "no changes is accepted with an empty affected set (REQ-GRR-006)":
+        step("Plan with zero generic facet changes (REQ-GRR-006)")
+        val plan = plan_t([])
+        expect(plan.accepted).to_equal(true)
+        expect(plan.rejection_reason).to_equal("")
+        expect(plan.affected.len()).to_equal(0)
+        expect(plan.affected_partitions.len()).to_equal(0)
+
+    it "a change on the linux variant does not affect the windows partition (REQ-GRR-005)":
+        step("Change the linux variant producer and expect only the linux user (REQ-GRR-005)")
+        val ms = variant_manifests()
+        val result = affected_consumers_v1([change(linux_variant(), GENERIC_FACET_BODY_V1)], [],
+            verified_all(ms), shards_of(ms))
+        expect(result.accepted).to_equal(true)
+        expect(ids(result.affected)).to_equal(["app-linux"])
+        expect(result.affected[0].partition_id).to_equal(LINUX_PART)
+
+describe "generic RR exact invalidation: canonical output":
+    it "orders affected consumers canonically and de-duplicates RR and forward hits":
+        step("Plan a signature+bound change where O is reached by edges and forward reads")
+        val plan = plan_t([GENERIC_FACET_SIGNATURE_V1, GENERIC_FACET_BOUND_V1, GENERIC_FACET_SIGNATURE_V1])
+        expect(plan.accepted).to_equal(true)
+        expect(plan.changed_facets).to_equal([GENERIC_FACET_BOUND_V1, GENERIC_FACET_SIGNATURE_V1])
+        expect(plan.affected.len()).to_equal(3)
+        val a0 = semantic_query_key_canonical_v1(plan.affected[0].consumer)
+        val a1 = semantic_query_key_canonical_v1(plan.affected[1].consumer)
+        val a2 = semantic_query_key_canonical_v1(plan.affected[2].consumer)
+        expect(a0 < a1).to_equal(true)
+        expect(a1 < a2).to_equal(true)
+
+    it "maps generic facet changes onto the generic dimension":
+        step("Map a body change for T into ChangedSemanticFacetV1 rows")
+        val rows = generic_changed_semantic_facets_v1(template_t(), [gchange(GENERIC_FACET_BODY_V1)])
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].dimension).to_equal(GENERIC_FACET_DIMENSION_V1)
+        expect(rows[0].facet).to_equal(GENERIC_FACET_BODY_V1)
+        expect(rows[0].producer).to_equal(template_t())
+
+describe "generic RR exact invalidation: fail-closed rejections":
+    it "rejects a facet name outside the three generic facets":
+        step("Plan a change whose facet is generic.layout")
+        val plan = plan_t(["generic.layout"])
+        expect(plan.accepted).to_equal(false)
+        expect(plan.rejection_reason).to_equal("invalid_changed_facet")
+        expect(plan.affected.len()).to_equal(0)
+
+    it "rejects a shard with Unknown coverage":
+        step("Downgrade one shard to Unknown coverage and plan a body change")
+        val shards = shards_of(linux_manifests())
+        val s = shards[0]
+        val unknown = ReverseReferenceShardV1(schema: s.schema, partition_id: s.partition_id,
+            coverage: SemanticCoverageV1.Unknown, sorted_edges: s.sorted_edges)
+        val plan = plan_generic_invalidation_v1(template_t(), [gchange(GENERIC_FACET_BODY_V1)],
+            verified_all(linux_manifests()), [unknown])
+        expect(plan.accepted).to_equal(false)
+        expect(plan.rejection_reason).to_equal("rr_shard_incomplete")
+
+    it "rejects changes without verified forward manifests":
+        step("Plan a body change with no forward manifests")
+        val plan = plan_generic_invalidation_v1(template_t(), [gchange(GENERIC_FACET_BODY_V1)],
+            [], shards_of(linux_manifests()))
+        expect(plan.accepted).to_equal(false)
+        expect(plan.rejection_reason).to_equal("affected_evidence_incomplete")
+
+    it "rejects a tampered forward manifest digest":
+        step("Replace O's manifest digest with an unrelated digest")
+        val good = verified_all(linux_manifests())
+        val v = good[0]
+        val tampered = VerifiedForwardManifestV1(manifest_digest: digest("tampered"),
+            manifest: v.manifest, scc_group: v.scc_group, affected_domains: v.affected_domains)
+        val result = affected_consumers_v1([change(template_t(), GENERIC_FACET_BODY_V1)], [],
+            [tampered], shards_of(linux_manifests()))
+        expect(result.accepted).to_equal(false)
+        expect(result.rejection_reason).to_equal("forward_manifest_unverified")
+        expect(result.affected.len()).to_equal(0)
