@@ -602,8 +602,29 @@ impl HirLowering:
         parameters
 
     me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
+        # An imported generic callable (`fn array_sort_by<T>(arr: [T], ..)
+        # -> [T]`) used to register UNTYPED, so its call result carried no
+        # HIR type at all: `sorted.len()` failed as "unresolved method call"
+        # and `for x in sorted` as a non-array iterable. Its own binders are
+        # scoped to the signature exactly like an owner's: project them in a
+        # temporary scope so `T` lowers as TypeParam (the erased tagged-word
+        # ABI the callers decode), and publish the declared shape
+        # (generics = one erased body, 2026-11-01).
         if callable.type_params.len() > 0:
-            return nil
+            # Keep the owner's binders (a generic method of a generic owner
+            # arrives inside declared_imported_owner_callable_type's scope);
+            # the callable's own binders are only added on top of them.
+            val saved_parameters = self.prescan_type_parameters
+            self.symbols.push_scope(ScopeKind.Class)
+            self.project_imported_owner_type_parameters(callable.type_params, imported_module_name)
+            val generic_callable_type = self.declared_imported_surface_callable_type_inner(
+                callable, imported_module_name, owner_symbol)
+            self.symbols.pop_scope()
+            self.prescan_type_parameters = saved_parameters
+            return generic_callable_type
+        self.declared_imported_surface_callable_type_inner(callable, imported_module_name, owner_symbol)
+
+    me declared_imported_surface_callable_type_inner(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
         # A bodyless extern with no arrow has a complete Unit return contract;
         # retaining its callable type is required for imported alias authority.
         if not callable.has_return_type and not callable.is_extern:

@@ -515,7 +515,6 @@ impl MirLowering:
             local_hir_type_resource_states: [],
             fn_return_types: {},
             extern_fn_symbols: {},
-            generic_template_fn_symbols: {},
             extern_result_locals: {},
             static_scalar_locals: {},
             current_function_symbols: [],
@@ -564,6 +563,7 @@ impl MirLowering:
             struct_type_param_names: {},
             generic_instance_field_types: {},
             generic_instance_field_struct_names: {},
+            erased_callback_record_bindings: {},
             struct_field_repr_name: {},
             struct_field_hir_type: {},
             struct_bare_layout_owner: {},
@@ -3057,15 +3057,13 @@ impl MirLowering:
                     case HirTypeKind.Str:
                         bootstrap_fn_ret_type_register(fn_.name, self.lower_type(fn_.return_type))
                     case _: ()
-                # #158 Phase C: a generic TEMPLATE is non-emittable (hardening
-                # plan 9.3 step 12). It carries unsubstituted TypeParams, so
-                # lowering it produces opaque pointer-width slots and silent
-                # wrong answers. Generics are erased: nothing specializes a template, so it is never emitted and
-                # every direct call to one is a hard E-GEN-001 error at the
-                # call site (switch_operators_calls.spl lower_call).
-                if fn_.is_generic_template:
-                    ()
-                elif not self.hir_function_is_extern(fn_):
+                # Generics = ONE ERASED BODY per generic fn (owner decision,
+                # 2026-10-31): a template is emitted exactly like any other
+                # function. Every `T`-typed slot lowers to the tagged runtime
+                # word (`lower_type` TypeParam arm); callers box into it and
+                # typed consumers decode out of it, the same contract `Any`
+                # already has. No specialization, no substitution.
+                if not self.hir_function_is_extern(fn_):
                     if bootstrap_trace:
                         print "[mir-lower] function:start {fn_.name}"
                     var mir_fn = self.lower_function(fn_)
@@ -3447,10 +3445,6 @@ impl MirLowering:
                     # `-> i64` result as a declared scalar: `ext() == nil` folded
                     # to false and `take(ext())` boxed a nil word as Some.
                     self.extern_fn_symbols[prescan_fn.symbol.id] = true
-                if prescan_fn.is_generic_template:
-                    # Recorded before any body lowers so a call to a template
-                    # declared later in the module is still refused (E-GEN-001).
-                    self.generic_template_fn_symbols[prescan_fn.symbol.id] = true
                 if prescan_trace:
                     eprint("[mir-prescan-function] done module={module.name} index={psi} name={prescan_fn.name}")
             psi = psi + 1
@@ -3537,10 +3531,6 @@ impl MirLowering:
                 if selected_symbol == fn_.symbol.id: selected_for_emission = true
         if not selected_for_emission:
             return
-        elif fn_.is_generic_template:
-            return
-            # #158 Phase C: generic templates are non-emittable (see the
-            # function-symbol loop above for the full rationale).
         elif self.hir_function_is_extern(fn_):
             # Record the extern's symbol so call-result locals can be
             # excluded from nil-free scalar reasoning (see
