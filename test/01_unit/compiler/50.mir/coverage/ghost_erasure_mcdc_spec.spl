@@ -1,0 +1,128 @@
+# @req REQ-GEN-COV-TRAITGHOST
+"""
+# MC/DC coverage: ghost_erasure.spl
+
+Target: src/compiler/50.mir/mir/ghost_erasure.spl
+Every single-condition decision takes both outcomes; every loop runs zero
+and several iterations.
+
+## Decision inventory
+
+| Line | Decision | Conditions | Covering its |
+|------|----------|------------|--------------|
+| 51 | `for error in left` | loop | L51 empty / non-empty |
+| 53 | `for error in right` | loop | L53 empty / non-empty |
+| 78 | `for func in module.functions` | loop | L78 empty only; non-empty is a bug (below) |
+| 109 | `for l in func.locals` (erase) | loop | L109 empty / several |
+| 110 | `l.is_ghost` (erase) | c1 | L110 T / F |
+| 119 | `for l in func.locals` (has) | loop | L119 empty |
+| 120 | `l.is_ghost` (has) | c1 | L120 T (early return) / F |
+| 127 | `for l in func.locals` (count) | loop | L127 empty |
+| 128 | `l.is_ghost` (count) | c1 | L128 T / F |
+
+Totals: all 3 instrumented decisions (L110, L120, L128) take both outcomes.
+L78 loop body is not exercised: iterating `module.functions`
+(`Dict<SymbolId, MirFunction>`) yields `(key, value)` tuples, so L80
+`erase_ghost_from_function(func)` fails with "unknown property or method
+'locals' on Tuple" for any non-empty module (seed). Reported, not fixed
+here (50.mir is frozen this wave).
+Bug suspects: `erase_ghost_from_function` is a documented stub; it counts
+ghost locals but never removes them nor reports errors (see L101-104).
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{MirLocal, LocalId, LocalKind, MirType, MirSignature}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir.ghost_erasure.*
+
+fn local(id: i64, ghost: bool) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: ghost)
+
+fn func_with(sym: i64, ghosts: [bool]) -> MirFunction:
+    val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+    var builder = MirBuilder.new()
+    builder.begin_function(SymbolId(id: sym), "ghost_probe_{sym}", signature, Span.empty())
+    var function = builder.end_function()
+    var locals: [MirLocal] = []
+    var i = 0
+    while i < ghosts.len():
+        locals = locals.push(local(i, ghosts[i]))
+        i = i + 1
+    function.locals = locals
+    function
+
+fn err(name: text) -> GhostErasureError:
+    GhostErasureError(function_name: name, message: "m")
+
+describe "ghost_erasure MC/DC":
+    it "ghost_erasure.spl:51 c1 errors_concat with both lists empty":
+        # @req REQ-GEN-COV-TRAITGHOST-001
+        step("concatenate two empty error lists")
+        expect(errors_concat([], []).len()).to_equal(0)
+
+    it "ghost_erasure.spl:53 c1 errors_concat preserves left then right order":
+        # @req REQ-GEN-COV-TRAITGHOST-002
+        step("concatenate non-empty left and right lists")
+        val out = errors_concat([err("a"), err("b")], [err("c")])
+        expect(out.len()).to_equal(3)
+        expect(out[0].function_name).to_equal("a")
+        expect(out[2].function_name).to_equal("c")
+
+    it "ghost_erasure.spl:51 c1 errors_concat with only right populated":
+        # @req REQ-GEN-COV-TRAITGHOST-003
+        val out = errors_concat([], [err("r")])
+        expect(out.len()).to_equal(1)
+        expect(out[0].function_name).to_equal("r")
+
+    it "ghost_erasure.spl:36 stats start at zero":
+        # @req REQ-GEN-COV-TRAITGHOST-004
+        val s = ghosterasurestats_new()
+        expect(s.ghost_params_erased).to_equal(0)
+        expect(s.ghost_locals_erased).to_equal(0)
+        expect(s.instructions_erased).to_equal(0)
+        expect(s.functions_processed).to_equal(0)
+
+    it "ghost_erasure.spl:109 c1 function with no locals":
+        # @req REQ-GEN-COV-TRAITGHOST-005
+        step("erase, query and count on a function without locals")
+        val f = func_with(1, [])
+        val res = erase_ghost_from_function(f)
+        expect(res[0].ghost_locals_erased).to_equal(0)
+        expect(res[1].len()).to_equal(0)
+        expect(has_ghost_variables(f)).to_equal(false)
+        expect(ghost_variable_count(f)).to_equal(0)
+
+    it "ghost_erasure.spl:110 c1 erase counts only ghost locals (T and F)":
+        # @req REQ-GEN-COV-TRAITGHOST-006
+        val f = func_with(2, [false, true, true, false])
+        val res = erase_ghost_from_function(f)
+        expect(res[0].ghost_locals_erased).to_equal(2)
+        expect(res[1].len()).to_equal(0)
+
+    it "ghost_erasure.spl:120 c1 has_ghost false when every local is real":
+        # @req REQ-GEN-COV-TRAITGHOST-007
+        expect(has_ghost_variables(func_with(3, [false, false]))).to_equal(false)
+
+    it "ghost_erasure.spl:120 c1 has_ghost true after skipping a real local":
+        # @req REQ-GEN-COV-TRAITGHOST-008
+        expect(has_ghost_variables(func_with(4, [false, true]))).to_equal(true)
+
+    it "ghost_erasure.spl:128 c1 ghost_variable_count mixes T and F":
+        # @req REQ-GEN-COV-TRAITGHOST-009
+        expect(ghost_variable_count(func_with(5, [true, false, true, true]))).to_equal(3)
+
+    it "ghost_erasure.spl:78 c1 module with no functions":
+        # @req REQ-GEN-COV-TRAITGHOST-010
+        val m = MirModule(name: "empty", functions: {}, statics: {}, constants: {}, types: {})
+        val res = erase_ghost_from_module(m)
+        expect(res[0].functions_processed).to_equal(0)
+        expect(res[0].ghost_locals_erased).to_equal(0)
+        expect(res[1].len()).to_equal(0)

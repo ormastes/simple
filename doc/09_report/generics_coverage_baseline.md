@@ -64,3 +64,30 @@ Documented gaps: see the spec docstrings. Bug suspect:
 `hir_prune_published_templates_v1` (hir_function_selection_v1.spl:55) returns a
 nil `module` from a non-optional `-> HirModule`; the runtime rejects that return,
 so the nil guard cannot do what it is written to do.
+
+## Wave 2 — trait_impl_lowering.spl, ghost_erasure.spl
+
+Seed binary (`build/cargo-target/bootstrap/simple.exe`), `mcdc_module_coverage.shs`.
+Baseline = existing specs only (`hir/class_with_trait_conformance_spec`,
+`hir/generic_impl_head_params_gate_spec`, `hir/unannotated_module_const_shape_type_spec`,
+`20.hir/bootstrap_regressions/class_header_trait_impl_spec`; none exist for ghost_erasure).
+Final = baseline specs plus `20.hir/coverage/trait_impl_lowering_mcdc_spec.spl` and
+`50.mir/coverage/ghost_erasure_mcdc_spec.spl`.
+
+| File | Decisions | Conditions | CD % baseline → final (seed) | MC/DC % baseline → final (seed) |
+|---|---:|---:|---:|---:|
+| `20.hir/hir_lowering/_Items/trait_impl_lowering.spl` | 63 | 71 | 20.9 → 94.0 | 21.1 → 93.0 |
+| `50.mir/mir/ghost_erasure.spl` | 3 | 3 | 0.0 → 100.0 | 0.0 → 100.0 |
+
+Remaining gaps (unreachable, documented in the spec docstring):
+- `trait_impl_lowering.spl:36` F and `:427` c2: an instance method always carries the receiver param.
+- `trait_impl_lowering.spl:72` F: `BitfieldField.type_` is non-optional.
+- `trait_impl_lowering.spl:397` F: `if val` already excludes nil.
+- `trait_impl_lowering.spl:400` c2: masked by short-circuit once line 398 binds the written symbol.
+
+Bug found (not fixed; 50.mir frozen this wave): `ghost_erasure.spl:79`
+`for func in module.functions` iterates a `Dict<SymbolId, MirFunction>` and yields
+`(key, value)` tuples, so `erase_ghost_from_function(func)` fails with
+"unknown property or method 'locals' on Tuple" for any non-empty module.
+Parser note: the flat-AST bridge drops trait type params and associated types
+(`_FlatAstBridge/module_assembly.spl:411,415`), so those trait lowering arms are driven directly.
