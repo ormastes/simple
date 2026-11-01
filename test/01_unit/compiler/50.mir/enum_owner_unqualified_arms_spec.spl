@@ -1,0 +1,91 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# enumowner-mir-20261031: bare Ok/Err, bare Tuple/Struct, un_op owner
+
+Bug: doc/08_tracking/bug/enumowner_mir_2026-10-31.md. Lowers the original
+unqualified shapes (no Result./EnumPayload. qualification, no typed un_op
+local) through pure-Simple HIR+MIR in-process (seed-hosted). All three lower
+without an ambiguity/owner diagnostic in current source; the failures were
+only observed in the pinned stage2 full stage3 closure.
+"""
+
+# @tag: unit, compiler, mir, enum, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn lower_closure(names: [text], srcs: [text]) -> text:
+    """Lower every module through HIR, prescan all, then MIR-lower the last one.
+    Returns the concatenated HIR/MIR diagnostics ("" when clean)."""
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        val ast = parse_full_frontend(srcs[i], path, names[i], log)
+        modules[names[i]] = ast
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        asts.push(ast)
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    var out = ""
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(names[i], surfaces)
+        hirs.push(hl.lower_module(asts[i]))
+        for e in hl.errors:
+            out = out + "hir: " + e.message + "\n"
+        i = i + 1
+    val last = hirs.len() - 1
+    var ml = MirLowering.new(hirs[last].symbols)
+    var pre: Dict<text, HirModule> = {}
+    i = 0
+    while i < names.len():
+        pre["m" + i.to_text()] = hirs[i]
+        i = i + 1
+    i = 0
+    while i < names.len():
+        ml.prescan_module_struct_names(pre, "m" + i.to_text())
+        i = i + 1
+    val mir = ml.lower_module(hirs[last], hirs)
+    for e in ml.errors:
+        # Exhaustiveness notes are advisory and unrelated to these bugs.
+        if not e.message.contains("non-exhaustive enum match"):
+            out = out + "mir: " + e.message + "\n"
+    print "diagnostics: [" + out + "]"
+    out
+
+fn lower_one(src: text) -> text:
+    lower_closure(["app.main"], [src])
+
+describe "enumowner-mir-20261031 unqualified arms":
+    it "bare Ok/Err over a method-call subject with a competing Ok/Err enum":
+        val d = lower_one(lines(["enum Status:", "    Ok", "    Err(m: text)", "", "class Svc:", "    n: i64", "    fn compute() -> Result<i64, text>:", "        if self.n > 0:", "            return Ok(self.n)", "        Err(\"bad\")", "    fn run() -> i64:", "        match self.compute():", "            case Ok(v):", "                v", "            case Err(e):", "                e.len()"]))
+        expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("unresolved")).to_equal(false)
+
+    it "bare Tuple/Struct payload arms over an unwrapped optional subject":
+        val d = lower_one(lines(["enum EnumPayload:", "    Unit", "    Tuple(types: [i64])", "    Struct(fields: [text])", "", "enum Shape:", "    Tuple(a: i64)", "    Struct(b: i64)", "", "struct Variant:", "    payload: EnumPayload?", "", "fn count(v: Variant) -> i64:", "    if val p = v.payload:", "        match p:", "            case Tuple(types):", "                return types.len()", "            case Struct(fields):", "                return fields.len()", "            case Unit:", "                return 0", "    0"]))
+        expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("unresolved")).to_equal(false)
+
+    it "un_op payload binder keeps its HirUnaryOp owner next to Visibility":
+        val d = lower_one(lines(["enum Visibility:", "    Public", "    Private", "", "enum HirUnaryOp:", "    Neg", "    Not", "", "enum HirExprKind:", "    Unary(op: HirUnaryOp, operand: i64)", "    Lit(v: i64)", "", "struct HirExpr:", "    kind: HirExprKind", "    vis: Visibility", "", "fn fold(e: HirExpr) -> i64:", "    match e.kind:", "        case HirExprKind.Unary(un_op, operand):", "            match un_op:", "                case HirUnaryOp.Neg:", "                    0 - operand", "                case HirUnaryOp.Not:", "                    1", "        case HirExprKind.Lit(v):", "            v"]))
+        expect(d.contains("owner")).to_equal(false)
+        expect(d.contains("Visibility")).to_equal(false)

@@ -1,6 +1,6 @@
 # enumowner: bare variant / enum-owner MIR failures in pinned stage2
 
-**Status:** open (workaround applied)
+**Status:** open (workaround applied); see 2026-11-01 re-check below
 
 ## Root bug
 Stage3 MIR lowering (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`, bare-variant
@@ -24,3 +24,13 @@ Find all with: `git grep -n "bug=enumowner-mir-20261031"`.
 
 ## Removal condition
 Remove once the root fix is in a stage2 used for bootstrapping.
+
+## Status (2026-11-01 re-check)
+
+Not reproducible outside the full stage3 closure. Seed-hosted in-process pure-Simple
+HIR+MIR re-check (`test/01_unit/compiler/50.mir/enum_owner_unqualified_arms_spec.spl`):
+bare `Ok`/`Err` over a method-call subject (with a competing `Ok`/`Err` enum), bare
+`Tuple`/`Struct` arms over an unwrapped `EnumPayload?` (with a competing enum), and an
+`un_op` payload binder next to `Visibility` all lower with no ambiguity/owner
+diagnostic. Revert-ready: unknown — only after a full-closure stage3 build passes
+without the qualifications (phase 3 owner).
