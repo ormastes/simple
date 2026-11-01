@@ -30,3 +30,13 @@ Removal condition: remove once the root fix is in a stage2 used for bootstrappin
 - src/lib/nogc_async_mut/file_system/path_ops.spl:205
 - src/lib/nogc_async_mut/sosix/host_facade.spl:253
 - src/lib/nogc_sync_mut/env/paths.spl:212
+
+## Status (2026-11-01 re-check)
+
+**Status:** open, not reproducible outside the full stage3 closure.
+Seed-hosted in-process pure-Simple HIR+MIR re-check
+(`test/01_unit/compiler/50.mir/infer_empty_array_push_spec.spl`): `var x = []` +
+`.push(...)` (while / for loops, `.join`) lowers with no `[infer-arm]` diagnostic.
+The single-module path does not exhibit the bug; whether the full closure still does
+must be decided by a stage3 build without the annotations (phase 3 owner).
+Revert-ready: unknown — only after a full-closure stage3 build passes without them.
