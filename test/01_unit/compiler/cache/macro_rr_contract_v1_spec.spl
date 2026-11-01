@@ -1,0 +1,311 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/04_architecture/compiler/macro_rr_invalidation.md ; plan: doc/03_plan/sys_test/macro_rr_invalidation.md ; design: doc/05_design/compiler/macro_rr_invalidation.md
+
+"""
+## Purpose and audience
+
+Purpose: pin the pure macro reverse-reference contract (subjects, families,
+input root, effect surface, changed-subject diff, fact derivation, dependents
+closure). Audience: compiler cache engineers changing macro invalidation.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/cache/macro_rr_contract_v1_spec.spl --mode=interpreter`.
+2. Every scenario must pass; a failure is a regression in the macro RR contract.
+
+## Compatibility and limitations
+
+Pure functions only (no I/O). Failing-first: the contract module
+`macro_rr_contract_v1` does not exist until the implementation lands.
+"""
+
+# doc-path: doc/03_plan/sys_test/macro_rr_invalidation.md
+# doc-path: doc/04_architecture/compiler/macro_rr_invalidation.md
+# doc-path: doc/05_design/compiler/macro_rr_invalidation.md
+# doc-path: doc/03_plan/agent_tasks/macro_rr_invalidation.md
+# @manual: primary
+# @tag:in-development
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:macros
+
+"""
+# Macro reverse-reference contract v1
+
+Root-free subjects `macro-def:<id>` / `macro-name:<name>` with the def key,
+candidate root or absence witness as evidence (ADR-MRR-1).
+"""
+use std.spec.step
+
+use std.spec.*
+use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefIdV1,
+    MacroDefinitionEntryV1, MacroDefinitionTableV1, MacroUseV1, MacroUseStatusV1,
+    macro_def_id_canonical_v1, macro_content_digest_v1}
+use compiler.common.cache_contract.macro_rr_contract_v1.{
+    macro_rr_family_definition_v1, macro_rr_family_resolution_v1, macro_rr_family_absence_v1,
+    macro_rr_definition_subject_v1, macro_rr_name_subject_v1, macro_rr_subject_kind_v1,
+    MacroInputRootV1, macro_input_root_v1, macro_effect_surface_v1,
+    MacroRrDefinitionStateV1, MacroRrChangedSubjectsV1, macro_rr_changed_subjects_v1,
+    MacroRrFactV1, macro_rr_facts_of_module_v1, macro_rr_dependents_closure_v1}
+
+fn def_id_v1(module: text, name: text) -> text:
+    macro_def_id_canonical_v1(MacroDefIdV1(package: "pkg", module: module,
+        namespace: "macro", binder: name))
+
+fn status_of_v1(tag: text) -> MacroUseStatusV1:
+    if tag == "unresolved": return MacroUseStatusV1.Unresolved
+    if tag == "inactive": return MacroUseStatusV1.Inactive
+    MacroUseStatusV1.Resolved
+
+fn use_v1(src: text, region: text, tag: text, name: text, def_id: text, def_key: text,
+        coverage: text) -> MacroUseV1:
+    val resolved = tag == "resolved"
+    val unresolved = tag == "unresolved"
+    MacroUseV1(invoking_source_id: src, region_id: region,
+        stable_invocation_id: "inv:" + region, requested_scoped_name: name,
+        has_resolved_def: resolved, resolved_def_id: if resolved: def_id else: "",
+        resolved_def_key: if resolved: def_key else: "",
+        invocation_ast_digest: macro_content_digest_v1("ast:" + region),
+        argument_digest: macro_content_digest_v1("args:" + region), hygiene_scope_id: "h0",
+        active_guard_id: "", generated_symbols_digest: macro_content_digest_v1("symbols"),
+        resolution_candidate_root: macro_content_digest_v1("candidates:" + name),
+        has_absence_witness: unresolved,
+        absence_witness: if unresolved: macro_content_digest_v1("absent:" + name) else: "",
+        expand_key: if resolved: macro_content_digest_v1("expand:" + region + def_key) else: "",
+        status: status_of_v1(tag), coverage: coverage)
+
+fn resolved_use_v1(region: text, key_seed: text) -> MacroUseV1:
+    use_v1("user.spl", region, "resolved", "twice", def_id_v1("provider", "twice"),
+        macro_content_digest_v1(key_seed), "complete")
+
+fn state_v1(module: text, name: text, key_seed: text, deps: [text]) -> MacroRrDefinitionStateV1:
+    MacroRrDefinitionStateV1(def_id: def_id_v1(module, name), macro_name: name,
+        key: macro_content_digest_v1(key_seed), dependent_macros: deps,
+        source_path: module + ".spl")
+
+fn entry_v1(name: text, body: text, surface: text, is_public: bool) -> MacroDefinitionEntryV1:
+    MacroDefinitionEntryV1(def_id: MacroDefIdV1(package: "pkg", module: "provider",
+        namespace: "macro", binder: name), macro_name: name, generation: 1,
+        contract_digest: macro_content_digest_v1("contract:" + name),
+        body_digest: macro_content_digest_v1(body), hygiene_schema: "h1",
+        declared_effects: [], dependent_macros: [], guard_ids: [], is_public: is_public,
+        generated_member_names: [], generated_member_root: macro_content_digest_v1("members"),
+        exported_surface_digest: macro_content_digest_v1(surface))
+
+fn table_v1(entries: [MacroDefinitionEntryV1]) -> MacroDefinitionTableV1:
+    MacroDefinitionTableV1(schema: 1, module_id: "pkg.provider", entries: entries)
+
+describe "macro RR subjects and families":
+    # @req REQ-MACRO-RR-010
+    it "names the three macro families with the receipt literal strings":
+        step("Family constants equal the REVERSE_REFERENCE_FAMILIES_V2 literals")
+        expect(macro_rr_family_definition_v1()).to_equal("macro-definition-consumer")
+        expect(macro_rr_family_resolution_v1()).to_equal("macro-name-resolution")
+        expect(macro_rr_family_absence_v1()).to_equal("macro-name-absence")
+
+    # @req REQ-MACRO-RR-010
+    it "round trips definition and name subjects through the subject kind":
+        step("Build root-free subjects and classify them")
+        val id = def_id_v1("provider", "twice")
+        expect(macro_rr_definition_subject_v1(id)).to_equal("macro-def:" + id)
+        expect(macro_rr_name_subject_v1("twice")).to_equal("macro-name:twice")
+        expect(macro_rr_subject_kind_v1(macro_rr_definition_subject_v1(id))).to_equal("definition")
+        expect(macro_rr_subject_kind_v1(macro_rr_name_subject_v1("twice"))).to_equal("name")
+        expect(macro_rr_subject_kind_v1("src/a.spl")).to_equal("")
+
+describe "macro input root":
+    # @req REQ-MACRO-RR-001
+    it "is known, complete and order independent over resolved uses":
+        step("Fold two resolved uses in both orders")
+        val a = resolved_use_v1("r1", "key-a")
+        val b = resolved_use_v1("r2", "key-a")
+        val forward = macro_input_root_v1([a, b])
+        val backward = macro_input_root_v1([b, a])
+        expect(forward.known).to_equal(true)
+        expect(forward.complete).to_equal(true)
+        expect(forward.reason).to_equal("ok")
+        expect(forward.root.len()).to_be_greater_than(0)
+        expect(backward.root).to_equal(forward.root)
+
+    # @req REQ-MACRO-RR-001
+    it "changes when a resolved definition key changes":
+        step("Swap the resolved_def_key of one use")
+        val before = macro_input_root_v1([resolved_use_v1("r1", "key-a"), resolved_use_v1("r2", "key-a")])
+        val after = macro_input_root_v1([resolved_use_v1("r1", "key-b"), resolved_use_v1("r2", "key-a")])
+        expect(after.known).to_equal(true)
+        expect(after.root == before.root).to_equal(false)
+
+    # @req REQ-MACRO-RR-007
+    it "is a known-empty digest for zero uses":
+        step("Fold no uses")
+        val empty = macro_input_root_v1([])
+        expect(empty.known).to_equal(true)
+        expect(empty.complete).to_equal(true)
+        expect(empty.root.len()).to_be_greater_than(0)
+
+    # @req REQ-MACRO-RR-009
+    it "is incomplete with an empty root for a conservative use":
+        step("A conservative-coverage use cannot certify a root")
+        val conservative = use_v1("user.spl", "r1", "resolved", "twice",
+            def_id_v1("provider", "twice"), macro_content_digest_v1("key-a"), "conservative")
+        val root = macro_input_root_v1([conservative])
+        expect(root.complete).to_equal(false)
+        expect(root.root).to_equal("")
+        expect(root.reason).to_equal("conservative-use")
+
+    # @req REQ-MACRO-RR-009
+    it "is unknown for an invalid use":
+        step("An empty invoking_source_id fails use validation")
+        val invalid = use_v1("", "r1", "resolved", "twice", def_id_v1("provider", "twice"),
+            macro_content_digest_v1("key-a"), "complete")
+        val root = macro_input_root_v1([invalid])
+        expect(root.known).to_equal(false)
+        expect(root.root).to_equal("")
+        expect(root.reason).to_equal("invalid-use")
+
+describe "macro effect surface":
+    # @req REQ-MACRO-RR-004
+    it "is independent of generated public name order":
+        step("Same def table, names reordered")
+        val defs = table_v1([entry_v1("twice", "x + x", "surface-1", true)])
+        expect(macro_effect_surface_v1(defs, ["b_gen", "a_gen"]))
+            .to_equal(macro_effect_surface_v1(defs, ["a_gen", "b_gen"]))
+
+    # @req REQ-MACRO-RR-004
+    it "changes when a generated public name is added":
+        step("Add one generated public name")
+        val defs = table_v1([entry_v1("twice", "x + x", "surface-1", true)])
+        val before = macro_effect_surface_v1(defs, ["a_gen"])
+        val after = macro_effect_surface_v1(defs, ["a_gen", "c_gen"])
+        expect(after == before).to_equal(false)
+
+    # @req REQ-MACRO-RR-004
+    it "ignores a body-only digest change":
+        step("Change only body_digest; exported surface and public flag stay")
+        val before = macro_effect_surface_v1(table_v1([entry_v1("twice", "x + x", "surface-1", true)]), [])
+        val after = macro_effect_surface_v1(table_v1([entry_v1("twice", "x * 2", "surface-1", true)]), [])
+        expect(after).to_equal(before)
+        val unpublished = macro_effect_surface_v1(table_v1([entry_v1("twice", "x + x", "surface-1", false)]), [])
+        expect(unpublished == before).to_equal(false)
+
+describe "macro changed subjects":
+    # @req REQ-MACRO-RR-001
+    it "reports only the definition subject for a body edit":
+        step("Same id, different key")
+        val changed = macro_rr_changed_subjects_v1([state_v1("provider", "twice", "k1", [])], true,
+            [state_v1("provider", "twice", "k2", [])], true)
+        expect(changed.complete).to_equal(true)
+        expect(changed.definition_subjects).to_equal(["macro-def:" + def_id_v1("provider", "twice")])
+        expect(changed.name_subjects).to_equal([])
+
+    # @req REQ-MACRO-RR-005
+    it "reports both definitions and both names for a rename":
+        step("twice disappears, thrice appears")
+        val changed = macro_rr_changed_subjects_v1([state_v1("provider", "twice", "k1", [])], true,
+            [state_v1("provider", "thrice", "k1", [])], true)
+        expect(changed.definition_subjects).to_equal(["macro-def:" + def_id_v1("provider", "twice"),
+            "macro-def:" + def_id_v1("provider", "thrice")].sorted())
+        expect(changed.name_subjects).to_equal(["macro-name:thrice", "macro-name:twice"])
+
+    # @req REQ-MACRO-RR-005
+    it "reports the new subjects for an added macro":
+        step("Old side empty")
+        val changed = macro_rr_changed_subjects_v1([], true, [state_v1("provider", "twice", "k1", [])], true)
+        expect(changed.definition_subjects).to_equal(["macro-def:" + def_id_v1("provider", "twice")])
+        expect(changed.name_subjects).to_equal(["macro-name:twice"])
+
+    # @req REQ-MACRO-RR-005
+    it "reports the old subjects for a removed macro":
+        step("New side empty")
+        val changed = macro_rr_changed_subjects_v1([state_v1("provider", "twice", "k1", [])], true, [], true)
+        expect(changed.definition_subjects).to_equal(["macro-def:" + def_id_v1("provider", "twice")])
+        expect(changed.name_subjects).to_equal(["macro-name:twice"])
+
+    # @req REQ-MACRO-RR-009
+    it "fails closed when either forward side is incomplete":
+        step("Incomplete old, then incomplete new")
+        val s = [state_v1("provider", "twice", "k1", [])]
+        val old_bad = macro_rr_changed_subjects_v1(s, false, s, true)
+        expect(old_bad.complete).to_equal(false)
+        expect(old_bad.reason).to_equal("old-forward-incomplete")
+        val new_bad = macro_rr_changed_subjects_v1(s, true, s, false)
+        expect(new_bad.complete).to_equal(false)
+        expect(new_bad.reason).to_equal("new-forward-incomplete")
+
+describe "macro RR facts of a module":
+    # @req REQ-MACRO-RR-010
+    it "derives a definition and a resolution fact for a resolved use":
+        step("One resolved use, no local definitions")
+        val use = resolved_use_v1("r1", "key-a")
+        val facts = macro_rr_facts_of_module_v1("user.spl", [], [use])
+        expect(facts.len()).to_equal(2)
+        expect(facts[0].family).to_equal("macro-definition-consumer")
+        expect(facts[0].subject).to_equal("macro-def:" + def_id_v1("provider", "twice"))
+        expect(facts[0].consumer).to_equal("user.spl")
+        expect(facts[0].evidence).to_equal(use.resolved_def_key)
+        expect(facts[1].family).to_equal("macro-name-resolution")
+        expect(facts[1].subject).to_equal("macro-name:twice")
+        expect(facts[1].evidence).to_equal(use.resolution_candidate_root)
+
+    # @req REQ-MACRO-RR-005
+    it "derives an absence and a resolution fact for an unresolved use":
+        step("One unresolved use")
+        val use = use_v1("user.spl", "r1", "unresolved", "missing", "", "", "complete")
+        val facts = macro_rr_facts_of_module_v1("user.spl", [], [use])
+        expect(facts.len()).to_equal(2)
+        expect(facts[0].family).to_equal("macro-name-absence")
+        expect(facts[0].subject).to_equal("macro-name:missing")
+        expect(facts[0].evidence).to_equal(use.absence_witness)
+        expect(facts[1].family).to_equal("macro-name-resolution")
+
+    # @req REQ-MACRO-RR-005
+    it "derives only a resolution fact for an inactive use":
+        step("One inactive (guarded off) use")
+        val use = use_v1("user.spl", "r1", "inactive", "twice", "", "", "complete")
+        val facts = macro_rr_facts_of_module_v1("user.spl", [], [use])
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].family).to_equal("macro-name-resolution")
+        expect(facts[0].subject).to_equal("macro-name:twice")
+
+    # @req REQ-MACRO-RR-006
+    it "derives a definition fact for each dependent macro of a local definition":
+        step("quad depends on twice")
+        val twice_id = def_id_v1("provider", "twice")
+        val quad = state_v1("nested", "quad", "kq", [twice_id])
+        val facts = macro_rr_facts_of_module_v1("nested.spl", [quad], [])
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].family).to_equal("macro-definition-consumer")
+        expect(facts[0].subject).to_equal("macro-def:" + twice_id)
+        expect(facts[0].consumer).to_equal("nested.spl")
+        expect(facts[0].evidence).to_equal(quad.key)
+
+    # @req REQ-MACRO-RR-010
+    it "sorts and de-duplicates facts":
+        step("Two uses of the same macro collapse to one fact per family")
+        val facts = macro_rr_facts_of_module_v1("user.spl", [],
+            [resolved_use_v1("r2", "key-a"), resolved_use_v1("r1", "key-a")])
+        expect(facts.len()).to_equal(2)
+        expect(facts[0].family < facts[1].family).to_equal(true)
+
+describe "macro dependents closure":
+    # @req REQ-MACRO-RR-006
+    it "follows a chain and skips an unrelated sibling":
+        step("m depends on h; m2 lives beside m and depends on nothing")
+        val h = state_v1("helper_macros", "h", "kh", [])
+        val m = state_v1("mid", "m", "km", [h.def_id])
+        val m2 = state_v1("mid", "m2", "km2", [])
+        val closure = macro_rr_dependents_closure_v1(["macro-def:" + h.def_id], [h, m, m2])
+        expect(closure).to_equal(["macro-def:" + h.def_id, "macro-def:" + m.def_id].sorted())
+        expect(closure.contains("macro-def:" + m2.def_id)).to_equal(false)
+
+    # @req REQ-MACRO-RR-006
+    it "terminates on a two-cycle and reports both members":
+        step("a depends on b, b depends on a")
+        val a_id = def_id_v1("cyc", "a")
+        val b_id = def_id_v1("cyc", "b")
+        val a = state_v1("cyc", "a", "ka", [b_id])
+        val b = state_v1("cyc", "b", "kb", [a_id])
+        val closure = macro_rr_dependents_closure_v1(["macro-def:" + a_id], [a, b])
+        expect(closure).to_equal(["macro-def:" + a_id, "macro-def:" + b_id].sorted())
