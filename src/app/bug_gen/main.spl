@@ -4,6 +4,7 @@
 use std.cli.cli_util (get_cli_args, parse_csv_fields)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (file_exists, file_read, file_write)
+use app.tracking_doc.stable_write.{write_generated_doc}
 use std.log.{error}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day}
@@ -89,7 +90,10 @@ fn load_bugs(db_path: text) -> BugLoad:
             continue
 
         val fields = parse_csv_fields(trimmed)
-        if fields.len() >= 10:
+        # Exactly 10 columns. An unquoted comma in a free-text field yields
+        # MORE than 10 fields: accepting that shifted every later column (the
+        # `valid` flag read a note fragment, so the bug was silently excluded).
+        if fields.len() == 10:
             val valid_str = fields[9]
             bugs.push(BugItem(
                 id: fields[0],
@@ -216,7 +220,7 @@ fn main() -> i64:
             refs.push(db_path + ":" + n.to_string())
         val msg = "refusing to regenerate from a partial parse: " +
             loaded.unparsed_lines.len().to_string() +
-            " row(s) in the `bugs` table did not fully parse (" +
+            " row(s) in the `bugs` table did not parse as exactly 10 columns (quote free text containing commas) (" +
             refs.join(", ") + "); nothing was written"
         print "error[bug-gen]: {msg}"
         error("bug-gen", msg)
@@ -224,7 +228,7 @@ fn main() -> i64:
 
     val bugs = loaded.bugs
     val md = generate_md(bugs)
-    file_write(md_path, md)
+    write_generated_doc(md_path, md)
     if log_opts.progress != "summary":
         val progress_line = render_progress(log_opts.progress, bugs.len(), bugs.len(), "bug-gen")
         if progress_line != "":

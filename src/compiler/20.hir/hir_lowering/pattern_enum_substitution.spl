@@ -25,6 +25,39 @@ pub fn declared_pattern_slot_type_is_concrete(type_: HirType) -> bool:
         case HirTypeKind.DynTrait(owner): owner.is_valid()
         case _: true
 
+pub fn declared_pattern_slot_type_is_resolved(type_: HirType) -> bool:
+    """Concrete, or an erased generic binder (`T`) anywhere inside.
+
+    Generics = one erased body (2026-10-31): inside `fn unwrap<T>(p:
+    Poll<T>)` the subject is `Poll<T>` with `T` a rigid binder, the arm is
+    chosen by the variant tag alone, and a payload binder over a `T` slot
+    is the erased tagged word, exactly like a `T` parameter. Such an
+    actual substitutes to `T` and is NOT an inference gap: Infer, Error,
+    Any and Projection stay unresolved."""
+    if type_ == nil:
+        return false
+    match type_.kind:
+        case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any | HirTypeKind.Projection(_, _): false
+        case HirTypeKind.TypeParam(_, _): true
+        case HirTypeKind.Array(inner, _) | HirTypeKind.Slice(inner) | HirTypeKind.Optional(inner) | HirTypeKind.Isolated(inner) | HirTypeKind.Unique(inner) | HirTypeKind.Shared(inner) | HirTypeKind.Weak(inner):
+            declared_pattern_slot_type_is_resolved(inner)
+        case HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _): declared_pattern_slot_type_is_resolved(inner)
+        case HirTypeKind.Dict(left, right) | HirTypeKind.Result(left, right):
+            declared_pattern_slot_type_is_resolved(left) and declared_pattern_slot_type_is_resolved(right)
+        case HirTypeKind.Tuple(elements) | HirTypeKind.Union(elements): declared_pattern_slot_types_are_resolved(elements)
+        case HirTypeKind.Named(owner, args): owner.is_valid() and declared_pattern_slot_types_are_resolved(args)
+        case HirTypeKind.Function(params, result, _): declared_pattern_slot_types_are_resolved(params) and declared_pattern_slot_type_is_resolved(result)
+        case HirTypeKind.Tensor(inner, _, _): declared_pattern_slot_type_is_resolved(inner)
+        case HirTypeKind.DynTrait(owner): owner.is_valid()
+        case _: true
+
+pub fn declared_pattern_slot_types_are_resolved(types: [HirType]) -> bool:
+    for raw in types:
+        val type_: HirType = raw
+        if not declared_pattern_slot_type_is_resolved(type_):
+            return false
+    true
+
 pub fn declared_pattern_slot_types_are_concrete(types: [HirType]) -> bool:
     for raw in types:
         val type_: HirType = raw
@@ -92,7 +125,9 @@ pub fn substitute_declared_pattern_type(template: HirType, names: [text], actual
     if template == nil:
         return HirType(kind: HirTypeKind.Error, span: Span.empty())
     val invalid = HirType(kind: HirTypeKind.Error, span: template.span)
-    if names.len() != actuals.len() or not declared_pattern_slot_types_are_concrete(actuals):
+    # An erased binder actual (`Poll<T>` inside a generic body) is a
+    # resolved substitution, not an inference gap.
+    if names.len() != actuals.len() or not declared_pattern_slot_types_are_resolved(actuals):
         return invalid
     var name_index = 0
     while name_index < names.len():
@@ -107,7 +142,7 @@ pub fn substitute_declared_pattern_type(template: HirType, names: [text], actual
             var index = 0
             while index < names.len():
                 if names[index] == name:
-                    if not declared_pattern_slot_type_is_concrete(actuals[index]):
+                    if not declared_pattern_slot_type_is_resolved(actuals[index]):
                         return invalid
                     return actuals[index]
                 index = index + 1
