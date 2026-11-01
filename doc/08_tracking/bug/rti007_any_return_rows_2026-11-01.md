@@ -1,5 +1,7 @@
 # rti007: declared returns that lower to `Any` get no RTI row in the frozen stage2 (2026-11-01)
 
+Status: OPEN in the frozen stage2 bootstrap compiler; tagged source workarounds stay until the stage2 refresh.
+
 Bug id: `rti007_any_return_rows_2026-11-01` (every `@workaround` tag of this family
 references it). Successor of `rti007_mir_2026-10-31.md` (bare `-> Result` in the linker
 modules, same root bug, different producers).
@@ -99,3 +101,18 @@ f512a01c535, d2e2813c37d and 1c8132a5952 (i.e. after the next stage2 refresh fro
   416-module closure (frontend + HIR lowering + lib, entry importing
   `compiler.hir.hir_lowering.types`) no longer reports `E-RTI-007` for
   `module_callable_types` / `async.poll` (see the PR description for the exact run).
+
+## Re-verification of the run-12 lib.nogc_async_mut MIR failures (2026-11-01)
+
+Tip eb72b5c9fde (includes #5737, #5741, #5742, #5743, #5749, #5753). Frozen stage2
+`C:/dev/p3new/stage2.exe`, `compile build/repro/entry_libasync.spl --format=smf --source src/lib
+--source src/compiler --source src/app --threads 8 --keep-going --go-to-end` with a private copy of
+the cachewp6 cache and a 16 GB tree cap. The entry imports `async.poll`, `async_ring.async_ref`,
+`async_ring.simple_ring` and `io.buffer`:
+
+- `phase=mir ... done=71 total=71 succeeded=71 failed=0`; 0 `failed stage=` lines; peak tree RSS 0.77 GB, 80 s.
+- Run 12 (`C:/dev/p3new/r11/run12/build.log.err`) had: poll 2x E-RTI-007 `enum:Poll::unwrap`;
+  async_ref 8x E-RTI-004 (ids 2^50+315/316 at 270:19, 279:19); simple_ring 2x ambiguous `Ok`
+  (383:31) + 2x `CancelRejected` payload mismatch; io.buffer 36x E-MIR-TYPE-TypeParam. All gone.
+- The later `smf_package` step fails (rc=1); that is after MIR and outside this bug.
+- Regression spec for the poll site: `test/01_unit/lib/nogc_async_mut/async/poll_rti007_wa_spec.spl`.

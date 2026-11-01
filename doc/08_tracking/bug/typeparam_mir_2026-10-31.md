@@ -1,5 +1,7 @@
 # typeparam MIR failure: static generic class factory leaves T unsubstituted (2026-10-31)
 
+Status: OPEN in the frozen stage2 bootstrap compiler; tagged source workarounds stay until the stage2 refresh.
+
 ## Root bug
 `Future.from_value(x)` / `Future.pending()` (static fns of generic `class Future<T>`,
 src/lib/nogc_async_mut/async/future.spl) reach MIR lowering with `T` unsubstituted in the
