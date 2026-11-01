@@ -14,3 +14,10 @@ REQ-WUN-005: Calendar years shall distinguish UCUM variants `a`, `a_j`, `a_g`, a
 REQ-WUN-006: Currency units shall use ISO 4217 identities such as `USD`; display symbols such as `$` are aliases.
 
 REQ-WUN-007: Public bare primitive APIs shall be migrated to custom `newunit`, measurement `unit`, enum, Option, or Result types unless explicitly allowlisted.
+
+2026-11-01 clarification: the selected
+[extreme-typing policy](../../feature/extreme_typing_traceability.md) supersedes
+this allowlist for robust/critical/verified public Simple APIs. Option/Result
+alone do not remove a primitive leaf. Private representation remains legal;
+public constructors/getters/conversions must preserve the semantic boundary.
+Non-robust historical lint behavior is unchanged by this design addendum.

@@ -69,3 +69,14 @@ Development intent is authored in
 requirements and 40 planned criteria, with explicit current artifact links.
 It contains no execution records. Native parser admission and registered
 authority remain pending; file presence is not traceability qualification.
+
+# Proposed trace/code/API and extreme-typing extension
+
+The 2026-11-01 [extension design](../../04_architecture/extreme_typing_traceability.md)
+and [phase plan](../../03_plan/agent_tasks/extreme_typing_traceability.md) extend
+the existing traceability roadmap. Proposed `simple trace` and `simple api`
+commands are not documented here as implemented. The selected public API rule
+for robust, critical and verified profiles forbids all bare builtins and requires
+domain-safe generic bounds; easy nominal construction must be demonstrated
+before completion. Existing
+traceability-check behavior and baseline qualification claims are unchanged.
