@@ -1,0 +1,231 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/04_architecture/compiler/macro_rr_invalidation.md ; plan: doc/03_plan/sys_test/macro_rr_invalidation.md ; design: doc/05_design/compiler/macro_rr_invalidation.md
+
+"""
+## Purpose and audience
+
+Purpose: pin the driver macro invalidation step: changed subjects per edited
+path, affected sources through a schema-2 receipt, and the current input root
+rewrite. Audience: compiler cache engineers.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/cache/macro_rr_invalidation_v1_spec.spl --mode=interpreter`.
+2. Every scenario must pass; a failure is over- or under-invalidation.
+
+## Compatibility and limitations
+
+Writes a fixture tree under `build/test_tmp/`; the receipt is built by hand
+from inventory facts. Failing-first: `macro_rr_invalidation_v1` does not exist
+until the implementation lands.
+"""
+
+# doc-path: doc/03_plan/sys_test/macro_rr_invalidation.md
+# doc-path: doc/04_architecture/compiler/macro_rr_invalidation.md
+# doc-path: doc/05_design/compiler/macro_rr_invalidation.md
+# doc-path: doc/03_plan/agent_tasks/macro_rr_invalidation.md
+# @manual: primary
+# @tag:in-development
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:macros
+
+"""
+# Macro RR invalidation v1
+
+Exact or widen: every non-exact answer carries a reason and the caller widens.
+"""
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{file_write, file_read, file_exists}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.time_ops.{time_now_unix_micros}
+use compiler.driver.cache.module_artifacts_v1.{module_artifacts_emit_v1}
+use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1}
+use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceProjectionV1,
+    ReverseReferenceGenerationReceiptV1, ReverseReferenceReceiptReadV1,
+    reverse_reference_receipt_encode_v1, reverse_reference_receipt_decode_v1}
+use compiler.common.cache_contract.macro_rr_contract_v1.{MacroRrFactV1,
+    MacroRrChangedSubjectsV1}
+use compiler.driver.cache.macro_rr_inventory_v1.{MacroRrInventoryV1, macro_rr_inventory_v1,
+    macro_rr_module_state_v1}
+use compiler.driver.cache.macro_rr_invalidation_v1.{MacroRrAffectedV1,
+    macro_rr_changed_subjects_for_path_v1, macro_rr_affected_sources_v1,
+    macro_rr_current_input_root_v1}
+
+extern fn rt_file_delete(path: text) -> bool
+
+struct MacroRrInvalidationFixtureV1:
+    tldr: text
+    provider: text
+    user: text
+    provider_text: text
+    receipt: ReverseReferenceReceiptReadV1
+
+fn provider_text_v1() -> text:
+    "macro twice(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\n"
+
+fn user_text_v1() -> text:
+    "fn first() -> i64:\n    twice!(1)\n"
+
+fn receipt_from_facts_v1(facts: [MacroRrFactV1], schema: i64) -> ReverseReferenceGenerationReceiptV1:
+    var projections: [ReverseReferenceProjectionV1] = []
+    for fact in facts:
+        projections.push(ReverseReferenceProjectionV1(key: ReverseReferenceKeyV1(
+            registry_kind: "semantic", owner_generation: "owner-g1", root_generation: "root-g1",
+            subject_identity: fact.subject, projection_kind: fact.family,
+            projection_digest: sha256_text(fact.evidence), schema_version: 1),
+            consumer_identity: fact.consumer))
+    ReverseReferenceGenerationReceiptV1(schema_version: schema, owner_generation: "owner-g1",
+        root_generation: "root-g1", projections: projections)
+
+fn setup_macro_rr_invalidation_v1() -> MacroRrInvalidationFixtureV1:
+    val root = "build/test_tmp/macro_rr_invalidation_{time_now_unix_micros()}"
+    val _created = dir_create_all(root + "/src")
+    val provider = root + "/src/provider.spl"
+    val user = root + "/src/user.spl"
+    val tldr = root + "/tldr"
+    val _p = file_write(provider, provider_text_v1())
+    val _u = file_write(user, user_text_v1())
+    val _ep = module_artifacts_emit_v1(provider, tldr)
+    val _eu = module_artifacts_emit_v1(user, tldr)
+    val inventory = macro_rr_inventory_v1([provider, user], tldr)
+    val receipt = reverse_reference_receipt_decode_v1(
+        reverse_reference_receipt_encode_v1(receipt_from_facts_v1(inventory.facts, 2)))
+    MacroRrInvalidationFixtureV1(tldr: tldr, provider: provider, user: user,
+        provider_text: provider_text_v1(), receipt: receipt)
+
+fn edit_provider_body_v1(fx: MacroRrInvalidationFixtureV1) -> MacroRrChangedSubjectsV1:
+    val _w = file_write(fx.provider, fx.provider_text.replace("x + x", "x * 2"))
+    macro_rr_changed_subjects_for_path_v1(fx.provider, "modified", fx.tldr,
+        sha256_text(fx.provider_text))
+
+describe "macro RR changed subjects for a path":
+    # @req REQ-MACRO-RR-001
+    it "yields only the definition subject for a provider body edit":
+        step("Read pre-edit sections raw, then refresh, then diff")
+        val fx = setup_macro_rr_invalidation_v1()
+        val before = macro_rr_module_state_v1(fx.provider, fx.tldr)
+        val changed = edit_provider_body_v1(fx)
+        expect(changed.complete).to_equal(true)
+        expect(changed.definition_subjects).to_equal(["macro-def:" + before.defs[0].def_id])
+        expect(changed.name_subjects).to_equal([])
+
+    # @req REQ-MACRO-RR-005
+    it "treats an added file as an empty old side":
+        step("Write a new provider and report it as added")
+        val fx = setup_macro_rr_invalidation_v1()
+        val added = fx.provider.replace("provider.spl", "added.spl")
+        expect(file_write(added, provider_text_v1().replace("twice", "thrice"))).to_equal(true)
+        val changed = macro_rr_changed_subjects_for_path_v1(added, "added", fx.tldr, "")
+        expect(changed.complete).to_equal(true)
+        expect(changed.definition_subjects.len()).to_equal(1)
+        expect(changed.name_subjects).to_equal(["macro-name:thrice"])
+
+    # @req REQ-MACRO-RR-005
+    it "treats a deleted file as an empty new side":
+        step("Delete the provider source; its companion still holds the old sections")
+        val fx = setup_macro_rr_invalidation_v1()
+        val before = macro_rr_module_state_v1(fx.provider, fx.tldr)
+        expect(rt_file_delete(fx.provider)).to_equal(true)
+        val changed = macro_rr_changed_subjects_for_path_v1(fx.provider, "deleted", fx.tldr,
+            sha256_text(fx.provider_text))
+        expect(changed.complete).to_equal(true)
+        expect(changed.definition_subjects).to_equal(["macro-def:" + before.defs[0].def_id])
+        expect(changed.name_subjects).to_equal(["macro-name:twice"])
+
+describe "macro RR affected sources":
+    # @req REQ-MACRO-RR-001
+    it "answers exactly the recorded user and never the changed path":
+        step("Body edit, current inventory, schema-2 receipt lookup")
+        val fx = setup_macro_rr_invalidation_v1()
+        expect(fx.receipt.valid).to_equal(true)
+        val changed = edit_provider_body_v1(fx)
+        val inventory = macro_rr_inventory_v1([fx.provider, fx.user], fx.tldr)
+        val affected = macro_rr_affected_sources_v1(fx.receipt, changed, inventory,
+            [fx.provider, fx.user])
+        expect(affected.exact).to_equal(true)
+        expect(affected.reason).to_equal("")
+        expect(affected.sources).to_equal([fx.user])
+        expect(affected.sources.contains(fx.provider)).to_equal(false)
+
+    # @req REQ-MACRO-RR-009
+    it "widens when the changed subjects are incomplete":
+        step("Hand an incomplete diff to the lookup")
+        val fx = setup_macro_rr_invalidation_v1()
+        val inventory = macro_rr_inventory_v1([fx.provider, fx.user], fx.tldr)
+        val incomplete = MacroRrChangedSubjectsV1(complete: false, reason: "old-forward-incomplete",
+            definition_subjects: [], name_subjects: [])
+        val affected = macro_rr_affected_sources_v1(fx.receipt, incomplete, inventory,
+            [fx.provider, fx.user])
+        expect(affected.exact).to_equal(false)
+
+    # @req REQ-MACRO-RR-009
+    it "widens on a schema 1 receipt":
+        step("Same facts, schema_version 1: macro families are unknown")
+        val fx = setup_macro_rr_invalidation_v1()
+        val inventory0 = macro_rr_inventory_v1([fx.provider, fx.user], fx.tldr)
+        val legacy = ReverseReferenceReceiptReadV1(valid: true, reason: "",
+            receipt: receipt_from_facts_v1(inventory0.facts, 1))
+        val changed = edit_provider_body_v1(fx)
+        val inventory = macro_rr_inventory_v1([fx.provider, fx.user], fx.tldr)
+        val affected = macro_rr_affected_sources_v1(legacy, changed, inventory,
+            [fx.provider, fx.user])
+        expect(affected.exact).to_equal(false)
+
+    # @req REQ-MACRO-RR-009
+    it "widens when the receipt names a consumer outside the known sources":
+        step("Omit the user from known_sources")
+        val fx = setup_macro_rr_invalidation_v1()
+        val changed = edit_provider_body_v1(fx)
+        val inventory = macro_rr_inventory_v1([fx.provider, fx.user], fx.tldr)
+        val affected = macro_rr_affected_sources_v1(fx.receipt, changed, inventory, [fx.provider])
+        expect(affected.exact).to_equal(false)
+        expect(affected.reason).to_start_with("receipt-consumer-unknown:")
+
+describe "macro RR current input root":
+    # @req REQ-MACRO-RR-009
+    it "is unknown when a resolved definition is missing from the inventory":
+        step("Drop every definition from the inventory and recompute the user's root")
+        val fx = setup_macro_rr_invalidation_v1()
+        val inventory = macro_rr_inventory_v1([fx.provider, fx.user], fx.tldr)
+        val stripped = MacroRrInventoryV1(complete: true, reason: "ok", modules: inventory.modules,
+            facts: inventory.facts, all_defs: [])
+        val root = macro_rr_current_input_root_v1(macro_rr_module_state_v1(fx.user, fx.tldr), stripped)
+        expect(root.known).to_equal(false)
+        expect(root.reason).to_equal("definition-missing")
+
+    # @req REQ-MACRO-RR-001
+    it "matches the recorded root when nothing changed":
+        step("Current fold equals the companion fold on an unchanged tree")
+        val fx = setup_macro_rr_invalidation_v1()
+        val inventory = macro_rr_inventory_v1([fx.provider, fx.user], fx.tldr)
+        val state = macro_rr_module_state_v1(fx.user, fx.tldr)
+        val root = macro_rr_current_input_root_v1(state, inventory)
+        expect(root.known).to_equal(true)
+        expect(root.root).to_equal(state.input_root.root)
+
+describe "macro RR invalidation pre-edit companion binding":
+    it "refuses a pre-edit companion that was rewritten after the edit":
+        # @req REQ-MACRO-RR-009
+        step("Edit the provider, re-emit its companion, then ask for the recorded pre-edit state")
+        val fx = setup_macro_rr_invalidation_v1()
+        expect(file_write(fx.provider, fx.provider_text.replace("x + x", "x * 2"))).to_equal(true)
+        expect(module_artifacts_emit_v1(fx.provider, fx.tldr)).to_equal("")
+        val changed = macro_rr_changed_subjects_for_path_v1(fx.provider, "modified", fx.tldr,
+            sha256_text(fx.provider_text))
+        expect(changed.complete).to_equal(false)
+        expect(changed.reason).to_start_with("old-forward-incomplete:pre-edit-companion-not-recorded")
+
+    it "refuses a modified path whose recorded source hash is missing":
+        # @req REQ-MACRO-RR-009
+        step("Ask for changed subjects without the cache's recorded hash")
+        val fx = setup_macro_rr_invalidation_v1()
+        expect(file_write(fx.provider, fx.provider_text.replace("x + x", "x * 2"))).to_equal(true)
+        val changed = macro_rr_changed_subjects_for_path_v1(fx.provider, "modified", fx.tldr, "")
+        expect(changed.complete).to_equal(false)
+        expect(changed.reason).to_start_with("old-forward-incomplete:pre-edit-source-hash-missing")

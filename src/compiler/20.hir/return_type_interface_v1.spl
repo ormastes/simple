@@ -184,7 +184,22 @@ fn rti_row_canonical_text_v1(row: ReturnTypeRow) -> text:
 # HIR type -> interface term
 # ============================================================================
 
+val RTI_ERASED_BUILTIN = "any"
+
 fn rti_builtin_of_kind(kind: HirTypeKind) -> text:
+    """Builtin term name of a scalar HIR kind; "" when the kind is composite.
+
+    `HirTypeKind.Any` is the erased row term (`b:any`). A declared return
+    reaches RTI as Any only when the provider made no concrete claim: a bare
+    `-> Result`/`-> Option`/`-> Dict` payload, an untyped function whose body
+    value could not be inferred on the bootstrap route, an unbound
+    single-letter type name, or an `extern fn rt_*` whose ABI is dynamic.
+    Such a callee still owns one row (its callers may resolve it by
+    qualified name, E-RTI-002 otherwise); the row says "dynamic" instead of
+    refusing with E-RTI-007, and `bind` turns it back into Any for the
+    consumer. Every concrete declared shape must keep its shape instead of
+    reaching this arm; the producers are covered by
+    test/01_unit/compiler/hir/return_type_interface_any_rows_spec.spl."""
     match kind:
         case HirTypeKind.Int(bits, signed): (if signed: "i" else: "u") + bits.to_string()
         case HirTypeKind.Float(bits): "f" + bits.to_string()
@@ -193,7 +208,7 @@ fn rti_builtin_of_kind(kind: HirTypeKind) -> text:
         case HirTypeKind.Str: "text"
         case HirTypeKind.Unit: "unit"
         case HirTypeKind.Never: "never"
-        case HirTypeKind.Any: "any"
+        case HirTypeKind.Any: RTI_ERASED_BUILTIN
         case _: ""
 
 fn rti_param_index(name: text, type_params: [text]) -> i64:
@@ -246,8 +261,8 @@ fn rti_term_of_hir_type(t: HirType, symbols: SymbolTable, type_params: [text]) -
         case HirTypeKind.Shared(inner): Ok(RtType.OwnedT("shared", rti_term_of_hir_type(inner, symbols, type_params)?))
         case HirTypeKind.Weak(inner): Ok(RtType.OwnedT("weak", rti_term_of_hir_type(inner, symbols, type_params)?))
         case HirTypeKind.Isolated(inner): rti_term_of_hir_type(inner, symbols, type_params)
-        # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
-        case HirTypeKind.Any: Err(rti_error("E-RTI-007", "declared return is Any; not representable in an interface row"))
+        # Any is handled by rti_builtin_of_kind above (erased row `b:any`);
+        # an E-RTI-007 arm for it would be unreachable and is deliberately absent.
         # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
         case HirTypeKind.Infer(_, _): Err(rti_error("E-RTI-007", "declared return is an inference variable"))
         # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference

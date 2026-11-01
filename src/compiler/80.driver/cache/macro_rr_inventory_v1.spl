@@ -1,0 +1,259 @@
+# Macro RR inventory: the committed forward authority for macro reverse
+# references, rebuilt from the module `.tldr` companions (`macro-def|`,
+# `macro-use|`, `macro-key|` sections written by module_artifacts_emit_v1).
+#
+# Plan 2026-10-31 §8.4: reverse references are derived from COMPLETE old and
+# new forward manifests, never from the in-process owner snapshot (an
+# unchanged module is not re-emitted in an incremental build, so its edges
+# must come from its committed companion). Any module whose companion is
+# missing, stale, corrupt, or carries an unexpected section count makes the
+# inventory incomplete; the receipt then marks the macro families
+# `@unknown-family` and every lookup widens (fail closed, never "no
+# dependents").
+#
+# Uncacheable definitions (ambient effects, `macro-key|` flag 1) keep their
+# key, but every expansion of one is conservative: its site never gets a
+# complete input root, so the site is always rebuilt.
+#
+# Design: doc/05_design/compiler/macro_rr_invalidation.md §2.
+
+use std.io_runtime.{file_exists, file_read}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse}
+use compiler.driver.cache.module_artifacts_v1.{module_artifacts_emit_v1,
+    module_artifact_module_id_v1, module_tldr_companion_path_v1,
+    module_tldr_companion_sections_v1, module_tldr_companion_sections_raw_v1,
+    module_tldr_companion_source_digest_raw_v1}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroUseV1,
+    MacroDefinitionTableV1, macro_definition_table_decode_v1, macro_use_table_decode_v1,
+    macro_reference_schema_v1, macro_reference_max_items_v1, macro_use_status_tag_v1}
+use compiler.common.cache_contract.macro_rr_contract_v1.{MacroInputRootV1,
+    MacroRrDefinitionStateV1, MacroRrFactV1, macro_input_root_v1, macro_effect_surface_v1,
+    macro_rr_facts_of_module_v1, macro_rr_definition_states_v1,
+    macro_rr_definition_states_complete_v1}
+
+pub struct MacroRrModuleStateV1:
+    source_path: text
+    fresh: bool
+    reason: text
+    defs: [MacroRrDefinitionStateV1]
+    uses: [MacroUseV1]
+    def_table: MacroDefinitionTableV1
+    generated_public_names: [text]
+    uncacheable_def_ids: [text]
+    input_root: MacroInputRootV1
+    effect_surface: text
+
+pub struct MacroRrInventoryV1:
+    complete: bool
+    reason: text
+    modules: [MacroRrModuleStateV1]
+    facts: [MacroRrFactV1]
+    all_defs: [MacroRrDefinitionStateV1]
+    uncacheable_def_ids: [text]
+
+fn _empty_table_v1(module_id: text) -> MacroDefinitionTableV1:
+    MacroDefinitionTableV1(schema: macro_reference_schema_v1(), module_id: module_id, entries: [])
+
+fn _unknown_root_v1(reason: text) -> MacroInputRootV1:
+    MacroInputRootV1(known: false, complete: false, root: "", reason: reason)
+
+fn _not_fresh_v1(source_path: text, reason: text) -> MacroRrModuleStateV1:
+    MacroRrModuleStateV1(source_path: source_path, fresh: false, reason: reason, defs: [], uses: [],
+        def_table: _empty_table_v1(module_artifact_module_id_v1(source_path)),
+        generated_public_names: [], uncacheable_def_ids: [],
+        input_root: _unknown_root_v1(reason), effect_surface: "")
+
+# An explicitly empty state (a file with no companion history: "added", or
+# the post-delete side). complete by construction: zero definitions, zero uses.
+pub fn macro_rr_module_state_empty_v1(source_path: text) -> MacroRrModuleStateV1:
+    val table = _empty_table_v1(module_artifact_module_id_v1(source_path))
+    MacroRrModuleStateV1(source_path: source_path, fresh: true, reason: "empty", defs: [], uses: [],
+        def_table: table, generated_public_names: [], uncacheable_def_ids: [],
+        input_root: macro_input_root_v1([]), effect_surface: macro_effect_surface_v1(table, []))
+
+# Uses re-marked conservative where they expand an uncacheable definition.
+pub fn macro_rr_uses_with_uncacheable_v1(uses: [MacroUseV1], uncacheable_def_ids: [text]) -> [MacroUseV1]:
+    var out: [MacroUseV1] = []
+    for u in uses:
+        var v = u
+        if macro_use_status_tag_v1(u.status) == "resolved" and
+                uncacheable_def_ids.contains(u.resolved_def_id):
+            v.coverage = "conservative"
+        out.push(v)
+    out
+
+# Decode the three macro sections of ONE module. Exactly one of each section
+# is required: a companion written by an older producer (no macro sections)
+# is not a known-empty inventory, it is unknown.
+fn _state_from_sections_v1(source_path: text, sections: [text]) -> MacroRrModuleStateV1:
+    val module_id = module_artifact_module_id_v1(source_path)
+    var def_text = ""
+    var use_text = ""
+    var key_text = ""
+    var def_count = 0
+    var use_count = 0
+    var key_count = 0
+    for s in sections:
+        if s.starts_with("macro-def|"):
+            def_text = s.substring(10)
+            def_count = def_count + 1
+        elif s.starts_with("macro-use|"):
+            use_text = s.substring(10)
+            use_count = use_count + 1
+        elif s.starts_with("macro-key|"):
+            key_text = s.substring(10)
+            key_count = key_count + 1
+    if def_count != 1 or use_count != 1:
+        return _not_fresh_v1(source_path, "macro-section-count")
+    val defs_decoded = macro_definition_table_decode_v1(def_text)
+    if not defs_decoded.ok or defs_decoded.value.schema != macro_reference_schema_v1() or
+            defs_decoded.value.module_id != module_id:
+        return _not_fresh_v1(source_path, "macro-def-corrupt")
+    val uses_decoded = macro_use_table_decode_v1(use_text)
+    if not uses_decoded.ok or uses_decoded.value.schema != macro_reference_schema_v1() or
+            uses_decoded.value.module_id != module_id:
+        return _not_fresh_v1(source_path, "macro-use-corrupt")
+    for u in uses_decoded.value.uses:
+        if u.invoking_source_id != source_path:
+            return _not_fresh_v1(source_path, "macro-use-foreign-source")
+    # `macro-key|` is written only when the module defines macros (one row per
+    # definition: id \t name \t key \t uncacheable-flag).
+    if defs_decoded.value.entries.len() > 0 and key_count != 1:
+        return _not_fresh_v1(source_path, "macro-key-missing")
+    if key_count > 1:
+        return _not_fresh_v1(source_path, "macro-section-count")
+    var key_ids: [text] = []
+    var keys: [text] = []
+    var uncacheable: [text] = []
+    if key_count == 1:
+        for line in key_text.split("\n"):
+            if line == "": continue
+            val f = line.split("\t")
+            if f.len() != 4:
+                return _not_fresh_v1(source_path, "macro-key-corrupt")
+            key_ids.push(f[0])
+            keys.push(f[2])
+            if f[3] == "1": uncacheable.push(f[0])
+            elif f[3] != "0":
+                return _not_fresh_v1(source_path, "macro-key-corrupt")
+    val defs = macro_rr_definition_states_v1(source_path, defs_decoded.value, key_ids, keys)
+    if not macro_rr_definition_states_complete_v1(defs):
+        return _not_fresh_v1(source_path, "macro-key-incomplete")
+    # The generated public surface a dependent observes: the member roots of
+    # every resolved expansion in this module (one per use, sorted inside the
+    # fold) plus the exported contracts of its own definitions.
+    var generated: [text] = []
+    for u in uses_decoded.value.uses:
+        if macro_use_status_tag_v1(u.status) == "resolved" and u.generated_symbols_digest != "":
+            generated.push(u.generated_symbols_digest)
+    MacroRrModuleStateV1(source_path: source_path, fresh: true, reason: "ok", defs: defs,
+        uses: uses_decoded.value.uses, def_table: defs_decoded.value,
+        generated_public_names: generated, uncacheable_def_ids: uncacheable,
+        input_root: macro_input_root_v1(
+            macro_rr_uses_with_uncacheable_v1(uses_decoded.value.uses, uncacheable)),
+        effect_surface: macro_effect_surface_v1(defs_decoded.value, generated))
+
+# Current state from a FRESH companion (source-bound).
+pub fn macro_rr_module_state_v1(source_path: text, tldr_root: text) -> MacroRrModuleStateV1:
+    if tldr_root == "":
+        return _not_fresh_v1(source_path, "tldr-root-unset")
+    if not file_exists(source_path):
+        return _not_fresh_v1(source_path, "source-missing")
+    val companion = module_tldr_companion_path_v1(tldr_root, source_path)
+    if not file_exists(companion):
+        return _not_fresh_v1(source_path, "companion-missing")
+    val sections = module_tldr_companion_sections_v1(file_read(companion), file_read(source_path))
+    if sections.len() == 0:
+        return _not_fresh_v1(source_path, "companion-stale-or-invalid")
+    _state_from_sections_v1(source_path, sections)
+
+# Pre-edit state: the companion as last committed for the source the cache
+# RECORDED (`recorded_source_hash` = the entry's SHA-256 hex). A companion
+# rewritten after the edit (a compile or record step that ran before this
+# detect) carries a different digest and is refused, so the OLD forward
+# manifest can never be silently equal to the new one.
+pub fn macro_rr_module_state_raw_v1(source_path: text, tldr_root: text,
+        recorded_source_hash: text) -> MacroRrModuleStateV1:
+    if tldr_root == "":
+        return _not_fresh_v1(source_path, "tldr-root-unset")
+    if recorded_source_hash == "":
+        return _not_fresh_v1(source_path, "pre-edit-source-hash-missing")
+    val companion = module_tldr_companion_path_v1(tldr_root, source_path)
+    if not file_exists(companion):
+        return _not_fresh_v1(source_path, "pre-edit-companion-missing")
+    val content = file_read(companion)
+    val tagged = module_tldr_companion_source_digest_raw_v1(content)
+    val parsed = digest_v1_parse(tagged)
+    if parsed == nil or parsed!.hex != recorded_source_hash:
+        return _not_fresh_v1(source_path, "pre-edit-companion-not-recorded")
+    val (ok, sections) = module_tldr_companion_sections_raw_v1(content)
+    if not ok:
+        return _not_fresh_v1(source_path, "pre-edit-companion-corrupt")
+    _state_from_sections_v1(source_path, sections)
+
+# Re-emit the companion (the one parse; a no-op when already fresh) and read
+# the current state. Emission failure is reported, never hidden as empty.
+pub fn macro_rr_module_state_refresh_v1(source_path: text, tldr_root: text) -> MacroRrModuleStateV1:
+    if tldr_root == "":
+        return _not_fresh_v1(source_path, "tldr-root-unset")
+    if not file_exists(source_path):
+        return _not_fresh_v1(source_path, "source-missing")
+    val error = module_artifacts_emit_v1(source_path, tldr_root)
+    if error != "":
+        return _not_fresh_v1(source_path, "emit:" + error)
+    macro_rr_module_state_v1(source_path, tldr_root)
+
+pub fn macro_rr_module_state_complete_v1(state: MacroRrModuleStateV1) -> bool:
+    state.fresh and macro_rr_definition_states_complete_v1(state.defs)
+
+fn _incomplete_inventory_v1(reason: text, modules: [MacroRrModuleStateV1],
+        facts: [MacroRrFactV1], all_defs: [MacroRrDefinitionStateV1],
+        uncacheable: [text]) -> MacroRrInventoryV1:
+    MacroRrInventoryV1(complete: false, reason: reason, modules: modules, facts: facts,
+        all_defs: all_defs, uncacheable_def_ids: uncacheable)
+
+# The complete committed inventory over `source_paths` (the BuildCache
+# entries). Facts of every fresh module are collected even when another
+# module is not fresh, so diagnostics can name the gap; `complete` is the only
+# admission signal.
+pub fn macro_rr_inventory_v1(source_paths: [text], tldr_root: text) -> MacroRrInventoryV1:
+    if tldr_root == "":
+        return _incomplete_inventory_v1("tldr-root-unset", [], [], [], [])
+    if source_paths.len() > macro_reference_max_items_v1():
+        return _incomplete_inventory_v1("macro-inventory-bound", [], [], [], [])
+    var modules: [MacroRrModuleStateV1] = []
+    var facts: [MacroRrFactV1] = []
+    var all_defs: [MacroRrDefinitionStateV1] = []
+    var uncacheable: [text] = []
+    var reason = "ok"
+    var complete = true
+    var seen: [text] = []
+    for path in source_paths:
+        if seen.contains(path): continue
+        seen.push(path)
+        val state = macro_rr_module_state_v1(path, tldr_root)
+        modules.push(state)
+        if not macro_rr_module_state_complete_v1(state):
+            if complete:
+                complete = false
+                reason = path + ":" + state.reason
+            continue
+        for f in macro_rr_facts_of_module_v1(path, state.defs, state.uses):
+            facts.push(f)
+        for d in state.defs:
+            all_defs.push(d)
+        for id in state.uncacheable_def_ids:
+            if not uncacheable.contains(id): uncacheable.push(id)
+    MacroRrInventoryV1(complete: complete, reason: reason, modules: modules, facts: facts,
+        all_defs: all_defs, uncacheable_def_ids: uncacheable)
+
+pub fn macro_rr_inventory_module_v1(inventory: MacroRrInventoryV1, source_path: text) -> MacroRrModuleStateV1?:
+    for m in inventory.modules:
+        if m.source_path == source_path: return Some(m)
+    None
+
+export MacroRrModuleStateV1, MacroRrInventoryV1
+export macro_rr_module_state_empty_v1, macro_rr_module_state_v1, macro_rr_module_state_raw_v1
+export macro_rr_module_state_refresh_v1, macro_rr_module_state_complete_v1
+export macro_rr_uses_with_uncacheable_v1
+export macro_rr_inventory_v1, macro_rr_inventory_module_v1
