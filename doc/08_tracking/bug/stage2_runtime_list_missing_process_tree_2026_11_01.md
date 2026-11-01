@@ -2,7 +2,8 @@
 
 - **ID:** stage2_runtime_list_missing_process_tree_2026_11_01
 - **Severity:** P1 (blocks every stage3 final link done by the frozen stage2)
-- **Status:** open, workaround landed
+- **Status:** root fix in source; workaround revert-ready after stage3 self-build
+- **Confirmed 2026-11-01:** `src/compiler/70.backend/backend/runtime_compiler.spl` lists `runtime_process_tree` in the core list (:647) and the full list (:739); `src/runtime/runtime_process_tree.c` exists. Only the frozen stage2 (ef0681fc0e1) baked list lacks it.
 - **Workaround tag:** `@workaround bug=stage2_runtime_list_missing_process_tree_2026_11_01`
 - **Workaround:** `scripts/bootstrap/workarounds/stage2-runtime-process-tree-shadow.shs`
 
