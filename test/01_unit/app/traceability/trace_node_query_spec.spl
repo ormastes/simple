@@ -1,0 +1,144 @@
+"""P0 deterministic typed-node pages and strict options. Execution pending admitted runtime."""
+# @req REQ-TRC-021 REQ-TRC-023
+use std.spec.*
+use std.common.traceability.model.*
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
+use app.traceability.query_options_v1.{trace_query_options_parse_v1, TraceQueryOptionsV1, trace_query_sdn_requested_v1}
+use app.traceability.query_render_v1.{trace_query_render_v1}
+use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, TraceSnapshotBuild}
+use app.cli.command_registry.{cli_registry_payload_text_v1}
+
+fn node_query_graph() -> TraceGraph:
+    TraceGraph(subject: SnapshotSubject(repository_id: "repo:test", snapshot_id: "snapshot:one",
+        kind: "git_commit", revision_id: "commit:one", tree_id: "tree:one", object_format: "sha256"),
+        input_manifest_id: "inputs:one", generation_id: "generation:one", complete: true,
+        nodes: [TraceNode(id: "feature:z", kind: TraceNodeKind.Feature, title: "Last"),
+            TraceNode(id: "req:a", kind: TraceNodeKind.Requirement, title: "Requirement"),
+            TraceNode(id: "feature:a", kind: TraceNodeKind.Feature, title: "First\nspoof"),
+            TraceNode(id: "bug:a", kind: TraceNodeKind.Bug, title: "Authored bug")],
+        test_definitions: [], claims: [], edges: [], edge_origins: [], origins: [], locators: [], diagnostics: [])
+
+fn node_list_query(limit: i64) -> TraceNodeQueryV1:
+    TraceNodeQueryV1(snapshot_id: "snapshot:one", operation: "list", kind: "features", limit: limit)
+
+describe "P0 typed node projection":
+    it "sorts canonical identities before paging and preserves kinds":
+        # @ac AC-TRC-041 AC-TRC-044
+        val graph = node_query_graph()
+        val first = query_trace_nodes_v1(graph, node_list_query(1)).unwrap()
+        expect(first.nodes.len()).to_equal(1)
+        expect(first.nodes[0].id).to_equal("feature:a")
+        expect(first.total_count).to_equal(2)
+        expect(first.complete).to_be(false)
+        var query = node_list_query(1)
+        query.cursor = first.next_cursor
+        val second = query_trace_nodes_v1(graph, query).unwrap()
+        expect(second.nodes[0].id).to_equal("feature:z")
+        expect(second.complete).to_be(true)
+        expect(second.edges.len()).to_equal(0)
+
+    it "binds cursors to limit filter kind generation snapshot and visibility":
+        # @ac AC-TRC-044
+        val graph = node_query_graph()
+        val cursor = query_trace_nodes_v1(graph, node_list_query(1)).unwrap().next_cursor
+        var query = node_list_query(1)
+        query.cursor = cursor
+        query.limit = 2
+        expect(query_trace_nodes_v1(graph, query).is_err()).to_be(true)
+        query.limit = 1
+        query.id_prefix = "feature:z"
+        expect(query_trace_nodes_v1(graph, query).is_err()).to_be(true)
+        query.id_prefix = ""
+        query.kind = "requirements"
+        expect(query_trace_nodes_v1(graph, query).is_err()).to_be(true)
+        query.kind = "features"
+        query.visibility_context = "different-local-scope"
+        expect(query_trace_nodes_v1(graph, query).is_err()).to_be(true)
+        query.visibility_context = "local-selected-content/v1"
+        var changed = node_query_graph()
+        changed.generation_id = "generation:two"
+        expect(query_trace_nodes_v1(changed, query).is_err()).to_be(true)
+        changed = node_query_graph()
+        changed.subject.snapshot_id = "snapshot:two"
+        query.snapshot_id = "snapshot:two"
+        expect(query_trace_nodes_v1(changed, query).is_err()).to_be(true)
+
+    it "rejects wrong-kind missing duplicate and unavailable identities":
+        # @ac AC-TRC-041
+        var query = TraceNodeQueryV1(snapshot_id: "snapshot:one", operation: "show", kind: "features", selected_id: "req:a")
+        expect(query_trace_nodes_v1(node_query_graph(), query).is_err()).to_be(true)
+        query.selected_id = "feature:absent"
+        expect(query_trace_nodes_v1(node_query_graph(), query).is_err()).to_be(true)
+        query.kind = "feature-groups"
+        expect(query_trace_nodes_v1(node_query_graph(), query).is_err()).to_be(true)
+        var duplicate = node_query_graph()
+        duplicate.nodes.push(TraceNode(id: "feature:a", kind: TraceNodeKind.Feature, title: "Duplicate"))
+        expect(query_trace_nodes_v1(duplicate, node_list_query(10)).is_err()).to_be(true)
+
+    it "filters before paging and accepts only explicitly declared bug nodes":
+        var query = node_list_query(200)
+        query.id_prefix = "feature:z"
+        val filtered = query_trace_nodes_v1(node_query_graph(), query).unwrap()
+        expect(filtered.total_count).to_equal(1)
+        expect(filtered.nodes[0].id).to_equal("feature:z")
+        query.id_prefix = ""
+        query.kind = "bugs"
+        expect(query_trace_nodes_v1(node_query_graph(), query).unwrap().nodes[0].id).to_equal("bug:a")
+
+    it "keeps page exhaustion separate from incomplete graph and escapes table control text":
+        var graph = node_query_graph()
+        graph.complete = false
+        graph.diagnostics = [trace_diagnostic("TRACE-SNAPSHOT-INCOMPLETE", "snapshot:one", "test", "", "", "missing input")]
+        val page = query_trace_nodes_v1(graph, node_list_query(200)).unwrap()
+        val build = TraceSnapshotBuild(graph: graph, scope: TraceSnapshotScope(selected_roots: ["doc/test.sdn"],
+            authority_id: "", closure_kind: "selected_scope"), admission_eligible: false)
+        val output = trace_query_render_v1(build, page, TraceQueryOptionsV1())
+        expect(page.complete).to_be(true)
+        expect(output).to_contain("Graph complete: false; page complete: true")
+        expect(output).to_contain("First?spoof")
+        expect(output).to_contain("Qualification: unverified")
+        expect(output).to_equal(trace_query_render_v1(build, page, TraceQueryOptionsV1()))
+
+describe "P0 options and registry":
+    it "defaults to worktree and table without silently selecting a different snapshot":
+        val options = trace_query_options_parse_v1(["list", "features"]).unwrap()
+        expect(options.snapshot).to_equal("worktree")
+        expect(options.format).to_equal("table")
+        expect(options.declarations.len()).to_equal(0)
+
+    it "accepts singular show and both normal option value forms":
+        val shown = trace_query_options_parse_v1(["show", "feature", "feature:a", "--snapshot", "git:HEAD", "--format=sdn"]).unwrap()
+        expect(shown.kind).to_equal("features")
+        expect(shown.snapshot).to_equal("git:HEAD")
+        expect(shown.format).to_equal("sdn")
+        val paged = trace_query_options_parse_v1(["list", "requirements", "--limit", "50", "--cursor", "tn1:sample:50"]).unwrap()
+        expect(paged.limit).to_equal(50)
+        expect(paged.cursor).to_equal("tn1:sample:50")
+        expect(trace_query_options_parse_v1(["show", "requirement", "req:a"]).unwrap().kind).to_equal("requirements")
+        expect(trace_query_options_parse_v1(["show", "bug", "bug:a"]).unwrap().kind).to_equal("bugs")
+        expect(trace_query_options_parse_v1(["list", "features", "--limit", "2", "--limit=3"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["list", "features", "--limit"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["list", "features", "--prefix", ""]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["list", "feature"]).is_err()).to_be(true)
+
+    it "rejects invalid bounds formats unknown options and traversal before capture":
+        for option in ["--limit=0", "--limit=201", "--limit=-1", "--limit=abc", "--format=json", "--snapshot=git:", "--path=../secret", "--unknown=yes"]:
+            expect(trace_query_options_parse_v1(["list", "features", option]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["list", "features", "--limit=2", "--limit=3"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["show", "features", "feature:a", "--prefix=feature:"]).is_err()).to_be(true)
+
+    it "registers trace and advertises the structural checker's real SDN format":
+        val registry = cli_registry_payload_text_v1()
+        expect(registry).to_contain("command|trace|trace list|show <kind>")
+        expect(registry).to_contain("traceability-check --format=sdn")
+        expect(registry.contains("traceability-check --format=text|json")).to_be(false)
+
+    it "retains structured format intent when either option form fails validation":
+        val equals = ["list", "features", "--format=sdn", "--limit=0"]
+        val separate = ["list", "features", "--format", "sdn", "--limit", "0"]
+        expect(trace_query_options_parse_v1(equals).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(separate).is_err()).to_be(true)
+        expect(trace_query_sdn_requested_v1(equals)).to_be(true)
+        expect(trace_query_sdn_requested_v1(separate)).to_be(true)
+        expect(trace_query_sdn_requested_v1(["list", "features", "--format", "table", "--limit", "0"])).to_be(false)
+        expect(trace_query_sdn_requested_v1(["list", "features", "--format"])).to_be(false)

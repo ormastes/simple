@@ -1,0 +1,98 @@
+# Typed node pages over the canonical graph. Existing one-hop queries are unchanged.
+# @req REQ-TRC-021 REQ-TRC-023
+use std.common.traceability.model.*
+use std.common.traceability.schema.{trace_id_valid}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+
+pub struct TraceNodeQueryV1:
+    snapshot_id: text
+    operation: text
+    kind: text
+    selected_id: text = ""
+    id_prefix: text = ""
+    limit: i64 = 100
+    cursor: text = ""
+    visibility_context: text = "local-selected-content/v1"
+
+pub fn trace_node_query_kind_v1(kind: text) -> Result<TraceNodeKind, text>:
+    match kind:
+        case "features": Ok(TraceNodeKind.Feature)
+        case "requirements": Ok(TraceNodeKind.Requirement)
+        case "bugs": Ok(TraceNodeKind.Bug)
+        case "feature-groups" | "requirement-groups":
+            Err("TRACE-QUERY-UNAVAILABLE: group ingestion and canonical group kinds require P1")
+        case _: Err("TRACE-QUERY-INVALID: expected features, requirements or bugs")
+
+pub fn trace_node_query_validate_v1(query: TraceNodeQueryV1) -> Result<bool, text>:
+    trace_node_query_kind_v1(query.kind)?
+    if query.operation != "list" and query.operation != "show":
+        return Err("TRACE-QUERY-INVALID: expected list or show")
+    if query.limit < 1 or query.limit > 200:
+        return Err("TRACE-QUERY-INVALID: limit must be between 1 and 200")
+    if query.id_prefix.len() > 1024 or query.cursor.len() > 256 or query.visibility_context == "":
+        return Err("TRACE-QUERY-INVALID: query field exceeds its bound or lacks visibility context")
+    if query.id_prefix != "" and not trace_id_valid(query.id_prefix):
+        return Err("TRACE-QUERY-INVALID: prefix must be a canonical identity prefix")
+    if query.operation == "show":
+        if not trace_id_valid(query.selected_id) or query.id_prefix != "" or query.cursor != "":
+            return Err("TRACE-QUERY-INVALID: show needs one identity and accepts no prefix or cursor")
+    elif query.selected_id != "":
+        return Err("TRACE-QUERY-INVALID: list cannot select one identity")
+    Ok(true)
+
+fn node_cursor_prefix_v1(graph: TraceGraph, query: TraceNodeQueryV1) -> text:
+    val shape = SdnValue.Dict({
+        "schema": SdnValue.String("simple.trace.node-cursor/v1"),
+        "snapshot": SdnValue.String(graph.subject.snapshot_id),
+        "generation": SdnValue.String(graph.generation_id),
+        "operation": SdnValue.String(query.operation), "kind": SdnValue.String(query.kind),
+        "selected": SdnValue.String(query.selected_id), "prefix": SdnValue.String(query.id_prefix),
+        "limit": SdnValue.Int(query.limit), "visibility": SdnValue.String(query.visibility_context),
+        "order": SdnValue.String("canonical-id/v1")})
+    "tn1:" + sha256_text(sdn_encode_canonical(shape)) + ":"
+
+pub fn query_trace_nodes_v1(graph: TraceGraph, query: TraceNodeQueryV1) -> Result<TraceQueryResult, text>:
+    """Return a bounded node projection, never a full edge export or qualification."""
+    trace_node_query_validate_v1(query)?
+    if query.snapshot_id != graph.subject.snapshot_id or graph.generation_id == "":
+        return Err("TRACE-QUERY-INVALID: snapshot mismatch or missing generation; resync required")
+    if graph.nodes.len() > 40000:
+        return Err("TRACE-QUERY-BUDGET: node inventory exceeds 40000")
+    val kind = trace_node_query_kind_v1(query.kind)?
+    var by_id: Dict<text, TraceNode> = {}
+    var ids: [text] = []
+    for node in graph.nodes:
+        if not trace_id_valid(node.id) or by_id.contains_key(node.id):
+            return Err("TRACE-QUERY-INVALID: invalid or duplicate canonical identity")
+        by_id[node.id] = node
+        if node.kind == kind and node.id.starts_with(query.id_prefix):
+            ids.push(node.id)
+    if query.operation == "show":
+        if not by_id.contains_key(query.selected_id):
+            return Err("TRACE-QUERY-NOT-FOUND: identity is absent from the selected snapshot")
+        if by_id[query.selected_id].kind != kind:
+            return Err("TRACE-QUERY-NOT-FOUND: identity is not of the requested kind")
+        ids = [query.selected_id]
+    ids = trace_sorted_ids(ids)
+    val prefix = node_cursor_prefix_v1(graph, query)
+    var offset = 0
+    if query.cursor != "":
+        if not query.cursor.starts_with(prefix):
+            return Err("TRACE-QUERY-CURSOR: snapshot, generation or query changed; resync required")
+        val digits = query.cursor.substring(prefix.len(), query.cursor.len())
+        if digits == "" or digits.len() > 5:
+            return Err("TRACE-QUERY-CURSOR: malformed offset")
+        for ch in digits.chars():
+            if not "0123456789".contains(ch): return Err("TRACE-QUERY-CURSOR: malformed offset")
+        offset = digits.to_int()
+        if offset >= ids.len() or offset == 0 or offset % query.limit != 0 or digits != offset.to_text():
+            return Err("TRACE-QUERY-CURSOR: offset is not a continuation page")
+    var end = offset + query.limit
+    if end > ids.len(): end = ids.len()
+    var nodes: [TraceNode] = []
+    for index in offset..end: nodes.push(by_id[ids[index]])
+    val next = if end < ids.len(): prefix + end.to_text() else: ""
+    Ok(TraceQueryResult(snapshot_id: graph.subject.snapshot_id, nodes: nodes, edges: [],
+        total_count: ids.len(), next_cursor: next, complete: next == "", diagnostics: graph.diagnostics))

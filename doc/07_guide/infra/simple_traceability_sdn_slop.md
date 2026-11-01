@@ -80,3 +80,7 @@ for robust, critical and verified profiles forbids all bare builtins and require
 domain-safe generic bounds; easy nominal construction must be demonstrated
 before completion. Existing
 traceability-check behavior and baseline qualification claims are unchanged.
+
+P0 now has a [source implementation candidate guide](trace_query_p0.md) for
+registered list/show queries. Runtime admission, execution and deployment remain
+pending; this does not change existing qualification claims.
