@@ -1,0 +1,78 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Static generic class factories lower with T substituted (typeparam-mir-20261031)
+
+`Future.from_value(x)` / `Future.pending()` -- static fns of a generic class --
+reached MIR with `T` unsubstituted in the frozen stage2 (`E-MIR-TYPE-TypeParam`),
+so `src/lib/nogc_async_mut/io/buffer.spl` and three cache modules build Futures
+directly under a concrete return type (tagged `bug=typeparam-mir-20261031`).
+Current source (generic erasure; monomorphization deleted) lowers the original
+shape: the consumer module reports no HIR/MIR diagnostic at all.
+Bug: doc/08_tracking/bug/typeparam_mir_2026-10-31.md
+"""
+
+# @tag: unit, compiler, mir, generics, stage2
+
+use std.common.string_core.{char_from_code}
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val lib_source = "pub enum Poll<T>:\n    Ready(T)\n    Pending\n\npub class Fut<T>:\n    state: [u8]\n    poll_result: Poll<T>\n\n    static fn from_value(value: T) -> Fut<T>:\n        Fut(state: [], poll_result: Poll.Ready(value))\n\n    static fn pending() -> Fut<T>:\n        Fut(state: [], poll_result: Poll.Pending)\n\n    fn poll() -> Poll<T>:\n        self.poll_result\n\n    fn then<U>(f: fn(T) -> Fut<U>) -> Fut<U>:\n        match self.poll_result:\n            case Poll.Ready(v): f(v)\n            case Poll.Pending: Fut.pending()\n\npub enum RErr:\n    Cap\n    Busy\n\npub class Ring<Op, Cpl>:\n    ops: [Op]\n    cpls: [Cpl]\n\n    static fn create(n: i64) -> Result<Ring<Op, Cpl>, RErr>:\n        if n < 0:\n            return Err(RErr.Cap)\n        Ok(Ring(ops: [], cpls: []))\n\n    fn take(n: i64) -> Result<Op?, RErr>:\n        if n < 0:\n            return Err(RErr.Busy)\n        if self.ops.len() == 0:\n            return Ok(nil)\n        Ok(Some(self.ops[0]))\n\npub enum CR:\n    TypeError(errs: [text])\n    ResolveError(errs: [text])\n    Fine\n\npub fn stage(n: i64) -> CR?:\n    if n == 0:\n        return nil\n    Some(CR.TypeError([\"e\"]))\n\npub fn finish<T>(r: Result<T, RErr>) -> Result<T, RErr>:\n    r\n\npub fn sort_by<T>(xs: [T], cmp: fn(T, T) -> i64) -> [T]:\n    if xs.len() <= 1:\n        return xs\n    var less: [T] = []\n    var more: [T] = []\n    for i in 1..xs.len():\n        if cmp(xs[i], xs[0]) < 0:\n            less.push(xs[i])\n        else:\n            more.push(xs[i])\n    var out = sort_by(less, cmp)\n    out.push(xs[0])\n    for m in sort_by(more, cmp):\n        out.push(m)\n    out\n\npub class Rec:\n    v: i64\n"
+
+# Consumer-module HIR+MIR diagnostics only (the provider's own diagnostics are
+# out of scope for these call-site shapes).
+fn lower_consumer(imports: text, body: text) -> text:
+    val consumer_source = imports + "\n\n" + body
+    val log = Logger(level: 0)
+    val lib_ast = parse_full_frontend(lib_source, "lib/fut.spl", "lib.fut", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.fut"] = lib_ast
+    modules["app.main"] = consumer_ast
+    val sources = [SourceFile(path: "lib/fut.spl", content: lib_source, module_name: "lib.fut"), SourceFile(path: "app/main.spl", content: consumer_source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lib_lowering = hirlowering_for_module("lib.fut", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val lib_hir = lib_lowering.lower_module(lib_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["lib_hir"] = lib_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "lib_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val mir = mir_lowering.lower_module(consumer_hir, [lib_hir, consumer_hir])
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    print "consumer errors: [{out}]"
+    out
+
+val BS = char_from_code(92)
+val LB = char_from_code(123)
+val RB = char_from_code(125)
+val IMP = "use lib.fut." + LB + "Poll, Fut, RErr, Ring, Rec, stage, finish, sort_by" + RB
+
+describe "static generic class factory call sites (typeparam-mir-20261031)":
+    it "Fut.from_value(true) under a Fut<bool> return lowers cleanly":
+        expect(lower_consumer(IMP, "fn a() -> Fut<bool>:\n    Fut.from_value(true)\n")).to_equal("")
+
+    it "Fut.pending() under a Fut<i64> return lowers cleanly":
+        expect(lower_consumer(IMP, "fn b() -> Fut<i64>:\n    Fut.pending()\n")).to_equal("")
+
+    it "Fut.from_value of a Result payload (io.buffer shape) lowers cleanly":
+        val out = lower_consumer(IMP, "fn c(x: Result<[u8], RErr>) -> Fut<Result<[u8], RErr>>:\n    Fut.from_value(x)\n")
+        expect(out.contains("TypeParam")).to_equal(false)
+        expect(out).to_equal("")
