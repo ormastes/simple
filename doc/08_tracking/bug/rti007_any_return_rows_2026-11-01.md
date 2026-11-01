@@ -1,6 +1,6 @@
 # rti007: declared returns that lower to `Any` get no RTI row in the frozen stage2 (2026-11-01)
 
-Status: OPEN in the frozen stage2 bootstrap compiler; tagged source workarounds stay until the stage2 refresh.
+Status: FIXED IN SOURCE at release/1.0.0 (claims audited 2026-11-01, below); OPEN only in the frozen stage2 bootstrap compiler; tagged source workarounds stay until the stage2 refresh.
 
 Bug id: `rti007_any_return_rows_2026-11-01` (every `@workaround` tag of this family
 references it). Successor of `rti007_mir_2026-10-31.md` (bare `-> Result` in the linker
@@ -134,3 +134,32 @@ the module reverted to its pre-`99a45712909` source.
 
 No further source change was needed. `test/01_unit/lib/nogc_sync_mut/rti007_lib_mir_modules_spec.spl`
 pins the observable behaviour of the mutex gate and `Map::map_values<U>` signatures.
+
+## Claim audit of "Fixed at HEAD by" at release/1.0.0 (2026-11-01, label: seed)
+
+Every commit named in the table is an ancestor of release/1.0.0 (`git merge-base
+--is-ancestor`): 1c8132a5952, b6d71af144b, 933a0979878, f512a01c535, d2e2813c37d, and
+the removal-condition marker 8a935437a98. `map_values<U>` is present in
+`src/lib/nogc_sync_mut/src/map.spl:392`.
+
+Each producer was re-run without its workaround (the "Minimal repro" declarations above,
+one module each) through the current pure-Simple frontend + HIR + RTI, interpreted by the
+Rust seed (`simple.exe run`, scratch copy of `src/` with block `@when` flattened to the
+Windows branch and `rt_xxh3_128_text` routed to its pure-Simple fallback):
+
+| Producer | Row at HEAD | Claim |
+|---|---|---|
+| `extern fn rt_probe_get<T>(..) -> T?` | `1 decided opt(p0)` | holds |
+| `-> Option<Result<text, text>>` | `0 decided opt(result(b:text,b:text))` | holds |
+| `fn f_untyped(ch)` value return | `0 decided b:any` (erased row) | holds |
+| `Poll<T>::unwrap() -> T` | `1 decided p0` | holds |
+| `map_values(..) -> Box<K, U>` without `<U>` | `2 decided n:..[p0,b:any]` (no error) | holds; `<U>` source fix stays |
+| bare `-> Result` | `0 decided result(b:any,b:any)` | holds (see rti007_mir_2026-10-31.md) |
+
+No `E-RTI-007` for any producer. Regression pins already exist in
+`test/01_unit/compiler/hir/return_type_interface_any_rows_spec.spl` (one `it` per row);
+UNRUN here because the SPipe runner cannot start under the seed on Windows and runs were
+held for phase-3 memory.
+
+Status: FIXED IN SOURCE at release/1.0.0; OPEN only for the frozen stage2. Revert-ready:
+yes after the stage2 refresh named in "Removal condition" (keep `map_values<U>`).
