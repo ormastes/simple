@@ -30,7 +30,7 @@ developers must **never** declare `extern fn rt_*` or call `rt_*` directly — u
 
 ```simple
 # WRONG — app code must not touch rt_* directly
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 val c = rt_file_read_text("x.txt") ?? ""
 
 # RIGHT — use the std alias

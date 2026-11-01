@@ -26,9 +26,16 @@
 #include <openssl/params.h>
 #endif
 
+/* These helpers return non-null text and have no error channel, so an
+ * allocation failure fails closed instead of handing NULL to Simple text. */
+static char *tls_text_alloc_or_abort(size_t size) {
+    char *result = (char *)malloc(size);
+    if (!result) abort();
+    return result;
+}
+
 const char *rt_byte_char(int64_t value) {
-    char *result = (char *)malloc(2);
-    if (!result) return NULL;
+    char *result = tls_text_alloc_or_abort(2);
     result[0] = (char)(unsigned char)(value & 0xff);
     result[1] = '\0';
     return result;
@@ -152,14 +159,13 @@ const char *rt_wire_to_hex(const char *wire, int64_t wire_len) {
     size_t length;
 
     if (!wire || wire_len <= 0) {
-        result = (char *)malloc(1);
-        if (result) result[0] = '\0';
+        result = tls_text_alloc_or_abort(1);
+        result[0] = '\0';
         return result;
     }
-    if ((uint64_t)wire_len > (SIZE_MAX - 1) / 2) return NULL;
+    if ((uint64_t)wire_len > (SIZE_MAX - 1) / 2) abort();
     length = (size_t)wire_len;
-    result = (char *)malloc(length * 2 + 1);
-    if (!result) return NULL;
+    result = tls_text_alloc_or_abort(length * 2 + 1);
     for (size_t i = 0; i < length; ++i) {
         unsigned char byte = (unsigned char)wire[i];
         result[i * 2] = digits[byte >> 4];
@@ -178,8 +184,7 @@ const char *rt_hex_to_wire(const char *hex) {
     hex_len = strlen(hex);
     if ((hex_len & 1u) != 0 || hex_len == SIZE_MAX) goto invalid;
     wire_len = hex_len / 2;
-    result = (char *)malloc(wire_len + 1);
-    if (!result) return NULL;
+    result = tls_text_alloc_or_abort(wire_len + 1);
     for (size_t i = 0; i < wire_len; ++i) {
         int high = hex_value(hex[i * 2]);
         int low = hex_value(hex[i * 2 + 1]);
@@ -193,7 +198,7 @@ const char *rt_hex_to_wire(const char *hex) {
     return result;
 
 invalid:
-    result = (char *)malloc(1);
-    if (result) result[0] = '\0';
+    result = tls_text_alloc_or_abort(1);
+    result[0] = '\0';
     return result;
 }

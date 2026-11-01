@@ -93,6 +93,14 @@ CODE_BACKEND_RE='(^|[^A-Za-z0-9_])(MetalBackend|VulkanBackend|DirectXBackend|Sof
 code_only() {
     awk -v pat="$1" '{
         orig = $0
+        # rg on Windows prints walked paths with `\` separators; normalize the
+        # path prefix to `/` so entries match the baseline on every host.
+        if (match(orig, /^[^:]*:[0-9]+:/)) {
+            pre = substr(orig, 1, RLENGTH)
+            bs = sprintf("%c", 92)
+            while ((k = index(pre, bs)) > 0) pre = substr(pre, 1, k - 1) "/" substr(pre, k + 1)
+            orig = pre substr(orig, RLENGTH + 1)
+        }
         rest = orig
         sub(/^[^:]*:[0-9]+:/, "", rest)
         code = ""
@@ -147,10 +155,33 @@ current="$tmp_dir/current.txt"
 
 # Single grep pass per pattern over the whole scan-root tree (rg walks the
 # tree once per invocation) — no per-file process spawning.
-# shellcheck disable=SC2086
-rg -n $UI_INCLUDE_GLOBS $EXCLUDE_GLOBS -e "$RT_PATTERN" "$@" 2>/dev/null | code_only "$CODE_RT_RE" >"$rt_hits" || true
-# shellcheck disable=SC2086
-rg -n $UI_INCLUDE_GLOBS $EXCLUDE_GLOBS -e "$BACKEND_PATTERN" "$@" 2>/dev/null | code_only "$CODE_BACKEND_RE" >"$backend_hits" || true
+#
+# Fallback when ripgrep is absent (e.g. Windows Git Bash with winget's rg off
+# PATH): walk the roots with find, apply the same include/exclude set as
+# anchored EREs (mirror of UI_INCLUDE_GLOBS / EXCLUDE_GLOBS — keep in sync),
+# and grep with the POSIX CODE_* patterns. Without this the rg pipeline below
+# yields zero hits and a false ui_backend_isolation_ok=true.
+UI_INCLUDE_RE='(^|/)ui/|(^|/)gui[^/]*\.spl$|_gui\.spl$|(^|/)wm_[^/]*\.spl$|_wm\.spl$|(^|/)render[^/]*/|render[^/]*\.spl$|backend[^/]*\.spl$'
+UI_EXCLUDE_RE='(^|/)(vendor|node_modules)/|^src/app/interpreter/ffi/|^src/lib/nogc_sync_mut/ui/|^src/app/ui\.chromium/backend\.spl$|^examples/09_embedded/simple_os/arch/.*/wm_host_seam_entry\.spl$'
+if command -v rg >/dev/null 2>&1; then
+    # set -f: the glob lists are expanded unquoted on purpose (word splitting),
+    # but pathname expansion must not turn `**/ui/**/*.spl` into literal repo
+    # files (`*/ui/*/*.spl` in sh) -- that silently narrowed the scan.
+    set -f
+    # shellcheck disable=SC2086
+    rg -n $UI_INCLUDE_GLOBS $EXCLUDE_GLOBS -e "$RT_PATTERN" "$@" 2>/dev/null | code_only "$CODE_RT_RE" >"$rt_hits" || true
+    # shellcheck disable=SC2086
+    rg -n $UI_INCLUDE_GLOBS $EXCLUDE_GLOBS -e "$BACKEND_PATTERN" "$@" 2>/dev/null | code_only "$CODE_BACKEND_RE" >"$backend_hits" || true
+    set +f
+else
+    ui_files="$tmp_dir/ui_files.txt"
+    find "$@" -type f -name '*.spl' 2>/dev/null | sed 's#^\./##' \
+        | grep -E "$UI_INCLUDE_RE" | grep -Ev "$UI_EXCLUDE_RE" >"$ui_files" || true
+    if [ -s "$ui_files" ]; then
+        tr '\n' '\0' <"$ui_files" | xargs -0 grep -n -H -E -e "$CODE_RT_RE" 2>/dev/null | code_only "$CODE_RT_RE" >"$rt_hits" || true
+        tr '\n' '\0' <"$ui_files" | xargs -0 grep -n -H -E -e "$CODE_BACKEND_RE" 2>/dev/null | code_only "$CODE_BACKEND_RE" >"$backend_hits" || true
+    fi
+fi
 
 : >"$current"
 cut -d: -f1 "$rt_hits" | sort -u | sed '/^$/d;s/^/RT:/' >>"$current"

@@ -6,16 +6,21 @@ Each record carries a stable interface id (sha256 of symbol and canonical signat
 first 16 hex), one provider row per host profile, and separate verdict fields:
 
   map      PASS when a C provider is found on every hosted profile (linux, macos,
-           windows, freebsd); FAIL when some hosted profile has no provider (host gap);
-           UNKNOWN when no C provider is found or the symbol has a Rust export.
+           windows, freebsd) and every one of those rows is definite; UNKNOWN when any
+           hosted row is conditional (its guard used a non-host macro, so the provider
+           was kept on an unknown branch), when no C provider is found, or when the
+           symbol has a Rust export; FAIL when some hosted profile has no provider
+           (host gap) and no hosted row is conditional.
   pointer  from check-rt-pointer-ref-map.py rules: PASS (enforced or nullable-declared),
            FAIL (nil-mismatch or narrow-pointer), UNKNOWN otherwise. Never PASS on a
            bare-typed edge whose C return is not proven.
   compile  always UNTESTED. link  always UNTESTED.
 
-Provider state is `mapped` when check-rt-host-map.py's scan found a C provider on that
-host, else `unknown` (a text scan that found nothing is not a claim of absence). The
-simpleos profile is always `unknown`: no C macro selects it.
+Provider state per hosted profile: `mapped` when check-rt-host-map.py's scan_detail found
+a provider whose guard is definitely true on that host; `conditional` when the provider is
+kept only through an unknown (non-host) macro; else `unknown` (a text scan that found
+nothing is not a claim of absence). The simpleos profile is always `unknown`: no C macro
+selects it.
 
 The two guards are loaded with importlib and their scan() and regex helpers are reused.
 Their behavior is unchanged; this script never writes a baseline and never prints their
@@ -23,7 +28,8 @@ verdicts. Output is versioned JSON with sorted keys and no timestamps, so two ru
 the same tree are byte-identical.
 
 Metadata only: the exit code reports whether the index was produced, not whether the
-externs are correct. Exit 0 written, 2 nothing checked, 1 selftest failure.
+externs are correct. The summary line goes to stderr, so stdout is pure JSON when --out is omitted.
+Exit 0 written, 2 nothing checked, 1 selftest failure.
 Usage: rt-binding-index.py [--root DIR] [--out PATH] [--selftest]
 """
 import hashlib
@@ -71,10 +77,22 @@ def canonical_signature(pm, params, ret):
     return '(%s) -> %s' % (', '.join(' '.join(t.split()) for t in types), ' '.join((ret or 'void').split()))
 
 
-def map_verdict(sym, providers, rust):
+def provider_state(h, sym, prov, definite):
+    if h not in HOSTED:
+        return 'unknown'
+    if sym in definite[h]:
+        return 'mapped'
+    if sym in prov[h]:
+        return 'conditional'
+    return 'unknown'
+
+
+def map_verdict(sym, states, rust):
     if sym in rust:
         return 'UNKNOWN', 'rust-export, cfg not evaluated'
-    got = [h for h in HOSTED if providers[h]]
+    if any(states[h] == 'conditional' for h in HOSTED):
+        return 'UNKNOWN', 'conditional-provider-on-hosted-profile'
+    got = [h for h in HOSTED if states[h] == 'mapped']
     if not got:
         return 'UNKNOWN', 'no-c-provider-in-scan'
     if len(got) == len(HOSTED):
@@ -104,7 +122,7 @@ def pointer_verdict(sym, ty, c):
 def build(root):
     pm = load('check_rt_pointer_ref_map', 'check-rt-pointer-ref-map.py')
     hm = load('check_rt_host_map', 'check-rt-host-map.py')
-    prov, rust, _decl = hm.scan(root)
+    prov, rust, _decl, definite = hm.scan_detail(root)
     c = c_pointer_states(pm, root)
     records = []
     for top in TOPS:
@@ -114,16 +132,15 @@ def build(root):
             for m in pm.EXT.finditer(src):
                 sym, params, ret = m[1], m[2], (m[3] or 'void').strip()
                 sig = canonical_signature(pm, params, ret)
-                providers = {h: sym in prov[h] for h in hm.HOSTS}
-                map_v, map_r = map_verdict(sym, providers, rust)
+                states = {h: provider_state(h, sym, prov, definite) for h in hm.HOSTS}
+                map_v, map_r = map_verdict(sym, states, rust)
                 ptr_v, ptr_r = pointer_verdict(sym, ret, c)
                 records.append({
                     'id': hashlib.sha256((sym + '\n' + sig).encode()).hexdigest()[:16],
                     'symbol': sym,
                     'path': rel,
                     'signature': sig,
-                    'providers': [{'host': h, 'state': 'mapped' if providers[h] and h in HOSTED else 'unknown'}
-                                  for h in hm.HOSTS],
+                    'providers': [{'host': h, 'state': states[h]} for h in hm.HOSTS],
                     'verdict': {'map': map_v, 'map_reason': map_r,
                                 'pointer': ptr_v, 'pointer_reason': ptr_r,
                                 'compile': 'UNTESTED', 'link': 'UNTESTED'},
@@ -160,10 +177,12 @@ def selftest():
     runtime_c = (
         'char *rt_ok(void) {\n  return SIMPLE_RT_NONNULL(b);\n}\n'
         'char *rt_nil(void) {\n  if (a) return NULL;\n  return b;\n}\n'
-        '#if defined(__linux__)\nlong rt_linux_only(void) { return 1; }\n#endif\n')
+        '#if defined(__linux__)\nlong rt_linux_only(void) { return 1; }\n#endif\n'
+        '#ifdef SOME_FEATURE_X\nlong rt_feature_gated(void) { return 1; }\n#endif\n')
     spl = ('extern fn rt_ok() -> text\n'
            'extern fn rt_nil() -> text\n'
            'extern fn rt_linux_only() -> i64\n'
+           'extern fn rt_feature_gated() -> i64\n'
            'extern fn rt_missing(x: i64) -> i64\n')
     fails = []
     root = tree(runtime_c, spl)
@@ -177,6 +196,7 @@ def selftest():
         'rt_ok': ('PASS', 'PASS'),
         'rt_nil': ('PASS', 'FAIL'),
         'rt_linux_only': ('FAIL', 'UNKNOWN'),
+        'rt_feature_gated': ('UNKNOWN', 'UNKNOWN'),
         'rt_missing': ('UNKNOWN', 'UNKNOWN'),
     }
     for sym, (mv, pv) in want.items():
@@ -187,6 +207,14 @@ def selftest():
         if r['verdict']['map'] != mv or r['verdict']['pointer'] != pv:
             fails.append('%s map=%s pointer=%s, wanted %s %s' % (
                 sym, r['verdict']['map'], r['verdict']['pointer'], mv, pv))
+    gated = by.get('rt_feature_gated')
+    if gated is not None:
+        if gated['verdict']['map_reason'] != 'conditional-provider-on-hosted-profile':
+            fails.append('rt_feature_gated map reason is %s, wanted conditional-provider-on-hosted-profile'
+                         % gated['verdict']['map_reason'])
+        states = {p['host']: p['state'] for p in gated['providers']}
+        if states.get('linux') != 'conditional' or states.get('windows') != 'conditional':
+            fails.append('rt_feature_gated provider states are not conditional on hosted profiles')
     if by.get('rt_nil', {}).get('verdict', {}).get('pointer_reason') != 'nil-mismatch':
         fails.append('rt_nil pointer reason is not nil-mismatch')
     for r in doc['records']:
@@ -208,7 +236,7 @@ def selftest():
             print('SELFTEST FAIL: ' + f)
         print('ERROR — selftest %d failure(s)' % len(fails))
         return 1
-    print('PASS — selftest 4 records, 2 runs byte-identical, simpleos unknown, compile/link UNTESTED')
+    print('PASS — selftest 5 records, #ifdef conditional provider is UNKNOWN, 2 runs byte-identical, simpleos unknown, compile/link UNTESTED')
     return 0
 
 
@@ -235,7 +263,7 @@ def main():
     t = doc['summary']['tally']
     print('RT_BINDING_INDEX version=%d records=%d map=PASS:%d/FAIL:%d/UNKNOWN:%d pointer=PASS:%d/FAIL:%d/UNKNOWN:%d compile=UNTESTED link=UNTESTED out=%s' % (
         VERSION, doc['summary']['records'], t['map']['PASS'], t['map']['FAIL'], t['map']['UNKNOWN'],
-        t['pointer']['PASS'], t['pointer']['FAIL'], t['pointer']['UNKNOWN'], dest))
+        t['pointer']['PASS'], t['pointer']['FAIL'], t['pointer']['UNKNOWN'], dest), file=sys.stderr)
     return 0
 
 

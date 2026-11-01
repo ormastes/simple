@@ -1402,7 +1402,7 @@ SplArray* rt_process_owned_v3_input_value(int64_t handle);
 SplArray* rt_process_owned_v3_cancel_value(int64_t handle);
 SplArray* rt_process_owned_v3_result_value(int64_t handle);
 SplArray* rt_process_owned_v3_collect_value(int64_t handle);
-int       rt_process_owned_v3_release_value(int64_t handle);
+bool       rt_process_owned_v3_release_value(int64_t handle);
 
 /* Process Observation V4. The common Simple module owns the canonical request
  * codec and 64-word receipt schema. start_pinned is the sole spawning entry:
@@ -1641,7 +1641,7 @@ int64_t     rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr
  * 1..10 a named rejection, 0 this extern unresolved in the reading lane. */
 int64_t     rt_file_read_regular_no_follow_last_failure(void);
 int64_t     rt_file_read_text_rv(int64_t path);
-int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
+bool         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
 /* Failed-existence-probe measurement. begin returns a non-reusable monotonic
  * generation and end returns a nonnegative packed (total << 32) | failed
  * snapshot. Negative values are fail-closed errors. The counter observes this
@@ -1652,7 +1652,7 @@ int64_t     rt_file_exists_probe_end(int64_t token);
 int64_t     rt_file_exists_probe_test_seed_generation(int64_t generation);
 int64_t     rt_file_exists_probe_test_seed_counters(int64_t total, int64_t failed);
 #endif
-int         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
+bool         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len);
@@ -1670,7 +1670,7 @@ int8_t      rt_file_atomic_write_bytes_array(int64_t path, int64_t data);
 int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
 int         rt_file_append(const char* path, const char* content);
 int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
-int         rt_file_delete(const uint8_t* path_ptr, uint64_t path_len);
+bool         rt_file_delete(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len);
 bool        rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
@@ -1732,7 +1732,7 @@ int         rt_mem_snapshot_record(int64_t fd, int64_t seq,
                     int64_t hir_functions, int64_t hir_constants,
                     int64_t hir_enums, int64_t hir_structs, int64_t hir_classes);
 int         rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_t message_len);
-int         rt_mem_snapshot_close(int64_t fd);
+bool         rt_mem_snapshot_close(int64_t fd);
 int64_t     rt_process_rss_kib(void);
 int64_t     rt_process_hwm_kib(void);
 int64_t     rt_heap_live_bytes(void);

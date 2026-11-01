@@ -2696,7 +2696,7 @@ bootstrap_stage_sanity() (
     {
       echo "schema=simple-bootstrap-sanity-evidence-v1"
       echo "status=${sanity_status}"
-      echo "build_memory_reserve_bytes=${sanity_memory_reserve:-25769803776}"
+      echo "build_memory_reserve_bytes=${sanity_memory_reserve:-compiler-default}"
       echo "build_memory_reserve_source=$([ "$sanity_memory_reserve_present" = x ] && echo explicit || echo default)"
       echo "candidate_sha256_before=${candidate_sha_before}"
       echo "version_status=${version_status}"

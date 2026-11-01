@@ -1248,7 +1248,7 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
-SPL_RUNTIME_NATIVE_TWIN int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
     char path_buf[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
     const char* path = path_buf;
@@ -2014,7 +2014,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded(
 }
 /* (ptr, len): see rt_text_arg_to_path above -- a Simple `text` is not
  * NUL-terminated and the compiler passes it as a pair. */
-SPL_RUNTIME_NATIVE_TWIN int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN bool         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     uint_fast64_t lease = rt_file_exists_probe_lease_admit();
     char path[RT_TEXT_PATH_MAX];
     int exists = 0;
@@ -2100,7 +2100,7 @@ SPL_RUNTIME_NATIVE_TWIN int         rt_file_copy(const uint8_t* src_ptr, uint64_
     if (fclose(in) != 0) ok = 0;
     return ok;
 }
-SPL_RUNTIME_NATIVE_TWIN int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return spl_file_delete(path);
@@ -2486,7 +2486,7 @@ int rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_
     return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
 }
 
-int rt_mem_snapshot_close(int64_t fd) {
+bool rt_mem_snapshot_close(int64_t fd) {
 #if defined(_WIN32)
     return fd != -1 && CloseHandle((HANDLE)(intptr_t)fd) != 0;
 #else
@@ -4175,11 +4175,11 @@ const char* rt_aes_gcm_decrypt_hex(const char* key_hex, const char* iv_hex,
 /* Convert wire text (may contain NUL) to hex string, given explicit length. */
 const char* rt_wire_to_hex(const char* wire, int64_t wire_len) {
     if (!wire || wire_len <= 0) {
-        char* empty = (char*)malloc(1);
-        if (empty) empty[0] = '\0';
-        return empty;
+        char* empty = SIMPLE_RT_NONNULL("rt_wire_to_hex", malloc(1));
+        empty[0] = '\0';
+        return SIMPLE_RT_NONNULL("rt_wire_to_hex", empty);
     }
-    return hex_encode((const uint8_t*)wire, wire_len);
+    return SIMPLE_RT_NONNULL("rt_wire_to_hex", hex_encode((const uint8_t*)wire, wire_len));
 }
 
 /* Convert hex string back to wire text (binary, may contain NUL).
