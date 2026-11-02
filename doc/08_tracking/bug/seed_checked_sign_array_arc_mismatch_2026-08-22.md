@@ -30,3 +30,5 @@ The rebuilt Rust authority passed and the canonical strict Phase 2 admitted at
 SHA-256 `acd84663e494a8046bc8745b3bd380f03b22dacc15ef710c905beeb4d3fb53fd`.
 The preserved bootstrap Cargo target is immutable, so a direct focused test was
 not run against it; criterion 2 remains open and this record is not resolved.
+
+Revalidated 2026-11-02: still plausible because doc Status is PARTIAL with the focused Rust test still pending.

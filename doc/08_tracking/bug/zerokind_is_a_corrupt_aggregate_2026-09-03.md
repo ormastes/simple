@@ -494,3 +494,5 @@ specified rather than assumed away.
   `--threads 20` and runs at `cpu_pct=100`; see
   `doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md`.
 
+
+Revalidated 2026-11-02: still plausible because doc says root cause characterised but fix not identified.

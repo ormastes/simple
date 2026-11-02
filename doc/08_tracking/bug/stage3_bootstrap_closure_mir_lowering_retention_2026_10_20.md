@@ -27,3 +27,5 @@ transient scope, unlike the direct lane's `lower_module_transient_scoped`
 (`module_lowering.spl:2070`), which promotes only the returned MirModule.
 
 The SIGSEGV this lane was fixing is gone: closure modules lower normally.
+
+Revalidated 2026-11-02: still plausible because Status is still OPEN and no fix for the per-module MIR retention is referenced or found.

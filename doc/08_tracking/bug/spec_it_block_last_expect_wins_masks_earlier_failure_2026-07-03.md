@@ -9,8 +9,7 @@ evidence found in the body. This is bookkeeping, not verification.
 grep for as the trustworthy signal under the interpreter-mode greenwash
 caveat) is itself unreliable whenever an `it` block contains more than one
 `expect()`/`assert_*` call
-**Status:** Open — mitigated in new specs by using a single combined
-assertion per `it` block; no interpreter fix yet
+**Status:** FIXED (verified 2026-11-02) — `src/lib/nogc_sync_mut/spec.spl` now accumulates failures in `current_test_errors` (appended per failing assertion, reported joined at the `it` boundary), so an earlier failing `expect` is no longer masked by a later passing one. Probe on current tree (`it` with `expect(1).to_equal(2)` then `expect(3).to_equal(3)`, seed `bin/simple.exe test`) reports `✗ first fails second passes / expected 1 to equal 2 / 1 example, 1 failure`.
 
 ## Summary
 

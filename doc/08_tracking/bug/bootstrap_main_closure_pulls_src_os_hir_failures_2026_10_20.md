@@ -61,3 +61,5 @@ file defines `_aes128_gcm_inc32`/`_aes128_gcm_make_j0` (256, 322).
 Defined elsewhere but not imported by the failing file: `mmio_read*`,
 `log_raw_println`, `_bytes_to_hex`, `rt_bytes_u8_at`, `unsafe_addr_of`,
 `Scheduler*EvidenceV1`, `rt_thread_sleep`, `readdir`.
+
+Revalidated 2026-11-02: still plausible because doc itself lists remaining src/os name gaps after the closure-edge fix.

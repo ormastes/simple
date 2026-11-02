@@ -40,3 +40,5 @@ the six undefined method symbols are absent from the canonical link, and both
 admission gates pass. A standalone full-compiler regression build is still
 blocked by 16 separately owned unresolved runtime symbols, so criteria 2 and 3
 remain open and this record is not resolved.
+
+Revalidated 2026-11-02: still plausible because doc Status is PARTIAL (Phase 2 admitted; focused specs and Stage 3 pending).
