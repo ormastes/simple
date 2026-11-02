@@ -1,7 +1,7 @@
 # Rust seed checked-sign result constructs `Vec` where `Value::Array` owns `Arc<Vec>`
 
 Date: 2026-08-22
-Status: PARTIAL — authority and Phase 2 pass; focused Rust test pending
+Status: FIXED (closed 2026-11-02; see Closure)
 Owner: Rust seed interpreter checked-sign SFFI bridge
 Severity: P0 for current ARM64 bootstrap / SimpleOS QEMU continuation
 
@@ -32,3 +32,22 @@ The preserved bootstrap Cargo target is immutable, so a direct focused test was
 not run against it; criterion 2 remains open and this record is not resolved.
 
 Revalidated 2026-11-02: still plausible because doc Status is PARTIAL with the focused Rust test still pending.
+
+## Closure (2026-11-02, opus-opf-7)
+
+Status: FIXED. Checked against current policy/design: still valid as a
+Rust-seed type-shape bug. The erased-generics, nil-in-unsafe, Any-in-unsafe,
+SDN, per-file pipeline and HIR/MIR target policies do not touch it. It is
+already fixed in source:
+`src/compiler_rust/compiler/src/interpreter_extern/signatures.rs:153`
+`checked_sign_value` now builds both branches with `Value::array(vec![...])`,
+which wraps the vector in `Arc`. The fix landed in d46287b6352 and 9a674f7b45b.
+
+Criterion 2 is now met. On Windows, with clang-cl and its own target dir, on
+origin/release/1.0.0 5722fb002df:
+`cargo test -p simple-compiler --lib checked_signing_distinguishes` gives
+`test interpreter::interpreter_extern::signatures::tests::checked_signing_distinguishes_success_from_bridge_failure ... ok`
+and `test result: ok. 1 passed`.
+
+This is not related to the stage2_next worker AV after load_sources. That bug
+was a compile-time E0308, and a seed with it cannot build at all.
