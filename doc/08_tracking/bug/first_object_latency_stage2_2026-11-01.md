@@ -2,7 +2,7 @@
 
 - **ID:** first_object_latency_stage2_2026-11-01
 - **Priority:** P2 (perf; the user's rule is first `.o` within 10 s)
-- **Status:** open, re-measure with stage3
+- **Status:** partially fixed (shard fan-out clamp landed; SCV warm refresh + pre-closure window remain), re-measure with stage3
 - **Owner area:** `src/app/cli/native_build_main.spl` startup (SCV admission/inventory), runtime object build, `src/compiler/80.driver` front phases
 - **Found by:** phase-3 codegen probes, 2026-11-01 (`C:/dev/p3new/cgprobe/<name>/`), frozen stage2 `C:/dev/p3new/stage2.exe` (ef0681fc0e1), tip 3273833de3d
 
@@ -45,3 +45,47 @@ runtime C object build.
 
 Re-measure with the stage3 binary (same probes) and split the pre-driver time with
 timestamps. If SCV still dominates, scope the inventory to the entry closure.
+
+## Split measurement, 2026-11-02 (lane mp-4)
+
+Frozen stage2 (ef0681fc0e1), `src/app/dashboard/main.spl` (1-file closure), same flags
+as the cgprobe, fresh worktree `C:/dev/wt/mp-4`, wall clock from a timestamped stdout/stderr
+relay (`C:/dev/p3new/mp4probe/tsprobe.ps1`) plus `SIMPLE_INVENTORY_TRACE_ATTEMPT` cost lines.
+
+| run | SCV inventory | SCV snapshot | first .o | result |
+|---|---|---|---|---|
+| fresh checkout, `COLD_INIT=1` | 135.5 s (44,036 files hashed: src+test+examples) | 252.9 s (14,991 files materialized) | 485 s | rc=1 |
+| warm cache, `COLD_INIT=1` (cgprobe config) | 102.1 s | 8.2 s | 205 s | rc=1 |
+| warm cache, no `COLD_INIT` | 8.4 s | 8.7 s | 103-124 s | rc=1 (MIR shard aggregate failure) |
+| warm, no `COLD_INIT`, parse+MIR shards off | 8.4 s | ~9 s | **74 s** | out.o written |
+
+Findings:
+
+1. **The cgprobe's ~145 s pre-driver time is mostly its own `SIMPLE_SCV_INVENTORY_COLD_INIT=1`.**
+   Forced cold init re-lists and re-hashes every `.spl` under `src`, `test` and
+   `examples/10_tooling` (~100 s warm cache) on every run. A first build in a checkout already
+   auto-cold-inits (`source_authority.spl`, no cursor -> cold); probes must not force it.
+2. **Shard fan-out ignored the closure size.** A 1-file closure spawned 8 parse, 5 HIR and 5 MIR
+   shard processes. Each child pays ~4-5 s start plus ~3.7 s `load_sources` before claiming its
+   one unit, which is ~50 s, and the MIR shard pass failed the build (`empty mir_modules`).
+   **Fixed:** the coordinator now reads the published closure's selected count
+   (`SIMPLE_PARSE_CLOSURE_SELECTED_COUNT`). Closures of up to 4 files
+   (`SIMPLE_SHARD_SMALL_CLOSURE_MAX`) run in process, and larger closures never get more
+   shards than files (`native_build_shard_count_for_closure_v1`).
+3. **aop_weave is not a cost.** It short-circuits when nothing needs weaving (`config.enabled`
+   false): about 1 ms per process. The 6 s "aop_weave" window in the first table is the gap
+   between interleaved shard-process log lines.
+4. **Runtime object cache is shared already.** The cgprobe pins `SIMPLE_RT_OBJ_CACHE_DIR` to
+   one directory. No runtime C rebuild showed up in the warm timeline.
+
+Remaining (not fixed here, still above 10 s on stage2):
+
+- 0-3 s process start; 8.4 s warm SCV inventory refresh plus 8.7 s snapshot reopen (both
+  scale with the `--source` roots, not with the closure).
+- About 23 s between the SCV cost line and `[parse-closure] parent_walks=1`. The frozen stage2
+  does not emit the coordinator `build-trace` lines, so this window is not split yet. Candidates:
+  `native_build_warm_receipt_prepare` and the closure walk's snapshot open.
+- About 26 s in the in-process worker (load_sources ~3.7 s, HIR, MIR, LLVM).
+
+Measure again with the next stage3 build; the shard clamp only takes effect in a binary
+built from this source.

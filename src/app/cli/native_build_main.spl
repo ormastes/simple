@@ -9,11 +9,13 @@ use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_
     compiler_source_authority_publish_v1, compiler_source_authority_clear_v1,
     compiler_source_authority_open_published_v1,
     compiler_source_authority_selected_scope_v1}
-use app.cli.native_build_shard_admission.{native_build_hir_shard_policy_v1}
+use app.cli.native_build_shard_admission.{native_build_hir_shard_policy_v1,
+    native_build_shard_count_for_closure_v1, native_build_small_closure_max_v1}
 use app.cli.native_build_output_plan.{native_build_is_value_consuming_flag,
     native_build_mir_output_requires_full_set_v1}
 use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1,
-    native_build_parse_closure_reuse_decision_v1, NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1}
+    native_build_parse_closure_reuse_decision_v1, NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1,
+    NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1}
 use app.io._CliCompile.native_build_closure_request_admit.{native_build_closure_request_admit_v1}
 use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
@@ -1867,8 +1869,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     # Warm the front-end cache in parallel BEFORE the real worker runs, so
     # its parse phase is all hits. SIMPLE_NATIVE_BUILD_WORKER is already 1
     # here, so the shard children pass the worker entrypoint guard.
-    val shard_count = native_build_parse_shard_count(args)
-    log_build_trace("coordinator:shards parse={shard_count}")
+    val requested_parse_shards = native_build_parse_shard_count(args)
     # --refresh-source-authority replaced the authority above, so a request
     # prepublished (bootstrap_main) under the pre-refresh authority can no
     # longer admit. Drop it; this coordinator republishes after the refresh.
@@ -1882,6 +1883,15 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
             case Err(reason):
                 eprint "error: " + reason
                 return 1
+    # Bound every shard phase by the published closure (first-object latency,
+    # TODO #437): each shard is a process that pays start + load_sources
+    # before claiming one unit, so a tiny closure is faster in process.
+    val closure_files = native_build_closure_selected_count_v1()
+    val small_closure_max = native_build_small_closure_max_v1(
+        env_get("SIMPLE_SHARD_SMALL_CLOSURE_MAX") ?? "")
+    val shard_count = native_build_shard_count_for_closure_v1(
+        requested_parse_shards, closure_files, small_closure_max)
+    log_build_trace("coordinator:shards parse={shard_count} requested={requested_parse_shards} closure_files={closure_files}")
     if shard_count > 0:
         run_parse_shards(forwarded_args, shard_count, simple_bin, native_build_timeout_ms(args))
     # The request stays published for the HIR/MIR shard workers and the real
@@ -1889,7 +1899,8 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse
     # phase is then pure cache hits.
-    val hir_shard_count = native_build_hir_shard_count(args)
+    val hir_shard_count = native_build_shard_count_for_closure_v1(
+        native_build_hir_shard_count(args), closure_files, small_closure_max)
     log_build_trace("coordinator:shards hir={hir_shard_count}")
     if hir_shard_count > 0:
         # Explicit HIR-only warming may bypass the parse-publication phase,
@@ -1921,7 +1932,9 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     # nothing; any failed module blocks the final worker entirely.
     val old_mir_link = env_get("SIMPLE_MIR_SHARD_LINK") ?? ""
     val old_mir_export_dir = env_get("SIMPLE_MIR_SHARD_EXPORT_DIR") ?? ""
-    val mir_shard_parallel = native_build_mir_shard_parallel(args)
+    val requested_mir_parallel = native_build_mir_shard_parallel(args)
+    # A refusal (< 0) stays a refusal; only an admitted fan-out is clamped.
+    val mir_shard_parallel = if requested_mir_parallel < 0: requested_mir_parallel else: native_build_shard_count_for_closure_v1(requested_mir_parallel, closure_files, small_closure_max)
     log_build_trace("coordinator:shards mir_parallel={mir_shard_parallel}")
     if mir_shard_parallel < 0:
         env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
@@ -1995,6 +2008,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
     env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
     env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "")
+    env_set(NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1, "")
     env_set("SIMPLE_MIR_SHARD_LINK", old_mir_link)
     env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_mir_export_dir)
     val output_path = requested_output
@@ -2217,7 +2231,8 @@ pub fn native_build_closure_publish_once_v1(args: [text], frontend_cache_dir: te
         return Ok(true)
     if not env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "") or
             not env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "") or
-            not env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, ""):
+            not env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "") or
+            not env_set(NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1, ""):
         return Err("stale parse closure request could not be cleared")
     if not closure_publication_expected:
         return Ok(false)
@@ -2240,8 +2255,24 @@ pub fn native_build_closure_publish_once_v1(args: [text], frontend_cache_dir: te
         env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
         env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
         env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "")
+        env_set(NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1, "")
         return Err(publish_error)
     Ok(false)
+
+# Selected file count of the published closure request, or -1 when no
+# request was published (TLDR imports, no --entry-closure) or the value is
+# not a count. Sizing only; admission stays with the request digest.
+pub fn native_build_closure_selected_count_v1() -> i64:
+    if (env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "") == "":
+        return -1
+    val raw = env_get(NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1) ?? ""
+    if raw == "":
+        return -1
+    match raw.to_i64():
+        case Some(value):
+            if value < 0: -1 else: value
+        case None:
+            -1
 
 # True only when clearing was needed (refresh) and failed.
 pub fn native_build_closure_drop_prepublished_v1(refresh: bool) -> bool:
@@ -2249,7 +2280,8 @@ pub fn native_build_closure_drop_prepublished_v1(refresh: bool) -> bool:
     val a = env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
     val b = env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
     val c = env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "")
-    not (a and b and c)
+    val d = env_set(NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1, "")
+    not (a and b and c and d)
 
 # bootstrap_main coordinator route: publish once after the authority step and
 # BEFORE the file-worker/HIR/MIR prepass, so its children only consume.
