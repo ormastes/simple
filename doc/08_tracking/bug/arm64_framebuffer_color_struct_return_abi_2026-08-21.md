@@ -200,3 +200,5 @@ receipt, and resume. QEMU evidence remains pending and unclaimed.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+Revalidated 2026-11-02: still plausible because doc requires fresh attested QEMU evidence before closing and none is recorded.

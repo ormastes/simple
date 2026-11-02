@@ -63,3 +63,5 @@ surface owner and fail closed on absence.
 2. Strict Stage 3 completes with no seed fallback.
 3. Stage 3 provenance/self-verification passes.
 4. A regression test exercises the owner handoff under native execution.
+
+Revalidated 2026-11-02: still plausible because Status OPEN; no fixing commit referenced; cannot be reproduced here (aarch64-apple-darwin).

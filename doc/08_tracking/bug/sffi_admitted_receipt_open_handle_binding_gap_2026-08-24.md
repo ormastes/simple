@@ -70,3 +70,5 @@ production Simple files (4.48--4.96 s, 288,308--290,928 KiB); it reported only
 the scanner's broad existing opportunity sets. Runtime call bodies did not
 change, so no per-call benchmark was repeated.
 
+
+Revalidated 2026-11-02: still plausible because no resolution evidence in the body; receipt-to-handle binding is described as still open.

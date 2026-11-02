@@ -67,3 +67,5 @@ Also stop other large builds on the host; the reserve is the only guard.
 
 Open: no running-pool guard kills/requeues a worker when live headroom drops
 below the reserve; admission alone cannot stop growth after spawn.
+
+Revalidated 2026-11-02: still plausible because the fix lives on branch work/hir-shard-oom, which has no PR and is not in release/1.0.0 (gh pr list --head shows none).
