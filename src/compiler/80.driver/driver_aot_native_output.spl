@@ -36,9 +36,16 @@ use std.nogc_sync_mut.path.{dirname, basename}
 # already records at :34-40 for `file_read_bytes`. See
 # doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
 use compiler.backend.backend_helpers.{compile_module_with_backend,
-    compile_module_with_backend_scoped_v1, get_effective_backend_name}
+    compile_module_with_backend_scoped_v1, get_effective_backend_name,
+    llvm_module_ir_to_path_v1, llvm_module_llc_argv_v1}
+use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_pool_run_v1,
+    native_codegen_pool_workers_v1, native_codegen_headroom_kib_v1,
+    native_codegen_kib_field_v1, NativeCodegenPoolResultV1,
+    NATIVE_CODEGEN_POOL_ENV_V1, NATIVE_CODEGEN_WORKER_KIB_ENV_V1,
+    NATIVE_CODEGEN_JOB_PASS_V1}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes_result}
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
-use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
+use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, find_llc}
 use compiler.backend.llvm_capability.{find_archive_portable}
 use compiler.backend.runtime_compiler.{find_c_compiler, _is_msvc_cc}
 use std.platform.{get_host_os, get_host_arch}
@@ -2688,32 +2695,24 @@ impl CompilerDriver:
                     1
                 else:
                     driver_native_build_threads()
-                # Report the REAL degree of concurrency, unconditionally.
-                # `build()` compiles in-process, one unit at a time
-                # (parallel.spl:510-513), so concurrency on this path is 1 no
-                # matter what `provider_threads` says. This print is not gated
-                # on --verbose on purpose: the >1h33m silent step-5 phase in
+                # Report the REAL degree of concurrency, unconditionally (not
+                # gated on --verbose: the >1h33m silent step-5 phase in
                 # doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md
-                # was observed WITHOUT --verbose, so a verbose-only notice
-                # would not have surfaced it, and the verbose notice inside
-                # build() itself is likewise unreachable by default. Do not
-                # weaken this into a claim of parallelism -- the route to real
-                # parallelism is staged in
-                # doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md
-                # Every clause here must be unconditionally TRUE. `provider_threads`
-                # is the RESOLVED value, not the user's --threads: it is 1 when a
-                # BackendSession is admitted, and 0 when SIMPLE_NATIVE_BUILD_THREADS
-                # is unset (`driver_native_build_threads`, :248-255). So it must not
-                # be described as "requested", and "N is not honoured" would be false
-                # at 1 and meaningless at 0. State the resolved value and the
-                # invariant separately.
-                val uncached_count = uncached_names.len()
-                print "[NATIVE] codegen: {uncached_count} uncached module(s), "
-                    + "concurrency=1 (threads resolve to {provider_threads} here, but "
-                    + "build() compiles modules sequentially in this process -- no "
-                    + "value above 1 takes effect; see "
-                    + "step5_real_parallelism_plan_2026-09-04.md)"
-                _sffi_stdout_flush()
+                # was observed without it). build() itself compiles in-process,
+                # one unit at a time; the only concurrency is the pool below.
+                # Real parallelism (plan P2): for the built-in llvm lane the
+                # native codegen process pool translates every uncached module
+                # here and runs its llc in N concurrent child processes. It is
+                # a prefetch -- build() below still publishes, verifies and
+                # collects every module in order, taking the pooled object
+                # where one exists and compiling serially otherwise. The pool
+                # prints the honest `concurrency=N` line itself (N=1 with the
+                # reason when it is not admitted).
+                val pool_objects = _driver_codegen_pool_prefetch_v1(capsules,
+                    effective_backend, native_target, is_release,
+                    driver_opt_level, provider_receipt_hash,
+                    backend_session.?, ctx.options.backend_plugin_path,
+                    provider_threads, uncached_names)
                 val parallel_cfg = ParallelBuildConfig(
                     num_threads: provider_threads,
                     parallel_threshold: 4,
@@ -2729,10 +2728,11 @@ impl CompilerDriver:
                 for name in uncached_names:
                     builder.add_unit(name, [])
 
-                val build_result = builder.build(_compile_frozen_module_capsule(
+                val build_result = builder.build(_compile_frozen_module_capsule_prefetched_v1(
                     capsules, effective_backend, native_target, is_release,
                     driver_opt_level, provider_receipt_hash, backend_session,
-                    _1))
+                    pool_objects, _1))
+                _driver_codegen_pool_cleanup_v1(pool_objects)
                 cache_miss_count = cache_miss_count + build_result.stats.completed
                     + build_result.stats.failed
                 # The builder's OWN ledger of what it dispatched. Every unit it
@@ -3604,7 +3604,23 @@ fn _compile_frozen_module_capsule(
     is_release: bool, opt_level: i64, provider_receipt_hash: text,
     backend_session: BackendSessionOwnedLeaseV2?, name: text
 ) -> Result<text, text>:
+    val no_prefetched: {text: text} = {}
+    _compile_frozen_module_capsule_prefetched_v1(batch, backend_name, target,
+        is_release, opt_level, provider_receipt_hash, backend_session,
+        no_prefetched, name)
+
+# Same as _compile_frozen_module_capsule, but a module whose object the native
+# codegen pool already produced (`prefetched[name]` = staged object) publishes
+# that object instead of re-running translate + llc. Identity, receipt and
+# collect logic are shared, so the two lanes cannot drift.
+fn _compile_frozen_module_capsule_prefetched_v1(
+    batch: FrozenNativeModuleCapsuleBatchV1, backend_name: text, target: text,
+    is_release: bool, opt_level: i64, provider_receipt_hash: text,
+    backend_session: BackendSessionOwnedLeaseV2?, prefetched: {text: text},
+    name: text
+) -> Result<text, text>:
     compiler_work_codegen_schedule_v1(1)
+    val prefetched_object = if prefetched.has(name): prefetched[name] else: ""
     """Compile one parent-frozen module capsule without CompileContext/cache access."""
     if not batch.ok:
         return _aot_compile_failure(name, "invalid-capsule-batch")
@@ -3670,7 +3686,7 @@ fn _compile_frozen_module_capsule(
     match _compile_selected_module(backend_name, is_release, opt_level,
         capsule.output_base,
         name, capsule.mir_module, capsule.storage_snapshot,
-        capsule.target_cpu, backend_session):
+        capsule.target_cpu, backend_session, prefetched_object):
         case Err(error):
             if group_member_id != "":
                 log_phase("native_group:codegen:error member={group_member_id} backend={backend_name}")
@@ -4274,7 +4290,8 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                             output_base: text, name: text, mir_module: MirModule,
                             storage_snapshot: FrozenStorageModuleSnapshotV1,
                             frozen_target_cpu: text,
-                            backend_session: BackendSessionOwnedLeaseV2?) -> Result<text, text>:
+                            backend_session: BackendSessionOwnedLeaseV2?,
+                            prefetched_object: text) -> Result<text, text>:
     if not storage_snapshot.ok or storage_snapshot.module_name != name:
         return _aot_compile_failure(name, "storage-snapshot-module-mismatch")
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
@@ -4321,6 +4338,12 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         if cc_code != 0:
             return Err("Bootstrap empty object compile failed: {cc_err}")
         return Ok(obj_path)
+    if prefetched_object != "" and not backend_session.?:
+        val pooled_obj_path = native_aot_object_path_v1(output_base, name)
+        if _driver_codegen_pool_publish_object_v1(prefetched_object, pooled_obj_path):
+            return Ok(pooled_obj_path)
+        # Staged object unreadable or unwritable: the serial lane below
+        # recompiles the module and reports any real failure itself.
 
     # Finish the Result inside the selected provider branch. A self-hosted
     # conditional composite temporary can outlive its active flat payload and
@@ -4464,6 +4487,163 @@ fn _finish_selected_module_compile(
                 _aot_compile_failure(name, "backend produced no object code")
         case _:
             _aot_compile_failure(name, "backend result not Ok")
+
+# ---------------------------------------------------------------------------
+# Process-parallel native codegen pool (step 5, plan P2)
+# compiler/80.driver/driver_build/native_codegen_pool_v1.spl owns scheduling;
+# these are the driver-side hooks. The pool is a PREFETCH: it produces staged
+# objects, and the ordinary ParallelBuilder pass then publishes each one through
+# _compile_frozen_module_capsule_prefetched_v1, so identity checks, receipts,
+# cache collection and failure accounting are the serial lane's own code.
+# ---------------------------------------------------------------------------
+
+# Copy a pooled object to its capsule path through the serial lane's own
+# writer (write_elf_bytes_to_file), so the published bytes are identical.
+fn _driver_codegen_pool_publish_object_v1(staged_path: text, obj_path: text) -> bool:
+    match file_read_bytes_result(staged_path):
+        case Ok(bytes):
+            if bytes.len() == 0:
+                return false
+            match write_elf_bytes_to_file(obj_path, bytes):
+                case Ok(_): true
+                case Err(_): false
+        case Err(_): false
+
+# The built-in in-process `llvm` lane only: no backend session/plugin, no
+# native-group manifest, no translation-scope or bitcode-debug variants, and
+# llc present. Anything else keeps the serial lane (concurrency=1).
+fn _driver_codegen_pool_lane_reason_v1(backend_name: text, is_release: bool,
+        backend_session_present: bool, plugin_path: text) -> text:
+    if (env_get_nullable(NATIVE_CODEGEN_POOL_ENV_V1) ?? "") == "0":
+        return "{NATIVE_CODEGEN_POOL_ENV_V1}=0"
+    if backend_session_present or plugin_path != "":
+        return "backend session owns codegen"
+    val builtin_llvm = backend_name == "llvm" or (backend_name == "auto" and not is_release)
+    if not builtin_llvm:
+        return "backend {backend_name} is not the built-in llvm lane"
+    if native_group_request_path_v1() != "":
+        return "native group manifest lane"
+    if (env_get_nullable("SIMPLE_CODEGEN_MODULE_SCOPE") ?? "") == "1":
+        return "SIMPLE_CODEGEN_MODULE_SCOPE=1"
+    if (env_get_nullable("SIMPLE_LLVM_BITCODE_DEBUG") ?? "") == "1":
+        return "SIMPLE_LLVM_BITCODE_DEBUG=1"
+    if (env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? "") == "1":
+        return "SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ=1"
+    if find_llc() == "":
+        return "llc not found"
+    ""
+
+# Pool emission for job `index`: translate the module in this process exactly
+# as the serial lane would and return the llc argv, or [] to leave the module
+# to the serial lane (invalid capsule, empty MIR, ICE skip, translate failure).
+fn _driver_codegen_pool_emit_v1(batch: FrozenNativeModuleCapsuleBatchV1,
+        backend_name: text, target: text, is_release: bool, opt_level: i64,
+        provider_receipt_hash: text, names: [text], index: i64,
+        ir_path: text, obj_path: text) -> [text]:
+    val none: [text] = []
+    if index < 0 or index >= names.len() or not batch.ok:
+        return none
+    val name = names[index]
+    val capsule = frozen_native_capsule_batch_find_v1(batch, name)
+    if not capsule.ok or capsule.module_name != name:
+        return none
+    if not driver_native_capsule_inputs_valid_v1(capsule, backend_name, target,
+            is_release, opt_level, provider_receipt_hash):
+        return none
+    if capsule.storage_snapshot.registry_identity != batch.registry_identity:
+        return none
+    if not capsule.storage_snapshot.ok or capsule.storage_snapshot.module_name != name:
+        return none
+    val fn_count = capsule.mir_module.functions.keys().len()
+    val static_count = capsule.mir_module.statics.keys().len()
+    val const_count = capsule.mir_module.constants.keys().len()
+    if fn_count == 0 and static_count == 0 and const_count == 0:
+        return none
+    val ice_gate = ice_boundary_module_start(name, capsule.cache_source, "codegen", backend_name)
+    if ice_gate != "":
+        return none
+    val reason = llvm_module_ir_to_path_v1(capsule.mir_module, is_release,
+        opt_level, capsule.target_cpu, capsule.storage_snapshot.sites, ir_path)
+    ice_boundary_module_done(name, "codegen")
+    if reason != "":
+        log_build_trace("driver:codegen-pool:emit:serial module={name} detail={build_trace_detail(reason)}")
+        return none
+    print "[NATIVE] codegen-pool: ir {index + 1}/{names.len()} {name}"
+    _sffi_stdout_flush()
+    llvm_module_llc_argv_v1(is_release, opt_level, capsule.target_cpu, obj_path, ir_path)
+
+# Run the pool over `names` and return {module: staged object} for every
+# module it produced. {} when the lane is ineligible or only one worker is
+# admitted; the caller then compiles everything serially. Always prints the
+# honest `concurrency=N` line for this phase.
+fn _driver_codegen_pool_prefetch_v1(batch: FrozenNativeModuleCapsuleBatchV1,
+        backend_name: text, target: text, is_release: bool, opt_level: i64,
+        provider_receipt_hash: text, backend_session_present: bool,
+        plugin_path: text, requested_threads: i64, names: [text]) -> {text: text}:
+    var prefetched: {text: text} = {}
+    val lane_reason = _driver_codegen_pool_lane_reason_v1(backend_name, is_release,
+        backend_session_present, plugin_path)
+    val host_cpus = match cpu_count_checked():
+        case Ok(count): count
+        case Err(_): 1
+    val budget_kib = native_codegen_kib_field_v1(
+        env_get_nullable("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
+    val estimate_kib = native_codegen_kib_field_v1(
+        env_get_nullable(NATIVE_CODEGEN_WORKER_KIB_ENV_V1) ?? "")
+    val headroom_kib = if lane_reason == "": native_codegen_headroom_kib_v1() else: 0
+    var workers: i64 = 1
+    if lane_reason == "":
+        workers = native_codegen_pool_workers_v1(host_cpus, requested_threads,
+            names.len(), budget_kib, headroom_kib, estimate_kib)
+    var first_object = ""
+    if batch.ok and names.len() > 0:
+        val first = frozen_native_capsule_batch_find_v1(batch, names[0])
+        if first.ok:
+            first_object = first.object_path
+    var why = lane_reason
+    if why == "" and workers < 2:
+        why = "one worker admitted (cpus={host_cpus} budget_kib={budget_kib} headroom_kib={headroom_kib})"
+    if why == "" and first_object == "":
+        why = "first capsule unavailable"
+    var stage_root = ""
+    if why == "":
+        stage_root = secure_temp_dir_raw(dirname(first_object), "simple-codegen-pool")
+        if stage_root.len() <= 0:
+            why = "pool staging unavailable"
+    val ledger = if why == "": stage_root + "/ledger" else: ""
+    if why == "" and not dir_create_all(ledger):
+        why = "pool ledger unavailable"
+        val _removed = dir_remove(stage_root, true)
+    if why != "":
+        print "[NATIVE] codegen: {names.len()} uncached module(s), concurrency=1 (serial lane in this process: {why})"
+        _sffi_stdout_flush()
+        return prefetched
+    print "[NATIVE] codegen: {names.len()} uncached module(s), concurrency={workers} (process pool: {workers} llc workers, IR translation serial in this process; cpus={host_cpus} budget_kib={budget_kib} headroom_kib={headroom_kib})"
+    _sffi_stdout_flush()
+    val result = native_codegen_pool_run_v1(find_llc(), names, workers, stage_root, ledger,
+        _driver_codegen_pool_emit_v1(batch, backend_name, target, is_release,
+            opt_level, provider_receipt_hash, names, _1, _2, _3))
+    var index: i64 = 0
+    while index < names.len():
+        if result.states[index] == NATIVE_CODEGEN_JOB_PASS_V1:
+            prefetched[names[index]] = result.objects[index]
+        index = index + 1
+    print "[NATIVE] codegen-pool: done workers={result.workers} peak_live={result.peak_live} passed={result.passed} failed={result.failed} serial={result.skipped} first_object_ms={result.first_object_ms} wall_ms={result.wall_ms} stage={stage_root}"
+    _sffi_stdout_flush()
+    if prefetched.keys().len() == 0 and (env_get_nullable("SIMPLE_LLVM_KEEP_STAGE") ?? "") != "1":
+        val _removed_empty = dir_remove(stage_root, true)
+    prefetched
+
+# Remove the pool staging root (staged objects, IR, ledger, receipts) once
+# build() has published every pooled object. SIMPLE_LLVM_KEEP_STAGE=1 keeps it.
+fn _driver_codegen_pool_cleanup_v1(prefetched: {text: text}):
+    if (env_get_nullable("SIMPLE_LLVM_KEEP_STAGE") ?? "") == "1":
+        return
+    for name in prefetched.keys():
+        val stage_root = dirname(prefetched[name])
+        if stage_root != "" and stage_root.contains("simple-codegen-pool"):
+            val _removed = dir_remove(stage_root, true)
+        return
 
 export RuntimeStdNativeActionEmissionV1
 export RuntimeStdNativeActionEmissionV2
