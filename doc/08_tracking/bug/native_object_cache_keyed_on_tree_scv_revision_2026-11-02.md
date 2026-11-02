@@ -50,7 +50,7 @@ Fixed when a stage3 build reuses all objects after a one-file change outside the
   instead of the absolute snapshot path. Content is still bound by source identity,
   MIR identity, storage snapshot, witness, backend/provider, target/cpu/opt/release and
   object path; the cache scope directory still carries compiler/options/environment.
-- `build_cache_rebind_scv_snapshot_v1` (incremental.spl) moves a unique BuildCache
+- `build_cache_rebind_scv_snapshot_all_v1` (incremental.spl), in one indexed pass before the native loop, moves each unique BuildCache
   entry recorded under a prior revision onto the current snapshot path before lookup;
   validity (content hash, witness, capsule receipt bytes) is unchanged. Ambiguous
   prior revisions fail closed.
@@ -69,3 +69,7 @@ Fixed when a stage3 build reuses all objects after a one-file change outside the
   identity per revision. That is real object content, not a key bug.
 - Old receipts still carry the absolute path, so the first build after this change
   rebuilds once.
+- `dep_iface_gate_*_v2` folds rows over ABSOLUTE dependency paths, so a rebound entry
+  WITH recorded dependencies never revalidates across revisions. Native AOT entries
+  record `dependencies: []`, so the native path is unaffected; other BuildCache users
+  would need a path-neutral fold (one-time format change).
