@@ -34,3 +34,24 @@ A typed parameter / annotated binding gives MIR the exact imported CompileError 
   `70.backend/bitfield.spl` / `50.mir/mir_bitfield.spl` (`bitfield_symbol_key`).
   That site is a real fix, not a removable workaround.
 Revert-ready: no (driver_bootstrap / lean / vhdl helpers must stay).
+
+## Status (2026-11-02 fix, lane waf-3)
+
+- Root bug 1: **fixed in current source** for the `unwrap_err()` shape (and the
+  sibling Result/Option payload writers). New non-fatal helper
+  `MirLowering.struct_value_provenance_key(symbol)`
+  (`src/compiler/50.mir/_MirLowering/module_lowering.spl`) returns the
+  module-qualified declared layout key of the HIR-resolved record symbol when
+  that layout is registered and unambiguous, the class identity for classes,
+  and otherwise the legacy bare name (bare-name tier kept as fallback).
+  Migrated writers: `lower_result_unwrap_core` Struct arm
+  (`unwrap`/`unwrap_err`/`.ok`/`.err`), the `?`-exists Option payload arm and
+  the `!` owner arm in `expr_dispatch.spl`, and the Result payload tagging in
+  `enum_constructor_payload.spl`. The remaining ~60 `struct_value_syms[...] =`
+  writers are unchanged (migrate incrementally as shapes surface).
+- Evidence: `compile_error_owner_layout_spec.spl` tripwire inverted plus a
+  `val e = ...unwrap_err(); e.phase` example; red 3/5 -> green 5/5
+  (`bin/simple.exe test`, ~90 s, peak 193 MB both runs).
+- Workaround tags stay (driver_bootstrap / lean / vhdl helpers) until the
+  stage3 self-build revert loop removes them.
+
