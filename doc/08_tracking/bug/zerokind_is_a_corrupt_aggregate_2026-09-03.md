@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — root cause characterised, fix not yet identified
+**Status:** FIX-IMPLEMENTED-VERIFICATION-PENDING — seed fix `2c89727c11c` is in release/1.0.0; awaiting an aarch64 Stage-3 run (see "Verification 2026-11-02")
 **Filed:** 2026-09-03
 **Severity:** P0 — sole remaining blocker for Stage-3 self-host on aarch64-apple-darwin
 
@@ -527,3 +527,20 @@ Not reproducible on the Windows x86_64 host; analysed by source reading.
 
 TODO(p0f-3): confirm on aarch64-apple-darwin with a post-`2c89727c11c` seed that
 the class stays at 0, then close this record.
+
+## Verification 2026-11-02 (release/1.0.0, Windows x86_64)
+
+- Fix in source: `2c89727c11c` (`emit_aggregate_block_copy`, seed codegen)
+  is an ancestor of `origin/release/1.0.0`; the misleading "PRODUCER that left
+  kind unset" diagnostic wording is no longer present in `src/compiler`.
+- Regression guards present: `src/compiler_rust/compiler/tests/optional_aggregate_copy_jit.rs`
+  and `test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl`.
+- Spec run: `bin/simple run test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl`
+  -> `4 examples, 0 failures`, wall 8.9 s, peak RSS 270 MB. No code changed by
+  this pass, so there is no before/after delta.
+- Not reproducible on x86_64 (symptom was AAPCS64-only). Close only after:
+  build the seed at a commit containing `2c89727c11c` on aarch64-apple-darwin
+  (or aarch64-unknown-linux-gnu), rebuild Stage 2 with it, run Stage 3 via
+  `scripts/bootstrap/bootstrap-from-scratch.sh`, and confirm
+  `grep -c E-MIR-TYPE-ZeroKind` = 0 and `[post-mono-verify]` = 0 in the worker
+  stderr, with `phase5:mode_dispatch` reached.
