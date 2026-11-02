@@ -1,0 +1,300 @@
+# Pure arm-coverage helpers for E-MATCH-NONEXHAUSTIVE-VALUE.
+#
+# Lives in 20.hir because HIR lowering (match desugaring) needs it and a lower
+# layer must not import 35.semantics. 35.semantics/value_match_exhaustiveness
+# (mode, statement positions) and 50.mir (the reporter) import this module.
+# Holds no state and has no lowering dependency.
+
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirMatchArm, HirPattern, HirPatternKind, HirPatternPayload}
+use compiler.common.diagnostics.span.{Span}
+
+# ---------------------------------------------------------------------------
+# Arm coverage
+# ---------------------------------------------------------------------------
+
+struct VmCover:
+    catch_all: bool
+    names: [text]
+
+struct VmVerdict:
+    exhaustive: bool
+    missing: text
+
+fn vm_contains(items: [text], needle: text) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == needle:
+            return true
+        i = i + 1
+    false
+
+fn vm_cover_merge(a: VmCover, b: VmCover) -> VmCover:
+    var names = a.names
+    var i = 0
+    while i < b.names.len():
+        names = names.push(b.names[i])
+        i = i + 1
+    VmCover(catch_all: a.catch_all or b.catch_all, names: names)
+
+fn vm_pattern_irrefutable(p: HirPattern) -> bool:
+    match p.kind:
+        case HirPatternKind.Wildcard:
+            return true
+        case HirPatternKind.Binding(_, _):
+            return true
+        case HirPatternKind.Tuple(elements):
+            var i = 0
+            while i < elements.len():
+                val el: HirPattern = elements[i]
+                if not vm_pattern_irrefutable(el):
+                    return false
+                i = i + 1
+            return true
+        case HirPatternKind.Struct(_, fields):
+            var j = 0
+            while j < fields.len():
+                val (fname, sub) = fields[j]
+                val sp: HirPattern = sub
+                if not vm_pattern_irrefutable(sp):
+                    return false
+                j = j + 1
+            return true
+        case HirPatternKind.Or(patterns):
+            var k = 0
+            while k < patterns.len():
+                val alt: HirPattern = patterns[k]
+                if vm_pattern_irrefutable(alt):
+                    return true
+                k = k + 1
+            return false
+        case _:
+            return false
+
+fn vm_payload_irrefutable(payload: HirPatternPayload?) -> bool:
+    if val pl = payload:
+        match pl:
+            case HirPatternPayload.Tuple(patterns):
+                var i = 0
+                while i < patterns.len():
+                    val sub: HirPattern = patterns[i]
+                    if not vm_pattern_irrefutable(sub):
+                        return false
+                    i = i + 1
+                return true
+            case HirPatternPayload.Struct(fields):
+                var j = 0
+                while j < fields.len():
+                    val (fname, sub2) = fields[j]
+                    val sp: HirPattern = sub2
+                    if not vm_pattern_irrefutable(sp):
+                        return false
+                    j = j + 1
+                return true
+    true
+
+fn vm_pattern_cover(p: HirPattern, symbols: SymbolTable, variants: [text]) -> VmCover:
+    var out = VmCover(catch_all: false, names: [])
+    match p.kind:
+        case HirPatternKind.Wildcard:
+            out.catch_all = true
+        case HirPatternKind.Binding(sym, _):
+            # The frontend cannot tell a bare unit-variant name (`case Green:`)
+            # from a capture without the enum registry; a binder spelled like a
+            # variant of THIS scrutinee is that variant, anything else is a
+            # catch-all binder (equivalent to `_`).
+            val bname = symbols.symbol_name_scalar_raw(sym.id)
+            if vm_contains(variants, bname):
+                out.names = [bname]
+            else:
+                out.catch_all = true
+        case HirPatternKind.Literal(value):
+            match value.kind:
+                case HirExprKind.BoolLit(b):
+                    var lit = "false"
+                    if b:
+                        lit = "true"
+                    out.names = [lit]
+                case HirExprKind.NilLit:
+                    out.names = ["None"]
+                case _:
+                    ()
+        case HirPatternKind.Enum(_, variant, payload):
+            if vm_payload_irrefutable(payload):
+                out.names = [variant]
+        case HirPatternKind.Or(patterns):
+            var i = 0
+            while i < patterns.len():
+                val alt: HirPattern = patterns[i]
+                out = vm_cover_merge(out, vm_pattern_cover(alt, symbols, variants))
+                i = i + 1
+        case HirPatternKind.Tuple(_):
+            if vm_pattern_irrefutable(p):
+                out.catch_all = true
+        case HirPatternKind.Struct(_, _):
+            if vm_pattern_irrefutable(p):
+                out.catch_all = true
+        case _:
+            ()
+    out
+
+pub fn vm_has_unguarded_catch_all(arms: [HirMatchArm]) -> bool:
+    """Cheap pre-check (no symbol lookups): an unguarded `_`."""
+    var i = 0
+    while i < arms.len():
+        val arm: HirMatchArm = arms[i]
+        if not arm.has_guard:
+            match arm.pattern.kind:
+                case HirPatternKind.Wildcard:
+                    return true
+                case _:
+                    ()
+        i = i + 1
+    false
+
+pub fn vm_check_arms(arms: [HirMatchArm], symbols: SymbolTable, kind: text, variants: [text]) -> VmVerdict:
+    """`kind`: "bool" | "option" | "result" | "enum" (variants resolved from
+    the owner-qualified registry) | "unresolved" (owner not provable) |
+    "other" (literal/tuple/struct scrutinee: only a catch-all is exhaustive).
+    Guarded arms cover nothing."""
+    var covered: [text] = []
+    var i = 0
+    while i < arms.len():
+        val arm: HirMatchArm = arms[i]
+        if not arm.has_guard:
+            val c = vm_pattern_cover(arm.pattern, symbols, variants)
+            if c.catch_all:
+                return VmVerdict(exhaustive: true, missing: "")
+            covered = vm_cover_merge(VmCover(catch_all: false, names: covered), c).names
+        i = i + 1
+    if kind == "other":
+        return VmVerdict(exhaustive: false, missing: "non-literal values")
+    if kind == "unresolved" or variants.len() == 0:
+        return VmVerdict(exhaustive: false, missing: "could not resolve enum owner")
+    var missing: [text] = []
+    var j = 0
+    while j < variants.len():
+        if not vm_contains(covered, variants[j]):
+            missing = missing.push(variants[j])
+        j = j + 1
+    VmVerdict(exhaustive: missing.len() == 0, missing: missing.join(", "))
+
+pub fn vm_message(type_name: text, missing: text) -> text:
+    "non-exhaustive match used as a value; scrutinee type: {type_name}; missing: {missing}; help: add the missing arms or a `_:` arm (do not return nil)"
+
+
+# ---------------------------------------------------------------------------
+# Desugared (if-chain) matches
+# ---------------------------------------------------------------------------
+#
+# HIR lowering rewrites a match with any non-MIR-native arm (bool / text /
+# float / char literals, tuple, struct, array, range patterns) into an if-chain
+# inside `{ val __mp_scrutinee = <scrut>; <chain> }`, so `lower_match_case`
+# never sees it and the ORIGINAL arms are gone. Such a match names no enum
+# variant (enum arms always keep the MatchCase path), so its coverage is
+# decidable from the arms alone, at desugar time, with no enum registry. The
+# verdict ("<type label>|<missing>", empty when exhaustive) is carried to MIR in
+# a side table on the SymbolTable keyed by the temp symbol id
+# (`value_match_verdicts`); the temp keeps its plain name `__mp_scrutinee`, so
+# codegen is unchanged. MIR decides value position and reports.
+
+fn vm_pattern_has_bool_literal(p: HirPattern) -> bool:
+    match p.kind:
+        case HirPatternKind.Literal(value):
+            match value.kind:
+                case HirExprKind.BoolLit(_):
+                    return true
+                case _:
+                    return false
+        case HirPatternKind.Or(patterns):
+            var i = 0
+            while i < patterns.len():
+                val alt: HirPattern = patterns[i]
+                if vm_pattern_has_bool_literal(alt):
+                    return true
+                i = i + 1
+            return false
+        case _:
+            return false
+
+pub fn vm_type_label(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Int(_, _): "int"
+        case HirTypeKind.Float(_): "float"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Tuple(_): "tuple"
+        case _: ""
+
+fn vm_literal_label(arms: [HirMatchArm]) -> text:
+    var i = 0
+    while i < arms.len():
+        val arm: HirMatchArm = arms[i]
+        match arm.pattern.kind:
+            case HirPatternKind.Literal(value):
+                match value.kind:
+                    case HirExprKind.IntLit(_, _):
+                        return "int"
+                    case HirExprKind.FloatLit(_, _):
+                        return "float"
+                    case HirExprKind.FloatLexeme(_, _):
+                        return "float"
+                    case HirExprKind.StringLit(_, _):
+                        return "text"
+                    case HirExprKind.CharLit(_):
+                        return "char"
+                    case _:
+                        ()
+            case _:
+                ()
+        i = i + 1
+    "other"
+
+pub fn vm_desugar_verdict(arms: [HirMatchArm], symbols: SymbolTable, scrut_type: HirType) -> text:
+    """Empty when the desugared match is exhaustive, else "<label>|<missing>"."""
+    var is_bool = false
+    var i = 0
+    while i < arms.len():
+        val arm: HirMatchArm = arms[i]
+        if vm_pattern_has_bool_literal(arm.pattern):
+            is_bool = true
+        i = i + 1
+    var kind = "other"
+    var variants: [text] = []
+    var label = vm_type_label(scrut_type)
+    if is_bool or label == "bool":
+        kind = "bool"
+        variants = ["true", "false"]
+        label = "bool"
+    elif label == "":
+        label = vm_literal_label(arms)
+    val verdict = vm_check_arms(arms, symbols, kind, variants)
+    if verdict.exhaustive:
+        return ""
+    "{label}|{verdict.missing}"
+
+# ---------------------------------------------------------------------------
+# Verdict side table (desugared matches)
+# ---------------------------------------------------------------------------
+#
+# Keyed by the match's source span ("file:line:col"), NOT by symbol id: the
+# SymbolTable is cloned/rebuilt between HIR and MIR (typed-module copy, source
+# union admission) so a field on it does not survive, and span keys are unique
+# across modules where raw symbol ids are not. Only NON-exhaustive desugared
+# matches are recorded, so the table is tiny. No HIR node is changed: codegen
+# is identical whether or not an entry exists.
+
+var VM_DESUGAR_VERDICTS: Dict<text, text> = {}
+
+pub fn vm_verdict_key(sp: Span) -> text:
+    "{sp.file}:{sp.line}:{sp.col}"
+
+pub fn vm_record_desugar_verdict(sp: Span, verdict: text):
+    VM_DESUGAR_VERDICTS[vm_verdict_key(sp)] = verdict
+
+pub fn vm_desugar_verdict_at(sp: Span) -> text:
+    val key = vm_verdict_key(sp)
+    if VM_DESUGAR_VERDICTS.has(key):
+        return VM_DESUGAR_VERDICTS[key]
+    ""

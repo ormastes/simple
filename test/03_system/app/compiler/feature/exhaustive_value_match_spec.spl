@@ -1,0 +1,187 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Exhaustive value-position match (E-MATCH-NONEXHAUSTIVE-VALUE)
+
+A `match` whose result is used as a value must be exhaustive; an unguarded
+catch-all (`_` or a bare binder) always makes it exhaustive. Statement matches
+are unaffected. Guarded arms cover nothing. Enum coverage is owner-qualified.
+
+Mode `warn` (default): reported as a non-fatal advisory, codegen unchanged.
+Mode `error` (SIMPLE_VALUE_MATCH_EXHAUSTIVENESS=error): fatal MIR error.
+
+Design: doc/05_design/exhaustive_value_match.md
+"""
+
+# @tag: system, compiler, mir, match, exhaustiveness
+
+use std.spec
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.semantics.value_match_exhaustiveness.{value_match_mode_resolve, value_match_mode_normalize}
+
+val CODE: text = "E-MATCH-NONEXHAUSTIVE-VALUE"
+
+val DECLS: text = "enum Color:\n    Red\n    Green\n    Blue\n\nenum Shape:\n    Circle(r: i64)\n    Square(s: f64)\n    Empty\n\n"
+
+struct Diag:
+    messages: [text]
+    fatal: [bool]
+    in_errors: i64
+    in_advisories: i64
+
+# One function whose `val x = match s: <arms>` is in value position.
+fn value_src(param_ty: text, arms: text) -> text:
+    DECLS + "fn f(s: " + param_ty + ", c: bool) -> i64:\n    val x = match s:\n" + arms + "    x\n"
+
+fn compile_diag(src: text, mode: text) -> Diag:
+    val saved_mode = env_get("SIMPLE_VALUE_MATCH_EXHAUSTIVENESS")
+    val saved_profile = env_get("SIMPLE_SAFETY_PROFILE")
+    val _a = env_set("SIMPLE_VALUE_MATCH_EXHAUSTIVENESS", mode)
+    val _b = env_set("SIMPLE_SAFETY_PROFILE", "")
+    val parsed = parse_full_frontend(src, "testdata/exh_value_match.spl", "exh_value_match", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/exh_value_match.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    var fatal: [bool] = []
+    var in_errors = 0
+    var in_advisories = 0
+    for adv in lowering.mir_advisories:
+        if adv.message.contains(CODE):
+            messages = messages.push(adv.message)
+            fatal = fatal.push(adv.fatal)
+            in_advisories = in_advisories + 1
+    for err in lowering.errors:
+        if err.message.contains(CODE):
+            messages = messages.push(err.message)
+            fatal = fatal.push(err.fatal)
+            in_errors = in_errors + 1
+    val _c = env_set("SIMPLE_VALUE_MATCH_EXHAUSTIVENESS", saved_mode)
+    val _d = env_set("SIMPLE_SAFETY_PROFILE", saved_profile)
+    Diag(messages: messages, fatal: fatal, in_errors: in_errors, in_advisories: in_advisories)
+
+fn count_for(param_ty: text, arms: text, mode: text) -> i64:
+    val d = compile_diag(value_src(param_ty, arms), mode)
+    d.messages.len()
+
+# ---- arm sets --------------------------------------------------------------
+val ENUM_PARTIAL: text = "        case Color.Red:\n            1\n        case Color.Green:\n            2\n"
+val ENUM_FULL: text = "        case Color.Red:\n            1\n        case Color.Green:\n            2\n        case Color.Blue:\n            3\n"
+val ENUM_GUARDED: text = "        case Color.Red:\n            1\n        case Color.Green:\n            2\n        case Color.Blue if c:\n            3\n"
+val PAYLOAD_PARTIAL: text = "        case Shape.Circle(r):\n            1\n        case Shape.Square(q):\n            2\n"
+val PAYLOAD_FULL: text = "        case Shape.Circle(r):\n            1\n        case Shape.Square(q):\n            2\n        case Shape.Empty:\n            3\n"
+val PAYLOAD_REFUTABLE: text = "        case Shape.Circle(1):\n            1\n        case Shape.Square(q):\n            2\n        case Shape.Empty:\n            3\n"
+val BOOL_PARTIAL: text = "        case true:\n            1\n"
+val BOOL_FULL: text = "        case true:\n            1\n        case false:\n            2\n"
+val OPT_PARTIAL: text = "        case Some(v):\n            v\n"
+val OPT_FULL: text = "        case Some(v):\n            v\n        case None:\n            0\n"
+val RES_PARTIAL: text = "        case Ok(v):\n            v\n"
+val RES_FULL: text = "        case Ok(v):\n            v\n        case Err(e):\n            0\n"
+val INT_PARTIAL: text = "        case 1:\n            10\n        case 2:\n            20\n"
+val TEXT_PARTIAL: text = "        case \"a\":\n            10\n"
+val WILD: text = "        case _:\n            0\n"
+val BINDER: text = "        case other:\n            0\n"
+val GUARDED_WILD: text = "        case _ if c:\n            0\n"
+
+describe "value-position match: error mode must fail":
+    it "rejects a partial enum match":
+        expect(count_for("Color", ENUM_PARTIAL, "error")).to_equal(1)
+    it "rejects a partial payload-enum match":
+        expect(count_for("Shape", PAYLOAD_PARTIAL, "error")).to_equal(1)
+    it "rejects a partial bool match":
+        expect(count_for("bool", BOOL_PARTIAL, "error")).to_equal(1)
+    it "rejects a partial Option match":
+        expect(count_for("i64?", OPT_PARTIAL, "error")).to_equal(1)
+    it "rejects a partial Result match":
+        expect(count_for("Result<i64, text>", RES_PARTIAL, "error")).to_equal(1)
+    it "rejects an int match without a catch-all":
+        expect(count_for("i64", INT_PARTIAL, "error")).to_equal(1)
+    it "rejects a text match without a catch-all":
+        expect(count_for("text", TEXT_PARTIAL, "error")).to_equal(1)
+    # A float SCRUTINEE with int-literal arms: a float-literal arm (`case 1.5:`)
+    # is lowered by the frontend to a wildcard (doc/08_tracking/bug/
+    # float_literal_pattern_lowers_to_wildcard_2026-11-02.md), so it cannot be
+    # observed as non-exhaustive here.
+    it "rejects a float match without a catch-all":
+        expect(count_for("f64", INT_PARTIAL, "error")).to_equal(1)
+    it "treats a guarded arm as covering nothing":
+        expect(count_for("Color", ENUM_GUARDED, "error")).to_equal(1)
+    it "treats a refutable payload sub-pattern as covering nothing":
+        expect(count_for("Shape", PAYLOAD_REFUTABLE, "error")).to_equal(1)
+    it "does not let a guarded catch-all silence the match":
+        expect(count_for("Color", ENUM_PARTIAL + GUARDED_WILD, "error")).to_equal(1)
+    it "reports a fatal error naming the missing variant":
+        val d = compile_diag(value_src("Color", ENUM_PARTIAL), "error")
+        expect(d.in_errors).to_equal(1)
+        expect(d.fatal[0]).to_equal(true)
+        expect(d.messages[0]).to_contain("Blue")
+        expect(d.messages[0]).to_contain("error[E-MATCH-NONEXHAUSTIVE-VALUE]")
+
+describe "value-position match: a catch-all silences":
+    it "is silenced by `_` for every scrutinee class":
+        expect(count_for("Color", ENUM_PARTIAL + WILD, "error")).to_equal(0)
+        expect(count_for("Shape", PAYLOAD_PARTIAL + WILD, "error")).to_equal(0)
+        expect(count_for("bool", BOOL_PARTIAL + WILD, "error")).to_equal(0)
+        expect(count_for("i64?", OPT_PARTIAL + WILD, "error")).to_equal(0)
+        expect(count_for("Result<i64, text>", RES_PARTIAL + WILD, "error")).to_equal(0)
+        expect(count_for("i64", INT_PARTIAL + WILD, "error")).to_equal(0)
+        expect(count_for("text", TEXT_PARTIAL + WILD, "error")).to_equal(0)
+        expect(count_for("f64", INT_PARTIAL + WILD, "error")).to_equal(0)
+    it "is silenced by a bare binder arm":
+        expect(count_for("Color", ENUM_PARTIAL + BINDER, "error")).to_equal(0)
+        expect(count_for("i64", INT_PARTIAL + BINDER, "error")).to_equal(0)
+        expect(count_for("text", TEXT_PARTIAL + BINDER, "error")).to_equal(0)
+
+describe "value-position match: exhaustive without a catch-all passes":
+    it "accepts a complete enum":
+        expect(count_for("Color", ENUM_FULL, "error")).to_equal(0)
+    it "accepts a complete payload enum":
+        expect(count_for("Shape", PAYLOAD_FULL, "error")).to_equal(0)
+    it "accepts true and false":
+        expect(count_for("bool", BOOL_FULL, "error")).to_equal(0)
+    it "accepts Some and None":
+        expect(count_for("i64?", OPT_FULL, "error")).to_equal(0)
+    it "accepts Ok and Err":
+        expect(count_for("Result<i64, text>", RES_FULL, "error")).to_equal(0)
+
+describe "statement-position match is unaffected":
+    it "does not report a partial enum match whose value is discarded":
+        val src = DECLS + "fn g(s: Color, c: bool) -> i64:\n    match s:\n        case Color.Red:\n            print \"r\"\n    7\n"
+        val d = compile_diag(src, "error")
+        expect(d.messages.len()).to_equal(0)
+    it "does not report a partial match in a unit-returning function tail":
+        val src = DECLS + "fn h(s: Color):\n    match s:\n        case Color.Red:\n            print \"r\"\n"
+        val d = compile_diag(src, "error")
+        expect(d.messages.len()).to_equal(0)
+
+describe "warn mode (default) reports but compiles":
+    it "emits a non-fatal advisory and no MIR error":
+        val d = compile_diag(value_src("Color", ENUM_PARTIAL), "warn")
+        expect(d.in_advisories).to_equal(1)
+        expect(d.in_errors).to_equal(0)
+        expect(d.fatal[0]).to_equal(false)
+        expect(d.messages[0]).to_contain("warning[E-MATCH-NONEXHAUSTIVE-VALUE]")
+    it "defaults to warn when the mode is unset":
+        val d = compile_diag(value_src("Color", ENUM_PARTIAL), "")
+        expect(d.in_advisories).to_equal(1)
+        expect(d.in_errors).to_equal(0)
+
+describe "mode precedence":
+    it "orders CLI over env over SDN over the default":
+        expect(value_match_mode_resolve("", "", "", "")).to_equal("warn")
+        expect(value_match_mode_resolve("", "", "error", "")).to_equal("error")
+        expect(value_match_mode_resolve("", "warn", "error", "")).to_equal("warn")
+        expect(value_match_mode_resolve("error", "warn", "warn", "")).to_equal("error")
+    it "falls back to the default on an unknown value":
+        expect(value_match_mode_normalize("bogus")).to_equal("")
+        expect(value_match_mode_resolve("bogus", "bogus", "bogus", "")).to_equal("warn")
+    it "is forced to error by the critical safety profile":
+        expect(value_match_mode_resolve("", "warn", "warn", "critical")).to_equal("error")
