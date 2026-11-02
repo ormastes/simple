@@ -32,6 +32,7 @@
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists, file_read, file_size_raw, file_delete}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, host_os}
+use std.nogc_sync_mut.host_limits.{host_limit_i64, host_limit_mem_reserve_free_kib}
 use compiler.backend.llvm_diagnostic_admission.{llvm_llc_error_diagnostic}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal}
@@ -57,7 +58,8 @@ pub const NATIVE_CODEGEN_WORKER_KIB_ENV_V1: text = "SIMPLE_NATIVE_CODEGEN_WORKER
 # on this host are the in-process translation, which stays in the parent; an
 # llc child holds one module's IR and machine code only.
 pub const NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1: i64 = 2097152
-# RAM/commit the pool always leaves free (24 GiB), same floor as the shard pool.
+# Built-in default of the RAM/commit the pool always leaves free (24 GiB), same
+# floor as the shard pool. Live value: native_codegen_commit_floor_kib_v1().
 pub const NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1: i64 = 25165824
 # With neither a declared budget nor a measurable headroom, never admit-all.
 pub const NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1: i64 = 4
@@ -84,7 +86,8 @@ pub const NATIVE_CODEGEN_JOB_SKIPPED_V1: i64 = 4
 # the commit floor. Every known bound can only lower N; the result is >= 1
 # whenever there is a job (1 = serial).
 pub fn native_codegen_pool_workers_v1(host_cpus: i64, requested: i64, jobs: i64,
-        budget_kib: i64, headroom_kib: i64, estimate_kib: i64) -> i64:
+        budget_kib: i64, headroom_kib: i64, estimate_kib: i64,
+        floor_kib: i64 = NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1) -> i64:
     if jobs <= 0:
         return 0
     var n = if requested > 0: requested else: host_cpus
@@ -101,13 +104,40 @@ pub fn native_codegen_pool_workers_v1(host_cpus: i64, requested: i64, jobs: i64,
             n = by_budget
     if headroom_kib > 0:
         known = true
-        val spare = headroom_kib - NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1
+        val spare = headroom_kib - floor_kib
         val by_commit = if spare > 0: spare / est else: 0
         if by_commit < n:
             n = by_commit
     if not known and n > NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1:
         n = NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1
     if n < 1: 1 else: n
+
+# Commit floor (KiB): explicit SIMPLE_BUILD_MEMORY_RESERVE_BYTES, else host
+# config mem_reserve_free_mib, else 24 GiB. Pure form first, live form second.
+pub fn native_codegen_commit_floor_for_v1(reserve_bytes_field: text, host_reserve_kib: i64) -> i64:
+    val bytes = native_codegen_kib_field_v1(reserve_bytes_field)
+    if bytes > 0:
+        val kib = bytes / 1024
+        if kib > 0: return kib
+    if host_reserve_kib > 0: return host_reserve_kib
+    NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1
+
+pub fn native_codegen_commit_floor_kib_v1() -> i64:
+    native_codegen_commit_floor_for_v1(env_get_nullable("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? "",
+        host_limit_mem_reserve_free_kib(0))
+
+# Default cores for the pool: host config max_threads bounds the detected
+# count (it can only lower it); absent = detected.
+pub fn native_codegen_host_cpus_for_v1(detected: i64, max_threads: i64) -> i64:
+    if max_threads > 0 and (detected <= 0 or max_threads < detected): max_threads else: detected
+
+# Per-llc-child estimate (KiB): explicit SIMPLE_NATIVE_CODEGEN_WORKER_KIB, else
+# host worker_mem_mib when it is ABOVE the 2 GiB default (a host hint may only
+# make admission more conservative, same rule as shard_worker_budget_kb), else 2 GiB.
+pub fn native_codegen_worker_estimate_for_v1(env_kib: i64, host_worker_mib: i64) -> i64:
+    if env_kib > 0: return env_kib
+    val host_kib = if host_worker_mib > 0 and host_worker_mib < 9007199254740991: host_worker_mib * 1024 else: 0
+    if host_kib > NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1: host_kib else: NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1
 
 pub fn native_codegen_kib_field_v1(raw: text) -> i64:
     val parsed = raw.trim().to_i64() ?? 0

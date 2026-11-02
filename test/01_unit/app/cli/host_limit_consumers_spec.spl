@@ -1,0 +1,143 @@
+# Host-config resource limits: every build consumer reads its limit from the
+# host SDN config (simple-host-config-v1), an explicit SIMPLE_* env still wins,
+# and a missing key keeps the consumer's built-in default.
+#
+# Consumers: src/app/cli/shard_mem_clamp.spl (pool reserve floor, start-guard
+# reserve, worker_mem_mib estimate, max_threads cap),
+# src/compiler/80.driver/driver_build/native_codegen_pool_v1.spl (commit floor,
+# core count, per-llc-child estimate).
+
+use std.spec.{step}
+use app.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io_runtime.{file_write, dir_create_all}
+use app.cli.shard_mem_clamp.{shard_tree_headroom_kib_v1, shard_tree_headroom_kib_for_v1, SHARD_TREE_HEADROOM_KB_V1}
+use app.cli.shard_mem_clamp.{shard_effective_tree_budget_kb_v1, build_memory_reserve_kib, build_memory_reserve_kib_for}
+use app.cli.shard_mem_clamp.{shard_worker_budget_kb, shard_host_threads_cap}
+use std.nogc_sync_mut.host_limits.{host_limit_value}
+use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_commit_floor_kib_v1, native_codegen_commit_floor_for_v1}
+use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_host_cpus_for_v1, native_codegen_worker_estimate_for_v1}
+use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_pool_workers_v1, NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1, NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1}
+
+val GIB: i64 = 1048576
+val HOST_DIR = "build/host_limit_consumers_spec"
+val HOST_FILE = "build/host_limit_consumers_spec/host.sdn"
+val ENV_KEYS = ["SIMPLE_HOST_CONFIG", "SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "SIMPLE_HOST_MEM_RESERVE_FREE_MIB", "SIMPLE_HOST_MAX_THREADS", "SIMPLE_HOST_WORKER_MEM_MIB", "SIMPLE_SPEC_HL_WORKER_KB"]
+
+fn save_env() -> [text]:
+    var saved: [text] = []
+    for k in ENV_KEYS:
+        saved.push(env_get(k) ?? "")
+    saved
+
+fn restore_env(saved: [text]):
+    var i = 0
+    while i < ENV_KEYS.len():
+        env_set(ENV_KEYS[i], saved[i])
+        i = i + 1
+
+# Point the reader at a spec-owned user file and clear every override.
+fn use_host_file(content: text):
+    dir_create_all(HOST_DIR)
+    file_write(HOST_FILE, content)
+    for k in ENV_KEYS:
+        env_set(k, "")
+    env_set("SIMPLE_HOST_CONFIG", HOST_FILE)
+
+fn host_doc() -> text:
+    "host_config:\n  schema: simple-host-config-v1\n  mem_reserve_free_mib: 8192\n  max_threads: 6\n  worker_mem_mib: 12000\n"
+
+fn empty_doc() -> text:
+    "host_config:\n  schema: simple-host-config-v1\n"
+
+describe "host-config resource limits":
+    # @manual scenario evidence
+
+    describe "shard pool reserve floor (mem_reserve_free_mib)":
+        it "host key changes the floor, env overrides it, missing falls back to 24 GiB":
+            val saved = save_env()
+            step("host.sdn sets mem_reserve_free_mib: 8192")
+            use_host_file(host_doc())
+            expect(shard_tree_headroom_kib_v1()).to_equal(8 * GIB)
+            expect(shard_effective_tree_budget_kb_v1(0, 40 * GIB, 0, shard_tree_headroom_kib_v1())).to_equal(32 * GIB)
+            step("SIMPLE_HOST_MEM_RESERVE_FREE_MIB beats the file")
+            env_set("SIMPLE_HOST_MEM_RESERVE_FREE_MIB", "4096")
+            expect(shard_tree_headroom_kib_v1()).to_equal(4 * GIB)
+            step("SIMPLE_BUILD_MEMORY_RESERVE_BYTES beats every host layer")
+            env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "2147483648")
+            expect(shard_tree_headroom_kib_v1()).to_equal(2 * GIB)
+            step("no key anywhere keeps the 24 GiB default")
+            use_host_file(empty_doc())
+            expect(shard_tree_headroom_kib_v1()).to_equal(SHARD_TREE_HEADROOM_KB_V1)
+            expect(shard_effective_tree_budget_kb_v1(0, 40 * GIB, 0)).to_equal(16 * GIB)
+            restore_env(saved)
+
+        it "pure form orders env > host > default":
+            expect(shard_tree_headroom_kib_for_v1("1073741824", 8 * GIB)).to_equal(GIB)
+            expect(shard_tree_headroom_kib_for_v1("", 8 * GIB)).to_equal(8 * GIB)
+            expect(shard_tree_headroom_kib_for_v1("", 0)).to_equal(24 * GIB)
+
+    describe "build start reserve (mem_reserve_free_mib)":
+        it "host key changes the reserve, env overrides it, missing keeps the scaled default":
+            val saved = save_env()
+            use_host_file(host_doc())
+            expect(build_memory_reserve_kib()).to_equal(8 * GIB)
+            env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1073741824")
+            expect(build_memory_reserve_kib()).to_equal(GIB)
+            restore_env(saved)
+            expect(build_memory_reserve_kib_for("", 128 * GIB, 0)).to_equal(24 * GIB)
+            expect(build_memory_reserve_kib_for("", 16 * GIB, 0)).to_equal(8 * GIB)
+            expect(build_memory_reserve_kib_for("", 128 * GIB, 6 * GIB)).to_equal(6 * GIB)
+
+    describe "shard worker estimate (worker_mem_mib)":
+        it "host key raises the estimate, phase env overrides it, missing keeps the default":
+            val saved = save_env()
+            use_host_file(host_doc())
+            expect(shard_worker_budget_kb("SIMPLE_SPEC_HL_WORKER_KB", 9000000)).to_equal(12288000)
+            env_set("SIMPLE_HOST_WORKER_MEM_MIB", "10000")
+            expect(shard_worker_budget_kb("SIMPLE_SPEC_HL_WORKER_KB", 9000000)).to_equal(10240000)
+            env_set("SIMPLE_SPEC_HL_WORKER_KB", "4000000")
+            expect(shard_worker_budget_kb("SIMPLE_SPEC_HL_WORKER_KB", 9000000)).to_equal(4000000)
+            use_host_file(empty_doc())
+            expect(shard_worker_budget_kb("SIMPLE_SPEC_HL_WORKER_KB", 9000000)).to_equal(9000000)
+            restore_env(saved)
+
+    describe "shard thread cap (max_threads)":
+        it "host key bounds threads, env overrides it, missing is unbounded":
+            val saved = save_env()
+            use_host_file(host_doc())
+            expect(shard_host_threads_cap(80, host_limit_value("max_threads"))).to_equal(6)
+            env_set("SIMPLE_HOST_MAX_THREADS", "12")
+            expect(shard_host_threads_cap(80, host_limit_value("max_threads"))).to_equal(12)
+            use_host_file(empty_doc())
+            expect(shard_host_threads_cap(80, host_limit_value("max_threads"))).to_equal(80)
+            restore_env(saved)
+
+    describe "native codegen pool":
+        it "commit floor follows the host key, env overrides it, missing keeps 24 GiB":
+            val saved = save_env()
+            use_host_file(host_doc())
+            expect(native_codegen_commit_floor_kib_v1()).to_equal(8 * GIB)
+            env_set("SIMPLE_HOST_MEM_RESERVE_FREE_MIB", "16384")
+            expect(native_codegen_commit_floor_kib_v1()).to_equal(16 * GIB)
+            env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "4294967296")
+            expect(native_codegen_commit_floor_kib_v1()).to_equal(4 * GIB)
+            use_host_file(empty_doc())
+            expect(native_codegen_commit_floor_kib_v1()).to_equal(NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1)
+            restore_env(saved)
+            expect(native_codegen_commit_floor_for_v1("", 0)).to_equal(24 * GIB)
+
+        it "a lower floor admits more workers":
+            step("40 GiB headroom, 2 GiB per worker, 64 cores, 64 jobs")
+            expect(native_codegen_pool_workers_v1(64, 0, 64, 0, 40 * GIB, 2 * GIB)).to_equal(8)
+            expect(native_codegen_pool_workers_v1(64, 0, 64, 0, 40 * GIB, 2 * GIB, 8 * GIB)).to_equal(16)
+
+        it "max_threads bounds the detected cores; missing keeps detected":
+            expect(native_codegen_host_cpus_for_v1(80, 6)).to_equal(6)
+            expect(native_codegen_host_cpus_for_v1(4, 6)).to_equal(4)
+            expect(native_codegen_host_cpus_for_v1(80, 0)).to_equal(80)
+
+        it "worker_mem_mib only raises the per-child estimate; env wins":
+            expect(native_codegen_worker_estimate_for_v1(0, 4096)).to_equal(4 * GIB)
+            expect(native_codegen_worker_estimate_for_v1(0, 1200)).to_equal(NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1)
+            expect(native_codegen_worker_estimate_for_v1(GIB, 4096)).to_equal(GIB)
+            expect(native_codegen_worker_estimate_for_v1(0, 0)).to_equal(NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1)

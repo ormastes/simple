@@ -41,9 +41,12 @@ use compiler.backend.backend_helpers.{compile_module_with_backend,
 use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_pool_run_v1,
     native_codegen_pool_workers_v1, native_codegen_headroom_kib_v1,
     native_codegen_kib_field_v1, NativeCodegenPoolResultV1,
+    native_codegen_host_cpus_for_v1, native_codegen_worker_estimate_for_v1,
+    native_codegen_commit_floor_kib_v1,
     NATIVE_CODEGEN_POOL_ENV_V1, NATIVE_CODEGEN_WORKER_KIB_ENV_V1,
     NATIVE_CODEGEN_JOB_PASS_V1}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes_result}
+use std.nogc_sync_mut.host_limits.{host_limit_i64}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, find_llc}
@@ -4603,18 +4606,19 @@ fn _driver_codegen_pool_prefetch_v1(batch: FrozenNativeModuleCapsuleBatchV1,
     var prefetched: {text: text} = {}
     val lane_reason = _driver_codegen_pool_lane_reason_v1(backend_name, is_release,
         backend_session_present, plugin_path)
-    val host_cpus = match cpu_count_checked():
+    val detected_cpus = match cpu_count_checked():
         case Ok(count): count
         case Err(_): 1
+    val host_cpus = native_codegen_host_cpus_for_v1(detected_cpus, host_limit_i64("max_threads", 0))
     val budget_kib = native_codegen_kib_field_v1(
         env_get_nullable("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
-    val estimate_kib = native_codegen_kib_field_v1(
-        env_get_nullable(NATIVE_CODEGEN_WORKER_KIB_ENV_V1) ?? "")
+    val estimate_kib = native_codegen_worker_estimate_for_v1(native_codegen_kib_field_v1(
+        env_get_nullable(NATIVE_CODEGEN_WORKER_KIB_ENV_V1) ?? ""), host_limit_i64("worker_mem_mib", 0))
     val headroom_kib = if lane_reason == "": native_codegen_headroom_kib_v1() else: 0
     var workers: i64 = 1
     if lane_reason == "":
         workers = native_codegen_pool_workers_v1(host_cpus, requested_threads,
-            names.len(), budget_kib, headroom_kib, estimate_kib)
+            names.len(), budget_kib, headroom_kib, estimate_kib, native_codegen_commit_floor_kib_v1())
     var first_object = ""
     if batch.ok and names.len() > 0:
         val first = frozen_native_capsule_batch_find_v1(batch, names[0])
