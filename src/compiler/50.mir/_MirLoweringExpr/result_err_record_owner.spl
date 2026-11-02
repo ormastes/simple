@@ -23,7 +23,7 @@ fn result_err_layout_identity(owner: text) -> text:
 
 # Evaluate semantic identity only while symbols owns every Named ID.
 # Recursive records stop at their declaration identity, never expand fields.
-fn result_err_field_type_key(type_: HirType, symbols: SymbolTable) -> text:
+fn result_err_field_type_key_v2(type_: HirType, symbols: SymbolTable, layout_params: bool) -> text:
     if type_ == nil: return ""
     match type_.kind:
         case HirTypeKind.Int(bits, signed): if signed: "i{bits}" else: "u{bits}"
@@ -34,9 +34,19 @@ fn result_err_field_type_key(type_: HirType, symbols: SymbolTable) -> text:
         case HirTypeKind.Unit: "unit"
         case HirTypeKind.Never: "never"
         case HirTypeKind.Any: "any"
+        case HirTypeKind.TypeParam(name, _): if layout_params: "param({name})" else: ""
         case HirTypeKind.Named(id, args):
             if not symbols.symbols.has(id.id): return ""
             val declaration: HirSymbol = symbols.symbols[id.id]
+            # A declared generic field (`poll_result: Poll<T>`) is an erased
+            # runtime slot under the owner's single (uninstantiated) layout;
+            # key it by parameter name (ctor-mir-20261031 item 3). Layout
+            # signatures only: semantic type comparisons keep "" (unknown).
+            match declaration.kind:
+                case SymbolKind.TypeParam:
+                    if layout_params: return "param({declaration.name})"
+                    return ""
+                case _: ()
             val identity = result_err_layout_identity(mir_class_identity(declaration))
             if identity == "": return ""
             val kind = match declaration.kind:
@@ -46,45 +56,45 @@ fn result_err_field_type_key(type_: HirType, symbols: SymbolTable) -> text:
                 case SymbolKind.Trait: "trait"
                 case _: ""
             if kind == "": return ""
-            val arguments = result_err_field_type_keys(args, symbols)
+            val arguments = result_err_field_type_keys_v2(args, symbols, layout_params)
             if arguments == "": return ""
             "{kind}({identity}){arguments}"
         case HirTypeKind.Function(params, ret, effects):
-            val parameter_keys = result_err_field_type_keys(params, symbols)
-            val return_key = result_err_field_type_key(ret, symbols)
-            val effect_keys = result_err_function_effect_keys(effects, symbols)
+            val parameter_keys = result_err_field_type_keys_v2(params, symbols, layout_params)
+            val return_key = result_err_field_type_key_v2(ret, symbols, layout_params)
+            val effect_keys = result_err_function_effect_keys_v2(effects, symbols, layout_params)
             if parameter_keys == "" or return_key == "" or effect_keys == "": return ""
             "function(params={parameter_keys};return={return_key};effects={effect_keys})"
         case HirTypeKind.Optional(inner):
-            val key = result_err_field_type_key(inner, symbols)
+            val key = result_err_field_type_key_v2(inner, symbols, layout_params)
             if key == "": "" else: "optional({key})"
         case HirTypeKind.Array(inner, size):
-            val key = result_err_field_type_key(inner, symbols)
+            val key = result_err_field_type_key_v2(inner, symbols, layout_params)
             if key == "": "" else: "array({size ?? -1},{key})"
         case HirTypeKind.Slice(inner):
-            val key = result_err_field_type_key(inner, symbols)
+            val key = result_err_field_type_key_v2(inner, symbols, layout_params)
             if key == "": "" else: "slice({key})"
         case HirTypeKind.Tuple(elements):
-            val keys = result_err_field_type_keys(elements, symbols)
+            val keys = result_err_field_type_keys_v2(elements, symbols, layout_params)
             if keys == "": "" else: "tuple{keys}"
         case HirTypeKind.Dict(key_type, value_type):
-            val keys = result_err_field_type_keys([key_type, value_type], symbols)
+            val keys = result_err_field_type_keys_v2([key_type, value_type], symbols, layout_params)
             if keys == "": "" else: "dict{keys}"
         case HirTypeKind.Result(ok_type, err_type):
-            val keys = result_err_field_type_keys([ok_type, err_type], symbols)
+            val keys = result_err_field_type_keys_v2([ok_type, err_type], symbols, layout_params)
             if keys == "": "" else: "result{keys}"
         case HirTypeKind.Ref(inner, mutable):
-            val key = result_err_field_type_key(inner, symbols)
+            val key = result_err_field_type_key_v2(inner, symbols, layout_params)
             if key == "": "" else: "ref({mutable},{key})"
         case HirTypeKind.Ptr(inner, mutable):
-            val key = result_err_field_type_key(inner, symbols)
+            val key = result_err_field_type_key_v2(inner, symbols, layout_params)
             if key == "": "" else: "ptr({mutable},{key})"
         case HirTypeKind.Isolated(inner):
-            val key = result_err_field_type_key(inner, symbols)
+            val key = result_err_field_type_key_v2(inner, symbols, layout_params)
             if key == "": "" else: "isolated({key})"
         case _: ""
 
-fn result_err_function_effect_keys(effects: [Effect], symbols: SymbolTable) -> text:
+fn result_err_function_effect_keys_v2(effects: [Effect], symbols: SymbolTable, layout_params: bool) -> text:
     var keys: [text] = []
     for effect in effects:
         val key = match effect.kind:
@@ -95,20 +105,27 @@ fn result_err_function_effect_keys(effects: [Effect], symbols: SymbolTable) -> t
             case EffectKind.Allocates: "allocates"
             case EffectKind.Custom(name): "custom({name.len()}:{name})"
             case EffectKind.Throws(type_):
-                val payload_key = result_err_field_type_key(type_, symbols)
+                val payload_key = result_err_field_type_key_v2(type_, symbols, layout_params)
                 if payload_key == "": "" else: "throws({payload_key})"
             case _: ""
         if key == "": return ""
         keys = keys.push(key)
     "[" + keys.join(",") + "]"
 
-fn result_err_field_type_keys(types: [HirType], symbols: SymbolTable) -> text:
+fn result_err_field_type_keys_v2(types: [HirType], symbols: SymbolTable, layout_params: bool) -> text:
     var keys: [text] = []
     for type_ in types:
-        val key = result_err_field_type_key(type_, symbols)
+        val key = result_err_field_type_key_v2(type_, symbols, layout_params)
         if key == "": return ""
         keys.push(key)
     "[" + keys.join(",") + "]"
+
+fn result_err_field_type_key(type_: HirType, symbols: SymbolTable) -> text:
+    """Semantic type key; a type parameter is unknown ("")."""
+    result_err_field_type_key_v2(type_, symbols, false)
+
+fn result_err_field_type_keys(types: [HirType], symbols: SymbolTable) -> text:
+    result_err_field_type_keys_v2(types, symbols, false)
 
 impl MirLowering:
     me register_result_err_layout_types(name: text, fields: [HirField], symbols: SymbolTable):
@@ -131,7 +148,7 @@ impl MirLowering:
         var index = 0
         while index < names.len():
             val field_type: HirType = types[index]
-            val key = result_err_field_type_key(field_type, symbols)
+            val key = result_err_field_type_key_v2(field_type, symbols, true)
             if key == "": complete = false
             rows.push("{names[index].len()}:{names[index]}:{key}")
             index = index + 1

@@ -3307,7 +3307,7 @@ impl MirLowering:
                 # Error: still unsupported — loud, never an always-match.
                 self.error("enum match: unsupported nested sub-pattern kind inside an enum payload (nested enum variants, int/bool/text literals, bindings and wildcards are lowered here) — unsupported construct", Some(pat.span))
 
-    me emit_enum_payload_deep(enum_local: LocalId, payload: HirPatternPayload?, payload_fn: text, next_block: BlockId, top_level: bool, span: Span, slot_owner: text, slot_variant: text, semantic_capture: i64 = -1, semantic_node: i64 = -1, subject_payload_owner: text = ""):
+    me emit_enum_payload_deep(enum_local: LocalId, payload: HirPatternPayload?, payload_fn: text, next_block: BlockId, top_level: bool, span: Span, slot_owner: text, slot_variant: text, semantic_capture: i64 = -1, semantic_node: i64 = -1, subject_payload_owner: text = "", subject_payload_optional: bool = false):
         """Runtime tests + nested binds for the payload sub-patterns of one
         enum-match arm whose payload contains a nested Enum or Literal
         sub-pattern (enum_deep_flags classification in lower_enum_match). Called with the
@@ -3405,6 +3405,11 @@ impl MirLowering:
                                     match sub_pat.type_.kind:
                                         case HirTypeKind.Optional(_): nil_optional_slot = true
                                         case _: ()
+                                # MIR proved the same from the subject's concrete
+                                # payload type (e.g. an RTI-substituted method return) when HIR
+                                # had no subject type (ctor-mir-20261031 item 2).
+                                if top_level and pats.len() == 1 and subject_payload_optional:
+                                    nil_optional_slot = true
                                 # A raw payload word cannot distinguish None from
                                 # nonoptional scalar 3. Require this exact declared
                                 # owner key to be known nongeneric before its slot
@@ -4604,9 +4609,13 @@ impl MirLowering:
                 self.builder = b_cmp
                 val deep_owner = if enum_key != "": enum_key else: enum_name
                 var deep_subject_owner = ""
+                var deep_subject_optional = false
                 if val deep_payload_type = self.result_variant_payload_type(scrutinee, enum_variants[ci], scrut_local.id):
                     deep_subject_owner = self.enum_match_type_owner_key(deep_payload_type)
-                self.emit_enum_payload_deep(scrut_local, arm_payload, payload_symbol, next_block, true, deep_arm.pattern.span, deep_owner, enum_variants[ci], enum_semantic_capture, semantic_pattern_root, deep_subject_owner)
+                    match deep_payload_type.kind:
+                        case HirTypeKind.Optional(_): deep_subject_optional = true
+                        case _: ()
+                self.emit_enum_payload_deep(scrut_local, arm_payload, payload_symbol, next_block, true, deep_arm.pattern.span, deep_owner, enum_variants[ci], enum_semantic_capture, semantic_pattern_root, deep_subject_owner, deep_subject_optional)
                 # The pre-existing `b_arm.switch_to_block(arm_block)` just
                 # below performs the actual switch into arm_block for BOTH
                 # branches of this `if`; do not switch here (a second

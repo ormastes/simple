@@ -55,6 +55,9 @@ struct ReturnTypeRow:
     key: CalleeKey
     type_param_count: i64
     entry: ReturnTypeEntry
+    # Trailing owner (struct/class) type params of `type_param_count`; the
+    # row's Param indices are method params first, then owner params.
+    owner_type_param_count: i64 = 0
 
 struct RtiRowsV1:
     rows: [ReturnTypeRow]
@@ -391,7 +394,8 @@ fn rti_row_from_signature_v1(module_name: text, symbols: SymbolTable,
     match term:
         case Ok(t):
             val key = CalleeKey(module_id: module_id, owner: owner, name: rti_last_segment(decl.display), is_static: signature.is_static)
-            Ok(ReturnTypeRow(decl: decl, key: key, type_param_count: params.len(), entry: ReturnTypeEntry.Decided(t)))
+            val owner_count = if parts.len() == 2: signature.owner_type_params.len() else: 0
+            Ok(ReturnTypeRow(decl: decl, key: key, type_param_count: params.len(), entry: ReturnTypeEntry.Decided(t), owner_type_param_count: owner_count))
         case Err(e):
             # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
             Err(rti_error(e.code, "callee '{decl.display}' of module '{module_id}': {e.message}"))
@@ -743,9 +747,17 @@ impl ReturnTypeInterfaceTable:
         Err(rti_error("E-RTI-001", "callee '{rti_last_segment(decl.display)}' of module '{decl.module_id}' has no return-type row ({decl.display})"))
 
     fn receiver_owner(receiver: HirExpr, symbols: SymbolTable, receiver_type: HirType?) -> Result<(DeclRef, bool), RtiError>:
+        val (owner, is_static, _) = self.receiver_owner_with_args(receiver, symbols, receiver_type)?
+        Ok((owner, is_static))
+
+    fn receiver_owner_with_args(receiver: HirExpr, symbols: SymbolTable, receiver_type: HirType?) -> Result<(DeclRef, bool, [RtType]), RtiError>:
+        """Owner decl, static flag, and the receiver's concrete owner type
+        arguments (`Ring<i64, i64>` -> [i64, i64]). Arguments that are not
+        concrete in the consumer (its own type params, Infer) yield [] so the
+        row keeps today's unsubstituted path (ctor-mir-20261031 item 1b)."""
         if val declared = receiver_type:
             match declared.kind:
-                case HirTypeKind.Named(sym, _): return Ok((rti_type_decl_ref(symbols, sym.id)?, false))
+                case HirTypeKind.Named(sym, args): return Ok((rti_type_decl_ref(symbols, sym.id)?, false, rti_concrete_owner_args_v1(sym.id, args, symbols)))
                 # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
                 case HirTypeKind.DynTrait(_): return Err(rti_error("E-RTI-001", "dyn-trait receivers are RTI PR2"))
                 case _: ()
@@ -755,25 +767,68 @@ impl ReturnTypeInterfaceTable:
             case _: ()
         val term = self.require_concrete(self.resolve(self.callee_return(receiver, symbols, nil)?)?)?
         match term:
-            case RtType.Nominal(decl, _): Ok((decl, false))
+            case RtType.Nominal(decl, args): Ok((decl, false, args))
             # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
             case _: Err(rti_error("E-RTI-001", "receiver type '{rti_term_canonical_text(term)}' is not a struct/class (trait receivers are RTI PR2)"))
 
-    fn static_or_value_owner(symbols: SymbolTable, raw: i64) -> Result<(DeclRef, bool), RtiError>:
+    fn static_or_value_owner(symbols: SymbolTable, raw: i64) -> Result<(DeclRef, bool, [RtType]), RtiError>:
         if val sym = symbols.get_symbol_raw(raw):
             if rti_kind_display(sym.kind) != "":
-                return Ok((rti_type_decl_ref(symbols, raw)?, true))
+                return Ok((rti_type_decl_ref(symbols, raw)?, true, []))
             if val declared = sym.type_:
                 match declared.kind:
-                    case HirTypeKind.Named(type_sym, _): return Ok((rti_type_decl_ref(symbols, type_sym.id)?, false))
+                    case HirTypeKind.Named(type_sym, type_args): return Ok((rti_type_decl_ref(symbols, type_sym.id)?, false, rti_concrete_owner_args_v1(type_sym.id, type_args, symbols)))
                     case _: ()
         # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
         Err(rti_error("E-RTI-001", "receiver symbol {raw} has no declared struct/class type (trait receivers are RTI PR2)"))
 
     fn method_return(receiver: HirExpr, method: text, symbols: SymbolTable, receiver_type: HirType?) -> Result<ReturnTypeEntry, RtiError>:
-        val (owner, is_static) = self.receiver_owner(receiver, symbols, receiver_type)?
+        val (owner, is_static, owner_args) = self.receiver_owner_with_args(receiver, symbols, receiver_type)?
         val row = self.lookup(CalleeKey(module_id: owner.module_id, owner: Some(owner), name: method, is_static: is_static))?
-        Ok(row.entry)
+        Ok(rti_apply_owner_args_v1(row, owner_args))
+
+fn rti_concrete_owner_args_v1(owner_raw: i64, args: [HirType], symbols: SymbolTable) -> [RtType]:
+    """Concrete RTI terms for a receiver's type arguments, or [] when any
+    argument is not a concrete declared type in this module, or when the
+    receiver names an alias/trait (its args need not follow the owner's
+    declared parameter order)."""
+    if args.len() == 0:
+        return []
+    if val owner_sym = symbols.get_symbol_raw(owner_raw):
+        match owner_sym.kind:
+            case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum: ()
+            case _: return []
+    else:
+        return []
+    match rti_terms_of_hir_types(args, symbols, []):
+        case Ok(terms):
+            if rti_terms_have_param(terms):
+                return []
+            terms
+        case Err(_): []
+
+fn rti_apply_owner_args_v1(row: ReturnTypeRow, owner_args: [RtType]) -> ReturnTypeEntry:
+    """Substitute a generic owner's params in an instance-method row with the
+    receiver's type arguments. Method-level params (indices before the owner's)
+    stay `Param` so a method generic without explicit args keeps today's path.
+    Arity must match the owner's declared params exactly; otherwise the row is
+    returned unchanged."""
+    if owner_args.len() == 0 or owner_args.len() != row.owner_type_param_count:
+        return row.entry
+    val method_count = row.type_param_count - row.owner_type_param_count
+    if method_count < 0:
+        return row.entry
+    match row.entry:
+        case ReturnTypeEntry.Decided(term):
+            var args: [RtType] = []
+            var i = 0
+            while i < method_count:
+                args = args.push(RtType.Param(i))
+                i = i + 1
+            for a in owner_args:
+                args = args.push(a)
+            ReturnTypeEntry.Decided(rti_subst(term, args))
+        case _: row.entry
 
 fn rti_static_word(is_static: bool) -> text:
     if is_static: "static" else: "instance"
