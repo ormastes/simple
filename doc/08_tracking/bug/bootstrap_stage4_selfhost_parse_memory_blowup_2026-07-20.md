@@ -2000,3 +2000,29 @@ for `rt_core_*` allocations on the native lane first, and treat arena/eviction
 work as downstream of it.
 
 **Revalidated 2026-11-02: still plausible because localized, not fixed — a real fix here needs two more answers; no merged fix commit with a passing regression is cited in this doc.**
+
+## Analysis (2026-11-02, opf-5)
+
+Re-checked at `origin/release/1.0.0` (`8cb83fb9c14`). The bug is still OPEN.
+No commit since the 2026-09-22 audit shows native RSS staying flat across a
+full stage-4 closure. The cited path has changed: `frontend.spl:189-193` and
+`:216-219` now forward the caller's `streaming_scope` to
+`parse_and_build_module_scoped` (`_FlatAstBridge/module_assembly.spl:1617`),
+and that routes through `parse_and_build_module_with_scope_owner`. The only
+call that still hard-codes `false` is the provider fallback at
+`module_assembly.spl:1837`. This is not the s2-rebuild "stage2_next worker AV
+after load_sources" symptom: this bug is RSS growth with no crash.
+
+This host can't reproduce it. Reproducing needs a stage-3 artifact driving a
+1777-file stage-4 build, and full bootstrap builds are barred while Phase 3
+runs. A fix isn't bounded without heap attribution.
+
+Invariant spec added:
+`test/01_unit/compiler/80.driver/stage4_parse_scope_wiring_invariant_spec.spl`
+(2 examples, 0 failures). It pins the scope-flag wiring only. It does not
+check RSS.
+
+TODO: once a phase-3 artifact is admitted, run the native scale probe with
+heap_registry attribution (per-file RSS over at least 400 files, on both seed
+and self-host lanes). Then decide whether to close this bug or fix the
+retention owner. Also audit the `module_assembly.spl:1837` fallback.

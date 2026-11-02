@@ -1,0 +1,31 @@
+# @bug: bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20
+"""
+## Purpose and audience
+Purpose: assert-only invariant for the stage-4 parse memory blowup. The
+frontend driver must forward its caller's streaming_scope flag to
+parse_and_build_module_scoped (both cache-miss and uncached paths) so the
+transient parser scope can be reclaimed per file. This does not prove native
+RSS stays flat; that needs a phase-artifact scale probe (see bug doc TODO).
+Audience: frontend/driver maintainers.
+"""
+# @tag: unit, compiler, driver, memory
+
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+
+val FRONTEND = "src/compiler/10.frontend/frontend.spl"
+val ASSEMBLY = "src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl"
+
+fn read_or_empty(path: text) -> text:
+    file_read_nullable(path) ?? ""
+
+describe "stage4 parse scope wiring invariant":
+    it "frontend forwards streaming_scope on every scoped parse call":
+        val src = read_or_empty(FRONTEND)
+        expect(src.len()).to_be_greater_than(0)
+        expect(src).to_contain("parse_and_build_module_scoped(parse_source, file_path, streaming_scope)")
+        expect(src.contains("parse_and_build_module_scoped(parse_source, file_path, false)")).to_equal(false)
+
+    it "scoped parse entry routes through the scope owner with the caller flag":
+        val src = read_or_empty(ASSEMBLY)
+        expect(src).to_contain("parse_and_build_module_with_scope_owner(source, path, streaming_scope, false, false)")
