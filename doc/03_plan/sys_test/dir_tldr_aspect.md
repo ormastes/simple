@@ -1,10 +1,10 @@
-# dir_tldr_aspect: System Test Plan (DRAFT)
+# dir_tldr_aspect: System Test Plan (SELECTED; implementation deferred, TODO 418-430)
 
 Executable skeleton: `test/03_system/app/compiler/feature/dir_tldr_aspect_spec.spl`. Every case
 is currently a fail-fast placeholder and turns real during implementation. Requirement IDs
-are provisional and map to option groups until the user selects.
+map to the final REQ-DTA-* ids in `doc/02_requirements/feature/dir_tldr_aspect.md`; per-slice specs sit beside the skeleton (`dir_tldr_aspect_<slice>_spec.spl`).
 
-| Case | REQ (provisional) | Scenario | Assertion |
+| Case | REQ | Scenario | Assertion |
 |---|---|---|---|
 | T1 | A/H1 | compile a dir with no `__init__.tld` | gate builds it before the first member compile; compile admitted |
 | T2 | H1 | dir TLDR stale (member added) | gate rejects, rebuilds; the stale artifact is never used |
