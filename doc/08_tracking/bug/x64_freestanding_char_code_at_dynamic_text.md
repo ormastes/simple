@@ -44,3 +44,4 @@ LLVM backend path (correct). Add the probe above as a regression gate once fixed
 - `doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md`
 - `doc/08_tracking/bug/x64_freestanding_rt_string_to_int_stub.md`
 
+**Revalidated 2026-11-02: still plausible because the report title (x86_64 freestanding char_code_at mis-decodes at scattered indices on dynamicall) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

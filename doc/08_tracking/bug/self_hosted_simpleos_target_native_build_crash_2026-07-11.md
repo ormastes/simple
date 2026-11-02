@@ -336,3 +336,5 @@ The canonical SimpleOS wrapper now creates a missing sysroot before target Simpl
 ## 2026-07-12 static LLVM guest-tool relink
 
 Current sysroot inputs require LLC/LLD relink rather than reuse of older binaries. The relinker must include full `libsimple_runtime.a` because current libc calls Simple runtime owners. LLC then narrowed to one strong undefined, `rt_math_pow`; SimpleOS libc now exports that ABI by delegating to its existing freestanding `pow`. Verification awaits a fresh libc/sysroot rebuild and capped LLC/LLD relink.
+
+**Revalidated 2026-11-02: still plausible because the report title (native-build --target x86_64-unknown-simpleos dumps core before writing any cac) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

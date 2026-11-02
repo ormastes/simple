@@ -137,3 +137,5 @@ already applied.
 
 Restore a tight subprocess bound once the untracked walk itself is removed
 from the hot path (item 1-3 above; not addressed by this change).
+
+**Revalidated 2026-11-02: still plausible because OPEN (partial fix landed — see "2026-09-14 update" below; the; no merged fix commit with a passing regression is cited in this doc.**

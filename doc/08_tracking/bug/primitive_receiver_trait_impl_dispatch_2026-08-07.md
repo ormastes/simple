@@ -858,3 +858,4 @@ dispatch gap, Defect B had a measured fix recipe that was "lost to a"
 changes or deep interpreter/JIT dispatch work. Out of pure-Simple
 scope. Leaving OPEN.
 
+**Revalidated 2026-11-02: still plausible because OPEN (diagnosed, root cause located, not fixed) — re-verified; no merged fix commit with a passing regression is cited in this doc.**

@@ -291,3 +291,5 @@ requirement.
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: already root-caused, not fixed; the record's own status says the precise blocker needs a compiler-level trait-object dispatch fix. No change made.
+
+**Revalidated 2026-11-02: still plausible because Root-caused, not fixed — see "Investigation notes (2026-08-06)" below for the precise blocker; no merged fix commit with a passing regression is cited in this doc.**

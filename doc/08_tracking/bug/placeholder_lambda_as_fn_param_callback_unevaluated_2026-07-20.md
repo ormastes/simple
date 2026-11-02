@@ -134,3 +134,5 @@ site rather than the runtime value's actual callable-ness. Not root-caused
 further (would require reading the placeholder-lambda desugaring/lowering
 code, out of scope for this triage pass — no Rust seed source fix per the
 fix-guide's scope).
+
+**Revalidated 2026-11-02: still plausible because open — historical interpreter/compiler defect; current admitted; no merged fix commit with a passing regression is cited in this doc.**

@@ -564,3 +564,4 @@ No Stage 3/4 candidate or deployed CLI exists. The three-cycle cap is exhausted;
 the next fresh lane must expose and repair the first hidden frontend diagnostic
 before the 1-to-21 error expansion instead of repeating this transaction.
 
+**Revalidated 2026-11-02: still plausible because the report title (Stage3 crashes after HIR: CompileContext.error_count() from lower_and_check_imp) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

@@ -326,3 +326,5 @@ never reassigned from a returned struct, so it is a different shape — and
 `self.ctx.errors[0]`) drove the detection spec to
 `Results: 3 total, 1 passed, 2 failed`; restoring it returned it to green. The
 mitigation is therefore load-bearing for the guard.
+
+**Revalidated 2026-11-02: still plausible because ROOT-CAUSED (narrowly), NOT FIXED — still OPEN after a 2026-08-17; no merged fix commit with a passing regression is cited in this doc.**

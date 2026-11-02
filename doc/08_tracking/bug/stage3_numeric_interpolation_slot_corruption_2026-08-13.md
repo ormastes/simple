@@ -183,3 +183,5 @@ source-readable path.** The row's remaining claim ("native rebuild and runtime
 confirmation remain required") is still unverified here because no self-hosted
 Build10 binary exists in this checkout; that is a missing-evidence gap, not a
 live symptom. Leaving OPEN only for that native confirmation.
+
+**Revalidated 2026-11-02: still plausible because Pure-Simple MIR/LLVM root-cause fix implemented; native rebuild and; no merged fix commit with a passing regression is cited in this doc.**

@@ -234,3 +234,5 @@ The rv32 NVMe firmware SMP QEMU gate (`boot.shs --smp`, marker
 landed emit-object fixes (`19d868da3ace`, `de6c12922b64`) are unaffected and
 remain correct — this is a throughput/termination defect in interpreted
 emission, not a correctness defect in the emitted code.
+
+**Revalidated 2026-11-02: still plausible because open — BLOCKS the rv32 NVMe firmware QEMU gate (no ELF is produced); no merged fix commit with a passing regression is cited in this doc.**

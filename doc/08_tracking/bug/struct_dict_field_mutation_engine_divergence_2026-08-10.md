@@ -158,3 +158,4 @@ design question about intended semantics. A fix here risks subtle
 core-interpreter regressions and is far beyond this lane's per-item
 budget. Leaving OPEN, no attempt.
 
+**Revalidated 2026-11-02: still plausible because OPEN — engine divergence (defect) + undocumented language semantics (design question); no merged fix commit with a passing regression is cited in this doc.**

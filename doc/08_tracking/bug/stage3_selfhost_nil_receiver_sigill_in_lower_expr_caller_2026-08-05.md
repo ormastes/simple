@@ -274,3 +274,5 @@ Working notes for this investigation lived in a session-local scratchpad
 ## Triage 2026-09-13
 
 Record states the fix was POSTPONED by explicit user decision on 2026-08-05, with the prepared rank-1/rank-2/rank-4 changes deliberately reverted. Respecting that decision -- not resuming it unilaterally in this pass. Leaving OPEN, no code change made.
+
+**Revalidated 2026-11-02: still plausible because the report title (Stage 3 self-host dies at exit 139 with the bare leaf 'bytes' hijacked to) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

@@ -193,3 +193,4 @@ cd /home/ormastes/dev/pub/simple && git rev-list --count origin/main..HEAD   # 4
 git show HEAD:src/compiler_rust/runtime/src/value/collections.rs | wc -l     # 4211
 ```
 
+**Revalidated 2026-11-02: still plausible because (updated 2026-08-17): ROOT CAUSE FOUND; tree is healthy; no merged fix commit with a passing regression is cited in this doc.**

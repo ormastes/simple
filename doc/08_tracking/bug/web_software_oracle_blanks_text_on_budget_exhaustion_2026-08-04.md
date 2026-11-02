@@ -73,3 +73,5 @@ Return the degradation in-band rather than silently: either surface the existing
 convenience wrappers, or have the wrappers fail loudly when the paint stage was
 skipped. A silently-blank framebuffer should never be indistinguishable from a
 successful render.
+
+**Revalidated 2026-11-02: still plausible because the report title (Software web-render oracle silently blanks all text when its wall-clock budget ) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

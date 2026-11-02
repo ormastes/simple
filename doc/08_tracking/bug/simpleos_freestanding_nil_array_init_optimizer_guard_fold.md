@@ -73,3 +73,4 @@ codegen path itself, not in `.spl` source that a spec-level workaround could
 route around. Leaving OPEN/ARCHITECTURAL; re-attempt requires a session that
 can run a full bootstrap and touch `src/compiler_rust/`.
 
+**Revalidated 2026-11-02: still plausible because OPEN — blocks the last step of the in-guest Simple compiler port; no merged fix commit with a passing regression is cited in this doc.**

@@ -1351,3 +1351,5 @@ bounded workload, **not attribution or closure of the historical Stage 3 P0**.
 The 25 GB termination, real full-entry-closure RSS budget, provenance-bound
 candidate, hello, and module-qualified field-layout checks remain unverified.
 No canonical Stage 3 was run, and both authoritative DB rows remain OPEN.
+
+**Revalidated 2026-11-02: still plausible because the report title (Current-source Stage 3 terminates at status 143 after unbounded HIR-build RSS g) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

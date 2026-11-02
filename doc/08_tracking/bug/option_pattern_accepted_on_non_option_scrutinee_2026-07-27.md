@@ -975,3 +975,5 @@ unchanged, named HIR types cannot yet distinguish a user enum from a struct for
 exhaustive pattern-shape rejection, and no admitted Stage 2/3 artifact and
 receipt were available for native/interpreter proof. Keep `bug_db.sdn` at
 `P1, open` until those gaps and admitted cross-engine evidence are resolved.
+
+**Revalidated 2026-11-02: still plausible because open — owner ruling 2026-09-27: staged migration (error for new code first, then convert existing sites in batches, then hard error). Plan:; no merged fix commit with a passing regression is cited in this doc.**

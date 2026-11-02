@@ -137,3 +137,4 @@ directories in the multiplicity map, not just the five tiers.
 `src/lib/common/js/**` has been drained (30 files, 52 import lines) as part of
 that work.
 
+**Revalidated 2026-11-02: still plausible because stage 1 landed — the resolver now emits a default-on, NON-FATAL; no merged fix commit with a passing regression is cited in this doc.**
