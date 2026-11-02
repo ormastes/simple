@@ -175,6 +175,10 @@ fn native_build_compiler_source_fingerprint() -> text:
     if not rt_dir_exists(root):
         _compiler_src_fingerprint_memo = ""
         return ""
+    # Unreadable-input paths below stay pid/time-unique ON PURPOSE: the value is
+    # folded into the cache scope key, and a fixed sentinel would match a stored
+    # entry from another unreadable tree (stale reuse). Only content-derivable
+    # fallbacks are deterministic.
     var lines: [text] = []
     var dirs: [text] = [root]
     var i = 0
@@ -195,14 +199,19 @@ fn native_build_compiler_source_fingerprint() -> text:
                     # An unreadable source cannot be fingerprinted: never fresh.
                     return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
                 lines = lines.push("{full}|{rt_file_size(full)}|{file_digest.unwrap()}")
-    var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    # Content-derived fallback (no pid/time): the digest-via-temp-file path below
+    # wins when it works; otherwise hash the same manifest text directly.
+    val joined = lines.join("\n")
+    var fp = ""
     dir_create_all("build")
     val tmp = "build/.compiler_src_fp.{rt_getpid()}.tmp"
-    if rt_file_write_text(tmp, lines.join("\n")):
+    if rt_file_write_text(tmp, joined):
         val digest = rt_file_hash_sha256(tmp)
         rt_file_delete(tmp)
         if digest != nil and digest.unwrap().len() == 64:
             fp = "sha256:{digest.unwrap()}n{lines.len()}"
+    if fp == "":
+        fp = "sha256-text:{sha256_text(joined)}n{lines.len()}"
     _compiler_src_fingerprint_memo = fp
     fp
 
@@ -234,14 +243,19 @@ pub fn native_build_spl_tree_fingerprint(root: text) -> text:
                     # An unreadable source cannot be fingerprinted: never fresh.
                     return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
                 lines = lines.push("{full}|{rt_file_size(full)}|{file_digest.unwrap()}")
-    var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    # Content-derived fallback (no pid/time): the digest-via-temp-file path below
+    # wins when it works; otherwise hash the same manifest text directly.
+    val joined = lines.join("\n")
+    var fp = ""
     dir_create_all("build")
     val tmp = "build/.spl_tree_fp.{rt_getpid()}.tmp"
-    if rt_file_write_text(tmp, lines.join("\n")):
+    if rt_file_write_text(tmp, joined):
         val digest = rt_file_hash_sha256(tmp)
         rt_file_delete(tmp)
         if digest != nil and digest.unwrap().len() == 64:
             fp = "sha256:{digest.unwrap()}n{lines.len()}"
+    if fp == "":
+        fp = "sha256-text:{sha256_text(joined)}n{lines.len()}"
     fp
 
 fn native_build_stdlib_source_fingerprint() -> text:
@@ -288,14 +302,19 @@ fn native_build_frontend_source_fingerprint() -> text:
                     # An unreadable source cannot be fingerprinted: never fresh.
                     return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
                 lines = lines.push("{full}|{rt_file_size(full)}|{file_digest.unwrap()}")
-    var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    # Content-derived fallback (no pid/time): the digest-via-temp-file path below
+    # wins when it works; otherwise hash the same manifest text directly.
+    val joined = lines.join("\n")
+    var fp = ""
     dir_create_all("build")
     val tmp = "build/.frontend_src_fp.{rt_getpid()}.tmp"
-    if rt_file_write_text(tmp, lines.join("\n")):
+    if rt_file_write_text(tmp, joined):
         val digest = rt_file_hash_sha256(tmp)
         rt_file_delete(tmp)
         if digest != nil and digest.unwrap().len() == 64:
             fp = "sha256:{digest.unwrap()}n{lines.len()}"
+    if fp == "":
+        fp = "sha256-text:{sha256_text(joined)}n{lines.len()}"
     _frontend_src_fingerprint_memo = fp
     fp
 
@@ -450,7 +469,7 @@ fn _native_build_runtime_provider_fingerprint_uncached(runtime_path: text) -> te
                 return "file-sha256:{direct_hash}"
         return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
     if not rt_dir_exists(runtime_path):
-        return "missing-{rt_getpid()}-{rt_time_now_unix_micros()}"
+        return "missing"
     var lines: [text] = []
     # Linkers consume providers directly from SIMPLE_RUNTIME_PATH (-L/path and
     # explicit /path/archive names). Do not recurse: bootstrap cache directories
@@ -468,7 +487,7 @@ fn _native_build_runtime_provider_fingerprint_uncached(runtime_path: text) -> te
                 return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
             lines = lines.push("{entry}|{rt_file_size(full)}|{digest.unwrap()}")
     if lines.len() == 0:
-        return "empty-{rt_getpid()}-{rt_time_now_unix_micros()}"
+        return "empty"
     val manifest = lines.join("\n")
     val tmp = "build/.runtime_provider_fp.{rt_getpid()}.tmp"
     if rt_file_write_text(tmp, manifest):
@@ -476,7 +495,7 @@ fn _native_build_runtime_provider_fingerprint_uncached(runtime_path: text) -> te
         rt_file_delete(tmp)
         if digest != nil and digest.unwrap().len() == 64:
             return "dir-sha256:{digest.unwrap()}n{lines.len()}"
-    "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    "dir-sha256-text:{sha256_text(manifest)}n{lines.len()}"
 
 extern fn rt_simple_abi_version() -> i64
 extern fn rt_simple_abi_version_deferred() -> i64
