@@ -24,6 +24,7 @@ bin/simple fix file.spl --dry-run   # Preview fixes
 bin/simple todo-scan                # Update TODO tracking
 bin/simple bug-add --id=X           # Add bug
 bin/simple bug-gen                  # Generate bug report
+bin/simple-free claim helper: sh scripts/check/bug-claim.shs claim|heartbeat|release|done|status|list-active|reap|show --intent ...   # see doc/07_guide/infra/tracking/bug_fix_claims.md
 ```
 
 ## A `src/lib/**` change needs NO build (measured 2026-08-09)

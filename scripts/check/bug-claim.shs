@@ -1,0 +1,382 @@
+#!/bin/sh
+# bug-claim.shs -- "fixing" claims for the bug DB (doc/08_tracking/bug/bug_db.sdn).
+#
+# Concurrent fixers must not work the same bug. A claim flips the bug's
+# `status` to `fixing` in the main tables (bugs_active/bugs; still 10 columns,
+# bug-gen requires exactly 10) and appends a row to the side table
+#   bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
+# state: fixing | released | done. Newest claimed_at wins (history is kept).
+# A `fixing` claim whose max(claimed_at, heartbeat_at) is older than the max age
+# (default 24h) is STALE: anyone may take it over, and `reap` reverts it.
+#
+# Usage:
+#   bug-claim.shs claim <bug_id> <session_id> [note]
+#   bug-claim.shs heartbeat <bug_id> <session_id>
+#   bug-claim.shs release <bug_id> <session_id>
+#   bug-claim.shs done <bug_id> <session_id> <pr>
+#   bug-claim.shs status <bug_id>
+#   bug-claim.shs list-active
+#   bug-claim.shs reap [--max-age 24h] [--report]
+#   bug-claim.shs show <bug_id> --intent for_fixing --session <id> [--note <n>]
+#   bug-claim.shs show <bug_id> --intent not_for_fixing          (read-only)
+#
+# Exit codes: 0 ok, 2 usage/error, 3 refused (held by another live session or
+# not the holder), 4 not claimable (bug closed/unknown).
+# Env (specs): BUG_CLAIM_DB (db path), BUG_CLAIM_NOW (ISO UTC "now"),
+#   BUG_CLAIM_MAX_AGE (e.g. 24h), BUG_CLAIM_TEST_RACE_ROW (inject a rival row).
+
+set -u
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../.." && pwd)
+DB="${BUG_CLAIM_DB:-$ROOT/doc/08_tracking/bug/bug_db.sdn}"
+RESEAL="$HERE/reseal-sdn-crc32.shs"
+TABLE_HDR='bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|'
+CLOSED_RE='^(closed|fixed|invalid|resolved-|wontfix|cannot_reproduce|documented)'
+
+die() { echo "ERROR: $*" >&2; exit 2; }
+
+now_iso() { if [ -n "${BUG_CLAIM_NOW:-}" ]; then echo "$BUG_CLAIM_NOW"; else date -u +%Y-%m-%dT%H:%M:%SZ; fi; }
+
+# awk helper library: ISO-8601 UTC -> epoch seconds
+AWKLIB='
+function epoch(ts,   y, m, d, hh, mi, ss, era, yoe, doy, doe, days, mp) {
+    if (ts !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/) return 0
+    y = substr(ts,1,4)+0; m = substr(ts,6,2)+0; d = substr(ts,9,2)+0
+    hh = substr(ts,12,2)+0; mi = substr(ts,15,2)+0; ss = substr(ts,18,2)+0
+    if (m <= 2) y -= 1
+    era = int(y / 400)
+    yoe = y - era * 400
+    mp = (m + 9) % 12
+    doy = int((153 * mp + 2) / 5) + d - 1
+    doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+    days = era * 146097 + doe - 719468
+    return days * 86400 + hh * 3600 + mi * 60 + ss
+}
+function trim(s) { gsub(/^[ \t\r]+/, "", s); gsub(/[ \t\r]+$/, "", s); return s }
+'
+
+to_epoch() { awk "$AWKLIB"' BEGIN { print epoch(ARGV[1]) }' "$1"; }
+
+# "24h" / "90m" / "2d" / "3600s" / "3600" -> seconds
+parse_age() {
+    case "$1" in
+        *h) echo $(( ${1%h} * 3600 )) ;;
+        *m) echo $(( ${1%m} * 60 )) ;;
+        *d) echo $(( ${1%d} * 86400 )) ;;
+        *s) echo "${1%s}" ;;
+        ''|*[!0-9]*) die "bad --max-age '$1' (use 24h, 90m, 2d, 3600s)" ;;
+        *) echo "$1" ;;
+    esac
+}
+MAX_AGE_S=$(parse_age "${BUG_CLAIM_MAX_AGE:-24h}")
+
+valid_id() { case "$1" in ''|*[!A-Za-z0-9._/:+-]*) return 1 ;; *) return 0 ;; esac; }
+clean_note() { printf '%s' "$1" | tr '\r\n' '  ' | tr '"' ' ' | tr "'" ' ' | tr '\134' ' '; }
+
+[ -f "$DB" ] || die "$DB not found"
+
+# --- table readers ---------------------------------------------------------
+# claims as TSV: pos bug state session claimed hb prev note
+claims_tsv() {
+    awk -F'\n' '
+    function trim(s) { gsub(/^[ \t\r]+/, "", s); gsub(/[ \t\r]+$/, "", s); return s }
+    /^bug_fix_claims \|/ { t = 1; next }
+    t && /^[^ \t#]/ { t = 0 }
+    t && /^[ \t]+[^ \t#]/ {
+        s = $0; sub(/^[ \t]+/, "", s); sub(/\r$/, "", s)
+        for (i = 1; i <= 6; i++) { p = index(s, ","); if (p == 0) { f[i] = trim(s); s = "" } else { f[i] = trim(substr(s, 1, p - 1)); s = substr(s, p + 1) } }
+        n = trim(s); gsub(/^"|"$/, "", n)
+        printf "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", NR, f[1], f[2], f[3], f[4], f[5], f[6], n
+    }' "$DB"
+}
+
+# main-table row info for bug: prints "status<TAB>table" of first match
+main_status() {
+    awk -v id="$1" '
+    /^bugs_active \|/ { t = "bugs_active"; next }
+    /^bugs \|/ { t = "bugs"; next }
+    /^[^ \t#]/ { t = "" }
+    t != "" && index($0, "    " id ", ") == 1 {
+        r = substr($0, length(id) + 7); p = index(r, ", "); r = substr(r, p + 2)
+        q = index(r, ","); print substr(r, 1, q - 1) "\t" t; exit
+    }' "$DB"
+}
+
+# set status + updated_at (date) on every main row for bug
+set_main_status() { # bug status date
+    _tmp="$DB.edit.$$"
+    awk -v id="$1" -v st="$2" -v dt="$3" '
+    /^bugs_active \|/ { t = 1; print; next }
+    /^bugs \|/ { t = 1; print; next }
+    /^[^ \t#]/ { t = 0 }
+    t && index($0, "    " id ", ") == 1 {
+        pre = "    " id ", "; r = substr($0, length(pre) + 1)
+        p = index(r, ", "); sev = substr(r, 1, p - 1); r = substr(r, p + 2)
+        q = index(r, ","); rest = substr(r, q)
+        line = pre sev ", " st rest
+        if (match(line, /, [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9], (true|false)\r?$/)) {
+            line = substr(line, 1, RSTART - 1) ", " dt substr(line, RSTART + 12)
+        }
+        print line; next
+    }
+    { print }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
+}
+
+# current claim for a bug: sets C_* vars. newest claimed_at wins, ties -> later row.
+load_current() { # bug
+    C_STATE=none; C_SESSION=''; C_CLAIMED=''; C_HB=''; C_PREV=''; C_NOTE=''; C_LIVE=0; C_STALE=0
+    _out=$(claims_tsv | awk -F'\t' -v id="$1" '
+    $2 == id && ($5 >= best) { best = $5; st=$3; se=$4; cl=$5; hb=$6; pv=$7; nt=$8 }
+    END { if (best != "") printf "C_STATE=%s\nC_SESSION=%s\nC_CLAIMED=%s\nC_HB=%s\nC_PREV=%s\nC_NOTE=%s\n", q(st), q(se), q(cl), q(hb), q(pv), q(nt) }
+    function q(s) { gsub(/\047/, "", s); return "\047" s "\047" }')
+    [ -n "$_out" ] && eval "$_out"
+    if [ "$C_STATE" = fixing ]; then
+        _last="$C_HB"; [ -n "$_last" ] || _last="$C_CLAIMED"
+        _le=$(to_epoch "$_last"); _ne=$(to_epoch "$(now_iso)")
+        if [ $(( _ne - _le )) -le "$MAX_AGE_S" ]; then C_LIVE=1; else C_STALE=1; fi
+    fi
+}
+
+# --- table writers ---------------------------------------------------------
+reseal_db() { sh "$RESEAL" "$DB" >/dev/null 2>&1 || die "reseal failed for $DB"; }
+
+append_row() { # raw row text (without indent)
+    _tmp="$DB.edit.$$"
+    if ! grep -q '^bug_fix_claims |' "$DB"; then
+        { cat "$DB"; echo; echo "$TABLE_HDR"; echo "    $1"; } > "$_tmp" && mv "$_tmp" "$DB"
+        return
+    fi
+    awk -v row="    $1" '
+    /^bug_fix_claims \|/ { t = 1; print; next }
+    t && /^[^ \t#]/ { if (!done) { print row; done = 1 } t = 0 }
+    t && /^[ \t]*$/ { held = held $0 "\n"; next }
+    { if (held != "") { printf "%s", held; held = "" } print }
+    END { if (t && !done) print row; if (held != "") printf "%s", held }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
+}
+
+remove_row() { # exact row line (without indent); removes the last occurrence
+    _tmp="$DB.edit.$$"
+    awk -v row="    $1" '
+    { l[NR] = $0 }
+    END { gone = 0; for (i = NR; i >= 1; i--) if (!gone && l[i] == row) { gone = 1; skip = i }
+          for (i = 1; i <= NR; i++) if (i != skip) print l[i] }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
+}
+
+set_heartbeat() { # bug session ts : rewrite hb of the newest fixing row of session
+    _tmp="$DB.edit.$$"
+    awk -v id="$1" -v se="$2" -v ts="$3" '
+    function trim(s) { gsub(/^[ \t\r]+/, "", s); gsub(/[ \t\r]+$/, "", s); return s }
+    { l[NR] = $0 }
+    /^bug_fix_claims \|/ { t = 1; next }
+    t && /^[^ \t#]/ { t = 0 }
+    t && /^[ \t]+[^ \t#]/ {
+        s = $0; sub(/^[ \t]+/, "", s)
+        for (i = 1; i <= 6; i++) { p = index(s, ","); f[i] = trim(substr(s, 1, p - 1)); s = substr(s, p + 1) }
+        if (f[1] == id && f[2] == "fixing" && f[3] == se) { last = NR; cl[NR] = f[4]; pv[NR] = f[6]; nt[NR] = trim(s) }
+    }
+    END { for (i = 1; i <= NR; i++) {
+              if (i == last) print "    " id ", fixing, " se ", " cl[i] ", " ts ", " pv[i] ", " nt[i]
+              else print l[i] } }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
+}
+
+# --- race resolution -------------------------------------------------------
+# Among live fixing rows since the last non-fixing row, the earliest claimed_at
+# wins (ties: earlier row). Prints "session<TAB>claimed_at<TAB>hb" of the winner.
+race_winner() { # bug
+    _ne=$(to_epoch "$(now_iso)")
+    claims_tsv | awk -F'\t' -v id="$1" -v now="$_ne" -v maxage="$MAX_AGE_S" "$AWKLIB"'
+    $2 == id { n++; pos[n] = $1; st[n] = $3; se[n] = $4; cl[n] = $5; hb[n] = $6
+               if ($3 != "fixing" && $5 > cut) cut = $5 }
+    END {
+        best = ""
+        for (i = 1; i <= n; i++) {
+            if (st[i] != "fixing" || cl[i] < cut) continue
+            last = (hb[i] != "") ? hb[i] : cl[i]
+            if (now - epoch(last) > maxage) continue
+            if (best == "" || cl[i] < bcl) { best = i; bcl = cl[i] }
+        }
+        if (best != "") print se[best] "\t" cl[best] "\t" hb[best]
+    }'
+}
+
+date_of() { printf '%s' "${1%%T*}"; }
+
+refuse_held() { # prints holder info, exit 3
+    echo "REFUSED: $1 is being fixed by session $C_SESSION since $C_CLAIMED (last heartbeat ${C_HB:-$C_CLAIMED}); pick another bug" >&2
+    echo "REFUSED: $1 is being fixed by session $C_SESSION since $C_CLAIMED (last heartbeat ${C_HB:-$C_CLAIMED}); pick another bug"
+    exit 3
+}
+
+# --- commands --------------------------------------------------------------
+LOCKDIR="$DB.lock"
+lock() {
+    _i=0
+    while ! mkdir "$LOCKDIR" 2>/dev/null; do
+        _i=$((_i + 1)); [ "$_i" -gt 60 ] && die "could not lock $DB (stale lock dir $LOCKDIR?)"
+        sleep 1
+    done
+    trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT INT TERM
+}
+
+cmd_claim() { # bug session [note]
+    [ $# -ge 2 ] || die "usage: claim <bug_id> <session_id> [note]"
+    _b="$1"; _s="$2"; _n=$(clean_note "${3:-}")
+    valid_id "$_b" || die "bad bug_id '$_b'"; valid_id "$_s" || die "bad session_id '$_s'"
+    lock
+    _ms=$(main_status "$_b"); _cur=${_ms%%	*}
+    [ -n "$_ms" ] || { echo "ERROR: unknown bug $_b" >&2; exit 4; }
+    load_current "$_b"
+    if [ "$C_STATE" = fixing ] && [ "$C_LIVE" = 1 ] && [ "$C_SESSION" != "$_s" ]; then refuse_held "$_b"; fi
+    _lc=$(printf '%s' "$_cur" | tr 'A-Z' 'a-z')
+    if [ "$_lc" != fixing ] && printf '%s' "$_lc" | grep -Eq "$CLOSED_RE"; then
+        echo "NOT CLAIMABLE: $_b is $_cur (closed bugs need no claim)"; exit 4
+    fi
+    _prev="$_cur"
+    if [ "$_lc" = fixing ]; then _prev="${C_PREV:-open}"; [ "$_prev" = fixing ] && _prev=open; fi
+    _t=$(now_iso)
+    _row="$_b, fixing, $_s, $_t, $_t, $_prev, \"$_n\""
+    append_row "$_row"
+    set_main_status "$_b" fixing "$(date_of "$_t")"
+    if [ -n "${BUG_CLAIM_TEST_RACE_ROW:-}" ]; then append_row "${BUG_CLAIM_TEST_RACE_ROW#    }"; fi
+    reseal_db
+    # re-read after writing: the earliest live claim wins, the later one backs out
+    _w=$(race_winner "$_b"); _ws=$(printf '%s' "$_w" | cut -f1)
+    if [ -n "$_ws" ] && [ "$_ws" != "$_s" ]; then
+        remove_row "$_row"; reseal_db
+        C_SESSION="$_ws"; C_CLAIMED=$(printf '%s' "$_w" | cut -f2); C_HB=$(printf '%s' "$_w" | cut -f3)
+        echo "LOST RACE: backed out my claim"; refuse_held "$_b"
+    fi
+    echo "CLAIMED: $_b fixing by $_s at $_t (prev status $_prev)"
+}
+
+cmd_heartbeat() {
+    [ $# -ge 2 ] || die "usage: heartbeat <bug_id> <session_id>"
+    lock; load_current "$1"
+    if [ "$C_STATE" != fixing ] || [ "$C_SESSION" != "$2" ]; then
+        echo "REFUSED: $1 is not claimed as fixing by $2 (state=$C_STATE session=$C_SESSION)"; exit 3
+    fi
+    _t=$(now_iso); set_heartbeat "$1" "$2" "$_t"; reseal_db
+    echo "HEARTBEAT: $1 $2 at $_t"
+}
+
+finish() { # bug session newstate main_status note
+    lock; load_current "$1"
+    if [ "$C_STATE" != fixing ] || [ "$C_SESSION" != "$2" ]; then
+        echo "REFUSED: $1 is not claimed as fixing by $2 (state=$C_STATE session=$C_SESSION)"; exit 3
+    fi
+    _t=$(now_iso); _prev="${C_PREV:-open}"
+    _st="$4"; [ -n "$_st" ] || _st="$_prev"
+    append_row "$1, $3, $2, $_t, $_t, $_prev, \"$5\""
+    set_main_status "$1" "$_st" "$(date_of "$_t")"; reseal_db
+    echo "$(printf '%s' "$3" | tr 'a-z' 'A-Z'): $1 by $2 at $_t (status $_st)"
+}
+cmd_release() { [ $# -ge 2 ] || die "usage: release <bug_id> <session_id>"; finish "$1" "$2" released "" "released"; }
+cmd_done() {
+    [ $# -ge 3 ] || die "usage: done <bug_id> <session_id> <pr>"
+    case "$3" in ''|*[!0-9]*) die "pr must be a number";; esac
+    finish "$1" "$2" done fixed "PR #$3"
+}
+
+cmd_status() {
+    [ $# -ge 1 ] || die "usage: status <bug_id>"
+    load_current "$1"
+    _flag=''; [ "$C_STALE" = 1 ] && _flag=' STALE'; [ "$C_LIVE" = 1 ] && _flag=' live'
+    if [ "$C_STATE" = none ]; then echo "$1: state=none"; return 0; fi
+    echo "$1: state=$C_STATE session=$C_SESSION claimed_at=$C_CLAIMED heartbeat_at=$C_HB prev_status=$C_PREV note=\"$C_NOTE\"$_flag"
+}
+
+cmd_list_active() {
+    claims_tsv | cut -f2 | sort -u | while read -r _b; do
+        [ -n "$_b" ] || continue
+        load_current "$_b"
+        [ "$C_STATE" = fixing ] || continue
+        _f=live; [ "$C_STALE" = 1 ] && _f=STALE
+        echo "$_b session=$C_SESSION since=$C_CLAIMED heartbeat=${C_HB:-$C_CLAIMED} $_f"
+    done
+}
+
+# fixing bugs in the main tables whose claim is missing, not fixing, or stale
+reap_candidates() {
+    awk '
+    /^bugs_active \|/ { t = 1; next }
+    /^bugs \|/ { t = 1; next }
+    /^[^ \t#]/ { t = 0 }
+    t && /^    [^ ]/ { s = $0; sub(/^    /, "", s); p = index(s, ", "); id = substr(s, 1, p - 1); r = substr(s, p + 2)
+            q = index(r, ", "); r = substr(r, q + 2); e = index(r, ","); if (substr(r, 1, e - 1) == "fixing") print id }' "$DB" | sort -u
+}
+
+cmd_reap() {
+    _report=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --report) _report=1; shift ;;
+            --max-age) [ $# -ge 2 ] || die "--max-age needs a value"; MAX_AGE_S=$(parse_age "$2"); shift 2 ;;
+            *) die "unknown reap option $1" ;;
+        esac
+    done
+    [ "$_report" = 1 ] || lock
+    _n=0
+    for _b in $(reap_candidates); do
+        load_current "$_b"
+        if [ "$C_STATE" = fixing ] && [ "$C_STALE" = 0 ]; then continue; fi
+        _prev="${C_PREV:-open}"; [ "$C_STATE" = fixing ] || _prev=open; [ "$_prev" = fixing ] && _prev=open
+        _n=$((_n + 1))
+        if [ "$_report" = 1 ]; then
+            echo "ABANDONED: $_b (state=$C_STATE session=${C_SESSION:--} last=${C_HB:-${C_CLAIMED:--}}) would revert to $_prev"
+        else
+            _t=$(now_iso)
+            append_row "$_b, released, reaper, $_t, $_t, $_prev, \"abandoned (reaped)\""
+            set_main_status "$_b" "$_prev" "$(date_of "$_t")"
+            echo "REAPED: $_b reverted to $_prev"
+        fi
+    done
+    [ "$_report" = 1 ] || { [ "$_n" -gt 0 ] && reseal_db; }
+    echo "reap: $_n abandoned fixing bug(s)"
+    return 0
+}
+
+cmd_show() {
+    [ $# -ge 1 ] || die "usage: show <bug_id> --intent for_fixing|not_for_fixing [--session <id>] [--note <n>]"
+    _b="$1"; shift; _intent=''; _s=''; _n=''
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --intent) _intent="${2:-}"; shift 2 ;;
+            --session) _s="${2:-}"; shift 2 ;;
+            --note) _n="${2:-}"; shift 2 ;;
+            *) die "unknown show option $1" ;;
+        esac
+    done
+    case "$_intent" in
+        for_fixing) [ -n "$_s" ] || die "show --intent for_fixing requires --session <id>" ;;
+        not_for_fixing) ;;
+        '') die "show requires --intent for_fixing|not_for_fixing" ;;
+        *) die "bad --intent '$_intent' (use for_fixing or not_for_fixing)" ;;
+    esac
+    [ -n "$(main_status "$_b")" ] || { echo "ERROR: unknown bug $_b" >&2; exit 4; }
+    if [ "$_intent" = for_fixing ]; then
+        ( cmd_claim "$_b" "$_s" "$_n" ) || exit $?
+    fi
+    echo "== main row =="
+    grep -E "^    $_b, " "$DB" | grep -vE '^    [^,]+, (fixing|released|done), ' | head -4
+    echo "== description =="
+    awk -v id="$_b" '/^bug_descriptions \|/ { t = 1; next } /^[^ \t#]/ { t = 0 } t && index($0, "    " id ", ") == 1 { print }' "$DB" | head -20
+    echo "== difficulty =="
+    awk -v id="$_b" '/^bug_difficulty \|/ { t = 1; next } /^[^ \t#]/ { t = 0 } t && index($0, "    " id ", ") == 1 { l = $0 } END { if (l != "") print l; else print "(none)" }' "$DB"
+    echo "== claim =="
+    cmd_status "$_b"
+}
+
+[ $# -ge 1 ] || die "usage: bug-claim.shs claim|heartbeat|release|done|status|list-active|reap|show ..."
+_cmd="$1"; shift
+case "$_cmd" in
+    claim) cmd_claim "$@" ;;
+    heartbeat) cmd_heartbeat "$@" ;;
+    release) cmd_release "$@" ;;
+    done) cmd_done "$@" ;;
+    status) cmd_status "$@" ;;
+    list-active) cmd_list_active ;;
+    reap) cmd_reap "$@" ;;
+    show) cmd_show "$@" ;;
+    *) die "unknown command '$_cmd'" ;;
+esac
