@@ -48,4 +48,23 @@ next token were comments and require Indent then. Error text should say
 `empty block: use pass("reason")`. Add a regression spec covering `if`, `elif`,
 `else`, `while`, `for`, `match` arms, `fn`, `class`.
 
-**Revalidated 2026-11-02: still plausible because the report title (Comment-only block body silently swallows the next statement: `if false:` + com) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+## Resolution (2026-11-02, lane a6dffc9c/p12-1)
+
+Checked against current policy/design: still valid as written (parser behavior;
+no policy item makes comment-only bodies legal). Fixed in the pure-Simple parser:
+`parse_block_lexical_body` records the header Newline token's line and rejects
+the flat body when the next token is more than one line below it (blank or
+comment-only lines in between), reporting `expected Indent`. A flat body on the
+immediately following line is unchanged. A repo scan of `src/` and `test/` found
+no source relying on a gap flat body (only doc-string false positives).
+
+Evidence (bin/simple run, SIMPLE_LIB=src): before, `if/while/for/else` with a
+comment-only body followed by a sibling parsed with no error; after, all report
+`expected Indent` while a real indented body and `pass` still parse clean.
+Regression spec: `test/01_unit/compiler/parser/comment_only_block_body_spec.spl`
+(the `bin/simple test` runner on the current binary fails with
+`unknown extern function: rt_tuple_len`, so evidence was gathered with a driver
+calling `parse_module`/`parser_has_errors`).
+
+Rust seed (`parser_impl/core.rs` `parse_block_after_newline_allowing_empty`) is
+left unchanged: the rule above allows the seed to tolerate it; not rebuilt here.
