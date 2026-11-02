@@ -21,6 +21,7 @@ use compiler.hir.hir_lowering._Expressions.runtime_observation.{hir_pattern_runt
 # Split impl provider: native entry-closure discovery follows import edges and
 # otherwise omits HirLowering.union_narrow_arms from the final link.
 use compiler.hir.hir_lowering._Expressions.union_narrow_arms.*
+use compiler.hir.exhaustiveness.value_match_coverage.{vm_desugar_verdict, vm_record_desugar_verdict}
 
 # Keep both binary operands concrete after optional condition extraction.
 fn _hir_match_binary_payload(op: HirBinOp, left: HirExpr, right: HirExpr, span: Span) -> HirExpr:
@@ -500,6 +501,13 @@ impl HirLowering:
     me desugar_match_to_if_chain(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
         val scrutinee_type = self.binding_payload_type(hir_scrutinee)
         val fresh = self.symbols.define("__mp_scrutinee", SymbolKind.Variable, scrutinee_type, span, Visibility.Private, false, nil)
+        # E-MATCH-NONEXHAUSTIVE-VALUE: the original arms are about to be erased
+        # into an if-chain, so record the coverage verdict in a side table keyed
+        # by the scrutinee span (always overwritten, "" = exhaustive, so a re-lowered
+        # file never sees a stale verdict) for MIR to report once it knows the match is a
+        # value. The temp keeps its plain name (codegen unchanged).
+        val nonexhaustive_verdict = vm_desugar_verdict(hir_arms, self.symbols, scrutinee_type)
+        vm_record_desugar_verdict(hir_scrutinee.span, nonexhaustive_verdict)
         val let_stmt = HirStmt(kind: HirStmtKind.Let(fresh, scrutinee_type, hir_scrutinee), span: span)
         val scrut_var = HirExpr(kind: HirExprKind.Var(fresh), has_type_: false, type_: nil, span: span)
         val chain_value = self.build_if_chain(scrut_var, hir_arms, 0, span)

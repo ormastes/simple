@@ -39,6 +39,8 @@ use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.semantics.gpu_checker.{parse_gpu_kernel_target}
+use compiler.semantics.value_match_exhaustiveness.{value_match_code, value_match_env_name, value_match_env_raw, value_match_mode_current, value_match_mode_is_unknown, vm_span_key, vm_return_is_unit, vm_statement_match_keys}
+use compiler.hir.exhaustiveness.value_match_coverage.{vm_has_unguarded_catch_all, vm_check_arms, vm_message, vm_desugar_verdict_at}
 use compiler.common.attributes.{FunctionAttr, ExportAttr}
 use compiler.common._Attributes.decl_attrs.{OptimizationReqLevel, OptimizationBackend}
 use compiler.common.assurance.policy_names.{normalize_profile_name}
@@ -177,6 +179,174 @@ impl MirLowering:
                     case Zero: Some(MirType.i64())
                     case _: nil
 
+    me vm_record_statement_matches(fn_: HirFunction):
+        """E-MATCH-NONEXHAUSTIVE-VALUE: key the matches of `fn_` whose value is
+        discarded (statement position); all other matches are value matches."""
+        if fn_.is_extern:
+            return
+        val keys = vm_statement_match_keys(fn_.body, vm_return_is_unit(fn_.return_type))
+        var i = 0
+        while i < keys.len():
+            self.vm_stmt_match_keys[keys[i]] = true
+            i = i + 1
+
+    me vm_enum_variants_for_owner(owner_key: text) -> [text]:
+        """Declared variants of an owner-qualified enum key, or [] when the
+        owner cannot be proven (never substitutes another module's enum)."""
+        if self.enum_variant_index_q.has(owner_key):
+            return self.enum_variant_index_q[owner_key]
+        val bare = self.enum_bare_of(owner_key)
+        if owner_key == bare and not self.enum_bare_name_collisions.has(bare) and self.enum_variant_index.has(bare):
+            return self.enum_variant_index[bare]
+        []
+
+    me vm_report_value_match(scrutinee: HirExpr, type_name: text, missing: text):
+        val text_msg = vm_message(type_name, missing)
+        if self.vm_mode == "error":
+            self.error_fatal("error[{value_match_code()}]: {text_msg}", Some(scrutinee.span))
+        else:
+            self.mir_advisories = self.mir_advisories.push(MirError(message: "warning[{value_match_code()}]: {text_msg}", span: Some(scrutinee.span), fatal: false))
+
+    me vm_ensure_mode(at: Span):
+        if self.vm_mode != "":
+            return
+        self.vm_mode = value_match_mode_current()
+        if value_match_mode_is_unknown(value_match_env_raw()):
+            self.mir_advisories = self.mir_advisories.push(MirError(message: "warning[{value_match_code()}]: unknown {value_match_env_name()} value; using the default mode", span: Some(at), fatal: false))
+
+    me vm_check_desugared_match_block(block_expr: HirExpr, block: HirBlock):
+        """A match HIR lowering desugared to an if-chain (bool / text / float /
+        tuple ... arms) carries its non-exhaustive verdict in a span-keyed side
+        table (see vm_desugar_verdict, vm_record_desugar_verdict). Report it when it is a value."""
+        if block.stmts.len() != 1 or not block.has:
+            return
+        val first: HirStmt = block.stmts[0]
+        match first.kind:
+            case HirStmtKind.Let(_, _, scrut_init):
+                val verdict_text = vm_desugar_verdict_at(scrut_init.span)
+                if verdict_text == "":
+                    return
+                if block_expr.span.line <= 0:
+                    return
+                val key = vm_span_key(block_expr.span)
+                if self.vm_stmt_match_keys.has(key) or self.vm_reported.has(key):
+                    return
+                self.vm_ensure_mode(block_expr.span)
+                val detail = verdict_text.split("|")
+                var label = "other"
+                var missing = "non-literal values"
+                if detail.len() > 0:
+                    label = detail[0]
+                if detail.len() > 1:
+                    missing = detail[1]
+                self.vm_reported[key] = true
+                self.vm_report_value_match(block_expr, label, missing)
+            case _:
+                ()
+
+    me vm_check_value_match(scrutinee: HirExpr, arms: [HirMatchArm]):
+        """E-MATCH-NONEXHAUSTIVE-VALUE (design doc/05_design/exhaustive_value_match.md).
+
+        Called from lower_match_case, where the owner-qualified enum registries
+        are in scope. Diagnostic only: never changes lowering, so `warn` mode
+        leaves codegen byte-identical."""
+        if vm_has_unguarded_catch_all(arms):
+            return
+        if scrutinee.span.line <= 0:
+            return
+        val key = vm_span_key(scrutinee.span)
+        if self.vm_stmt_match_keys.has(key) or self.vm_reported.has(key):
+            return
+        self.vm_ensure_mode(scrutinee.span)
+        var kind = "other"
+        var variants: [text] = []
+        var type_name = "<unknown>"
+        var arm_has_enum = false
+        var arm_has_bool = false
+        var arm_enum_type: HirType? = None
+        var arm_variant = ""
+        var ai = 0
+        while ai < arms.len():
+            val a: HirMatchArm = arms[ai]
+            match a.pattern.kind:
+                case HirPatternKind.Enum(pt, pv, _):
+                    arm_has_enum = true
+                    arm_enum_type = Some(pt)
+                    arm_variant = pv
+                case HirPatternKind.Literal(lit):
+                    match lit.kind:
+                        case HirExprKind.BoolLit(_):
+                            arm_has_bool = true
+                        case _:
+                            ()
+                case _:
+                    ()
+            ai = ai + 1
+        var owner_type: HirType? = None
+        val scrut_type = self.enum_match_expr_type(scrutinee)
+        if val st = scrut_type:
+            owner_type = Some(st)
+            match st.kind:
+                case HirTypeKind.Bool:
+                    kind = "bool"
+                    variants = ["true", "false"]
+                    type_name = "bool"
+                case HirTypeKind.Optional(_):
+                    kind = "option"
+                    variants = ["Some", "None"]
+                    type_name = "Option"
+                case HirTypeKind.Result(_, _):
+                    kind = "result"
+                    variants = ["Ok", "Err"]
+                    type_name = "Result"
+                case HirTypeKind.Named(nsym, _):
+                    type_name = self.symbols.symbol_name_scalar_raw(nsym.id)
+                case HirTypeKind.Int(_, _):
+                    type_name = "int"
+                case HirTypeKind.Float(_):
+                    type_name = "float"
+                case HirTypeKind.Str:
+                    type_name = "text"
+                case HirTypeKind.Char:
+                    type_name = "char"
+                case _:
+                    type_name = "other"
+        elif arm_has_bool:
+            kind = "bool"
+            variants = ["true", "false"]
+            type_name = "bool"
+        elif arm_has_enum:
+            # Scrutinee type not recoverable: fall back to the arm pattern's own
+            # resolved enum type (still owner-qualified), else fail closed.
+            if arm_variant == "Some" or arm_variant == "None":
+                kind = "option"
+                variants = ["Some", "None"]
+                type_name = "Option"
+            elif arm_variant == "Ok" or arm_variant == "Err":
+                kind = "result"
+                variants = ["Ok", "Err"]
+                type_name = "Result"
+            else:
+                kind = "unresolved"
+                owner_type = arm_enum_type
+        if kind == "other" or kind == "unresolved":
+            if val ot = owner_type:
+                val owner_key = self.enum_match_type_owner_key(ot)
+                if owner_key != "":
+                    variants = self.vm_enum_variants_for_owner(owner_key)
+                    if variants.len() > 0:
+                        kind = "enum"
+                        type_name = self.enum_bare_of(owner_key)
+                    else:
+                        kind = "unresolved"
+                elif arm_has_enum:
+                    kind = "unresolved"
+        val verdict = vm_check_arms(arms, self.symbols, kind, variants)
+        if verdict.exhaustive:
+            return
+        self.vm_reported[key] = true
+        self.vm_report_value_match(scrutinee, type_name, verdict.missing)
+
     me reset_function_local_tracking():
         """Reset every table keyed by a per-function LocalId.
 
@@ -265,6 +435,10 @@ impl MirLowering:
         # bootstrap_stage2_empty_mir_bodies_2026-07-05). Real HIR->MIR lowering
         # now runs for all bootstrap functions.
         self.reset_function_local_tracking()
+        # E-MATCH-NONEXHAUSTIVE-VALUE: record which matches of this body are in
+        # STATEMENT position (value discarded); lower_match_case treats every
+        # other match as a value. One generated-visitor fold per function body.
+        self.vm_record_statement_matches(fn_)
         # Inlined lambdas re-enter this method on the same instance: keep the
         # caller's array-move approvals and restore them on exit.
         val caller_array_move_lets: Dict<i64, bool> = self.array_move_let_symbols
