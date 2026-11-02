@@ -24,10 +24,24 @@ emitters did not.
 - `80.driver/driver_aot_native_output.spl` phase-compatibility manifest items (encoded and digested in this order)
 - `80.driver/driver_build/incremental.spl` persisted `build_cache.sdn` entry order
 
+## Follow-up (lane sbr-3b)
+Spec: `test/01_unit/compiler/driver/fixpoint_fingerprint_determinism_spec.spl`.
+- `incremental.spl` fallback fingerprints: the three tree fingerprints (compiler,
+  stdlib, frontend) no longer seed `fp` with `unfingerprintable-{pid}-{micros}`;
+  if the temp-file digest fails they hash the manifest text (`sha256-text:`). The
+  runtime-provider fingerprint returns `missing` / `empty` (was pid+time) and a
+  `dir-sha256-text:` content hash instead of a pid/time fallback. The
+  unreadable-input early returns (dir listing or file hash failed) stay
+  pid/time-unique on purpose: the value is part of the cache scope key, and a
+  fixed sentinel would match a stored entry from another unreadable tree.
+- `driver_aot_native_output.spl` owner token (v1 and v2): lock claim only. It goes
+  to `coordinator_claim_v1` / `coordinator_complete_v1`; `BuildActionResultV1` (the
+  only record leaving the coordinator) has no owner field. No code change beyond a
+  comment; the spec asserts the result struct/constructor and token uses.
+- `generic_instance_object_producer_v1.spl` was deleted by ab9305d783e (40.mono
+  pass removal) and is absent on release/1.0.0; nothing to sort.
+
 ## Open (not fixed in this lane)
-- `80.driver/driver_build/incremental.spl` "unfingerprintable-{pid}-{micros}" fallback fingerprints. This cache-busting is deliberate, but any build that takes this path gets a cache identity that is not reproducible.
-- `80.driver/driver_aot_native_output.spl` runtime-std native action owner token: it hashes getpid and the absolute artifact root. This is acceptable if it is only a lock claim. Check whether it is ever persisted into a receipt.
-- `80.driver/driver_build/generic_instance_object_producer_v1.spl` `generic_instance_keyed_functions_v1`: pairs come back in SymbolId bucket order. Check callers.
 - Rust seed `src/compiler_rust/compiler/src/linker/smf_writer.rs` writes `repr(C)`
   `SmfSection`/`SmfSymbol`/`SmfRelocation`/`SmfHeader` structs with
   `from_raw_parts`, so uninitialized padding bytes reach the `.smf` file.

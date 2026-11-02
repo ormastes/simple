@@ -1,0 +1,86 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Fixpoint determinism follow-up (sbr-3b)
+
+A. Cache fingerprints must not embed pid/time when a content-derived value is
+   available (tmp-file digest failure, missing/empty runtime provider dir).
+   Unreadable-input paths stay unique on purpose: their uniqueness is the
+   fail-closed "never fresh" guarantee, since a fixed value could match a
+   stored cache entry from a different (unreadable) tree.
+B. The runtime/std native action owner token is a lock claim only. It must
+   never reach the action result, which is the only record that leaves the
+   coordinator.
+"""
+
+# @tag: unit, compiler, determinism
+
+use std.spec.*
+use std.io_runtime.{file_read}
+
+fn src_lines(path: text) -> [text]:
+    val content = file_read(path)
+    content.split("\n")
+
+fn lines_containing(lines: [text], needle: text) -> [text]:
+    var out: [text] = []
+    for line in lines:
+        if line.contains(needle):
+            out.push(line)
+    out
+
+describe "incremental.spl fallback fingerprints":
+    it "does not seed a tree fingerprint initializer with pid or time":
+        val lines = src_lines("src/compiler/80.driver/driver_build/incremental.spl")
+        val inits = lines_containing(lines, "    var fp = ")
+        expect(inits.len()).to_equal(3)
+        for line in inits:
+            expect(line.contains("rt_getpid")).to_equal(false)
+            expect(line.contains("rt_time_now_unix_micros")).to_equal(false)
+
+    it "makes missing and empty runtime provider fingerprints deterministic":
+        val lines = src_lines("src/compiler/80.driver/driver_build/incremental.spl")
+        for line in lines_containing(lines, "\"missing-"):
+            expect(line.contains("rt_getpid")).to_equal(false)
+        for line in lines_containing(lines, "\"empty-"):
+            expect(line.contains("rt_getpid")).to_equal(false)
+
+    it "falls back to a content hash when the runtime provider temp digest fails":
+        val lines = src_lines("src/compiler/80.driver/driver_build/incremental.spl")
+        val text_fallbacks = lines_containing(lines, "sha256-text:")
+        expect(text_fallbacks.len()).to_equal(4)
+
+describe "runtime/std native action owner token":
+    it "is never a field of the persisted action result":
+        val lines = src_lines("src/compiler/80.driver/action_graph/build_action_v1.spl")
+        var in_result = false
+        for line in lines:
+            if line.starts_with("struct BuildActionResultV1"):
+                in_result = true
+            elif in_result and not line.starts_with("    "):
+                in_result = false
+            if in_result:
+                expect(line.contains("owner")).to_equal(false)
+
+    it "is only passed to coordinator claim and completion":
+        val lines = src_lines("src/compiler/80.driver/driver_aot_native_output.spl")
+        val uses = lines_containing(lines, "owner_token")
+        # per variant: definition, claim argument, completion argument
+        expect(uses.len()).to_equal(6)
+        for line in uses:
+            expect(line.contains("persist")).to_equal(false)
+            expect(line.contains("receipt")).to_equal(false)
+            expect(line.contains("manifest")).to_equal(false)
+
+    it "is not folded into the coordinator result constructor":
+        val lines = src_lines("src/compiler/80.driver/action_graph/coordinator.spl")
+        var in_result_ctor = false
+        var seen_ctor = false
+        for line in lines:
+            if in_result_ctor:
+                expect(line.contains("owner_token")).to_equal(false)
+                if line.contains("memory_peak_bytes))"):
+                    in_result_ctor = false
+            elif line.contains("owner_token, BuildActionResultV1("):
+                seen_ctor = true
+                in_result_ctor = true
+        expect(seen_ctor).to_equal(true)
