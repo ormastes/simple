@@ -140,3 +140,5 @@ proving gate run is gated on the parse-memory-balloon fix (interning), not on
 anything in this bug. No user-facing regression meanwhile: `bin/simple` is the
 working seed. Guard-storm/PID-recycle and the sentinel PGID-pin (da7a702e199)
 were investigated and ruled out as the stage4 killer.
+
+**Revalidated 2026-11-02: still plausible because run/test source-fixed (00bfd7cfb0e9); redeployment BLOCKED by a; no merged fix commit with a passing regression is cited in this doc.**

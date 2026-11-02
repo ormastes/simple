@@ -101,3 +101,5 @@ ring-3 argv frame (M2) but does not fix the underlying codegen bug.
 Any freestanding/baremetal Simple code that factors u64 range math into a helper
 can get silently-wrong results. This is a correctness landmine for the OS,
 drivers, and firmware layers that run under freestanding native-build.
+
+**Revalidated 2026-11-02: still plausible because the report title (freestanding native-build returns 0 from a u64 range helper for an argument pro) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

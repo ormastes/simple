@@ -112,3 +112,5 @@ compiling the hosted runtime. The guest has LLVM 18 `llc` and no default
 No native comparison result was obtained. The next fix must first reproduce
 the array-of-struct field read and sort in one native executable, then inspect
 the emitted comparison path before changing MIR or SCV publication.
+
+**Revalidated 2026-11-02: still plausible because OPEN. These are the two blockers left on the FreeBSD QEMU self-host lane after the lane fixes in PR 1141; no merged fix commit with a passing regression is cited in this doc.**

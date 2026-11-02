@@ -143,3 +143,5 @@ backend-codegen implementation pass is required before finding 1's symptom
 disappears. Freestanding/board verification of the link-stage change itself
 remains pending per the board-runnable rule (no QEMU/board boot attempted
 this pass).
+
+**Revalidated 2026-11-02: still plausible because INVESTIGATING (root-cause candidates verified in binary artifacts; fix pending probe confirmation); no merged fix commit with a passing regression is cited in this doc.**

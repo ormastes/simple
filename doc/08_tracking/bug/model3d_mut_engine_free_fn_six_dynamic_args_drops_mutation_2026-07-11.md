@@ -86,3 +86,5 @@ the in-code pointer back to this doc.
   share a root cause (both are about `mut <ClassType>` parameter handling in
   compiled/JIT free-function calls), just triggered along different axes
   (argument dynamism/count here vs. a second class-typed argument there).
+
+**Revalidated 2026-11-02: still plausible because the report title (A free-function call taking mut Engine3D silently drops all mutation once 6 or ) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

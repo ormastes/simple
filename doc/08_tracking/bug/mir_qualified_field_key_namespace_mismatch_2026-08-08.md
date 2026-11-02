@@ -695,3 +695,5 @@ for which there is still no oracle short of a Stage 3 bootstrap.
 re-check. Also note the `Status re-verified 2026-08-17 by source inspection
 (triage shard 02)` stamp at the head of this doc cites no file, no line and no
 run; it should not be read as evidence in either direction.
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**

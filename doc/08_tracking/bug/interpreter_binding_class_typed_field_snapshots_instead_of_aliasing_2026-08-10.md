@@ -536,3 +536,5 @@ both only match `Value::Object`". Both arms exist today
 retargeted at the real remaining blocker, which is the 105 uncovered sites.
 
 No code was changed by this pass.
+
+**Revalidated 2026-11-02: still plausible because (single authoritative line, 2026-08-17): CLOSED — DID NOT REPRODUCE; no merged fix commit with a passing regression is cited in this doc.**

@@ -214,3 +214,5 @@ struct-returning wrapper. This deserves its own record.
 - Spec: `test/01_unit/infra/counterpart/host_vulkan_lavapipe_compare_spec.spl`
 - Spec verdict as of this record: `Results: 6 total, 6 passed, 0 failed`
   (sabotage control: `Results: 6 total, 5 passed, 1 failed`)
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**

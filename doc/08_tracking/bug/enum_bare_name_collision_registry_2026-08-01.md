@@ -584,3 +584,4 @@ wrong answer at the ABI boundary. It needs its own sequenced lane with an
 artifact-compatibility plan. The three controls above are the tripwire that
 keeps it honest in the meantime.
 
+**Revalidated 2026-11-02: still plausible because ENUMERATION LANDED — no fix applied. Needs an owner decision on the; no merged fix commit with a passing regression is cited in this doc.**

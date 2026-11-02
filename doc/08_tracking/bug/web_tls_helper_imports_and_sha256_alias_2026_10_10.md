@@ -20,3 +20,5 @@ Fixture results and full Web/core/MCP qualification remain pending. Native
 MIR may expose existing untyped helper limitations; retain those failures.
 Other Web errors (_make_j0/_inc32 local calls, mutex keeping helper, chr and
 collection method ownership) remain separate; this repair does not claim them fixed.
+
+**Revalidated 2026-11-02: still plausible because OPEN; source repair and regressions AUTHORED_UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**

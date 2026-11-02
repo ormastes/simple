@@ -86,3 +86,5 @@ without claiming Stage 4 authority.
 2. Diagnose the self-hosted call-result f64 path in `cranelift_codegen_adapter.spl`.
 3. Apply the fix; rebuild + deploy `bin/simple`.
 4. Confirm `scripts/check/check-f64-call-abi.shs` reports PASS.
+
+**Revalidated 2026-11-02: still plausible because OPEN (seed fixed & landed; self-hosted port blocked by bootstrap breakage); no merged fix commit with a passing regression is cited in this doc.**

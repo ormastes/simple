@@ -43,3 +43,4 @@ Engine-level capability gate: untrusted page script
 `src/lib/{gc_async_mut,nogc_sync_mut}/js/engine/interpreter_native.spl`,
 spec `test/01_unit/lib/js/js_native_confinement_spec.spl`.
 
+**Revalidated 2026-11-02: still plausible because OPEN (tracked; out of scope of the 2026-08-15 engine-gate change); no merged fix commit with a passing regression is cited in this doc.**

@@ -521,3 +521,5 @@ A SIGTERMed spec dies before printing its header, which through a pipe launders 
 exit 0 with no `Results:` line — indistinguishable from the silent-green class. Both
 specs therefore need a re-run on a quiet host, or with that foreign monitor stopped,
 before any verdict is claimed for them.
+
+**Revalidated 2026-11-02: still plausible because PARTIALLY FIXED — re-measured 2026-08-17 (see "Re-measurement"; no merged fix commit with a passing regression is cited in this doc.**

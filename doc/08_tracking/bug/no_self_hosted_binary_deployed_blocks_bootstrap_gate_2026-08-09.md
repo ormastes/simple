@@ -216,3 +216,4 @@ root-state referenced throughout many other records in this pass. Needs a
 full bootstrap run to deploy a self-hosted binary, out of a single-bug
 budget / this lane's no-bootstrap constraint. Left OPEN, no code change.
 
+**Revalidated 2026-11-02: still plausible because the report title (check-bootstrap-essential-tools-smoke.shs fails on a clean tree with error=rust) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

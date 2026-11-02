@@ -1998,3 +1998,5 @@ the loss is dominated by ordinary transient values that no eviction call would
 ever be handed. Whoever picks this up next should cost a reclamation strategy
 for `rt_core_*` allocations on the native lane first, and treat arena/eviction
 work as downstream of it.
+
+**Revalidated 2026-11-02: still plausible because localized, not fixed — a real fix here needs two more answers; no merged fix commit with a passing regression is cited in this doc.**

@@ -112,3 +112,5 @@ native builds and is tracked here.
   (`simple_web_html_layout_renderer_core.spl:1785`) is a pure wall-clock
   deadline (`WEB_RENDER_BUDGET_MS`), shares no data with the above, and is an
   independent perf issue. **Not the cause.**
+
+**Revalidated 2026-11-02: still plausible because source-side fix landed for the Draw IR executor; compiler gap OPEN; no merged fix commit with a passing regression is cited in this doc.**

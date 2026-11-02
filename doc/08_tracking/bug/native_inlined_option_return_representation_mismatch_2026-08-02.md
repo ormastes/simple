@@ -215,3 +215,5 @@ Probe: scratchpad `p_opt3.spl` (see CRIT C4 report).
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Record explicitly marks this TRACKED, NOT PARALLEL-CLAIMABLE with a named fix owner. No change made.
+
+**Revalidated 2026-11-02: still plausible because the report title (Inlined Option return uses a different representation than the caller expects o) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
