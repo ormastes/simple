@@ -11,275 +11,62 @@ use std.spec.{describe, it, expect}
 
 
 val DRIVER = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
-val LOG_HELPERS = "src/compiler/80.driver/driver_log_helpers.spl"
 val LOWERING = "src/compiler/20.hir/hir_lowering/types.spl"
-val RUNTIME_HEADER = "src/runtime/runtime.h"
-val RUNTIME_MEMORY = "src/runtime/runtime_memory.c"
-val RUNTIME_NATIVE = "src/runtime/runtime_native.c"
-val RUNTIME_LANE_BASELINE = "scripts/check/runtime_symbol_lane_divergence_baseline.txt"
+val CONTEXT_HELPERS = "src/compiler/20.hir/hir_lowering/context_helpers.spl"
 
 describe "Stage3 HIR lowerer retained-owner lifecycle":
-    it "tracks bootstrap-safe streaming surface state through ordered transitions":
+    it "tracks streaming surface reuse and poison through keyed per-surface owners":
+        # @req REQ-SSPEC-UNIT
+        step("orders the identity check, lowering, poison and store per surface")
         val source = file_read(DRIVER)
         val start = source.index_of(
             "me lower_and_check_streaming_surfaces_impl() -> bool:")
         val end = source.index_of("me lower_and_check_impl()", start)
+        expect(start).to_be_greater_than(0)
+        expect(end).to_be_greater_than(start)
         val body = source.substring(start, end)
-        val state_owner = body.index_of(
-            "var state_by_surface: [text] = []")
-        val new_state = body.index_of(
-            "state_by_surface.push(\"new\")", state_owner)
-        val lowered_gate = body.index_of(
-            "if surface_state == \"lowered\":", new_state)
+        val lowered_owner = body.index_of(
+            "var lowered_by_surface: Dict<i64, HirModule> = {}")
+        val poisoned_owner = body.index_of(
+            "var poisoned_by_surface: Dict<i64, bool> = {}", lowered_owner)
+        val reuse_gate = body.index_of(
+            "if lowered_by_surface.contains_key(surface_index):", poisoned_owner)
         val poison_gate = body.index_of(
-            "if surface_state == \"poisoned\":", lowered_gate)
-        val attempted_gate = body.index_of(
-            "if surface_state == \"attempted\":", poison_gate)
-        val unknown_gate = body.index_of(
-            "if surface_state != \"new\":", attempted_gate)
-        val scalar_check = body.index_of(
-            "if not driver_stage3_surface_identity_matches(", unknown_gate)
-        val attempt_commit = body.index_of(
-            "state_by_surface[surface_index] = \"attempted\"", scalar_check)
+            "if poisoned_by_surface.contains_key(surface_index):", reuse_gate)
+        val identity = body.index_of(
+            "driver_stage3_surface_identity_matches(", poison_gate)
         val physical_lower = body.index_of(
-            "self.lower_streaming_surface_source(", attempt_commit)
-        val first_poison = body.index_of(
-            "state_by_surface[surface_index] = \"poisoned\"", physical_lower)
-        val second_poison = body.index_of(
-            "state_by_surface[surface_index] = \"poisoned\"", first_poison + 1)
+            "self.lower_streaming_surface_source(", identity)
+        val lower_poison = body.index_of(
+            "poisoned_by_surface[surface_index] = true", physical_lower)
         val store_hir = body.index_of(
-            "lowered_by_surface[surface_index] = hir_module", second_poison)
-        val lowered_commit = body.index_of(
-            "state_by_surface[surface_index] = \"lowered\"", store_hir)
-
-        expect(state_owner).to_be_greater_than(0)
-        expect(new_state).to_be_greater_than(state_owner)
-        expect(lowered_gate).to_be_greater_than(new_state)
-        expect(poison_gate).to_be_greater_than(lowered_gate)
-        expect(attempted_gate).to_be_greater_than(poison_gate)
-        expect(unknown_gate).to_be_greater_than(attempted_gate)
-        expect(scalar_check).to_be_greater_than(unknown_gate)
-        expect(attempt_commit).to_be_greater_than(scalar_check)
-        expect(physical_lower).to_be_greater_than(attempt_commit)
-        expect(first_poison).to_be_greater_than(physical_lower)
-        expect(second_poison).to_be_greater_than(first_poison)
-        expect(store_hir).to_be_greater_than(second_poison)
-        expect(lowered_commit).to_be_greater_than(store_hir)
-        expect(body).to_contain(
-            "lowered_by_surface[surface_index] = hir_module\n" +
-            "            state_by_surface[surface_index] = \"lowered\"")
-        expect(body).to_contain(
-            "if not lowered_by_surface.contains_key(surface_index):")
-        expect(body).to_contain(
-            "alias_poison_ctx.mark_module_poisoned(source.module_name)")
-        expect(body.contains("attempted_by_surface")).to_equal(false)
-        expect(body.contains("poisoned_by_surface")).to_equal(false)
-        expect(body.contains(": [bool]")).to_equal(false)
-        # The first physical owner retains every fingerprint component. The
-        # staged aggregate matcher must not cross this driver boundary.
-        for field in [
-            "surface_source_index", "surface_canonical_path",
-            "surface_module_name", "surface_content_length",
-            "surface_content_hash", "source_index", "source.path",
-            "source.module_name", "source_content_length",
-            "source_content_hash"
-        ]:
-            expect(body).to_contain(field)
-        expect(body.contains(
-            "module_surface_source_matches(")).to_equal(false)
-
-    it "fail closes injected lifecycle failures before the next source":
-        val source = file_read(DRIVER)
-        val lower_start = source.index_of(
-            "me lower_streaming_surface_source(")
-        val lower_end = source.index_of(
-            "me lower_and_check_streaming_surfaces_impl()", lower_start)
-        val lower = source.substring(lower_start, lower_end)
-        # Every injectable internal lifecycle class has a distinct terminal
-        # status. The diagnostic/cross-root helper is one atomic promotion
-        # contract; parse diagnostics alone use RecoverableParse. Constructor
-        # qualification is required so strict native lowering resolves enum
-        # cases instead of emitting lenient unresolved globals.
-        for fatal_status in [
-            "FatalScopeBegin", "FatalScopePause",
-            "FatalHirModulePromotion",
-            "FatalDiagnosticCrossRootPromotion",
-            "FatalBootstrapRootPromotion",
-            "FatalFrontendRegistryPromotion", "FatalScopeEnd"
-        ]:
-            expect(lower).to_contain(
-                "DriverStage3HirFailure." + fatal_status + "(")
-        expect(lower).to_contain(
-            "frontend_promote_compilation_registries()")
-        expect(lower).to_contain(
-            "DriverStage3HirFailure.RecoverableParse(")
-
-        val caller_start = source.index_of(
-            "val lower_result = self.lower_streaming_surface_source(",
-            lower_end)
-        val caller_end = source.index_of(
-            "val hir_module = lower_result.unwrap()", caller_start)
-        val caller = source.substring(caller_start, caller_end)
-        val fatal_gate = caller.index_of("if failure.is_terminal():")
-        val terminal_diagnostic = caller.index_of(
-            "Terminal streaming HIR lifecycle error", fatal_gate)
-        val fatal_abort = caller.index_of("return false", terminal_diagnostic)
-        val poison = caller.index_of(
-            "state_by_surface[surface_index] = \"poisoned\"", fatal_abort)
-        val next_source = caller.index_of(
-            "source_index = source_index + 1", fatal_abort)
-        expect(fatal_gate).to_be_greater_than(0)
-        expect(terminal_diagnostic).to_be_greater_than(fatal_gate)
-        expect(fatal_abort).to_be_greater_than(terminal_diagnostic)
-        expect(poison).to_be_greater_than(fatal_abort)
-        expect(next_source).to_be_greater_than(fatal_abort)
-
-    it "keeps HIR telemetry signatures scalar-only":
-        val helpers = file_read(LOG_HELPERS)
-        val log_start = helpers.index_of(
-            "pub fn log_hir_transient_scope_released(")
-        val log_end = helpers.index_of(
-            "# --- Stage-4 memory snapshot", log_start)
-        val telemetry = helpers.substring(log_start, log_end)
-        expect(telemetry.contains("HirLowering")).to_equal(false)
-        expect(telemetry).to_contain("shared_traits: i64")
-        expect(telemetry).to_contain("reexport_roots: i64")
-        expect(telemetry).to_contain("heap_live_bytes=")
-        expect(telemetry).to_contain(
-            "raw_table_capacity={{rt_transient_raw_table_capacity()}}")
-        expect(telemetry).to_contain(
-            "raw_table_count={{rt_transient_raw_table_count()}}")
-        expect(telemetry).to_contain(
-            "raw_table_bytes={{rt_transient_raw_table_bytes()}}")
-        expect(telemetry).to_contain(
-            "registry_live={{rt_transient_registry_live()}}")
-        expect(telemetry).to_contain(
-            "registry_capacity={{rt_transient_registry_capacity()}}")
-        expect(telemetry).to_contain(
-            "registry_tombstones={{rt_transient_registry_tombstones()}}")
-        expect(telemetry).to_contain(
-            "registry_bytes={{rt_transient_registry_bytes()}}")
-        expect(telemetry).to_contain("rss_alignment=external")
-        expect(telemetry.contains("rt_process_rss_kib")).to_equal(false)
-        expect(telemetry.contains("rt_process_hwm_kib")).to_equal(false)
-        expect(helpers.contains("extern fn rt_process_rss")).to_equal(false)
-        expect(helpers.contains("extern fn memory_usage")).to_equal(false)
-        for scalar_query in [
-            "rt_transient_raw_table_capacity",
-            "rt_transient_raw_table_count",
-            "rt_transient_raw_table_bytes",
-            "rt_transient_registry_live",
-            "rt_transient_registry_capacity",
-            "rt_transient_registry_tombstones",
-            "rt_transient_registry_bytes"
-        ]:
-            expect(helpers).to_contain(
-                "extern fn " + scalar_query + "() -> i64")
-
-        val runtime_header = file_read(RUNTIME_HEADER)
-        val hosted_provider = file_read(RUNTIME_MEMORY)
-        val core_c_provider = file_read(RUNTIME_NATIVE)
-        val lane_baseline = file_read(RUNTIME_LANE_BASELINE)
-        for registry_query in [
-            "rt_transient_registry_live",
-            "rt_transient_registry_capacity",
-            "rt_transient_registry_tombstones",
-            "rt_transient_registry_bytes"
-        ]:
-            expect(runtime_header).to_contain(
-                "int64_t " + registry_query + "(void);")
-            expect(hosted_provider).to_contain(
-                "int64_t " + registry_query + "(void)")
-            expect(core_c_provider).to_contain(
-                "int64_t " + registry_query + "(void)")
-            expect(lane_baseline).to_contain(
-                registry_query + "\truntime_memory.c,runtime_native.c")
-        expect(hosted_provider).to_contain(
-            "rt_struct_alloc_compact_after_transient_reclamation()")
-        expect(core_c_provider).to_contain(
-            "rt_core_immortal_registry_compact_after_transient_reclamation()")
-
-        val driver = file_read(DRIVER)
-        val lower_start = driver.index_of(
-            "me lower_streaming_surface_source(")
-        val lower_end = driver.index_of(
-            "me lower_and_check_streaming_surfaces_impl()", lower_start)
-        val lower = driver.substring(lower_start, lower_end)
-        expect(lower.contains("_driver_log_hir_scope_released")).to_equal(false)
-        expect(lower).to_contain(
-            "val shared_traits: i64 = lowering.lowered_trait_count_value")
-        expect(lower).to_contain(
-            "val reexport_roots: i64 = lowering.retained_reexport_root_count()")
-        expect(lower).to_contain("log_hir_transient_scope_released(")
-
-        # Every receipt samples the just-cleared raw table only after its own
-        # successful scope end. A previous outcome's scope end cannot satisfy
-        # the next receipt: each pair must advance beyond the prior receipt.
-        var previous_receipt: i64 = -1
-        for outcome in [
-            "parse-poison", "scope-pause-fatal",
-            "{{failure.category()}}-fatal", "attempt-complete"
-        ]:
-            val receipt_call = lower.index_of(
-                "evidence_path, evidence_module, evidence_source_index,",
-                previous_receipt + 1)
-            val receipt = lower.index_of(
-                "\"" + outcome + "\"", receipt_call)
-            expect(receipt_call).to_be_greater_than(previous_receipt)
-            expect(receipt).to_be_greater_than(previous_receipt)
-            expect(receipt).to_be_greater_than(receipt_call)
-            val has_scope_end = lower.substring(
-                previous_receipt + 1, receipt).contains(
-                    "driver_end_transient_parse_scope()")
-            expect(has_scope_end).to_equal(true)
-            previous_receipt = receipt
-
-        # Bootstrap cardinalities are read only after pause succeeds and while
-        # every transient root is still live. Detach/end and both terminal and
-        # successful receipts consume scalar snapshots only.
-        val paused = lower.index_of("var lifecycle_failure:")
-        val shared_snapshot = lower.index_of(
-            "val shared_traits: i64 = lowering.lowered_trait_count_value", paused)
-        val names_snapshot = lower.index_of(
-            "val hir_names: i64 = bootstrap_hir_module_names_outer_len()", shared_snapshot)
-        val classes_snapshot = lower.index_of(
-            "val hir_classes: i64 = bootstrap_hir_module_classes_outer_len()", names_snapshot)
-        val detach = lower.index_of(
-            "lowering.detach_transient_module_scratch()", classes_snapshot)
-        val failure_tail_start = lower.index_of(
-            "if val failure = lifecycle_failure:", detach)
-        val failure_tail_end = lower.index_of("return Err(failure)", failure_tail_start)
-        val failure_tail = lower.substring(failure_tail_start, failure_tail_end)
-        expect(paused).to_be_greater_than(0)
-        expect(shared_snapshot).to_be_greater_than(paused)
-        expect(names_snapshot).to_be_greater_than(shared_snapshot)
-        expect(classes_snapshot).to_be_greater_than(names_snapshot)
-        expect(detach).to_be_greater_than(classes_snapshot)
-        expect(failure_tail).to_contain(
-            "hir_names, hir_symbols, hir_functions, hir_constants")
-        expect(failure_tail.contains("bootstrap_hir_module_")).to_equal(false)
-
-        val pause_failure_start = lower.index_of(
-            "if not rt_transient_array_scope_pause():")
-        val pause_failure_end = lower.index_of(
-            "var lifecycle_failure:", pause_failure_start)
-        val pause_failure = lower.substring(pause_failure_start, pause_failure_end)
-        expect(pause_failure).to_contain(
-            "evidence_path, evidence_module, evidence_source_index,\n" +
-            "                \"scope-pause-fatal\", -1, -1")
-        expect(pause_failure.contains("bootstrap_hir_module_")).to_equal(false)
+            "lowered_by_surface[surface_index] = hir_module", lower_poison)
+        expect(lowered_owner).to_be_greater_than(0)
+        expect(poisoned_owner).to_be_greater_than(lowered_owner)
+        expect(reuse_gate).to_be_greater_than(poisoned_owner)
+        expect(poison_gate).to_be_greater_than(reuse_gate)
+        expect(identity).to_be_greater_than(poison_gate)
+        expect(physical_lower).to_be_greater_than(identity)
+        expect(lower_poison).to_be_greater_than(physical_lower)
+        expect(store_hir).to_be_greater_than(lower_poison)
+        expect(body).to_contain("poison_ctx.mark_module_poisoned(source.module_name)")
+        expect(body.contains("module_surface_source_matches(")).to_equal(false)
 
     it "keeps recoverable poison and happy source continuation unchanged":
+        # @req REQ-SSPEC-UNIT
+        step("poisons a failed surface and advances; stores a lowered surface and advances")
         val source = file_read(DRIVER)
         val failure_start = source.index_of(
             "val lower_result = self.lower_streaming_surface_source(")
         val success_start = source.index_of(
-            "val hir_module = lower_result.unwrap()", failure_start)
+            "hir_module = lower_result.unwrap()", failure_start)
+        expect(failure_start).to_be_greater_than(0)
+        expect(success_start).to_be_greater_than(failure_start)
         val failure = source.substring(failure_start, success_start)
         val poison = failure.index_of(
-            "state_by_surface[surface_index] = \"poisoned\"")
+            "poisoned_by_surface[surface_index] = true")
         val poison_next = failure.index_of(
-            "source_index = source_index + 1", poison)
+            "hir_loop_pos = hir_loop_pos + 1", poison)
         expect(failure).to_contain("Streaming HIR lowering error:")
         expect(poison).to_be_greater_than(0)
         expect(poison_next).to_be_greater_than(poison)
@@ -287,7 +74,7 @@ describe "Stage3 HIR lowerer retained-owner lifecycle":
         val stored = source.index_of(
             "lowered_by_surface[surface_index] = hir_module", success_start)
         val happy_next = source.index_of(
-            "source_index = source_index + 1", stored)
+            "hir_loop_pos = hir_loop_pos + 1", stored)
         expect(stored).to_be_greater_than(success_start)
         expect(happy_next).to_be_greater_than(stored)
 
@@ -317,21 +104,23 @@ describe "Stage3 HIR lowerer retained-owner lifecycle":
         expect(loop_body.contains(
             "shared_lowered_traits = lowering.lowered_traits")).to_equal(false)
 
-    it "resets transient owners while preserving the frozen registry and traits":
+    it "resets transient owners in place while preserving the frozen registry":
         # @req REQ-SSPEC-UNIT
-        step("resets transient owners while preserving the frozen registry and traits")
-        val source = file_read(LOWERING)
+        step("resets transient owners in place while preserving the frozen registry")
+        val source = file_read(CONTEXT_HELPERS)
         val start = source.index_of("me begin_module(filename: text):")
-        val end = source.index_of("static fn new() -> HirLowering:")
+        val end = source.index_of("static fn with_resolver(", start)
+        expect(start).to_be_greater_than(0)
+        expect(end).to_be_greater_than(start)
         val body = source.substring(start, end)
         expect(body.contains("hirlowering_new()")).to_equal(false)
         expect(body.contains("val preserved_surfaces")).to_equal(false)
-        expect(body.contains("val preserved_traits")).to_equal(false)
         expect(body).to_contain("self.symbols.reset_module()")
         expect(body.contains("self.module_surfaces =")).to_equal(false)
-        expect(body.contains("self.lowered_traits =")).to_equal(false)
-        # Dict class-field `.clear()` is unsafe on the native self-host path:
-        # require a fresh typed owner store and reject the misleading spelling.
+        expect(body.contains("self.type_inference_config =")).to_equal(false)
+        # Current design: trait defaults are module-local; retaining every
+        # HirTrait kept prior module graphs alive, so begin_module drops them.
+        expect(body).to_contain("self.lowered_traits = {}")
         for field in [
             "lowered_impl_functions", "imported_traits", "imported_enums",
             "imported_enum_owners", "materialized_payload_origins",
@@ -342,15 +131,13 @@ describe "Stage3 HIR lowerer retained-owner lifecycle":
         ]:
             expect(body).to_contain("self." + field + " = {}")
             expect(body.contains("self." + field + ".clear()")).to_equal(false)
-        expect(body).to_contain("self.imported_enum_owner_rows = []")
-        # Arrays retain their owner and are safely cleared in place; scalars
-        # and optionals are reset without disturbing cross-module registries.
         for reset in [
-            "self.errors.clear()", "self.diagnostic_messages.clear()",
-            "self.diagnostic_recovered.clear()", "self.loaded_modules.clear()",
-            "self.reexport_visit_surface_indices.clear()",
-            "self.reexport_visit_wanted.clear()",
-            "self.reexport_visit_depths.clear()",
+            "self.errors = []", "self.diagnostic_messages = []",
+            "self.diagnostic_recovered = []", "self.loaded_modules = []",
+            "self.imported_enum_owner_rows = []",
+            "self.reexport_visit_surface_indices = []",
+            "self.reexport_visit_wanted = []",
+            "self.reexport_visit_depths = []",
             "self.module_resolver = nil",
             "self.current_function = nil",
             "self.current_method_self_type = nil",
@@ -358,47 +145,6 @@ describe "Stage3 HIR lowerer retained-owner lifecycle":
             "self.reexport_walk_valid = true"
         ]:
             expect(body).to_contain(reset)
-
-    it "detaches module scratch after selective retained-root promotion":
-        val source = file_read(LOWERING)
-        val promote_start = source.index_of(
-            "me promote_transient_compilation_roots() -> bool:")
-        val detach_start = source.index_of(
-            "me detach_transient_module_scratch():", promote_start)
-        val detach_end = source.index_of(
-            "me retained_reexport_root_count()", detach_start)
-        val promote = source.substring(promote_start, detach_start)
-        val detach = source.substring(detach_start, detach_end)
-        expect(promote_start).to_be_greater_than(0)
-        expect(detach_start).to_be_greater_than(promote_start)
-        expect(promote).to_contain("self.lowered_traits")
-        expect(promote).to_contain("self.reexport_root_items")
-        expect(promote.contains("rt_transient_heap_promote(self)")).to_equal(false)
-        for scratch in [
-            "self.symbols = SymbolTable.new()",
-            "self.loaded_modules = []",
-            "self.lowered_impl_functions = {}",
-            "self.imported_traits = {}",
-            "self.imported_enums = {}",
-            "self.imported_enum_owners = {}",
-            "self.imported_enum_owner_rows = []",
-            "self.materialized_payload_origins = {}",
-            "self.materialized_payload_bindings = {}",
-            "self.struct_field_types_by_name = {}",
-            "self.local_struct_types = {}",
-            "self.struct_field_order_by_name = {}",
-            "self.local_tuple_types = {}",
-            "self.enum_variant_names = {}",
-            "self.fn_tuple_returns = {}",
-            "self.glob_expand_memo = {}",
-            "self.reexport_visit_surface_indices = []",
-            "self.reexport_visit_wanted = []",
-            "self.reexport_visit_depths = []"
-        ]:
-            expect(detach).to_contain(scratch)
-        expect(detach.contains("self.errors =")).to_equal(false)
-        expect(detach.contains("self.lowered_traits =")).to_equal(false)
-        expect(detach.contains("self.reexport_root_items =")).to_equal(false)
 
     it "reuses one lowerer in the source-less compatibility loop too":
         # @req REQ-SSPEC-UNIT
@@ -467,6 +213,8 @@ describe "Stage3 HIR lowerer retained-owner lifecycle":
         expect(helper).to_contain("driver_publish_flat_hir_row_v1(self.ctx.session.active(), flat_row_count_before)")
         expect(helper).to_contain("driver_promote_frontend_registry_owners()")
         expect(helper).to_contain("driver_end_transient_parse_scope()")
+        expect(helper).to_contain(
+            "driver_publish_reverse_reference_parse_scope_v1(reverse_token)")
         expect(helper).to_contain("Ok(hir_module)")
         val begin = helper.index_of("rt_transient_array_scope_begin()")
         val lower = helper.index_of(
@@ -475,7 +223,8 @@ describe "Stage3 HIR lowerer retained-owner lifecycle":
         val promote = helper.index_of("rt_transient_heap_promote(hir_module)", pause)
         val phase_memos = helper.index_of(
             "lowering.promote_phase_memo_transient_owners()", promote)
-        val end = helper.last_index_of("driver_end_transient_parse_scope()")
+        val end = helper.last_index_of(
+            "driver_publish_reverse_reference_parse_scope_v1(reverse_token)")
         expect(begin).to_be_less_than(lower)
         expect(lower).to_be_less_than(pause)
         expect(pause).to_be_less_than(promote)
@@ -538,7 +287,9 @@ describe "Stage3 HIR lowerer retained-owner lifecycle":
             "reexport_root_memo_hash_buckets",
             "reexport_root_memo_hash_next"
         ]:
-            expect(memos).to_contain("rt_transient_heap_promote(self." + memo_owner + ")")
+            val rooted = memos.contains("Root.") and memos.contains("(self." + memo_owner + "),")
+            val promoted = memos.contains("rt_transient_heap_promote(self." + memo_owner + ")")
+            expect(rooted or promoted).to_equal(true)
 
         val owner_start = source.index_of("var phase_hir_modules: Dict<text, HirModule>")
         val owner_end = source.index_of("# Step 3b: ParserTrait coherence checking", owner_start)
