@@ -13146,6 +13146,15 @@ SPL_CORE_C_WEAK int64_t rt_time_now_seconds(void) {
     return (int64_t)time(NULL);
 }
 
+/* Weak mirror of runtime_timestamp.c's rt_time_now_seconds_f64 (not in the
+ * seed core-C list). Same microsecond-wallclock body as the Windows arm there;
+ * without it the seed->stage2 bootstrap_main link leaves it undefined. */
+int64_t rt_time_now_unix_micros(void);
+SPL_CORE_C_WEAK double rt_time_now_seconds_f64(void) {
+    int64_t micros = rt_time_now_unix_micros();
+    return micros < 0 ? -1.0 : (double)micros / 1000000.0;
+}
+
 #if defined(_WIN32)
 #include "platform/runtime_win_long_path.h"
 #endif
