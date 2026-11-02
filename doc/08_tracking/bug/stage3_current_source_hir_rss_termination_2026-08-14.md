@@ -1353,3 +1353,17 @@ candidate, hello, and module-qualified field-layout checks remain unverified.
 No canonical Stage 3 was run, and both authoritative DB rows remain OPEN.
 
 **Revalidated 2026-11-02: still plausible because the report title (Current-source Stage 3 terminates at status 143 after unbounded HIR-build RSS g) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Analysis (2026-11-02, opf-3)
+
+- Checked against current policy/design: still valid as a memory-boundedness evidence gap. It is compatible with the one-process-per-file pipeline, the BuildSession memory model and the host.sdn limits. It is not closed: no RSS/termination proof exists on release/1.0.0.
+- The source-side owner fix is still in place at release/1.0.0 `b3bd662bcda`.
+  - `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:1734` constructs one `HirLowering` before the `while hir_loop_pos < hir_visit_order.len():` loop.
+  - `:1882` calls `lowering.begin_module(src_path ?? "")` once per source.
+  - No `hirlowering_for_module*` call is left inside the loop.
+  - `src/compiler/20.hir/hir_lowering/context_helpers.spl:70` `begin_module` still resets in place and does not call `hirlowering_new()`.
+- This is not the s2-rebuild "stage2_next worker AV after load_sources" symptom. This bug is unbounded RSS growth ending in SIGTERM 143, with no access violation.
+- Spec drift: `test/01_unit/compiler/driver/stage3_hir_lowerer_reuse_contract_spec.spl` was 2/10 green. Its loop anchor `while source_idx < ...` had been renamed, so `index_of` returned -1 and the whole owner was scanned. The anchor is updated and now guarded with `expect(loop).to_be_greater_than(0)`. The core example "constructs the registry-bearing lowerer once outside the source loop" passes.
+- The 7 other examples still fail on other renamed text anchors, for example the streaming `surface_content_hash`, telemetry evidence fields and the `promote_phase_memo_transient_owners` body.
+- TODO(owner): re-anchor the remaining 7 contract examples to current source.
+- TODO(owner): run the single cache-preserving canonical Stage3 transaction under the RSS budget. This host cannot run it now: Phase 3 has priority and full bootstrap builds are not allowed.
