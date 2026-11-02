@@ -1,0 +1,53 @@
+"""WA-AR-1: emit-archive must not put every object path on argv (Windows os error 206)."""
+
+use compiler.backend.linker.archive_response_file.{
+    archive_command_build,
+    archive_argv_bytes,
+    archive_gnu_response_quote,
+    archive_response_quote
+}
+
+fn long_objects(count: i64) -> [text]:
+    var objs: [text] = []
+    var i = 0
+    while i < count:
+        objs = objs.push("C:\\dev\\wt\\mp-5\\build\\bootstrap\\phase3\\objects\\compiler\\80.driver\\module_with_a_long_name_{i}.o")
+        i = i + 1
+    objs
+
+describe "archive response file":
+    it "keeps llvm-ar argv short for 1500 long Windows paths":
+        val objs = long_objects(1500)
+        var naive: i64 = 0
+        for o in objs:
+            naive = naive + o.len() + 3
+        expect(naive).to_be_greater_than(32767)
+        val cmd = archive_command_build("C:/llvm/bin/llvm-ar.exe", "windows", "C:\\out\\libsimple.a", objs)
+        expect(cmd.argv.len()).to_equal(3)
+        expect(cmd.argv[0]).to_equal("rcsD")
+        expect(cmd.argv[2]).to_equal("@C:\\out\\libsimple.a.ar.rsp")
+        expect(archive_argv_bytes(cmd.argv)).to_be_less_than(1024)
+        expect(cmd.response_body).to_contain("\"C:/dev/wt/mp-5/build/bootstrap/phase3/objects/compiler/80.driver/module_with_a_long_name_1499.o\"")
+
+    it "uses response file for lib.exe":
+        val cmd = archive_command_build("lib.exe", "windows", "out.lib", long_objects(1500))
+        expect(cmd.argv.len()).to_equal(3)
+        expect(cmd.argv[0]).to_equal("/NOLOGO")
+        expect(cmd.argv[1]).to_equal("/OUT:out.lib")
+        expect(cmd.argv[2]).to_equal("@out.lib.ar.rsp")
+
+    it "uses GNU quoting on linux":
+        val cmd = archive_command_build("llvm-ar", "linux", "/tmp/a b/out.a", ["/tmp/a b/one.o", "two\\x.o"])
+        expect(cmd.argv[2]).to_equal("@/tmp/a b/out.a.ar.rsp")
+        expect(cmd.response_body).to_equal("\"/tmp/a b/one.o\"\n\"two\\\\x.o\"\n")
+
+    it "quotes Windows paths with spaces and trailing backslash":
+        expect(archive_response_quote("windows", true, "C:\\a b\\")).to_equal("\"C:\\a b\\\\\"")
+        expect(archive_response_quote("windows", false, "C:\\a b\\x.o")).to_equal("\"C:/a b/x.o\"")
+        expect(archive_gnu_response_quote("say\"hi")).to_equal("\"say\\\"hi\"")
+
+    it "keeps argv for BSD ar on macOS":
+        val cmd = archive_command_build("ar", "macos", "out.a", ["one.o", "two.o"])
+        expect(cmd.argv.len()).to_equal(4)
+        expect(cmd.argv[0]).to_equal("rcs")
+        expect(cmd.response_path).to_equal("")
