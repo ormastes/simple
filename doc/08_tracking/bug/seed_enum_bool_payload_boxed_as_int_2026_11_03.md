@@ -1,42 +1,61 @@
-# Rust MIR lowering boxes enum bool payloads as integers
+# Multi-field enum constructor boxes Bool payloads as integers
 
-Status: OPEN (P1) — native regression failure and source owner identified; no production fix or closure claim.
+Status: FIXED (P1, narrow multi-field enum Bool payload construction). No Phase 2 or Phase 3 qualification is claimed.
 
-## Failure and owner
+## Scope and repair
 
-The failing generic optional-tuple native case reaches the `true optional bool
-projection` assertion and panics before its 24-check completion marker. The
-retained campaign result is
-`C:/dev/p3new/tuple_abi_optional_verify_20261103/attempt_01/generic_tuple_24/result.sdn`,
-SHA256 `BB024BFBECF813FC1350612EE81BFEF2010F0E95B807EA6E62B314B92A937A3C`;
-stderr SHA256 is
-`88A745754C75DA0B9BA110E85A75E00F90EDDFC51790C3235B5E89CC0B74131B` and the
-observed panic is `tuple ABI probe failed: true optional bool projection`.
-The executable SHA256 is
-`C0A67AACC8B7BEF7500C67CB12E96EA70B908861F57017E676C05D682BB66523`. This
-failed generic case is separate from the guarded optional-reference binding
-fix, whose 20-check and 8-check cases pass on the same seed.
+The original failure was the `true optional bool projection` assertion in the
+generic 24-check native tuple fixture. The multi-field enum constructor path in
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs` included Bool
+in its integer `needs_box` arm and emitted `BoxInt`. The correction excludes
+Bool from that integer arm and uses `box_scalar_for_tagged_slot(ANY, BOOL, arg)`
+for the multi-field payload, preserving the runtime's tagged-boolean
+representation. This record is intentionally limited to the multi-field enum
+constructor path; the single-field constructor and typed-array method paths
+remain separate OPEN P1 findings below.
 
-The source owner is Rust MIR lowering in
-`src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs`: the
-`needs_box` path includes `BOOL` and then emits `BoxInt`, producing an integer
-tagged value for a boolean payload. In the retained native disassembly, the
-input is boxed via `rt_value_int` before `rt_array_push`; optional projection
-then performs `rt_is_some`, `rt_unwrap_or_self`, and `rt_value_as_bool`. The
-runtime boolean decoder accepts the tagged special-boolean representation, so
-this input def/use path explains the observed true-value mismatch. It does not
-establish a tuple-getter ABI defect or a production fix.
+The source patch SHA256 is
+`EC2ED6A77AE3A2CD715B3FCB2B2C0A1C511D2B1F852DF3767588DCBEC714330B`, applied
+to source head `7137e3c2c05cab49562d277372ad1050d1b8d835`.
 
-The offline mechanism receipt is
-`C:/dev/p3new/tuple_abi_optional_verify_20261103/attempt_01/mechanism_receipt.sdn`,
-SHA256 `D5F3077A70BAC048221F7025E2303A88536F0E02EBEC0B5DA5760B2B8490D719`;
-the disassembly excerpt SHA256 is
-`C87F1A7D0CCC74C1ED10475E7EEFACD7ABD745A563A25DE54AC85FA6C205EEB5`. The
-campaign is a focused diagnostic, not Phase 2 or Phase 3 qualification. The
-issue remains OPEN pending a narrowly owned source repair and a native
-regression that proves the bool payload representation end to end.
+## Focused evidence
 
-Do not close or fold this issue into the guarded optional-binding fix, the
-older generic tuple-getter/FFI hypothesis, the existing candidate AV, or
-LayoutAttr requalification. Those records retain their separate scopes and
-statuses.
+The immutable uncertified seed built from that patch is
+`DDA32D9110D28691928F1A3D03D59C50307D08B0FD357903CEB3F4B955392B68`; its
+build result at
+`C:/dev/p3new/s2_enum_bool_seed_20261103/build_attempt_01/result.sdn`
+(SHA256 `F524D927247EA7A441094584A76AD709E73CAA9D0075B001B66C72ACFE2D2874`)
+records rc 0, 250.0 seconds, and 3.61 GiB peak tree RSS.
+
+The MIR unit `sanitized_multifield_enum_constructor_boxes_bool_payload_as_bool`
+passed once (result
+`C:/dev/p3new/s2_enum_bool_seed_20261103/attempt_01/result.sdn`, SHA256
+`B239B42AA03A16E329D12D9F60419CCB01FD946D8CFDD963244DC13E2D67F1D5`). It
+covers false, true, and numeric payload ordering.
+
+The bounded PowerShell native campaign at
+`C:/dev/p3new/tuple_abi_generic_bool_verify_20261103/attempt_01/result.sdn`
+(SHA256 `295E3F382CC10A75B487D61A4F2A912B03F4E47963040FF0BA8C3935D5595A50`)
+reports `NATIVE_PASS` for the generic 24-check case. Its case result SHA256 is
+`1125042CE294E2BB7F4ACE8498ACE6732B0764DBDC3A140036A7B4FE0E35C28A`; the
+executed executable SHA256 is
+`6E5AE59287B7B0572C4F701CE34312A8C2C998C21CDF1EF2125EB3612FE9B65E`. The
+later offline mechanism receipt
+`C:/dev/p3new/tuple_abi_generic_bool_verify_20261103/attempt_01/mechanism_receipt.sdn`,
+SHA256
+`55CF450498E0E77F915AA65F4848D1842D774885D46A31A0EB0CE4DDE439D322`,
+received Astra exact-receipt PASS. The receipt supports this narrow
+multi-field construction fix; it does not qualify Phase 2/3 or close the
+separate findings below.
+
+The previous failing result on the D18 seed is retained as pre-fix history; it
+is superseded only for this multi-field constructor case. This does not assert
+a tuple-getter ABI defect, and does not imply that every enum Bool construction
+or collection operation is correct.
+
+## Remaining separate OPEN findings
+
+- Single-field enum Bool payload construction remains OPEN P1:
+  `doc/08_tracking/bug/seed_single_field_enum_bool_payload_boxed_as_int_2026_11_03.md`.
+- Typed array `.push` / `.index_of` Bool boxing remains OPEN P1:
+  `doc/08_tracking/bug/seed_array_method_bool_value_boxed_as_int_2026_11_03.md`.

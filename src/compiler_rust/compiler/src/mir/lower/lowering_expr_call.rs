@@ -870,10 +870,10 @@ impl<'a> MirLowerer<'a> {
                             });
                             dest
                         })?;
-                        // Push each arg into the array. `rt_array_push` (per its
-                        // runtime comment) expects values to arrive *tagged*; for
-                        // integer-typed args we must insert MirInst::BoxInt first,
-                        // mirroring what regular `arr.push(int)` lowering does.
+                        // Push each arg into the array. `rt_array_push` expects
+                        // tagged values. Integer args use BoxInt; bool args use
+                        // rt_value_bool because bool has dedicated true/false
+                        // tags and is not BoxInt-compatible.
                         // Without this, integer enum fields are stored untagged,
                         // and destructuring later applies DECODE_INT to a raw int,
                         // silently zeroing the field. See
@@ -889,7 +889,6 @@ impl<'a> MirLowerer<'a> {
                                     | TypeId::U8
                                     | TypeId::U16
                                     | TypeId::U32
-                                    | TypeId::BOOL
                             );
                             // Float payloads need BoxFloat (lossless heap box):
                             // a raw double stored untagged loses its low 3
@@ -899,7 +898,9 @@ impl<'a> MirLowerer<'a> {
                             // lowering_expr_method.rs; see
                             // doc/08_tracking/bug/seed_f64_array_element_precision_mask_2026-07-19.md.
                             let needs_float_box = matches!(arg_ty, TypeId::F32 | TypeId::F64);
-                            let push_arg = if arg_ty == TypeId::U64 {
+                            let push_arg = if arg_ty == TypeId::BOOL {
+                                self.box_scalar_for_tagged_slot(TypeId::ANY, arg_ty, *arg)?
+                            } else if arg_ty == TypeId::U64 {
                                 self.box_u64_runtime_value(*arg)?
                             } else if needs_box || needs_float_box {
                                 self.with_func(|func, current_block| {

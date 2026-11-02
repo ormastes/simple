@@ -316,6 +316,122 @@ fn sanitized_enum_constructor_call_lowers_to_enum_with() {
 }
 
 #[test]
+fn sanitized_multifield_enum_constructor_boxes_bool_payload_as_bool() {
+    let source = "enum Probe:\n    BoolFields(value: bool, marker: i64)\n\nfn test_false() -> Probe:\n    return Probe.BoolFields(value: false, marker: 73)\n\nfn test_true() -> Probe:\n    return Probe.BoolFields(value: true, marker: 91)\n";
+    let ast = Parser::new(source).parse().expect("parse failed");
+    let mut hir_module = hir::lower(&ast).expect("hir lower failed");
+
+    for function_name in ["test_false", "test_true"] {
+        let function = hir_module
+            .functions
+            .iter_mut()
+            .find(|function| function.name == function_name)
+            .expect("constructor fixture function exists");
+        let hir::HirStmt::Return(Some(expr)) = &mut function.body[0] else {
+            panic!("expected enum constructor return");
+        };
+        let hir::HirExprKind::Call { func, .. } = &mut expr.kind else {
+            panic!("expected enum constructor call");
+        };
+        func.kind = hir::HirExprKind::Global("Probe_dot_BoolFields".to_string());
+    }
+
+    let mir = lower_to_mir(&hir_module).expect("mir lower failed");
+    for (function_name, bool_value, marker_value) in
+        [("test_false", false, 73), ("test_true", true, 91)]
+    {
+        let function = mir
+            .functions
+            .iter()
+            .find(|function| function.name == function_name)
+            .expect("MIR fixture function exists");
+        let instructions: Vec<_> = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect();
+
+        let bool_input = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::ConstBool { dest, value } if *value == bool_value => Some(*dest),
+                _ => None,
+            })
+            .expect("bool constructor input exists");
+        let bool_box = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::Call {
+                    dest: Some(dest),
+                    target,
+                    args,
+                } if target == &CallTarget::from_name("rt_value_bool")
+                    && args.len() == 1
+                    && args[0] == bool_input => Some(*dest),
+                _ => None,
+            })
+            .expect("bool payload must use the runtime bool tag");
+        let marker_input = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::ConstInt { dest, value } if *value == marker_value => Some(*dest),
+                _ => None,
+            })
+            .expect("numeric marker input exists");
+        let marker_box = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::BoxInt { dest, value } if *value == marker_input => Some(*dest),
+                _ => None,
+            })
+            .expect("numeric marker must retain integer boxing");
+        let payload_array = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::Call {
+                    dest: Some(dest),
+                    target,
+                    args,
+                } if target == &CallTarget::from_name("rt_array_new")
+                    && args.len() == 1
+                    && instructions.iter().any(|candidate| {
+                        matches!(candidate, MirInst::ConstInt { dest, value }
+                            if *dest == args[0] && *value == 2)
+                    }) => Some(*dest),
+                _ => None,
+            })
+            .expect("two-field payload array exists");
+
+        let pushed_payloads: Vec<_> = instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                MirInst::Call { target, args, .. }
+                    if target == &CallTarget::from_name("rt_array_push")
+                        && args.len() == 2
+                        && args[0] == payload_array => Some(args[1]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pushed_payloads,
+            vec![bool_box, marker_box],
+            "bool must use rt_value_bool before the BoxInt-tagged numeric marker"
+        );
+        assert!(instructions.iter().any(|inst| matches!(
+            inst,
+            MirInst::EnumWith { enum_name, variant_name, payload, .. }
+                if enum_name == "Probe"
+                    && variant_name == "BoolFields"
+                    && *payload == payload_array
+        )), "enum consumes the ordered payload array");
+        assert!(!instructions.iter().any(|inst| matches!(
+            inst,
+            MirInst::BoxInt { value, .. } if *value == bool_input
+        )), "bool constructor input is not integer-boxed");
+    }
+}
+
+#[test]
 fn sanitized_enum_unit_global_lowers_to_enum_unit() {
     let mut parser = Parser::new("enum Tag:\n    Ready\n\nfn test() -> Tag:\n    return Tag.Ready\n");
     let ast = parser.parse().expect("parse failed");
