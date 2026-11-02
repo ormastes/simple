@@ -4,7 +4,7 @@ use std.sffi.cli_args.{cli_get_args}
 use app.io.cli_ops.{cli_current_exe_path}
 use app.io.process_ops.{process_run_bounded}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
-use app.test_daemon.light_protocol.{LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE, LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER, light_request_deadline, light_request_parse_v2, light_request_matches_daemon_v2, timeout_verdict_line, has_verdict_line, exit_code_reason, light_request_inflight_path, light_request_is_pollable}
+use app.test_daemon.light_protocol.{light_lock_claim, light_lock_release, light_atomic_publish, LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE, LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER, light_request_deadline, light_request_parse_v2, light_request_matches_daemon_v2, timeout_verdict_line, has_verdict_line, exit_code_reason, light_request_inflight_path, light_request_is_pollable}
 use app.test_daemon.environment_identity.{test_daemon_environment_identity_v1}
 
 use std.io_runtime.{dir_create_all}
@@ -27,12 +27,10 @@ use std.io_runtime.{env_remove_process}
 # 0-byte/partial by the polling client between this daemon's open(truncate)
 # and its write()).
 fn atomic_write_text(path: text, content: text) -> bool:
-    val tmp_path = "{path}.tmp"
-    if file_write(tmp_path, content):
-        if file_rename(tmp_path, path):
-            return true
-        file_delete(tmp_path)
-    file_write(path, content)
+    if light_atomic_publish(path, content):
+        return true
+    print "light_daemon: atomic publish of {path} failed"
+    false
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
@@ -251,31 +249,12 @@ fn pid_is_live(pid: text) -> bool:
     file_exists("/proc/{pid}")
 
 fn claim_lane(environment_digest: text) -> bool:
-    """Take exclusive ownership of the lane, or report that someone else has it.
+    """Take exclusive ownership of the lane (O_EXCL, pid + digest in one record).
 
-    `ensure_daemon()` in test_runner_client.spl is check-then-spawn with NO
-    mutual exclusion, so N clients that all find the lock absent all spawn a
-    daemon. Measured 2026-08-21: a 6-client burst left 4+ light daemons alive,
-    every one of them polling the SAME request directory, racing to serve and
-    to answer the same `.req` files. That is the concurrency defect behind
-    doc/08_tracking/bug/test_runner_concurrent_runs_lose_output_2026-08-21.md.
-
-    Fixing the client alone cannot close it (the check and the spawn can never
-    be one atomic step from out there), so the exclusion is enforced HERE, by
-    the only processes that can see each other: a daemon that does not own the
-    lock exits instead of serving. Claim = atomic tmp+rename, then verify. Two
-    racing renames are serialised by the kernel, so after the settle both
-    losers read the same winner pid and stand down."""
-    val my_pid = "{getpid()}"
-    val incumbent = lock_owner_pid()
-    if incumbent != "" and incumbent != my_pid and pid_is_live(incumbent):
-        return false
-    # PID and environment identity are one atomic generation record. A client
-    # can never pair a new PID with an old digest from a sibling side file.
-    if not atomic_write_text(LIGHT_LOCK, my_pid + "\n" + environment_digest):
-        return false
-    thread_sleep(200)
-    lock_owner_pid() == my_pid
+    The client serialises spawns with a kernel lock, but a daemon must still
+    never trust that: exactly one O_EXCL creator wins, a stale lock is broken
+    only for a provably dead pid. No tmp+rename, no sleep arbitration."""
+    light_lock_claim(LIGHT_LOCK, environment_digest, "{getpid()}", pid_is_live, LIGHT_BINARY)
 
 fn main() -> i64:
     ensure_dirs()
@@ -287,13 +266,14 @@ fn main() -> i64:
     val binary = simple_binary()
     # Publish the served binary BEFORE accepting any request, so a client that
     # observes the lock also observes an accurate binary record.
-    atomic_write_text(LIGHT_BINARY, binary)
+    if not atomic_write_text(LIGHT_BINARY, binary):
+        light_lock_release(LIGHT_LOCK, LIGHT_BINARY, "{getpid()}")
+        return 1
     var idle = 0
     while idle < 240:
         if file_exists(LIGHT_STOP):
             file_delete(LIGHT_STOP)
-            file_delete(LIGHT_LOCK)
-            file_delete(LIGHT_BINARY)
+            light_lock_release(LIGHT_LOCK, LIGHT_BINARY, "{getpid()}")
             return 0
         # Stand down the moment another daemon owns the lane, so a duplicate
         # spawned by a racing client cannot double-serve requests.
@@ -327,6 +307,5 @@ fn main() -> i64:
                 i = entries.len()
             else:
                 i = i + 1
-    file_delete(LIGHT_LOCK)
-    file_delete(LIGHT_BINARY)
+    light_lock_release(LIGHT_LOCK, LIGHT_BINARY, "{getpid()}")
     0

@@ -75,7 +75,13 @@ struct cw_cap {
     unsigned count;
     int sealed;
     struct cw_cap *next;
+    int refs;       /* guarded by cw_lock: list reference + one per in-flight operation */
+    int closed;     /* guarded by lock */
+    SRWLOCK lock;   /* per-capability: all handle I/O happens under this, never cw_lock */
 };
+/* cw_lock guards ONLY the capability list and refs counters.  Operations take
+ * a counted reference, drop cw_lock, and run their (possibly slow) handle I/O
+ * under the per-capability lock.  Lock order: cap->lock, then cw_lock. */
 static SRWLOCK cw_lock = SRWLOCK_INIT;
 static struct cw_cap *cw_caps;
 static int cw_random(void *,ULONG);
@@ -91,17 +97,47 @@ static void cw_free(struct cw_cap *c) {
     while (c->count) CloseHandle(c->handles[--c->count]);
     free(c);
 }
+/* Takes cw_lock itself; the caller must NOT hold it. */
 static int64_t cw_admit(struct cw_cap *c, enum cw_kind kind) {
     if (!c) return -1;
     for (int i=0; i<128; ++i) {
         uint64_t token;
         if (!cw_random(&token,sizeof token)) break;
         token &= INT64_MAX;
-        if (!token || cw_find((int64_t)token)) continue;
+        if (!token) continue;
+        AcquireSRWLockExclusive(&cw_lock);
+        if (cw_find((int64_t)token)) { ReleaseSRWLockExclusive(&cw_lock); continue; }
+        InitializeSRWLock(&c->lock); c->refs=1; /* the list's reference */
         c->token=(int64_t)token; c->kind=kind; c->next=cw_caps; cw_caps=c;
-        return c->token;
+        ReleaseSRWLockExclusive(&cw_lock);
+        return (int64_t)token;
     }
     cw_free(c); return -1;
+}
+static struct cw_cap *cw_find_ref(int64_t token) {
+    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token); if (c) ++c->refs;
+    ReleaseSRWLockExclusive(&cw_lock); return c;
+}
+static void cw_put(struct cw_cap *c) {
+    AcquireSRWLockExclusive(&cw_lock); int last=--c->refs==0; ReleaseSRWLockExclusive(&cw_lock);
+    if (last) cw_free(c);
+}
+/* Reference + lock a capability; NULL if unknown or already closed. */
+static struct cw_cap *cw_lock_cap(int64_t token) {
+    struct cw_cap *c=cw_find_ref(token); if (!c) return NULL;
+    AcquireSRWLockExclusive(&c->lock);
+    if (c->closed) { ReleaseSRWLockExclusive(&c->lock); cw_put(c); return NULL; }
+    return c;
+}
+static void cw_unlock_cap(struct cw_cap *c) { ReleaseSRWLockExclusive(&c->lock); cw_put(c); }
+/* Unlink from the list; 1 means this caller now owns the list's reference. */
+static int cw_detach(struct cw_cap *c) {
+    AcquireSRWLockExclusive(&cw_lock); struct cw_cap **slot=&cw_caps; while (*slot && *slot!=c) slot=&(*slot)->next;
+    int found=*slot!=NULL; if (found) *slot=c->next; ReleaseSRWLockExclusive(&cw_lock); return found;
+}
+/* Close handles and mark dead; caller holds c->lock. */
+static void cw_retire_locked(struct cw_cap *c) {
+    c->closed=1; while (c->count) CloseHandle(c->handles[--c->count]);
 }
 static struct cw_cap *cw_clone(struct cw_cap *src) {
     struct cw_cap *c = (struct cw_cap *)calloc(1, sizeof *c);
@@ -207,7 +243,7 @@ int64_t rt_cache_host_open_root_v1(const uint8_t *p, int64_t n) {
     if (cw_final(cw_file(c),path))
         (void)cw_checked_append(c,path,GENERIC_READ|GENERIC_WRITE,
             FILE_SHARE_READ|FILE_SHARE_WRITE,OPEN_EXISTING,1);
-    AcquireSRWLockExclusive(&cw_lock); result=cw_admit(c,CW_ROOT); c=NULL; ReleaseSRWLockExclusive(&cw_lock);
+    result=cw_admit(c,CW_ROOT); c=NULL;
 done:
     cw_free(c); free(path); free(w); return result;
 }
@@ -216,9 +252,11 @@ int64_t rt_cache_host_open_read_v1(int64_t token,const uint8_t *p,int64_t n) {
     struct cw_cap *c=NULL; int64_t result=-1;
     if (!w || !cw_relative(w,0)) { free(w); return -1; }
     path=(wchar_t *)malloc(CW_PATH*sizeof *path); if (!path) { free(w); return -1; }
-    AcquireSRWLockExclusive(&cw_lock);
-    struct cw_cap *parent=cw_find(token);
-    if (!parent || parent->kind!=CW_ROOT || !(c=cw_clone(parent))) goto done;
+    struct cw_cap *parent=cw_lock_cap(token);
+    if (!parent) { free(path); free(w); return -1; }
+    if (parent->kind!=CW_ROOT || !(c=cw_clone(parent))) { cw_unlock_cap(parent); goto done; }
+    /* The clone owns duplicated handles: the parent need not stay locked for the path walk. */
+    cw_unlock_cap(parent);
     wchar_t *start=w;
     for (;;) {
         wchar_t *end=wcschr(start,L'/'); int directory=end!=NULL;
@@ -231,14 +269,14 @@ int64_t rt_cache_host_open_read_v1(int64_t token,const uint8_t *p,int64_t n) {
     }
     result=cw_admit(c,CW_READ); c=NULL;
 done:
-    cw_free(c); ReleaseSRWLockExclusive(&cw_lock); free(path); free(w); return result;
+    cw_free(c); free(path); free(w); return result;
 }
 int64_t rt_cache_host_size_v1(int64_t token,int64_t maximum) {
     if (maximum<0 || maximum>CW_LIMIT) return -1;
-    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token); LARGE_INTEGER size;
-    int64_t result=c && (c->kind==CW_READ || c->kind==CW_SEALED) && GetFileSizeEx(cw_file(c),&size) &&
+    struct cw_cap *c=cw_lock_cap(token); LARGE_INTEGER size; if (!c) return -1;
+    int64_t result=(c->kind==CW_READ || c->kind==CW_SEALED) && GetFileSizeEx(cw_file(c),&size) &&
         size.QuadPart>=0 && size.QuadPart<=maximum ? size.QuadPart : -1;
-    ReleaseSRWLockExclusive(&cw_lock); return result;
+    cw_unlock_cap(c); return result;
 }
 static int cw_read_at(HANDLE h,int64_t off,uint8_t *p,DWORD n) {
     LARGE_INTEGER pos; pos.QuadPart=off; DWORD got=0;
@@ -246,9 +284,9 @@ static int cw_read_at(HANDLE h,int64_t off,uint8_t *p,DWORD n) {
 }
 int64_t rt_cache_host_pread_receipt_v1(int64_t token,int64_t off,uint8_t *out,int64_t cap) {
     if (!out || off || cap<0 || cap>CW_LIMIT) return -1;
-    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
+    struct cw_cap *c=cw_lock_cap(token); if (!c) return -1;
     int64_t result=-1; BY_HANDLE_FILE_INFORMATION a,b; LARGE_INTEGER size;
-    if (!c || (c->kind!=CW_READ && c->kind!=CW_SEALED) || !GetFileInformationByHandle(cw_file(c),&a) ||
+    if ((c->kind!=CW_READ && c->kind!=CW_SEALED) || !GetFileInformationByHandle(cw_file(c),&a) ||
             !GetFileSizeEx(cw_file(c),&size) || size.QuadPart<0 || size.QuadPart>cap) goto done;
     DWORD want=(DWORD)size.QuadPart;
     if (!cw_read_at(cw_file(c),0,out,want)) goto done;
@@ -264,7 +302,7 @@ int64_t rt_cache_host_pread_receipt_v1(int64_t token,int64_t off,uint8_t *out,in
             a.nFileSizeLow!=b.nFileSizeLow || CompareFileTime(&a.ftLastWriteTime,&b.ftLastWriteTime)) result=-2;
     else result=want;
 done:
-    ReleaseSRWLockExclusive(&cw_lock); return result;
+    cw_unlock_cap(c); return result;
 }
 static int cw_random(void *out,ULONG n) {
     HMODULE lib=LoadLibraryW(L"advapi32.dll"); if (!lib) return 0;
@@ -275,8 +313,10 @@ static int cw_random(void *out,ULONG n) {
 int64_t rt_cache_host_secure_temp_v1(int64_t token) {
     wchar_t *path=(wchar_t *)malloc(CW_PATH*sizeof *path); if (!path) return -1;
     int64_t result=-1; struct cw_cap *c=NULL;
-    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *parent=cw_find(token);
-    if (!parent || parent->kind!=CW_ROOT || !(c=cw_clone(parent))) goto done;
+    struct cw_cap *parent=cw_lock_cap(token);
+    if (!parent) { free(path); return -1; }
+    if (parent->kind!=CW_ROOT || !(c=cw_clone(parent))) { cw_unlock_cap(parent); goto done; }
+    cw_unlock_cap(parent);
     for (int attempt=0; attempt<128; ++attempt) {
         uint64_t random[2]; wchar_t name[80]; if (!cw_random(random,sizeof random)) break;
         swprintf(name,80,L".simple-cache-tmp-%016llx%016llx",(unsigned long long)random[0],(unsigned long long)random[1]);
@@ -287,25 +327,22 @@ int64_t rt_cache_host_secure_temp_v1(int64_t token) {
         if (GetLastError()!=ERROR_FILE_EXISTS && GetLastError()!=ERROR_ALREADY_EXISTS) break;
     }
 done:
-    cw_free(c); ReleaseSRWLockExclusive(&cw_lock); free(path); return result;
+    cw_free(c); free(path); return result;
 }
 int64_t rt_cache_host_write_temp_v1(int64_t token,int64_t off,const uint8_t *p,int64_t n) {
     if (!p || off<0 || n<0 || off>CW_LIMIT || n>CW_LIMIT-off) return -1;
-    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token); LARGE_INTEGER pos; pos.QuadPart=off; DWORD written;
-    int64_t result=c && c->kind==CW_TEMP && !c->sealed && SetFilePointerEx(cw_file(c),pos,NULL,FILE_BEGIN) &&
+    struct cw_cap *c=cw_lock_cap(token); LARGE_INTEGER pos; pos.QuadPart=off; DWORD written; if (!c) return -1;
+    int64_t result=c->kind==CW_TEMP && !c->sealed && SetFilePointerEx(cw_file(c),pos,NULL,FILE_BEGIN) &&
         WriteFile(cw_file(c),p,(DWORD)n,&written,NULL) ? (int64_t)written : -1;
-    ReleaseSRWLockExclusive(&cw_lock); return result;
-}
-static void cw_unlink_cap(struct cw_cap *c) {
-    struct cw_cap **slot=&cw_caps; while (*slot && *slot!=c) slot=&(*slot)->next;
-    if (*slot) *slot=c->next;
+    cw_unlock_cap(c); return result;
 }
 static int64_t cw_publish(int64_t token,const uint8_t *p,int64_t n,int retained) {
     wchar_t *name=cw_widen(p,n), *path=NULL; int64_t result=-1;
     if (!name || !cw_relative(name,1)) { free(name); return -1; }
     path=(wchar_t *)malloc(CW_PATH*sizeof *path); if (!path) { free(name); return -1; }
-    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
-    if (!c || c->kind!=CW_TEMP || c->count<2 || !FlushFileBuffers(cw_file(c)) ||
+    struct cw_cap *c=cw_lock_cap(token);
+    if (!c) { free(path); free(name); return -1; }
+    if (c->kind!=CW_TEMP || c->count<2 || !FlushFileBuffers(cw_file(c)) ||
             !cw_append_path(c->handles[c->count-2],name,path)) goto done;
     /* Reserve a distinct capability while the old TEMP token is still live.
      * Failure here leaves the TEMP available for its ordinary cleanup owner. */
@@ -315,7 +352,9 @@ static int64_t cw_publish(int64_t token,const uint8_t *p,int64_t n,int retained)
             uint64_t candidate;
             if (!cw_random(&candidate,sizeof candidate)) break;
             candidate &= INT64_MAX;
-            if (candidate && !cw_find((int64_t)candidate)) { sealed_token=(int64_t)candidate; break; }
+            if (!candidate) continue;
+            AcquireSRWLockExclusive(&cw_lock); int taken=cw_find((int64_t)candidate)!=NULL; ReleaseSRWLockExclusive(&cw_lock);
+            if (!taken) { sealed_token=(int64_t)candidate; break; }
         }
         if (!sealed_token) goto done;
     }
@@ -336,10 +375,11 @@ static int64_t cw_publish(int64_t token,const uint8_t *p,int64_t n,int retained)
     if (good && retained) {
         /* Same original writer, acquired before sealing: no path reopen and
          * no write surface for the resulting capability. Old TEMP is invalid. */
-        c->token=sealed_token; c->kind=CW_SEALED; result=sealed_token;
-    } else { cw_unlink_cap(c); cw_free(c); result=good?1:-1; }
+        AcquireSRWLockExclusive(&cw_lock); c->token=sealed_token; ReleaseSRWLockExclusive(&cw_lock);
+        c->kind=CW_SEALED; result=sealed_token;
+    } else { cw_retire_locked(c); if (cw_detach(c)) cw_put(c); result=good?1:-1; }
 done:
-    ReleaseSRWLockExclusive(&cw_lock); free(path); free(name); return result;
+    cw_unlock_cap(c); free(path); free(name); return result;
 }
 int64_t rt_cache_host_publish_noreplace_v1(int64_t token,const uint8_t *p,int64_t n) {
     return cw_publish(token,p,n,0);
@@ -348,24 +388,30 @@ int64_t rt_cache_host_publish_retained_noreplace_v2(int64_t token,const uint8_t 
     return cw_publish(token,p,n,1);
 }
 int64_t rt_cache_host_fsync_v1(int64_t token) {
-    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
+    struct cw_cap *c=cw_lock_cap(token); if (!c) return -1;
     /* Read capabilities intentionally cannot grant write/append access.
      * Windows therefore cannot flush them: preserve Unsupported rather than
      * claiming that a read-only FlushFileBuffers failure is durable success. */
-    int64_t result=c && c->kind!=CW_READ && FlushFileBuffers(cw_file(c))?1:-1;
-    ReleaseSRWLockExclusive(&cw_lock); return result;
+    int64_t result=c->kind!=CW_READ && FlushFileBuffers(cw_file(c))?1:-1;
+    cw_unlock_cap(c); return result;
 }
 int64_t rt_cache_host_close_v1(int64_t token) {
-    AcquireSRWLockExclusive(&cw_lock); struct cw_cap *c=cw_find(token);
-    if (!c) { ReleaseSRWLockExclusive(&cw_lock); return -1; }
-    int64_t result=0;
+    struct cw_cap *c=cw_find_ref(token); if (!c) return -1;
+    if (!cw_detach(c)) { cw_put(c); return -1; } /* lost the race to another closer/publisher */
+    AcquireSRWLockExclusive(&c->lock);
+    int64_t result=-1;
+    if (!c->closed) {
+    result=0;
     if (c->kind==CW_TEMP) {
         FILE_BASIC_INFO basic; memset(&basic,0,sizeof basic); basic.FileAttributes=FILE_ATTRIBUTE_NORMAL;
         FILE_DISPOSITION_INFO disposition; disposition.DeleteFile=TRUE;
         if (!SetFileInformationByHandle(cw_file(c),FileBasicInfo,&basic,sizeof basic) ||
                 !SetFileInformationByHandle(cw_file(c),FileDispositionInfo,&disposition,sizeof disposition)) result=-1;
     }
-    cw_unlink_cap(c); cw_free(c); ReleaseSRWLockExclusive(&cw_lock); return result;
+    cw_retire_locked(c);
+    }
+    ReleaseSRWLockExclusive(&c->lock);
+    cw_put(c); /* list reference */ cw_put(c); /* ours */ return result;
 }
 #define UNSUPPORTED(name, args) int64_t name args { return -1; }
 UNSUPPORTED(rt_cache_host_open_child_v1, (int64_t h, const uint8_t *p, int64_t n, int64_t c))
@@ -402,6 +448,14 @@ UNSUPPORTED(rt_cache_host_quarantine_v1, (int64_t r, int64_t o, const uint8_t *p
 
 enum cache_cap_kind { CAP_ROOT=1, CAP_DIR=2, CAP_READ=3, CAP_TEMP=4, CAP_CAS_ROOT=5, CAP_CAS_KIND=6, CAP_CAS_SHARD1=7, CAP_CAS_SHARD2=8, CAP_TEMP_CAS=9, CAP_SEALED=10 };
 struct cache_cap { int64_t token; int fd; int parent_fd; enum cache_cap_kind kind; int sealed; char temp_name[96]; struct cache_cap *next; };
+/* Locking model: caps_lock guards ONLY the capability list and the refs
+ * counters.  Every operation takes a counted reference (find_cap_ref) and then
+ * does its descriptor I/O (fsync, pread, verify re-read, rename) under the
+ * per-capability lock, so a slow operation on one capability never stalls
+ * another.  Lock order: cap->lock, then caps_lock (never the reverse; the list
+ * lock is always dropped before a cap lock is taken). */
+struct cache_cap { int64_t token; int fd; int parent_fd; enum cache_cap_kind kind; int sealed; char temp_name[96]; struct cache_cap *next;
+    int refs; int closed; pthread_mutex_t lock; };
 static struct cache_cap *caps;
 static pthread_mutex_t caps_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -411,16 +465,45 @@ static int64_t random_token(void) {
     if (fd < 0 || read(fd, &value, sizeof value) != sizeof value) { if (fd >= 0) close(fd); return -1; }
     close(fd); value &= INT64_MAX; return value ? (int64_t)value : 1;
 }
+/* Unlocked list scan: caller must hold caps_lock (the returned pointer is only
+ * stable while it is held).  Operations use find_cap_ref instead. */
 static struct cache_cap *find_cap(int64_t token) {
     struct cache_cap *p; for (p = caps; p; p = p->next) if (p->token == token) return p; return NULL;
 }
 static int64_t add_cap(enum cache_cap_kind kind, int fd, int parent_fd, const char *temp) {
     struct cache_cap *cap = calloc(1, sizeof *cap); if (!cap) return -1;
-    cap->kind = kind; cap->fd = fd; cap->parent_fd = parent_fd;
+    cap->kind = kind; cap->fd = fd; cap->parent_fd = parent_fd; cap->refs = 1; /* the list's reference */
+    pthread_mutex_init(&cap->lock, NULL);
     if (temp) snprintf(cap->temp_name, sizeof cap->temp_name, "%s", temp);
     pthread_mutex_lock(&caps_lock);
     do cap->token = random_token(); while (cap->token < 0 || find_cap(cap->token));
-    cap->next = caps; caps = cap; pthread_mutex_unlock(&caps_lock); return cap->token;
+    cap->next = caps; caps = cap; int64_t token = cap->token; pthread_mutex_unlock(&caps_lock); return token;
+}
+static struct cache_cap *find_cap_ref(int64_t token) {
+    pthread_mutex_lock(&caps_lock); struct cache_cap *c = find_cap(token); if (c) c->refs++;
+    pthread_mutex_unlock(&caps_lock); return c;
+}
+static void put_cap(struct cache_cap *c) {
+    pthread_mutex_lock(&caps_lock); int last = --c->refs == 0; pthread_mutex_unlock(&caps_lock);
+    if (last) { pthread_mutex_destroy(&c->lock); free(c); }
+}
+/* Reference + lock a capability; NULL if unknown or already closed. */
+static struct cache_cap *lock_cap(int64_t token) {
+    struct cache_cap *c = find_cap_ref(token); if (!c) return NULL;
+    pthread_mutex_lock(&c->lock);
+    if (c->closed) { pthread_mutex_unlock(&c->lock); put_cap(c); return NULL; }
+    return c;
+}
+static void unlock_cap(struct cache_cap *c) { pthread_mutex_unlock(&c->lock); put_cap(c); }
+/* Unlink from the list.  Returns 1 if this call did so; that caller then owns
+ * the list's reference and must put_cap() it after the cap is retired. */
+static int detach_cap(struct cache_cap *c) {
+    pthread_mutex_lock(&caps_lock); struct cache_cap **s = &caps; while (*s && *s != c) s = &(*s)->next;
+    int found = *s != NULL; if (found) *s = c->next; pthread_mutex_unlock(&caps_lock); return found;
+}
+/* Close the descriptors and mark the cap dead; caller holds c->lock. */
+static void retire_locked(struct cache_cap *c) {
+    c->closed = 1; close(c->fd); if (c->parent_fd >= 0) close(c->parent_fd);
 }
 static int copy_name(const uint8_t *p, int64_t n, char out[32769]) {
     if (!p || n <= 0 || n > 32768 || memchr(p, 0, (size_t)n)) return 0;
@@ -451,11 +534,27 @@ static int open_absolute_root(const char *path) {
 int64_t rt_cache_host_open_root_v1(const uint8_t *p, int64_t n) {
     char path[32769]; if(!copy_name(p,n,path))return -1; int fd=open_absolute_root(path); return fd<0?-1:add_cap(CAP_ROOT,fd,-1,NULL);
 }
-int64_t rt_cache_host_open_read_v1(int64_t h,const uint8_t*p,int64_t n){char path[32769];if(!copy_name(p,n,path))return -1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);int root=(c&&(c->kind==CAP_ROOT||c->kind==CAP_DIR))?c->fd:-1;int fd=root<0?-1:open_beneath(root,path,O_RDONLY,0);pthread_mutex_unlock(&caps_lock);return fd<0?-1:add_cap(CAP_READ,fd,-1,NULL);}
-int64_t rt_cache_host_open_child_v1(int64_t h,const uint8_t*p,int64_t n,int64_t create){char name[32769];if(!copy_name(p,n,name)||!valid_relative(name)||strchr(name,'/'))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||(c->kind!=CAP_ROOT&&c->kind!=CAP_DIR)){pthread_mutex_unlock(&caps_lock);return-1;}if(c->kind==CAP_ROOT&&strcmp(name,"db")&&strcmp(name,"cas")&&strcmp(name,"journal")&&strcmp(name,"spool")&&strcmp(name,"quarantine")){pthread_mutex_unlock(&caps_lock);return-1;}int kind=(c->kind==CAP_ROOT&&!strcmp(name,"cas"))?CAP_CAS_ROOT:CAP_DIR;int fd=open_dir_child(c->fd,name,(int)create);pthread_mutex_unlock(&caps_lock);return fd<0?-1:add_cap((enum cache_cap_kind)kind,fd,-1,NULL);}
-int64_t rt_cache_host_open_cas_kind_v1(int64_t h,const uint8_t*p,int64_t n,int64_t create){char name[32769];if(!copy_name(p,n,name)||!cas_kind_name(name))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);int fd=(!c||c->kind!=CAP_CAS_ROOT)?-1:open_dir_child(c->fd,name,(int)create);pthread_mutex_unlock(&caps_lock);return fd<0?-1:add_cap(CAP_CAS_KIND,fd,-1,NULL);}
-int64_t rt_cache_host_open_cas_shard_v1(int64_t h,const uint8_t*p,int64_t n,int64_t level,int64_t create){char name[32769];if(!copy_name(p,n,name)||!lower_hex_n(name,2))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);int good=c&&((level==1&&c->kind==CAP_CAS_KIND)||(level==2&&c->kind==CAP_CAS_SHARD1));int fd=!good?-1:open_dir_child(c->fd,name,(int)create);pthread_mutex_unlock(&caps_lock);return fd<0?-1:add_cap(level==1?CAP_CAS_SHARD1:CAP_CAS_SHARD2,fd,-1,NULL);}
-int64_t rt_cache_host_open_cas_leaf_v1(int64_t h,const uint8_t*p,int64_t n){char name[32769];if(!copy_name(p,n,name)||!lower_hex_n(name,60))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);int fd=(!c||c->kind!=CAP_CAS_SHARD2)?-1:openat(c->fd,name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);pthread_mutex_unlock(&caps_lock);return fd<0?-1:add_cap(CAP_READ,fd,-1,NULL);}
+int64_t rt_cache_host_open_read_v1(int64_t h,const uint8_t*p,int64_t n){char path[32769];if(!copy_name(p,n,path))return -1;
+    struct cache_cap*c=lock_cap(h);if(!c)return -1;
+    int root=(c->kind==CAP_ROOT||c->kind==CAP_DIR)?c->fd:-1;int fd=root<0?-1:open_beneath(root,path,O_RDONLY,0);unlock_cap(c);
+    return fd<0?-1:add_cap(CAP_READ,fd,-1,NULL);}
+int64_t rt_cache_host_open_child_v1(int64_t h,const uint8_t*p,int64_t n,int64_t create){char name[32769];if(!copy_name(p,n,name)||!valid_relative(name)||strchr(name,'/'))return-1;
+    struct cache_cap*c=lock_cap(h);if(!c)return-1;
+    if((c->kind!=CAP_ROOT&&c->kind!=CAP_DIR)||(c->kind==CAP_ROOT&&strcmp(name,"db")&&strcmp(name,"cas")&&strcmp(name,"journal")&&strcmp(name,"spool")&&strcmp(name,"quarantine"))){unlock_cap(c);return-1;}
+    int kind=(c->kind==CAP_ROOT&&!strcmp(name,"cas"))?CAP_CAS_ROOT:CAP_DIR;int fd=open_dir_child(c->fd,name,(int)create);unlock_cap(c);
+    return fd<0?-1:add_cap((enum cache_cap_kind)kind,fd,-1,NULL);}
+int64_t rt_cache_host_open_cas_kind_v1(int64_t h,const uint8_t*p,int64_t n,int64_t create){char name[32769];if(!copy_name(p,n,name)||!cas_kind_name(name))return-1;
+    struct cache_cap*c=lock_cap(h);if(!c)return-1;
+    int fd=c->kind!=CAP_CAS_ROOT?-1:open_dir_child(c->fd,name,(int)create);unlock_cap(c);
+    return fd<0?-1:add_cap(CAP_CAS_KIND,fd,-1,NULL);}
+int64_t rt_cache_host_open_cas_shard_v1(int64_t h,const uint8_t*p,int64_t n,int64_t level,int64_t create){char name[32769];if(!copy_name(p,n,name)||!lower_hex_n(name,2))return-1;
+    struct cache_cap*c=lock_cap(h);if(!c)return-1;
+    int good=(level==1&&c->kind==CAP_CAS_KIND)||(level==2&&c->kind==CAP_CAS_SHARD1);int fd=!good?-1:open_dir_child(c->fd,name,(int)create);unlock_cap(c);
+    return fd<0?-1:add_cap(level==1?CAP_CAS_SHARD1:CAP_CAS_SHARD2,fd,-1,NULL);}
+int64_t rt_cache_host_open_cas_leaf_v1(int64_t h,const uint8_t*p,int64_t n){char name[32769];if(!copy_name(p,n,name)||!lower_hex_n(name,60))return-1;
+    struct cache_cap*c=lock_cap(h);if(!c)return-1;
+    int fd=c->kind!=CAP_CAS_SHARD2?-1:openat(c->fd,name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);unlock_cap(c);
+    return fd<0?-1:add_cap(CAP_READ,fd,-1,NULL);}
 /* Reader admission is fail-closed in the native-C provider until its opaque
  * generation registry has parity with the Rust runtime. */
 int64_t rt_cache_host_begin_reader_pin_v1(int64_t r,int64_t e,int64_t g,const uint8_t*m,int64_t ml,const uint8_t*p,int64_t pl,const uint8_t*b,int64_t bl,const uint8_t*ns,int64_t nl,int64_t now,int64_t ttl){(void)r;(void)e;(void)g;(void)m;(void)ml;(void)p;(void)pl;(void)b;(void)bl;(void)ns;(void)nl;(void)now;(void)ttl;return-1;}
@@ -465,28 +564,54 @@ int64_t rt_cache_host_release_reader_pin_v1(int64_t h,int64_t e,int64_t g,const 
 int64_t rt_cache_host_open_pinned_cas_v1(int64_t h,const uint8_t*k,int64_t kl,const uint8_t*d,int64_t dl,int64_t now){(void)h;(void)k;(void)kl;(void)d;(void)dl;(void)now;return-1;}
 int64_t rt_cache_host_reader_gc_begin_v1(int64_t r,int64_t e){(void)r;(void)e;return-1;}
 int64_t rt_cache_host_reader_gc_end_v1(int64_t r,int64_t e,int64_t g){(void)r;(void)e;(void)g;return-1;}
-int64_t rt_cache_host_size_v1(int64_t h,int64_t maximum){if(maximum<0||maximum>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);struct stat s;int64_t result=(!c||(c->kind!=CAP_READ&&c->kind!=CAP_SEALED)||fstat(c->fd,&s)||(s.st_mode&S_IFMT)!=S_IFREG||s.st_size<0||s.st_size>maximum)?-1:(int64_t)s.st_size;pthread_mutex_unlock(&caps_lock);return result;}
-int64_t rt_cache_host_pread_receipt_v1(int64_t h,int64_t off,uint8_t*out,int64_t cap){if(!out||off||cap<0||cap>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||(c->kind!=CAP_READ&&c->kind!=CAP_SEALED)){pthread_mutex_unlock(&caps_lock);return-1;}struct stat a,b;if(fstat(c->fd,&a)||(a.st_mode&S_IFMT)!=S_IFREG||a.st_size<0||a.st_size>cap){pthread_mutex_unlock(&caps_lock);return-1;}size_t got=0,want=(size_t)a.st_size;while(got<want){ssize_t n=pread(c->fd,out+got,want-got,(off_t)got);if(n<=0){pthread_mutex_unlock(&caps_lock);return-1;}got+=(size_t)n;}uint8_t verify[4096];size_t checked=0;while(checked<want){size_t n=want-checked<sizeof verify?want-checked:sizeof verify;if(pread(c->fd,verify,n,(off_t)checked)!=(ssize_t)n||memcmp(out+checked,verify,n)){pthread_mutex_unlock(&caps_lock);return-2;}checked+=n;}int bad=fstat(c->fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size||SPL_STAT_MTIM_NSEC(a)!=SPL_STAT_MTIM_NSEC(b)||SPL_STAT_CTIM_NSEC(a)!=SPL_STAT_CTIM_NSEC(b)||a.st_mtime!=b.st_mtime||a.st_ctime!=b.st_ctime;pthread_mutex_unlock(&caps_lock);return bad?-2:(int64_t)want;}
-int64_t rt_cache_host_secure_temp_v1(int64_t h){pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||(c->kind!=CAP_ROOT&&c->kind!=CAP_DIR&&c->kind!=CAP_CAS_SHARD2)){pthread_mutex_unlock(&caps_lock);return-1;}int temp_kind=c->kind==CAP_CAS_SHARD2?CAP_TEMP_CAS:CAP_TEMP;int parent=fcntl(c->fd,F_DUPFD_CLOEXEC,3);pthread_mutex_unlock(&caps_lock);if(parent<0)return-1;for(int i=0;i<128;i++){char name[96];snprintf(name,sizeof name,".simple-cache-tmp-%ld-%lld",(long)getpid(),(long long)random_token());int fd=openat(parent,name,O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)return add_cap((enum cache_cap_kind)temp_kind,fd,parent,name);if(errno!=EEXIST)break;}close(parent);return-1;}
-int64_t rt_cache_host_write_temp_v1(int64_t h,int64_t off,const uint8_t*p,int64_t n){if(!p||off<0||n<0||n>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);ssize_t rc=(!c||c->sealed||(c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS))?-1:pwrite(c->fd,p,(size_t)n,(off_t)off);pthread_mutex_unlock(&caps_lock);return rc;}
-int64_t rt_cache_host_publish_noreplace_v1(int64_t h,const uint8_t*p,int64_t n){char dest[32769];if(!copy_name(p,n,dest)||!valid_relative(dest)||strchr(dest,'/'))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||(c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS)||(c->kind==CAP_TEMP_CAS&&!lower_hex_n(dest,60))||fsync(c->fd)||fchmod(c->fd,0444)){pthread_mutex_unlock(&caps_lock);return-1;}
+int64_t rt_cache_host_size_v1(int64_t h,int64_t maximum){if(maximum<0||maximum>67108864)return-1;
+    struct cache_cap*c=lock_cap(h);if(!c)return-1;struct stat s;
+    int64_t result=((c->kind!=CAP_READ&&c->kind!=CAP_SEALED)||fstat(c->fd,&s)||(s.st_mode&S_IFMT)!=S_IFREG||s.st_size<0||s.st_size>maximum)?-1:(int64_t)s.st_size;
+    unlock_cap(c);return result;}
+int64_t rt_cache_host_pread_receipt_v1(int64_t h,int64_t off,uint8_t*out,int64_t cap){if(!out||off||cap<0||cap>67108864)return-1;
+    struct cache_cap*c=lock_cap(h);if(!c)return-1;int64_t result=-1;
+    if(c->kind!=CAP_READ&&c->kind!=CAP_SEALED)goto done;
+    struct stat a,b;if(fstat(c->fd,&a)||(a.st_mode&S_IFMT)!=S_IFREG||a.st_size<0||a.st_size>cap)goto done;
+    size_t got=0,want=(size_t)a.st_size;
+    while(got<want){ssize_t n=pread(c->fd,out+got,want-got,(off_t)got);if(n<=0)goto done;got+=(size_t)n;}
+    uint8_t verify[4096];size_t checked=0;
+    while(checked<want){size_t n=want-checked<sizeof verify?want-checked:sizeof verify;if(pread(c->fd,verify,n,(off_t)checked)!=(ssize_t)n||memcmp(out+checked,verify,n)){result=-2;goto done;}checked+=n;}
+    int bad=fstat(c->fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size||SPL_STAT_MTIM_NSEC(a)!=SPL_STAT_MTIM_NSEC(b)||SPL_STAT_CTIM_NSEC(a)!=SPL_STAT_CTIM_NSEC(b)||a.st_mtime!=b.st_mtime||a.st_ctime!=b.st_ctime;
+    result=bad?-2:(int64_t)want;
+done:
+    unlock_cap(c);return result;}
+int64_t rt_cache_host_secure_temp_v1(int64_t h){
+    struct cache_cap*c=lock_cap(h);if(!c)return-1;
+    if(c->kind!=CAP_ROOT&&c->kind!=CAP_DIR&&c->kind!=CAP_CAS_SHARD2){unlock_cap(c);return-1;}
+    int temp_kind=c->kind==CAP_CAS_SHARD2?CAP_TEMP_CAS:CAP_TEMP;int parent=fcntl(c->fd,F_DUPFD_CLOEXEC,3);unlock_cap(c);
+    if(parent<0)return-1;
+    for(int i=0;i<128;i++){char name[96];snprintf(name,sizeof name,".simple-cache-tmp-%ld-%lld",(long)getpid(),(long long)random_token());int fd=openat(parent,name,O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)return add_cap((enum cache_cap_kind)temp_kind,fd,parent,name);if(errno!=EEXIST)break;}
+    close(parent);return-1;}
+int64_t rt_cache_host_write_temp_v1(int64_t h,int64_t off,const uint8_t*p,int64_t n){if(!p||off<0||n<0||n>67108864)return-1;
+    struct cache_cap*c=lock_cap(h);if(!c)return-1;
+    ssize_t rc=(c->sealed||(c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS))?-1:pwrite(c->fd,p,(size_t)n,(off_t)off);unlock_cap(c);return rc;}
+int64_t rt_cache_host_publish_noreplace_v1(int64_t h,const uint8_t*p,int64_t n){char dest[32769];if(!copy_name(p,n,dest)||!valid_relative(dest)||strchr(dest,'/'))return-1;
+    struct cache_cap*c=lock_cap(h);if(!c)return-1;
+    if((c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS)||(c->kind==CAP_TEMP_CAS&&!lower_hex_n(dest,60))||fsync(c->fd)||fchmod(c->fd,0444)){unlock_cap(c);return-1;}
 #ifdef __linux__
-int rc=(int)syscall(SYS_renameat2,c->parent_fd,c->temp_name,c->parent_fd,dest,RENAME_NOREPLACE);
+    int rc=(int)syscall(SYS_renameat2,c->parent_fd,c->temp_name,c->parent_fd,dest,RENAME_NOREPLACE);
 #else
-int rc=linkat(c->parent_fd,c->temp_name,c->parent_fd,dest,0);if(!rc)unlinkat(c->parent_fd,c->temp_name,0);
+    int rc=linkat(c->parent_fd,c->temp_name,c->parent_fd,dest,0);if(!rc)unlinkat(c->parent_fd,c->temp_name,0);
 #endif
-if(rc){int e=errno;pthread_mutex_unlock(&caps_lock);return e==EEXIST?0:-1;}fsync(c->parent_fd);struct cache_cap**slot=&caps;while(*slot&&*slot!=c)slot=&(*slot)->next;if(*slot)*slot=c->next;close(c->fd);close(c->parent_fd);free(c);pthread_mutex_unlock(&caps_lock);return 1;}
+    if(rc){int e=errno;unlock_cap(c);return e==EEXIST?0:-1;}
+    fsync(c->parent_fd);retire_locked(c);if(detach_cap(c))put_cap(c);unlock_cap(c);return 1;}
 /* Retained original descriptor; destination-name observation is fail-closed,
  * not an atomic conditional rename or a cross-process directory lock. */
 int64_t rt_cache_host_publish_retained_noreplace_v2(int64_t h,const uint8_t *p,int64_t n) {
     char dest[32769]; int64_t result=-1, token=-1; struct stat original,published;
     if (!copy_name(p,n,dest)||!valid_relative(dest)||strchr(dest,'/')) return -1;
-    pthread_mutex_lock(&caps_lock); struct cache_cap *c=find_cap(h);
-    if (!c||(c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS)||
+    struct cache_cap *c=lock_cap(h); if (!c) return -1;
+    if ((c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS)||
             (c->kind==CAP_TEMP_CAS&&!lower_hex_n(dest,60))||
             fstat(c->fd,&original)||(original.st_mode&S_IFMT)!=S_IFREG) goto done;
     for (int i=0;i<128;++i) { int64_t candidate=random_token();
-        if (candidate>0&&!find_cap(candidate)) { token=candidate; break; } }
+        if (candidate>0) { pthread_mutex_lock(&caps_lock); int taken=find_cap(candidate)!=NULL; pthread_mutex_unlock(&caps_lock);
+            if (!taken) { token=candidate; break; } } }
     if (token<0||fsync(c->fd)||fchmod(c->fd,0444)) goto done;
     c->sealed=1;
 #ifdef __linux__
@@ -503,24 +628,40 @@ int64_t rt_cache_host_publish_retained_noreplace_v2(int64_t h,const uint8_t *p,i
     int good=removed_temp&&!fstatat(c->parent_fd,dest,&published,AT_SYMLINK_NOFOLLOW)&&
         (published.st_mode&S_IFMT)==S_IFREG&&original.st_dev==published.st_dev&&
         original.st_ino==published.st_ino&&!fsync(c->fd)&&!fsync(c->parent_fd);
-    if (good) { c->token=token; c->kind=CAP_SEALED; c->temp_name[0]=0; result=token; }
-    else {
-        struct cache_cap **slot=&caps; while (*slot&&*slot!=c) slot=&(*slot)->next;
-        if (*slot) *slot=c->next;
-        close(c->fd); close(c->parent_fd); free(c);
-    }
+    if (good) {
+        pthread_mutex_lock(&caps_lock); c->token=token; pthread_mutex_unlock(&caps_lock);
+        c->kind=CAP_SEALED; c->temp_name[0]=0; result=token;
+    } else { retire_locked(c); if (detach_cap(c)) put_cap(c); }
  done:
-    pthread_mutex_unlock(&caps_lock); return result;
+    unlock_cap(c); return result;
 }
 int64_t rt_cache_host_quarantine_v1(int64_t r,int64_t o,const uint8_t*p,int64_t n){
 #ifndef __linux__
 (void)r;(void)o;(void)p;(void)n;return-1;
 #else
-char dest[32769];if(!copy_name(p,n,dest)||!valid_relative(dest)||strchr(dest,'/'))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*root=find_cap(r),*obj=find_cap(o);if(!root||!obj||(root->kind!=CAP_ROOT&&root->kind!=CAP_DIR)||obj->kind!=CAP_READ){pthread_mutex_unlock(&caps_lock);return-1;}int rc=linkat(obj->fd,"",root->fd,dest,AT_EMPTY_PATH);int e=errno;if(!rc)fsync(root->fd);pthread_mutex_unlock(&caps_lock);return rc?(e==EEXIST?0:-1):1;
+    char dest[32769];if(!copy_name(p,n,dest)||!valid_relative(dest)||strchr(dest,'/'))return-1;
+    struct cache_cap*root=find_cap_ref(r),*obj=find_cap_ref(o);int64_t result=-1;
+    if(!root||!obj){if(root)put_cap(root);if(obj)put_cap(obj);return-1;}
+    /* Two cap locks: take them in address order so concurrent callers cannot deadlock. */
+    struct cache_cap*first=root<obj?root:obj,*second=root<obj?obj:root;
+    pthread_mutex_lock(&first->lock);if(second!=first)pthread_mutex_lock(&second->lock);
+    if(!root->closed&&!obj->closed&&(root->kind==CAP_ROOT||root->kind==CAP_DIR)&&obj->kind==CAP_READ){
+        int rc=linkat(obj->fd,"",root->fd,dest,AT_EMPTY_PATH);int e=errno;if(!rc)fsync(root->fd);
+        result=rc?(e==EEXIST?0:-1):1;}
+    if(second!=first)pthread_mutex_unlock(&second->lock);pthread_mutex_unlock(&first->lock);
+    put_cap(root);put_cap(obj);return result;
 #endif
 }
-int64_t rt_cache_host_fsync_v1(int64_t h){pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);int rc=c?fsync(c->fd):-1;pthread_mutex_unlock(&caps_lock);return rc?-1:1;}
-int64_t rt_cache_host_close_v1(int64_t h){pthread_mutex_lock(&caps_lock);struct cache_cap**p=&caps,*c=NULL;while(*p){if((*p)->token==h){c=*p;*p=c->next;break;}p=&(*p)->next;}pthread_mutex_unlock(&caps_lock);if(!c)return-1;if(c->kind==CAP_TEMP||c->kind==CAP_TEMP_CAS){unlinkat(c->parent_fd,c->temp_name,0);close(c->parent_fd);}else if(c->kind==CAP_SEALED){close(c->parent_fd);}int rc=close(c->fd);free(c);return rc;}
+int64_t rt_cache_host_fsync_v1(int64_t h){struct cache_cap*c=lock_cap(h);if(!c)return-1;int rc=fsync(c->fd);unlock_cap(c);return rc?-1:1;}
+int64_t rt_cache_host_close_v1(int64_t h){
+    struct cache_cap*c=find_cap_ref(h);if(!c)return-1;
+    if(!detach_cap(c)){put_cap(c);return-1;} /* lost the race to another closer/publisher */
+    pthread_mutex_lock(&c->lock);int rc=-1;
+    if(!c->closed){
+        if(c->kind==CAP_TEMP||c->kind==CAP_TEMP_CAS){unlinkat(c->parent_fd,c->temp_name,0);close(c->parent_fd);}
+        else if(c->kind==CAP_SEALED){close(c->parent_fd);}
+        rc=close(c->fd);c->closed=1;}
+    pthread_mutex_unlock(&c->lock);put_cap(c); /* list reference */ put_cap(c); /* ours */ return rc;}
 #endif
 
 /* ===========================================================================
