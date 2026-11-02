@@ -20,14 +20,19 @@ jobs:
         include:
           - arch: x64
             runner: windows-2025
+            target_triple: x86_64-pc-windows-msvc
             vcvars: amd64
             cetflags: /CETCOMPAT
           - arch: arm64
             runner: windows-11-arm
+            target_triple: aarch64-pc-windows-msvc
             vcvars: arm64
             cetflags: ''
     steps:
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            test/integration/xray
 
       - name: Compile and execute under native MSVC and Windows
         shell: cmd
@@ -57,3 +62,23 @@ jobs:
           } else {
             Write-Host 'XRAY_PROBE dumpbin unavailable: PE metadata UNVERIFIED'
           }
+
+      - name: Compile and execute real LLVM XRay-style sleds under native Windows
+        shell: cmd
+        run: |
+          echo XRAY_INTEGRATION runner=${{ matrix.runner }} target=${{ matrix.target_triple }}
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath > "%TEMP%\xray_vs_path.txt"
+          set /p VSDIR=<"%TEMP%\xray_vs_path.txt"
+          if not defined VSDIR exit /b 11
+          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b 12
+          where clang
+          if errorlevel 1 exit /b 13
+          clang --target=${{ matrix.target_triple }} -c -x ir test\integration\xray\sled_${{ matrix.arch }}.ll -o xray_sled.obj
+          if errorlevel 1 exit /b 14
+          clang --target=${{ matrix.target_triple }} -c -x assembler test\integration\xray\trampoline_${{ matrix.arch }}.S -o xray_trampoline.obj
+          if errorlevel 1 exit /b 15
+          cl /nologo /std:c++17 /EHsc /O2 /guard:cf /Fe:xray_native_integration.exe test\integration\xray\windows_native_integration.cpp xray_sled.obj xray_trampoline.obj /link /GUARD:CF /DYNAMICBASE ${{ matrix.cetflags }}
+          if errorlevel 1 exit /b 16
+          xray_native_integration.exe
+          if errorlevel 1 exit /b 17
