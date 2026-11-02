@@ -138,8 +138,8 @@ fn is_fixing(status: text) -> bool:
     status == "fixing"
 
 # A live-or-stale `fixing` claim from the bug_fix_claims side table (never part
-# of the 10-column bugs rows): newest claimed_at per bug wins; only those whose
-# newest row is state=fixing are returned.
+# of the 10-column bugs rows); holder rule below picks one claim per bug; only
+# bugs currently held (fixing) are returned.
 struct FixClaim:
     bug_id: text
     session_id: text
@@ -147,7 +147,7 @@ struct FixClaim:
     heartbeat_at: text
 
 fn load_fixing_claims(db_path: text) -> [FixClaim]:
-    # Same holder rule as scripts/check/bug-claim.shs: among `fixing` rows at or
+    # Same holder rule as scripts/check/bug-claim.shs: among `fixing` rows
     # strictly after the newest non-fixing row (released/done) of a bug, the earliest
     # claimed_at holds it. No such row means nobody is fixing it.
     if not file_exists(db_path):
@@ -193,6 +193,17 @@ fn load_fixing_claims(db_path: text) -> [FixClaim]:
                 if holder < 0 or rows[k].claimed_at < rows[holder].claimed_at:
                     holder = k
             k = k + 1
+        if holder < 0:
+            # no fixing row after the newest closing row: the newest row decides
+            # (ties go to the later row), matching bug-claim.shs
+            var newest = -1
+            k = 0
+            while k < ids.len():
+                if ids[k] == id and (newest < 0 or rows[k].claimed_at >= rows[newest].claimed_at):
+                    newest = k
+                k = k + 1
+            if newest >= 0 and states[newest] == "fixing":
+                holder = newest
         if holder >= 0:
             out.push(rows[holder])
     out

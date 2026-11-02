@@ -5,7 +5,7 @@
 # `status` to `fixing` in the main tables (bugs_active/bugs; still 10 columns,
 # bug-gen requires exactly 10) and appends a row to the side table
 #   bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
-# state: fixing | released | done. Newest claimed_at wins (history is kept).
+# state: fixing, released, done. History is kept; holder rule: see "holder" below.
 # A `fixing` claim whose max(claimed_at, heartbeat_at) is older than the max age
 # (default 24h) is STALE: anyone may take it over, and `reap` reverts it.
 #
@@ -123,7 +123,7 @@ set_main_status() { # bug status date
     { print }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
 }
 
-# current claim for a bug: sets C_* vars. newest claimed_at wins, ties -> later row.
+# current claim for a bug: sets C_* vars (holder rule below).
 load_current() { # bug
     C_STATE=none; C_SESSION=''; C_CLAIMED=''; C_HB=''; C_PREV=''; C_NOTE=''; C_LIVE=0; C_STALE=0
     _out=$(claims_tsv | awk -F'\t' -v id="$1" '
@@ -209,7 +209,7 @@ lock() {
     _i=0
     while ! mkdir "$LOCKDIR" 2>/dev/null; do
         # break a lock left behind by a killed process (older than 2 minutes)
-        if [ -n "$(find "$LOCKDIR" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then rmdir "$LOCKDIR" 2>/dev/null; continue; fi
+        if [ -n "$(find "$LOCKDIR" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then mv "$LOCKDIR" "$LOCKDIR.dead.$$" 2>/dev/null && rmdir "$LOCKDIR.dead.$$" 2>/dev/null; continue; fi
         _i=$((_i + 1)); [ "$_i" -gt 60 ] && die "could not lock $REAL_DB (lock dir $LOCKDIR)"
         sleep 1
     done
