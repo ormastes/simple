@@ -1,0 +1,52 @@
+Deterministic content-derived fallback fingerprints live-key source review (2026-11-02)
+
+Reviewed change: PR #5859 (commit d09b24a1c0c, "deterministic content-derived
+fallback fingerprints; pin owner token as lock-only"), diff of
+src/compiler/80.driver/driver_build/incremental.spl. That PR landed without
+re-pinning source_bindings.txt, which broke the local-cache-formal-source-binding
+gate on every PR; this note is the missing review.
+
+Re-reviewed bindings (Generated/LiveKey.lean, T-K1 / producer_stdlib_src):
+  native_build_compiler_source_fingerprint          (producer_compiler_src)
+  native_build_spl_tree_fingerprint                 (producer_stdlib_src)
+  _native_build_runtime_provider_fingerprint_uncached (producer_runtime)
+
+What changed (inputs of the fallback paths only):
+- Compiler-source and spl-tree fingerprints: the manifest text
+  ("{full}|{size}|{digest}" rows, same order, same "\n" join) is now computed
+  once as `joined`. The primary path is untouched (temp-file hash, 64-char
+  check, "sha256:{d}n{N}"). Only when that path fails does the fallback run:
+  previously a pid/time-unique "unfingerprintable-..." value, now
+  "sha256-text:{sha256_text(joined)}n{N}", a digest of the identical manifest.
+- Runtime provider fingerprint: a nonexistent runtime directory returns
+  "missing" and a directory with no provider files returns "empty" (were
+  pid/time-unique); the temp-file-hash failure fallback is
+  "dir-sha256-text:{sha256_text(manifest)}n{N}" (was pid/time-unique).
+- Unreadable-input paths (a source file that cannot be hashed, an unlistable
+  directory) are UNCHANGED and remain pid/time-unique "unfingerprintable-..."
+  on purpose, so one unreadable tree can never alias a stored entry of another.
+
+Success path (primary temp-file hash works): byte-identical to before. Field
+set, component order, framing (cache_key_frame), producer identity, scope key
+and the DependencyEntry schema are untouched.
+
+Soundness of the new fallback values: each is a function of the full manifest
+content (or of "no providers at all"), under a prefix distinct from every
+other form ("sha256:", "sha256-text:", "dir-sha256:", "dir-sha256-text:",
+"missing", "empty", "unfingerprintable-"), with the file count appended. T-K1
+(live_key_sound) needs only that equal encodings imply equal inputs. For the
+hashed forms that is collision resistance of sha256 over the manifest. For
+"missing"/"empty" the input set is empty (no provider archives contribute to
+the link), so two runs that both report it have equal provider inputs; the old
+unique value only forced a miss. The change can make a previously always-miss
+fallback hit again, but only when the recomputed content is equal, which is
+exactly the key's contract. The model treats each producer field as an opaque
+scalar, so determinism of the fallback is outside what it constrains, and it
+still assumes injective framing and collision-resistant digests.
+
+Model impact: none. No Lean change required; LiveKey field list, enc, enc_inj
+and the per-field visibility theorems are unaffected. No cache encoding
+version, validation policy, or runtime ABI changed by this review.
+
+Validation: source-binding --update re-pinned only the three bindings listed
+above; the follow-up source-binding check passed.
