@@ -44,9 +44,11 @@ really contains: a second user `enum Result<T, E>`
 (`src/compiler/30.types/const_key_validator.spl`), three enums declaring
 `Tuple`/`Struct` (runtime_value_v1 / parser_types / treesitter_types shapes), the
 original `case Some(pl): match pl:` binder (the earlier spec only covered `if val`),
-and an imported `Visibility` that shares a variant name with `HirUnaryOp`. The
-current `subject_owner_type` Optional-payload ownership and `enum_match_type_owner_key`
-Result/Option handling in `switch_operators_calls.spl` resolve all of them. The
+and an imported `Visibility` that shares a variant name (`Neg`) with `HirUnaryOp`
+(bare `case Neg:` arms). `enum_match_type_owner_key` in `switch_operators_calls.spl`
+(Named-symbol qualified key; Result/Option canonical keys) resolves every subject,
+including the unwrapped `pl` binder. Each case asserts its target function reached HIR,
+so a fixture parse failure cannot pass silently. The
 failure is attributed to the pinned (older) stage2 binary, not to current source.
 Audit: all 25 tagged sites present; no untagged `case Some(x): match x: case Tuple/Struct`
 or `Unary(un_op ..) ... match un_op:` sites remain in src/. Bare `Ok`/`Err` over typed

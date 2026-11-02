@@ -54,6 +54,11 @@ fn lower_closure(names: [text], srcs: [text]) -> text:
             out = out + "hir: " + e.message + "\n"
         i = i + 1
     val last = hirs.len() - 1
+    # Prove the fixture parsed and its functions reached HIR (a parse
+    # failure would otherwise pass the negative checks silently).
+    for fk in hirs[last].functions.keys():
+        val hf: HirFunction = hirs[last].functions[fk]
+        out = out + "fn:" + hf.name + ";"
     var ml = MirLowering.new(hirs[last].symbols)
     var pre: Dict<text, HirModule> = {}
     i = 0
@@ -83,23 +88,27 @@ describe "enumowner-mir-20261031 full-closure shapes":
         val main = lines(["struct CodegenOutput:", "    n: i64", "", "struct CompileError:", "    m: text", "", "class Codegen:", "    n: i64", "    fn compile_module(m: i64) -> Result<CodegenOutput, CompileError>:", "        if m > 0:", "            return Ok(CodegenOutput(n: m))", "        Err(CompileError(m: \"bad\"))", "", "fn run(codegen: Codegen, m: i64) -> Result<i64, CompileError>:", "    val compiled: Result<CodegenOutput, CompileError> = codegen.compile_module(m)", "    match compiled:", "        case Ok(output):", "            Ok(output.n)", "        case Err(err):", "            Err(err)"])
         val d = lower_closure(["compiler.types.const_key_validator", "app.main"], [competing_result_module(), main])
         expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("fn:run;")).to_equal(true)
         expect(d.contains("unresolved")).to_equal(false)
 
     it "bare Ok/Err over a direct method-call subject with a competing user enum Result":
         val main = lines(["class Svc:", "    n: i64", "    fn compute() -> Result<i64, text>:", "        if self.n > 0:", "            return Ok(self.n)", "        Err(\"bad\")", "    fn run() -> i64:", "        match self.compute():", "            case Ok(v):", "                v", "            case Err(e):", "                e.len()"])
         val d = lower_closure(["compiler.types.const_key_validator", "app.main"], [competing_result_module(), main])
         expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("fn:run;")).to_equal(true)
         expect(d.contains("unresolved")).to_equal(false)
 
     it "bare Tuple/Struct under case Some(value) with several competing enums":
         val main = lines(["enum HirEnumPayload:", "    Tuple(values: [i64])", "    Struct(fields: [(text, i64)])", "", "enum HirExprKind:", "    EnumLit(name: text, variant: text, payload: HirEnumPayload?)", "    Lit(v: i64)", "", "fn uses(kind: HirExprKind) -> i64:", "    match kind:", "        case EnumLit(_, _, payload):", "            match payload:", "                case Some(pl):", "                    match pl:", "                        case Tuple(values): return values.len()", "                        case Struct(fields):", "                            return fields.len()", "                case nil: return 0", "        case Lit(v): return v", "    0"])
         val d = lower_closure(["compiler.common.runtime_value_v1", "app.main"], [competing_payload_module(), main])
         expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("fn:uses;")).to_equal(true)
         expect(d.contains("unresolved")).to_equal(false)
 
     it "un_op binder keeps HirUnaryOp with an imported Visibility enum":
         val vis = lines(["enum Visibility:", "    Public", "    Private", "    Neg"])
-        val main = lines(["enum HirUnaryOp:", "    Neg", "    Not", "", "enum HirExprKind:", "    Unary(op: HirUnaryOp, operand: HirExpr)", "    Lit(v: i64)", "", "struct HirExpr:", "    kind: HirExprKind", "", "fn fold(expr: HirExpr) -> i64?:", "    match expr.kind:", "        case HirExprKind.Unary(un_op, un_operand):", "            val un_operand_t: HirExpr = un_operand", "            val folded = fold(un_operand_t)", "            if val inner = folded:", "                match un_op:", "                    case HirUnaryOp.Neg:", "                        return Some(0 - inner)", "                    case HirUnaryOp.Not:", "                        return Some(inner)", "            nil", "        case HirExprKind.Lit(v):", "            Some(v)"])
+        val main = lines(["enum HirUnaryOp:", "    Neg", "    Not", "", "enum HirExprKind:", "    Unary(op: HirUnaryOp, operand: HirExpr)", "    Lit(v: i64)", "", "struct HirExpr:", "    kind: HirExprKind", "", "fn fold(expr: HirExpr) -> i64?:", "    match expr.kind:", "        case HirExprKind.Unary(un_op, un_operand):", "            val un_operand_t: HirExpr = un_operand", "            val folded = fold(un_operand_t)", "            if val inner = folded:", "                match un_op:", "                    case Neg:", "                        return Some(0 - inner)", "                    case Not:", "                        return Some(inner)", "            nil", "        case HirExprKind.Lit(v):", "            Some(v)"])
         val d = lower_closure(["compiler.common.dependency.visibility", "app.main"], [vis, main])
-        expect(d.contains("owner")).to_equal(false)
-        expect(d.contains("Visibility")).to_equal(false)
+        expect(d.contains("fn:fold;")).to_equal(true)
+        expect(d.contains("does not match subject owner")).to_equal(false)
+        expect(d.contains("ambiguous")).to_equal(false)
