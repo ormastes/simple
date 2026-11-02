@@ -19,3 +19,5 @@ Earlier Messenger compilation admitted all169 MIR modules after explicit SQLite 
 Retire after the actual deployed producer passes try-propagated u64 maxima and byte arrays plus the full SQLite parser and production Messenger read/wrong-key/tamper regressions. Keep the underlying bug open until then.
 
 The standard SSpec suite, all runtime-family combinations and any claim not explicitly tied to an actual artifact remain unqualified. Record the workaround commit in the canonical BugDatabase investigation log after integration; never retire it from a source-only review.
+
+**Revalidated 2026-11-02: still plausible because open; an active source workaround is not a compiler/provider fix; no merged fix commit with a passing regression is cited in this doc.**

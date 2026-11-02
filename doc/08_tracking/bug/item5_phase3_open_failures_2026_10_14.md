@@ -73,3 +73,9 @@ Owner/source: `doc/08_tracking/bug/bare_enum_pattern_binding_in_compiler_2026_10
 Retained receipts are under build/review: item5-functionfield-cache-resume-object-20261014, item5-functionfield-mir-crash-parent-gdb-20261014, item5-four-failed-llvm-collection-20261014.md, and item5-parallel-blockid-object-b061-20261014/object-aot-inventory.json. All objects stay bound to their own closure, producer, runtime and backend. Preserve failed receipts; use exact required object sets for manual links.
 
 Fix the observed MIR crash owner, qualify each changed object, build the full compiler, and execute Hello using that compiler. Native Simple DB/HTTP scalar-versus-AVX512 correctness/performance, CUDA and other provider/device qualification, small-executable targets, and full tooling/CI acceptance remain outstanding. Restore normal admission gates before promotion or publication.
+
+**Revalidated 2026-11-02: still plausible because OPEN. The user authorized landing focused fixes with these bugs recorded, then manual object repairs and follow-up landings. This is not ful; no merged fix commit with a passing regression is cited in this doc.**
+
+**Revalidated 2026-11-02: still plausible because OPEN. The user authorized landing focused fixes with these bugs recorded, then manual object repairs and follow-up landings. This is not ful; no merged fix commit with a passing regression is cited in this doc.**
+
+**Revalidated 2026-11-02: still plausible because OPEN. The user authorized landing focused fixes with these bugs recorded, then manual object repairs and follow-up landings. This is not ful; no merged fix commit with a passing regression is cited in this doc.**

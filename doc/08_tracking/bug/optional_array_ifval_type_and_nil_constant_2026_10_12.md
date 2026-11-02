@@ -23,3 +23,5 @@ Final cycle3 exact cb8ce176 successor/unchanged99c36f fixture failed in4.304s, e
 Authored regression and native reproducer bytes are preserved as adjacent `.spl.repro` report attachments, outside executable test discovery. They are not passing tests or skipped placeholders. The original private source files remain available for explicit future qualification.
 
 Reproduction attachments: [seven authored SSpec cases](optional_array_ifval_type_and_nil_constant_2026_10_12_metadata.spl.repro) and [unchanged native fixture](optional_array_ifval_type_and_nil_constant_2026_10_12_native.spl.repro). The absolute paths inside the evidence JSON identify preserved execution artifacts; those files are not repository-relative links.
+
+**Revalidated 2026-11-02: still plausible because the report title (Guarded Optional array loses payload type then emits invalid LLVM nil pointer c) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

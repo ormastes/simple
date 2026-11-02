@@ -7,3 +7,5 @@ Actual a713/8b producer, source460, 89-module MIR object closure fails B5b. Sche
 Compatibility workaround qualifies the existing enum member as SymbolKind.Function. It preserves the two boolean results and does not disable duplicate-default, enum identity or publication checks. This is a documented source workaround, not a completed parser repair. Source-level short bare-member syntax must still be investigated.
 
 Native canonical object verification is pending. Evidence: build/review/item5-b5b-cached-hir-owner-20261014.json and item5-producer8b-private-qualification-20261013/blockid-object-build. Full Phase3 compilation and produced-compiler Hello are still required before landing.
+
+**Revalidated 2026-11-02: still plausible because OPEN; declaring-owner/pattern inference defect remains unproved; no merged fix commit with a passing regression is cited in this doc.**

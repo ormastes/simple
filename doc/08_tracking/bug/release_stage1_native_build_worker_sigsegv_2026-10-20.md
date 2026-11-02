@@ -71,3 +71,5 @@ Workaround commit: the release.yml change that introduces the marker on
   three remaining fabricated stubs.
 - Once stage1 builds the runner, remove the seed fallback in a separate linked
   change. The provenance file must then say `stage1`.
+
+**Revalidated 2026-11-02: still plausible because OPEN. A workaround is active in .github/workflows/release.yml; no merged fix commit with a passing regression is cited in this doc.**

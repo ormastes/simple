@@ -19,3 +19,5 @@ Source-confirmed Windows provider gap. Actual curl8.21.0 exists on the qualifica
 Retire only after the selected Windows native provider supports text and exact binary bodies, status and errors, size and time bounds, redirects/TLS policy, secret handling and independent HTTP/SigV4 acceptance with the deployed compiler. An installed curl workaround does not close the missing provider bug.
 
 The standard SSpec suite, all runtime-family combinations and any claim not explicitly tied to an actual artifact remain unqualified. Record the workaround commit in the canonical BugDatabase investigation log after integration; never retire it from a source-only review.
+
+**Revalidated 2026-11-02: still plausible because open; an active source workaround is not a compiler/provider fix; no merged fix commit with a passing regression is cited in this doc.**

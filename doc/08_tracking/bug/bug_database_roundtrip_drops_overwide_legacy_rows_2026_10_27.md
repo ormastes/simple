@@ -11,3 +11,5 @@ Read-only baseline audit found eleven versus ten fields at lines2452,2453,2463 a
 ## Removal condition
 
 Retire the legacy append compatibility path only after all legacy rows are repaired by their owners or the canonical serializer losslessly retains opaque fields, and a complete scratch round trip preserves every original payload byte and record. Never normalize or truncate records merely to enable registration.
+
+**Revalidated 2026-11-02: still plausible because Canonical ID: bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27. Status: open. Owner: canonical BugDatabase. Created: 2026-10-27; no merged fix commit with a passing regression is cited in this doc.**

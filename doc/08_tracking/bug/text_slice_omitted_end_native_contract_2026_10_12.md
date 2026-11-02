@@ -9,3 +9,5 @@ Shared ABI prevents a safe runtime-only rewrite: explicit text.slice(start,end) 
 Temporary explicit-end source workaround is tracked in PR3231. Old producers retain the defect until a source-containing generation is built and qualified. Embedded-NUL raw-C-string truncation is a separate OPEN defect; this report claims no counted-NUL correctness.
 
 Prevention covers omitted/explicit-negative colon, unchanged negative method, empty/reversed/end bounds/extreme i64, UTF8 byte boundaries, int64 base overload, module initializer/local capture, side-effect order/once and colliding user identifiers. Native Linux projection passed; Windows/macOS/BSD/SimpleOS and full Simple owner execution remain unexecuted.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Severity: P1. Source fix not landed or executed by a source-containing producer; no merged fix commit with a passing regression is cited in this doc.**

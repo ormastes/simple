@@ -21,3 +21,5 @@ the enclosing substitution). Remove the workaround after.
 ## Source-admission annotation repair (2026-10-30)
 
 A bounded static admission inventory for the current-release generic hardening lane found the existing build_session.spl marker carried a trailing colon in its bug ID and unkeyed explanatory prose. The canonical marker parser rejects that identifier. Keep the already registered ID unchanged, remove the colon, and label the same explanation with reason=. The marker still immediately precedes the same if block; executable behavior is unchanged. This repair is source-admission evidence, not a new generic-inference runtime PASS.
+
+**Status:** FIXED (row closed 2026-11-02: E-MONO-032/033 were emitted only by src/compiler/40.mono, deleted by 200a05f5bc8 (refactor(compiler)!: delete monomorphization, merged on release/1.0.0); git grep E-MONO-032 over src/compiler finds nothing and src/compiler/40.mono is absent)
