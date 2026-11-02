@@ -48,6 +48,7 @@ use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, find_llc}
 use compiler.backend.llvm_capability.{find_archive_portable}
+use compiler.backend.linker.archive_response_file.{archive_command_build}
 use compiler.backend.runtime_compiler.{find_c_compiler, _is_msvc_cc}
 use std.platform.{get_host_os, get_host_arch}
 use std.nogc_async_mut.sosix.host_facade.{sosix_run}
@@ -3217,21 +3218,22 @@ impl CompilerDriver:
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("Cranelift Mach-O archives require llvm-ar"))
-            val msvc_lib = archiver == "lib" or archiver.ends_with("lib.exe")
-            var args: [text] = []
-            if msvc_lib:
-                args = ["/NOLOGO", "/OUT:{output}"]
-            else:
-                val archive_flags = if host_os == "macos" and system_ar: "rcs" else: "rcsD"
-                args = [archive_flags, output]
-            for obj in object_files:
-                args = args.push(obj)
+            # Object paths go through an @response file: 1400+ paths overflow
+            # the Windows 32767-char command line (os error 206).
+            val archive_cmd = archive_command_build(archiver, host_os, output, object_files)
             if not driver_native_collection_link_inputs_current_v1(
                     collection_bindings, object_files):
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before archive creation"))
-            val (_stdout, stderr, code) = process_run(archiver, args)
+            if archive_cmd.response_path != "":
+                if not file_write_exact(archive_cmd.response_path, archive_cmd.response_body):
+                    return driver_native_collection_link_cleanup_error_v1(
+                        collection_link_input_dir,
+                        CompileResult.CodegenError("emit-archive cannot write response file: {archive_cmd.response_path}"))
+            val (_stdout, stderr, code) = process_run(archiver, archive_cmd.argv)
+            if archive_cmd.response_path != "":
+                val _rsp_deleted = file_delete(archive_cmd.response_path)
             if code != 0:
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
