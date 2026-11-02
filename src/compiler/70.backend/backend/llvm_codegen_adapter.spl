@@ -18,8 +18,9 @@ use std.nogc_sync_mut.io_runtime.{env_get_opt}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
-    transient_scope_end, transient_promote}
+    transient_scope_end}
 use compiler.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
+use compiler.interp.interpreter.llvm.tools.{find_llc, find_clang}
 
 fn llvm_codegen_trace_enabled() -> bool:
     (env_get_opt("SIMPLE_COMPILER_TRACE") ?? "") == "1"
@@ -158,35 +159,47 @@ pub fn llvm_compile_module_direct_to_path(
         llvm_codegen_bare_metal_requested()
     val config = retained_config ?? llvm_codegen_target_config_for(options, bare_metal)
     # The LLVM object-path adapter bypasses the in-memory backend scope.
-    # Bound only translator scratch here: MIR optimization mutates its provider
-    # report before this call, and tool admission may initialize persistent
-    # bindings after it. Neither owner belongs to this scratch transaction.
-    var scoped = (env_get_opt("SIMPLE_CODEGEN_MODULE_SCOPE") ?? "") == "1"
+    # One transient scope covers translation AND object emission (IR text,
+    # staged-object byte read, llc argv): the result is a scalar status, so
+    # nothing is promoted and the whole module's codegen scratch is freed at
+    # scope end. Promoting the IR out of a translation-only scope made it
+    # persistent: every module's IR text stayed live for the worker's whole
+    # shard (bug codegen_module_memory_not_freed_per_module_2026_11_02).
+    # MIR optimization (persistent provider report) runs before this call and
+    # backend-session authority writes run after it; neither is in scope.
+    var scoped = llvm_codegen_module_scope_enabled_v1()
     # @workaround bug=llvm_bootstrap_string_cache_scope_escape_2026_10_25 reason=bootstrap-translator-publishes-heap-text-in-exported-global-cache
     if scoped and (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1":
         eprint("[codegen-scope] WARNING LLVM bootstrap string cache requires unscoped translation: module={module.name}")
         scoped = false
+    # Bitcode debug discovers llvm-as/opt lazily inside emission; keep it unscoped.
+    if scoped and (env_get_opt("SIMPLE_LLVM_BITCODE_DEBUG") ?? "") == "1":
+        scoped = false
+    if scoped:
+        # Tool discovery fills process-lifetime caches (_find_tool_cache_*,
+        # strict tool bindings). Warm them before the scope so a cold first
+        # module cannot publish scope-owned text into those globals.
+        val warm_llc = find_llc()
+        if warm_llc == "":
+            val _warm_clang = find_clang()
     if scoped and (transient_array_scope_state_v1() != 0 or not transient_scope_begin()):
-        eprint("[codegen-scope] WARNING LLVM translation scope refused; compiling UNSCOPED: module={module.name}")
+        eprint("[codegen-scope] WARNING LLVM codegen scope refused; compiling UNSCOPED: module={module.name}")
         scoped = false
     val llvm_ir = llvm_translate_module_direct_ir_for(
         options, module, bare_metal, retained_config)
-    if scoped:
-        # The IR is the only heap value that crosses this boundary. Object and
-        # diagnostic publication happens afterward, while the promoted IR is
-        # live. Never wrap the caller's backend-session authority mutations.
-        val paused = transient_scope_pause()
-        val kept = paused and transient_promote(llvm_ir)
-        val ended = transient_scope_end()
-        if not ended:
-            panic("LLVM translation scope ownership failed")
-        if not paused or not kept:
-            # Scope end may have freed llvm_ir: do not inspect or emit it.
-            backend_aot_write_diagnostic(diagnostic_path,
-                "LLVM translation scope promotion failed (object not written)")
-            return 1
-    compile_ir_to_object_path(
+    val status = compile_ir_to_object_path(
         llvm_ir, config, options.opt_level, object_path, diagnostic_path, retained_config != nil)
+    if scoped:
+        val paused = transient_scope_pause()
+        val ended = transient_scope_end()
+        if not paused or not ended:
+            panic("LLVM codegen scope ownership failed")
+    status
+
+# Per-module codegen scratch release is the default for native object
+# codegen. SIMPLE_CODEGEN_MODULE_SCOPE=0 is the explicit opt-out.
+pub fn llvm_codegen_module_scope_enabled_v1() -> bool:
+    (env_get_opt("SIMPLE_CODEGEN_MODULE_SCOPE") ?? "") != "0"
 
 # The IR llvm_compile_module_direct_compiled feeds llc when no retained config
 # is supplied (SIMPLE_BOOTSTRAP=1 lane). Exposed so the process-parallel

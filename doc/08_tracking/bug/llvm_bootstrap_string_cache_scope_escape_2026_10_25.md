@@ -19,3 +19,7 @@ A borrowed active/paused scope is never ended by this function. An unavailable n
 `llvm_direct_translation_scope_native_spec.spl` exercises real LLVM emission of a string literal, repeated calls using the same retained configuration, scope-off/on object comparison with debug metadata disabled, file-publication failure diagnostics, an outer caller-owned scope, and the bootstrap exclusion. The first call permits cold tool admission; the outer-scope case warms tools before borrowing its scope. The spec is not represented as passed until executed with a compiler containing this candidate. Actual P3/native lifetime and memory measurements remain required before merge. No Phase 2 compiler or runtime rebuild is authorized or performed for this draft.
 
 The earlier SIG9 below a 17 GiB guard remains unattributed; this source-level scratch-lifetime gap does not establish the cause of that termination.
+
+## Update 2026-11-02
+
+The object-path scope now covers translation and object emission with no IR promotion, and is on by default (`SIMPLE_CODEGEN_MODULE_SCOPE=0` opts out). The `SIMPLE_BOOTSTRAP=1` exclusion is unchanged; `compile_module_with_backend_scoped_v1` stays opt-in. See `codegen_module_memory_not_freed_per_module_2026_11_02.md`.
