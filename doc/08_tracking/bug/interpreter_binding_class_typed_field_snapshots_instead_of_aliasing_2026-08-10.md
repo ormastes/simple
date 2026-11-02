@@ -37,7 +37,7 @@ evidence found in the body. This is bookkeeping, not verification.
 > requires narrowing the gap between the two, not re-adjudicating either from
 > the other. This record was NOT reopened unilaterally.
 
-- **Status (single authoritative line, 2026-08-17): CLOSED — DID NOT REPRODUCE.**
+- ~~**Status (2026-08-17): CLOSED — DID NOT REPRODUCE.**~~ **SUPERSEDED 2026-11-02** (reproduced 2026-09-20 and 2026-09-18; bug stays OPEN). Original text:
   Basis: EXECUTION evidence — two independent 2026-08-17 reproducer runs of the
   doc's own bind-then-mutate (P6) shape under the interpreter both show the local
   ALIASING the field (`back_through_root=1`; `field=42 / local=42`). See the two
@@ -538,3 +538,24 @@ retargeted at the real remaining blocker, which is the 105 uncovered sites.
 No code was changed by this pass.
 
 **Revalidated 2026-11-02: still plausible because (single authoritative line, 2026-08-17): CLOSED — DID NOT REPRODUCE; no merged fix commit with a passing regression is cited in this doc.**
+
+---
+
+## 2026-11-02 (lane a6dffc9c/p12-7) — policy check, plan, step 1 landed
+
+**Checked against current policy/design: still valid as filed (classes are
+reference types, structs are value types).** The interpreter copies a class where
+the JIT aliases it; the bug stays OPEN, difficulty 4 (value-model change).
+
+Plan (each step independently landable):
+
+1. Env-guarded tripwire `SIMPLE_INTERP_CLASSINSTANCE_TRIPWIRE=1`: report to stderr,
+   once per site, when a `Value::ClassInstance` reaches a `Value::Object`-only
+   wildcard arm. **LANDED** (`interpreter/place.rs::classinstance_tripwire`; sites
+   `place::step_mut`, `place::store_last`, `patterns::place_method_mutation`).
+   Field read already has a `ClassInstance` arm (`expr/calls.rs`), so no tripwire there.
+2. Flip `Value::aggregate()` in an instrumented build only; run the full corpus to
+   get the empirical list of reached sites.
+3. Add `ClassInstance` arms at the confirmed semantic sites (`place.rs`, method resolution).
+4. Measure the interpreter perf delta from fast paths classes now miss; restore or file.
+5. Flip `aggregate()` for real; un-RED the `sj_daemon_mutual_exclusion_spec` example.
