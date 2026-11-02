@@ -80,3 +80,5 @@ is authorized in the capped session" and requires a two-independent-process
 barrier reproducer plus an independent highest-capability review before any
 fix lands — well beyond this lane's per-bug budget and outside the pure-Simple
 fix path this lane is scoped to. Left OPEN, no change made.
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**

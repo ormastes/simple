@@ -170,3 +170,5 @@ these all require Rust-seed or C-runtime/driver work and are filed as requests:
 - **FR-5 (codegen):** `os__apps__sshd__ssh_session__log_raw_println` is defined and
   used within `ssh_session.spl` yet dropped from native emission — investigate the
   local-fn emission gap for the baremetal closure.
+
+**Revalidated 2026-11-02: still plausible because the report title (RV64 HTTP+NVFS gate gets zero GET-200: arm64 import leaks into the link) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

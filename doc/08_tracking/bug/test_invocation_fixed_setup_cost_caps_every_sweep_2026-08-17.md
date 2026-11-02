@@ -127,3 +127,5 @@ per nested invocation) — consistent with, not contradicting, the doc's
 existing measurements. **Verdict: confirmed OPEN, root cause and fix scope
 unchanged (seed-side). No code change made in this pass — not a one-file
 narrow fix per the doc's own "Fix status" section.**
+
+**Revalidated 2026-11-02: still plausible because OPEN (root cause characterized; the fix is seed-side); no merged fix commit with a passing regression is cited in this doc.**

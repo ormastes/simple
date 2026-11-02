@@ -165,3 +165,5 @@ steady-state allocation or hot-path work was added.
 
 TODO(deferred-environment): after Linux bootstrap succeeds, run the x86_64
 SimpleOS guest-kernel UD2 scenario in QEMU and retain its serial fault receipt.
+
+**Revalidated 2026-11-02: still plausible because the report title (C fallback and fatal UD2 hook are restored; post-restore SysV stack pad is cove) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

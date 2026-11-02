@@ -120,3 +120,4 @@ declared-symbol set (`WM_EVENT_CLOSE`, `WmInputEvent`,
 identical to what this doc originally found. No fix attempted here per the
 "why this is not fixed" reasoning above, which still applies unchanged.
 
+**Revalidated 2026-11-02: still plausible because OPEN (partially fixed) — re-verified 2026-08-17 by content grep, not; no merged fix commit with a passing regression is cited in this doc.**

@@ -217,3 +217,4 @@ kills the run before a verdict. `SIMPLE_TRACE_FONT_STYLE=1` arms the
   before styling it. It is not evidence that the paint-side producer is wrong.
 - `bin/simple` is stale/broken; use `src/compiler_rust/target/bootstrap/simple`.
 
+**Revalidated 2026-11-02: still plausible because ROOT-CAUSED (fix plan below; not yet landed); no merged fix commit with a passing regression is cited in this doc.**

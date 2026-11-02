@@ -195,3 +195,4 @@ pins the Simple side byte-for-byte and records `RUST_SEED_HEADER_SIZE = 96`,
 
 Record explicitly states this is architectural and confirmed out of scope for a unilateral fix (needs a dual-write migration, would invalidate cached artifacts). No change made.
 
+**Revalidated 2026-11-02: still plausible because OPEN — ARCHITECTURAL, confirmed genuinely out of scope for a unilateral fix; no merged fix commit with a passing regression is cited in this doc.**

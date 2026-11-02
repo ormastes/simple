@@ -142,3 +142,5 @@ staleness). If confirmed, the interpreter's environment capture for nested `fn`s
 be snapshotting the module binding's *storage location* at closure-creation time
 rather than resolving it dynamically on each access when the enclosing frame later
 rebinds it.
+
+**Revalidated 2026-11-02: still plausible because open (worked around in test/01_unit/lib/std/concurrency/promise_spec.spl;; no merged fix commit with a passing regression is cited in this doc.**

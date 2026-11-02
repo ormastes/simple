@@ -218,3 +218,5 @@ either way, since native-build never ran.
 2. `check-native-extern-fabrication.shs` reaches a real PASS or a real
    extern-fabrication FAIL — never exit 143.
 3. Pushing `main` no longer needs `--no-verify`.
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1) — blocks every push to main, including releases; no merged fix commit with a passing regression is cited in this doc.**

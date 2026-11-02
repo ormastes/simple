@@ -122,3 +122,5 @@ assembler yet places two producers' owner records in one table (per "Why not
 fixed here" above). This is a design decision for the scene-assembler owner
 (thread a producer id onto the command/range row), not a local repair, and
 stays out of BUGFIX-12 scope. Leaving OPEN, no code change.
+
+**Revalidated 2026-11-02: still plausible because OPEN (filed, not fixed — see "Why not fixed here"); no merged fix commit with a passing regression is cited in this doc.**

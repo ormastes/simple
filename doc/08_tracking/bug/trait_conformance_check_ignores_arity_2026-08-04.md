@@ -749,3 +749,5 @@ Status: two real Tier-A arity drifts fixed and verified; the standing gate's
 one remaining hit is a known-good fixture. Left OPEN overall (parameter
 *types* are still never compared, per the record's own "still not covered"
 section — that is unchanged by this fix).
+
+**Revalidated 2026-11-02: still plausible because ARITY ARMED / TYPES STILL OPEN — mechanism confirmed; census; no merged fix commit with a passing regression is cited in this doc.**

@@ -110,3 +110,5 @@ the probe-timeout fix that surfaced it.
 
 - `doc/08_tracking/bug/os_build_scenario_runner_5s_compiler_probe_timeout_2026-08-06.md`
   — the probe-timeout bug fixed alongside this discovery.
+
+**Revalidated 2026-11-02: still plausible because the report title (os test --scenario fails with no runnable pure-Simple compiler because every ca) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

@@ -68,3 +68,4 @@ in one day, and they must not be conflated:
 Found by: unified 2D campaign, web-gap lane; confirmed independently by the
 coordinator (fail 2/6 then pass 6/6 with no code change).
 
+**Revalidated 2026-11-02: still plausible because OPEN — not fixed, out of scope of the campaign that found it; no merged fix commit with a passing regression is cited in this doc.**

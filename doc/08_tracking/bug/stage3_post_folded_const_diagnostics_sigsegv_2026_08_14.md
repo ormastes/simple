@@ -159,3 +159,5 @@ rebuilding `bin/**` or `build/bootstrap/**` is forbidden in this wave (~16
 concurrent lanes). The stage3 binary used above is from 2026-08-11, so this is
 evidence about that binary; the reproducer is cheap enough to re-run against any
 newly admitted stage3 in seconds.
+
+**Revalidated 2026-11-02: still plausible because the report title (Stage 3 peaks near 7.7 GiB RSS and exits 139 right after post-folded-constant) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

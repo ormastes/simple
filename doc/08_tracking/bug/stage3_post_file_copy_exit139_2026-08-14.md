@@ -64,3 +64,4 @@ native bootstrap cycle (native compile + link + multi-stage
 self-compilation), far outside this lane's per-item budget and risky
 to attempt on a shared, already-loaded host. Leaving OPEN, no attempt.
 
+**Revalidated 2026-11-02: still plausible because FOCUSED PASS / STAGE 3 VERIFICATION PENDING; no merged fix commit with a passing regression is cited in this doc.**

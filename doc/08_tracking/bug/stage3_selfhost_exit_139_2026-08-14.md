@@ -413,3 +413,5 @@ in place, then wraps the original registry exactly once at the outer API.  A
 regression now unwraps `builder.finish()` and reads both the retained surface
 count and frozen flag.  This repair is not admitted until a fresh bounded
 bootstrap session passes Stage 3 and Stage 4.
+
+**Revalidated 2026-11-02: still plausible because unchanged. Recorded so future sweeps skip this in O(1) instead of; no merged fix commit with a passing regression is cited in this doc.**

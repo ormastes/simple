@@ -346,3 +346,5 @@ platform-specific or single-build artifact:
 Native column still not re-measured: `native-build` on this host is blocked
 before codegen by the persistent package index (`scv-authority-missing`), so a
 native row would be manufactured rather than observed.
+
+**Revalidated 2026-11-02: still plausible because OPEN — measured, staged migration designed, stage 0 (measurement) landed; no merged fix commit with a passing regression is cited in this doc.**

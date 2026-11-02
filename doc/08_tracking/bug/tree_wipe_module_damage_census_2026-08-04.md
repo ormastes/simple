@@ -432,3 +432,4 @@ then split truncation from rewrite by novel-line fraction.
 
 This is an ongoing multi-session damage-recovery census (3/39 truncations restored, several more checked and found unrestorable), not a single actionable code bug. No new restoration work attempted this pass given the remaining shard size. Leaving OPEN as previously tracked.
 
+**Revalidated 2026-11-02: still plausible because OPEN (inventory complete; 3 of 39 truncations restored — 4 more; no merged fix commit with a passing regression is cited in this doc.**
