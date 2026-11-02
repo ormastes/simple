@@ -43,6 +43,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.common.text_bytes.{text_to_bytes}
 use compiler.common.cache.canonical_identity.{canonical_identity_text_lt}
 use std.common.binary_inspect.{byte_to_hex}
+use compiler.driver.cache.native_object_source_key_v1.{native_scv_snapshot_root_v1, native_scv_snapshot_rebase_v1, native_scv_snapshot_rebind_candidate_v1}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_snapshot_v1, reverse_reference_owner_mark_known_v1,
     reverse_reference_owner_register_source_alias_v1,
@@ -2152,3 +2153,43 @@ pub fn build_cache_module_witness(cache: BuildCache, source: text) -> text:
     ""
 
 export native_module_cache_shadow_mismatch_v1, build_cache_module_witness
+
+pub fn build_cache_rebind_scv_snapshot_v1(cache: BuildCache, source: text) -> bool:
+    """Move the entry recorded for `source`'s file under a PRIOR SCV snapshot
+    revision onto `source` (#5797). Every build compiles from a fresh
+    `build/scv/snapshots/scv-revision-v1-<tree digest>/` root, so without this
+    an unrelated one-file edit orphaned every entry. Only the KEY moves: the
+    recorded fingerprint, outputs, witness and dependency-interface fold are
+    kept, so build_cache_entry_is_valid still requires the current bytes to
+    hash to the recorded content and the caller still requires a witness and
+    capsule-receipt match. Dependency paths are rebased onto the new root.
+    Returns true when an entry was moved; ambiguity fails closed."""
+    var keys: [text] = []
+    for key in cache.entries.keys():
+        keys.push(key)
+    val found = native_scv_snapshot_rebind_candidate_v1(keys, source)
+    if found == "":
+        return false
+    val old_root = native_scv_snapshot_root_v1(found)
+    val new_root = native_scv_snapshot_root_v1(source)
+    val entry = cache.entries[found]
+    var dependencies: [text] = []
+    for dependency in entry.dependencies:
+        dependencies.push(native_scv_snapshot_rebase_v1(dependency, old_root, new_root))
+    val fingerprint = FileFingerprint(path: source,
+        content_hash: entry.fingerprint.content_hash,
+        modified_time: entry.fingerprint.modified_time,
+        size: entry.fingerprint.size)
+    cache.entries.remove(found)
+    cache.fingerprints.remove(found)
+    cache.fingerprints[source] = fingerprint
+    cache.entries[source] = DependencyEntry(
+        source: source, fingerprint: fingerprint,
+        dependencies: dependencies, outputs: entry.outputs,
+        deps_iface: entry.deps_iface,
+        interface_digest: entry.interface_digest,
+        module_witness: entry.module_witness,
+        macro_input_root: entry.macro_input_root)
+    true
+
+export build_cache_rebind_scv_snapshot_v1

@@ -1,0 +1,105 @@
+# @req BUG-5797
+"""
+# Native object source key is per-module, not per SCV tree revision (#5797)
+
+**Bug:** doc/08_tracking/bug/native_object_cache_keyed_on_tree_scv_revision_2026-11-02.md
+
+## Overview
+
+Every build freezes the source tree into
+`build/scv/snapshots/scv-revision-v1-<tree digest>/`, and the native capsule
+identity (written into each `.o.capsule-receipt`) plus the BuildCache entry key
+used that absolute snapshot path. A one-file edit anywhere changed the tree
+digest and so every module's object key. The key must name the module by its
+snapshot-relative path; content stays bound by the source identity, MIR
+identity, witness, target, options and compiler identity.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @cover src/compiler/80.driver/cache/native_object_source_key_v1.spl 90%
+
+use std.spec.*
+use compiler.driver.cache.native_object_source_key_v1.*
+use compiler.driver.driver_types.{FrozenNativeModuleCapsuleV1, FrozenStorageModuleSnapshotV1}
+use compiler.mir.mir_data.{MirModule}
+
+val ROOT_A: text = "C:/dev/wt/phase3/build/scv/snapshots/scv-revision-v1-89766ed566d1220ecdd3320d0fa2b213e88b8b7ab002fc2349ca41cb482850d4/"
+val ROOT_B: text = "C:/dev/wt/phase3/build/scv/snapshots/scv-revision-v1-23016a5f00000000000000000000000000000000000000000000000000000000/"
+val REL_A: text = "src/compiler/20.hir/hir_lowering/types.spl"
+
+describe "native_object_source_key_v1":
+    it "is unchanged for module A when only the tree revision changes":
+        val before = native_object_source_key_v1(ROOT_A + REL_A)
+        val after = native_object_source_key_v1(ROOT_B + REL_A)
+        expect(after).to_equal(before)
+        expect(before.contains("scv-revision-v1-")).to_equal(false)
+
+    it "differs for a different module under the same revision":
+        val a = native_object_source_key_v1(ROOT_A + REL_A)
+        val b = native_object_source_key_v1(ROOT_A + "src/lib/common/unicode_17_0_0.spl")
+        expect(a == b).to_equal(false)
+
+    it "keeps non-snapshot paths byte-identical":
+        expect(native_object_source_key_v1("src/app/x/main.spl")).to_equal("src/app/x/main.spl")
+        expect(native_object_source_key_v1("C:/dev/simple/src/app/x/main.spl")).to_equal("C:/dev/simple/src/app/x/main.spl")
+
+    it "accepts backslash snapshot spellings":
+        val back = "C:\\dev\\wt\\phase3\\build\\scv\\snapshots\\scv-revision-v1-abc\\" + "src\\a.spl"
+        expect(native_object_source_key_v1(back)).to_equal("scv-snapshot:src/a.spl")
+
+    it "fails closed on a snapshot root with no relative path":
+        expect(native_scv_snapshot_root_v1("x/build/scv/snapshots/scv-revision-v1-abc")).to_equal("")
+        expect(native_scv_snapshot_root_v1(ROOT_A + REL_A)).to_equal(ROOT_A)
+
+describe "native_scv_snapshot_rebase_v1":
+    it "moves a path from the old root to the new root":
+        expect(native_scv_snapshot_rebase_v1(ROOT_A + REL_A, ROOT_A, ROOT_B)).to_equal(ROOT_B + REL_A)
+
+    it "leaves paths outside the old root untouched":
+        expect(native_scv_snapshot_rebase_v1("src/a.spl", ROOT_A, ROOT_B)).to_equal("src/a.spl")
+
+describe "native_scv_snapshot_rebind_candidate_v1":
+    it "finds the unique prior-revision key for the same relative path":
+        val keys = [ROOT_A + REL_A, ROOT_A + "src/b.spl"]
+        expect(native_scv_snapshot_rebind_candidate_v1(keys, ROOT_B + REL_A)).to_equal(ROOT_A + REL_A)
+
+    it "refuses when the exact key already exists":
+        val keys = [ROOT_B + REL_A]
+        expect(native_scv_snapshot_rebind_candidate_v1(keys, ROOT_B + REL_A)).to_equal("")
+
+    it "refuses ambiguous prior revisions":
+        val root_c = "C:/x/build/scv/snapshots/scv-revision-v1-ccc/"
+        val keys = [ROOT_A + REL_A, root_c + REL_A]
+        expect(native_scv_snapshot_rebind_candidate_v1(keys, ROOT_B + REL_A)).to_equal("")
+
+    it "refuses non-snapshot sources":
+        expect(native_scv_snapshot_rebind_candidate_v1([ROOT_A + REL_A], REL_A)).to_equal("")
+
+fn capsule_at(cache_source: text, source_identity: text) -> FrozenNativeModuleCapsuleV1:
+    FrozenNativeModuleCapsuleV1(ok: true,
+        module_name: "compiler.hir.hir_lowering.types", capsule_identity: "",
+        mir_identity: "c6dfb619fab9bc30f9b8b514b3fbcbca31ba742348609dd3d890dfabb1681c09",
+        mir_module: MirModule(name: "", functions: {}, statics: {}, constants: {}, types: {}),
+        storage_snapshot: FrozenStorageModuleSnapshotV1(ok: true,
+            module_name: "compiler.hir.hir_lowering.types", registry_identity: "r",
+            module_identity: "m", sites: [], evidence: [], reason: "ok"),
+        cache_source: cache_source, source_identity: source_identity,
+        module_witness: "w", module_witness_reason: "ok",
+        output_base: "C:/dev/p3new/out", object_path: "C:/dev/p3new/aot-x.o",
+        backend_name: "llvm", provider_receipt_hash: "", target: "x86_64-pc-windows-gnu",
+        target_cpu: "", opt_level: 2, is_release: true, reason: "ok")
+
+describe "FrozenNativeModuleCapsuleV1.expected_identity":
+    it "is unchanged when only the SCV tree revision changes":
+        val sid = "b8346ae38dd2e98d5a1da3fab4632a2089a4cae089370e3673cda873a3979b72"
+        val a = capsule_at(ROOT_A + REL_A, sid).expected_identity()
+        val b = capsule_at(ROOT_B + REL_A, sid).expected_identity()
+        expect(b).to_equal(a)
+        expect(a.contains("scv-revision-v1-")).to_equal(false)
+
+    it "changes when the module's own source content changes":
+        val a = capsule_at(ROOT_A + REL_A, "b8346ae38dd2e98d5a1da3fab4632a2089a4cae089370e3673cda873a3979b72").expected_identity()
+        val b = capsule_at(ROOT_B + REL_A, "0000000000000000000000000000000000000000000000000000000000000001").expected_identity()
+        expect(a == b).to_equal(false)

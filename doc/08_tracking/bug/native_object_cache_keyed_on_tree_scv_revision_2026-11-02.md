@@ -2,7 +2,7 @@
 
 - **ID:** native_object_cache_keyed_on_tree_scv_revision_2026-11-02
 - **Priority:** P1 (perf; every source change forces a full re-codegen of the closure)
-- **Status:** open
+- **Status:** fix landed (identity + BuildCache rebind); residual inputs listed below
 - **Owner area:** `src/compiler/80.driver` native capsule / object cache identity
   (`driver_types.spl` capsule identity, `driver_aot_native_output.spl` object reuse);
   related intent: generic-RR HIR-variant object keys (#5745)
@@ -40,3 +40,32 @@ they are unavoidable, and accept one full re-codegen for each.
 ## Removal condition
 
 Fixed when a stage3 build reuses all objects after a one-file change outside their closure.
+
+## Fix (lane mp-1, 2026-11-02)
+
+- `src/compiler/80.driver/cache/native_object_source_key_v1.spl`: revision-neutral
+  source key (`scv-snapshot:<relative path>` for paths under
+  `build/scv/snapshots/scv-revision-v1-<id>/`, unchanged otherwise).
+- `FrozenNativeModuleCapsuleV1.expected_identity()` (receipt line 2) now uses that key
+  instead of the absolute snapshot path. Content is still bound by source identity,
+  MIR identity, storage snapshot, witness, backend/provider, target/cpu/opt/release and
+  object path; the cache scope directory still carries compiler/options/environment.
+- `build_cache_rebind_scv_snapshot_v1` (incremental.spl) moves a unique BuildCache
+  entry recorded under a prior revision onto the current snapshot path before lookup;
+  validity (content hash, witness, capsule receipt bytes) is unchanged. Ambiguous
+  prior revisions fail closed.
+- Spec: `test/01_unit/compiler/driver/native_object_source_key_spec.spl`.
+
+## Residual (not changed here)
+
+- Compiler identity folds the live `src/compiler` and `src/lib` tree fingerprints
+  (`native_build_compiler_source_fingerprint`, `native_build_stdlib_source_fingerprint`).
+  When the build runs from a checkout, an edit under `src/lib` or `src/compiler`
+  still changes the cache scope directory for every object. This needs a separate
+  decision: should a compiled (non-interpreted) compiler drop those fingerprints?
+- Module witnesses that come back `ambiguous-resolution-fact` never match, so those
+  modules can only be reused through the phase-2 manifest route.
+- MIR that embeds absolute source paths (spans, panic locations) changes the MIR
+  identity per revision. That is real object content, not a key bug.
+- Old receipts still carry the absolute path, so the first build after this change
+  rebuilds once.

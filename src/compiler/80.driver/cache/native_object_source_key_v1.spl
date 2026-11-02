@@ -1,0 +1,79 @@
+# Revision-neutral source key for native object caching (#5797).
+#
+# Every build freezes the source tree into
+#   <repo>/build/scv/snapshots/scv-revision-v1-<tree digest>/<relative path>
+# and compiles from there, so the absolute path of EVERY module changes when
+# ANY file changes. The native capsule identity (receipt line 2) and the
+# BuildCache entry key both used that absolute path, so a one-file edit
+# invalidated every object. The object key must name the module by its
+# snapshot-relative path; the module's content is still bound by the source
+# identity, MIR identity, witness (dependency interface facts), target,
+# options and compiler identity, so this never admits a stale object.
+#
+# Paths outside an SCV snapshot are returned unchanged (byte-identical keys
+# for non-snapshot builds).
+#
+# Bug: doc/08_tracking/bug/native_object_cache_keyed_on_tree_scv_revision_2026-11-02.md
+
+val NATIVE_SCV_SNAPSHOT_MARKER_V1: text = "/build/scv/snapshots/scv-revision-v1-"
+val NATIVE_OBJECT_SOURCE_KEY_PREFIX_V1: text = "scv-snapshot:"
+
+pub fn native_scv_snapshot_root_v1(path: text) -> text:
+    """The `<...>/build/scv/snapshots/scv-revision-v1-<id>/` prefix of `path`
+    (in the spelling of `path`, with `/` separators), or "" when `path` is
+    not under an SCV snapshot or names no file below the root."""
+    val norm = path.replace("\\", "/")
+    val marker = norm.index_of(NATIVE_SCV_SNAPSHOT_MARKER_V1)
+    if marker < 0:
+        return ""
+    val id_start = marker + NATIVE_SCV_SNAPSHOT_MARKER_V1.len()
+    val tail = norm.substring(id_start)
+    val slash = tail.index_of("/")
+    if slash <= 0:
+        return ""
+    val root_len = id_start + slash + 1
+    if root_len >= norm.len():
+        return ""
+    norm.substring(0, root_len)
+
+pub fn native_object_source_key_v1(path: text) -> text:
+    """Revision-neutral spelling of a cache source path."""
+    val root = native_scv_snapshot_root_v1(path)
+    if root == "":
+        return path
+    val norm = path.replace("\\", "/")
+    NATIVE_OBJECT_SOURCE_KEY_PREFIX_V1 + norm.substring(root.len())
+
+pub fn native_scv_snapshot_rebase_v1(path: text, old_root: text, new_root: text) -> text:
+    """Move `path` from `old_root` to `new_root`; other paths are unchanged."""
+    if old_root == "" or new_root == "":
+        return path
+    val norm = path.replace("\\", "/")
+    if not norm.starts_with(old_root):
+        return path
+    new_root + norm.substring(old_root.len())
+
+pub fn native_scv_snapshot_rebind_candidate_v1(keys: [text], source: text) -> text:
+    """The unique existing key that names `source`'s file under a DIFFERENT
+    SCV snapshot revision, or "" (exact key present, not a snapshot path, no
+    candidate, or more than one candidate -- fail closed)."""
+    if source == "" or keys.contains(source):
+        return ""
+    val new_root = native_scv_snapshot_root_v1(source)
+    if new_root == "":
+        return ""
+    val want = native_object_source_key_v1(source)
+    var found = ""
+    var count = 0
+    for key in keys:
+        val old_root = native_scv_snapshot_root_v1(key)
+        if old_root != "" and old_root != new_root:
+            if native_object_source_key_v1(key) == want:
+                found = key
+                count = count + 1
+    if count != 1:
+        return ""
+    found
+
+export native_scv_snapshot_root_v1, native_object_source_key_v1
+export native_scv_snapshot_rebase_v1, native_scv_snapshot_rebind_candidate_v1
