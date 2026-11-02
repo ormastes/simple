@@ -1,0 +1,26 @@
+use std.spec
+use app.cli.shard_mem_clamp.{shard_default_threads, shard_threads_cap_for}
+
+# Bug native_shard_threads_default_serial_ignores_host_max_threads_2026-11-02:
+# with no --threads/--jobs/env, native-build ran serial and launchers hardcoded
+# `--threads 8`. The default must come from host.sdn max_threads; the existing
+# memory clamp (shard_threads_cap_for) still bounds it downstream.
+describe "shard default threads from host max_threads":
+
+    it "uses the host max_threads when nothing explicit is requested":
+        expect(shard_default_threads(0, "80")).to_equal(80)
+
+    it "keeps an explicit request untouched":
+        expect(shard_default_threads(4, "80")).to_equal(4)
+        expect(shard_default_threads(200, "80")).to_equal(200)
+
+    it "stays serial when host max_threads is absent or invalid":
+        expect(shard_default_threads(0, "")).to_equal(0)
+        expect(shard_default_threads(0, "abc")).to_equal(0)
+
+    it "is not hard-capped at 8 and is still clamped by memory":
+        expect(shard_default_threads(0, "80") > 8).to_be_true()
+        # 80 workers x 1 GiB cannot fit in 16 GiB available: clamp lowers it.
+        val capped = shard_threads_cap_for(shard_default_threads(0, "80"), 1048576, 16777216)
+        expect(capped < 80).to_be_true()
+        expect(capped >= 1).to_be_true()
