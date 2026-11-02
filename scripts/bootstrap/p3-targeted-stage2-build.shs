@@ -2,12 +2,15 @@
 # p3-targeted-stage2-build.shs - targeted object rebuild driver (frozen stage2,
 # --emit-object). Port of C:/dev/p3new/cgprobe/probe_obj40.ps1 + tools/measure.ps1.
 # Usage: sh scripts/bootstrap/p3-targeted-stage2-build.shs NAME ENTRY [--heavy|--probe]
-#   --heavy  cap = heavy_cap_gb, MIR shard count 8 (default)
+#   --heavy  cap = heavy_cap_gb (default)
 #   --probe  cap = probe_cap_gb
+#   Both modes set MIR shard count 8 and a tree memory budget (cap - 10 GiB, min 1 GiB).
 # Env: P3_STAGE2_EXE (default build/p3/stage2), P3_SHARDS (parse shard max, default 1),
 #      P3_OUT_ROOT (default build/p3/targeted), P3_PTREE_SHADOW (SIMPLE_PROJECT_ROOT),
-#      P3_LIMIT_S (default 3600), P3_DRY_RUN=1 (print env + command, run nothing).
-# Kills only its own process (by PID) on cap/time-limit breach.
+#      P3_LIMIT_S (default 3600), P3_DRY_RUN=1 (print env + command, run nothing),
+#      SIMPLE_LLVM_MINGW_ROOT (Windows: llvm-mingw root, else ~/.simple/toolchains/llvm-mingw-*).
+# Memory cap covers the whole process tree (root + descendants). On breach, or if the
+# tree cannot be sampled, only PIDs of that tree are killed (never by image name).
 
 set -u
 p3_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -20,7 +23,9 @@ case "$MODE" in --heavy|--probe) ;; *) echo "mode must be --heavy or --probe" >&
 caps=$(sh "$p3_dir/p3-host-caps.shs") || exit 2
 cap_of() { printf '%s\n' "$caps" | sed -n "s/^$1=//p"; }
 if [ "$MODE" = "--heavy" ]; then CAP_GB=$(cap_of heavy_cap_gb); else CAP_GB=$(cap_of probe_cap_gb); fi
-HEAVY_GB=$(cap_of heavy_cap_gb)
+
+IS_WIN=0
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) IS_WIN=1;; esac
 
 # Workarounds for the stage2 parse-shard child AV on large closures, see
 # doc/08_tracking/bug/stage2_parse_shard_child_av_large_closure_2026-11-02.md
@@ -32,14 +37,31 @@ export SIMPLE_NATIVE_BUILD_THREADS=8
 export SIMPLE_NATIVE_INCREMENTAL=1
 export SIMPLE_SCV_INVENTORY_COLD_INIT=1
 export SIMPLE_SCV_FREEZE_FALLBACK=1
-if [ "$MODE" = "--heavy" ]; then
-    export SIMPLE_MIR_SHARD_COUNT=8
-    export SIMPLE_MIR_SHARD_WORKER_KB=30000000
-    export SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$(( (HEAVY_GB - 10) * 1048576 ))
-fi
+export SIMPLE_MIR_SHARD_COUNT=8
+export SIMPLE_MIR_SHARD_WORKER_KB=30000000
+budget_gb=$(( CAP_GB - 10 )); if [ "$budget_gb" -lt 1 ]; then budget_gb=1; fi
+export SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$(( budget_gb * 1048576 ))
 if [ -n "${P3_PTREE_SHADOW:-}" ]; then
     export SIMPLE_PROJECT_ROOT=$P3_PTREE_SHADOW
     export SIMPLE_RT_OBJ_CACHE_DIR=$P3_PTREE_SHADOW.rtcache
+fi
+
+EXTRA_TARGET=""
+if [ "$IS_WIN" = 1 ]; then
+    # Windows = llvm-mingw UCRT + clang only (no MSVC, no GCC).
+    unset LIB
+    lm=${SIMPLE_LLVM_MINGW_ROOT:-}
+    if [ -z "$lm" ]; then
+        for c in "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64; do [ -d "$c/bin" ] && lm=$c; done
+    fi
+    if [ -n "$lm" ]; then
+        export SIMPLE_LLVM_MINGW_ROOT=$lm CC="$lm/bin/clang.exe"
+        PATH="$PATH:$lm/bin"; export PATH
+    elif [ "${P3_DRY_RUN:-0}" != "1" ]; then
+        echo "p3-targeted-stage2-build: llvm-mingw toolchain not found (set SIMPLE_LLVM_MINGW_ROOT)" >&2; exit 2
+    fi
+    if [ -d /c/msys64/clang64/bin ]; then PATH="/c/msys64/clang64/bin:$PATH"; export PATH; fi
+    EXTRA_TARGET="x86_64-pc-windows-gnu"
 fi
 
 EXE=${P3_STAGE2_EXE:-build/p3/stage2}
@@ -48,34 +70,60 @@ LIMIT=${P3_LIMIT_S:-3600}
 set -- native-build --entry-closure --entry "$ENTRY" --runtime-bundle core-c-bootstrap \
     --source src/lib --source src/compiler --source src/app --backend llvm --threads 8 \
     --keep-going --go-to-end --emit-object --cache-dir "$OUT/cache" -o "$OUT/out.o"
+if [ -n "$EXTRA_TARGET" ]; then set -- "$@" --target "$EXTRA_TARGET"; fi
 
 if [ "${P3_DRY_RUN:-0}" = "1" ]; then
-    echo "cap_gb=$CAP_GB mode=$MODE"
-    env | grep -E '^SIMPLE_(PARSE_SHARD|FILE_FIBERS|MIR_SHARD_COUNT|PROJECT_ROOT)' | sort
+    echo "cap_gb=$CAP_GB mode=$MODE budget_kib=$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB"
+    env | grep -E '^SIMPLE_(PARSE_SHARD|FILE_FIBERS|FILE_WORKERS|MIR_SHARD_COUNT|PROJECT_ROOT)' | sort
     echo "cmd: $EXE $*"
     exit 0
 fi
+
+# p3_tree_kb ROOT_PID -> total RSS (KiB) of ROOT and descendants; empty on failure.
+p3_tree_kb() {
+    if [ "$IS_WIN" = 1 ]; then
+        wp=$(cat "/proc/$1/winpid" 2>/dev/null) || return 1
+        powershell.exe -NoProfile -Command "\$a=Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,WorkingSetSize;\$i=@($wp);\$k=0;while(\$k -lt \$i.Count){\$p=\$i[\$k];\$i+=@(\$a|?{\$_.ParentProcessId -eq \$p}|%{[int]\$_.ProcessId});\$k++};[long]((\$a|?{\$i -contains [int]\$_.ProcessId}|Measure-Object WorkingSetSize -Sum).Sum/1KB)" 2>/dev/null | tr -d '\r'
+    else
+        ps -e -o pid= -o ppid= -o rss= 2>/dev/null | awk -v root="$1" '
+            { pp[$1]=$2; rs[$1]=$3; ids[NR]=$1 }
+            END { for (n=1;n<=NR;n++) { p=ids[n]; while (p!="" && p!=0) { if (p==root) { s+=rs[ids[n]]; break } p=pp[p] } } print s+0 }'
+    fi
+}
+# p3_kill_tree ROOT_PID -> kill ROOT and its descendants by PID only.
+p3_kill_tree() {
+    if [ "$IS_WIN" = 1 ]; then
+        wp=$(cat "/proc/$1/winpid" 2>/dev/null) && taskkill /T /F /PID "$wp" >/dev/null 2>&1
+    else
+        for c in $(ps -e -o pid= -o ppid= 2>/dev/null | awk -v r="$1" '{pp[$1]=$2} END{for(i in pp){p=i;while(p!=""&&p!=0){if(p==r){print i;break}p=pp[p]}}}'); do kill -9 "$c" 2>/dev/null; done
+    fi
+    kill -9 "$1" 2>/dev/null
+}
 
 mkdir -p "$OUT"
 count_objs() { find "$OUT/cache" -name '*.o' -type f 2>/dev/null | wc -l | tr -d ' '; }
 o0=$(count_objs); start=$(date +%s)
 "$EXE" "$@" >"$OUT/build.log" 2>"$OUT/build.log.err" &
 pid=$!
-peak=0; killed=0; first=-1
+peak_kb=0; killed=0; first=-1; blind=0; cap_kb=$(( CAP_GB * 1048576 ))
 while kill -0 "$pid" 2>/dev/null; do
     sleep 10
-    kb=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')   # root process only; tree sum is OS specific
-    gb=$(( ${kb:-0} / 1048576 ))
-    if [ "$gb" -gt "$peak" ]; then peak=$gb; fi
+    kb=$(p3_tree_kb "$pid")
+    case "$kb" in ''|*[!0-9]*) kb=""; blind=$(( blind + 1 ));; *) blind=0;; esac
+    if [ -n "$kb" ] && [ "$kb" -gt "$peak_kb" ]; then peak_kb=$kb; fi
     now=$(( $(date +%s) - start ))
     if [ "$first" -lt 0 ] && [ "$(count_objs)" -gt "$o0" ]; then first=$now; fi
-    echo "${now}s rss_GB=$gb" >"$OUT/build.log.cap"
-    if [ "$gb" -gt "$CAP_GB" ] || [ "$now" -gt "$LIMIT" ]; then
-        echo "CAP/LIMIT EXCEEDED: ${gb} GB / ${now} s; killing own pid $pid" >>"$OUT/build.log.cap"
-        kill "$pid" 2>/dev/null; killed=1
+    echo "${now}s tree_KiB=${kb:-unknown}" >"$OUT/build.log.cap"
+    why=""
+    if [ -n "$kb" ] && [ "$kb" -gt "$cap_kb" ]; then why="cap exceeded ${kb} KiB"; fi
+    if [ "$now" -gt "$LIMIT" ]; then why="time limit ${now}s"; fi
+    if [ "$blind" -ge 3 ]; then why="memory sampler failed 3x (fail closed)"; fi
+    if [ -n "$why" ]; then
+        echo "KILL: $why; killing own tree pid $pid" >>"$OUT/build.log.cap"
+        p3_kill_tree "$pid"; killed=1
     fi
 done
 wait "$pid"; rc=$?
 total=$(( $(date +%s) - start )); objs=$(( $(count_objs) - o0 ))
-echo "first_obj_s=$first total_s=$total peak_rss_GB=$peak objs=$objs killed=$killed rc=$rc" | tee "$OUT/result.txt"
+echo "first_obj_s=$first total_s=$total peak_tree_GB=$(( peak_kb / 1048576 )) objs=$objs killed=$killed rc=$rc" | tee "$OUT/result.txt"
 exit "$rc"
