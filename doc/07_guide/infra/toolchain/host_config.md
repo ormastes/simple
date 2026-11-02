@@ -26,8 +26,11 @@ which uses the same env-over-user order.
 | Key | Example | Consumer |
 |-----|---------|----------|
 | `max_build_jobs` | `16` | bootstrap worker ceiling (`bootstrap-build-jobs-policy.shs`); `SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS` still wins |
-| `max_threads` | `32` | detected logical CPUs (informational) |
-| `worker_mem_mib` | `3300` | bootstrap memory clamp; `SIMPLE_BOOTSTRAP_WORKER_MEM_MIB` still wins |
+| `max_threads` | `32` | upper bound on native-build shard threads, the native codegen pool core count, and test-runner workers (can only lower) |
+| `worker_mem_mib` | `3300` | bootstrap memory clamp (`SIMPLE_BOOTSTRAP_WORKER_MEM_MIB` still wins); driver per-worker estimate for HIR/MIR shard workers and codegen-pool llc children, which it may only **raise** above the measured default (`SIMPLE_{HIR,MIR,PARSE}_SHARD_WORKER_KB`, `SIMPLE_NATIVE_CODEGEN_WORKER_KIB` still win) |
+| `mem_reserve_free_mib` | `24576` | RAM/commit every build keeps free: shard worker pool and native codegen pool floor, native-build start guard; `SIMPLE_BUILD_MEMORY_RESERVE_BYTES` still wins. Default 24 GiB (start guard: min(24 GiB, RAM/2)) |
+| `probe_max_mib` | `8192` | memory cap for one launch-script probe (`scripts/setup/host-limits.shs`); default 8192 |
+| `probe_max_parallel` | `2` | concurrent probes for launch scripts; default 2 |
 | `tree_rss_base_mib` | `3072` | process-tree RSS cap reserve (`scripts/bootstrap/lib/tree-rss-policy.shs`); `SIMPLE_BOOTSTRAP_TREE_RSS_BASE_MIB` still wins |
 | `tree_rss_per_job_mib` | `96` | process-tree RSS cap budget per native-build worker; `SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB` still wins |
 | `tree_rss_host_pct` | `50` | process-tree RSS cap ceiling as % of host physical RAM (validated 1..75 by both readers); `SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT` still wins |
@@ -116,6 +119,25 @@ shell. Before projecting its scratch HOME, centralized storage binds
 `SIMPLE_HOST_CONFIG` to the original user's config path, preserving an explicit
 `SIMPLE_HOST_CONFIG` override. Individual `SIMPLE_HOST_<KEY>` values are not
 exported; subprocess readers continue to resolve the configured layers.
+
+## Resource limits
+
+Memory and core limits are host config, not constants: each host edits its
+own `~/.config/simple/host.sdn` (or `config/host/<hostname>.sdn`). Physical RAM
+is detected; the share of it a single heavy build may use is
+`tree_rss_host_pct` (75 = 96 GB on a 128 GB host). Print what a launch script
+would use:
+
+```bash
+sh scripts/setup/host-limits.shs           # human-readable, with the winning layer
+eval "$(sh scripts/setup/host-limits.shs --env)"   # HOST_LIMIT_* variables
+```
+
+The driver resolves the same layers live through
+`std.nogc_sync_mut.host_limits` (env > user file > hostname-checked per-host
+file > defaults file > built-in). Specs:
+`test/01_unit/lib/nogc_sync_mut/host_limits_spec.spl`,
+`test/01_unit/app/cli/host_limit_consumers_spec.spl`.
 
 ## Simple-side reader
 
