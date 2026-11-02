@@ -202,3 +202,32 @@ receipt, and resume. QEMU evidence remains pending and unclaimed.
 Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
 
 Revalidated 2026-11-02: still plausible because doc requires fresh attested QEMU evidence before closing and none is recorded.
+
+## Analysis (2026-11-02, opf-8)
+
+Checked against current policy/design: re-scoped to evidence-only (attested ARM64 QEMU run); consistent with target-neutral HIR and MIR-selected target, no nil/Any involved.
+
+Windows x86_64 host: **not affected / not reproducible**.
+
+- The native backend has no AAPCS64 small-aggregate/HFA register-return path:
+  `src/compiler/70.backend/backend/native/isel_aarch64.spl` contains no
+  struct/aggregate return lowering (no x8 indirect-result, no HFA classification);
+  Simple struct values ride the target-independent aggregate transport already
+  swept by `native_aggregate_return_transport_class_spec.spl`.
+- The 2026-08-21 focused result above isolates the historical fault to the
+  ambiguous duplicate short-name `Color` binding (framebuffer vs paint), fixed at
+  consumers by the `FbColor` alias. That is a frontend/type-registration issue,
+  not an arm64 ABI defect; the duplicate-registration root stays tracked
+  separately.
+- No new fix commit since 91d21404821 (triage). What remains is evidence-only:
+  an attested ARM64 QEMU run reaching `desktop-ready`.
+
+Invariant spec (target-independent, assert-only):
+`test/01_unit/compiler/70.backend/color_struct_return_invariant_spec.spl`
+— `bin/simple.exe run` on Windows: 3 examples, 0 failures.
+
+TODO(opf-8): repro needs an aarch64 host (macOS arm64 or Linux arm64) with an
+admitted pure-Simple Stage-2/3 compiler: run
+`native_arm64_framebuffer_color_return_spec.spl` natively (expect
+`17,31,47,255`), then one attested ARM64 QEMU `ramfb` run to `desktop-ready`
+with a nonblank device-origin framebuffer capture and serial/QMP evidence.

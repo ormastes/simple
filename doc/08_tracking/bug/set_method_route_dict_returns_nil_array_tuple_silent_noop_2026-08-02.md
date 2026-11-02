@@ -1,11 +1,5 @@
 # `set` method: dict returns nil on the JIT; array/tuple silently no-op when a dict `.set` shares the module
 
-Status: FIXED (found already fixed in the seed at release/1.0.0; closed 2026-11-02, lane a6dffc9c/p12-3)
-
-Checked against current policy/design: obsolete because the seed already routes typed and erased dict `.set`/`.insert` to the fluent receiver-returning path (`mir/lower/lowering_expr_method.rs` returns `receiver_reg`; `codegen/instr/methods.rs` returns `receiver_val`; `closures_structs.rs` maps erased `set` to receiver-dispatched `rt_collection_set`). Array/tuple `.set` is a loud method-not-found, matching the interpreter. The non-nil return is consistent with nil-only-in-unsafe. Self-hosted side fixed per `dict_set_bracket_write_parity_2026-08-07.md`.
-
-Evidence: `cargo test -p simple-runtime --lib collection_set_tests` -> 6 passed (erased dict set mutates and returns receiver; array/tuple set exits 70 loudly). Historical report follows.
-
 ### Re-verification 2026-09-13 — unchanged, still OPEN
 
 Defect 1's minimal repro re-run on the Rust seed `build/vt4/bootstrap/simple.exe`
