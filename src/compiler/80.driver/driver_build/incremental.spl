@@ -43,6 +43,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.common.text_bytes.{text_to_bytes}
 use compiler.common.cache.canonical_identity.{canonical_identity_text_lt}
 use std.common.binary_inspect.{byte_to_hex}
+use compiler.driver.cache.native_object_source_key_v1.{native_scv_snapshot_root_v1, native_scv_snapshot_rebase_v1, native_object_source_key_v1}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_snapshot_v1, reverse_reference_owner_mark_known_v1,
     reverse_reference_owner_register_source_alias_v1,
@@ -2152,3 +2153,70 @@ pub fn build_cache_module_witness(cache: BuildCache, source: text) -> text:
     ""
 
 export native_module_cache_shadow_mismatch_v1, build_cache_module_witness
+
+pub fn build_cache_rebind_scv_snapshot_all_v1(cache: BuildCache, sources: [text]) -> i64:
+    """Move every BuildCache entry recorded under a PRIOR SCV snapshot
+    revision onto the current snapshot path of the same file (#5797), in ONE
+    pass before the native reuse loop (so dependency entries are already
+    rebound when a dependent's closure is checked). Every build compiles from
+    a fresh `build/scv/snapshots/scv-revision-v1-<tree digest>/` root, so
+    without this an unrelated one-file edit orphaned every entry. Only the KEY
+    moves: the recorded fingerprint, outputs, witness and dependency-interface
+    fold are kept, so build_cache_entry_is_valid still requires the current
+    bytes to hash to the recorded content and the caller still requires a
+    witness and capsule-receipt match. Dependency paths are rebased onto the
+    new root. A file with more than one prior-revision entry fails closed.
+    Returns the number of entries moved."""
+    # neutral key -> prior-revision keys (index once: O(entries + sources)).
+    var by_neutral: {text: [text]} = {}
+    for key in cache.entries.keys():
+        if native_scv_snapshot_root_v1(key) != "":
+            val neutral = native_object_source_key_v1(key)
+            var bucket: [text] = []
+            if by_neutral.contains_key(neutral):
+                bucket = by_neutral[neutral]
+            bucket.push(key)
+            by_neutral[neutral] = bucket
+    var moved = 0
+    for source in sources:
+        val new_root = native_scv_snapshot_root_v1(source)
+        if new_root == "" or cache.entries.contains_key(source):
+            continue
+        val neutral = native_object_source_key_v1(source)
+        if not by_neutral.contains_key(neutral):
+            continue
+        val bucket = by_neutral[neutral]
+        if bucket.len() != 1:
+            continue
+        val found = bucket[0]
+        val old_root = native_scv_snapshot_root_v1(found)
+        if old_root == new_root or not cache.entries.contains_key(found):
+            continue
+        val entry = cache.entries[found]
+        var dependencies: [text] = []
+        for dependency in entry.dependencies:
+            dependencies.push(native_scv_snapshot_rebase_v1(dependency, old_root, new_root))
+        val fingerprint = FileFingerprint(path: source,
+            content_hash: entry.fingerprint.content_hash,
+            modified_time: entry.fingerprint.modified_time,
+            size: entry.fingerprint.size)
+        cache.entries.remove(found)
+        cache.fingerprints.remove(found)
+        cache.fingerprints[source] = fingerprint
+        cache.entries[source] = DependencyEntry(
+            source: source, fingerprint: fingerprint,
+            dependencies: dependencies, outputs: entry.outputs,
+            deps_iface: entry.deps_iface,
+            interface_digest: entry.interface_digest,
+            module_witness: entry.module_witness,
+            macro_input_root: entry.macro_input_root)
+        # Same owner aliases build_cache_record_entry_with_fp registers.
+        reverse_reference_owner_register_source_alias_v1(source, source)
+        for output in entry.outputs:
+            reverse_reference_owner_register_source_alias_v1(output, source)
+        for dependency in dependencies:
+            reverse_reference_owner_register_source_alias_v1(dependency, dependency)
+        moved = moved + 1
+    moved
+
+export build_cache_rebind_scv_snapshot_all_v1
