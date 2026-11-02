@@ -117,3 +117,4 @@ a test result. Deferred command for whoever picks this up:
 bin/simple test test/01_unit/lib/text/rfind_optional_spec.spl
 ```
 
+**Revalidated 2026-11-02: still plausible because OPEN (root cause identified; fix deliberately NOT applied — see; no merged fix commit with a passing regression is cited in this doc.**

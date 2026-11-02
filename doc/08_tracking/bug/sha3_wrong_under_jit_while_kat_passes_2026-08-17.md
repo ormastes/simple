@@ -228,3 +228,5 @@ length, and repeats `89abcdef`/`01234567` — Keccak state words leaking rather 
 truncation. No regression vs the isolated build (which also only closed the wide-int half).
 
 **Status: wide-int family RESOLVED on the deployed seed; SHA3-under-JIT STILL OPEN.**
+
+**Revalidated 2026-11-02: still plausible because PARTIALLY FIXED 2026-08-17 — the 61-bit wide-int family defect this; no merged fix commit with a passing regression is cited in this doc.**

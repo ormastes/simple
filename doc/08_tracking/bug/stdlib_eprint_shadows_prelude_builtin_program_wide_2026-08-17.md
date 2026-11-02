@@ -300,3 +300,5 @@ not load the whole compiler into one process.
 
 Whether the stdlib `eprint` and the prelude builtin differ in stream/buffering,
 and whether `print`/`file_write` have sibling shadows.
+
+**Revalidated 2026-11-02: still plausible because OPEN — root cause RE-DIAGNOSED 2026-08-17 (the shadow is NOT the; no merged fix commit with a passing regression is cited in this doc.**

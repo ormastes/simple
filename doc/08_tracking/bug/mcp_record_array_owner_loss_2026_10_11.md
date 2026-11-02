@@ -46,3 +46,5 @@ gaps do not establish that every observed error has one cause. Keep OPEN until
 an immutable repaired producer passes fixtures and all eight actual sites.
 Separate MCP StructLit, extend, Result.map, float conversion, JSON optional
 array, and unlocated trim errors remain outside this change.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Canonical ID: mcp_record_array_owner_loss_2026_10_11; no merged fix commit with a passing regression is cited in this doc.**

@@ -117,3 +117,4 @@ an instrumented count of `scope.objects` length over time. The hot path is certa
 exact growth curve is inferred from `Vec::retain`'s definition and the per-surface call
 pattern, and has not been measured directly.
 
+**Revalidated 2026-11-02: still plausible because the report title (Stage 3 stalls in `rt_transient_heap_promote` — one enormous scan) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

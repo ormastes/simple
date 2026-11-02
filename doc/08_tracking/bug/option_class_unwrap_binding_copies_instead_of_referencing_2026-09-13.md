@@ -103,3 +103,4 @@ different code path than a bare class-typed parameter bind? Compare the
 seed's pattern-match/binding lowering for `Option::Some(x)` destructuring
 against a plain class parameter bind to find where the copy is introduced.
 
+**Revalidated 2026-11-02: still plausible because OPEN (2026-09-13); no merged fix commit with a passing regression is cited in this doc.**

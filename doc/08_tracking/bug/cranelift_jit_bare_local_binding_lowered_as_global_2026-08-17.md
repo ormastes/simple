@@ -186,3 +186,5 @@ to rewrite. Fix the resolver as the bug body already proposes, and consider a
 lint rule so a bare binding is a diagnostic rather than a silent deoptimisation.
 Separately, file the closure-capture JIT failure found above; it is a real,
 distinct gap with live occurrences.
+
+**Revalidated 2026-11-02: still plausible because OPEN — filed, not fixed (fix is not small/certain; see Root cause); no merged fix commit with a passing regression is cited in this doc.**

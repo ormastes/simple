@@ -39,3 +39,5 @@ aarch64-linux and x86_64-simpleos objects cannot be linked by an ELF linker
 ## Suspected area
 
 `src/compiler/70.backend/backend/llvm_native_link_*.spl` object-format selection.
+
+**Revalidated 2026-11-02: still plausible because the report title (aarch64-unknown-linux-gnu and x86_64-unknown-simpleos emit COFF instead of ELF:) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

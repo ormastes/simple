@@ -119,3 +119,5 @@ instead of the requested default.
 `"unwrap" | "unwrap_or" | "expect"` arm, plus the JIT `UnwrapOr` lowering), so
 it is out of scope for a pure-Simple fix. Root cause file:line for the JIT arm
 still NOT located — deliberately not guessed at.
+
+**Revalidated 2026-11-02: still plausible because the report title (JIT: `.unwrap_or(default)` on an absent optional returns nil instead of the def) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

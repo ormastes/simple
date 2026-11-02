@@ -37,3 +37,5 @@ compiles (`compiled=1 failed=0`).
 Propagate the declared field type of `self.<field>` into the method-call receiver type so a
 trait-typed field receiver takes the trait-dispatch path. Remove the workaround after that fix is
 verified with the full-CLI native-build.
+
+**Revalidated 2026-11-02: still plausible because - Severity: P1 (silent miscall class in seed) · Status: open (workaround active); no merged fix commit with a passing regression is cited in this doc.**

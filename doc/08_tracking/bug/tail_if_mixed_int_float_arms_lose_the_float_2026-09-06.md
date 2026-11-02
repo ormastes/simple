@@ -88,3 +88,5 @@ must update it.
 Agreeing-type arms are all correct as of 2026-09-06: f64/f64, f32/f32, i64/i64,
 text/text, `elif` chains, and nested tail `if`s. Verified in `_scratch/mabs5.spl`
 against the interpreter oracle.
+
+**Revalidated 2026-11-02: still plausible because the report title (Tail `if` with one float arm and one integer arm loses the value (JIT)) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

@@ -138,3 +138,5 @@ So `check-native-trailing-default-param` cannot give this row a verdict at
 present. Detail, and the driver-side fix that stops that abort being reported as
 a `7200s` timeout:
 `doc/08_tracking/bug/native_build_source_closure_zero_sources_2026-08-17.md`.
+
+**Revalidated 2026-11-02: still plausible because OPEN, diagnosed and bisected, unfixed; no merged fix commit with a passing regression is cited in this doc.**

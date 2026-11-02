@@ -74,3 +74,5 @@ ABI-trace change. Host availability fell ~7 GB faster than Stage 3's own RSS
 because two `native-build` processes from another lane (PIDs 449611, 449861,
 ~11 GB together, started 17:54 using this run's Stage 2 binary) ran
 concurrently. Projected full-HIR RSS at this slope: ~78 GB.
+
+**Revalidated 2026-11-02: still plausible because the report title (Stage 2 matrix full-CLI build peaks above 40 GiB in MIR lowering (41.8 GiB) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

@@ -46,3 +46,5 @@ Validation: focused shell constructor fixture controls and source inspections;
 pure-Simple unit/integration specifications remain AUTHORED_UNEXECUTED until a
 new admitted producer exists. Full compiler/lib/MCP checks and native bootstrap
 qualification remain pending under the task's source-only execution restriction.
+
+**Revalidated 2026-11-02: still plausible because OPEN — source repair and regression specifications authored; rebuilt-producer; no merged fix commit with a passing regression is cited in this doc.**

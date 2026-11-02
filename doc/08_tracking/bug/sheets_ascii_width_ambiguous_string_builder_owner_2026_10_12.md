@@ -21,3 +21,5 @@ runtime acceptance remain PENDING. This document claims no native or runtime PAS
 
 Initial source binding: `3fc904b31db05ca6b3d6d60528eb1b60dc770dc9`.
 Metadata integration parent: `cbf3d3facb5818c7d725ada4d8117674f5ce111a`.
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1). GitHub: https://github.com/ormastes/simple/issues/3314; no merged fix commit with a passing regression is cited in this doc.**

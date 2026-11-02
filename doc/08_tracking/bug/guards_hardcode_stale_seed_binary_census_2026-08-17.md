@@ -92,3 +92,5 @@ three-binary probe table is another lane's measurement, reproduced by them on tw
 independent fresh builds; full detail in
 `doc/08_tracking/bug/engine_divergence_guard_hardcodes_stale_seed_2026-08-17.md`
 (`2d461171550`).
+
+**Revalidated 2026-11-02: still plausible because the report title (27 guards and gates hardcode `bin/simple`) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

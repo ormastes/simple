@@ -21,3 +21,4 @@ bodies and passes. Do not refresh the broad baseline mechanically: each of the
 12 unrelated pairs needs an owner/link-profile review, and the stale
 `rt_thread_sleep` row needs removal only after confirming its producer moved.
 
+**Revalidated 2026-11-02: still plausible because the report title (Runtime bundle duplicate-symbol gate has unrelated baseline drift) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

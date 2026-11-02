@@ -131,3 +131,5 @@ to prevent: the fatal error is the `LBrace` one, several screens further down.
    with no line or column.
 3. Add a parse-level spec covering all four cells of the control table above,
    so the relative+braces combination cannot regress silently again.
+
+**Revalidated 2026-11-02: still plausible because OPEN — filed, not fixed. No parser fix attempted in this lane; no merged fix commit with a passing regression is cited in this doc.**

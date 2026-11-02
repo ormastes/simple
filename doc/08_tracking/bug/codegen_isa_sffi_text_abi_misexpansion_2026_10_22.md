@@ -48,3 +48,5 @@ lane owned the tree at filing time.
   expansion at the call sites.
 - Sibling bug: `stage2_sanity_p2_add_zero_source_files_scv_cold_snapshot_2026_10_22.md`
   (io_file_open chain, fixed).
+
+**Revalidated 2026-11-02: still plausible because the report title (Cranelift ISA/config SFFI wrappers hand-expand text with rt_string_data/rt_stri) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

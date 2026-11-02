@@ -72,3 +72,5 @@ Rust sources aborts a running bootstrap, so no change was attempted.
 Pinned copy of `src/compiler_rust/target/release/simple.exe`
 (Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix
 `1b62a1a42755774fc087`, built 2026-09-13). Windows 11 / Git Bash.
+
+**Revalidated 2026-11-02: still plausible because the report title (Seed JIT: `.?` passed directly as a `bool` call argument yields a non-boolean s) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
