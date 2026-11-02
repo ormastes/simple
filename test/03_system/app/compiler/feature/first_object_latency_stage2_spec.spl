@@ -9,6 +9,7 @@
 # build. The coordinator now clamps every shard phase to the published
 # closure size and runs tiny closures in process.
 use std.spec.*
+use std.io_runtime.{file_read}
 use app.cli.native_build_shard_admission.{native_build_shard_count_for_closure_v1,
     native_build_small_closure_max_v1, NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1}
 
@@ -40,3 +41,16 @@ describe "first native object latency on stage2":
             expect(native_build_small_closure_max_v1("0")).to_equal(0)
             expect(native_build_small_closure_max_v1("junk")).to_equal(NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1)
             expect(native_build_shard_count_for_closure_v1(8, 1, 0)).to_equal(1)
+
+    context "coordinator wiring":
+        it "clamps parse, HIR and MIR fan-out with the published closure count":
+            val src = file_read("src/app/cli/native_build_main.spl")
+            expect(src).to_contain("val closure_files = native_build_closure_selected_count_v1()")
+            expect(src).to_contain("requested_parse_shards, closure_files, small_closure_max)")
+            expect(src).to_contain("native_build_hir_shard_count(args), closure_files, small_closure_max)")
+            expect(src).to_contain("if requested_mir_parallel < 0: requested_mir_parallel else: native_build_shard_count_for_closure_v1(requested_mir_parallel, closure_files, small_closure_max)")
+
+        it "publishes and clears the selected count with the closure request":
+            val owner = file_read("src/app/cli/native_build_parse_closure_owner.spl")
+            expect(owner).to_contain("env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, \"1\") and")
+            expect(owner).to_contain("val selected_cleared = env_set(NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1, \"\")")
