@@ -51,3 +51,5 @@ Do not touch any of the RFC 7748 §5.2/§6.2 expected byte values.
 
 - `test/unit/lib/crypto/curve448_rfc7748_kat_spec.spl` (all scalar-mult and
   ECDH examples fail)
+
+**Revalidated 2026-11-02: still plausible because OPEN. Do not touch the expected vectors — RFC 7748 §5.2/§6.2; no merged fix commit with a passing regression is cited in this doc.**

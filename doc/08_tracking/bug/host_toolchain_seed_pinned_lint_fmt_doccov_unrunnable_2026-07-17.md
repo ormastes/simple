@@ -325,3 +325,4 @@ bug's title.
 
 OPEN. Redeploy path advanced: stage1-3 GREEN (cargo bootstrap clean), stage4 blocked by flat-AST-bridge/cranelift issue (cross-ref stage3_selfhost_parser_case_multielem_pattern doc). Pure-Simple fmt/lint/doc-coverage paths confirmed runnable via standalone entry points; 3 root-cause bugs fixed in those tools (read_file collision, cli_run_* collision, missing run_lint_file). Self-hosted redeploy remains the strategic fix; do not race it.
 
+**Revalidated 2026-11-02: still plausible because the report title (No pure-Simple binary can run lint/fmt/doc-coverage; seed treats doc-coverage a) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

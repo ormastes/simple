@@ -43,3 +43,4 @@ with `SIMPLE_EXECUTION_MODE=interpreter` completes.
 Open. Engine-divergence family
 (`doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`).
 
+**Revalidated 2026-11-02: still plausible because the report title (layout_run_full_with_ports core-dumps on nil-receiver field access under JIT) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

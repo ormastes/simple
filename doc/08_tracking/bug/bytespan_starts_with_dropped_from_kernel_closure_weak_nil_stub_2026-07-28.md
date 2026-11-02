@@ -246,3 +246,5 @@ untouched. Unit test:
 TODO(deferred-environment): once the Phase-2 compiler is admitted, run the full
 SimpleOS entry-closure build and confirm the real ByteSpan provider is retained
 and no weak nil stub is emitted.
+
+**Revalidated 2026-11-02: still plausible because the report title (ByteSpan.starts_with is dropped from the SimpleOS kernel closure and replaced b) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

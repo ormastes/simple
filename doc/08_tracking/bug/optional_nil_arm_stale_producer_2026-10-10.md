@@ -45,3 +45,5 @@ Final original-module evidence (retained local artifacts):
 - `original0424-final/module-0424/result.json`: `f664d091f0ecf6fd62d877fcadaa500802f2e4b372b235014847740e67e91136`
 - `original0424-final/independent-audit.json`: `456d101fa3b300693a3163c96de6b64e78f8535ade1b180254e4f927bd0edea0`
 - `original0424-final/cache-binding-addendum.json`: `4f9e8353da71cb8c3d109f71a8a2713ec610f060233813975202c19654ad3429`
+
+**Revalidated 2026-11-02: still plausible because Canonical bug: BUG-MIR-OPTION-NIL-ARM-STALE-PRODUCER-20261010. Status: OPEN; compatibility workaround for the retained producer. Background; no merged fix commit with a passing regression is cited in this doc.**

@@ -63,3 +63,5 @@ checks (exit 0; exact `smtp-recipient-arrays-ok` stdout). Receipt:
 `/home/ormastes/simple-phase4-web-a0-parallel-20261010/leaf-fixtures/smtp-api-epoch03/evidence.json`.
 This is focused provisional LLVM evidence, not a full application or release
 qualification; producer remains unadmitted.
+
+**Revalidated 2026-11-02: still plausible because OPEN; source repair and regressions AUTHORED_UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**

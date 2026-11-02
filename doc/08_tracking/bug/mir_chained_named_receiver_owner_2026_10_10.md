@@ -23,3 +23,5 @@ method call, with an adjacent negative unknown-method rejection regression.
 Second source workaround candidate: retain an explicit typed ByteSpan receiver before slice as well as the typed result; actual first result-only variant generated string-slice calls and failed its first equality check despite a nonempty object and successful link. Receipt `/home/ormastes/simple-phase4-web-a0-parallel-20261010/leaf-fixtures/typed-span/evidence.json`; disassembly diagnosis adjacent. New receiver candidate UNEXECUTED; original valid chained control remains unchanged.
 
 Receiver/input/result annotation candidate `df4abc1a2` also fails actual runtime: object16696B, link0, run1, emitted string-slice callee remains wrong. No recovery claimed. Permanent compiler dispatch repair is required; no further unchanged source spelling retries.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Tagged source workaround and regressions AUTHORED_UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**

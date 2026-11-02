@@ -153,3 +153,5 @@ the line-245 call), and is outside this mangling fix's locus.
 
 - A separate, concurrent fix addresses `rt_bytes_alloc` in
   `freestanding_runtime.c`; that symbol is unrelated to this mangling bug.
+
+**Revalidated 2026-11-02: still plausible because the report title (rv64 cross-module calls reference os__kernel__ names while definitions emit bar) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

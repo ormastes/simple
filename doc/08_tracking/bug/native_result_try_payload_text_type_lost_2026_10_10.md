@@ -73,3 +73,5 @@ with a freshly built stage2 producer (only the Rust seed was available; its JIT
 falls back to the interpreter). The MIR spec runs the Simple compiler's own
 lowering in the interpreter; the real driver's module-surface construction may
 differ from `module_surfaces_from_modules`.
+
+**Status:** FIXED (row closed 2026-11-02: fix commits 265252279c9 and 3aa79ca1610 are ancestors of release/1.0.0 with the decode_declared_enum_payload_slot routing present; test/01_unit/compiler/mir/result_try_text_payload_spec.spl on bin/simple.exe: Results: 3 total, 3 passed, 0 failed)

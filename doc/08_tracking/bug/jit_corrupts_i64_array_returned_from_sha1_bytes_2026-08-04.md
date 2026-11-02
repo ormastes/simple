@@ -246,3 +246,4 @@ Root cause is a Rust JIT codegen defect (`src/compiler_rust/compiler/src/codegen
 requiring a seed rebuild to fix and verify — out of scope for a pure-Simple
 shard fix. No change made. Leaving OPEN.
 
+**Revalidated 2026-11-02: still plausible because (superseded below): UNABLE-still-open — architecturally plausible per; no merged fix commit with a passing regression is cited in this doc.**

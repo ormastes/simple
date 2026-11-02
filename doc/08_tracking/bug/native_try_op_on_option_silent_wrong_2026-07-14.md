@@ -181,3 +181,4 @@ calls, returns, control-flow merges, Option methods, and early `?` absence now
 route through `ensure_option_handle`; the runtime recognizes only enum id 1 /
 None ordinal 1 plus the raw-nil migration fallback. Execution remains pending.
 
+**Revalidated 2026-11-02: still plausible because typed local/direct-call support implemented; execution and uniform tagged Option ABI pending; no merged fix commit with a passing regression is cited in this doc.**

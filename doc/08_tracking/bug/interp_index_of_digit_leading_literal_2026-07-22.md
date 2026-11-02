@@ -249,3 +249,5 @@ other agents are concurrently editing compiler lowering files this session —
 would repeat the already-rejected approach and risks regressing `print`/`??`
 for all values, per the explicit prior-session finding. This entry is a
 status re-confirmation only, landed as a doc-only change.
+
+**Revalidated 2026-11-02: still plausible because OPEN — root-caused 2026-07-22; architectural fix required; no merged fix commit with a passing regression is cited in this doc.**

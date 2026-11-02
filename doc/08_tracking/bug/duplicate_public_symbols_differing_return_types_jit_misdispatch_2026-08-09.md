@@ -196,3 +196,5 @@ Regression guard:
    produces wrong answers and can vacate specs.
 3. Use the 373 count as the regression metric. Absence of a specific warning is
    the bar for a single symbol; a falling total is the bar for the campaign.
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**

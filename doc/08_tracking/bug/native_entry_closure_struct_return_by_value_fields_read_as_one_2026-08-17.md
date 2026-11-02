@@ -192,3 +192,4 @@ concurrent lanes and this defect's own unblock condition explicitly
 requires a completed build plus two RED specs going green, which is
 well beyond this lane's per-item budget. Leaving OPEN, no new attempt.
 
+**Revalidated 2026-11-02: still plausible because OPEN — root cause isolated; the seed-side fail-open IS now fixed in; no merged fix commit with a passing regression is cited in this doc.**

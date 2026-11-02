@@ -103,3 +103,4 @@ artifact build cannot succeed while that holds, and re-attempting these
 benchmarks before it is fixed would only re-derive the same blocker. Detail:
 `doc/08_tracking/bug/aot_llvm_void_type_struct_probe_2026-08-10.md`.
 
+**Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**

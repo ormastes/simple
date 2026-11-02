@@ -8,3 +8,5 @@ Field syntax qualification is separate from field access control: CoreDecl retai
 
 Canonical bug DB ID: class_scoped_visibility_parser_failure_2026_10_10. Source repair commit: 43601a167aa75e2639479dcf8d0cf478e7cf0fb8. Qualified DB-tool reconciliation is pending until the full pure-Simple CLI is built.
 Nearby source-review prevention: only invoke the visibility helper for pub or a pri marker without a following colon. An ordinary field named pri must remain a field; sixth authored scenario distinguishes it from pri me. UNEXECUTED.
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**

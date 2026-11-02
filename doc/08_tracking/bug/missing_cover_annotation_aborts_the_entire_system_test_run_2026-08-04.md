@@ -220,3 +220,4 @@ threading corrupts every session's verdict) — the same caution applies now,
 compounded by this host's 300-900s per-test-invocation cost making a safe
 verify-before-land loop impractical this pass. No change made. Leaving OPEN.
 
+**Revalidated 2026-11-02: still plausible because stays OPEN. Classified ARCHITECTURAL/OUT-OF-SCOPE for this pass; no merged fix commit with a passing regression is cited in this doc.**

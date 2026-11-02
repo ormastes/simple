@@ -109,3 +109,5 @@ guard-lane files this bug was found while working on.
   unaffected by the generics rewrite.
 - `interpreter_extern/atomic.rs:486-527` (`value_to_runtime`/`runtime_to_value`)
 - `concurrent_providers/native_impl.rs:858+` (`NativeLockProvider`, unaffected)
+
+**Revalidated 2026-11-02: still plausible because the report title (Mutex/RwLock silently null non-int/float/bool values (text) under the default P) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

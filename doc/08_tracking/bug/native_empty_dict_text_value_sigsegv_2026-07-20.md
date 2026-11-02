@@ -85,3 +85,5 @@ The same blocker is why `check-engine-differential`'s native lane answers 0 of
 19 fixtures (see that gate's DEGRADED COVERAGE line). Whoever clears the
 persistent package index unblocks both at once, and this entry becomes
 measurable again.
+
+**Revalidated 2026-11-02: still plausible because the report title (A text value stored into an empty-literal {} dict SIGSEGVs on read or compare u) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
