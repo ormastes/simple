@@ -1,4 +1,4 @@
-# Rust HIR lowering boxes enum bool payloads as integers
+# Rust MIR lowering boxes enum bool payloads as integers
 
 Status: OPEN (P1) — native regression failure and source owner identified; no production fix or closure claim.
 
@@ -18,7 +18,7 @@ failed generic case is separate from the guarded optional-reference binding
 fix, whose 20-check and 8-check cases pass on the same seed.
 
 The source owner is Rust MIR lowering in
-`src/compiler_rust/compiler/src/hir/lower/lowering_expr_call.rs`: the
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs`: the
 `needs_box` path includes `BOOL` and then emits `BoxInt`, producing an integer
 tagged value for a boolean payload. In the retained native disassembly, the
 input is boxed via `rt_value_int` before `rt_array_push`; optional projection

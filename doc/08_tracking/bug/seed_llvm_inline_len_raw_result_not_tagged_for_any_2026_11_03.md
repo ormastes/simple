@@ -17,7 +17,7 @@ The Astra-reviewed repair is a four-owner HIR change: optional provenance
 tracking (`HashSet` and `register_optional`), a central optional type resolver,
 and guarded inner-binding handling for Array, String, Struct, and Enum values,
 with regression tests. The current seed build and native results are recorded
-below. Astra reviewed the retained compile-only MIR mechanism receipt
+below. Astra reviewed the later native campaign's offline mechanism receipt
 `D5F3077A70BAC048221F7025E2303A88536F0E02EBEC0B5DA5760B2B8490D719` and
 approved its scoped finding. The corrected focused Rust optional-binding test
 run passed; do not infer an LLVM `Any`-destination fix from the earlier
@@ -56,11 +56,16 @@ explains the observed failing path but does not establish a production fix or
 shared cause. Keep generic tuple/boolean behavior, the existing candidate AV,
 and LayoutAttr requalification separately OPEN.
 
+The SSpec wrapper was statically reviewed but was not executed by the
+self-hosted runner. Native execution evidence above came from a bounded
+PowerShell campaign.
+
 The initial `optional_` selection produced 30 passes and one failure caused by
 the test's parameter offset. A corrected exact-test retry, with test-only
 source diff SHA256
 `C5F6145293B57237D054136091EA360C8597F329ADF297AB522A8612D3D38405`, passed
-that remaining test against the same immutable D18 seed; no seed rebuild or
+that remaining test in the Rust test harness using corrected `cfg(test)`
+source. The immutable native D18 seed remained unchanged; no seed rebuild or
 30-test rerun was performed. The retry result SHA256 is
 `2F8207C35ACCDDA5F0B1A405FF3548F6F7BC99EDB1EDFFA2AFAF1F93F0A14803` and its
 input pin SHA256 is
@@ -107,7 +112,7 @@ not a build of the current guarded optional-reference repair; its executable
 does not qualify that repair. The current repair's later seed, tests, and
 verification are recorded above.
 
-## Native outcomes and compile-only MIR capture
+## Historical LLVM trial and compile-only MIR capture
 
 A later fixed-native one-binary attempt at
 `C:/dev/p3new/tuple_abi_native_verify_20261103/attempt_01` records
@@ -128,7 +133,7 @@ establish any broader status.
 A separate compile-only capture at
 `C:/dev/p3new/tuple_abi_mir_diag_20261103/attempt_01` completed with rc 0 in
 15.6 seconds and 0.18 GiB peak process-tree RSS; its status explicitly says no
-executable was run. The mechanism receipt SHA256 is
+executable was run. This historical compile-only receipt SHA256 is
 `DF1692B194D43D7A590EDBD44689A8D4970381E81B6898C6300E18878D95F0B1`. It records
 MIR `MethodCallStatic` `len` with receiver VReg(144), destination VReg(146),
 and receiver type ID 71, followed by integer literal 2 boxed to VReg(148) and
