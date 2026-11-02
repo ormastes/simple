@@ -9,7 +9,7 @@ fresh dated repro if the symptom returns.
 **Date:** 2026-08-17
 **Severity:** P1 — silent wrong-answer bug. No diagnostic, correct length, wrong
 contents. Found because it made X25519 compute the wrong shared secret.
-**Status:** OPEN
+**Status:** FIXED (row closed 2026-11-02: the repro below prints 5/5/5/3 and `len 2 2` on the repo seed `bin/simple.exe run`; `rt_array_copy` fix present at `src/compiler_rust/runtime/src/value/collections.rs:7088`)
 **Status:** ROOT-CAUSED and FIXED 2026-08-17 in `rt_array_copy`
 (`src/compiler_rust/runtime/src/value/collections.rs`), commit `a4cc6f61dfb`.
 
