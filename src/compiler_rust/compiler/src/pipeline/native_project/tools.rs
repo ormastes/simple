@@ -122,7 +122,7 @@ fn archive_has_exact_runtime_members(archive: &Path, inputs: &[&str]) -> bool {
         .iter()
         .copied()
         .filter(|input| input.ends_with(".c"))
-        .map(|input| format!("{}.{}", input.trim_end_matches(".c"), host_object_extension()))
+        .map(|input| format!("{}.{}", core_c_object_stem(input), host_object_extension()))
         .collect();
     actual.sort();
     expected.sort();
@@ -403,6 +403,26 @@ fn run_core_c_command(command: &mut std::process::Command) -> Result<(), String>
     }
 }
 
+/// Per-OS async driver owners for the core-C composition. Mirrors
+/// `runtime_core_c_platform_sources_v1` in
+/// src/compiler/70.backend/backend/runtime_compiler.spl: platform/async_driver.c
+/// owns the 14 rt_driver_* exports and dispatches to one OS backend (IOCP on
+/// Windows). Without them the seed->stage2 bootstrap_main link fails with 15
+/// undefined rt_driver_* symbols. Other OS backends are not yet admitted.
+pub(crate) fn core_c_platform_sources(windows_target: bool) -> &'static [&'static str] {
+    if windows_target {
+        &["platform/async_driver.c", "platform/async_windows.c"]
+    } else {
+        &[]
+    }
+}
+
+/// Flat object/archive-member stem for a core-C source that may live in a
+/// subdirectory (`platform/async_driver.c` -> `platform_async_driver`).
+pub(crate) fn core_c_object_stem(source: &str) -> String {
+    source.trim_end_matches(".c").replace('/', "_")
+}
+
 fn build_c_runtime_library(
     build_dir: &Path,
     include_stage4_hosted: bool,
@@ -605,6 +625,9 @@ fn build_c_runtime_library(
         // this in the include_stage4_hosted == false arm only.
         runtime_inputs.push("runtime_cranelift_bridge_stub.c");
     }
+    runtime_inputs.extend_from_slice(core_c_platform_sources(
+        target.os == simple_common::target::TargetOS::Windows,
+    ));
 
     let fingerprint = format!("{};no_rust_array_packing={no_rust_array_packing}",
         runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?);
@@ -662,7 +685,7 @@ fn build_c_runtime_library(
             .collect::<Vec<_>>()
             .into_par_iter()
             .map(|source| {
-                let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
+                let object = build_dir.join(format!("{}.{}", core_c_object_stem(source), obj_ext));
                 let mut command = std::process::Command::new(&cc);
                 if msvc {
                     command
@@ -1259,6 +1282,29 @@ fn executable_file_names(tool: &str) -> Vec<String> {
         vec![format!("{tool}.exe"), tool.to_string()]
     } else {
         vec![tool.to_string()]
+    }
+}
+
+#[cfg(test)]
+mod core_c_platform_source_tests {
+    use super::{core_c_object_stem, core_c_platform_sources};
+
+    #[test]
+    fn windows_core_c_carries_async_driver_and_iocp_backend() {
+        // Parity with runtime_core_c_platform_sources_v1 (runtime_compiler.spl):
+        // without these the seed->stage2 link leaves the 14 rt_driver_* externs
+        // undefined (stage2_runtime_missing_rt_heap_aux_live_bytes_2026-11-02 sibling).
+        assert_eq!(
+            core_c_platform_sources(true),
+            &["platform/async_driver.c", "platform/async_windows.c"]
+        );
+        assert!(core_c_platform_sources(false).is_empty());
+    }
+
+    #[test]
+    fn subdir_sources_get_flat_object_stems() {
+        assert_eq!(core_c_object_stem("platform/async_driver.c"), "platform_async_driver");
+        assert_eq!(core_c_object_stem("runtime_native.c"), "runtime_native");
     }
 }
 
