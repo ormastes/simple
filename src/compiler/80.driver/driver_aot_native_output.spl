@@ -44,6 +44,7 @@ use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_pool_run
     NATIVE_CODEGEN_POOL_ENV_V1, NATIVE_CODEGEN_WORKER_KIB_ENV_V1,
     NATIVE_CODEGEN_JOB_PASS_V1}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes_result}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, find_llc}
 use compiler.backend.llvm_capability.{find_archive_portable}
@@ -4529,6 +4530,8 @@ fn _driver_codegen_pool_lane_reason_v1(backend_name: text, is_release: bool,
         return "SIMPLE_LLVM_BITCODE_DEBUG=1"
     if (env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? "") == "1":
         return "SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ=1"
+    if native_tool_strict_requested_v1():
+        return "strict native tool admission (nm symbol check runs in the serial lane)"
     if find_llc() == "":
         return "llc not found"
     ""
@@ -4561,6 +4564,8 @@ fn _driver_codegen_pool_emit_v1(batch: FrozenNativeModuleCapsuleBatchV1,
         return none
     val ice_gate = ice_boundary_module_start(name, capsule.cache_source, "codegen", backend_name)
     if ice_gate != "":
+        # Close the breadcrumb; build() reopens it and reports the refusal.
+        ice_boundary_module_done(name, "codegen")
         return none
     val reason = llvm_module_ir_to_path_v1(capsule.mir_module, is_release,
         opt_level, capsule.target_cpu, capsule.storage_snapshot.sites, ir_path)
