@@ -1,6 +1,6 @@
-# dir_tldr_aspect: Agent Task Breakdown (DRAFT)
+# dir_tldr_aspect: Agent Task Breakdown (selection made 2026-11-02; implementation deferred as TODO 418-430)
 
-Pending requirement selection. Lane scope shrinks or grows with the chosen options.
+Selected: A1 B3 C1 D1 D-T3 E1 F1 G1 H1-H5 (NFR N1 N2 N4-N8). Lanes below apply as written; E2/E3, F2/F3, A2/A3 lanes are dropped.
 
 | Lane | Model | Scope | Depends |
 |---|---|---|---|
