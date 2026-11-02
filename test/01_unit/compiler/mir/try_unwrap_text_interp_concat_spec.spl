@@ -1,0 +1,121 @@
+# Regression: bug stage2_try_unwrap_text_typed_as_i64_2026-11-02.
+# The frozen stage2 (ef0681fc0e1) typed a `?`-unwrapped Result<text, _> as i64
+# inside interpolation / `+` and rendered the heap handle with
+# rt_raw_i64_to_string. Fixed in source by 0528a9ed3ac
+# (decode_declared_enum_payload_slot Str arm). This spec pins the inline
+# shapes: interpolation, inline concat, text compare and text argument.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+val tu_source = "fn f() -> Result<text, text>:\n    Ok(\"x\")\nfn take(s: text) -> text:\n    s + \"!\"\nfn g() -> Result<text, text>:\n    val s = \"a{f()?}\"\n    Ok(s)\nfn h() -> Result<text, text>:\n    Ok(\"a\" + f()?)\nfn c() -> Result<bool, text>:\n    Ok(f()? == \"x\")\nfn k() -> Result<text, text>:\n    Ok(take(f()?))\n"
+
+fn tu_callee_is(callee: MirOperand, name: text) -> bool:
+    match callee.kind:
+        case MirOperandKind.Const(MirConstValue.Str(actual), _):
+            return actual == name or actual.ends_with("." + name)
+        case _: return false
+
+fn tu_call_count(function: MirFunction, name: text) -> i64:
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    if tu_callee_is(callee, name): count = count + 1
+                case _: ()
+    count
+
+# Static check: every rt_enum_payload word (the `?` Ok payload) is restored to
+# text via rt_interp_cstr and never reaches rt_raw_i64_to_string.
+fn tu_payload_text_typed(function: MirFunction) -> bool:
+    var payloads: [i64] = []
+    var restored: [i64] = []
+    var rendered: [i64] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(dest, callee, args):
+                    if tu_callee_is(callee, "rt_enum_payload"):
+                        if val local = dest: payloads.push(local.id)
+                    val is_restore = tu_callee_is(callee, "rt_interp_cstr")
+                    val is_render = tu_callee_is(callee, "rt_raw_i64_to_string")
+                    for arg in args:
+                        match arg.kind:
+                            case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                if is_restore: restored.push(local.id)
+                                if is_render: rendered.push(local.id)
+                            case _: ()
+                case _: ()
+    if payloads.len() == 0: return false
+    for id in payloads:
+        if not restored.contains(id): return false
+        if rendered.contains(id): return false
+    true
+
+fn tu_lowered(name: text) -> MirFunction:
+    val parsed = parse_full_frontend(tu_source, "tryunwrap.spl", "tryunwrap", Logger(level: 0))
+    var hir = HirLowering.new()
+    val module = hir.lower_module(parsed)
+    expect(hir.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(module.symbols)
+    val mir = lowering.lower_module(module, [module])
+    expect(lowering.errors.len()).to_equal(0)
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name): return function
+    fail("missing lowered function {name}")
+
+fn run_f() -> Result<text, text>:
+    Ok("x")
+
+fn run_take(s: text) -> text:
+    s + "!"
+
+fn run_g() -> Result<text, text>:
+    val s = "a{run_f()?}"
+    Ok(s)
+
+fn run_h() -> Result<text, text>:
+    Ok("a" + run_f()?)
+
+fn run_c() -> Result<bool, text>:
+    Ok(run_f()? == "x")
+
+fn run_k() -> Result<text, text>:
+    Ok(run_take(run_f()?))
+
+describe "stage2_try_unwrap_text_typed_as_i64: `?` text payload in text contexts":
+    it "keeps the `?` payload text-typed in interpolation (g)":
+        val function = tu_lowered("g")
+        expect(tu_payload_text_typed(function)).to_be(true)
+        expect(tu_call_count(function, "rt_raw_i64_to_string")).to_equal(0)
+
+    it "keeps the `?` payload text-typed in inline concat (h)":
+        val function = tu_lowered("h")
+        expect(tu_payload_text_typed(function)).to_be(true)
+        expect(tu_call_count(function, "rt_raw_i64_to_string")).to_equal(0)
+
+    it "keeps the `?` payload text-typed in a text compare (c)":
+        val function = tu_lowered("c")
+        expect(tu_payload_text_typed(function)).to_be(true)
+        expect(tu_call_count(function, "rt_raw_i64_to_string")).to_equal(0)
+
+    it "keeps the `?` payload text-typed as a text argument (k)":
+        val function = tu_lowered("k")
+        expect(tu_payload_text_typed(function)).to_be(true)
+        expect(tu_call_count(function, "rt_raw_i64_to_string")).to_equal(0)
+
+    it "produces text values when executed":
+        expect(run_g().unwrap()).to_equal("ax")
+        expect(run_h().unwrap()).to_equal("ax")
+        expect(run_c().unwrap()).to_be(true)
+        expect(run_k().unwrap()).to_equal("x!")
