@@ -108,17 +108,22 @@ describe "native-build MIR output preflight":
         expect(native_build_mir_output_is_both_v1(["entry.spl"], false, true)).to_equal(false)
         expect(native_build_mir_output_is_both_v1(["--emit-smf"], false, true)).to_equal(true)
 
-    it "runs the shared preflight after selective dispatch and before worker budgeting":
+    it "runs the shared preflight after the selective-lane refusal and before worker budgeting":
         val source = file_read("src/app/cli/native_build_main.spl")
-        val start = source.index_of("fn native_build_mir_shard_parallel(args:")
-        val end = source.index_of("fn native_build_mir_selective_parallel_v1(args:")
-        expect(start >= 0 and end > start).to_equal(true)
-        val coordinator = source.substring(start, end)
-        val selective = coordinator.index_of("return native_build_mir_selective_parallel_v1(args)")
-        val preflight = coordinator.index_of("if native_build_mir_output_requires_full_set_v1(args, false,")
-        val budget = coordinator.index_of("val requested = native_build_shard_threads(args,")
-        expect(selective >= 0 and preflight > selective and budget > preflight).to_equal(true)
-        expect(coordinator.substring(preflight, budget)).to_contain("return 0")
+        # Slice by marker split, not index_of+substring: the source has
+        # non-ASCII comment text, and index_of/substring offsets disagree.
+        val head = source.split("fn native_build_mir_shard_parallel(args:")
+        expect(head.len()).to_equal(2)
+        # The selective MIR lane was removed (2026-10-31); the coordinator now
+        # refuses SIMPLE_MIR_SELECTIVE before the shared preflight.
+        val coordinator = head[1].split("\nfn ")[0]
+        val by_refusal = coordinator.split("SIMPLE_MIR_SELECTIVE")
+        expect(by_refusal.len() >= 2).to_equal(true)
+        val by_preflight = by_refusal[by_refusal.len() - 1].split("if native_build_mir_output_requires_full_set_v1(args, false,")
+        expect(by_preflight.len()).to_equal(2)
+        val by_budget = by_preflight[1].split("val requested = native_build_shard_threads(args,")
+        expect(by_budget.len()).to_equal(2)
+        expect(by_budget[0]).to_contain("return 0")
         val worker = file_read("src/app/io/_CliCompile/compile_targets.spl")
         expect(worker).to_contain("options.output_format = native_build_output_format_v1(build_mode, true, false, native_group_requested)")
         expect(worker).to_contain("options.output_format = native_build_output_format_v1(build_mode, false,")
