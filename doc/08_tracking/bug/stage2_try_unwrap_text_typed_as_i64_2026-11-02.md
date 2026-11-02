@@ -39,5 +39,26 @@ between ef0681fc0e1 and release/1.0.0.
 
 ## Removal
 
-No source workaround. Retire once stage3 is rebuilt from a tree containing
+Retire the tagged workaround once stage3 is rebuilt from a tree containing
 0528a9ed3ac and the env-policy digest is deterministic.
+
+## Workaround (stage3 closure, 2026-11-02)
+
+The s3 self-build is still produced by the frozen stage2, so the affected
+stage3-closure sources were rewritten into the typed-local form, tagged
+`# @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02`:
+
+    val x: text = match f(...):
+        case Ok(v): v
+        case Err(e): return Err(e)
+
+Earlier `?` operands of the same statement are hoisted in source order so
+the first failing `?` still returns. Scope is `Result<text|str, _>` only:
+`[u8]`/array payloads go through `runtime_array_locals` and `Option<text>`
+through `option_text_value` at ef0681fc0e1. 274 sites in 51 modules were
+rewritten here. The env-policy handoff and driver parse files belong to the
+parse-path lane (s3_env_policy_digest_nondeterministic_2026-11-02). The
+regression spec is test/01_unit/compiler/mir/try_text_typed_match_workaround_spec.spl.
+
+Removal: once stage3 is rebuilt by a compiler containing 0528a9ed3ac, revert
+the tagged sites (`rg 'bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02' src`).
