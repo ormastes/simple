@@ -147,11 +147,14 @@ struct FixClaim:
     heartbeat_at: text
 
 fn load_fixing_claims(db_path: text) -> [FixClaim]:
+    # Same holder rule as scripts/check/bug-claim.shs: among `fixing` rows at or
+    # strictly after the newest non-fixing row (released/done) of a bug, the earliest
+    # claimed_at holds it. No such row means nobody is fixing it.
     if not file_exists(db_path):
         return []
-    var newest_ids: [text] = []
-    var newest: [FixClaim] = []
-    var newest_state: [text] = []
+    var ids: [text] = []
+    var states: [text] = []
+    var rows: [FixClaim] = []
     var in_table = false
     for line in file_read(db_path).split("\n"):
         val trimmed = line.trim()
@@ -165,26 +168,33 @@ fn load_fixing_claims(db_path: text) -> [FixClaim]:
         val f = parse_csv_fields(trimmed)
         if f.len() != 7:
             continue
-        val claim = FixClaim(bug_id: f[0], session_id: f[2], claimed_at: f[3], heartbeat_at: f[4])
-        var idx = -1
-        var i = 0
-        while i < newest_ids.len():
-            if newest_ids[i] == f[0]:
-                idx = i
-            i = i + 1
-        if idx < 0:
-            newest_ids.push(f[0])
-            newest.push(claim)
-            newest_state.push(f[1])
-        elif newest[idx].claimed_at <= claim.claimed_at:
-            newest[idx] = claim
-            newest_state[idx] = f[1]
+        ids.push(f[0])
+        states.push(f[1])
+        rows.push(FixClaim(bug_id: f[0], session_id: f[2], claimed_at: f[3], heartbeat_at: f[4]))
     var out: [FixClaim] = []
-    var j = 0
-    while j < newest.len():
-        if newest_state[j] == "fixing":
-            out.push(newest[j])
-        j = j + 1
+    var done_ids: [text] = []
+    var i = 0
+    while i < ids.len():
+        val id = ids[i]
+        i = i + 1
+        if done_ids.contains(id):
+            continue
+        done_ids.push(id)
+        var cut = ""
+        var k = 0
+        while k < ids.len():
+            if ids[k] == id and states[k] != "fixing" and rows[k].claimed_at > cut:
+                cut = rows[k].claimed_at
+            k = k + 1
+        var holder = -1
+        k = 0
+        while k < ids.len():
+            if ids[k] == id and states[k] == "fixing" and rows[k].claimed_at > cut:
+                if holder < 0 or rows[k].claimed_at < rows[holder].claimed_at:
+                    holder = k
+            k = k + 1
+        if holder >= 0:
+            out.push(rows[holder])
     out
 
 fn _generated_date() -> text:
