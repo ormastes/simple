@@ -29,6 +29,8 @@ use compiler.driver.driver_log_helpers.{log_build_progress}
 use compiler.common.config.{Logger}
 use compiler.common.attributes.{DriverManifestAttr}
 use compiler.mir.mir_data.{MirModule}
+use compiler.driver.driver_build.smf_staged_parts_v1.{smf_parts_assemble_objects_v1,
+    smf_parts_assemble_manifests_v1}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
@@ -177,48 +179,65 @@ impl CompilerDriver:
             case Err(e):
                 CompileResult.CodegenError("Self-contained build failed: {e}")
 
-    me collect_smf_bytes() -> Result<[u8], CompileResult>:
+    me smf_record_module_parts_v1(names: [text]) -> text:
+        """Compile the SMF object + driver-manifest bytes of each named module
+        still held in ctx.mir_modules into native_staged_codegen's part maps
+        (smf_staged_parts_v1.spl). Staged batches and MIR shards call it before
+        releasing their MIR; collect_smf_bytes records whatever is still held.
+        Returns "" or the first module's compile error."""
         val ctx: CompileContext = self.ctx
-        val log = ctx.logger
         val backend_name = ctx.options.backend
         val opt_level = compileoptions_effective_mir_opt_level(ctx.options)
-        var all_object_bytes: [u8] = []
-
-        # Fail closed. An SMF with no code still gets a `main` symbol of size
-        # 0 (smf_writer), and the loader then jumps into it. Zero modules,
-        # a module with functions but no object, or no code in total are
-        # compile errors, never a successful empty artifact.
-        if ctx.mir_modules.keys().len() == 0:
-            return Err(CompileResult.CodegenError(
-                "SMF compile produced no MIR modules; nothing to package"))
-        for name in ctx.mir_modules.keys():
-            smf_log_trace(log, "compiling module for SMF: {name}")
+        for name in names:
+            if not ctx.mir_modules.contains_key(name):
+                continue
+            smf_log_trace(ctx.logger, "compiling module for SMF: {name}")
+            val module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend(
                 backend_name,
-                ctx.mir_modules[name],
+                module,
                 ctx.options.release,
                 opt_level
             )
             match compiled:
                 case Err(err):
-                    return Err(CompileResult.CodegenError(
-                        "AOT compile error in {name}: {err.to_text()}"))
-                case Ok(module):
+                    return "AOT compile error in {name}: {err.to_text()}"
+                case Ok(compiled_module):
                     var module_bytes: [u8] = []
-                    if val obj_bytes = module.object_code:
+                    if val obj_bytes = compiled_module.object_code:
                         module_bytes = obj_bytes
-                    if module_bytes.len() == 0 and ctx.mir_modules[name].functions.len() > 0:
-                        return Err(CompileResult.CodegenError(
-                            "AOT compile error in {name}: backend returned no object code for {ctx.mir_modules[name].functions.len()} function(s)"))
-                    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                    all_object_bytes = bytes_concat_copy_v1(all_object_bytes, module_bytes)
+                    if module_bytes.len() == 0 and module.functions.len() > 0:
+                        return "AOT compile error in {name}: backend returned no object code for {module.functions.len()} function(s)"
+                    self.native_staged_codegen.smf_part_objects[name] = module_bytes
+                    self.native_staged_codegen.smf_part_manifests[name] = smf_module_driver_manifest_bytes_v1(module)
                 case _:
-                    return Err(CompileResult.CodegenError(
-                        "AOT compile error in {name}: backend result not Ok"))
+                    return "AOT compile error in {name}: backend result not Ok"
+        ""
+
+    me collect_smf_bytes() -> Result<[u8], CompileResult>:
+        # Fail closed. An SMF with no code still gets a `main` symbol of size
+        # 0 (smf_writer), and the loader then jumps into it. Zero modules,
+        # a module with functions but no object, or no code in total are
+        # compile errors, never a successful empty artifact.
+        var held_names: [text] = []
+        for held_name in self.ctx.mir_modules.keys():
+            held_names = held_names.push(held_name)
+        val record_error = self.smf_record_module_parts_v1(held_names)
+        if record_error != "":
+            return Err(CompileResult.CodegenError(record_error))
+        val ctx: CompileContext = self.ctx
+        # Parts are keyed by module name and assembled in sorted key order,
+        # the order the whole-program loop iterated ctx.mir_modules, so a
+        # staged or sharded build packages the same bytes.
+        val module_count = self.native_staged_codegen.smf_part_objects.keys().len()
+        if module_count == 0:
+            return Err(CompileResult.CodegenError(
+                "SMF compile produced no MIR modules; nothing to package"))
+        val all_object_bytes = smf_parts_assemble_objects_v1(self.native_staged_codegen.smf_part_objects)
 
         if all_object_bytes.len() == 0:
             return Err(CompileResult.CodegenError(
-                "SMF compile produced no object code across {ctx.mir_modules.keys().len()} module(s)"))
+                "SMF compile produced no object code across {module_count} module(s)"))
         # extract_code_from_object only understands ELF and passes anything
         # else through as raw code, so a COFF or Mach-O object would be
         # loaded and entered at its file header.
@@ -236,7 +255,7 @@ impl CompilerDriver:
             ctx.source_content_hashes_owner[0]
         else:
             0
-        val manifest_bytes = smf_collect_driver_manifest_bytes(ctx.mir_modules)
+        val manifest_bytes = smf_parts_assemble_manifests_v1(self.native_staged_codegen.smf_part_manifests)
         val launch_metadata_bytes = smf_render_launch_metadata().bytes()
         val target = Target.host()
         val mode = ctx.options.smf_output_mode
@@ -263,16 +282,14 @@ impl CompilerDriver:
             generate_smf_with_options(all_object_bytes, opts)
         Ok(smf_bytes)
 
-fn smf_collect_driver_manifest_bytes(modules: Dict<text, MirModule>) -> [u8]:
+fn smf_module_driver_manifest_bytes_v1(module: MirModule) -> [u8]:
     var payload: [u8] = []
-    for module_name in modules.keys():
-        val module = modules[module_name]
-        for fn_ in module.functions.values():
-            if fn_.has_driver_manifest_attr:
-                # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                payload = bytes_concat_copy_v1(payload,
-                    smf_encode_driver_manifest_record(
-                        fn_.name, fn_.driver_manifest_attr))
+    for fn_ in module.functions.values():
+        if fn_.has_driver_manifest_attr:
+            # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
+            payload = bytes_concat_copy_v1(payload,
+                smf_encode_driver_manifest_record(
+                    fn_.name, fn_.driver_manifest_attr))
     payload
 
 fn smf_encode_driver_manifest_record(

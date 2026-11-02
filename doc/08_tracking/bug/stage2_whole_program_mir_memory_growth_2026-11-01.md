@@ -100,3 +100,17 @@ $env:SIMPLE_MIR_SHARD_WORKER_KB="40000000" # was 24000000; forces parallel=1 und
 - Let `Both` output evict MIR after per-module codegen. Re-derive the SMF side from per-module archives instead of re-iterating `ctx.mir_modules` (`driver_aot_pipeline.spl:492`).
 - Find the codegen leak: about 29 GB over at most 1414 sequential modules in one process (`[NATIVE] codegen ... concurrency=1`). Per-module LLVM context and MIR should be freed after each object.
 - Make the `[mir]`/`[NATIVE]` progress lines flush to the parent log, so a kill does not lose them (run 16 has none).
+
+## Fix: Both stages and shards (lane 3, 2026-11-02)
+
+`OutputFormat.Both` (default dynload, `--emit-smf`) no longer refuses staged
+codegen or MIR sharding. The SMF half needed only two byte strings per module
+(backend object bytes, driver-manifest records); they are now recorded per
+module as each staged batch or shard emits
+(`src/compiler/80.driver/driver_build/smf_staged_parts_v1.spl`), persisted as
+`<ledger record>.smfpart` by shard workers, and assembled in `Dict.keys()`
+(sorted) order -- the order the whole-program loop iterated -- so the same MIR yields
+the same SMF bytes (per-batch MIR passes apply as for native objects). SMF-only and self-contained formats still hold the full set.
+Spec: `test/01_unit/compiler/driver/smf_staged_parts_spec.spl`.
+Takes effect after the next stage2 rebuild; the `--mode one-binary` launch
+workaround above remains valid until then.

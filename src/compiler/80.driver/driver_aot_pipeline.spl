@@ -33,7 +33,11 @@ use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenState
 use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1,
     native_mir_shard_spec_v1, native_mir_shard_queue_v1, native_mir_shard_owner_v1,
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
-    native_mir_shard_link_inputs_v1, native_mir_shard_module_passed_v1}
+    native_mir_shard_link_inputs_v1, native_mir_shard_module_passed_v1,
+    native_mir_shard_smf_part_write_v1, native_mir_shard_smf_part_read_v1}
+use compiler.driver.driver_build.smf_staged_parts_v1.{smf_staged_output_format_refusal_v1,
+    smf_part_encode_v1, smf_part_decode_ok_v1, smf_part_decode_object_v1,
+    smf_part_decode_manifest_v1}
 use compiler.driver.driver_aot_native_output.{driver_cold_hir_record_verified_object_v1, driver_cold_hir_record_objectless_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_arm_v1, native_mir_fork_disarm_v1, native_mir_fork_exit_v1}
 use compiler.driver.driver_build.native_mir_shard_export_v1.{
@@ -363,31 +367,37 @@ impl CompilerDriver:
             val native_result = self.compile_to_native(output)
             if not native_result.is_success():
                 return native_result
-            val source_path = _driver_entry_source_input(self.ctx.options.input_files)
-            val smf_cache_path = source_to_cache_path(source_path, native_build_cache_dir(), ".smf")
-            val smf_result = self.compile_to_smf(smf_cache_path)
-            if smf_result.is_success():
-                val smf_opt_level = compileoptions_effective_mir_opt_level(self.ctx.options)
-                val source_result = file_read_result(source_path)
-                val src = match source_result:
-                    case Ok(content): content
-                    case Err(read_error): return CompileResult.CodegenError(read_error)
-                val src_hash = hash_text(src)
-                update_smf_manifest_entry(
-                    source_path,
-                    smf_cache_path,
-                    src_hash,
-                    self.ctx.options.backend,
-                    smf_opt_level,
-                    self.ctx.options.release,
-                    self.ctx.options.debug_info,
-                    self.ctx.options.gc_off,
-                    self.ctx.options.profile,
-                    self.ctx.options.allowed_families
-                )
-            return CompileResult.Success(output)
+            return self.emit_both_smf_half_v1(output)
         log_phase("aot:native_dispatch:start")
         return self.compile_to_native(output)
+
+    me emit_both_smf_half_v1(output: text) -> CompileResult:
+        """OutputFormat.Both after the native half succeeded: package the SMF
+        cache artifact from the recorded per-module parts (plus any MIR still
+        held) and refresh its manifest entry."""
+        val source_path = _driver_entry_source_input(self.ctx.options.input_files)
+        val smf_cache_path = source_to_cache_path(source_path, native_build_cache_dir(), ".smf")
+        val smf_result = self.compile_to_smf(smf_cache_path)
+        if smf_result.is_success():
+            val smf_opt_level = compileoptions_effective_mir_opt_level(self.ctx.options)
+            val source_result = file_read_result(source_path)
+            val src = match source_result:
+                case Ok(content): content
+                case Err(read_error): return CompileResult.CodegenError(read_error)
+            val src_hash = hash_text(src)
+            update_smf_manifest_entry(
+                source_path,
+                smf_cache_path,
+                src_hash,
+                self.ctx.options.backend,
+                smf_opt_level,
+                self.ctx.options.release,
+                self.ctx.options.debug_info,
+                self.ctx.options.gc_off,
+                self.ctx.options.profile,
+                self.ctx.options.allowed_families
+            )
+        return CompileResult.Success(output)
 
     me go_to_end_finish_v1(object_count: i64, built_modules: [text]) -> CompileResult:
         """go-to-end terminal: write `<output>.go-to-end.sdn` naming every
@@ -487,11 +497,12 @@ impl CompilerDriver:
                 (env_get_opt("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1" and
                 (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             return "bootstrap-flat lane (SIMPLE_BOOTSTRAP=1 without STAGE4)"
-        # SMF / self-contained / both re-iterate ctx.mir_modules after codegen.
-        val format = self.ctx.options.output_format
-        if driver_output_format_is_smf(format) or driver_output_format_is_self_contained(format) or
-                driver_output_format_is_both(format):
-            return "output format re-reads MIR set"
+        # SMF / self-contained re-iterate ctx.mir_modules after codegen. Both
+        # records each module's SMF part as its batch or shard emits
+        # (driver_build/smf_staged_parts_v1.spl), so it stages and shards.
+        val format_refusal = smf_staged_output_format_refusal_v1(self.ctx.options.output_format)
+        if format_refusal != "":
+            return format_refusal
         if (env_get_opt("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? "") == "1" or
                 self.ctx.runtime_std_full_inventory_selection != nil:
             return "full inventory selection active"
@@ -581,6 +592,12 @@ impl CompilerDriver:
                     case _: "staged native codegen batch {batch_index} failed"
                 self.ctx.add_error(batch_error)
                 batch_failed = true
+            elif driver_output_format_is_both(self.ctx.options.output_format):
+                # The SMF half reads this batch's parts after its MIR is gone.
+                val smf_error = self.smf_record_module_parts_v1(batch_names)
+                if smf_error != "":
+                    self.ctx.add_error(smf_error)
+                    batch_failed = true
         if batch_failed:
             val failed_units = batch_names.join(",")
             self.native_staged_codegen.failed_batches = self.native_staged_codegen.failed_batches.push(
@@ -718,6 +735,11 @@ impl CompilerDriver:
                     self.native_staged_codegen.flushing = false
                     if shard_result.is_success():
                         codegen_ok = true
+                        if driver_output_format_is_both(self.ctx.options.output_format):
+                            val part_error = self.shard_write_smf_parts_v1(queue)
+                            if part_error != "":
+                                self.ctx.add_error(part_error)
+                                codegen_ok = false
                     else:
                         val shard_error = match shard_result:
                             case CompileResult.CodegenError(message): message
@@ -818,7 +840,45 @@ impl CompilerDriver:
             if objectless_reason != "":
                 return CompileResult.CodegenError(objectless_reason)
         self.native_staged_codegen = link_state
+        val link_both = driver_output_format_is_both(self.ctx.options.output_format)
+        if link_both:
+            val ledger = native_mir_shard_link_ledger_v1()
+            for part_module in inputs.modules:
+                val part_read = native_mir_shard_smf_part_read_v1(ledger, part_module)
+                if part_read.is_err():
+                    return CompileResult.CodegenError("MIR shard SMF part missing: {part_module} ({part_read.unwrap_err()})")
+                val part = part_read.unwrap()
+                if not smf_part_decode_ok_v1(part):
+                    return CompileResult.CodegenError("MIR shard SMF part malformed: {part_module}")
+                self.native_staged_codegen.smf_part_objects[part_module] = smf_part_decode_object_v1(part)
+                self.native_staged_codegen.smf_part_manifests[part_module] = smf_part_decode_manifest_v1(part)
         print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} objectless={inputs.objectless}"
         val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
-        self.compile_to_native(output)
+        val native_result = self.compile_to_native(output)
+        if not link_both or not native_result.is_success():
+            return native_result
+        self.emit_both_smf_half_v1(output)
+
+    me shard_write_smf_parts_v1(queue: text) -> text:
+        """OutputFormat.Both MIR shard worker: record the SMF part of every
+        module this worker holds and persist one part file per claimed module
+        beside its ledger record (a claimed module without MIR gets an empty
+        part, contributing no bytes, as it did to the whole-program loop).
+        Returns "" or the first failure."""
+        var held_names: [text] = []
+        for held_name in self.ctx.mir_modules.keys():
+            held_names = held_names.push(held_name)
+        val record_error = self.smf_record_module_parts_v1(held_names)
+        if record_error != "":
+            return record_error
+        for claimed_name in self.native_staged_codegen.shard_claimed_names:
+            var part_object: [u8] = []
+            var part_manifest: [u8] = []
+            if self.native_staged_codegen.smf_part_objects.contains_key(claimed_name):
+                part_object = self.native_staged_codegen.smf_part_objects[claimed_name]
+                part_manifest = self.native_staged_codegen.smf_part_manifests[claimed_name]
+            if not native_mir_shard_smf_part_write_v1(queue, claimed_name,
+                    smf_part_encode_v1(part_object, part_manifest)):
+                return "MIR shard SMF part write failed: {claimed_name}"
+        ""
 use compiler.common.diagnostics.span.{Span}

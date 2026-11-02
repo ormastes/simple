@@ -1,0 +1,109 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/smf_staged_parts_v1.spl 0%
+"""
+# Dynload (Both) output streams SMF parts so MIR can be staged and sharded
+
+**Category:** Compiler / driver
+**Bug:** doc/08_tracking/bug/stage2_whole_program_mir_memory_growth_2026-11-01.md (#5791)
+
+## Purpose and Audience
+
+Default dynload builds use OutputFormat.Both. The SMF half used to re-read the
+whole `ctx.mir_modules` after native codegen, so Both refused staged codegen
+and MIR sharding and the full MIR set stayed resident. The SMF side is now
+recorded per module (object bytes + driver-manifest bytes) as each batch or
+shard emits, and assembled in sorted module-name order -- the same order
+`Dict.keys()` gave the whole-program loop -- so SMF bytes are unchanged.
+
+## Expected Outcome
+
+Both is no longer refused by the staged-codegen or MIR-shard preflight; SMF
+and self-contained still are. Parts recorded in any batch order assemble to
+the same bytes as the whole-set sorted concatenation, and a part file
+round-trips exactly.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.driver.driver_build.smf_staged_parts_v1.{
+    smf_staged_output_format_refusal_v1, smf_part_encode_v1,
+    smf_part_decode_object_v1, smf_part_decode_manifest_v1,
+    smf_part_decode_ok_v1, smf_parts_assemble_objects_v1,
+    smf_parts_assemble_manifests_v1}
+use compiler.common.driver_core_modes.{driver_output_format_both,
+    driver_output_format_native, driver_output_format_smf,
+    driver_output_format_self_contained}
+use app.cli.native_build_output_plan.{native_build_mir_output_requires_full_set_v1}
+
+describe "Both output admits staged codegen and MIR sharding":
+    it "does not refuse staging for Both or Native":
+        # @req REQ-SSPEC-COMPILER
+        step("Both and Native carry no output-format refusal")
+        assert_equal(smf_staged_output_format_refusal_v1(driver_output_format_both()), "")
+        assert_equal(smf_staged_output_format_refusal_v1(driver_output_format_native()), "")
+
+    it "still refuses staging for SMF-only and self-contained":
+        # @req REQ-SSPEC-COMPILER
+        step("SMF-only and self-contained still re-read the MIR set")
+        assert_equal(smf_staged_output_format_refusal_v1(driver_output_format_smf()),
+            "output format re-reads MIR set")
+        assert_equal(smf_staged_output_format_refusal_v1(driver_output_format_self_contained()),
+            "output format re-reads MIR set")
+
+    it "lets the coordinator shard a default dynload build":
+        # @req REQ-SSPEC-COMPILER
+        step("dynload and --emit-smf no longer require the full MIR set")
+        assert_false(native_build_mir_output_requires_full_set_v1(
+            ["src/app/cli/main.spl", "--mode", "dynload"], false))
+        assert_false(native_build_mir_output_requires_full_set_v1(
+            ["src/app/cli/main.spl", "--emit-smf"], false))
+
+describe "SMF part assembly":
+    it "assembles batches in sorted module order regardless of flush order":
+        # @req REQ-SSPEC-COMPILER
+        step("record parts in batch order b, c then a")
+        var objects: {text: [u8]} = {}
+        var manifests: {text: [u8]} = {}
+        objects["mod.b"] = [2, 2]
+        manifests["mod.b"] = [20]
+        objects["mod.c"] = [3]
+        manifests["mod.c"] = []
+        objects["mod.a"] = [1, 1, 1]
+        manifests["mod.a"] = [10, 11]
+        step("objects and manifests concatenate in sorted key order")
+        val all_objects = smf_parts_assemble_objects_v1(objects)
+        val all_manifests = smf_parts_assemble_manifests_v1(manifests)
+        assert_equal(all_objects.len(), 6)
+        assert_equal(all_objects[0] as i64, 1)
+        assert_equal(all_objects[3] as i64, 2)
+        assert_equal(all_objects[5] as i64, 3)
+        assert_equal(all_manifests.len(), 3)
+        assert_equal(all_manifests[0] as i64, 10)
+        assert_equal(all_manifests[2] as i64, 20)
+
+    it "round-trips a part file exactly":
+        # @req REQ-SSPEC-COMPILER
+        step("encode object + manifest bytes, decode both halves")
+        val obj: [u8] = [127, 69, 76, 70, 0, 255]
+        val man: [u8] = [83, 86, 82, 68]
+        val encoded = smf_part_encode_v1(obj, man)
+        assert_true(smf_part_decode_ok_v1(encoded))
+        val dobj = smf_part_decode_object_v1(encoded)
+        val dman = smf_part_decode_manifest_v1(encoded)
+        assert_equal(dobj.len(), 6)
+        assert_equal(dobj[5] as i64, 255)
+        assert_equal(dman.len(), 4)
+        assert_equal(dman[3] as i64, 68)
+
+    it "rejects a truncated part file":
+        # @req REQ-SSPEC-COMPILER
+        step("a part shorter than its declared object length is invalid")
+        val obj: [u8] = [1, 2, 3, 4]
+        val encoded = smf_part_encode_v1(obj, [])
+        var truncated: [u8] = []
+        var i = 0
+        while i < encoded.len() - 2:
+            truncated = truncated.push(encoded[i])
+            i = i + 1
+        assert_false(smf_part_decode_ok_v1(truncated))
+        assert_false(smf_part_decode_ok_v1([]))
