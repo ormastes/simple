@@ -1,0 +1,100 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bare variants of an unimported enum (ctor-mir-20261031 item 4)
+
+Real-tree shape: `driver_unit_tldr_imports_v1.spl` matched
+`driver.stage_lower_hir(..)` (a method on an imported class returning
+`CompileResult?`) through bare `TypeError(..)` / `ResolveError(..)` arms without
+importing `CompileResult`, while a second, unrelated `enum CompileResult` exists
+in the closure. Stage2 reported "missing runtime identity for CompileResult".
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+use std.common.string_core.{char_from_code}
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val LB = char_from_code(123)
+val RB = char_from_code(125)
+
+val cr_source = "pub enum CR:\n    Success(text?)\n    TypeError([text])\n    ResolveError([text])\n    CodegenError(text)\n"
+val other_source = "pub enum CR:\n    Success(text)\n    Failed(text, text)\n"
+val drv_source = "use lib.cr." + LB + "CR" + RB + "\n\npub class Drv:\n    n: i64\n\n    fn stage_lower(check: bool) -> CR?:\n        if check:\n            return nil\n        Some(CR.TypeError([\"e\"]))\n"
+
+fn lower_consumer(body: text, with_other: bool, with_drv: bool = true) -> text:
+    val consumer_source = "use lib.drv." + LB + "Drv" + RB + "\n\n" + body
+    val log = Logger(level: 0)
+    val cr_ast = parse_full_frontend(cr_source, "lib/cr.spl", "lib.cr", log)
+    val other_ast = parse_full_frontend(other_source, "lib/other.spl", "lib.other", log)
+    val drv_ast = parse_full_frontend(drv_source, "lib/drv.spl", "lib.drv", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.cr"] = cr_ast
+    modules["lib.other"] = other_ast
+    modules["lib.drv"] = drv_ast
+    modules["app.main"] = consumer_ast
+    val sources = [SourceFile(path: "lib/cr.spl", content: cr_source, module_name: "lib.cr"), SourceFile(path: "lib/other.spl", content: other_source, module_name: "lib.other"), SourceFile(path: "lib/drv.spl", content: drv_source, module_name: "lib.drv"), SourceFile(path: "app/main.spl", content: consumer_source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var cr_lowering = hirlowering_for_module("lib.cr", surfaces)
+    var other_lowering = hirlowering_for_module("lib.other", surfaces)
+    var drv_lowering = hirlowering_for_module("lib.drv", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val cr_hir = cr_lowering.lower_module(cr_ast)
+    val other_hir = other_lowering.lower_module(other_ast)
+    val drv_hir = drv_lowering.lower_module(drv_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    if with_other:
+        prescan_mods["other_hir"] = other_hir
+    if with_drv:
+        prescan_mods["drv_hir"] = drv_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    if with_other:
+        mir_lowering.prescan_module_struct_names(prescan_mods, "other_hir")
+    if with_drv:
+        mir_lowering.prescan_module_struct_names(prescan_mods, "drv_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    var providers: [HirModule] = []
+    if with_other:
+        providers.push(other_hir)
+    if with_drv:
+        providers.push(drv_hir)
+    providers.push(consumer_hir)
+    val mir = mir_lowering.lower_module(consumer_hir, providers)
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    print "consumer errors: [{out}]"
+    out
+
+val BODY = "fn gap(d: Drv) -> text:\n    var g = \"\"\n    match d.stage_lower(false):\n        case Some(stop):\n            match stop:\n                case TypeError(errs): g = errs.join(\" | \")\n                case ResolveError(errs): g = errs.join(\" | \")\n                case _: g = \"other\"\n        case None: g = \"none\"\n    g\n"
+
+describe "bare variants of an unimported enum (ctor-mir-20261031 item 4)":
+    it "resolve through the callee's declared payload enum (no collision)":
+        val out = lower_consumer(BODY, false)
+        expect(out.contains("missing runtime identity")).to_equal(false)
+        expect(out.contains("enum match:")).to_equal(false)
+
+    it "resolve through the callee's declared payload enum with a same-named enum in the closure":
+        val out = lower_consumer(BODY, true)
+        expect(out.contains("missing runtime identity")).to_equal(false)
+        expect(out.contains("enum match:")).to_equal(false)
+
+    it "resolve with surface-only providers (TLDR unit lane, no provider HIR)":
+        val out = lower_consumer(BODY, true, false)
+        expect(out.contains("missing runtime identity")).to_equal(false)
+        expect(out.contains("enum match:")).to_equal(false)
