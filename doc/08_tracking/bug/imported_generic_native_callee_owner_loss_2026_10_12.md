@@ -1,6 +1,6 @@
 # Imported generic specialization loses its native callee owner
 
-Status: OPEN until full compiler/core/tool-server gates qualify this candidate.
+Status: CLOSED 2026-11-02 (stale, code path deleted): monomorphization was deleted by 200a05f5bc8 (`src/compiler/40.mono/` no longer exists; see monomorphization_deleted_2026-10-31.md), and this defect was reproduced only in the deleted module(s). The specialization-callee rewrite it concerned (`specialization_signature_in_caller`) no longer exists in src.
 
 ## 2026-10-12 isolated f34 adaptation — UNEXECUTED
 

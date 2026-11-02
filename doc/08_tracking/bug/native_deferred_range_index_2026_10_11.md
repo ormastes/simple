@@ -1,6 +1,6 @@
 # Native range indexing blocks deferred deserialization
 
-Status: OPEN. Canonical bug ID: `native_deferred_range_index_2026_10_11`. GitHub: https://github.com/ormastes/simple/issues/3014
+Status: CLOSED 2026-11-02 (stale, code path deleted): monomorphization was deleted by 200a05f5bc8 (`src/compiler/40.mono/` no longer exists; see monomorphization_deleted_2026-10-31.md), and this defect was reproduced only in the deleted module(s). Former status: OPEN. Canonical bug ID: `native_deferred_range_index_2026_10_11`. GitHub: https://github.com/ormastes/simple/issues/3014
 
 Original failure: C36 HIR7 PASS then unlocated MIR range-index failure; closure has one byte-array range and four text ranges. First thrown site remains unknown.
 
