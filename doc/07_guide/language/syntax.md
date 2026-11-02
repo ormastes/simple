@@ -285,6 +285,22 @@ match shape:
     Rectangle(w, h): w * h
 ```
 
+**Exhaustiveness of value matches.** A `match` used as a value (assigned,
+passed, returned, or the implicit return of a non-unit function) must be
+exhaustive, or it is a compile-time error `E-MATCH-NONEXHAUSTIVE-VALUE`.
+Exhaustive means: an unguarded `_`/binder arm, or all enum variants (payload
+arms with irrefutable sub-patterns), or `true`+`false`, or `Some`+`None`, or
+`Ok`+`Err`. Literal scrutinees (`int`, `float`, `text`, `char`) always need
+`_`. Statement matches are unaffected. Staged: currently a warning by default
+(`SIMPLE_VALUE_MATCH_EXHAUSTIVENESS=error` to enforce). Full rule:
+`doc/05_design/exhaustive_value_match.md`.
+
+```simple:skip
+val n = match s:          # error without the `_` arm
+    case "a": 1
+    case _: panic("unexpected: " + s)
+```
+
 ---
 
 ## Optional Chaining and Coalescing
