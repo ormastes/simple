@@ -496,3 +496,34 @@ specified rather than assumed away.
 
 
 Revalidated 2026-11-02: still plausible because doc says root cause characterised but fix not identified.
+
+## Analysis (2026-11-02, p0f-3)
+
+Not reproducible on the Windows x86_64 host; analysed by source reading.
+
+- **Platform-specific?** Yes, the observed symptom. Section 3a measured
+  `Optional<struct> = nil` materialising as a non-nil zeroed aggregate only in
+  seed-built code on aarch64 (AAPCS64 by-value aggregate handling); x86_64
+  self-hosts. The count law (1 report per nil `HirType?` slot) is
+  platform-independent, so Windows x86_64 would only be affected if its codegen
+  had the same nil-Optional-aggregate defect; the new spec checks it does not.
+- **Already fixed?** Yes: `2c89727c11c` "fix(codegen): stop turning a nil
+  Optional<aggregate> into a zeroed aggregate" (`emit_aggregate_block_copy` in
+  `src/compiler_rust/compiler/src/codegen/llvm/functions/objects.rs`), an
+  ancestor of `release/1.0.0`. This record's own "After the fix" section
+  reports `E-MIR-TYPE-ZeroKind: 0 (was 3)`. The follow-up failure
+  (`unresolved name: _is_decimal_digit`) is a different bug; see `9e99c3345c9`
+  and the `f859550a42c` note "ZeroKind class is cleared".
+- **Variance (2..6):** explained in 3a as the discriminant byte of the zeroed
+  block, not distinct source sites.
+- **Windows impact:** none known; no bounded Windows fix to make.
+- **Regression guard added:**
+  `test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl`
+  (4 examples, 0 failures on Windows x86_64) asserts nil Optional-of-struct
+  locals, enum payloads and array elements read back nil.
+- **Needed to close:** a Stage 3 run on aarch64-apple-darwin with a seed built
+  after `2c89727c11c` reaching `phase5:mode_dispatch` with zero
+  `E-MIR-TYPE-ZeroKind`. Suggested status: `fixed_pending_verification`.
+
+TODO(p0f-3): confirm on aarch64-apple-darwin with a post-`2c89727c11c` seed that
+the class stays at 0, then close this record.

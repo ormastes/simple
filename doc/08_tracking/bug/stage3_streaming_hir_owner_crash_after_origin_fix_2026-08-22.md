@@ -65,3 +65,40 @@ surface owner and fail closed on absence.
 4. A regression test exercises the owner handoff under native execution.
 
 Revalidated 2026-11-02: still plausible because Status OPEN; no fixing commit referenced; cannot be reproduced here (aarch64-apple-darwin).
+
+## Analysis (2026-11-02, p0f-3)
+
+Not reproducible on the Windows x86_64 host; analysed by source reading.
+
+- **Code path:** `lower_and_check_streaming_surfaces_impl`
+  (`src/compiler/80.driver/driver_hir_pipeline_lowering.spl`, ~line 936) reads
+  `self.streaming_module_surfaces_owner` (class field,
+  `src/compiler/80.driver/driver_compiler_type.spl:30`, initialised to
+  `ModuleSurfacesByName.empty()` with `streaming_surface_owner_ready: false`).
+- **Already mitigated (fail closed):** `57271d9ba49` "feat(runtime):
+  rt_heap_ref_wellformed formation probe + fail-closed HIR-entry guards" adds,
+  before the first field load: the readiness check,
+  `rt_heap_ref_wellformed(surfaces)` (rejects a heap payload word of 0 or in the
+  zero page; its comment cites this 2026-08-22 incident, a Some-tagged Option
+  with payload word 0) and the empty-surface abort `E-DRV-PHASE3-EMPTY-SURFACES`.
+  `af74374c355` fixed a lost readiness flag. Both are ancestors of
+  `release/1.0.0`. The SIGSEGV can no longer be silent at this site; a
+  malformed owner yields a named diagnostic. Why the payload is 0 on aarch64 is
+  not independently fixed.
+- **Platform-specific?** Probably yes: a malformed Some/Option payload matches
+  the aarch64 nil/Option-of-aggregate codegen defect fixed by `2c89727c11c`
+  (see `zerokind_is_a_corrupt_aggregate_2026-09-03.md` section 3a). On Windows
+  x86_64 the guard is active and the hand-off round-trips correctly.
+- **Regression guard added:**
+  `test/01_unit/compiler/bootstrap/streaming_surface_owner_handoff_invariant_spec.spl`
+  (4 examples, 0 failures on Windows x86_64): initial empty/not-ready state,
+  owner content survives a class-field store, reset after reclaim, Option unwrap
+  payload intact.
+- **Needed to repro/close:** an aarch64-apple-darwin Stage 3 run on a seed built
+  after `2c89727c11c`; if it still dies, the symbolized fault (IPS/lldb) at the
+  first streaming HIR load, or the `E-DRIVER-HIR-OWNER-MALFORMED` text,
+  identifies the remaining producer. Suggested status:
+  `fixed_pending_verification`.
+
+TODO(p0f-3): re-run strict Stage 3 on macOS ARM64 with the current seed and
+record whether the guard fires or the crash is gone.
