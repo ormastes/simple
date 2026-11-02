@@ -1,5 +1,7 @@
 # Mutex/RwLock lose `text` (and any non-int/float/bool/heap-tagged) values under the default `PureStd` concurrent backend
 
+> **CLOSED 2026-11-02 (lane a6dffc9c/p12-2): FIXED.** Checked against current policy/design: still valid as filed (a real PureStd data-loss defect; erased generics / nil-only-in-unsafe / no-Any do not obsolete it, and the fix adds none of them). Fix on release/1.0.0: `src/compiler_rust/compiler/src/interpreter_extern/atomic.rs` `value_to_runtime` now routes text/composites through `runtime_bridge::value_to_runtime`, `runtime_to_protected_value` decodes them back, and an interpreter-side slot table keeps structs (commit 4f7a93c7e58). Evidence: `cargo test -p simple-compiler --lib lock_value_roundtrip_tests` = 5 passed / 0 failed (`mutex_protecting_text_reads_back_the_same_text`, `rwlock_protecting_text_reads_and_writes_back_the_same_text` (added here), `no_interpreter_value_kind_silently_degrades_to_nil_through_a_lock`, `mutex_protecting_struct_reads_back_the_same_struct`, `struct_carrying_enum_and_rwlock_values_survive_the_lock`). The "Status: open" text below is historical.
+
 - **Filed:** 2026-07-28
 - **Severity:** high — silent data loss, no error, no warning
 - **Status:** open
