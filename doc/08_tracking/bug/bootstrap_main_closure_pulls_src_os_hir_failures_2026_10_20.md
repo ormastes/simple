@@ -72,7 +72,7 @@ Checked against origin/release/1.0.0 at 807253b2748. Result: FIXED (closure edge
   The coordinator's "paths removed" premise is wrong, so this bug is not stale
   for that reason. It is fixed in source instead.
 - Fix: e9505f50f94 "collect bare `export X from M` as the sibling `.M`".
-  Current code: `src/compiler/80.driver/driver_entry_closure_core.spl:787-788`
+  Carried into the split-out closure core by 98519d733d6. Current code: `src/compiler/80.driver/driver_entry_closure_core.spl:787-788`
   (`if tail != "" and not tail.contains("."): tail = "." + tail`).
 - Trigger removed too: `src/compiler/55.borrow/borrow_check/__init__.spl` no
   longer has `from mod` re-exports.
