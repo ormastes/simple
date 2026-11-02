@@ -5,7 +5,8 @@
 use std.spec.{describe, it, expect}
 use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct_to_path,
     llvm_codegen_module_scope_enabled_v1}
-use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.backend.backend.backend_types.{CodegenTarget, BackendCompileOptions,
+    compileoptions_default_options}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
@@ -73,6 +74,21 @@ fn cg_scope_module() -> MirModule:
     functions[fn_.symbol] = fn_
     MirModule(name: "test.llvm.scope_default", functions: functions, statics: {}, constants: {}, types: {})
 
+fn cg_scope_growth(options: BackendCompileOptions, module: MirModule,
+        config: LlvmTargetConfig, directory: text, tag: text, n: i64) -> i64:
+    val diagnostic = "{directory}/diagnostic-{tag}"
+    var failures = 0
+    var index = 0
+    val before = heap_live_bytes()
+    while index < n:
+        if llvm_compile_module_direct_to_path(options, module,
+                "{directory}/{tag}{index}.o", diagnostic, Some(config)) != 0:
+            failures = failures + 1
+        index = index + 1
+    val after = heap_live_bytes()
+    if failures != 0: return -1
+    after - before
+
 describe "codegen module scope default":
     it "is enabled when SIMPLE_CODEGEN_MODULE_SCOPE is unset and disabled only by 0":
         val previous = env_get_nullable("SIMPLE_CODEGEN_MODULE_SCOPE")
@@ -102,20 +118,15 @@ describe "codegen module scope default":
         expect(llvm_compile_module_direct_to_path(options, module,
             "{directory}/warm.o", diagnostic, Some(config))).to_equal(0)
         val n = 16
-        var statuses: [i64] = []
-        var index = 0
-        val before = heap_live_bytes()
-        while index < n:
-            statuses.push(llvm_compile_module_direct_to_path(options, module,
-                "{directory}/m{index}.o", diagnostic, Some(config)))
-            index = index + 1
-        val after = heap_live_bytes()
-        for status in statuses:
-            expect(status).to_equal(0)
+        val scoped_growth = cg_scope_growth(options, module, config, directory, "s", n)
+        expect(env_set("SIMPLE_CODEGEN_MODULE_SCOPE", "0")).to_equal(true)
+        val unscoped_growth = cg_scope_growth(options, module, config, directory, "u", n)
+        env_remove_process("SIMPLE_CODEGEN_MODULE_SCOPE")
         expect(transient_array_scope_state_v1()).to_equal(0)
-        expect(file_size_raw("{directory}/m{n - 1}.o")).to_be_greater_than(32)
-        # Unscoped, each emission retains its IR text, staged-object bytes and
-        # translator scratch. Scoped, only the per-iteration path texts and
-        # statuses built by this loop survive.
-        val per_module = (after - before) / n
-        expect(per_module).to_be_less_than(4096)
+        expect(file_size_raw("{directory}/s{n - 1}.o")).to_be_greater_than(32)
+        # Unscoped (=0) retains each module's IR text, staged-object bytes and
+        # translator scratch; the default scope frees them, so its growth must
+        # be well below the unscoped lane's on the same N modules.
+        expect(scoped_growth).to_be_greater_than(-1)
+        expect(unscoped_growth).to_be_greater_than(0)
+        expect(scoped_growth * 4).to_be_less_than(unscoped_growth)

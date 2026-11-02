@@ -21,8 +21,7 @@ use compiler.backend.feature_caps.{TargetCapsKind, x86_caps_from_target}
 use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct,
     llvm_compile_module_direct_compiled, llvm_compile_module_direct_to_path,
     llvm_translate_module_direct_ir, llvm_translate_module_bootstrap_ir_v1,
-    llvm_codegen_target_config_for, llvm_codegen_bare_metal_requested,
-    llvm_codegen_module_scope_enabled_v1}
+    llvm_codegen_target_config_for, llvm_codegen_bare_metal_requested}
 use compiler.backend.llvm_backend_tools.{llvm_llc_object_argv_v1}
 use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
 use std.nogc_sync_mut.io.file_ops.{file_write}
@@ -393,7 +392,7 @@ pub fn backend_helper_aot_opt_level(
 # Bug native_codegen_unscoped_rss_growth_2026_10_24: one module's AOT compile
 # (storage-projection lowering, the backend MIR optimization copy, Cranelift
 # translation scratch, the object byte read) in its own transient scope,
-# on by default (SIMPLE_CODEGEN_MODULE_SCOPE=0 opts out). Only the returned Result is
+# opt-in via SIMPLE_CODEGEN_MODULE_SCOPE=1. Only the returned Result is
 # promoted. The scope wraps this pure call and nothing else: the backend
 # session authority mutates its persistent records (uses/results/kept) around
 # it, and a scope over those writes freed records still linked into the
@@ -409,12 +408,7 @@ fn compile_module_with_backend_scoped_v1(
     retained_cranelift_triple: text?, retained_cranelift_cpu_v2: text?,
     retained_cranelift_features_v2: [text]
 ) -> Result<CompiledModule, CompileError>:
-    var scoped = llvm_codegen_module_scope_enabled_v1()
-    # @workaround bug=llvm_bootstrap_string_cache_scope_escape_2026_10_25 reason=bootstrap-translator-and-last-object-path-globals-hold-heap-text
-    # Default-on must not change the managed bootstrap lane: its translator
-    # string cache and llvm_bootstrap_last_object_path() outlive this call.
-    if scoped and (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1":
-        scoped = false
+    var scoped = (env_get_opt("SIMPLE_CODEGEN_MODULE_SCOPE") ?? "") == "1"
     if scoped and (transient_array_scope_state_v1() != 0 or not transient_scope_begin()):
         eprint("[codegen-scope] WARNING transient scope refused; compiling UNSCOPED, arena retained: module={module.name}")
         scoped = false

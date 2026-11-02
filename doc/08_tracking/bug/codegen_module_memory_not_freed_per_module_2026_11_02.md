@@ -33,9 +33,9 @@ warnings, so the opt-in scope was active and still did not bound growth.
   translator scratch and the staged-object byte copy.
 - Tool discovery (`find_llc`/`find_clang`, which fill `_find_tool_cache_*` and
   strict tool bindings) is warmed before the scope opens.
-- `llvm_codegen_module_scope_enabled_v1()`: on by default; `SIMPLE_CODEGEN_MODULE_SCOPE=0`
-  is the explicit opt-out. Used by both the object-path lane and
-  `compile_module_with_backend_scoped_v1`.
+- `llvm_codegen_module_scope_enabled_v1()`: on by default for the LLVM object-path lane; `SIMPLE_CODEGEN_MODULE_SCOPE=0`
+  is the explicit opt-out. `compile_module_with_backend_scoped_v1` (in-memory llvm/cranelift)
+  stays opt-in (`=1`) until it has its own qualification spec.
 - Exclusions kept/added: `SIMPLE_BOOTSTRAP=1` (bootstrap string cache and
   `llvm_bootstrap_last_object_path()` globals), `SIMPLE_LLVM_BITCODE_DEBUG=1`
   (lazy llvm-as/opt discovery), any caller-owned scope (refused with warning).
@@ -57,6 +57,7 @@ warnings, so the opt-in scope was active and still did not bound growth.
   (default-enabled policy; per-module heap growth < 4 KiB over 16 emissions).
   Red on base: `llvm_codegen_module_scope_enabled_v1` absent (seed-labeled: the
   Rust seed cannot parse current `src/lib`, frozen stage2 has no `test`).
+- Heap live growth, tiny module x16 (seed runner): unscoped (=0) 1808 B, default scope 0 B.
 - RSS before: ~21 GB per 48-module shard worker (runs 20-23b).
 - RSS after: pending a stage3 producer built from this source (no stage2
   whole-program builds allowed on the shared host). A `[codegen-scope] WARNING`
