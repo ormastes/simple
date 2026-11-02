@@ -1,0 +1,51 @@
+use std.spec.*
+use compiler.backend.runtime_compiler.{runtime_core_c_sources_v1, runtime_core_c_platform_sources_v1, runtime_object_basename_v1, runtime_object_paths_v1}
+
+# The phase-3 manual stage3 link (2026-11-02) needed runtime C owners that the
+# baked core-C runtime list omitted: runtime_cranelift_bridge_stub (75
+# rt_cranelift_* + 3 spl_cranelift_* named traps), platform/async_driver
+# (14 rt_driver_*), platform/async_windows (spl_driver_create_iocp) and
+# runtime_process_tree. These specs pin them into the source lists.
+
+fn list_has(names: [text], wanted: text) -> bool:
+    for name in names:
+        if name == wanted:
+            return true
+    false
+
+fn ordinary_source_list_text() -> text:
+    val source = file_read("src/compiler/70.backend/backend/runtime_compiler.spl")
+    val start = source.find("    var sources = [\"runtime\", ")
+    val tail = source.substring(start, source.len())
+    tail.substring(0, tail.find("\n"))
+
+describe "Runtime C source list completeness":
+    it "core-C list owns process tree and the cranelift bridge":
+        val sources = runtime_core_c_sources_v1()
+        expect(list_has(sources, "runtime_process_tree")).to_be(true)
+        expect(list_has(sources, "runtime_cranelift_bridge_stub")).to_be(true)
+        expect(list_has(sources, "runtime_native")).to_be(true)
+
+    it "core-C Windows platform list owns async_driver and async_windows":
+        val windows = runtime_core_c_platform_sources_v1(true)
+        expect(windows).to_equal(["platform/async_driver", "platform/async_windows"])
+        val other = runtime_core_c_platform_sources_v1(false)
+        expect(other.len()).to_equal(0)
+
+    it "every listed core-C source exists as a C file":
+        var all = runtime_core_c_sources_v1()
+        for extra in runtime_core_c_platform_sources_v1(true):
+            all = all.push(extra)
+        for name in all:
+            val path = "src/runtime/{name}.c"
+            expect(path + "=" + "{file_exists(path)}").to_equal(path + "=true")
+
+    it "platform sources map to flat object basenames":
+        expect(runtime_object_basename_v1("platform/async_driver")).to_equal("platform_async_driver")
+        expect(runtime_object_basename_v1("runtime_native")).to_equal("runtime_native")
+        val objects = runtime_object_paths_v1(["platform/async_windows"], "build/rt_", ".o")
+        expect(objects).to_equal(["build/rt_platform_async_windows.o"])
+
+    it "ordinary list keeps runtime_process_tree":
+        val line = ordinary_source_list_text()
+        expect(line).to_contain("\"runtime_process_tree\"")

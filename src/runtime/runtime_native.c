@@ -1582,6 +1582,54 @@ static int rt_core_dict_has(RtCoreDict* d, int64_t key);
 static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed);
 
 static _Atomic size_t rt_core_heap_registry_count = 0;
+
+/* Aux-byte accounting: container BACKING buffers (RtCoreArray.data,
+ * RtCoreDict.entries) live in allocations separate from the object header,
+ * so header/registry counters miss them. Mirrors the Rust runtime's
+ * value::heap AUX_LIVE_BYTES contract (rt_heap_aux_live_bytes /
+ * rt_heap_array_capacity_bytes). Relaxed atomics only: diagnostic counters,
+ * never used for correctness. Every site that allocates, reallocs or frees a
+ * backing buffer must call one of the helpers below. */
+static _Atomic int64_t g_core_aux_live_bytes = 0;
+static _Atomic int64_t g_core_array_cap_bytes = 0;
+
+static inline int64_t core_aux_array_data_bytes(const RtCoreArray* a) {
+    if (!a || !a->data || a->cap <= 0) return 0;
+    int64_t elem = (a->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1 : (int64_t)sizeof(int64_t);
+    return a->cap * elem;
+}
+
+static inline int64_t core_aux_dict_entries_bytes(const RtCoreDict* d) {
+    if (!d || !d->entries || d->cap <= 0) return 0;
+    return d->cap * (int64_t)sizeof(RtCoreDictEntry);
+}
+
+static inline void core_aux_note_array(int64_t delta) {
+    if (!delta) return;
+    atomic_fetch_add_explicit(&g_core_aux_live_bytes, delta, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_core_array_cap_bytes, delta, memory_order_relaxed);
+}
+
+static inline void core_aux_note_dict(int64_t delta) {
+    if (!delta) return;
+    atomic_fetch_add_explicit(&g_core_aux_live_bytes, delta, memory_order_relaxed);
+}
+
+/* Release an array's backing buffer and its accounting. */
+static inline void core_aux_array_data_free(RtCoreArray* a) {
+    if (!a) return;
+    core_aux_note_array(-core_aux_array_data_bytes(a));
+    free(a->data);
+    a->data = NULL;
+}
+
+/* Release a dict's entry table and its accounting. */
+static inline void core_aux_dict_entries_free(RtCoreDict* d) {
+    if (!d) return;
+    core_aux_note_dict(-core_aux_dict_entries_bytes(d));
+    free(d->entries);
+    d->entries = NULL;
+}
 static RtCoreString* rt_core_short_string_cache[257] = {0};
 static atomic_flag rt_core_short_string_cache_lock = ATOMIC_FLAG_INIT;
 static _Atomic uint32_t rt_core_transient_array_scope_next_id = 1;
@@ -1889,6 +1937,18 @@ static int rt_core_is_registered_enum(RtCoreEnum* e) {
 
 int64_t rt_heap_registry_count(void) {
     return (int64_t)atomic_load_explicit(&rt_core_heap_registry_count, memory_order_relaxed);
+}
+
+/* Live container backing-buffer bytes (array element buffers + dict entry
+ * tables); excludes object headers. Same contract as the Rust runtime's
+ * value::heap::rt_heap_aux_live_bytes. */
+int64_t rt_heap_aux_live_bytes(void) {
+    return atomic_load_explicit(&g_core_aux_live_bytes, memory_order_relaxed);
+}
+
+/* Live array element-buffer CAPACITY bytes (subset of aux bytes). */
+int64_t rt_heap_array_capacity_bytes(void) {
+    return atomic_load_explicit(&g_core_array_cap_bytes, memory_order_relaxed);
 }
 
 /* Current owner's context only. Observation neither opens a scope nor grants
@@ -2546,10 +2606,10 @@ static void core_reclaim_tracked_object_locked(void* ptr, uint32_t scope_id, int
     atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
     switch (rt_core_registered_object_kind(ptr)) {
         case RT_VALUE_HEAP_ARRAY:
-            free(((RtCoreArray*)ptr)->data);
+            core_aux_array_data_free((RtCoreArray*)ptr);
             break;
         case RT_VALUE_HEAP_DICT:
-            free(((RtCoreDict*)ptr)->entries);
+            core_aux_dict_entries_free((RtCoreDict*)ptr);
             break;
         default:
             break;
@@ -8792,6 +8852,7 @@ static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_ite
         free(a);
         return NULL;
     }
+    core_aux_note_array(core_aux_array_data_bytes(a));
     return (SplArray*)(((uintptr_t)a) | RT_VALUE_TAG_HEAP);
 }
 
@@ -8907,7 +8968,7 @@ int rt_array_is_byte_packed(SplArray* value) {
 void rt_array_free(SplArray* value) {
     RtCoreArray* array = rt_core_as_registered_array((int64_t)(uintptr_t)value);
     if (!array || !rt_core_unregister_array(array)) return;
-    free(array->data);
+    core_aux_array_data_free(array);
     free(array);
 }
 
@@ -9220,13 +9281,13 @@ static int64_t rt_core_deep_free_run(void* root, int root_kind) {
             if (plan.nodes[i].kind == RT_CORE_DEEP_FREE_ARRAY) {
                 RtCoreArray* a = (RtCoreArray*)plan.nodes[i].ptr;
                 if (rt_core_unregister_array(a)) {
-                    free(a->data);
+                    core_aux_array_data_free(a);
                     free(a);
                 }
             } else if (plan.nodes[i].kind == RT_CORE_DEEP_FREE_DICT) {
                 RtCoreDict* d = (RtCoreDict*)plan.nodes[i].ptr;
                 if (rt_core_unregister_immortal_ptr(d)) {
-                    free(d->entries);
+                    core_aux_dict_entries_free(d);
                     free(d);
                 }
             } else {
@@ -9669,8 +9730,8 @@ static void core_rc_free_node(RtCoreRcNode n) {
     if (!erased) return;
     atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
     core_transient_share_forget((uintptr_t)n.ptr);
-    if (n.kind == RT_VALUE_HEAP_ARRAY) free(((RtCoreArray*)n.ptr)->data);
-    else if (n.kind == RT_VALUE_HEAP_DICT) free(((RtCoreDict*)n.ptr)->entries);
+    if (n.kind == RT_VALUE_HEAP_ARRAY) core_aux_array_data_free((RtCoreArray*)n.ptr);
+    else if (n.kind == RT_VALUE_HEAP_DICT) core_aux_dict_entries_free((RtCoreDict*)n.ptr);
     free(n.ptr);
 }
 
@@ -11077,14 +11138,17 @@ static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap) {
     }
     if (!rt_core_array_capacity_valid(new_cap, array->flags)) return 0;
     size_t elem_size = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
+    int64_t old_bytes = core_aux_array_data_bytes(array);
     void* data = rt_observed_realloc_v1(array->data, (size_t)new_cap * elem_size);
     if (!data) {
         array->len = 0;
         array->cap = 0;
+        core_aux_note_array(-old_bytes); /* cap 0: later free counts 0 */
         return 0;
     }
     array->data = data;
     array->cap = new_cap;
+    core_aux_note_array(core_aux_array_data_bytes(array) - old_bytes);
     return 1;
 }
 
@@ -12657,6 +12721,7 @@ static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
         }
     }
     free(old);
+    core_aux_note_dict((new_cap - old_cap) * (int64_t)sizeof(RtCoreDictEntry));
 }
 
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
@@ -12790,6 +12855,7 @@ int64_t rt_dict_new(int64_t cap_hint) {
         free(d);
         return rt_core_nil();
     }
+    core_aux_note_dict(core_aux_dict_entries_bytes(d));
     int64_t owner = atomic_load_explicit(&rt_core_dict_read_owner_counter, memory_order_relaxed);
     while (owner < INT64_MAX &&
            !atomic_compare_exchange_weak_explicit(&rt_core_dict_read_owner_counter,
