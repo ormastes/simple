@@ -31,6 +31,11 @@
 # The entry shim (simple_entry.c) is regenerated as in
 # llvm_native_link_hosted_support.spl compile_entry_point_c, with the defined
 # (non-weak) __module_init* symbols found by llvm-nm, sorted.
+# Objects reach llvm-nm via xargs and the link via a clang response file
+# (Windows argv limit); lld reports every undefined symbol (--error-limit=0).
+# $P3_LINK_EXTRA_ARGS is appended to the link (word-split), e.g. the COFF alias
+# for stage2_facade_sdn_leaf_method_mangling_2026-11-02:
+#   -Wl,-Xlink=-alternatename:compiler.backend.SdnBackendImpl.process_module=compiler.backend.sdn.SdnBackendImpl.process_module
 # Toolchain: llvm-mingw UCRT clang + lld only ($SIMPLE_LLVM_MINGW_ROOT).
 set -eu
 
@@ -51,7 +56,7 @@ out_dir=$(dirname "$out_exe")
 mkdir -p "$out_dir"
 work="$out_exe.p3link"
 rm -rf "$work"
-mkdir -p "$work/rt"
+mkdir -p "$work/rt/platform"
 
 # ---- object selection -------------------------------------------------------
 link_cmd=${P3_LINK_COMMAND:-}
@@ -99,6 +104,11 @@ if [ -n "$link_cmd" ]; then
 fi
 [ -n "$names" ] || names=$frozen_list
 names=$(echo " $(echo $names) " | sed 's/ runtime_process_tree / /; s/^ *//; s/ *$//')
+# The frozen stage2 predates #5800, so its list (and its link-command) lacks these
+# Windows core-C sources that current runtime_compiler.spl compiles; add any missing.
+for extra in runtime_cranelift_bridge_stub platform/async_driver platform/async_windows; do
+    case " $names " in *" $extra "*) ;; *) names="$names $extra" ;; esac
+done
 case " $names " in
     *" runtime_process_owned "*) ;;
     *) echo "error: runtime list lacks runtime_process_owned" >&2; exit 1 ;;
@@ -126,7 +136,7 @@ fi
 
 # ---- entry shim -------------------------------------------------------------
 # shellcheck disable=SC2046
-inits=$("$nm" --defined-only $(cat "$work/objs.txt") 2>/dev/null |
+inits=$(xargs "$nm" --defined-only < "$work/objs.txt" 2>/dev/null |
     awk 'NF>=3 && $2 !~ /^[UuWwVv]$/ {print $3}' | sed 's/^___module_init/__module_init/' |
     grep -E '^__module_init(_.*)?$' | LC_ALL=C sort -u || true)
 entry_c="$work/simple_entry.c"
@@ -153,7 +163,9 @@ echo "entry: $(echo $inits | wc -w | tr -d ' ') module init symbols"
 # ---- link -------------------------------------------------------------------
 rt_objs=""
 for n in $names; do rt_objs="$rt_objs $work/rt/$n.o"; done
-cmd="$cc --target=x86_64-w64-windows-gnu -fuse-ld=lld -lkernel32 -lws2_32 -lmswsock -lbcrypt -luserenv -lntdll -lole32 -lsynchronization -ld3d11 -ldxgi --rtlib=compiler-rt --unwindlib=libunwind -Wl,--gc-sections -o $out_exe $(echo $(cat "$work/objs.txt"))$rt_objs $work/simple_entry.o"
+# Windows argv is limited to 32 KiB: pass objects through a clang response file.
+{ cat "$work/objs.txt"; for o in $rt_objs; do echo "$o"; done; echo "$work/simple_entry.o"; } > "$work/link-objs.rsp"
+cmd="$cc --target=x86_64-w64-windows-gnu -fuse-ld=lld -lkernel32 -lws2_32 -lmswsock -lbcrypt -luserenv -lntdll -lole32 -lsynchronization -ld3d11 -ldxgi --rtlib=compiler-rt --unwindlib=libunwind -Wl,--gc-sections -Wl,--error-limit=0 ${P3_LINK_EXTRA_ARGS:-} -o $out_exe @$work/link-objs.rsp"
 echo "$cmd" > "$out_exe.link-command.txt"
 # shellcheck disable=SC2086
 $cmd
