@@ -1,0 +1,88 @@
+# std.nogc_sync_mut.host_limits — host resource limits from the host SDN config.
+#
+# Build and driver consumers read memory / core limits here instead of
+# hardcoding them. Precedence (schema simple-host-config-v1, identical to
+# scripts/setup/host-env.shs --get):
+#   SIMPLE_HOST_<KEY> env > ${SIMPLE_HOST_CONFIG:-~/.config/simple/host.sdn}
+#   > config/host/<hostname>.sdn (only when its hostname: field matches)
+#   > config/host/host_config.sdn (commented defaults) > consumer default.
+# A consumer-specific SIMPLE_* variable (e.g. SIMPLE_HIR_SHARD_WORKER_KB) is
+# checked by the consumer BEFORE calling here, so it still wins.
+#
+# Cost: at most three small file reads per lookup; callers are admission
+# points (once per pool / build start), never per-module hot paths.
+
+use std.common.config_core.host_config.{host_config_entries, host_config_int, host_config_value, host_config_env_name}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, file_read_nullable}
+
+fn _hl_env(name: text) -> text:
+    env_get_nullable(name) ?? ""
+
+fn host_limits_user_path() -> text:
+    val explicit = _hl_env("SIMPLE_HOST_CONFIG")
+    if explicit != "":
+        return explicit
+    var home = _hl_env("HOME")
+    if home == "":
+        home = _hl_env("USERPROFILE")
+    if home == "":
+        return ""
+    home + "/.config/simple/host.sdn"
+
+fn host_limits_hostname() -> text:
+    val win = _hl_env("COMPUTERNAME")
+    if win != "":
+        return win.lower()
+    _hl_env("HOSTNAME").lower()
+
+fn _hl_read(path: text) -> text:
+    if path == "":
+        return ""
+    file_read_nullable(path) ?? ""
+
+# The legacy per-host document only applies when its own hostname field names
+# this host (same safety rule as host_env_load in host-env.shs).
+fn host_limits_machine_doc(content: text, hostname: text) -> text:
+    if content == "" or hostname == "":
+        return ""
+    for line in content.split("\n"):
+        val t = line.trim()
+        if t.starts_with("hostname:"):
+            val v = t.substring(9).trim().lower()
+            if v == hostname:
+                return content
+            return ""
+    ""
+
+# Pure: resolve `key` from the given documents and env value.
+fn host_limits_value_from(key: text, defaults_text: text, host_text: text, user_text: text, env_value: text) -> text:
+    val env: [(text, text)] = [(host_config_env_name(key), env_value)]
+    host_config_value(host_config_entries(defaults_text, host_text, user_text, env), key)
+
+fn host_limits_int_from(key: text, defaults_text: text, host_text: text, user_text: text, env_value: text, default_value: i64) -> i64:
+    val env: [(text, text)] = [(host_config_env_name(key), env_value)]
+    host_config_int(host_config_entries(defaults_text, host_text, user_text, env), key, default_value)
+
+# Live lookup: the effective text value of `key` ("" when unconfigured).
+fn host_limit_value(key: text) -> text:
+    val hostname = host_limits_hostname()
+    val machine = host_limits_machine_doc(_hl_read("config/host/" + hostname + ".sdn"), hostname)
+    host_limits_value_from(key, _hl_read("config/host/host_config.sdn"), machine, _hl_read(host_limits_user_path()), _hl_env(host_config_env_name(key)))
+
+# Live lookup of a positive integer key, else `default_value`.
+fn host_limit_i64(key: text, default_value: i64) -> i64:
+    val raw = host_limit_value(key)
+    if raw == "":
+        return default_value
+    val parsed = raw.to_i64() ?? 0
+    if parsed > 0:
+        return parsed
+    default_value
+
+# The free RAM/commit floor every build pool keeps, in KiB. Host key
+# mem_reserve_free_mib, else `default_kib` (callers pass their documented 24 GiB).
+fn host_limit_mem_reserve_free_kib(default_kib: i64) -> i64:
+    val mib = host_limit_i64("mem_reserve_free_mib", 0)
+    if mib <= 0 or mib > 9007199254740991:
+        return default_kib
+    mib * 1024

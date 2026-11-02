@@ -1,0 +1,75 @@
+#!/bin/sh
+# host-limits.shs — print this host's resolved resource limits (schema
+# simple-host-config-v1) for launch scripts. Values come from
+# scripts/setup/host-env.shs --get (SIMPLE_HOST_<KEY> env > user host.sdn >
+# config/host/<hostname>.sdn > config/host/host_config.sdn), else the built-in
+# default; physical RAM is detected.
+#
+#   sh scripts/setup/host-limits.shs           # key=value (layer) lines
+#   eval "$(sh scripts/setup/host-limits.shs --env)"   # HOST_LIMIT_<KEY>=value
+#
+# Keys: max_build_jobs max_threads worker_mem_mib mem_reserve_free_mib
+# probe_max_mib probe_max_parallel tree_rss_host_pct, plus derived
+# host_mem_mib (detected) and heavy_build_max_mib = min(host_mem *
+# tree_rss_host_pct / 100, host_mem - mem_reserve_free_mib).
+set -eu
+
+hl_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+hl_mode=${1:-}
+case "$hl_mode" in
+  ''|--env) ;;
+  *) printf 'usage: host-limits.shs [--env]\n' >&2; exit 2 ;;
+esac
+
+hl_cpus() {
+  getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null ||
+    sysctl -n hw.ncpu 2>/dev/null || printf '1'
+}
+
+# Physical RAM in MiB; 0 when unknown.
+hl_mem_mib() {
+  if [ -r /proc/meminfo ]; then
+    awk '/^MemTotal:/ { printf "%d", $2 / 1024; found = 1 } END { if (!found) printf "0" }' /proc/meminfo
+    return 0
+  fi
+  hl_b=$(sysctl -n hw.memsize 2>/dev/null || sysctl -n hw.physmem 2>/dev/null || printf '0')
+  case "$hl_b" in *[!0-9]*|'') hl_b=0 ;; esac
+  printf '%s' $((hl_b / 1048576))
+}
+
+# hl_get KEY DEFAULT -> sets hl_value and hl_layer.
+hl_get() {
+  hl_value=$(sh "$hl_dir/host-env.shs" --get "$1" 2>/dev/null || :)
+  if [ -n "$hl_value" ]; then
+    hl_layer=host
+  else
+    hl_value=$2
+    hl_layer=default
+  fi
+}
+
+hl_emit() {
+  if [ "$hl_mode" = --env ]; then
+    printf 'HOST_LIMIT_%s=%s\n' "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')" "$2"
+  else
+    printf '%s=%s (%s)\n' "$1" "$2" "$3"
+  fi
+}
+
+hl_cpu_count=$(hl_cpus)
+hl_host_mem=$(hl_mem_mib)
+hl_emit host_mem_mib "$hl_host_mem" detected
+
+hl_get max_build_jobs 16; hl_emit max_build_jobs "$hl_value" "$hl_layer"
+hl_get max_threads "$hl_cpu_count"; hl_emit max_threads "$hl_value" "$hl_layer"
+hl_get worker_mem_mib 3300; hl_emit worker_mem_mib "$hl_value" "$hl_layer"
+hl_get mem_reserve_free_mib 24576; hl_reserve=$hl_value; hl_emit mem_reserve_free_mib "$hl_value" "$hl_layer"
+hl_get probe_max_mib 8192; hl_emit probe_max_mib "$hl_value" "$hl_layer"
+hl_get probe_max_parallel 2; hl_emit probe_max_parallel "$hl_value" "$hl_layer"
+hl_get tree_rss_host_pct 50; hl_pct=$hl_value; hl_emit tree_rss_host_pct "$hl_value" "$hl_layer"
+
+hl_heavy=$((hl_host_mem * hl_pct / 100))
+hl_room=$((hl_host_mem - hl_reserve))
+[ "$hl_room" -lt 0 ] && hl_room=0
+[ "$hl_room" -lt "$hl_heavy" ] && hl_heavy=$hl_room
+hl_emit heavy_build_max_mib "$hl_heavy" derived

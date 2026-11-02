@@ -1,0 +1,54 @@
+# std.nogc_sync_mut.host_limits — host resource-limit reader precedence.
+#
+# Source: src/lib/nogc_sync_mut/host_limits.spl (shell twin:
+# sh scripts/setup/host-env.shs --selftest, case e3).
+
+use std.spec.{step}
+use std.nogc_sync_mut.host_limits.{host_limits_value_from, host_limits_int_from, host_limits_machine_doc}
+use std.common.config_core.host_config.{host_config_entries, host_config_mem_reserve_free_mib, host_config_worker_mem_mib, host_config_max_threads, host_config_probe_max_parallel}
+
+fn defaults_doc() -> text:
+    "host_config:\n  schema: simple-host-config-v1\n  # mem_reserve_free_mib: 24576\n  probe_max_mib: 8192\n"
+
+fn host_doc() -> text:
+    "host_env:\n  hostname: sthost\n  mem_reserve_free_mib: 12288\n  max_threads: 16\n"
+
+fn user_doc() -> text:
+    "host_config:\n  schema: simple-host-config-v1\n  mem_reserve_free_mib: 16384\n  worker_mem_mib: 1200\n"
+
+describe "std host_limits reader":
+    # @manual scenario evidence
+
+    describe "precedence env > user > host > defaults > consumer default":
+        it "env beats the user file":
+            step("SIMPLE_HOST_MEM_RESERVE_FREE_MIB=8192 with a user value 16384")
+            expect(host_limits_int_from("mem_reserve_free_mib", defaults_doc(), host_doc(), user_doc(), "8192", 24576)).to_equal(8192)
+
+        it "user file beats the per-host file":
+            expect(host_limits_int_from("mem_reserve_free_mib", defaults_doc(), host_doc(), user_doc(), "", 24576)).to_equal(16384)
+
+        it "per-host file beats the defaults file":
+            expect(host_limits_int_from("max_threads", defaults_doc(), host_doc(), user_doc(), "", 0)).to_equal(16)
+
+        it "an uncommented defaults value applies when nothing else sets it":
+            expect(host_limits_value_from("probe_max_mib", defaults_doc(), host_doc(), user_doc(), "")).to_equal("8192")
+
+        it "a commented default pins nothing; the consumer default wins":
+            expect(host_limits_int_from("mem_reserve_free_mib", defaults_doc(), "", "", "", 24576)).to_equal(24576)
+
+        it "an invalid env value falls through to the file":
+            expect(host_limits_int_from("mem_reserve_free_mib", defaults_doc(), host_doc(), user_doc(), "0", 24576)).to_equal(16384)
+            expect(host_limits_int_from("mem_reserve_free_mib", defaults_doc(), host_doc(), user_doc(), "lots", 24576)).to_equal(16384)
+
+    describe "per-host document safety":
+        it "applies only when its hostname field matches":
+            expect(host_limits_machine_doc(host_doc(), "sthost")).to_equal(host_doc())
+            expect(host_limits_machine_doc(host_doc(), "otherhost")).to_equal("")
+
+    describe "typed getters":
+        it "read the limit keys with consumer defaults":
+            val entries = host_config_entries(defaults_doc(), host_doc(), user_doc(), [])
+            expect(host_config_mem_reserve_free_mib(entries, 24576)).to_equal(16384)
+            expect(host_config_worker_mem_mib(entries, 3300)).to_equal(1200)
+            expect(host_config_max_threads(entries, 0)).to_equal(16)
+            expect(host_config_probe_max_parallel(entries, 2)).to_equal(2)

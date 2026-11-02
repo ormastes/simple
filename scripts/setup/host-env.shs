@@ -181,7 +181,7 @@ host_env_load() {
 #   4. versioned defaults config/host/host_config.sdn (values commented out)
 # Every layer uses the same "  key: value" two-space shape as host_env:.
 # ---------------------------------------------------------------------------
-HOST_CONFIG_KEYS="max_build_jobs max_threads worker_mem_mib tree_rss_base_mib tree_rss_per_job_mib tree_rss_host_pct cpu_family cpu_features os llvm_root llvm_version gpu cache_root cache_scope frontend_cache hir_cache hir_cache_selfcheck native_build_cache_dir cache_max_bytes cache_max_gb hwir assurance arm_baremetal cache_memory_max_bytes cache_storage_max_bytes cache_max_branches cache_kept_branches cache_versions_per_source cache_per_source_max_disk_bytes cache_per_source_max_memory_bytes"
+HOST_CONFIG_KEYS="max_build_jobs max_threads worker_mem_mib mem_reserve_free_mib probe_max_mib probe_max_parallel tree_rss_base_mib tree_rss_per_job_mib tree_rss_host_pct cpu_family cpu_features os llvm_root llvm_version gpu cache_root cache_scope frontend_cache hir_cache hir_cache_selfcheck native_build_cache_dir cache_max_bytes cache_max_gb hwir assurance arm_baremetal cache_memory_max_bytes cache_storage_max_bytes cache_max_branches cache_kept_branches cache_versions_per_source cache_per_source_max_disk_bytes cache_per_source_max_memory_bytes"
 HOST_CONFIG_CACHE_KEYS="cache_root cache_scope frontend_cache hir_cache hir_cache_selfcheck native_build_cache_dir cache_max_bytes cache_max_gb"
 
 # host_config_cache_var KEY -> the EXISTING consumer variable a cache key is a
@@ -231,7 +231,7 @@ host_config_valid() {
                 *[!0-9]*|0*|???*) return 1 ;;
             esac
             [ "$2" -le 75 ] ;;
-        max_build_jobs|max_threads|worker_mem_mib|tree_rss_base_mib|tree_rss_per_job_mib|llvm_version|cache_max_bytes|cache_max_gb|cache_memory_max_bytes|cache_storage_max_bytes|cache_max_branches|cache_versions_per_source|cache_per_source_max_disk_bytes|cache_per_source_max_memory_bytes)
+        max_build_jobs|max_threads|worker_mem_mib|mem_reserve_free_mib|probe_max_mib|probe_max_parallel|tree_rss_base_mib|tree_rss_per_job_mib|llvm_version|cache_max_bytes|cache_max_gb|cache_memory_max_bytes|cache_storage_max_bytes|cache_max_branches|cache_versions_per_source|cache_per_source_max_disk_bytes|cache_per_source_max_memory_bytes)
             case "$2" in
                 *[!0-9]*) return 1 ;;
                 *[1-9]*) return 0 ;;
@@ -688,6 +688,26 @@ EOF
         printf 'not ok - (e2) invalid values / foreign schema are rejected and fall through with a warning\n'
         _st_fail=$((_st_fail + 1))
     fi
+
+    # (e3) memory-limit keys: user file sets them, env wins, 0/text rejected.
+    printf 'host_config:\n  schema: simple-host-config-v1\n  mem_reserve_free_mib: 16384\n  probe_max_mib: 4096\n  probe_max_parallel: 3\n' >"${_st_dir}/memuser.sdn"
+    SIMPLE_HOST_CONFIG="${_st_dir}/memuser.sdn"
+    unset SIMPLE_HOST_MEM_RESERVE_FREE_MIB SIMPLE_HOST_PROBE_MAX_MIB SIMPLE_HOST_PROBE_MAX_PARALLEL
+    _st_m_ok=1
+    _st_v=$(host_config_get mem_reserve_free_mib "${_st_dir}"); [ "${_st_v}" = 16384 ] || _st_m_ok=0
+    _st_v=$(host_config_get probe_max_mib "${_st_dir}"); [ "${_st_v}" = 4096 ] || _st_m_ok=0
+    _st_v=$(host_config_get probe_max_parallel "${_st_dir}"); [ "${_st_v}" = 3 ] || _st_m_ok=0
+    _st_v=$(SIMPLE_HOST_MEM_RESERVE_FREE_MIB=8192 host_config_get mem_reserve_free_mib "${_st_dir}"); [ "${_st_v}" = 8192 ] || _st_m_ok=0
+    _st_v=$(SIMPLE_HOST_MEM_RESERVE_FREE_MIB=0 host_config_get mem_reserve_free_mib "${_st_dir}" 2>/dev/null); [ "${_st_v}" = 16384 ] || _st_m_ok=0
+    _st_v=$(SIMPLE_HOST_PROBE_MAX_PARALLEL=many host_config_get probe_max_parallel "${_st_dir}" 2>/dev/null); [ "${_st_v}" = 3 ] || _st_m_ok=0
+    if [ "${_st_m_ok}" -eq 1 ]; then
+        printf 'ok - (e3) memory-limit keys resolve env > user and reject invalid values\n'
+        _st_pass=$((_st_pass + 1))
+    else
+        printf 'not ok - (e3) memory-limit keys resolve env > user and reject invalid values\n'
+        _st_fail=$((_st_fail + 1))
+    fi
+    SIMPLE_HOST_CONFIG="${_st_dir}/user.sdn"
 
     # (g) cache keys: validation, consumer-var mapping (on/off -> 1/0), and a
     # SET consumer var always wins (it is never printed / never overridden).
