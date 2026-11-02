@@ -30,7 +30,7 @@ evidence found in the body. This is bookkeeping, not verification.
 > and therefore whether this is a bug or simply expensive-but-correct work. Those
 > need instrumentation, not another stack sample.
 
-**Status:** OPEN
+**Status:** CLOSED (already fixed, 2026-11-02)
 **Filed:** 2026-09-02
 **Severity:** P1 — blocks Stage-3 self-host on aarch64-apple-darwin. The stage does not
 error and does not deadlock; it burns CPU for a very long time in one large scan.
@@ -118,3 +118,19 @@ exact growth curve is inferred from `Vec::retain`'s definition and the per-surfa
 pattern, and has not been measured directly.
 
 **Revalidated 2026-11-02: still plausible because the report title (Stage 3 stalls in `rt_transient_heap_promote` — one enormous scan) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Closure (2026-11-02, opf-4)
+
+Checked against current policy/design: still valid as a Rust-runtime
+transient-scope perf defect (independent of erased generics, nil/Any rules,
+SDN, one-process-per-file and HIR/MIR target split), and already fixed.
+
+Fixed by `7cfa794e2c2` "perf(runtime): defer Rust transient-scope
+compaction to scope end (BSM P0)", which is suggested fix option 1. On
+`origin/release/1.0.0`, `rt_transient_heap_promote`
+(`src/compiler_rust/runtime/src/value/collections.rs:3081`) records promoted
+addresses in the per-scope `promoted` set and no longer runs
+`scope.objects.retain`. The single compaction is in `rt_transient_array_scope_end`
+(`collections.rs:3267`). Regression coverage: the promote-then-end and
+idempotent double-promote tests that the fix commit added to `collection_tests.rs`.
+Not related to the s2-rebuild "stage2_next worker AV after load_sources" lane.
