@@ -110,7 +110,7 @@ static void stress_other_cap_latency(void) {
     qsort(lat, (size_t)samples, sizeof lat[0], cmp_double);
     double p99 = lat[(samples * 99) / 100], max = lat[samples - 1];
     printf("other-cap size_v1: %d samples, p99=%.2f ms, max=%.2f ms (slow reader holds ~%d ms per call)\n", samples, p99, max, 17 * HOLD_MS);
-    CHECK(p99 < 25.0);
+    CHECK(p99 < (17.0 * HOLD_MS) / 4.0);   /* bound relative to the injected hold, not wall-clock luck */
 }
 
 struct hammer { int64_t token; volatile int stop; };
@@ -134,8 +134,8 @@ static void close_with_reference_held(void) {
     sleep_ms(30);
     int64_t rc = rt_cache_host_close_v1(g_big);
     join(t);
-    CHECK(rc >= 0 || rc == -1);
-    CHECK(g_big_results[0] == BIG_BYTES || g_big_results[0] < 0);
+    CHECK(rc == 0);                                /* close waits for the in-flight read, then succeeds */
+    CHECK(g_big_results[0] == BIG_BYTES);           /* the read that held the reference completed intact */
     CHECK(rt_cache_host_size_v1(g_big, 1 << 20) == -1);      /* token is dead */
     CHECK(rt_cache_host_close_v1(g_big) == -1);              /* double close rejected */
 

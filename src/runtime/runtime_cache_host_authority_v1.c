@@ -373,10 +373,16 @@ static int64_t cw_publish(int64_t token,const uint8_t *p,int64_t n,int retained)
      * and no-replace; errors after rename remain errors, never fake success. */
     good=FlushFileBuffers(cw_file(c));
     if (good && retained) {
-        /* Same original writer, acquired before sealing: no path reopen and
-         * no write surface for the resulting capability. Old TEMP is invalid. */
-        AcquireSRWLockExclusive(&cw_lock); c->token=sealed_token; ReleaseSRWLockExclusive(&cw_lock);
-        c->kind=CW_SEALED; result=sealed_token;
+        /* Re-validate and assign under ONE hold of the list lock so a concurrent
+         * admit cannot pick the same value between check and assignment. */
+        int assigned=0; AcquireSRWLockExclusive(&cw_lock);
+        for (int i=0; i<128; ++i) {
+            if (!cw_find(sealed_token)) { c->token=sealed_token; assigned=1; break; }
+            uint64_t t; if (!cw_random(&t,sizeof t)) break; t&=INT64_MAX; if (t) sealed_token=(int64_t)t;
+        }
+        ReleaseSRWLockExclusive(&cw_lock);
+        if (assigned) { c->kind=CW_SEALED; result=sealed_token; }
+        else { cw_retire_locked(c); if (cw_detach(c)) cw_put(c); }
     } else { cw_retire_locked(c); if (cw_detach(c)) cw_put(c); result=good?1:-1; }
 done:
     cw_unlock_cap(c); free(path); free(name); return result;
@@ -447,7 +453,6 @@ UNSUPPORTED(rt_cache_host_quarantine_v1, (int64_t r, int64_t o, const uint8_t *p
 #endif
 
 enum cache_cap_kind { CAP_ROOT=1, CAP_DIR=2, CAP_READ=3, CAP_TEMP=4, CAP_CAS_ROOT=5, CAP_CAS_KIND=6, CAP_CAS_SHARD1=7, CAP_CAS_SHARD2=8, CAP_TEMP_CAS=9, CAP_SEALED=10 };
-struct cache_cap { int64_t token; int fd; int parent_fd; enum cache_cap_kind kind; int sealed; char temp_name[96]; struct cache_cap *next; };
 /* Locking model: caps_lock guards ONLY the capability list and the refs
  * counters.  Every operation takes a counted reference (find_cap_ref) and then
  * does its descriptor I/O (fsync, pread, verify re-read, rename) under the
@@ -629,8 +634,16 @@ int64_t rt_cache_host_publish_retained_noreplace_v2(int64_t h,const uint8_t *p,i
         (published.st_mode&S_IFMT)==S_IFREG&&original.st_dev==published.st_dev&&
         original.st_ino==published.st_ino&&!fsync(c->fd)&&!fsync(c->parent_fd);
     if (good) {
-        pthread_mutex_lock(&caps_lock); c->token=token; pthread_mutex_unlock(&caps_lock);
-        c->kind=CAP_SEALED; c->temp_name[0]=0; result=token;
+        /* Re-validate and assign under ONE hold of the list lock so a concurrent
+         * add_cap cannot pick the same value between check and assignment. */
+        int assigned=0; pthread_mutex_lock(&caps_lock);
+        for (int i=0;i<128;++i) {
+            if (token>0&&!find_cap(token)) { c->token=token; assigned=1; break; }
+            token=random_token();
+        }
+        pthread_mutex_unlock(&caps_lock);
+        if (assigned) { c->kind=CAP_SEALED; c->temp_name[0]=0; result=token; }
+        else { retire_locked(c); if (detach_cap(c)) put_cap(c); }
     } else { retire_locked(c); if (detach_cap(c)) put_cap(c); }
  done:
     unlock_cap(c); return result;
