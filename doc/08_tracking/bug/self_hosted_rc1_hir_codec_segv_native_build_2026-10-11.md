@@ -69,3 +69,5 @@ distinguished by a fresh self-hosted build:
 - lldb single-frame backtrace above (binary is `--strip`, so no deeper frames).
 - Sibling family: `stage2_test_runner_build_mir_segv_aarch64_2026-10-11.md`
   (FIXED by #2943, same nil-guard pattern class).
+
+**Revalidated 2026-11-02: still plausible because OPEN — toolchain/binary drift; needs a rebuilt self-hosted compiler; no merged fix commit with a passing regression is cited in this doc.**

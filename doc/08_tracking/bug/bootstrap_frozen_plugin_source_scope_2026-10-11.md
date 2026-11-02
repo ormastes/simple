@@ -42,3 +42,5 @@ Source-only controls validate all seven actual source vectors and reject missing
 plugin roots or precedence inversion. A real Git/SCV snapshot fixture for all
 three CUDA modes is authored but UNEXECUTED. The recorded native failure is not
 claimed fixed until a new changed-input bootstrap attempt qualifies it.
+
+**Revalidated 2026-11-02: still plausible because OPEN — constructor correction authored; newly built producer and native; no merged fix commit with a passing regression is cited in this doc.**

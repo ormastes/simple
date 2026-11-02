@@ -40,3 +40,5 @@ Memory/alias checks are in the positive fixture; elapsed time and peak RSS must
 be captured during its native run. The source adds only bounded scalar decode
 and per-local metadata, not runtime deep copies. No measured performance or
 memory improvement is claimed.
+
+**Revalidated 2026-11-02: still plausible because source repair; native validation UNRUN; no merged fix commit with a passing regression is cited in this doc.**

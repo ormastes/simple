@@ -34,3 +34,5 @@ behavior tests need no mirror import-string tests. Next bounded current-producer
 compile must use a fresh owned source overlay and preserved private caches for
 these modules; all native execution is UNRUN in this checkpoint. No frozen
 source916be, active build, or previous failure receipt was modified.
+
+**Revalidated 2026-11-02: still plausible because source repair authored; current-producer compilation UNRUN; no merged fix commit with a passing regression is cited in this doc.**

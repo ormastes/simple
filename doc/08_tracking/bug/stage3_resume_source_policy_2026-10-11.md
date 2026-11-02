@@ -63,3 +63,5 @@ Independent source review remains required. Native/build/runtime
 qualification is UNEXECUTED; no Stage3 admission or release PASS is claimed.
 The bug remains OPEN until corrected-producer native qualification is
 completed. Database registration is owned by the final composition lane.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Severity: P1. GitHub: https://github.com/ormastes/simple/issues/3114; no merged fix commit with a passing regression is cited in this doc.**

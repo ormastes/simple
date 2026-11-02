@@ -27,3 +27,5 @@ The semantic snapshot map persists with provider metadata and is promoted with t
 `test/fixtures/compiler/result_err_record_owner/{records,provider,main}.spl` is the native three-module positive: local IoError homonym has a different first-field type, provider message is the second field, aliases preserve it, a mutable Service call counter must stay exactly one, and mutation of a copied imported Struct Err payload must not alter the original. `conflicting_owner.spl` is a separate compile-negative entry, sharing the providers. It must report a fatal provider-layout conflict and produce no admitted executable.
 
 No compiler, native fixture or compiled spec has run for this source change. Runtime source/producer/runtime/backend/cache pins, positive exact values and negative diagnostic/no-object proof are required before closure. Do not transfer a prior producer or a source-review PASS into native admission.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Severity: P1. Source repair and regressions are authored; native and compiled-spec qualification are UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**

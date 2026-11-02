@@ -70,3 +70,5 @@ from the wrong text-to-bytes call independently explains the default port.
 The forced OS `listen` failure branch is source-reviewed; no fault-injection
 runtime coverage is claimed. All executable checks remain UNEXECUTED until a
 qualified producer/runtime executes them; normal source hooks are separate.
+
+**Revalidated 2026-11-02: still plausible because OPEN — source repair authored; native fixtures and platform tests UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**

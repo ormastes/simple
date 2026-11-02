@@ -37,3 +37,5 @@ configuration/response-file refusal, concurrent writers, failed publication,
 and elapsed-time plus peak-RSS comparison. Preprocessing and hashing still cost
 time on hits; whole source admission and linking remain separate bottlenecks.
 Live bootstrap source snapshots and caches were not changed by this work.
+
+**Revalidated 2026-11-02: still plausible because source implementation prepared; native correctness, concurrency, memory,; no merged fix commit with a passing regression is cited in this doc.**

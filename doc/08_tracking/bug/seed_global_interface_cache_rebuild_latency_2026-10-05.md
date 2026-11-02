@@ -87,3 +87,5 @@ private body change rebuilds only affected objects; imported signature, field
 layout, enum, trait/default changes invalidate all actual dependents; adding an
 ambiguous resolution candidate invalidates consumers. Compare native outputs,
 peak RSS and elapsed/CPU time. These new qualification cases are UNRUN.
+
+**Revalidated 2026-11-02: still plausible because OPEN performance limitation; no cache correctness weakening proposed; no merged fix commit with a passing regression is cited in this doc.**

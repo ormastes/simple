@@ -26,3 +26,5 @@ or memory improvement is claimed. Remaining receiver-resolution failures need
 their own evidence after this minimal fix; the existing unresolved method path
 also only recovers Enum owners from declared Named types when struct metadata
 is missing, which remains under investigation rather than bundled speculatively.
+
+**Revalidated 2026-11-02: still plausible because the report title (Early Let transports aggregate receiver metadata across staged ABI) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

@@ -160,3 +160,5 @@ buffer/session/library cleanup, changed-provider cache miss and unchanged hit,
 and full bootstrap with the same frontend and both provider identities. Pair
 startup/request latency with peak and steady RSS; distinguish diagnostic runs
 from canonical Phase 4 admission. Existing fixture PASS cannot close these gaps.
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1). Windows bridge invocation repaired and fixture-tested below;; no merged fix commit with a passing regression is cited in this doc.**

@@ -7,3 +7,5 @@ Producer `4cca9585fbc6069e1755c9958df3fcdf05d6168046f7934f8130640f1dd23d3d`, sou
 Tagged workaround spells the same text/array byte or element length with its receiver `.len()`; input codepoint cursor helpers stay unchanged. It adds no TLS dependency or host access. Safe global `len` grammar must be repaired in the compiler; this source workaround is not recovery evidence. Tests and changed closure remain UNEXECUTED.
 
 Production workaround and native regressions: commit `02c42fc51` (qualification pending).
+
+**Revalidated 2026-11-02: still plausible because OPEN. Workaround qualification pending; no merged fix commit with a passing regression is cited in this doc.**

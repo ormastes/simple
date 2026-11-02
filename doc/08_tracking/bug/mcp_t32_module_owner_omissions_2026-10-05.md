@@ -31,3 +31,5 @@ These imports/declarations must remain after future compiler rebuilds. They are
 not temporary compiler workarounds and must not be automatically reverted.
 The failed original Phase4 receipts and cache are retained; the next attempt
 uses the current compiler and a separately authenticated source revision.
+
+**Revalidated 2026-11-02: still plausible because permanent source repairs prepared; native validation pending; no merged fix commit with a passing regression is cited in this doc.**

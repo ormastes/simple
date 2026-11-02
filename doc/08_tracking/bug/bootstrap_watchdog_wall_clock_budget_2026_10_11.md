@@ -109,3 +109,5 @@ References: [Time::HiRes contract](https://perldoc.perl.org/Time::HiRes),
 [Perl5.40 native providers](https://github.com/Perl/perl5/blob/v5.40.0/dist/Time-HiRes/HiRes.xs),
 [FreeBSD clock contract](https://man.freebsd.org/cgi/man.cgi?query=clock_gettime&sektion=2),
 [OpenBSD clock contract](https://man.openbsd.org/clock_gettime.2).
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1). Source repair and controlled-clock contracts; release and; no merged fix commit with a passing regression is cited in this doc.**

@@ -71,3 +71,5 @@ All full compiler/core/lib checks, MCP/LSP smokes, whole suites and native Windo
 `/mnt/c/Temp/simple-native-codegen-allocation-diagnosis-20261012/`: exact producer commands, private Git fixtures, GDB stack/counters, RSS samples, paired native sanity receipts, source-owner hash comparison and causal-report.md.
 
 `/mnt/c/Temp/simple-mir-json-linear-qualification-20261012/`: per-attempt command/log/receipt/errors, frozen-source-binding.json and candidate source binding. Original runner: `/mnt/c/Temp/simple-manual-lanes-20261011/p2-runner-bounded-read-final/`.
+
+**Revalidated 2026-11-02: still plausible because OPEN; source candidate, native qualification blocked. This patch is not an admitted compiler repair. No aggregate runner retry is authorized; no merged fix commit with a passing regression is cited in this doc.**

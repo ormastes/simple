@@ -11,3 +11,5 @@ Regression: test/fixtures/native/imported_generic_owner_scope/{owner,main}.spl c
 Related but distinct: explicit call type arguments are discarded in the parser; inferred optional generic results can produce Some(nil). This field-scope draft does not claim to fix those call-transport defects.
 
 Astra source review accepted saved/restored owner scope, dependency filtering and binder-first projection; review identified optional has_X sugar and exact has_-prefixed binder preservation, now included. Review does not establish executable qualification.
+
+**Revalidated 2026-11-02: still plausible because OPEN; draft repair and regression fixture AUTHORED_UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**

@@ -76,3 +76,5 @@ RSS against the same serial fixture. A policy-only fixture cannot prove actual
 the directory-root validator blocker remains unqualified. No freeze fallback,
 seed fallback, global hardcoded 20/80 compiler limit, or live build restart is
 part of this candidate.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Priority: P1. Native repair admission pending; no merged fix commit with a passing regression is cited in this doc.**

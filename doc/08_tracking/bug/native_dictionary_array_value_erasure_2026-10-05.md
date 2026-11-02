@@ -27,3 +27,5 @@ incomplete_family.spl checks lifetime publication independently. Next bounded
 diagnostic validation should compile/run both with each actual backend using
 the current producer and private source overlay/cache; preserve all failed
 receipts. Do not restart ongoing bootstrap phases for this workaround.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Source workaround authored; native validation UNRUN; no merged fix commit with a passing regression is cited in this doc.**
