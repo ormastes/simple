@@ -611,6 +611,20 @@ impl Lowerer {
                 // Compare subject == literal
                 let lit_hir = self.lower_expr(lit_expr, ctx)?;
 
+                // `case nil:` tests absence, exactly like `case None:`. As an
+                // equality it lowered to text/scalar `==` against nil, which is
+                // never true for an absent `text?` (rt_string_eq(nil, nil) == 0),
+                // so the arm silently never matched.
+                if matches!(lit_hir.kind, HirExprKind::Nil) {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_none".to_string(),
+                            args: vec![subject_ref],
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
+
                 // Check if subject or literal is a string type - use rt_string_eq for string comparison
                 // Also check CHAR and ANY since string indexing returns single-char strings
                 // and the literal may be a string (e.g., char literals like '(' are strings)
@@ -1069,6 +1083,16 @@ impl Lowerer {
                 // `case A(0, y)` must reject `A(9, 7)`. Without this the arm was
                 // irrefutable and the first literal arm swallowed every value.
                 let lit_hir = self.lower_expr(lit_expr, ctx).ok()?;
+                // Nested `nil` literal: absence test, same as the top-level arm.
+                if matches!(lit_hir.kind, HirExprKind::Nil) {
+                    return Some(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_none".to_string(),
+                            args: vec![slot.clone()],
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
                 // The slot is ANY-typed (it came out of rt_enum_payload), so the
                 // literal's own type is the only usable signal for picking the
                 // text comparison over the scalar one.

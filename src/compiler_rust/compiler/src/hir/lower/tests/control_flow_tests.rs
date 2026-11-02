@@ -1245,3 +1245,23 @@ fn test_placeholder_lambda_param_uses_expected_type_when_available() {
         "a placeholder param with an available expected element type must not fall back to ANY: {params:?}"
     );
 }
+
+/// `case nil:` on an optional text subject must test absence (rt_is_none),
+/// never text equality: rt_string_eq(nil, nil) is 0, so the arm never
+/// matched, the match fell through with a nil value, and stage2_next
+/// crashed dereferencing it in native_build_cache_scope_key (2026-11-02).
+#[test]
+fn test_nil_literal_pattern_on_optional_text_uses_is_none() {
+    let source = "fn pick(cpu: text?) -> text:\n    val v = match cpu:\n        case Some(c): c\n        case nil: \"native\"\n    return v\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        !repr.contains("rt_string_eq"),
+        "`case nil:` must not lower to text equality: {repr}"
+    );
+    assert!(
+        repr.contains("rt_is_none"),
+        "`case nil:` must lower to rt_is_none: {repr}"
+    );
+}
