@@ -141,21 +141,35 @@ int main() {
     std::printf("XRAY_INTEGRATION static-enabled PASS entry=%llu exit=%llu\n",
                 entries, exits);
 
-    constexpr unsigned workers = 4, calls_per_worker = 90000;
-    std::atomic<bool> start{false};
+    constexpr unsigned workers = 4;
+    std::atomic<bool> start{false}, patch_done{false};
+    std::atomic<unsigned> workers_ready{0}, patch_generation{0};
+    std::atomic<unsigned long long> calls_during_transitions{0};
     std::vector<std::thread> threads;
     for (unsigned t = 0; t < workers; ++t) {
         threads.emplace_back([&, t] {
             while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
-            run_calls(calls_per_worker, t * 10000);
+            workers_ready.fetch_add(1, std::memory_order_release);
+            unsigned round = 0;
+            while (!patch_done.load(std::memory_order_acquire)) {
+                const unsigned generation = patch_generation.load(std::memory_order_acquire);
+                run_calls(8, t * 10000 + round++);
+                if (generation != 0)
+                    calls_during_transitions.fetch_add(8, std::memory_order_relaxed);
+            }
         });
     }
     start.store(true, std::memory_order_release);
+    while (workers_ready.load(std::memory_order_acquire) != workers)
+        std::this_thread::yield();
     for (unsigned i = 0; i < 15000; ++i) {
         const bool enabled = (i & 1) != 0;
         patch(kEntry, enabled);
         patch(kExit, enabled);
+        patch_generation.store(i + 1, std::memory_order_release);
+        if ((i % 32) == 0) std::this_thread::yield();
     }
+    patch_done.store(true, std::memory_order_release);
     for (auto& thread : threads) thread.join();
     patch(kEntry, false);
     patch(kExit, false);
@@ -164,9 +178,10 @@ int main() {
                    original_protection, &ignored);
 
     const auto bad_ids = g_bad_ids.load(), bad_results = g_bad_results.load();
-    std::printf("XRAY_INTEGRATION concurrent entry=%llu exit=%llu transitions=15000 id_errors=%llu corruptions=%llu\n",
-                g_entries.load(), g_exits.load(), bad_ids, bad_results);
-    if (bad_ids || bad_results) return 6;
+    const auto overlap = calls_during_transitions.load();
+    std::printf("XRAY_INTEGRATION concurrent entry=%llu exit=%llu transitions=15000 overlapping_calls=%llu id_errors=%llu corruptions=%llu\n",
+                g_entries.load(), g_exits.load(), overlap, bad_ids, bad_results);
+    if (bad_ids || bad_results || overlap < 1000) return 6;
     std::puts("XRAY_INTEGRATION PASS native entry/exit and concurrent patching");
     return 0;
 }
