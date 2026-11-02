@@ -31,13 +31,14 @@
 #              the full diagnostic.
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists, file_read, file_size_raw, file_delete}
-use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, host_os}
+use compiler.backend.llvm_diagnostic_admission.{llvm_llc_error_diagnostic}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal}
 
 extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
-extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_thread_sleep(millis: i64)
 extern fn rt_time_now_monotonic_ms() -> i64
 extern fn rt_host_memory_headroom_bytes_v1() -> i64
@@ -54,6 +55,10 @@ pub const NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1: i64 = 2097152
 pub const NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1: i64 = 25165824
 # With neither a declared budget nor a measurable headroom, never admit-all.
 pub const NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1: i64 = 4
+# Per-job wall clock cap (ms); a child past it is killed and the module
+# falls back to the serial lane. SIMPLE_NATIVE_CODEGEN_JOB_TIMEOUT_MS overrides.
+pub const NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1: text = "SIMPLE_NATIVE_CODEGEN_JOB_TIMEOUT_MS"
+pub const NATIVE_CODEGEN_JOB_TIMEOUT_MS_DEFAULT_V1: i64 = 1800000
 
 pub const NATIVE_CODEGEN_JOB_QUEUED_V1: i64 = 0
 pub const NATIVE_CODEGEN_JOB_RUNNING_V1: i64 = 1
@@ -121,6 +126,22 @@ pub fn native_codegen_job_ir_path_v1(stage_root: text, index: i64) -> text:
 
 pub fn native_codegen_job_object_path_v1(stage_root: text, index: i64) -> text:
     "{stage_root}/job-{index}.o"
+
+pub fn native_codegen_job_log_path_v1(stage_root: text, index: i64) -> text:
+    "{stage_root}/job-{index}.log"
+
+# The serial lane runs llc as one shell command line ("{llc} {argv joined} 2>&1",
+# backend_shell_tuple). The pool runs the same line through the same shell,
+# with its output redirected to the job log for diagnostic admission.
+pub fn native_codegen_shell_cmd_v1() -> text:
+    if host_os() == "windows": "cmd.exe" else: "/bin/sh"
+
+pub fn native_codegen_command_line_v1(tool: text, argv: [text], log_path: text) -> text:
+    "{tool} " + argv.join(" ") + " > {log_path} 2>&1"
+
+pub fn native_codegen_shell_args_v1(tool: text, argv: [text], log_path: text) -> [text]:
+    val line = native_codegen_command_line_v1(tool, argv, log_path)
+    if host_os() == "windows": ["/c", line] else: ["-c", line]
 
 pub fn native_codegen_receipt_path_v1(ledger: text, module_name: text) -> text:
     "{ledger}/{sha256_text(module_name)}.codegen-receipt.sdn"
@@ -210,6 +231,9 @@ pub fn native_codegen_pool_run_v1(tool: text, names: [text], workers: i64,
     var emitted: i64 = 0
     var passed: i64 = 0
     var failed: i64 = 0
+    val shell_cmd = native_codegen_shell_cmd_v1()
+    val timeout_field = native_codegen_kib_field_v1(env_get_nullable(NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1) ?? "")
+    val job_timeout_ms = if timeout_field > 0: timeout_field else: NATIVE_CODEGEN_JOB_TIMEOUT_MS_DEFAULT_V1
     var poll: i64 = 0
     while emitted < count or live > 0 or next_spawn < emitted:
         # 1. Reap every finished child (non-blocking).
@@ -218,16 +242,28 @@ pub fn native_codegen_pool_run_v1(tool: text, names: [text], workers: i64,
         while job < emitted:
             if states[job] == NATIVE_CODEGEN_JOB_RUNNING_V1:
                 val pid = pids[job]
-                var running = true
+                # ONE reaping call. rt_process_is_running reaps on POSIX
+                # (waitpid WNOHANG), so a following wait would see ECHILD and
+                # lose the exit status. A 1 ms wait answers -2 while running.
                 var code: i64 = -2
                 unsafe(capabilities: [ffi]):
-                    running = rt_process_is_running(pid)
-                    if not running:
-                        code = rt_process_wait(pid, 1)
-                if not running and code != -2:
+                    code = rt_process_wait(pid, 1)
+                var timed_out = false
+                if code == -2 and native_codegen_now_ms_v1() - starts[job] > job_timeout_ms:
+                    unsafe(capabilities: [ffi]):
+                        val _killed = rt_process_kill(pid)
+                        code = rt_process_wait(pid, 5000)
+                    timed_out = true
+                if code != -2 or timed_out:
                     val obj = native_codegen_job_object_path_v1(stage_root, job)
+                    val log_path = native_codegen_job_log_path_v1(stage_root, job)
                     val size = if file_exists(obj): file_size_raw(obj) else: -1
-                    val ok = code == 0 and size > 0
+                    val log_text = if file_exists(log_path): file_read(log_path) else: ""
+                    # Same admission as the serial compile_ir_to_object: an
+                    # llc `error:` record refuses even an exit-0 object.
+                    val diagnostic = llvm_llc_error_diagnostic(code, log_text, "", tool,
+                        native_codegen_job_ir_path_v1(stage_root, job))
+                    val ok = not timed_out and code == 0 and size > 0 and diagnostic == ""
                     if (env_get_nullable("SIMPLE_KEEP_LLVM_IR") ?? "") != "1":
                         val _ir_dropped = file_delete(native_codegen_job_ir_path_v1(stage_root, job))
                     val slot = slots[job]
@@ -265,7 +301,9 @@ pub fn native_codegen_pool_run_v1(tool: text, names: [text], workers: i64,
                 var pid: i64 = -1
                 if claim == 1:
                     unsafe(capabilities: [ffi]):
-                        pid = rt_process_spawn_async_value(tool, argvs[next_spawn])
+                        pid = rt_process_spawn_async_value(shell_cmd,
+                            native_codegen_shell_args_v1(tool, argvs[next_spawn],
+                                native_codegen_job_log_path_v1(stage_root, next_spawn)))
                 if pid > 0:
                     pids[next_spawn] = pid
                     slots[next_spawn] = slot
