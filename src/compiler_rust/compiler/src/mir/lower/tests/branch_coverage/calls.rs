@@ -432,6 +432,109 @@ fn sanitized_multifield_enum_constructor_boxes_bool_payload_as_bool() {
 }
 
 #[test]
+fn sanitized_singlefield_enum_constructor_boxes_bool_and_preserves_integer() {
+    let source = "enum ProbeSingle:\n    Flag(value: bool)\n    Count(value: i64)\n\nfn test_false() -> ProbeSingle:\n    return ProbeSingle.Flag(value: false)\n\nfn test_true() -> ProbeSingle:\n    return ProbeSingle.Flag(value: true)\n\nfn test_count() -> ProbeSingle:\n    return ProbeSingle.Count(value: 37)\n";
+    let ast = Parser::new(source).parse().expect("parse failed");
+    let mut hir_module = hir::lower(&ast).expect("hir lower failed");
+
+    for (function_name, variant_name) in [
+        ("test_false", "Flag"),
+        ("test_true", "Flag"),
+        ("test_count", "Count"),
+    ] {
+        let function = hir_module
+            .functions
+            .iter_mut()
+            .find(|function| function.name == function_name)
+            .expect("constructor fixture function exists");
+        let hir::HirStmt::Return(Some(expr)) = &mut function.body[0] else {
+            panic!("expected enum constructor return");
+        };
+        let hir::HirExprKind::Call { func, .. } = &mut expr.kind else {
+            panic!("expected enum constructor call");
+        };
+        func.kind = hir::HirExprKind::Global(format!("ProbeSingle_dot_{variant_name}"));
+    }
+
+    let mir = lower_to_mir(&hir_module).expect("mir lower failed");
+    for (function_name, bool_value) in [("test_false", false), ("test_true", true)] {
+        let function = mir
+            .functions
+            .iter()
+            .find(|function| function.name == function_name)
+            .expect("MIR bool fixture function exists");
+        let instructions: Vec<_> = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .collect();
+        let bool_input = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::ConstBool { dest, value } if *value == bool_value => Some(*dest),
+                _ => None,
+            })
+            .expect("bool constructor input exists");
+        let bool_box = instructions
+            .iter()
+            .find_map(|inst| match inst {
+                MirInst::Call {
+                    dest: Some(dest),
+                    target,
+                    args,
+                } if target == &CallTarget::from_name("rt_value_bool")
+                    && args.len() == 1
+                    && args[0] == bool_input => Some(*dest),
+                _ => None,
+            })
+            .expect("single bool payload must use the runtime bool tag");
+        assert!(instructions.iter().any(|inst| matches!(
+            inst,
+            MirInst::EnumWith { enum_name, variant_name, payload, .. }
+                if enum_name == "ProbeSingle"
+                    && variant_name == "Flag"
+                    && *payload == bool_box
+        )), "single-field enum stores the tagged bool directly");
+        assert!(!instructions.iter().any(|inst| matches!(
+            inst,
+            MirInst::BoxInt { value, .. } if *value == bool_input
+        )), "bool constructor input is not integer-boxed");
+    }
+
+    let count_fn = mir
+        .functions
+        .iter()
+        .find(|function| function.name == "test_count")
+        .expect("MIR integer control function exists");
+    let count_instructions: Vec<_> = count_fn
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .collect();
+    let int_input = count_instructions
+        .iter()
+        .find_map(|inst| match inst {
+            MirInst::ConstInt { dest, value: 37 } => Some(*dest),
+            _ => None,
+        })
+        .expect("integer control input exists");
+    let int_box = count_instructions
+        .iter()
+        .find_map(|inst| match inst {
+            MirInst::BoxInt { dest, value } if *value == int_input => Some(*dest),
+            _ => None,
+        })
+        .expect("integer control keeps BoxInt");
+    assert!(count_instructions.iter().any(|inst| matches!(
+        inst,
+        MirInst::EnumWith { enum_name, variant_name, payload, .. }
+            if enum_name == "ProbeSingle"
+                && variant_name == "Count"
+                && *payload == int_box
+    )), "single-field integer enum still stores the BoxInt payload");
+}
+
+#[test]
 fn sanitized_enum_unit_global_lowers_to_enum_unit() {
     let mut parser = Parser::new("enum Tag:\n    Ready\n\nfn test() -> Tag:\n    return Tag.Ready\n");
     let ast = parser.parse().expect("parse failed");
