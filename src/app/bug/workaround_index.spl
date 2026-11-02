@@ -71,6 +71,15 @@ fn workaround_lexical_state(line: text, previous: text) -> text:
         i = i + 1
     state
 
+fn workaround_marker_line(line: text) -> bool:
+    val trimmed = line.trim()
+    var body = ""
+    if trimmed.starts_with("#"):
+        body = trimmed.substring(1).trim()
+    elif trimmed.starts_with("//"):
+        body = trimmed.substring(2).trim()
+    body.starts_with("@workaround ")
+
 fn parse_workaround_source(path: text, content: text) -> Result<[WorkaroundLink], text>:
     """Parse standalone markers immediately before an affected source block."""
     if not workaround_path_valid(path): return Err("unsafe workaround path: {path}")
@@ -115,9 +124,13 @@ fn parse_workaround_source(path: text, content: text) -> Result<[WorkaroundLink]
                 in_reason = true
             else:
                 return Err("{location}: unexpected or duplicate workaround field: {field}")
-        if offset + 1 >= lines.len():
+        # Stacked markers share one affected block: skip following marker lines.
+        var next = offset + 1
+        while next < lines.len() and workaround_marker_line(lines[next]):
+            next = next + 1
+        if next >= lines.len():
             return Err("{location}: workaround must immediately precede the affected block")
-        val affected = lines[offset + 1].trim()
+        val affected = lines[next].trim()
         if affected == "" or affected.starts_with("#") or affected.starts_with("//") or affected.starts_with("/*"):
             return Err("{location}: workaround must immediately precede the affected block")
         links.push(WorkaroundLink(bug_id: bug_id, path: path, line: offset + 1,
