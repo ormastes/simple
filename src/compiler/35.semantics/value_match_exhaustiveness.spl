@@ -1,0 +1,178 @@
+# E-MATCH-NONEXHAUSTIVE-VALUE: a `match` whose result is used as a value must
+# be exhaustive (lane exhaustive-value-match; design:
+# doc/05_design/exhaustive_value_match.md).
+#
+# Closes the silent nil/0 fall-through class: a value-position match with no
+# matching arm used to lower to a `const 0` / nil placeholder and say nothing
+# (doc/08_tracking/bug/seed_value_match_no_arm_yields_nil_2026-11-02.md).
+#
+# This module is PURE policy + HIR shape analysis; it owns no lowering state:
+#
+#   * mode resolution       value_match_mode_resolve / value_match_mode_current
+#   * statement positions   vm_statement_match_keys  (which matches are NOT values)
+#   * arm coverage          vm_check_arms            (what the arms provably cover)
+#
+# The CALL SITE is `MirLowering.lower_match_case` (50.mir), not an HIR pass:
+# the OWNER-QUALIFIED enum identity (`enum_variant_index_q`, enum_qualified_key)
+# lives only in the MIR lowering's declaration registries -- HIR carries a bare
+# `Named(symbol)` whose id is not distinct across modules on every binary (see
+# enum_contract/hir_match_coverage.spl) and no cross-module variant table. MIR
+# is the first place where "which declaration is this scrutinee" is answered
+# without falling back to the bare-name registry that collides (see
+# doc/08_tracking/bug/match_enum_fallthrough_silent_2026-08-01.md). An
+# unresolvable owner fails CLOSED here (reported), never open.
+#
+# Mode: `warn` (default; codegen unchanged) | `error` (fatal).
+# Precedence, highest first: CLI --value-match-exhaustiveness=, env
+# SIMPLE_VALUE_MATCH_EXHAUSTIVENESS, SDN [compiler] value_match_exhaustiveness,
+# default warn. The CLI handler transports CLI and SDN through the env var so
+# lowering reads a single source. SIMPLE_SAFETY_PROFILE=critical|verified
+# forces `error` (an explicit `warn` cannot weaken a critical profile).
+
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock, HirMatchArm, HirPattern, HirPatternKind, HirPatternPayload}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_block}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.assurance.policy_names.{normalize_profile_name}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+pub fn value_match_code() -> text:
+    "E-MATCH-NONEXHAUSTIVE-VALUE"
+
+pub fn value_match_env_name() -> text:
+    "SIMPLE_VALUE_MATCH_EXHAUSTIVENESS"
+
+# ---------------------------------------------------------------------------
+# Mode
+# ---------------------------------------------------------------------------
+
+pub fn value_match_mode_normalize(raw: text) -> text:
+    """`warn` | `error`, or "" for unset/unknown."""
+    val v = raw.trim().lower()
+    if v == "warn" or v == "error":
+        return v
+    ""
+
+pub fn value_match_mode_is_unknown(raw: text) -> bool:
+    """True when `raw` is set but is not a recognised mode (one-time warning)."""
+    raw.trim() != "" and value_match_mode_normalize(raw) == ""
+
+pub fn value_match_mode_resolve(cli: text, env: text, sdn: text, profile: text) -> text:
+    """Pure precedence: critical profile > CLI > env > SDN > default `warn`."""
+    val canonical = normalize_profile_name(profile)
+    if canonical == "critical" or canonical == "verified":
+        return "error"
+    val c = value_match_mode_normalize(cli)
+    if c != "":
+        return c
+    val e = value_match_mode_normalize(env)
+    if e != "":
+        return e
+    val s = value_match_mode_normalize(sdn)
+    if s != "":
+        return s
+    "warn"
+
+pub fn value_match_mode_current() -> text:
+    """Mode for this process: env (which carries CLI/SDN) + safety profile."""
+    value_match_mode_resolve("", env_get(value_match_env_name()), "", env_get("SIMPLE_SAFETY_PROFILE"))
+
+# ---------------------------------------------------------------------------
+# Statement positions (matches whose value is discarded)
+# ---------------------------------------------------------------------------
+
+pub fn vm_span_key(sp: Span) -> text:
+    "{sp.file}:{sp.line}:{sp.col}"
+
+fn vm_mark_block_tail(b: HirBlock, acc: [text]) -> [text]:
+    if b.has:
+        return vm_mark_discarded(b.value, acc)
+    acc
+
+fn vm_mark_discarded(e: HirExpr, acc: [text]) -> [text]:
+    """`e` is in statement position: key every match it IS or whose value flows
+    out of it (branch/arm/block tails), keyed by the scrutinee span."""
+    var out = acc
+    match e.kind:
+        case HirExprKind.MatchCase(scrutinee, arms):
+            out = out.push(vm_span_key(scrutinee.span))
+            var i = 0
+            while i < arms.len():
+                val arm: HirMatchArm = arms[i]
+                out = vm_mark_block_tail(arm.body, out)
+                i = i + 1
+        case HirExprKind.If(cond, then_, else_):
+            out = vm_mark_block_tail(then_, out)
+            if val else_block = else_:
+                out = vm_mark_block_tail(else_block, out)
+        case HirExprKind.IfChain(arms, else_):
+            var j = 0
+            while j < arms.len():
+                out = vm_mark_block_tail(arms[j].then_, out)
+                j = j + 1
+            if val else_block2 = else_:
+                out = vm_mark_block_tail(else_block2, out)
+        case HirExprKind.Block(block):
+            # Also key the block itself: a desugared (if-chain) match is a
+            # `Block` whose span is the match's span.
+            out = out.push(vm_span_key(e.span))
+            out = vm_mark_block_tail(block, out)
+        case HirExprKind.UnsafeBlock(body):
+            out = vm_mark_block_tail(body, out)
+        case _:
+            ()
+    out
+
+fn vm_scan_step(node: HirWalkNode, acc: [text]) -> [text]:
+    var out = acc
+    match node:
+        case HirWalkNode.Stmt(s):
+            match s.kind:
+                case HirStmtKind.Expr(e):
+                    out = vm_mark_discarded(e, out)
+                case HirStmtKind.Block(b):
+                    out = vm_mark_block_tail(b, out)
+                case _:
+                    ()
+        case HirWalkNode.Expr(e):
+            match e.kind:
+                case HirExprKind.Loop(body, _):
+                    out = vm_mark_block_tail(body, out)
+                case HirExprKind.While(_, body, _):
+                    out = vm_mark_block_tail(body, out)
+                case HirExprKind.For(_, _, body, _):
+                    out = vm_mark_block_tail(body, out)
+                case HirExprKind.With(_, body):
+                    out = vm_mark_block_tail(body, out)
+                case HirExprKind.Lambda(_, body, _):
+                    # Conservative: a lambda's tail is treated as discarded
+                    # (its return type is not known here), so it is never
+                    # reported. Under-reporting, not a false positive.
+                    out = vm_mark_discarded(body, out)
+                case _:
+                    ()
+        case _:
+            ()
+    out
+
+pub fn vm_return_is_unit(t: HirType) -> bool:
+    """Unit, or a type not yet inferred, counts as unit-returning (conservative)."""
+    match t.kind:
+        case HirTypeKind.Unit: true
+        case HirTypeKind.Infer(_, _): true
+        case HirTypeKind.Error: true
+        case _: false
+
+pub fn vm_statement_match_keys(body: HirBlock, ret_is_unit: bool) -> [text]:
+    """Scrutinee-span keys of every match in `body` that is in STATEMENT
+    position. Every other match in the function is in value position."""
+    val start: [text] = []
+    # @workaround bug=mono_return_context_and_fixed_nominal_binding_2026-10-05
+    var keys: [text] = walk_hir_block<[text]>(body, start, vm_scan_step)
+    if ret_is_unit:
+        keys = vm_mark_block_tail(body, keys)
+    keys
+
+pub fn value_match_env_raw() -> text:
+    env_get(value_match_env_name())
+

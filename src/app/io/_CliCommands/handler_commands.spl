@@ -162,6 +162,40 @@ fn _run_resolve_profile(cli_value: text) -> text:
         return cli_value
     run_read_sdn_lints_profile("simple.sdn")
 
+# E-MATCH-NONEXHAUSTIVE-VALUE mode transport (doc/05_design/exhaustive_value_match.md).
+# Precedence CLI > env > SDN > default is resolved HERE and handed to lowering
+# through SIMPLE_VALUE_MATCH_EXHAUSTIVENESS, so the compiler reads one source.
+# Deliberately self-contained (no compiler.semantics import): src/app/io must
+# not pull the compiler graph into the `run` path (see the notes above).
+fn _run_normalize_value_match_mode(raw: text) -> text:
+    val v = raw.trim().lower()
+    if v == "warn" or v == "error":
+        return v
+    ""
+
+# Reads `compiler:` / `  value_match_exhaustiveness: "warn"` from simple.sdn.
+pub fn run_read_sdn_value_match_mode(sdn_path: text) -> text:
+    if not file_exists(sdn_path):
+        return ""
+    val content = read_file_text(sdn_path)
+    var in_compiler = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val indented = line.starts_with(" ") or line.starts_with("\t")
+        if not indented:
+            in_compiler = trimmed == "compiler:"
+            continue
+        if in_compiler and trimmed.starts_with("value_match_exhaustiveness") and trimmed.contains(":"):
+            val sep = trimmed.index_of(":") ?? -1
+            if sep > 0 and trimmed.substring(0, sep).trim() == "value_match_exhaustiveness":
+                var mode_raw = trimmed.substring(sep + 1).trim()
+                mode_raw = mode_raw.replace("\"", "")
+                mode_raw = mode_raw.replace("'", "")
+                return _run_normalize_value_match_mode(mode_raw)
+    ""
+
 fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
     val capture = collection_run_options(args)
     if capture.error != "":
@@ -172,6 +206,7 @@ fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
         var program_args: [text] = []
         var result_file = ""
         var profile_value = ""
+        var value_match_cli = ""
         var parse_internal = true
         for arg in run_args[1:]:
             if parse_internal and arg == "--":
@@ -179,6 +214,13 @@ fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
                 program_args = program_args.push(arg)
             elif parse_internal and arg.starts_with("--test-result-file="):
                 result_file = arg.substring(19)
+            elif parse_internal and arg.starts_with("--value-match-exhaustiveness="):
+                val raw_vm = arg.substring(29)
+                value_match_cli = _run_normalize_value_match_mode(raw_vm)
+                if value_match_cli == "":
+                    _cli_eprint("Error: invalid value for --value-match-exhaustiveness: {raw_vm}")
+                    _cli_eprint("  Valid: warn, error")
+                    return 1
             elif parse_internal and arg.starts_with("--profile="):
                 val raw_profile = arg.substring(10)
                 val normalized = _run_normalize_profile_name(raw_profile)
@@ -196,6 +238,12 @@ fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
         val previous_safety_profile = env_get("SIMPLE_SAFETY_PROFILE") ?? ""
         if resolved_profile != "" and not env_set("SIMPLE_SAFETY_PROFILE", resolved_profile):
             return 1
+        val previous_value_match = env_get("SIMPLE_VALUE_MATCH_EXHAUSTIVENESS") ?? ""
+        var resolved_value_match = value_match_cli
+        if resolved_value_match == "" and previous_value_match == "":
+            resolved_value_match = run_read_sdn_value_match_mode("simple.sdn")
+        if resolved_value_match != "" and not env_set("SIMPLE_VALUE_MATCH_EXHAUSTIVENESS", resolved_value_match):
+            return 1
         # Capture must execute in the owner process: a delegated child has a
         # different ABI channel and cannot contribute to this snapshot.
         val code = if capture.output != "" or capture.input != "":
@@ -210,6 +258,8 @@ fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
         if result_file != "" and not env_set("SIMPLE_TEST_RESULT_FILE", previous_result_file):
             return 1
         if resolved_profile != "" and not env_set("SIMPLE_SAFETY_PROFILE", previous_safety_profile):
+            return 1
+        if resolved_value_match != "" and not env_set("SIMPLE_VALUE_MATCH_EXHAUSTIVENESS", previous_value_match):
             return 1
         code
     else:
