@@ -11,3 +11,5 @@ Focused evidence: one valid toolchain binding +8negativecases PASS; actual selec
 Other platforms remain unqualified: nativeMac multiplatform still llvm@18/LLVM_SYS_180_PREFIX; dedicatedMac23.1.1job separate. Crossarchitecture LLVM18reader/setup and Windows contracts are not qualified by this change. LocalLLVM23.1.2 remains untouched.
 
 Official archive Polly/PollyISL and static LLVM availability is unexecuted. Installer requires those archive-owned libraries before publication; no floating apt Polly may be mixed. Native Mac multiplatform and cross-platform LLVM18 contracts remain outside this Linux candidate.
+
+**Revalidated 2026-11-02: still plausible because OPEN; source and focused fixtures qualified, real installation/bootstrap pending; no merged fix commit with a passing regression is cited in this doc.**

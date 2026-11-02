@@ -47,3 +47,5 @@ sibling, not a body), or track that the only lines between the header and the
 next token were comments and require Indent then. Error text should say
 `empty block: use pass("reason")`. Add a regression spec covering `if`, `elif`,
 `else`, `while`, `for`, `match` arms, `fn`, `class`.
+
+**Revalidated 2026-11-02: still plausible because the report title (Comment-only block body silently swallows the next statement: `if false:` + com) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

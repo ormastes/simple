@@ -36,3 +36,5 @@ transport; adds no new retained aggregate or module scan. Later validation must
 compare retained and streaming outputs/diagnostics and measure peak RSS/time on
 the same frozen closure with a corrected producer. Existing log_phase boundaries
 must be enabled in that bounded run before drawing a narrower fault conclusion.
+
+**Revalidated 2026-11-02: still plausible because OPEN; ownership repair authored, native validation UNRUN. Exact fault; no merged fix commit with a passing regression is cited in this doc.**

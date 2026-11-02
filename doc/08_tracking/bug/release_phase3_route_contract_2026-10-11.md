@@ -19,3 +19,5 @@ The authorized RC integration branch and allowed ancestry must be explicitly set
 The independent source review covered 14 workflow/sanity/bootstrap/document paths. Four Rust/library paths were separately assigned; no full-candidate acceptance is claimed. Manifest owner-attestations and historical/native PASS statements do not qualify this exact candidate. Workflows, tests, compiler/native jobs and publication remain UNRUN. Closure requires reviewed source alignment and normal exact-ref/head/provider evidence and protected admission/qualification.
 
 Evidence: `reviews/remote-13ca-after-26b7/workflow-release-independent-review.md` and `independent-18-path-review.md` in the retained phase3-whole-20261011-c06 evidence root. Existing issue search found #1603 about whole-trunk gate ranges and hook skew; that is distinct from this alias/ancestry contract. No main source/index/ref or allocated probe was changed.
+
+**Revalidated 2026-11-02: still plausible because OPEN; candidate HOLD; authorized branch/ancestry policy unresolved; no merged fix commit with a passing regression is cited in this doc.**

@@ -37,3 +37,5 @@ with the same-name flattening defect in
 
 Workaround used on 2026-10-04: rows appended by hand and resealed with
 `scripts/check/reseal-sdn-crc32.shs`.
+
+**Revalidated 2026-11-02: still plausible because the report title (bug-add crashes with rename_path infinite recursion) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

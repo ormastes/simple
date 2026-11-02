@@ -97,3 +97,5 @@ comparison and extern ordering fixes are untouched. The complete prior
 The LLVM tuple emitter, Cranelift adapter and MIR type representation match
 the reviewed b58 blobs; the enum runtime payload-storage section is unchanged.
 No release producer qualification or PostgreSQL completion is inferred.
+
+**Revalidated 2026-11-02: still plausible because OPEN — source repair and regressions authored; native and compiled unit execution pending; no merged fix commit with a passing regression is cited in this doc.**

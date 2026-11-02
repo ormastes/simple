@@ -13,3 +13,5 @@ The repair extracts the helper verbatim from `src/compiler/80.driver/cache/cold_
 `python3 -B -I scripts/check/tests/cold_hir_path_diagnostic_contract_test.py -v` passed six bounded controls: complete fixture/type closure, exact source propagation, missing/duplicate helper rejection, missing/duplicate insertion-slot rejection, changed caller-boundary rejection and exact current oracle lines. These are source/template checks, not compiled Simple execution. Existing five real diagnostic scenarios remain in the native harness.
 
 Closure requires running `scripts/check/check-cold-hir-path-diagnostic.shs` with an admitted producer/runtime and verifying the real fixture compilation/output, helper/driver/template stability, and producer identity. Current compiled/native/Stage 3/release qualification remains pending. Keep the issue OPEN.
+
+**Revalidated 2026-11-02: still plausible because OPEN; source/template controls PASS, native compilation and output verification UNRUN; no merged fix commit with a passing regression is cited in this doc.**

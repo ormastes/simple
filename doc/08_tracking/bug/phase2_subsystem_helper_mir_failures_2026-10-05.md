@@ -45,3 +45,5 @@ each binary through completion with truthful counts and closure evidence.
 Qualify root fixes with reproductions and neighboring cases before retiring
 workarounds on an isolated later rebuild. Check memory and behavior for every
 performance-related repair, and performance and behavior for memory repairs.
+
+**Revalidated 2026-11-02: still plausible because OPEN (P1). No subsystem test binary or test execution is proved by this run; no merged fix commit with a passing regression is cited in this doc.**

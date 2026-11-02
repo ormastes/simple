@@ -19,3 +19,5 @@ Targeted cycle1 d1da4f5e2 cleared unary I16 but exposed ten CUDA HIR records/six
 Targeted source a98662333215ca8a9446c44adb74a3ac66555c6f with pure producer aa404c21c4d2435e871ac0f57903da18610b452323fe09355f86b9cdddb0a41f passed all 154 HIR modules, including CUDA. The original b9 run passed 1,159 other modules; their source blobs are unchanged. The evidence union covers 1,160 modules, not a new aggregate run or dependency-cache admission stamp. Compilation subsequently rejected 24 E-MONO-032/033 callsites; no object or runtime PASS is claimed. Nearby native fixtures remain UNEXECUTED; underlying compiler bug stays OPEN.
 
 Durable receipt: `/mnt/c/Temp/simple-cuda-complete-owner-targeted-20261010/all-module-hir-evidence-union.json`. Target terminal, HIR artifact, SHA pins, and the 154-module ledger are retained alongside it.
+
+**Revalidated 2026-11-02: still plausible because OPEN; tagged source workaround, not a compiler repair. Native verification pending; no merged fix commit with a passing regression is cited in this doc.**
