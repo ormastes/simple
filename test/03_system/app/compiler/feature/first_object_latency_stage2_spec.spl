@@ -1,0 +1,42 @@
+# First native object latency on the frozen stage2 (TODO #437).
+# Bug doc: doc/08_tracking/bug/first_object_latency_stage2_2026-11-01.md
+#
+# Measured 2026-11-02 (stage2 ef0681fc0e1, src/app/dashboard/main.spl, warm
+# SCV cache): the coordinator spawned 8 parse, 5 HIR and 5 MIR shard
+# processes for a ONE-file closure. Each child pays ~4-5 s of process start
+# plus a ~3.7 s load_sources before claiming its single unit, so the fan-out
+# alone added ~50 s (124 s -> 74 s first .o) and the MIR shard pass failed the
+# build. The coordinator now clamps every shard phase to the published
+# closure size and runs tiny closures in process.
+use std.spec.*
+use app.cli.native_build_shard_admission.{native_build_shard_count_for_closure_v1,
+    native_build_small_closure_max_v1, NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1}
+
+describe "first native object latency on stage2":
+    context "shard fan-out is bounded by the entry closure":
+        it "runs a one-file closure in process with no shard children":
+            expect(native_build_shard_count_for_closure_v1(8, 1, NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1)).to_equal(0)
+            expect(native_build_shard_count_for_closure_v1(5, 1, NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1)).to_equal(0)
+
+        it "runs every closure at or below the small-closure bound in process":
+            val bound = NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1
+            expect(native_build_shard_count_for_closure_v1(8, bound, bound)).to_equal(0)
+            expect(native_build_shard_count_for_closure_v1(8, bound + 1, bound)).to_equal(bound + 1)
+
+        it "never spawns more shard processes than closure files":
+            expect(native_build_shard_count_for_closure_v1(8, 6, 4)).to_equal(6)
+            expect(native_build_shard_count_for_closure_v1(8, 95, 4)).to_equal(8)
+
+        it "keeps the requested fan-out when the closure size is unknown":
+            expect(native_build_shard_count_for_closure_v1(8, -1, 4)).to_equal(8)
+
+        it "keeps an already disabled phase disabled":
+            expect(native_build_shard_count_for_closure_v1(0, 95, 4)).to_equal(0)
+            expect(native_build_shard_count_for_closure_v1(0, 1, 4)).to_equal(0)
+
+        it "lets the small-closure bound be overridden or disabled":
+            expect(native_build_small_closure_max_v1("")).to_equal(NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1)
+            expect(native_build_small_closure_max_v1("12")).to_equal(12)
+            expect(native_build_small_closure_max_v1("0")).to_equal(0)
+            expect(native_build_small_closure_max_v1("junk")).to_equal(NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1)
+            expect(native_build_shard_count_for_closure_v1(8, 1, 0)).to_equal(1)

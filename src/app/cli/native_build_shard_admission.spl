@@ -46,3 +46,42 @@ pub fn native_build_shard_worker_limit(requested: i64, rss_budget_mb: i64,
     if admitted < 1:
         return 1
     admitted
+
+# Closure-size bound for shard fan-out (first-object latency, TODO #437).
+# Every parse/HIR/MIR shard is a full process: ~4-5 s start plus a ~3.7 s
+# load_sources before it claims a unit (stage2, 2026-11-02). A one-file
+# closure got 8 + 5 + 5 children and its first .o moved from 74 s (in
+# process) to 124 s. Closures at or below this bound run in process; larger
+# ones never get more shards than files. SIMPLE_SHARD_SMALL_CLOSURE_MAX
+# overrides the bound; 0 keeps only the file-count clamp.
+pub val NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1: i64 = 4
+
+pub fn native_build_small_closure_max_v1(configured: text) -> i64:
+    if configured == "":
+        return NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1
+    # Digits only: some runtimes parse junk as 0, which would silently drop
+    # the small-closure bound instead of keeping the default.
+    for ch in configured:
+        if ch < "0" or ch > "9":
+            return NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1
+    # Explicit match: a parsed 0 is a real value (keep only the file clamp).
+    match configured.to_i64():
+        case Some(value):
+            if value < 0: NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1 else: value
+        case None:
+            NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1
+
+pub fn native_build_shard_count_for_closure_v1(requested: i64, closure_files: i64,
+                                               small_closure_max: i64) -> i64:
+    """Clamp a shard phase's process count to the published closure size.
+
+    closure_files < 0 means the size is unknown (no published closure); the
+    requested count is kept. A disabled phase (requested <= 0) stays disabled.
+    """
+    if requested <= 0 or closure_files < 0:
+        return requested
+    if closure_files <= small_closure_max:
+        return 0
+    if closure_files < requested:
+        return closure_files
+    requested
