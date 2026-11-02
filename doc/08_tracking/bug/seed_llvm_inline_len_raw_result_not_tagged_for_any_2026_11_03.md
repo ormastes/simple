@@ -72,8 +72,10 @@ input pin SHA256 is
 `26B4C518DBC51E83D9DDA1999DC5F9B652D36B53C2AE1116E5941F42DF4C8A4C`.
 Together, the 30 original passing tests plus this retry yield 31 unique focused
 tests passing, including all five new optional-binding tests. No Phase 2 or
-Phase 3 qualification is claimed. The separate generic optional-boolean
-failure remains tracked in
+Phase 3 qualification is claimed. The separate multi-field enum Bool payload
+construction issue is now FIXED in its narrow scope; that fix does not qualify
+generic optional-boolean projection behavior and is not part of this
+guarded-binding finding. See
 `doc/08_tracking/bug/seed_enum_bool_payload_boxed_as_int_2026_11_03.md`.
 
 The earlier two LLVM-owner changes in `functions.rs` and `functions/calls.rs`

@@ -53,9 +53,11 @@ is superseded only for this multi-field constructor case. This does not assert
 a tuple-getter ABI defect, and does not imply that every enum Bool construction
 or collection operation is correct.
 
-## Remaining separate OPEN findings
+## Related independently scoped fixes
 
-- Single-field enum Bool payload construction remains OPEN P1:
+- Single-field enum Bool payload construction is FIXED in its scoped path:
   `doc/08_tracking/bug/seed_single_field_enum_bool_payload_boxed_as_int_2026_11_03.md`.
-- Typed array `.push` / `.index_of` Bool boxing remains OPEN P1:
+- Typed array `.push` / `.index_of` Bool boxing is FIXED in its scoped paths:
   `doc/08_tracking/bug/seed_array_method_bool_value_boxed_as_int_2026_11_03.md`.
+
+These scoped fixes do not imply that all BOOL boxing sites are correct.

@@ -830,9 +830,10 @@ impl<'a> MirLowerer<'a> {
                                 | TypeId::U8
                                 | TypeId::U16
                                 | TypeId::U32
-                                | TypeId::BOOL
                         );
-                        if arg_ty == TypeId::U64 {
+                        if arg_ty == TypeId::BOOL {
+                            self.box_scalar_for_tagged_slot(TypeId::ANY, arg_ty, arg_regs[0])?
+                        } else if arg_ty == TypeId::U64 {
                             self.box_u64_runtime_value(arg_regs[0])?
                         } else if needs_box {
                             self.with_func(|func, current_block| {
