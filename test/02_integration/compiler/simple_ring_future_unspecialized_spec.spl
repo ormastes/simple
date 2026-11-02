@@ -8,7 +8,7 @@
 # ef0681fc0e1 emitted none of them, so the stage3 link failed with 11 undefined
 # symbols. Bug: doc/08_tracking/bug/stage2_generic_selfcall_bodies_missing_2026-11-02.md.
 use std.spec
-use nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError, RingReservation, RingToken}
+use nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError, RingReservation, RingToken, RingCancelOutcome}
 use nogc_async_mut.async.future.{Future}
 use nogc_async_mut.async.poll.{Poll}
 
@@ -49,7 +49,11 @@ describe "SimpleRing<i64,i64> self-call paths":
         val reservation = ring.reserve(3u64, 5u64).unwrap()
         val token = ring.commit(3u64, reservation, 1).unwrap()
         val outcome = ring.cancel(3u64, token)                                            # -> _request_provider_cancel
-        expect(outcome.is_ok()).to_equal(true)
+        # cancel returns RingCancelOutcome (not a Result); a committed token is in
+        # flight, so the ring asks the provider to cancel that same token.
+        match outcome:
+            case RingCancelOutcome.ProviderCancelRequested(t): expect(t.slot).to_equal(token.slot)
+            case _: fail("expected ProviderCancelRequested")
 
 describe "Future<T>.poll erased accessor":
     it "returns the stored Ready value":
