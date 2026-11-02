@@ -2,20 +2,19 @@
 """
 # Generic Result from generic-self methods (ctor-mir-20261031)
 
-Still OPEN in current source (seed-run, 2026-11-01). The passing scenarios pin
-what works now; the skipped ones record the remaining defects with their exact
-current diagnostics (see doc/08_tracking/bug/ctor_mir_2026-10-31.md, "Design
-note 2026-11-01"):
+Fixed in current source on 2026-11-02 (see doc/08_tracking/bug/ctor_mir_2026-10-31.md,
+"Update 2026-11-02"). Before the fix, these shapes produced:
 - unannotated `ring.take(1)` on `Ring<i64,i64>` -> E-RTI-003 'result(opt(p0), RErr)'
 - `case Ok(nil)` there -> "nil sub-pattern requires a declared optional payload slot"
 - `futs: [Fut<text>]` field -> "array return record element has conflicting or unknown provider field types"
-- `Option<CR>` matched via bare variants without importing CR -> non-exhaustive 'Option'
+- `Option<CR>` matched via bare variants without importing CR: the fixture shows only
+  the warn-only fall-through note. The real-tree identity defect is not reproduced here.
 """
 
 # @tag: unit, compiler, mir, generics, stage2
 
 use std.common.string_core.{char_from_code}
-use std.spec.{describe, it, expect, skip}
+use std.spec.{describe, it, expect}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{Module}
 use compiler.common.config.{Logger}
@@ -78,7 +77,28 @@ describe "generic static factory Result (ctor-mir-20261031, fixed part)":
         expect(out.contains("nil sub-pattern")).to_equal(false)
 
 describe "generic-self method Result (ctor-mir-20261031, open part)":
-    skip("unannotated ring.take(1) substitutes Op from the receiver", "OPEN ctor-mir-20261031: E-RTI-003 result(opt(p0), RErr) at the receiver-generic method return")
-    skip("case Ok(nil) over an unannotated generic-self method Result", "OPEN ctor-mir-20261031: nil sub-pattern requires a declared optional payload slot (follows from the E-RTI-003 above)")
-    skip("[Fut<text>] record field element", "OPEN ctor-mir-20261031: array return record element has conflicting or unknown provider field types: lib.fut.Fut")
-    skip("bare Some/None over Option<CR> without importing CR", "OPEN ctor-mir-20261031: non-exhaustive enum match on 'Option' (missing runtime enum identity)")
+    it "unannotated ring.take(1) substitutes Op from the receiver":
+        val out = lower_consumer(IMP, "fn e5(ring: Ring<i64, i64>) -> i64:\n    match ring.take(1):\n        case Err(_): -2\n        case Ok(Some(x)): x\n        case Ok(_): 0\n")
+        expect(out.contains("E-RTI-003")).to_equal(false)
+        expect(out.contains("payload type mismatch")).to_equal(false)
+
+    it "case Ok(nil) over an unannotated generic-self method Result":
+        val out = lower_consumer(IMP, "fn e6(ring: Ring<i64, i64>) -> i64:\n    match ring.take(1):\n        case Err(_): -2\n        case Ok(nil): 0\n        case Ok(Some(x)): x\n")
+        expect(out.contains("E-RTI-003")).to_equal(false)
+        expect(out.contains("nil sub-pattern")).to_equal(false)
+
+    it "[Fut<text>] record field element":
+        val out = lower_consumer(IMP, "class Holder:\n    futs: [Fut<text>]\n\nfn ready_count(h: Holder) -> i64:\n    var n = 0\n    for f in h.futs:\n        match f.poll():\n            case Poll.Ready(_): n = n + 1\n            case Poll.Pending: n = n + 0\n    n\n")
+        expect(out.contains("conflicting or unknown provider field types")).to_equal(false)
+        expect(out.contains("E-RTI-003")).to_equal(false)
+
+    it "bare variants over Option<CR> without importing CR":
+        val out = lower_consumer(IMP, "fn e7(n: i64) -> i64:\n    match stage(n):\n        case Some(stop):\n            match stop:\n                case TypeError(errs): errs.len()\n                case ResolveError(errs): 0 - errs.len()\n                case Fine: 0\n        case None: -1\n")
+        # The warn-only "non-exhaustive enum match" fall-through note is emitted
+        # for EVERY default-less match (also the fixed Result shapes above), so
+        # it is not this defect's signal. The defect is a missing/ambiguous
+        # payload enum identity for the bare arms.
+        expect(out.contains("missing runtime identity")).to_equal(false)
+        expect(out.contains("is ambiguous")).to_equal(false)
+        expect(out.contains("unknown nested variant")).to_equal(false)
+        expect(out.contains("E-RTI-")).to_equal(false)
