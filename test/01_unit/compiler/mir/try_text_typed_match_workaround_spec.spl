@@ -1,0 +1,130 @@
+# Regression: bug stage2_try_unwrap_text_typed_as_i64_2026-11-02 (workaround form).
+# The frozen stage2 (ef0681fc0e1) decodes a `?`-unwrapped Result<text, _> payload
+# as an i64 local, so concat/interpolation render the handle as digits and `==`
+# compares it as an integer. The stage3-closure sites were rewritten into the
+# typed-local form
+#     val x: text = match f(...):
+#         case Ok(v): v
+#         case Err(e): return Err(e)
+# with every earlier `?` of the same statement hoisted in order. This spec pins
+# that the rewritten form keeps the original text value, Err propagation and
+# early-return order for each rewritten shape.
+use std.spec.*
+
+fn tw_text(value: text, fail: bool) -> Result<text, text>:
+    if fail: return Err("text-failed:" + value)
+    Ok(value)
+
+fn tw_int(value: i64, fail: bool) -> Result<i64, text>:
+    if fail: return Err("int-failed")
+    Ok(value)
+
+fn tw_take(value: text) -> text:
+    "<" + value + ">"
+
+struct TwRow:
+    name: text
+    count: i64
+    label: text
+
+fn tw_bind_concat(fail: bool) -> Result<text, text>:
+    val root: text = match tw_text("owned-root", fail):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    Ok(root + "/owner.token")
+
+fn tw_interp(fail: bool) -> Result<text, text>:
+    val hex: text = match tw_text("2a", fail):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    Ok("name={hex}\n")
+
+fn tw_compare(expected: text) -> Result<bool, text>:
+    val actual: text = match tw_text("x86_64", false):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    Ok(actual == expected)
+
+fn tw_arg() -> Result<text, text>:
+    val inner: text = match tw_text("arg", false):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    Ok(tw_take(inner))
+
+# Mixed statement: the original was
+#     TwRow(name: tw_text(n, fail_name)?, count: tw_int(c, fail_count)?, label: tw_text(l, fail_label)?)
+# Hoisting keeps the left-to-right `?` order, so the first failing `?` wins.
+fn tw_field(fail_name: bool, fail_count: bool, fail_label: bool) -> Result<TwRow, text>:
+    val name_value: text = match tw_text("row", fail_name):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val count_value = tw_int(7, fail_count)?
+    val label_value: text = match tw_text("lbl", fail_label):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    Ok(TwRow(name: name_value, count: count_value, label: label_value))
+
+fn tw_accumulate(parts: [text]) -> Result<text, text>:
+    var out = ""
+    for part in parts:
+        val row: text = match tw_text(part, part == "bad"):
+            case Ok(v): v
+            case Err(e): return Err(e)
+        out = out + row + ";"
+    Ok(out)
+
+fn tw_optional_target(has_target: bool) -> Result<text, text>:
+    var native_target: text = ""
+    if has_target:
+        native_target = match tw_text("x86_64-pc-windows-gnu", false):
+            case Ok(v): v
+            case Err(e): return Err(e)
+    Ok("target=" + native_target)
+
+fn tw_ok_or(result: Result<text, text>) -> text:
+    match result:
+        case Ok(v): "ok:" + v
+        case Err(e): "err:" + e
+
+describe "stage2_try_unwrap_text_typed_as_i64 typed-match workaround":
+    it "keeps the text payload through bind then concat":
+        expect(tw_ok_or(tw_bind_concat(false))).to_equal("ok:owned-root/owner.token")
+
+    it "propagates Err unchanged from the bind form":
+        expect(tw_ok_or(tw_bind_concat(true))).to_equal("err:text-failed:owned-root")
+
+    it "interpolates the bound text, not the handle digits":
+        expect(tw_ok_or(tw_interp(false))).to_equal("ok:name=2a\n")
+
+    it "compares the bound text by value":
+        expect(tw_compare("x86_64").unwrap()).to_equal(true)
+        expect(tw_compare("aarch64").unwrap()).to_equal(false)
+
+    it "passes the bound text to a text parameter":
+        expect(tw_ok_or(tw_arg())).to_equal("ok:<arg>")
+
+    it "stores bound text into record fields":
+        val row = tw_field(false, false, false).unwrap()
+        expect(row.name).to_equal("row")
+        expect(row.count).to_equal(7)
+        expect(row.label).to_equal("lbl")
+        expect(row.name.len()).to_equal(3)
+
+    it "keeps the first-failing ? order after hoisting":
+        match tw_field(true, true, true):
+            case Ok(_): expect("ok").to_equal("err")
+            case Err(e): expect(e).to_equal("text-failed:row")
+        match tw_field(false, true, true):
+            case Ok(_): expect("ok").to_equal("err")
+            case Err(e): expect(e).to_equal("int-failed")
+        match tw_field(false, false, true):
+            case Ok(_): expect("ok").to_equal("err")
+            case Err(e): expect(e).to_equal("text-failed:lbl")
+
+    it "accumulates rows inside a loop and stops at the first Err":
+        expect(tw_ok_or(tw_accumulate(["a", "b"]))).to_equal("ok:a;b;")
+        expect(tw_ok_or(tw_accumulate(["a", "bad", "c"]))).to_equal("err:text-failed:bad")
+
+    it "rewrites an inline-if text ? into a guarded typed assignment":
+        expect(tw_ok_or(tw_optional_target(true))).to_equal("ok:target=x86_64-pc-windows-gnu")
+        expect(tw_ok_or(tw_optional_target(false))).to_equal("ok:target=")
