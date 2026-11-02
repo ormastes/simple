@@ -68,13 +68,21 @@ fn load_bugs(db_path: text) -> BugLoad:
     var bugs: [BugItem] = []
     var unparsed: [i64] = []
     var in_table = false
+    # bugs_active rows are only read for status `fixing` so claimed bugs show in the report
+    var active_only = false
+    var fixing_ids: [text] = []
     var line_no = 0
 
     for line in lines:
         line_no = line_no + 1
         val trimmed = line.trim()
+        if trimmed.starts_with("bugs_active |"):
+            in_table = true
+            active_only = true
+            continue
         if trimmed.starts_with("bugs |"):
             in_table = true
+            active_only = false
             continue
         # End of the `bugs` table: the next unindented, non-empty, non-comment
         # line starts a different table. The previous form of this test asked
@@ -93,6 +101,12 @@ fn load_bugs(db_path: text) -> BugLoad:
         # Exactly 10 columns. An unquoted comma in a free-text field yields
         # MORE than 10 fields: accepting that shifted every later column (the
         # `valid` flag read a note fragment, so the bug was silently excluded).
+        if active_only and (fields.len() != 10 or fields[2] != "fixing"):
+            continue
+        if fields.len() == 10 and fields[2] == "fixing":
+            if fixing_ids.contains(fields[0]):
+                continue
+            fixing_ids.push(fields[0])
         if fields.len() == 10:
             val valid_str = fields[9]
             bugs.push(BugItem(
@@ -120,6 +134,80 @@ fn is_closed(status: text) -> bool:
     status == "fixed" or status == "closed" or status == "cannot_reproduce" or
     status == "invalid"
 
+fn is_fixing(status: text) -> bool:
+    status == "fixing"
+
+# A live-or-stale `fixing` claim from the bug_fix_claims side table (never part
+# of the 10-column bugs rows); holder rule below picks one claim per bug; only
+# bugs currently held (fixing) are returned.
+struct FixClaim:
+    bug_id: text
+    session_id: text
+    claimed_at: text
+    heartbeat_at: text
+
+fn load_fixing_claims(db_path: text) -> [FixClaim]:
+    # Same holder rule as scripts/check/bug-claim.shs: among `fixing` rows
+    # strictly after the newest non-fixing row (released/done) of a bug, the earliest
+    # claimed_at holds it. No such row means nobody is fixing it.
+    if not file_exists(db_path):
+        return []
+    var ids: [text] = []
+    var states: [text] = []
+    var rows: [FixClaim] = []
+    var in_table = false
+    for line in file_read(db_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("bug_fix_claims |"):
+            in_table = true
+            continue
+        if in_table and trimmed != "" and not trimmed.starts_with("#") and not line.starts_with(" ") and not line.starts_with("\t"):
+            in_table = false
+        if not in_table or trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val f = parse_csv_fields(trimmed)
+        if f.len() != 7:
+            continue
+        ids.push(f[0])
+        states.push(f[1])
+        rows.push(FixClaim(bug_id: f[0], session_id: f[2], claimed_at: f[3], heartbeat_at: f[4]))
+    var out: [FixClaim] = []
+    var done_ids: [text] = []
+    var i = 0
+    while i < ids.len():
+        val id = ids[i]
+        i = i + 1
+        if done_ids.contains(id):
+            continue
+        done_ids.push(id)
+        var cut = ""
+        var k = 0
+        while k < ids.len():
+            if ids[k] == id and states[k] != "fixing" and rows[k].claimed_at > cut:
+                cut = rows[k].claimed_at
+            k = k + 1
+        var holder = -1
+        k = 0
+        while k < ids.len():
+            if ids[k] == id and states[k] == "fixing" and rows[k].claimed_at > cut:
+                if holder < 0 or rows[k].claimed_at < rows[holder].claimed_at:
+                    holder = k
+            k = k + 1
+        if holder < 0:
+            # no fixing row after the newest closing row: the newest row decides
+            # (ties go to the later row), matching bug-claim.shs
+            var newest = -1
+            k = 0
+            while k < ids.len():
+                if ids[k] == id and (newest < 0 or rows[k].claimed_at >= rows[newest].claimed_at):
+                    newest = k
+                k = k + 1
+            if newest >= 0 and states[newest] == "fixing":
+                holder = newest
+        if holder >= 0:
+            out.push(rows[holder])
+    out
+
 fn _generated_date() -> text:
     # Real current date via the runtime clock (was previously a permanently
     # hardcoded "2026-04-14" stamped into every regenerated bug doc).
@@ -131,14 +219,17 @@ fn _generated_date() -> text:
     val day_text = if day < 10: "0" + day.to_string() else: day.to_string()
     year.to_string() + "-" + month_text + "-" + day_text
 
-fn generate_md(bugs: [BugItem]) -> text:
+fn generate_md(bugs: [BugItem], claims: [FixClaim]) -> text:
     var open_bugs: [BugItem] = []
     var closed_bugs: [BugItem] = []
+    var fixing_bugs: [BugItem] = []
 
     for b in bugs:
         if not b.valid:
             continue
-        if is_open(b.status):
+        if is_fixing(b.status):
+            fixing_bugs.push(b)
+        elif is_open(b.status):
             open_bugs.push(b)
         elif is_closed(b.status):
             closed_bugs.push(b)
@@ -148,7 +239,7 @@ fn generate_md(bugs: [BugItem]) -> text:
     lines.push("")
     lines.push("**Generated:** {_generated_date()}")
     lines.push("**Database:** `{BUG_DB_PATH}`")
-    lines.push("**Open:** {open_bugs.len()} | **Closed:** {closed_bugs.len()}")
+    lines.push("**Open:** {open_bugs.len()} | **Fixing:** {fixing_bugs.len()} | **Closed:** {closed_bugs.len()}")
     lines.push("")
     lines.push("## Open Bugs")
     lines.push("")
@@ -160,6 +251,25 @@ fn generate_md(bugs: [BugItem]) -> text:
         lines.push("|----|----------|--------|-------|------|")
         for b in open_bugs:
             lines.push("| {b.id} | {b.severity} | {b.status} | {b.title} | `{b.file}:{b.line}` |")
+
+    lines.push("")
+    lines.push("## Fixing (session, since)")
+    lines.push("")
+    if fixing_bugs.len() == 0:
+        lines.push("No bugs are being fixed.")
+    else:
+        lines.push("| ID | Severity | Title | Session | Since | Last heartbeat |")
+        lines.push("|----|----------|-------|---------|-------|----------------|")
+        for b in fixing_bugs:
+            var session = "unclaimed"
+            var since = b.updated_at
+            var beat = "-"
+            for c in claims:
+                if c.bug_id == b.id:
+                    session = c.session_id
+                    since = c.claimed_at
+                    beat = c.heartbeat_at
+            lines.push("| {b.id} | {b.severity} | {b.title} | {session} | {since} | {beat} |")
 
     lines.push("")
     lines.push("## Closed Bugs")
@@ -227,7 +337,7 @@ fn main() -> i64:
         return 1
 
     val bugs = loaded.bugs
-    val md = generate_md(bugs)
+    val md = generate_md(bugs, load_fixing_claims(db_path))
     write_generated_doc(md_path, md)
     if log_opts.progress != "summary":
         val progress_line = render_progress(log_opts.progress, bugs.len(), bugs.len(), "bug-gen")

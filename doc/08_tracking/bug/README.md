@@ -83,3 +83,45 @@ When creating a new bug, include:
 5. A bug_difficulty row (required for non-closed status)
 
 Use a date-based ID when appropriate: `problem_description_YYYY_MM_DD`
+
+## Fix Claims (`fixing`)
+
+Concurrent fixers claim a bug before working on it. Helper: `sh scripts/check/bug-claim.shs`
+(wiki page: `doc/07_guide/infra/tracking/bug_fix_claims.md`).
+
+### Main tables
+While claimed, the bug's row in both `bugs_active` and `bugs` reads `status=fixing` and
+`updated_at` = the claim date. No column is added (bug-gen requires exactly 10 columns, #5738).
+`bug-gen` renders a "Fixing (session, since)" section; the typed loader and `check-dbs`
+accept `fixing` (the typed `BugStatus` enum maps it to `Investigating`, so any tool that
+round-trips a row through that enum writes `investigating` back; re-run `claim` or `reap`).
+
+### bug_fix_claims
+`bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|`
+- **state**: `fixing` | `released` | `done` (done means it landed; the PR number is in note)
+- **session_id**: short session/lane id, for example `a6dffc9c/p0f-1`
+- **claimed_at / heartbeat_at**: ISO 8601 UTC, for example `2026-11-02T05:40:00Z`
+- **prev_status**: main-table status before the claim (restored on release/reap)
+- **note**: quoted free text (`PR #N` for done, `abandoned (reaped)` for reaped)
+- Multiple rows per bug are allowed (history is kept). Holder rule, identical in the script and bug-gen: the earliest `fixing` row with `claimed_at` strictly after the newest `released`/`done` row; with none, the newest row is the current state. A stale takeover first appends a `released` (session `takeover`) row.
+- A `fixing` claim with `max(claimed_at, heartbeat_at)` older than 24 h is STALE: it may be
+  taken over, and `reap` reverts it. Closed bugs need no claim.
+
+### Commands
+| Command | Effect |
+|---------|--------|
+| `claim <bug_id> <session_id> [note]` | status=fixing + claim row; exit 3 if another live session holds it; exit 4 if closed/unknown |
+| `heartbeat <bug_id> <session_id>` | refresh `heartbeat_at` (call at least every 2 h) |
+| `release <bug_id> <session_id>` | state=released, status back to `prev_status` |
+| `done <bug_id> <session_id> <pr>` | state=done, status=`fixed`, note `PR #<pr>` |
+| `status <bug_id>` | claim state, session, times, `live`/`STALE` |
+| `list-active` | all bugs whose newest claim is `fixing` |
+| `reap [--max-age 24h] [--report]` | revert abandoned `fixing` bugs (no claim row, or stale) to `prev_status` and append a `released` row; `--report` is read-only (wired into `must_check_gates.sdn` as a non-blocking report) |
+| `show <bug_id> --intent for_fixing --session <id> [--note n]` | print details and atomically claim |
+| `show <bug_id> --intent not_for_fixing` | print details, change nothing; `--intent` is required |
+
+Claims are race-checked: after writing, the script re-reads the table; if two live
+claims raced, the earlier `claimed_at` wins and the later one backs out (exit 3).
+Every write reseals the CRC (`scripts/check/reseal-sdn-crc32.shs`). Exit codes: 0 ok,
+2 usage, 3 refused, 4 not claimable. There is no other bug-lookup entry point
+(`bug-add`/`bug-gen`/`bug-resolve` only write); `bug-claim.shs show` is the lookup.
