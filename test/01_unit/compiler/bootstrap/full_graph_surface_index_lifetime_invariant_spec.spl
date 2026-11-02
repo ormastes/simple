@@ -1,0 +1,39 @@
+# Platform-independent invariant behind bug_db row
+# stage3_macos_full_graph_hir_sigsegv_2026_09_21 (macOS Stage3 SIGSEGV after
+# 104/848 HIR modules; doc/08_tracking/bug/stage3_macos_full_graph_hir_sigsegv_2026-09-21.md).
+# The full-graph run keeps one name->index table plus parallel ordered arrays
+# alive across hundreds of module lowerings. These assertions check that the
+# table stays consistent with its ordered arrays after many insertions and a
+# copy, on every host.
+# TODO(p0f-3): the faulting operation is unknown; needs a symbolized native
+# fault on aarch64-apple-darwin or a bounded fixture reproducing 104/848.
+use std.spec.{describe, it, expect}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+
+fn build_index(n: i64) -> ModuleSurfacesByName:
+    var o = ModuleSurfacesByName.empty()
+    var i = 0
+    while i < n:
+        val name = "mod.m{i}"
+        o.index_by_name[name] = i
+        o.ordered_names.push(name)
+        o.ordered_indices.push(i)
+        i = i + 1
+    o
+
+describe "full-graph surface index stays consistent across a large graph":
+    it "keeps every name resolvable to its ordered position for 848 modules":
+        val o = build_index(848)
+        expect(o.ordered_names.len()).to_equal(848)
+        expect(o.ordered_indices.len()).to_equal(848)
+        expect(o.index_by_name.len()).to_equal(848)
+        expect(o.index_by_name["mod.m104"]).to_equal(104)
+        expect(o.index_by_name["mod.m847"]).to_equal(847)
+        expect(o.ordered_names[104]).to_equal("mod.m104")
+
+    it "does not alias the source when the owner is copied":
+        val a = build_index(10)
+        var b = a
+        b.ordered_names.push("mod.extra")
+        expect(a.ordered_names.len()).to_equal(10)
+        expect(b.ordered_names.len()).to_equal(11)

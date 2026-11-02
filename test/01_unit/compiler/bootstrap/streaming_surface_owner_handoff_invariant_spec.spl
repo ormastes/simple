@@ -1,0 +1,61 @@
+# Platform-independent invariants behind
+# doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md
+# and doc/08_tracking/bug/stage3_macos_full_graph_hir_sigsegv_2026_09_21.md
+#
+# The aarch64-apple-darwin SIGSEGV happened when HIR typecheck read a
+# streaming surface owner whose payload word was 0. The driver now fails closed
+# (57271d9ba49: rt_heap_ref_wellformed + empty-surface abort). These assertions
+# cover the hand-off the guard relies on: an owner stored in a class field keeps
+# its content, the fresh/cleared state is empty+not-ready, and a surface count
+# is preserved across a function boundary.
+# TODO(p0f-3): the native SIGSEGV (104/848 HIR modules; faulting operation
+# unknown) needs a symbolized fault (IPS/lldb) on aarch64-apple-darwin.
+use std.spec.{describe, it, expect}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+
+class SurfaceOwnerHolder:
+    owner: ModuleSurfacesByName
+    ready: bool
+
+fn owner_surface_count(o: ModuleSurfacesByName) -> i64:
+    o.surfaces.len()
+
+fn owner_names(h: SurfaceOwnerHolder) -> [text]:
+    h.owner.ordered_names
+
+describe "streaming surface owner hand-off":
+    it "starts empty and not ready (the state the phase-3 guard rejects)":
+        val h = SurfaceOwnerHolder(owner: ModuleSurfacesByName.empty(), ready: false)
+        expect(h.ready).to_equal(false)
+        expect(owner_surface_count(h.owner)).to_equal(0)
+        expect(h.owner.ordered_names.len()).to_equal(0)
+
+    it "keeps owner content after storing it in a class field":
+        var o = ModuleSurfacesByName.empty()
+        o.ordered_names.push("a.b")
+        o.ordered_names.push("c.d")
+        o.generation = 7
+        var h = SurfaceOwnerHolder(owner: ModuleSurfacesByName.empty(), ready: false)
+        h.owner = o
+        h.ready = true
+        expect(h.ready).to_equal(true)
+        expect(owner_names(h).len()).to_equal(2)
+        expect(h.owner.generation).to_equal(7)
+
+    it "returns to empty+not-ready after the reclaim reset":
+        var h = SurfaceOwnerHolder(owner: ModuleSurfacesByName.empty(), ready: true)
+        h.owner.ordered_names.push("x")
+        h.owner = ModuleSurfacesByName.empty()
+        h.ready = false
+        expect(h.ready).to_equal(false)
+        expect(h.owner.ordered_names.len()).to_equal(0)
+        expect(h.owner.generation).to_equal(0)
+
+    it "unwraps an Option<ModuleSurfacesByName> with its payload intact":
+        var o = ModuleSurfacesByName.empty()
+        o.generation = 3
+        val opt: ModuleSurfacesByName? = Some(o)
+        expect(opt.is_some()).to_equal(true)
+        expect(opt.unwrap().generation).to_equal(3)
+        val none_opt: ModuleSurfacesByName? = None
+        expect(none_opt.is_none()).to_equal(true)
