@@ -196,10 +196,20 @@ impl CompilerDriver:
         val receipt_ok = if parsed.is_ok():
             self.promote_target_cfg_receipt_v1(source_path)
         else: true
+        # @workaround bug=s3_parse_selected_result_freed_by_transient_scope_2026-11-02 reason=stage3 returned a Result with a tag that is neither Ok nor Err after scope end; re-box it on the paused (ordinary) heap and promote the payload explicitly
+        var reboxed: Result<ParserModule, text> = Err("parse result was not re-boxed")
+        match parsed:
+            case Ok(m):
+                val _m_ok = rt_transient_heap_promote(m)
+                reboxed = Ok(m)
+            case Err(e):
+                val _e_ok = rt_transient_heap_promote(e)
+                reboxed = Err(e)
         val ended = driver_end_transient_parse_scope()
         if not (result_ok and owners_ok and receipt_ok and ended):
             panic("transient retained parser ownership failed for {source_path} (result_ok={result_ok} owners_ok={owners_ok} receipt_ok={receipt_ok} ended={ended})")
-        parsed
+        # @workaround bug=s3_parse_selected_result_freed_by_transient_scope_2026-11-02 reason=return the re-boxed Result, not the scope-owned box
+        reboxed
 
     me parse_full_frontend_unscoped_selected_v1(source_content: text, source_path: text,
         source_module_name: text) -> Result<ParserModule, text>:

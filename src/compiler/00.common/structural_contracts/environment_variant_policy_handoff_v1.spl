@@ -129,13 +129,21 @@ fn _handoff_hex_decode(value: text) -> Result<text, EnvironmentVariantPolicyHand
         i = i + 2
     match validated_utf8_bytes_to_text_linear(bytes):
         case Ok(text_value):
-            if _handoff_hex_encode(text_value)? != value:
+            # @workaround bug=s3_env_policy_digest_nondeterministic_2026-11-02 reason=frozen stage2 ef0681fc0e1 types `Result<text,_>?` as i64 inside text concat/interpolation (rt_raw_i64_to_string of the handle); bind through a typed match
+            val reencoded: text = match _handoff_hex_encode(text_value):
+                case Ok(v): v
+                case Err(e): return Err(e)
+            if reencoded != value:
                 return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
             Ok(text_value)
         case Err(_): Err(EnvironmentVariantPolicyHandoffErrorV1.InvalidValue)
 
 fn _handoff_row(name: text, value: text) -> Result<text, EnvironmentVariantPolicyHandoffErrorV1>:
-    Ok("{name}={_handoff_hex_encode(value)?}\n")
+    # @workaround bug=s3_env_policy_digest_nondeterministic_2026-11-02 reason=frozen stage2 ef0681fc0e1 types `Result<text,_>?` as i64 inside text concat/interpolation (rt_raw_i64_to_string of the handle); bind through a typed match
+    val hex: text = match _handoff_hex_encode(value):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    Ok(name + "=" + hex + "\n")
 
 fn _handoff_bool_row(name: text, value: bool) -> text:
     val encoded = if value: "1" else: "0"
@@ -177,7 +185,11 @@ fn _handoff_material(
         ("target_cpu", collection.target_cpu),
         ("target_cpu_features", collection.target_cpu_features)
     ]:
-        out = out + _handoff_row(named.0, named.1)?
+        # @workaround bug=s3_env_policy_digest_nondeterministic_2026-11-02 reason=frozen stage2 ef0681fc0e1 types `Result<text,_>?` as i64 inside text concat/interpolation (rt_raw_i64_to_string of the handle); bind through a typed match
+        val row: text = match _handoff_row(named.0, named.1):
+            case Ok(v): v
+            case Err(e): return Err(e)
+        out = out + row
     out = out + "collection.schema_version={receipt.schema_version}\n"
     out = out + _handoff_bool_row("collection.cli_host_present", presence.cli_host_present)
     out = out + _handoff_bool_row("collection.env_host_present", presence.env_host_present)
@@ -188,9 +200,19 @@ fn _handoff_material(
     out = out + _handoff_bool_row("collection.env_target_present", presence.env_target_present)
     out = out + _handoff_bool_row("collection.project_target_present", presence.project_target_present)
     out = out + _handoff_bool_row("collection.user_target_present", presence.user_target_present)
-    out = out + _handoff_row("collection.host_source_order", receipt.host_source_order)?
-    out = out + _handoff_row("collection.target_cpu_source", receipt.target_cpu_source)?
-    out = out + _handoff_row("collection.target_cpu_features_source", receipt.target_cpu_features_source)?
+    # @workaround bug=s3_env_policy_digest_nondeterministic_2026-11-02 reason=frozen stage2 ef0681fc0e1 types `Result<text,_>?` as i64 inside text concat/interpolation (rt_raw_i64_to_string of the handle); bind through a typed match
+    val host_order_row: text = match _handoff_row("collection.host_source_order", receipt.host_source_order):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    out = out + host_order_row
+    val cpu_source_row: text = match _handoff_row("collection.target_cpu_source", receipt.target_cpu_source):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    out = out + cpu_source_row
+    val cpu_features_source_row: text = match _handoff_row("collection.target_cpu_features_source", receipt.target_cpu_features_source):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    out = out + cpu_features_source_row
     out = out + _handoff_bool_row("collection.target_cpu_present", receipt.target_cpu_present)
     out = out + _handoff_bool_row(
         "collection.target_cpu_features_present", receipt.target_cpu_features_present)
@@ -234,8 +256,11 @@ pub fn environment_variant_policy_handoff_encode_v1(
             canonical.cache_identity != value.cache_identity or
             canonical.integrity_digest != value.integrity_digest):
         return Err(EnvironmentVariantPolicyHandoffErrorV1.NonCanonical)
-    val material = _handoff_material(
-        value.collection, value.policy_digest, value.cache_identity)?
+    # @workaround bug=s3_env_policy_digest_nondeterministic_2026-11-02 reason=frozen stage2 ef0681fc0e1 types `Result<text,_>?` as i64 inside text concat/interpolation (rt_raw_i64_to_string of the handle); bind through a typed match
+    val material: text = match _handoff_material(
+        value.collection, value.policy_digest, value.cache_identity):
+        case Ok(v): v
+        case Err(e): return Err(e)
     val wire = material + "integrity_digest={value.integrity_digest}\n"
     if text_to_bytes_linear(wire).len() > ENVIRONMENT_VARIANT_POLICY_HANDOFF_MAX_WIRE_BYTES_V1:
         return Err(EnvironmentVariantPolicyHandoffErrorV1.Oversized)
