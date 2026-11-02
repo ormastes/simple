@@ -1,0 +1,96 @@
+# @cover src/lib/nogc_sync_mut/database/atomic.spl
+use std.spec.*
+use std.env.{env_get}
+use std.io.file_ops.{secure_temp_dir}
+use std.io.dir_ops.{dir_remove_all}
+use std.io_runtime.{file_exists, file_write, read_file_text_result, getpid}
+use std.nogc_sync_mut.database.atomic.{FileLock}
+
+fn filelock_workspace() -> text:
+    var parent = env_get("TMPDIR")
+    if parent == "": parent = env_get("TEMP")
+    if parent == "": parent = env_get("TMP")
+    if parent == "": parent = "/tmp"
+    secure_temp_dir(parent, "filelock-stale-test").unwrap()
+
+fn lock_text(path: text) -> text:
+    match read_file_text_result(path):
+        Ok(t): t
+        Err(_): ""
+
+val DEAD_PID_CONTENT = "2147483646\n1000000"
+
+describe "FileLock stale-lock break":
+    it "breaks a complete lock whose pid is dead and then holds it":
+        val root = filelock_workspace()
+        val target = root + "/db.sdn"
+        file_write(target + ".lock", DEAD_PID_CONTENT)
+        var a = FileLock.for_file(target)
+        val got = a.try_create_lock()
+        val owner_is_me = lock_text(target + ".lock").starts_with("{getpid()}\n")
+        a.release()
+        val gone = not file_exists(target + ".lock")
+        dir_remove_all(root)
+        expect(got and owner_is_me and gone).to_equal(true)
+
+    it "never treats a just-created empty lock as stale":
+        val root = filelock_workspace()
+        val target = root + "/db.sdn"
+        file_write(target + ".lock", "")
+        var b = FileLock.for_file(target)
+        val got = b.try_create_lock()
+        val still = file_exists(target + ".lock")
+        dir_remove_all(root)
+        expect(got).to_equal(false)
+        expect(still).to_equal(true)
+
+    it "never treats a partially written lock as stale":
+        val root = filelock_workspace()
+        val target = root + "/db.sdn"
+        file_write(target + ".lock", "2147483646")
+        var b = FileLock.for_file(target)
+        val got = b.try_create_lock()
+        val still = lock_text(target + ".lock") == "2147483646"
+        dir_remove_all(root)
+        expect(got).to_equal(false)
+        expect(still).to_equal(true)
+
+    it "does not steal a live holder's lock even if it is older than 2 hours":
+        val root = filelock_workspace()
+        val target = root + "/db.sdn"
+        file_write(target + ".lock", "{getpid()}\n1000")
+        var b = FileLock.for_file(target)
+        val got = b.try_create_lock()
+        dir_remove_all(root)
+        expect(got).to_equal(false)
+
+    it "late breaker holding a stale judgement cannot delete the new live lock":
+        step("A breaks the stale lock and holds it")
+        val root = filelock_workspace()
+        val target = root + "/db.sdn"
+        file_write(target + ".lock", DEAD_PID_CONTENT)
+        var a = FileLock.for_file(target)
+        val a_got = a.try_create_lock()
+        val a_content = lock_text(target + ".lock")
+        step("B, already past its staleness check, now acts on the old judgement")
+        var b = FileLock.for_file(target)
+        val b_got = b.break_stale(DEAD_PID_CONTENT)
+        val after = lock_text(target + ".lock")
+        a.release()
+        dir_remove_all(root)
+        expect(a_got).to_equal(true)
+        expect(b_got).to_equal(false)
+        expect(after).to_equal(a_content)
+
+    it "release does not delete a lock now owned by another pid":
+        val root = filelock_workspace()
+        val target = root + "/db.sdn"
+        var a = FileLock.for_file(target)
+        val got = a.try_create_lock()
+        a.acquired = true
+        file_write(target + ".lock", "2147483645\n5")
+        a.release()
+        val survived = lock_text(target + ".lock") == "2147483645\n5"
+        dir_remove_all(root)
+        expect(got).to_equal(true)
+        expect(survived).to_equal(true)

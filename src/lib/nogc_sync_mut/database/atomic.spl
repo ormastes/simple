@@ -25,7 +25,7 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 use std.io_runtime.{file_rename}
-use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir, file_lock, file_unlock, file_modified_time}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.path.{dirname}
 extern fn rt_file_create_excl(path: text, content: text) -> bool
@@ -117,62 +117,69 @@ class FileLock:
 
         false
 
-    # Try to create lock file (atomic via O_EXCL)
+    # Try to create lock file (atomic via O_EXCL). A lock that exists is only
+    # ever removed by break_stale(), under the kernel .break lock.
     me try_create_lock() -> bool:
-        # Check if lock file exists and is stale
-        if file_exists(self.lock_path):
-            if self.is_stale_lock():
-                # Force remove stale lock
-                file_delete(self.lock_path)
-            else:
-                return false
+        if self.create_lock_file():
+            return true
+        val judged = file_read(self.lock_path)
+        if not self.is_stale_content(judged):
+            return false
+        self.break_stale(judged)
 
-        # Atomically create lock file with PID (O_EXCL prevents TOCTOU race)
+    fn create_lock_file() -> bool:
         val pid = getpid()
         val lock_content = "{pid}\n{get_timestamp()}"
         rt_file_create_excl(self.lock_path, lock_content)
 
-    # Check if lock is stale (>2 hours old or process dead)
-    fn is_stale_lock() -> bool:
-        if not file_exists(self.lock_path):
+    # Break a lock previously judged stale (`judged` is the content that was
+    # seen). Breakers are serialized by a kernel lock; under it the lock is
+    # re-read and deleted ONLY if it is still byte-identical to `judged` and
+    # still stale, so a live lock created after the judgement is never removed.
+    me break_stale(judged: text) -> bool:
+        val handle = file_lock(self.lock_path + ".break", 5)
+        if handle < 0:
             return false
+        var created = false
+        val current = file_read(self.lock_path)
+        if current == judged and self.is_stale_content(current):
+            file_delete(self.lock_path)
+            created = self.create_lock_file()
+        elif not file_exists(self.lock_path):
+            created = self.create_lock_file()
+        file_unlock(handle)
+        created
 
-        val content: text = file_read(self.lock_path)
-        if content == "":
-            return true
-
+    # Stale means: complete content ("<pid>\n<timestamp>") whose pid is dead.
+    # Empty or partial content is a lock still being written, and a live pid
+    # is never stale regardless of age. A never-completed lock file (crash
+    # between create and write) is stale only after a 10 s mtime grace.
+    fn is_stale_content(content: text) -> bool:
         val lines: [text] = content.split("\n")
-        if lines.len() < 2:
-            return true
+        if lines.len() < 2 or lines[1].trim() == "":
+            return self.is_incomplete_lock_abandoned()
+        val pid = lines[0].trim().to_int() ?? 0
+        if pid <= 0:
+            return false
+        not is_process_alive(pid)
 
-        # Parse PID and timestamp
-        val pid_str = lines[0].trim()
-        val pid = pid_str.to_int() ?? 0
+    fn is_incomplete_lock_abandoned() -> bool:
+        val mtime = file_modified_time(self.lock_path)
+        if mtime <= 0:
+            return false
+        val now_secs = get_timestamp() / 1000000
+        now_secs - mtime > 10
 
-        val timestamp_str = lines[1].trim()
-        val timestamp = timestamp_str.to_int() ?? 0
-
-        # Check if process is still alive
-        if pid > 0 and not is_process_alive(pid):
-            return true  # Process died, lock is stale
-
-        # Check if >2 hours old (fallback timeout)
-        val now = get_timestamp()
-        val age = now - timestamp
-        val two_hours = 2 * 60 * 60 * 1000000  # 2 hours in microseconds
-
-        if age > two_hours:
-            return true
-
-        false
-
-    # Release lock
+    # Release lock: only if the lock file still names our own pid.
     me release():
         if not self.acquired:
             return
 
         if file_exists(self.lock_path):
-            file_delete(self.lock_path)
+            val lines: [text] = file_read(self.lock_path).split("\n")
+            val owner = lines[0].trim().to_int() ?? 0
+            if owner == getpid():
+                file_delete(self.lock_path)
 
         self.acquired = false
 

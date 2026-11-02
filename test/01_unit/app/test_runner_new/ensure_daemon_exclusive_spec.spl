@@ -1,0 +1,103 @@
+"""
+ensure_daemon / light-daemon lane lock: exclusive spawn and exclusive claim.
+
+Race (bug test_daemon_ensure_daemon_deletes_live_lock_and_shared_tmp_claim_2026-11-02):
+two clients both pass the unlocked alive check, then each deleted the lock and
+spawned; the slower one destroyed the first daemon's live lock. The
+`after_first_check` hook forces that exact interleaving deterministically.
+
+# @req REQ-TESTRUNNER-ENSURE-DAEMON-EXCLUSIVE
+"""
+use std.spec.*
+use std.io_runtime.{file_exists, read_file_text, file_write, file_delete, dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_append}
+use app.test_daemon.light_protocol.{ensure_daemon_at}
+use app.test_daemon.light_protocol.{light_lock_claim, light_lock_release}
+
+val DIR: text = ".build/ensure_daemon_exclusive_spec"
+val LOCK: text = ".build/ensure_daemon_exclusive_spec/daemon.lock"
+val BIN: text = ".build/ensure_daemon_exclusive_spec/daemon.binary"
+val SPAWNS: text = ".build/ensure_daemon_exclusive_spec/spawns.log"
+
+fn alive_4242(pid: text) -> bool:
+    pid == "4242"
+
+fn alive_4242_or_1001(pid: text) -> bool:
+    pid == "4242" or pid == "1001"
+
+fn fake_spawn() -> bool:
+    file_append(SPAWNS, "x\n")
+    file_write(LOCK, "4242\ndigest")
+    file_write(BIN, "/bin/simple")
+    true
+
+fn no_hook():
+    pass
+
+fn run_second_client():
+    ensure_daemon_at(LOCK, BIN, alive_4242, fake_spawn, no_hook, no_hook)
+
+fn reset():
+    dir_create_all(DIR)
+    file_delete(LOCK)
+    file_delete(BIN)
+    file_delete(SPAWNS)
+    file_delete(LOCK + ".spawn")
+    file_delete(LOCK + ".break")
+
+fn spawn_count() -> i64:
+    if not file_exists(SPAWNS):
+        return 0
+    read_file_text(SPAWNS).split("\n").len() - 1
+
+describe "ensure_daemon exclusive spawn", :
+    it "second caller past the alive check does not delete the first daemon's live lock", :
+        reset()
+        # A passes the unlocked check (no daemon), then B runs to completion
+        # (spawns D1) before A takes the spawn lock.
+        val ok = ensure_daemon_at(LOCK, BIN, alive_4242, fake_spawn, no_hook, run_second_client)
+        expect(ok).to_be_true()
+        expect(read_file_text(LOCK)).to_equal("4242\ndigest")
+        expect(spawn_count()).to_equal(1)
+
+    it "same interleaving over a stale lock spawns exactly once and keeps the live lock", :
+        reset()
+        file_write(LOCK, "9999\nolddigest")
+        val ok = ensure_daemon_at(LOCK, BIN, alive_4242, fake_spawn, no_hook, run_second_client)
+        expect(ok).to_be_true()
+        expect(read_file_text(LOCK)).to_equal("4242\ndigest")
+        expect(spawn_count()).to_equal(1)
+
+    it "a live lock is never touched", :
+        reset()
+        file_write(LOCK, "4242\ndigest")
+        val ok = ensure_daemon_at(LOCK, BIN, alive_4242, fake_spawn, no_hook, no_hook)
+        expect(ok).to_be_true()
+        expect(spawn_count()).to_equal(0)
+
+describe "light daemon exclusive claim", :
+    it "exactly one of two claimants owns the lane and the lock is never torn", :
+        reset()
+        expect(light_lock_claim(LOCK, "digest", "1001", alive_4242_or_1001, BIN)).to_be_true()
+        expect(light_lock_claim(LOCK, "digest", "1002", alive_4242_or_1001, BIN)).to_be_false()
+        expect(read_file_text(LOCK)).to_equal("1001\ndigest")
+
+    it "does not treat a half-written lock as stale", :
+        reset()
+        file_write(LOCK, "")
+        expect(light_lock_claim(LOCK, "digest", "1002", alive_4242, BIN)).to_be_false()
+        expect(file_exists(LOCK)).to_be_true()
+
+    it "takes over a lock whose recorded pid is dead", :
+        reset()
+        file_write(LOCK, "9999\nolddigest")
+        expect(light_lock_claim(LOCK, "digest", "1003", alive_4242, BIN)).to_be_true()
+        expect(read_file_text(LOCK)).to_equal("1003\ndigest")
+
+    it "release deletes only a lock owned by the releasing pid", :
+        reset()
+        file_write(LOCK, "1001\ndigest")
+        light_lock_release(LOCK, BIN, "1002")
+        expect(file_exists(LOCK)).to_be_true()
+        light_lock_release(LOCK, BIN, "1001")
+        expect(file_exists(LOCK)).to_be_false()

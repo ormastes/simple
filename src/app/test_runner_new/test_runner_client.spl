@@ -15,10 +15,11 @@ use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
 use app.test_runner_new.sdn_wrapper.{run_test_sdn_wrapper}
-use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT, light_response_client_result, light_request_encode_v2, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, early_death_verdict_line, bounded_run_classification, has_verdict_line, exit_code_reason}
+use app.test_daemon.light_protocol.{ensure_daemon_at, LIGHT_REQUEST_RESPONSE_GRACE_MS, LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT, light_response_client_result, light_request_encode_v2, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, early_death_verdict_line, bounded_run_classification, has_verdict_line, exit_code_reason}
 use app.test_daemon.environment_identity.{test_daemon_environment_identity_v1, test_daemon_environment_can_reuse_v1}
 
 use std.io_runtime.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.io_runtime.{dir_list}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{read_file_text}
@@ -41,14 +42,7 @@ extern fn sys_get_args() -> [text]
 # daemon can misread an in-flight request as empty ("missing test path"),
 # consuming and discarding the real request (#98).
 fn atomic_write_text(path: text, content: text) -> bool:
-    val tmp_path = "{path}.tmp"
-    if not file_write(tmp_path, content):
-        file_delete(tmp_path)
-        return false
-    if file_rename(tmp_path, path):
-        return true
-    file_delete(tmp_path)
-    false
+    file_atomic_write(path, content)
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
@@ -339,14 +333,16 @@ fn daemon_recorded_binary() -> text:
     # "" is this fn's documented "no recorded binary" result.
     ""
 
+fn real_pid_alive(pid: text) -> bool:
+    pid_alive_and_named(pid: pid, proc_root: "/proc")
+
 fn ensure_daemon() -> bool:
-    if daemon_lock_alive():
-        return true
-    report_stale_lock()
-    file_delete(LIGHT_LOCK)
-    # The binary record belongs to the dead lock holder; clear it so the wait
-    # below can only be satisfied by the daemon spawned here.
-    file_delete(LIGHT_BINARY)
+    ensure_daemon_at(LIGHT_LOCK, LIGHT_BINARY, real_pid_alive, spawn_light_daemon, report_stale_lock, no_hook)
+
+fn no_hook():
+    pass
+
+fn spawn_light_daemon() -> bool:
     val binary = simple_binary()
     val (_daemon_out, _daemon_err, daemon_code) = process_run(
         "/bin/sh",
@@ -355,18 +351,7 @@ fn ensure_daemon() -> bool:
     if daemon_code != 0:
         file_write("/tmp/simple-test-daemon-light.log", "failed to spawn light daemon: {daemon_code}\n")
         return false
-    # The daemon claims LIGHT_LOCK first and publishes LIGHT_BINARY right
-    # after. Returning on the lock alone raced that publish: the caller then
-    # read no binary record, reported "identity unavailable or mismatched" and
-    # bypassed the daemon it had just started. Wait for both.
-    var waits = 0
-    while waits < 40:
-        if file_exists(LIGHT_LOCK) and file_exists(LIGHT_BINARY):
-            return true
-        thread_sleep(50)
-        waits = waits + 1
-    file_write("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
-    false
+    true
 
 # Fail-closed verdict for a run that produced NO evidence it executed anything.
 #
