@@ -33,7 +33,37 @@ Status values: `fixed-in-source (<evidence>)`, `fixed (PR #n)`,
 | go_to_end_dynload_zero_objects_2026-11-01 | driver flag `--mode one-binary` (run scripts) | src/compiler/80.driver/driver_build/go_to_end.spl (go_to_end_emit_format_v1), driver_aot_pipeline.spl | fixed (PR #5766; seed spec 4/4; revert-ready after one phase-3 dynload go-to-end run shows objects) |
 | stage2_module_global_assign_no_binding_2026-11-01 | 3 (80.driver/driver_build/incremental.spl, nogc_sync_mut/replay/core/replay_engine.spl, replay/semantic/trace_writer.spl; `= None` spelled `= nil`, PR #5785) | src/compiler/50.mir/_MirLowering/module_lowering.spl (runtime_module_initializer_type_fallback admits Optional) | fixed-in-source (this PR; module_global_optional_none_static_spec UNRUN). Removal: revert to `= None` after the stage3 self-build |
 | stage2_try_unwrap_text_typed_as_i64_2026-11-02 | process (frozen stage2 C:/dev/p3new/stage2.exe @ ef0681fc0e1; env-policy digest at df3a14d194b) | src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl (Str arm, fixed by 0528a9ed3ac) | fixed-in-source (spec try_unwrap_text_interp_concat_spec UNRUN). Removal: rebuild stage3 from current source |
+| s3_env_policy_digest_nondeterministic_2026-11-02 | 7 (00.common/structural_contracts/environment_variant_policy_handoff_v1.spl: typed `match` instead of `f()?` in concat/interp) | same root cause as stage2_try_unwrap_text_typed_as_i64 (enum_constructor_payload.spl, fixed by 0528a9ed3ac) | open workaround; root cause fixed-in-source. Removal: stage3 rebuilt from current source |
+| s3_parse_selected_result_freed_by_transient_scope_2026-11-02 | 1 (80.driver/driver_source_parse_selected.spl: re-box Result before the transient scope ends) | transient-scope promote (#5753 family) | open (P1, diagnosis unconfirmed, workaround not yet built into a stage3) |
+| stage2_facade_sdn_leaf_method_mangling_2026-11-02 | link (`-Xlink=-alternatename` alias for `SdnBackendImpl.process_module`, see below) | src/compiler/00.common/module_path_naming.spl | fixed-in-source (e1e2bb893fb). revert-ready |
+| stage2_generic_selfcall_bodies_missing_2026-11-02 | link (WA-BC-1/2 laneBC concrete objects, see below) | erased generic bodies (#5732) | fixed-in-source (spec generic_selfcall_facade_symbols_spec green on seed). revert-ready |
+| stage2_emit_archive_argv_overflow_win_2026-11-02 | process (WA-AR-1 manual `llvm-ar rcsD ... @ar.rsp`) | src/compiler/70.backend/linker/archive_response_file.spl | fixed (PR #5805). revert-ready |
+| stage2_runtime_missing_rt_heap_aux_live_bytes_2026-11-02 | link (a local `rt_heap_aux_live_bytes` shim object is no longer needed) | src/runtime/runtime_native.c | fixed (PR #5800 added the real symbol and the core-C list entries). The shim is superseded |
 
 Bug files: `doc/08_tracking/bug/<id with _ and date>.md`. Rows exist in `bug_db.sdn` for
 rti007_any_return_rows, rti004_mono, typeparam_mir, enumowner_mir, go_to_end_dynload,
 stage2_runtime_list, stage2_ifexpr. mono-call-inference: doc/08_tracking/bug/mono_call_inference_2026-10-31.md (PR #5780). "seed" = Rust seed interpreting pure-Simple src/compiler in a reduced closure; UNRUN = written during the run-14c memory hold.
+
+## Phase-3 stage3 manual link workarounds (2026-11-02)
+
+These are folded from `C:/dev/p3new/linkdry/WORKAROUNDS.md`. None of them changes source. They apply to the
+manual stage3 link of the 1414 objects that the frozen stage2 emitted at df3a14d194b
+(`scripts/bootstrap/p3-manual-link-stage3.shs`).
+
+- **WA-AR-1** (bug stage2_emit_archive_argv_overflow_win_2026-11-02): run `llvm-ar rcsD stage3_closure.a @ar.rsp`
+  with one quoted path per line. The probe gave rc=0, 59,184,150 bytes, 1414 members. Drop it once stage2
+  contains #5805.
+- **Link alias** (bug stage2_facade_sdn_leaf_method_mangling_2026-11-02):
+  `P3_LINK_EXTRA_ARGS='-Wl,-Xlink=-alternatename:compiler.backend.SdnBackendImpl.process_module=compiler.backend.sdn.SdnBackendImpl.process_module'`.
+  lld's MinGW driver rejects `--defsym` on COFF.
+- **WA-BC-1** (bug stage2_generic_selfcall_bodies_missing_2026-11-02): `laneBC_simple_ring.o` is built from the
+  `C:/dev/wt/p3-bc` worktree, which carries an uncommitted `WORKAROUND(p3-laneBC)` edit that makes SimpleRing
+  concrete over i64/i64. Six module-shared definitions (module init, global initialize, init `$state`,
+  `SIMPLE_RING_U64_MAX`, `_ring_add_counter`, `_ring_next_counter`) are made UNDEFINED with `coff_undef.ps1`, so
+  they bind to the originals in `aot-c2379e99...o`. No aliases are used. The ABI proof (identical field offsets,
+  argument registers and stack slots, i64 handle returns in rax) is in `laneBC/caller_*.dis` and `ring_nr.dis`.
+- **WA-BC-2** (same bug): `laneBC_future.o` holds Future made concrete with T=i64 and trimmed to its fields plus
+  `from_value`/`pending`/`poll`. `_future_time_now_ms` is made undefined. The body is instruction-identical to the
+  erased `Future__poll$unknown`.
+- **Revert** WA-BC-1/2 when stage2 is rebuilt from #5732 or later and the link resolves these symbols without the
+  laneBC objects. Then drop both objects from the rsp.

@@ -40,3 +40,16 @@ mis-qualified symbol name was emitted. Any module whose leaf is `sdn` (or matche
 
 Stage-2 form (`driver.spl` importing from the defining module, or defsym aliases) stays until a stage3 built from
 this fix links `SdnBackendImpl.process_module` without them.
+
+## Phase-3 stage3 link evidence (lane A, 2026-11-02)
+
+The manual stage3 link (`C:/dev/p3new/linkdry`, `@link3.rsp`, 1414 objects) reported
+`undefined symbol: compiler.backend.SdnBackendImpl.process_module`, referenced by `CompilerDriver.process_sdn`
+and `compiler.driver.driver_types.__lambda_lift_9`, while the definer emits
+`compiler.backend.sdn.SdnBackendImpl.process_module`. Lane A first guessed that the facade re-export path was used
+for mangling; the leaf-strip root cause above explains the same symptom. A static scan of all 1414 objects found
+only this one symbol with a missing module segment.
+
+Link workaround: lld's MinGW driver rejects `--defsym` on COFF, so the link uses
+`-Wl,-Xlink=-alternatename:compiler.backend.SdnBackendImpl.process_module=compiler.backend.sdn.SdnBackendImpl.process_module`
+(passed through `P3_LINK_EXTRA_ARGS` in `scripts/bootstrap/p3-manual-link-stage3.shs`). Undefined count went from 12 to 11.
