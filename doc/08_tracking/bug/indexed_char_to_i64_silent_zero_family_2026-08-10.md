@@ -1,10 +1,42 @@
 # `s[i].to_i64()` on a string-indexed char silently returns 0 — family census
 
+## Policy re-check 2026-11-02 (lane a6dffc9c/p12-6)
+
+**Checked against current policy/design: re-scoped to: indexed characters from `text[i]` are ambiguous (`'7'.to_i64()` = 7, not 55; JIT 0 vs interpreter code point for non-digits) because there is no distinct `char` type**
+
+Policy: nil only inside `unsafe`, `Option`/`None` elsewhere; no `Any` outside `unsafe`; erased generics (no monomorphization); TDD.
+
+Measured at 2345aff3ff5: `val c = "A"[0]; c.to_i64()` was `65` on the interpreter
+(commit `8d100a8aa81`) but `0` on the JIT (`rt_string_to_int` returned 0 for any
+non-numeric text) - a silent cross-engine wrong answer.
+
+- **Not changed (review decision, PR #5924):** an attempt to make the shared
+  `rt_string_to_int` return a code point for a single non-numeric character was
+  reverted. That function backs ALL text-to-int conversion, so
+  `"x".to_i64()` on single-character user input would silently become 120, a new
+  silent-wrong-value class, and the Rust runtime would diverge from the C twin
+  (`src/runtime/runtime_native.c:7539`). The JIT therefore still returns 0 for
+  `"A"[0].to_i64()` while the interpreter returns 65 (`8d100a8aa81`).
+- **Scope now:** indexing a `text` still yields `text`, so any indexed character
+  is ambiguous (non-digit: 0 on the JIT / code point on the interpreter; digit: `"7"[0].to_i64()` is `7`, not the code point `55`);
+  `char_code_at` is the unambiguous API, guarded by
+  `scripts/check/check-string-index-char-to-i64.shs`). The fix belongs at the type level: a distinct
+  `char` type from `text[i]` in HIR (the cited `hir/lower/expr/index.rs` site),
+  or making callers use `char_code_at` - a language/type-system decision; a
+  difficulty-3 row records it.
+- Policy interaction: none of nil/Any/erasure is involved; this is not obsoleted
+  by the Option policy. Severity stays P1 (the seed JIT/interpreter divergence is unfixed).
+
+Evidence (this lane): debug Rust seed built from `2345aff3ff5`
+(`cargo build -p simple-driver`, `CARGO_TARGET_DIR=C:/dev/wt/p12-6/target-p12`), JIT
+= `simple run`, interpreter = `SIMPLE_EXECUTION_MODE=interpret simple run`.
+(No test for this bug: no runtime change was made.)
+
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
 **Filed:** 2026-08-10
 **Parent:** `blink_selector_engine_totally_red_and_dom_node_builder_missing_2026-08-10.md` (Defect 2)
-Status: OPEN (P1)
+Status: OPEN (P1) — RE-SCOPED 2026-11-02 (type-level: no char type from text[i]; no runtime change made)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Defect
