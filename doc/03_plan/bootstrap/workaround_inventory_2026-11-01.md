@@ -41,6 +41,7 @@ Status values: `fixed-in-source (<evidence>)`, `fixed (PR #n)`,
 | stage2_generic_selfcall_bodies_missing_2026-11-02 | link (WA-BC-1/2 laneBC concrete objects, see below) | erased generic bodies (#5732) | fixed-in-source (spec generic_selfcall_facade_symbols_spec green on seed). revert-ready |
 | stage2_emit_archive_argv_overflow_win_2026-11-02 | process (WA-AR-1 manual `llvm-ar rcsD ... @ar.rsp`) | src/compiler/70.backend/linker/archive_response_file.spl | fixed (PR #5805). revert-ready |
 | stage2_runtime_missing_rt_heap_aux_live_bytes_2026-11-02 | link (a local `rt_heap_aux_live_bytes` shim object is no longer needed) | src/runtime/runtime_native.c | fixed (PR #5800 added the real symbol and the core-C list entries). The shim is superseded |
+| stage2_parse_shard_child_av_large_closure_2026-11-02 | process (env flags SIMPLE_PARSE_SHARDING=0, SIMPLE_FILE_FIBERS=0, SIMPLE_PARSE_SHARD_MAX=1 set by scripts/bootstrap/p3-targeted-stage2-build.shs; parent in-process fallback otherwise) | src/app/cli/parse_shard_main.spl / src/compiler/80.driver parse shard | open (child AV 0xC0000005 on CompilerDriver-sized closures at any shard count; counts in bug doc). Removal: stage3 from current source shows zero child AVs with sharding on. Local unwrap diag patch correlated with the AVs is diagnostic-only and NOT landed |
 
 Bug files: `doc/08_tracking/bug/<id with _ and date>.md`. Rows exist in `bug_db.sdn` for
 rti007_any_return_rows, rti004_mono, typeparam_mir, enumowner_mir, go_to_end_dynload,
