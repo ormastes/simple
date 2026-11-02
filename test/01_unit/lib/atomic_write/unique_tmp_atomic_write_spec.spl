@@ -1,0 +1,61 @@
+# Purpose and audience: executable evidence that atomic publishes never share a fixed "<path>.tmp".
+# @req shared_fixed_tmp_name_atomic_write_collides
+"""
+## Purpose and audience
+Purpose: a concurrent writer that holds (or abandoned) the fixed name `<path>.tmp`
+must not be able to tear, truncate or block another writer's publish. The
+collision is forced deterministically by pre-occupying `<path>.tmp` with a
+directory: a writer that stages at the fixed name fails (or, with a plain-write
+fallback, publishes torn content); a writer with a unique stage name publishes
+the full payload. Audience: lib/app maintainers of tmp+rename publish paths.
+"""
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_exists, file_delete, mkdir_p, read_file_text}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.daemon_sdk.types.{daemon_request_new}
+use std.daemon_sdk.protocol.{write_daemon_request, daemon_request_path_for}
+use nogc_async_mut.process_set.ipc.{_ipc_atomic_write}
+
+val ROOT = ".build/atomic_unique_tmp_spec"
+
+fn _big(ch: text) -> text:
+    var s = ""
+    var i = 0
+    while i < 4096:
+        s = s + ch
+        i = i + 1
+    s
+
+fn _occupy_fixed_tmp(path: text):
+    # Another writer owns "<path>.tmp": model it as a directory nobody can open for write.
+    mkdir_p(path + ".tmp")
+
+describe "atomic publish with the fixed tmp name occupied":
+    it "file_atomic_write publishes the full payload":
+        step("occupy tmp")
+        val p = ROOT + "/std/a.txt"
+        mkdir_p(ROOT + "/std")
+        _occupy_fixed_tmp(p)
+        expect(file_atomic_write(p, _big("A"))).to_equal(true)
+        expect(read_file_text(p)).to_equal(_big("A"))
+
+    it "daemon_sdk write_daemon_request publishes the request":
+        val dir = ROOT + "/sdk_req"
+        mkdir_p(dir)
+        val req = daemon_request_new(1)
+        _occupy_fixed_tmp(daemon_request_path_for(req.id, dir))
+        val path = write_daemon_request(req, dir)
+        expect(path != "").to_equal(true)
+        expect(file_exists(path)).to_equal(true)
+
+    it "a failed atomic write never falls back to a plain write":
+        val p = ROOT + "/nofallback/dir_target"
+        mkdir_p(p)
+        expect(file_atomic_write(p, "x")).to_equal(false)
+
+    it "process_set ipc atomic write publishes the full payload":
+        val p = ROOT + "/ipc/a.txt"
+        mkdir_p(ROOT + "/ipc")
+        _occupy_fixed_tmp(p)
+        expect(_ipc_atomic_write(p, _big("C"))).to_equal(true)
+        expect(read_file_text(p)).to_equal(_big("C"))

@@ -1,3 +1,6 @@
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_lock, file_unlock, file_modified_time}
+use std.io_runtime.{file_exists, read_file_text, file_write, file_delete, file_rename, getpid, thread_sleep, time_now_unix_micros}
+
 val LIGHT_REQUEST_DEFAULT_TIMEOUT_MS: i64 = 600000
 # Ceiling on an EXPLICITLY requested budget, not the default (which stays
 # 600s above). It used to equal the default, so a spec that asked for more —
@@ -340,3 +343,137 @@ fn light_request_is_pollable(name: text) -> bool:
     if not name.ends_with(".req"):
         return false
     true
+
+# --- Lane lock protocol (shared by light_daemon.spl and test_runner_client.spl)
+#
+# daemon.lock holds "<pid>\n<environment digest>". It is created with O_EXCL
+# (exactly one creator wins) and is only ever deleted by its owner, or by a
+# breaker that proved the recorded pid dead while holding the kernel lock
+# "<lock>.break". An empty or one-line file is "being written", never stale.
+# Bug: test_daemon_ensure_daemon_deletes_live_lock_and_shared_tmp_claim_2026-11-02.
+
+pub fn light_lock_is_complete(content: text) -> bool:
+    val lines = content.split("\n")
+    lines.len() >= 2 and lines[0].trim() != "" and lines[1].trim() != ""
+
+pub fn light_lock_pid(content: text) -> text:
+    (content.split("\n")[0]).trim()
+
+pub fn light_unique_tmp_path(path: text) -> text:
+    "{path}.{getpid()}.{time_now_unix_micros()}.tmp"
+
+pub fn light_atomic_publish(path: text, content: text) -> bool:
+    """Unique tmp + same-directory rename. No shared tmp name, no plain-write fallback."""
+    val tmp_path = light_unique_tmp_path(path)
+    if not file_write(tmp_path, content):
+        file_delete(tmp_path)
+        return false
+    if file_rename(tmp_path, path):
+        return true
+    file_delete(tmp_path)
+    false
+
+pub fn light_lock_older_than(path: text, secs: i64) -> bool:
+    val mtime = file_modified_time(path)
+    mtime > 0 and (time_now_unix_micros() / 1000000) - mtime > secs
+
+pub fn light_lock_break_stale(lock_path: text, binary_path: text, judged_pid: text, alive: fn(text) -> bool) -> bool:
+    """Delete the lock iff it is complete, still names judged_pid, and that pid is dead."""
+    val h = file_lock("{lock_path}.break", 10)
+    if h < 0:
+        return false
+    var broke = false
+    if file_exists(lock_path):
+        val content = read_file_text(lock_path)
+        if light_lock_is_complete(content):
+            val pid = light_lock_pid(content)
+            if pid == judged_pid and not alive(pid):
+                file_delete(lock_path)
+                file_delete(binary_path)
+                broke = true
+        elif judged_pid == "" and light_lock_older_than(lock_path, 10):
+            # Torn record from a claimant that died mid-write: stale only after a grace.
+            file_delete(lock_path)
+            file_delete(binary_path)
+            broke = true
+    file_unlock(h)
+    broke
+
+pub fn light_lock_release(lock_path: text, binary_path: text, my_pid: text):
+    """Release only a lock this pid owns."""
+    if file_exists(lock_path) and light_lock_pid(read_file_text(lock_path)) == my_pid:
+        file_delete(lock_path)
+        file_delete(binary_path)
+
+pub fn light_lock_claim(lock_path: text, digest: text, my_pid: text, alive: fn(text) -> bool, binary_path: text) -> bool:
+    """Become the lane owner or report that someone else is. O_EXCL decides; no sleep arbitration."""
+    var attempt = 0
+    while attempt < 4:
+        if file_create_exclusive(lock_path, my_pid + "\n" + digest):
+            return true
+        val content = read_file_text(lock_path)
+        if light_lock_is_complete(content):
+            val pid = light_lock_pid(content)
+            if pid == my_pid:
+                return true
+            if alive(pid):
+                return false
+            light_lock_break_stale(lock_path, binary_path, pid, alive)
+        else:
+            # Another claimant is between create and write (or the file is gone).
+            thread_sleep(50)
+            if attempt == 3:
+                light_lock_break_stale(lock_path, binary_path, "", alive)
+        attempt = attempt + 1
+    false
+
+fn lock_alive_at(lock_path: text, alive: fn(text) -> bool) -> bool:
+    if not file_exists(lock_path):
+        return false
+    val pid = light_lock_pid(read_file_text(lock_path))
+    pid != "" and alive(pid)
+
+
+
+
+fn ensure_daemon_at(lock_path: text, binary_path: text, alive: fn(text) -> bool, spawn: fn() -> bool, on_stale: fn(), after_first_check: fn()) -> bool:
+    """Start the light daemon at most once however many clients race here.
+
+    The unlocked alive check is only a fast path. Everything after it runs under
+    a kernel lock (auto-released if this process dies), re-checks liveness, and
+    deletes a lock only after proving its recorded pid dead. `after_first_check`
+    is a test seam that runs between the fast-path check and the spawn lock."""
+    if lock_alive_at(lock_path, alive):
+        return true
+    after_first_check()
+    val h = file_lock("{lock_path}.spawn", 30)
+    if h < 0:
+        return false
+    var ok = false
+    if lock_alive_at(lock_path, alive):
+        ok = true
+    else:
+        if file_exists(lock_path):
+            val content = read_file_text(lock_path)
+            val pid = light_lock_pid(content)
+            if pid != "":
+                on_stale()
+            light_lock_break_stale(lock_path, binary_path, pid, alive)
+        ok = spawn() and wait_for_daemon_record(lock_path, binary_path)
+    file_unlock(h)
+    ok
+
+fn wait_for_daemon_record(lock_path: text, binary_path: text) -> bool:
+    # The daemon claims LIGHT_LOCK first and publishes LIGHT_BINARY right
+    # after. Returning on the lock alone raced that publish: the caller then
+    # read no binary record, reported "identity unavailable or mismatched" and
+    # bypassed the daemon it had just started. Wait for both.
+    var waits = 0
+    while waits < 40:
+        if file_exists(lock_path) and file_exists(binary_path):
+            return true
+        thread_sleep(50)
+        waits = waits + 1
+    file_write("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
+    false
+
