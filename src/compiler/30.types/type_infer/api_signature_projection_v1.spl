@@ -1,0 +1,201 @@
+# Retained-mode observation while the actual HM substitution owner is alive.
+# No HIR/parser/symbol/substitution object escapes through the returned records.
+use compiler.common.api_signature_facts_v1.{ApiSignatureKindV1, ApiSignatureNodeV1,
+    ApiCallableFactV1, ApiSignatureFactsV1, api_signature_unavailable_v1}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, HirSymbol, SymbolTable, SymbolKind}
+use compiler.hir.hir_definitions.{HirFunction, HirParam}
+use compiler.types.type_infer_types.{HmInferContext, Substitution}
+
+class ApiSignatureProjectorV1:
+    module_name: text
+    symbols: SymbolTable
+    substitution: Substitution
+    nodes: [ApiSignatureNodeV1]
+    exhausted: bool
+
+    me append(kind: ApiSignatureKindV1, parent: i64, ordinal: i64,
+            reason: text = "") -> i64:
+        if self.nodes.len() >= 1024:
+            self.exhausted = true
+            return -1
+        val index = self.nodes.len()
+        self.nodes.push(ApiSignatureNodeV1(kind, parent, ordinal, 0, false, -1, "", "", reason))
+        index
+
+    me project(type_: HirType, parent: i64, ordinal: i64,
+            depth: i64, active: [i64]) -> i64:
+        if self.exhausted: return -1
+        if depth >= 32:
+            return self.append(ApiSignatureKindV1.Unknown, parent, ordinal, "type-depth-budget")
+        if type_ == nil or type_.kind == nil:
+            return self.append(ApiSignatureKindV1.Unknown, parent, ordinal, "missing-type")
+        # Follow only this live context's map; no recursive apply/path-compress
+        # operation is allowed to escape the projection's cycle/depth budget.
+        match type_.kind:
+            case HirTypeKind.Infer(id, _):
+                for previous in active:
+                    if previous == id:
+                        return self.append(ApiSignatureKindV1.Unknown, parent, ordinal, "substitution-cycle")
+                if self.substitution.map.has(id):
+                    var next_active: [i64] = []
+                    for previous in active: next_active.push(previous)
+                    next_active.push(id)
+                    return self.project(self.substitution.map[id], parent, ordinal, depth + 1, next_active)
+                return self.append(ApiSignatureKindV1.Unknown, parent, ordinal, "unresolved-inference")
+            case _: ()
+        val index = self.append(ApiSignatureKindV1.Unknown, parent, ordinal)
+        if index < 0: return index
+        var node = self.nodes[index]
+        var children: [HirType] = []
+        match type_.kind:
+            case HirTypeKind.Int(bits, signed):
+                node.kind = ApiSignatureKindV1.Integer
+                node.bits = bits
+                node.mutable_or_signed = signed
+            case HirTypeKind.Float(bits):
+                node.kind = ApiSignatureKindV1.Float
+                node.bits = bits
+            case HirTypeKind.Bool: node.kind = ApiSignatureKindV1.Bool
+            case HirTypeKind.Str: node.kind = ApiSignatureKindV1.Text
+            case HirTypeKind.Char: node.kind = ApiSignatureKindV1.Char
+            case HirTypeKind.Unit: node.kind = ApiSignatureKindV1.Unit
+            case HirTypeKind.Never: node.kind = ApiSignatureKindV1.Never
+            case HirTypeKind.Tuple(items):
+                node.kind = ApiSignatureKindV1.Tuple
+                children = items
+            case HirTypeKind.Union(items):
+                node.kind = ApiSignatureKindV1.Union
+                children = items
+            case HirTypeKind.Array(inner, _):
+                node.kind = ApiSignatureKindV1.Array
+                children = [inner]
+            case HirTypeKind.Slice(inner):
+                node.kind = ApiSignatureKindV1.Slice
+                children = [inner]
+            case HirTypeKind.Dict(key, value):
+                node.kind = ApiSignatureKindV1.Dict
+                children = [key, value]
+            case HirTypeKind.Optional(inner):
+                node.kind = ApiSignatureKindV1.Optional
+                children = [inner]
+            case HirTypeKind.Result(ok, err):
+                node.kind = ApiSignatureKindV1.Result
+                children = [ok, err]
+            case HirTypeKind.Function(params, result, effects):
+                node.kind = ApiSignatureKindV1.Function
+                # Return has ordinal -1; parameters retain declaration order.
+                self.project(result, index, -1, depth + 1, active)
+                children = params
+                if effects.len() > 0: node.unknown_reason = "effect-types-not-projected"
+            case HirTypeKind.Ref(inner, mutable):
+                node.kind = ApiSignatureKindV1.Reference
+                node.mutable_or_signed = mutable
+                children = [inner]
+            case HirTypeKind.Ptr(inner, mutable):
+                node.kind = ApiSignatureKindV1.Pointer
+                node.mutable_or_signed = mutable
+                node.unknown_reason = "unsafe-pointer-exposure-unclassified"
+                children = [inner]
+            case HirTypeKind.Unique(inner):
+                node.kind = ApiSignatureKindV1.Unique
+                children = [inner]
+            case HirTypeKind.Shared(inner):
+                node.kind = ApiSignatureKindV1.Shared
+                children = [inner]
+            case HirTypeKind.Weak(inner):
+                node.kind = ApiSignatureKindV1.Weak
+                children = [inner]
+            case HirTypeKind.Isolated(inner):
+                node.kind = ApiSignatureKindV1.Isolated
+                children = [inner]
+            case HirTypeKind.Named(symbol, arguments):
+                node.local_symbol = symbol.id
+                children = arguments
+                node.unknown_reason = "nominal-members-not-projected"
+                if self.symbols.symbols.has(symbol.id):
+                    val declaration: HirSymbol = self.symbols.symbols[symbol.id]
+                    val owner = declaration.defining_module ?? self.module_name
+                    if declaration.id.id == symbol.id and declaration.name.len() > 0 and declaration.name.len() <= 256 and owner.len() > 0 and owner.len() <= 512:
+                        match declaration.kind:
+                            case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum | SymbolKind.Trait:
+                                node.kind = ApiSignatureKindV1.Nominal
+                                node.declaration_owner = owner
+                                node.declaration_name = declaration.name
+                            case _: node.unknown_reason = "nominal-symbol-kind-mismatch"
+                    else: node.unknown_reason = "nominal-symbol-identity-invalid"
+                else: node.unknown_reason = "nominal-symbol-absent"
+            case HirTypeKind.TypeParam(_, _): node.unknown_reason = "generic-domain-guarantee-unavailable"
+            case HirTypeKind.Projection(_, _): node.unknown_reason = "associated-type-unresolved"
+            case HirTypeKind.DynTrait(_): node.unknown_reason = "trait-surface-not-projected"
+            case HirTypeKind.Any: node.unknown_reason = "unsafe-any-exposure-unclassified"
+            case HirTypeKind.Error: node.unknown_reason = "type-error"
+            case _: node.unknown_reason = "type-kind-not-projected"
+        self.nodes[index] = node
+        var child_index = 0
+        for raw_child in children:
+            if self.exhausted: break
+            val child: HirType = raw_child
+            self.project(child, index, child_index, depth + 1, active)
+            child_index = child_index + 1
+        index
+
+pub fn project_api_signatures_v1(module: HirModule, context: HmInferContext) -> ApiSignatureFactsV1:
+    if module.name.len() == 0 or module.name.len() > 512 or module.path.len() > 1024:
+        var unavailable = api_signature_unavailable_v1("", "", "module-identity-invalid")
+        unavailable.inference_errors = context.errors.len()
+        return unavailable
+    if module.functions.len() > 128:
+        var unavailable = api_signature_unavailable_v1(module.name, module.path, "callable-budget")
+        unavailable.inference_errors = context.errors.len()
+        return unavailable
+    var projector = ApiSignatureProjectorV1(module.name, module.symbols, context.subst, [], false)
+    var facts = api_signature_unavailable_v1(module.name, module.path, "effective-export-closure-not-collected")
+    facts.inference_errors = context.errors.len()
+    facts.unknown_reasons.push("non-callable-and-generated-surfaces-not-collected")
+    # Stable module-local identity ordering; at most 128 rows. Do not rely on
+    # dictionary iteration when the node budget may truncate later functions.
+    var keys = module.functions.keys()
+    var position = 1
+    while position < keys.len():
+        val key = keys[position]
+        var cursor = position
+        while cursor > 0 and keys[cursor - 1].id > key.id:
+            keys[cursor] = keys[cursor - 1]
+            cursor = cursor - 1
+        keys[cursor] = key
+        position = position + 1
+    for key in keys:
+        if projector.exhausted: break
+        val function_: HirFunction = module.functions[key]
+        if key.id != function_.symbol.id or not module.symbols.symbols.has(key.id):
+            facts.unknown_reasons.push("callable-symbol-absent-or-mismatched")
+            continue
+        val declaration: HirSymbol = module.symbols.symbols[key.id]
+        val owner = declaration.defining_module ?? module.name
+        if declaration.id.id != key.id or declaration.name != function_.name or declaration.kind != SymbolKind.Function or owner.len() == 0 or owner.len() > 512 or function_.name.len() > 256:
+            facts.unknown_reasons.push("callable-symbol-identity-invalid")
+            continue
+        val root = projector.append(ApiSignatureKindV1.Function, -1, facts.callables.len())
+        if root < 0: break
+        facts.callables.push(ApiCallableFactV1(key.id, owner, function_.name, declaration.visibility, root))
+        # The lowered unannotated-return sentinel is not a uniquely allocated
+        # HM variable. Never accidentally resolve it through substitution id 0.
+        if function_.return_type == nil or function_.return_type.kind == nil:
+            projector.append(ApiSignatureKindV1.Unknown, root, -1, "missing-type")
+        elif function_.return_type.kind == HirTypeKind.Infer(0, 0):
+            projector.append(ApiSignatureKindV1.Unknown, root, -1, "unannotated-return-unavailable")
+        else:
+            projector.project(function_.return_type, root, -1, 0, [])
+        var ordinal = 0
+        for raw_param in function_.params:
+            if projector.exhausted: break
+            val param: HirParam = raw_param
+            projector.project(param.type_, root, ordinal, 0, [])
+            ordinal = ordinal + 1
+        if function_.type_params.len() > 0:
+            facts.unknown_reasons.push("generic-bounds-and-defaults-not-collected")
+        if function_.effects.len() > 0:
+            facts.unknown_reasons.push("effect-types-not-projected")
+    facts.nodes = projector.nodes
+    if projector.exhausted: facts.unknown_reasons.push("type-node-budget")
+    facts

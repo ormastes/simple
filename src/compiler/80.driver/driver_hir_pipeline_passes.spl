@@ -95,6 +95,15 @@ impl CompilerDriver:
 export publish_module_typecheck_receipt_v1
 
 pub fn publish_module_typecheck_receipt_v1(ctx: CompileContext, receipt: HirTypecheckReceiptV1):
+    if val facts = receipt.api_signatures:
+        if ctx.api_signature_facts.has(facts.module_name):
+            ctx.api_signature_node_count = ctx.api_signature_node_count - ctx.api_signature_facts[facts.module_name].nodes.len()
+            ctx.api_signature_facts.remove(facts.module_name)
+        if facts.module_name != "" and ctx.api_signature_facts.len() < 256 and facts.nodes.len() <= 16384 - ctx.api_signature_node_count:
+            ctx.api_signature_facts[facts.module_name] = facts
+            ctx.api_signature_node_count = ctx.api_signature_node_count + facts.nodes.len()
+        else:
+            ctx.api_signature_retention_exhausted = true
     for message in receipt.warnings:
         ctx.add_warning(message)
     for message in receipt.errors:
@@ -128,9 +137,15 @@ pub fn run_typecheck_warn_pass(
     """
     # Keep module iteration, severity, diagnostic order, and feature policy.
     val severity = typecheck_pass_severity()
+    # A fresh pass replaces the prior observation generation, including failed
+    # and budget-limited runs. Absent modules never inherit previous facts.
+    ctx.api_signature_facts = {}
+    ctx.api_signature_node_count = 0
+    ctx.api_signature_retention_exhausted = false
     var out: [text] = []
     for name in hir_modules.keys():
-        val receipt = collect_module_typecheck_receipt_v1(name, hir_modules[name], severity)
+        val collect_signatures = not ctx.api_signature_retention_exhausted
+        val receipt = collect_module_typecheck_receipt_v1(name, hir_modules[name], severity, collect_signatures)
         for message in receipt.messages:
             out = out.push(message)
         publish_module_typecheck_receipt_v1(ctx, receipt)

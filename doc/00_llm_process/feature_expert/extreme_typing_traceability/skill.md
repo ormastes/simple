@@ -2,6 +2,17 @@
 
 Status: design handoff, 2026-11-01; no feature/runtime qualification.
 
+2026-11-02 source candidate: the retained HIR typecheck consumer now projects
+owned signature facts from live HM substitutions through
+`compiler.types.type_infer.api_signature_projection_v1`, using
+`compiler.common.api_signature_facts_v1` records and bounded CompileContext
+storage. This adds a `src/compiler/30.types` owner route; it does not establish
+effective exports, complete E1, fatal enforcement or engine parity. Archive
+leases keep collection absent. Read the [current slice status and
+bounds](../../../05_design/extreme_typing_traceability.md#e1-retained-signature-observation-candidate-2026-11-02)
+before extending the source. Authored projection/lifetime/storage specs are
+unrun pending an admitted runtime; no generated manual or proof is claimed.
+
 Read the [selected policy](../../../02_requirements/feature/extreme_typing_traceability.md),
 [architecture](../../../04_architecture/extreme_typing_traceability.md),
 [implementation plan](../../../03_plan/agent_tasks/extreme_typing_traceability.md)
