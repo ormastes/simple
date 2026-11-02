@@ -21,6 +21,7 @@ use compiler.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_add_pair}
 use compiler.backend.cranelift_global_address.*
 use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_void}
 use compiler.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
+use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.sffi.codegen.*
@@ -185,14 +186,14 @@ pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: M
             "Failed to declare module statics"))
 
     var func_handles: Dict<text, i64> = {}
-    for func in module.functions.values():
+    for func in mir_module_functions_sorted(module):
         val emit_name = cl_function_emit_name(func.name)
         print "[cranelift-direct] declare {emit_name}"
         val sig = build_signature(func.signature, func.name == "main")
         val handle = cranelift_declare_function(cl_module, emit_name, sig, cranelift_function_linkage(func))
         func_handles[func.name] = handle
 
-    for func in module.functions.values():
+    for func in mir_module_functions_sorted(module):
         print "[cranelift-direct] compile {func.name}"
         val result = compile_function(cl_module, func, func_handles, global_handles)
         if not result:
@@ -247,14 +248,14 @@ impl Codegen for CraneliftCodegenAdapter:
 
         # First pass: declare all functions so forward references work
         var func_handles: Dict<text, i64> = {}
-        for func in module.functions.values():
+        for func in mir_module_functions_sorted(module):
             val sig = build_signature(func.signature, func.name == "main")
             val emit_name = cl_function_emit_name(func.name)
             val handle = cranelift_declare_function(cl_module, emit_name, sig, cranelift_function_linkage(func))
             func_handles[func.name] = handle
 
         # Second pass: compile each function
-        for func in module.functions.values():
+        for func in mir_module_functions_sorted(module):
             val result = compile_function(cl_module, func, func_handles, global_handles)
             if not result:
                 cranelift_free_module(cl_module)
@@ -398,7 +399,7 @@ val STATICS_FAILED_KEY: i64 = -1
 fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, CraneliftGlobalBinding>:
     var handles: Dict<i64, CraneliftGlobalBinding> = {}
     val failed = CraneliftGlobalBinding(data_handle: 0, accessor_handle: 0)
-    for static_ in module.statics.values():
+    for static_ in mir_module_statics_sorted(module):
         if not cranelift_static_init_supported(static_):
             print "[cranelift] unsupported module static '{static_.name}' (non-scalar type or non-const init)"
             handles[STATICS_FAILED_KEY] = failed
