@@ -22,4 +22,4 @@ The earlier SIG9 below a 17 GiB guard remains unattributed; this source-level sc
 
 ## Update 2026-11-02
 
-The object-path scope now covers translation and object emission with no IR promotion, and is on by default (`SIMPLE_CODEGEN_MODULE_SCOPE=0` opts out). The `SIMPLE_BOOTSTRAP=1` exclusion is unchanged and now also applies in `compile_module_with_backend_scoped_v1`. See `codegen_module_memory_not_freed_per_module_2026_11_02.md`.
+The object-path scope now covers translation and object emission with no IR promotion, and is on by default (`SIMPLE_CODEGEN_MODULE_SCOPE=0` opts out). The `SIMPLE_BOOTSTRAP=1` exclusion is unchanged; `compile_module_with_backend_scoped_v1` stays opt-in. See `codegen_module_memory_not_freed_per_module_2026_11_02.md`.
