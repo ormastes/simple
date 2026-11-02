@@ -34,3 +34,28 @@ bare `Ok`/`Err` over a method-call subject (with a competing `Ok`/`Err` enum), b
 `un_op` payload binder next to `Visibility` all lower with no ambiguity/owner
 diagnostic. Revert-ready: unknown — only after a full-closure stage3 build passes
 without the qualifications (phase 3 owner).
+
+## Status (2026-11-02 full-closure-competitor re-check, lane sbr-1)
+
+Still not reproducible from current source. New seed-hosted spec
+`test/01_unit/compiler/50.mir/enum_owner_full_closure_shapes_spec.spl` (4/4 green)
+re-lowers the ORIGINAL unqualified shapes with the competitors the stage4 closure
+really contains: a second user `enum Result<T, E>`
+(`src/compiler/30.types/const_key_validator.spl`), three enums declaring
+`Tuple`/`Struct` (runtime_value_v1 / parser_types / treesitter_types shapes), the
+original `case Some(pl): match pl:` binder (the earlier spec only covered `if val`),
+and an imported `Visibility` that shares a variant name with `HirUnaryOp`. The
+current `subject_owner_type` Optional-payload ownership and `enum_match_type_owner_key`
+Result/Option handling in `switch_operators_calls.spl` resolve all of them. The
+failure is attributed to the pinned (older) stage2 binary, not to current source.
+Audit: all 25 tagged sites present; no untagged `case Some(x): match x: case Tuple/Struct`
+or `Unary(un_op ..) ... match un_op:` sites remain in src/. Bare `Ok`/`Err` over typed
+`Result` locals also exist untagged (e.g. file_fiber_tldr_bridge_v1.spl:110/170/304,
+file_text_session.spl:191) and were lowered by the frozen stage2 that emitted the
+1414 stage3 objects, so the shape alone is not the trigger; no sites were added.
+Removal condition unchanged.
+Real-module attempt: re-lowering the original `hir_literal_constant_v1.spl` (untyped
+`match un_op:`) together with its real imports (span, visibility, parser_types[_expr],
+hir_operators, hir_types, hir_definitions) under the Rust seed exceeded the 900 s
+per-spec budget (child-timeout, <1 GB RSS) before any diagnostic. A seed-hosted
+full-import repro is therefore infeasible; it needs a native stage3 lowering run.

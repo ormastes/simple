@@ -1,0 +1,105 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# enumowner-mir-20261031: original full-closure shapes
+
+Bug: doc/08_tracking/bug/enumowner_mir_2026-10-31.md. Re-lowers the ORIGINAL
+unqualified shapes with the competitors present in the stage4 closure: a
+second user `enum Result<T, E>` (src/compiler/30.types/const_key_validator.spl),
+several enums declaring Tuple/Struct, a `case Some(value): match value:` binder
+(not `if val`), and an imported `Visibility` next to `HirUnaryOp`.
+"""
+
+# @tag: unit, compiler, mir, enum, stage2
+
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn lower_closure(names: [text], srcs: [text]) -> text:
+    """Lower every module through HIR, prescan all, then MIR-lower the last one.
+    Returns the concatenated HIR/MIR diagnostics ("" when clean)."""
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        val ast = parse_full_frontend(srcs[i], path, names[i], log)
+        modules[names[i]] = ast
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        asts.push(ast)
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    var out = ""
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(names[i], surfaces)
+        hirs.push(hl.lower_module(asts[i]))
+        for e in hl.errors:
+            out = out + "hir: " + e.message + "\n"
+        i = i + 1
+    val last = hirs.len() - 1
+    var ml = MirLowering.new(hirs[last].symbols)
+    var pre: Dict<text, HirModule> = {}
+    i = 0
+    while i < names.len():
+        pre["m" + i.to_text()] = hirs[i]
+        i = i + 1
+    i = 0
+    while i < names.len():
+        ml.prescan_module_struct_names(pre, "m" + i.to_text())
+        i = i + 1
+    val mir = ml.lower_module(hirs[last], hirs)
+    for e in ml.errors:
+        # Exhaustiveness notes are advisory and unrelated to these bugs.
+        if not e.message.contains("non-exhaustive enum match"):
+            out = out + "mir: " + e.message + "\n"
+    print "diagnostics: [" + out + "]"
+    out
+
+fn competing_result_module() -> text:
+    lines(["enum Result<T, E>:", "    Ok(value: T)", "    Err(error: E)", "", "impl Result<T, E>:", "    fn is_ok() -> bool:", "        match self:", "            case Ok(_): true", "            case _: false"])
+
+fn competing_payload_module() -> text:
+    lines(["enum Value:", "    Nil", "    Tuple(elements: [i64])", "    Struct(type_: text, fields: Dict<text, i64>)", "", "enum ParserType:", "    Tuple([i64])", "    Struct([text])", "", "enum OutlineType:", "    Tuple(types: [text])", "    Struct(fields: [text])"])
+
+describe "enumowner-mir-20261031 full-closure shapes":
+    it "bare Ok/Err over a typed Result local with a competing user enum Result":
+        val main = lines(["struct CodegenOutput:", "    n: i64", "", "struct CompileError:", "    m: text", "", "class Codegen:", "    n: i64", "    fn compile_module(m: i64) -> Result<CodegenOutput, CompileError>:", "        if m > 0:", "            return Ok(CodegenOutput(n: m))", "        Err(CompileError(m: \"bad\"))", "", "fn run(codegen: Codegen, m: i64) -> Result<i64, CompileError>:", "    val compiled: Result<CodegenOutput, CompileError> = codegen.compile_module(m)", "    match compiled:", "        case Ok(output):", "            Ok(output.n)", "        case Err(err):", "            Err(err)"])
+        val d = lower_closure(["compiler.types.const_key_validator", "app.main"], [competing_result_module(), main])
+        expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("unresolved")).to_equal(false)
+
+    it "bare Ok/Err over a direct method-call subject with a competing user enum Result":
+        val main = lines(["class Svc:", "    n: i64", "    fn compute() -> Result<i64, text>:", "        if self.n > 0:", "            return Ok(self.n)", "        Err(\"bad\")", "    fn run() -> i64:", "        match self.compute():", "            case Ok(v):", "                v", "            case Err(e):", "                e.len()"])
+        val d = lower_closure(["compiler.types.const_key_validator", "app.main"], [competing_result_module(), main])
+        expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("unresolved")).to_equal(false)
+
+    it "bare Tuple/Struct under case Some(value) with several competing enums":
+        val main = lines(["enum HirEnumPayload:", "    Tuple(values: [i64])", "    Struct(fields: [(text, i64)])", "", "enum HirExprKind:", "    EnumLit(name: text, variant: text, payload: HirEnumPayload?)", "    Lit(v: i64)", "", "fn uses(kind: HirExprKind) -> i64:", "    match kind:", "        case EnumLit(_, _, payload):", "            match payload:", "                case Some(pl):", "                    match pl:", "                        case Tuple(values): return values.len()", "                        case Struct(fields):", "                            return fields.len()", "                case nil: return 0", "        case Lit(v): return v", "    0"])
+        val d = lower_closure(["compiler.common.runtime_value_v1", "app.main"], [competing_payload_module(), main])
+        expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("unresolved")).to_equal(false)
+
+    it "un_op binder keeps HirUnaryOp with an imported Visibility enum":
+        val vis = lines(["enum Visibility:", "    Public", "    Private", "    Neg"])
+        val main = lines(["enum HirUnaryOp:", "    Neg", "    Not", "", "enum HirExprKind:", "    Unary(op: HirUnaryOp, operand: HirExpr)", "    Lit(v: i64)", "", "struct HirExpr:", "    kind: HirExprKind", "", "fn fold(expr: HirExpr) -> i64?:", "    match expr.kind:", "        case HirExprKind.Unary(un_op, un_operand):", "            val un_operand_t: HirExpr = un_operand", "            val folded = fold(un_operand_t)", "            if val inner = folded:", "                match un_op:", "                    case HirUnaryOp.Neg:", "                        return Some(0 - inner)", "                    case HirUnaryOp.Not:", "                        return Some(inner)", "            nil", "        case HirExprKind.Lit(v):", "            Some(v)"])
+        val d = lower_closure(["compiler.common.dependency.visibility", "app.main"], [vis, main])
+        expect(d.contains("owner")).to_equal(false)
+        expect(d.contains("Visibility")).to_equal(false)

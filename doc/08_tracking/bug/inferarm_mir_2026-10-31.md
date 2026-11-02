@@ -40,3 +40,15 @@ Seed-hosted in-process pure-Simple HIR+MIR re-check
 The single-module path does not exhibit the bug; whether the full closure still does
 must be decided by a stage3 build without the annotations (phase 3 owner).
 Revert-ready: unknown — only after a full-closure stage3 build passes without them.
+
+## Status (2026-11-02 full-closure-competitor re-check, lane sbr-1)
+
+Still not reproducible from current source. New seed-hosted spec
+`test/01_unit/compiler/50.mir/infer_empty_array_full_closure_spec.spl` (2/2 green)
+re-lowers the ORIGINAL unannotated `text_advanced.extract_words` and
+`state_enum` (`lines = lines.push(...)`) shapes next to user classes that declare
+their own `push`/`join`/`len` (StringBuilder/Stack), the full-closure competitor
+for method-name dispatch. No `[infer-arm]`. Audit: all 20 tagged sites present;
+~1400 other unannotated `var x = []` locals in src/ were lowered by the frozen
+stage2 that emitted the stage3 objects, so mass annotation is not justified.
+Removal condition unchanged.
