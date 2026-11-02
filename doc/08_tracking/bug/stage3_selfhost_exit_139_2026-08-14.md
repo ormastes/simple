@@ -441,3 +441,5 @@ phase 3 priority forbids the full Linux bootstrap the unblock condition needs).
 TODO(opf-1): on the next sanctioned Linux bootstrap, retain driver stdout/stderr
 and exit status of `stage3-native-build`. If Stage 3 completes, close this bug
 and cite a0d60244575. If it still exits 139, get a symbolized backtrace.
+
+Checked against current policy/design (2026-11-02): still valid as an unretained native Stage-3 crash. The candidate call-shape fix is independent of monomorphization (now deleted), nil/Any, and the per-file pipeline policies.
