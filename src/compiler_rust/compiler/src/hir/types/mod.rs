@@ -116,6 +116,38 @@ mod tests {
     }
 
     #[test]
+    fn optional_provenance_survives_clone_and_alias_but_not_replacement() {
+        let mut registry = TypeRegistry::new();
+        let optional = registry.register_optional(TypeId::STRING);
+        registry.register_alias("MaybeText".to_string(), optional);
+
+        let cloned = registry.clone();
+        assert_eq!(cloned.lookup("MaybeText"), Some(optional));
+        assert_eq!(cloned.optional_inner(optional), Some(TypeId::STRING));
+
+        registry.update_named(
+            "MaybeText".to_string(),
+            HirType::Pointer {
+                kind: PointerKind::Shared,
+                capability: simple_parser::ast::ReferenceCapability::Shared,
+                inner: TypeId::STRING,
+            },
+        );
+        assert_eq!(registry.optional_inner(optional), None);
+    }
+
+    #[test]
+    fn raw_shared_pointer_does_not_gain_optional_provenance() {
+        let mut registry = TypeRegistry::new();
+        let raw_pointer = registry.register(HirType::Pointer {
+            kind: PointerKind::Shared,
+            capability: simple_parser::ast::ReferenceCapability::Shared,
+            inner: TypeId::STRING,
+        });
+        assert_eq!(registry.optional_inner(raw_pointer), None);
+    }
+
+    #[test]
     fn test_hir_expr_integer() {
         let expr = HirExpr {
             kind: HirExprKind::Integer(42),
