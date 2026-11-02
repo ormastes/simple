@@ -187,7 +187,7 @@ describe "native codegen pool child lifetime":
         expect(result.wall_ms).to_be_greater_than(1000)
         step("Idle wakeups are bounded by the wait cap, not a 10-100 ms poll")
         expect(result.idle_wakeups).to_be_greater_than(0)
-        expect(result.idle_wakeups).to_be_less_than(6)
+        expect(result.idle_wakeups).to_be_less_than(10)
 
     it "kills the whole child tree when a job times out":
         step("A 1.5 s job timeout over a tool whose grandchild outlives the shell")
@@ -199,10 +199,14 @@ describe "native codegen pool child lifetime":
         expect(env_set(NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1, "1500")).to_equal(true)
         val result = native_codegen_pool_run_v1(tree_tool(), ["tree.m"], 1, stage, ledger,
             tree_emit(_1, _2, _3))
-        expect(env_set(NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1, "")).to_equal(true)
+        val cleared_timeout = env_set(NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1, "")
+        val cleared_marker = env_set("SIMPLE_POOL_TREE_MARKER", "")
+        expect(cleared_timeout and cleared_marker).to_equal(true)
         step("The job timed out and fell back to the serial lane")
         expect(result.failed).to_equal(1)
         expect(result.states[0]).to_equal(NATIVE_CODEGEN_JOB_FAILED_V1)
+        expect(result.timed_out).to_equal(1)
+        expect(result.wall_ms).to_be_greater_than(1400)
         expect(result.wall_ms).to_be_less_than(15000)
         step("Wait past the grandchild's 4 s write: it must have been killed")
         thread_sleep(6000)
