@@ -1,0 +1,121 @@
+# Bug codegen_module_memory_not_freed_per_module_2026_11_02: per-module codegen
+# memory must be released by default (SIMPLE_CODEGEN_MODULE_SCOPE unset), not
+# only when the opt-in env is "1". Explicit "0" keeps the unscoped lane.
+# Native qualification: requires llc (or clang fallback) and runtime scopes.
+use std.spec.{describe, it, expect}
+use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct_to_path,
+    llvm_codegen_module_scope_enabled_v1}
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.backend.llvm_target.{LlvmTargetConfig}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use std.io_runtime.{env_get_nullable, env_set}
+use std.nogc_sync_mut.io_runtime.{env_remove_process}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_size_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.host.{heap_live_bytes}
+
+fn cg_scope_restore_env(key: text, previous: text):
+    if previous == nil: env_remove_process(key)
+    else: env_set(key, previous)
+
+fn cg_scope_module() -> MirModule:
+    val ptr_type = MirType.ptr(MirType(kind: MirTypeKind.I8), false)
+    val print_signature = MirSignature(params: [ptr_type], return_type: MirType.unit(), is_variadic: false)
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 7),
+        name: "scope_default_print",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            MirLocal(id: LocalId(id: 1), name: Some("message"), type_: ptr_type, kind: LocalKind.Temp, is_ghost: false)
+        ],
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: [
+                    MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Str("scope-default-literal"), ptr_type), span: nil),
+                    MirInst(kind: MirInstKind.Call(
+                        nil,
+                        MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_print"),
+                            MirType(kind: MirTypeKind.FuncPtr(print_signature))
+                        )),
+                        [mir_operand_copy(LocalId(id: 1))]
+                    ), span: nil)
+                ],
+                terminator: MirTerminator.Ret(nil)
+            )
+        ],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    MirModule(name: "test.llvm.scope_default", functions: functions, statics: {}, constants: {}, types: {})
+
+describe "codegen module scope default":
+    it "is enabled when SIMPLE_CODEGEN_MODULE_SCOPE is unset and disabled only by 0":
+        val previous = env_get_nullable("SIMPLE_CODEGEN_MODULE_SCOPE")
+        defer cg_scope_restore_env("SIMPLE_CODEGEN_MODULE_SCOPE", previous)
+        env_remove_process("SIMPLE_CODEGEN_MODULE_SCOPE")
+        expect(llvm_codegen_module_scope_enabled_v1()).to_equal(true)
+        expect(env_set("SIMPLE_CODEGEN_MODULE_SCOPE", "1")).to_equal(true)
+        expect(llvm_codegen_module_scope_enabled_v1()).to_equal(true)
+        expect(env_set("SIMPLE_CODEGEN_MODULE_SCOPE", "0")).to_equal(true)
+        expect(llvm_codegen_module_scope_enabled_v1()).to_equal(false)
+
+    it "does not grow the heap per module across N object emissions by default":
+        val previous_scope = env_get_nullable("SIMPLE_CODEGEN_MODULE_SCOPE")
+        val previous_bootstrap = env_get_nullable("SIMPLE_BOOTSTRAP")
+        defer cg_scope_restore_env("SIMPLE_CODEGEN_MODULE_SCOPE", previous_scope)
+        defer cg_scope_restore_env("SIMPLE_BOOTSTRAP", previous_bootstrap)
+        env_remove_process("SIMPLE_CODEGEN_MODULE_SCOPE")
+        expect(env_set("SIMPLE_BOOTSTRAP", "0")).to_equal(true)
+        val directory = secure_temp_dir_raw("/tmp", "simple-cg-scope-default")
+        expect(directory.len()).to_be_greater_than(0)
+        defer dir_remove(directory, true)
+        val module = cg_scope_module()
+        val options = compileoptions_default_options()
+        val config = LlvmTargetConfig.for_target(CodegenTarget.Host, nil)
+        val diagnostic = "{directory}/diagnostic"
+        # Warm call: tool discovery caches are filled outside the measurement.
+        expect(llvm_compile_module_direct_to_path(options, module,
+            "{directory}/warm.o", diagnostic, Some(config))).to_equal(0)
+        val n = 16
+        var statuses: [i64] = []
+        var index = 0
+        val before = heap_live_bytes()
+        while index < n:
+            statuses.push(llvm_compile_module_direct_to_path(options, module,
+                "{directory}/m{index}.o", diagnostic, Some(config)))
+            index = index + 1
+        val after = heap_live_bytes()
+        for status in statuses:
+            expect(status).to_equal(0)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(file_size_raw("{directory}/m{n - 1}.o")).to_be_greater_than(32)
+        # Unscoped, each emission retains its IR text, staged-object bytes and
+        # translator scratch. Scoped, only the per-iteration path texts and
+        # statuses built by this loop survive.
+        val per_module = (after - before) / n
+        expect(per_module).to_be_less_than(4096)
