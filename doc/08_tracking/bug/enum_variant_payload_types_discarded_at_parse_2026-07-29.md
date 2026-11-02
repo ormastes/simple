@@ -1,98 +1,48 @@
-# Enum variant payload types are discarded at parse time — MC-API enum-payload lint (A4) structurally blocked
+# Enum variant payload capture is present; MC-API payload lint remains open
 
 - **Filed:** 2026-07-29 (lane A4E `semantic-enum-payloads`)
-- **Severity:** Medium — blocks a documented mission-critical lint gap (A1's
-  `semantic_api` recursive primitive-API checker cannot fire on enum variant
-  payloads); no runtime-correctness impact by itself.
-- **Component:** compiler frontend — enum declaration parsing
-  (`10.frontend/core/parser_decls_types.spl`,
-  `10.frontend/core/_ParserDecls/enum_module_body.spl`) and the flat-AST bridge
-  (`10.frontend/_FlatAstBridge/module_assembly.spl`).
-- **Status:** OPEN — not fixed by this lane (out of ownership scope; would
-  require parser + decl-arena + bridge changes, none of which A4E is
-  authorized to touch).
+- **Severity:** P3 — no runtime-correctness impact; the remaining issue is semantic API lint coverage.
+- **Component:** compiler frontend payload capture and `semantic_api` lint integration.
+- **Status:** OPEN. The parser/decl/bridge payload-loss condition described in the original report is no longer present in the current release source. This record remains open because the MC-API enum-payload lint is still not connected to the captured types. Keep it open until that remaining acceptance scope has an owner and verification.
 
-## Ground truth (file:line evidence)
+## Original finding (historical)
 
-A1 (`src/compiler/35.semantics/lint/semantic_api/checker.spl` header) already
-recorded that enum payloads are "NOT covered" and asked A4 to verify whether
-the flat AST carries payload type nodes. It does not, at any layer:
+The 2026-07-29 investigation correctly found that the then-current parser consumed enum payload types without retaining them, the decl arena had no payload storage, and the AST bridge emitted empty tuple payloads. Those statements describe the source snapshot investigated at that time; they are superseded by the current source findings below and must not be treated as current ground truth.
 
-1. **Parser throws the type away at the token level.** Both enum-decl parse
-   paths call `parser_parse_type()` for a variant's payload field purely to
-   advance the token stream; the return value is never assigned or stored:
-   - `src/compiler/10.frontend/core/parser_decls_types.spl:140` —
-     `parser_parse_type()` (bare statement, result discarded) inside the
-     `Variant(field: type, ...)` loop (comment at line 127).
-   - `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl:150` and
-     `:155` — same pattern, the module-level `enum X:` variant-list parser.
+## Current release source state
 
-2. **The decl arena has no payload slot to store it in even if it wanted to.**
-   `decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64], span_id: i64) -> i64`
-   (`src/compiler/10.frontend/core/_Ast/decl_nodes.spl:586`) takes no type
-   parameter at all — only names and discriminant expression ids.
+Checked against current `release/1.0.0` at `232cba1b0f88272aa571d7dffe69a0a0aff8bc48`:
 
-3. **The one real production bridge from decl-arena to AST hardcodes empty
-   payloads for every real enum.**
-   `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:370-405`
-   converts `tag_text == "8"` (enum) decls into `compiler.core.ast.Enum` /
-   `Variant` nodes and explicitly sets `kind: VariantKind.Tuple([])` for
-   every variant (line 390), with the inline comment (lines 372-375):
-   "Payload types are not stored in the flat AST, so kind is Tuple([])."
-   This is the ONLY site in the tree that builds `Enum`/`Variant` AST nodes
-   from real parsed source (no other `Node.Enum(`/`Enum(` construction site
-   exists outside this file, test fixtures, and the unrelated generic-template
-   cache below).
+1. `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl:562-584` accumulates each variant's parsed payload type tags, per-variant counts, and field names, then passes them to `decl_enum_def`.
+2. `src/compiler/10.frontend/core/_Ast/decl_nodes.spl:794-846` stores payload types in `FIELD_TYPES`, counts in `FIELD_BITS`, and payload field names in `PARAM_NAMES`.
+3. `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:576-664` slices those flat lists back into variants. Named fields become `VariantKind.Struct`; positional fields become `VariantKind.Tuple`; payloadless variants remain `VariantKind.Tuple([])`.
+4. `src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl:881-887` lowers both tuple and struct payload forms.
+5. The downstream gap remains: `src/compiler/35.semantics/lint/semantic_api/checker.spl:229` still has `case Enum(_): pass`, so the semantic API lint does not inspect captured enum payload types.
 
-4. **HIR (a later, richer, fully-typed stage) inherits the same emptiness.**
-   `HirVariantKind.Tuple(types: [HirType])`
-   (`src/compiler/20.hir/hir_definitions.spl:196-199`) CAN represent real
-   payload types, but `lower_variant`
-   (`src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl:728-743`)
-   only ever receives the already-empty `[]` produced by step 3 for a genuine
-   user-declared enum. So even HIR carries no real payload types for enums
-   parsed from ordinary source.
+Current release blob IDs for the owner files are:
 
-5. **The `compiler.frontend.ast.EnumDef.variants: [text]` field CAN encode
-   payload text** (used by `40.mono/monomorphize/deferred_subst.spl:318-343`
-   `_specialize_enum_def`, whose docstring says it substitutes type params
-   "in variants (variant type annotations)", and the illustrative comment at
-   `deferred.spl:668` shows `variants: ["Some(Int)", "None"]`) — but this is a
-   separate generic-template specialization/serialization cache
-   (`.smf` template round-trip: `deserialize_enum_def` in
-   `deferred_deserialize.spl:360-393` only round-trips bytes previously
-   serialized). No construction site for the *original* (non-specialized)
-   template `EnumDef` from real source was found anywhere in the tree — i.e.
-   nothing was found that populates that text with genuine parsed payload
-   types for a first-generation enum declaration. This path is unproven/dead
-   for the purpose of recovering payload types and should not be relied on.
+- enum parser: `f474cf0942d7b59703b14f90289a7d9a228ec586`
+- decl arena: `9cc5c72faf9e7c9545f5b2ecd2f84440ef0aba43`
+- flat AST bridge: `845487161788a88427873fe40c8fd892fa269d3d`
+- HIR lowering: `cfcb4bac7f9679a182d08e6149401bbf6da4b3f5`
+- semantic API checker: `c2c5a870137cfd232beaf994c05b8eb310ce3c7b`
 
-## Conclusion for A4
+## Regression and diagnostic evidence
 
-Enum variant payload types are discarded at the parser itself (step 1) and
-never reconstructed anywhere downstream that a semantic checker over the
-production AST (flat or HIR) could consume (steps 2-4). There is no AST
-structure available to lane A4E's checker
-(`src/compiler/35.semantics/lint/semantic_api/{type_walk,checker}.spl`) to
-walk — this is not a lossy-tag recovery problem (A1's original framing), it is
-a genuine "never stored" problem one layer earlier, at the parser.
+PR [#5945](https://github.com/ormastes/simple/pull/5945), merged as `c00113a0dc484c7654552762d38869b1d8da891c`, corrected the existing enum payload spec contract. Its eight cases now check named field names and type order, empty tuple representation for payloadless variants, and positional tuple type order. The PR changes the spec only; it does not implement the parser capture or semantic lint.
 
-## What would actually fix this (out of scope for A4E)
+A direct parser-owner diagnostic harness and its captured log are retained alongside this report:
 
-Store parsed payload types in the decl arena (extend `decl_enum_def` with a
-per-variant type-text or type-id list, mirroring how struct/class fields
-already carry `"name: Type"` text) at
-`parser_decls_types.spl:140`/`enum_module_body.spl:150,155`, thread it through
-`decl_get_fields`-equivalent accessors, and stop hardcoding
-`VariantKind.Tuple([])` in `module_assembly.spl:390`. That is a parser +
-decl-arena + bridge change, well beyond a `semantic_api/` lint-layer edit, and
-touches files A4E's ownership charter explicitly excludes.
+- Executed harness bytes SHA256: `4A4150F78A8A7F5824C2EFA1DB63D5B4D0A59BDCC70D3143C43F8104D774DBBE`; retained LF-normalized Git blob for `test/01_unit/compiler/frontend/enum_payload_capture_direct_diagnostic.spl`: `46b701578f7c095d17be8c96d2ba0a304e7046fb`.
+- Executed log bytes SHA256: `1CCD4C1FACA0A8B242216DB97D06B1FBD5D814085B8E81B53E66016A5E8DBA65`; staged retained LF-normalized Git blob for `doc/08_tracking/bug/evidence/enum_payload_capture_phase1_2026-11-02.log`: `a40328215f6a7666b19af9c6104a05a3df15b1b1`.
+- Structured receipt: `doc/08_tracking/bug/evidence/enum_payload_capture_phase1_2026-11-02.sdn`
 
-## This lane's outcome
+The direct run passed eight fixture scenarios: seven named/unit fixtures plus a positional `Both(i64, text)` tuple fixture. It used `C:\dev\p3new\stage2_next\seed_nilfix.exe`, SHA256 `FC56D4B5FC384EA93ED20BEFD4503FF6E27DB7734214CA45E072B4DF1B081828`. This seed is unadmitted and has no exact source-input receipt; the result is diagnostic evidence only, not Phase 2 or full-suite qualification.
 
-No functional change to `type_walk.spl`/`checker.spl` — the enum arm in
-`checker.spl.check_module_items` (`case Enum(_): pass`) is correct as-is given
-the ground truth above; its comment was updated to point at this bug doc
-instead of only describing the (now superseded) "lossy tag" theory. One spec
-example was added confirming the current, honest behavior (a clean/any enum
-emits nothing) so the gap stays test-visible instead of silently assumed.
+The run environment set `SIMPLE_PROJECT_ROOT=C:\dev\wt\win-bootstrap-runtime`, but captured output shows imports resolving under `C:\dev\simple`. The effective enum parser blob at execution time was not independently recorded. During later review, the file in that resolved tree had Git blob `87dcec6a0a972b74faff6498e3ebc50dde00280b`; the release parser blob at that review was `47903033c383c6152a7e4ba81f1fdb9b48d92ce4`. Astra confirmed that the enum parsing body exercised by the fixtures was equivalent in those two files, while their whole-file difference was in unrelated module-script arms. The subsequent release update changed the parser file again (current blob `f474cf0942d7b59703b14f90289a7d9a228ec586`); the payload collection calls at lines 562-584 remain present. Do not describe the diagnostic as an exact whole-source release run.
+
+The standard `test` invocation did not execute scenarios: it exited before test execution with `SDN worker scoped-environment process provider is unavailable or insufficient` (`worker_exit_code: -1`). The test-runner failure log is preserved locally at `C:\dev\wt\win-bootstrap-runtime\build\enum_payload_capture_spec_seed_nilfix_sdn.log`, SHA256 `2E409833210BF43D3E0C8DC36FDB135DA35E3DE329408E89D560404F73063861`.
+
+## Tracking disposition
+
+Keep this record **OPEN**. The original parser-capture condition is superseded by current source, but the linked MC-API enum-payload lint acceptance remains unsatisfied. Astra's tracking review recommends retaining the record open until the remaining lint integration has a separately reviewed owner and acceptance scope. No separate issue is created by this update.
