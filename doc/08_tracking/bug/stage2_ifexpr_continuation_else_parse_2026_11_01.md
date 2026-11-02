@@ -2,7 +2,7 @@
 
 - **ID:** stage2_ifexpr_continuation_else_parse_2026_11_01
 - **Priority:** P2
-- **Status:** root fix in source; workaround revert-ready after stage3 self-build
+- **Status:** fixed (PR #5768, merged into release/1.0.0; verified 2026-11-02); workaround revert-ready after stage3 self-build
 - **Owner area:** `src/compiler/10.frontend` expression parser (if-expression continuation)
 - **Found by:** phase-3 run 13 (frozen stage2 `C:/dev/p3new/stage2.exe`, source ef0681fc0e1), release/1.0.0 at eb72b5c9fde
 

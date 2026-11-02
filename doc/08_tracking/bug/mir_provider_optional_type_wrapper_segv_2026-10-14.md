@@ -1,6 +1,6 @@
 # Optional provider collection types cross a concrete HirType ABI
 
-Status: source repair proposed; native regression and rebuilt producer UNRUN.
+Status: fixed in source (4710b22a991 `fix(mir): unwrap optional provider metadata before relocation`, ancestor of release/1.0.0; `relocate_provider_default` now binds `val optional_elem: HirType? = elem` before relocating, `src/compiler/50.mir/_MirLowering/provider_metadata.spl:631-638`; verified 2026-11-02). Native regression on a rebuilt producer still UNRUN.
 
 The direct positional diagnostic using producer SHA `d657c734623482284f1de1a8eafa923135ebbf436b5b4acdf9633ec54e8bd58f` reached MIR after monomorphization reported zero unresolved calls. PID 1551343 received SIGSEGV at Apport timestamp `Wed Oct 14 05:57:30 2026` (as recorded). Kernel core dumping to Apport explained its later `anon_pipe_write` sleep; this was not a proven logging deadlock or memory-cap kill.
 

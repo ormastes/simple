@@ -1,6 +1,6 @@
 # E-RTI-004 / unresolved binder on mono specializations used as match subjects (2026-11-01)
 
-Status: OPEN in the frozen stage2 bootstrap compiler (`C:/dev/p3new/stage2.exe`,
+Status: FIXED IN SOURCE (monomorphization deleted by 200a05f5bc8; the specialization pass that produced the match-subject shape no longer exists; verified 2026-11-02). OPEN only in the frozen stage2 bootstrap compiler (`C:/dev/p3new/stage2.exe`,
 built 2026-10-27, monomorphization pass present). Worked around in source with
 `# @workaround bug=rti004-mono-20261101` (behaviour-identical rewrites).
 

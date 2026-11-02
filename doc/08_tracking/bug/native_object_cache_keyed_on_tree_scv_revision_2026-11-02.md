@@ -2,7 +2,7 @@
 
 - **ID:** native_object_cache_keyed_on_tree_scv_revision_2026-11-02
 - **Priority:** P1 (perf; every source change forces a full re-codegen of the closure)
-- **Status:** fix landed (identity + BuildCache rebind); residual inputs listed below
+- **Status:** fixed (PR #5811, 04c260209a: native objects keyed per module, not per SCV tree revision; merged into release/1.0.0, verified 2026-11-02); residual inputs listed below
 - **Owner area:** `src/compiler/80.driver` native capsule / object cache identity
   (`driver_types.spl` capsule identity, `driver_aot_native_output.spl` object reuse);
   related intent: generic-RR HIR-variant object keys (#5745)
