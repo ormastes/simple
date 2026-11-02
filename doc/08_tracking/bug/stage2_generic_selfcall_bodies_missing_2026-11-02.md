@@ -31,3 +31,16 @@ laneBC objects, drop `laneBC_simple_ring.o` / `laneBC_future.o` from the rsp and
 The same fixture logs `unresolved method call: push` for `var r = Ring<i64, i64>.create(3); r.push(1, 2)`
 (receiver of an unannotated static generic factory call has no type) and E-RTI-003 for the generic owner;
 these are the B2/B4 receiver-typing shapes (methods-mir / ctor-mir lanes), not missing bodies.
+
+## Phase-3 link evidence and runtime spec (lane BC, 2026-11-02)
+
+The 11 undefined symbols are referenced unmangled from inside the `SimpleRing__*$i64_i64` specializations, from
+`FileFiberTldrBridgeV1.create` (static `SimpleRing<i64,i64>.create`), and from
+`AsyncBufferedWriter.close/write_all` (`Future.poll`). Stage2 reported `[mono] specializations=0` on the targeted
+build. WA-BC-1/2 build tagged concrete copies (`WORKAROUND(p3-laneBC)`, worktree `C:/dev/wt/p3-bc`) and link them
+without aliases. The ABI proof (field offsets, argument registers, i64 handle returns) is in
+`C:/dev/p3new/objs_extra/laneBC/*.dis`.
+
+Runtime regression spec: `test/02_integration/compiler/simple_ring_future_unspecialized_spec.spl` drives the
+create/reserve/commit/provider_take/complete/release/cancel self-call chains and `Future.poll` Ready/Pending.
+It was not run on this host.

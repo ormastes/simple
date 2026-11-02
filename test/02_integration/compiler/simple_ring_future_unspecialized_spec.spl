@@ -1,0 +1,62 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: integration, compiler, generics, stage2
+# Regression spec for stage2_generic_selfcall_bodies_missing_2026-11-02 (WA-BC-1/2):
+# A generic class's methods that are reached only through self-calls from inside
+# a specialization (SimpleRing<i64,i64>.reserve -> reserve_with_payload, ...),
+# a static generic constructor (SimpleRing<i64,i64>.create), and an erased
+# generic accessor (Future<T>.poll) must all get native bodies. Frozen stage2
+# ef0681fc0e1 emitted none of them, so the stage3 link failed with 11 undefined
+# symbols. Bug: doc/08_tracking/bug/stage2_generic_selfcall_bodies_missing_2026-11-02.md.
+use std.spec
+use nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError, RingReservation, RingToken}
+use nogc_async_mut.async.future.{Future}
+use nogc_async_mut.async.poll.{Poll}
+
+describe "SimpleRing<i64,i64> self-call paths":
+    it "create -> reserve -> commit -> provider_take -> complete_success -> take_completion_retained":
+        val created: Result<SimpleRing<i64, i64>, SimpleRingError> = SimpleRing<i64, i64>.create(7u64, 9u64, 2)
+        var ring = match created:
+            case Ok(value): value
+            case Err(_):
+                fail("create failed")
+                return
+        val res: Result<RingReservation, SimpleRingError> = ring.reserve(9u64, 1u64)      # -> reserve_with_payload
+        val reservation = match res:
+            case Ok(value): value
+            case Err(_):
+                fail("reserve failed")
+                return
+        expect(ring.occupancy()).to_equal(1u64)
+        val tok: Result<RingToken, SimpleRingError> = ring.commit(9u64, reservation, 42)  # -> _reservation_slot/_advance/_token_for
+        val token = match tok:
+            case Ok(value): value
+            case Err(_):
+                fail("commit failed")
+                return
+        val taken = ring.provider_take(1)                                                 # -> provider_take_at
+        match taken:
+            case Ok(Some(sub)): expect(sub.operation).to_equal(42)
+            case _: fail("provider_take returned nothing")
+        val done = ring.complete_success(token, 99)                                       # -> _complete/_token_slot
+        expect(done.is_ok()).to_equal(true)
+        match ring.take_completion_retained(9u64):
+            case Ok(Some(c)): expect(c.value).to_equal(Some(99))
+            case _: fail("no completion")
+        expect(ring.release_retained_completion(9u64, token).is_ok()).to_equal(true)     # -> _token_slot/_release_slot
+
+    it "cancel of a reserved token goes through _token_slot/_release_slot":
+        var ring = SimpleRing<i64, i64>.create(8u64, 3u64, 1).unwrap()
+        val reservation = ring.reserve(3u64, 5u64).unwrap()
+        val token = ring.commit(3u64, reservation, 1).unwrap()
+        val outcome = ring.cancel(3u64, token)                                            # -> _request_provider_cancel
+        expect(outcome.is_ok()).to_equal(true)
+
+describe "Future<T>.poll erased accessor":
+    it "returns the stored Ready value":
+        val f = Future<i64>.from_value(5)
+        match f.poll():
+            case Poll.Ready(v): expect(v).to_equal(5)
+            case Poll.Pending: fail("expected Ready")
+    it "returns Pending for a pending future":
+        val f = Future<text>.pending()
+        expect(f.poll().is_ready()).to_equal(false)
