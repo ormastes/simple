@@ -63,3 +63,24 @@ Defined elsewhere but not imported by the failing file: `mmio_read*`,
 `Scheduler*EvidenceV1`, `rt_thread_sleep`, `readdir`.
 
 Revalidated 2026-11-02: still plausible because doc itself lists remaining src/os name gaps after the closure-edge fix.
+
+## Verification (2026-11-02, opf-6)
+
+Checked against origin/release/1.0.0 at 807253b2748. Result: FIXED (closure edge).
+
+- `src/os` and `src/package_ownership` still exist on release/1.0.0 (`git ls-tree`).
+  The coordinator's "paths removed" premise is wrong, so this bug is not stale
+  for that reason. It is fixed in source instead.
+- Fix: e9505f50f94 "collect bare `export X from M` as the sibling `.M`".
+  Carried into the split-out closure core by 98519d733d6. Current code: `src/compiler/80.driver/driver_entry_closure_core.spl:787-788`
+  (`if tail != "" and not tail.contains("."): tail = "." + tail`).
+- Trigger removed too: `src/compiler/55.borrow/borrow_check/__init__.spl` no
+  longer has `from mod` re-exports.
+- Regression specs: `test/01_unit/compiler/bootstrap/entry_closure_from_import_spec.spl:37`
+  and `test/01_unit/compiler/bootstrap/closure_walk_parity_spec.spl:54-55`
+  (bare `export BorrowChecker from mod` must never bind `src/os/mod.spl`).
+- No compiler closure root or launcher references `src/os` (only comments in
+  10.frontend). The remaining `src/os` references are in os/firmware build
+  scripts and SFFI audits, which are not part of the bootstrap_main closure.
+- Not re-run here (no heavy build). The src/os unresolved-name gaps listed above
+  are outside this bug's closure-edge scope.
