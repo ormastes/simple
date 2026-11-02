@@ -21,6 +21,7 @@
 # compiler closure in.
 use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.host_limits.{host_limit_value, host_limit_mem_reserve_free_kib}
 
 @when(os="windows"):
 use std.nogc_sync_mut.io.windows_process_owner.{windows_available_memory_headroom_v1}
@@ -259,7 +260,7 @@ pub fn shard_worker_budget_kb(var_name: text, default_kb: i64) -> i64:
         val parsed = shard_mem_available_kb_from_field(raw)
         if parsed > 0:
             return parsed
-    val host_kb = shard_host_worker_budget_kb(env_get("SIMPLE_HOST_WORKER_MEM_MIB") ?? "")
+    val host_kb = shard_host_worker_budget_kb(host_limit_value("worker_mem_mib"))
     val chosen = shard_host_budget_floor_kb(host_kb, default_kb)
     if host_kb > 0 and chosen != host_kb:
         val host_mib = host_kb / 1024
@@ -416,16 +417,32 @@ pub fn shard_worker_estimate_kib_v1(default_kb: i64, worker_peaks_kib: [i64], ov
         if p > best: best = p
     if best > default_kb: best else: default_kb
 
+# Built-in default of the free RAM/commit floor (24 GiB); the live value is
+# shard_tree_headroom_kib_v1().
 pub const SHARD_TREE_HEADROOM_KB_V1: i64 = 25165824
 
-# min(declared, cap_or_free - 24 GB). cap_or_free is the enforced tree RSS cap
-# when set, else free commit. Unknown declared (<= 0) takes the clamp; unknown
-# cap and free (both <= 0) leave the declared budget. 0 = nothing admissible.
-pub fn shard_effective_tree_budget_kb_v1(declared_kb: i64, cap_kb: i64, free_kb: i64) -> i64:
+# The floor the worker pool leaves free, in KiB. Precedence: explicit
+# SIMPLE_BUILD_MEMORY_RESERVE_BYTES, then host config mem_reserve_free_mib
+# (SIMPLE_HOST_MEM_RESERVE_FREE_MIB > host.sdn > config/host/*.sdn), then 24 GiB.
+pub fn shard_tree_headroom_kib_for_v1(reserve_bytes_field: text, host_reserve_kib: i64) -> i64:
+    val parsed = shard_mem_available_kb_from_field(reserve_bytes_field)
+    if parsed > 0: return parsed / 1024
+    if host_reserve_kib > 0: return host_reserve_kib
+    SHARD_TREE_HEADROOM_KB_V1
+
+pub fn shard_tree_headroom_kib_v1() -> i64:
+    shard_tree_headroom_kib_for_v1(env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? "",
+        host_limit_mem_reserve_free_kib(0))
+
+# min(declared, cap_or_free - headroom). cap_or_free is the enforced tree RSS
+# cap when set, else free commit; headroom is the reserve floor (default
+# 24 GiB). Unknown declared (<= 0) takes the clamp; unknown cap and free (both
+# <= 0) leave the declared budget. 0 = nothing admissible.
+pub fn shard_effective_tree_budget_kb_v1(declared_kb: i64, cap_kb: i64, free_kb: i64, headroom_kb: i64 = SHARD_TREE_HEADROOM_KB_V1) -> i64:
     val base = if cap_kb > 0: cap_kb else: free_kb
     if base <= 0: return declared_kb
-    if base <= SHARD_TREE_HEADROOM_KB_V1: return 0
-    val clamped = base - SHARD_TREE_HEADROOM_KB_V1
+    if base <= headroom_kb: return 0
+    val clamped = base - headroom_kb
     if declared_kb > 0 and declared_kb < clamped: declared_kb else: clamped
 
 pub fn shard_pool_workers_v1(effective_kb: i64, estimate_kb: i64) -> i64:
@@ -534,7 +551,7 @@ pub fn shard_tree_budget_kb_for(declared_kb: i64, cgroup_kb: i64) -> i64:
 pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64 = -1) -> i64:
     if requested <= 1 and parent_peak_kb < 0:
         return requested
-    val bounded = shard_host_threads_cap(requested, env_get("SIMPLE_HOST_MAX_THREADS") ?? "")
+    val bounded = shard_host_threads_cap(requested, host_limit_value("max_threads"))
     val host_clamp = (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") != "0"
     val avail_kb = if host_clamp: shard_mem_available_kb() else: 0
     val declared_kb = shard_mem_available_kb_from_field(
@@ -549,10 +566,11 @@ pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64
     if parent_peak_kb >= 0:
         val rss_cap = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
         val cap_kb = if rss_cap > 0 and (cgroup_kb <= 0 or rss_cap < cgroup_kb): rss_cap else: cgroup_kb
-        val effective = shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb)
+        val headroom_kb = shard_tree_headroom_kib_v1()
+        val effective = shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb, headroom_kb)
         val clamp_workers = shard_pool_workers_v1(effective, budget_kb)
         if effective != tree_kb:
-            print "[hir-shard] tree budget clamped: declared {tree_kb} kB, cap {cap_kb} kB, free {avail_kb} kB, headroom {SHARD_TREE_HEADROOM_KB_V1} kB -> effective {effective} kB"
+            print "[hir-shard] tree budget clamped: declared {tree_kb} kB, cap {cap_kb} kB, free {avail_kb} kB, headroom {headroom_kb} kB -> effective {effective} kB"
         if cap_kb > 0 or avail_kb > 0 or tree_kb > 0:
             if clamp_workers < cap: cap = clamp_workers
         print "[hir-shard] admission worker estimate={budget_kb} kB (coordinator peak {parent_peak_kb} kB reserved for the coordinator only); warmup pool only, RSS guard authoritative"
@@ -570,11 +588,11 @@ pub fn shard_pool_clamp_workers(estimate_kb: i64) -> i64:
     val rss_cap = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
     val cap_kb = if rss_cap > 0 and (cgroup_kb <= 0 or rss_cap < cgroup_kb): rss_cap else: cgroup_kb
     if cap_kb <= 0 and avail_kb <= 0 and tree_kb <= 0: return -1
-    shard_pool_workers_v1(shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb), estimate_kb)
+    shard_pool_workers_v1(shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb, shard_tree_headroom_kib_v1()), estimate_kb)
 
 # Host memory reserve a build must leave free (RAM and commit, whichever is
-# smaller on Windows): SIMPLE_BUILD_MEMORY_RESERVE_BYTES, else
-# min(24 GiB, installed RAM / 2). Also the floor the worker pool keeps when
+# smaller on Windows): SIMPLE_BUILD_MEMORY_RESERVE_BYTES, else host config
+# mem_reserve_free_mib, else min(24 GiB, installed RAM / 2). Also the floor the worker pool keeps when
 # admitting more workers.
 #
 # Why half, capped: 5b9b780b8a3 fixed the reserve at 24 GiB after a ~127 GiB
@@ -598,16 +616,22 @@ pub fn build_memory_reserve_default_kib_v1(total_kib: i64) -> i64:
     if half <= 0 or half >= BUILD_MEMORY_RESERVE_CAP_KIB_V1: BUILD_MEMORY_RESERVE_CAP_KIB_V1 else: half
 
 # Pure composition: an explicit byte value wins unchanged (its sub-KiB range
-# is rejected at the shell boundary, not here), else the host-scaled default.
-pub fn build_memory_reserve_kib_for(reserve_bytes_field: text, total_kib: i64) -> i64:
+# is rejected at the shell boundary, not here), then the host config key
+# mem_reserve_free_mib (host_reserve_kib > 0), else the host-scaled default.
+pub fn build_memory_reserve_kib_for(reserve_bytes_field: text, total_kib: i64, host_reserve_kib: i64 = 0) -> i64:
     val parsed = shard_mem_available_kb_from_field(reserve_bytes_field)
-    if parsed > 0: parsed / 1024 else: build_memory_reserve_default_kib_v1(total_kib)
+    if parsed > 0: return parsed / 1024
+    if host_reserve_kib > 0: return host_reserve_kib
+    build_memory_reserve_default_kib_v1(total_kib)
 
 pub fn build_memory_reserve_kib() -> i64:
     val field = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
-    # An explicit value never probes the host.
+    # An explicit value (env or host key) never probes the host.
     if shard_mem_available_kb_from_field(field) > 0:
         return build_memory_reserve_kib_for(field, 0)
+    val host_kib = host_limit_mem_reserve_free_kib(0)
+    if host_kib > 0:
+        return build_memory_reserve_kib_for(field, 0, host_kib)
     build_memory_reserve_kib_for(field, build_host_memory_total_kib())
 
 # "" admits; otherwise the refusal message. Headroom <= 0 means it could not
