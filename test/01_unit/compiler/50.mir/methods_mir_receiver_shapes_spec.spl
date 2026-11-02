@@ -5,10 +5,10 @@
 Bug: doc/08_tracking/bug/methods_mir_2026-10-31.md. Lowers the original
 receiver shapes through pure-Simple HIR+MIR in-process (seed-hosted).
 
-- Shapes 1-3 (untyped param substring/slice, un-annotated return, narrowed `text?`) still
-  fail closed with "unresolved method call" -- the open root bug. These
-  examples are tripwires: when the root fix lands they flip and must be
-  inverted, and the workarounds become removable.
+- Shapes 1-3 (untyped param substring/slice, un-annotated return, narrowed `text?`)
+  lower clean (root fix waf-2): erased slice/substring dispatch through the
+  runtime-polymorphic rt_slice, an un-annotated callee's inferred body type
+  types its call result, and a `text?` len receiver narrows (runtime-checked).
 - Shapes 4-6 (call-result receiver, unsafe-block value, enum payload binder)
   lower clean in a single module; they reproduced only in the full stage3
   closure.
@@ -81,20 +81,32 @@ fn lower_one(src: text) -> text:
     lower_closure(["app.main"], [src])
 
 describe "methods-mir-20261031 receiver shapes":
-    it "shape 1 untyped parameter receiver still fails closed (open bug)":
-        val d = lower_one(lines(["fn take_len(value):", "    value.len()", "", "fn sub_of(value):", "    value.substring(0, 1)", "", "fn slice_of(value):", "    value[0:1]"]))
-        # `.len()` on an untyped param already lowers (dynamic len); substring and slice do not.
-        expect(d.contains("unresolved method call: len")).to_equal(false)
-        expect(d).to_contain("unresolved method call: slice")
-        expect(d).to_contain("unresolved method call: substring")
+    it "shape 1 untyped parameter receiver lowers clean":
+        val d = lower_one(lines(["fn take_len(value):", "    value.len()", "", "fn sub_of(value):", "    value.substring(0, 1)", "", "fn slice_of(value):", "    value[0:1]", "", "fn sub_tail(value):", "    value.substring(1)"]))
+        expect(d.contains("unresolved method call")).to_equal(false)
+        expect(d).to_equal("")
 
-    it "shape 2 un-annotated return result receiver still fails closed (open bug)":
+    it "shape 2 un-annotated return result receiver lowers clean":
         val d = lower_one(lines(["fn make_list(n: i64):", "    var out: [i64] = []", "    out.push(n)", "    out", "", "fn use_list() -> i64:", "    make_list(3).len()"]))
+        expect(d.contains("unresolved method call")).to_equal(false)
+        expect(d).to_equal("")
+
+    it "shape 3 narrowed optional text receiver lowers clean":
+        val d = lower_one(lines(["fn narrowed(x: text?) -> i64:", "    if x == nil:", "        return 0", "    x.len()"]))
+        expect(d.contains("unresolved method call")).to_equal(false)
+        expect(d).to_equal("")
+
+    it "shape 2 array-literal tail binding carries its parsed array type":
+        val d = lower_one(lines(["fn make_lit(n: i64):", "    val out = [n]", "    out", "", "fn use_lit() -> i64:", "    make_lit(3).len()"]))
+        expect(d).to_equal("")
+
+    it "shape 2 untyped call-initialized tail binding stays fail-closed (no guessed type)":
+        val d = lower_one(lines(["fn build(n: i64) -> [i64]:", "    [n]", "", "fn make_any(n: i64):", "    val out = build(n)", "    out", "", "fn use_any() -> i64:", "    make_any(3).len()"]))
         expect(d).to_contain("unresolved method call: len")
 
-    it "shape 3 narrowed optional text receiver still fails closed (open bug)":
-        val d = lower_one(lines(["fn narrowed(x: text?) -> i64:", "    if x == nil:", "        return 0", "    x.len()"]))
-        expect(d).to_contain("unresolved method call: len")
+    it "custom-owner len on a nominal receiver still uses its own method":
+        val d = lower_one(lines(["class Bag:", "    n: i64", "    fn len() -> i64:", "        self.n", "", "fn make_bag():", "    val b: Bag = Bag(n: 2)", "    b", "", "fn bag_len() -> i64:", "    make_bag().len()"]))
+        expect(d).to_equal("")
 
     it "workaround form for shapes 1-3 (annotations) lowers clean":
         val d = lower_one(lines(["fn take_len(value: text) -> i64:", "    value.len()", "", "fn make_list(n: i64) -> [i64]:", "    var out: [i64] = []", "    out.push(n)", "    out", "", "fn use_list() -> i64:", "    make_list(3).len()"]))

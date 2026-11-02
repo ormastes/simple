@@ -2082,6 +2082,40 @@ impl MirLowering:
             self.builder = b
             return self.emit_runtime_array_slice_bounds(receiver_local, zero, bounded)
 
+    me lower_erased_receiver_slice_v1(receiver_local: LocalId, args: [HirCallArg]) -> LocalId:
+        # Erased receiver (no text/array proof): one rt_slice call, which
+        # inspects the tagged value at runtime. The open end of a 1-arg form
+        # is the receiver's own rt_len (also polymorphic). The result is an
+        # erased word; no array/text metadata is claimed for it.
+        val start_local = self.lower_expr(args[0].value)
+        var end_local: LocalId = 0
+        var b_slice = self.builder
+        if args.len() == 2:
+            self.builder = b_slice
+            end_local = self.lower_expr(args[1].value)
+            b_slice = self.builder
+        else:
+            val len_callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_len"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))))
+            end_local = b_slice.emit_call_value(len_callee, [mir_operand_copy(receiver_local)], MirType.i64())
+        val handle = b_slice.emit_cast(mir_operand_copy(receiver_local), MirType.i64())
+        val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
+        val finish = b_slice.emit_cast(mir_operand_copy(end_local), MirType.i64())
+        val step = b_slice.emit_const_int(1)
+        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_slice"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.i64(), MirType.i64(), MirType.i64(), MirType.i64()],
+                return_type: MirType.i64(), is_variadic: false)))))
+        var operands: [MirOperand] = []
+        operands.push(mir_operand_copy(handle))
+        operands.push(mir_operand_copy(start))
+        operands.push(mir_operand_copy(finish))
+        operands.push(mir_operand_copy(step))
+        val result = b_slice.emit_call_value(callee, operands, MirType.i64())
+        self.builder = b_slice
+        self.mark_runtime_value_local(result.id)
+        result
+
     me emit_runtime_array_slice_bounds(receiver_local: LocalId, start_local: LocalId, end_local: LocalId) -> LocalId:
         # Both slice and take use one fresh-storage runtime call and the same
         # result metadata owner. rt_slice is O(k), allocates a new container,
@@ -3221,6 +3255,24 @@ impl MirLowering:
                     len_symbol = "rt_dict_len"
                 elif self.local_is_str(receiver_local):
                     len_symbol = "rt_string_len"
+            # methods-mir-20261031 shape 3: a `text?` receiver after an
+            # early-return nil guard (`if x == nil: return 0` then `x.len()`)
+            # still carries Optional(Str) -- MIR has no flow narrowing. Take
+            # the Some payload with the same runtime-checked narrowing the
+            # primitive text builtins use (nil aborts loudly, never 0).
+            if len_symbol == "" and resolution_is_unresolved and static_receiver_name == "" and (method == "len" or method == "length" or method == "is_empty"):
+                if val optional_len_type = length_receiver_type:
+                    match optional_len_type.kind:
+                        case HirTypeKind.Optional(_):
+                            if not has_prelowered_method_receiver:
+                                prelowered_method_receiver = self.lower_expr(receiver)
+                                has_prelowered_method_receiver = true
+                            if val narrowed_len_receiver = self.narrow_optional_text_receiver(receiver, prelowered_method_receiver):
+                                prelowered_method_receiver = narrowed_len_receiver
+                                receiver_local = narrowed_len_receiver
+                                receiver_lowered = true
+                                len_symbol = "rt_string_len"
+                        case _: ()
             # `rt_len` is an intentional recovery path only for unresolved
             # len/length calls.  An unresolved user-defined `is_empty` must
             # continue to its normal method-dispatch recovery below; unlike
@@ -3686,6 +3738,20 @@ impl MirLowering:
                     return subslice_local
                 return sub_recv_raw
             return sub_recv_tagged
+
+        # methods-mir-20261031 shape 1: `fn f(value): value.substring(0, 1)`
+        # / `value[0:1]` -- an erased (untyped-param) receiver with no text or
+        # array proof. rt_slice is runtime-polymorphic over tagged strings and
+        # array handles (runtime_native.c), so dispatch through it instead of
+        # guessing a representation; any other value yields nil at runtime,
+        # never a const-0 placeholder.
+        if (method == "substring" or method == "slice") and (args.len() == 1 or args.len() == 2) and resolution_is_unresolved and not slice_recv_is_array and text_builtin_resolution_erased_allowed and static_receiver_name == "":
+            var erased_slice_recv: LocalId = 0
+            if has_prelowered_method_receiver:
+                erased_slice_recv = prelowered_method_receiver
+            else:
+                erased_slice_recv = self.lower_expr(receiver)
+            return self.lower_erased_receiver_slice_v1(erased_slice_recv, args)
 
         # `.char_at(index)` (task #178 text3 probe #4): had NO native MIR
         # lowering at all -- unlike substring/slice above, this fell all the

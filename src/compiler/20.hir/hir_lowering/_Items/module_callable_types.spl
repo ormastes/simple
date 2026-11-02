@@ -185,6 +185,13 @@ impl HirLowering:
         if not scan.found_value_return:
             if val dynamic_tail = self.dynamic_callback_tail_type(fn_decl):
                 return dynamic_tail
+            # methods-mir-20261031 shape 2: `fn make(n: i64):` ending in a
+            # bare `out` tail whose binding is annotated (`var out: [i64]`).
+            # A bare identifier statement has no side effect, so its only
+            # meaning is the implicit value return; typing it lets callers
+            # resolve `make(3).len()` and lowers the body in value position.
+            if val tail_bound = self.annotated_tail_identifier_type_v1(fn_decl):
+                return tail_bound
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         if scan.ambiguous or scan.resolved_name == "":
             if self.ambient_bootstrap_enabled():
@@ -195,6 +202,59 @@ impl HirLowering:
                 self.error("untyped function returns a value: function '{fn_decl.name}' returns a value but declares no return type; add '-> T'", fn_decl.span)
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         return HirType(kind: hir_type_kind_from_simple_name(scan.resolved_name), span: fn_decl.span)
+
+    me annotated_tail_identifier_type_v1(fn_decl: ParserFunction) -> HirType?:
+        """Declared type of a bare-identifier tail statement, or nil.
+
+        Only the last top-level statement counts, only when it is a plain
+        `Ident`, and only when the newest top-level binding of that name
+        before it carries an explicit annotation (`val`/`var x: T`), or the
+        name is a typed parameter with no later rebinding. Anything else
+        (unannotated binding, nested/conditional binding, call tail) stays
+        nil so the caller keeps the Unit default -- never a guess.
+        """
+        val fn_body_stmts: [Stmt] = fn_decl.body.stmts
+        if fn_body_stmts.len() == 0:
+            return nil
+        val tail_index: i64 = fn_body_stmts.len() - 1
+        var tail_name = ""
+        if val tail_expr = hir_ast_expr_statement_payload_v1(fn_body_stmts[tail_index].kind):
+            match tail_expr.kind:
+                case ExprKind.Ident(name): tail_name = name
+                case _: ()
+        if tail_name == "":
+            return nil
+        var found_binding = false
+        var found_type: HirType? = nil
+        var si: i64 = 0
+        while si < tail_index:
+            match fn_body_stmts[si].kind:
+                case StmtKind.Val(bound_name, bound_type, _):
+                    if bound_name == tail_name:
+                        found_binding = true
+                        found_type = nil
+                        val bound_type_opt: Type? = bound_type
+                        if val declared_bound = bound_type_opt:
+                            found_type = Some(self.lower_type(declared_bound))
+                case StmtKind.Var(bound_name, bound_type, _):
+                    if bound_name == tail_name:
+                        found_binding = true
+                        found_type = nil
+                        val bound_type_opt: Type? = bound_type
+                        if val declared_bound = bound_type_opt:
+                            found_type = Some(self.lower_type(declared_bound))
+                case _: ()
+            si = si + 1
+        if not found_binding:
+            for raw_param in fn_decl.params:
+                val param: Param = raw_param
+                if param.name == tail_name and param.has_type_:
+                    found_type = Some(self.lower_type(param.type_))
+        if val tail_type = found_type:
+            match tail_type.kind:
+                case HirTypeKind.Unit | HirTypeKind.Infer(_, _) | HirTypeKind.Error: return nil
+                case _: return Some(tail_type)
+        nil
 
     me declared_callable_type(fn_decl: ParserFunction, owner_symbol: SymbolId?) -> HirType?:
         # Generic callables keep the existing untyped-symbol behavior.
