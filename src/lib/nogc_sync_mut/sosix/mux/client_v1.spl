@@ -54,12 +54,12 @@ pub class SosixMuxClientV1 with CoreMuxV1:
     pub fn recovery_handle() -> MuxHandleV1?:
         match self.connection:
             case Some(connection): Some(connection.snapshot.handle)
-            case nil: nil
+            case None: nil
 
     fn known(handle: MuxHandleV1, recovery: bool, request_id: u64) -> Result<MuxConnectionV1, MuxErrorV1>:
         val connection = match self.connection:
             case Some(value): value
-            case nil: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "no admitted client lease", request_id, MuxCommitStateV1.NotApplied, false))
+            case None: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "no admitted client lease", request_id, MuxCommitStateV1.NotApplied, false))
         if not mux_wire_same_handle_v1(handle, connection.snapshot.handle):
             return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "client lease identity differs", request_id, MuxCommitStateV1.NotApplied, false))
         val now = sosix_time_now_monotonic_ms()
@@ -79,7 +79,7 @@ pub class SosixMuxClientV1 with CoreMuxV1:
         val request = MuxWireRequestV1(correlation: correlation, auth_token: self.config.auth_token, call: call)
         val negotiated_limit: i64? = match self.connection:
             case Some(connection): Some(connection.snapshot.limits.discovery.max_reply_bytes)
-            case nil: nil
+            case None: nil
         val reply_limit = match mux_sosix_reply_limit_v1(call, self.config.max_frame_bytes, negotiated_limit, self.recovery_reply_limit):
             case Ok(limit): limit
             case Err(failure):
@@ -131,7 +131,7 @@ pub class SosixMuxClientV1 with CoreMuxV1:
                         for target in failure.affected:
                             if mux_wire_ref_v1(connection.snapshot.handle.owner_id, connection.snapshot.handle.owner_generation, target, target.kind).is_err():
                                 return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "remote error owner differs", request_id, MuxCommitStateV1.Unknown, true))
-                    case nil: ()
+                    case None: ()
                 var sanitized = failure
                 # Never forward peer-controlled text that might echo auth/pane data.
                 sanitized.detail = "remote CoreMux operation failed"
@@ -144,7 +144,7 @@ pub class SosixMuxClientV1 with CoreMuxV1:
     me renew(started_ms: i64, request_id: u64) -> Result<(), MuxErrorV1>:
         val connection = match self.connection:
             case Some(value): value
-            case nil: return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "missing renewal terms", request_id, MuxCommitStateV1.Unknown, true))
+            case None: return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "missing renewal terms", request_id, MuxCommitStateV1.Unknown, true))
         val now = sosix_time_now_monotonic_ms()
         # Response arrival + TTL would overstate authority. Also never revive an
         # interval that expired locally while this call was in flight.
@@ -182,7 +182,7 @@ pub class SosixMuxClientV1 with CoreMuxV1:
             case Some(failure):
                 self.connect_uncertain = true
                 return Err(failure)
-            case nil: ()
+            case None: ()
         if self.connection == nil:
             self.connect_uncertain = true
             return Err(mux_sosix_error_v1(MuxErrorKindV1.Unavailable, "connect lacks trusted recovery disposition", 0, MuxCommitStateV1.Unknown, true))
@@ -259,7 +259,7 @@ pub class SosixMuxClientV1 with CoreMuxV1:
             match self.last_disconnect:
                 case Some(original):
                     if original != request: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "only original disconnect replay is permitted", request.request_id, MuxCommitStateV1.NotApplied, false))
-                case nil: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "no retained disconnect request", request.request_id, MuxCommitStateV1.NotApplied, false))
+                case None: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "no retained disconnect request", request.request_id, MuxCommitStateV1.NotApplied, false))
         self.last_disconnect = Some(request)
         val result = self.exchange(MuxWireCallV1.Disconnect(request), now)
         match result:
@@ -283,7 +283,7 @@ pub class SosixMuxClientV1 with CoreMuxV1:
     pub me maintain_lease() -> Result<bool, MuxErrorV1>:
         val handle = match self.recovery_handle():
             case Some(value): value
-            case nil: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "no client lease to maintain", 0, MuxCommitStateV1.NotApplied, false))
+            case None: return Err(mux_sosix_error_v1(MuxErrorKindV1.PermissionDenied, "no client lease to maintain", 0, MuxCommitStateV1.NotApplied, false))
         val connection = self.known(handle, false, 0)?
         val now = sosix_time_now_monotonic_ms()
         if now - self.lease_started_ms < connection.lease_terms.renew_after_ms: return Ok(false)
