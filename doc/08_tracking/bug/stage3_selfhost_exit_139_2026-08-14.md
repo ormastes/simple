@@ -415,3 +415,31 @@ count and frozen flag.  This repair is not admitted until a fresh bounded
 bootstrap session passes Stage 3 and Stage 4.
 
 **Revalidated 2026-11-02: still plausible because unchanged. Recorded so future sweeps skip this in O(1) instead of; no merged fix commit with a passing regression is cited in this doc.**
+
+## Analysis (2026-11-02, opf-1)
+
+Verdict: analysis-only, remains OPEN (not reproducible on this Windows host;
+phase 3 priority forbids the full Linux bootstrap the unblock condition needs).
+
+- No commit names this bug as fixed. `f906bb6b3f2` added only a scope note.
+- Strongest later candidate: `a0d60244575` (on origin/release/1.0.0) fixed a
+  Stage-3 exit 139 that died right after `aot:bootstrap_fixed:start`, before any
+  function was lowered or any diagnostic was written. That matches this record's
+  "exit 139 before writing diagnostic output". Root cause there: the fixed lane
+  called `bootstrap_lowering.lower_module(bootstrap_hir)` with defaults omitted,
+  under a name `HirLowering` also declares. Now
+  `src/compiler/80.driver/driver_pipeline_lowering.spl:1070` calls
+  `lower_bootstrap_entry_module`, declared at
+  `src/compiler/50.mir/_MirLowering/module_lowering.spl:2278`.
+- Attribution is unproven: the August console was not retained and the source
+  authority (`f26936914d9`) differs. Do not close on this inference.
+- Not the s2-rebuild "stage2_next worker AV after load_sources" symptom on
+  available evidence (that one is a Windows worker AV; this one is Linux, unretained).
+- Invariant spec (assert-only, pins the candidate fix shape):
+  `test/01_unit/compiler/driver/stage3_selfhost_exit_139_invariant_spec.spl` (2/2).
+
+TODO(opf-1): on the next sanctioned Linux bootstrap, retain driver stdout/stderr
+and exit status of `stage3-native-build`. If Stage 3 completes, close this bug
+and cite a0d60244575. If it still exits 139, get a symbolized backtrace.
+
+Checked against current policy/design (2026-11-02): still valid as an unretained native Stage-3 crash. The candidate call-shape fix is independent of monomorphization (now deleted), nil/Any, and the per-file pipeline policies.
