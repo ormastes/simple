@@ -9,7 +9,9 @@
 # A consumer-specific SIMPLE_* variable (e.g. SIMPLE_HIR_SHARD_WORKER_KB) is
 # checked by the consumer BEFORE calling here, so it still wins.
 #
-# Cost: at most three small file reads per lookup; callers are admission
+# Paths under config/host/ are cwd-relative (run from the repo root, as
+# the test runner's host-config reader does); outside it those layers are
+# simply absent. Cost: at most four small file reads per lookup; callers are admission
 # points (once per pool / build start), never per-module hot paths.
 
 use std.common.config_core.host_config.{host_config_entries, host_config_int, host_config_value, host_config_env_name}
@@ -29,11 +31,17 @@ fn host_limits_user_path() -> text:
         return ""
     home + "/.config/simple/host.sdn"
 
+# Same source order as host_env_resolve_hostname in host-env.shs (hostname,
+# then uname -n) without a subprocess: Windows COMPUTERNAME, exported
+# HOSTNAME, then /etc/hostname (bash does not export HOSTNAME on Linux).
 fn host_limits_hostname() -> text:
     val win = _hl_env("COMPUTERNAME")
     if win != "":
-        return win.lower()
-    _hl_env("HOSTNAME").lower()
+        return win
+    val env_name = _hl_env("HOSTNAME")
+    if env_name != "":
+        return env_name
+    (file_read_nullable("/etc/hostname") ?? "").trim()
 
 fn _hl_read(path: text) -> text:
     if path == "":
@@ -41,18 +49,26 @@ fn _hl_read(path: text) -> text:
     file_read_nullable(path) ?? ""
 
 # The legacy per-host document only applies when its own hostname field names
-# this host (same safety rule as host_env_load in host-env.shs).
+# this host exactly (same rule as host_env_load in host-env.shs).
 fn host_limits_machine_doc(content: text, hostname: text) -> text:
     if content == "" or hostname == "":
         return ""
     for line in content.split("\n"):
         val t = line.trim()
         if t.starts_with("hostname:"):
-            val v = t.substring(9).trim().lower()
-            if v == hostname:
+            if t.substring(9).trim() == hostname:
                 return content
             return ""
     ""
+
+# config/host/NAME.sdn, then the lowercased name (host_env_config_path).
+fn host_limits_machine_text(hostname: text) -> text:
+    if hostname == "":
+        return ""
+    val exact = _hl_read("config/host/" + hostname + ".sdn")
+    if exact != "":
+        return host_limits_machine_doc(exact, hostname)
+    host_limits_machine_doc(_hl_read("config/host/" + hostname.lower() + ".sdn"), hostname)
 
 # Pure: resolve `key` from the given documents and env value.
 fn host_limits_value_from(key: text, defaults_text: text, host_text: text, user_text: text, env_value: text) -> text:
@@ -65,8 +81,7 @@ fn host_limits_int_from(key: text, defaults_text: text, host_text: text, user_te
 
 # Live lookup: the effective text value of `key` ("" when unconfigured).
 fn host_limit_value(key: text) -> text:
-    val hostname = host_limits_hostname()
-    val machine = host_limits_machine_doc(_hl_read("config/host/" + hostname + ".sdn"), hostname)
+    val machine = host_limits_machine_text(host_limits_hostname())
     host_limits_value_from(key, _hl_read("config/host/host_config.sdn"), machine, _hl_read(host_limits_user_path()), _hl_env(host_config_env_name(key)))
 
 # Live lookup of a positive integer key, else `default_value`.
