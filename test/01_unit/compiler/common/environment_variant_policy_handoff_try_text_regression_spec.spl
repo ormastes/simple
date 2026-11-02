@@ -1,0 +1,76 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, stage2, regression
+# Regression for s3_env_policy_digest_nondeterministic_2026-11-02.
+# The frozen stage2 (ef0681fc0e1) typed `Result<text,_>?` as i64 inside text concat and interpolation. The handoff
+# wire then held decimal heap addresses (first line `2188812121569integrity_digest=...`, 2 lines), the
+# integrity digest changed on every call, and encode_v1 failed with NonCanonical.
+# These checks pin the failure shape: a deterministic digest, a successful encode, and `name=hex` rows.
+use std.spec.*
+use compiler.common.structural_contracts.environment_variant_policy_handoff_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
+
+fn layer(
+    prefer: text = "", require: text = "", cpu: text = "",
+    offload: text = "", fallback: text = ""
+) -> EnvironmentVariantPolicyLayerV1:
+    EnvironmentVariantPolicyLayerV1(
+        parser_prefer: prefer, parser_require: require, host_cpu_max: cpu,
+        frontend_offload: offload, frontend_fallback: fallback)
+
+fn collection(
+    inputs: EnvironmentVariantPolicyInputsV1,
+    target_cpu: text = "znver4",
+    target_features: text = "+avx2,-avx512f"
+) -> EnvironmentVariantPolicyCollectionV1:
+    EnvironmentVariantPolicyCollectionV1(
+        policy_inputs: inputs, target_cpu: target_cpu,
+        target_cpu_features: target_features,
+        receipt: EnvironmentVariantPolicyCollectionReceiptV1(
+            schema_version: ENVIRONMENT_VARIANT_POLICY_COLLECTION_SCHEMA_V1,
+            presence: EnvironmentVariantPolicyPresenceV1(
+                cli_host_present: true, env_host_present: true,
+                project_host_present: false, user_host_present: false,
+                admin_present: true, cli_target_present: true,
+                env_target_present: true, project_target_present: false,
+                user_target_present: false),
+            host_source_order: "cli>env>project>user>default",
+            target_cpu_source: "cli", target_cpu_features_source: "env",
+            target_cpu_present: target_cpu != "",
+            target_cpu_features_present: target_features != ""))
+
+fn fixture() -> EnvironmentVariantPolicyHandoffV1:
+    val inputs = EnvironmentVariantPolicyInputsV1(
+        cli: layer(prefer: "simd", cpu: "x86-64-v3"),
+        env: layer(offload: "on"), project: layer(), user: layer(),
+        admin: EnvironmentVariantAdminRestrictionsV1(
+            parser_provider: "", host_cpu_max: "x86-64-v4",
+            frontend_offload_max: "", frontend_fallback: ""))
+    environment_variant_policy_handoff_v1(collection(inputs)).unwrap()
+
+
+describe "environment variant policy handoff text-try regression":
+    it "computes the same integrity digest for two independent handoffs":
+        val first = fixture()
+        val second = fixture()
+        expect(first.integrity_digest).to_equal(second.integrity_digest)
+        expect(first.policy_digest).to_equal(second.policy_digest)
+
+    it "encodes without NonCanonical and produces the same wire twice":
+        val a = environment_variant_policy_handoff_encode_v1(fixture())
+        val b = environment_variant_policy_handoff_encode_v1(fixture())
+        expect(a.is_ok()).to_equal(true)
+        expect(a.unwrap()).to_equal(b.unwrap())
+
+    it "writes every row as name=value, with no address digits in front of a name":
+        val wire = environment_variant_policy_handoff_encode_v1(fixture()).unwrap()
+        expect(wire).to_contain("\ncli.parser_prefer=")
+        val lines = wire.split("\n")
+        expect(lines.len()).to_equal(46)
+        expect(lines[0]).to_equal("simple-environment-variant-policy-handoff-v1")
+        var i = 1
+        while i < 45:
+            expect(lines[i]).to_contain("=")
+            i = i + 1
+        expect(wire).to_contain("\ntarget_cpu=")
+        expect(wire).to_contain("\nintegrity_digest=")
