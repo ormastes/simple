@@ -60,3 +60,21 @@ Suggested bug_db status: keep open, reproducibility `target_only`.
 
 TODO(p0f-3): obtain an IPS/lldb backtrace for the compiler process on macOS and
 rerun with a Stage2 built by a post-`2c89727c11c` seed.
+
+## Re-review (2026-11-02, opus, release/1.0.0 74cdbef8e6b)
+
+- Darwin thread-stack difference ruled out. Phase-3 HIR runs on the main
+  thread, and no runtime `pthread_create` sets a stack size. The 8 MiB Darwin
+  main stack is larger than the 1 MiB Windows default, so a recursion-depth
+  overflow would show up on Windows first.
+- After the mono removal, the bug is neither obsolete nor confirmed. The
+  failing source `a31729a` predates the monomorphization deletion, but the
+  `resolve_import_symbols` path behind the last probe still exists
+  (`hir_lowering/_Items/module_build.spl:320`). Validity on the current head is
+  unknown.
+- There is no fault, so no code change was made. Status stays `open`.
+- Exact macOS repro: on aarch64-apple-darwin, rebuild the seed and Stage2 from
+  `release/1.0.0`, then run
+  `sh scripts/bootstrap/resume-stage3-from-admitted.sh <OUTPUT_DIR>` under
+  `lldb` (or keep the ReportCrash IPS). It passes when HIR reaches 848/848; if
+  it crashes, attach the symbolized backtrace here.
