@@ -2026,3 +2026,9 @@ TODO: once a phase-3 artifact is admitted, run the native scale probe with
 heap_registry attribution (per-file RSS over at least 400 files, on both seed
 and self-host lanes). Then decide whether to close this bug or fix the
 retention owner. Also audit the `module_assembly.spl:1837` fallback.
+
+Checked against current policy/design: still valid, re-scoped to in-process
+multi-file parse loops. Under the one-process-per-file pipeline policy,
+per-process RSS is bounded by construction, but this report has no evidence
+that stage 4 runs that way yet. Erased generics, the nil/Any rules, SDN and
+target-neutral HIR don't affect it.
