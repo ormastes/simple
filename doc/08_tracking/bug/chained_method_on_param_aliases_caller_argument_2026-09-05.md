@@ -57,3 +57,5 @@ the workaround when this defect is fixed — a `TODO(scilib)` marks the site.
 `src/compiler_rust/target/debug/simple run <spec>` (debug Rust seed built from
 current source). Not reproduced against a deployed pure-Simple binary — none is
 deployed on this host.
+
+**Revalidated 2026-11-02: still plausible because the report title (Chained method call on a function PARAMETER aliases and clobbers the caller's a) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

@@ -63,3 +63,5 @@ Stage 2 compiler sha256 for r4: `79307b44e2233463ef44f164dae0eb480c536c316d5c2f8
 
 Which owner stores the text without promoting it. No source workaround is
 small enough: the corrupted rows differ run to run.
+
+**Revalidated 2026-11-02: still plausible because the report title (Stage 2 test-runner build reads overwritten imported-enum owner text (schema=..) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

@@ -35,3 +35,5 @@ receipt that verifies; that in turn invalidates the Stage 4 receipt.
 
 Give each target its own admission directory (or make the planner build
 reproducible and refuse to overwrite a differing binary).
+
+**Revalidated 2026-11-02: still plausible because the report title (Producing the Stage 3 and managed Stage 4 planner receipts in one run overwrite) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

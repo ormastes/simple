@@ -62,3 +62,5 @@ about one worker growing without bound, and does not address this bug at all.
 - Consider a liveness probe in `portable_lock_acquire`: a lock whose
   `owner_pid` is gone, or whose `owner_start_hex` no longer matches that pid's
   start time, is stale and may be broken rather than waited on.
+
+**Revalidated 2026-11-02: still plausible because the report title (A failed bootstrap leaves orphan workers running and its output lock held) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

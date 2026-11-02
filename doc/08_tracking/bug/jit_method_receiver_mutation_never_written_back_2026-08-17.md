@@ -301,3 +301,5 @@ Note the two halves of this record want **opposite** movements — the interpret
 half needs *more* write-back (honour `mut`), the JIT half needs *less* copying
 (honour a mutating receiver). Fixing one does not fix the other, and neither
 engine may be used as the oracle for the other's fix.
+
+**Revalidated 2026-11-02: still plausible because OPEN — re-reproduced on the 2026-08-17 12:58 seed. Both halves; no merged fix commit with a passing regression is cited in this doc.**

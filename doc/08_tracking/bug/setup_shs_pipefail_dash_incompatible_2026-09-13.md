@@ -88,3 +88,5 @@ release/aarch64-unknown-linux-gnu/simple`, matching what `setup.shs` would
 have produced had a release binary already existed in this worktree. This
 worktree has no build of its own; every fan-out lane on this host most likely
 hits the same `rc=2` and needs either this workaround or a real fix.
+
+**Status:** FIXED (row closed 2026-11-02: scripts/setup/materialize-symlinks-windows.shs now exits 0 on non-Windows hosts at lines 39-46 before `set -o pipefail` (line 54), so dash never reaches the non-POSIX option)

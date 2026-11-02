@@ -55,3 +55,5 @@ Unknown) and in `std.common.encoding.codec` (Utf8, Utf16LE, …). Loading
 Key enum lookup by the owning module (the import binding in the caller's
 environment), not the bare name, in both the interpreter and MIR lowering. Until
 then, also check the pure-Simple compiler's enum tables for the same keying.
+
+**Revalidated 2026-11-02: still plausible because open (worked around for ByteOrder by rename on work/codec-native-build-and-perf); no merged fix commit with a passing regression is cited in this doc.**

@@ -59,3 +59,5 @@ seed-side JIT investigation, not a stdlib fix.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+**Revalidated 2026-11-02: still plausible because OPEN (2026-09-13); no merged fix commit with a passing regression is cited in this doc.**

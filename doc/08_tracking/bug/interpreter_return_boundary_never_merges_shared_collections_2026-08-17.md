@@ -98,3 +98,5 @@ so it needs a rebuilt seed; a `.spl`-only edit cannot reach it.
 Not attempted in this pass — recorded with reproduction so whoever picks it up
 does not re-derive it. `interpreter_call/**` was not on the claimed-path list at
 time of writing.
+
+**Revalidated 2026-11-02: still plausible because OPEN, reproduced. Collapses at least two separately-filed rows; no merged fix commit with a passing regression is cited in this doc.**

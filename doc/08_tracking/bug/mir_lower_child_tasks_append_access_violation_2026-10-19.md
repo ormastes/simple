@@ -82,3 +82,5 @@ Workaround commit: see the PR that introduced this record.
   mcp closure, repeated without a debugger, must not fault.
 - Retire the workaround only after a rebuilt producer passes that test (see
   `doc/07_guide/tooling/bug_linked_workarounds.md`).
+
+**Revalidated 2026-11-02: still plausible because the report title (native MIR lowering access-violates on the loop-tail `if a.f != '' and b.f == a) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

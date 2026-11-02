@@ -15,3 +15,5 @@ Validation command, from the isolated src/compiler_rust workspace:
     cargo test --locked --profile bootstrap --package simple-runtime --lib --jobs 2 --target-dir <owned-target> byte_text_utf8_invariant_tests -- --test-threads=1
 
 This command has not been run. Matched native-all feature/archive construction, Windows heap/ABI fixtures, throughput checks, and required compiler/core/lib/MCP gates remain open. No capped Simple build is restarted. Valid-input allocation preservation is a source observation, not a performance PASS.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Source repair reviewed; runtime tests and native qualification UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**

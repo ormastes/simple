@@ -231,3 +231,5 @@ There is no `bootstrap-progress.log` and no stage2/stage3 tree in this worktree
 "next step 1 — identify the offending file" cannot be executed here: the tail
 file identities come from the parse closure order, which only a stage-2 binary
 run produces. Unchanged; next owner needs a lane with a stage-2 binary.
+
+**Revalidated 2026-11-02: still plausible because OPEN, observed live; no merged fix commit with a passing regression is cited in this doc.**

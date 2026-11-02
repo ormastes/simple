@@ -88,3 +88,5 @@ It passes with provider=static-cli and empty LLVM_LIB. `/usr/bin/time -v` record
 startup validation cost on this installed provider, not compiler memory or CI
 asset23.1.1 availability. Receipts: local-static-owner.log and
 local-static-owner-time.txt. No unchanged shared-policy test was rerun.
+
+**Revalidated 2026-11-02: still plausible because focused provider contract repaired; actual Linux CI bootstrap remains; no merged fix commit with a passing regression is cited in this doc.**

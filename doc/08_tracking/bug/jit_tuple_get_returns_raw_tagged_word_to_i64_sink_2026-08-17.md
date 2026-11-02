@@ -150,3 +150,5 @@ defect being i64-specific. Not measured; stated as a prediction, not a finding.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+**Revalidated 2026-11-02: still plausible because OPEN — re-verified on the 2026-08-17 12:58 seed; the omitted lowering site is now identified (see the end of this record). Not fixed: Rust s; no merged fix commit with a passing regression is cited in this doc.**

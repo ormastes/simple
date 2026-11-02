@@ -83,3 +83,4 @@ representation) alongside `Value::Int`, so callers do not need to manually
 downgrade a typed byte array to an untyped integer array before any
 byte-taking extern call.
 
+**Revalidated 2026-11-02: still plausible because Open — worked around at the call site in; no merged fix commit with a passing regression is cited in this doc.**

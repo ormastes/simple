@@ -116,3 +116,4 @@ owners exist and the required admitted-runtime and reset/remount campaigns pass,
 durability and cross-backend image construction remain unproved. No manual
 verification was run for this update.
 
+**Revalidated 2026-11-02: still plausible because PARTIAL — portable FAT32/NVFS recovery slice implemented; mounted; no merged fix commit with a passing regression is cited in this doc.**
