@@ -2,7 +2,7 @@
 
 - **ID:** stage2_codegen_large_array_literal_2026-11-02
 - **Priority:** P1 (blocks phase-3 whole-program build)
-- **Status:** open (workaround landed in the source module; compiler fix pending)
+- **Status:** fixed in source (PR #5796, df3a14d194: `unicode_17_0_0.spl` is now text-encoded, no large array literal reaches LLVM codegen; verified 2026-11-02). Caveat: the generic compiler scaling of huge array literals is not changed; revert-ready after stage3 self-build
 - **Binary:** frozen stage2 `C:/dev/p3new/stage2.exe` built from `ef0681fc0e1`
 - **Runs:** phase-3 runs 20b and 21 (dynload `--emit-archive`, 32 MIR shards)
 
