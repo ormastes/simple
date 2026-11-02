@@ -1,0 +1,96 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# inferarm-mir-20261031: original shapes with full-closure competitors
+
+Bug: doc/08_tracking/bug/inferarm_mir_2026-10-31.md. Re-lowers the ORIGINAL
+unannotated `var x = []` shapes (text_advanced.extract_words, state_enum
+`lines = lines.push(...)`) with the competitors present in the stage4
+closure: user classes that declare their own `push`/`join`/`len` methods.
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn lower_closure(names: [text], srcs: [text]) -> text:
+    """Lower every module through HIR, prescan all, then MIR-lower the last one.
+    Returns the concatenated HIR/MIR diagnostics ("" when clean)."""
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        val ast = parse_full_frontend(srcs[i], path, names[i], log)
+        modules[names[i]] = ast
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        asts.push(ast)
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    var out = ""
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(names[i], surfaces)
+        hirs.push(hl.lower_module(asts[i]))
+        for e in hl.errors:
+            out = out + "hir: " + e.message + "\n"
+        i = i + 1
+    val last = hirs.len() - 1
+    # Prove the fixture parsed and its functions reached HIR (a parse
+    # failure would otherwise pass the negative checks silently).
+    for fk in hirs[last].functions.keys():
+        val hf: HirFunction = hirs[last].functions[fk]
+        out = out + "fn:" + hf.name + ";"
+    var ml = MirLowering.new(hirs[last].symbols)
+    var pre: Dict<text, HirModule> = {}
+    i = 0
+    while i < names.len():
+        pre["m" + i.to_text()] = hirs[i]
+        i = i + 1
+    i = 0
+    while i < names.len():
+        ml.prescan_module_struct_names(pre, "m" + i.to_text())
+        i = i + 1
+    val mir = ml.lower_module(hirs[last], hirs)
+    for e in ml.errors:
+        # Exhaustiveness notes are advisory and unrelated to these bugs.
+        if not e.message.contains("non-exhaustive enum match"):
+            out = out + "mir: " + e.message + "\n"
+    print "diagnostics: [" + out + "]"
+    out
+
+fn competing_methods_module() -> text:
+    lines(["class StringBuilder:", "    parts: [text]", "    fn push(s: text) -> StringBuilder:", "        StringBuilder(parts: self.parts)", "    fn join(sep: text) -> text:", "        sep", "    fn len() -> i64:", "        0", "", "class Stack:", "    items: [i64]", "    me push(v: i64):", "        self.items.push(v)", "    fn join(sep: text) -> i64:", "        0"])
+
+fn no_infer(d: text) -> bool:
+    not d.contains("infer-arm") and not d.contains("unresolved inference")
+
+describe "inferarm-mir-20261031 full-closure shapes":
+    it "extract_words: var words = [] filled by push(join) with competing push/join":
+        val main = lines(["fn is_alnum(ch: text) -> bool:", "    ch != \" \"", "", "fn extract_words(text: text) -> [text]:", "    var words = []", "    var word_chars: [text] = []", "    var i = 0", "    while i < text.len():", "        val ch = text[i]", "        if is_alnum(ch):", "            word_chars.push(ch)", "        else:", "            if word_chars.len() > 0:", "                words.push(word_chars.join(\"\"))", "                word_chars = []", "        i = i + 1", "    if word_chars.len() > 0:", "        words.push(word_chars.join(\"\"))", "    words"])
+        val d = lower_closure(["common.string_builder", "app.main"], [competing_methods_module(), main])
+        expect(no_infer(d)).to_equal(true)
+        expect(d.contains("fn:extract_words;")).to_equal(true)
+
+    it "state_enum: var lines = [] reassigned from lines.push(...) with competing push":
+        val main = lines(["struct V:", "    name: text", "    fields: [text]", "", "fn render(name: text, variants: [V]) -> text:", "    var lines = []", "    lines = lines.push(\"enum \" + name)", "    for variant in variants:", "        if variant.fields.len() == 0:", "            lines = lines.push(variant.name)", "        else:", "            var field_strs = []", "            for f in variant.fields:", "                field_strs.push(f + \": <type>\")", "            lines = lines.push(variant.name + field_strs.join(\", \"))", "    lines.join(\",\")"])
+        val d = lower_closure(["common.string_builder", "app.main"], [competing_methods_module(), main])
+        expect(no_infer(d)).to_equal(true)
+        expect(d.contains("fn:render;")).to_equal(true)
