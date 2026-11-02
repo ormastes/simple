@@ -1,6 +1,6 @@
 # Live process capture paths were not quoted for both shells
 
-Status: source fixed; Phase 2 native qualification pending.
+Status: fixed in source (verified present 2026-11-02: `process_ops.spl` quotes pgid/stdout/stderr paths and the whole child script, lines ~1920-1930); Phase 2 native qualification pending. Row closed 2026-11-02.
 
 Priority: P1. Host: aarch64-apple-darwin.
 
