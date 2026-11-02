@@ -1,6 +1,6 @@
 # devhub specs: extensionless `#!/bin/sh` fake binaries never ran on the Windows seed
 
-Status: RESOLVED in the spec harness (2026-10-31). The seed-side limit below stays OPEN.
+Status: RESOLVED in the spec harness (2026-10-31, verified 2026-11-02). The seed-side limit below stays OPEN.
 Branch: work/devhub-gh-spec-20261031.
 
 ## Symptom (before)
