@@ -1,0 +1,35 @@
+"""Windows GNU (mingw) native link never needs liboldnames.
+
+llvm-mingw ships libmoldname.a (clang adds -lmoldname itself) but no
+liboldnames.a. `oldnames` is only requested by /DEFAULTLIB:oldnames.lib
+directives inside MSVC-ABI objects, so a windows-gnu link must only select the
+GNU-named runtime archives (libsimple_*.a) and never name oldnames/libcmt."""
+
+use compiler.backend.linker.linker_wrapper.{native_all_gnu_support_args, native_runtime_archive_names_for_platform}
+
+fn has_flag_containing(args: [text], needle: text) -> bool:
+    var found = false
+    for a in args:
+        if a.contains(needle):
+            found = true
+    found
+
+describe "windows-mingw link without liboldnames":
+    it "emits no oldnames or libcmt -l flag":
+        val args = native_all_gnu_support_args(["libsimple_native_all.a"], "windows-mingw", "")
+        expect(args.len()).to_be_greater_than(0)
+        expect(has_flag_containing(args, "oldnames")).to_equal(false)
+        expect(has_flag_containing(args, "libcmt")).to_equal(false)
+        expect(args).to_contain("-lmsvcrt")
+
+    it "selects only GNU-named runtime archives for a non-msvc link":
+        val names = native_runtime_archive_names_for_platform("auto", false, true, true, true)
+        expect(names).to_equal(["libsimple_compiler.a"])
+        val pair = native_runtime_archive_names_for_platform("auto", false, false, true, true)
+        for n in pair:
+            expect(n.starts_with("lib")).to_equal(true)
+            expect(n.ends_with(".a")).to_equal(true)
+
+    it "selects .lib archives only when msvc is requested":
+        val names = native_runtime_archive_names_for_platform("auto", true, true, true, true)
+        expect(names).to_equal(["simple_compiler.lib"])
