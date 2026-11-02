@@ -644,7 +644,24 @@ pub fn runtime_core_c_sources_v1() -> [text]:
     and the narrow core provider owners. Extra existing media/device providers
     retain their C ABI; this profile never adds Rust archives or trap stubs.
     """
-    ["runtime_native", "runtime_alloc_observer", "runtime_core_intrinsics", "runtime_file_view", "runtime_disk_headroom", "runtime_memory_headroom", "runtime_cache_host_authority_v1", "runtime_framebuffer", "runtime_directx_core", "runtime_legacy_core", "runtime_core_io_exports", "runtime_core_host_services", "runtime_fork", "runtime_memtrack", "runtime_process", "runtime_process_tree", "runtime_memory", "runtime_process_owned", "runtime_coverage_core", "runtime_contracts", "runtime_font", "runtime_thread", "runtime_simd_utf8", "runtime_simd_case", "runtime_simd_search", "runtime_simd_dispatch", "runtime_packed_span", "runtime_terminal", "runtime_prof_sample", "runtime_core_exports", "runtime_backend_plugin", "runtime_rocm", "runtime_renderdoc", "runtime_timestamp", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime"]
+    ["runtime_native", "runtime_alloc_observer", "runtime_core_intrinsics", "runtime_file_view", "runtime_disk_headroom", "runtime_memory_headroom", "runtime_cache_host_authority_v1", "runtime_framebuffer", "runtime_directx_core", "runtime_legacy_core", "runtime_core_io_exports", "runtime_core_host_services", "runtime_fork", "runtime_memtrack", "runtime_process", "runtime_process_tree", "runtime_memory", "runtime_process_owned", "runtime_coverage_core", "runtime_contracts", "runtime_font", "runtime_thread", "runtime_simd_utf8", "runtime_simd_case", "runtime_simd_search", "runtime_simd_dispatch", "runtime_packed_span", "runtime_terminal", "runtime_prof_sample", "runtime_core_exports", "runtime_backend_plugin", "runtime_rocm", "runtime_renderdoc", "runtime_timestamp", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime", "runtime_cranelift_bridge_stub"]
+
+pub fn runtime_core_c_platform_sources_v1(windows_target: bool) -> [text]:
+    """Per-OS async driver owners for the core-C composition.
+
+    platform/async_driver.c owns the 14 rt_driver_* exports and dispatches to
+    one OS backend; on Windows that is platform/async_windows.c
+    (spl_driver_create_iocp). The phase-3 stage3 link needed both and the
+    baked list omitted them (bug stage2_runtime_missing_rt_heap_aux_live_bytes
+    _2026-11-02 sibling). Other OS backends are not yet admitted here.
+    """
+    if windows_target:
+        return ["platform/async_driver", "platform/async_windows"]
+    []
+
+pub fn runtime_object_basename_v1(name: text) -> text:
+    """Flat object basename for a runtime source that may live in a subdir."""
+    name.replace("/", "_")
 
 pub fn runtime_thread_rust_owner_v1(runtime_owner: text, include_dynload: bool,
         core_c_profile: bool, coff_host: bool, target: text) -> bool:
@@ -667,7 +684,7 @@ pub fn runtime_object_paths_v1(sources: [text], prefix: text, ext: text) -> [tex
     """Keep each object basename paired with the source that produced it."""
     var objects: [text] = []
     for name in sources:
-        objects = objects.push("{prefix}{name}{ext}")
+        objects = objects.push("{prefix}{runtime_object_basename_v1(name)}{ext}")
     objects
 
 fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool = true, compiler: text = "", include_stage4_legacy_compat: bool = false, runtime_bundle: text = "", runtime_owner: text = "c") -> Result<[text], text>:
@@ -751,6 +768,10 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     val use_msvc = _is_msvc_cc(cc)
     val compile_pid = getpid()
     val target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? "host"
+    if core_c_profile:
+        val windows_target = target.contains("-windows") or (target == "host" and _is_windows())
+        for platform_source in runtime_core_c_platform_sources_v1(windows_target):
+            sources = sources.push(platform_source)
     if alloc_observer and target != "host":
         return Err("allocation observer v1 requires startup-linked native host target")
     val abi_policy = match runtime_abi_policy_v1():
@@ -902,7 +923,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args.push(obj_path)
             comp_args.push(src_path)
 
-        val cache_obj = if cache_dir != "": cache_dir + "/" + name + ext else: ""
+        val cache_obj = if cache_dir != "": cache_dir + "/" + runtime_object_basename_v1(name) + ext else: ""
         var cache_hit = false
         var cache_obj_exists = false
         if cache_obj != "":

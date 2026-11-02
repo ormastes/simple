@@ -1,0 +1,178 @@
+#!/bin/sh
+# Runtime link-completeness checker (pure shell; no Python).
+#
+# Fails, listing each symbol, when a runtime ABI symbol (rt_* / spl_*) is
+# required but no runtime C object defines it. Born from bug
+# stage2_runtime_missing_rt_heap_aux_live_bytes_2026-11-02: host.spl declared
+# `extern fn rt_heap_aux_live_bytes` with NO C definition anywhere, and the
+# phase-3 stage3 link had to be closed with a tagged 0-returning shim.
+#
+# Required set (pick one; both may be combined):
+#   --decl-root DIR   every `extern fn rt_*|spl_*` declared in DIR/**/*.spl
+#                     (repeatable). Default: the stage2/stage3 compiler surface
+#                     src/compiler, src/lib/nogc_sync_mut/sffi/host.spl,
+#                     src/app/cli/native_build_worker.spl.
+#   --objects DIR     every UNDEFINED rt_*|spl_* referenced by the compiled
+#                     Simple objects in DIR (the exact stage3 closure; repeatable).
+# Defined set: the core-C runtime list from
+#   src/compiler/70.backend/backend/runtime_compiler.spl
+#   (runtime_core_c_sources_v1 + runtime_core_c_platform_sources_v1), compiled
+#   with the same core-C defines by clang (llvm-mingw UCRT on Windows) and read
+#   with llvm-nm. --runtime-lib FILE uses a prebuilt archive instead.
+# Other options:
+#   --allow FILE      SDN list (`- rt_sym` lines) of symbols accepted as unreferenced
+#                     by the real link. Default: scripts/check/runtime_link_completeness_allow.sdn
+#   --jobs N          parallel C compiles (default 8).
+#   --keep DIR        object/work directory (default: mktemp under build/).
+# Exit: 0 = complete, 1 = missing symbols (listed as `MISSING <sym>`),
+#       2 = usage / toolchain / compile failure.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+DECL_ROOTS=""
+OBJECT_DIRS=""
+RUNTIME_LIB=""
+ALLOW_FILE="scripts/check/runtime_link_completeness_allow.sdn"
+JOBS=8
+WORK_DIR=""
+
+die() { printf 'runtime-link-completeness: %s\n' "$1" >&2; exit 2; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --decl-root) [ $# -ge 2 ] || die "missing value for --decl-root"; DECL_ROOTS="$DECL_ROOTS
+$2"; shift 2 ;;
+        --objects) [ $# -ge 2 ] || die "missing value for --objects"; OBJECT_DIRS="$OBJECT_DIRS
+$2"; shift 2 ;;
+        --runtime-lib) [ $# -ge 2 ] || die "missing value for --runtime-lib"; RUNTIME_LIB=$2; shift 2 ;;
+        --allow) [ $# -ge 2 ] || die "missing value for --allow"; ALLOW_FILE=$2; shift 2 ;;
+        --no-allow) ALLOW_FILE=""; shift ;;
+        --jobs) [ $# -ge 2 ] || die "missing value for --jobs"; JOBS=$2; shift 2 ;;
+        --keep) [ $# -ge 2 ] || die "missing value for --keep"; WORK_DIR=$2; shift 2 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+if [ -z "$DECL_ROOTS" ] && [ -z "$OBJECT_DIRS" ]; then
+    DECL_ROOTS="src/compiler
+src/lib/nogc_sync_mut/sffi/host.spl
+src/app/cli/native_build_worker.spl"
+fi
+
+# --- toolchain: clang + llvm-nm only (Windows: llvm-mingw UCRT) -------------
+CC=${CC:-}
+NM=${NM:-}
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+        IS_WINDOWS=1
+        for d in "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin; do
+            [ -x "$d/clang.exe" ] || continue
+            [ -n "$CC" ] || CC="$d/clang.exe"
+            [ -n "$NM" ] || NM="$d/llvm-nm.exe"
+        done ;;
+    *) IS_WINDOWS=0 ;;
+esac
+[ -n "$CC" ] || CC=clang
+[ -n "$NM" ] || NM=llvm-nm
+case "$("$CC" --version 2>&1 | head -1)" in
+    *clang*) ;;
+    *) die "C compiler must be clang (got: $CC)" ;;
+esac
+"$NM" --version >/dev/null 2>&1 || die "llvm-nm not found ($NM)"
+
+if [ -z "$WORK_DIR" ]; then
+    mkdir -p build
+    WORK_DIR=$(mktemp -d "build/runtime-link-completeness.XXXXXX")
+    trap 'rm -rf "$WORK_DIR"' EXIT
+fi
+mkdir -p "$WORK_DIR/obj"
+
+# --- required symbols --------------------------------------------------------
+: >"$WORK_DIR/required.txt"
+if [ -n "$DECL_ROOTS" ]; then
+    for root in $DECL_ROOTS; do
+        [ -e "$root" ] || die "decl root not found: $root"
+        grep -rhoE '^[[:space:]]*(pub[[:space:]]+)?extern[[:space:]]+fn[[:space:]]+(rt|spl)_[A-Za-z0-9_]+' \
+            --include='*.spl' "$root" 2>/dev/null |
+            sed -E 's/.*fn[[:space:]]+//' >>"$WORK_DIR/required.txt" || true
+    done
+fi
+if [ -n "$OBJECT_DIRS" ]; then
+    for dir in $OBJECT_DIRS; do
+        [ -d "$dir" ] || die "object dir not found: $dir"
+        find "$dir" -type f \( -name '*.o' -o -name '*.obj' \) -print |
+            while IFS= read -r obj; do
+                "$NM" -u "$obj" 2>/dev/null | awk '{print $NF}'
+            done | sed -E 's/^_//' | grep -E '^(rt|spl)_' >>"$WORK_DIR/required.txt" || true
+    done
+fi
+LC_ALL=C sort -u "$WORK_DIR/required.txt" -o "$WORK_DIR/required.txt"
+
+# --- defined symbols ---------------------------------------------------------
+RC=src/compiler/70.backend/backend/runtime_compiler.spl
+if [ -n "$RUNTIME_LIB" ]; then
+    [ -f "$RUNTIME_LIB" ] || die "runtime lib not found: $RUNTIME_LIB"
+    "$NM" --defined-only -g "$RUNTIME_LIB" 2>/dev/null | awk 'NF>=3{print $NF}' |
+        sed -E 's/^_//' >"$WORK_DIR/defined.txt"
+else
+    SOURCES=$(awk '/^pub fn runtime_core_c_sources_v1/{f=1} f&&/^    \["runtime_native"/{print; exit}' "$RC" |
+        grep -oE '"[^"]+"' | tr -d '"')
+    [ -n "$SOURCES" ] || die "could not read runtime_core_c_sources_v1 from $RC"
+    if [ "$IS_WINDOWS" = 1 ]; then
+        PLATFORM=$(awk '/^pub fn runtime_core_c_platform_sources_v1/{f=1} f&&/return \[/{print; exit}' "$RC" |
+            grep -oE '"[^"]+"' | tr -d '"')
+        SOURCES="$SOURCES
+$PLATFORM"
+    else
+        SOURCES="$SOURCES
+hosted_cocoa
+hosted_win32"
+    fi
+    FLAGS="-c -O1 -std=gnu11 -ffunction-sections -fdata-sections -DSIMPLE_ABI_VERSION=1 -DSIMPLE_ABI_VERSION_DEFERRED=0 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1 -DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1 -DSIMPLE_CORE_C_STANDALONE=1 -Isrc/runtime -Isrc/runtime/platform"
+    [ "$IS_WINDOWS" = 1 ] || FLAGS="$FLAGS -fPIC"
+    : >"$WORK_DIR/compile.failed"
+    running=0
+    for name in $SOURCES; do
+        src="src/runtime/$name.c"
+        [ -f "$src" ] || die "listed runtime source missing: $src"
+        obj="$WORK_DIR/obj/$(printf '%s' "$name" | tr '/' '_').o"
+        # shellcheck disable=SC2086
+        ( "$CC" $FLAGS "$src" -o "$obj" >"$obj.log" 2>&1 || printf '%s\n' "$name" >>"$WORK_DIR/compile.failed" ) &
+        running=$((running + 1))
+        if [ "$running" -ge "$JOBS" ]; then wait; running=0; fi
+    done
+    wait
+    if [ -s "$WORK_DIR/compile.failed" ]; then
+        while IFS= read -r name; do
+            printf 'COMPILE-FAILED %s\n' "$name" >&2
+            sed -n '1,5p' "$WORK_DIR/obj/$(printf '%s' "$name" | tr '/' '_').o.log" >&2
+        done <"$WORK_DIR/compile.failed"
+        die "runtime compile failed"
+    fi
+    for obj in "$WORK_DIR"/obj/*.o; do
+        "$NM" --defined-only -g "$obj" 2>/dev/null | awk 'NF>=3{print $NF}'
+    done | sed -E 's/^_//' >"$WORK_DIR/defined.txt"
+fi
+LC_ALL=C sort -u "$WORK_DIR/defined.txt" -o "$WORK_DIR/defined.txt"
+
+if [ -n "$ALLOW_FILE" ]; then
+    [ -f "$ALLOW_FILE" ] || die "allow file not found: $ALLOW_FILE"
+    sed -e 's/#.*//' -e 's/^[[:space:]]*-[[:space:]]*//' -e 's/[[:space:]]//g' "$ALLOW_FILE" | grep -E '^(rt|spl)_[A-Za-z0-9_]+$' |
+        LC_ALL=C sort -u >>"$WORK_DIR/defined.txt"
+    LC_ALL=C sort -u "$WORK_DIR/defined.txt" -o "$WORK_DIR/defined.txt"
+fi
+
+LC_ALL=C comm -23 "$WORK_DIR/required.txt" "$WORK_DIR/defined.txt" >"$WORK_DIR/missing.txt"
+REQ=$(wc -l <"$WORK_DIR/required.txt" | tr -d ' ')
+DEF=$(wc -l <"$WORK_DIR/defined.txt" | tr -d ' ')
+MISS=$(wc -l <"$WORK_DIR/missing.txt" | tr -d ' ')
+printf 'runtime-link-completeness: required=%s defined=%s missing=%s work=%s\n' "$REQ" "$DEF" "$MISS" "$WORK_DIR"
+if [ "$MISS" -gt 0 ]; then
+    sed 's/^/MISSING /' "$WORK_DIR/missing.txt"
+    printf 'STATUS: FAIL\n'
+    exit 1
+fi
+printf 'STATUS: PASS\n'
