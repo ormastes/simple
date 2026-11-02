@@ -1,0 +1,88 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# stage2_poll_payload_typeparam_match_2026-11-01: generic enum payload binder
+
+Bug: doc/08_tracking/bug/stage2_poll_payload_typeparam_match_2026-11-01.md.
+The payload binder of `case Poll.Ready(x)` on a `Poll<Result<A, E>>` subject
+must be typed `Result<A, E>` (T substituted with the subject's type argument),
+so a nested bare `Ok`/`Err` match resolves against Result even when a second
+enum in scope declares `Ok`/`Err`. Lowered in-process through pure-Simple
+HIR+MIR (seed-hosted).
+"""
+
+# @tag: unit, compiler, mir, enum, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn lower_closure(names: [text], srcs: [text]) -> text:
+    """Lower every module through HIR, prescan all, then MIR-lower the last one.
+    Returns the concatenated HIR/MIR diagnostics ("" when clean)."""
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        val ast = parse_full_frontend(srcs[i], path, names[i], log)
+        modules[names[i]] = ast
+        sources.push(SourceFile(path: path, content: srcs[i], module_name: names[i]))
+        asts.push(ast)
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    var out = ""
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(names[i], surfaces)
+        hirs.push(hl.lower_module(asts[i]))
+        for e in hl.errors:
+            out = out + "hir: " + e.message + "\n"
+        i = i + 1
+    val last = hirs.len() - 1
+    var ml = MirLowering.new(hirs[last].symbols)
+    var pre: Dict<text, HirModule> = {}
+    i = 0
+    while i < names.len():
+        pre["m" + i.to_text()] = hirs[i]
+        i = i + 1
+    i = 0
+    while i < names.len():
+        ml.prescan_module_struct_names(pre, "m" + i.to_text())
+        i = i + 1
+    val mir = ml.lower_module(hirs[last], hirs)
+    for e in ml.errors:
+        # Exhaustiveness notes are advisory and unrelated to these bugs.
+        if not e.message.contains("non-exhaustive enum match"):
+            out = out + "mir: " + e.message + "\n"
+    print "diagnostics: [" + out + "]"
+    out
+
+fn lower_one(src: text) -> text:
+    lower_closure(["app.main"], [src])
+
+describe "stage2_poll_payload_typeparam_match generic payload binder":
+    it "Poll.Ready(result) on Poll<Result<[u8], text>> resolves nested bare Ok/Err":
+        val d = lower_one(lines(["enum Poll<T>:", "    Ready(T)", "    Pending", "", "enum AesGcmResult:", "    Ok", "    Err(m: text)", "", "fn show(p: Poll<Result<[u8], text>>) -> text:", "    match p:", "        case Poll.Ready(result):", "            match result:", "                case Ok(b):", "                    \"ok\"", "                case Err(e):", "                    e", "        case Poll.Pending:", "            \"pending\""]))
+        expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("has type T")).to_equal(false)
+
+    it "Poll.Ready(r) on a local Poll<Result<i64, text>> from a method resolves nested bare Ok/Err":
+        val d = lower_one(lines(["enum Poll<T>:", "    Ready(T)", "    Pending", "", "enum Status:", "    Ok", "    Err(m: text)", "", "class Rd:", "    n: i64", "    fn poll_read() -> Poll<Result<i64, text>>:", "        Poll.Ready(Ok(self.n))", "    fn count() -> i64:", "        val p: Poll<Result<i64, text>> = self.poll_read()", "        match p:", "            case Poll.Ready(r):", "                match r:", "                    case Ok(v):", "                        v", "                    case Err(e):", "                        0 - 1", "            case Poll.Pending:", "                0"]))
+        expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("has type T")).to_equal(false)
+        expect(d.contains("unresolved")).to_equal(false)

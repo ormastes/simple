@@ -2,7 +2,8 @@
 
 - **ID:** stage2_poll_payload_typeparam_match_2026-11-01
 - **Priority:** P1 (blocks phase-3 stage3 self-build)
-- **Status:** open; source workaround landed in `src/lib/nogc_async_mut/io/buffer.spl`
+- **Status:** fixed in source (2026-11-02); revert-ready after the stage3 self-build. Source workaround in
+  `src/lib/nogc_async_mut/io/buffer.spl` stays tagged until the revert loop removes it.
 - **Owner area:** `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` (enum-match lowering:
   type of a generic enum payload binder used as a nested match subject), with the HIR/RTI pass that
   assigns payload binder types for `Poll<T>` patterns
@@ -65,3 +66,28 @@ Regression spec: `test/01_unit/lib/nogc_async_mut/io/async_buffer_poll_payload_w
 
 Once the payload binder type is substituted, revert the helpers and restore the direct
 `case Poll.Ready(result): match result:` form.
+
+## Fix (2026-11-02, current source only)
+
+Reproduced in current source (not only the frozen stage2): seed-hosted in-process HIR+MIR lowering of
+the repro reported `bare variant 'Ok' is ambiguous ... has type known non-enum type`. HIR already
+substitutes the arm's enum type (`Named(Poll, [Result<..>])`), but MIR's single-payload binder
+recorded the variant's DECLARED slot type `T` on the bound local, so the nested `match result:`
+subject resolved to a TypeParam and the bare-variant owner search saw two `Ok` owners.
+
+- `MirLowering.enum_type_param_names` records each enum's declared type-parameter names (bare and
+  runtime_name keys) at all three enum registration sites.
+- `substitute_enum_payload_type_params_v1` (declaration_enum_metadata_v1.spl) instantiates the
+  declared slot type with the arm's (fallback: subject's) type arguments via the HIR
+  `substitute_declared_pattern_type`; unknown names / arity mismatch / unresolved result keep the
+  declared type (today's path).
+- The single-payload bind in `lower_enum_match_flat` records the instantiated type as the binder's
+  local HIR type. Metadata only: payload decoding still uses the declared slot type.
+  The multi-slot tuple-payload path is unchanged (lane B4 builds on this helper).
+
+Spec: `test/01_unit/compiler/50.mir/poll_payload_typeparam_match_spec.spl` (seed: red 0/2 before,
+green 2/2 after).
+
+Revert loop: after a stage3 binary built from this source compiles `lib.nogc_async_mut.io.buffer`,
+restore the direct `case Poll.Ready(result): match result:` form at the tagged sites and confirm 0
+`go-to-end failed stage=mir` lines for buffer in the 8 GB-capped closure probe above.

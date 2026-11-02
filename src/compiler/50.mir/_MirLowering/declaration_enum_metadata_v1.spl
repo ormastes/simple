@@ -8,6 +8,7 @@ use compiler.mir.hir_declaration_summary_v1.*
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.hir.hir_lowering.pattern_enum_substitution.{substitute_declared_pattern_type, declared_pattern_slot_type_is_resolved}
 
 impl MirLowering:
     me declaration_enum_definition_v1(provider: MirHirModuleDeclarationsV1,
@@ -179,3 +180,50 @@ impl MirLowering:
         if write_bare:
             self.declaration_enum_payload_owner[declaration.name] = declaration.runtime_name
         self.ensure_declaration_enum_runtime_v1(enum_key)
+
+    me record_enum_type_param_names_v1(name: text, runtime_name: text, type_params: [HirTypeParam]):
+        """Remember an enum's declared type-parameter names in order.
+
+        Keyed by bare name and runtime_name like the payload maps. A
+        non-generic enum records an empty list (an overwrite by a same-bare
+        non-generic enum then disables substitution instead of guessing)."""
+        var names: [text] = []
+        for raw_param in type_params:
+            val param: HirTypeParam = raw_param
+            names = names.push(param.name)
+        if name != "":
+            self.enum_type_param_names[name] = names
+        if runtime_name != "":
+            self.enum_type_param_names[runtime_name] = names
+
+    me substitute_enum_payload_type_params_v1(owner_key: text, bare_owner: text, declared: HirType, instance: HirType?) -> HirType:
+        """Instantiate a generic enum payload slot type for one match subject.
+
+        `declared` is the variant's declared slot type (written in terms of
+        the enum's own params, e.g. `T` for `Poll<T>.Ready(T)`); `instance`
+        is the subject/arm type `E<A..>`. Returns `declared` with T:=A when
+        the enum's param names are known, the instance is a Named type with
+        exactly that many arguments, and the substitution is resolved.
+        Anything else returns `declared` unchanged (today's path). Bug
+        stage2_poll_payload_typeparam_match_2026-11-01."""
+        if declared == nil:
+            return declared
+        var names: [text] = []
+        if owner_key != "" and self.enum_type_param_names.has(owner_key):
+            names = self.enum_type_param_names[owner_key]
+        elif bare_owner != "" and self.enum_type_param_names.has(bare_owner):
+            names = self.enum_type_param_names[bare_owner]
+        if names.len() == 0:
+            return declared
+        if val inst = instance:
+            if inst == nil:
+                return declared
+            match inst.kind:
+                case HirTypeKind.Named(_, args):
+                    if args.len() != names.len():
+                        return declared
+                    val substituted = substitute_declared_pattern_type(declared, names, args)
+                    if declared_pattern_slot_type_is_resolved(substituted):
+                        return substituted
+                case _: ()
+        declared

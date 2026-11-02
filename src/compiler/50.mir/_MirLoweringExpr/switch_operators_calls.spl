@@ -4762,7 +4762,25 @@ impl MirLowering:
                     # has no struct layout from which to recover its methods.
                     if not exact_err_record and not exact_optional_record:
                         if val bound_payload_type = effective_payload_type:
-                            self.remember_local_hir_type(bound_payload.id, bound_payload_type, 0, 0)
+                            # A generic enum's declared slot (`Ready(T)`) is
+                            # instantiated with the arm/subject type argument
+                            # so a nested match on the binder resolves against
+                            # e.g. Result<A, E> (bug
+                            # stage2_poll_payload_typeparam_match_2026-11-01).
+                            # Metadata only: decoding above keeps the declared
+                            # slot type.
+                            val payload_arm: HirMatchArm = arms[enum_arm_srcidx[ci]]
+                            var payload_instance: HirType? = scrutinee_enum_type
+                            match payload_arm.pattern.kind:
+                                case Enum(payload_arm_type, _, _):
+                                    match payload_arm_type.kind:
+                                        case HirTypeKind.Named(_, payload_arm_args):
+                                            if payload_arm_args.len() > 0:
+                                                payload_instance = Some(payload_arm_type)
+                                        case _: ()
+                                case _: ()
+                            val instantiated_payload_type = self.substitute_enum_payload_type_params_v1(payload_owner_key, enum_name, bound_payload_type, payload_instance)
+                            self.remember_local_hir_type(bound_payload.id, instantiated_payload_type, 0, 0)
                     if result_match_candidate:
                         if enum_variants[ci] == "Ok": result_ok_payload = bound_payload
                         elif enum_variants[ci] == "Err": result_err_payload = bound_payload
