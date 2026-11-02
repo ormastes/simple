@@ -72,3 +72,38 @@ change, so no per-call benchmark was repeated.
 
 
 Revalidated 2026-11-02: still plausible because no resolution evidence in the body; receipt-to-handle binding is described as still open.
+
+## Analysis 2026-11-02 (lane p0f-2)
+
+Receipt-to-handle binding in current source (`src/lib/nogc_sync_mut/sffi/dynamic.spl`):
+
+- `SignatureVerifiedExactArtifactDynLib.load_signed_linux` verifies the signed
+  evidence (`verify_sffi_evidence_v2`, `admission.spl:238`), then calls
+  `ExactArtifactDynLib.load_exact_linux(path, admission.artifact_digest())`,
+  which hashes the sealed memfd snapshot and rejects a digest mismatch
+  (E-SFFI-004) before `dlopen`. The class pairs `sealed` and `admission`
+  with file-private fields, so a receipt cannot be re-paired with a different
+  handle outside this module, and `resolve_i64_checked` goes only through
+  `self.sealed`.
+- So the artifact-identity half of the binding already holds on Linux: the
+  handle that is opened is the exact byte image the receipt names.
+
+What is genuinely still open (not a bounded change, so no code fix here):
+
+1. `ExactArtifactDynLib.load_exact_linux` and `DynLib.load*` stay public
+   (`@unsafe`) and take a caller-supplied digest; there is no loader-minted
+   token tying the open handle's `lifetime_identity` to the admitting
+   verification result (provider-generation binding).
+2. No equivalent immutable-snapshot admission exists off Linux (the
+   non-Linux path returns E-SFFI-020; critical rejection is fail-closed
+   there, but no safe load exists).
+3. A mismatch regression spec cannot be written at the Simple level: the
+   carrier fields are file-private (that is the existing defence), and the
+   Linux sealed load needs a real provider `.so` and a Linux host, which this
+   Windows lane and the Rust seed cannot exercise.
+
+TODO(owner): mint a verifier-owned token (provider generation + artifact
+digest) at admission, store it in the `DynLib` registry entry
+(`dynlib_lifetime_register_v1`), and have `dynlib_lifetime_begin_v1` reject a
+token that does not match; add a Linux-only spec using a sealed test provider.
+Status stays open; severity P0 unchanged.

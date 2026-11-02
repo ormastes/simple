@@ -42,3 +42,16 @@ blocked by 16 separately owned unresolved runtime symbols, so criteria 2 and 3
 remain open and this record is not resolved.
 
 Revalidated 2026-11-02: still plausible because doc Status is PARTIAL (Phase 2 admitted; focused specs and Stage 3 pending).
+
+## Update 2026-11-02 (lane p0f-2)
+
+Fix confirmed present in source (commit 567e35070c9 "fix(bootstrap): retain
+split impl providers in stage2"): the explicit provider imports are
+`src/compiler/20.hir/hir_lowering/_Expressions/match_desugaring.spl:23`
+(`union_narrow_arms`) and `src/compiler/35.semantics/resolve.spl:26`
+(`resolve_lookup_helpers`). Focused spec added:
+`test/01_unit/app/cli/entry_closure_split_impl_spec.spl` (3/3 pass; fails 2/3 with the two edges removed; fixture
+`test/fixtures/entry_closure_split_impl/`) pins the two real import edges; `entry_closure_split_impl_walk_spec.spl` asserts the walker
+`_native_build_entry_closure` includes a split impl provider only when the
+type owner imports it (walker spec UNVERIFIED: the installed runtime timed out at 898 s loading the driver).
+Stage 3 verification (criterion 3) remains pending.
