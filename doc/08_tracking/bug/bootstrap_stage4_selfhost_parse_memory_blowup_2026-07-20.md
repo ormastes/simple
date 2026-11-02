@@ -2005,11 +2005,11 @@ work as downstream of it.
 
 Re-checked at `origin/release/1.0.0` (`8cb83fb9c14`). The bug is still OPEN.
 No commit since the 2026-09-22 audit shows native RSS staying flat across a
-full stage-4 closure. The cited path has changed: `frontend.spl:189-193` and
-`:216-219` now forward the caller's `streaming_scope` to
+full stage-4 closure. The cited path has changed: `frontend.spl:193` and
+`:220` now forward the caller's `streaming_scope` to
 `parse_and_build_module_scoped` (`_FlatAstBridge/module_assembly.spl:1617`),
 and that routes through `parse_and_build_module_with_scope_owner`. The only
-call that still hard-codes `false` is the provider fallback at
+call that still hard-codes `false` is the plain `parse_and_build_module` wrapper at
 `module_assembly.spl:1837`. This is not the s2-rebuild "stage2_next worker AV
 after load_sources" symptom: this bug is RSS growth with no crash.
 
@@ -2025,7 +2025,7 @@ check RSS.
 TODO: once a phase-3 artifact is admitted, run the native scale probe with
 heap_registry attribution (per-file RSS over at least 400 files, on both seed
 and self-host lanes). Then decide whether to close this bug or fix the
-retention owner. Also audit the `module_assembly.spl:1837` fallback.
+retention owner. Also audit the `parse_and_build_module` wrapper (`module_assembly.spl:1836-1837`).
 
 Checked against current policy/design: still valid, re-scoped to in-process
 multi-file parse loops. Under the one-process-per-file pipeline policy,
