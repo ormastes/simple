@@ -6,6 +6,7 @@
 # integrity digest changed on every call, and encode_v1 failed with NonCanonical.
 # These checks pin the failure shape: a deterministic digest, a successful encode, and `name=hex` rows.
 use std.spec.*
+use std.common.base_encoding.base64.{base64url_decode_strict}
 use compiler.common.structural_contracts.environment_variant_policy_handoff_v1.*
 use compiler.common.structural_contracts.environment_variant_policy_v1.*
 use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
@@ -63,14 +64,22 @@ describe "environment variant policy handoff text-try regression":
         expect(a.unwrap()).to_equal(b.unwrap())
 
     it "writes every row as name=value, with no address digits in front of a name":
-        val wire = environment_variant_policy_handoff_encode_v1(fixture()).unwrap()
-        expect(wire).to_contain("\ncli.parser_prefer=")
-        val lines = wire.split("\n")
-        expect(lines.len()).to_equal(46)
-        expect(lines[0]).to_equal("simple-environment-variant-policy-handoff-v1")
+        val encoded = environment_variant_policy_handoff_encode_v1(fixture()).unwrap()
+        # The handoff argument is base64url; the name=value rows live in the decoded wire.
+        val wire = base64url_decode_strict(encoded).unwrap()
+        expect(wire).to_end_with("\n")
+        var rows: [text] = []
+        for line in wire.split("\n"):
+            if line != "": rows.push(line)
+        expect(rows.len()).to_equal(45)
+        expect(rows[0]).to_equal("simple-environment-variant-policy-handoff-v1")
         var i = 1
-        while i < 45:
-            expect(lines[i]).to_contain("=")
+        while i < rows.len():
+            val row = rows[i]
+            expect(row).to_contain("=")
+            val first = row.char_at(0)
+            expect(first >= "0" and first <= "9").to_equal(false)
             i = i + 1
+        expect(rows[1]).to_start_with("cli.parser_prefer=")
         expect(wire).to_contain("\ntarget_cpu=")
-        expect(wire).to_contain("\nintegrity_digest=")
+        expect(rows[44]).to_start_with("integrity_digest=")
