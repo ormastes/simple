@@ -24,32 +24,64 @@ fn native_capsule_sorted_symbol_ids_v1(keys: [SymbolId]) -> [SymbolId]:
     # runtime_native.c:4002). So every swapped key used to come back as a fresh
     # object its own dict no longer resolved, and the caller's
     # `module.functions[symbol]` answered nil -- site 8's SEGV in
-    # serialize_mir_function. The comparison and the resulting permutation are
-    # the same as the bubble sort this replaces.
+    # serialize_mir_function.
     var ids: [i64] = []
-    var order: [i64] = []
     var i = 0
     while i < keys.len():
         ids.push(keys[i].id)
-        order.push(i)
-        i = i + 1
-    i = 0
-    while i < order.len():
-        var j = i + 1
-        while j < order.len():
-            if ids[j] < ids[i]:
-                val swapped_id = ids[i]
-                ids[i] = ids[j]
-                ids[j] = swapped_id
-                val swapped_index = order[i]
-                order[i] = order[j]
-                order[j] = swapped_index
-            j = j + 1
         i = i + 1
     var result: [SymbolId] = []
-    for index in order:
+    for index in native_capsule_sorted_order_v1(ids):
         result.push(keys[index])
     result
+
+# Ascending permutation of `ids`, ties kept in input order. This runs for every
+# function/constant/static/type map on each capsule MIR identity computation
+# (several times per module), so it is a bottom-up merge sort: O(n log n)
+# instead of the former O(n^2) exchange sort. For distinct ids (the normal case
+# for one module map) the permutation equals the exchange sort's; ties are stable.
+pub fn native_capsule_sorted_order_v1(ids: [i64]) -> [i64]:
+    val n = ids.len()
+    var order: [i64] = []
+    var scratch: [i64] = []
+    var i = 0
+    while i < n:
+        order.push(i)
+        scratch.push(i)
+        i = i + 1
+    var width = 1
+    while width < n:
+        var left = 0
+        while left < n:
+            var mid = left + width
+            if mid > n:
+                mid = n
+            var right = left + width + width
+            if right > n:
+                right = n
+            var a = left
+            var b = mid
+            var k = left
+            while k < right:
+                var take_left = false
+                if a < mid:
+                    if b >= right:
+                        take_left = true
+                    elif ids[order[a]] <= ids[order[b]]:
+                        take_left = true
+                if take_left:
+                    scratch[k] = order[a]
+                    a = a + 1
+                else:
+                    scratch[k] = order[b]
+                    b = b + 1
+                k = k + 1
+            left = right
+        val swapped = order
+        order = scratch
+        scratch = swapped
+        width = width + width
+    order
 
 pub fn native_capsule_type_def_identity_v1(type_def: MirTypeDef) -> text:
     var kind_identity = ""
