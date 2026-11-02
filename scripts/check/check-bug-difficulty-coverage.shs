@@ -1,0 +1,85 @@
+#!/bin/sh
+# check-bug-difficulty-coverage.shs
+#
+# Verifies that all non-closed bugs have at least one bug_difficulty row.
+# Non-closed status: open, investigating, fix-implemented-verification-pending
+# and any status that doesn't start with "closed", "fixed", "invalid", or "resolved-".
+#
+# Exit codes:
+#   0 = all non-closed bugs have difficulty rows
+#   1 = one or more non-closed bugs missing difficulty rows
+#   2 = error (file not found, parse error, etc.)
+
+set -u
+
+_db="doc/08_tracking/bug/bug_db.sdn"
+
+# Verify file exists
+[ -f "$_db" ] || { echo "ERROR: $_db not found" >&2; exit 2; }
+
+# Extract all non-closed bug IDs from both tables
+_non_closed=$(
+    awk -F',' '
+    /^bugs_active \|/ || /^bugs \|/ {
+        in_table = 1
+        next
+    }
+    /^\w+ \|/ {
+        in_table = 0
+        next
+    }
+    in_table && NF >= 3 {
+        # Fields: id, severity, status, ...
+        status = $3
+        gsub(/^[[:space:]]+/, "", status)
+        gsub(/[[:space:]]+$/, "", status)
+
+        # Check if status is closed/fixed/invalid/resolved-*
+        if (status !~ /^(closed|fixed|invalid|resolved-)/) {
+            id = $1
+            gsub(/^[[:space:]]+/, "", id)
+            print id
+        }
+    }
+    ' "$_db" | sort -u
+)
+
+# Extract all bug IDs that have difficulty rows
+_with_difficulty=$(
+    awk -F',' '
+    /^bug_difficulty \|/ {
+        in_table = 1
+        next
+    }
+    /^\w+ \|/ {
+        in_table = 0
+        next
+    }
+    in_table && NF >= 5 {
+        id = $1
+        gsub(/^[[:space:]]+/, "", id)
+        print id
+    }
+    ' "$_db" | sort -u
+)
+
+# Find non-closed bugs without difficulty rows
+_missing=$(
+    echo "$_non_closed" | while read _id; do
+        if ! echo "$_with_difficulty" | grep -q "^$_id$"; then
+            echo "$_id"
+        fi
+    done
+)
+
+# Report
+if [ -z "$_missing" ]; then
+    _count=$(echo "$_non_closed" | wc -l)
+    echo "PASS: all $_count non-closed bugs have difficulty rows"
+    exit 0
+else
+    _count=$(echo "$_missing" | wc -l)
+    echo "FAIL: $_count non-closed bugs missing difficulty rows:"
+    echo "$_missing" | sed 's/^/  /'
+    exit 1
+fi
