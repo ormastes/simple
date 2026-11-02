@@ -531,7 +531,12 @@ pub(crate) fn try_place_mutation_in_place(
             Some(resolved) => PlaceMutation::Object(class.clone(), resolved),
             None => return Ok(None),
         },
-        _ => return Ok(None),
+        other => {
+            if let Some(v) = other {
+                crate::interpreter::place::classinstance_tripwire("patterns::place_method_mutation", v);
+            }
+            return Ok(None);
+        }
     };
 
     let result = match kind {

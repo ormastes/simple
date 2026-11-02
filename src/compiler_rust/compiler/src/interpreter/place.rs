@@ -28,7 +28,7 @@
 //! `None` and callers keep their previous copy behavior.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use simple_parser::ast::{ClassDef, Expr, FunctionDef};
 
@@ -184,8 +184,40 @@ fn step_mut<'a>(slot: &'a mut Value, projection: &Projection) -> Option<&'a mut 
                 .get_mut(&key_string)
                 .map(Value::dict_entry_value_mut)
         }
-        _ => None,
+        (other, _) => {
+            classinstance_tripwire("place::step_mut", other);
+            None
+        }
     }
+}
+
+/// Diagnostic tripwire (class-value-identity bug, step 1 of its plan): report
+/// to stderr, once per site, when a `Value::ClassInstance` reaches a
+/// `Value::Object`-only wildcard arm. Enabled by
+/// `SIMPLE_INTERP_CLASSINSTANCE_TRIPWIRE=1`, read once; a single bool load when off.
+pub(crate) fn classinstance_tripwire(site: &'static str, value: &Value) {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let enabled = *ENABLED.get_or_init(|| std::env::var("SIMPLE_INTERP_CLASSINSTANCE_TRIPWIRE").as_deref() == Ok("1"));
+    tripwire_report(enabled, &SEEN, site, value);
+}
+
+/// Returns true when a report was emitted (enabled, a ClassInstance, first hit for `site`).
+fn tripwire_report(enabled: bool, seen: &Mutex<Vec<&'static str>>, site: &'static str, value: &Value) -> bool {
+    if !enabled {
+        return false;
+    }
+    let Value::ClassInstance(instance) = value else {
+        return false;
+    };
+    let mut seen = seen.lock().unwrap();
+    if seen.contains(&site) {
+        return false;
+    }
+    seen.push(site);
+    eprintln!("[classinstance-tripwire] ClassInstance `{}` reached Value::Object wildcard at {}", instance.class(), site);
+    true
 }
 
 /// Walk every projection, returning a mutable reference to the final storage.
@@ -252,7 +284,10 @@ fn store_last(container: &mut Value, projection: &Projection, value: Value) -> b
                 .insert(key.to_key_string(), Value::wrap_dict_entry(key, value));
             true
         }
-        _ => false,
+        (other, _) => {
+            classinstance_tripwire("place::store_last", other);
+            false
+        }
     }
 }
 
@@ -433,6 +468,18 @@ mod tests {
             fields: Arc::new(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect()),
         }
     }
+    #[test]
+    fn classinstance_tripwire_fires_once_per_site_only_when_enabled() {
+        use crate::value::ClassInstance;
+        let ci = Value::ClassInstance(Arc::new(ClassInstance::new("Inner".to_string(), HashMap::new())));
+        let seen = Mutex::new(Vec::new());
+        assert!(!tripwire_report(false, &seen, "t::site", &ci), "off: silent");
+        assert!(!tripwire_report(true, &seen, "t::site", &Value::Int(1)), "non-ClassInstance: silent");
+        assert!(tripwire_report(true, &seen, "t::site", &ci), "first hit reports");
+        assert!(!tripwire_report(true, &seen, "t::site", &ci), "once per site");
+        assert!(tripwire_report(true, &seen, "t::other", &ci), "new site reports");
+    }
+
 
     fn read(env: &Env, root: &str, path: &[&str]) -> Value {
         let mut current = env.get(root).unwrap().clone();
