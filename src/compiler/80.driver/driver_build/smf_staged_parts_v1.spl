@@ -1,0 +1,88 @@
+# SMF parts for staged / sharded OutputFormat.Both (default dynload).
+#
+# The SMF half of Both used to re-read the whole ctx.mir_modules after native
+# codegen (driver_aot_smf_output.spl collect_smf_bytes), which forced Both to
+# refuse staged codegen and MIR sharding and kept every MirModule resident
+# (#5791, doc/08_tracking/bug/stage2_whole_program_mir_memory_growth_2026-11-01.md).
+#
+# Per module the SMF needs only two byte strings: the backend object bytes and
+# the driver-manifest records. Those are recorded as each batch / shard emits
+# (keyed by module name) and assembled at the end in `Dict.keys()` order, which
+# is sorted by key on every engine (doc/07_guide/language/dict_iteration_order.md)
+# -- the same order the whole-program loop iterated -- so SMF bytes are
+# unchanged. A shard worker persists one part file per module next to its
+# ledger record; the link step reads them back.
+use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
+use compiler.common.driver_core_modes.{OutputFormat, driver_output_format_is_smf,
+    driver_output_format_is_self_contained}
+
+pub const SMF_STAGED_REFUSAL_V1: text = "output format re-reads MIR set"
+
+# Staging / sharding refusal for an output format. Both streams SMF parts;
+# SMF-only and self-contained still package from the whole MIR set (and would
+# pay a native codegen per batch they do not need), so they stay unstaged.
+pub fn smf_staged_output_format_refusal_v1(format: OutputFormat) -> text:
+    if driver_output_format_is_smf(format) or driver_output_format_is_self_contained(format):
+        return SMF_STAGED_REFUSAL_V1
+    ""
+
+pub fn smf_parts_assemble_objects_v1(objects: {text: [u8]}) -> [u8]:
+    var out: [u8] = []
+    for name in objects.keys():
+        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
+        out = bytes_concat_copy_v1(out, objects[name])
+    out
+
+pub fn smf_parts_assemble_manifests_v1(manifests: {text: [u8]}) -> [u8]:
+    var out: [u8] = []
+    for name in manifests.keys():
+        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
+        out = bytes_concat_copy_v1(out, manifests[name])
+    out
+
+# Part file: 8-byte little-endian object length, object bytes, manifest bytes.
+pub fn smf_part_encode_v1(object_bytes: [u8], manifest_bytes: [u8]) -> [u8]:
+    var out: [u8] = []
+    var length = object_bytes.len()
+    var i = 0
+    while i < 8:
+        out = out.push((length & 0xFF).to_u8())
+        length = length / 256
+        i = i + 1
+    out = bytes_concat_copy_v1(out, object_bytes)
+    bytes_concat_copy_v1(out, manifest_bytes)
+
+fn smf_part_object_len_v1(part: [u8]) -> i64:
+    if part.len() < 8:
+        return -1
+    var length = 0
+    var i = 7
+    while i >= 0:
+        length = length * 256 + (part[i] as i64)
+        i = i - 1
+    if length < 0 or length > part.len() - 8:
+        return -1
+    length
+
+pub fn smf_part_decode_ok_v1(part: [u8]) -> bool:
+    smf_part_object_len_v1(part) >= 0
+
+fn smf_part_slice_v1(part: [u8], start: i64, end: i64) -> [u8]:
+    var out: [u8] = []
+    var i = start
+    while i < end:
+        out = out.push(part[i])
+        i = i + 1
+    out
+
+pub fn smf_part_decode_object_v1(part: [u8]) -> [u8]:
+    val length = smf_part_object_len_v1(part)
+    if length < 0:
+        return []
+    smf_part_slice_v1(part, 8, 8 + length)
+
+pub fn smf_part_decode_manifest_v1(part: [u8]) -> [u8]:
+    val length = smf_part_object_len_v1(part)
+    if length < 0:
+        return []
+    smf_part_slice_v1(part, 8 + length, part.len())
