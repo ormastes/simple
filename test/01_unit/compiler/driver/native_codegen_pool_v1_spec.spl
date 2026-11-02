@@ -14,6 +14,7 @@ Plan: doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04
 use std.spec
 use compiler.driver.driver_build.native_codegen_pool_v1.{
     native_codegen_pool_workers_v1, native_codegen_meminfo_available_kib_v1,
+    native_codegen_host_cpus_for_v1, native_codegen_worker_estimate_for_v1,
     native_codegen_kib_field_v1, native_codegen_receipt_encode_v1,
     native_codegen_receipt_publish_v1, native_codegen_receipt_path_v1,
     native_codegen_job_ir_path_v1, native_codegen_job_object_path_v1,
@@ -72,6 +73,21 @@ describe "native codegen pool worker admission":
         step("no budget and no measurable headroom")
         val n = native_codegen_pool_workers_v1(80, 0, 100, 0, 0, 2 * GIB)
         expect(n).to_equal(NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1)
+
+describe "native codegen pool default-config concurrency":
+    it "admits more than one worker for a multi-module build with default config":
+        step("driver default: requested threads 0, 8 detected cpus, no host limit, 12 uncached modules")
+        val cpus = native_codegen_host_cpus_for_v1(8, 0)
+        val est = native_codegen_worker_estimate_for_v1(0, 0)
+        step("memory unknown (no budget, no headroom): capped, never serial")
+        val unknown = native_codegen_pool_workers_v1(cpus, 0, 12, 0, 0, est)
+        expect(unknown > 1).to_equal(true)
+        step("memory known and plentiful (64 GiB headroom): cpu-bound")
+        val known = native_codegen_pool_workers_v1(cpus, 0, 12, 0, 64 * GIB, est)
+        expect(known > 1).to_equal(true)
+
+    it "stays serial for a single uncached module":
+        expect(native_codegen_pool_workers_v1(8, 0, 1, 0, 64 * GIB, 2 * GIB)).to_equal(1)
 
 describe "native codegen pool memory probe parsing":
     it "reads MemAvailable from /proc/meminfo text":
