@@ -109,8 +109,8 @@ codegen or MIR sharding. The SMF half needed only two byte strings per module
 module as each staged batch or shard emits
 (`src/compiler/80.driver/driver_build/smf_staged_parts_v1.spl`), persisted as
 `<ledger record>.smfpart` by shard workers, and assembled in `Dict.keys()`
-(sorted) order -- the order the whole-program loop iterated -- so SMF bytes are
-unchanged. SMF-only and self-contained formats still hold the full set.
+(sorted) order -- the order the whole-program loop iterated -- so the same MIR yields
+the same SMF bytes (per-batch MIR passes apply as for native objects). SMF-only and self-contained formats still hold the full set.
 Spec: `test/01_unit/compiler/driver/smf_staged_parts_spec.spl`.
 Takes effect after the next stage2 rebuild; the `--mode one-binary` launch
 workaround above remains valid until then.
