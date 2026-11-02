@@ -1,6 +1,6 @@
 # mono_return_context_and_fixed_nominal_binding_2026-10-05
 
-Status: OPEN. Workaround source prepared; native validation UNRUN.
+Status: CLOSED 2026-11-02 (stale, code path deleted): monomorphization was deleted by 200a05f5bc8 (`src/compiler/40.mono/` no longer exists; see monomorphization_deleted_2026-10-31.md), and this defect was reproduced only in the deleted module(s). `infer_call_type_args` and the E-MONO-032 gate no longer exist in src.
 
 P3 p3-stability30577-cranelift40 naturally terminated with exit 1 after 1142
 successful HIR modules and 1142 cold receipts. Worker stderr file
