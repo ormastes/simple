@@ -1,0 +1,44 @@
+#!/bin/sh
+# resolve_llvm_nm: print the path/name of a usable llvm-nm, or return 1.
+# Order: $NM (explicit), llvm-nm, versioned llvm-nm-NN (highest first),
+# $llvm_root/bin/llvm-nm from host config (scripts/setup/host-env.shs --get
+# llvm_root; override script with LLVM_NM_HOST_ENV), llvm-mingw UCRT under
+# $HOME/.simple/toolchains. Never succeeds without a tool that runs.
+_rln_ok() { [ -n "$1" ] && "$1" --version >/dev/null 2>&1; }
+
+resolve_llvm_nm() {
+    if [ -n "${NM:-}" ]; then
+        if _rln_ok "$NM"; then printf '%s\n' "$NM"; return 0; fi
+        return 1
+    fi
+    if _rln_ok llvm-nm; then printf 'llvm-nm\n'; return 0; fi
+    _rln_dirs=$(printf '%s' "${PATH:-}" | tr ':' '\n')
+    _rln_vers=$(for _d in $_rln_dirs; do
+        [ -d "$_d" ] || continue
+        for _f in "$_d"/llvm-nm-[0-9]*; do
+            [ -e "$_f" ] || continue
+            _b=${_f##*/}; _b=${_b%.exe}
+            printf '%s\n' "${_b#llvm-nm-}"
+        done
+    done | grep -E '^[0-9]+$' | sort -rnu)
+    for _v in $_rln_vers; do
+        if _rln_ok "llvm-nm-$_v"; then printf 'llvm-nm-%s\n' "$_v"; return 0; fi
+    done
+    _rln_script=${LLVM_NM_HOST_ENV:-}
+    if [ -z "$_rln_script" ]; then
+        _rln_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE:-$0}")/../.." 2>/dev/null && pwd)
+        _rln_script="$_rln_root/scripts/setup/host-env.shs"
+    fi
+    if [ -f "$_rln_script" ]; then
+        _rln_llvm=$(sh "$_rln_script" --get llvm_root 2>/dev/null | head -1)
+        for _c in "$_rln_llvm/bin/llvm-nm" "$_rln_llvm/bin/llvm-nm.exe"; do
+            [ -n "$_rln_llvm" ] && [ -f "$_c" ] && _rln_ok "$_c" && { printf '%s\n' "$_c"; return 0; }
+        done
+    fi
+    for _d in "${HOME:-/nonexistent}"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin; do
+        for _c in "$_d/llvm-nm.exe" "$_d/llvm-nm"; do
+            [ -f "$_c" ] && _rln_ok "$_c" && { printf '%s\n' "$_c"; return 0; }
+        done
+    done
+    return 1
+}
