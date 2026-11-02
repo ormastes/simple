@@ -2,7 +2,7 @@
 
 - **ID:** s3_parse_selected_result_freed_by_transient_scope_2026-11-02
 - **Priority:** P1 (every stage3 parse-fiber and hir-shard child panics, so the hello smoke fails)
-- **Status:** open (stage2-only miscompile, 2026-11-02 static verdict). Current source is not buggy; the tagged re-box workaround stays until a stage3 is rebuilt by a correct stage2.
+- **Status:** fix-implemented-verification-pending (tagged re-box workaround merged in PR #5818; stage2-only miscompile, 2026-11-02 static verdict). Current source is not buggy; the tagged re-box workaround stays until a stage3 is rebuilt by a correct stage2.
 
 ## Symptom
 `panic: called `.unwrap()` on an Err Result` in s3 children (`[parse-shard] shard=1/4 FAILED`, `[hir-shard] failed_workers=4`).
@@ -72,3 +72,12 @@ still pending: run this spec with the next correct stage2 or stage3 test runner.
 
 Removal condition (revised): a stage3 built by a stage2 from source at or after df3a14d194b, without the re-box, returns
 valid Results from `parse_full_frontend_selected_v1`, and the behavioral spec passes natively.
+
+## Verification status (2026-11-02)
+The tagged re-box workaround is merged on release/1.0.0 (PR #5818, commit 54a9ebe58a9, `# @workaround bug=s3_parse_selected_...` in `src/compiler/80.driver/driver_source_parse_selected.spl`). It is unverified until a stage3 is built by the combined3p run. The status is fix-implemented-verification-pending, not closed.
+
+Repro / verification steps:
+1. Build stage3 from release/1.0.0 with the Windows stage2, as for the phase-3 hello smoke.
+2. Run the stage3 hello smoke (parse-fiber and hir-shard children). Pass: no `called .unwrap() on an Err Result` panic from `driver_parse_shard_entry.spl:293` or `driver_source_parse_retained.spl:242`.
+3. Optional diagnostic: `SIMPLE_P3_PARSE_DIAG=1` prints is_ok/is_err before and after the transient scope ends.
+4. Removal: once a stage3 built by a correct stage2 passes without the re-box, drop the workaround and close this bug.
