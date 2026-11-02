@@ -1,0 +1,150 @@
+# @cover src/compiler/80.driver/driver_build/native_codegen_pool_v1.spl 80%
+# @cover src/compiler/70.backend/backend/llvm_backend_tools.spl 5%
+# @req REQ-COMPILER-DRIVER-PARALLEL-002
+"""
+## Purpose and audience
+Purpose: specify the native codegen process pool's admission (worker count
+from cores, declared tree budget, live headroom minus the 24 GiB commit
+floor), its SDN receipt publication, and the shared llc argv that keeps a
+pooled object byte-identical to the serial lane's.
+Audience: compiler engineers who maintain native-build step 5.
+Plan: doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md (P2)
+"""
+
+use std.spec
+use compiler.driver.driver_build.native_codegen_pool_v1.{
+    native_codegen_pool_workers_v1, native_codegen_meminfo_available_kib_v1,
+    native_codegen_kib_field_v1, native_codegen_receipt_encode_v1,
+    native_codegen_receipt_publish_v1, native_codegen_receipt_path_v1,
+    native_codegen_job_ir_path_v1, native_codegen_job_object_path_v1,
+    native_codegen_command_line_v1, native_codegen_job_log_path_v1,
+    NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1, NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1}
+use compiler.backend.llvm_backend_tools.{llvm_llc_object_argv_v1}
+use compiler.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use std.io_runtime.{dir_create_all, dir_exists, file_read, getpid}
+
+val GIB: i64 = 1048576
+
+fn pool_fixture(label: text) -> text:
+    val dir = "build/tmp/native_codegen_pool/{getpid()}-{label}"
+    expect(dir_exists(dir)).to_equal(false)
+    expect(dir_create_all(dir)).to_equal(true)
+    dir
+
+describe "native codegen pool worker admission":
+    it "uses every core when memory is plentiful":
+        step("80 cores, 100 jobs, 1 TiB budget and headroom, 2 GiB workers")
+        val n = native_codegen_pool_workers_v1(80, 0, 100, 1024 * GIB, 1024 * GIB, 2 * GIB)
+        expect(n).to_equal(80)
+
+    it "never admits more workers than jobs":
+        step("80 cores but only 3 uncached modules")
+        expect(native_codegen_pool_workers_v1(80, 0, 3, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(3)
+        expect(native_codegen_pool_workers_v1(80, 0, 0, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(0)
+
+    it "honours an explicit thread request as an upper bound":
+        step("--threads 6 on an 80-core host")
+        expect(native_codegen_pool_workers_v1(80, 6, 100, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(6)
+
+    it "clamps by the declared tree budget":
+        step("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB = 20 GiB at 2 GiB per worker")
+        expect(native_codegen_pool_workers_v1(80, 0, 100, 20 * GIB, 0, 2 * GIB)).to_equal(10)
+
+    it "keeps the 24 GiB commit floor free":
+        step("40 GiB headroom leaves 16 GiB above the floor: 8 workers of 2 GiB")
+        expect(NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1).to_equal(24 * GIB)
+        expect(native_codegen_pool_workers_v1(80, 0, 100, 0, 40 * GIB, 2 * GIB)).to_equal(8)
+        step("Headroom below the floor admits only the serial lane")
+        expect(native_codegen_pool_workers_v1(80, 0, 100, 0, 20 * GIB, 2 * GIB)).to_equal(1)
+
+    it "takes the tightest of budget and headroom":
+        step("budget allows 10, headroom allows 4")
+        expect(native_codegen_pool_workers_v1(80, 0, 100, 20 * GIB, 32 * GIB, 2 * GIB)).to_equal(4)
+
+    it "prices workers with the per-worker estimate":
+        step("10 GiB per worker (heaviest measured module) under a 64 GiB budget")
+        expect(native_codegen_pool_workers_v1(80, 0, 100, 64 * GIB, 0, 10 * GIB)).to_equal(6)
+
+    it "never admits all cores when memory is unknown":
+        step("no budget and no measurable headroom")
+        val n = native_codegen_pool_workers_v1(80, 0, 100, 0, 0, 2 * GIB)
+        expect(n).to_equal(NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1)
+
+describe "native codegen pool memory probe parsing":
+    it "reads MemAvailable from /proc/meminfo text":
+        step("Parse a realistic meminfo body")
+        val body = "MemTotal:       131072000 kB\nMemFree:         1000 kB\nMemAvailable:   65536000 kB\nBuffers: 1 kB\n"
+        expect(native_codegen_meminfo_available_kib_v1(body)).to_equal(65536000)
+        expect(native_codegen_meminfo_available_kib_v1("MemTotal: 5 kB\n")).to_equal(0)
+
+    it "treats malformed KiB fields as unset":
+        step("Only positive integers count")
+        expect(native_codegen_kib_field_v1(" 4096 ")).to_equal(4096)
+        expect(native_codegen_kib_field_v1("")).to_equal(0)
+        expect(native_codegen_kib_field_v1("-5")).to_equal(0)
+        expect(native_codegen_kib_field_v1("lots")).to_equal(0)
+
+describe "native codegen pool receipts":
+    it "encodes an SDN receipt with the module name escaped":
+        step("Encode a PASS receipt")
+        val body = native_codegen_receipt_encode_v1("app.\"q\"", 3, "PASS", 0, 1234, 10, 99)
+        expect(body).to_start_with("native_codegen_receipt_v1:\n")
+        expect(body).to_contain("  module: \"app.\\\"q\\\"\"\n")
+        expect(body).to_contain("  worker: 3\n")
+        expect(body).to_contain("  status: \"PASS\"\n")
+        expect(body).to_contain("  object_bytes: 1234\n")
+
+    it "publishes receipts atomically and verifies the read-back":
+        step("Publish, then republish a different body over it")
+        val ledger = pool_fixture("receipt")
+        val first = native_codegen_receipt_encode_v1("m.a", 0, "PASS", 0, 1, 0, 1)
+        expect(native_codegen_receipt_publish_v1(ledger, "m.a", first)).to_equal(true)
+        expect(file_read(native_codegen_receipt_path_v1(ledger, "m.a"))).to_equal(first)
+        val second = native_codegen_receipt_encode_v1("m.a", 1, "FAILED", 1, -1, 0, 2)
+        expect(native_codegen_receipt_publish_v1(ledger, "m.a", second)).to_equal(true)
+        expect(file_read(native_codegen_receipt_path_v1(ledger, "m.a"))).to_equal(second)
+
+    it "keys staged files by job index":
+        step("IR and object paths are per job, never per process")
+        expect(native_codegen_job_ir_path_v1("/s", 7)).to_equal("/s/job-7.ll")
+        expect(native_codegen_job_object_path_v1("/s", 7)).to_equal("/s/job-7.o")
+
+describe "shared llc argv":
+    it "spells the serial default command's tokens":
+        step("Default lane: target arguments, then opt level, then -o out in")
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.X86_64, nil)
+        val argv = llvm_llc_object_argv_v1(config, OptimizationLevel.Speed, false, false, "o.o", "i.ll")
+        expect(argv[0]).to_equal("--filetype=obj")
+        expect(argv[1]).to_equal("--relocation-model=pic")
+        expect(argv[2]).to_equal("--function-sections")
+        expect(argv[3]).to_equal("--data-sections")
+        expect(argv[4]).to_start_with("-mtriple=")
+        expect(argv[5]).to_start_with("-mcpu=")
+        expect(argv[argv.len() - 4]).to_equal("-O2")
+        expect(argv[argv.len() - 3]).to_equal("-o")
+        expect(argv[argv.len() - 2]).to_equal("o.o")
+        expect(argv[argv.len() - 1]).to_equal("i.ll")
+
+    it "omits target arguments in the bootstrap form":
+        step("Bootstrap lane: exactly the seven tokens the serial command used")
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.X86_64, nil)
+        val argv = llvm_llc_object_argv_v1(config, OptimizationLevel.Speed, true, false, "o.o", "i.ll")
+        expect(argv.len()).to_equal(7)
+        expect(argv.join(" ")).to_equal("--filetype=obj --relocation-model=pic --function-sections --data-sections -o o.o i.ll")
+
+    it "places features after the input in the direct form":
+        step("Retained/SimpleOS lane: input precedes -mattr/-target-abi")
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.X86_64, nil)
+        val argv = llvm_llc_object_argv_v1(config, OptimizationLevel.Speed, true, true, "o.o", "i.ll")
+        expect(argv[4]).to_start_with("-mtriple=")
+        expect(argv[6]).to_equal("-O2")
+        expect(argv[7]).to_equal("-o")
+        expect(argv[9]).to_equal("i.ll")
+
+describe "native codegen pool child command":
+    it "runs the serial lane's command line with output captured to the job log":
+        step("Same tokens as compile_ir_to_object's shell command, redirected")
+        val line = native_codegen_command_line_v1("llc", ["--filetype=obj", "-o", "o.o", "i.ll"], "s/job-0.log")
+        expect(line).to_equal("llc --filetype=obj -o o.o i.ll > s/job-0.log 2>&1")
+        expect(native_codegen_job_log_path_v1("/s", 2)).to_equal("/s/job-2.log")
