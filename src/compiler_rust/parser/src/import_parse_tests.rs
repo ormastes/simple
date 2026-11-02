@@ -150,6 +150,21 @@ mod tests {
     }
 
     #[test]
+    fn test_relative_use_with_brace_member_list() {
+        // relative_use_with_brace_member_list_fails_to_parse_2026-08-17
+        for src in [
+            "use .sub.mod.{helper}\n",
+            "use .vhdl.vhdl_builder.{VhdlBuilder}\n",
+            "use .sub.mod.{A, B}\n",
+            "use .sub.mod\n",
+            "use sub.mod.{helper}\n",
+        ] {
+            let r = try_parse(src);
+            assert!(r.is_ok(), "{:?}: {:?}", src, r);
+        }
+    }
+
+    #[test]
     fn test_dot_question_in_if() {
         let r = try_parse("fn foo(x: Option<i64>):\n    if x.?:\n        42\n");
         assert!(r.is_ok(), "if x.?: {:?}", r);

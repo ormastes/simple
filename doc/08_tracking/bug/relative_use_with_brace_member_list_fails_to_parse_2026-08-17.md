@@ -1,5 +1,7 @@
 # Bug: `use .relative.path.{Name}` fails to parse — the seed cannot parse its own compiler source
 
+> **CLOSED 2026-11-02 (lane a6dffc9c/p12-2): FIXED.** Checked against current policy/design: still valid as filed, and now fixed (the seed parser must accept `use .a.b.{C}`; no policy obsoletes it). Fix is the core.rs statement-dispatcher leading-Dot repair, documented in commit 5b3f192e141 (cherry-pick of 6f40cbf1439, with ablation). Regression test added: `cargo test -p simple-parser --lib relative_use` -> `import_parse_tests::tests::test_relative_use_with_brace_member_list` ok (1 passed), covering `use .sub.mod.{helper}`, `.vhdl.vhdl_builder.{VhdlBuilder}`, `{A, B}`, no-brace relative and absolute braces. The OPEN status below is historical.
+
 - **ID:** relative_use_with_brace_member_list_fails_to_parse_2026-08-17
 - **Severity:** P1 — **bootstrap-blocking**, not a cosmetic lint gap. The Rust
   seed built from the current `origin/main` cannot parse

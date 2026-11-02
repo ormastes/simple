@@ -1,4 +1,6 @@
 # The `collections.rs` clobber is ONE commit replayed 6 times — and it is still armed
+
+> **CLOSED 2026-11-02 (lane a6dffc9c/p12-2): FIXED.** Checked against current policy/design: re-scoped to a process/guard concern, with no code defect left. The 2026-08-17 note below records a healthy tree (`collections.rs` 6200 lines, `HeapObjectType::UInt` consistent) and states the recurrence is covered fail-closed by two existing pre-push guards (`check-runtime-api-regression-push.shs` symbol delta and the absolute new-tip `cargo check` guard), with "no new guard warranted". Closed on that evidence; not re-measured here.
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

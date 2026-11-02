@@ -1339,4 +1339,25 @@ mod lock_value_roundtrip_tests {
         let read = rt_rwlock_read_fn(std::slice::from_ref(&rwlock)).expect("rwlock_read");
         assert_eq!(read, probe_struct(5));
     }
+
+    /// RwLock counterpart of the text round trip: read and write must both
+    /// hand back the stored text, and `set` must replace it.
+    #[test]
+    fn rwlock_protecting_text_reads_and_writes_back_the_same_text() {
+        let rwlock = rt_rwlock_new_fn(&[Value::text("hello".to_string())]).expect("rwlock_new");
+        assert!(!matches!(rwlock, Value::Nil), "rwlock handle must not be nil");
+        match rt_rwlock_read_fn(std::slice::from_ref(&rwlock)).expect("rwlock_read") {
+            Value::Str(s) => assert_eq!(&*s, "hello"),
+            other => panic!("read: expected text, got {:?}", other),
+        }
+        match rt_rwlock_write_fn(std::slice::from_ref(&rwlock)).expect("rwlock_write") {
+            Value::Str(s) => assert_eq!(&*s, "hello"),
+            other => panic!("write: expected text, got {:?}", other),
+        }
+        rt_rwlock_set_fn(&[rwlock.clone(), Value::text("world".to_string())]).expect("rwlock_set");
+        match rt_rwlock_read_fn(std::slice::from_ref(&rwlock)).expect("rwlock_read") {
+            Value::Str(s) => assert_eq!(&*s, "world"),
+            other => panic!("read after set: expected text, got {:?}", other),
+        }
+    }
 }
