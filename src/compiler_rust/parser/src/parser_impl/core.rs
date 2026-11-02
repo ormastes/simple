@@ -1218,12 +1218,22 @@ impl<'a> Parser<'a> {
         // Handle by checking if next token is a valid statement-start token
         // instead of an Indent. If so, parse a single-statement body.
         if !self.check(&TokenKind::Indent) {
+            // Line of the header's terminating Newline (already consumed by
+            // the caller). A flat body is only legal on the very next line:
+            // comment-only / blank lines emit no Indent, so a sibling
+            // statement after them must NOT be taken as the body. See
+            // doc/08_tracking/bug/
+            // comment_only_block_swallows_next_statement_2026-10-04.md
+            let header_line = self.previous.span.line;
+
             // Skip blank lines before checking
             while self.check(&TokenKind::Newline) {
                 self.advance();
             }
 
-            if self.is_statement_start() {
+            let flat_body_adjacent = self.current.span.line <= header_line + 1;
+
+            if flat_body_adjacent && self.is_statement_start() {
                 let start_span = self.current.span;
                 let stmt = self.parse_item()?;
                 let mut statements = vec![stmt];

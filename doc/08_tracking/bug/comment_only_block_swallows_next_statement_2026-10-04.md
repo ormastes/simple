@@ -68,3 +68,18 @@ calling `parse_module`/`parser_has_errors`).
 
 Rust seed (`parser_impl/core.rs` `parse_block_after_newline_allowing_empty`) is
 left unchanged: the rule above allows the seed to tolerate it; not rebuilt here.
+
+## Seed note (2026-11-02, lane a6dffc9c/p12-5)
+
+Checked against current policy/design: still valid as written (seed parity with
+PR #5893). The Rust seed had the same defect, confirmed red:
+`if false:\n    # c\nprint(1)` parsed OK with `print(1)` as the `if` body.
+Fixed in `src/compiler_rust/parser/src/parser_impl/core.rs`
+`parse_block_after_newline_allowing_empty`: the flat body is taken only when
+the first body token is on the line immediately after the header Newline;
+otherwise it falls through to `expect(Indent)` ("expected indented block").
+Gate: `src/compiler_rust/parser/tests/comment_only_block_gate.rs` (6 tests).
+A scan of `src/compiler`, `src/lib`, `src/app` (14,991 .spl files) found no
+gapped flat body. Four other parser test targets fail identically with and
+without this change (error_recovery_test, expression_tests,
+kernel_relocation_consumers_strict_parse, test_decorator_helpers): pre-existing.
