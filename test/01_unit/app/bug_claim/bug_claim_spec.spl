@@ -19,6 +19,8 @@ fn _dir(n: text) -> text:
 val T0 = "2026-11-02T05:40:00Z"
 val T_FRESH = "2026-11-02T06:40:00Z"
 val T_STALE = "2026-11-03T06:00:01Z"
+val T_FRESH2 = "2026-11-02T06:50:00Z"
+val T_FRESH3 = "2026-11-02T07:00:00Z"
 
 fn _setup(n: text):
     val FIXD = _dir(n)
@@ -117,8 +119,8 @@ describe "bug-claim.shs claim protocol":
         expect(_db("t6")).to_contain("BUG-B, P2, investigating,")
         val (st, _e2, _c2) = _bc("t6", T_FRESH, "status BUG-B")
         expect(st).to_contain("state=released")
-        val (_o3, _e3, _c3) = _bc("t6", T_FRESH, "claim BUG-B aaaa1111/x")
-        val (dn, _e4, _c4) = _bc("t6", T_FRESH, "done BUG-B aaaa1111/x 5900")
+        val (_o3, _e3, _c3) = _bc("t6", T_FRESH2, "claim BUG-B aaaa1111/x")
+        val (dn, _e4, _c4) = _bc("t6", T_FRESH3, "done BUG-B aaaa1111/x 5900")
         expect(dn).to_contain("EXIT=0")
         expect(_db("t6")).to_contain("BUG-B, P2, fixed,")
         expect(_db("t6")).to_contain("PR #5900")
@@ -225,3 +227,14 @@ describe "check-dbs accepts fixing":
         ])
         expect(out.contains("fixing")).to_equal(false)
         expect(out.contains("parse_error")).to_equal(false)
+
+describe "merged claim rows":
+    it "status reports the earliest live claim as holder after a git merge of two claims":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t15")
+        val (_o, _e, _c) = rt_process_run("/bin/sh", ["-c",
+            "printf '    BUG-A, fixing, later000/b, 2026-11-02T06:00:00Z, 2026-11-02T06:00:00Z, open, \"\"\n    BUG-A, fixing, early000/a, 2026-11-02T05:50:00Z, 2026-11-02T05:50:00Z, open, \"\"\n' >> " + _dir("t15") + "/bug_db.sdn"])
+        val (st, _e2, _c2) = _bc("t15", "2026-11-02T06:30:00Z", "status BUG-A")
+        expect(st).to_contain("session=early000/a")
+        val (hb, _e3, _c3) = _bc("t15", "2026-11-02T06:30:00Z", "heartbeat BUG-A later000/b")
+        expect(hb).to_contain("EXIT=3")

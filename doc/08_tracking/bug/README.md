@@ -103,7 +103,7 @@ round-trips a row through that enum writes `investigating` back; re-run `claim` 
 - **claimed_at / heartbeat_at**: ISO 8601 UTC, for example `2026-11-02T05:40:00Z`
 - **prev_status**: main-table status before the claim (restored on release/reap)
 - **note**: quoted free text (`PR #N` for done, `abandoned (reaped)` for reaped)
-- Multiple rows per bug are allowed; the newest `claimed_at` wins (history is kept).
+- Multiple rows per bug are allowed (history is kept). Holder rule, identical in the script and bug-gen: the earliest `fixing` row with `claimed_at` strictly after the newest `released`/`done` row; with none, the newest row is the current state. A stale takeover first appends a `released` (session `takeover`) row.
 - A `fixing` claim with `max(claimed_at, heartbeat_at)` older than 24 h is STALE: it may be
   taken over, and `reap` reverts it. Closed bugs need no claim.
 
