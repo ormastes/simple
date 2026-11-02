@@ -1,0 +1,59 @@
+name: XRay Windows native verification (experimental)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/xray-windows-native-verification.yml'
+      - 'test/integration/xray/**'
+
+permissions:
+  contents: read
+
+jobs:
+  native-security-prerequisites:
+    name: Native Windows ${{ matrix.arch }} security probe
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            vcvars: amd64
+            cetflags: /CETCOMPAT
+          - arch: arm64
+            runner: windows-11-arm
+            vcvars: arm64
+            cetflags: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile and execute under native MSVC and Windows
+        shell: cmd
+        run: |
+          echo XRAY_PROBE runner=${{ matrix.runner }} intended_arch=${{ matrix.arch }}
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath > "%TEMP%\xray_vs_path.txt"
+          set /p VSDIR=<"%TEMP%\xray_vs_path.txt"
+          if not defined VSDIR exit /b 2
+          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b 2
+          cl /nologo /std:c++17 /EHsc /O2 /guard:cf /Fe:xray_windows_probe.exe test\integration\xray\windows_native_probe.cpp /link /GUARD:CF /DYNAMICBASE ${{ matrix.cetflags }}
+          if errorlevel 1 exit /b 3
+          xray_windows_probe.exe
+          if errorlevel 1 exit /b 4
+
+      - name: Examine PE security metadata
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem -Path "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
+            Where-Object { $_.FullName -match 'Host' } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if ($dumpbin) {
+            & $dumpbin /headers /loadconfig xray_windows_probe.exe |
+              Select-String -Pattern 'machine|Guard|CF Instrumented|FID table|CET|Load Configuration'
+          } else {
+            Write-Host 'XRAY_PROBE dumpbin unavailable: PE metadata UNVERIFIED'
+          }
