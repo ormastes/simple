@@ -1,0 +1,81 @@
+#!/bin/sh
+# p3-targeted-stage2-build.shs - targeted object rebuild driver (frozen stage2,
+# --emit-object). Port of C:/dev/p3new/cgprobe/probe_obj40.ps1 + tools/measure.ps1.
+# Usage: sh scripts/bootstrap/p3-targeted-stage2-build.shs NAME ENTRY [--heavy|--probe]
+#   --heavy  cap = heavy_cap_gb, MIR shard count 8 (default)
+#   --probe  cap = probe_cap_gb
+# Env: P3_STAGE2_EXE (default build/p3/stage2), P3_SHARDS (parse shard max, default 1),
+#      P3_OUT_ROOT (default build/p3/targeted), P3_PTREE_SHADOW (SIMPLE_PROJECT_ROOT),
+#      P3_LIMIT_S (default 3600), P3_DRY_RUN=1 (print env + command, run nothing).
+# Kills only its own process (by PID) on cap/time-limit breach.
+
+set -u
+p3_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+NAME=${1:-}; ENTRY=${2:-}; MODE=${3:---heavy}
+if [ -z "$NAME" ] || [ -z "$ENTRY" ]; then
+    echo "p3-targeted-stage2-build: NAME and ENTRY are required" >&2; exit 2
+fi
+case "$MODE" in --heavy|--probe) ;; *) echo "mode must be --heavy or --probe" >&2; exit 2;; esac
+
+caps=$(sh "$p3_dir/p3-host-caps.shs") || exit 2
+cap_of() { printf '%s\n' "$caps" | sed -n "s/^$1=//p"; }
+if [ "$MODE" = "--heavy" ]; then CAP_GB=$(cap_of heavy_cap_gb); else CAP_GB=$(cap_of probe_cap_gb); fi
+HEAVY_GB=$(cap_of heavy_cap_gb)
+
+# Workarounds for the stage2 parse-shard child AV on large closures, see
+# doc/08_tracking/bug/stage2_parse_shard_child_av_large_closure_2026-11-02.md
+export SIMPLE_PARSE_SHARDING=0
+export SIMPLE_FILE_FIBERS=0
+export SIMPLE_PARSE_SHARD_MAX=${P3_SHARDS:-1}
+export SIMPLE_FILE_WORKERS=0
+export SIMPLE_NATIVE_BUILD_THREADS=8
+export SIMPLE_NATIVE_INCREMENTAL=1
+export SIMPLE_SCV_INVENTORY_COLD_INIT=1
+export SIMPLE_SCV_FREEZE_FALLBACK=1
+if [ "$MODE" = "--heavy" ]; then
+    export SIMPLE_MIR_SHARD_COUNT=8
+    export SIMPLE_MIR_SHARD_WORKER_KB=30000000
+    export SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$(( (HEAVY_GB - 10) * 1048576 ))
+fi
+if [ -n "${P3_PTREE_SHADOW:-}" ]; then
+    export SIMPLE_PROJECT_ROOT=$P3_PTREE_SHADOW
+    export SIMPLE_RT_OBJ_CACHE_DIR=$P3_PTREE_SHADOW.rtcache
+fi
+
+EXE=${P3_STAGE2_EXE:-build/p3/stage2}
+OUT=${P3_OUT_ROOT:-build/p3/targeted}/$NAME
+LIMIT=${P3_LIMIT_S:-3600}
+set -- native-build --entry-closure --entry "$ENTRY" --runtime-bundle core-c-bootstrap \
+    --source src/lib --source src/compiler --source src/app --backend llvm --threads 8 \
+    --keep-going --go-to-end --emit-object --cache-dir "$OUT/cache" -o "$OUT/out.o"
+
+if [ "${P3_DRY_RUN:-0}" = "1" ]; then
+    echo "cap_gb=$CAP_GB mode=$MODE"
+    env | grep -E '^SIMPLE_(PARSE_SHARD|FILE_FIBERS|MIR_SHARD_COUNT|PROJECT_ROOT)' | sort
+    echo "cmd: $EXE $*"
+    exit 0
+fi
+
+mkdir -p "$OUT"
+count_objs() { find "$OUT/cache" -name '*.o' -type f 2>/dev/null | wc -l | tr -d ' '; }
+o0=$(count_objs); start=$(date +%s)
+"$EXE" "$@" >"$OUT/build.log" 2>"$OUT/build.log.err" &
+pid=$!
+peak=0; killed=0; first=-1
+while kill -0 "$pid" 2>/dev/null; do
+    sleep 10
+    kb=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')   # root process only; tree sum is OS specific
+    gb=$(( ${kb:-0} / 1048576 ))
+    if [ "$gb" -gt "$peak" ]; then peak=$gb; fi
+    now=$(( $(date +%s) - start ))
+    if [ "$first" -lt 0 ] && [ "$(count_objs)" -gt "$o0" ]; then first=$now; fi
+    echo "${now}s rss_GB=$gb" >"$OUT/build.log.cap"
+    if [ "$gb" -gt "$CAP_GB" ] || [ "$now" -gt "$LIMIT" ]; then
+        echo "CAP/LIMIT EXCEEDED: ${gb} GB / ${now} s; killing own pid $pid" >>"$OUT/build.log.cap"
+        kill "$pid" 2>/dev/null; killed=1
+    fi
+done
+wait "$pid"; rc=$?
+total=$(( $(date +%s) - start )); objs=$(( $(count_objs) - o0 ))
+echo "first_obj_s=$first total_s=$total peak_rss_GB=$peak objs=$objs killed=$killed rc=$rc" | tee "$OUT/result.txt"
+exit "$rc"

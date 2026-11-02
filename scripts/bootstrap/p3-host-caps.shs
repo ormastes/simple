@@ -1,0 +1,61 @@
+#!/bin/sh
+# p3-host-caps.shs - derive memory caps from host config (simple-host-config-v1).
+# Usage: sh scripts/bootstrap/p3-host-caps.shs [--get KEY]
+# Prints: probe_cap_gb, heavy_cap_gb, reserve_gb, max_threads, ram_gb (key=value lines).
+# Env: P3_HOST_SDN (config file, default ~/.config/simple/host.sdn; when set,
+#      host-env.shs --get is skipped), P3_HOST_RAM_GB (override RAM detection).
+# Port of C:/dev/p3new/tools/hostcfg.ps1. No hardcoded caps: missing keys fail.
+
+p3_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+p3_repo_root=$(CDPATH= cd -- "$p3_script_dir/../.." && pwd)
+p3_host_sdn=${P3_HOST_SDN:-$HOME/.config/simple/host.sdn}
+
+# p3_cfg KEY -> value on stdout, exit 1 if missing.
+p3_cfg() {
+    key=$1
+    if [ -z "${P3_HOST_SDN:-}" ] && [ -f "$p3_repo_root/scripts/setup/host-env.shs" ]; then
+        v=$(sh "$p3_repo_root/scripts/setup/host-env.shs" --get "$key" 2>/dev/null) || v=""
+        v=$(printf '%s' "$v" | tr -d '\r' | sed 's/[[:space:]].*$//')
+        if [ -n "$v" ]; then printf '%s\n' "$v"; return 0; fi
+    fi
+    if [ -f "$p3_host_sdn" ]; then
+        v=$(sed -n "s/^[[:space:]]*$key:[[:space:]]*\([^#[:space:]]*\).*/\1/p" "$p3_host_sdn" | tr -d '\r' | head -n 1)
+        if [ -n "$v" ]; then printf '%s\n' "$v"; return 0; fi
+    fi
+    return 1
+}
+
+p3_need() {
+    v=$(p3_cfg "$1") || { echo "p3-host-caps: host.sdn key $1 missing" >&2; exit 2; }
+    printf '%s' "$v"
+}
+
+p3_ram_gb() {
+    if [ -n "${P3_HOST_RAM_GB:-}" ]; then printf '%s' "$P3_HOST_RAM_GB"; return 0; fi
+    if [ -r /proc/meminfo ]; then
+        kb=$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo)
+        if [ -n "$kb" ]; then echo $(( (kb + 524288) / 1048576 )); return 0; fi
+    fi
+    b=$(powershell.exe -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory" 2>/dev/null | tr -d '\r')
+    if [ -z "$b" ]; then b=$(sysctl -n hw.physmem 2>/dev/null); fi
+    if [ -n "$b" ]; then echo $(( (b + 536870912) / 1073741824 )); return 0; fi
+    echo "p3-host-caps: cannot detect RAM (set P3_HOST_RAM_GB)" >&2
+    return 1
+}
+
+if [ "${1:-}" = "--get" ]; then
+    p3_cfg "${2:?key}" || exit 1
+    exit 0
+fi
+
+probe_mib=$(p3_need probe_max_mib) || exit 2
+pct=$(p3_need tree_rss_host_pct) || exit 2
+reserve_mib=$(p3_need mem_reserve_free_mib) || exit 2
+threads=$(p3_cfg max_threads) || threads=0
+ram=$(p3_ram_gb) || exit 2
+
+echo "probe_cap_gb=$(( probe_mib / 1024 ))"
+echo "heavy_cap_gb=$(( (ram * pct + 50) / 100 ))"
+echo "reserve_gb=$(( reserve_mib / 1024 ))"
+echo "max_threads=$threads"
+echo "ram_gb=$ram"
