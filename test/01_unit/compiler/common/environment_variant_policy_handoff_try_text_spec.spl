@@ -1,0 +1,114 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, stage2, regression
+# Covers the typed-match rewrite of every `_handoff_field(...)?` / `_handoff_material(...)?` site in
+# environment_variant_policy_handoff_v1.spl (stage2_try_unwrap_text_typed_as_i64_2026-11-02):
+# round-trip fidelity, no pointer-like digit runs in the wire, and the Err path for bad input.
+use std.spec.*
+use std.common.base_encoding.base64.{base64url_decode_strict, base64url_encode}
+use compiler.common.structural_contracts.environment_variant_policy_handoff_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
+
+fn layer(
+    prefer: text = "", require: text = "", cpu: text = "",
+    offload: text = "", fallback: text = ""
+) -> EnvironmentVariantPolicyLayerV1:
+    EnvironmentVariantPolicyLayerV1(
+        parser_prefer: prefer, parser_require: require, host_cpu_max: cpu,
+        frontend_offload: offload, frontend_fallback: fallback)
+
+fn collection(
+    inputs: EnvironmentVariantPolicyInputsV1,
+    target_cpu: text = "znver4",
+    target_features: text = "+avx2,-avx512f"
+) -> EnvironmentVariantPolicyCollectionV1:
+    EnvironmentVariantPolicyCollectionV1(
+        policy_inputs: inputs, target_cpu: target_cpu,
+        target_cpu_features: target_features,
+        receipt: EnvironmentVariantPolicyCollectionReceiptV1(
+            schema_version: ENVIRONMENT_VARIANT_POLICY_COLLECTION_SCHEMA_V1,
+            presence: EnvironmentVariantPolicyPresenceV1(
+                cli_host_present: true, env_host_present: true,
+                project_host_present: false, user_host_present: false,
+                admin_present: true, cli_target_present: true,
+                env_target_present: true, project_target_present: false,
+                user_target_present: false),
+            host_source_order: "cli>env>project>user>default",
+            target_cpu_source: "cli", target_cpu_features_source: "env",
+            target_cpu_present: target_cpu != "",
+            target_cpu_features_present: target_features != ""))
+
+fn fixture() -> EnvironmentVariantPolicyHandoffV1:
+    val inputs = EnvironmentVariantPolicyInputsV1(
+        cli: layer(prefer: "simd", cpu: "x86-64-v3"),
+        env: layer(offload: "on"), project: layer(), user: layer(),
+        admin: EnvironmentVariantAdminRestrictionsV1(
+            parser_provider: "", host_cpu_max: "x86-64-v4",
+            frontend_offload_max: "", frontend_fallback: ""))
+    environment_variant_policy_handoff_v1(collection(inputs)).unwrap()
+
+fn longest_digit_run(text_value: text) -> i64:
+    var best = 0
+    var run = 0
+    for ch in text_value:
+        if ch >= "0" and ch <= "9":
+            run = run + 1
+            if run > best: best = run
+        else:
+            run = 0
+    best
+
+describe "environment variant policy handoff typed-text try":
+    it "round-trips layer fields and the material text through encode and decode":
+        val original = fixture()
+        val encoded = environment_variant_policy_handoff_encode_v1(original).unwrap()
+        val decoded = environment_variant_policy_handoff_decode_v1(encoded).unwrap()
+        expect(decoded.collection.policy_inputs.cli.parser_prefer).to_equal("simd")
+        expect(decoded.collection.policy_inputs.cli.host_cpu_max).to_equal("x86-64-v3")
+        expect(decoded.collection.policy_inputs.env.frontend_offload).to_equal("on")
+        expect(decoded.collection.policy_inputs.cli.parser_require).to_equal("")
+        expect(decoded.collection.policy_inputs.admin.host_cpu_max).to_equal("x86-64-v4")
+        expect(decoded.collection.target_cpu).to_equal("znver4")
+        expect(decoded.collection.target_cpu_features).to_equal("+avx2,-avx512f")
+        expect(decoded.collection.receipt.host_source_order).to_equal("cli>env>project>user>default")
+        expect(decoded.collection.receipt.target_cpu_source).to_equal("cli")
+        expect(decoded.collection.receipt.target_cpu_features_source).to_equal("env")
+        expect(decoded.policy_digest).to_equal(original.policy_digest)
+        expect(decoded.cache_identity).to_equal(original.cache_identity)
+        expect(decoded.integrity_digest).to_equal(original.integrity_digest)
+        val reencoded = environment_variant_policy_handoff_encode_v1(decoded).unwrap()
+        expect(reencoded).to_equal(encoded)
+
+    it "keeps decimal-digit runs of 10+ out of the short-value field rows of the wire":
+        val encoded = environment_variant_policy_handoff_encode_v1(fixture()).unwrap()
+        val wire = base64url_decode_strict(encoded).unwrap()
+        var checked = 0
+        for line in wire.split("\n"):
+            if line == "": continue
+            if line.starts_with("policy_digest=") or line.starts_with("cache_identity=") or
+                    line.starts_with("integrity_digest=") or line.starts_with("collection.") or
+                    line.starts_with("target_cpu_features="):
+                continue
+            expect(longest_digit_run(line)).to_be_less_than(10)
+            checked = checked + 1
+        expect(checked).to_be_greater_than(20)
+
+    it "returns Err for a wire with a tampered field row":
+        val encoded = environment_variant_policy_handoff_encode_v1(fixture()).unwrap()
+        val wire = base64url_decode_strict(encoded).unwrap()
+        val tampered = wire.replace("cli.parser_prefer=", "cli.parser_prefeX=")
+        expect(tampered != wire).to_equal(true)
+        val result = environment_variant_policy_handoff_decode_v1(base64url_encode(tampered))
+        expect(result.is_err()).to_equal(true)
+
+    it "returns Err for a wire with a corrupted hex field value":
+        val encoded = environment_variant_policy_handoff_encode_v1(fixture()).unwrap()
+        val wire = base64url_decode_strict(encoded).unwrap()
+        val tampered = wire.replace("cli.parser_prefer=73696d64", "cli.parser_prefer=7zzz6d64")
+        expect(tampered != wire).to_equal(true)
+        val result = environment_variant_policy_handoff_decode_v1(base64url_encode(tampered))
+        expect(result.is_err()).to_equal(true)
+
+    it "returns Err for empty and non-base64 input":
+        expect(environment_variant_policy_handoff_decode_v1("").is_err()).to_equal(true)
+        expect(environment_variant_policy_handoff_decode_v1("!!not base64!!").is_err()).to_equal(true)
