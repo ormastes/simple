@@ -39,7 +39,7 @@ jobs:
     # 2.1): the self-hosted ARM64 runner left this required check queued and
     # blocked every PR on 2026-10-25. The check name is unchanged.
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -68,7 +68,27 @@ jobs:
             config/check
             src/runtime/startup/common
             src/runtime/test
+            src/runtime
+            src/compiler
+            src/lib/nogc_sync_mut/sffi
+            src/app/cli
           sparse-checkout-cone-mode: true
+
+      # local-runtime-link-completeness compiles the core-C runtime with clang
+      # and reads symbols with llvm-nm (src/compiler, src/runtime and the
+      # sffi/cli decl roots are in the sparse set above for that reason). The
+      # hosted image has no llvm-nm on PATH. The gate itself FAILS (exit 2) if
+      # no llvm-nm resolves, so a missing tool can never read as green.
+      - name: Install LLVM toolchain (llvm-nm, clang)
+        shell: sh
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends llvm clang
+          sh scripts/check/check-runtime-link-completeness.shs --resolve-only
+
+      - name: LLVM nm resolver self-test
+        shell: sh
+        run: sh scripts/check/check-llvm-nm-resolve-selftest.shs
 
       - name: Fast push-tier gates on the PR range
         shell: sh

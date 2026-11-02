@@ -1,0 +1,45 @@
+#!/bin/sh
+# Self-test for scripts/lib/resolve-llvm-nm.shs resolution order.
+# Fake PATH dirs hold stub tools; a real `sh` stays reachable via absolute path.
+set -u
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+T=$(mktemp -d "${TMPDIR:-/tmp}/llvm-nm-selftest.XXXXXX"); trap 'rm -rf "$T"' EXIT
+FAIL=0
+stub() { mkdir -p "$(dirname "$1")"; printf '#!/bin/sh\necho "LLVM version stub"\n' >"$1"; chmod +x "$1"; }
+UTILS=$(dirname "$(command -v tr)")
+run() { # run <PATH> [env...] -> resolver output
+    _p=$1; shift
+    env -i HOME="$T/home" PATH="$_p" LLVM_NM_HOST_ENV="${HOSTENV:-$T/none}" "$@" \
+        "$(command -v sh)" -c ". '$ROOT/scripts/lib/resolve-llvm-nm.shs'; resolve_llvm_nm"
+}
+expect() { # expect <name> <want> <got>
+    if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1: want '$2' got '$3'"; FAIL=1; fi
+}
+SYS="$UTILS"
+# 1. only llvm-nm-19 and llvm-nm-17 -> highest versioned wins
+stub "$T/b1/llvm-nm-17"; stub "$T/b1/llvm-nm-19"
+expect versioned-highest "llvm-nm-19" "$(run "$T/b1:$SYS")"
+# 2. plain llvm-nm beats versioned
+stub "$T/b2/llvm-nm"; stub "$T/b2/llvm-nm-19"
+expect plain-first "llvm-nm" "$(run "$T/b2:$SYS")"
+# 3. host-config llvm_root
+mkdir -p "$T/root/bin"; stub "$T/root/bin/llvm-nm"
+printf '#!/bin/sh\n[ "$1" = --get ] && [ "$2" = llvm_root ] && echo "%s"\n' "$T/root" >"$T/hostenv.sh"
+HOSTENV="$T/hostenv.sh"
+expect host-config "$T/root/bin/llvm-nm" "$(run "$SYS")"
+HOSTENV=""
+# 4. llvm-mingw fallback
+stub "$T/home/.simple/toolchains/llvm-mingw-20250101-ucrt-x86_64/bin/llvm-nm"
+expect llvm-mingw "$T/home/.simple/toolchains/llvm-mingw-20250101-ucrt-x86_64/bin/llvm-nm" "$(run "$SYS")"
+rm -rf "$T/home"
+# 5. nothing -> failure rc 1, empty output
+out=$(run "$SYS"); rc=$?
+expect none-empty "" "$out"
+# rc of $(...) assignment is run's rc
+[ "$rc" -eq 1 ] && echo "PASS none-rc1" || { echo "FAIL none-rc1: rc=$rc"; FAIL=1; }
+# 6. end to end: checker with no tool fails (exit 2) with the clear message
+msg=$(env -i HOME="$T/home" PATH="$T/b1x:$SYS" LLVM_NM_HOST_ENV="$T/none" CC="$(command -v sh)" \
+    "$(command -v sh)" "$ROOT/scripts/check/check-runtime-link-completeness.shs" --resolve-only 2>&1); rc=$?
+[ "$rc" -eq 2 ] && echo "PASS e2e-rc2" || { echo "FAIL e2e-rc2: rc=$rc"; FAIL=1; }
+case "$msg" in *"llvm-nm not found"*"tried:"*) echo "PASS e2e-msg" ;; *) echo "FAIL e2e-msg: $msg"; FAIL=1 ;; esac
+[ "$FAIL" -eq 0 ] && echo "STATUS: PASS" || { echo "STATUS: FAIL"; exit 1; }
