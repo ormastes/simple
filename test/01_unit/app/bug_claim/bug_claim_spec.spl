@@ -1,0 +1,227 @@
+# Purpose and audience: executable specification evidence for agents that claim bugs before fixing them.
+# @req REQ-BUGCLAIM-001
+"""
+## Purpose and audience
+Purpose: proves scripts/check/bug-claim.shs implements the bug-fix claim protocol
+(claim, heartbeat, release, done, reap, show --intent) over the bug_fix_claims
+side table without changing the 10-column main bug tables, and that bug-gen
+renders the `fixing` status.
+Audience: agents that fix bugs concurrently, and tracking maintainers.
+"""
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIX = "/tmp/simple_bug_claim_fixture"
+
+fn _dir(n: text) -> text:
+    FIX + "_" + n
+val T0 = "2026-11-02T05:40:00Z"
+val T_FRESH = "2026-11-02T06:40:00Z"
+val T_STALE = "2026-11-03T06:00:01Z"
+
+fn _setup(n: text):
+    val FIXD = _dir(n)
+    val (_o, _e, _c) = rt_process_run("/bin/sh", [
+        "-c",
+        "set -e; rm -rf " + FIXD + "; mkdir -p " + FIXD + "; cd " + FIXD + "; " +
+        "{ printf '#sdn-crc32:0\\n'; " +
+        "printf 'bug_descriptions |bug_id, line_num, content|\\n    BUG-A, 0, \"Parser drops the last token\"\\n\\n'; " +
+        "printf 'bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\\n'; " +
+        "printf '    BUG-A, P1, open, \"Parser drops, last token\", src/p.spl, 3, test, 2026-10-01, 2026-10-01, true\\n'; " +
+        "printf '    BUG-B, P2, investigating, \"Other\", src/q.spl, 4, test, 2026-10-01, 2026-10-02, true\\n\\n'; " +
+        "printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\\n'; " +
+        "printf '    BUG-C, P2, closed, \"Old\", src/r.spl, 5, test, 2026-09-01, 2026-09-02, true\\n\\n'; " +
+        "printf 'bug_difficulty |bug_id, difficulty, basis, assessed_at, assessed_by|\\n    BUG-A, 2, \"easy\", 2026-11-02, t\\n\\n'; " +
+        "printf 'bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|\\n'; " +
+        "} > bug_db.sdn"
+    ])
+
+fn _bc(n: text, now: text, args: text) -> (text, text, i64):
+    val FIXD = _dir(n)
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); BUG_CLAIM_DB=" + FIXD + "/bug_db.sdn BUG_CLAIM_NOW=" + now +
+        " sh \"$REPO/scripts/check/bug-claim.shs\" " + args + " 2>&1; echo EXIT=$?"
+    ])
+
+fn _db(n: text) -> text:
+    val FIXD = _dir(n)
+    val (out, _e, _c) = rt_process_run("/bin/sh", ["-c", "cat " + FIXD + "/bug_db.sdn"])
+    out
+
+describe "bug-claim.shs claim protocol":
+    # @manual scenario evidence
+    it "claim sets main status=fixing and status shows session and time":
+        # @req: REQ-BUGCLAIM-001
+        step("claim BUG-A as a6dffc9c/p0f-1")
+        _setup("t1")
+        val (out, _e, _c) = _bc("t1", T0, "claim BUG-A a6dffc9c/p0f-1 first-try")
+        expect(out).to_contain("EXIT=0")
+        step("status shows the session and claim time")
+        val (st, _e2, _c2) = _bc("t1", T_FRESH, "status BUG-A")
+        expect(st).to_contain("state=fixing")
+        expect(st).to_contain("session=a6dffc9c/p0f-1")
+        expect(st).to_contain("claimed_at=2026-11-02T05:40:00Z")
+        step("main row reads fixing with updated_at = claim date, still 10 columns")
+        val db = _db("t1")
+        expect(db).to_contain("BUG-A, P1, fixing, \"Parser drops, last token\", src/p.spl, 3, test, 2026-10-01, 2026-11-02, true")
+        expect(db).to_contain("BUG-A, fixing, a6dffc9c/p0f-1, 2026-11-02T05:40:00Z, 2026-11-02T05:40:00Z, open,")
+
+    it "refuses a second session while the claim is live":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t2")
+        val (_o, _e, _c) = _bc("t2", T0, "claim BUG-A aaaa1111/x")
+        val (out, _e2, _c2) = _bc("t2", T_FRESH, "claim BUG-A bbbb2222/y")
+        expect(out).to_contain("EXIT=3")
+        expect(out).to_contain("aaaa1111/x")
+        expect(out).to_contain("2026-11-02T05:40:00Z")
+
+    it "lets the same session re-claim (refresh)":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t3")
+        val (_o, _e, _c) = _bc("t3", T0, "claim BUG-A aaaa1111/x")
+        val (out, _e2, _c2) = _bc("t3", T_FRESH, "claim BUG-A aaaa1111/x")
+        expect(out).to_contain("EXIT=0")
+
+    it "heartbeat keeps a claim alive past the stale window":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t4")
+        val (_o, _e, _c) = _bc("t4", T0, "claim BUG-A aaaa1111/x")
+        val (_o2, _e2, _c2) = _bc("t4", "2026-11-03T04:00:00Z", "heartbeat BUG-A aaaa1111/x")
+        val (out, _e3, _c3) = _bc("t4", T_STALE, "claim BUG-A bbbb2222/y")
+        expect(out).to_contain("EXIT=3")
+        val (hb, _e4, _c4) = _bc("t4", T_STALE, "heartbeat BUG-A bbbb2222/y")
+        expect(hb).to_contain("EXIT=3")
+
+    it "lets another session take over a stale claim":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t5")
+        val (_o, _e, _c) = _bc("t5", T0, "claim BUG-A aaaa1111/x")
+        val (st, _e1, _c1) = _bc("t5", T_STALE, "status BUG-A")
+        expect(st).to_contain("STALE")
+        val (out, _e2, _c2) = _bc("t5", T_STALE, "claim BUG-A bbbb2222/y")
+        expect(out).to_contain("EXIT=0")
+        val (st2, _e3, _c3) = _bc("t5", T_STALE, "status BUG-A")
+        expect(st2).to_contain("session=bbbb2222/y")
+        expect(_db("t5")).to_contain("BUG-A, P1, fixing")
+
+    it "release restores prev_status; done sets fixed and records the PR":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t6")
+        val (_o, _e, _c) = _bc("t6", T0, "claim BUG-B aaaa1111/x")
+        val (wrong, _e0, _c0) = _bc("t6", T_FRESH, "release BUG-B zzzz9999/q")
+        expect(wrong).to_contain("EXIT=3")
+        val (rel, _e1, _c1) = _bc("t6", T_FRESH, "release BUG-B aaaa1111/x")
+        expect(rel).to_contain("EXIT=0")
+        expect(_db("t6")).to_contain("BUG-B, P2, investigating,")
+        val (st, _e2, _c2) = _bc("t6", T_FRESH, "status BUG-B")
+        expect(st).to_contain("state=released")
+        val (_o3, _e3, _c3) = _bc("t6", T_FRESH, "claim BUG-B aaaa1111/x")
+        val (dn, _e4, _c4) = _bc("t6", T_FRESH, "done BUG-B aaaa1111/x 5900")
+        expect(dn).to_contain("EXIT=0")
+        expect(_db("t6")).to_contain("BUG-B, P2, fixed,")
+        expect(_db("t6")).to_contain("PR #5900")
+        val (st2, _e5, _c5) = _bc("t6", T_FRESH, "status BUG-B")
+        expect(st2).to_contain("state=done")
+
+    it "closed bugs need no claim and cannot be claimed":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t7")
+        val (out, _e, _c) = _bc("t7", T0, "claim BUG-C aaaa1111/x")
+        expect(out).to_contain("EXIT=4")
+        val (st, _e2, _c2) = _bc("t7", T0, "status BUG-C")
+        expect(st).to_contain("state=none")
+        expect(st).to_contain("EXIT=0")
+
+    it "reap reverts a stale fixing bug and report mode changes nothing":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t8")
+        val (_o, _e, _c) = _bc("t8", T0, "claim BUG-A aaaa1111/x")
+        val (fresh, _e1, _c1) = _bc("t8", T_FRESH, "reap --report")
+        expect(fresh).to_contain("EXIT=0")
+        expect(fresh.contains("BUG-A")).to_equal(false)
+        val (rep, _e2, _c2) = _bc("t8", T_STALE, "reap --report")
+        expect(rep).to_contain("BUG-A")
+        expect(rep).to_contain("EXIT=0")
+        expect(_db("t8")).to_contain("BUG-A, P1, fixing")
+        val (rp, _e3, _c3) = _bc("t8", T_STALE, "reap --max-age 24h")
+        expect(rp).to_contain("EXIT=0")
+        expect(_db("t8")).to_contain("BUG-A, P1, open,")
+        expect(_db("t8")).to_contain("abandoned (reaped)")
+
+    it "reap reverts a fixing row that has no claim row":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t9")
+        val (_o, _e, _c) = rt_process_run("/bin/sh", ["-c", "sed -i 's/BUG-A, P1, open/BUG-A, P1, fixing/' " + _dir("t9") + "/bug_db.sdn"])
+        val (rp, _e2, _c2) = _bc("t9", T0, "reap")
+        expect(rp).to_contain("BUG-A")
+        expect(_db("t9")).to_contain("BUG-A, P1, open,")
+
+    it "a lost race backs out the later claim":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t10")
+        val (o, _e, _c) = rt_process_run("/bin/sh", [
+            "-c",
+            "REPO=$(pwd); BUG_CLAIM_DB=" + _dir("t10") + "/bug_db.sdn BUG_CLAIM_NOW=" + T_FRESH +
+            " BUG_CLAIM_TEST_RACE_ROW='    BUG-A, fixing, rival000/z, 2026-11-02T06:39:59Z, 2026-11-02T06:39:59Z, open, \"\"'" +
+            " sh \"$REPO/scripts/check/bug-claim.shs\" claim BUG-A loser000/l 2>&1; echo EXIT=$?"
+        ])
+        expect(o).to_contain("EXIT=3")
+        expect(o).to_contain("rival000/z")
+        expect(_db("t10").contains("loser000/l")).to_equal(false)
+
+    it "show requires --intent; not_for_fixing is read-only; for_fixing claims":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t11")
+        val before = _db("t11")
+        val (noint, _e, _c) = _bc("t11", T0, "show BUG-A")
+        expect(noint).to_contain("EXIT=2")
+        val (ro, _e1, _c1) = _bc("t11", T0, "show BUG-A --intent not_for_fixing")
+        expect(ro).to_contain("Parser drops, last token")
+        expect(ro).to_contain("difficulty")
+        expect(ro).to_contain("EXIT=0")
+        expect(_db("t11")).to_equal(before)
+        val (ff, _e2, _c2) = _bc("t11", T0, "show BUG-A --intent for_fixing --session aaaa1111/x")
+        expect(ff).to_contain("Parser drops, last token")
+        expect(ff).to_contain("EXIT=0")
+        expect(_db("t11")).to_contain("BUG-A, P1, fixing")
+        val (ref, _e3, _c3) = _bc("t11", T_FRESH, "show BUG-A --intent for_fixing --session bbbb2222/y")
+        expect(ref).to_contain("EXIT=3")
+        expect(ref).to_contain("aaaa1111/x")
+        expect(ref).to_contain("heartbeat")
+        val (bad, _e4, _c4) = _bc("t11", T_FRESH, "show BUG-A --intent maybe")
+        expect(bad).to_contain("EXIT=2")
+
+    it "resealed database keeps a valid crc32 header":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t12")
+        val (_o, _e, _c) = _bc("t12", T0, "claim BUG-A aaaa1111/x")
+        val (out, _e2, _c2) = rt_process_run("/bin/sh", ["-c", "REPO=$(pwd); sh \"$REPO/scripts/check/reseal-sdn-crc32.shs\" " + _dir("t12") + "/bug_db.sdn | tail -1"])
+        expect(out).to_contain("already sealed")
+
+describe "bug-gen renders fixing":
+    it "bug-gen renders a Fixing section with session and since":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t13")
+        val (_o, _e, _c) = _bc("t13", T0, "claim BUG-A aaaa1111/x")
+        val (out, _e2, code) = rt_process_run("/bin/sh", [
+            "-c",
+            "REPO=$(pwd); cd " + _dir("t13") + " && mkdir -p out && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/bug_gen/main.spl\" --db=" + _dir("t13") + "/bug_db.sdn -o " + _dir("t13") + "/out 2>&1; cat " + _dir("t13") + "/out/recent_bugs.md"
+        ])
+        expect(out).to_contain("Fixing")
+        expect(out).to_contain("BUG-A")
+        expect(out).to_contain("aaaa1111/x")
+        expect(out).to_contain("2026-11-02T05:40:00Z")
+
+describe "check-dbs accepts fixing":
+    it "does not flag status fixing as an invalid value":
+        # @req: REQ-BUGCLAIM-001
+        _setup("t14")
+        val (_o, _e, _c) = _bc("t14", T0, "claim BUG-A aaaa1111/x")
+        val (out, _e2, _c2) = rt_process_run("/bin/sh", [
+            "-c",
+            "REPO=$(pwd); D=" + _dir("t14") + "; mkdir -p $D/doc/08_tracking/bug && cp $D/bug_db.sdn $D/doc/08_tracking/bug/bug_db.sdn && cd $D && \"$REPO/bin/simple\" check-dbs bugs 2>&1 | grep -v 'gc-warning'"
+        ])
+        expect(out.contains("fixing")).to_equal(false)
+        expect(out.contains("parse_error")).to_equal(false)

@@ -153,3 +153,7 @@ scripts/bootstrap.sh --verify          # Verify determinism
 ```
 
 Workflow: Capture → check HIR count at phase 3 vs phase 5 → register bug → fix & verify.
+
+## Bug fix claims
+
+Bug fix claims (see `doc/07_guide/infra/tracking/bug_fix_claims.md`): run `sh scripts/check/bug-claim.shs reap` before triage; request bug details with `show <bug_id> --intent for_fixing --session <id>` when you intend to fix (claims it atomically; exit 3 = held by another live session, pick another bug) or `--intent not_for_fixing` otherwise (read-only); heartbeat at least every 2 h (`heartbeat <bug_id> <session>`); finish with `done <bug_id> <session> <pr>` after the PR merges or `release <bug_id> <session>`; never fix a bug whose status is `fixing` under another session.
