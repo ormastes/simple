@@ -1,6 +1,6 @@
 # Stage 3 streaming HIR owner crashes after export-origin convergence
 
-Status: OPEN  
+Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (2026-11-02)  
 Priority: P0 bootstrap blocker  
 Platform: aarch64-apple-darwin  
 Observed: 2026-08-22
@@ -102,3 +102,43 @@ Not reproducible on the Windows x86_64 host; analysed by source reading.
 
 TODO(p0f-3): re-run strict Stage 3 on macOS ARM64 with the current seed and
 record whether the guard fires or the crash is gone.
+
+## Validity and status decision (2026-11-02, p0-hir-owner)
+
+**Still valid, not obsolete.** Mono removal (erased generics), the nil/Any
+unsafe-only rules, target-neutral HIR and the one-process-per-file pipeline do
+not remove this path: `lower_and_check_streaming_surfaces_impl`,
+`CompilerDriver.streaming_module_surfaces_owner` and
+`streaming_surface_owner_ready` are all live on `release/1.0.0`
+(`driver_hir_pipeline_lowering.spl`, `driver_compiler_type.spl`,
+`driver_orchestration.spl`, `cache/driver_hir_source_body_*_v1.spl`).
+
+**Root cause (best evidence):** a Some-tagged `Option<ModuleSurfacesByName>`
+whose heap payload word was 0 on aarch64 — the Option-of-aggregate codegen
+defect fixed by `2c89727c11c`. Verified ancestors of `release/1.0.0`:
+`2c89727c11c` (producer fix), `57271d9ba49` (fail-closed
+`E-DRIVER-HIR-OWNER-MALFORMED` / `E-DRV-PHASE3-EMPTY-SURFACES` guards at
+`driver_hir_pipeline_lowering.spl:950-960`), `af74374c355` (lost readiness
+flag). No further source change is warranted without a fresh aarch64 fault.
+
+**Host evidence (Windows x86_64):** the regression spec
+`test/01_unit/compiler/bootstrap/streaming_surface_owner_handoff_invariant_spec.spl`
+could not be re-run on the currently deployed `C:/dev/simple/bin/simple.exe`
+(40,717,312 B, 2026-11-02 14:40): the runner aborts with
+`semantic: unknown extern function: rt_tuple_len` (binary/source skew, exit 1,
+13 s, peak RSS 189 MB) before reaching the spec. Earlier #5855 run: 4 examples,
+0 failures.
+
+**Exact verification repro (stage3-only):** on aarch64-apple-darwin with a seed
+built at or after `2c89727c11c`:
+
+```sh
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_HIR_EXPORT_ORIGIN_TRACE=1 \
+sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --backend=cranelift --mode=dynload --strategy=normal \
+  --jobs=1 --progress --no-mcp
+```
+
+Pass = log continues past `phase3:hir_typecheck:start` to the first streaming
+HIR progress receipt with no SIGSEGV and neither guard code. If a guard fires,
+its text names the remaining producer; reopen with that output.
