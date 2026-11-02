@@ -95,3 +95,51 @@ executable or Hello run was produced, and no Phase3 qualification is claimed.
 The bug remains OPEN P1 until a provenance-bound producer containing commit
 `8aafa6cf8544e4e2f126540a11cdd5c7139341dc` passes the focused codec regression
 and relevant cache/build requalification.
+
+## Current candidate did not reach LayoutAttr requalification (2026-11-02)
+
+Candidate `C:/dev/p3new/p2_layoutattr_71d_20261102/attempt/stage2.exe`
+(SHA256 `24164F6F390716ECF4DD021C0AD0D9103CC801670AB92D4E49E22269B66F3C38`)
+was built from source commit `c9078245fa1926391ee8a2fd48a56c8c87cbaa6b`.
+The clean producer source tree was `a48366bcdfd56a57809d6d3d8dd4830fb600338a`
+and the pinned FC56 seed binary SHA256 was
+`FC56D4B5FC384EA93ED20BEFD4503FF6E27DB7734214CA45E072B4DF1B081828`. The
+retained build result reports 1545 compiled, zero failed, 1543 objects, and
+successful linking. The input manifest's `producer_source_index_tree`
+`9023adc607c125c67c7fcfe60b6d7a7be1db56ee` is the later smoke fixture index,
+not the producer source tree.
+
+The following canonical native smoke invocations then failed before execution,
+with the same Windows access-violation status `-1073741819` (`0xC0000005`):
+
+- `hello`: native compilation failed in unit
+  `app._scratch_ed.p2_candidate_smokes_20261102.hello` after 235.0 seconds;
+  zero objects, peak process-tree RSS 0.93 GB.
+- `variable`: MIR lowering failed in unit
+  `app._scratch_ed.p2_candidate_smokes_20261102.variable` after 82.9 seconds;
+  zero objects, peak process-tree RSS 0.71 GB.
+
+The retained summary is
+`C:/dev/p3new/p2_layoutattr_71d_20261102/smokes/summary.sdn` (SHA256
+`40BE412781CACB8694A1357617ECE554BCE2BBC1BD194BB9C0D34F745C73F007`). It
+records nine admitted threads per invocation, zero raw cache object files,
+zero executed programs, and `layout_attr_fixture_executed: false`; the
+LayoutAttr codec fixture therefore did not run. Detailed build and case records
+are `attempt/result.txt`, `attempt/native-build.log`, each case's
+`build-result.txt`, `run-result.sdn`, and `native-build.log.err` under the same
+candidate root.
+
+These two failed cases belong to the same candidate smoke attempt. They do not
+establish two independent compiler defects or a shared root cause. The earlier
+`47D8...` variable-reference AV has no matching exact candidate hash or report
+in the current release tracking records; no causal relationship is asserted.
+This newer candidate failure supplies no LayoutAttr codec/cache evidence and
+does not change this bug's OPEN P1 status or qualify Phase2/Phase3.
+Cache isolation in that smoke attempt was incomplete: HIR artifacts used
+`/tmp/simple-cache`, and the variable case skipped its HIR store below the
+2 GiB free-disk reserve. Offline minidump analysis places Hello at
+`MirToLlvm.translate_const+215` after MIR completion and the variable case at
+`mir_expr_symbol_id_value+68` during MIR lowering. The latter function also
+appeared in an earlier `47D8...` variable AV, but no source cause, shared cause,
+or use-after-free claim is made. See
+`doc/08_tracking/bug/phase2_candidate_native_smokes_access_violation_2026_11_02.md`.
