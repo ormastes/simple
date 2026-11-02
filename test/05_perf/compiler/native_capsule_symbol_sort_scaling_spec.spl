@@ -1,0 +1,81 @@
+# Capsule MIR identity sorts each module's function/constant/static/type keys
+# on every identity computation (several times per module). The ordering must
+# stay ascending by SymbolId and must scale O(n log n): a 4x larger input may
+# not cost 16x (the quadratic signature of the former exchange sort).
+use std.spec.{describe, it, expect}
+use compiler.driver.native_capsule_mir_identity.{native_capsule_sorted_order_v1}
+use compiler.driver.driver_types.{native_capsule_sorted_symbol_ids_v1}
+use compiler.hir.hir_types.{SymbolId}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn reverse_ids(count: i64) -> [i64]:
+    var ids: [i64] = []
+    var id = count - 1
+    while id >= 0:
+        ids.push(id)
+        id = id - 1
+    ids
+
+fn order_ascending(ids: [i64], order: [i64]) -> bool:
+    if order.len() != ids.len(): return false
+    var seen: [bool] = []
+    var i = 0
+    while i < ids.len():
+        seen.push(false)
+        i = i + 1
+    i = 0
+    while i < order.len():
+        val index = order[i]
+        if index < 0 or index >= ids.len() or seen[index]: return false
+        seen[index] = true
+        if i > 0 and ids[order[i - 1]] > ids[index]: return false
+        i = i + 1
+    true
+
+fn time_sort_us(count: i64) -> i64:
+    var keys: [SymbolId] = []
+    for id in reverse_ids(count):
+        keys.push(SymbolId(id: id))
+    val started = rt_time_now_unix_micros()
+    val sorted = native_capsule_sorted_symbol_ids_v1(keys)
+    val elapsed = rt_time_now_unix_micros() - started
+    var i = 0
+    while i < sorted.len():
+        if sorted[i].id != i: return -1
+        i = i + 1
+    elapsed + 1
+
+describe "native capsule symbol sort":
+    it "orders mixed ids ascending and keeps the original key objects":
+        val keys = [SymbolId(id: 9), SymbolId(id: 2), SymbolId(id: 7), SymbolId(id: 0), SymbolId(id: 5)]
+        val sorted = native_capsule_sorted_symbol_ids_v1(keys)
+        expect(sorted.len()).to_equal(5)
+        expect(sorted[0].id).to_equal(0)
+        expect(sorted[1].id).to_equal(2)
+        expect(sorted[2].id).to_equal(5)
+        expect(sorted[3].id).to_equal(7)
+        expect(sorted[4].id).to_equal(9)
+        var lookup: Dict<SymbolId, i64> = {}
+        for key in keys:
+            lookup[key] = key.id
+        var resolved = 0
+        for key in sorted:
+            if lookup.contains_key(key):
+                resolved = resolved + 1
+        expect(resolved).to_equal(5)
+
+    it "handles empty, singleton and odd-sized inputs":
+        expect(native_capsule_sorted_order_v1([]).len()).to_equal(0)
+        expect(native_capsule_sorted_order_v1([7])[0]).to_equal(0)
+        val ids = reverse_ids(1025)
+        expect(order_ascending(ids, native_capsule_sorted_order_v1(ids))).to_equal(true)
+
+    it "scales sub-quadratically on reverse input":
+        val small = time_sort_us(1024)
+        val large = time_sort_us(4096)
+        print "[capsule-sort] n=1024 us={small} n=4096 us={large}"
+        expect(small).to_be_greater_than(0)
+        expect(large).to_be_greater_than(0)
+        # Quadratic gives ~16x; n log n gives ~4.8x. Allow noise up to 10x.
+        expect(large).to_be_less_than(small * 10)
