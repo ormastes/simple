@@ -18,11 +18,13 @@ use compiler.driver.driver_build.native_codegen_pool_v1.{
     native_codegen_receipt_publish_v1, native_codegen_receipt_path_v1,
     native_codegen_job_ir_path_v1, native_codegen_job_object_path_v1,
     native_codegen_command_line_v1, native_codegen_job_log_path_v1,
-    NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1, NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1}
+    NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1, NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1,
+    native_codegen_pool_run_v1, NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1, NATIVE_CODEGEN_JOB_FAILED_V1}
 use compiler.backend.llvm_backend_tools.{llvm_llc_object_argv_v1}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
-use std.io_runtime.{dir_create_all, dir_exists, file_read, getpid}
+use std.io_runtime.{dir_create_all, dir_exists, file_exists, file_read, getpid, thread_sleep}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, host_os}
 
 val GIB: i64 = 1048576
 
@@ -148,3 +150,64 @@ describe "native codegen pool child command":
         val line = native_codegen_command_line_v1("llc", ["--filetype=obj", "-o", "o.o", "i.ll"], "s/job-0.log")
         expect(line).to_equal("llc --filetype=obj -o o.o i.ll > s/job-0.log 2>&1")
         expect(native_codegen_job_log_path_v1("/s", 2)).to_equal("/s/job-2.log")
+
+fn on_windows() -> bool:
+    host_os() == "windows"
+
+# A child that stays alive ~2 s and produces nothing (the job fails closed).
+fn sleeper_emit(index: i64, ir_path: text, obj_path: text) -> [text]:
+    if on_windows(): ["-n", "3", "127.0.0.1"] else: ["2"]
+
+fn sleeper_tool() -> text:
+    if on_windows(): "ping" else: "sleep"
+
+# The pool's shell runs `tool`; `tool` leaves a grandchild that writes the
+# marker after 4 s unless the whole tree is killed at the job timeout.
+fn tree_tool() -> text:
+    if on_windows(): "powershell.exe" else: "sh"
+
+fn tree_emit(index: i64, ir_path: text, obj_path: text) -> [text]:
+    val marker = env_get_nullable("SIMPLE_POOL_TREE_MARKER") ?? ""
+    if on_windows():
+        return ["-NoProfile", "-NonInteractive", "-Command",
+            "Start-Sleep 4; Set-Content -Path '{marker}' -Value alive"]
+    ["-c", "'(sleep 4; echo alive > {marker}) & wait'"]
+
+describe "native codegen pool child lifetime":
+    it "blocks on its children instead of polling while only children remain":
+        step("One ~2 s child on one worker, nothing left to translate")
+        val stage = pool_fixture("idle-wait")
+        val ledger = stage + "/ledger"
+        expect(dir_create_all(ledger)).to_equal(true)
+        val result = native_codegen_pool_run_v1(sleeper_tool(), ["idle.m"], 1, stage, ledger,
+            sleeper_emit(_1, _2, _3))
+        step("The child ran to completion and was reaped")
+        expect(result.peak_live).to_equal(1)
+        expect(result.passed + result.failed).to_equal(1)
+        expect(result.wall_ms).to_be_greater_than(1000)
+        step("Idle wakeups are bounded by the wait cap, not a 10-100 ms poll")
+        expect(result.idle_wakeups).to_be_greater_than(0)
+        expect(result.idle_wakeups).to_be_less_than(10)
+
+    it "kills the whole child tree when a job times out":
+        step("A 1.5 s job timeout over a tool whose grandchild outlives the shell")
+        val stage = pool_fixture("tree-kill")
+        val ledger = stage + "/ledger"
+        expect(dir_create_all(ledger)).to_equal(true)
+        val marker = stage + "/grandchild-survived.txt"
+        expect(env_set("SIMPLE_POOL_TREE_MARKER", marker)).to_equal(true)
+        expect(env_set(NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1, "1500")).to_equal(true)
+        val result = native_codegen_pool_run_v1(tree_tool(), ["tree.m"], 1, stage, ledger,
+            tree_emit(_1, _2, _3))
+        val cleared_timeout = env_set(NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1, "")
+        val cleared_marker = env_set("SIMPLE_POOL_TREE_MARKER", "")
+        expect(cleared_timeout and cleared_marker).to_equal(true)
+        step("The job timed out and fell back to the serial lane")
+        expect(result.failed).to_equal(1)
+        expect(result.states[0]).to_equal(NATIVE_CODEGEN_JOB_FAILED_V1)
+        expect(result.timed_out).to_equal(1)
+        expect(result.wall_ms).to_be_greater_than(1400)
+        expect(result.wall_ms).to_be_less_than(15000)
+        step("Wait past the grandchild's 4 s write: it must have been killed")
+        thread_sleep(6000)
+        expect(file_exists(marker)).to_equal(false)

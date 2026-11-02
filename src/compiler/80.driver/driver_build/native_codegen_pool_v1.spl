@@ -39,8 +39,14 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_rec
 extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_kill(pid: i64) -> bool
-extern fn rt_thread_sleep(millis: i64)
 extern fn rt_time_now_monotonic_ms() -> i64
+# Session-owned trees (runtime_process_tree.c): the child is a session leader,
+# so a timeout reaches every descendant, not just the shell. 0 = supported.
+extern fn rt_process_tree_support() -> i64
+extern fn rt_process_spawn_session_value(cmd: text, args: [text]) -> i64
+extern fn rt_process_session_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_process_session_is_running(pid: i64) -> i64
+extern fn rt_process_kill_tree(pid: i64) -> i64
 extern fn rt_host_memory_headroom_bytes_v1() -> i64
 
 # "0" disables the pool (serial lane, concurrency=1).
@@ -59,6 +65,14 @@ pub const NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1: i64 = 4
 # falls back to the serial lane. SIMPLE_NATIVE_CODEGEN_JOB_TIMEOUT_MS overrides.
 pub const NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1: text = "SIMPLE_NATIVE_CODEGEN_JOB_TIMEOUT_MS"
 pub const NATIVE_CODEGEN_JOB_TIMEOUT_MS_DEFAULT_V1: i64 = 1800000
+# Blocking-wait caps (ms) once only children remain. The parent blocks on the
+# child with the earliest deadline; the cap bounds how late a sibling that
+# exited first is reaped: short while queued jobs wait for a slot, long when
+# nothing is queued.
+pub const NATIVE_CODEGEN_WAIT_CAP_QUEUED_MS_V1: i64 = 50
+pub const NATIVE_CODEGEN_WAIT_CAP_IDLE_MS_V1: i64 = 1000
+# "Exit status not collected yet" (rt_process_wait answers >= 0, -1 or -2).
+const NATIVE_CODEGEN_CODE_PENDING_V1: i64 = -3
 
 pub const NATIVE_CODEGEN_JOB_QUEUED_V1: i64 = 0
 pub const NATIVE_CODEGEN_JOB_RUNNING_V1: i64 = 1
@@ -143,6 +157,85 @@ pub fn native_codegen_shell_args_v1(tool: text, argv: [text], log_path: text) ->
     val line = native_codegen_command_line_v1(tool, argv, log_path)
     if host_os() == "windows": ["/c", line] else: ["-c", line]
 
+# Child ownership. With a session owner (Linux/macOS/FreeBSD) every job's
+# shell is spawned as a session leader, so the timeout kill reaches the llc
+# under it and anything llc started. Without one (Windows) the shell is a
+# plain child and the timeout kills its tree by PID (taskkill /T), found by
+# the job's unique log path on the shell's command line -- the HANDLE/PID a
+# plain spawn returns differs per engine, the command line does not.
+pub fn native_codegen_session_owned_v1() -> bool:
+    var support: i64 = -1
+    unsafe(capabilities: [ffi]):
+        support = rt_process_tree_support()
+    support == 0
+
+fn native_codegen_child_spawn_v1(session: bool, shell_cmd: text, args: [text]) -> i64:
+    var pid: i64 = -1
+    unsafe(capabilities: [ffi]):
+        pid = if session: rt_process_spawn_session_value(shell_cmd, args) else: rt_process_spawn_async_value(shell_cmd, args)
+    pid
+
+# Non-blocking: exit code, -1 on error, -2 while running. ONE reaping call:
+# a second wait after a reap would see ECHILD and lose the status.
+fn native_codegen_child_probe_v1(session: bool, pid: i64) -> i64:
+    var code: i64 = -2
+    unsafe(capabilities: [ffi]):
+        if session:
+            if rt_process_session_is_running(pid) != 1:
+                code = rt_process_session_wait(pid, 0)
+        else:
+            code = rt_process_wait(pid, 1)
+    code
+
+# Blocks up to timeout_ms (>= 1) for this child: exit code, -1, or -2.
+fn native_codegen_child_wait_v1(session: bool, pid: i64, timeout_ms: i64) -> i64:
+    val bounded = if timeout_ms < 1: 1 else: timeout_ms
+    var code: i64 = -2
+    unsafe(capabilities: [ffi]):
+        code = if session: rt_process_session_wait(pid, bounded) else: rt_process_wait(pid, bounded)
+    code
+
+# PowerShell program that kills (taskkill /F /T) every cmd.exe whose command
+# line carries `marker`, and with it the whole tree under that shell.
+pub fn native_codegen_windows_tree_kill_script_v1(marker: text) -> text:
+    val quoted = marker.replace("'", "''")
+    "$m = '" + quoted + "'; Get-CimInstance Win32_Process | Where-Object " +
+        "{ $_.Name -eq 'cmd.exe' -and $_.CommandLine -and $_.CommandLine.Contains($m) } | " +
+        "ForEach-Object { taskkill.exe /F /T /PID $_.ProcessId | Out-Null }"
+
+# Kill the job's whole tree and reap its shell. The exit status is not
+# meaningful after a kill; the caller records the job as timed out.
+fn native_codegen_child_kill_tree_v1(session: bool, pid: i64, log_path: text) -> i64:
+    var code: i64 = -1
+    if session:
+        unsafe(capabilities: [ffi]):
+            val rc = rt_process_kill_tree(pid)
+            # RT_PTREE_SWEEP_FAILED_AFTER_REAP (-100002): the leader is already
+            # reaped and its pid may be recycled -- never signal it again.
+            if rc != 0 and rc != -100002:
+                # Not reaped by the owner: fall back to the leader alone.
+                val _killed = rt_process_kill(pid)
+                code = rt_process_session_wait(pid, 5000)
+        return code
+    if host_os() == "windows":
+        unsafe(capabilities: [ffi]):
+            val killer = rt_process_spawn_async_value("powershell.exe",
+                ["-NoProfile", "-NonInteractive", "-Command",
+                    native_codegen_windows_tree_kill_script_v1(log_path)])
+            if killer > 0:
+                val _kill_rc = rt_process_wait(killer, 60000)
+            code = rt_process_wait(pid, 5000)
+            if code == -2:
+                # The tree kill missed the shell: terminate it directly. That
+                # releases the handle, so it is not waited on again.
+                val _killed = rt_process_kill(pid)
+                code = -1
+        return code
+    unsafe(capabilities: [ffi]):
+        val _killed = rt_process_kill(pid)
+        code = rt_process_wait(pid, 5000)
+    code
+
 pub fn native_codegen_receipt_path_v1(ledger: text, module_name: text) -> text:
     "{ledger}/{sha256_text(module_name)}.codegen-receipt.sdn"
 
@@ -183,6 +276,11 @@ pub struct NativeCodegenPoolResultV1:
     skipped: i64
     first_object_ms: i64
     wall_ms: i64
+    # Blocking waits the parent made while only children remained (each one
+    # is a single wakeup, bounded by NATIVE_CODEGEN_WAIT_CAP_*_MS_V1).
+    idle_wakeups: i64
+    # Jobs killed at the per-job timeout (whole tree).
+    timed_out: i64
 
 fn native_codegen_now_ms_v1() -> i64:
     var now: i64 = 0
@@ -231,32 +329,36 @@ pub fn native_codegen_pool_run_v1(tool: text, names: [text], workers: i64,
     var emitted: i64 = 0
     var passed: i64 = 0
     var failed: i64 = 0
+    val session = native_codegen_session_owned_v1()
     val shell_cmd = native_codegen_shell_cmd_v1()
     val timeout_field = native_codegen_kib_field_v1(env_get_nullable(NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1) ?? "")
     val job_timeout_ms = if timeout_field > 0: timeout_field else: NATIVE_CODEGEN_JOB_TIMEOUT_MS_DEFAULT_V1
-    var poll: i64 = 0
+    # Per job: exit status collected by a blocking wait, not yet recorded.
+    var codes: [i64] = []
+    index = 0
+    while index < count:
+        codes.push(NATIVE_CODEGEN_CODE_PENDING_V1)
+        index = index + 1
+    var idle_wakeups: i64 = 0
+    var timed_out_jobs: i64 = 0
     while emitted < count or live > 0 or next_spawn < emitted:
-        # 1. Reap every finished child (non-blocking).
+        # 1. Reap every finished child (non-blocking), kill expired trees.
         var reaped_any = false
         var job: i64 = 0
         while job < emitted:
             if states[job] == NATIVE_CODEGEN_JOB_RUNNING_V1:
                 val pid = pids[job]
-                # ONE reaping call. rt_process_is_running reaps on POSIX
-                # (waitpid WNOHANG), so a following wait would see ECHILD and
-                # lose the exit status. A 1 ms wait answers -2 while running.
-                var code: i64 = -2
-                unsafe(capabilities: [ffi]):
-                    code = rt_process_wait(pid, 1)
+                val log_path = native_codegen_job_log_path_v1(stage_root, job)
+                var code = codes[job]
+                if code == NATIVE_CODEGEN_CODE_PENDING_V1:
+                    code = native_codegen_child_probe_v1(session, pid)
                 var timed_out = false
-                if code == -2 and native_codegen_now_ms_v1() - starts[job] > job_timeout_ms:
-                    unsafe(capabilities: [ffi]):
-                        val _killed = rt_process_kill(pid)
-                        code = rt_process_wait(pid, 5000)
+                if code == -2 and native_codegen_now_ms_v1() - starts[job] >= job_timeout_ms:
+                    code = native_codegen_child_kill_tree_v1(session, pid, log_path)
                     timed_out = true
+                    timed_out_jobs = timed_out_jobs + 1
                 if code != -2 or timed_out:
                     val obj = native_codegen_job_object_path_v1(stage_root, job)
-                    val log_path = native_codegen_job_log_path_v1(stage_root, job)
                     val size = if file_exists(obj): file_size_raw(obj) else: -1
                     val log_text = if file_exists(log_path): file_read(log_path) else: ""
                     # Same admission as the serial compile_ir_to_object: an
@@ -285,6 +387,7 @@ pub fn native_codegen_pool_run_v1(tool: text, names: [text], workers: i64,
                     else:
                         states[job] = NATIVE_CODEGEN_JOB_FAILED_V1
                         failed = failed + 1
+                    codes[job] = code
                     slot_busy[slot] = false
                     live = live - 1
                     reaped_any = true
@@ -300,10 +403,9 @@ pub fn native_codegen_pool_run_v1(tool: text, names: [text], workers: i64,
                     names[next_spawn], sha256_text(argvs[next_spawn].join("\n")))
                 var pid: i64 = -1
                 if claim == 1:
-                    unsafe(capabilities: [ffi]):
-                        pid = rt_process_spawn_async_value(shell_cmd,
-                            native_codegen_shell_args_v1(tool, argvs[next_spawn],
-                                native_codegen_job_log_path_v1(stage_root, next_spawn)))
+                    pid = native_codegen_child_spawn_v1(session, shell_cmd,
+                        native_codegen_shell_args_v1(tool, argvs[next_spawn],
+                            native_codegen_job_log_path_v1(stage_root, next_spawn)))
                 if pid > 0:
                     pids[next_spawn] = pid
                     slots[next_spawn] = slot
@@ -331,17 +433,24 @@ pub fn native_codegen_pool_run_v1(tool: text, names: [text], workers: i64,
                 argvs[emitted] = argv
                 states[emitted] = NATIVE_CODEGEN_JOB_QUEUED_V1
             emitted = emitted + 1
-            poll = 0
         elif not reaped_any and live > 0:
-            # Only children left: bounded back-off polling.
-            var sleep_ms: i64 = 10
-            if poll >= 50:
-                sleep_ms = 100
-            elif poll >= 10:
-                sleep_ms = 25
-            unsafe(capabilities: [ffi]):
-                rt_thread_sleep(sleep_ms)
-            poll = poll + 1
+            # Only children left: block on the uncollected child with the
+            # earliest deadline (one wakeup per exit, cap, or deadline).
+            var target: i64 = -1
+            job = 0
+            while job < emitted:
+                if states[job] == NATIVE_CODEGEN_JOB_RUNNING_V1 and codes[job] == NATIVE_CODEGEN_CODE_PENDING_V1:
+                    if target < 0 or starts[job] < starts[target]:
+                        target = job
+                job = job + 1
+            if target >= 0:
+                val cap = if next_spawn < emitted: NATIVE_CODEGEN_WAIT_CAP_QUEUED_MS_V1 else: NATIVE_CODEGEN_WAIT_CAP_IDLE_MS_V1
+                val remaining = starts[target] + job_timeout_ms - native_codegen_now_ms_v1()
+                val wait_ms = if remaining < cap: remaining else: cap
+                val code = native_codegen_child_wait_v1(session, pids[target], wait_ms)
+                if code != -2:
+                    codes[target] = code
+                idle_wakeups = idle_wakeups + 1
     var skipped: i64 = 0
     for state in states:
         if state == NATIVE_CODEGEN_JOB_SKIPPED_V1:
@@ -349,4 +458,5 @@ pub fn native_codegen_pool_run_v1(tool: text, names: [text], workers: i64,
     NativeCodegenPoolResultV1(objects: objects, states: states, workers: max_workers,
         peak_live: peak_live, passed: passed, failed: failed, skipped: skipped,
         first_object_ms: first_object_ms,
-        wall_ms: native_codegen_now_ms_v1() - started)
+        wall_ms: native_codegen_now_ms_v1() - started,
+        idle_wakeups: idle_wakeups, timed_out: timed_out_jobs)
