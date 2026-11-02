@@ -6,11 +6,17 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 T=$(mktemp -d "${TMPDIR:-/tmp}/llvm-nm-selftest.XXXXXX"); trap 'rm -rf "$T"' EXIT
 FAIL=0
 stub() { mkdir -p "$(dirname "$1")"; printf '#!/bin/sh\necho "LLVM version stub"\n' >"$1"; chmod +x "$1"; }
-UTILS=$(dirname "$(command -v tr)")
+# Private tool dir: only what the resolver needs, so a host llvm-nm in /usr/bin cannot leak in.
+UTILS="$T/utils"; mkdir -p "$UTILS"
+for _t in tr sort grep dirname head sh cat uname sed; do ln -s "$(command -v $_t)" "$UTILS/$_t" 2>/dev/null || cp "$(command -v $_t)" "$UTILS/$_t"; done
+# Symlinked tools are only reliable under env -i on Linux; elsewhere (Git Bash)
+# use the real tool dir, which carries no llvm-nm.
+[ "$(uname -s)" = Linux ] || UTILS=$(dirname "$(command -v tr)")
+REALSH=$(command -v sh)
 run() { # run <PATH> [env...] -> resolver output
     _p=$1; shift
-    env -i HOME="$T/home" PATH="$_p" LLVM_NM_HOST_ENV="${HOSTENV:-$T/none}" "$@" \
-        "$(command -v sh)" -c ". '$ROOT/scripts/lib/resolve-llvm-nm.shs'; resolve_llvm_nm"
+    env -i SYSTEMROOT="${SYSTEMROOT:-}" HOME="$T/home" PATH="$_p" LLVM_NM_HOST_ENV="${HOSTENV:-$T/none}" "$@" \
+        "$REALSH" -c ". '$ROOT/scripts/lib/resolve-llvm-nm.shs'; resolve_llvm_nm"
 }
 expect() { # expect <name> <want> <got>
     if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1: want '$2' got '$3'"; FAIL=1; fi
@@ -38,8 +44,8 @@ expect none-empty "" "$out"
 # rc of $(...) assignment is run's rc
 [ "$rc" -eq 1 ] && echo "PASS none-rc1" || { echo "FAIL none-rc1: rc=$rc"; FAIL=1; }
 # 6. end to end: checker with no tool fails (exit 2) with the clear message
-msg=$(env -i HOME="$T/home" PATH="$T/b1x:$SYS" LLVM_NM_HOST_ENV="$T/none" CC="$(command -v sh)" \
-    "$(command -v sh)" "$ROOT/scripts/check/check-runtime-link-completeness.shs" --resolve-only 2>&1); rc=$?
+msg=$(env -i SYSTEMROOT="${SYSTEMROOT:-}" HOME="$T/home" PATH="$T/b1x:$SYS" LLVM_NM_HOST_ENV="$T/none" CC="$REALSH" \
+    "$REALSH" "$ROOT/scripts/check/check-runtime-link-completeness.shs" --resolve-only 2>&1); rc=$?
 [ "$rc" -eq 2 ] && echo "PASS e2e-rc2" || { echo "FAIL e2e-rc2: rc=$rc"; FAIL=1; }
 case "$msg" in *"llvm-nm not found"*"tried:"*) echo "PASS e2e-msg" ;; *) echo "FAIL e2e-msg: $msg"; FAIL=1 ;; esac
 [ "$FAIL" -eq 0 ] && echo "STATUS: PASS" || { echo "STATUS: FAIL"; exit 1; }
