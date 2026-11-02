@@ -52,3 +52,25 @@ instantiation; shape 2 needs MIR to read the inferred return type of an un-annot
 function (30.types result) instead of only the declared type; shape 3 needs flow
 narrowing of `T?` after an early-return nil guard to reach MIR's receiver type.
 Revert-ready: no.
+
+## Status (2026-11-02, lane waf-2): shapes 1-3 fixed in current source
+
+**Status:** partially fixed -- shapes 1-3 root-fixed in pure Simple; shapes 4-6 remain
+full-closure-only (not reproduced in a single module, not claimed). Workaround tags stay
+until a stage3 binary compiles the tree without them (revert loop owns removal).
+- Shape 1 (`fn f(value): value.substring(..)` / `value[a:b]`): erased receivers (no text/array
+  proof, unresolved, no custom owner) now lower through the runtime-polymorphic `rt_slice`
+  (tagged string or array handle; anything else yields nil at runtime). 1-arg form ends at
+  `rt_len(value)`. `method_calls_literals.spl` `lower_erased_receiver_slice_v1`.
+- Shape 2 (`fn make(n: i64):` ending in bare `out`): `infer_untyped_return_type` now types an
+  un-annotated function from a bare-identifier tail whose newest top-level binding is
+  annotated (or parser-typed, e.g. an array literal) or is a typed param; the body is then
+  lowered in value position. Unannotated/call-initialized bindings keep the Unit default and
+  still fail closed. `20.hir/.../module_callable_types.spl` `annotated_tail_identifier_type_v1`.
+- Shape 3 (`text?` after `if x == nil: return`): the len/length/is_empty path narrows an
+  `Optional(Str)` receiver via the existing runtime-checked `narrow_optional_text_receiver`
+  (nil aborts loudly) and calls `rt_string_len`.
+Evidence (seed `bin/simple.exe`, in-process HIR+MIR):
+`methods_mir_receiver_shapes_spec.spl` red 5/4 (pre-fix) -> green 10/10; 17 related
+MIR/HIR specs identical pass/fail before and after (pre-existing failures unchanged).
+Revert-ready: not yet (needs stage3 self-build).
