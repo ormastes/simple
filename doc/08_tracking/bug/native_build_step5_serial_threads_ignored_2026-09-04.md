@@ -1,5 +1,5 @@
 # native-build late phases are serial: `--threads` is plumbed end-to-end and then discarded
-## Open 2026-09-16 — needs owner triage
+## Partially fixed 2026-11-02 — step 5 llc is process-parallel (plan section 6); MIR->IR translation and step 4 stay serial
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.

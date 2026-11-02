@@ -1,7 +1,7 @@
 # Staged plan: give native-build step 5 real parallelism
 
 **Date:** 2026-09-04
-**Status:** PLAN. Nothing in P0-P3 below is implemented.
+**Status:** P2 IMPLEMENTED 2026-11-02 (process pool, see section 6). P1 is subsumed (per-job staged paths); P0 is not needed by P2 (only the parent writes the manifest). P3 not taken.
 **Bug:** `doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md`
 **Related:** `doc/03_plan/infra/unstable_mode_build_side.md`
 
@@ -221,3 +221,44 @@ non-`--verbose` path — which is where the >1h33m silent phase was observed.
   the bug record marks it code-reading inference, unmeasured.
 - Nothing in P0-P3 has been run. No bootstrap or native-build was executed for
   this plan (two long builds owned the machine).
+
+---
+## 6. Implemented 2026-11-02 — P2 as a process pool
+
+Lane `full-parallel-codegen`. Design: the IR-split of option (e), run as a
+**prefetch** in front of the unchanged `ParallelBuilder.build()` pass.
+
+- `src/compiler/80.driver/driver_build/native_codegen_pool_v1.spl` — the
+  scheduler. The parent translates each uncached module's MIR to an IR file
+  serially (same order as the serial lane), and N `llc` child processes turn
+  the files into objects concurrently; translation and llc are pipelined, so
+  the first object appears as soon as the first module's llc finishes. Each
+  child exits after its object (no GC in the native runtime: process exit is
+  the memory release). Staged paths are per job (`job-<i>.ll/.o` in a
+  private `simple-codegen-pool-*` dir), never per pid, so P1 is subsumed.
+- N = min(cores or `--threads`, jobs, `SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB` /
+  est, (live RAM/commit headroom − 24 GiB) / est), est =
+  `SIMPLE_NATIVE_CODEGEN_WORKER_KIB` (default 2 GiB per llc child); unknown
+  memory caps N at 4. `SIMPLE_NATIVE_CODEGEN_POOL=0` disables it.
+- Ownership: each job is claimed in a pool ledger through the shared
+  `hir_shard_recovery_claim` (lock + exclusive claim) before its child is
+  spawned; an already-held claim fails closed. Terminal records and SDN
+  receipts (`native_codegen_receipt_v1`) are published by temp + rename.
+- Determinism: IR comes from `backend_helpers.llvm_module_ir_to_path_v1`
+  (the serial `llvm` lane's own prelude) and llc runs
+  `llvm_llc_object_argv_v1`, which `compile_ir_to_object` now uses too, so a
+  pooled object is byte-identical to the serial one. Pooled objects are then
+  published by `_compile_frozen_module_capsule_prefetched_v1` through the
+  serial writer, identity checks, receipt and collect code.
+- Failure: any pool failure (translate refusal, llc error, claim refusal)
+  leaves the module to the serial lane, which reports the real diagnostic.
+- Scope: built-in `llvm` lane only. Backend session / plugin, native-group
+  manifest, `SIMPLE_CODEGEN_MODULE_SCOPE=1`, `SIMPLE_LLVM_BITCODE_DEBUG=1`,
+  `SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ=1` and hosts without llc keep the serial
+  lane and print `concurrency=1 (serial lane in this process: <reason>)`.
+- Still serial: MIR -> IR translation (in the parent). Speedup is bounded by
+  the llc share of step 5, which remains unmeasured (section 5).
+
+Specs: `test/01_unit/compiler/driver/native_codegen_pool_v1_spec.spl`,
+`test/01_unit/compiler/driver/native_codegen_claim_race_stress_spec.spl`,
+`test/03_system/app/native_build/feature/native_codegen_pool_determinism_spec.spl`.

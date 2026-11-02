@@ -1,0 +1,121 @@
+# @cover src/compiler/80.driver/driver_build/native_codegen_pool_v1.spl 60%
+# @cover src/compiler/70.backend/backend/backend_helpers.spl 5%
+# @cover src/compiler/70.backend/backend/llvm_backend_tools.spl 10%
+# @req REQ-COMPILER-DRIVER-PARALLEL-004
+"""
+## Purpose and audience
+Purpose: prove that the native codegen process pool emits objects that are
+byte-identical to the serial lane, with real concurrent llc children, and that
+the first object is published within the 10 s budget.
+Audience: compiler engineers who maintain native-build step 5, and release
+reviewers who need determinism evidence for parallel codegen.
+Plan: doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md (P2)
+
+Requires `llc` on PATH (find_llc). The serial side is the serial lane's own
+compile_ir_to_object; the parallel side is the pool driven by the driver's own
+llc argv (llvm_module_llc_argv_v1), so any drift between the two lanes fails
+this spec.
+"""
+
+use std.spec
+use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_pool_run_v1,
+    native_codegen_receipt_path_v1, NATIVE_CODEGEN_JOB_PASS_V1}
+use compiler.backend.backend_helpers.{llvm_module_llc_argv_v1}
+use compiler.backend.llvm_backend_tools.{compile_ir_to_object, find_llc}
+use compiler.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use std.io_runtime.{dir_create_all, dir_exists, file_exists, file_read, file_write, getpid}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes_result}
+
+val FIXTURE_COUNT: i64 = 6
+
+fn determinism_fixture(label: text) -> text:
+    val dir = "build/tmp/native_codegen_determinism/{getpid()}-{label}"
+    expect(dir_exists(dir)).to_equal(false)
+    expect(dir_create_all(dir)).to_equal(true)
+    dir
+
+fn fixture_name(index: i64) -> text:
+    "pool.fixture_{index}"
+
+fn fixture_ir(index: i64) -> text:
+    val name = fixture_name(index)
+    var body = "source_filename = \"{name}.spl\"\n\n"
+    body = body + "@msg_{index} = private unnamed_addr constant [6 x i8] c\"m{index}abc\\00\"\n\n"
+    val sym = "pool_fixture_{index}"
+    val open = "{"
+    val close = "}"
+    body = body + "define i64 @" + sym + "_sum(i64 %n) " + open + "\n"
+    body = body + "entry:\n  br label %loop\n"
+    body = body + "loop:\n  %i = phi i64 [ 0, %entry ], [ %next, %loop ]\n"
+    body = body + "  %acc = phi i64 [ {index}, %entry ], [ %acc2, %loop ]\n"
+    body = body + "  %acc2 = add i64 %acc, %i\n  %next = add i64 %i, 1\n"
+    body = body + "  %done = icmp sge i64 %next, %n\n  br i1 %done, label %exit, label %loop\n"
+    body = body + "exit:\n  ret i64 %acc2\n" + close + "\n\n"
+    body = body + "define ptr @" + sym + "_msg() " + open + "\nentry:\n  ret ptr @msg_{index}\n" + close + "\n"
+    body
+
+fn emit_fixture(index: i64, ir_path: text, obj_path: text) -> [text]:
+    if not file_write(ir_path, fixture_ir(index)):
+        return []
+    llvm_module_llc_argv_v1(false, 2, "", obj_path, ir_path)
+
+fn bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+describe "native codegen pool determinism":
+    # @manual scenario evidence
+    it "emits objects byte-identical to the serial lane with concurrent llc children":
+        step("Require llc for both lanes")
+        val llc = find_llc()
+        expect(llc.len()).to_be_greater_than(0)
+
+        step("Run the pool: six modules on three llc workers")
+        val stage = determinism_fixture("stage")
+        val ledger = stage + "/ledger"
+        expect(dir_create_all(ledger)).to_equal(true)
+        var names: [text] = []
+        var index: i64 = 0
+        while index < FIXTURE_COUNT:
+            names.push(fixture_name(index))
+            index = index + 1
+        val result = native_codegen_pool_run_v1(llc, names, 3, stage, ledger,
+            emit_fixture(_1, _2, _3))
+        expect(result.passed).to_equal(FIXTURE_COUNT)
+        expect(result.failed).to_equal(0)
+        expect(result.skipped).to_equal(0)
+
+        step("Prove real concurrency: more than one llc child was live at once")
+        expect(result.peak_live).to_be_greater_than(1)
+
+        step("First object published within the 10 s budget")
+        expect(result.first_object_ms).to_be_greater_than(-1)
+        expect(result.first_object_ms).to_be_less_than(10000)
+
+        step("Compile each module through the serial lane and compare bytes")
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
+        index = 0
+        while index < FIXTURE_COUNT:
+            expect(result.states[index]).to_equal(NATIVE_CODEGEN_JOB_PASS_V1)
+            val serial = compile_ir_to_object(fixture_ir(index), config, OptimizationLevel.Speed, false)
+            expect(serial.is_ok()).to_equal(true)
+            val serial_bytes = serial.unwrap().bytes
+            val pooled_bytes = match file_read_bytes_result(result.objects[index]):
+                case Ok(bytes): bytes
+                case Err(_): []
+            expect(pooled_bytes.len()).to_be_greater_than(0)
+            expect(bytes_equal(serial_bytes, pooled_bytes)).to_equal(true)
+            index = index + 1
+
+        step("Every module has an SDN PASS receipt")
+        for name in names:
+            val receipt = file_read(native_codegen_receipt_path_v1(ledger, name))
+            expect(receipt).to_start_with("native_codegen_receipt_v1:\n")
+            expect(receipt).to_contain("  status: \"PASS\"\n")
