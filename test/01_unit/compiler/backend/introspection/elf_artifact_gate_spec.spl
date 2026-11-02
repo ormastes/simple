@@ -1,0 +1,88 @@
+# native-build functionless-artifact gate
+# Bug: native_build_reports_success_for_functionless_artifact_2026-08-10
+use std.spec
+use compiler.backend.introspection.elf_artifact_gate.{elf64_defined_func_count, native_artifact_functionless_reason}
+use app.io.file_ops (file_write_bytes, file_remove)
+
+fn _put(buf: [u8], off: i64, value: i64, width: i64) -> [u8]:
+    var out = buf
+    var i = 0
+    while i < width:
+        out[off + i] = ((value >> (8 * i)) & 255) as u8
+        i = i + 1
+    out
+
+# Minimal ELF64 LE with one .symtab. kinds[i] = (st_info, st_shndx) per symbol.
+fn _elf(infos: [i64], shndxs: [i64]) -> [u8]:
+    val n = infos.len()
+    val shoff = 64 + 24 * n
+    var b: [u8] = []
+    var k = 0
+    while k < shoff + 3 * 64:
+        b.push(0u8)
+        k = k + 1
+    b[0] = 0x7F
+    b[1] = 0x45
+    b[2] = 0x4C
+    b[3] = 0x46
+    b[4] = 2
+    b[5] = 1
+    b = _put(b, 0x28, shoff, 8)
+    b = _put(b, 0x3A, 64, 2)
+    b = _put(b, 0x3C, 3, 2)
+    var i = 0
+    while i < n:
+        b[64 + 24 * i + 4] = infos[i] as u8
+        b = _put(b, 64 + 24 * i + 6, shndxs[i], 2)
+        i = i + 1
+    val sh = shoff + 64
+    b = _put(b, sh + 0x04, 2, 4)
+    b = _put(b, sh + 0x18, 64, 8)
+    b = _put(b, sh + 0x20, 24 * n, 8)
+    b = _put(b, sh + 0x28, 2, 4)
+    b = _put(b, sh + 0x38, 24, 8)
+    b
+
+describe "native-build functionless artifact gate":
+    it "counts defined FUNC symbols":
+        # FILE(4) sym, FUNC(2) defined x2, FUNC undefined, OBJECT(1) defined
+        val e = _elf([0x04, 0x12, 0x12, 0x12, 0x11], [0xFFF1, 1, 1, 0, 1])
+        expect(elf64_defined_func_count(e)).to_equal(2)
+
+    it "reports zero for an ELF with only FILE symbols":
+        val e = _elf([0x04, 0x04, 0x04], [0xFFF1, 0xFFF1, 0xFFF1])
+        expect(elf64_defined_func_count(e)).to_equal(0)
+
+    it "reports -1 for non-ELF input":
+        expect(elf64_defined_func_count([1u8, 2u8, 3u8])).to_equal(-1)
+
+    it "rejects a functionless ELF artifact on disk":
+        val path = "build/_functionless_gate_spec_nofunc.out"
+        file_write_bytes(path, _elf([0x04, 0x04], [0xFFF1, 0xFFF1]))
+        val reason = native_artifact_functionless_reason(path)
+        file_remove(path)
+        expect(reason.contains("zero defined function")).to_equal(true)
+
+    it "accepts an ELF artifact with a defined function":
+        val path = "build/_functionless_gate_spec_good.out"
+        file_write_bytes(path, _elf([0x04, 0x12], [0xFFF1, 1]))
+        val reason = native_artifact_functionless_reason(path)
+        file_remove(path)
+        expect(reason).to_equal("")
+
+    it "does not reject non-ELF non-empty artifacts":
+        val path = "build/_functionless_gate_spec_pe.out"
+        var pe: [u8] = [0x4Du8, 0x5Au8]
+        while pe.len() < 128:
+            pe.push(0x41u8)
+        file_write_bytes(path, pe)
+        val reason = native_artifact_functionless_reason(path)
+        file_remove(path)
+        expect(reason).to_equal("")
+
+    it "rejects an empty artifact":
+        val path = "build/_functionless_gate_spec_empty.out"
+        file_write_bytes(path, [])
+        val reason = native_artifact_functionless_reason(path)
+        file_remove(path)
+        expect(reason.contains("empty")).to_equal(true)

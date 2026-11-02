@@ -13,6 +13,7 @@ use compiler.driver.driver_log_helpers.{log_build_trace}
 use app.io.process_ops (process_run)
 use app.io.file_ops (file_exists, file_write, file_copy, file_remove)
 use app.io.dir_ops (dir_create)
+use compiler.backend.introspection.elf_artifact_gate.{native_artifact_functionless_reason}
 use app.io.sysinfo_ops (getpid)
 use app.io.time_ops (time_now_unix_micros)
 use app.io.cli_ops.{cli_current_exe_path}
@@ -1753,6 +1754,22 @@ fn _cli_native_build(
                     native_build_finish_intermediate(staged_output, keep_intermediates, print_intermediates)
                     _cli_eprint("error: native-build reported success but produced no fresh output binary: {staged_output}")
                     _cli_eprint("  (compiler driver returned Success without writing the expected file -- treating as a hard failure, not a silent success)")
+                    return 1
+                # Existence is not enough: an ELF with a symbol table but zero
+                # defined functions (e.g. 294 FILE / 0 FUNC) is a function-less
+                # artifact, not a build. Bug native_build_reports_success_for_
+                # functionless_artifact_2026-08-10; mirrors the Rust driver gate.
+                val functionless_reason = native_artifact_functionless_reason(staged_output)
+                if functionless_reason != "":
+                    cli_native_build_restore_result_env_v1(
+                        old_log_mode, old_emit_object, old_no_mangle, old_native_cache_dir,
+                        old_native_arena_decls, old_native_entry, old_native_entry_closure, old_runtime_path,
+                        old_core_runtime_path, old_native_runtime_bundle, old_native_target, old_native_cpu,
+                        old_native_threads, runtime_bundle_explicit, set_native_target, set_native_cpu,
+                        native_threads
+                    )
+                    native_build_finish_intermediate(staged_output, keep_intermediates, print_intermediates)
+                    _cli_eprint("error: native-build reported success but {functionless_reason}")
                     return 1
                 if not _cli_file_rename_impl(staged_output, output):
                     native_build_finish_intermediate(staged_output, keep_intermediates, print_intermediates)

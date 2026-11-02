@@ -1,0 +1,102 @@
+# Function-less artifact gate for native-build.
+#
+# Bug: native_build_reports_success_for_functionless_artifact_2026-08-10.
+# An ELF64 image whose .symtab carries zero DEFINED STT_FUNC symbols (e.g.
+# 294 FILE / 0 FUNC) is not a build success. Mirrors the Rust driver gate:
+# ELF64 LE with .symtab -> require >= 1 defined FUNC; non-ELF/stripped images
+# are only checked for non-emptiness.
+#
+# Cost: positional reads of the 64-byte ELF header, the section header table
+# and the .symtab section only -- never the whole (possibly ~180 MB) artifact.
+
+use app.io.file_ops (file_size, file_read_bytes)
+use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
+
+fn _u16(buf: [u8], off: i64) -> i64:
+    (buf[off] as i64) | ((buf[off + 1] as i64) << 8)
+
+fn _u32(buf: [u8], off: i64) -> i64:
+    (buf[off] as i64) | ((buf[off + 1] as i64) << 8) | ((buf[off + 2] as i64) << 16) | ((buf[off + 3] as i64) << 24)
+
+fn _u64(buf: [u8], off: i64) -> i64:
+    _u32(buf, off) | (_u32(buf, off + 4) << 32)
+
+fn _is_elf64_le(buf: [u8]) -> bool:
+    buf.len() >= 64 and buf[0] == 0x7F and buf[1] == 0x45 and buf[2] == 0x4C and buf[3] == 0x46 and buf[4] == 2 and buf[5] == 1
+
+fn _count_defined_funcs(symtab: [u8], entsize: i64) -> i64:
+    var count = 0
+    var off = 0
+    while off + entsize <= symtab.len():
+        val info = symtab[off + 4] as i64
+        if (info & 15) == 2 and _u16(symtab, off + 6) != 0:
+            count = count + 1
+        off = off + entsize
+    count
+
+# -1: not an ELF64 LE image; -2: ELF64 but no usable .symtab (stripped/malformed);
+# otherwise the number of defined STT_FUNC symbols.
+fn elf64_defined_func_count(bytes: [u8]) -> i64:
+    if not _is_elf64_le(bytes):
+        return -1
+    val shoff = _u64(bytes, 0x28)
+    val shentsize = _u16(bytes, 0x3A)
+    val shnum = _u16(bytes, 0x3C)
+    if shoff <= 0 or shnum <= 0 or shentsize < 64 or shoff + shnum * shentsize > bytes.len():
+        return -2
+    var i = 0
+    while i < shnum:
+        val sh = shoff + i * shentsize
+        if _u32(bytes, sh + 0x04) == 2:
+            val off = _u64(bytes, sh + 0x18)
+            val size = _u64(bytes, sh + 0x20)
+            val entsize = _u64(bytes, sh + 0x38)
+            if entsize < 24 or off < 0 or off + size > bytes.len():
+                return -2
+            return _count_defined_funcs(bytes[off:off + size], entsize)
+        i = i + 1
+    -2
+
+fn _read_at(path: text, off: i64, size: i64) -> [u8]?:
+    match external_file_read_bytes_at(path, off, size):
+        case Ok(bytes): Some(bytes)
+        case Err(_):
+            # Positional read unavailable on this host: fall back to the whole
+            # file rather than silently passing an unreadable artifact.
+            val all = file_read_bytes(path)
+            if all.len() < off + size:
+                nil
+            else:
+                Some(all[off:off + size])
+
+# "" when the artifact is acceptable, otherwise the rejection reason.
+fn native_artifact_functionless_reason(path: text) -> text:
+    val total = file_size(path)
+    if total <= 0:
+        return "output artifact is empty or unreadable: {path}"
+    val head = _read_at(path, 0, 64) ?? []
+    if not _is_elf64_le(head):
+        return ""
+    val shoff = _u64(head, 0x28)
+    val shentsize = _u16(head, 0x3A)
+    val shnum = _u16(head, 0x3C)
+    if shoff <= 0 or shnum <= 0 or shentsize < 64 or shoff + shnum * shentsize > total:
+        return ""
+    val shdrs = _read_at(path, shoff, shnum * shentsize) ?? []
+    if shdrs.len() < shnum * shentsize:
+        return ""
+    var i = 0
+    while i < shnum:
+        val sh = i * shentsize
+        if _u32(shdrs, sh + 0x04) == 2:
+            val off = _u64(shdrs, sh + 0x18)
+            val size = _u64(shdrs, sh + 0x20)
+            val entsize = _u64(shdrs, sh + 0x38)
+            if entsize < 24 or off < 0 or off + size > total:
+                return ""
+            val symtab = _read_at(path, off, size) ?? []
+            if _count_defined_funcs(symtab, entsize) == 0:
+                return "output artifact has zero defined function symbols (ELF .symtab has no defined FUNC): {path}"
+            return ""
+        i = i + 1
+    ""
