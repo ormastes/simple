@@ -2206,8 +2206,23 @@ impl Lowerer {
                                             ty: TypeId::BOOL,
                                         }),
                                         then_branch: Box::new(legacy_payload_expr),
+                                        // Raw-form optional: the subject word IS the
+                                        // payload, but a primitive `T?` is carried as
+                                        // a TAGGED word (`BoxInt` on return). Read it
+                                        // through `rt_unwrap_or_self` so the
+                                        // name-keyed `UnboxInt` fires for a scalar
+                                        // binding, exactly like plain `if val x = o`.
+                                        // A bare `Local` read bound the tagged word
+                                        // (`Some(a)` of 7 read back as 56). Bug:
+                                        // doc/08_tracking/bug/jit_some_pattern_payload_shifted_left_3_2026-09-13.md
                                         else_branch: Some(Box::new(HirExpr {
-                                            kind: HirExprKind::Local(subject_idx),
+                                            kind: HirExprKind::BuiltinCall {
+                                                name: "rt_unwrap_or_self".to_string(),
+                                                args: vec![HirExpr {
+                                                    kind: HirExprKind::Local(subject_idx),
+                                                    ty: subject_ty,
+                                                }],
+                                            },
                                             ty: payload_expr_ty,
                                         })),
                                     },

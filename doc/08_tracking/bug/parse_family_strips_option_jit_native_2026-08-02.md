@@ -1,5 +1,46 @@
 # BUG: the `parse_*` text-method family silently strips the Option on JIT and native
 
+## Policy re-check 2026-11-02 (lane a6dffc9c/p12-6)
+
+**Checked against current policy/design: re-scoped to: JIT/native `parse_*` must yield `Option::Some(x)` / `Option::None`, not a bare scalar / `nil` (value-level wrong answers are already fixed); the original 'absence -> 0' framing is obsolete**
+
+Policy: nil only inside `unsafe`, `Option`/`None` elsewhere; no `Any` outside `unsafe`; erased generics (no monomorphization); TDD.
+
+Measured again on the JIT lane (`"12".parse_int()`, `"abc".parse_int()`, `"3".parse_int() ?? -1`, `"abc".parse_int() ?? -1`):
+
+| | JIT | interpreter |
+|---|---|---|
+| `"12".parse_int()` | `12` | `Option::Some(12)` |
+| `"abc".parse_int()` | `nil` | `Option::None` |
+| `?? -1` forms | `3`, `-1` | `3`, `-1` |
+
+- The silent-wrong-VALUE modes (absence -> 0, present 3 -> absent) are fixed:
+  the family routes to `rt_string_parse_int` (commit `0641097d685`; alias tables
+  `codegen/instr/calls.rs:3757,4414`, `closures_structs.rs:2687`,
+  `llvm/emitter.rs:353`, `llvm/functions/calls.rs:2265,2500`,
+  `llvm/functions.rs:3184`) and the primitive-optional lane is tagged.
+  Stages 1-2 of the migration below have landed; the "present 3 read as absent"
+  and "absence -> 0" text in sections 1-4 is HISTORICAL.
+- **Remaining defect under policy (the new scope):** a failed parse is the bare
+  runtime `nil` (`rt_string_parse_int` returns `RuntimeValue::NIL`,
+  `runtime/src/value/collections.rs:6043-6058`) and a success is a bare tagged
+  int, not `Option::Some`/`Option::None`. Policy says `nil` is only legal inside
+  `unsafe`; outside it the JIT must yield `Option::None` (and print as such). Do
+  NOT restore any sentinel/0 behaviour.
+- Why it is not a cheap seed fix (difficulty 4): it is the seed-wide
+  nil-boxed primitive `T?` representation (`Pointer{inner:T}`; print path
+  `mir/lower/lowering_expr_builtin.rs:757` `rt_opt_i64_to_string`;
+  `hir/lower/expr/control.rs` `lower_coalesce`/`payload_slot_expr`), shared by
+  every `T?` producer, not just `parse_*`. Native column still unmeasurable
+  (`[TryOperator]` fails closed). A `bug_difficulty` row records the root cause.
+- Severity downgraded P1 -> P2 as the 2026-09-13 note already recommended.
+
+Evidence (this lane): debug Rust seed built from `2345aff3ff5`
+(`cargo build -p simple-driver`, `CARGO_TARGET_DIR=C:/dev/wt/p12-6/target-p12`), JIT
+= `simple run`, interpreter = `SIMPLE_EXECUTION_MODE=interpret simple run`.
+Regression: `src/compiler_rust/compiler/tests/option_payload_pattern_jit.rs`
+(`cargo test -p simple-compiler --test option_payload_pattern_jit`).
+
 ## Re-measured 2026-09-13 — BOTH silent-wrong-answer modes are GONE; only the representation divergence remains
 
 Binary: Rust seed `build/vt4/bootstrap/simple.exe` (Windows), same
@@ -43,7 +84,7 @@ scheduling the staged migration should reprice it accordingly.
 Native column not re-measured (no `compile --native` run in this pass).
 
 
-- **Status:** OPEN — measured, staged migration designed, stage 0 (measurement) landed
+- **Status:** OPEN (P2) — RE-SCOPED 2026-11-02: JIT/native yield a bare scalar / `nil` instead of `Option::Some(x)` / `Option::None`
 - **Filed:** 2026-08-02
 - **Base sha measured:** `a788a2a3e5c68ef1736401428397b5bf950d3a67`
 - **Binary under test:** `bin/release/x86_64-unknown-linux-gnu/simple`, enum-probe = 0 ⇒ **Rust seed**
@@ -346,5 +387,3 @@ platform-specific or single-build artifact:
 Native column still not re-measured: `native-build` on this host is blocked
 before codegen by the persistent package index (`scv-authority-missing`), so a
 native row would be manufactured rather than observed.
-
-**Revalidated 2026-11-02: still plausible because OPEN — measured, staged migration designed, stage 0 (measurement) landed; no merged fix commit with a passing regression is cited in this doc.**
