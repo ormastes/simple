@@ -1,6 +1,40 @@
 # Bug: flat `i64?` optional lane collides with tagged-value scheme (seed JIT) — payload 3 reads as nil
 
-Status: OPEN — root-caused 2026-07-22; architectural fix required
+## Policy re-check 2026-11-02 (lane a6dffc9c/p12-6)
+
+**Checked against current policy/design: obsolete because the flat nilable `i64?` lane with in-band nil sentinel 3 was replaced by the tagged-word lane; payload 3 no longer reads as nil**
+
+Policy: nil only inside `unsafe`, `Option`/`None` elsewhere; no `Any` outside `unsafe`; erased generics (no monomorphization); TDD.
+
+The report's premise is a flat (non-boxed) `i64?` lane whose in-band none
+sentinel is bit pattern 3, so a present `3` is lost. That lane has been retired:
+
+- MIR of `fn g(v: i64) -> i64?: return v` now emits `BoxInt` on return and
+  `UnboxInt` on `if val`/`rt_unwrap_or_self` (dumped with
+  `simple compile --emit-mir`); a primitive `T?` payload is a TAGGED word, so
+  `3` is `24` and cannot equal the nil word.
+- Measured on the JIT: `make_opt(3) ?? -99` = `3`, `make_opt(11) ?? -99` = `11`,
+  `if val y = make_opt(3)` binds `3`, `make_opt(3) == nil` is `false`,
+  `"abcdef".index_of("d")` = `3`. Interpreter agrees. Locked by rows 6, 7, 11
+  and 12 of `option_payload_pattern_jit.rs`.
+- The fix direction recorded in "Resolution" (retire the flat Pointer
+  representation for primitive optionals in favor of the tagged scheme) is what
+  landed (see also `coalesce_raw_i64_sentinel_collision_2026-08-02.md`, CLOSED).
+- Residual JIT-vs-interpreter print divergence (`3` vs `Option::Some(3)`,
+  `nil` vs `Option::None`) is the nil-boxed Option representation tracked in
+  `parse_family_strips_option_jit_native_2026-08-02.md` (re-scoped there);
+  it is not this bug. `llm_caret_index_of_optioni64_tagbox_2026-07-07` (pure-Simple
+  app lane) was not re-verified here and stays open.
+
+Closed as obsolete; the old behaviour (a sentinel-3 flat lane) is not restored.
+
+Evidence (this lane): debug Rust seed built from `2345aff3ff5`
+(`cargo build -p simple-driver`, `CARGO_TARGET_DIR=C:/dev/wt/p12-6/target-p12`), JIT
+= `simple run`, interpreter = `SIMPLE_EXECUTION_MODE=interpret simple run`.
+Regression: `src/compiler_rust/compiler/tests/option_payload_pattern_jit.rs`
+(`cargo test -p simple-compiler --test option_payload_pattern_jit`).
+
+Status: CLOSED — obsolete 2026-11-02 (flat `i64?` lane with in-band nil sentinel 3 no longer exists; payload 3 round-trips)
 Observed: 2026-07-22 (as "index_of digit-leading literal" — that was a red herring, twice)
 Severity: P1 — silently wrong values in production tooling paths (JIT `run` on
 seed-engine binaries, which includes the currently deployed bin/release binary)
@@ -249,5 +283,3 @@ other agents are concurrently editing compiler lowering files this session —
 would repeat the already-rejected approach and risks regressing `print`/`??`
 for all values, per the explicit prior-session finding. This entry is a
 status re-confirmation only, landed as a doc-only change.
-
-**Revalidated 2026-11-02: still plausible because OPEN — root-caused 2026-07-22; architectural fix required; no merged fix commit with a passing regression is cited in this doc.**

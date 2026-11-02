@@ -50,3 +50,37 @@ lane owned the tree at filing time.
   (io_file_open chain, fixed).
 
 **Revalidated 2026-11-02: still plausible because the report title (Cranelift ISA/config SFFI wrappers hand-expand text with rt_string_data/rt_stri) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Policy re-check and re-scope (2026-11-02, lane a6dffc9c/p12-8)
+
+Checked against current policy/design: **still valid, re-scoped to: all
+hand-expanded `rt_cranelift_*` text wrappers in `sffi/codegen.spl`; fix via the
+two-arg twin route (`fs.spl` precedent) or seed+Simple text-registry rows
+(`calls.rs` `text_arg_indices`, `text_extern_abi.spl` + arity + parity spec,
+`interpreter_extern/cranelift.rs` accepting text); needs seed-built native
+red/green.** Difficulty raised 3 -> 4. No code change made.
+
+The earlier "Status" claim that only the `text` declaration is needed is wrong:
+declaring the externs as `text` is a no-op until the registries carry rows.
+
+File:line list:
+
+- `src/lib/nogc_sync_mut/sffi/codegen.spl` ~34-53: hand expansion for
+  `cranelift_new_module`, `cranelift_new_aot_module`,
+  `cranelift_new_aot_module_config_v2`, `cranelift_aot_isa_feature_v2`; the same
+  pattern recurs in `cranelift_declare_string_data`,
+  `cranelift_declare_global_data*`, `cranelift_function_addr_in_func`,
+  `cranelift_begin_function` and later wrappers (wider than the three named).
+- `src/compiler_rust/compiler/src/codegen/instr/calls.rs:3132` `text_arg_indices`
+  (no rows for these symbols; `rt_io_file_open` precedent at ~3301).
+- `src/compiler/50.mir/text_extern_abi.spl:40` `text_arg_indices`, `:239`
+  `text_extern_semantic_arity`; parity spec
+  `test/01_unit/compiler/mir/text_extern_abi_seed_parity_spec.spl`.
+- `src/compiler_rust/compiler/src/interpreter_extern/cranelift.rs:199`
+  (`spl_cranelift_aot_isa_feature_v2`) and the module constructors read raw
+  `i64` ptr/len via `expect_i64`; they break if the wrapper passes text.
+- `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:1866-1872` expanded I64 specs.
+- `src/lib/nogc_sync_mut/sffi/fs.spl:332` records that multi-arg text externs
+  mis-pass the length in seed-produced candidates (why `fs.spl` moved to
+  two-arg twins); `spl_cranelift_new_aot_module_config_v2` mixes text and
+  scalar args and is the highest-risk form.

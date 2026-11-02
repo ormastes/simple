@@ -245,10 +245,9 @@ pub const SHARD_MIR_WORKER_KB_V1: i64 = 9000000
 # are clamped harder (measured defaults: SHARD_PARSE/HIR_WORKER_KB_V1 above). Precedence: the per-phase
 # variable (a deliberate override, may go lower), then the host config key
 # worker_mem_mib (environment layer SIMPLE_HOST_WORKER_MEM_MIB), then the
-# default. The host key is a machine-wide hint shared by every phase, so it may
-# only make a phase MORE conservative: a value below the phase default (e.g.
-# below the measured HIR RSS behind the 3 GB HIR default) is ignored, with a
-# warning, rather than silently loosening the clamp.
+# default. The host key is the machine owner's measured per-worker figure, so it
+# is honored in BOTH directions (2026-11-02: it used to be ignored below the
+# default, so a 1200 MiB host.sdn could never lower the 9 GB default).
 #
 # The coordinator's peak is never a worker budget (a floor at the supervisor's
 # own front-end peak collapsed admission to one SIGBUS-killed worker, 41 deaths,
@@ -261,11 +260,9 @@ pub fn shard_worker_budget_kb(var_name: text, default_kb: i64) -> i64:
         if parsed > 0:
             return parsed
     val host_kb = shard_host_worker_budget_kb(host_limit_value("worker_mem_mib"))
-    val chosen = shard_host_budget_floor_kb(host_kb, default_kb)
-    if host_kb > 0 and chosen != host_kb:
-        val host_mib = host_kb / 1024
-        print "[shard] ignoring worker_mem_mib={host_mib} MiB below the {var_name} default {default_kb} kB; set {var_name} to lower it deliberately"
-    chosen
+    if host_kb > 0:
+        return host_kb
+    default_kb
 
 # worker_mem_mib in kB; 0 (use the default) when absent, invalid or so large
 # that the KiB value would overflow i64.

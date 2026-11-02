@@ -1,7 +1,36 @@
 # Seed JIT: `Some(x)` payload destructuring returns the value shifted left 3 bits
 
+## Policy re-check 2026-11-02 (lane a6dffc9c/p12-6)
+
+**Checked against current policy/design: still valid as filed (reproduced), now FIXED; the shift is a missing unbox, independent of the nil/Option representation policy**
+
+Policy: nil only inside `unsafe`, `Option`/`None` elsewhere; no `Any` outside `unsafe`; erased generics (no monomorphization); TDD.
+
+Still reproduced at `2345aff3ff5` (`someptn=56 plainval=7 match=56`; also
+`a + 1` = 57, so a real wrong value, not a display issue).
+
+Root cause (MIR dump): the primitive `T?` lane is tagged (`BoxInt` on return).
+The `Some(x)` binder in `hir/lower/stmt_lowering.rs` (identifier-payload path)
+takes `if rt_enum_id(subj) == OPTION_ENUM_ID then rt_enum_payload(subj) else
+subj`; the else branch was a bare `Local` read, so the still-tagged word was
+stored into the `i64` binding with no `UnboxInt` (plain `if val x` goes through
+`rt_unwrap_or_self`, which unboxes). Not an Option-policy issue (no nil/Any).
+
+Fix (TDD): the else branch now reads the subject through `rt_unwrap_or_self`,
+typed as the binding. Test `option_payload_pattern_jit.rs` was red at row 1 and
+is green; after the fix JIT = interpreter for `Some(a)` / `match case Some(c)` on
+`i64?` payloads 0, 1, 3, 5, 7, 100, and `Some` of struct, `f64`, `bool`, enum and
+`[i64]` payloads is unchanged (compared against the interpreter).
+`cargo test -p simple-compiler --lib hir::lower`: 384 passed.
+
+Evidence (this lane): debug Rust seed built from `2345aff3ff5`
+(`cargo build -p simple-driver`, `CARGO_TARGET_DIR=C:/dev/wt/p12-6/target-p12`), JIT
+= `simple run`, interpreter = `SIMPLE_EXECUTION_MODE=interpret simple run`.
+Regression: `src/compiler_rust/compiler/tests/option_payload_pattern_jit.rs`
+(`cargo test -p simple-compiler --test option_payload_pattern_jit`).
+
 - **Date:** 2026-09-13
-- **Status:** OPEN
+- **Status:** FIXED 2026-11-02 (lane a6dffc9c/p12-6)
 - **Severity:** P1 — silent wrong value, no diagnostic, only on the default `run` lane
 - **Found by:** July-2026 bug-triage sweep, while re-verifying
   `if_val_some_constructor_pattern_parser_regression_2026-07-02.md`
@@ -119,5 +148,3 @@ Rust sources aborts a running bootstrap, so no change was attempted.
 Pinned copy of `src/compiler_rust/target/release/simple.exe`
 (Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix
 `1b62a1a42755774fc087`, built 2026-09-13). Windows 11 / Git Bash.
-
-**Revalidated 2026-11-02: still plausible because the report title (Seed JIT: `Some(x)` payload destructuring returns the value shifted left 3 bits) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
