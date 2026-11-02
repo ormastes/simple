@@ -33,10 +33,10 @@ The one-module rebuild (entry src/app/p3_parsesel_obj/main.spl) peaked at 14.3 G
 A stage3 built by a stage2 with the #5753 fix produces valid Results without the re-box.
 
 ## Verdict (2026-11-02): stage2-only MISCOMPILE, not a source bug
-Static analysis of origin/release/1.0.0 (f5b32bda67c), tip df3a14d194b and frozen stage2 ef0681fc0e1:
+Static analysis (runtime line numbers cite f5b32bda67c) of origin/release/1.0.0 (f5b32bda67c), tip df3a14d194b and frozen stage2 ef0681fc0e1:
 
-1. **Same source works under a correct compiler.** The function body is byte-identical between stage2 source
-   (`ef0681fc0e1:src/compiler/80.driver/driver_source_pipeline_parsing.spl:472-503`) and tip
+1. **Same source works under a correct compiler.** The function body is semantically identical (only `me` became `pub me`, and `_sffi_env_get` became the forwarding `driver_parse_env_get_v1`) between stage2 source
+   (`ef0681fc0e1:src/compiler/80.driver/driver_source_pipeline_parsing.spl:472-512`) and tip
    (`df3a14d194b:src/compiler/80.driver/driver_source_parse_selected.spl:163-203`); only the scope wrappers were renamed
    (`driver_parse_transient_scope_begin_v1`/`_pause_v1` in `driver_source_parse_support.spl:162-166` just forward to
    `_sffi_transient_array_scope_begin`/`_pause`). The seed-compiled stage2 runs this exact code on every retained parse
@@ -46,7 +46,7 @@ Static analysis of origin/release/1.0.0 (f5b32bda67c), tip df3a14d194b and froze
    `RT_CORE_TRANSIENT_ENUM` (`:3185`), the root is added to the plan, and the payload is walked (`:3403-3404`). A
    persistent registered root is a no-op success (`:3346-3361`), and its memory is not owned by the scope. Either way the
    box cannot be freed by `driver_end_transient_parse_scope()`. The pure-Simple lane
-   (`src/runtime/simple_core/core_memory.spl:458`, enum kind 4 walks `rt_enum_payload`) behaves the same.
+   (`src/runtime/simple_core/core_memory.spl:458`; enum kind 4 walks `rt_enum_payload` at `:501-502`) behaves the same.
 3. **No compiler-inserted promotion is needed.** The promote is explicit in source. MIR/codegen does not have to
    promote a returned value implicitly.
 4. **#5753 is not a codegen fix.** #5753 (88bc2edede3, `50.mir/_MirLowering/transient_owner.spl`) promotes the
