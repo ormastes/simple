@@ -1,7 +1,7 @@
 # Stage 3 exits 139 after post-folded-constant diagnostics
 
 - **Bug ID:** `stage3_post_folded_const_diagnostics_sigsegv_2026_08_14`
-- **Status:** OPEN
+- **Status:** CLOSED (already fixed, 2026-11-02 opf-2)
 - **Severity:** P0 bootstrap blocker
 - **Date:** 2026-08-14
 
@@ -161,3 +161,32 @@ evidence about that binary; the reproducer is cheap enough to re-run against any
 newly admitted stage3 in seconds.
 
 **Revalidated 2026-11-02: still plausible because the report title (Stage 3 peaks near 7.7 GiB RSS and exits 139 right after post-folded-constant) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Closure (2026-11-02, opf-2) — already fixed in source
+
+Checked against `origin/release/1.0.0` @ `8cb83fb9c14`.
+
+1. **Fail-closed (follow-up 1) is in place.** `src/compiler/80.driver/driver_aot_pipeline.spl`
+   `stage_lower_mir()` (lines 143-180): when `lower_to_mir()` fails it logs every
+   `MIR error:` and returns `Some(CompileResult.CodegenError(msg))` (line 180), or
+   `go_to_end_finish_v1` which never links. `stage_emit_object` is not reached,
+   so no object containing a `call 0` can be emitted after an MIR error. Landed by
+   `0c09a2081cd` (PR2a per-stage split), same logic as the earlier
+   `array_first_unresolved_native_codegen_core_dump_2026-08-06` guard.
+2. **The `[wildcard-arm] disc=-1` emitter (follow-up 2) no longer exists.**
+   `git grep "wildcard-arm" src/compiler` is empty; removed from `50.mir` by
+   `4b88aebf00b` (2026-08-21 hardening lanes).
+3. The `call 0` was baked into the 2026-08-11 stage3 binary itself; it is a
+   property of that stale binary, not of current source.
+4. Not the s2-rebuild "stage2_next worker AV after load_sources" symptom.
+
+Regression: `test/01_unit/compiler/50.mir/enum_variant_call_wildcard_arm_spec.spl`
+pins the exact W6 reproducer (3 examples, 0 failures on this host). Re-run it under
+the next admitted self-hosted stage3 to confirm natively; no self-hosted binary was
+available on this Windows host.
+
+Checked against current policy/design: obsolete because the defect lived in the
+stale 2026-08-11 stage3 binary; current source fails closed on any MIR lowering
+error (no object/link after `CodegenError`), which matches the one-process-per-file
+pipeline and the HIR-target-neutral / MIR-picks-target design. The spec uses only
+concrete enums (no generics, no `nil`, no `Any`). No old behavior is restored.
