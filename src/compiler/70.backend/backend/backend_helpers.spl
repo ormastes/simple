@@ -19,7 +19,12 @@ use compiler.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
 use compiler.mir_opt.mod.{TargetOptContext, target_opt_context_default, optimize_module_for_backend, OptLevel}
 use compiler.backend.feature_caps.{TargetCapsKind, x86_caps_from_target}
 use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct,
-    llvm_compile_module_direct_compiled, llvm_compile_module_direct_to_path}
+    llvm_compile_module_direct_compiled, llvm_compile_module_direct_to_path,
+    llvm_translate_module_direct_ir, llvm_translate_module_bootstrap_ir_v1,
+    llvm_codegen_target_config_for, llvm_codegen_bare_metal_requested}
+use compiler.backend.llvm_backend_tools.{llvm_llc_object_argv_v1}
+use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
+use std.nogc_sync_mut.io.file_ops.{file_write}
 use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.backend.codegen_factory.{CodegenFactory}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
@@ -720,3 +725,71 @@ fn mode_default_optimization(mode: BuildMode) -> OptimizationLevel:
         case Debug: OptimizationLevel.Debug
         case Test: OptimizationLevel.None_
         case Bootstrap: OptimizationLevel.Debug
+
+# ============================================================================
+# Process-parallel native codegen pool hooks
+# (doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md P2)
+# ============================================================================
+#
+# The built-in `llvm` lane of compile_module_with_backend_target_cpu_storage_bindings
+# is "translate MIR to IR text in process, then run llc on a file". The pool
+# splits it at that file: the parent translates serially (same order, same
+# helpers as the serial lane) and N llc child processes turn the IR files into
+# objects concurrently, each exiting and returning its memory to the OS. These
+# two hooks are the serial lane's own prelude and argv, so a pooled object is
+# byte-identical to the serial one. Only valid with no retained options/config
+# (the frozen-capsule driver lane passes nil for both).
+
+fn backend_helper_llvm_pool_options_v1(is_release: bool, opt_level_i64: i64,
+        target_cpu: text) -> BackendCompileOptions:
+    val opt = backend_helper_aot_opt_level(opt_level_i64, nil)
+    val target_opt_ctx = backend_helper_target_opt_context(
+        env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "", target_cpu, has_avx2())
+    BackendCompileOptions(
+        target: backend_helper_native_target(),
+        opt_level: opt,
+        debug_info: backend_helper_debug_info(is_release),
+        emit_assembly: false,
+        emit_llvm_ir: false,
+        emit_mir: false,
+        verify_output: true,
+        target_opt_ctx: target_opt_ctx,
+        backend_kind: nil
+    )
+
+# Translate one module exactly as the serial `llvm` lane does and write the IR
+# to `ir_path`. "" on success, else the failure reason (the caller then
+# compiles the module through the serial lane, which reports it in full).
+pub fn llvm_module_ir_to_path_v1(module: MirModule, is_release: bool,
+        opt_level_i64: i64, target_cpu: text,
+        storage_bindings: [MirStorageViewSiteBindingV1], ir_path: text) -> text:
+    val options = backend_helper_llvm_pool_options_v1(is_release, opt_level_i64, target_cpu)
+    val storage_lowered = lower_mir_storage_project_fields_v1(module, storage_bindings)
+    if not storage_lowered.ok:
+        return "storage projection lowering failed: {storage_lowered.reason}"
+    if storage_lowered.rewritten_count > 0:
+        return "typed storage projections require the custom native backend"
+    val backend_module = optimize_module_for_backend(storage_lowered.module,
+        backend_helper_mir_opt_level(options.opt_level), "llvm")
+    val bootstrap = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    val llvm_ir = if bootstrap:
+        llvm_translate_module_bootstrap_ir_v1(options, backend_module)
+    else:
+        llvm_translate_module_direct_ir(options, backend_module, nil)
+    val codegen_error = llvm_codegen_error_from_ir(llvm_ir)
+    if codegen_error != "":
+        return codegen_error
+    if not file_write(ir_path, llvm_ir):
+        return "failed to write LLVM IR to {ir_path}"
+    ""
+
+# The llc argv (without argv[0]) the serial lane's compile_ir_to_object runs
+# for this build's options, retargeted at `ir_path` -> `obj_path`.
+pub fn llvm_module_llc_argv_v1(is_release: bool, opt_level_i64: i64,
+        target_cpu: text, obj_path: text, ir_path: text) -> [text]:
+    val options = backend_helper_llvm_pool_options_v1(is_release, opt_level_i64, target_cpu)
+    val config = llvm_codegen_target_config_for(options, llvm_codegen_bare_metal_requested())
+    val bootstrap_io = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    val direct_argv = (env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "").ends_with("-simpleos")
+    llvm_llc_object_argv_v1(config, options.opt_level, bootstrap_io, direct_argv,
+        obj_path, ir_path)

@@ -69,6 +69,49 @@ pub fn llvm_llc_opt_flag(opt_level: OptimizationLevel) -> text:
         case OptimizationLevel.Aggressive: "-O3"
         case _: "-O0"
 
+pub fn llvm_llc_object_argv_v1(config: LlvmTargetConfig, opt_level: OptimizationLevel,
+        bootstrap_io: bool, direct_argv: bool, obj_path: text,
+        input_path: text) -> [text]:
+    """llc argv (without argv[0]) for one IR file -> one object.
+
+    Shared by compile_ir_to_object (serial) and the native codegen process
+    pool, so both lanes run the identical llc invocation. `direct_argv` is the
+    retained-target / SimpleOS form (target args always present, -mattr and
+    -target-abi after the input); otherwise the bootstrap form omits target
+    arguments and the default form carries -mtriple/-mcpu/target flags/opt.
+    """
+    val opt_flag = llvm_llc_opt_flag(opt_level)
+    val triple = config.triple.to_text()
+    var cpu = config.to_cpu_string()
+    if cpu == "x86-64-v1":
+        cpu = "x86-64"
+    var args: [text] = ["--filetype=obj", "--relocation-model=pic",
+        "--function-sections", "--data-sections"]
+    if direct_argv:
+        args.push("-mtriple={triple}")
+        args.push("-mcpu={cpu}")
+        args.push(opt_flag)
+        args.push("-o")
+        args.push(obj_path)
+        args.push(input_path)
+        if config.features.len() > 0:
+            args.push("-mattr={config.to_feature_string()}")
+        match config.abi:
+            case Some(abi): args.push("-target-abi={abi}")
+            case nil: ()
+        return args
+    if not bootstrap_io:
+        args.push("-mtriple={triple}")
+        args.push("-mcpu={cpu}")
+        for flag in llvm_target_flags(config).split(" "):
+            if flag != "":
+                args.push(flag)
+        args.push(opt_flag)
+    args.push("-o")
+    args.push(obj_path)
+    args.push(input_path)
+    args
+
 pub fn llvm_clang_object_args(triple: text, cpu: text, has_features: bool,
         features: text, opt_flag: text, target_args: bool, obj_path: text,
         input_path: text) -> [text]:
@@ -250,33 +293,20 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
         print "[llvm-bitcode-debug] ir {ir_path}"
         print "[llvm-bitcode-debug] bitcode {bitcode_path}"
 
-    # Determine optimization flag
-    val opt_flag = llvm_llc_opt_flag(opt_level)
-
-    # Build llc command
-    val triple = config.triple.to_text()
-    var cpu = config.to_cpu_string()
-    if cpu == "x86-64-v1":
-        cpu = "x86-64"
-    val target_flags = llvm_target_flags(config)
-    val cmd = if bootstrap_io:
-        "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -o {obj_path} {compile_input_path} 2>&1"
-    else:
-        "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -mtriple={triple} -mcpu={cpu}{target_flags} {opt_flag} -o {obj_path} {compile_input_path} 2>&1"
+    # Build llc command. The argv is the single source of truth shared with
+    # the process-parallel codegen pool (llvm_llc_object_argv_v1), so a pooled
+    # llc child runs exactly the invocation this serial path runs and emits
+    # byte-identical objects. The shell form is that argv joined by spaces --
+    # the same text the inline command string used to spell out.
+    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val direct_argv = retain_target_arguments or target.ends_with("-simpleos")
+    val llc_args = llvm_llc_object_argv_v1(config, opt_level, bootstrap_io,
+        direct_argv, obj_path, compile_input_path)
+    val cmd = "{llc} " + llc_args.join(" ") + " 2>&1"
     var llc_out = ""
     var llc_err = ""
     var llc_code = 0
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-    if retain_target_arguments or target.ends_with("-simpleos"):
-        var llc_args: [text] = [
-            "--filetype=obj", "--relocation-model=pic", "--function-sections", "--data-sections",
-            "-mtriple={triple}", "-mcpu={cpu}", opt_flag, "-o", obj_path, compile_input_path
-        ]
-        if config.features.len() > 0:
-            llc_args.push("-mattr={config.to_feature_string()}")
-        match config.abi:
-            case Some(abi): llc_args.push("-target-abi={abi}")
-            case nil: ()
+    if direct_argv:
         val (direct_out, direct_err, direct_code) = process_run(llc, llc_args)
         llc_out = direct_out
         llc_err = direct_err
@@ -743,7 +773,7 @@ export llvm_bootstrap_last_object_path, extract_symbols_nm
 export llvm_target_flags, generate_wasm_runtime_declarations
 export compile_ir_to_wasm, to_mir_opt_level
 export compile_ir_to_object
-export compile_ir_to_object_path
+export compile_ir_to_object_path, llvm_llc_object_argv_v1
 export find_llc, find_opt, opt_available, llc_available
 export find_wasm_ld, find_wasm_opt, find_wasi_sysroot
 # ============================================================================
