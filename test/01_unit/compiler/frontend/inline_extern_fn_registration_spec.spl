@@ -1,8 +1,8 @@
 # Function-body `extern fn` declarations must become module declarations.
 #
 # Regression: parse_extern_fn_stmt_inline built the extern decl but never
-# called module_add_decl, so every call to an extern declared only inside a
-# function body failed HIR lowering with "unresolved name".
+# called module_add_decl, so function-body extern calls failed HIR lowering
+# with "unresolved name". Repeated declarations also need compatible types.
 # Bugs: doc/08_tracking/bug/pure_simple_nested_extern_registration_2026_10_12.md
 #       (lane duplicate: p4p2_inline_extern_fn_never_registered_2026-10-20)
 #
@@ -10,6 +10,7 @@
 
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.frontend.parser_types.*
+use compiler.core.parser.{parser_error_count, parser_get_errors}
 
 fn order_count(module: ParserModule, name: text) -> i64:
     var n = 0
@@ -24,6 +25,7 @@ describe "function-body extern fn registration":
             "    extern fn unsafe_addr_of(ref: any) -> u64\n" +
             "    unsafe_addr_of(data) + 16u64\n"
         val module = parse_and_build_module(src, "inline_extern_single_probe.spl")
+        expect(parser_error_count()).to_equal(0)
         expect(module.functions.contains("probe")).to_equal(true)
         expect(module.functions.contains("unsafe_addr_of")).to_equal(true)
         val ext: ParserFunction = module.functions["unsafe_addr_of"]
@@ -35,11 +37,12 @@ describe "function-body extern fn registration":
             "    extern fn mmio_read32(addr: u64) -> u32\n" +
             "    mmio_read32(addr)\n"
         val module = parse_and_build_module(src, "inline_extern_attr_probe.spl")
+        expect(parser_error_count()).to_equal(0)
         expect(module.functions.contains("mmio_read32")).to_equal(true)
 
     it "adds one declaration when several bodies repeat the same extern":
         val src = "fn first(addr: u64) -> u32:\n" +
-            "    extern fn mmio_read32(addr: u64) -> u32\n" +
+            "    extern fn mmio_read32(ptr: u64) -> u32\n" +
             "    mmio_read32(addr)\n" +
             "\n" +
             "fn second(addr: u64) -> u32:\n" +
@@ -47,6 +50,7 @@ describe "function-body extern fn registration":
             "    extern fn mmio_read16(addr: u64) -> u16\n" +
             "    mmio_read32(addr) + mmio_read16(addr).to_u32()\n"
         val module = parse_and_build_module(src, "inline_extern_repeat_probe.spl")
+        expect(parser_error_count()).to_equal(0)
         expect(module.functions.contains("first")).to_equal(true)
         expect(module.functions.contains("second")).to_equal(true)
         expect(order_count(module, "mmio_read32")).to_equal(1)
@@ -59,6 +63,7 @@ describe "function-body extern fn registration":
             "    extern fn unsafe_addr_of(ref: any) -> u64\n" +
             "    unsafe_addr_of(data)\n"
         val module = parse_and_build_module(src, "inline_extern_toplevel_probe.spl")
+        expect(parser_error_count()).to_equal(0)
         expect(order_count(module, "unsafe_addr_of")).to_equal(1)
 
     it "never replaces a same-named module fn with a body-local extern":
@@ -69,12 +74,13 @@ describe "function-body extern fn registration":
             "    extern fn rt_probe(x: i64) -> i64\n" +
             "    rt_probe(x)\n"
         val module = parse_and_build_module(src, "inline_extern_fn_twin_probe.spl")
+        expect(parser_error_count()).to_equal(0)
         expect(module.functions.contains("rt_probe")).to_equal(true)
         val probe: ParserFunction = module.functions["rt_probe"]
         expect(probe.is_extern).to_equal(false)
         expect(order_count(module, "rt_probe")).to_equal(1)
 
-    it "keeps the first signature when bodies declare conflicting externs":
+    it "rejects repeated externs with a conflicting parameter count":
         val src = "fn first(a: i64) -> i64:\n" +
             "    extern fn rt_conflict(a: i64) -> i64\n" +
             "    rt_conflict(a)\n" +
@@ -84,5 +90,67 @@ describe "function-body extern fn registration":
             "    rt_conflict(a, a)\n"
         val module = parse_and_build_module(src, "inline_extern_conflict_probe.spl")
         expect(order_count(module, "rt_conflict")).to_equal(1)
-        val ext: ParserFunction = module.functions["rt_conflict"]
-        expect(ext.params.len()).to_equal(1)
+        expect(parser_error_count()).to_equal(1)
+        expect(parser_get_errors().join("\n")).to_contain("line 6:5: conflicting extern declaration: rt_conflict")
+
+    it "rejects a same-arity extern with a different parameter type":
+        val src = "fn first(a: i64) -> i64:\n" +
+            "    extern fn rt_param_conflict(a: i64) -> i64\n" +
+            "    a\n" +
+            "\n" +
+            "fn second(a: i64) -> i64:\n" +
+            "    extern fn rt_param_conflict(a: u64) -> i64\n" +
+            "    a\n"
+        val module = parse_and_build_module(src, "inline_extern_param_conflict_probe.spl")
+        expect(order_count(module, "rt_param_conflict")).to_equal(1)
+        expect(parser_error_count()).to_equal(1)
+        expect(parser_get_errors().join("\n")).to_contain("conflicting extern declaration: rt_param_conflict")
+
+    it "checks every parameter type in a repeated signature":
+        val src = "fn first(a: i64, b: i64) -> i64:\n" +
+            "    extern fn rt_second_param_conflict(a: i64, b: i64) -> i64\n" +
+            "    a + b\n" +
+            "\n" +
+            "fn second(a: i64, b: i64) -> i64:\n" +
+            "    extern fn rt_second_param_conflict(a: i64, b: u64) -> i64\n" +
+            "    a + b\n"
+        val module = parse_and_build_module(src, "inline_extern_second_param_conflict_probe.spl")
+        expect(order_count(module, "rt_second_param_conflict")).to_equal(1)
+        expect(parser_error_count()).to_equal(1)
+        expect(parser_get_errors().join("\n")).to_contain("conflicting extern declaration: rt_second_param_conflict")
+
+    it "rejects an extern with a different return type, including zero-argument signatures":
+        val src = "fn first() -> i64:\n" +
+            "    extern fn rt_return_conflict() -> i64\n" +
+            "    1\n" +
+            "\n" +
+            "fn second() -> i64:\n" +
+            "    extern fn rt_return_conflict() -> u64\n" +
+            "    1\n"
+        val module = parse_and_build_module(src, "inline_extern_return_conflict_probe.spl")
+        expect(order_count(module, "rt_return_conflict")).to_equal(1)
+        expect(parser_error_count()).to_equal(1)
+        expect(parser_get_errors().join("\n")).to_contain("conflicting extern declaration: rt_return_conflict")
+
+    it "accepts identical composite signatures with renamed parameter names":
+        val src = "fn first(cb: fn(i64) -> text, values: [i64], maybe: i64?) -> text:\n" +
+            "    extern fn rt_composite(cb: fn(i64) -> text, values: [i64], maybe: i64?) -> text\n" +
+            "    \"\"\n" +
+            "\n" +
+            "fn second(callback: fn(i64) -> text, items: [i64], optional: i64?) -> text:\n" +
+            "    extern fn rt_composite(callback: fn(i64) -> text, items: [i64], optional: i64?) -> text\n" +
+            "    \"\"\n"
+        val module = parse_and_build_module(src, "inline_extern_composite_probe.spl")
+        expect(parser_error_count()).to_equal(0)
+        expect(order_count(module, "rt_composite")).to_equal(1)
+
+    it "rejects a nested extern conflicting with a prior top-level extern":
+        val src = "extern fn rt_top_conflict(value: i64) -> i64\n" +
+            "\n" +
+            "fn caller(value: i64) -> i64:\n" +
+            "    extern fn rt_top_conflict(value: u64) -> i64\n" +
+            "    value\n"
+        val module = parse_and_build_module(src, "inline_extern_top_conflict_probe.spl")
+        expect(order_count(module, "rt_top_conflict")).to_equal(1)
+        expect(parser_error_count()).to_equal(1)
+        expect(parser_get_errors().join("\n")).to_contain("conflicting extern declaration: rt_top_conflict")
