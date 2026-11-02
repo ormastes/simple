@@ -13,3 +13,5 @@ Cycle3 canonical API compile0 and copy-run0 were not passing evidence because th
 Retire the explicit width normalization only after the deployed producer passes text123456789 CRC3421780262, empty input, chunked update through high-bit-set states and independent unsigned zlib comparisons for real registry bodies. Never accept negative header CRC or relax the external oracle.
 
 No compiler rebuild or exact root-cause claim is made. Public CRC values remain unsigned32-bit values carried in i64.
+
+**Revalidated 2026-11-02: still plausible because Canonical ID: phase2_crc32_i64_width_spill_2026_10_27. Status: open. Owner: compiler/runtime CRC boundary. Created: 2026-10-27; no merged fix commit with a passing regression is cited in this doc.**

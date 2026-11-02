@@ -114,3 +114,5 @@ Production repairs and regression files in this composed candidate are
 AUTHORED_UNEXECUTED. Historical upstream receipts above are not execution
 evidence for this source composition or the current ARM/RISC-V compiler.
 Status remains OPEN; full Phase3 and required verification remain pending.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Real native failure and causal input boundary confirmed; narrow; no merged fix commit with a passing regression is cited in this doc.**

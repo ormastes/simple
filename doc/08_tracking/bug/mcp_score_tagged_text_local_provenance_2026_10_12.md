@@ -23,3 +23,5 @@ Source review identifies the missing marker at the genuine `rt_strcat_tagged` pr
 Astra found no P0/P1 in source review. Ten executable prevention cases inspect actual MIR call operands and native score/copy/raw-literal/integer/callback behavior. They are UNEXECUTED. No producer was built, no fourth score probe ran, and no compiler/lib/MCP/LSP/core/native or whole-suite PASS is claimed. Bug remains OPEN; root owns landing after future source-containing qualification. Raw-literal reassignment into nominal i64 storage and branch-join marker merging remain separate unqualified concerns.
 
 Regression source: `test/01_unit/compiler/mir/tagged_text_concat_reassignment_spec.spl`. Source/evidence identities are in the adjacent `_source_proposal.json` attachment.
+
+**Revalidated 2026-11-02: still plausible because OPEN. This is distinct from unresolved f64.to_int dispatch; no merged fix commit with a passing regression is cited in this doc.**

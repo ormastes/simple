@@ -31,3 +31,5 @@ Run the closure loop with `SIMPLE_MIR_SECTION_PROFILE_FILE` (heap_live and
 rss per `s4_promote_*` mark) on this tree to split retained heap from
 allocator retention, then find which per-module provider registration
 products survive the transient scope.
+
+**Revalidated 2026-11-02: still plausible because the report title (Stage 3 closure loop RSS grows 20-36 MB per module with the provider feed (52 G) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

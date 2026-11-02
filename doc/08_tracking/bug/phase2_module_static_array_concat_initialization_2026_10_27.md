@@ -19,3 +19,5 @@ The retained literal tables were part of the earlier DevHub P2 source repair. Cu
 Retire only after actual module-static concatenation preserves every flag value and method/type metadata under the deployed producer, with native command flag regressions and no startup evaluation error.
 
 Commit identity and final receipts must be appended through the canonical BugDatabase API after integration. No compiler rebuild, standard SSpec execution or unexecuted matrix is claimed.
+
+**Revalidated 2026-11-02: still plausible because open; source compatibility does not close the underlying bug; no merged fix commit with a passing regression is cited in this doc.**

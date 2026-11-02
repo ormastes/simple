@@ -24,3 +24,5 @@ On the pinned Phase 2 producer (13d73267...), `test/fixtures/devhub/native_os_cr
 - Whether the failures reproduce on a rebuilt compiler. Re-test first on a rebuilt compiler.
 - Whether the `.to_i64()` defect is the cause of the wrong AES and X25519 results.
 - Whether the segmentation fault (exit 139) has the same cause as the wrong results.
+
+**Revalidated 2026-11-02: still plausible because Open (not verified on a rebuilt compiler); no merged fix commit with a passing regression is cited in this doc.**

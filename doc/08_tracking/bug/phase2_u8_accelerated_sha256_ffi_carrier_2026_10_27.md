@@ -19,3 +19,5 @@ Initial native compile0 run1 artifact3adb13de091efe809b6a571ced270f697ee30de9d36
 Retire after this deployed producer and linked crypto provider pass exact octets 0,128,255 plus empty, Unicode byte sequences and independent SHA256 goldens through the accelerated ABI. Keep the byte-exact upload and SigV4 oracle.
 
 The standard SSpec suite, all runtime-family combinations and any claim not explicitly tied to an actual artifact remain unqualified. Record the workaround commit in the canonical BugDatabase investigation log after integration; never retire it from a source-only review.
+
+**Revalidated 2026-11-02: still plausible because open; an active source workaround is not a compiler/provider fix; no merged fix commit with a passing regression is cited in this doc.**

@@ -43,3 +43,5 @@ module instead of a co-compiled name.
 
 Related: `src/lib/nogc_sync_mut/desktop/lifecycle.spl:30` compares a `text?` value
 with `""`, so an unset `XDG_RUNTIME_DIR` builds a bad lock path.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Severity: P1. Date: 2026-10-31; no merged fix commit with a passing regression is cited in this doc.**

@@ -120,3 +120,5 @@ No MinGW compiler was available. Root source review found no P0/P1 in arithmetic
 handle admission, cleanup, or result ownership; final acceptance remains bounded
 to the executed focused contract. The larger native-codegen OOM and cache-scope
 questions still require independent evidence after compiler qualification.
+
+**Revalidated 2026-11-02: still plausible because focused Linux owner1 repair qualified; compiler integration and the larger runner OOM remain OPEN; no merged fix commit with a passing regression is cited in this doc.**

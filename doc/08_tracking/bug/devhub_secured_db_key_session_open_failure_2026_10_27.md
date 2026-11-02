@@ -78,3 +78,5 @@ This bug stays OPEN because the fixture does not pass end to end. Phase 2 now op
 the database and fails reading rows: `text_from_codepoints` returns empty text, so
 `SchemaNotFound` surfaces as `STORAGE_PORT_CORRUPT_SOURCE`. Messenger verbs and the
 rejection checks have not run on Phase 2. On Phase 1 the fixture has no final verdict.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Severity: P1. Date: 2026-10-27; no merged fix commit with a passing regression is cited in this doc.**

@@ -87,3 +87,5 @@ Local immutable-attempt receipts and LLDB evidence:
 `probe-explicit.status`, `facade-timeout-marker.stdout`,
 `facade-v5-check.stdout`, `runner-patched-build.status`, and
 `qualification-patched/`).
+
+**Revalidated 2026-11-02: still plausible because open; source compatibility does not close the underlying bug; no merged fix commit with a passing regression is cited in this doc.**

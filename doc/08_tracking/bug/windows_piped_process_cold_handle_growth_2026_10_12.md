@@ -16,3 +16,5 @@ The genuine Windows fixture compiled and strict-linked against retained Rust199,
 The diagnostic fixture emitted six phases. The driver wrongly expected an additional Unicode phase, so its diagnostic JSON was not written. Actual native exit36 and these six stderr counts remain retained evidence. No fourth retry is allowed. The plateau during threads and sixteen-slot reuse does not prove legitimate initialization or absence of a leak; it rejects the earlier thread-specific attribution.
 
 Source-only investigation binds frozen82 constructor/accessor and validator paths. First spawn reaches BCrypt/Windows process APIs; stdout validation reaches SIMD tier selection, which can resolve CPU configuration through dirs_next cache directories and filesystem metadata. Those are candidate chains, not observed handle ownership. No cold baseline was weakened, no provider eligibility advanced, and no full compiler/core/MCP/whole-test PASS is claimed.
+
+**Revalidated 2026-11-02: still plausible because OPEN, P1 qualification blocker; heap/OS owner attribution unresolved; no merged fix commit with a passing regression is cited in this doc.**
