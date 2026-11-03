@@ -15242,7 +15242,7 @@ static int rt_http_has_header(const char* headers, size_t len, const char* name)
 /* This owner implements only chunked transfer coding. Never decode one layer
  * of an unsupported coding chain and report the encoded bytes as content.
  * 0 absent, 1 chunked, -1 invalid, -2 unsupported. */
-static int rt_http_response_transfer_coding(const char* headers, size_t len) {
+static int simple_http_response_transfer_coding(const char* headers, size_t len) {
     const char* name = "Transfer-Encoding";
     size_t name_len = strlen(name);
     int present = 0, chunked = 0;
@@ -15587,7 +15587,7 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     }
     const uint8_t* payload = (const uint8_t*)header_end + 4;
     size_t payload_len = received - (size_t)(payload - response);
-    int transfer_coding = rt_http_response_transfer_coding(header_start, header_len);
+    int transfer_coding = simple_http_response_transfer_coding(header_start, header_len);
     if (transfer_coding != 0 && rt_http_has_header(header_start, header_len, "Content-Length")) {
         free(headers_copy); free(reason_copy); free(response);
         snprintf(error, error_cap, "conflicting HTTP response framing"); return 0;
