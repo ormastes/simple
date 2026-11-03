@@ -94,3 +94,13 @@ independent fresh builds; full detail in
 (`2d461171550`).
 
 **Revalidated 2026-11-02: still plausible because the report title (27 guards and gates hardcode `bin/simple`) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 (lane p01-c): required-fix item 1 completed
+
+`sh scripts/check/check-guard-binary-injectable.shs` was RED on
+`origin/release/1.0.0` (`FAIL — 68 file(s) checked, 15 hardcode the compiler`).
+All 15 now resolve the compiler as `${SIMPLE_BIN:-$ROOT/bin/simple}`; the gate
+reports `PASS — 68 file(s) checked, 0 hardcoded`. Default behavior is unchanged
+when `SIMPLE_BIN` is unset. Still open: item 2 (fail closed on a stale binary in
+the remaining guards), item 3 (reopen the 4 rows retired by `e21824a4ed4`), and
+the per-guard audit of item 4.
