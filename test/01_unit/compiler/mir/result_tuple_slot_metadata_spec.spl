@@ -1,0 +1,55 @@
+# phase2_result_tuple_try_binding_metadata_2026_10_27: a `Result<(u64, [u8], ...), E>`
+# payload kept integer width/signedness and byte-array element metadata only through
+# explicit typed bindings. The payload classifier must keep that metadata itself, so a
+# `?`-propagated tuple needs no compatibility binding (sqlite_format/cell.spl).
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLoweringExpr.result_tuple_payload.*
+
+fn hir(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn payload_of(fields: [HirType]) -> MirType?:
+    var lowering = MirLowering.new(SymbolTable.new())
+    lowering.wrapper_owned_native_tuple_payload_type(hir(HirTypeKind.Tuple(fields)))
+
+fn tuple_fields(payload: MirType?) -> [MirType]:
+    if val tuple = payload:
+        match tuple.kind:
+            case MirTypeKind.Tuple(fields): return fields
+            case _: ()
+    fail("expected an admitted native tuple payload")
+
+describe "Result tuple payload slot metadata":
+    it "keeps u64 unsigned and i64 signed":
+        val fields = tuple_fields(payload_of([hir(HirTypeKind.Int(64, false)), hir(HirTypeKind.Int(64, true))]))
+        expect(fields.len()).to_equal(2)
+        expect(fields[0].kind == MirTypeKind.U64).to_equal(true)
+        expect(fields[1].kind == MirTypeKind.I64).to_equal(true)
+
+    it "keeps every integer width and signedness":
+        val widths = [(8, false), (16, false), (32, false), (8, true), (16, true), (32, true)]
+        var specs: [HirType] = []
+        for (bits, signed) in widths:
+            specs = specs.push(hir(HirTypeKind.Int(bits, signed)))
+        val fields = tuple_fields(payload_of(specs))
+        expect(fields[0].kind == MirTypeKind.U8).to_equal(true)
+        expect(fields[1].kind == MirTypeKind.U16).to_equal(true)
+        expect(fields[2].kind == MirTypeKind.U32).to_equal(true)
+        expect(fields[3].kind == MirTypeKind.I8).to_equal(true)
+        expect(fields[4].kind == MirTypeKind.I16).to_equal(true)
+        expect(fields[5].kind == MirTypeKind.I32).to_equal(true)
+
+    it "keeps byte-array element metadata":
+        val bytes = hir(HirTypeKind.Array(hir(HirTypeKind.Int(8, false)), nil))
+        val fields = tuple_fields(payload_of([hir(HirTypeKind.Int(64, false)), bytes]))
+        match fields[1].kind:
+            case MirTypeKind.Array(element, _): expect(element.kind == MirTypeKind.U8).to_equal(true)
+            case _: fail("byte array slot lost its array type")
+
+    it "rejects an unsupported slot instead of guessing":
+        expect(payload_of([hir(HirTypeKind.Int(64, false)), hir(HirTypeKind.Str)]) == nil).to_equal(true)
+        expect(payload_of([hir(HirTypeKind.Int(7, false))]) == nil).to_equal(true)
