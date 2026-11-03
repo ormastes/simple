@@ -350,6 +350,22 @@ own merge-tree + CRC + rt-delta checks. Details:
   `bug_db.sdn` load as nil), `push-rust-duplicate-reexport` (rustc E0252 class,
   static, ~2 s; the full seed `cargo check` is outside the budget and belongs to
   CI), `push-no-stale-snapshot-rewind` (the e274cd33719 class itself).
+- **`bug_db.sdn` conflicts resolve automatically (2026-11-03).** Its line 1
+  `#sdn-crc32:` seal changes on every row edit, so any two PRs touching rows
+  used to conflict. `.gitattributes` maps it to `merge=sdn-rows`;
+  `scripts/setup/setup.shs` sets `merge.sdn-rows.driver = sh
+  scripts/vcs/sdn-rows-merge.shs %O %A %B %P`. The driver unions rows by id
+  (newer `updated_at` wins, one-sided deletes honoured, append-only log tables
+  merged as row multisets) and reseals via `reseal-sdn-crc32.shs`. Same id +
+  same timestamp + different content exits 1 with standard markers (fail-closed);
+  a clone without the config gets a plain text merge. Selftest:
+  `sh scripts/vcs/sdn-rows-merge.shs --selftest` (row `local-sdn-rows-merge-selftest`).
+  **GitHub never runs merge drivers**, so on github.com such PRs still show
+  DIRTY: run `sh scripts/vcs/gh-pr-sdn-sync.shs <pr>` (or `--all --base <b>`).
+  It merges the base into the PR head in the object store (`git merge-tree`)
+  with the driver injected via `git -c`, verifies every seal, refuses any
+  non-SDN conflict or out-of-scope file change, and pushes the merge commit
+  to the PR branch through the normal pre-push gates.
 - **`push-rt-dual-implementation` is a DELTA vs the commit the push replaces**
   (`--baseline-rev`); frozen-baseline drift is printed as information. The
   frozen comparison blocked 15 unrelated pushes in one day once main was red.
