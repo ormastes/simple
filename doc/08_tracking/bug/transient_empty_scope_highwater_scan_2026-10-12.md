@@ -25,3 +25,7 @@ The optimization is appropriate for the measured owner1 archive. The no-memory-o
 Additional qualification: the changed runtime translation unit also compiles with `SIMPLE_RUNTIME_MEMORY_OWNER=0` using the frozen ABI1 flags (exit 0, object 681,680 bytes). This is a Linux compile-only result; owner0 execution and all non-Linux execution remain unqualified. The manually relinked cached Phase 3 compiler compiled and executed fresh Hello successfully; the full test owner still fails an independently confirmed null callback.
 
 **Revalidated 2026-11-02: still plausible because the report title (Empty transient scopes scan prior allocation high water) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Landed-fix evidence (2026-11-03)
+
+The early return for empty transient scopes is present on `release/1.0.0` in `rt_core_reclaim_transient_raw` (`src/runtime/runtime_native.c`, landed by `d47c62df389`): zero live entries return immediately, clearing tombstones first when any remain. Status moved to fix-implemented-verification-pending: the code is landed, but the native owner1 probe and negative-contract fixture have not been re-run on a deployed stage3 on Windows. Repro: run the owner1 empty-scope probe from the receipt above against a `release/1.0.0` runtime build and confirm per-scope p95 stays at timer floor after a 750,000-object cohort.
