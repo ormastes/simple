@@ -1,0 +1,59 @@
+#!/bin/sh
+# Host-portable (Windows/Linux/macOS) variant of
+# simpleos_ud2_fault_link_contract_test.shs: no python, no qemu.
+# Extracts the real weak fallback + _rich_fault_entry from baremetal_stubs.c,
+# cross-compiles them freestanding for x86_64-unknown-none with clang, and
+# checks the object with llvm-nm / llvm-objdump:
+#   - spl_x86_on_kernel_ud2_fault is a WEAK DEFINITION (never undefined), so a
+#     tree-shaken entry-closure link can never leave it unresolved;
+#   - the ISR compares the faulting opcode against ud2 (0x0B0F) and calls it;
+#   - the call site realigns %rsp (SysV pad);
+#   - a strong Simple @export("C") definition overrides the weak one.
+# Guest QEMU/board evidence is out of scope (see the bug record).
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+src="$root/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+t=$(mktemp -d)
+[ -n "${KEEP:-}" ] || trap 'rm -rf "$t"' EXIT HUP INT TERM
+fail() { echo "ud2_fault_link_contract_win=fail reason=$1"; exit 1; }
+
+[ -f "$src" ] || fail missing-source
+nm_tool=$(command -v llvm-nm || true)
+od_tool=$(command -v llvm-objdump || true)
+[ -n "$nm_tool" ] && [ -n "$od_tool" ] || fail missing-llvm-tools
+
+{
+    printf '%s\n' '#include <stdint.h>' \
+        'static void serial_puts(const char *s) {(void)s;}' \
+        'static void serial_put_hex(uint64_t v) {(void)v;}' \
+        'void _rich_fault_print(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;}'
+    awk 'index($0, "__attribute__((weak, noreturn))") == 1 {a=$0; next}
+         a != "" && index($0, "void spl_x86_on_kernel_ud2_fault(uint64_t rip)") == 1 {p=1; print a}
+         {a=""} p {print} p && /^}/ {exit}' "$src"
+    awk '/__attribute__\(\(naked\)\) static void _rich_fault_entry\(void\)/{p=1} p&&/\/\* _rich_fault_print/{exit} p{sub(/__attribute__\(\(naked\)\)/,"__attribute__((naked, used))"); print}' "$src"
+} > "$t/fault.c"
+
+grep -q 'weak, noreturn' "$t/fault.c" || fail missing-weak-fallback
+grep -q '_rich_fault_entry' "$t/fault.c" || fail missing-rich-fault-entry
+
+if clang -target x86_64-unknown-none -ffreestanding -fno-builtin -c "$t/fault.c" -o "$t/fault.o" 2>"$t/cc.err"; then rc=0; else rc=$?; fi
+[ "$rc" -eq 0 ] || { cat "$t/cc.err"; fail compile; }
+
+"$nm_tool" "$t/fault.o" > "$t/nm.txt"
+grep -Eq ' W spl_x86_on_kernel_ud2_fault$' "$t/nm.txt" || fail not-weak-defined
+if grep -Eq ' U spl_x86_on_kernel_ud2_fault$' "$t/nm.txt"; then fail undefined-symbol; fi
+
+"$od_tool" -dr "$t/fault.o" > "$t/fault.dis"
+grep -Eiq 'cmp.*\$0xb0f' "$t/fault.dis" || fail missing-ud2-opcode-compare
+grep -Eq 'R_X86_64_PLT32[[:space:]]+spl_x86_on_kernel_ud2_fault' "$t/fault.dis" || fail missing-fatal-call
+grep -Eq 'andq?[[:space:]]+\$(-0x10|0xfffffffffffffff0|-16), *%rsp' "$t/fault.dis" || fail missing-stack-alignment
+
+printf '%s\n' '#include <stdint.h>' 'void spl_x86_on_kernel_ud2_fault(uint64_t rip) { (void)rip; }' > "$t/strong.c"
+clang -target x86_64-unknown-none -ffreestanding -fno-builtin -c "$t/strong.c" -o "$t/strong.o"
+ld_tool=$(command -v ld.lld || echo "")
+[ -n "$ld_tool" ] || fail missing-ld.lld
+"$ld_tool" -r "$t/fault.o" "$t/strong.o" -o "$t/combined.o"
+"$nm_tool" "$t/combined.o" | grep -Eq ' T spl_x86_on_kernel_ud2_fault$' || fail strong-override
+
+echo 'ud2_fault_link_contract_win=pass'
