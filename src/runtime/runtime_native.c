@@ -15257,6 +15257,7 @@ static int rt_http_header_has_token(const char* headers, size_t len,
 static int64_t rt_http_content_length(const char* headers, size_t len) {
     const char* line = headers;
     const char* end = headers + len;
+    int64_t declared = -1;
     while (line < end) {
         const char* next = strstr(line, "\r\n");
         if (!next || next > end) next = end;
@@ -15270,11 +15271,12 @@ static int64_t rt_http_content_length(const char* headers, size_t len) {
                 parsed > (unsigned long long)INT64_MAX) return -2;
             while (parse_end < next && (*parse_end == ' ' || *parse_end == '\t')) parse_end++;
             if (parse_end != next) return -2;
-            return (int64_t)parsed;
+            if (declared >= 0 && declared != (int64_t)parsed) return -2;
+            declared = (int64_t)parsed;
         }
         line = next < end ? next + 2 : end;
     }
-    return -1;
+    return declared;
 }
 
 static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
@@ -15289,14 +15291,34 @@ static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
         size_t size_len = pos - line_start;
         const uint8_t* semi = memchr(src + line_start, ';', size_len);
         if (semi) size_len = (size_t)(semi - (src + line_start));
-        char size_text[32];
-        if (size_len == 0 || size_len >= sizeof(size_text)) { free(result); return 0; }
-        memcpy(size_text, src + line_start, size_len); size_text[size_len] = '\0';
-        char* parse_end = NULL;
-        unsigned long long chunk = strtoull(size_text, &parse_end, 16);
-        if (parse_end == size_text || chunk > SIZE_MAX) { free(result); return 0; }
+        if (size_len == 0) { free(result); return 0; }
+        size_t chunk = 0;
+        for (size_t i = 0; i < size_len; i++) {
+            unsigned char c = src[line_start + i];
+            unsigned digit;
+            if (c >= '0' && c <= '9') digit = c - '0';
+            else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+            else { free(result); return 0; }
+            if (chunk > (SIZE_MAX - digit) / 16) { free(result); return 0; }
+            chunk = chunk * 16 + digit;
+        }
         pos += 2;
-        if (chunk == 0) break;
+        if (chunk == 0) {
+            /* The last-chunk is followed by trailers and a final empty line.
+             * EOF after the size line (or inside a trailer) is incomplete. */
+            while (pos < src_len) {
+                size_t trailer_start = pos;
+                while (pos + 1 < src_len && !(src[pos] == '\r' && src[pos + 1] == '\n')) pos++;
+                if (pos + 1 >= src_len) { free(result); return 0; }
+                size_t trailer_len = pos - trailer_start;
+                pos += 2;
+                if (trailer_len == 0) {
+                    *out = result; *out_len = used; return 1;
+                }
+            }
+            free(result); return 0;
+        }
         if ((size_t)chunk > src_len - pos || used > SIZE_MAX - (size_t)chunk) {
             free(result); return 0;
         }
@@ -15311,7 +15333,8 @@ static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
         }
         pos += 2;
     }
-    *out = result; *out_len = used; return 1;
+    /* Exhausting the input after a data chunk is not a last-chunk. */
+    free(result); return 0;
 }
 
 static int rt_http_token_char(unsigned char value) {
