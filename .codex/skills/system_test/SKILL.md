@@ -48,6 +48,17 @@ and scoped workaround without presenting skipped or failed tests as passes.
 - Identify testable behaviors per requirement
 - Map edge cases and error paths
 
+For PDF/standard-derived tests, use the canonical
+[specification sources to executed evidence workflow](../../../doc/07_guide/infra/sspec_typed_evidence.md#specification-sources-to-executed-evidence).
+It covers pinned primary sources, clause-to-requirement mapping, independent
+oracles, real production calls and manual receipts. Keep standard obligations
+distinct from repository policy. Writing a failing-looking test is not an
+observed TDD RED: retain actual before/after results or label AUTHORED_UNRUN.
+An authored manual is not generated evidence. Report branch counts for the
+actual owner/backend/target, including zero-hit branches; label injected failure
+paths separately from real provider failures. Missing runtime evidence remains
+pending rather than a pass. Keep detailed procedures in that guide.
+
 ## Phase 2: Step-Based SSpec Test Generation
 
 Generate executable SSpec `.spl` scenarios using the canonical matcher set.

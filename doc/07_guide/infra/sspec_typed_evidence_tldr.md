@@ -1,29 +1,39 @@
 # Modern SSpec Typed Evidence — TL;DR
 
-Full guide: `doc/07_guide/infra/sspec_typed_evidence.md`
+Full guide: [Modern SSpec Typed Evidence](sspec_typed_evidence.md).
+For PDF/standards work, start at
+[specification sources to executed evidence](sspec_typed_evidence.md#specification-sources-to-executed-evidence).
 
-An observation is not an oracle. A capture proves something was recorded; only a declared,
-fail-closed check proves it was right.
+An observation is not an oracle. A capture records behavior; only an independent,
+declared, fail-closed comparison checks correctness. Pin primary source editions
+and hashes, map clauses to requirements, and distinguish repository policy from
+standard obligations. Use real owner calls and independent expected values.
 
 ```text
 EvidenceRequest -> provider -> RawArtifact -> format adapter -> CanonicalEvidence
   -> OracleSpec + comparator -> ComparisonResult -> ManualBlock[] -> spipe_docgen -> manual
 ```
 
-Landed 2026-08-08 (`src/lib/common/spec/evidence/`): `model.spl` + `evidence_comparator.spl`
-(contract); E2/E2b `format/terminal_grid.spl` + `action_trace.spl`; E3
-`format/text_protocol.spl`; E4 `format/binary_layout.spl`; E6 `spipe_extension.spl`;
-E7a/E7b `format/scene_profile.spl` + `format/simulation_profile.spl`; `manual_render.spl`.
-8 spec files / 124 examples.
+Implemented source includes the shared model/comparator, format adapters, action
+trace, spec bridge, manual renderer and E5 docgen sidecar wiring. E5 wiring is
+not complete provenance enforcement: the loader does not yet gate rendering
+with `evidence_manifest_is_complete`. Process/file capture providers and live
+example specs exist; remaining domain-provider gaps are not a blanket absence
+of live capture. `sspec-maintain evidence` commands remain designed/unimplemented.
+Use the full guide's implementation boundary for current scope.
 
-Fail-closed: parse error, unresolved selector, ambiguous cardinality, ignore without a
-reason, all-ignore vacuity, closed-mode undeclared field, zero positive resolutions all
-FAIL. Patterns (`"hex:16"`) are anchored class tokens, never regex/substring.
-**Still open** (red-team, unfixed): bind-only oracles pass vacuously, `numeric_tolerance`
-accepts non-numeric operands, tolerance math can overflow into a false pass, manifest
-digests aren't checked for 64 hex chars — guide §8a.
+The four historical red-team comparator defects are fixed in source: bind-only
+vacuity, non-numeric tolerance, overflow and malformed SHA-256 text. This does
+not itself prove downstream loader enforcement or current test execution.
+Historical August 2026 checks used the disclosed Rust seed; they are not fresh
+admitted self-hosted verification. Do not infer present runtime availability.
 
-Not yet implemented: `spipe_docgen` evidence wiring (E5), `sspec-maintain evidence`
-commands, live capture providers, the three reference examples (E8) — guide §8.
+TDD requires observed RED then GREEN on the actual target. Tests written first
+but unexecuted remain AUTHORED_UNRUN; authored manuals are not generated proof.
+Generated evidence needs spec/artifact hashes and real docgen results. Label
+injected failures separately from real-provider failures, and keep branch
+numerator/denominator tied to the actual owner, backend and target, including
+zero-hit sites. UNMEASURED is neither zero nor 100% coverage.
 
-Run with `bin/simple run` — the `test` daemon path trips its 800-module import cap.
+Use the admitted runtime's supported test route. A historical module-cap
+workaround is not a universal instruction to replace `test` with `run`.
