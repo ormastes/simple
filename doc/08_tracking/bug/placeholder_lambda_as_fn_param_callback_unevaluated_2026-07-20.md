@@ -136,3 +136,16 @@ code, out of scope for this triage pass — no Rust seed source fix per the
 fix-guide's scope).
 
 **Revalidated 2026-11-02: still plausible because open — historical interpreter/compiler defect; current admitted; no merged fix commit with a passing regression is cited in this doc.**
+
+## Triage 2026-11-03 — deferred (design decision), not fixed
+
+Re-probed on the seed: `val r = apply(_1 + 1, 41)` works (42), but
+`print(apply(_1 + 1, 41) + 0)` prints `<lambda>`. Cause: the outer call
+(`print`) owns the placeholder scope (`call_arg_depth > 0` skips nested call
+args in `parser/src/expressions/postfix.rs::transform_placeholder_args_for_call`;
+the pure-Simple twin uses `placeholder_enter_call_arg`), and only callees named
+as higher-order get forced transforms. Making a user free function's `fn`-typed
+parameter own the scope needs callee signature knowledge at parse time (not
+available in a single-pass parser) or a post-resolve desugar; that changes
+placeholder scoping semantics and needs an owner decision. Workaround: bind to
+a `val` first, or use an explicit lambda. Pure-Simple AST spec still passes.
