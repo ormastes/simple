@@ -1,0 +1,170 @@
+# gxHash4.0.0 scalar one-shot port. Noncryptographic; output is16 LE bytes.
+# Adapted from Olivier Giniaux's MIT-licensed gxhash, revision
+# 5e00a497289d1c2f0ae07e5f956654c77f1cfc09. See gxhash_upstream_LICENSE.txt.
+# Historical2023 paper is design background, not this version's byte oracle.
+# Safe bounded reads replace upstream speculative SIMD reads. No ISA required.
+use std.common.aes.sbox.{aes_sbox}
+
+# _gx_round is an explicit internal primitive contract for direct AES KATs.
+# It is not a second hash variant; callers should use gxhash128.
+export gxhash128, _gx_round
+
+fn _gx_zero() -> [u8]:
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+fn _gx_key() -> [u8]:
+    [0x42,0x45,0x78,0xf2,0x21,0x3e,0x9d,0xb0,0xe5,0x22,0xc2,0x89,0x8e,0xc2,0x3b,0xfc]
+
+fn _gx_xor(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 16:
+        out.push(a[i] ^ b[i])
+        i = i + 1
+    out
+
+fn _gx_xtime(value: i64) -> i64:
+    ((value << 1) & 255) ^ ((0 - (value >> 7)) & 27)
+
+# AESENC order, with AESENCLAST selected by last. Table built once per hash.
+fn _gx_round(state: [u8], key: [u8], last: bool, table: list) -> [u8]:
+    var shifted: [u8] = []
+    var i: i64 = 0
+    while i < 16:
+        val row = i % 4
+        val col = i / 4
+        shifted.push(table[state[((col + row) % 4) * 4 + row].to_i64()].to_u8())
+        i = i + 1
+    if last:
+        return _gx_xor(shifted, key)
+    var out: [u8] = []
+    var col: i64 = 0
+    while col < 4:
+        val off = col * 4
+        val a = shifted[off].to_i64()
+        val b = shifted[off + 1].to_i64()
+        val c = shifted[off + 2].to_i64()
+        val d = shifted[off + 3].to_i64()
+        val total = a ^ b ^ c ^ d
+        out.push((a ^ total ^ _gx_xtime(a ^ b) ^ key[off].to_i64()).to_u8())
+        out.push((b ^ total ^ _gx_xtime(b ^ c) ^ key[off + 1].to_i64()).to_u8())
+        out.push((c ^ total ^ _gx_xtime(c ^ d) ^ key[off + 2].to_i64()).to_u8())
+        out.push((d ^ total ^ _gx_xtime(d ^ a) ^ key[off + 3].to_i64()).to_u8())
+        col = col + 1
+    out
+
+fn _gx_load(data: [u8], offset: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 16:
+        out.push(data[offset + i])
+        i = i + 1
+    out
+
+fn _gx_seed(seed: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 16:
+        # Shift signed seed then mask, preserving MIN/-1 two's-complement bits.
+        out.push(((seed >> ((i % 8) * 8)) & 255).to_u8())
+        i = i + 1
+    out
+
+fn _gx_length(length: i64) -> [u8]:
+    var out = _gx_zero()
+    var i: i64 = 0
+    while i < 8:
+        out[i] = ((length >> (i * 8)) & 255).to_u8()
+        i = i + 1
+    out
+
+fn _gx_finish(state: [u8], table: list) -> [u8]:
+    val a = _gx_round(state, _gx_key(), false, table)
+    val b = _gx_round(a, _gx_zero(), false, table)
+    _gx_round(b, _gx_zero(), true, table)
+
+fn _gx_absorb_two(lane: [u8], block: [u8], table: list) -> [u8]:
+    _gx_round(_gx_round(lane, _gx_zero(), false, table), block, false, table)
+
+fn _gx_medium(data: [u8], seed: [u8], table: list) -> [u8]:
+    val length = data.len()
+    var a = _gx_xor(seed, _gx_load(data, 0))
+    a = _gx_absorb_two(a, _gx_load(data, length - 16), table)
+    if length > 32:
+        a = _gx_absorb_two(a, _gx_load(data, 16), table)
+        if length > 48:
+            a = _gx_absorb_two(a, _gx_load(data, length - 32), table)
+            if length > 64:
+                var b = _gx_xor(seed, _gx_load(data, 32))
+                b = _gx_absorb_two(b, _gx_load(data, length - 48), table)
+                if length > 96:
+                    b = _gx_absorb_two(b, _gx_load(data, 48), table)
+                    b = _gx_absorb_two(b, _gx_load(data, length - 64), table)
+                b = _gx_round(b, _gx_length(length), false, table)
+                val end_a = _gx_round(a, _gx_zero(), false, table)
+                return _gx_absorb_two(end_a, b, table)
+    _gx_round(a, _gx_length(length), false, table)
+
+fn _gx_large(data: [u8], seed: [u8], table: list) -> [u8]:
+    val length = data.len()
+    var count: i64 = 16
+    if length <= 512:
+        count = 4
+    elif length <= 2048:
+        count = 8
+    var lanes: [[u8]] = []
+    var i: i64 = 0
+    while i < count:
+        lanes.push(_gx_xor(seed, _gx_load(data, i * 16)))
+        i = i + 1
+    val last = length - count * 16
+    var offset = count * 16
+    while offset < last:
+        i = 0
+        while i < count:
+            lanes[i] = _gx_round(lanes[i], _gx_load(data, offset + i * 16), false, table)
+            i = i + 1
+        offset = offset + count * 16
+    i = 0
+    while i < count:
+        val absorbed = _gx_round(lanes[i], _gx_load(data, last + i * 16), false, table)
+        lanes[i] = _gx_round(absorbed, _gx_zero(), false, table)
+        i = i + 1
+    var n = count
+    while n > 1:
+        n = n / 2
+        i = 0
+        while i < n:
+            if n == count / 2:
+                lanes[i] = _gx_round(lanes[i], lanes[i + n], false, table)
+            else:
+                lanes[i] = _gx_absorb_two(lanes[i], lanes[i + n], table)
+            i = i + 1
+    _gx_xor(lanes[0], _gx_length(length))
+
+fn gxhash128(data: [u8], seed: i64) -> [u8]:
+    """Return gxHash4.0.0's128-bit result as16 little-endian bytes.
+
+    Accepts any byte length and every signed64 seed. No cryptographic security,
+    streaming or Rust typed-Hasher equivalence is promised.
+    """
+    val table: list = aes_sbox()
+    val length = data.len()
+    val raw_seed = _gx_seed(seed)
+    if length < 16:
+        var block = _gx_zero()
+        var i: i64 = 0
+        while i < 16:
+            if i < length:
+                block[i] = data[i]
+            else:
+                block[i] = length.to_u8()
+            i = i + 1
+        return _gx_finish(_gx_round(_gx_xor(raw_seed, block), _gx_zero(), false, table), table)
+    val prepared = _gx_round(_gx_xor(raw_seed, _gx_key()), _gx_zero(), false, table)
+    if length == 16:
+        val state = _gx_round(_gx_xor(prepared, _gx_load(data, 0)), _gx_length(length), false, table)
+        return _gx_finish(state, table)
+    if length <= 128:
+        return _gx_finish(_gx_medium(data, prepared, table), table)
+    _gx_finish(_gx_large(data, prepared, table), table)
