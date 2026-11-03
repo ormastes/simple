@@ -61,3 +61,6 @@ compilation succeeds, and required verification passes. Source ancestry or a
 stage label alone is insufficient. A compatible cross-source producer is
 acceptable when the required feature and ABI compatibility are proven; this
 bug does not impose a global source-equality admission rule.
+
+## 2026-11-03 status: fix-implemented-verification-pending
+Fix present at `src/compiler/10.frontend/core/parser_expr.spl:709-719` (`parse_call_arg_raw` snapshots, probes `(` after `unsafe`/`danger`, rolls back, routes via `parse_expr`). Executed `bin/simple.exe run test/01_unit/compiler/frontend/unsafe_call_argument_parser_spec.spl`: 8 examples, 0 failures. Pending: admitted producer + removal of the `lockless_map_i64.spl` local-binding workaround (tag kept).

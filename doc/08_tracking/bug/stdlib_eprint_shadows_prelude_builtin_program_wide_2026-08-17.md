@@ -302,3 +302,6 @@ Whether the stdlib `eprint` and the prelude builtin differ in stream/buffering,
 and whether `print`/`file_write` have sibling shadows.
 
 **Revalidated 2026-11-02: still plausible because OPEN — root cause RE-DIAGNOSED 2026-08-17 (the shadow is NOT the; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 status: fix-implemented-verification-pending
+Fix present: `eprint` in `is_interp_builtin_fn` at `src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl:60`. Verify: `bin/simple native-build r4.spl -o r4.bin` (fixture above) on a stage3 binary must exit 0 and print `count=1boom` to stderr. The stdlib shadow stays (deliberate fd-2 routing).
