@@ -47,6 +47,12 @@ impl Lowerer {
         let Some(contracts) = self.imported_fn_param_defaults.get(source) else { return; };
         let mut names = Vec::new();
         selected_names(target, contracts, &mut names);
+        if let Some(name_contracts) = self.imported_fn_param_names.get(source).cloned() {
+            let copied: Vec<_> = names.iter().filter_map(|(name, alias)| {
+                name_contracts.get(name).cloned().map(|n| (alias.clone(), n))
+            }).collect();
+            self.imported_fn_param_names.entry(caller.to_path_buf()).or_default().extend(copied);
+        }
         let selected: Vec<_> = names.into_iter().filter_map(|(name, alias)| {
             contracts.get(&name).cloned().map(|defaults| (alias, defaults))
         }).collect();
@@ -534,6 +540,9 @@ impl Lowerer {
                             self.imported_fn_param_defaults
                                 .entry(crate::interpreter::normalize_path_key(path)).or_default()
                                 .insert(func_def.name.clone(), defaults);
+                            self.imported_fn_param_names
+                                .entry(crate::interpreter::normalize_path_key(path)).or_default()
+                                .insert(func_def.name.clone(), if func_def.params.iter().any(|p| p.variadic) { Vec::new() } else { func_def.params.iter().map(|p| p.name.clone()).collect() });
                         }
                         let ret_ty = self.resolve_type_opt(&func_def.return_type)?;
                         self.globals.insert(func_def.name.clone(), ret_ty);
