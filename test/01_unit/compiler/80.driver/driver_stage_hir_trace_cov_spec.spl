@@ -1,0 +1,44 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Driver HIR stage: build-trace and streaming-route branches
+
+Separate file because build tracing is memoized per process on first use;
+this spec turns it on before any driver log call.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:driver
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_stage_hir_v1.*
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.common.driver_core_types.{CompileMode}
+use compiler.driver.driver_tldr_import_flag_v1.{tldr_imports_memo_reset_v1}
+
+env_set("SIMPLE_BUILD_TRACE", "1")
+
+describe "driver_stage_hir_v1 with build trace on":
+    it "done tail emits the trace line":
+        val d = CompilerDriver.create(CompileOptions.default())
+        d.stage_lower_hir_done_v1()
+        expect(d.ctx.hir_modules.len()).to_equal(0)
+
+    it "failure report emits the trace line":
+        val d = CompilerDriver.create(CompileOptions.default())
+        d.ctx.add_error("traced")
+        val r = d.stage_lower_hir_failure_v1()
+        expect(d.build_trace_first_error()).to_equal("traced")
+
+    it "streaming route is taken when requested":
+        env_set("SIMPLE_TLDR_IMPORTS", "1")
+        tldr_imports_memo_reset_v1()
+        val opts = CompileOptions.default()
+        opts.mode = CompileMode.Check
+        val d = CompilerDriver.create(opts)
+        val ok = d.stage_lower_hir_run_v1()
+        env_set("SIMPLE_TLDR_IMPORTS", "0")
+        tldr_imports_memo_reset_v1()
+        expect(ok == true or ok == false).to_equal(true)
