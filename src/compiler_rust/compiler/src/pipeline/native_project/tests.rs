@@ -10016,3 +10016,30 @@ fn non_native_import_alias_keeps_original_callable_and_function_value() {
         HirStmt::Let { value: Some(expr), .. }
         if matches!(&expr.kind, HirExprKind::Global(name) if name == "normalize"))));
 }
+
+/// The pre-compile diagnostic names the changed global component (or states
+/// that only interface slices can invalidate) so a wide rebuild is explained
+/// before compilation starts (seed_global_interface_cache_rebuild_latency).
+#[test]
+fn test_global_build_fingerprint_describe_change_names_component() {
+    let base = GlobalBuildFingerprint {
+        producer: 1,
+        opt_level: 2,
+        entry_closure: 3,
+        target: 4,
+        linker_script: 5,
+        layout: 6,
+        instrumentation: 7,
+    };
+    assert!(base.describe_change(None).contains("no previous manifest"));
+    assert_eq!(base.describe_change(Some(&base)), "global inputs unchanged");
+    let mut producer = base;
+    producer.producer = 9;
+    assert_eq!(
+        producer.describe_change(Some(&base)),
+        "full rebuild expected: compiler producer changed"
+    );
+    let mut layout = base;
+    layout.layout = 9;
+    assert!(layout.describe_change(Some(&base)).contains("interface layout changed"));
+}
