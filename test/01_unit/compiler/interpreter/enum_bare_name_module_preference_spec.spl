@@ -1,0 +1,38 @@
+"""
+## Purpose and audience
+Purpose: Pin that interpreter enum lookup prefers the enum declared by the
+current module when two modules declare the same bare enum name.
+Audience: compiler engineers; bugs enum_bare_name_collision_registry_2026-08-01 and
+seed_enum_variant_bare_name_last_registration_wins_2026_10_19.
+"""
+
+use compiler.core.interpreter.eval_tables.{
+    enum_table_register_in,
+    enum_table_lookup,
+    enum_table_lookup_in,
+    enum_table_reset
+}
+use std.spec.step
+
+describe "interpreter enum bare-name module preference":
+    it "resolves each module's own enum when the bare name collides":
+        step("Given two modules declaring enum Mode with different variants")
+        enum_table_reset()
+        enum_table_register_in("a.spl", "Mode", ["Alpha", "Beta"])
+        enum_table_register_in("b.spl", "Mode", ["Beta", "Gamma"])
+        step("Then each module sees its own declaration, not the first/last registration")
+        expect(enum_table_lookup_in("a.spl", "Mode")).to_equal("Alpha,Beta")
+        expect(enum_table_lookup_in("b.spl", "Mode")).to_equal("Beta,Gamma")
+
+    it "falls back to the bare registry for a module that does not declare the name":
+        enum_table_reset()
+        enum_table_register_in("a.spl", "Mode", ["Alpha", "Beta"])
+        expect(enum_table_lookup_in("c.spl", "Mode")).to_equal("Alpha,Beta")
+        expect(enum_table_lookup_in("", "Mode")).to_equal("Alpha,Beta")
+        expect(enum_table_lookup_in("c.spl", "Missing")).to_equal("")
+
+    it "keeps the bare lookup first-wins for callers without a module":
+        enum_table_reset()
+        enum_table_register_in("a.spl", "Mode", ["Alpha", "Beta"])
+        enum_table_register_in("b.spl", "Mode", ["Beta", "Gamma"])
+        expect(enum_table_lookup("Mode")).to_equal("Alpha,Beta")

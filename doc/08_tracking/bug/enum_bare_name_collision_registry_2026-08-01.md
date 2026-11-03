@@ -589,3 +589,12 @@ keeps it honest in the meantime.
 ## 2026-11-03 staged rollout, stage 1 (warning only)
 
 Seed interpreter now emits `warning[enum-bare-name-ambiguous]` on stderr when an enum name is registered again with a different variant set (`warn_on_ambiguous_bare_enum_name`, evaluation_helpers.rs; hooked at GLOBAL_ENUMS/global_enums registration). No rejection yet; lookup is still last-wins. Unit tests: `cargo test -p simple-compiler --lib enum_bare_name_warning` (2 pass). Stage 2 (module-keyed lookup / hard error) still open.
+
+## 2026-11-03: pure-Simple interpreter table is module-aware
+`compiler.core.interpreter.eval_tables` gained `enum_table_register_in(file, name, variants)` /
+`enum_table_lookup_in(file, name)`: the module-qualified entry is kept for both sides of a
+collision and lookups from `eval_access`/`eval_calls` prefer the caller module's own enum, falling back to the
+first-wins bare entry (collision warning unchanged). Spec:
+`test/01_unit/compiler/interpreter/enum_bare_name_module_preference_spec.spl` (3/3 pass).
+The MIR side already had dual keys (`enum_variant_index_q`). Variant discriminant globals in the interpreter
+(`Name.Variant`) remain bare-keyed.

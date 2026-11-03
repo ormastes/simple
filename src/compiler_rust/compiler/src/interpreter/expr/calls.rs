@@ -850,9 +850,7 @@ pub(super) fn eval_call_expr(
                         //   2. `BLOCK_SCOPED_ENUMS` (block-local definitions)
                         //   3. `GLOBAL_ENUMS` (cross-module enum registry)
                         {
-                            let enum_def = enums
-                                .get(class_name)
-                                .cloned()
+                            let enum_def = crate::interpreter::owner_module_enum(class_name).or_else(|| enums.get(class_name).cloned())
                                 .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()))
                                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()));
                             if let Some(enum_def) = enum_def {
@@ -937,9 +935,7 @@ pub(super) fn eval_call_expr(
                     // `Architecture` from `os.kernel.arch.arch_context` when a spec
                     // only imports the `std.spec.arch.Architecture` struct) fails
                     // to resolve its variants.
-                    let enum_def = enums
-                        .get(enum_name)
-                        .cloned()
+                    let enum_def = crate::interpreter::owner_module_enum(enum_name).or_else(|| enums.get(enum_name).cloned())
                         .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
                         .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
                     if let Some(enum_def) = enum_def {

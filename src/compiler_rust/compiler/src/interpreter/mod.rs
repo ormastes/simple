@@ -179,6 +179,7 @@ use interpreter_call::{
 // Module caching and loading state
 #[path = "../module_cache.rs"]
 mod module_cache;
+pub use module_cache::owner_module_enum;
 pub use module_cache::clear_module_cache;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::{

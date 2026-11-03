@@ -915,6 +915,7 @@ fn _enum_variant_index_remove_csv(variants_csv: text):
         _enum_variant_index_remove(variant)
 
 fn enum_table_reset():
+    enum_file_variants = {}
     enum_reg_names = []
     enum_reg_variants = []
     enum_hm_buckets = hm_make_global_buckets()
@@ -927,6 +928,7 @@ fn enum_table_reset():
 # Bare enum names already warned about, so a repeatedly re-registered enum
 # reports once instead of once per module. Mirrors `_ftr_collision_warned`.
 var _enum_collision_warned: [text] = []
+var enum_file_variants: {text: text} = {}
 
 fn _enum_warn_bare_name_collision(name: text, existing_csv: text, new_csv: text):
     """Report a DIVERGENT same-bare-name enum registration.
@@ -975,6 +977,24 @@ fn enum_table_lookup(name: text) -> text:
             return enum_reg_variants[idx]
         idx = enum_hm_nexts[idx]
     ""
+
+fn enum_table_register_in(file: text, name: text, variants: [text]):
+    """Register `name` as declared by `file`. The module-qualified entry is kept
+    for BOTH sides of a bare-name collision; the bare table stays first-wins and
+    still emits the collision warning."""
+    if file != "" and name != "":
+        enum_file_variants[file + "::" + name] = variants.join(",")
+    enum_table_register(name, variants)
+
+fn enum_table_lookup_in(file: text, name: text) -> text:
+    """Variants of enum `name` as seen from module `file`: the module's own
+    declaration wins over the bare-name registry (which is first-wins across
+    modules); modules that do not declare it fall back to the bare entry."""
+    if file != "":
+        val key = file + "::" + name
+        if enum_file_variants.has(key):
+            return enum_file_variants[key]
+    enum_table_lookup(name)
 
 fn enum_variant_is_declared(variant: text) -> bool:
     """True when some registered enum declares `variant`. Reverse of
