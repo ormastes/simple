@@ -1,0 +1,67 @@
+use std.spec.*
+use std.io_runtime.{file_read_nullable}
+
+# Bug: stage2_split_impl_modules_missing_from_entry_closure_2026-08-22
+# (instance 2, 2026-11-03). driver_unit_tldr_imports_v1 called
+# CompilerDriver.stage_lower_hir, defined in a split impl in
+# driver_orchestration.spl, while importing only the type owner
+# driver_compiler_type. Native MIR lowering then failed with
+# "unresolved method call 'stage_lower_hir'". Importing driver_orchestration
+# widened the closure into driver_aot_pipeline -> plugins.backend_vhdl.
+# Fix: the HIR stage core lives in the narrow provider driver_stage_hir_v1,
+# which callers import directly.
+
+val DRV = "src/compiler/80.driver/"
+
+fn _src(path: text) -> text:
+    val content = file_read_nullable(path)
+    if content.is_none():
+        return ""
+    content.unwrap()
+
+fn _use_lines(content: text) -> text:
+    var out = ""
+    for line in content.split("\n"):
+        if line.starts_with("use "):
+            out = out + line + "\n"
+    out
+
+describe "CompilerDriver HIR stage split impl provider":
+    it "defines the check-mode HIR stage in the narrow provider":
+        val p = _src(DRV + "driver_stage_hir_v1.spl")
+        expect(p.contains("impl CompilerDriver:")).to_equal(true)
+        expect(p.contains("me stage_lower_hir_check_v1() -> Option<CompileResult>:")).to_equal(true)
+        expect(p.contains("me stage_lower_hir_failure_v1() -> CompileResult:")).to_equal(true)
+
+    it "keeps the provider closure off the aot/orchestration/vhdl modules":
+        val uses = _use_lines(_src(DRV + "driver_stage_hir_v1.spl"))
+        expect(uses.len() > 0).to_equal(true)
+        expect(uses.contains("driver_aot_pipeline")).to_equal(false)
+        expect(uses.contains("driver_orchestration")).to_equal(false)
+        expect(uses.contains("driver_pipeline_lowering")).to_equal(false)
+        expect(uses.contains("driver_pipeline.")).to_equal(false)
+        expect(uses.contains("backend_vhdl")).to_equal(false)
+
+    it "unit TLDR caller imports the provider and calls the check entry":
+        val c = _src(DRV + "driver_unit_tldr_imports_v1.spl")
+        expect(c.contains("\nuse compiler.driver.driver_stage_hir_v1.*")).to_equal(true)
+        expect(c.contains("driver.stage_lower_hir_check_v1()")).to_equal(true)
+        expect(c.contains("driver.stage_lower_hir(")).to_equal(false)
+        expect(_use_lines(c).contains("driver_orchestration")).to_equal(false)
+
+    it "orchestration delegates to the provider instead of duplicating it":
+        val o = _src(DRV + "driver_orchestration.spl")
+        expect(o.contains("\nuse compiler.driver.driver_stage_hir_v1.*")).to_equal(true)
+        expect(o.contains("self.stage_lower_hir_failure_v1()")).to_equal(true)
+        expect(o.contains("fn build_trace_first_error() -> text:")).to_equal(false)
+
+    it "2-module fixture: caller imports the split impl provider":
+        val fx = "test/fixtures/stage_hir_split_impl/"
+        expect(_src(fx + "caller.spl").contains("\nuse stage_hir_split_impl.narrow_provider.*")).to_equal(true)
+        expect(_src(fx + "narrow_provider.spl").contains("impl StageOwner:")).to_equal(true)
+        expect(_src(fx + "owner_type.spl").contains("impl ")).to_equal(false)
+
+    it "sibling: HIR source-body surfaces imports add_streaming_module_surface provider":
+        val s = _src(DRV + "cache/driver_hir_source_body_surfaces_v1.spl")
+        expect(s.contains("driver.add_streaming_module_surface(")).to_equal(true)
+        expect(s.contains("\nuse compiler.driver.driver_source_parse_selected.*")).to_equal(true)
