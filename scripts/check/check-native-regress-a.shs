@@ -1,0 +1,78 @@
+#!/bin/sh
+# Native-lane regression gate: reassigned var struct field reads, if-val on
+# Option<struct>, .? as value argument, un-annotated dict-index unwrap.
+# Verdict is the last line of stdout: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-native-regress-a-fields.$$}"
+FIXTURE="test/fixtures/native_regress_a/main.spl"
+
+if [ ! -x "$SIMPLE_BINARY" ]; then
+    echo "ERROR — nothing was checked (no runnable compiler at $SIMPLE_BINARY)"
+    exit 2
+fi
+if [ ! -f "$FIXTURE" ]; then
+    echo "ERROR — nothing was checked (fixture missing: $FIXTURE)"
+    exit 2
+fi
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+binary="$WORK_DIR/regress-a"
+log="$WORK_DIR/build.log"
+
+# Exit status is read DIRECTLY into a variable on the line AFTER the command --
+# never through a pipe. A pipeline's $? is the LAST command's status and has
+# produced false greens in this repo.
+env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" native-build "$FIXTURE" -o "$binary" >"$log" 2>&1
+build_rc=$?
+if [ "$build_rc" -ne 0 ] || [ ! -f "$binary" ]; then
+    echo "ERROR — nothing was checked (native-build failed rc=$build_rc; log $log)"
+    tail -20 "$log" >&2 || true
+    exit 2
+fi
+
+out="$WORK_DIR/native.out"
+timeout 60 "$binary" >"$out" 2>&1
+run_rc=$?
+if [ "$run_rc" -ne 0 ]; then
+    echo "FAIL — the fixture binary exited rc=$run_rc (>=128 is a crash; 124 is a timeout)"
+    exit 1
+fi
+
+# Expected values, all trivially derivable from the fixture source.
+# The last two are CONTROLS that were correct even before the fix.
+probes="reassign_b=4 reassign_a=3 ifval_b=10 dotq_pair=10 dict_unwrap=8"
+
+checked=0
+failed=0
+for probe in $probes; do
+    key="${probe%%=*}"
+    want="${probe#*=}"
+    # The AOT lane emits `print` without a trailing newline, so the whole run
+    # arrives as ONE line. Parse the explicit <<key=value>> markers instead of
+    # anchoring on line starts -- an empty capture would otherwise read as a
+    # mismatch on every probe including the always-correct controls.
+    got="$(tr -d '\n' < "$out" | sed -n "s/.*<<${key}=\\([^>]*\\)>>.*/\\1/p")"
+    checked=$((checked + 1))
+    if [ "$got" != "$want" ]; then
+        failed=$((failed + 1))
+        echo "  mismatch ${key}: expected [$want] actual [$got]"
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no probes evaluated)"
+    exit 2
+fi
+if [ "$failed" -ne 0 ]; then
+    echo "FAIL — $checked probe(s) checked, $failed mismatch(es) under native-build"
+    echo "  full output: $(tr '\n' '|' < "$out")"
+    exit 1
+fi
+echo "PASS — $checked probe(s) checked, 0 mismatches"
+exit 0
