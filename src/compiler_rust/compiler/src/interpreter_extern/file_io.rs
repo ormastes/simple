@@ -3403,13 +3403,16 @@ pub fn rt_fd_pread(args: &[Value]) -> Result<Value, CompileError> {
         }
         Ok(Value::Int(n as i64))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
-        // non-unix branch does not depend on the libc crate exposing that
-        // constant for Windows targets, which cannot be verified on the
-        // aarch64 Linux host this landed from.
-        Ok(Value::Int(-38))
+        Ok(Value::Int(unsafe {
+            simple_runtime::value::sffi::file_io::descriptor::windows_positioned::pread(fd, buffer as *mut u8, len, offset)
+        }))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (fd, buffer, len, offset);
+        Ok(Value::Int(-38)) // ENOSYS
     }
 }
 
@@ -3427,13 +3430,16 @@ pub fn rt_fd_pwrite(args: &[Value]) -> Result<Value, CompileError> {
         }
         Ok(Value::Int(n as i64))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
-        // non-unix branch does not depend on the libc crate exposing that
-        // constant for Windows targets, which cannot be verified on the
-        // aarch64 Linux host this landed from.
-        Ok(Value::Int(-38))
+        Ok(Value::Int(unsafe {
+            simple_runtime::value::sffi::file_io::descriptor::windows_positioned::pwrite(fd, buffer as *const u8, len, offset)
+        }))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (fd, buffer, len, offset);
+        Ok(Value::Int(-38)) // ENOSYS
     }
 }
 
