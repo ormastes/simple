@@ -1,4 +1,4 @@
-use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.crypto.entropy_platform.{entropy_platform_bytes}
 # WebSocket Frame Module
 # Implements frame encoding, decoding, masking, and parsing
 
@@ -26,17 +26,36 @@ use std.nogc_sync_mut.websocket.handshake.{ws_handshake_text_to_bytes as text_to
 # Masking Functions
 # ==============================================================================
 
-fn generate_masking_key() -> List<i64>:
-    # @workaround bug=websocket_timestamp_owner_and_entropy_2026_10_16 recover=c1f630e7a05d539852f53444231d4f90fd76d6a4 reason=undefined Platform timestamp owner; historical timestamp units unknown
-    val time = current_time_ms()
-    val seed = time % 256
+fn websocket_mask_from_entropy(entropy: Result<[u8], text>) -> Result<List<i64>, text>:
+    if entropy.is_err(): return Err(entropy.unwrap_err())
+    val bytes = entropy.unwrap()
+    if bytes.len() != 4:
+        return Err("WebSocket mask requires exactly four entropy bytes")
+    Ok([bytes[0] as i64, bytes[1] as i64, bytes[2] as i64, bytes[3] as i64])
 
-    val key1 = (seed * 37) % 256
-    val key2 = (seed * 73) % 256
-    val key3 = (seed * 109) % 256
-    val key4 = (seed * 157) % 256
+fn generate_masking_key() -> Result<List<i64>, text>:
+    # RFC6455 section 5.3: a fresh unpredictable key for every client frame.
+    websocket_mask_from_entropy(entropy_platform_bytes(4u64))
 
-    [key1, key2, key3, key4]
+fn create_frame_with_mask_result(is_final: i64, opcode: i64, is_masked: i64, payload: List<i64>, mask: Result<List<i64>, text>) -> Result<List<i64>, text>:
+    var key: List<i64> = []
+    if is_masked == 1:
+        if mask.is_err(): return Err(mask.unwrap_err())
+        key = mask.unwrap()
+        if key.length() != 4:
+            return Err("WebSocket mask requires exactly four bytes")
+        for byte in key:
+            if byte < 0 or byte > 255:
+                return Err("WebSocket mask contains an invalid byte")
+    val frame = create_frame(is_final, opcode, is_masked, payload, key)
+    if frame.length() == 0:
+        return Err("invalid WebSocket frame")
+    Ok(frame)
+
+fn create_frame_with_random_mask(is_final: i64, opcode: i64, is_masked: i64, payload: List<i64>) -> Result<List<i64>, text>:
+    # Server frames do not request entropy. No fallback on client failures.
+    val key = if is_masked == 1: generate_masking_key() else: Ok([])
+    create_frame_with_mask_result(is_final, opcode, is_masked, payload, key)
 
 fn mask_payload(payload: List<i64>, mask_key: List<i64>) -> List<i64>:
     val result = []
@@ -131,40 +150,34 @@ fn create_frame(is_final: i64, opcode: i64, is_masked: i64, payload: List<i64>, 
 
     result
 
-fn create_text_frame(text_data: text, is_final: i64, is_masked: i64) -> List<i64>:
+fn create_text_frame(text_data: text, is_final: i64, is_masked: i64) -> Result<List<i64>, text>:
     val payload = text_to_bytes(text_data)
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(is_final: is_final, opcode: OPCODE_TEXT, is_masked: is_masked, payload: payload, mask_key: mask_key)
+    create_frame_with_random_mask(is_final: is_final, opcode: OPCODE_TEXT, is_masked: is_masked, payload: payload)
 
-fn create_binary_frame(data: List<i64>, is_final: i64, is_masked: i64) -> List<i64>:
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(is_final: is_final, opcode: OPCODE_BINARY, is_masked: is_masked, payload: data, mask_key: mask_key)
+fn create_binary_frame(data: List<i64>, is_final: i64, is_masked: i64) -> Result<List<i64>, text>:
+    create_frame_with_random_mask(is_final: is_final, opcode: OPCODE_BINARY, is_masked: is_masked, payload: data)
 
-fn create_continuation_frame(data: List<i64>, is_final: i64, is_masked: i64) -> List<i64>:
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(is_final: is_final, opcode: OPCODE_CONTINUATION, is_masked: is_masked, payload: data, mask_key: mask_key)
+fn create_continuation_frame(data: List<i64>, is_final: i64, is_masked: i64) -> Result<List<i64>, text>:
+    create_frame_with_random_mask(is_final: is_final, opcode: OPCODE_CONTINUATION, is_masked: is_masked, payload: data)
 
-fn create_ping_frame(data: List<i64>, is_masked: i64) -> List<i64>:
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(is_final: 1, opcode: OPCODE_PING, is_masked: is_masked, payload: data, mask_key: mask_key)
+fn create_ping_frame(data: List<i64>, is_masked: i64) -> Result<List<i64>, text>:
+    create_frame_with_random_mask(is_final: 1, opcode: OPCODE_PING, is_masked: is_masked, payload: data)
 
-fn create_pong_frame(data: List<i64>, is_masked: i64) -> List<i64>:
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(is_final: 1, opcode: OPCODE_PONG, is_masked: is_masked, payload: data, mask_key: mask_key)
+fn create_pong_frame(data: List<i64>, is_masked: i64) -> Result<List<i64>, text>:
+    create_frame_with_random_mask(is_final: 1, opcode: OPCODE_PONG, is_masked: is_masked, payload: data)
 
-fn create_text_frame_from_bytes(payload: List<i64>, is_final: i64, is_masked: i64) -> List<i64>:
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(is_final: is_final, opcode: OPCODE_TEXT, is_masked: is_masked, payload: payload, mask_key: mask_key)
+fn create_text_frame_from_bytes(payload: List<i64>, is_final: i64, is_masked: i64) -> Result<List<i64>, text>:
+    create_frame_with_random_mask(is_final: is_final, opcode: OPCODE_TEXT, is_masked: is_masked, payload: payload)
 
-fn create_ping_text(text_data: text, is_masked: i64) -> List<i64>:
+fn create_ping_text(text_data: text, is_masked: i64) -> Result<List<i64>, text>:
     val payload = text_to_bytes(text_data)
     create_ping_frame(data: payload, is_masked: is_masked)
 
-fn create_pong_text(text_data: text, is_masked: i64) -> List<i64>:
+fn create_pong_text(text_data: text, is_masked: i64) -> Result<List<i64>, text>:
     val payload = text_to_bytes(text_data)
     create_pong_frame(data: payload, is_masked: is_masked)
 
-fn create_pong_response(ping_payload: List<i64>, is_masked: i64) -> List<i64>:
+fn create_pong_response(ping_payload: List<i64>, is_masked: i64) -> Result<List<i64>, text>:
     create_pong_frame(data: ping_payload, is_masked: is_masked)
 
 # ==============================================================================

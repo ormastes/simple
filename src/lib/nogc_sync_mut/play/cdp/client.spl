@@ -122,69 +122,28 @@ fn cdp_u8_to_i64_array(bytes: [u8]) -> [i64]:
 # ============================================================================
 
 use std.websocket.handshake.{generate_websocket_key}
+use std.nogc_sync_mut.websocket.frame.{generate_masking_key, create_frame_with_mask_result}
 
 # ============================================================================
 # Frame builders
 # ============================================================================
 
-fn cdp_make_mask_key() -> [i64]:
-    val t = time_now_unix_micros()
-    var mk: [i64] = []
-    mk.push(((t >> 0) & 0xFF) ^ 0x5A)
-    mk.push(((t >> 8) & 0xFF) ^ 0xA5)
-    mk.push(((t >> 16) & 0xFF) ^ 0x3C)
-    mk.push(((t >> 24) & 0xFF) ^ 0xC3)
-    mk
+fn cdp_make_mask_key() -> Result<[i64], text>:
+    generate_masking_key()
 
-fn cdp_build_frame(opcode: i64, payload: [i64]) -> [i64]:
-    """Build a MASKED client frame. Client frames MUST be masked per RFC 6455."""
-    var out: [i64] = []
-    val pl = payload.length()
+fn cdp_build_frame(opcode: i64, payload: [i64]) -> Result<[i64], text>:
+    create_frame_with_mask_result(1, opcode, 1, payload, cdp_make_mask_key())
 
-    out.push(WS_FIN | (opcode & 0x0F))
-
-    if pl < 126:
-        out.push(WS_MASK | pl)
-    else:
-        if pl < 65536:
-            out.push(WS_MASK | 126)
-            out.push((pl >> 8) & 0xFF)
-            out.push(pl & 0xFF)
-        else:
-            out.push(WS_MASK | 127)
-            # 64-bit length — we push 4 zero bytes + 4 length bytes
-            out.push(0)
-            out.push(0)
-            out.push(0)
-            out.push(0)
-            out.push((pl >> 24) & 0xFF)
-            out.push((pl >> 16) & 0xFF)
-            out.push((pl >> 8) & 0xFF)
-            out.push(pl & 0xFF)
-
-    val mk = cdp_make_mask_key()
-    out.push(mk[0])
-    out.push(mk[1])
-    out.push(mk[2])
-    out.push(mk[3])
-
-    var i = 0
-    while i < pl:
-        out.push(payload[i] ^ mk[i % 4])
-        i = i + 1
-
-    out
-
-fn cdp_build_text_frame(s: text) -> [i64]:
+fn cdp_build_text_frame(s: text) -> Result<[i64], text>:
     cdp_build_frame(WS_OP_TEXT, cdp_text_to_bytes(s))
 
-fn cdp_build_close_frame(code: i64) -> [i64]:
+fn cdp_build_close_frame(code: i64) -> Result<[i64], text>:
     var payload: [i64] = []
     payload.push((code >> 8) & 0xFF)
     payload.push(code & 0xFF)
     cdp_build_frame(WS_OP_CLOSE, payload)
 
-fn cdp_build_pong_frame(data: [i64]) -> [i64]:
+fn cdp_build_pong_frame(data: [i64]) -> Result<[i64], text>:
     cdp_build_frame(WS_OP_PONG, data)
 
 # ============================================================================
@@ -390,6 +349,7 @@ class CdpClient:
                     else:
                         self.buffer = cdp_buffer_drop_front(self.buffer, pf.consumed)
                         self._handle_frame(pf.opcode, pf.payload)
+                        if self.closed: return false
                 true
             case Err(e):
                 # Timeout or would-block — normal under polling
@@ -403,7 +363,12 @@ class CdpClient:
             true
         else:
             if opcode == WS_OP_PING:
-                val pong = cdp_build_pong_frame(payload)
+                val pong = match cdp_build_pong_frame(payload):
+                    case Ok(frame): frame
+                    case Err(message):
+                        self.closed = true
+                        val _c = self.stream.close()
+                        return false
                 val _wp = self.stream.write_all(cdp_i64_array_to_u8(pong))
                 true
             else:
@@ -473,7 +438,10 @@ class CdpClient:
             .field_raw("params", params)
             .build()
 
-        val frame = cdp_build_text_frame(cmd)
+        val frame = match cdp_build_text_frame(cmd):
+            case Ok(bytes): bytes
+            case Err(message):
+                return Err(play_error_with_detail(ERR_CDP_TRANSPORT, "websocket mask generation failed", message))
         match self.stream.write_all(cdp_i64_array_to_u8(frame)):
             case Ok(_): pass_do_nothing
             case Err(e):
@@ -486,6 +454,8 @@ class CdpClient:
         val deadline = time_now_unix_micros() + (timeout_ms * 1000)
         while time_now_unix_micros() < deadline:
             self._pump_once()
+            if self.closed:
+                return Err(play_error(ERR_CDP_TRANSPORT, "cdp connection closed while receiving"))
             for p in self.pending:
                 if p.id == id and p.resolved:
                     if p.is_error:
@@ -510,7 +480,10 @@ class CdpClient:
             .field("sessionId", session_id)
             .build()
 
-        val frame = cdp_build_text_frame(cmd)
+        val frame = match cdp_build_text_frame(cmd):
+            case Ok(bytes): bytes
+            case Err(message):
+                return Err(play_error_with_detail(ERR_CDP_TRANSPORT, "websocket mask generation failed", message))
         match self.stream.write_all(cdp_i64_array_to_u8(frame)):
             case Ok(_): pass_do_nothing
             case Err(e):
@@ -523,6 +496,8 @@ class CdpClient:
         val deadline = time_now_unix_micros() + (timeout_ms * 1000)
         while time_now_unix_micros() < deadline:
             self._pump_once()
+            if self.closed:
+                return Err(play_error(ERR_CDP_TRANSPORT, "cdp connection closed while receiving"))
             for p in self.pending:
                 if p.id == id and p.resolved:
                     if p.is_error:
@@ -531,17 +506,21 @@ class CdpClient:
 
         Err(play_error(ERR_TIMEOUT, "cdp send timed out after {timeout_ms}ms: {method}"))
 
-    me drain_events() -> [CdpEvent]:
+    me drain_events() -> Result<[CdpEvent], PlayError>:
         """Pump the read loop once and return any queued events."""
         self._pump_once()
+        if self.closed:
+            return Err(play_error(ERR_CDP_TRANSPORT, "cdp connection closed while receiving"))
         val out = self.events
         self.events = []
-        out
+        Ok(out)
 
     me wait_for_event(method: text, timeout_ms: i64) -> Result<CdpEvent, PlayError>:
         val deadline = time_now_unix_micros() + (timeout_ms * 1000)
         while time_now_unix_micros() < deadline:
             self._pump_once()
+            if self.closed:
+                return Err(play_error(ERR_CDP_TRANSPORT, "cdp connection closed while receiving"))
             var hit: CdpEvent = CdpEvent(method: "", params_json: "", session_id: "")
             var found = false
             var keep: [CdpEvent] = []
@@ -558,7 +537,12 @@ class CdpClient:
 
     me close() -> bool:
         if self.closed: return true
-        val frame = cdp_build_close_frame(1000)
+        val frame = match cdp_build_close_frame(1000):
+            case Ok(bytes): bytes
+            case Err(message):
+                self.closed = true
+                val _c = self.stream.close()
+                return false
         val _wf = self.stream.write_all(cdp_i64_array_to_u8(frame))
         val _cs = self.stream.close()
         self.closed = true

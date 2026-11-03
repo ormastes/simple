@@ -1,0 +1,60 @@
+# RFC6455 sections 5.3 and 5.7. AUTHORED_UNRUN; no runtime TDD claim.
+use std.spec
+use std.nogc_sync_mut.websocket.frame.{websocket_mask_from_entropy, create_frame_with_mask_result, generate_masking_key, create_text_frame, create_binary_frame, create_continuation_frame, create_ping_frame, create_pong_frame}
+use std.nogc_sync_mut.websocket.connection.{create_close_frame, create_empty_close_frame}
+use std.nogc_sync_mut.websocket.message.{create_fragmented_text, create_fragmented_binary}
+
+describe "WebSocket masking entropy and frame propagation":
+    it "preserves the four entropy octets including high bytes":
+        val bytes: [u8] = [0u8, 127u8, 128u8, 255u8]
+        expect(websocket_mask_from_entropy(Ok(bytes)).unwrap()).to_equal([0, 127, 128, 255])
+
+    it "propagates the provider error without a fallback key":
+        val result = websocket_mask_from_entropy(Err("entropy unavailable"))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("entropy unavailable")
+
+    it "rejects empty short and oversized keys":
+        expect(websocket_mask_from_entropy(Ok([])).is_err()).to_equal(true)
+        expect(websocket_mask_from_entropy(Ok([1u8, 2u8, 3u8])).is_err()).to_equal(true)
+        expect(websocket_mask_from_entropy(Ok([1u8, 2u8, 3u8, 4u8, 5u8])).is_err()).to_equal(true)
+
+    it "encodes the RFC6455 section 5.7 masked Hello bytes":
+        val frame = create_frame_with_mask_result(1, 1, 1, [72, 101, 108, 108, 111], Ok([55, 250, 33, 61]))
+        expect(frame.unwrap()).to_equal([129, 133, 55, 250, 33, 61, 127, 159, 77, 81, 88])
+
+    it "returns no frame when mask acquisition fails":
+        val result = create_frame_with_mask_result(1, 1, 1, [72], Err("entropy unavailable"))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("entropy unavailable")
+
+    it "accepts a legitimately random all-zero key without substitution":
+        expect(create_frame_with_mask_result(1, 2, 1, [0, 127, 128, 255], Ok([0, 0, 0, 0])).unwrap()).to_equal([130, 132, 0, 0, 0, 0, 0, 127, 128, 255])
+
+    it "does not need entropy for an unmasked server frame":
+        expect(create_frame_with_mask_result(1, 1, 0, [72], Err("not requested")).unwrap()).to_equal([129, 1, 72])
+
+    it "rejects malformed explicit key results instead of empty success":
+        expect(create_frame_with_mask_result(1, 1, 1, [72], Ok([1, 2, 3])).is_err()).to_equal(true)
+        expect(create_frame_with_mask_result(1, 1, 1, [72], Ok([1, 2, 3, 4, 5])).is_err()).to_equal(true)
+
+    it "preserves unmasked text binary continuation ping and pong constructors":
+        expect(create_text_frame("Hi", 1, 0).unwrap()).to_equal([129, 2, 72, 105])
+        expect(create_binary_frame([255], 1, 0).unwrap()).to_equal([130, 1, 255])
+        expect(create_continuation_frame([255], 1, 0).unwrap()).to_equal([128, 1, 255])
+        expect(create_ping_frame([], 0).unwrap()).to_equal([137, 0])
+        expect(create_pong_frame([], 0).unwrap()).to_equal([138, 0])
+
+    it "preserves unmasked close constructors":
+        expect(create_close_frame(1000, "", 0).unwrap()).to_equal([136, 2, 3, 232])
+        expect(create_empty_close_frame(0).unwrap()).to_equal([136, 0])
+
+    it "returns complete fragment collections through Result":
+        expect(create_fragmented_text("Hi", 1, 0).unwrap()).to_equal([[1, 1, 72], [128, 1, 105]])
+        expect(create_fragmented_binary([0, 255], 1, 0).unwrap()).to_equal([[2, 1, 0], [128, 1, 255]])
+
+    it "requests a complete key from the production entropy owner":
+        val key = generate_masking_key().unwrap()
+        expect(key.length()).to_equal(4)
+        for byte in key:
+            expect(byte >= 0 and byte <= 255).to_equal(true)
