@@ -39,3 +39,16 @@ decision): route the native lane to the pure-Simple `src/lib/common/crypto/aes_g
 which is already native-verified, instead of the extern. Do not add a C AES. The AES-128 and
 X25519 wrong-output and SIGSEGV parts still need a rebuilt-compiler rerun of
 `test/fixtures/devhub/native_os_crypto_kat`.
+
+## 2026-11-03 fix (AES-256 GCM link) — fix-implemented-verification-pending
+
+`src/os/crypto/aes256_gcm.spl` no longer declares or calls `rt_tls13_aes256_gcm_*`.
+`aes256_gcm_encrypt` and `aes256_gcm_decrypt` now delegate to the pure-Simple
+`std.common.crypto.aes_gcm`. Interpreter evidence: `aes256_gcm_nist_vectors_spec.spl` passes 12/12, and
+the new `test/01_unit/lib/crypto/aes256_gcm_no_seed_extern_spec.spl` passes 2/2. That spec fails on the
+old source because the extern was present.
+
+Native repro (pending a Phase 2 producer): native-build
+`test/fixtures/devhub/native_os_crypto_kat/main.spl`, then confirm lld-link reports no
+undefined `rt_tls13_aes256_gcm_*` and that the AES-256 vectors pass. The AES-128 GCM and X25519
+wrong-output and SIGSEGV parts are not addressed by this change.
