@@ -3,6 +3,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/pem.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -42,6 +44,16 @@ static int64_t now_ms(void) {
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* Model another crypto operation failing on the same runtime thread. */
+static void leave_pem_error(void) {
+    BIO *input = BIO_new_mem_buf("not a PEM private key", -1);
+    EVP_PKEY *key = input ? PEM_read_bio_PrivateKey(input, NULL, NULL, NULL) : NULL;
+    check(input != NULL && key == NULL && ERR_peek_error() != 0,
+          "failed PEM parse leaves an unrelated OpenSSL error");
+    EVP_PKEY_free(key);
+    BIO_free(input);
 }
 
 int64_t rt_string_new(const uint8_t *bytes, uint64_t len) {
@@ -207,6 +219,7 @@ int main(int argc, char **argv) {
     pthread_t thread;
     int port;
     int expect_success;
+    int error_queue;
     int server_joined = 0;
     int64_t host;
     int64_t name;
@@ -215,6 +228,7 @@ int main(int argc, char **argv) {
     int64_t connect_started_ms;
     int64_t connect_timeout_ms;
     if (argc != 5) return 64;
+    error_queue = strcmp(argv[1], "error-queue") == 0;
     memset(&server, 0, sizeof(server));
     server.listener = -1;
     server.cert_path = argv[2];
@@ -224,7 +238,7 @@ int main(int argc, char **argv) {
     server.trickle = strcmp(argv[1], "trickle") == 0;
     server.binary = strcmp(argv[1], "binary") == 0;
     expect_success = strcmp(argv[1], "trusted") == 0 ||
-                     server.stall || server.reset || server.binary;
+                     server.stall || server.reset || server.binary || error_queue;
     port = start_server(&server, &thread);
     check(port > 0, "server started");
     if (port <= 0) return 1;
@@ -234,6 +248,7 @@ int main(int argc, char **argv) {
     baseline = live_strings;
     connect_timeout_ms = server.trickle ? 1000 : 5000;
     connect_started_ms = now_ms();
+    if (error_queue) leave_pem_error();
     handle = rt_tls_client_connect_address_with_sni_timeout(
         host, port, name, connect_timeout_ms
     );
@@ -255,6 +270,7 @@ int main(int argc, char **argv) {
             check(rt_tls_client_close(handle) == 0,
                   "peer-reset handle closes as broken");
         } else {
+            if (error_queue) leave_pem_error();
             check(rt_tls_client_write(handle, request) == 3, "full request write");
         }
         (void)rt_string_free(request);
@@ -309,6 +325,7 @@ int main(int argc, char **argv) {
             first = rt_string_new(NULL, 0);
         } else {
             int64_t read_started_ms = now_ms();
+            if (error_queue) leave_pem_error();
             first = rt_tls_client_read(handle, 1);
             check(now_ms() - read_started_ms <= 6000,
                   "TLS read respects the runtime deadline");
@@ -322,9 +339,24 @@ int main(int argc, char **argv) {
         } else if (!server.reset && !server.binary) {
             int64_t second;
             check(rt_string_len(first) == 1, "read cap enforced");
+            if (error_queue) {
+                check(rt_string_len(first) == 1 && rt_string_data(first)[0] == 'O',
+                      "first response byte survives stale error queue");
+            }
+            if (error_queue) leave_pem_error();
             second = rt_tls_client_read(handle, 8);
             check(rt_string_len(second) == 1, "remaining response read");
+            if (error_queue) {
+                check(rt_string_len(second) == 1 && rt_string_data(second)[0] == 'K',
+                      "remaining response byte survives stale error queue");
+                leave_pem_error();
+                int64_t eof = rt_tls_client_read_bytes_timeout_checked(handle, 8, 5000);
+                check(eof != rt_value_nil() && ((TestBytes *)(intptr_t)eof)->len == 0,
+                      "close_notify stays clean EOF despite stale error queue");
+                test_bytes_free(eof);
+            }
             (void)rt_string_free(second);
+            if (error_queue) leave_pem_error();
             check(rt_tls_client_close(handle) == 1, "clean close succeeds");
         }
         (void)rt_string_free(first);
