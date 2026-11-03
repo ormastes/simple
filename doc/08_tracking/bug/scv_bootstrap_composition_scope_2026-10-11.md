@@ -48,3 +48,9 @@ new admitted producer exists. Full compiler/lib/MCP checks and native bootstrap
 qualification remain pending under the task's source-only execution restriction.
 
 **Revalidated 2026-11-02: still plausible because OPEN — source repair and regression specifications authored; rebuilt-producer; no merged fix commit with a passing regression is cited in this doc.**
+
+## Status 2026-11-03: fix-implemented-verification-pending
+
+Constructor/alias source repair is in tree (see b2d2555f65b composition-selector pin). Remaining: rebuilt
+producer qualification - run Stage2 on a source containing the repair and confirm no
+`SCV-E-ADMISSION: source-inventory-scope-unsupported` for the generated CUDA selector.
