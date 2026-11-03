@@ -66,7 +66,7 @@ match divide(10, 0):
 
 match find_user(42):
     Some(user): process(user)
-    nil: print "User not found"
+    None: print "User not found"
 ```
 
 ---

@@ -1,0 +1,111 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# @tag:in-development
+# design: doc/04_architecture/adr/ADR-005-text-index-yields-char.md
+#
+# Pins the `text[i]` contract decided 2026-11-03: indexing yields a `char`
+# code-point value (no allocation), with explicit `.ord()` / `as i64` /
+# `.to_digit()` / `.to_text()` conversions. Resolves
+# indexed_char_to_i64_silent_zero_family_2026-08-10.
+#
+# In development: `'x'` char literals and a runtime `char` value are not yet
+# implemented in the seed, so this spec is EXPECTED TO FAIL until the Rust and
+# pure-Simple implementation PRs land. Remove the tag when it passes.
+#
+# Out-of-range policy (unchanged, pinned by comment because the spec DSL has
+# no raise matcher): `s[i]` with i outside -len..len is a runtime
+# "index out of bounds" error in every engine. `s.char_at(i)` keeps its own
+# over-run policy (returns ""), pinned below and in
+# text_char_primitive_engine_contract_spec.spl.
+
+use std.spec.step
+
+describe "text[i] yields a char code point":
+    # @manual scenario evidence
+    """
+    As a Simple developer indexing text,
+    I want s[i] to give me a char, and the code point only when I ask for it,
+    so that a digit never silently turns into its digit value or into 0.
+    """
+
+    it "indexes a digit as a char, not an integer":
+        # @req REQ-SSPEC-UNIT
+        step("indexes a digit as a char")
+        val s = "72"
+        assert_equal(s[0], '7')
+        assert_equal(s[1], '2')
+
+    it "ord gives the code point of an indexed digit":
+        # @req REQ-SSPEC-UNIT
+        step("ord gives the code point")
+        val s = "72"
+        assert_equal(s[0].ord(), 55)
+        assert_equal(s[0] as i64, 55)
+
+    it "char_code_at stays equal to ord":
+        # @req REQ-SSPEC-UNIT
+        step("char_code_at stays equal to ord")
+        val s = "72"
+        assert_equal(s.char_code_at(0), s[0].ord())
+
+    it "to_digit is explicit and optional":
+        # @req REQ-SSPEC-UNIT
+        step("to_digit returns Option")
+        assert_equal("72"[0].to_digit(), Some(7))
+        assert_equal("a"[0].to_digit(), None)
+
+    it "to_text gives a one-character text":
+        # @req REQ-SSPEC-UNIT
+        step("to_text gives a one-character text")
+        assert_equal("72"[0].to_text(), "7")
+
+    it "indexes by code point, not by byte":
+        # @req REQ-SSPEC-UNIT
+        step("indexes by code point")
+        val s = "72é"
+        assert_equal(s[2], 'é')
+        assert_equal(s[2].ord(), 233)
+        assert_equal(s.len(), 3)
+        assert_equal(s.byte_len(), 4)
+
+    it "a lone multi-byte character is one char":
+        # @req REQ-SSPEC-UNIT
+        step("é is one char")
+        assert_equal("é"[0], 'é')
+        assert_equal("é"[0].to_text(), "é")
+
+    it "negative index counts code points from the end":
+        # @req REQ-SSPEC-UNIT
+        step("negative index from the end")
+        assert_equal("abc"[-1], 'c')
+        assert_equal("72é"[-1], 'é')
+
+    it "char.from_code inverts ord":
+        # @req REQ-SSPEC-UNIT
+        step("from_code inverts ord")
+        assert_equal(char.from_code(55), '7')
+        assert_equal(char.from_code(233), 'é')
+
+    it "byte_at stays a byte":
+        # @req REQ-SSPEC-UNIT
+        step("byte_at is a byte")
+        val s = "é"
+        assert_equal(s.byte_at(0), 195)
+
+    it "chars iterates chars":
+        # @req REQ-SSPEC-UNIT
+        step("chars iterates chars")
+        var n = 0
+        for c in "a7é".chars():
+            n = n + c.ord()
+        assert_equal(n, 97 + 55 + 233)
+
+    it "slicing still yields text":
+        # @req REQ-SSPEC-UNIT
+        step("slices are text")
+        assert_equal("72é"[0..2], "72")
+
+    it "char_at over-run keeps its empty-text policy":
+        # @req REQ-SSPEC-UNIT
+        step("char_at over-run is empty text")
+        assert_equal("72".char_at(99), "")
