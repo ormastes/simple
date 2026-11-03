@@ -5,7 +5,7 @@
 # `status` to `fixing` in the main tables (bugs_active/bugs; still 10 columns,
 # bug-gen requires exactly 10) and appends a row to the side table
 #   bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
-# state: fixing, released, done. History is kept; holder rule: see "holder" below.
+# state: fixing, waiting_verify, released, done. History is kept.
 # A `fixing` claim whose max(claimed_at, heartbeat_at) is older than the max age
 # (default 24h) is STALE: anyone may take it over, and `reap` reverts it.
 #
@@ -14,6 +14,9 @@
 #   bug-claim.shs heartbeat <bug_id> <session_id>
 #   bug-claim.shs release <bug_id> <session_id>
 #   bug-claim.shs done <bug_id> <session_id> [--pr <n> | <n>]
+#   bug-claim.shs wait-verify <bug_id> <session_id> <required-check>
+#   bug-claim.shs check <bug_id>
+#   bug-claim.shs environment <bug_id> <found-env> <repro-env> <unknown|candidate|verified> <evidence>
 #   bug-claim.shs status <bug_id>
 #   bug-claim.shs list-active
 #   bug-claim.shs list                 (alias of list-active)
@@ -74,6 +77,8 @@ parse_age() {
     esac
 }
 MAX_AGE_S=$(parse_age "${BUG_CLAIM_MAX_AGE:-24h}")
+LOCK_RETRIES="${BUG_CLAIM_LOCK_RETRIES:-60}"
+case "$LOCK_RETRIES" in ''|*[!0-9]*) die "bad BUG_CLAIM_LOCK_RETRIES" ;; esac
 
 valid_id() { case "$1" in ''|*[!A-Za-z0-9._/:+-]*) return 1 ;; *) return 0 ;; esac; }
 clean_note() { printf '%s' "$1" | tr '\r\n\t' '   ' | tr '"' ' ' | tr "'" ' ' | tr '\134' ' '; }
@@ -103,7 +108,14 @@ FX
     sed -i 's/@CR@$/\r/' "$_fx"
     sh "$RESEAL" "$_fx" >/dev/null 2>&1
     _fails=0
-    run() { BUG_CLAIM_DB="$_fx" BUG_CLAIM_NOW=2026-11-03T00:00:00Z sh "$0" "$@" 2>&1; }
+    # Isolate each CLI operation without spawning another shell per assertion.
+    # Git-for-Windows shell startup dominates these small fixtures under load.
+    run() { (
+        DB="$_fx"; REAL_DB="$DB"; LOCKDIR="$DB.lock"; WORK_DB="$DB.work.$$"
+        BUG_CLAIM_NOW="${BUG_CLAIM_TEST_NOW:-2026-11-03T00:00:00Z}"
+        LOCK_RETRIES="${BUG_CLAIM_LOCK_RETRIES:-60}"
+        dispatch "$@"
+    ) 2>&1; }
     chk() { # label expected-substring output
         case "$3" in *"$2"*) ;; *) echo "selftest FAIL: $1: want '$2' got '$3'"; _fails=$((_fails+1)) ;; esac
     }
@@ -131,14 +143,40 @@ FX
     chk "done extra args" "usage: done" "$(run done MIXED_C_3 d3 1 2)"
     chk "done --pr no value" "usage: done" "$(run done MIXED_C_3 d3 --pr)"
     chk "reap sees all as live" "reap: 0 abandoned" "$(run reap --report)"
+    chk "wait requires check" "required-check" "$(run wait-verify SP-A-1 s4)"
+    chk "wait rejects sanitized-empty check" "required-check" "$(run wait-verify SP-A-1 s4 "'")"
+    chk "wait rejects other owner" "REFUSED" "$(run wait-verify SP-A-1 stranger native-smoke)"
+    chk "wait transition" "WAITING_VERIFY:" "$(run wait-verify SP-A-1 s4 native-smoke)"
+    chk "wait preserves owner" "session=s4" "$(run status SP-A-1)"
+    chk "wait records check" "native-smoke" "$(run status SP-A-1)"
+    chk "wait main status" "status=fix-implemented-verification-pending" "$(run status SP-A-1)"
+    chk "wait validates" "CHECK PASS:" "$(run check SP-A-1)"
+    chk "wait not reaped" "reap: 0 abandoned" "$(run reap --report)"
+    chk "wait resumes" "CLAIMED:" "$(BUG_CLAIM_TEST_NOW=2026-11-03T00:00:01Z run claim SP-A-1 verifier)"
+    chk "fixing validates" "CHECK PASS:" "$(run check SP-A-1)"
+    chk "verifier releases" "status fix-implemented-verification-pending" "$(BUG_CLAIM_TEST_NOW=2026-11-03T00:00:02Z run release SP-A-1 verifier)"
+    chk "released verification validates" "CHECK PASS:" "$(run check SP-A-1)"
+    BUG_CLAIM_TEST_NOW=2026-11-03T00:00:03Z
+    # Old age alone must never evict a still-running writer.
+    mkdir "$_fx.lock"; echo "$$" > "$_fx.lock/owner.pid"
+    touch -t 200001010000 "$_fx.lock"
+    chk "live old lock refused" "could not lock" "$(BUG_CLAIM_LOCK_RETRIES=0 run claim SP-A-1 blocked)"
+    [ -f "$_fx.lock/owner.pid" ] || { echo "selftest FAIL: live lock removed"; _fails=$((_fails+1)); }
+    echo 2147483647 > "$_fx.lock/owner.pid"
+    touch -t 200001010000 "$_fx.lock"
+    chk "dead old lock refused" "could not lock" "$(BUG_CLAIM_LOCK_RETRIES=0 run claim SP-A-1 recovered)"
+    rm -f "$_fx.lock/owner.pid"; rmdir "$_fx.lock"
+    chk "explicitly cleared lock usable" "CLAIMED:" "$(run claim SP-A-1 recovered)"
+    chk "unknown environments" "state=unknown" "$(run environment SP-A-1 unknown unknown unknown unknown)"
+    chk "candidate is not proof" "state=candidate" "$(run environment SP-A-1 unknown windows candidate unknown)"
+    chk "verified needs evidence" "requires evidence" "$(run environment SP-A-1 unknown windows verified unknown)"
+    chk "found needs evidence" "requires evidence" "$(run environment SP-A-1 windows windows candidate unknown)"
+    chk "verified environment" "state=verified" "$(run environment SP-A-1 windows windows verified retained-test-log)"
+    chk "environment shown" "retained-test-log" "$(run show SP-A-1 --intent not_for_fixing)"
     rm -rf "$_d"
     if [ "$_fails" -eq 0 ]; then echo "bug-claim selftest PASS"; exit 0; fi
     echo "bug-claim selftest FAIL ($_fails)"; exit 1
 }
-[ "${1:-}" = "--selftest" ] && selftest
-
-[ -f "$DB" ] || die "$DB not found"
-
 # --- table readers ---------------------------------------------------------
 # claims as TSV: pos bug state session claimed hb prev note
 claims_tsv() {
@@ -270,17 +308,24 @@ refuse_held() { # prints holder info, exit 3
 REAL_DB="$DB"
 LOCKDIR="$REAL_DB.lock"
 WORK_DB="$REAL_DB.work.$$"
-cleanup() { rm -f "$WORK_DB" "$WORK_DB".edit.* 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; }
+cleanup() {
+    rm -f "$WORK_DB" "$WORK_DB".edit.* 2>/dev/null
+    if [ "$(cat "$LOCKDIR/owner.pid" 2>/dev/null)" = "$$" ]; then
+        rm -f "$LOCKDIR/owner.pid"; rmdir "$LOCKDIR" 2>/dev/null
+    fi
+}
 lock() {
     _i=0
     while ! mkdir "$LOCKDIR" 2>/dev/null; do
-        # break a lock left behind by a killed process (older than 2 minutes)
-        if [ -n "$(find "$LOCKDIR" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then mv "$LOCKDIR" "$LOCKDIR.dead.$$" 2>/dev/null && rmdir "$LOCKDIR.dead.$$" 2>/dev/null; continue; fi
-        _i=$((_i + 1)); [ "$_i" -gt 60 ] && die "could not lock $REAL_DB (lock dir $LOCKDIR)"
+        # Never rename an observed lock: another writer may have replaced it
+        # since inspection. Even dead-owner recovery needs external quiescence.
+        _pid=$(cat "$LOCKDIR/owner.pid" 2>/dev/null || true)
+        _i=$((_i + 1)); [ "$_i" -gt "$LOCK_RETRIES" ] && die "could not lock $REAL_DB (lock dir $LOCKDIR owner ${_pid:-unknown}); recover only after all writers are stopped"
         sleep 1
     done
     trap cleanup EXIT
     trap 'exit 130' INT TERM
+    echo "$$" > "$LOCKDIR/owner.pid" || die "cannot record lock owner"
     cp "$REAL_DB" "$WORK_DB" || die "cannot copy $REAL_DB"
     DB="$WORK_DB"
 }
@@ -379,13 +424,83 @@ cmd_done() {
     finish "$_db" "$_ds" done fixed "$_dn"
 }
 
+cmd_wait_verify() {
+    [ $# -eq 3 ] || die "usage: wait-verify <bug_id> <session_id> <required-check>"
+    _required=$(clean_note "$3")
+    [ -n "$(printf '%s' "$_required" | tr -d '[:space:]')" ] || die "required-check must contain text after sanitization"
+    finish "$1" "$2" waiting_verify fix-implemented-verification-pending "$_required"
+}
+
+cmd_environment() {
+    [ $# -eq 5 ] || die "usage: environment <bug_id> <found-env> <repro-env> <unknown|candidate|verified> <evidence>"
+    valid_id "$1" || die "bad bug_id"
+    _found=$(clean_note "$2"); _repro=$(clean_note "$3"); _verification="$4"; _evidence=$(clean_note "$5")
+    for _value in "$_found" "$_repro" "$_evidence"; do
+        [ -n "$(printf '%s' "$_value" | tr -d '[:space:]')" ] || die "environment values must contain text (use unknown when absent)"
+    done
+    case "$_verification" in
+        unknown) [ "$_repro" = unknown ] || die "unknown reproduction requires unknown environment" ;;
+        candidate|verified) [ "$_repro" != unknown ] || die "candidate/verified reproduction needs an environment" ;;
+        *) die "reproduction state must be unknown, candidate or verified" ;;
+    esac
+    if { [ "$_found" != unknown ] || [ "$_verification" = verified ]; } && [ "$_evidence" = unknown ]; then
+        die "observed/verified environment requires evidence"
+    fi
+    lock
+    [ -n "$(main_status "$1")" ] || die "unknown bug $1"
+    _header='bug_environments |bug_id, found_env, reproduction_env, reproduction_state, evidence, recorded_at|'
+    _envrow="    $1, \"$_found\", \"$_repro\", $_verification, \"$_evidence\", $(now_iso)"
+    _tmp="$DB.edit.$$"
+    if ! grep -Fqx "$_header" "$DB"; then
+        { cat "$DB"; echo; echo "$_header"; echo "$_envrow"; } > "$_tmp" || die "environment append failed"
+    else
+        awk -v hdr="$_header" -v row="$_envrow" '
+        $0 == hdr { t = 1; print; next }
+        t && /^[^ \t#]/ { print row; t = 0; done = 1 }
+        { print }
+        END { if (t && !done) print row }' "$DB" > "$_tmp" || die "environment append failed"
+    fi
+    mv "$_tmp" "$DB" || die "environment update failed"
+    commit_db
+    echo "ENVIRONMENT: $1 found=$_found reproduction=$_repro state=$_verification evidence=$_evidence"
+}
+
+# Read-only integrity check for owner-linked workflow states.
+cmd_check() {
+    [ $# -eq 1 ] || die "usage: check <bug_id>"
+    valid_id "$1" || die "bad bug_id"
+    _main=$(main_status "$1" | cut -f1)
+    [ -n "$_main" ] || die "unknown bug $1"
+    load_current "$1"
+    case "$_main" in
+        fixing) _expected=fixing ;;
+        fix-implemented-verification-pending)
+            # A verifier may release its later claim back to the waiting state.
+            # The last waiting event retains the submitter, time and requirement.
+            _wait=$(claims_tsv | awk -F'\t' -v id="$1" '$2 == id && $3 == "waiting_verify" { row = $4 "\t" $5 "\t" $8 } END { print row }')
+            _owner=$(printf '%s' "$_wait" | cut -f1)
+            _since=$(printf '%s' "$_wait" | cut -f2)
+            _check=$(printf '%s' "$_wait" | cut -f3-)
+            if [ -z "$_owner" ] || [ "$(to_epoch "$_since")" = 0 ] || [ -z "$_check" ]; then
+                echo "CHECK FAIL: $1 status=$_main requires waiting_verify owner/start/check details"; return 1
+            fi
+            echo "CHECK PASS: $1 status=$_main session=$_owner since=$_since check=$_check"; return 0 ;;
+        *) echo "CHECK PASS: $1 status=$_main (no active owner required)"; return 0 ;;
+    esac
+    if [ "$C_STATE" != "$_expected" ] || [ -z "$C_SESSION" ] || [ "$(to_epoch "$C_CLAIMED")" = 0 ] || { [ "$_expected" = waiting_verify ] && [ -z "$C_NOTE" ]; }; then
+        echo "CHECK FAIL: $1 status=$_main requires $_expected owner/start/check details"; return 1
+    fi
+    echo "CHECK PASS: $1 status=$_main session=$C_SESSION since=$C_CLAIMED"
+}
+
 cmd_status() {
     [ $# -ge 1 ] || die "usage: status <bug_id>"
     valid_id "$1" || die "bad bug_id"
     load_current "$1"
     _flag=''; [ "$C_STALE" = 1 ] && _flag=' STALE'; [ "$C_LIVE" = 1 ] && _flag=' live'
-    if [ "$C_STATE" = none ]; then echo "$1: state=none"; return 0; fi
-    echo "$1: state=$C_STATE session=$C_SESSION claimed_at=$C_CLAIMED heartbeat_at=$C_HB prev_status=$C_PREV note=\"$C_NOTE\"$_flag"
+    _main=$(main_status "$1" | cut -f1)
+    if [ "$C_STATE" = none ]; then echo "$1: state=none status=$_main"; return 0; fi
+    echo "$1: state=$C_STATE session=$C_SESSION claimed_at=$C_CLAIMED heartbeat_at=$C_HB prev_status=$C_PREV note=\"$C_NOTE\"$_flag status=$_main"
 }
 
 cmd_list_active() {
@@ -471,18 +586,29 @@ cmd_show() {
     awk -v id="$_b" "$AWKLIB"'/^bug_difficulty \|/ { t = 1; next } /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 } t && /^[ \t]*[^ \t#\r]/ && rowid($0) == id { l = $0 } END { if (l != "") print l; else print "(none)" }' "$DB"
     echo "== claim =="
     cmd_status "$_b"
+    echo "== environments (missing means unknown) =="
+    awk -v id="$_b" "$AWKLIB"'/^bug_environments \|/ { t = 1; next } /^[^ \t#]/ { t = 0 } t && /^[ \t]+[^ \t#]/ && rowid($0) == id { print; found = 1 } END { if (!found) print "(unknown)" }' "$DB"
 }
 
-[ $# -ge 1 ] || die "usage: bug-claim.shs claim|heartbeat|release|done|status|list|list-active|reap|show ..."
+dispatch() {
+[ $# -ge 1 ] || die "usage: bug-claim.shs claim|heartbeat|release|done|wait-verify|check|environment|status|list|list-active|reap|show ..."
 _cmd="$1"; shift
 case "$_cmd" in
     claim) cmd_claim "$@" ;;
     heartbeat) cmd_heartbeat "$@" ;;
     release) cmd_release "$@" ;;
     done) cmd_done "$@" ;;
+    wait-verify) cmd_wait_verify "$@" ;;
+    check) cmd_check "$@" ;;
+    environment) cmd_environment "$@" ;;
     status) cmd_status "$@" ;;
     list|list-active) cmd_list_active ;;
     reap) cmd_reap "$@" ;;
     show) cmd_show "$@" ;;
     *) die "unknown command '$_cmd'" ;;
 esac
+}
+
+[ "${1:-}" = "--selftest" ] && selftest
+[ -f "$DB" ] || die "$DB not found"
+dispatch "$@"
