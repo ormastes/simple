@@ -1,0 +1,30 @@
+# Purpose: composed child-output-to-protocol contract; no live child is launched.
+# @req REQ-LSP-TIMEOUT-RESULT-001
+# Live process and stdio qualification remains a separate admitted-runtime gate.
+use std.spec
+use std.spec.step
+use app.simple_lsp_mcp.tools.{command_result, lsp_diagnostics_output, diagnostics_result}
+use app.simple_lsp_mcp.json_helpers.{extract_field, extract_id}
+
+describe "LSP timeout response protocol boundary":
+    it "returns an error without publishing partial diagnostic content":
+        step("a bounded check expires after emitting an incomplete warning")
+        val output = lsp_diagnostics_output("probe.spl:2:3: warning: partial", "\nTIMEOUT\n", -1)
+        val response = diagnostics_result("42", "probe.spl", output)
+        step("the caller receives the matching id and timeout error without a success result")
+        expect(extract_id(response)).to_equal("42")
+        expect(extract_field(response, "result")).to_equal("")
+        val error_body = extract_field(response, "error")
+        expect(extract_field(error_body, "code")).to_equal("-32001")
+        expect(extract_field(error_body, "message")).to_equal("lsp request timed out after 10000 ms")
+        expect(response.contains("partial")).to_equal(false)
+        expect(response.contains("new-diagnostics")).to_equal(false)
+
+    it "does not retain timeout state across response construction":
+        step("construct a timed-out query followed by successful symbol content")
+        val failed = command_result("50", "lsp request timed out after 30000 ms")
+        val next_response = command_result("51", "symbol: next")
+        expect(extract_field(failed, "result")).to_equal("")
+        expect(extract_field(next_response, "error")).to_equal("")
+        expect(extract_id(next_response)).to_equal("51")
+        expect(extract_field(next_response, "result")).to_contain("symbol: next")
