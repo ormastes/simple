@@ -26,3 +26,16 @@ On the pinned Phase 2 producer (13d73267...), `test/fixtures/devhub/native_os_cr
 - Whether the segmentation fault (exit 139) has the same cause as the wrong results.
 
 **Revalidated 2026-11-02: still plausible because Open (not verified on a rebuilt compiler); no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 blocker (lane p1blk)
+
+Root cause of the AES-256 GCM link failure confirmed. `src/os/crypto/aes256_gcm.spl:22-23`
+declares `extern fn rt_tls13_aes256_gcm_encrypt/decrypt`, and `:650` / `:689` call them
+on the fast path. The only definitions are in the Rust seed runtime
+(`src/compiler_rust/runtime/src/value/aes.rs:1099`, plus aes128 at `:801`). There is **no**
+`rt_tls13_*` definition in the C runtime (`git grep rt_tls13_aes -- src/runtime` = 0 hits).
+The Phase 2 lld-link uses the C runtime, so the symbol is undefined. Fix direction (owner
+decision): route the native lane to the pure-Simple `src/lib/common/crypto/aes_gcm.spl`,
+which is already native-verified, instead of the extern. Do not add a C AES. The AES-128 and
+X25519 wrong-output and SIGSEGV parts still need a rebuilt-compiler rerun of
+`test/fixtures/devhub/native_os_crypto_kat`.

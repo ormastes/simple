@@ -76,3 +76,13 @@ does not merge or reclassify that history.
 The same attempt included a LayoutAttr codec fixture, but the summary explicitly
 records `layout_attr_fixture_executed: false`. This entry does not establish a
 LayoutAttr result or qualify the candidate for Phase2 or Phase3.
+
+## 2026-11-03 blocker (lane p1blk)
+
+All retained evidence (candidate exe, `smokes/summary.sdn`, per-case stderr) is under
+`C:/dev/p3new/p2_layoutattr_71d_20261102/`, which fix lanes are forbidden to touch. No
+faulting address or stack has been recorded. The doc's own cache note means the
+HIR-cache contamination is not ruled out (the driver reads `SIMPLE_HIR_CACHE_DIR`, but the
+private cache was passed only to the frontend). Next step for the Phase 2 owner: rerun both
+smokes with `SIMPLE_HIR_CACHE_DIR` set to a private empty dir, and capture a minidump of
+the 0xC0000005.
