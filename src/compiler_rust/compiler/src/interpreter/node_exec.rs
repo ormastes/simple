@@ -122,6 +122,81 @@ pub(crate) fn coerce_to_declared_field_of(class_def: &ClassDef, field: &str, val
     }
 }
 
+/// Class name of the object stored at `owner` (a class instance or object).
+fn owner_class_name(env: &Env, owner: &super::place::Place) -> Option<String> {
+    let slot = super::place::place_slot_ref(env, owner)?;
+    match slot {
+        Value::ClassInstance(inst) => Some(inst.class().to_string()),
+        Value::Object { class, .. } => Some(class.clone()),
+        _ => None,
+    }
+}
+
+/// Coerce `value` for a store into the declared field `field_place` (a place
+/// ending in `Field(f)`): the field's own declared unsigned width, or, when
+/// `element` is true, the declared element type of a `[uN]` field
+/// (`o.f[i] = v`). Unknown owner/field: unchanged. Covers the place-based
+/// store paths (`a.b.f = v`, `arr[i].f = v`, `self.rows[i].f = v`) that
+/// `write_place` serves.
+fn coerce_store_at_field_place(
+    env: &Env,
+    field_place: &super::place::Place,
+    element: bool,
+    value: Value,
+    classes: &HashMap<String, Arc<ClassDef>>,
+) -> Value {
+    let Some((super::place::Projection::Field(field), owner_projs)) = field_place.projections.split_last() else {
+        return value;
+    };
+    let owner = super::place::Place {
+        root: field_place.root.clone(),
+        projections: owner_projs.to_vec(),
+    };
+    let Some(class_name) = owner_class_name(env, &owner) else {
+        return value;
+    };
+    if !element {
+        return coerce_to_declared_field(&class_name, field, value, classes);
+    }
+    let Some(class_def) = classes.get(&class_name) else {
+        return value;
+    };
+    match class_def.fields.iter().find(|f| &f.name == field).map(|f| &f.ty) {
+        Some(Type::Array { element: elem, .. }) => coerce_to_declared_unsigned(value, Some(elem.as_ref())),
+        _ => value,
+    }
+}
+
+/// [`coerce_store_at_field_place`] for a complete assignment-target place:
+/// a trailing `Index` means an element store into the preceding field.
+fn coerce_store_at_place(
+    env: &Env,
+    place: &super::place::Place,
+    value: Value,
+    classes: &HashMap<String, Arc<ClassDef>>,
+) -> Value {
+    match place.projections.last() {
+        Some(super::place::Projection::Field(_)) => coerce_store_at_field_place(env, place, false, value, classes),
+        Some(super::place::Projection::Index(_)) => {
+            let mut field_place = place.clone();
+            field_place.projections.pop();
+            coerce_store_at_field_place(env, &field_place, true, value, classes)
+        }
+        None => value,
+    }
+}
+
+/// True for place expressions whose evaluation has no side effects, so
+/// resolving them an extra time (only to read a declared type) is harmless.
+fn is_pure_place_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(_) | Expr::Integer(_) => true,
+        Expr::FieldAccess { receiver, .. } => is_pure_place_expr(receiver),
+        Expr::Index { receiver, index } => is_pure_place_expr(receiver) && is_pure_place_expr(index),
+        _ => false,
+    }
+}
+
 fn pack_u8_array(value: Value) -> Value {
     let Value::Array(data) = &value else {
         return value;
@@ -1350,6 +1425,7 @@ pub(crate) fn exec_assignment(
                                 super::place::Projection::Field(field.clone()),
                             ],
                         };
+                let value = coerce_store_at_place(env, &place, value, classes);
                         if super::place::write_place(env, &place, value) {
                             return Ok(Control::Next);
                         }
@@ -1373,6 +1449,7 @@ pub(crate) fn exec_assignment(
                 if let Some(place) =
                     super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
                 {
+                let value = coerce_store_at_place(env, &place, value, classes);
                     if super::place::write_place(env, &place, value) {
                         return Ok(Control::Next);
                     }
@@ -1521,6 +1598,7 @@ pub(crate) fn exec_assignment(
                 if let Some(place) =
                     super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
                 {
+                let value = coerce_store_at_place(env, &place, value, classes);
                     if super::place::write_place(env, &place, value) {
                         return Ok(Control::Next);
                     }
@@ -1541,6 +1619,7 @@ pub(crate) fn exec_assignment(
             if let Some(place) =
                 super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
             {
+                let value = coerce_store_at_place(env, &place, value, classes);
                 if super::place::write_place(env, &place, value) {
                     return Ok(Control::Next);
                 }
@@ -1557,6 +1636,18 @@ pub(crate) fn exec_assignment(
         // Handle index assignment: arr[i] = value or dict["key"] = value or self.dict[key] = value
         let mut value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         let index_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
+
+        // `o.f[i] = v` / `a.b.f[i] = v` where `f` is declared `[uN]`: coerce the
+        // element to the declared width (bug
+        // seed_interp_u64_field_store_not_coerced_2026-11-03). Done once up
+        // front because the container paths below are many and bespoke.
+        if matches!(receiver.as_ref(), Expr::FieldAccess { .. }) && is_pure_place_expr(receiver) {
+            if let Some(field_place) =
+                super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)?
+            {
+                value = coerce_store_at_field_place(env, &field_place, true, value, classes);
+            }
+        }
 
         // Case 1: Plain identifier: arr[i] = value
         if let Expr::Identifier(container_name) = receiver.as_ref() {
