@@ -1,0 +1,43 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Inlined std env_get with a text argument
+
+Regression for bug stage2_inline_env_get_boxed_extern_abi_2026-11-03 (S3N-7):
+the inlined env_get passed the BOXED text to rt_env_get(ptr, len), crashing in
+memcpy. The wrapper takes a text param so the argument crosses the inline
+boundary exactly as in driver_aot_native_output.
+"""
+
+# @tag: unit, compiler, mir, native, env
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.env.variables.{env_get, env_set, env_get_or}
+
+fn env_probe_get(key: text) -> text:
+    env_get(key)
+
+fn env_probe_set_get(key: text, value: text) -> text:
+    env_set(key, value)
+    env_get(key)
+
+describe "inlined env_get with text argument":
+    it "round-trips a value set through a text-taking wrapper":
+        expect(env_probe_set_get("SPL_REGRESS_ENV_A", "hello")).to_equal("hello")
+
+    it "returns the exact bytes for a long value":
+        val long_value = "x" * 300
+        val got = env_probe_set_get("SPL_REGRESS_ENV_B", long_value)
+        expect(got.len()).to_equal(300)
+        expect(got).to_equal(long_value)
+
+    it "keeps backslashes and spaces in values":
+        expect(env_probe_set_get("SPL_REGRESS_ENV_C", "C:\a b\c")).to_equal("C:\a b\c")
+
+    it "returns empty text for an unset key built at runtime":
+        val key = "SPL_REGRESS_ENV_UNSET_" + "{1 + 2}"
+        expect(env_probe_get(key)).to_equal("")
+
+    it "uses the default only when unset":
+        env_set("SPL_REGRESS_ENV_D", "v")
+        expect(env_get_or("SPL_REGRESS_ENV_D", "dflt")).to_equal("v")
+        expect(env_get_or("SPL_REGRESS_ENV_D_MISSING", "dflt")).to_equal("dflt")
