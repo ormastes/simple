@@ -23,3 +23,5 @@ Commit identity and final receipts must be appended through the canonical BugDat
 **Revalidated 2026-11-02: still plausible because open; source compatibility does not close the underlying bug; no merged fix commit with a passing regression is cited in this doc.**
 
 **2026-11-03 (sonB): deferred, pointer.** `infer_unfolded_static_expr_type_bounded` (`50.mir/_MirLowering/module_lowering.spl:234`) has no Array case for `Binary(Add)` of two module-static arrays (only scalar/text), so the Infer branch at ~3689 errors. Fix: add an array-typed Add arm reusing the array-literal inference used by the unannotated-global spec. Needs stage3 to verify.
+
+**2026-11-03 (sonB): fix-implemented-verification-pending.** `infer_unfolded_static_expr_type_bounded` (`module_lowering.spl`) now accepts a settled HIR Array type and keeps the array MIR type for `Add` of array operands. Spec: "module static array concatenation" in `test/01_unit/compiler/mir/unannotated_module_global_static_type_spec.spl`. Verify on stage3, then retire the literal tables in `src/app/devhub/gh_compat.spl` in a separate commit.
