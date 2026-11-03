@@ -27,9 +27,23 @@ docker run --rm --network none -v C:/dev/wt/http-framing-20261103:/work -w /work
 ```
 
 The same command with `build/http-framing-before` ran before the source fix.
-Retained evidence in both output directories: `compile.log`, `results.txt`,
-and the executable `http-framing`. Before: 99 cases, 63 pass, 36 fail.
-After: 99 cases, 99 pass, 0 fail. One repair cycle.
+Both runs produced `compile.log`, `results.txt`, and the executable
+`http-framing` in those directories. However, the ignored build directories
+were subsequently lost after expanding sparse checkout to materialize audit
+scripts. They are not available as retained host artifacts. Session tool
+outputs retain the source/executable hashes below and the observed totals:
+before 99 cases, 63 pass, 36 fail; after 99 cases, 99 pass, 0 fail. The
+before-run output also lists the first 20 failing cases. One repair cycle;
+passing checks were not repeated to recreate lost artifacts.
+
+Recorded tool-output summary (not a reconstruction of the lost full logs):
+
+```
+functions.write_stdin session_id=46400, chunk_id=22b514, exit_code=1
+cases=99 passed=63 failed=36
+functions.write_stdin session_id=50312, chunk_id=0930af, exit_code=0
+cases=99 passed=99 failed=0
+```
 
 The matrix includes binary bytes 00/7f/80/ff, empty/short bodies, decimal
 overflow/negative/suffix lengths, identical/conflicting duplicate lengths,
@@ -45,7 +59,8 @@ body/status publication on failure.
 GCC 14.4.0 container digest:
 `sha256:c84ee277183a56c8302ca9a83a91535d46eeb549fd1bee958045dbf9f5e50b7f`.
 
-SHA-256:
+Historical SHA-256 values recorded in those tool outputs; executable hashes
+cannot currently be independently re-verified because the binaries were lost:
 
 | Artifact | Hash |
 | --- | --- |
@@ -55,7 +70,8 @@ SHA-256:
 | Original executable | `5bbce0b52348d9c867cde03093e07ff80e1ea513f171140a6ef2600ae1dbe117` |
 | Repaired executable | `1a2c4f9ec0ce4580b0cc337b7c89e3f6fdce66fe4686f6b1756c7f08ceff0303` |
 
-STATUS: PASS for this native framing regression. Full self-hosted checks are
+Execution result: PASS for this native framing regression; full per-case logs
+and executables were lost as disclosed above. Full self-hosted checks are
 UNRUN because no admitted self-hosted runtime is available. Windows core-C
 HTTP remains unsupported by its existing contract. This evidence does not
 qualify TLS, redirects, timeout behavior, complete trailer/extension grammar,
