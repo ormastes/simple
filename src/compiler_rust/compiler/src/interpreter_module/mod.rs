@@ -14,7 +14,7 @@ use super::module_cache;
 
 // Submodules
 mod export_handler;
-mod module_evaluator;
+pub(crate) mod module_evaluator;
 mod module_loader;
 mod module_merger;
 mod path_resolution;

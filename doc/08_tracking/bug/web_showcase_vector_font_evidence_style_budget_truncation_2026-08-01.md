@@ -218,3 +218,5 @@ kills the run before a verdict. `SIMPLE_TRACE_FONT_STYLE=1` arms the
 - `bin/simple` is stale/broken; use `src/compiler_rust/target/bootstrap/simple`.
 
 **Revalidated 2026-11-02: still plausible because ROOT-CAUSED (fix plan below; not yet landed); no merged fix commit with a passing regression is cited in this doc.**
+
+**Triage 2026-11-03 (grp03):** fail-closed half (plan item 2) is landed; the remaining blocker is the ~2.45 s interpreted per-distinct-text-node measure cost measured above, which needs a compiled-lane profile of the showcase page and cannot be verified without the long-running showcase run. Still OPEN; no change to budget or gate.

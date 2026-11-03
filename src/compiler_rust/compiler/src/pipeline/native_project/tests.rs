@@ -10043,3 +10043,27 @@ fn test_global_build_fingerprint_describe_change_names_component() {
     layout.layout = 9;
     assert!(layout.describe_change(Some(&base)).contains("interface layout changed"));
 }
+
+/// bootstrap_imported_free_method_rebind_2026_10_12: a class method `free` and
+/// an `extern fn free` collide on the bare name; the extern identity must win
+/// regardless of module order.
+#[test]
+fn build_import_map_prefers_extern_identity_over_same_named_method_in_either_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src");
+    std::fs::create_dir_all(&root).unwrap();
+    let builder = root.join("a_builder.spl");
+    let abi = root.join("b_abi.spl");
+    std::fs::write(
+        &builder,
+        "class Builder:\n    h: i64\n    fn free():\n        pass\n",
+    )
+    .unwrap();
+    std::fs::write(&abi, "extern fn free(p: i64)\n").unwrap();
+    let b = (builder.clone(), std::fs::read_to_string(&builder).unwrap());
+    let a = (abi.clone(), std::fs::read_to_string(&abi).unwrap());
+    for sources in [vec![b.clone(), a.clone()], vec![a, b]] {
+        let result = super::imports::build_import_map(&sources, std::slice::from_ref(&root), &root);
+        assert_eq!(result.map.get("free").map(String::as_str), Some("free"));
+    }
+}

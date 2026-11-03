@@ -61,3 +61,9 @@ seed-side JIT investigation, not a stdlib fix.
 Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
 
 **Revalidated 2026-11-02: still plausible because OPEN (2026-09-13); no merged fix commit with a passing regression is cited in this doc.**
+
+## Verified FIXED 2026-11-03 (no code change in this lane)
+
+Seed built from release/1.0.0 source: the repro above prints `[0, 1]` under
+both `SIMPLE_EXECUTION_MODE=interpret` and `jit` (default mode), exit 0, no
+fallback line. No segfault.

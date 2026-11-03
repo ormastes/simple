@@ -75,3 +75,5 @@ skipped. A silently-blank framebuffer should never be indistinguishable from a
 successful render.
 
 **Revalidated 2026-11-02: still plausible because the report title (Software web-render oracle silently blanks all text when its wall-clock budget ) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+**Fixed 2026-11-03 (grp03):** `SimpleWebLayoutPixelResult.render_degraded/degrade_reason` plus `simple_web_layout_software_pixels_presentable` and `..._present_decision` surface exhaustion in-band. The degrade reason now names the concrete site (style-cascade, style-*, layout-subtree, paint-*) instead of the generic `deadline-exceeded`. Specs `web_renderer_cpu_oracle_budget_exhaustion_spec` (7/7) and `web_renderer_budget_site_family_spec` (4/4) fixed to drive exhaustion with an injected stepping clock (`simple_web_layout_set_budget_clock`), because `WEB_RENDER_STAGE_MIN_SLICE_MS` (2 s) makes a 1 ms budget no longer starve a render on the host clock.

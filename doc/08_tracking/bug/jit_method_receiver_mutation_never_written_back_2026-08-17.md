@@ -316,3 +316,15 @@ Evidence on the deployed seed (bin/simple.exe, 2026-11-02), `SIMPLE_EXECUTION_MO
 `me bump()` x3 on a struct local -> `depth0=3` (correct); `fn bump()` -> `depth0=0`
 (the by-design immutable copy). Probes were using `fn`; changed to `me`.
 The interpreter `mut`-parameter half is a separate worker's scope.
+
+## 2026-11-03 — interpreter half fixed (fix-implemented, verification pending)
+
+`write_back_mutable_arguments` (`interpreter_call/core/function_exec.rs`, Ident
+arm) now takes the full write-back branch when the parameter is an explicit
+`mut` one, instead of treating it as a value-type struct. Plain (non-`mut`)
+struct params keep value semantics. Proof (test-only seed build, never
+deployed): `probe_receiver_mutation_writeback_class_jit.spl` prints
+`PASS mut_parameter = 1` under `SIMPLE_EXECUTION_MODE=interpreter`; before the
+fix a probe printed `mut_struct=0`, after `mut_struct=1`, `plain_struct=0`
+unchanged. Verification on a redeployed seed/stage3 pending. The JIT receiver
+half is not touched here.
