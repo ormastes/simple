@@ -13,6 +13,13 @@ bounds](../../../05_design/extreme_typing_traceability.md#e1-retained-signature-
 before extending the source. Authored projection/lifetime/storage specs are
 unrun pending an admitted runtime; no generated manual or proof is claimed.
 
+2026-11-03 source follow-up adds the HIR frozen export-route projector and
+explicit retained-registry driver wiring. It joins physical source/generation
+and declaration authority to callable IDs; `Joined` is identity linkage only.
+Ancestor/effective external visibility is still Unknown. Read the
+[route status](../../../05_design/extreme_typing_traceability.md#e1-frozen-export-route-join-candidate-2026-11-03)
+before consuming these records. Tests/performance remain unexecuted.
+
 Read the [selected policy](../../../02_requirements/feature/extreme_typing_traceability.md),
 [architecture](../../../04_architecture/extreme_typing_traceability.md),
 [implementation plan](../../../03_plan/agent_tasks/extreme_typing_traceability.md)

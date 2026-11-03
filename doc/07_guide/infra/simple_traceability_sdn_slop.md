@@ -93,3 +93,11 @@ nominal public operations and generated/other-engine surfaces remain unknown;
 archive/no-op paths do not collect these facts. This is neither a new CLI nor
 fatal enforcement, and execution is unverified. See the
 [implementation status and bounds](../../05_design/extreme_typing_traceability.md#e1-retained-signature-observation-candidate-2026-11-02).
+
+The 2026-11-03 follow-up joins frozen export-origin/authority rows to those
+callable observations, carrying physical source identity and the current
+registry generation. Missing, stale and ambiguous joins remain Unknown.
+An identity match does not establish external visibility: ancestor module and
+directory policy is still uncollected. This remains an unexecuted compiler
+observation slice, with no new CLI or enforcement. See the
+[route-join contract](../../05_design/extreme_typing_traceability.md#e1-frozen-export-route-join-candidate-2026-11-03).

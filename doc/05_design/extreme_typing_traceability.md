@@ -186,3 +186,36 @@ guarantees, nominal public operations, non-callable/generated surfaces and all
 engine admission remain explicit unknowns. No fatal rule or Safe verdict is
 introduced. E1 and E2 remain unfinished. New execution/negative specs are
 authored but unrun because a source-matched admitted runtime is unavailable.
+
+## E1 frozen export-route join candidate (2026-11-03)
+
+`20.hir/hir_lowering/api_export_route_projection_v1.spl` now joins frozen
+export-origin/declaration-authority rows to the preceding callable observations.
+`run_typecheck_warn_pass` receives the actual retained registry explicitly from
+HIR lowering, binds each freshly collected signature to its physical source,
+and retains one flat route projection in CompileContext. Compile/pass entry
+clears it; the existing retain-products path preserves it. No registry means
+NotCollected. Archive leases and cache admission remain unchanged.
+
+Each witness records exporter and terminal physical index/canonical path,
+registry generation, alias/source names, declaration visibility and the joined
+module-local SymbolId. Generation/index are process-local, not durable identity.
+An exact join requires both authority rows and export origin to agree on the
+same physical declaration and exactly one captured callable to match. Missing,
+stale, malformed, duplicate or conflicting observations remain Unknown.
+`Joined` means callable identity linkage only: even a public declaration retains
+`ancestor-visibility-not-collected`, because directory/module ancestry is not
+supplied by this surface contract. Nominal/private representation is unchanged.
+
+Bounds: 4096 physical surfaces, 16384 aliases, 16384 authority rows, 4096 routes,
+256 captured modules and 128 callables per module. The binder canonicalizes one
+source path and scans the bounded physical array once per captured module; the
+projector builds alias, authority and callable indexes once. It never rescans
+the registry per callable or route. Metadata lengths and existing signature
+node limits bound retention; over-budget projection returns explicit truncation.
+No filesystem tree scan, initializer, or publication gate is introduced.
+
+Authored route specs exercise real parser/surface/inference owners and negative
+identity cases. Execution and measured performance remain pending the admitted
+runtime. This slice does not complete effective export closure, E1, enforcement,
+generated-surface coverage or cross-engine parity.

@@ -11,6 +11,8 @@ use compiler.semantics.representation_boundary.hir_binding.{representation_bind_
 use std.common.crypto.sha256.{sha256_text}
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.api_export_route_projection_v1.{bind_api_signature_surface_v1, project_api_export_routes_v1}
 use compiler.hir.hir.*
 use compiler.driver.driver_log_helpers.{log_debug, log_phase}
 use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet, resolve_methods_module_owner}
@@ -111,7 +113,8 @@ pub fn publish_module_typecheck_receipt_v1(ctx: CompileContext, receipt: HirType
 
 pub fn run_typecheck_warn_pass(
     ctx: CompileContext,
-    hir_modules: Dict<text, HirModule>
+    hir_modules: Dict<text, HirModule>,
+    surfaces: ModuleSurfacesByName? = nil
 ) -> [text]:
     """Type-inference + visibility diagnostics, profile-gated for enforcement.
 
@@ -142,13 +145,19 @@ pub fn run_typecheck_warn_pass(
     ctx.api_signature_facts = {}
     ctx.api_signature_node_count = 0
     ctx.api_signature_retention_exhausted = false
+    ctx.api_export_route_facts = nil
     var out: [text] = []
     for name in hir_modules.keys():
         val collect_signatures = not ctx.api_signature_retention_exhausted
-        val receipt = collect_module_typecheck_receipt_v1(name, hir_modules[name], severity, collect_signatures)
+        var receipt = collect_module_typecheck_receipt_v1(name, hir_modules[name], severity, collect_signatures)
+        if val registry = surfaces:
+            if val facts = receipt.api_signatures:
+                receipt.api_signatures = Some(bind_api_signature_surface_v1(facts, registry))
         for message in receipt.messages:
             out = out.push(message)
         publish_module_typecheck_receipt_v1(ctx, receipt)
+    if val registry = surfaces:
+        ctx.api_export_route_facts = Some(project_api_export_routes_v1(registry, ctx.api_signature_facts))
     out
 
 pub fn run_safety_warn_pass(ctx: CompileContext,
