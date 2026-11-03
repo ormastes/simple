@@ -1,0 +1,72 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# W-MATCH-NONE-SCALAR: `case None` on a non-Option scalar subject
+
+A `None` arm against an i64 / bool / text subject can never be an Option variant
+test. It used to be accepted silently. Mode `warn` (default) records a recovered
+HIR diagnostic; mode `error` (SIMPLE_CASE_NONE_SCALAR=error) makes it fatal.
+Option subjects produce no diagnostic in either mode.
+
+Staged like E-MATCH-NONEXHAUSTIVE-VALUE; flip tracked by bug row
+case_none_on_scalar_subject_silent_2026-11-03.
+"""
+
+# @tag: system, compiler, hir, match
+
+use std.spec
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.exhaustiveness.value_match_coverage.{cn_mode_resolve}
+
+val CODE: text = "W-MATCH-NONE-SCALAR"
+
+fn src_for(param_ty: text, arms: text) -> text:
+    "fn f(s: " + param_ty + ") -> i64:\n    val x = match s:\n" + arms + "    x\n"
+
+fn count_diag(src: text, mode: text) -> i64:
+    val saved_mode = env_get("SIMPLE_CASE_NONE_SCALAR")
+    val saved_profile = env_get("SIMPLE_SAFETY_PROFILE")
+    val _a = env_set("SIMPLE_CASE_NONE_SCALAR", mode)
+    val _b = env_set("SIMPLE_SAFETY_PROFILE", "")
+    val parsed = parse_full_frontend(src, "testdata/case_none_scalar.spl", "case_none_scalar", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/case_none_scalar.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var n = 0
+    for m in hir_lowering.diagnostic_messages:
+        if m.contains(CODE):
+            n = n + 1
+    val _c = env_set("SIMPLE_CASE_NONE_SCALAR", saved_mode)
+    val _d = env_set("SIMPLE_SAFETY_PROFILE", saved_profile)
+    n
+
+val NONE_ARMS: text = "        case 1:\n            10\n        case None:\n            0\n"
+val OPT_ARMS: text = "        case Some(v):\n            v\n        case None:\n            0\n"
+val BOOL_ARMS: text = "        case true:\n            1\n        case None:\n            0\n"
+val TEXT_ARMS: text = "        case \"a\":\n            1\n        case None:\n            0\n"
+val NO_NONE: text = "        case 1:\n            10\n        case _:\n            0\n"
+
+describe "case None on a scalar subject":
+    it "warns for an i64 subject":
+        expect(count_diag(src_for("i64", NONE_ARMS), "warn")).to_equal(1)
+    it "warns for a bool subject":
+        expect(count_diag(src_for("bool", BOOL_ARMS), "warn")).to_equal(1)
+    it "warns for a text subject":
+        expect(count_diag(src_for("text", TEXT_ARMS), "warn")).to_equal(1)
+    it "warns by default when the mode is unset":
+        expect(count_diag(src_for("i64", NONE_ARMS), "")).to_equal(1)
+    it "emits no diagnostic for an Option subject":
+        expect(count_diag(src_for("i64?", OPT_ARMS), "warn")).to_equal(0)
+        expect(count_diag(src_for("i64?", OPT_ARMS), "error")).to_equal(0)
+    it "emits no diagnostic when no arm is None":
+        expect(count_diag(src_for("i64", NO_NONE), "warn")).to_equal(0)
+
+describe "case None staging mode":
+    it "defaults to warn and honours error":
+        expect(cn_mode_resolve("", "")).to_equal("warn")
+        expect(cn_mode_resolve("bogus", "")).to_equal("warn")
+        expect(cn_mode_resolve("error", "")).to_equal("error")
+    it "is forced to error by a critical profile":
+        expect(cn_mode_resolve("warn", "critical")).to_equal("error")
