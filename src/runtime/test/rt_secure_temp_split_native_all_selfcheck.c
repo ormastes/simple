@@ -132,6 +132,7 @@ int main(void) {
     require(rt_secure_temp_dir_set_prefix(boxed("")) == 0, "empty prefix refused");
     require(rt_secure_temp_dir_set_prefix(boxed("bad/name")) == 0, "slash prefix refused");
     require(rt_secure_temp_dir_set_prefix(boxed("bad\\name")) == 0, "backslash prefix refused");
+    require(rt_secure_temp_dir_set_parent(rt_value_nil()) == 0, "nil parent refused");
     const uint8_t nul_path[] = {'x', 0, 'y'};
     require(rt_secure_temp_dir_set_parent(rt_string_new(nul_path, 3)) == 0, "embedded NUL parent refused");
     require(rt_secure_temp_dir_set_prefix(rt_string_new(nul_path, 3)) == 0, "embedded NUL prefix refused");
