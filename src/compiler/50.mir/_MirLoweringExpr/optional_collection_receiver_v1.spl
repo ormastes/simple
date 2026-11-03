@@ -1,0 +1,44 @@
+# Optional collection projections retain their declared payload owner.
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirExpr}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+
+impl MirLowering:
+    me optional_collection_receiver_payload_v1(receiver: HirExpr, raw: LocalId) -> LocalId?:
+        val declared = self.option_inner_hir_type_for_local(receiver, raw)
+        if val payload = declared:
+            match payload.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Dict(_, _): ()
+                case _: return nil
+            # Flat HIR does not prove dominating source guards. Establish
+            # presence here before extracting, including on unguarded reads.
+            # The absence block cannot fall through to collection operations.
+            var b = self.builder
+            val present_fn = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_is_some"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
+            ))
+            val present = b.emit_call_value(present_fn, [mir_operand_copy(raw)], MirType.bool())
+            val some_block = b.new_block(Some("optional_collection_some"))
+            val none_block = b.new_block(Some("optional_collection_none"))
+            b.terminate_if(mir_operand_copy(present), some_block, none_block)
+            b.switch_to_block(none_block)
+            val message_text = "collection projection on a nil optional collection"
+            val message = b.emit_const_str(message_text)
+            val length = b.emit_const_int(message_text.len())
+            val pointer_type = MirType.ptr(MirType(kind: MirTypeKind.I8), false)
+            val panic_fn = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_panic"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [pointer_type, MirType.i64()], return_type: MirType.unit(), is_variadic: false, params_known: true)))
+            ))
+            b.emit_call(panic_fn, [mir_operand_copy(message), mir_operand_copy(length)], MirType.unit())
+            b.terminate_unreachable()
+            b.switch_to_block(some_block)
+            self.builder = b
+            val extracted = self.option_payload_or_self(raw)
+            self.remember_local_hir_type(extracted.id, payload, 0, 0)
+            self.mark_instance_field_local(extracted, payload)
+            return Some(extracted)
+        nil

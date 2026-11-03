@@ -50,3 +50,22 @@ The direct matcher grammar defect remains OPEN.
 The completed slice merged through PR3023
 (`f3eb9e8a4c8a35f1de265062c3e804dd08a666f0`). The broader PR3015
 preserves the remaining workarounds and ten open product-contract failures.
+
+## 2026-11-03 remaining nil matcher source repair candidate
+
+Merged PR2803 already routes method-chain negation through the real ExpectHelper
+matcher. Both pure interpreter field-access owners still treated bare
+`expect(value).to_be_nil` / `to_not_be_nil` as ordinary fields, and the direct
+negative nil method spelling did not share the normalized dispatch.
+
+The candidate routes these argument-free forms through the same real matcher
+owner, evaluates expect once, and composes the link and matcher negations by
+parity. Ordinary object fields retain normal field lookup. The original unchanged
+four-example grammar regression remains intact. New core interpreter tests
+exercise positive/negative nil, double negation, parenthesized forms, evaluation
+count, ordinary same-name fields, and unknown-field rejection.
+
+Status: TEST_BLOCKED, not native admission. This host has no qualified self-hosted
+full CLI. Run the original direct grammar regression and the new exact/adjacent
+core regression on an admitted producer before closing this record or removing
+consumer workaround tags. Required compiler/lib/MCP checks also remain unrun.

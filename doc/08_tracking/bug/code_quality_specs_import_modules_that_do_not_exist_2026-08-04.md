@@ -123,3 +123,28 @@ STILL-OPEN. `ls src/lib/common/iterable.spl src/lib/common/set_utils.spl` ->
 both "No such file or directory". `test/system/code_quality/deprecated_removed_spec.spl`
 is still present and still imports them. The specs remain unloadable.
 
+
+## 2026-11-03 — production imports repaired; behavioral verification pending
+
+The release source still contained the reported nonexistent set-utils and
+iterable imports. The canaries now explicitly import the existing production
+`HashSet` and `HashMap` types. Set assertions exercise their actual supported
+membership, intersection, difference, and symmetric-difference methods; no
+membership oracle was removed. The narrative no longer calls supported
+`HashSet.contains` a removed method.
+
+Added `std.common.iterable` with generic ordered array callback traversal and
+zero-based `(value, index)` traversal. These are implemented loops, consumed
+by the existing canaries, rather than an unused module or a test-local fake.
+Text callbacks continue through `std.text.each` under an explicit alias.
+Array tests retain callback order, empty input, sums, and direct iteration,
+and additionally assert exact value/index pairs, empty indexed callbacks,
+and duplicate values at distinct indices. Empty arrays use the real `[i64]`
+type rather than an unimported `List<Int>` spelling.
+
+STATUS: TEST_BLOCKED. No qualified self-hosted runtime is available on this
+host; the tracked Rust seed was not used for test/check/run. Required resume:
+run all three code-quality specs, compiler/lib/MCP/LSP checks, MCP integration,
+and runtime/native MCP smoke with a qualified producer. Static diff checks
+cannot substitute for those behavioral gates. This record remains open until
+verified and merged.

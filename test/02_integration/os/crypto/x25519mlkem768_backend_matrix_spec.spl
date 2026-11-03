@@ -38,8 +38,6 @@ use os.crypto.ml_kem.{ml_kem_keygen_checked, ml_kem_encaps_checked,
     ml_kem_decaps_checked_provider}
 use os.crypto.ml_kem_kpke.{MlKemNttBatchProvider}
 use std.simd.{mlkem_ntt_simd_backend}
-use std.gc_async_mut.cuda.{cuda_available}
-use std.gc_async_mut.io.metal_sffi.{metal_sffi_is_available}
 use os.crypto.x25519_mlkem768.cuda_ntt_provider.{
     X25519MlKem768CudaNttExecutor, x25519_mlkem768_cuda_ntt_execute,
     x25519_mlkem768_cuda_intt_execute}
@@ -54,6 +52,18 @@ use test.fixtures.crypto.x25519mlkem768.canonical_fixture.{
     X25519_MLKEM768_NTT_FIXTURE_ID, X25519_MLKEM768_NTT_BATCH,
     x25519_mlkem768_fixture_list32, x25519_mlkem768_fixture_bytes32,
     x25519_mlkem768_ntt_fixture}
+
+fn _physical_gpu_blocker(backend: text, reason: text) -> bool:
+    # Fail closed on artifact, pipeline, submission, readback and oracle bugs.
+    # Only an actual operation's physical admission failure may skip GPU proof.
+    (backend == "cuda" and reason == "cuda-ntt-init-failed") or
+        (backend == "metal" and (reason == "metal-unavailable" or
+            reason == "metal-device-ordinal-unavailable"))
+
+fn _assert_physical_gpu_blocker(backend: text, reason: text):
+    if not _physical_gpu_blocker(backend, reason):
+        fail("Unexpected {backend} operation failure: {reason}")
+    print "[crypto-gpu] {backend}: GPU BRANCH SKIPPED reason={reason}; proves NOTHING about GPU execution"
 
 fn _list_seed(offset: i64) -> list:
     x25519_mlkem768_fixture_list32(offset)
@@ -494,6 +504,18 @@ describe "X25519MLKEM768 specialized backend promotion boundary":
             case Ok(_): fail("CUDA executed without a promoted implementation")
             case Err(reason): expect(reason).to_contain("no promoted native implementation")
 
+    it "rejects nonphysical errors as unavailable GPU outcomes":
+        step("Reject the adjacent regression")
+        expect(_physical_gpu_blocker("cuda", "cuda-ntt-init-failed")).to_be(true)
+        expect(_physical_gpu_blocker("metal", "metal-unavailable")).to_be(true)
+        expect(_physical_gpu_blocker("cuda", "cuda-ntt-artifact-invalid")).to_be(false)
+        expect(_physical_gpu_blocker("cuda", "cuda-ntt-module-load-failed")).to_be(false)
+        expect(_physical_gpu_blocker("cuda", "cuda-ntt-device-readback-failed")).to_be(false)
+        expect(_physical_gpu_blocker("metal", "metal-pipeline-create-failed")).to_be(false)
+        expect(_physical_gpu_blocker("metal", "metal-submit-or-completion-failed")).to_be(false)
+        expect(_physical_gpu_blocker("metal", "metal-device-readback-failed")).to_be(false)
+        expect(_physical_gpu_blocker("cuda", "unknown-error")).to_be(false)
+
     it "should submit and read identical CUDA fixtures (REQ-010 REQ-012 REQ-015 NFR-017)":
         step("Execute forward and inverse CUDA fixtures with device readback")
         var executor = X25519MlKem768CudaNttExecutor.create(
@@ -504,7 +526,10 @@ describe "X25519MLKEM768 specialized backend promotion boundary":
         val inverse = x25519_mlkem768_cuda_intt_execute(
             executor, inverse_input)
         executor.shutdown()
-        if cuda_available():
+        step("Reproduce the exact failure")
+        # Each dispatch owns its outcome. Neither a later capability probe nor
+        # the other dispatch may suppress this dispatch's provenance checks.
+        if forward.completed:
             expect(forward.completed).to_be(true)
             expect(forward.compiled).to_be(true)
             expect(forward.submitted).to_be(true)
@@ -514,6 +539,13 @@ describe "X25519MLKEM768 specialized backend promotion boundary":
             expect(forward.device_identity).to_be_greater_than(0)
             expect(_lists_equal(forward.values,
                 _gpu_ntt_scalar_expected(3))).to_be(true)
+            print "[crypto-gpu] CUDA forward GPU branch executed; device proof requires the assertions above to pass"
+        else:
+            expect(forward.values.len()).to_equal(0)
+            expect(forward.device_readback).to_be(false)
+            expect(forward.device_identity).to_equal(0)
+            _assert_physical_gpu_blocker("cuda", forward.reason)
+        if inverse.completed:
             expect(inverse.completed).to_be(true)
             expect(inverse.compiled).to_be(true)
             expect(inverse.submitted).to_be(true)
@@ -523,11 +555,12 @@ describe "X25519MLKEM768 specialized backend promotion boundary":
             expect(inverse.device_identity).to_be_greater_than(0)
             expect(_lists_equal(inverse.values,
                 _gpu_intt_scalar_expected(inverse_input))).to_be(true)
+            print "[crypto-gpu] CUDA inverse GPU branch executed; device proof requires the assertions above to pass"
         else:
-            expect(forward.completed).to_equal(false)
-            expect(forward.reason).to_contain("cuda")
-            expect(inverse.completed).to_equal(false)
-            expect(inverse.reason).to_contain("cuda")
+            expect(inverse.values.len()).to_equal(0)
+            expect(inverse.device_readback).to_be(false)
+            expect(inverse.device_identity).to_equal(0)
+            _assert_physical_gpu_blocker("cuda", inverse.reason)
 
     it "should reject invalid CUDA lifecycle use (REQ-010 NFR-005 NFR-007 NFR-013)":
         step("Exercise invalid CUDA input closed state and artifact admission")
@@ -642,7 +675,11 @@ describe "X25519MLKEM768 specialized backend promotion boundary":
         val config = _candidate_config(X25519MlKem768Backend.Cuda)
         var executor = X25519MlKem768CudaNttExecutor.create(
             "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.ptx")
-        if cuda_available():
+        step("Exercise the repaired owner")
+        val created = x25519_mlkem768_keygen_cuda_candidate(
+                    config, executor, _byte_seed(1),
+                    _list_seed(33), _list_seed(65))
+        if created.is_ok():
             val scalar = x25519_mlkem768_default_config()
             val scalar_client = match x25519_mlkem768_keygen(
                     scalar, _byte_seed(1), _list_seed(33), _list_seed(65)):
@@ -659,9 +696,7 @@ describe "X25519MLKEM768 specialized backend promotion boundary":
                     scalar_client.decapsulation_key):
                 case Ok(value): value
                 case Err(reason): fail(reason)
-            val cuda_client = match x25519_mlkem768_keygen_cuda_candidate(
-                    config, executor, _byte_seed(1),
-                    _list_seed(33), _list_seed(65)):
+            val cuda_client = match created:
                 case Ok(value): value
                 case Err(reason): fail(reason)
             val cuda_server = match x25519_mlkem768_encapsulate_cuda_candidate(
@@ -697,13 +732,13 @@ describe "X25519MLKEM768 specialized backend promotion boundary":
             expect(executor.kernel_invocations).to_equal(7)
             expect(executor.capacity_bytes).to_equal(6144)
             expect(executor.session.generation).to_equal(1)
+            print "[crypto-gpu] cuda full exchange GPU branch executed; device proof requires the assertions above to pass"
             executor.shutdown()
         else:
-            match x25519_mlkem768_keygen_cuda_candidate(
-                    config, executor, _byte_seed(1),
-                    _list_seed(33), _list_seed(65)):
-                case Ok(_): fail("CUDA candidate ran on an unavailable host")
-                case Err(reason): expect(reason).to_contain("cuda")
+            step("Reject the adjacent regression")
+            match created:
+                case Ok(_): fail("inconsistent cuda candidate result")
+                case Err(reason): _assert_physical_gpu_blocker("cuda", reason)
             executor.shutdown()
 
     it "should keep full Metal output identical or report a physical blocker (REQ-010 REQ-012 REQ-015 NFR-017)":
@@ -711,7 +746,11 @@ describe "X25519MLKEM768 specialized backend promotion boundary":
         val config = _candidate_config(X25519MlKem768Backend.Metal)
         var executor = X25519MlKem768MetalNttExecutor.create(
             "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt.metal")
-        if metal_sffi_is_available():
+        step("Exercise the repaired owner")
+        val created = x25519_mlkem768_keygen_metal_candidate(
+                    config, executor, _byte_seed(1),
+                    _list_seed(33), _list_seed(65))
+        if created.is_ok():
             val scalar = x25519_mlkem768_default_config()
             val scalar_client = match x25519_mlkem768_keygen(
                     scalar, _byte_seed(1), _list_seed(33), _list_seed(65)):
@@ -728,9 +767,7 @@ describe "X25519MLKEM768 specialized backend promotion boundary":
                     scalar_client.decapsulation_key):
                 case Ok(value): value
                 case Err(reason): fail(reason)
-            val metal_client = match x25519_mlkem768_keygen_metal_candidate(
-                    config, executor, _byte_seed(1),
-                    _list_seed(33), _list_seed(65)):
+            val metal_client = match created:
                 case Ok(value): value
                 case Err(reason): fail(reason)
             val metal_server = match x25519_mlkem768_encapsulate_metal_candidate(
@@ -764,11 +801,11 @@ describe "X25519MLKEM768 specialized backend promotion boundary":
             expect(executor.kernel_invocations).to_equal(7)
             expect(executor.session.capacity_bytes).to_equal(6144)
             expect(executor.session.generation).to_equal(1)
+            print "[crypto-gpu] metal full exchange GPU branch executed; device proof requires the assertions above to pass"
             executor.shutdown()
         else:
-            match x25519_mlkem768_keygen_metal_candidate(
-                    config, executor, _byte_seed(1),
-                    _list_seed(33), _list_seed(65)):
-                case Ok(_): fail("Metal candidate ran on an unavailable host")
-                case Err(reason): expect(reason).to_contain("metal")
+            step("Reject the adjacent regression")
+            match created:
+                case Ok(_): fail("inconsistent metal candidate result")
+                case Err(reason): _assert_physical_gpu_blocker("metal", reason)
             executor.shutdown()

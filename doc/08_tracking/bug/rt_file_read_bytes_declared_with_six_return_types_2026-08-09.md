@@ -250,3 +250,41 @@ explicitly warns that converging only the in-scope sites would be
 change with the whole caller set in view, which exceeds this lane's
 per-item budget. Guard spec left RED as designed. Leaving OPEN.
 
+
+
+## Candidate repair 2026-11-03 — nullable packed-byte boundary
+
+The previous assertion that `[u8]?` invented an absence channel was incorrect.
+At release base `89d4e41ec88d781ec7191f2f3fe5b7334560ee21`,
+`runtime_native.c:17392` allocates with `rt_byte_array_new_len` and returns
+zero on open/seek/read/allocation failure. `simple_core/core_fs.spl:485`
+returns tagged nil on failure and a byte-array handle on success. Therefore
+`[u8]?` is the canonical Simple declaration; text decoding is not involved.
+A successful empty file has an empty array, distinct from nil.
+
+The remaining SFM container, persistent-cache regression helper, four image
+builder scripts and hosted FS example now use the existing io_runtime facade.
+The SFM wrapper directly decodes `[u8]` without an unnecessary i64 copy and
+preserves `sfm: empty or unreadable file PATH` for both empty/missing inputs.
+The cache helper explicitly requests the existing byte-to-i64 facade because
+its adjacent corruption/write helpers operate on i64 arrays.
+
+The strict signature guard still requires exactly one return type. Its oracle
+now states the actual nullable contract, and vendor exclusion occurs during
+traversal rather than after grep has discarded filenames. Historical backup
+files ending `.spl.pre-comments` / `.spl.pre-styles` are not executable source.
+
+Static evidence: an anchored owned-source census of all tracked `.spl` files
+under src/test/scripts/examples, overlaid with this candidate, found 79 raw
+declarations and exactly one return type `[u8]?`. The initial overbroad census
+also included those historical backup files; the corrected census uses the
+same executable `.spl` extension restriction as the guard. `git diff --check`
+passed. No vendor declarations or runtime providers were rewritten.
+
+Behavioral verification: TEST_BLOCKED; no admitted self-hosted full CLI is
+available on this Windows host. No Rust seed was used as normal test evidence.
+The SFM spec adds two executable regressions: file roundtrip of 0/127/128/255,
+and empty-success versus missing-error facade results with unchanged SFM error
+text. Required before admission: execute that spec, the signature guard and
+persistent-cache invalidation spec, plus core/lib/MCP runtime checks. This is
+an unverified candidate, not a closed bug or verification PASS.

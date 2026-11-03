@@ -1,0 +1,73 @@
+# Exact gzip compiler forms, without the library's explicit match workaround.
+extern fn rt_exit(code: i32)
+
+var checks: i64 = 0
+var producer_calls: i64 = 0
+
+fn check_i64(actual: i64, expected: i64, label: text):
+    if actual != expected:
+        print "FAIL optional collection provenance: {label} actual={actual} expected={expected}"
+        rt_exit(1)
+    checks = checks + 1
+
+fn byte_payload(present: bool) -> [u8]?:
+    producer_calls = producer_calls + 1
+    if not present:
+        return nil
+    [31u8, 139u8, 255u8]
+
+fn guarded_bytes(present: bool) -> i64:
+    val bytes = byte_payload(present)
+    if bytes == nil:
+        return -1
+    bytes[0].to_i64() + bytes[1].to_i64() + bytes[2].to_i64()
+
+fn guarded_length(value: [u8]?) -> i64:
+    if value == nil:
+        return -1
+    value.len()
+
+fn header_payload(present: bool) -> [i64]?:
+    if not present:
+        return nil
+    [0, 305419896, 2, 3, 10]
+
+fn guarded_header(present: bool) -> i64:
+    val header = header_payload(present)
+    if header == nil:
+        return -1
+    header[1] + header[4]
+
+fn guarded_dictionary(value: Dict<text, i64>?) -> i64:
+    if value == nil:
+        return -1
+    value["count"] + value.len()
+
+# Original untyped reader shape: indexing bytes must not become text parsing.
+fn untyped_reader(data, base: i64) -> i64:
+    if data == nil:
+        return -1
+    data[base].to_i64()
+
+print "BEGIN optional collection provenance"
+check_i64(guarded_bytes(true), 425, "original optional byte payload")
+check_i64(guarded_bytes(false), -1, "absent byte payload")
+check_i64(producer_calls, 2, "producer evaluated once per call")
+check_i64(guarded_length([31u8, 139u8]), 2, "optional byte array length")
+val empty: [u8] = []
+check_i64(guarded_length(empty), 0, "empty array is present")
+check_i64(guarded_length(nil), -1, "absent array length")
+check_i64(guarded_header(true), 305419906, "original header payload indexing")
+check_i64(guarded_header(false), -1, "absent header")
+val counts: Dict<text, i64> = {"count": 7}
+check_i64(guarded_dictionary(counts), 8, "dictionary retains owner")
+check_i64(guarded_dictionary(nil), -1, "absent dictionary")
+check_i64(untyped_reader([31u8, 139u8, 255u8], 1), 139, "untyped byte reader")
+check_i64(untyped_reader([31u8, 139u8, 255u8], 2), 255, "untyped high byte")
+check_i64(untyped_reader(nil, 0), -1, "untyped nil reader")
+check_i64(untyped_reader(["139"], 0), 139, "erased text still parses")
+check_i64(139.to_i64(), 139, "raw integer conversion")
+if checks != 15:
+    rt_exit(2)
+print "END optional collection provenance checks={checks}"
+rt_exit(0)

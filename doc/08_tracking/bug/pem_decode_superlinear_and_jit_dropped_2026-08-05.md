@@ -244,3 +244,17 @@ Score wall clock from outside the process. `SIMPLE_TIMEOUT_SECONDS=0` is require
 or a ~60 s CPU guard kills the 16,000-char run at exit 143 and it reads as a
 failure.
 
+
+## 2026-11-03 source candidate — TEST_BLOCKED
+
+Replaced both indexed UTF-8 character scans and alphabet searches with one
+byte traversal, ASCII range mapping, and four scalar quartet fields. The
+output remains permissive: noise is ignored, incomplete quartets are dropped,
+and complete quartets after padding are decoded. Added exact RFC 4648 byte
+assertions plus Unicode noise, padding, trailing fragments, and +/ coverage.
+
+This is an unexecuted source candidate, not a verified fix. The Windows host
+has no bin/release pure-Simple runtime; bin/simple.exe is excluded as a Rust
+bootstrap seed. Correctness, optimizer, adjacent x509/TLS specs, and paired
+p50/p95 time plus peak/steady RSS are UNRUN. No performance improvement or
+closure is claimed. Historical JIT attribution remains separate.

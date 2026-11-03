@@ -14,7 +14,7 @@ use compiler.common.cuda_backend_policy.{install_cuda_backend_mode_v1}
 use compiler.driver.driver_backend_plugin_selection.{
     driver_backend_plugin_request_v1, driver_aot_uses_versioned_backend,
     driver_aot_backend_plugin_request_v1, driver_backend_plugin_error_text,
-    driver_cuda_plugin_request_error_v1
+    driver_backend_plugin_target, driver_cuda_plugin_request_error_v1
 }
 
 fn projected_request(
@@ -136,3 +136,51 @@ describe "versioned backend plugin driver selection":
             driver_aot_backend_plugin_request_v1(
                 "missing", "", "", 0)
         ))).to_start_with("BACKEND_PLUGIN_NOT_FOUND:")
+
+describe "p2_p3_bug_reproduction":
+    it "admits the exact armv7 Windows AOT request as the existing LLVM ARM target":
+        step("Reproduce the exact failure")
+        val request = driver_aot_backend_plugin_request_v1(
+            "llvm", "armv7-w64-mingw32", "generic", 0)
+        expect(request.target).to_equal("arm")
+        expect(request.backend_name).to_equal("llvm")
+        expect(request.cpu).to_equal("generic")
+        expect(request.optimization).to_equal("o0")
+        step("Exercise the repaired owner")
+        match load_backend(request):
+            case Ok(session):
+                var admitted = session
+                expect(admitted.request.target).to_equal("arm")
+                expect(admitted.receipt.target).to_equal("arm")
+                expect(admitted.provider_name()).to_equal("llvm")
+                expect(admitted.is_open()).to_equal(true)
+                expect(admitted.close()).to_equal(true)
+            case Err(error):
+                fail("armv7 Windows admission failed: " + error.code() + ": " + error.diagnostic())
+
+describe "p2_p3_adjacent_regression":
+    it "normalizes the armv7 architecture across existing target environments":
+        step("Exercise the repaired owner")
+        expect(driver_backend_plugin_target("armv7")).to_equal("arm")
+        expect(driver_backend_plugin_target("armv7-unknown-linux-gnueabihf")).to_equal("arm")
+        expect(driver_backend_plugin_target("armv7-unknown-none-eabi")).to_equal("arm")
+        expect(driver_backend_plugin_target("armv7-pc-windows-msvc")).to_equal("arm")
+        expect(driver_backend_plugin_target("thumbv7em-none-eabihf")).to_equal("arm")
+        expect(driver_backend_plugin_target("arm")).to_equal("arm")
+        expect(driver_backend_plugin_target("i686-w64-mingw32")).to_equal("x86")
+        expect(driver_backend_plugin_target("aarch64-w64-mingw32")).to_equal("aarch64")
+
+    it "keeps unknown architectures unsupported instead of substituting ARM":
+        step("Reject the adjacent regression")
+        val target = "armv9-w64-mingw32"
+        expect(driver_backend_plugin_target(target)).to_equal(target)
+        val request = driver_aot_backend_plugin_request_v1("llvm", target, "generic", 0)
+        expect(selection_error_code(load_backend(request))).to_equal("BACKEND_PLUGIN_TARGET")
+
+    it "does not give the Cranelift provider unsupported ARM capability":
+        step("Reject the adjacent regression")
+        val request = driver_aot_backend_plugin_request_v1(
+            "cranelift", "armv7-w64-mingw32", "generic", 0)
+        expect(request.target).to_equal("arm")
+        expect(request.backend_name).to_equal("cranelift")
+        expect(selection_error_code(load_backend(request))).to_equal("BACKEND_PLUGIN_TARGET")

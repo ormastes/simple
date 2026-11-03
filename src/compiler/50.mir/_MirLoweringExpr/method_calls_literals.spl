@@ -6,6 +6,7 @@ use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
 use compiler.mir._MirLoweringExpr.text_static_builtins.*
 use compiler.mir._MirLoweringExpr.result_predicates.*
 use compiler.mir._MirLoweringExpr.result_tuple_payload.*
+use compiler.mir._MirLoweringExpr.optional_collection_receiver_v1.*
 use compiler.mir._MirLowering.native_trait_registration.*
 use compiler.mir._MirLowering.native_trait_dispatch.*
 use compiler.mir._MirLowering.native_trait_conversion.*
@@ -2672,6 +2673,20 @@ impl MirLowering:
                 # i64"). The numeric conversion arm below owns these receivers.
                 if erased_recv_ty_ok and (self.local_is_proven_numeric_scalar(prelowered_method_receiver) or self.builtin_numeric_expr_kind(receiver) != 0):
                     erased_recv_ty_ok = false
+                if erased_recv_ty_ok and method == "to_i64" and args.len() == 0 and self.is_runtime_value_local(prelowered_method_receiver.id):
+                    # An erased index read returns a tagged value, including
+                    # byte-packed array elements. Text parsing would erase a
+                    # byte; rt_to_int_dynamic would leave its tag bits intact.
+                    # The tagged conversion owner parses text and unboxes
+                    # numbers, while raw scalar conversion stays below.
+                    val convert = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_any_to_int"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var conversion_builder = self.builder
+                    val converted = conversion_builder.emit_call_value(convert, [mir_operand_copy(prelowered_method_receiver)], MirType.i64())
+                    self.builder = conversion_builder
+                    return converted
                 if erased_recv_ty_ok:
                     erased_receiver_text_builtin = true
         val text_builtin_resolution_erased_allowed = erased_receiver_text_builtin
@@ -3288,6 +3303,11 @@ impl MirLowering:
                             if not has_prelowered_method_receiver:
                                 prelowered_method_receiver = self.lower_expr(receiver)
                                 has_prelowered_method_receiver = true
+                            if val collection_receiver = self.optional_collection_receiver_payload_v1(receiver, prelowered_method_receiver):
+                                prelowered_method_receiver = collection_receiver
+                                receiver_local = collection_receiver
+                                receiver_lowered = true
+                                len_symbol = self.len_runtime_symbol_for_hir_type(self.find_local_hir_type(collection_receiver.id))
                             if val narrowed_len_receiver = self.narrow_optional_text_receiver(receiver, prelowered_method_receiver):
                                 prelowered_method_receiver = narrowed_len_receiver
                                 receiver_local = narrowed_len_receiver
