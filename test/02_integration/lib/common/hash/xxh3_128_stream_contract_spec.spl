@@ -1,0 +1,100 @@
+"""
+## Purpose and audience
+Independent XXH3-128 streaming and public-wrapper integration for library maintainers comparing pure-Simple behavior to xxHash v0.8.3.
+## Operator workflow
+Run this spec with an admitted native runner, --native-backend=llvm --assert-ran --no-cache.
+## Compatibility and limitations
+AUTHORED_UNRUN. No admitted runtime was available; branch coverage is UNMEASURED.
+XXH3 is non-cryptographic. This tests the production API, not the upstream C library.
+## Verification guidance and troubleshooting
+Independent oracle: xxHash e626a72bc2321cd320e953a0ccf1584cad60f363, xxhash.h.
+Input repeats 00 7f 80 ff; secret byte i is (13*i+5) mod 256.
+Retain actual test counts and branch denominators before claiming coverage.
+"""
+# codex-system-test
+# Lifecycle: doc/03_plan/sys_test/xxh3_128_spec_boundaries_20261103.md
+# @manual_section: XXH3-128 published contract
+# @evidence-display: links
+use std.spec.*
+use std.common.hash.xxh3.{xxh3_state_new, xxh3_128_seeded}
+
+# @inline
+fn binary_input(n: i64) -> [u8]:
+    val pattern: [u8] = [0u8, 127u8, 128u8, 255u8]
+    var data: [u8] = []
+    for i in 0..n:
+        data.push(pattern[i % 4])
+    data
+
+describe "XXH3-128 streaming independent reference contract":
+    it "should preserve digest observations while continuing across short and block boundaries":
+        # @req REQ-HASH-XXH3-004
+        # @capture(binary): digest128 values at 240, 241, 1024 and 1025 bytes
+        step("Load the published vector")
+        var state = xxh3_state_new(0xffffffffffffffffu64)
+        step("Hash through the production API")
+        state.update(binary_input(240))
+        val digest240 = state.digest128()
+        step("Compare the expected digest")
+        expect(digest240.low).to_equal(0x9d2734dd5361cd05u64) # oracle: pinned upstream seed vector
+        expect(digest240.high).to_equal(0x9134d65dc018ccbdu64) # oracle: pinned upstream seed vector
+        state.update([0u8])
+        val digest241 = state.digest128()
+        step("Compare the expected digest")
+        expect(digest241.low).to_equal(0x72d1e198c71b2effu64) # oracle: pinned upstream seed vector
+        expect(digest241.high).to_equal(0x1c8f496d19a44e93u64) # oracle: pinned upstream seed vector
+        for i in 241..1024:
+            val pattern: [u8] = [0u8, 127u8, 128u8, 255u8]
+            state.update([pattern[i % 4]])
+        val digest1024 = state.digest128()
+        step("Compare the expected digest")
+        expect(digest1024.low).to_equal(0xb8b58a870348a532u64) # oracle: pinned upstream seed vector
+        expect(digest1024.high).to_equal(0x981efc953e3582d9u64) # oracle: pinned upstream seed vector
+        state.update([0u8])
+        val digest1025 = state.digest128()
+        step("Compare the expected digest")
+        expect(digest1025.low).to_equal(0xa3e265f548404d56u64) # oracle: pinned upstream seed vector
+        expect(digest1025.high).to_equal(0xda8cfd49a62fe118u64) # oracle: pinned upstream seed vector
+
+    it "should match independent multi-block vectors for varied chunks and empty updates":
+        # @req REQ-HASH-XXH3-004
+        # @capture(binary): exact 2048-byte digest after varied update schedules
+        step("Load the published vector")
+        val pattern: [u8] = [0u8, 127u8, 128u8, 255u8]
+        for width in [1, 63, 64, 65, 255, 256, 257]:
+            var state = xxh3_state_new(0xffffffffffffffffu64)
+            var offset = 0
+            step("Hash through the production API")
+            while offset < 2048:
+                var chunk: [u8] = []
+                var count = 0
+                while count < width and offset < 2048:
+                    chunk.push(pattern[offset % 4])
+                    count = count + 1
+                    offset = offset + 1
+                state.update([])
+                state.update(chunk)
+            val digest = state.digest128()
+            step("Compare the expected digest")
+            expect(digest.low).to_equal(0x4706c51efdc9755cu64) # oracle: pinned upstream seed vector
+            expect(digest.high).to_equal(0x0d6dbde146c1b48fu64) # oracle: pinned upstream seed vector
+
+    it "should retain the high-bit seed after resetting a populated stream":
+        # @req REQ-HASH-XXH3-004
+        # @capture(binary): exact empty and reused digests following reset
+        step("Load the published vector")
+        var state = xxh3_state_new(0xffffffffffffffffu64)
+        step("Hash through the production API")
+        state.update(binary_input(1025))
+        state.reset()
+        val empty_digest = state.digest128()
+        state.update(binary_input(256))
+        val reused_digest = state.digest128()
+        val public_digest = xxh3_128_seeded(binary_input(256), 0xffffffffffffffffu64)
+        step("Compare the expected digest")
+        expect(empty_digest.low).to_equal(0x2d10110a247d19ddu64) # oracle: pinned upstream seed vector
+        expect(empty_digest.high).to_equal(0x5334ec22748b5fcdu64) # oracle: pinned upstream seed vector
+        expect(reused_digest.low).to_equal(0x9ecaeed6807ded54u64) # oracle: pinned upstream seed vector
+        expect(reused_digest.high).to_equal(0x0272d54900af0640u64) # oracle: pinned upstream seed vector
+        expect(public_digest.low).to_equal(0x9ecaeed6807ded54u64) # oracle: pinned upstream seed vector
+        expect(public_digest.high).to_equal(0x0272d54900af0640u64) # oracle: pinned upstream seed vector
