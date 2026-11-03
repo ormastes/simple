@@ -1,5 +1,6 @@
 use compiler.core.parser.{parser_lexical_scope_enter, parser_lexical_scope_leave, parser_lexical_bind_value, parser_lexical_unknown_shadow}
 use compiler.frontend.core.parser_use_path.{parse_use_decl}
+use compiler.frontend.core.parser_identifiers.{declaration_identifier_text}
 use compiler.core.ast_stmt.{stmt_use_import}
 # Parser — Statement Module
 #
@@ -501,12 +502,16 @@ fn _extern_signatures_equal(existing_decl: i64, param_types: [i64], ret_type: i6
 # the decl-parsing modules, which import parse_block from this file.
 fn parse_extern_fn_stmt_inline() -> i64:
     val representation_owner = representation_declaration_begin_v1("nested_extern")
+    val declaration_start = lex_token_start_get()
     val declaration_line = par_line_get()
     val declaration_col = par_col_get()
     parser_advance()  # consume 'extern'
     parser_expect(20)
-    val ef_name = par_text_get()
-    parser_expect(6)
+    val ef_name = declaration_identifier_text(par_kind_get(), par_text_get())
+    if ef_name == "":
+        parser_expect(TOK_IDENT)
+    else:
+        parser_advance()
     parser_expect(140)
     var ef_pnames: [text] = []
     var ef_ptypes: [i64] = []
@@ -529,9 +534,10 @@ fn parse_extern_fn_stmt_inline() -> i64:
         parser_advance()
         ef_ret = parser_parse_type()
     val ef_tparams: [text] = []
+    val declaration_span = flat_span_new(declaration_start, lex_token_start_get(), declaration_line, declaration_col)
     val existing_decl = _module_find_function_decl(ef_name)
     if existing_decl < 0:
-        module_add_decl(decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0))
+        module_add_decl(decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, declaration_span))
     else if decl_get_tag(existing_decl) == 2 and not _extern_signatures_equal(existing_decl, ef_ptypes, ef_ret):
         parser_error_at(declaration_line, declaration_col, "conflicting extern declaration: " + ef_name)
     representation_declaration_end_v1(representation_owner, -1, ef_name)
