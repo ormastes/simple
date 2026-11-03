@@ -1,4 +1,5 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_observer_compile_gate_v1.{driver_observer_compile_gate_v1}
 use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_aot_output.*
 # compile_to_vhdl is an optional plugin-owned CompilerDriver extension. The
@@ -99,6 +100,8 @@ fn _driver_entry_source_input(input_files: [text]) -> text:
 
 impl CompilerDriver:
     me aot_compile() -> CompileResult:
+        if val rejection = driver_observer_compile_gate_v1(self.ctx.options.aspect_params, self.ctx.options.native_target):
+            return rejection
         val log = self.ctx.logger
         # MIR shard export summary step (driver_build/native_mir_shard_export_v1.spl):
         # write the final declaration bundle and exit before lowering.
@@ -188,6 +191,8 @@ impl CompilerDriver:
 
     # PR2a stage: run the post-MIR passes and emit objects / link the output.
     me stage_emit_object() -> CompileResult:
+        if val rejection = driver_observer_compile_gate_v1(self.ctx.options.aspect_params, self.ctx.options.native_target):
+            return rejection
         # HIR is dead after MIR lowering for every AOT backend except vhdl and the
         # SIMPLE_BOOTSTRAP_DIRECT_IR dispatch (bootstrap_compile_to_native_local
         # re-reads ctx.hir_modules). Retaining it held the whole-closure HIR
@@ -259,6 +264,8 @@ impl CompilerDriver:
             log_build_progress("weave_aop", "modules", 0,
                 self.ctx.mir_modules.len(), "start", 4, 6, 0, 0, "running")
             self.weave_aop()
+            if self.ctx.has_errors():
+                return CompileResult.CodegenError(self.ctx.errors.join("\n"))
             log_phase("aot:weave_aop:done")
             log_build_progress("weave_aop", "modules",
                 self.ctx.mir_modules.len(), self.ctx.mir_modules.len(),

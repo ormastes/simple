@@ -1,0 +1,21 @@
+use compiler.backend.observer_llvm_host_shim_v1.*
+
+describe "Linux LLVM resident callback shim candidate":
+    it "rejects every target and profile outside the explicit narrow emitter":
+        for target in ["aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "x86_64-unknown-freebsd"]:
+            expect(trace_llvm_host_shim_emit_v1(target, TRACE_LLVM_SYSV_YMM_SHIM_PROFILE_V1).is_err()).to_equal(true)
+        expect(trace_llvm_host_shim_emit_v1("x86_64-unknown-linux-gnu", "avx512").is_err()).to_equal(true)
+
+    it "emits a strong owner dependency and symmetric state regions without upper-half clearing":
+        val output = trace_llvm_host_shim_emit_v1("x86_64-unknown-linux-gnu",
+            TRACE_LLVM_SYSV_YMM_SHIM_PROFILE_V1).unwrap()
+        expect(output).to_contain("call simple_trace_llvm_resident_event_v1")
+        expect(output.contains(".weak")).to_equal(false)
+        expect(output.contains("vzeroupper")).to_equal(false)
+        expect(output).to_contain("fxsave64 0(%rsp)")
+        expect(output).to_contain("fxrstor64 0(%rsp)")
+        expect(output).to_contain("vmovdqu %ymm15, 992(%rsp)")
+        expect(output).to_contain("vmovdqu 992(%rsp), %ymm15")
+        expect(output).to_contain("call __xray_unpack_function_id@PLT")
+        expect(output).to_contain("call __xray_unpack_object_id@PLT")
+        expect(output).to_contain(".section .note.GNU-stack,\"\",@progbits")

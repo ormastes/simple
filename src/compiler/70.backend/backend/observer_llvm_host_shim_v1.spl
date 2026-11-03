@@ -1,0 +1,95 @@
+# Private hosted ELF callback shim emitter, not a native profile admission.
+# LLVM23 xray_trampoline_x86_64.S source inspected at SHA256
+# 43c116f9003ffc2a6c711fc98e610dd0e213aeb642968d60f86a80b2c1fcc392:
+# entry saves XMM0..7 via legacy SSE moves; exit saves XMM0..1. Neither
+# preserves YMM upper halves, x87 state or MXCSR against arbitrary callbacks.
+# This wrapper adds bounded state preservation around the resident callback.
+# No ZMM/opmask, AMX/APX, signal-handler, exception-unwind or generic ABI claim.
+# Native integration must bind the actual LLVM source/archive, this output,
+# compiler flags and excluded callback closure before admitting this profile.
+
+pub const TRACE_LLVM_SYSV_YMM_SHIM_PROFILE_V1 = "linux-x86_64-sysv-llvm23-ymm-x87-v1"
+pub const TRACE_LLVM_SYSV_YMM_HANDLER_V1 = "simple_trace_llvm_sysv_ymm_handler_v1"
+pub const TRACE_LLVM_RESIDENT_CALLBACK_V1 = "simple_trace_llvm_resident_event_v1"
+
+pub fn trace_llvm_host_shim_emit_v1(target: text, profile: text) -> Result<text, text>:
+    if target != "x86_64-unknown-linux-gnu":
+        return Err("LLVM observer shim requires the explicit Linux x86_64 ELF target")
+    if profile != TRACE_LLVM_SYSV_YMM_SHIM_PROFILE_V1:
+        return Err("LLVM observer shim profile is unsupported")
+    val symbol = TRACE_LLVM_SYSV_YMM_HANDLER_V1
+    var lines: [text] = [
+        ".text", ".p2align 4", ".globl {symbol}", ".hidden {symbol}",
+        ".type {symbol},@function", "{symbol}:", ".cfi_startproc",
+        "endbr64", "pushfq", ".cfi_adjust_cfa_offset 8"
+    ]
+    # SysV callback entry RSP is 8 mod16. Fifteen GPR pushes plus RFLAGS use
+    # 128 bytes; another 1064 bytes leaves the call sites 16-byte aligned.
+    val registers = ["rax", "rbx", "rcx", "rdx", "rbp", "rsi", "rdi",
+        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"]
+    var cfa: i64 = 16
+    for register in registers:
+        lines.push("pushq %{register}")
+        cfa = cfa + 8
+        lines.push(".cfi_adjust_cfa_offset 8")
+        lines.push(".cfi_offset %{register}, -{cfa}")
+    lines.push("subq $1064, %rsp")
+    lines.push(".cfi_adjust_cfa_offset 1064")
+    # FXSAVE area 0..511 is 16-byte aligned. Full YMM images 512..1023.
+    # Scalars: errno pointer1024, errno1032, packedID1036, kind1040,
+    # unpacked function1048. No state is stored in a shared/TLS scratch buffer.
+    lines.push("fxsave64 0(%rsp)")
+    for index in 0..16:
+        val offset = 512 + index * 32
+        lines.push("vmovdqu %ymm{index}, {offset}(%rsp)")
+    lines.push("movl %edi, 1036(%rsp)")
+    lines.push("movl %esi, 1040(%rsp)")
+    lines.push("cld")
+    lines.push("call __errno_location@PLT")
+    lines.push("movq %rax, 1024(%rsp)")
+    lines.push("movl (%rax), %ecx")
+    lines.push("movl %ecx, 1032(%rsp)")
+    # LLVM23 callback IDs are packed. Never interpret packed bits as a stable
+    # Simple function/module identity, nor use truncating __xray_pack_id.
+    lines.push("movl 1036(%rsp), %edi")
+    lines.push("call __xray_unpack_function_id@PLT")
+    lines.push("movl %eax, 1048(%rsp)")
+    lines.push("movl 1036(%rsp), %edi")
+    lines.push("call __xray_unpack_object_id@PLT")
+    lines.push("movslq %eax, %rdi")
+    lines.push("movslq 1048(%rsp), %rsi")
+    lines.push("movl 1040(%rsp), %edx")
+    lines.push("cmpl $2, %edx")
+    lines.push("ja .Ltrace_llvm_unknown_kind_v1")
+    lines.push("addl $1, %edx")
+    lines.push("jmp .Ltrace_llvm_dispatch_v1")
+    lines.push(".Ltrace_llvm_unknown_kind_v1:")
+    lines.push("xorl %edx, %edx")
+    lines.push(".Ltrace_llvm_dispatch_v1:")
+    # Strong resident C3 ABI: void(i64 object, i64 function, i64 kind).
+    # kind0 is unsupported, 1 entry, 2 exit, 3 tail; owner must count/reject 0.
+    # Missing owner must fail linkage. No weak symbol or fallback is emitted.
+    lines.push(".hidden {TRACE_LLVM_RESIDENT_CALLBACK_V1}")
+    lines.push("call {TRACE_LLVM_RESIDENT_CALLBACK_V1}")
+    lines.push("movq 1024(%rsp), %rax")
+    lines.push("movl 1032(%rsp), %ecx")
+    lines.push("movl %ecx, (%rax)")
+    lines.push("fxrstor64 0(%rsp)")
+    for index in 0..16:
+        val offset = 512 + index * 32
+        lines.push("vmovdqu {offset}(%rsp), %ymm{index}")
+    # No VZEROUPPER after restoring upper halves.
+    lines.push("addq $1064, %rsp")
+    lines.push(".cfi_adjust_cfa_offset -1064")
+    for index in 0..registers.len():
+        val register = registers[registers.len() - index - 1]
+        lines.push("popq %{register}")
+        lines.push(".cfi_adjust_cfa_offset -8")
+        lines.push(".cfi_restore %{register}")
+    lines.push("popfq")
+    lines.push(".cfi_adjust_cfa_offset -8")
+    lines.push("ret")
+    lines.push(".cfi_endproc")
+    lines.push(".size {symbol}, .-{symbol}")
+    lines.push(".section .note.GNU-stack,\"\",@progbits")
+    lines.join("\n") + "\n"

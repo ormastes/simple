@@ -1,0 +1,37 @@
+# Source-discovery regression only; not Windows object/link qualification.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_nullable}
+use compiler.driver.driver_entry_closure_core.{_driver_collect_sources, _driver_entry_import_module_paths}
+
+describe "unqualified Linux observer leaf source exclusion":
+    it "cannot discover the effectful leaf at its former default-root location":
+        val old_path = "src/lib/nogc_sync_mut/sffi/observer_llvm_linux_v1.spl"
+        expect(file_read_nullable(old_path)).to_be_nil()
+        val sources = _driver_collect_sources(old_path)
+        expect(sources.len()).to_equal(0)
+
+    it "keeps the native candidate available only as an explicit fixture input":
+        val path = "test/fixtures/trace/hosted_linux/observer_llvm_linux_v1.spl"
+        val source = file_read_nullable(path).unwrap()
+        expect(source).to_contain("extern fn __xray_init()")
+        expect(source).to_contain("extern fn __xray_patch_function_in_object")
+        # This exercises the production collector, without calling any FFI.
+        val sources = _driver_collect_sources(path)
+        expect(sources.len()).to_be_greater_than(0)
+
+    it "does not introduce the staged provider into observer compiler or common imports":
+        val paths = [
+            "src/compiler/80.driver/driver_observer_compile_gate_v1.spl",
+            "src/compiler/80.driver/driver_observer_request_v1.spl",
+            "src/compiler/70.backend/backend/observer_llvm_host_shim_v1.spl",
+            "src/lib/common/trace/observer_contract_v1.spl",
+            "src/lib/common/trace/observer_aspect_config_v1.spl",
+            "src/lib/common/trace/observer_config_v1.spl",
+            "src/lib/common/trace/observer_build_route_v1.spl"
+        ]
+        for path in paths:
+            val source = file_read_nullable(path).unwrap()
+            expect(source.len()).to_be_greater_than(0)
+            for dependency in _driver_entry_import_module_paths(source):
+                expect(dependency.contains("observer_llvm_linux_v1")).to_equal(false)
+                expect(dependency.starts_with("test.fixtures.")).to_equal(false)

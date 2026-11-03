@@ -27,6 +27,20 @@ Additional source-only slices are authored: W1 serial reference collector/sessio
 
 The old uncomposed linked-startup packets still retain both accepted P1 findings: writable overlapping PT_LOAD aliases and stale activation-policy checks after external work. Rejecting overlaps in the new structural map owner is not a repair of those packets. Their retained sources and hashes must not be imported without both fixes and renewed review.
 
+## Native-boundary continuation
+
+The second source tranche adds a draft copied-buffer request/response owner (144-byte request, 64-byte response), strict config-schema/selection metadata, operation-specific lengths and reserved-field checks, and explicit copied output. It does not export a native entrypoint, dereference caller pointers, or establish handle issuance. Native buffer leasing and provider dispatch remain open.
+
+Compiler request rejection is now propagated at actual compile, VHDL, JIT, AOT and object-emission entry points; JIT/AOT stop after weaving errors. The earlier weave-only guard could accumulate an error and still reach execution/codegen. New owner-entry specs cover that source correction but are UNRUN.
+
+An optional Linux x86-64 LLVM23 effectful candidate is staged as `test/fixtures/trace/hosted_linux/observer_llvm_linux_v1.spl`, outside default source roots. It initializes LLVM, installs a resident handler, validates object/function IDs and retains native patch statuses. A private compiler emitter constructs a SysV x64 handler candidate preserving bounded GPR/flags, x87/MXCSR, YMM and errno state around a strong resident callback dependency. Missing collector implementation fails linkage. Neither the fixture nor the emitter advertises a qualified profile. Production provider selection, actual callback closure exclusion, whole-trampoline behavior and nonallocating collector admission remain gates.
+
+The [Windows graph audit](xray_windows_off_graph_review_2026-11-03.sdn) distinguishes compiler conditional preprocessing from the CLI's earlier raw import scan. Physical staging contains the new Linux leaf; it does not fix that scanner or prove a Windows build comparison.
+
+A single isolated C diagnostic executed on Linux AArch64 using installed LLVM23.1.0 (`ea7d852a70e8bdfaf601d6626a760f9771b2c4b4`): 10,000 entry/exit callbacks, correct scalar results and runtime address association, followed by 100 unpatched calls without new callbacks. Exact commands, hashes and retained maps are under `/tmp/parallel-three-tracks-20261103/features/llvm-probe/REPORT.md`. This is installed-toolchain evidence only, not Simple-generated ABI/profile or lifecycle qualification.
+
+Both old startup P1s have an immutable successor source packet at `/tmp/parallel-three-tracks-20261103/features/startup-p1-repair`, manifest SHA-256 `54c6bb1feb08d5831c2565e3ec6acd690475ed4f63ee4096d4a45462af7cf03f`. Review accepted the activation-fence source change, but found the raw overlap correction incomplete: byte-disjoint PT_LOADs can alias after host-page rounding. A revision addressing that remaining P1 is in progress. No packet is integrated because its dependency closure is absent from this Git tree. Tests remain UNRUN; original frozen sources are untouched.
+
 ## Ordered remaining work
 
 1. W0: implement/review codecs, native ABI and golden fixtures; validate with admitted self-hosted tooling; then freeze the contract.

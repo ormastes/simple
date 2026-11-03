@@ -1,0 +1,101 @@
+# STAGED outside native-build default source roots. Explicit future Linux
+# provider admission must select this file; it is not a std.* module or an
+# available production capability. See xray_windows_off_graph_review_2026-11-03.sdn.
+# PRIVATE optional Linux x86_64 ELF boundary. Never import from common/trace or
+# ordinary Windows/SimpleOS builds. This invokes LLVM; it does NOT grant profile
+# admission. The driver remains unsupported until exact producer/runtime/shim
+# and resident collector execution have passed their independent gates.
+# Pinned LLVM23 xray_interface.h SHA256:
+# 4e746114d6ff996671efb5179e0148c18cd73220cc4ed05bd266b0fb2a6e30ee
+# int/enum=int32, size_t/uintptr_t=uint64 for this one LP64 target.
+use std.common.trace.observer_contract_v1.{TraceFailureV1}
+use std.nogc_sync_mut.sffi.cpu.{cpu_is_x86_64, cpuid, xgetbv}
+
+@unsafe(reason: "optional pinned LLVM23 LP64 runtime boundary", capabilities: [ffi])
+extern fn __xray_init()
+@unsafe(reason: "optional pinned LLVM23 LP64 runtime boundary", capabilities: [ffi])
+extern fn __xray_num_objects() -> u64
+@unsafe(reason: "optional pinned LLVM23 LP64 runtime boundary", capabilities: [ffi])
+extern fn __xray_max_function_id_in_object(object_id: i32) -> u64
+@unsafe(reason: "optional pinned LLVM23 LP64 runtime boundary", capabilities: [ffi])
+extern fn __xray_function_address_in_object(function_id: i32, object_id: i32) -> u64
+@unsafe(reason: "resident handler remains installed until process exit", capabilities: [ffi])
+extern fn __xray_set_handler(handler: fn(i32, i32)) -> i32
+@unsafe(reason: "control owner already holds native quiescence and map admission", capabilities: [ffi])
+extern fn __xray_patch_function_in_object(function_id: i32, object_id: i32) -> i32
+@unsafe(reason: "unpatch result is not callback drain evidence", capabilities: [ffi])
+extern fn __xray_unpatch_function_in_object(function_id: i32, object_id: i32) -> i32
+
+# Defined ONLY by the emitted assembly. Its resident collector dependency is a
+# strong symbol too; absent collector/shim therefore fails linkage, not capture.
+@unsafe(reason: "exact raw two-int32 SysV callback implemented by emitted ELF shim", capabilities: [ffi])
+extern fn simple_trace_llvm_sysv_ymm_handler_v1(packed_id: i32, kind: i32)
+
+var _trace_llvm_linux_initialized_v1: bool = false
+var _trace_llvm_linux_installed_v1: bool = false
+
+# Necessary hardware precondition only: this does not authorize AVX-512, AMX,
+# APX, special calling conventions, signal handlers, or exception unwinding.
+fn trace_llvm_linux_ymm_state_usable_v1() -> bool:
+    if cpu_is_x86_64() != 1: return false
+    val features = cpuid(1, 0)
+    val ecx = features.2
+    # XSAVE + OSXSAVE + AVX; never execute XGETBV without OSXSAVE.
+    if (ecx & 469762048) != 469762048: return false
+    (xgetbv(0) & 6) == 6
+
+# These control calls require external serialization and an already admitted
+# image/selection. Return native patch statuses unchanged (0,1,2,3), so Ongoing
+# cannot become success. No retry loop, patch-all, remove-handler, or unload API.
+@unsafe(reason: "initialize optional runtime only after compiler-side admission", capabilities: [ffi])
+pub fn trace_llvm_linux_initialize_v1() -> Result<u64, TraceFailureV1>:
+    unsafe(capabilities: [ffi]):
+        if not trace_llvm_linux_ymm_state_usable_v1():
+            return Err(TraceFailureV1.UnsupportedProfile)
+        __xray_init()
+        val objects = __xray_num_objects()
+        if objects == 0: return Err(TraceFailureV1.InstrumentationAbsent)
+        _trace_llvm_linux_initialized_v1 = true
+        Ok(objects)
+
+@unsafe(reason: "install one resident emitted handler; closure must be excluded from XRay", capabilities: [ffi])
+pub fn trace_llvm_linux_install_resident_v1() -> Result<bool, TraceFailureV1>:
+    unsafe(capabilities: [ffi]):
+        if not _trace_llvm_linux_initialized_v1:
+            return Err(TraceFailureV1.InstrumentationAbsent)
+        if _trace_llvm_linux_installed_v1: return Ok(true)
+        if __xray_set_handler(simple_trace_llvm_sysv_ymm_handler_v1) != 1:
+            return Err(TraceFailureV1.BackendFailure)
+        _trace_llvm_linux_installed_v1 = true
+        Ok(true)
+
+@unsafe(reason: "bounded exact-object LLVM lookup before effectful per-function patch", capabilities: [ffi])
+fn trace_llvm_linux_validate_id_v1(object_id: i32, function_id: i32
+    ) -> Result<bool, TraceFailureV1>:
+    unsafe(capabilities: [ffi]):
+        if not _trace_llvm_linux_initialized_v1:
+            return Err(TraceFailureV1.InstrumentationAbsent)
+        if object_id < 0 or function_id <= 0:
+            return Err(TraceFailureV1.InvalidArgument)
+        if object_id.to_u64() >= __xray_num_objects():
+            return Err(TraceFailureV1.InvalidMap)
+        if function_id.to_u64() > __xray_max_function_id_in_object(object_id):
+            return Err(TraceFailureV1.InvalidMap)
+        if __xray_function_address_in_object(function_id, object_id) == 0:
+            return Err(TraceFailureV1.InvalidMap)
+        Ok(true)
+
+@unsafe(reason: "effectful native patch under externally owned quiescence and admission", capabilities: [ffi])
+pub fn trace_llvm_linux_patch_v1(object_id: i32, function_id: i32
+    ) -> Result<i32, TraceFailureV1>:
+    unsafe(capabilities: [ffi]):
+        trace_llvm_linux_validate_id_v1(object_id, function_id)?
+        if not _trace_llvm_linux_installed_v1: return Err(TraceFailureV1.Busy)
+        Ok(__xray_patch_function_in_object(function_id, object_id))
+
+@unsafe(reason: "unpatch closes sleds but does not retire in-flight resident callbacks", capabilities: [ffi])
+pub fn trace_llvm_linux_unpatch_v1(object_id: i32, function_id: i32
+    ) -> Result<i32, TraceFailureV1>:
+    unsafe(capabilities: [ffi]):
+        trace_llvm_linux_validate_id_v1(object_id, function_id)?
+        Ok(__xray_unpatch_function_in_object(function_id, object_id))

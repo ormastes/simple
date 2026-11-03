@@ -1,0 +1,75 @@
+# These execute real driver entrypoints. They are not build-DAG or Windows
+# execution evidence; those require the target compiler/linker comparison.
+use std.spec.{describe, it, expect, fail}
+use std.common.plugin.aspect_params.*
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.*
+use std.common.text_bytes.{text_to_bytes}
+use compiler.common.driver_core_types.{CompileResult, CompileMode, driver_core_compile_options_default}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_orchestration.*
+use compiler.driver.driver_pipeline_execution.*
+use compiler.driver.driver_aot_pipeline.*
+use compiler.driver.driver_observer_compile_gate_v1.{driver_observer_compile_gate_v1}
+
+fn observer_entry_driver_v1(target: text) -> CompilerDriver:
+    var config = trace_config_defaults_v1()
+    config.instrumentation = TraceInstrumentationV1.Dynamic
+    config.abi_profile = "scalar-v1"
+    var params = AspectParamsV1.defaults()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1,
+        text_to_bytes(trace_config_format_sdn_v1(config).unwrap()), TRACE_CONFIG_SCHEMA_HASH_V1))
+    var options = driver_core_compile_options_default()
+    options.input_files = ["test/fixtures/observer-intentionally-absent-input.spl"]
+    options.native_target = target
+    options.mode = CompileMode.Check
+    options.backend = "check"
+    options.aspect_params = params
+    CompilerDriver.create(options)
+
+fn expect_observer_entry_rejection_v1(result: CompileResult, code: text):
+    match result:
+        case CompileResult.CodegenError(message):
+            expect(message).to_equal("TRACE-E-REQUEST: observer V1 request rejected (status={code})")
+        case _:
+            fail("observer request must fail before source loading, MIR work, or backend execution")
+
+describe "observer compiler entry admission":
+    it "rejects Windows before the ordinary driver loads sources":
+        var driver = observer_entry_driver_v1("x86_64-pc-windows-msvc")
+        expect_observer_entry_rejection_v1(driver.compile(), "1")
+        expect(driver.ctx.sources.len()).to_equal(0)
+
+    it "rejects an unqualified Linux profile before the ordinary driver loads sources":
+        var driver = observer_entry_driver_v1("x86_64-unknown-linux-gnu")
+        expect_observer_entry_rejection_v1(driver.compile(), "2")
+        expect(driver.ctx.sources.len()).to_equal(0)
+
+    it "rejects direct JIT before lowering or executing empty modules":
+        var driver = observer_entry_driver_v1("aarch64-pc-windows-msvc")
+        expect_observer_entry_rejection_v1(driver.jit_compile_and_run(), "1")
+        expect(driver.ctx.mir_modules.len()).to_equal(0)
+
+    it "rejects direct VHDL before backend validation or loading":
+        var driver = observer_entry_driver_v1("x86_64-pc-windows-msvc")
+        expect_observer_entry_rejection_v1(driver.compile_vhdl_only(), "1")
+        expect(driver.ctx.sources.len()).to_equal(0)
+
+    it "rejects direct AOT before optional bootstrap and shard routes":
+        var driver = observer_entry_driver_v1("x86_64-pc-windows-msvc")
+        expect_observer_entry_rejection_v1(driver.aot_compile(), "1")
+        expect(driver.ctx.mir_modules.len()).to_equal(0)
+
+    it "rejects direct object emission before optional transform bypasses":
+        var driver = observer_entry_driver_v1("x86_64-pc-windows-msvc")
+        expect_observer_entry_rejection_v1(driver.stage_emit_object(), "1")
+        expect(driver.ctx.mir_modules.len()).to_equal(0)
+
+    it "preserves no-extension and explicit-Off compiler admission":
+        expect(driver_observer_compile_gate_v1(AspectParamsV1.defaults(), "")).to_be_nil()
+        var params = AspectParamsV1.defaults()
+        val source = trace_config_format_sdn_v1(trace_config_defaults_v1()).unwrap()
+        params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1,
+            text_to_bytes(source), TRACE_CONFIG_SCHEMA_HASH_V1))
+        expect(driver_observer_compile_gate_v1(params, "aarch64-pc-windows-msvc")).to_be_nil()
