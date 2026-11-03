@@ -5,7 +5,7 @@
   `test/unit/lib/crypto/curve448_rfc7748_kat_spec.spl`
 - **Severity:** high (every KAT vector in the file mismatches — near-total
   break, not an edge case).
-- **Status:** OPEN. **Do not touch the expected vectors** — RFC 7748 §5.2/§6.2
+- **Status:** FIXED 2026-11-03. Root cause: `_f448_sub` added an all-0x1FFFFFFE bias (= 2*(2^448-1), not a multiple of p); 2p needs limb 8 = 0x1FFFFFFC. Fixed in `src/os/crypto/curve448.spl`; `curve448_rfc7748_kat_spec.spl` 7/7 pass, new `curve448_field_sub_spec.spl` fails before/passes after. (was OPEN.) **Do not touch the expected vectors** — RFC 7748 §5.2/§6.2
   values are canonical.
 
 ## Symptom
