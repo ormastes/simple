@@ -27,3 +27,6 @@ Regression spec: test/01_unit/compiler/mir/text_bytes_inferred_trim_receiver_spe
 ## Workaround
 src/lib/common/sdn/parser.spl `parse`: `val trimmed: text = source.trim()` tagged @workaround.
 Retire after fixed compiler is deployed.
+
+## Triage 2026-11-04 (MIR slice B)
+Fix present on origin/release/1.0.0 in method_calls_literals.spl (`bytes_receiver_has_declaration`, only Str/Named authoritative, ~line 2887) with spec test/01_unit/compiler/mir/text_bytes_inferred_trim_receiver_spec.spl. Status: fix-implemented-verification-pending (needs stage2/3 native-build of the test runner; then remove the annotation workaround at src/lib/common/sdn/parser.spl:33).
