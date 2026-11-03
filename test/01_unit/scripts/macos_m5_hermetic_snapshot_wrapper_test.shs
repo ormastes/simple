@@ -81,6 +81,29 @@ stderr_sha=$(awk -F= '$1 == "checker_stderr_sha256" { print $2 }' "$fixture/buil
 [ ! -w "$fixture/build/evidence/checker.stdout" ]
 [ ! -w "$fixture/build/evidence" ]
 
+# A persistent runner must be able to remove its checkout while the separately
+# retained hermetic evidence is still sealed (GitHub issue #1632). Exercise the
+# actual wrapper's default evidence path with the workflow's external storage
+# contract; do not make the evidence writable just to make checkout cleanup pass.
+new_fixture checkout-reuse
+write_fast_checker "$fixture/checker-ran"
+external_storage="$work/runner-temp/m5-storage"
+SIMPLE_WORKTREE_STORAGE_ROOT="$external_storage" \
+    sh "$fixture/scripts/check/check-macos-universal-m5-hermetic.shs" >/dev/null
+external_receipts=$(find "$external_storage/evidence/release" -name status.env -type f)
+[ "$(printf '%s\n' "$external_receipts" | wc -l | tr -d ' ')" = 1 ]
+grep -Fxq status=PASS "$external_receipts"
+external_evidence=$(dirname "$external_receipts")
+[ ! -w "$external_evidence" ]
+[ ! -w "$external_evidence/checker.stdout" ]
+[ ! -e "$fixture/.simple/storage" ]
+rm -rf "$fixture"
+[ ! -e "$fixture" ]
+[ -f "$external_receipts" ]
+mkdir -p "$fixture"
+printf 'next-checkout\n' >"$fixture/next-job"
+grep -Fxq next-checkout "$fixture/next-job"
+
 new_fixture before-run-drift
 write_fast_checker "$fixture/checker-ran"
 barrier=$fixture/barrier
@@ -144,4 +167,4 @@ if sh "$fixture/scripts/check/check-macos-universal-m5-hermetic.shs" \
 fi
 grep -Fxq reason=source-inventory-invalid "$fixture/build/evidence/status.env"
 
-echo 'PASS — M5 hermetic wrapper: clean snapshot admitted; 5/5 mutations rejected; undeclared files excluded'
+echo 'PASS — M5 hermetic wrapper: clean snapshot admitted; 5/5 mutations rejected; undeclared files excluded; checkout reuse preserves sealed external evidence'

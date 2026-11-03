@@ -20,8 +20,8 @@ including integers, floats, strings, booleans, symbols, and nil.
 3.14            # Float
 1.0e10          # Scientific notation
 "hello"         # Interpolated string
-'raw'           # Raw string
-r"raw{NL}"        # Raw string (r prefix)
+'x'             # char literal (exactly one Unicode scalar or one escape; single quotes are char-only, ADR-005)
+r"raw{NL}"        # Raw string (r prefix); r"""...""" multi-line raw
 true false      # Booleans
 nil             # Nil value
 :symbol         # Symbol literal
