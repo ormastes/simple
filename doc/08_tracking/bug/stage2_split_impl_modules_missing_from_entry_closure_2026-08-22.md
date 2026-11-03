@@ -55,3 +55,41 @@ split impl providers in stage2"): the explicit provider imports are
 `_native_build_entry_closure` includes a split impl provider only when the
 type owner imports it (walker spec UNVERIFIED: the installed runtime timed out at 898 s loading the driver).
 Stage 3 verification (criterion 3) remains pending.
+
+## Update 2026-11-03: instance 2 (CompilerDriver.stage_lower_hir)
+
+`driver_unit_tldr_imports_v1.spl` called `driver.stage_lower_hir("check")`
+(split impl in `driver_orchestration.spl`) importing only the type owner
+`driver_compiler_type`; frozen stage2 MIR lowering: "unresolved method call
+'stage_lower_hir' is a FATAL lowering error". Importing `driver_orchestration.*`
+widens the closure into `driver_aot_pipeline -> plugins.backend_vhdl`.
+
+Fix: new narrow provider `src/compiler/80.driver/driver_stage_hir_v1.spl`
+(`stage_lower_hir_run_v1` / `_failure_v1` / `_done_v1` / `_check_v1`,
+`build_trace_first_error`), imports limited to the type owner,
+`driver_hir_pipeline_lowering` (closure scanned: 623 files, no aot /
+orchestration / vhdl), log helpers. `driver_orchestration.stage_lower_hir`
+delegates to it and keeps only aot go-to-end recovery. The TLDR caller imports
+the provider and calls `stage_lower_hir_check_v1()`.
+
+Sibling found: `cache/driver_hir_source_body_surfaces_v1.spl` calls
+`driver.add_streaming_module_surface` (defined in
+`driver_source_parse_selected.spl`) without importing it; edge added. The
+other non-impl caller, `driver_source_llvm_ir.spl`, imports
+`compiler.driver.driver` (full driver), so its closure already covers the
+providers.
+
+Release-side workaround (tagged `@workaround bug=stage2_split_impl_...`):
+the TLDR unit HIR step returns the fail-closed gap
+`stage-lower-hir-gap:split-impl-provider-unverified` unless
+`SIMPLE_UNIT_TLDR_STAGE_HIR=1`. Nothing consumes that result.
+
+Spec: `test/01_unit/app/cli/stage_hir_split_impl_provider_spec.spl` (6/6 pass;
+5/5 failed before the fix) + fixture `test/fixtures/stage_hir_split_impl/`.
+
+Verification pending (needs stage3): build phase 3 from this source with
+`SIMPLE_UNIT_TLDR_STAGE_HIR=1`; expect no "unresolved method call
+'stage_lower_hir'" / `add_streaming_module_surface` and no
+PRECLOSED_ALIAS_IMPORT_MISSING for backend_vhdl; then delete the workaround.
+Open class: no static guard yet maps every `driver.X(` call to an imported
+provider; `self.X(` calls inside split impls are not scanned.
