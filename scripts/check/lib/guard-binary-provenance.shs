@@ -1,0 +1,80 @@
+#!/bin/sh
+# Shared provenance gate for guards that run a `simple` binary.
+#
+# Single home for the check required by
+# doc/08_tracking/bug/guards_hardcode_stale_seed_binary_census_2026-08-17.md
+# (item 2): a guard that needs self-hosted behavior must not report on the Rust
+# bootstrap seed or on a binary older than the sources it probes. Absence of a
+# current compiler is absence of evidence, so these cases are
+# `ERROR — nothing was checked` (exit 2), never a pass.
+#
+# Usage (source it, then call):
+#   . "$ROOT/scripts/check/lib/guard-binary-provenance.shs"
+#   guard_require_binary "$SIMPLE" "$ROOT" selfhosted   # seed -> exit 2
+#   guard_require_binary "$SIMPLE" "$ROOT" any          # seed allowed
+# Staleness (binary older than src/compiler or src/lib *.spl) is exit 2 when
+# SIMPLE_REQUIRE_FRESH=1; otherwise it is reported via GUARD_BINARY_NOTE only.
+# Seed detection = `--version` banner contains "bootstrap seed" (same probe as
+# check-lint-binary-staleness.shs; nm/strings are unsound for lineage).
+#
+# Direct run: `sh guard-binary-provenance.shs --selftest`.
+
+guard_binary_is_seed() {
+    case $("$1" --version 2>&1 | head -3) in
+        *"bootstrap seed"*) return 0 ;;
+    esac
+    return 1
+}
+
+guard_require_binary() {
+    _gb=$1; _gr=$2; _gn=${3:-any}
+    GUARD_BINARY_NOTE=""
+    if [ ! -x "$_gb" ]; then
+        echo "ERROR — nothing was checked: compiler '$_gb' is not executable (set SIMPLE_BIN)"
+        exit 2
+    fi
+    _real=$(readlink -f "$_gb" 2>/dev/null || echo "$_gb")
+    if [ "$_gn" = "selfhosted" ] && guard_binary_is_seed "$_gb"; then
+        echo "ERROR — nothing was checked: compiler '$_real' is the Rust bootstrap seed; this gate needs self-hosted behavior (set SIMPLE_BIN to a self-hosted build)"
+        exit 2
+    fi
+    _newer=$(find "$_gr/src/compiler" "$_gr/src/lib" -name '*.spl' -newer "$_real" -print 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${_newer:-0}" -gt 0 ]; then
+        GUARD_BINARY_NOTE=" [STALE: '$_real' predates $_newer source file(s)]"
+        if [ "${SIMPLE_REQUIRE_FRESH:-0}" = "1" ]; then
+            echo "ERROR — nothing was checked: compiler '$_real' is older than $_newer source file(s); SIMPLE_REQUIRE_FRESH=1"
+            exit 2
+        fi
+    fi
+    return 0
+}
+
+guard_binary_selftest() {
+    _t=$(mktemp -d) || return 2
+    mkdir -p "$_t/src/compiler"
+    printf '#!/bin/sh\necho "simple bootstrap seed 1.0"\n' > "$_t/seed"
+    printf '#!/bin/sh\necho "simple 1.0 self-hosted"\n' > "$_t/real"
+    chmod +x "$_t/seed" "$_t/real"
+    _fail=0
+    _o=$( (guard_require_binary "$_t/seed" "$_t" selfhosted) 2>&1 ); _rc=$?
+    { [ "$_rc" = 2 ] && case $_o in *"ERROR — nothing was checked"*"$_t/seed"*) true;; *) false;; esac; } \
+        || { echo "SELFTEST FAILED — seed not rejected (rc=$_rc)"; _fail=1; }
+    (guard_require_binary "$_t/seed" "$_t" any) >/dev/null 2>&1 \
+        || { echo "SELFTEST FAILED — seed rejected for need=any"; _fail=1; }
+    (guard_require_binary "$_t/real" "$_t" selfhosted) >/dev/null 2>&1 \
+        || { echo "SELFTEST FAILED — self-hosted fixture rejected"; _fail=1; }
+    _o=$( (guard_require_binary "$_t/missing" "$_t" any) 2>&1 ); _rc=$?
+    [ "$_rc" = 2 ] || { echo "SELFTEST FAILED — missing binary not exit 2"; _fail=1; }
+    touch -d '2000-01-01' "$_t/real"; printf 'x\n' > "$_t/src/compiler/a.spl"
+    _o=$( (SIMPLE_REQUIRE_FRESH=1 guard_require_binary "$_t/real" "$_t" any) 2>&1 ); _rc=$?
+    [ "$_rc" = 2 ] || { echo "SELFTEST FAILED — stale binary not rejected under SIMPLE_REQUIRE_FRESH=1"; _fail=1; }
+    rm -rf "$_t"
+    if [ "$_fail" = 0 ]; then echo "PASS — 5 fixture(s) checked, provenance helper discriminates"; return 0; fi
+    echo "FAIL — provenance helper selftest"; return 1
+}
+
+case "${0##*/}" in
+    guard-binary-provenance.shs)
+        [ "${1:-}" = "--selftest" ] || { echo "ERROR — nothing was checked (usage: --selftest, or source me)"; exit 2; }
+        guard_binary_selftest; exit $? ;;
+esac
