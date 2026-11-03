@@ -5554,10 +5554,18 @@ impl MirLowering:
         # semantics remain single-sourced.
         val binary_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Binary(HirBinOp.Add, nil_expr, nil_expr))
         if expr_disc == binary_disc:
-            val binary_payload = _sffi_enum_payload<HirExprKind>(expr_value.kind)
-            val binary_op: HirBinOp = _sffi_tuple_get<HirBinOp>(binary_payload, 0)
-            val binary_left: HirExpr = _sffi_tuple_get<HirExpr>(binary_payload, 1)
-            val binary_right: HirExpr = _sffi_tuple_get<HirExpr>(binary_payload, 2)
+            # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=stage3 reads HirExprKind payloads through _sffi_enum_payload/_sffi_tuple_get as garbage (c01: garbage child expression handle, disc=-1); bind by pattern after the discriminant check (same fix as the NamedVar pre-dispatch)
+            var binary_op: HirBinOp = HirBinOp.Add
+            var binary_left: HirExpr = nil_expr
+            var binary_right: HirExpr = nil_expr
+            val binary_kind: HirExprKind = expr_value.kind
+            match binary_kind:
+                case HirExprKind.Binary(binary_op_p, binary_left_p, binary_right_p):
+                    binary_op = binary_op_p
+                    binary_left = binary_left_p
+                    binary_right = binary_right_p
+                case _:
+                    self.payload_decode_failed("HirExprKind.Binary", expr_value.span)
             if binary_left == nil or binary_right == nil or _sffi_enum_discriminant<HirBinOp>(binary_op) < 0:
                 self.error_fatal("empty HIR Binary payload", Some(expr_value.span))
                 return self.builder.emit_const_int(0)
@@ -5571,10 +5579,18 @@ impl MirLowering:
         # and reject malformed mandatory fields before any aggregate deref.
         val if_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.If(nil_expr, HirBlock(stmts: [], has: false, value: nil, span: nil_span), None))
         if expr_disc == if_disc:
-            val if_payload = _sffi_enum_payload<HirExprKind>(expr_value.kind)
-            val if_cond: HirExpr = _sffi_tuple_get<HirExpr>(if_payload, 0)
-            val if_then: HirBlock = _sffi_tuple_get<HirBlock>(if_payload, 1)
-            val if_else: HirBlock? = _sffi_tuple_get<HirBlock>(if_payload, 2)
+            # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=stage3 reads HirExprKind payloads through _sffi_enum_payload/_sffi_tuple_get as garbage (c01: garbage child expression handle, disc=-1); bind by pattern after the discriminant check (same fix as the NamedVar pre-dispatch)
+            var if_cond: HirExpr = nil_expr
+            var if_then: HirBlock = HirBlock(stmts: [], has: false, value: nil, span: nil_span)
+            var if_else: HirBlock? = nil
+            val if_kind: HirExprKind = expr_value.kind
+            match if_kind:
+                case HirExprKind.If(if_cond_p, if_then_p, if_else_p):
+                    if_cond = if_cond_p
+                    if_then = if_then_p
+                    if_else = if_else_p
+                case _:
+                    self.payload_decode_failed("HirExprKind.If", expr_value.span)
             if if_cond == nil or if_then == nil:
                 self.error_fatal("empty HIR If payload", Some(expr_value.span))
                 var b_bad_if = self.builder
@@ -5935,9 +5951,16 @@ impl MirLowering:
                     self.payload_decode_failed("HirExprKind.Var", expr_value.span)
         val namedvar_pre_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.NamedVar(SymbolId(id: -1), ""))
         if expr_disc == namedvar_pre_disc:
-            val named_var_payload = _sffi_enum_payload<HirExprKind>(expr_value.kind)
-            val named_var_symbol: SymbolId = _sffi_tuple_get<SymbolId>(named_var_payload, 0)
-            val named_var_name: text = _sffi_tuple_get<text>(named_var_payload, 1)
+            # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=stage3 reads the NamedVar payload through _sffi_enum_payload/_sffi_tuple_get as garbage (name "(false, )", unknown id); bind it by pattern after the discriminant check, as the Call arm's NamedVar callee path does
+            var named_var_symbol: SymbolId = SymbolId(id: -1)
+            var named_var_name: text = ""
+            val named_var_kind: HirExprKind = expr_value.kind
+            match named_var_kind:
+                case HirExprKind.NamedVar(nv_pre_symbol, nv_pre_name):
+                    named_var_symbol = nv_pre_symbol
+                    named_var_name = nv_pre_name
+                case _:
+                    self.payload_decode_failed("HirExprKind.NamedVar", expr_value.span)
             if named_var_symbol == nil or named_var_name == nil:
                 self.error_fatal("empty HIR NamedVar payload", Some(expr_value.span))
                 var b_bad_named_var = self.builder
@@ -7726,7 +7749,7 @@ impl MirLowering:
                                 None
                             ),
                             has_type_: false,
-                            type_: nil,
+                            type_: HirType(kind: HirTypeKind.Unit, span: arm0.pattern.span),
                             span: arm0.pattern.span
                         )
                         norm_arms = norm_arms.push(HirMatchArm(
