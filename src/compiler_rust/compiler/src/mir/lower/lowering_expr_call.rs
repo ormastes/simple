@@ -178,7 +178,7 @@ impl<'a> MirLowerer<'a> {
     /// done a few lines below for arbitrary user enums (see
     /// `doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md`);
     /// the `Some`/`Ok`/`Err` fast paths above bypassed that logic.
-    fn box_enum_payload_if_needed(&mut self, value: VReg, arg_ty: TypeId) -> MirLowerResult<VReg> {
+    pub(super) fn box_enum_payload_if_needed(&mut self, value: VReg, arg_ty: TypeId) -> MirLowerResult<VReg> {
         if arg_ty == TypeId::BOOL {
             // Enum payloads hold RuntimeValues. Boolean true is SPECIAL_TRUE
             // (11), not the tagged integer 1 (8) produced by BoxInt.

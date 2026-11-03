@@ -2188,18 +2188,41 @@ impl Lowerer {
             ty: subject_ty,
         };
 
-        // Create a nil check: expr != nil
-        let nil_expr = HirExpr {
-            kind: HirExprKind::Nil,
-            ty: TypeId::NIL,
-        };
-        let condition = HirExpr {
-            kind: HirExprKind::Binary {
-                op: BinOp::NotEq,
-                left: Box::new(expr_hir.clone()),
-                right: Box::new(nil_expr),
-            },
-            ty: TypeId::BOOL,
+        // Presence check: neither the nil sentinel nor a canonical
+        // `Option::None`. A bare `expr != nil` compared the word against the
+        // sentinel only, so a canonical None (e.g. `Dict.get` on a miss, which
+        // returns a real Option) took the present branch and unwrapped to nil
+        // (jit_dict_get_option_presence_in_string_interp_2026-11-03).
+        // Only tagged `T?` slots take `rt_is_some` (`!rt_is_none`, i.e.
+        // `is_nil()` for every non-enum word); raw scalar / raw-pointer
+        // operands keep the sentinel compare, as in `lower_condition`.
+        let is_tagged_slot = matches!(
+            self.module.types.get(subject_ty),
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared | PointerKind::Unique | PointerKind::Weak | PointerKind::Handle,
+                ..
+            })
+        );
+        let condition = if is_tagged_slot {
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_is_some".to_string(),
+                    args: vec![expr_hir.clone()],
+                },
+                ty: TypeId::BOOL,
+            }
+        } else {
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::NotEq,
+                    left: Box::new(expr_hir.clone()),
+                    right: Box::new(HirExpr {
+                        kind: HirExprKind::Nil,
+                        ty: TypeId::NIL,
+                    }),
+                },
+                ty: TypeId::BOOL,
+            }
         };
 
         // The result type is the type of the expression (or default if expr could be nil)

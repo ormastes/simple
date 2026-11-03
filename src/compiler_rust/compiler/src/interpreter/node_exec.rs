@@ -1523,6 +1523,15 @@ pub(crate) fn exec_assignment(
                                         env.insert(obj_name.clone(), Value::Object { class, fields });
                                         Ok(Control::Next)
                                     }
+                                    // A class-typed field of a struct holds a shared
+                                    // reference (SIMPLE_INTERP_CLASS_REF carrier): mutate
+                                    // the instance in place so every alias observes it.
+                                    Value::ClassInstance(inner_inst) => {
+                                        let value = coerce_to_declared_field(inner_inst.class(), field, value, classes);
+                                        inner_inst.set_field(field.clone(), value);
+                                        env.insert(obj_name.clone(), Value::Object { class, fields });
+                                        Ok(Control::Next)
+                                    }
                                     _ => {
                                         let ctx = ErrorContext::new()
                                             .with_code(codes::INVALID_ASSIGNMENT)
