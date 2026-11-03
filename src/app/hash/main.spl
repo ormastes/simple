@@ -1,0 +1,55 @@
+# `simple run src/app/hash/main.spl --xxh3|--blake3 [--lf] <file>...`
+#
+# Prints the lowercase hex digest of a file (xxh3: 16 chars, blake3: 64 chars).
+# --lf strips every CR (0x0D) before hashing so CRLF/LF checkouts agree.
+
+use std.cli.cli_util.{get_cli_args}
+use std.common.hash.xxh3.{xxh3_64_hex_bytes}
+use std.common.crypto.blake3.{blake3_hash, blake3_hex}
+
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+
+fn strip_cr(raw: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < raw.len():
+        if raw[i] != 13u8:
+            out.push(raw[i])
+        i = i + 1
+    out
+
+fn main() -> i64:
+    # Batch: every non-flag arg after the first flag is a file; one process,
+    # one `<hex>  <path>` line per file (xxhsum/sha256sum layout).
+    val args = get_cli_args()
+    var algo = ""
+    var lf = false
+    var seen_flag = false
+    var paths: [text] = []
+    for a in args:
+        if a == "--xxh3" or a == "--blake3":
+            algo = a
+            seen_flag = true
+        elif a == "--lf":
+            lf = true
+            seen_flag = true
+        elif seen_flag:
+            paths.push(a)
+    if algo == "" or paths.len() == 0:
+        print("usage: hash --xxh3|--blake3 [--lf] <file>...")
+        return 2
+    var rc = 0
+    for path in paths:
+        match rt_file_read_bytes(path):
+            case Some(data):
+                var bytes: [u8] = data
+                if lf:
+                    bytes = strip_cr(bytes)
+                if algo == "--xxh3":
+                    print("{xxh3_64_hex_bytes(bytes)}  {path}")
+                else:
+                    print("{blake3_hex(blake3_hash(bytes))}  {path}")
+            case None:
+                print("hash: cannot read {path}")
+                rc = 1
+    rc
