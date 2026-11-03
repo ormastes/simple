@@ -1,6 +1,9 @@
 # `app_mcp_intensive_spec` is not hung — it is an 84s spec, RED with 8 real failures
 
 Status: OPEN (P2)
+Current qualification (2026-11-03): historical diagnosis partially superseded;
+current-source regression execution remains TEST_BLOCKED. See the dated
+reconciliation below before changing compiler semantics or server behavior.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 against the product (8 real assertion failures) and is left RED.
 **Filed:** 2026-08-10
@@ -166,3 +169,47 @@ Reconfirmed classification: not a hang, a slow (84s) spec with 8 real
 product assertion failures, deliberately left RED per this record. Not
 re-run this pass (84s cost, no new information expected). Left as-is, no
 code change attempted.
+
+## 2026-11-03: current-source reconciliation, not a new runtime PASS
+
+Inspected fetched `release/1.0.0` at `524e65382b2`. The August verdicts above
+remain historical evidence. They do not describe a run of this revision.
+
+The six dictionary-presence scenarios now explicitly compare the result of
+`.?` with `nil` in `test/02_integration/app/app_mcp_intensive_spec.spl`.
+The language's current quick reference, section "Existence Check (`.?`) —
+Returns `T?`", specifies payload-or-nil semantics, including pattern binding
+and coalescing. `compiler.core.interpreter.eval`'s `EXPR_EXISTS_CHECK` arm
+normalizes the payload and returns it when present, or nil when absent. Thus
+the historical claim that this operator must always return `bool` must not
+be used to rewrite the current compiler. Presence assertions must compare
+with nil; payload assertions must check the actual payload.
+
+The two source-mode unknown-tool scenarios reach `main.spl`'s `tools/call`
+arm, then `main_dispatch.dispatch_tool`, then `make_tool_error`. The current
+owner creates a JSON-RPC `result` with `isError:true`, code `-32601` and the
+unknown tool name, without a protocol-level `error` member. Existing
+`tool_dispatch_spec.spl` covers unknown and missing tool names. Historical
+commit `f1b6a04b044` (an ancestor of this inspected release head) records
+35/35 against the older facade's lowercase message. Current dispatch and
+the current intensive assertions both use `Unknown tool`. Neither historical
+case-sensitive wording nor that old 35/35 verdict is a current runtime test.
+
+The numbered intensive spec currently also has `only-compiled` tags on its
+intensive groups, unlike the old measurement described above. A partial
+interpreter inventory cannot close this bug. No examples, guards, timeouts,
+tags or subprocess wrappers were changed in this reconciliation.
+
+Added `test/01_unit/app/mcp/intensive_failure_contract_spec.spl` with nine
+ungated real scenarios: all six dictionary shapes (including actual payload
+values), the real unknown-tool dispatcher, absent versus zero/false values,
+and separation of missing-name tool errors, protocol errors and tool success.
+No production/compiler edit is warranted from the current source evidence.
+
+Behavioral status is **TEST_BLOCKED**, zero executed cases: this Windows
+host has no qualified self-hosted full CLI. The Rust seed was not used for
+ordinary testing. Keep this record open until a qualified producer executes
+the focused spec, the full intensive compiled inventory and MCP smoke/NFR
+gates with actual registered/pass/fail/skip counts. Startup, hot-request
+dispatch, cache/invalidation strategy and latency/RSS limits are unchanged;
+no performance improvement or new measurement is claimed.
