@@ -1,6 +1,6 @@
 # Caret essential leaf provider gaps
 
-Status: OPEN; original leaf gaps (file_read, print_raw, manager adapters) verified 2026-11-03: test/01_unit/app/llm_caret/essential_leaf_provider_spec.spl 3/3 and test/01_unit/lib/smtp/recipient_array_type_spec.spl 3/3 passing. Remaining enum payload, local binding and collection method closure failures keep this open.
+Status: CLOSED 2026-11-03 (split; see end). Prior: OPEN; original leaf gaps (file_read, print_raw, manager adapters) verified 2026-11-03: test/01_unit/app/llm_caret/essential_leaf_provider_spec.spl 3/3 and test/01_unit/lib/smtp/recipient_array_type_spec.spl 3/3 passing. Remaining enum payload, local binding and collection method closure failures keep this open.
 
 Actual aa404/a0 Caret closure HIR errors: helpers_compat imports absent std.io.file_read; tui_io calls unbound print_raw; pane_team imports three functions not declared by multi_caret_manager. Retained evidence: /home/ormastes/simple-phase4-web-a0-parallel-20261010/caret/build/failure-summary.json. This is a source provider repair, not permission to suppress diagnostics.
 
@@ -67,3 +67,7 @@ qualification; producer remains unadmitted.
 **Revalidated 2026-11-02: still plausible because OPEN; source repair and regressions AUTHORED_UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**
 
 **2026-11-03 (sonB): deferred.** Source repairs are authored; the remaining items (enum payload, local binding, collection method failures) need the Caret closure HIR run on stage3 to enumerate; workaround kept.
+
+## 2026-11-03 closed
+
+The named gaps (file_read, print_raw, pane-manager adapters, ModelProfileV1 import, SMTP `List` types) are repaired and verified (essential_leaf_provider_spec 3/3, recipient_array_type_spec 3/3). The remaining closure failures are separate compiler classes (enum payload, local binding, collection method owners), split into caret_closure_enum_payload_binding_collection_gaps_2026_11_03.
