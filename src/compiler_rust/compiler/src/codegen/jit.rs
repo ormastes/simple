@@ -184,8 +184,9 @@ impl JitCompiler {
             // de-JITted code is *correct but slow*, so it silently hides real
             // miscompiles until someone makes it fast. Always emit a greppable
             // marker naming the symbol.
+            let kind = unresolved_import_kind(&name);
             eprintln!(
-                "[jit-fallback] unresolved external symbol '{name}': \
+                "[jit-fallback] unresolved external symbol '{name}' ({kind}): \
                  whole module dropped to the interpreter (expect ~100-1000x slowdown). \
                  Set SIMPLE_JIT_STRICT=1 to turn this into a hard error."
             );
@@ -195,12 +196,12 @@ impl JitCompiler {
             if jit_fallback_is_strict() {
                 self.emit_unresolved_symbol_trace(mir, &name);
                 return Err(BackendError::ModuleError(format!(
-                    "SIMPLE_JIT_STRICT: unresolved external symbol '{name}' would NULL-jump in JIT; \
+                    "SIMPLE_JIT_STRICT: unresolved external symbol '{name}' ({kind}) would NULL-jump in JIT; \
                      refusing to fall back to the interpreter"
                 )));
             }
             return Err(BackendError::ModuleError(format!(
-                "unresolved external symbol '{name}' would NULL-jump in JIT; deferring to interpreter"
+                "unresolved external symbol '{name}' ({kind}) would NULL-jump in JIT; deferring to interpreter"
             )));
         }
 
@@ -805,3 +806,17 @@ fn dlsym_resolves(name: &str) -> bool {
 #[cfg(all(test, target_arch = "x86_64"))]
 #[path = "jit_tests.rs"]
 mod tests;
+
+/// Classify an unresolved JIT import for the de-JIT diagnostic.
+///
+/// Runtime/SFFI externs (`rt_*`, `spl_*`) lack a registered runtime symbol; any
+/// other name is a Simple function defined in ANOTHER module, which the
+/// per-module JIT does not compile or link (it is declared as an undefined
+/// `Linkage::Import` with no provider).
+fn unresolved_import_kind(name: &str) -> &'static str {
+    if name.starts_with("rt_") || name.starts_with("spl_") {
+        "runtime extern with no JIT-resolvable backing"
+    } else {
+        "cross-module Simple function; per-module JIT does not link imported Simple functions"
+    }
+}
