@@ -10899,6 +10899,29 @@ static HMODULE runtime_dynload_open_utf8(const char *path) {
 }
 #endif
 
+#if defined(__linux__)
+/* Fallback twin of runtime_dynload.c simple_dynload_unique_snapshot_linux_v1:
+ * dlopen caches by pathname even after the snapshot fd is closed, so every
+ * admitted snapshot must get a fresh, monotonically increasing fd number or a
+ * reused /proc/self/fd/N path could resolve to an older mapped object under a
+ * newer digest. Without this the fallback returned the raw memfd, whose number
+ * is reused as soon as it is closed. */
+static int simple_dynload_unique_snapshot_linux_v1(int snapshot) {
+    static atomic_flag lock = ATOMIC_FLAG_INIT;
+    static uint64_t fd_floor = 64;
+    int unique_snapshot = -1;
+    while (atomic_flag_test_and_set_explicit(&lock, memory_order_acquire)) { }
+    if (fd_floor <= INT_MAX) {
+        unique_snapshot = fcntl(snapshot, F_DUPFD_CLOEXEC, (int)fd_floor);
+        if (unique_snapshot >= 0)
+            fd_floor = (uint64_t)unique_snapshot + 1;
+    }
+    atomic_flag_clear_explicit(&lock, memory_order_release);
+    close(snapshot);
+    return unique_snapshot;
+}
+#endif
+
 int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
 #if defined(__linux__)
     const char* path = rt_interp_cstr(path_value);
@@ -10942,7 +10965,7 @@ int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
         close(snapshot);
         return -1;
     }
-    return (int64_t)snapshot;
+    return (int64_t)simple_dynload_unique_snapshot_linux_v1(snapshot);
 #else
     (void)path_value;
     return -1;
