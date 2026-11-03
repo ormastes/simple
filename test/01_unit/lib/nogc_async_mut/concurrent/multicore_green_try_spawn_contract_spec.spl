@@ -1,9 +1,65 @@
 use std.spec
-use std.concurrent.multicore_green.{MulticoreGreenHandle, multicore_green_try_spawn}
+use std.concurrent.multicore_green.{MulticoreGreenHandle, multicore_green_try_spawn, multicore_green_try_spawn_with_submit}
 
 fn try_spawn_contract_value() -> i64: 17
 
+var try_spawn_task_runs: i64 = 0
+var try_spawn_submit_calls: i64 = 0
+var try_spawn_submitted_env: i64 = -1
+
+fn try_spawn_observable_task() -> i64:
+    try_spawn_task_runs = try_spawn_task_runs + 1
+    17
+
+fn try_spawn_reject(task: fn() -> i64, env_ptr: i64) -> i64:
+    try_spawn_submit_calls = try_spawn_submit_calls + 1
+    try_spawn_submitted_env = env_ptr
+    0
+
+fn try_spawn_reject_negative(task: fn() -> i64, env_ptr: i64) -> i64:
+    try_spawn_submit_calls = try_spawn_submit_calls + 1
+    try_spawn_submitted_env = env_ptr
+    -7
+
+fn try_spawn_accept(task: fn() -> i64, env_ptr: i64) -> i64:
+    try_spawn_submit_calls = try_spawn_submit_calls + 1
+    try_spawn_submitted_env = env_ptr
+    23
+
 describe "multicore green non-inline submission":
+    it "does not execute the closure when submission returns zero":
+        try_spawn_task_runs = 0
+        try_spawn_submit_calls = 0
+        val handle = multicore_green_try_spawn_with_submit(try_spawn_observable_task, try_spawn_reject)
+        expect(try_spawn_submit_calls).to_equal(1)
+        expect(try_spawn_submitted_env).to_equal(0)
+        expect(try_spawn_task_runs).to_equal(0)
+        expect(handle.used_runtime_pool()).to_equal(false)
+        expect(handle.ran_inline_fallback()).to_equal(false)
+        expect(handle.is_done()).to_equal(false)
+
+    it "does not execute the closure when submission returns a negative error":
+        try_spawn_task_runs = 0
+        try_spawn_submit_calls = 0
+        val handle = multicore_green_try_spawn_with_submit(try_spawn_observable_task, try_spawn_reject_negative)
+        expect(try_spawn_submit_calls).to_equal(1)
+        expect(try_spawn_submitted_env).to_equal(0)
+        expect(try_spawn_task_runs).to_equal(0)
+        expect(handle.used_runtime_pool()).to_equal(false)
+        expect(handle.ran_inline_fallback()).to_equal(false)
+        expect(handle.is_done()).to_equal(false)
+
+    it "retains an accepted native handle without running work on the caller":
+        try_spawn_task_runs = 0
+        try_spawn_submit_calls = 0
+        val handle = multicore_green_try_spawn_with_submit(try_spawn_observable_task, try_spawn_accept)
+        expect(try_spawn_submit_calls).to_equal(1)
+        expect(try_spawn_submitted_env).to_equal(0)
+        expect(try_spawn_task_runs).to_equal(0)
+        expect(handle.native_handle).to_equal(23)
+        expect(handle.used_runtime_pool()).to_equal(true)
+        expect(handle.ran_inline_fallback()).to_equal(false)
+
     it "distinguishes a rejected submission from an inline result":
         val rejected = MulticoreGreenHandle(native_handle: 0, inline_done: false, inline_result: 0)
         expect(rejected.used_runtime_pool()).to_equal(false)
