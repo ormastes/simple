@@ -413,6 +413,59 @@ impl<'a> MirLowerer<'a> {
         // `lower_dict_expr`): boxing the value without unboxing `.get()` (or
         // vice versa) breaks the OTHER read path — see the comment there.
         // See task: dict_value_read_returns_tag_boxed_word.
+        // Policy: `Dict.get` returns `Option<V>` in every engine. HIR types
+        // `get` on a typed `Dict<K, V>` receiver (`receiver.ty` itself, the
+        // same test as `dict_kv` in hir/lower/expr/mod.rs) as `V?`, so build a
+        // canonical Option at runtime: a hit and a miss stay distinguishable
+        // (jit_dict_get_option_presence_in_string_interp_2026-11-03). The
+        // payload is the stored tagged word, the same shape `Some(v)` boxes.
+        if method == "get"
+            && args.len() == 1
+            && self.type_registry.is_some_and(
+                |tr| matches!(tr.get(receiver.ty), Some(HirType::Dict { value, .. }) if *value != TypeId::U64),
+            )
+        {
+            let value_ty = self
+                .type_registry
+                .and_then(|tr| match tr.get(receiver.ty) {
+                    Some(HirType::Dict { value, .. }) => Some(*value),
+                    _ => None,
+                })
+                .unwrap_or(TypeId::ANY);
+            let receiver_reg = self.lower_expr(receiver)?;
+            let key_reg = self.lower_expr(&args[0])?;
+            let key_ty = args[0].ty;
+            let boxed_key = if key_ty == TypeId::U64 {
+                self.box_u64_runtime_value(key_reg)?
+            } else if matches!(
+                key_ty,
+                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32
+            ) {
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxInt {
+                        dest: boxed,
+                        value: key_reg,
+                    });
+                    boxed
+                })?
+            } else if key_ty == TypeId::BOOL {
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(boxed),
+                        target: crate::mir::effects::CallTarget::from_name("rt_value_bool"),
+                        args: vec![key_reg],
+                    });
+                    boxed
+                })?
+            } else {
+                key_reg
+            };
+            return self.lower_dict_get_option(receiver_reg, boxed_key, value_ty);
+        }
         if method == "get" && args.len() == 1 && self.receiver_is_dict(receiver, receiver_local_ty) {
             let value_ty = self
                 .type_registry
@@ -2587,5 +2640,143 @@ mod enum_discriminant_abi_tests {
         assert_ne!(MirLowerer::enum_variant_discriminant("Err"), 1);
         // Well above any plausible ordinal, i.e. unmistakably a hash.
         assert!(MirLowerer::enum_variant_discriminant("Ok") > i64::from(u16::MAX));
+    }
+}
+
+impl<'a> MirLowerer<'a> {
+    /// `Dict.get(k)` on a typed `Dict<K, V>`: a canonical `Option`
+    /// (`Some(v)` on a hit, `None` on a miss), built from the
+    /// existing `rt_dict_contains` / `rt_dict_get` runtime pair so a stored
+    /// value equal to the nil sentinel is still present
+    /// (jit_dict_get_option_presence_in_string_interp_2026-11-03).
+    fn lower_dict_get_option(&mut self, dict: VReg, key: VReg, value_ty: TypeId) -> MirLowerResult<VReg> {
+        use crate::mir::effects::{CallTarget, LocalKind};
+        use crate::mir::function::MirLocal;
+
+        let slot = self.with_func(|func, _| {
+            let index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: format!("$dict_get_option_{}", index),
+                ty: TypeId::ANY,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+        let (slot_addr, present) = self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let present = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: slot,
+            });
+            block.instructions.push(MirInst::Call {
+                dest: Some(present),
+                target: CallTarget::from_name("rt_dict_contains"),
+                args: vec![dict, key],
+            });
+            (addr, present)
+        })?;
+        let (hit_id, miss_id, merge_id) = self.with_func(|func, current_block| {
+            let hit_id = func.new_block();
+            let miss_id = func.new_block();
+            let merge_id = func.new_block();
+            let block = func.block_mut(current_block).unwrap();
+            block.terminator = crate::mir::Terminator::Branch {
+                cond: present,
+                then_block: hit_id,
+                else_block: miss_id,
+            };
+            (hit_id, miss_id, merge_id)
+        })?;
+
+        self.set_current_block(hit_id)?;
+        let stored = self.with_func(|func, current_block| {
+            let stored = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Call {
+                dest: Some(stored),
+                target: CallTarget::from_name("rt_dict_get"),
+                args: vec![dict, key],
+            });
+            stored
+        })?;
+        // Decode the stored word to V's native form exactly as `d[k]` does
+        // (lower_index_expr), then box it the way `Some(v)` boxes a V payload,
+        // so the Option matches what every Option consumer expects.
+        let decoded = if matches!(
+            value_ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::BOOL
+        ) {
+            self.with_func(|func, current_block| {
+                let unboxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::UnboxInt {
+                    dest: unboxed,
+                    value: stored,
+                });
+                unboxed
+            })?
+        } else if matches!(value_ty, TypeId::F32 | TypeId::F64) {
+            self.with_func(|func, current_block| {
+                let unboxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::UnboxFloat {
+                    dest: unboxed,
+                    value: stored,
+                });
+                unboxed
+            })?
+        } else {
+            stored
+        };
+        let payload = self.box_enum_payload_if_needed(decoded, value_ty)?;
+        self.with_func(|func, current_block| {
+            let some = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::OptionSome {
+                dest: some,
+                value: payload,
+            });
+            block.instructions.push(MirInst::Store {
+                addr: slot_addr,
+                value: some,
+                ty: TypeId::ANY,
+            });
+        })?;
+        self.finalize_block_jump(merge_id)?;
+
+        self.set_current_block(miss_id)?;
+        self.with_func(|func, current_block| {
+            let none = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::OptionNone { dest: none });
+            block.instructions.push(MirInst::Store {
+                addr: slot_addr,
+                value: none,
+                ty: TypeId::ANY,
+            });
+        })?;
+        self.finalize_block_jump(merge_id)?;
+
+        self.set_current_block(merge_id)?;
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Load {
+                dest,
+                addr: slot_addr,
+                ty: TypeId::ANY,
+            });
+            dest
+        })
     }
 }

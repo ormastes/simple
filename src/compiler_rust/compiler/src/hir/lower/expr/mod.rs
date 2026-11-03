@@ -2236,6 +2236,14 @@ impl Lowerer {
                 // RuntimeValue and misdecoded it (nil / <invalid-heap> /
                 // garbage float) under the JIT — the exact ANY/unboxed-V
                 // mismatch class documented just above for `index_of`.
+                // `get` on a typed Dict<K, V> is `V?` (policy: Dict.get
+                // returns Option); MIR builds it (lower_dict_get_option). A
+                // `u64` value stays bare V: `u64? ?? d` is not decoded on the
+                // JIT yet (optional_boxint_scalar_inner excludes u64), so
+                // retyping it would regress `d.get(k) ?? 0` arithmetic.
+                "get" if dict_kv.is_some_and(|(_, v)| v != TypeId::U64) && hir_args.len() == 1 => {
+                    Some(self.module.types.register_optional(dict_kv.map(|(_, v)| v).unwrap()))
+                }
                 "get" | "remove" | "get_or" => Some(dict_kv.map(|(_, v)| v).unwrap_or(TypeId::ANY)),
                 "insert" | "set" | "put" | "clear" => Some(TypeId::VOID),
                 "contains_key" | "has" | "contains" => Some(TypeId::BOOL),
