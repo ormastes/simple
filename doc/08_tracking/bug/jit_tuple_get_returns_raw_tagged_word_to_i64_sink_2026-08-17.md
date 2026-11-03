@@ -7,7 +7,7 @@ evidence found in the body. This is bookkeeping, not verification.
 **ID:** jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17
 **Date:** 2026-08-17
 **Severity:** P1 — silent wrong value, exit 0, no diagnostic.
-**Status:** OPEN — re-verified on the 2026-08-17 12:58 seed; the omitted lowering site is now identified (see the end of this record). Not fixed: Rust seed.
+**Status:** FIXED (verified 2026-11-03, fix commit ee815637f72; see "Verified" at the end).
 
 ## How it was found
 
@@ -152,3 +152,15 @@ defect being i64-specific. Not measured; stated as a prediction, not a finding.
 Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
 
 **Revalidated 2026-11-02: still plausible because OPEN — re-verified on the 2026-08-17 12:58 seed; the omitted lowering site is now identified (see the end of this record). Not fixed: Rust s; no merged fix commit with a passing regression is cited in this doc.**
+
+## Verified (2026-11-03)
+
+Fix commit `ee815637f72` (HIR + MIR constant-index tuple `.get()` typed unbox).
+Verified on the current release/1.0.0 seed (`bin/simple.exe`, Rust seed):
+the record's repro prints `5 5 5 5` under both `SIMPLE_EXECUTION_MODE=jit` and
+`interpreter` (was `40 40 5 5` under jit), and
+`test/01_unit/compiler/codegen/probe_int_width_boxing_matrix_jit.spl` prints
+PASS for every row including `tuple_i64_0`, `tuple_inferred_i64_1`,
+`tuple_mixed_i64_1`, `tuple_mixed_text_1`, `tuple_labeled_i64_1`,
+`tuple_labeled_text_0`. (The `test` subcommand is unavailable on the seed, so
+the probe was run directly via `run`.)
