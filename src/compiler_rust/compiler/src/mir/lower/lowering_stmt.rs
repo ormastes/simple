@@ -62,12 +62,23 @@ fn if_merge_tail_value_ty(stmts: &[HirStmt], depth: usize) -> Option<TypeId> {
 /// Narrow on purpose: only floats switch away from `I64`, and only when every
 /// value-producing arm agrees on the same float type. Every other shape keeps
 /// the previous `I64` slot, so this cannot perturb int/bool/heap merges.
+fn if_merge_is_int(ty: TypeId) -> bool {
+    matches!(
+        ty,
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+    )
+}
+
 fn if_merge_local_ty(then_block: &[HirStmt], else_block: Option<&Vec<HirStmt>>) -> TypeId {
     let is_float = |ty: TypeId| matches!(ty, TypeId::F32 | TypeId::F64);
     let then_ty = if_merge_tail_value_ty(then_block, 0);
     let else_ty = else_block.and_then(|stmts| if_merge_tail_value_ty(stmts, 0));
     let merged = match (then_ty, else_ty) {
         (Some(a), Some(b)) if a == b => Some(a),
+        // One float arm + one plain integer arm (`1.5` vs the literal `2` in an
+        // f64 fn): merge as the float; the integer arm is converted at its store.
+        (Some(a), Some(b)) if is_float(a) && if_merge_is_int(b) => Some(a),
+        (Some(a), Some(b)) if is_float(b) && if_merge_is_int(a) => Some(b),
         (Some(a), None) => Some(a),
         (None, Some(b)) => Some(b),
         _ => None,
@@ -1430,8 +1441,10 @@ impl<'a> MirLowerer<'a> {
                 let then_value = self.last_expr_value;
                 // Store then value in temp local BEFORE finalize (current block may be inner merge)
                 if let Some(tv) = then_value {
+                    let arm_ty = if_merge_tail_value_ty(then_block, 0);
                     self.with_func(|func, current_block| {
                         let addr = func.new_vreg();
+                        let tv = if_merge_int_arm_to_float(func, current_block, tv, arm_ty, merge_ty);
                         let block = func.block_mut(current_block).unwrap();
                         block.instructions.push(MirInst::LocalAddr {
                             dest: addr,
@@ -1457,8 +1470,10 @@ impl<'a> MirLowerer<'a> {
                 let else_value = self.last_expr_value;
                 // Store else value in temp local BEFORE finalize
                 if let Some(ev) = else_value {
+                    let arm_ty = else_block.as_ref().and_then(|s| if_merge_tail_value_ty(s, 0));
                     self.with_func(|func, current_block| {
                         let addr = func.new_vreg();
+                        let ev = if_merge_int_arm_to_float(func, current_block, ev, arm_ty, merge_ty);
                         let block = func.block_mut(current_block).unwrap();
                         block.instructions.push(MirInst::LocalAddr {
                             dest: addr,
@@ -2750,5 +2765,29 @@ fn range_counter_type(start_ty: TypeId, end_ty: TypeId) -> TypeId {
             TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 => start_ty,
             _ => TypeId::I64,
         },
+    }
+}
+
+/// Convert an integer-typed tail value to the float merge slot type (see
+/// `if_merge_local_ty`); any other combination passes the vreg through.
+fn if_merge_int_arm_to_float(
+    func: &mut crate::mir::function::MirFunction,
+    block: crate::mir::instructions::BlockId,
+    value: VReg,
+    arm_ty: Option<TypeId>,
+    merge_ty: TypeId,
+) -> VReg {
+    match arm_ty {
+        Some(ty) if matches!(merge_ty, TypeId::F32 | TypeId::F64) && if_merge_is_int(ty) => {
+            let dest = func.new_vreg();
+            func.block_mut(block).unwrap().instructions.push(MirInst::Cast {
+                dest,
+                source: value,
+                from_ty: ty,
+                to_ty: merge_ty,
+            });
+            dest
+        }
+        _ => value,
     }
 }
