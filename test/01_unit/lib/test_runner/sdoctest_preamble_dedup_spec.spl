@@ -1,0 +1,34 @@
+# Guard: sdoctest preamble must not grow with repeated `use` lines.
+# Bug: sdoctest_use_accumulation_exceeds_5s_block_timeout_2026-08-18
+use std.test_runner.sdoctest.extractor.{extract_reusable_lines, build_accumulated_preambles}
+use std.io.{time_now_unix_micros}
+
+fn doc_blocks(n: i64) -> [text]:
+    var codes: [text] = []
+    var i = 0
+    while i < n:
+        codes.push("use std.spec.{describe, it}\nuse app.io.*\nuse std.text.*\nval x{i} = {i}\nprint(x{i})")
+        i = i + 1
+    codes
+
+describe "sdoctest preamble accumulation":
+    it "dedups repeated use lines: last of 40 blocks has only the 3 unique uses":
+        val pre = build_accumulated_preambles(doc_blocks(40))
+        expect(pre.len()).to_equal(40)
+        val last_lines = pre[39].split("\n")
+        expect(last_lines.len()).to_equal(3)
+        expect(last_lines[0]).to_equal("use std.spec.{describe, it}")
+        expect(last_lines[1]).to_equal("use app.io.*")
+        expect(last_lines[2]).to_equal("use std.text.*")
+        expect(pre[0]).to_equal("")
+
+    it "keeps first-seen order and distinct defs across blocks":
+        val pre = build_accumulated_preambles(["use a.b\nfn f():\n    use c.d", "use e.f\nuse a.b", "x"])
+        expect(pre[2]).to_equal("use a.b\nfn f():\n    use c.d\nuse e.f")
+
+    it "builds the 40-block preambles in under 5000 ms":
+        val t0 = time_now_unix_micros()
+        val pre = build_accumulated_preambles(doc_blocks(40))
+        val ms = (time_now_unix_micros() - t0) / 1000
+        print("preamble_build_ms={ms} last_len={pre[39].len()}")
+        expect(ms < 5000).to_equal(true)
