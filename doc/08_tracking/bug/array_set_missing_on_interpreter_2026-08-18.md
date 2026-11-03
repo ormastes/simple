@@ -61,3 +61,12 @@ index-set semantics as `rt_index_set`), then revert the helper in
 still passes. A seed rebuild is required to verify; the lane that found this
 was forbidden from rebuilding `bin/simple`.
 
+
+## Fixed 2026-11-03
+
+Added `set` to the seed interpreter array mutators (`ARRAY_MUTATING_METHODS`, `apply_array_mutation_in_place`,
+and the three arg-evaluation sites in `interpreter_helpers/patterns.rs`). Writes back like `push` (var binding,
+class field, module global). Negative index counts from the end (as `rt_array_set`); out of range raises
+`E3002` (codegen's `rt_index_set` returns false silently; interpreter fails closed instead).
+Spec: `test/01_unit/interpreter/array_set_method_spec.spl` (5/5; 5/5 failed before).
+Status: fix-implemented-partial. Remaining gap: JIT lane (`SIMPLE_EXECUTION_MODE=jit`) still reports `Method 'set' not found on type 'Array'`; interpreter lane is fixed.
