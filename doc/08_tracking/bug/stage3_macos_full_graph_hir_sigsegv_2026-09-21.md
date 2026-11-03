@@ -78,3 +78,12 @@ rerun with a Stage2 built by a post-`2c89727c11c` seed.
   `sh scripts/bootstrap/resume-stage3-from-admitted.sh <OUTPUT_DIR>` under
   `lldb` (or keep the ReportCrash IPS). It passes when HIR reaches 848/848; if
   it crashes, attach the symbolized backtrace here.
+
+## 2026-11-03 status: open, macOS-only, needs-macos-backtrace
+
+No generic cause on release/1.0.0: the types.spl:1017-1023 guard (PR #5855)
+is in place and the crash does not reproduce on Windows. Likely cause: a stale
+Stage2 built from a seed older than 2c89727c11c.
+
+macOS repro: rebuild Stage2 from a seed that includes 2c89727c11c, run Stage3
+under `lldb -o run`, and save the crash report (symbolized backtrace) here.
