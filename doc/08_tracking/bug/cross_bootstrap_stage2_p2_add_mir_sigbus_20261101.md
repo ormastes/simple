@@ -90,9 +90,21 @@ That exact source is retained as `test/04_smoke/bootstrap_tuple_projection.spl`.
 Commands, hashes and external stdout comparisons are in the implementation
 worktree's `build/cross-bootstrap/tuple-probe/observation_{i64,generic}/`.
 
-Two diagnostic probe cycles completed, no repaired full compiler built yet.
-The two production declarations/calls are now corrected locally. Refreshed
-Stage 2 RTI compatibility, p2_add, Hello and normal test-runner gates remain
-open. The old frozen Windows producer's RTI limitation remains historical;
-this correction does not claim compatibility with that producer. Astra's
-source review found zero P0/P1 issues; fresh-candidate verification is pending.
+The two controlled diagnostic cycles above preceded the later provisional
+compiler build. Producer `e08760304ddc7a441fe7f9d9a71afebdd3b129f217d6e49b04cb47bb70411553`
+subsequently passed its recorded narrow p2_add/Hello and receiver probes, but
+full qualification rejected it: the CLI build failed after 1,817 seconds and
+the test-runner build failed after 96 seconds. Neither tooling artifact was
+behavior-qualified. Exact rejection and resource receipts are preserved in
+`doc/09_report/evidence/immutable_hir_p0_20261103/`; narrow probes do not override
+that rejection.
+
+On 2026-11-03, upstream `9cf71a74dbf` restored the typed tuple contracts in both
+production owners and additional parser/HIR owners. The release-lane rebase
+retains those upstream production files unchanged; this local tuple increment
+now contributes regression coverage and historical evidence only. The separate
+enum-provider correction still requires its own qualification.
+
+The old frozen Windows producer's RTI limitation remains historical. Astra's
+source review found no confirmed P0/P1 in the retained tuple contract; a fresh
+Phase 3 link and Hello produced by that exact candidate remain unverified.

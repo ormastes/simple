@@ -178,3 +178,14 @@ held for phase-3 memory.
 
 Status: FIXED IN SOURCE at release/1.0.0; OPEN only for the frozen stage2. Revert-ready:
 yes after the stage2 refresh named in "Removal condition" (keep `map_values<U>`).
+
+### 2026-11-03 release integration note
+
+Upstream `9cf71a74dbf` restores typed foreign tuple projections in the compiler
+owners, including the two production sites covered by the cross-bootstrap
+tuple regression. The rebased cross-bootstrap lane keeps those upstream files
+unchanged. This source integration does not qualify producer `e0876030…1553`:
+its narrow sanity/receiver probes passed, but full CLI and test-runner builds
+were rejected. Historical receipts are retained under
+`doc/09_report/evidence/immutable_hir_p0_20261103/`. A fresh Phase 3 candidate
+must link and compile/run its own Hello before that lane can land.
