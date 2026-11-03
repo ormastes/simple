@@ -1,0 +1,43 @@
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+# bug stage2_var_hir_module_field_access_offset0_2026-11-03: the frozen phase-3
+# stage2 lowers every field access on the reassigned `var hir_module: HirModule`
+# of the streaming/retained HIR loops at offset 0, so the layout projection read
+# the module's first word as `symbols` and the stage3 hello smoke AV'd. Field
+# access through a typed parameter lowers correctly, so the two loops must reach
+# the module's fields only through the typed accessors.
+fn hir_loop_bodies(src: text) -> text:
+    val start = src.index_of("me lower_and_check_streaming_surfaces_impl")
+    val stop = src.index_of("fn lower_to_hir_impl")
+    if start < 0 or stop <= start:
+        return ""
+    src.substring(start, stop)
+
+describe "HIR loop module field access goes through typed accessors":
+    it "defines one typed accessor per field the loops read":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        expect(src).to_contain("fn driver_hir_module_typed_v1(m: HirModule) -> HirModule:")
+        expect(src).to_contain("fn driver_hir_module_path_v1(m: HirModule) -> text:")
+        expect(src).to_contain("fn driver_hir_module_structs_v1(m: HirModule) -> Dict<SymbolId, HirStruct>:")
+        expect(src).to_contain("fn driver_hir_module_symbols_v1(m: HirModule) -> SymbolTable:")
+        expect(src).to_contain("fn driver_hir_module_functions_v1(m: HirModule) -> Dict<SymbolId, HirFunction>:")
+
+    it "never dereferences the reassigned var hir_module directly inside the two loops":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val loops = hir_loop_bodies(src)
+        expect(loops.len() > 0).to_equal(true)
+        expect(loops).not_to_contain("hir_module.path")
+        expect(loops).not_to_contain("hir_module.structs")
+        expect(loops).not_to_contain("hir_module.symbols")
+        expect(loops).not_to_contain("hir_module.functions")
+        expect(loops).not_to_contain("hir_module.representation_declarations")
+
+    it "routes the layout projection through the accessors at both retained sites":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val loops = hir_loop_bodies(src)
+        val call = "driver_hir_module_symbols_v1(hir_module)"
+        val first = loops.index_of(call)
+        expect(first >= 0).to_equal(true)
+        val rest = loops.substring(first + call.len(), loops.len())
+        expect(rest.index_of(call) >= 0).to_equal(true)
