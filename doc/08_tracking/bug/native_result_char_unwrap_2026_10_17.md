@@ -17,3 +17,12 @@ Source evidence: switch_operators_calls.spl enum-match binding3915 invokes decod
 The immediately preceding workaround tag identifies this bug and full recovery hash. Applied workaround commit is recorded in external cycle2 freeze metadata after commit. Removing the workaround requires fixing and qualifying the actual producer unwrap owner, not just fetching a patch. No automatic recovery/reset is authorized.
 
 Next attempt is NativeChar feature cycle2/3, SAME entry and cycle1 persistent cache with ordinary source invalidation, same exact producer/runtime/SDK lineage. Root must review frozen source/command before launch. No stale cache identity rewrite, foreign runtime, reader helper rerun, generated-codec consumer claim or exhausted-budget reset is permitted. Broad compiler/lib/MCP/LSP/BDD and whole-codec acceptance remain UNRUN.
+## 2026-11-03 — fix implemented, verification pending
+
+`lower_result_unwrap_core` gained a `HirTypeKind.Char` arm (no-default only,
+like Bool) typing the result `MirTypeKind.Char`; the payload word passes
+through `enum_payload_value` raw, matching the Ok(c) match binding.
+Spec: `test/01_unit/compiler/mir/result_char_unwrap_lowering_spec.spl`.
+Verification pending: rerun the NativeChar cycle with a stage3 compiler, then
+drop the fixture workaround. Siblings not changed: `result_optional_inner_supported`
+and the Result tuple element mapper also lack Char (`Result<char?,E>`, tuples).

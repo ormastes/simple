@@ -811,3 +811,15 @@ O(index) scan — the quadratic term when a caller walks a string — is unfixed
 **What was NOT proven.** No timing re-measurement. The quadratic *magnitude* in
 the doc's baseline table is unre-run; only the code shape was verified.
 
+
+## 2026-11-03 — Defect 2 fix implemented (ADR-005 ASCII flag), verification pending
+
+`rt_string_char_code_at` now consults a lazily computed is-ASCII header bit
+(`string_ascii_state`, word-0 bits 33/34, clear of the transient bit 32) and
+returns the byte directly for all-ASCII strings — O(len) once, then O(1),
+including reverse/random access the forward char cursor could not rescue.
+Spec: `test/01_unit/runtime/core_string_char_code_at_ascii_budget_spec.spl`
+(structural + reverse-scan 20k-char budget 2.0 s on the seed lane).
+Sibling search: no other char-index walk in `src/runtime/simple_core/`.
+Verification pending: needs a native/SimpleOS build exercising core_string.
+Defect 1 (seed non-ASCII quadratic) is Rust-seed work, deferred (C: < 15 GB).
