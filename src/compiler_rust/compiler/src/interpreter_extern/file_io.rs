@@ -977,6 +977,12 @@ pub fn rt_process_hwm_kib(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(simple_runtime::mem_snapshot::rt_process_hwm_kib()))
 }
 
+/// Peak RSS in KiB of the child reaped by the most recent bounded/timeout
+/// process run on this thread, or -1 when it was not measured.
+pub fn rt_process_last_child_peak_rss_kib(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::child_peak_rss::rt_process_last_child_peak_rss_kib()))
+}
+
 fn snapshot_monotonic_ms() -> i64 {
     #[cfg(unix)]
     unsafe {

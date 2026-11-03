@@ -1,0 +1,43 @@
+"""
+## Purpose and audience
+Supervised runners (test runner R6, supervised builder R5) must report the peak
+RSS of each child they run. `process_last_child_peak_rss_kib` returns the peak
+captured at the child's own reap (wait4 ru_maxrss / PeakWorkingSetSize), not the
+parent's high-water mark and not a running maximum over all children.
+"""
+# @manual_section: Process peak RSS
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_last_child_peak_rss_kib}
+use std.platform.{is_windows}
+
+fn run_allocating_child(megabytes: i64) -> (text, text, i64):
+    val open_brace = text.from_char_code(123)
+    val close_brace = text.from_char_code(125)
+    if is_windows():
+        # Write one byte per 4 KiB page so the whole array is resident.
+        val script = "$a = New-Object byte[] " + megabytes.to_string() + "MB; for ($i = 0; $i -lt $a.Length; $i += 4096) " + open_brace + " $a[$i] = 1 " + close_brace
+        return process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], 60000, 65536)
+    # awk keeps one 1 MB string per slot, so N slots is ~N MB resident.
+    val prog = "BEGIN " + open_brace + " s = sprintf(\"%1000000s\", \"x\"); for (i = 0; i < " + megabytes.to_string() + "; i++) a[i] = s " + close_brace
+    process_run_bounded("awk", [prog], 60000, 65536)
+
+describe "child peak RSS":
+    it "reports at least 180 MB and under 400 MB for a child that allocates 200 MB":
+        step("Run a child that touches 200 MB")
+        val (_out, _err, code) = run_allocating_child(200)
+        expect(code).to_equal(0)
+        val peak_kib = process_last_child_peak_rss_kib()
+        step("Peak {peak_kib} KiB must be within [180 MB, 400 MB)")
+        expect(peak_kib >= 180 * 1024).to_equal(true)
+        expect(peak_kib < 400 * 1024).to_equal(true)
+
+    it "is per child: a later small child does not inherit the earlier peak":
+        step("Run a heavy child then a light one")
+        val (_o1, _e1, c1) = run_allocating_child(200)
+        expect(c1).to_equal(0)
+        val (_o2, _e2, c2) = run_allocating_child(1)
+        expect(c2).to_equal(0)
+        val peak_kib = process_last_child_peak_rss_kib()
+        step("Second peak {peak_kib} KiB must be below 150 MB")
+        expect(peak_kib > 0).to_equal(true)
+        expect(peak_kib < 150 * 1024).to_equal(true)

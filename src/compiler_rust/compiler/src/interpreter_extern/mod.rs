@@ -1425,6 +1425,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ed25519_verify", signatures::rt_ed25519_verify);
     insert_simple!("rt_ed25519_verify_checked", signatures::rt_ed25519_verify_checked);
     insert_simple!("rt_entropy_hardware_ready", random::rt_entropy_hardware_ready_fn);
+    insert_simple!("rt_entropy_fill", random::rt_entropy_fill_fn);
     insert_simple!("rt_env_all", system::rt_env_all);
     insert_simple!("rt_env_vars", system::rt_env_all);
     insert_simple!("rt_env_cwd", system::rt_env_cwd);
@@ -1564,6 +1565,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_publish_noreplace", file_io::rt_file_publish_noreplace);
     insert_simple!("rt_process_rss_kib", file_io::rt_process_rss_kib);
     insert_simple!("rt_process_hwm_kib", file_io::rt_process_hwm_kib);
+    insert_simple!("rt_process_last_child_peak_rss_kib", file_io::rt_process_last_child_peak_rss_kib);
     insert_simple!("rt_mem_snapshot_open", file_io::rt_mem_snapshot_open);
     insert_simple!("rt_mem_snapshot_record", file_io::rt_mem_snapshot_record);
     insert_simple!("rt_mem_snapshot_close", file_io::rt_mem_snapshot_close);

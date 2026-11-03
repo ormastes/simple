@@ -3,8 +3,13 @@
 # The operation result for the current fill authorizes the returned bytes.
 # `rt_entropy_hardware_ready` remains diagnostic compatibility only and must
 # never substitute for an exact-fill result.
+#
+# `rt_entropy_fill(count)` returns a fresh byte array of exactly `count` OS
+# CSPRNG bytes (BCryptGenRandom / getrandom / getentropy), or nil on any
+# provider failure. It never returns a zero-filled stand-in.
 
-extern fn rt_entropy_fill(bytes: [u8]) -> i64
+@unsafe(reason: "OS CSPRNG byte provider; nil on failure, checked for presence and exact length", capabilities: [ffi])
+extern fn rt_entropy_fill(count: u64) -> [u8]?
 extern fn rt_entropy_hardware_ready() -> i64
 
 val ENTROPY_PLATFORM_MAX_REQUEST: u64 = 1048576u64
@@ -15,13 +20,21 @@ fn _entropy_platform_wipe(bytes: [u8]):
         bytes[i] = 0u8
         i = i + 1u64
 
-fn _entropy_platform_zeroed(count: u64) -> [u8]:
-    var bytes: [u8] = []
-    var i: u64 = 0u64
-    while i < count:
-        bytes.push(0u8)
-        i = i + 1u64
-    bytes
+fn _entropy_platform_raw(count: u64) -> Result<[u8], text>:
+    var raw: [u8]? = nil
+    unsafe(capabilities: [ffi]):
+        raw = rt_entropy_fill(count)
+    if raw == nil:
+        return Err("production cryptographic entropy is unavailable")
+    var bytes: [u8] = raw ?? []
+    if bytes.len() != count:
+        _entropy_platform_wipe(bytes)
+        return Err("platform entropy provider returned the wrong length")
+    Ok(bytes)
+
+fn entropy_platform_raw_for_test(count: u64) -> Result<[u8], text>:
+    """Raw provider draw without the owner's nonzero-length policy."""
+    _entropy_platform_raw(count)
 
 fn entropy_platform_bytes(count: u64) -> Result<[u8], text>:
     """Fill an exact-length byte array from the hosted OS CSPRNG."""
@@ -29,18 +42,11 @@ fn entropy_platform_bytes(count: u64) -> Result<[u8], text>:
         return Err("platform entropy request must be nonzero")
     if count > ENTROPY_PLATFORM_MAX_REQUEST:
         return Err("platform entropy request exceeds the owner limit")
-    val bytes = _entropy_platform_zeroed(count)
-    if rt_entropy_fill(bytes) != 1:
-        _entropy_platform_wipe(bytes)
-        return Err("production cryptographic entropy is unavailable")
-    if bytes.len() != count:
-        _entropy_platform_wipe(bytes)
-        return Err("platform entropy provider returned the wrong length")
-    Ok(bytes)
+    _entropy_platform_raw(count)
 
 fn entropy_platform_ready() -> bool:
     """Return the legacy diagnostic bit; never authorize entropy with it."""
     rt_entropy_hardware_ready() > 0
 
-export entropy_platform_bytes, entropy_platform_ready
+export entropy_platform_bytes, entropy_platform_ready, entropy_platform_raw_for_test
 export ENTROPY_PLATFORM_MAX_REQUEST

@@ -141,6 +141,7 @@ fn finish_bounded_output_reader(reader: Option<BoundedOutputReader>, bounded_wai
 }
 
 fn finish_child_output_bounded(mut child: Child, timeout_ms: i64, max_output_bytes: usize) -> (Vec<u8>, Vec<u8>, i64) {
+    simple_runtime::child_peak_rss::reset();
     let stdout_reader = spawn_bounded_output_reader(child.stdout.take(), max_output_bytes);
     let stderr_reader = spawn_bounded_output_reader(child.stderr.take(), max_output_bytes);
     let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_millis(timeout_ms.max(0) as u64));
@@ -150,9 +151,9 @@ fn finish_child_output_bounded(mut child: Child, timeout_ms: i64, max_output_byt
     let mut status = None;
     loop {
         if status.is_none() {
-            match child.try_wait() {
+            match simple_runtime::child_peak_rss::reap(&mut child, true) {
                 Ok(Some(exit_status)) => status = Some(exit_status),
-                Ok(None) if timeout_ms <= 0 => status = child.wait().ok(),
+                Ok(None) if timeout_ms <= 0 => status = simple_runtime::child_peak_rss::reap(&mut child, false).ok().flatten(),
                 Ok(None) => {}
                 Err(_) => {
                     aborted = true;
@@ -179,7 +180,7 @@ fn finish_child_output_bounded(mut child: Child, timeout_ms: i64, max_output_byt
             #[cfg(not(unix))]
             let _ = child.kill();
             if status.is_none() {
-                let _ = child.wait();
+                let _ = simple_runtime::child_peak_rss::reap(&mut child, false);
             }
             break;
         }
@@ -207,6 +208,7 @@ fn finish_child_output_bounded(mut child: Child, timeout_ms: i64, max_output_byt
 }
 
 fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result<(String, String, i64), ()> {
+    simple_runtime::child_peak_rss::reset();
     let stdout_handle = child.stdout.take().map(|mut pipe| {
         std::thread::spawn(move || {
             let mut buf = String::new();
@@ -227,7 +229,7 @@ fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result
     let poll_interval = std::time::Duration::from_millis(10);
 
     let status = loop {
-        match child.try_wait() {
+        match simple_runtime::child_peak_rss::reap(&mut child, true) {
             Ok(Some(status)) => break Ok(status),
             Ok(None) => {
                 if start.elapsed() >= timeout {
@@ -252,7 +254,7 @@ fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result
             }
             Err(_) => {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = simple_runtime::child_peak_rss::reap(&mut child, false);
                 break Err(());
             }
         }
