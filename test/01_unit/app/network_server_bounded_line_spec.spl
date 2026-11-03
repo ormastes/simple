@@ -1,0 +1,57 @@
+# @req REQ-SSPEC-LIB
+# @cover src/lib/nogc_sync_mut/io/tcp.spl 40%
+"""
+# Network servers - bounded request line read
+
+TcpStream.read_line() is read_line_bounded(i64 max), so devhub/llm_caret/portal/
+simple_portal servers buffered unbounded no-newline input. They now call
+read_line_bounded(8192). This pins the bound on a real socket pair: an
+oversized no-newline line is rejected with at most 8193 bytes buffered.
+"""
+
+use std.spec.step
+use std.spec
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+
+describe "network server request line bound":
+    it "rejects an oversized no-newline line with buffered bytes <= 8193":
+        # @req REQ-SSPEC-LIB
+        step("rejects an oversized no-newline line with buffered bytes <= 8193")
+        var listener = match TcpListener.bind("127.0.0.1:0"):
+            Err(e): panic("bind failed: {e.message}")
+            Ok(l): l
+        val addr = match listener.local_addr():
+            Err(e): panic("local_addr failed: {e.message}")
+            Ok(a): a
+        var client = match TcpStream.connect(addr):
+            Err(e): panic("connect failed: {e.message}")
+            Ok(c): c
+        var payload: [u8] = []
+        var i = 0
+        while i < 20000:
+            payload = payload.append(65)
+            i = i + 1
+        payload = payload.append(10)
+        match client.write_all(payload):
+            Err(e): panic("write failed: {e.message}")
+            Ok(_): pass
+        val _f = client.flush()
+        var server = match listener.accept():
+            Err(e): panic("accept failed: {e.message}")
+            Ok(s): s
+
+        val rejected = match server.read_line_bounded(8192):
+            Err(_e): true
+            Ok(_line): false
+        expect(rejected).to_equal(true)
+
+        # The rejected read consumed at most 8193 bytes; the remainder
+        # (20001 total) is still unread on the socket.
+        val rest = match server.read_line_bounded(30000):
+            Err(e): panic("rest read failed: {e.message}")
+            Ok(line): line
+        expect(rest.len() >= 20001 - 8193).to_equal(true)
+
+        val _a = server.close()
+        val _b = client.close()
+        val _c = listener.close()

@@ -1,0 +1,23 @@
+#!/bin/sh
+# check-no-unbounded-tcp-read-line.shs -- network servers under src/app must not
+# call bare TcpStream .read_line()/.read_line_nullable()/.read_line_or_empty()
+# (unbounded: max_bytes = i64 max). Use .read_line_bounded(8192).
+# Allowlist (grandfathered sibling debt, shrink only): scripts/check/no_unbounded_tcp_read_line_allowlist.txt
+# Verdict is the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Usage: sh scripts/check/check-no-unbounded-tcp-read-line.shs [--root DIR]
+root="."
+[ "$1" = "--root" ] && root="$2"
+cd "$root" || { echo "ERROR - nothing was checked (bad root)"; exit 2; }
+allow="scripts/check/no_unbounded_tcp_read_line_allowlist.txt"
+[ -d src/app ] || { echo "ERROR - nothing was checked (no src/app)"; exit 2; }
+files=$(grep -rl "TcpStream" src/app --include=*.spl 2>/dev/null)
+n=0; bad=""
+for f in $files; do
+    n=$((n+1))
+    if grep -q "\.read_line()\|\.read_line_nullable()\|\.read_line_or_empty()" "$f"; then
+        if ! grep -qxF "$f" "$allow" 2>/dev/null; then bad="$bad $f"; fi
+    fi
+done
+[ "$n" -gt 0 ] || { echo "ERROR - nothing was checked (0 files)"; exit 2; }
+if [ -n "$bad" ]; then echo "FAIL - $n file(s) checked, unbounded read_line in:$bad"; exit 1; fi
+echo "PASS - $n file(s) checked, 0 unallowlisted unbounded read_line"
