@@ -1322,7 +1322,13 @@ impl Lowerer {
                 if let Some(stmts) = self.try_lower_bdd_statement(expr, ctx)? {
                     return Ok(stmts);
                 }
-                let hir_expr = self.lower_expr(expr, ctx)?;
+                // Statement-position match: value discarded, so exhausting
+                // every arm stays a silent fall-through (no exhaustion panic).
+                let hir_expr = if let Expr::Match { subject, arms } = expr {
+                    self.lower_match_with(subject, arms, false, ctx)?
+                } else {
+                    self.lower_expr(expr, ctx)?
+                };
                 Ok(vec![HirStmt::Expr(hir_expr)])
             }
 
