@@ -21,3 +21,5 @@ Retire only after actual module-static concatenation preserves every flag value 
 Commit identity and final receipts must be appended through the canonical BugDatabase API after integration. No compiler rebuild, standard SSpec execution or unexecuted matrix is claimed.
 
 **Revalidated 2026-11-02: still plausible because open; source compatibility does not close the underlying bug; no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-03 (sonB): deferred, pointer.** `infer_unfolded_static_expr_type_bounded` (`50.mir/_MirLowering/module_lowering.spl:234`) has no Array case for `Binary(Add)` of two module-static arrays (only scalar/text), so the Infer branch at ~3689 errors. Fix: add an array-typed Add arm reusing the array-literal inference used by the unannotated-global spec. Needs stage3 to verify.

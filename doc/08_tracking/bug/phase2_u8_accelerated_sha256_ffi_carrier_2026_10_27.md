@@ -21,3 +21,11 @@ Retire after this deployed producer and linked crypto provider pass exact octets
 The standard SSpec suite, all runtime-family combinations and any claim not explicitly tied to an actual artifact remain unqualified. Record the workaround commit in the canonical BugDatabase investigation log after integration; never retire it from a source-only review.
 
 **Revalidated 2026-11-02: still plausible because open; an active source workaround is not a compiler/provider fix; no merged fix commit with a passing regression is cited in this doc.**
+
+## Triage 2026-11-03 (lane s3g2)
+
+Not reproducible from source: both providers already accept packed and boxed [u8] (`rt_tls13_sha256`, `src/runtime/runtime_native.c:10039` via `rt_core_as_registered_array`; Rust twin `value/sffi/hash/sha256.rs:154`), and `sha256_u8_fast_hex` falls back to pure-Simple on a non-32-byte result. "invalid array handle" is thrown by the pinned P2 producer's array-handle check on the typed-carrier argument, observable only in a native run of that producer. Concrete blocker: needs the native fixture run, no static defect to patch. Workaround kept.
+
+Added regression spec `test/01_unit/lib/common/crypto/sha256_u8_accelerated_carrier_spec.spl` (octets 0,128,255 + empty, independent goldens; passes interpreted).
+
+Stage3 verify: native-build `test/fixtures/devhub/native_minio_binary_put/main.spl` and the spec with a current producer; if both pass, delete the copy loop in `_minio_binary_payload_hash` and call `sha256_u8_fast_hex`.

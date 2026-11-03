@@ -129,3 +129,23 @@ unchanged (seed-side). No code change made in this pass — not a one-file
 narrow fix per the doc's own "Fix status" section.**
 
 **Revalidated 2026-11-02: still plausible because OPEN (root cause characterized; the fix is seed-side); no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 Windows remeasure
+
+Seed `C:/dev/simple/bin/simple.exe` (v1.0.0-rc.1) on Windows. The light daemon is
+skipped there ("light daemon requires Linux /proc; running directly"), so this is
+the direct path only. The Linux daemon-path cost (~310s) is NOT remeasured here.
+
+| spec | wall | spec body | fixed setup | peak RSS |
+|---|---|---|---|---|
+| `test/01_unit/_mcdc_probe/plain_ok_spec.spl` | 8.5s | 656ms | ~7.8s | ~1859 MB (PeakWorkingSet64 poll over all `simple` processes, upper bound) |
+
+Every Windows run printed `SPEC FILE VERDICT:` or an explicit `ERROR:` /
+`error: test-runner:` line (OK spec, parse-error spec, runtime-error spec,
+directory target, missing file `ERROR: test file not found` rc=1). A `.md`
+target runs sdoctest and prints no `SPEC FILE VERDICT:`.
+
+Guards: `scripts/check/check-test-setup-cost-budget.shs` pins this spec at a 30s
+budget (env `TEST_SETUP_BUDGET_S`); `scripts/check/check-test-verdict-not-silent.shs`
+now FAILs a non-zero exit that has neither a verdict line nor an explicit error
+line. Status above is unchanged.
