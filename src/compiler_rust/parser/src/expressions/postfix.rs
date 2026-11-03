@@ -48,7 +48,7 @@ impl<'a> Parser<'a> {
             }
             return;
         }
-        if self.call_arg_depth > 0 {
+        if self.ho_arg_depth > 0 {
             return;
         }
         for arg in args {
@@ -425,8 +425,9 @@ impl<'a> Parser<'a> {
                         let generic_args = self.try_parse_method_generic_args();
 
                         if self.check(&TokenKind::LParen) {
-                            let mut args = self.parse_arguments()?;
                             let method_callee = Expr::Identifier(field.clone());
+                            self.next_args_higher_order = Self::expr_is_higher_order_callee(&method_callee);
+                            let mut args = self.parse_arguments()?;
                             self.transform_placeholder_args_for_call(&method_callee, &mut args);
                             // Check for trailing block: obj.method(args) \x: body
                             if self.check(&TokenKind::Backslash) {
@@ -978,6 +979,7 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_call(&mut self, callee: Expr) -> Result<Expr, ParseError> {
+        self.next_args_higher_order = Self::expr_is_higher_order_callee(&callee);
         let mut args = self.parse_arguments()?;
         if !self.check(&TokenKind::Backslash) && Self::is_typed_empty_array_ctor(&callee, &args) {
             return Ok(Expr::Array(Vec::new()));

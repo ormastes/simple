@@ -116,6 +116,12 @@ pub struct Parser<'a> {
     /// transformed for the direct argument expression and deferred for nested
     /// ordinary call arguments so outer callbacks can own the placeholder scope.
     pub(crate) call_arg_depth: usize,
+    /// Number of enclosing higher-order-callee arguments being parsed. Only
+    /// those defer nested ordinary calls' placeholders to the outer lambda.
+    pub(crate) ho_arg_depth: usize,
+    /// Set by a call site just before `parse_arguments` when the callee is
+    /// higher-order; consumed (cleared) by `parse_arguments`.
+    pub(crate) next_args_higher_order: bool,
     /// Recursive-descent nesting depth for expression/type parsing. Bounded by
     /// `MAX_PARSE_RECURSION_DEPTH` so a non-advancing misparse yields a located
     /// `parse error (recovery limit)` instead of a native stack overflow / SIGABRT.
@@ -177,6 +183,8 @@ impl<'a> Parser<'a> {
             deferred_dedent_count: 0,
             inline_if_then_call_depth: None,
             call_arg_depth: 0,
+            ho_arg_depth: 0,
+            next_args_higher_order: false,
             parse_recursion_depth: 0,
             grid_row_depth: 0,
         };
@@ -272,6 +280,8 @@ impl<'a> Parser<'a> {
             deferred_dedent_count: 0,
             inline_if_then_call_depth: None,
             call_arg_depth: 0,
+            ho_arg_depth: 0,
+            next_args_higher_order: false,
             parse_recursion_depth: 0,
             grid_row_depth: 0,
         }
