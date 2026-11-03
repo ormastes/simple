@@ -523,3 +523,7 @@ specs therefore need a re-run on a quiet host, or with that foreign monitor stop
 before any verdict is claimed for them.
 
 **Revalidated 2026-11-02: still plausible because PARTIALLY FIXED — re-measured 2026-08-17 (see "Re-measurement"; no merged fix commit with a passing regression is cited in this doc.**
+
+## Re-measurement 2026-11-03 (origin/release/1.0.0)
+
+Re-ran the corrected oracle (`git grep` over `src/**/*.spl`, `<X>_<Y>(<X>` shape, defs via first `fn`/`me fn`): 25 hits. Triage: the engine2d `vulkan_*` sites are gone; `markdown.spl` `path_file_exists` is an import alias (`io.fs_helpers.{exist as path_file_exists}`, false positive); `desugar_async` x2, `poll_generator`, `definition`, `easy`, `registry` x2 are docstring text; `cols_too_small`, `cache_i64` (`_cache_i64`), `char_code_at` are string/method/regex artifacts; `fuzz.spl` and `os/` are the known Class C / false positives. The only real live-code survivor was `src/compiler/70.backend/backend/common/literal_converter.spl` (`value_string(value)` plus `value_int/float/bool`, none imported/defined for `Value`), now rewritten to `Value.Int/Float/String/Bool(value)`. Pinned in `impl_to_free_fn_class_a_call_sites_spec.spl`. Status: fix-implemented-verification-pending (specs not run: no runnable self-hosted runner in worktree).
