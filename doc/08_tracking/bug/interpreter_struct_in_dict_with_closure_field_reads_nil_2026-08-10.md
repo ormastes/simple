@@ -119,3 +119,7 @@ which is core compiler-internals work well beyond this lane's per-item
 budget and risky to attempt without deep interpreter familiarity.
 Leaving OPEN, no attempt (per the record's own explicit guidance).
 
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN; PR #6301 MERGED at 5cec7885187661e950f941045cdb6b8d522a4884 and contributes real actor singleton/closure persistence detectors only, not a production repair. TEST_BLOCKED: named/lambda/empty-handler production API scenarios UNRUN without a qualified self-hosted runtime. Await detector execution and triage; no current interpreter regression or repair is claimed from source inspection alone.

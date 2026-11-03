@@ -93,3 +93,7 @@ actual-owner fixture and actual database source, including mutation/aliasing
 and persistence. Keep the regression. Native array.take parity is separately
 OPEN under native_array_take_method_missing_2026_10_21; this annotation does
 not implement it or change its removal conditions.
+
+## Canonical database reconciliation — 2026-11-03
+
+FIX IMPLEMENTED, VERIFICATION PENDING; source repair PR #6304 MERGED at efbd310e067829ba67386a5f246c400b08b744a8. Optional Try nominal-owner propagation received source safety review, but MIR regression, effectful single-evaluation/alias probes, both native backends, original unannotated database input and required core/MCP smokes are UNRUN. TEST_BLOCKED: qualified self-hosted runtime unavailable. Keep the historical library annotation until producer-qualified verification; no closure or Phase2/Phase3 qualification. Main status fix-implemented-verification-pending records the merged implementation, not a runtime PASS. Source owner session codex-optional-try-owner-20261103; original claim start is unknown in the current remote ledger.

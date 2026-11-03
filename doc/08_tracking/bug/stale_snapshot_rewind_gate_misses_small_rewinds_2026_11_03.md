@@ -1,6 +1,6 @@
 # no-stale-snapshot-rewind gate missed PR #6132's rewind (threshold 5, advisory at push)
 
-Status: fix implemented and verified; landing pending (P2). Filed 2026-11-03.
+Status: fixed (P2), merged PR #6302. Filed 2026-11-03.
 
 ## Incident
 PR #6132 (`work/owner-transport-av`, single commit `8382092ddf4`, parent `eb686ac15dc` =
@@ -85,3 +85,7 @@ the commit is not a revert (`This reverts commit`) and carries no `Rewind-Allowe
 selftest fixtures (2-file rewind of parent contribution must FAIL; ordinary edit of own file
 must PASS) and a false-positive census over recent main. Also consider a fast-path (<20 s) for the
 parent-only contributor so it can return to the push tier.
+
+## Canonical database reconciliation — 2026-11-03
+
+FIXED: PR #6302 merged into release/1.0.0 at 4e9488336fcb491f660f447d9a759c42ce8db0cb (2026-11-03T07:26:16Z). Concentrated direct-parent loss now rejects the historical two-file rewind. Full selftest 14 fixtures/0 failures, six focused controls/0 failures and ten-commit census PASS. Advisory push enforcement and older-contributor limits remain documented; no bootstrap qualification claimed.

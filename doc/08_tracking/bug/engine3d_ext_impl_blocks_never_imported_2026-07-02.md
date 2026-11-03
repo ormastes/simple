@@ -71,3 +71,7 @@ these paths. All three backing paths now remain as same-family re-exports;
 no duplicate extension impls are retained. Existing storage-buffer emulation
 is unsupported too, so the regression deliberately exercises the real
 occlusion pixel loop rather than asserting placeholder buffer behavior.
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN umbrella; partial source candidate PR #6299 MERGED at 621609a09580be96d70467632df79d8efba1561c. Software/CUDA/ROCm trait methods and compatibility imports received source checks, but other backends and unsupported texture behavior remain outside the repair. TEST_BLOCKED: three behavioral occlusion cases and required core/native checks UNRUN. Await qualified runtime verification; no GPU qualification or umbrella closure.

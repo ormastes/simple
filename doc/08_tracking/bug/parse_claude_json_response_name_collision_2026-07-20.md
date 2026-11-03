@@ -128,3 +128,7 @@ still an unimplemented `501` stub) is stale requires knowing the current
 `/v1/chat/completions` handler contract — left unclassified, not attempted as
 a mechanical fix.
 
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN original name-collision hypothesis; PR #6300 MERGED at a1b0b7bb79421b7d835054fd9d3ae89cc3ee34a4 and addresses a distinct integer search-offset consumer defect. TEST_BLOCKED: five authored JSON scenarios and canonical app/cross-module reproductions UNRUN without a qualified self-hosted runtime. Even a verified search-offset fix would not establish or close the historical collision hypothesis.
