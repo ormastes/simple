@@ -22,7 +22,9 @@
 # Shell twin: scripts/check/sdn-seal-lib.shs (same names, same states).
 
 use std.nogc_sync_mut.compression.gzip.crc.{crc32_text, crc32_update}
-use std.io_runtime.{dir_list, file_delete, read_file_text_result}
+use std.common.hash.xxh3.{xxh3_64_hex_lf, xxh3_64_hex_bytes}
+use std.common.crypto.blake3.{blake3_hex_lf, blake3_hex, blake3_hash}
+use std.io_runtime.{dir_list_optional, file_delete, read_file_text_result}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write}
 
 val CSM_OK: text = "OK"
@@ -31,8 +33,7 @@ val CSM_MERGED_UNSEALED: text = "MERGED_UNSEALED"
 val CSM_MISSING: text = "MISSING"
 val CSM_LEGACY: text = "LEGACY"
 
-# TODO: flip to "xxh3" once std.common.crypto.xxh3 lands (hash_hex has only crc32 today).
-val CSM_DEFAULT_ALGO: text = "crc32"
+val CSM_DEFAULT_ALGO: text = "xxh3"
 val CSM_POLICY_PATH: text = "config/check/sdn_seal_policy.sdn"
 val CSM_LEGACY_PREFIX: text = "#sdn-crc32:"
 
@@ -61,14 +62,16 @@ fn _csm_hex8(value: i64) -> text:
         shift = shift - 4
     out
 
-# The ONE hashing function for sidecar seals. LF-normalized.
+# The ONE hashing function for sidecar seals (crc32 | xxh3 | blake3). LF-normalized.
 fn hash_hex(content: text, algo: text) -> text:
     val lf = csm_strip_cr(content)
     if algo == "crc32":
         return _csm_hex8(crc32_text(lf))
-    # TODO: xxh3 -> std.common.crypto.xxh3.xxh3_64_hex_lf(content),
-    #       blake3 -> blake3_hex_lf(content); primitives land in a separate PR.
-    assert false, "csm_seal: hash algorithm not implemented yet: {algo}"
+    if algo == "xxh3":
+        return xxh3_64_hex_lf(content)
+    if algo == "blake3":
+        return blake3_hex_lf(content)
+    assert false, "csm_seal: unknown hash algorithm: {algo}"
     ""
 
 # `dir/X.sdn` -> `dir/X` (the sidecar stem).
@@ -96,7 +99,12 @@ fn csm_list(path: text) -> [text]:
     val stem = if base.ends_with(".sdn"): base.substring(0, base.len() - 4) else: base
     val prefix = stem + "."
     var found: [text] = []
-    for entry in dir_list(dir):
+    # dir_list_optional: the bare name `dir_list` has co-compiled variants with
+    # differing return types (text[] vs text[]?) that mis-dispatch under the test runner.
+    val entries: [text] = match dir_list_optional(dir):
+        case Some(listed): listed
+        case nil: []
+    for entry in entries:
         val name: text = entry
         if name.starts_with(prefix) and name.ends_with(".csm") and name.len() > prefix.len() + 4:
             val tag = name.substring(prefix.len(), name.len() - 4)
@@ -132,13 +140,16 @@ fn _csm_is_lower_hex(s: text) -> bool:
 # Hash of the raw file bytes (LF-normalized) for callers that must not round-trip
 # the file through text (workaround_store reads bytes on purpose).
 fn csm_hash_hex_bytes(raw: [u8], algo: text) -> text:
+    var lf: [u8] = []
+    for b in raw:
+        if b != 13: lf.push(b)
     if algo == "crc32":
-        var lf: [u8] = []
-        for b in raw:
-            if b != 13: lf.push(b)
         return _csm_hex8(crc32_update(0xffffffff, lf) ^ 0xffffffff)
-    # TODO: xxh3 / blake3 byte entry points land with the primitives PR.
-    assert false, "csm_seal: hash algorithm not implemented yet: {algo}"
+    if algo == "xxh3":
+        return xxh3_64_hex_bytes(lf)
+    if algo == "blake3":
+        return blake3_hex(blake3_hash(lf))
+    assert false, "csm_seal: unknown hash algorithm: {algo}"
     ""
 
 fn _csm_hash(content: text, raw: [u8], use_raw: bool, algo: text) -> text:

@@ -34,6 +34,7 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 DRIVER="$HERE/sdn-rows-merge.shs"
 SEALCHK="$HERE/../check/check-sdn-crc32-sealed.shs"
+. "$HERE/../check/sdn-seal-lib.shs"
 REMOTE=${SDN_SYNC_REMOTE:-origin}
 DRY=0
 
@@ -58,19 +59,18 @@ sealed_list() { # rev... -> sorted unique sealed SDN paths (.csm sidecar or lega
 # driver merges rows only; sidecars are separate files that merge as add/add).
 reseal_tree() {
     _tr=$1; _sl=$2; _wd=$3
-    . "$HERE/../check/sdn-seal-lib.shs"
     _empty=$(git hash-object -w /dev/null)
     export GIT_INDEX_FILE="$_wd/reseal.idx"
     git read-tree "$_tr" || { unset GIT_INDEX_FILE; return 1; }
     git show "$_tr:config/check/sdn_seal_policy.sdn" > "$_wd/policy.sdn" 2>/dev/null || : > "$_wd/policy.sdn"
-    while IFS= read -r _p; do
-        [ -n "$_p" ] || continue
-        git cat-file -e "$_tr:$_p" 2>/dev/null || continue
-        git show "$_tr:$_p" > "$_wd/data.sdn"
-        _alg=$(csm_policy_algo "$_wd/policy.sdn" "$_p")
+    while IFS= read -r _sp; do
+        [ -n "$_sp" ] || continue
+        git cat-file -e "$_tr:$_sp" 2>/dev/null || continue
+        git show "$_tr:$_sp" > "$_wd/data.sdn"
+        _alg=$(csm_policy_algo_strict "$_wd/policy.sdn" "$_sp")
         _hx=$(csm_hash_hex "$_alg" "$_wd/data.sdn") || { unset GIT_INDEX_FILE; return 1; }
-        _stem=${_p%.sdn}
-        git ls-files "$_stem".*.csm | while IFS= read -r _old; do git update-index --force-remove -- "$_old"; done
+        _stem=${_sp%.sdn}
+        git ls-files "$_stem.*.csm" | while IFS= read -r _old; do git update-index --force-remove -- "$_old"; done
         git update-index --add --cacheinfo "100644,$_empty,$_stem.${_alg}_$_hx.csm" || { unset GIT_INDEX_FILE; return 1; }
     done < "$_sl"
     git write-tree; _rc=$?
@@ -141,6 +141,7 @@ sync_pr() { # pr -> verdict
 }
 
 selftest() {
+    SDN_SEAL_ALGO=crc32; export SDN_SEAL_ALGO   # fixtures need no external hasher
     _t=$(mktemp -d) || return 1
     _fails=0; _n=0
     _g="$_t/r"
@@ -149,6 +150,9 @@ selftest() {
     H='bugs |id, status, updated_at|'
     seal() { sh "$HERE/../check/reseal-sdn-crc32.shs" --no-selftest "$1" >/dev/null; }
     printf '#sdn-crc32:0\n%s\n    a, open, 2026-11-01\n' "$H" > db.sdn; seal db.sdn
+    mkdir -p config/check; printf 'seal_policy |glob, algo|
+    *.sdn, crc32
+' > config/check/sdn_seal_policy.sdn
     printf 'x\n' > f.txt; git add -A; git commit -qm base; _O=$(git rev-parse HEAD)
     printf '#sdn-crc32:0\n%s\n    a, open, 2026-11-01\n    b, open, 2026-11-02\n' "$H" > db.sdn; seal db.sdn
     git add -A; git commit -qm main; _M=$(git rev-parse HEAD)
@@ -160,8 +164,7 @@ selftest() {
     _n=$((_n+1)); mkdir "$_t/w1"
     if merge_sync "$_P" "$_M" "$_t/w1"; then
         _C=$(git commit-tree "$M_TREE" -p "$_P" -p "$_M" -m m)
-        _v=$(sh "$SEALCHK" --rev "$_C" --root "$_g" 2>/dev/null | tail -3 | tr "
-" " ")
+        _v=$(sh "$SEALCHK" --no-selftest --rev "$_C" --root "$_g" 2>/dev/null | tail -1)
         git show "$_C:db.sdn" | grep -q '^    b,' && git show "$_C:db.sdn" | grep -q '^    c,' \
             && case "$_v" in PASS*) true ;; *) false ;; esac \
             || { echo "selftest FAIL: sdn-only merge rows/seal ($_v)"; _fails=$((_fails+1)); }

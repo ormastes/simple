@@ -49,11 +49,13 @@ POLICY_REL="config/check/sdn_seal_policy.sdn"
 REV=""
 ROOT=""
 SELFTEST_ONLY=0
+SKIP_SELFTEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --rev) REV=${2:-}; shift 2 ;;
         --root) ROOT=${2:-}; shift 2 ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
+        --no-selftest) SKIP_SELFTEST=1; shift ;;
         *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
     esac
 done
@@ -77,8 +79,43 @@ scan() {
     # candidate files: those with seals, legacy headers, or policy rows
     { cut -f1 "$_work/seals.tsv"; cat "$_work/legacy.txt"; cat "$_work/listed.txt"; } | grep -v '^$' | LC_ALL=C sort -u > "$_work/files.txt"
 
-    _n=0; _k=0; _stale=""; _legacy=0
+    # PASS 1: copy every single-sealed blob out of git and hash them per
+    # algorithm in ONE batch call each (xxh3/blake3 go through the pure-Simple
+    # CLI whose ~5 s startup must be paid once per algorithm, not per file).
+    mkdir -p "$_work/h"
+    _i=0
+    : > "$_work/algos.txt"
     while IFS= read -r _path; do
+        _i=$((_i + 1))
+        [ -n "$_path" ] || continue
+        _tags=$(awk -F'\t' -v p="$_path" '$1 == p { print $2 }' "$_work/seals.tsv")
+        [ -n "$_tags" ] && [ "$(printf '%s\n' "$_tags" | wc -l | tr -d ' ')" -eq 1 ] || continue
+        _a=${_tags%%_*}
+        csm_hex_len "$_a" >/dev/null || continue
+        git -C "$_root" cat-file -e "$_rev:$_path" 2>/dev/null || continue
+        git -C "$_root" show "$_rev:$_path" > "$_work/h/blob.$_i" 2>/dev/null || continue
+        printf '%s\t%s\n' "$_a" "$_i" >> "$_work/algos.txt"
+    done < "$_work/files.txt"
+    : > "$_work/h/empty"
+    for _a in $(cut -f1 "$_work/algos.txt" | LC_ALL=C sort -u); do
+        _idx=$(awk -F'\t' -v a="$_a" '$1 == a { print $2 }' "$_work/algos.txt")
+        # The first input is an EMPTY file: its digest must equal the published
+        # known answer, so a hasher that is the wrong algorithm/variant is caught
+        # in the same process instead of silently disagreeing with the loader.
+        _args="$_work/h/empty"; for _x in $_idx; do _args="$_args $_work/h/blob.$_x"; done
+        case "$_a" in xxh3) _kat=$CSM_KAT_XXH3_EMPTY ;; blake3) _kat=$CSM_KAT_BLAKE3_EMPTY ;; *) _kat=00000000 ;; esac
+        # shellcheck disable=SC2086
+        if csm_hash_batch "$_a" "$_work/h/out.$_a" $_args 2>"$_work/h/err.$_a" && [ "$(sed -n 1p "$_work/h/out.$_a")" = "$_kat" ]; then
+            _j=1
+            for _x in $_idx; do _j=$((_j + 1)); sed -n "${_j}p" "$_work/h/out.$_a" > "$_work/h/hash.$_x"; done
+        else
+            echo "hasher for $_a unavailable or failed its known-answer check: $(head -1 "$_work/h/err.$_a" 2>/dev/null) (every $_a-sealed file is treated as CORRUPT)"
+        fi   # a failed batch leaves no hash files => every file of that algo is CORRUPT (fail closed)
+    done
+    # PASS 2: judge each file.
+    _i=0; _n=0; _k=0; _stale=""; _legacy=0
+    while IFS= read -r _path; do
+        _i=$((_i + 1))
         [ -n "$_path" ] || continue
         _tags=$(awk -F'\t' -v p="$_path" '$1 == p { print $2 }' "$_work/seals.tsv")
         _is_listed=0; grep -qxF "$_path" "$_work/listed.txt" && _is_listed=1
@@ -91,13 +128,13 @@ scan() {
         _has_legacy=0; grep -qxF "$_path" "$_work/legacy.txt" && case "$(head -1 "$_work/copy.sdn")" in '#sdn-crc32:'*) _has_legacy=1 ;; esac
         if [ -z "$_tags" ] && [ "$_has_legacy" -eq 0 ] && [ "$_is_listed" -eq 0 ]; then continue; fi
         _n=$((_n + 1))
+        _got=$(cat "$_work/h/hash.$_i" 2>/dev/null); [ -n "$_got" ] || _got="-"
         # shellcheck disable=SC2086
-        # shellcheck disable=SC2086
-        _res=$(csm_state "$_work/copy.sdn" $_tags)
+        _res=$(csm_judge "$_work/copy.sdn" "$_got" $_tags)
         _state=${_res%% *}
         case "$_state" in
             OK)
-                _want=$(csm_policy_algo "$_work/policy.sdn" "$_path")
+                _want=$(csm_policy_algo_strict "$_work/policy.sdn" "$_path")
                 _have=${_res#OK }
                 if [ "$_have" != "$_want" ]; then
                     _k=$((_k + 1)); _stale="$_stale $_path"
@@ -172,7 +209,18 @@ selftest() {
     done
 
     # --- repo B: every accepted state; the verdict must be PASS
-    _mk "$_t/b"; mkdir -p "$_t/b/doc"
+    _mk "$_t/b"; mkdir -p "$_t/b/doc" "$_t/b/config/check"
+    printf 'seal_policy |glob, algo|
+    doc/x3.sdn, xxh3
+    doc/b3.sdn, blake3
+    doc/*.sdn, crc32
+' > "$_t/b/config/check/sdn_seal_policy.sdn"
+    printf 'bugs |id|
+    x
+' > "$_t/b/doc/x3.sdn"; csm_seal_file "$_t/b/doc/x3.sdn" xxh3 >/dev/null
+    printf 'bugs |id|
+    x
+' > "$_t/b/doc/b3.sdn"; csm_seal_file "$_t/b/doc/b3.sdn" blake3 >/dev/null
     printf 'bugs |id, status|\n    a, open\n' > "$_t/b/doc/good.sdn"; csm_seal_file "$_t/b/doc/good.sdn" crc32 >/dev/null
     printf 'bugs |id, status|\n    d, open\n' > "$_t/b/doc/unsealed.sdn"
     # CRLF content verifies against the LF seal
@@ -189,7 +237,7 @@ selftest() {
     printf 'bugs |id|\n#sdn-crc32:5\n    a\n' > "$_t/b/doc/later.sdn"
     _commit "$_t/b"
     _out=$(scan "$_t/b" HEAD); _rc=$?
-    _expect b-pass "$_rc" 0 "$_out" "PASS — 4 sealed .sdn file(s) checked at HEAD, 0 stale"
+    _expect b-pass "$_rc" 0 "$_out" "PASS — 6 sealed .sdn file(s) checked at HEAD, 0 stale"
     case "$_out" in *"note: doc/legacy.sdn still carries"*) ;; *) echo "selftest FAIL b: valid legacy header not accepted with a note"; _fails=$((_fails + 1)) ;; esac
     case "$_out" in *unsealed.sdn*|*later.sdn*) echo "selftest FAIL b: unsealed/body-header file reported"; _fails=$((_fails + 1)) ;; esac
     # the working copy must not decide
@@ -204,10 +252,10 @@ selftest() {
 
     rm -rf "$_t"
     [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
-    echo "selftest: 3 repos, 16 states passed"
+    echo "selftest: 3 repos, 16 states, 3 algorithms passed"
 }
 
-selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
+[ "$SKIP_SELFTEST" -eq 1 ] || selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
     echo "PASS — 3 fixture repo(s) checked, selftest only"
     exit 0

@@ -221,6 +221,7 @@ merge_files() { # base ours theirs [path] -> rewrites ours; rc 0 clean, 1 confli
 }
 
 selftest() {
+    SDN_SEAL_ALGO=crc32; export SDN_SEAL_ALGO   # fixtures need no external hasher
     _t=$(mktemp -d) || return 1
     _fails=0; _n=0
     H='bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|'
@@ -276,9 +277,11 @@ selftest() {
     # 5 the merged result passes the sdn-crc32 push gate checker (committed content)
     _n=$((_n+1))
     _g="$_t/repo"
-    if git init -q "$_g" 2>/dev/null && git -C "$_g" config core.autocrlf false && mkdir -p "$_g/d" && cp "$_t/a1" "$_g/d/db.sdn" \
-        && sh "$RESEAL" --no-selftest "$_g/d/db.sdn" >/dev/null && git -C "$_g" add d/ && git -C "$_g" -c user.name=t -c user.email=t@t commit -q -m t; then
-        _v=$(sh "$SEALCHK" --rev HEAD --root "$_g" 2>/dev/null | tail -1)
+    if git init -q "$_g" 2>/dev/null && git -C "$_g" config core.autocrlf false && mkdir -p "$_g/d" "$_g/config/check" \
+        && printf 'seal_policy |glob, algo|\n    *.sdn, crc32\n' > "$_g/config/check/sdn_seal_policy.sdn" \
+        && cp "$_t/a1" "$_g/d/db.sdn" && sh "$RESEAL" --no-selftest "$_g/d/db.sdn" >/dev/null \
+        && git -C "$_g" add -A && git -C "$_g" -c user.name=t -c user.email=t@t commit -q -m t; then
+        _v=$(sh "$SEALCHK" --no-selftest --rev HEAD --root "$_g" 2>/dev/null | tail -1)
         case "$_v" in PASS*) ;; *) echo "selftest FAIL: sealed-SDN checker rejected merge ($_v)"; _fails=$((_fails+1)) ;; esac
     else
         echo "selftest FAIL: could not build checker fixture repo"; _fails=$((_fails+1))

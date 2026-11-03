@@ -8,7 +8,7 @@ use std.nogc_sync_mut.compression.gzip.{crc32_text}
 use std.spec.{describe, it, assert_equal, assert_true}
 use std.io_runtime.{dir_create_all, dir_remove_all, file_delete}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_exists}
-use std.nogc_sync_mut.database.csm_seal.{hash_hex, csm_verify, csm_load_body, csm_seal, csm_list, csm_sidecar_path, csm_policy_algo_from, csm_policy_row_from, csm_hex_len, CSM_OK, CSM_CORRUPT, CSM_MERGED_UNSEALED, CSM_MISSING, CSM_LEGACY}
+use std.nogc_sync_mut.database.csm_seal.{hash_hex, csm_hash_hex_bytes, csm_verify, csm_load_body, csm_seal, csm_list, csm_sidecar_path, csm_policy_algo_from, csm_policy_row_from, csm_hex_len, CSM_OK, CSM_CORRUPT, CSM_MERGED_UNSEALED, CSM_MISSING, CSM_LEGACY}
 
 val DIR: text = "build/csm_seal_spec_tmp"
 val BODY: text = "bugs |id, status|\n    a, open\n"
@@ -93,10 +93,28 @@ describe "csm sidecar seal":
         assert_equal(csm_verify(p, crlf).state, CSM_OK)
         assert_equal(hash_hex(crlf, "crc32"), hash_hex(BODY, "crc32"))
 
-    it "policy: first matching glob wins, default is crc32 until xxh3 lands":
+    it "policy: first matching glob wins, default is xxh3":
         step("policy")
         val pol = "seal_policy |glob, algo|\n    doc/08_tracking/bug/bug_db.sdn, crc32\n    var/*.sdn, blake3\n"
         assert_equal(csm_policy_algo_from(pol, "doc/08_tracking/bug/bug_db.sdn"), "crc32")
         assert_equal(csm_policy_algo_from(pol, "C:/x/doc/08_tracking/bug/bug_db.sdn"), "crc32")
         assert_equal(csm_policy_algo_from(pol, "var/a.sdn"), "blake3")
-        assert_equal(csm_policy_algo_from(pol, "other/a.sdn"), "crc32")
+        assert_equal(csm_policy_algo_from(pol, "other/a.sdn"), "xxh3")
+
+    it "xxh3 and blake3 seals: widths, LF normalization, text/bytes agreement, sidecar round trip":
+        step("xxh3/blake3")
+        assert_equal(hash_hex("abc", "xxh3").len(), 16)
+        assert_equal(hash_hex("abc", "blake3").len(), 64)
+        assert_equal(hash_hex("a\r\nb\r\n", "xxh3"), hash_hex("a\nb\n", "xxh3"))
+        assert_equal(hash_hex("a\r\nb\r\n", "blake3"), hash_hex("a\nb\n", "blake3"))
+        assert_equal(csm_hash_hex_bytes("a\r\nb\r\n".bytes(), "xxh3"), hash_hex("a\nb\n", "xxh3"))
+        assert_equal(csm_hash_hex_bytes("a\r\nb\r\n".bytes(), "blake3"), hash_hex("a\nb\n", "blake3"))
+        val p = fresh("x3")
+        file_write(p, BODY)
+        assert_true(csm_seal(p, BODY, "xxh3"))
+        assert_equal(csm_verify(p, BODY).state, CSM_OK)
+        assert_equal(csm_verify(p, BODY.replace("\n", "\r\n")).state, CSM_OK)
+        assert_true(csm_seal(p, BODY, "blake3"))
+        assert_equal(csm_list(p).len(), 1)
+        assert_equal(csm_verify(p, BODY).algo, "blake3")
+        assert_equal(csm_verify(p, BODY + "x").state, CSM_CORRUPT)
