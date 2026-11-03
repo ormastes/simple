@@ -369,7 +369,7 @@ impl Lowerer {
                     Expr::ExistsCheck(inner) => inner.as_ref(),
                     other => other,
                 };
-                let subject = self.lower_expr(condition_expr, ctx)?;
+                let subject = self.lower_subject_for_patterns(condition_expr, [pattern], true, ctx)?;
                 let subject_ty = subject.ty;
                 let subject_idx = ctx.locals.len();
                 ctx.add_local("$if_let_subject_elif".to_string(), subject_ty, Mutability::Immutable);
@@ -847,7 +847,7 @@ impl Lowerer {
                         Expr::ExistsCheck(inner) => inner.as_ref(),
                         other => other,
                     };
-                    let subject_hir = self.lower_expr(condition_expr, ctx)?;
+                    let subject_hir = self.lower_subject_for_patterns(condition_expr, if_stmt.let_pattern.iter(), true, ctx)?;
                     let subject_ty = subject_hir.ty;
 
                     // 2. Create temp local for subject value
@@ -995,7 +995,7 @@ impl Lowerer {
                         Expr::ExistsCheck(inner) => inner.as_ref(),
                         other => other,
                     };
-                    let subject_hir = self.lower_expr(condition_expr, ctx)?;
+                    let subject_hir = self.lower_subject_for_patterns(condition_expr, while_stmt.let_pattern.iter(), true, ctx)?;
                     let subject_ty = subject_hir.ty;
 
                     let subject_idx = ctx.locals.len();
@@ -1717,7 +1717,7 @@ impl Lowerer {
     /// Lower a match statement to a chain of If-Else statements
     fn lower_match_stmt(&mut self, match_stmt: &MatchStmt, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
         // Lower the subject expression once
-        let subject_hir = self.lower_expr(&match_stmt.subject, ctx)?;
+        let subject_hir = self.lower_subject_for_patterns(&match_stmt.subject, match_stmt.arms.iter().map(|a| &a.pattern), false, ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value

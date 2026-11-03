@@ -195,7 +195,7 @@ impl Lowerer {
             Expr::ExistsCheck(inner) => inner.as_ref(),
             other => other,
         };
-        let subject_hir = self.lower_expr(condition_expr, ctx)?;
+        let subject_hir = self.lower_subject_for_patterns(condition_expr, [pattern], true, ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Temp local holding the subject value, so the pattern condition and the
@@ -478,7 +478,7 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         // Lower the subject once and store in a local variable to avoid re-evaluation
-        let subject_hir = self.lower_expr(subject, ctx)?;
+        let subject_hir = self.lower_subject_for_patterns(subject, arms.iter().map(|a| &a.pattern), false, ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value
@@ -2071,7 +2071,7 @@ impl Lowerer {
         default: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        let expr_hir = self.lower_expr(expr, ctx)?;
+        let expr_hir = self.lower_optional_subject(expr, ctx)?;
         let default_hir = self.lower_expr(default, ctx)?;
 
         // Statically non-nullable scalars can NEVER legitimately be nil, and the
