@@ -1888,6 +1888,11 @@ impl<'a> MirLowerer<'a> {
                 matches!(push_arg_ty, TypeId::F32 | TypeId::F64) && !receiver_element_is_function;
             if push_arg_ty == TypeId::U64 {
                 arg_regs[0] = self.box_u64_runtime_value(arg_regs[0])?;
+            } else if needs_push_boxing && push_arg_ty == TypeId::BOOL {
+                // Array literals and index stores encode typed bools as the
+                // canonical tagged bool RuntimeValue. Keep push consistent;
+                // BoxInt would encode true/false as integer values instead.
+                arg_regs[0] = self.box_scalar_for_tagged_slot(TypeId::ANY, push_arg_ty, arg_regs[0])?;
             } else if needs_push_boxing || needs_push_float_boxing {
                 let raw_arg = arg_regs[0];
                 let use_float = needs_push_float_boxing;
@@ -1940,6 +1945,11 @@ impl<'a> MirLowerer<'a> {
             let needs_needle_float_boxing = matches!(needle_ty, TypeId::F32 | TypeId::F64);
             if needle_ty == TypeId::U64 {
                 arg_regs[0] = self.box_u64_runtime_value(arg_regs[0])?;
+            } else if needs_needle_int_boxing && needle_ty == TypeId::BOOL {
+                // `rt_index_of` compares the needle against tagged array
+                // values, so a typed bool uses the same canonical RuntimeValue
+                // tag as array literals and stores (never BoxInt).
+                arg_regs[0] = self.box_scalar_for_tagged_slot(TypeId::ANY, needle_ty, arg_regs[0])?;
             } else if needs_needle_int_boxing || needs_needle_float_boxing {
                 let raw_arg = arg_regs[0];
                 let use_float = needs_needle_float_boxing;

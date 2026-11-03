@@ -35,3 +35,26 @@ Fixture: C:/dev/simple-bootstrap-storage/fix-p6enum (y_dict_field).
   tuple payload `T((i64, text))` fails to parse (`expected enum variant name, got )`) and a
   function-typed payload `F(fn(i64) -> i64)` fails to parse (`expected enum variant name, got ->`).
   `Dict<text, i64>`, `[i64]`, `i64?` and the named form build. Both gaps are in the reproducer spec.
+
+## Parser owner repair evidence (2026-11-02)
+
+Status remains OPEN. The enum payload parser now routes a leading dict-type
+token through `parser_parse_type`, preserving `{K: V}` as one positional type.
+The original-form HIR/MIR construction and removal of the `Dict<K, V>`
+workaround are still pending.
+
+Direct parser-owner diagnostic: `repro/positional_brace_dict_payload_2026_11_02/probe.spl`. Before the
+change it failed with `Positional dict was parsed as named fields` after
+observing `IndexMap struct count=1 payload=text:i64`; after the change it
+passed with `IndexMap tuple count=1 payload=dict<text,i64>`. The same probe
+checks a named dictionary field and the following `After(i64)` variant remain
+correct. Logs: `repro/positional_brace_dict_payload_2026_11_02/before_owner.log`
+and `repro/positional_brace_dict_payload_2026_11_02/after_owner.log`. The logs
+record the original pre-move absolute harness path; the checked-in harness has
+identical content and can be run from this evidence directory.
+
+This diagnostic used the unadmitted Windows seed
+`C:\dev\p3new\stage2_next\seed_nilfix.exe` (SHA256
+`FC56D4B5FC384EA93ED20BEFD4503FF6E27DB7734214CA45E072B4DF1B081828`) with
+`run ... --mode=interpreter`; source-provenance receipt is unavailable. It is
+parser-owner evidence only and does not qualify native/JIT behavior or Phase 2.

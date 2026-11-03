@@ -56,6 +56,10 @@ pub struct TypeRegistry {
     types: std::collections::BTreeMap<TypeId, HirType>,
     allocator: TypeIdAllocator,
     name_to_id: HashMap<String, TypeId>,
+    /// TypeIds created from source-level `T?` annotations. Optional values
+    /// share the pointer representation with genuine references, so this
+    /// provenance cannot be recovered from `HirType::Pointer` alone.
+    optional_type_ids: std::collections::HashSet<TypeId>,
     /// Owner-scope overlay for same-named flattened structs/classes: bare
     /// name -> owner-exact registered name, as seen from the function being
     /// lowered. Empty outside HIR lowering of a flattened unit with a
@@ -69,6 +73,7 @@ impl TypeRegistry {
             types: std::collections::BTreeMap::new(),
             allocator: TypeIdAllocator::new(),
             name_to_id: HashMap::new(),
+            optional_type_ids: std::collections::HashSet::new(),
             scope_aliases: HashMap::new(),
         };
 
@@ -133,6 +138,35 @@ impl TypeRegistry {
         id
     }
 
+    /// Register the shared-pointer representation used for a source-level
+    /// optional and retain its provenance for guarded payload narrowing.
+    pub fn register_optional(&mut self, inner: TypeId) -> TypeId {
+        let id = self.register(HirType::Pointer {
+            kind: PointerKind::Shared,
+            capability: simple_parser::ast::ReferenceCapability::Shared,
+            inner,
+        });
+        self.optional_type_ids.insert(id);
+        id
+    }
+
+    /// Return the payload type only for a still-valid source Optional ID.
+    /// Aliases keep the same ID; genuine pointers and replaced named types do
+    /// not acquire Optional semantics from their representation.
+    pub fn optional_inner(&self, id: TypeId) -> Option<TypeId> {
+        if !self.optional_type_ids.contains(&id) {
+            return None;
+        }
+        match self.types.get(&id) {
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                capability: simple_parser::ast::ReferenceCapability::Shared,
+                inner,
+            }) => Some(*inner),
+            _ => None,
+        }
+    }
+
     /// Get the allocator for inspection (useful for verification).
     pub fn allocator(&self) -> &TypeIdAllocator {
         &self.allocator
@@ -163,6 +197,7 @@ impl TypeRegistry {
                 return self.register(ty);
             }
             // Update in place - keep the same TypeId
+            self.optional_type_ids.remove(&existing_id);
             self.types.insert(existing_id, ty);
             existing_id
         } else {

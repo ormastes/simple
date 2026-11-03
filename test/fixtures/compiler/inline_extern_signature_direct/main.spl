@@ -1,0 +1,92 @@
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.*
+use compiler.core.parser.{parser_error_count, parser_get_errors}
+
+fn order_count(module: ParserModule, name: text) -> i64:
+    var n = 0
+    for entry in module.function_order:
+        if entry == name: n = n + 1
+    n
+
+fn require(ok: bool, label: text):
+    if not ok: panic("ASSERT_FAIL {label}")
+    print("ASSERT_PASS {label}")
+
+val src1 = "fn probe(data: [u8]) -> u64:\n    extern fn unsafe_addr_of(ref: any) -> u64\n    unsafe_addr_of(data) + 16u64\n"
+val m1 = parse_and_build_module(src1, "inline_extern_single_probe.spl")
+require(parser_error_count() == 0, "case1 errors=0")
+require(m1.functions.contains("probe"), "case1 probe exists")
+require(m1.functions.contains("unsafe_addr_of"), "case1 extern exists")
+require(m1.functions["unsafe_addr_of"].is_extern, "case1 extern flag")
+print("CASE_PASS 1")
+
+val src2 = "fn probe(addr: u64) -> u32:\n    @unsafe(reason: \"reads raw memory\", capabilities: [ffi, raw_ptr])\n    extern fn mmio_read32(addr: u64) -> u32\n    mmio_read32(addr)\n"
+val m2 = parse_and_build_module(src2, "inline_extern_attr_probe.spl")
+require(parser_error_count() == 0, "case2 errors=0")
+require(m2.functions.contains("mmio_read32"), "case2 extern exists")
+print("CASE_PASS 2")
+
+val src3 = "fn first(addr: u64) -> u32:\n    extern fn mmio_read32(ptr: u64) -> u32\n    mmio_read32(addr)\n\nfn second(addr: u64) -> u32:\n    extern fn mmio_read32(addr: u64) -> u32\n    extern fn mmio_read16(addr: u64) -> u16\n    mmio_read32(addr) + mmio_read16(addr).to_u32()\n"
+val m3 = parse_and_build_module(src3, "inline_extern_repeat_probe.spl")
+require(parser_error_count() == 0, "case3 errors=0")
+require(m3.functions.contains("first"), "case3 first exists")
+require(m3.functions.contains("second"), "case3 second exists")
+require(order_count(m3, "mmio_read32") == 1, "case3 read32 count=1")
+require(order_count(m3, "mmio_read16") == 1, "case3 read16 count=1")
+print("CASE_PASS 3")
+
+val src4 = "extern fn unsafe_addr_of(ref: any) -> u64\n\nfn probe(data: [u8]) -> u64:\n    extern fn unsafe_addr_of(ref: any) -> u64\n    unsafe_addr_of(data)\n"
+val m4 = parse_and_build_module(src4, "inline_extern_toplevel_probe.spl")
+require(parser_error_count() == 0, "case4 errors=0")
+require(order_count(m4, "unsafe_addr_of") == 1, "case4 extern count=1")
+print("CASE_PASS 4")
+
+val src5 = "fn rt_probe(x: i64) -> i64:\n    x + 1\n\nfn caller(x: i64) -> i64:\n    extern fn rt_probe(x: i64) -> i64\n    rt_probe(x)\n"
+val m5 = parse_and_build_module(src5, "inline_extern_fn_twin_probe.spl")
+require(parser_error_count() == 0, "case5 errors=0")
+require(m5.functions.contains("rt_probe"), "case5 fn exists")
+require(not m5.functions["rt_probe"].is_extern, "case5 fn remains non-extern")
+require(order_count(m5, "rt_probe") == 1, "case5 fn count=1")
+print("CASE_PASS 5")
+
+val src6 = "fn first(a: i64) -> i64:\n    extern fn rt_conflict(a: i64) -> i64\n    rt_conflict(a)\n\nfn second(a: i64) -> i64:\n    extern fn rt_conflict(a: i64, b: i64) -> i64\n    rt_conflict(a, a)\n"
+val m6 = parse_and_build_module(src6, "inline_extern_conflict_probe.spl")
+require(order_count(m6, "rt_conflict") == 1, "case6 declaration count=1")
+require(parser_error_count() == 1, "case6 errors=1")
+require(parser_get_errors().join("\n").contains("conflicting extern declaration: rt_conflict"), "case6 conflict diagnostic")
+print("CASE_PASS 6")
+
+val src7 = "fn first(a: i64) -> i64:\n    extern fn rt_param_conflict(a: i64) -> i64\n    a\n\nfn second(a: i64) -> i64:\n    extern fn rt_param_conflict(a: u64) -> i64\n    a\n"
+val m7 = parse_and_build_module(src7, "inline_extern_param_conflict_probe.spl")
+require(order_count(m7, "rt_param_conflict") == 1, "case7 declaration count=1")
+require(parser_error_count() == 1, "case7 errors=1")
+require(parser_get_errors().join("\n").contains("conflicting extern declaration: rt_param_conflict"), "case7 conflict diagnostic")
+print("CASE_PASS 7")
+
+val src8 = "fn first(a: i64, b: i64) -> i64:\n    extern fn rt_second_param_conflict(a: i64, b: i64) -> i64\n    a + b\n\nfn second(a: i64, b: i64) -> i64:\n    extern fn rt_second_param_conflict(a: i64, b: u64) -> i64\n    a + b\n"
+val m8 = parse_and_build_module(src8, "inline_extern_second_param_conflict_probe.spl")
+require(order_count(m8, "rt_second_param_conflict") == 1, "case8 declaration count=1")
+require(parser_error_count() == 1, "case8 errors=1")
+require(parser_get_errors().join("\n").contains("conflicting extern declaration: rt_second_param_conflict"), "case8 conflict diagnostic")
+print("CASE_PASS 8")
+
+val src9 = "fn first() -> i64:\n    extern fn rt_return_conflict() -> i64\n    1\n\nfn second() -> i64:\n    extern fn rt_return_conflict() -> u64\n    1\n"
+val m9 = parse_and_build_module(src9, "inline_extern_return_conflict_probe.spl")
+require(order_count(m9, "rt_return_conflict") == 1, "case9 declaration count=1")
+require(parser_error_count() == 1, "case9 errors=1")
+require(parser_get_errors().join("\n").contains("conflicting extern declaration: rt_return_conflict"), "case9 conflict diagnostic")
+print("CASE_PASS 9")
+
+val src10 = "fn first(cb: fn(i64) -> text, values: [i64], maybe: i64?) -> text:\n    extern fn rt_composite(cb: fn(i64) -> text, values: [i64], maybe: i64?) -> text\n    \"\"\n\nfn second(callback: fn(i64) -> text, items: [i64], optional: i64?) -> text:\n    extern fn rt_composite(callback: fn(i64) -> text, items: [i64], optional: i64?) -> text\n    \"\"\n"
+val m10 = parse_and_build_module(src10, "inline_extern_composite_probe.spl")
+require(parser_error_count() == 0, "case10 errors=0")
+require(order_count(m10, "rt_composite") == 1, "case10 declaration count=1")
+print("CASE_PASS 10")
+
+val src11 = "extern fn rt_top_conflict(value: i64) -> i64\n\nfn caller(value: i64) -> i64:\n    extern fn rt_top_conflict(value: u64) -> i64\n    value\n"
+val m11 = parse_and_build_module(src11, "inline_extern_top_conflict_probe.spl")
+require(order_count(m11, "rt_top_conflict") == 1, "case11 declaration count=1")
+require(parser_error_count() == 1, "case11 errors=1")
+require(parser_get_errors().join("\n").contains("conflicting extern declaration: rt_top_conflict"), "case11 conflict diagnostic")
+print("CASE_PASS 11")
+print("NESTED_EXTERN_DIRECT_PASS scenarios=11 assertions=34")
