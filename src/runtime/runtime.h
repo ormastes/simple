@@ -668,6 +668,7 @@ int64_t   rt_free_deep(int64_t value);
 SplArray* rt_byte_array_new(uint64_t cap);
 SplArray* rt_byte_array_new_len(uint64_t len);
 int64_t   rt_random_bytes_c(uint64_t count);
+int64_t   rt_entropy_fill(uint64_t count);
 double    rt_random_random(void);
 SplArray* rt_bytes_alloc(int64_t len);
 int64_t  rt_tls13_sha256(int64_t data);
