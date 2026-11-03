@@ -1,0 +1,29 @@
+# bug: mir_lower_child_tasks_append_access_violation_2026-10-19
+# Prevention test: the original loop-tail `if a.f != "" and b.f == a.f:` form,
+# lowered right after a function sharing the `items`/`value` parameter names,
+# must lower without fault (interpreter producer). The native-producer fault
+# itself needs a rebuilt stage3 producer; see the bug record for repro steps.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+val CHILD_TASKS_SOURCE = "class Rec:\n    task_id: text\n\nfn contains(items: [text], value: text) -> bool:\n    for item in items:\n        if item == value:\n            return true\n    false\n\nfn append_unique(items: [text], value: text) -> [text]:\n    if value.trim() == \"\":\n        return items\n    if contains(items, value):\n        return items\n    var out: [text] = []\n    for item in items:\n        out.push(item)\n    out.push(value)\n    out\n\nfn child_tasks_append(items: [Rec], value: Rec) -> [Rec]:\n    var out: [Rec] = []\n    var found = false\n    for item in items:\n        if value.task_id != \"\" and item.task_id == value.task_id:\n            out.push(value)\n            found = true\n        else:\n            out.push(item)\n    if not found:\n        out.push(value)\n    out\n"
+
+describe "child tasks append MIR lowering":
+    it "lowers the original and-condition loop-tail form after a same-param-name function":
+        var round = 0
+        while round < 3:
+            val filename = "child_tasks_probe.spl"
+            val parsed = parse_full_frontend(CHILD_TASKS_SOURCE, filename, "child_tasks_probe", Logger(level: 0))
+            var hir_owner = HirLowering.with_filename(filename)
+            val hir = hir_owner.lower_module(parsed)
+            expect(hir_owner.errors.len()).to_equal(0)
+            var lowering = MirLowering.new(hir.symbols)
+            val mir = lowering.lower_module(hir)
+            expect(lowering.errors.len()).to_equal(0)
+            expect(mir.functions.len()).to_be_greater_than(2)
+            round = round + 1

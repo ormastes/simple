@@ -1,7 +1,7 @@
 # PureDatabase treats total numeric conversions as optional parsers
 
-Status: OPEN — source repair and executable regressions authored; native and
-SSpec execution UNEXECUTED.
+Status: FIXED 2026-11-03 — spec 6/6 under bin/simple.exe test (was 4/6: negative INSERT literal stored as Text("-"); spec used /tmp and a clean checkpoint). Native
+execution still unexecuted.
 
 ## Actual failure
 
