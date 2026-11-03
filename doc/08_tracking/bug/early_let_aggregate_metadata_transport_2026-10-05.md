@@ -28,3 +28,6 @@ also only recovers Enum owners from declared Named types when struct metadata
 is missing, which remains under investigation rather than bundled speculatively.
 
 **Revalidated 2026-11-02: still plausible because the report title (Early Let transports aggregate receiver metadata across staged ABI) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 status: fix-implemented-verification-pending
+Fix is in source (early Let uses `copy_local_hir_type_metadata`, `mir_lowering_stmts.spl:1668,1998`). `test/01_unit/compiler/mir/early_let_receiver_metadata_spec.spl` re-run on the seed: 3/3 pass. Closure: stage3 build of the lexer/HashMap modules shows none of the eight diagnostics.
