@@ -41,3 +41,6 @@ Keep typed admission, discriminant selection, payload E and Optional metadata to
 The landing candidate is based on release_phase3 eca61a8efc4f054f2c37d4cecef2c140165e4180. Since the tested frozen source, this branch added nominal record ownership and a fourth source_owner argument to builtin_result_payload. The port preserves those changes and passes the retained source_owner while projecting E. Native behavior of this exact composed landing source is UNEXECUTED, including record payloads. Earlier native PASS applies only to producer dae595a and the frozen source hashes in the evidence. No rebuild or admission is implied by this conflict adaptation.
 
 **Revalidated 2026-11-02: still plausible because focused native repair qualified; repository-wide verification and release admission remain open; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 status: fix-implemented-verification-pending
+Focused native repair qualified (see above); repository-wide verification is the only open item. Workaround tag `RESULT_ERR_MATCH_PROJECTION` kept.
