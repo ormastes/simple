@@ -1,0 +1,47 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# Regression for bug os_crypto_native_failures_2026_10_31: os.crypto.aes256_gcm
+# must not depend on rt_tls13_aes256_gcm_*, which only the Rust seed runtime
+# defines (the C runtime used by the Phase 2 native link has none, so lld-link
+# failed with an undefined symbol). It delegates to pure-Simple aes_gcm.spl.
+
+use std.spec.step
+use os.crypto.aes256_gcm.{aes256_gcm_encrypt, aes256_gcm_decrypt, Aes256GcmResult}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val SRC_PATH: text = "src/os/crypto/aes256_gcm.spl"
+
+fn _zeros(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(0x00)
+        i = i + 1
+    out
+
+describe "os.crypto.aes256_gcm native link surface":
+    it "declares no rt_tls13_aes256_gcm extern":
+        val src = rt_file_read_text(SRC_PATH) ?? ""
+        expect(src.len() > 0).to_equal(true)
+        expect(src.contains("extern fn rt_tls13_aes256_gcm")).to_equal(false)
+
+    it "round-trips through the pure-Simple path":
+        val key = _zeros(32)
+        val nonce = _zeros(12)
+        val pt = _zeros(16)
+        val ct = aes256_gcm_encrypt(key, nonce, pt, [])
+        expect(ct.len()).to_equal(32)
+        var body: [u8] = []
+        var tag: [u8] = []
+        var i = 0
+        while i < 32:
+            if i < 16:
+                body.push(ct[i])
+            else:
+                tag.push(ct[i])
+            i = i + 1
+        match aes256_gcm_decrypt(key, nonce, body, [], tag):
+            case Aes256GcmResult.Ok(data):
+                expect(data).to_equal(pt)
+            case Aes256GcmResult.Err(msg):
+                expect(msg).to_equal("")

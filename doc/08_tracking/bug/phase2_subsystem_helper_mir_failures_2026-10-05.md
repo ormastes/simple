@@ -57,7 +57,7 @@ current producer to regenerate the diagnostic lines before a per-site fix can be
 
 ## 2026-11-03 blocker (lane p1blk)
 
-The cited site `src/compiler/10.frontend/core/flat_pool_codec.spl:37` is now a comment.
+Correction: the premise is NOT stale. `FlatPoolReader` still exists (`flat_pool_codec.spl:111`, constructor `:143`); only the cited line moved.
 The codec was reworked to the v4 frame (`flat_pool_codec.spl:30-45`), so the
 `FlatPoolReader` diagnostic premise may be stale. It cannot be confirmed or closed without
 re-running the six-lane generator/verdict helper builds on a current Phase 2 producer.
