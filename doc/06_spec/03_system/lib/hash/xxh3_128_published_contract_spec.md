@@ -2,7 +2,7 @@
 
 **Status: AUTHORED_UNRUN.** This is an authored manual, not spipe-docgen output. No scenario has qualified execution evidence; no zero-stub or coverage claim is made.
 
-Executable: `test/03_system/lib/hash/xxh3_128_published_contract_spec.spl`. SHA-256: `a92dbb12f1220d3dbc99a4472982ccf594e776ac74a4b8ca26da2fea7f71d1fb`.
+Executable: `test/03_system/lib/hash/xxh3_128_published_contract_spec.spl`. SHA-256: `aa5228e2ec845820700c1981d54c6555e8689e4e72220d72ca18651077dd0a2d`.
 
 ## Workflow
 
@@ -69,7 +69,8 @@ describe "XXH3-128 published binary contract":
         expect(canonical).to_equal("a7dde2cbf750eed6122a2693be716e1b") # oracle: XXH128 canonical high word then low word
 
     it "should accept a minimum secret at its first complete long-input block":
-        # @req REQ-HASH-XXH3-001
+        # @req REQ-HASH-XXH3-004
+        # @req REQ-HASH-XXH3-003
         # @capture(binary): exact minimum-secret 576-byte digest
         step("Load the published vector")
         val input = binary_input(576)
@@ -80,7 +81,7 @@ describe "XXH3-128 published binary contract":
         expect(digest).to_equal([0xd9e7cd4086b97da8u64, 0xa1a762c499e1705cu64]) # oracle: pinned upstream withSecret vector
 
     it "should reject a secret one byte below the published minimum":
-        # @req REQ-HASH-XXH3-003
+        # @req REQ-HASH-XXH3-004
         # @capture(binary): invalid-secret result contains no digest words
         step("Load the published vector")
         val input = binary_input(576)

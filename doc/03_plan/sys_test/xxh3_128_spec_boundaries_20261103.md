@@ -17,12 +17,14 @@ Reproduce using message byte `[0,127,128,255][i mod 4]`, secret byte `(13*i+5) m
 
 ## Requirements and specification mapping
 
+Canonical IDs are defined in `doc/01_research/domain/hash_crypto_specs_20261103/hash_requirements.md`: 001 short inputs; 002 medium inputs; 003 large inputs; 004 secret validity and exact outputs; 005 serialization; 006 streaming/reset and seed preservation. Shared mapping agreed with the specification owner; mixed boundary scenarios cite each applicable ID. This lane adds missing cases, not complete satisfaction of every canonical row.
+
 | Requirement | Official section/local contract | Existing tests and gap | New coverage intent |
 |---|---|---|---|
-| REQ-HASH-XXH3-001 | Seed and Secret; large-input Steps 2–4 | `xxh3_kat_spec.spl` minimum secret checks only result length; reference vectors use 192-byte secrets | Unit 136/137-byte secrets at 0,4,240,241,575,576,577,1152,1153 input bytes; system exact 136-byte secret at 576 |
-| REQ-HASH-XXH3-002 | Small/medium XXH3-128; seed-derived secret | Existing sanity/affine vectors broadly cover length classes | Unit binary high-bit seed at 0,2,7,15,159,160,191,192,223,224,239,240,241,255,256,257,1023,1024,1025,2048 |
-| REQ-HASH-XXH3-003 | Minimum secret precondition; local fail-closed API | Existing empty/135-byte secrets rejected at one input size | Unit secret lengths 0,1,64,135 crossed with inputs 0,4,241,577; system public wrapper rejects 135-byte secret |
-| REQ-HASH-XXH3-004 | Header streaming/reset/digest API; specified digest equivalence | `common/hash/xxh3_spec.spl` mostly compares to same-owner one-shot; reset seed zero | Integration independent digests at 240,241,1024,1025,2048; varied chunk sizes; empty updates; maximum seed survives reset; typed public wrapper |
+| REQ-HASH-XXH3-004 / REQ-HASH-XXH3-003 | Seed and Secret; large-input Steps 2–4 | `xxh3_kat_spec.spl` minimum secret checks only result length; reference vectors use 192-byte secrets | Unit 136/137-byte secrets at 0,4,240,241,575,576,577,1152,1153 input bytes; system exact 136-byte secret at 576 |
+| REQ-HASH-XXH3-001 / REQ-HASH-XXH3-002 / REQ-HASH-XXH3-003 | Small/medium XXH3-128; seed-derived secret | Existing sanity/affine vectors broadly cover length classes | Unit binary high-bit seed at 0,2,7,15,159,160,191,192,223,224,239,240,241,255,256,257,1023,1024,1025,2048 |
+| REQ-HASH-XXH3-004 | Minimum secret precondition; local fail-closed API | Existing empty/135-byte secrets rejected at one input size | Unit secret lengths 0,1,64,135 crossed with inputs 0,4,241,577; system public wrapper rejects 135-byte secret |
+| REQ-HASH-XXH3-006 | Header streaming/reset/digest API; specified digest equivalence | `common/hash/xxh3_spec.spl` mostly compares to same-owner one-shot; reset seed zero | Integration independent digests at 240,241,1024,1025,2048; varied chunk sizes; empty updates; maximum seed survives reset; typed public wrapper |
 | REQ-HASH-XXH3-005 | Overview low64/high64; canonical output | Existing empty/abc/sanity hex vectors | System binary 00/7f/80/ff exact words and high-word-first hex |
 
 ## Executable/manual pairs

@@ -2,7 +2,7 @@
 
 **Status: AUTHORED_UNRUN.** This is an authored manual, not spipe-docgen output. No scenario has qualified execution evidence; no zero-stub or coverage claim is made.
 
-Executable: `test/02_integration/lib/common/hash/xxh3_128_stream_contract_spec.spl`. SHA-256: `c8bfa14eeec5b215d433c3fd17075b14e12e01efb7096ad480a8bb0855ccbfaf`.
+Executable: `test/02_integration/lib/common/hash/xxh3_128_stream_contract_spec.spl`. SHA-256: `d0575d89170573bb94e2633e7c242b0916cc651b04f8d1ba8c14261fb7975aec`.
 
 ## Workflow
 
@@ -49,7 +49,7 @@ fn binary_input(n: i64) -> [u8]:
 
 describe "XXH3-128 streaming independent reference contract":
     it "should preserve digest observations while continuing across short and block boundaries":
-        # @req REQ-HASH-XXH3-004
+        # @req REQ-HASH-XXH3-006
         # @capture(binary): digest128 values at 240, 241, 1024 and 1025 bytes
         step("Load the published vector")
         var state = xxh3_state_new(0xffffffffffffffffu64)
@@ -78,7 +78,7 @@ describe "XXH3-128 streaming independent reference contract":
         expect(digest1025.high).to_equal(0xda8cfd49a62fe118u64) # oracle: pinned upstream seed vector
 
     it "should match independent multi-block vectors for varied chunks and empty updates":
-        # @req REQ-HASH-XXH3-004
+        # @req REQ-HASH-XXH3-006
         # @capture(binary): exact 2048-byte digest after varied update schedules
         step("Load the published vector")
         val pattern: [u8] = [0u8, 127u8, 128u8, 255u8]
@@ -101,7 +101,7 @@ describe "XXH3-128 streaming independent reference contract":
             expect(digest.high).to_equal(0x0d6dbde146c1b48fu64) # oracle: pinned upstream seed vector
 
     it "should retain the high-bit seed after resetting a populated stream":
-        # @req REQ-HASH-XXH3-004
+        # @req REQ-HASH-XXH3-006
         # @capture(binary): exact empty and reused digests following reset
         step("Load the published vector")
         var state = xxh3_state_new(0xffffffffffffffffu64)

@@ -2,7 +2,7 @@
 
 **Status: AUTHORED_UNRUN.** This is an authored manual, not spipe-docgen output. No scenario has qualified execution evidence; no zero-stub or coverage claim is made.
 
-Executable: `test/01_unit/lib/common/crypto/xxh3_128_spec_boundaries_spec.spl`. SHA-256: `73372a7afed64d4f59eaf58666a7adc6f5406e98e6444d747bd5fe8246a63087`.
+Executable: `test/01_unit/lib/common/crypto/xxh3_128_spec_boundaries_spec.spl`. SHA-256: `64917016f869ba1eb01d08724cef836c520770199a54d142b9f4dc068eb9ee95`.
 
 ## Workflow
 
@@ -62,7 +62,8 @@ struct BoundaryVector:
 
 describe "XXH3-128 missing published boundary cases":
     it "should match exact digests at minimum-secret block boundaries":
-        # @req REQ-HASH-XXH3-001
+        # @req REQ-HASH-XXH3-004
+        # @req REQ-HASH-XXH3-003
         # @capture(binary): exact low/high digest words checked against upstream reference
         step("Load the published vector")
         val vectors: [BoundaryVector] = [
@@ -92,7 +93,9 @@ describe "XXH3-128 missing published boundary cases":
             expect(digest).to_equal([vector.low, vector.high]) # oracle: pinned upstream XXH3_128bits_withSecret
 
     it "should match high-bit seed digests across remaining round and stripe boundaries":
+        # @req REQ-HASH-XXH3-001
         # @req REQ-HASH-XXH3-002
+        # @req REQ-HASH-XXH3-003
         # @capture(binary): exact low/high words for seed 0xffffffffffffffff
         step("Load the published vector")
         val vectors: [BoundaryVector] = [
@@ -124,7 +127,7 @@ describe "XXH3-128 missing published boundary cases":
             expect(digest).to_equal([vector.low, vector.high]) # oracle: pinned upstream XXH3_128bits_withSeed
 
     it "should reject undersized secrets before short and long input hashing":
-        # @req REQ-HASH-XXH3-003
+        # @req REQ-HASH-XXH3-004
         # @capture(binary): rejected secrets produce no digest words
         step("Load the published vector")
         val invalid_lengths = [0, 1, 64, 135]
