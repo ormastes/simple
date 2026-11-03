@@ -66,3 +66,7 @@ access, capturing the exact argv per the record's own evidence bar.
 Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
 
 **Revalidated 2026-11-02: still plausible because the report title (Simple CLI invocation attempts to lock the user's .gitconfig during a read-only) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Windows triage 2026-11-03
+
+Run on Windows 11 with `bin/simple.exe` (v1.0.0-rc.1 seed). With `HOME`/`USERPROFILE` pointed at a scratch dir holding a `.gitconfig` and a pre-existing `.gitconfig.lock` (so any lock attempt would fail or alter it), `--version`, `--help` and `lint --help` all ran with no lock diagnostic, and both files kept identical sha256 before and after. `git grep` of `src/app/cli` and `src/compiler_rust/driver/src` on release/1.0.0 finds no `git config` invocation. Not reproduced for these argv; the original smoke argv/digest was never retained. No code change. Stays open pending the original invocation (tool-dispatch probe) with Process Monitor capture.
