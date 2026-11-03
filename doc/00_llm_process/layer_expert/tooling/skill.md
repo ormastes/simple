@@ -36,3 +36,9 @@ untracked) > `config/host/<hostname>.sdn` > `config/host/host_config.sdn`
 (`--get/--print/--init/--selftest`) and `std.common.config_core.host_config`.
 Guide: `doc/07_guide/infra/toolchain/host_config.md`; feature expert:
 `doc/00_llm_process/feature_expert/host_config/skill.md`.
+
+## SDN data-file seals (.csm)
+Sealed `*.sdn` files carry an empty `X.<algo>_<hex>.csm` sidecar (xxh3 default; policy in
+`config/check/sdn_seal_policy.sdn`; states OK/CORRUPT/MERGED_UNSEALED/MISSING/LEGACY). Reseal with
+`scripts/check/reseal-sdn-crc32.shs`, verify with `check-sdn-crc32-sealed.shs`. Details:
+`doc/00_llm_process/feature_expert/sdn_csm_seals/skill.md`.

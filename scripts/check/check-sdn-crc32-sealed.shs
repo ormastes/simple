@@ -63,7 +63,7 @@ done
 # scan <root> <rev> -> prints the verdict, returns 0/1/2
 scan() {
     _root=$1; _rev=$2
-    _work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    _work=$(csm_mktemp_dir) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
     git -C "$_root" rev-parse --verify --quiet "$_rev^{commit}" >/dev/null 2>&1 ||
         { rm -rf "$_work"; echo "ERROR — nothing was checked ($_rev is not a commit in $_root)"; return 2; }
     git -C "$_root" show "$_rev:$POLICY_REL" > "$_work/policy.sdn" 2>/dev/null || : > "$_work/policy.sdn"
@@ -169,7 +169,7 @@ scan() {
 
 # Fixtures are real git repositories scanned by the real scan(), never a mock.
 selftest() {
-    _t=$(mktemp -d) || return 1
+    _t=$(csm_mktemp_dir) || return 1
     _fails=0
     _mk() { mkdir -p "$1" && git -C "$1" init -q && git -C "$1" config user.email s@t && git -C "$1" config user.name selftest && git -C "$1" config core.autocrlf false; }
     _commit() { git -C "$1" add -A && git -C "$1" commit -q -m fixture; }
@@ -220,7 +220,12 @@ selftest() {
 ' > "$_t/b/doc/x3.sdn"; csm_seal_file "$_t/b/doc/x3.sdn" xxh3 >/dev/null
     printf 'bugs |id|
     x
-' > "$_t/b/doc/b3.sdn"; csm_seal_file "$_t/b/doc/b3.sdn" blake3 >/dev/null
+' > "$_t/b/doc/b3.sdn"
+    # blake3 needs b3sum or a deployed CLI; a runner has neither. The fixture is
+    # then dropped (loudly) instead of failing the guard on a missing tool.
+    _nb=6
+    if csm_hasher_kat blake3 2>/dev/null; then csm_seal_file "$_t/b/doc/b3.sdn" blake3 >/dev/null
+    else rm -f "$_t/b/doc/b3.sdn"; _nb=5; echo "selftest NOTE: blake3 fixture skipped (no b3sum / CLI hasher here)" >&2; fi
     printf 'bugs |id, status|\n    a, open\n' > "$_t/b/doc/good.sdn"; csm_seal_file "$_t/b/doc/good.sdn" crc32 >/dev/null
     printf 'bugs |id, status|\n    d, open\n' > "$_t/b/doc/unsealed.sdn"
     # CRLF content verifies against the LF seal
@@ -237,7 +242,7 @@ selftest() {
     printf 'bugs |id|\n#sdn-crc32:5\n    a\n' > "$_t/b/doc/later.sdn"
     _commit "$_t/b"
     _out=$(scan "$_t/b" HEAD); _rc=$?
-    _expect b-pass "$_rc" 0 "$_out" "PASS — 6 sealed .sdn file(s) checked at HEAD, 0 stale"
+    _expect b-pass "$_rc" 0 "$_out" "PASS — $_nb sealed .sdn file(s) checked at HEAD, 0 stale"
     case "$_out" in *"note: doc/legacy.sdn still carries"*) ;; *) echo "selftest FAIL b: valid legacy header not accepted with a note"; _fails=$((_fails + 1)) ;; esac
     case "$_out" in *unsealed.sdn*|*later.sdn*) echo "selftest FAIL b: unsealed/body-header file reported"; _fails=$((_fails + 1)) ;; esac
     # the working copy must not decide
