@@ -120,10 +120,12 @@ and review visible intent/steps plus folded executable source. Mirror
 `test/<path>_spec.spl` as `doc/06_spec/<path>_spec.md`; executable `.spl` specs
 never belong under `doc/06_spec`. Preserve spec and execution-artifact hashes
 and the run's proof class. Docgen success is a documentation result, not evidence
-that scenarios executed. An authored companion must say it is authored and
-unexecuted, record its source hash, and mark execution artifacts absent rather
-than inventing generated provenance. Preserve historical run statuses and their
-runtime identities when refreshing prose.
+that scenarios executed. Label a hand-authored companion as authored, not
+docgen-generated, and record its source hash separately from the actual test
+execution status and receipts. It may accompany executed tests with genuine run
+artifacts; use `AUTHORED_UNRUN` and mark execution artifacts absent only when
+execution is absent. Never invent generated provenance. Preserve historical run
+statuses and their runtime identities when refreshing prose.
 
 See the [scenario manual guide](sspec_scenario_manual.md),
 [native test workflow](testing/native_test_binary_workflow.md), and
