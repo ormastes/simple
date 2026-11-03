@@ -15,7 +15,7 @@ use crate::value::{Env, ExportTable, Value};
 use super::module_cache::{cache_partial_module_exports, normalize_path_key};
 use crate::interpreter::MODULE_ENV_BY_OWNER;
 
-mod evaluation_helpers;
+pub(crate) mod evaluation_helpers;
 use evaluation_helpers::{
     add_builtin_types, create_filtered_env, export_functions, process_bare_exports, process_imports_and_assignments,
     register_definitions,
