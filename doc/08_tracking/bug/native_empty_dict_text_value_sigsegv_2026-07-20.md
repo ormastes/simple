@@ -87,3 +87,14 @@ persistent package index unblocks both at once, and this entry becomes
 measurable again.
 
 **Revalidated 2026-11-02: still plausible because the report title (A text value stored into an empty-literal {} dict SIGSEGVs on read or compare u) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Fix 2026-11-03 (verification pending)
+
+Root cause as predicted: `note_container_elem_type` (src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl)
+recorded only F64/F32 store types, so a text stored into an erased-i64 empty
+`{}` decoded on read through the integer `>>3` arm. It now also records the str
+type (`mir_type_is_str`), so the dict read (expr_dispatch.spl ~2631, which
+refines only when the declared value type is I64) takes the `rt_interp_cstr` arm.
+Verify (needs a native-build producer containing this change):
+`bin/simple native-build --entry repro.spl -o repro && ./repro; echo $?` -> 30,
+or run `test/01_unit/compiler/codegen/native_empty_dict_text_value_spec.spl` (tag in-development until then).
