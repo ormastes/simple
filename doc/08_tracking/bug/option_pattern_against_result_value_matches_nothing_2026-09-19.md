@@ -121,3 +121,21 @@ scrutinee holding `Ok(..)`; `print r` shows `<enum@0x..>`), so `"Some:" + v` pri
 Root cause is the missing static type error (scrutinee typed `text`, see
 `hir/lower/option_pattern_shape_diag.rs`, warn-only default OFF via SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1), owned by
 the type-checker worker; no JIT-only codegen fix is possible without changing that diagnostic's design.
+
+## 2026-11-03 - nil half + seed runtime warning (fix-implemented-verification-pending)
+
+- Self-hosted checker: `case nil` over a Result/scalar scrutinee now yields the
+  named `[E-TYPE-NIL-COMPARE]` diagnostic with a real span. Cause of the old
+  `unsupported expression kind: Block` at 0:0: `synthesize_expr` had no `Block`
+  arm, so the desugared `match` never reached the nil-compare check; and the
+  check exempted Result. Spec:
+  `test/01_unit/compiler/lint/frontend_diag/option_nil_pattern_non_option_scrutinee_spec.spl`
+  (3/3 pass; whole `frontend_diag/` dir 76/76). Bare `case None:` over a scalar
+  still lowers as a catch-all binding (separate, unfixed).
+- Rust seed interpreter: `Some`/`None`/`nil` arms tested against a `Result` value
+  now match nothing AND warn (`warning[option-pattern-on-result]`, once per
+  process, counted) in `interpreter_patterns.rs`. Unit tests
+  `option_patterns_over_result_value_match_nothing_and_are_counted` (+ negative).
+  Scalars are not diagnosed by value because Some-wrapped Options are bare values
+  in the interpreter (would false-positive). Needs a rebuilt seed to observe
+  end-to-end with the probe above.
