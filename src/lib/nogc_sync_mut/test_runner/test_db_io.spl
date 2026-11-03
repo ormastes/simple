@@ -4,6 +4,8 @@
 
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_copy}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.common.path_pure.{path_dirname}
 use std.test_runner.test_db_lock.TestDbFileLock
 
 # =========================================================================
@@ -31,7 +33,15 @@ fn read_db_file(path: text) -> Result<text, text>:
 # Atomic Write with Locking
 # =========================================================================
 
+# file_lock cannot create its lock file inside a missing directory, so a cold
+# start (fresh checkout, no doc/08_tracking/test yet) failed before writing.
+fn ensure_db_parent_dir(path: text):
+    val parent = path_dirname(path)
+    if parent != "" and parent != ".":
+        dir_create_all(parent)
+
 fn write_db_file_locked(path: text, content: text) -> Result<(), text>:
+    ensure_db_parent_dir(path)
     # Acquire lock. `acquire` yields `TestDbFileLock?`, never a Result, so it
     # is tested for nil; matching it against Ok/Err arms aborted every call
     # with "match expression exhausted". The binding is explicitly typed so
@@ -68,6 +78,7 @@ fn write_db_file_locked(path: text, content: text) -> Result<(), text>:
 # =========================================================================
 
 fn update_db_file(path: text, updater: fn(text) -> text) -> Result<(), text>:
+    ensure_db_parent_dir(path)
     # Same Option contract as write_db_file_locked above.
     val acquired = TestDbFileLock.acquire(path, LOCK_TIMEOUT)
     if acquired == nil:
