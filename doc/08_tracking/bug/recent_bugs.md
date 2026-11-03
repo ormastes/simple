@@ -206,7 +206,7 @@
 | scv_chunk_publication_concurrent_reader_2026-10-05 | P1 | open | SCV final chunk names become visible before complete publication | `src/lib/scv/compile_snapshot.spl:1` |
 | phase2_subsystem_helper_mir_failures_2026-10-05 | P1 | open | Phase 2 test generator and verdict helpers fail MIR lowering | `src/compiler/10.frontend/core/flat_pool_codec.spl:37` |
 | p4_gui_browser_missing_owner_imports_2026-10-05 | P1 | open | Phase 4 GUI browser modules omit implementation owner imports | `src/app/editor/gui_shell.spl:1` |
-| mcp_t32_module_owner_omissions_2026-10-05 | P1 | open | Phase 4 TRACE32 modules omit shared owner declarations | `examples/10_tooling/trace32_tools/t32_mcp/action_tools.spl:1` |
+| mcp_t32_module_owner_omissions_2026-10-05 | P1 | fixed | Phase 4 TRACE32 modules omit shared owner declarations | `examples/10_tooling/trace32_tools/t32_mcp/action_tools.spl:1` |
 | phase3_post_hir_owner_transport_av_2026-10-05 | P1 | open | Phase 3 access violation after successful HIR collection | `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:1077` |
 | windows_runtime_object_cache_2026-10-05 | P1 | open | Windows runtime objects are rebuilt for unchanged compilation inputs | `src/compiler/70.backend/backend/runtime_compiler.spl:483` |
 | brace_dictionary_type_tags_discarded_2026-10-05 | P1 | open | Brace dictionary annotations discard key and value type tags | `src/compiler/10.frontend/core/parser.spl:1090` |

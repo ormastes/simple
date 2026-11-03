@@ -1,6 +1,6 @@
 # TRACE32 MCP module owner omissions
 
-Status: permanent source repairs prepared; native validation pending.
+Status: fixed; smoke test/04_smoke/native_mcp_t32_owner_routes.spl passes 11/11 on seed (2026-11-03; also added missing MCP_T32_SESSIONS import in session_list_tools.spl). Needs no compiler redeploy.
 
 Early Phase4 with producer `2b831559` and immutable source `916be6` completed HIR
 with 2,583 successes and nine failed modules. Six failures are the MCP TRACE32
