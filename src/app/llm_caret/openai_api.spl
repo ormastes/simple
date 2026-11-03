@@ -3,10 +3,10 @@
 # Builds HTTP requests for the OpenAI Chat Completions API.
 # Pure functions for request/response JSON building/parsing.
 
-use app.llm_caret.retry.{retry_policy_from_env, with_retry}
+use app.llm_caret.retry.{retry_policy_from_env, with_retry_timeout}
 use app.llm_caret.json_helpers.{json_find, json_parse_int}
 
-use std.nogc_sync_mut.io.http_client_core.{http_request_raw}
+use std.nogc_sync_mut.io.http_client_core.{http_request_raw_timeout}
 
 # ============================================================================
 # JSON helpers (inlined)
@@ -307,8 +307,8 @@ fn complete_openai_exchange(raw: text, transport_error: text) -> OpenAIResponse:
 # `with_retry` receives a trailing-colon function literal.  Keep that callback
 # expression-only so the self-hosted production parser accepts this provider
 # entry closure; the transport's local result belongs in this named helper.
-fn openai_retry_transport(request: OpenAIApiRequest, attempt: i64) -> (i64, text, text, i64):
-    val result = http_request_raw(request.method, request.url, request.headers, request.body)
+fn openai_retry_transport(request: OpenAIApiRequest, attempt: i64, remaining_ms: i64) -> (i64, text, text, i64):
+    val result = http_request_raw_timeout(request.method, request.url, request.headers, request.body, remaining_ms)
     (result.0, result.1 ?? "", result.2 ?? "", 0)
 
 # ============================================================================
@@ -330,7 +330,7 @@ fn openai_send(api_key: text, base_url: text, model: text, messages_json: text, 
         )
     val request = build_openai_request(api_key, base_url, model, messages_json, max_tokens, temperature)
     val policy = retry_policy_from_env()
-    val outcome = with_retry(policy, fn(attempt: i64) -> (i64, text, text, i64):
-        openai_retry_transport(request, attempt)
+    val outcome = with_retry_timeout(policy, fn(attempt: i64, remaining_ms: i64) -> (i64, text, text, i64):
+        openai_retry_transport(request, attempt, remaining_ms)
     )
     complete_openai_exchange(outcome.body, outcome.error)
