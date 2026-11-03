@@ -157,8 +157,7 @@ class TodoDatabase:
 use nogc_sync_mut.database.atomic.{FileLock}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.io_runtime.{read_file_text_result}
-use std.nogc_sync_mut.compression.gzip.crc.{crc32_text}
-use std.convert (try_parse_int)
+use std.nogc_sync_mut.database.csm_seal.{csm_verify, csm_strip_legacy_header, csm_seal_add, csm_seal_prune, csm_writer_algo, CSM_CORRUPT}
 
 # Serialize only the new row; never parse and regenerate existing TODO payloads.
 fn append_todo_preserving_legacy(path: text, row: SdnRow) -> bool:
@@ -180,12 +179,9 @@ fn _todo_append_locked(path: text, row: SdnRow) -> bool:
         case Err(_): return false
     if original.len() > 33554432: return false
     var body: text = original
-    if original.starts_with("#sdn-crc32:"):
-        val newline = original.index_of("\n")
-        if newline < 0: return false
-        val expected = try_parse_int(original.substring(11, newline).trim())
-        body = original.substring(newline + 1)
-        if expected == nil or crc32_text(body) != (expected ?? -1): return false
+    val seal_state = csm_verify(path, original).state
+    if seal_state == CSM_CORRUPT: return false
+    if seal_state == CSM_LEGACY: body = csm_strip_legacy_header(original)
     val columns: [text] = ["id", "keyword", "area", "priority", "description", "file", "line", "issue", "blocked", "status", "valid"]
     val id: text = row.get("id") ?? ""
     if id == "": return false
@@ -221,5 +217,8 @@ fn _todo_append_locked(path: text, row: SdnRow) -> bool:
         updated = anchored.replace(crlf, crlf + rows).substring(1)
     else:
         updated = anchored.replace(lf, lf + rows).substring(1)
-    val checksum = crc32_text(updated)
-    file_atomic_write(path, "#sdn-crc32:{checksum}\n" + updated)
+    val seal = csm_seal_add(path, updated, csm_writer_algo(path))
+    if seal == "": return false
+    val published = file_atomic_write(path, updated)
+    if published: csm_seal_prune(path, seal)
+    published
