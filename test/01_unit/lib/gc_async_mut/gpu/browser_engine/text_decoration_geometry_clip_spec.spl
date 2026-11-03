@@ -1,0 +1,93 @@
+"""Exact and adjacent raster regressions for decoration geometry.
+
+CSS pixel thickness is independent of bitmap glyph scale. Decoration ink
+may overflow its line box but must obey ancestor overflow clipping. The tile
+operation must conservatively include that ink, including double strokes.
+"""
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_render_html_software_pixels_tile_lane}
+
+val DECO: u32 = 0xFFFF0000u32
+val WIDTH: i32 = 48
+val HEIGHT: i32 = 64
+
+fn decoration_document(extra: text, container: text = "") -> text:
+    "<html><head><style>html,body{margin:0;padding:0;background:#ffffff}" +
+    "div{line-height:48px;" + container + "}" +
+    "span{font-size:16px;color:#000000;text-decoration:underline;" +
+    "text-decoration-color:#ff0000;" + extra + "}" +
+    "</style></head><body><div><span>AB</span></div></body></html>"
+
+fn decoration_row_count(pixels: [u32], width: i32, height: i32) -> i32:
+    var rows = 0
+    for y in 0..height:
+        var occupied = false
+        for x in 0..width:
+            if pixels[y * width + x] == DECO:
+                occupied = true
+        if occupied:
+            rows = rows + 1
+    rows
+
+fn decoration_first_row(pixels: [u32], width: i32, height: i32) -> i32:
+    for y in 0..height:
+        for x in 0..width:
+            if pixels[y * width + x] == DECO:
+                return y
+    -1
+
+fn decoration_pixels(extra: text, container: text = "") -> [u32]:
+    simple_web_layout_render_html_software_pixels(
+        decoration_document(extra, container), WIDTH, HEIGHT)
+
+describe "p2_p3_bug_reproduction decoration geometry":
+    it "paints CSS pixel thickness without multiplying by glyph scale":
+        step("Reproduce the exact failure")
+        val thin = decoration_pixels("text-decoration-thickness:1px")
+        val thick = decoration_pixels("text-decoration-thickness:4px")
+        expect(decoration_row_count(thin, WIDTH, HEIGHT)).to_equal(1)
+        expect(decoration_row_count(thick, WIDTH, HEIGHT)).to_equal(4)
+
+    it "moves independent underline ink for positive and negative offsets":
+        step("Exercise the repaired owner")
+        val base = decoration_pixels("text-decoration-thickness:3px")
+        val down = decoration_pixels("text-decoration-thickness:3px;text-underline-offset:6px")
+        val up = decoration_pixels("text-decoration-thickness:3px;text-underline-offset:-4px")
+        val first = decoration_first_row(base, WIDTH, HEIGHT)
+        expect(first).to_be_greater_than(3)
+        expect(decoration_first_row(down, WIDTH, HEIGHT)).to_equal(first + 6)
+        expect(decoration_first_row(up, WIDTH, HEIGHT)).to_equal(first - 4)
+        expect(decoration_row_count(down, WIDTH, HEIGHT)).to_equal(3)
+        expect(decoration_row_count(up, WIDTH, HEIGHT)).to_equal(3)
+
+describe "p2_p3_adjacent_regression decoration clipping":
+    it "keeps the default identical to an explicit one pixel underline":
+        step("Reject the adjacent regression")
+        val implicit = decoration_pixels("")
+        val explicit = decoration_pixels("text-decoration-thickness:1px;text-underline-offset:0px")
+        expect(implicit).to_equal(explicit)
+        expect(decoration_row_count(implicit, WIDTH, HEIGHT)).to_equal(1)
+
+    it "clips decoration overflow only at the actual ancestor overflow edge":
+        val extra = "text-decoration-thickness:8px;text-underline-offset:8px"
+        val visible = decoration_pixels(extra, "height:20px;overflow:visible")
+        val hidden = decoration_pixels(extra, "height:20px;overflow:hidden")
+        expect(decoration_row_count(visible, WIDTH, HEIGHT)).to_equal(8)
+        expect(decoration_row_count(hidden, WIDTH, HEIGHT)).to_equal(0)
+
+    it "includes both double decoration strokes in the tile ink bounds":
+        # The glyph node is above the viewport and its 512px tile margin.
+        # Only the second thick stroke reaches the live viewport.
+        val html = decoration_document("text-decoration-thickness:600px;text-decoration-style:double")
+        val classic = simple_web_layout_render_html_software_pixels_tile_lane(
+            html, WIDTH, 1280, 1024, 32, false)
+        val tiled = simple_web_layout_render_html_software_pixels_tile_lane(
+            html, WIDTH, 1280, 1024, 32, true)
+        expect(decoration_row_count(classic, WIDTH, 1280)).to_equal(1200)
+        for y in 1024..1056:
+            for x in 0..WIDTH:
+                expect(tiled[y * WIDTH + x]).to_equal(classic[y * WIDTH + x])
+        expect(decoration_row_count(tiled, WIDTH, 1280)).to_equal(1200)
