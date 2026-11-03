@@ -1,0 +1,110 @@
+# Purpose and audience: branch-coverage evidence for text indexing (ADR-005), for the text/runtime owners.
+# @req REQ-SSPEC-UNIT
+# design: doc/04_architecture/adr/ADR-005-text-index-yields-char.md
+#
+# Interpreter-path (bin/simple test) specs for the code-point vs byte split of
+# text indexing: ASCII fast-path inputs, 2/3/4-byte UTF-8 inputs, empty text,
+# and every out-of-range side (negative, == len, far past end).
+# `char`-value specs live in the char-runtime-tag lane (PR #6269) and in
+# text_index_ruby_semantics_spec.spl (in-development); not repeated here.
+
+use std.spec.{describe, it, expect}
+
+describe "char_code_at is code-point indexed":
+    it "returns the byte value for ASCII":
+        expect("abc".char_code_at(0)).to_equal(97)
+        expect("abc".char_code_at(2)).to_equal(99)
+
+    it "decodes a 2-byte code point (e-acute)":
+        expect("caf\u{e9}!".char_code_at(3)).to_equal(233)
+        expect("caf\u{e9}!".char_code_at(4)).to_equal(33)
+
+    it "decodes a 3-byte code point (euro sign)":
+        expect("a\u{20ac}b".char_code_at(1)).to_equal(8364)
+        expect("a\u{20ac}b".char_code_at(2)).to_equal(98)
+
+    it "decodes a 4-byte code point (emoji) and keeps the tail aligned":
+        val e = "a\u{1F600}b"
+        expect(e.char_code_at(0)).to_equal(97)
+        expect(e.char_code_at(1)).to_equal(128512)
+        expect(e.char_code_at(2)).to_equal(98)
+
+    it "returns 0 for out-of-range indexes (negative, past end, empty)":
+        expect("abc".char_code_at(3)).to_equal(0)
+        expect("abc".char_code_at(99)).to_equal(0)
+        expect("abc".char_code_at(-1)).to_equal(0)
+        expect("".char_code_at(0)).to_equal(0)
+
+describe "byte_at is byte indexed":
+    it "reads ASCII bytes":
+        expect("abc".byte_at(0)).to_equal(97)
+        expect("abc".byte_at(2)).to_equal(99)
+
+    it "exposes the UTF-8 lead and continuation bytes of a 2-byte char":
+        expect("\u{e9}".byte_at(0)).to_equal(195)
+        expect("\u{e9}".byte_at(1)).to_equal(169)
+
+    it "exposes all four bytes of a 4-byte char":
+        val e = "\u{1F600}"
+        expect(e.byte_at(0)).to_equal(240)
+        expect(e.byte_at(1)).to_equal(159)
+        expect(e.byte_at(2)).to_equal(152)
+        expect(e.byte_at(3)).to_equal(128)
+
+    it "returns 0 for out-of-range indexes":
+        expect("abc".byte_at(3)).to_equal(0)
+        expect("abc".byte_at(-1)).to_equal(0)
+        expect("".byte_at(0)).to_equal(0)
+
+    it "disagrees with char_code_at once a multi-byte char precedes the index":
+        val s = "\u{e9}x"
+        expect(s.byte_at(1)).to_equal(169)
+        expect(s.char_code_at(1)).to_equal(120)
+
+describe "char_at over-run policy":
+    it "returns the character at an in-range code-point index":
+        expect("h\u{e9}llo".char_at(1)).to_equal("\u{e9}")
+        expect("hello".char_at(4)).to_equal("o")
+
+    it "returns empty text past the end, at len, and for negative or empty input":
+        expect("abc".char_at(3)).to_equal("")
+        expect("abc".char_at(99)).to_equal("")
+        expect("abc".char_at(-1)).to_equal("")
+        expect("".char_at(0)).to_equal("")
+
+describe "bracket indexing is code-point indexed":
+    it "indexes ASCII forward and from the end":
+        val s = "abc"
+        expect(s[0].to_text()).to_equal("a")
+        expect(s[2].to_text()).to_equal("c")
+        expect(s[-1].to_text()).to_equal("c")
+        expect(s[-3].to_text()).to_equal("a")
+
+    it "indexes past a multi-byte code point without splitting it":
+        val s = "h\u{e9}llo"
+        expect(s[1].to_text()).to_equal("\u{e9}")
+        expect(s[2].to_text()).to_equal("l")
+        expect(s[-1].to_text()).to_equal("o")
+
+    it "indexes a 4-byte code point as one element":
+        val e = "a\u{1F600}b"
+        expect(e[1].to_text()).to_equal("\u{1F600}")
+        expect(e[2].to_text()).to_equal("b")
+
+describe "slicing":
+    it "slices ASCII with closed, open-start and open-end ranges":
+        val s = "abcdef"
+        expect(s[1:4]).to_equal("bcd")
+        expect(s[:2]).to_equal("ab")
+        expect(s[4:]).to_equal("ef")
+        expect(s[-2:]).to_equal("ef")
+
+    it "clamps an end past the string and yields empty for inverted or empty ranges":
+        val s = "abcdef"
+        expect(s[3:99]).to_equal("def")
+        expect(s[4:2]).to_equal("")
+        expect(s[2:2]).to_equal("")
+        expect("".substring(0, 0)).to_equal("")
+
+    it "substring agrees with slicing on ASCII":
+        expect("abcdef".substring(1, 4)).to_equal("bcd")
