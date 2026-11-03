@@ -39,7 +39,7 @@ impl HirLowering:
         var hir_else: HirBlock? = nil
         if val else_src = else_block:
             hir_else = Some(self.lower_hir_block(else_src))
-        HirExpr(kind: HirExprKind.CfgSelect(conds, hir_arms, hir_else), has_type_: false, type_: nil, span: span)
+        HirExpr(kind: HirExprKind.CfgSelect(conds, hir_arms, hir_else), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
 
     fn attributed_collection_family_identity(name: text, owner: text) -> text:
         # A local type may reuse an adaptive leaf name. Only the stdlib type's
@@ -181,11 +181,12 @@ impl HirLowering:
                     has_type_: initializer.has_type_, type_: initializer.type_, span: initializer.span)
             case _: initializer
 
-    fn declared_static_method_resolution(receiver: HirExpr, method: text) -> MethodResolution:
+    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=by-value HirExpr param faults in the frozen stage2 prologue copy (AV declared_static_method_resolution+0x1cd, addr 0x100000000); take the kind only
+    fn declared_static_method_resolution(receiver_kind: HirExprKind, method: text) -> MethodResolution:
         # Keep the declared owner while HIR still owns the receiver expression.
         # Native MIR cannot reconstruct this from a nested MethodCall payload;
         # a leaf-name fallback is ambiguous when two types declare the method.
-        val owner = _hir_expr_symbol_or_invalid(receiver.kind)
+        val owner = _hir_expr_symbol_or_invalid(receiver_kind)
         if not owner.is_valid():
             return MethodResolution.Unresolved
         val owner_symbol = self.symbols.get_symbol_raw(owner.id)
@@ -389,7 +390,7 @@ impl HirLowering:
                 for call_type in e.explicit_call_types:
                     val call_type_t: Type = call_type
                     hir_type_args = hir_type_args.push(self.lower_type(call_type_t))
-                return HirExpr(kind: HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, hir_type_args), has_type_: false, type_: nil, span: e.span)
+                return HirExpr(kind: HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, hir_type_args), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
             case _:
                 pass
         # SEED PATTERN HAZARD (bug doc iteration 18): when a variant pattern's
@@ -415,7 +416,7 @@ impl HirLowering:
                     # arguments; nested lowering may advance interpreter-owned
                     # enum payload storage.
                     val mc_lowered_receiver = self.lower_static_owner_receiver(method_receiver_t)
-                    val mc_static_resolution = self.declared_static_method_resolution(mc_lowered_receiver, method_name_t)
+                    val mc_static_resolution = self.declared_static_method_resolution(mc_lowered_receiver.kind, method_name_t)
                     val mc_enum_owner = self.declared_enum_constructor_owner(mc_lowered_receiver, mc_static_resolution)
                     var hir_args: [HirCallArg] = []
                     for arg in method_args_t:
@@ -471,12 +472,12 @@ impl HirLowering:
                                     val mc_callable_name = self.symbols.symbol_display_name(mc_resolved_callable, method_name_t)
                                     return HirExpr(
                                         kind: HirExprKind.Call(
-                                            HirExpr(kind: _hir_callable_named_var_payload(mc_resolved_callable, mc_callable_name), has_type_: false, type_: nil, span: e.span),
+                                            HirExpr(kind: _hir_callable_named_var_payload(mc_resolved_callable, mc_callable_name), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span),
                                             hir_args,
                                             []
                                         ),
                                         has_type_: false,
-                                        type_: nil,
+                                        type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                                         span: e.span
                                     )
                         # A call through a struct FIELD that holds a function
@@ -536,7 +537,7 @@ impl HirLowering:
                                                 []
                                             ),
                                             has_type_: false,
-                                            type_: nil,
+                                            type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                                             span: e.span
                                         )
                                     case _:
@@ -594,7 +595,8 @@ impl HirLowering:
                     if method_name_t == "keys" or method_name_t == "values":
                         if hir_args.len() == 0:
                             var mc_recv_type_opt: HirType? = nil
-                            if mc_lowered_receiver.has_type_ and mc_lowered_receiver.type_ != nil:
+                            # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=stage2 loads type_ even when has_type_ is false (placeholder packed span AV); has_type_ alone is the authoritative presence bit
+                            if mc_lowered_receiver.has_type_:
                                 mc_recv_type_opt = mc_lowered_receiver.type_
                             else:
                                 val mc_recv_sym = _hir_expr_symbol_or_invalid(mc_lowered_receiver.kind)
@@ -621,7 +623,7 @@ impl HirLowering:
                     return HirExpr(
                         kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
                         has_type_: false,
-                        type_: nil,
+                        type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                         span: e.span
                     )
                 case _:
@@ -651,10 +653,10 @@ impl HirLowering:
                         return HirExpr(
                             kind: HirExprKind.IfChain(hir_arms, self.lower_hir_block(else_block_src)),
                             has_type_: false,
-                            type_: nil,
+                            type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                             span: e.span
                         )
-                    return HirExpr(kind: HirExprKind.IfChain(hir_arms, None), has_type_: false, type_: nil, span: e.span)
+                    return HirExpr(kind: HirExprKind.IfChain(hir_arms, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
                 case _:
                     pass
         if kind_disc_v == hir_expr_kind_disc(ExprKind.If(kind_disc_dummy, Block(stmts: [], span: e.span), None)):
@@ -673,13 +675,13 @@ impl HirLowering:
                         return HirExpr(
                             kind: HirExprKind.If(hir_cond, hir_then, self.lower_hir_block(else_block_src)),
                             has_type_: false,
-                            type_: nil,
+                            type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                             span: e.span
                         )
                     return HirExpr(
                         kind: HirExprKind.If(hir_cond, hir_then, None),
                         has_type_: false,
-                        type_: nil,
+                        type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                         span: e.span
                     )
                 case _:
@@ -714,7 +716,7 @@ impl HirLowering:
                                 val module_callable = self.field_module_callable(module_name, fld_name_t)
                                 if val resolved_callable = module_callable:
                                     val callable_name = self.symbols.symbol_display_name(resolved_callable, fld_name_t)
-                                    return HirExpr(kind: _hir_callable_named_var_payload(resolved_callable, callable_name), has_type_: false, type_: nil, span: e.span)
+                                    return HirExpr(kind: _hir_callable_named_var_payload(resolved_callable, callable_name), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
                     # Numeric tuple positional access (`t.0`, `t.1`, ...):
                     # route through HirExprKind.Index (rt_array_get at
                     # runtime) instead of the generic struct-field path
@@ -746,7 +748,7 @@ impl HirLowering:
                         # Tuple-returning calls need MIR's declared-return
                         # fallback; an absent local annotation is not a type.
                         return HirExpr(
-                            kind: HirExprKind.Index(fld_lowered_base, HirExpr(kind: HirExprKind.IntLit(fld_tuple_idx, None), has_type_: false, type_: nil, span: e.span)),
+                            kind: HirExprKind.Index(fld_lowered_base, HirExpr(kind: HirExprKind.IntLit(fld_tuple_idx, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)),
                             has_type_: fld_tuple_elem_type != nil,
                             type_: fld_tuple_elem_type,
                             span: e.span
@@ -784,13 +786,13 @@ impl HirLowering:
                         fld_acc_owner = self.owner_type_id_for_base_raw(fld_base_sym.id)
                     if val fld_forwarded = self.lower_accessor_read(fld_lowered_base, fld_name_t, fld_acc_owner, e.span):
                         return fld_forwarded
-                    return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, None), has_type_: false, type_: nil, span: e.span)
+                    return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
                 case _:
                     pass
         if kind_disc_v == hir_expr_kind_disc(ExprKind.Block(Block(stmts: [], span: e.span))):
             match expr_kind_value:
                 case ExprKind.Block(block):
-                    return HirExpr(kind: HirExprKind.Block(self.lower_hir_block(block)), has_type_: false, type_: nil, span: e.span)
+                    return HirExpr(kind: HirExprKind.Block(self.lower_hir_block(block)), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
                 case _:
                     pass
         val kind = match expr_kind_value:
@@ -935,7 +937,7 @@ impl HirLowering:
                         val indexed = HirExpr(
                             kind: HirExprKind.Index(self.lower_hir_expr(exists_base_t), lowered_index),
                             has_type_: false,
-                            type_: nil,
+                            type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                             span: e.span
                         )
                         HirExprKind.ExistsCheck(indexed)
@@ -959,7 +961,8 @@ impl HirLowering:
                         # true`. That malformed word later reaches the 16-byte
                         # HirType clone in `lower_hir_block`'s HirBlock
                         # construction and SIGSEGVs.
-                        if lowered_base.has_type_ and lowered_base.type_ != nil:
+                        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=stage2 loads type_ even when has_type_ is false (placeholder packed span AV); has_type_ alone is the authoritative presence bit
+                        if lowered_base.has_type_:
                             val base_type = lowered_base.type_ ?? HirType(kind: HirTypeKind.Error, span: e.span)
                             match base_type.kind:
                                 case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
@@ -1016,7 +1019,7 @@ impl HirLowering:
                 # values is untouched.
                 val is_type_name = binary_is_type_operand(bin_op_t, bin_right_t)
                 if is_type_name != "":
-                    val tested = HirExpr(kind: HirExprKind.TypeTest(self.lower_hir_expr(bin_left_t), is_type_name), has_type_: false, type_: nil, span: e.span)
+                    val tested = HirExpr(kind: HirExprKind.TypeTest(self.lower_hir_expr(bin_left_t), is_type_name), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
                     match bin_op_t:
                         case BinOp.IsNot: HirExprKind.Unary(HirUnaryOp.Not, tested)
                         case _: HirExprKind.TypeTest(self.lower_hir_expr(bin_left_t), is_type_name)
@@ -1050,7 +1053,7 @@ impl HirLowering:
                 # still authoritative. Lowering argument expressions can
                 # advance interpreter-owned enum payload storage.
                 val lowered_method_receiver = self.lower_static_owner_receiver(method_receiver_t)
-                val fallback_static_resolution = self.declared_static_method_resolution(lowered_method_receiver, method_name_t)
+                val fallback_static_resolution = self.declared_static_method_resolution(lowered_method_receiver.kind, method_name_t)
                 val fallback_enum_owner = self.declared_enum_constructor_owner(lowered_method_receiver, fallback_static_resolution)
                 var hir_args: [HirCallArg] = []
                 for arg in method_args_t:
@@ -1078,7 +1081,8 @@ impl HirLowering:
                 if method_name_t == "keys" or method_name_t == "values":
                     if hir_args.len() == 0:
                         var fb_recv_type_opt: HirType? = nil
-                        if lowered_method_receiver.has_type_ and lowered_method_receiver.type_ != nil:
+                        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=stage2 loads type_ even when has_type_ is false (placeholder packed span AV); has_type_ alone is the authoritative presence bit
+                        if lowered_method_receiver.has_type_:
                             fb_recv_type_opt = lowered_method_receiver.type_
                         else:
                             val fb_recv_sym = _hir_expr_symbol_or_invalid(lowered_method_receiver.kind)
@@ -1369,5 +1373,5 @@ impl HirLowering:
             case _:
                 self.error("unsupported expression kind", e.span)
                 HirExprKind.Error
-        val wrapped_expr = HirExpr(kind: kind, has_type_: false, type_: nil, span: e.span)
+        val wrapped_expr = HirExpr(kind: kind, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
         wrapped_expr
