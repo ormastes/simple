@@ -1,0 +1,111 @@
+# raw_quote_migrate driver: single-quoted raw strings -> r"..." (see rewrite.spl).
+#
+# Usage:
+#   bin/simple run src/app/tools/raw_quote_migrate/main.spl [options] <file-or-dir>...
+#
+# Options:
+#   --dry-run        report counts per file, write nothing
+#   --check          like --dry-run, exit 1 when any convertible site remains
+#   --verify         re-lex before/after; abort that file (not written, exit 1)
+#                    unless the token-kind sequence matches and every converted
+#                    token is a raw string carrying the identical value
+#   --skip-escapes   leave sites whose content has a backslash unconverted
+#   --quiet          summary line only
+#
+# Output: FILE <path> converted=<n> kept_char=<k> triple=<t> escapes=<e> skipped=<s>
+#         SUMMARY files=<f> changed=<c> converted=... verify_failures=<v>
+# Only *.spl outside vendor/ trees is scanned. Exit 0 ok, 1 check/verify failure.
+
+use app.tools.raw_quote_migrate.rewrite.{MigrateResult, migrate_source, verify_rewrite}
+use std.nogc_sync_mut.cli.{get_cli_args}
+use std.nogc_sync_mut.io_runtime.{file_exists, exit}
+use std.nogc_sync_mut.sffi.io.{dir_exists, dir_walk, file_read_text_nilable, file_write_text}
+
+fn _collect(paths: [text]) -> [text]:
+    var out: [text] = []
+    for p in paths:
+        if dir_exists(p):
+            for raw in dir_walk(p):
+                val f = raw.replace("\\", "/")
+                if f.ends_with(".spl") and not f.contains("/vendor/"):
+                    out.push(f)
+        elif file_exists(p):
+            out.push(p)
+        else:
+            print "raw_quote_migrate: no such file or directory: " + p
+    out
+
+fn main():
+    val args = get_cli_args()
+    var dry_run = false
+    var check = false
+    var verify = false
+    var skip_escapes = false
+    var quiet = false
+    var paths: [text] = []
+    for a in args:
+        if a == "--dry-run":
+            dry_run = true
+        elif a == "--check":
+            check = true
+            dry_run = true
+        elif a == "--verify":
+            verify = true
+        elif a == "--skip-escapes":
+            skip_escapes = true
+        elif a == "--quiet":
+            quiet = true
+        else:
+            paths.push(a)
+    if paths.len() == 0:
+        print "usage: raw_quote_migrate [--dry-run|--check] [--verify] [--skip-escapes] [--quiet] <file-or-dir>..."
+        exit(2)
+        return
+    var files = 0
+    var changed = 0
+    var converted = 0
+    var kept_char = 0
+    var triple = 0
+    var escapes = 0
+    var skipped = 0
+    var verify_failures = 0
+    var write_failures = 0
+    for path in _collect(paths):
+        val src = file_read_text_nilable(path)
+        if src == nil:
+            print "raw_quote_migrate: cannot read " + path
+            continue
+        val source: text = src ?? ""
+        files = files + 1
+        val r = migrate_source(source, skip_escapes)
+        kept_char = kept_char + r.kept_char
+        triple = triple + r.triple_kept
+        skipped = skipped + r.skipped.len()
+        if r.converted == 0 and r.skipped.len() == 0:
+            continue
+        if not quiet:
+            print "FILE " + path + " converted=" + r.converted.to_text() + " kept_char=" + r.kept_char.to_text() + " triple=" + r.triple_kept.to_text() + " escapes=" + r.escapes.to_text() + " skipped=" + r.skipped.len().to_text()
+            for s in r.skipped:
+                print "  SKIP " + s
+        if not r.changed:
+            continue
+        if verify:
+            val problem = verify_rewrite(source, r.output)
+            if problem != "":
+                print "VERIFY-FAIL " + path + ": " + problem
+                verify_failures = verify_failures + 1
+                continue
+        changed = changed + 1
+        converted = converted + r.converted
+        escapes = escapes + r.escapes
+        if not dry_run:
+            if not file_write_text(path, r.output):
+                print "raw_quote_migrate: WRITE FAILED: " + path
+                write_failures = write_failures + 1
+    print "SUMMARY files=" + files.to_text() + " changed=" + changed.to_text() + " converted=" + converted.to_text() + " kept_char=" + kept_char.to_text() + " triple_kept=" + triple.to_text() + " escapes=" + escapes.to_text() + " skipped=" + skipped.to_text() + " verify_failures=" + verify_failures.to_text() + " write_failures=" + write_failures.to_text() + (if dry_run: " mode=dry-run" else: " mode=apply")
+    if verify_failures > 0 or write_failures > 0:
+        exit(1)
+        return
+    if check and changed > 0:
+        exit(1)
+        return

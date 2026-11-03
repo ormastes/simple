@@ -1,0 +1,139 @@
+use std.spec.*
+use std.spec.step
+use app.io.mod.{file_read}
+use common.ui.builder.{build_tree, column, label, button, with_height}
+use common.ui.window_scene.{
+    WM_CONTENT_ORIGIN_GUI, WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    WM_CONTENT_ORIGIN_PIXEL_SURFACE,
+}
+use os.compositor.compositor.{Compositor}
+use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend}
+use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.desktop.shell.{DesktopShell}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+fn content_dispatch_compositor() -> Compositor:
+    Compositor.with_backends(
+        HeadlessHostCompositorBackend.new(160, 240), nil, 160, 240
+    )
+
+describe "p2_p3_bug_reproduction":
+    it "produces distinct canonical GUI Web and pixel frames for one shell scene":
+        step("Reproduce the exact failure")
+        var compositor = content_dispatch_compositor()
+        val gui = compositor.create_window_with_tree(
+            "GUI", 0, 10, 52, 80,
+            build_tree(column("gui-root", [label("gui-label", "GUI")]))
+        )
+        val web = compositor.create_window("Web", 52, 10, 52, 80)
+        compositor.update_window_content(web.to_u64(), "<p>Web</p>")
+        val pixel = compositor.create_window("Pixel", 104, 10, 52, 80)
+        val handle = compositor.create_pixel_content(44, 44, 0xff102030u32)
+        expect(handle > 0).to_equal(true)
+        expect(compositor.attach_window_pixel_content(pixel.to_u64(), handle)).to_equal(true)
+        var shell = DesktopShell.new(compositor)
+        val revision = shell.runtime_scene_revision()
+        val frames = shell.runtime_content_frames(revision)
+        expect(frames.len()).to_equal(3)
+        expect(frames[0].window_id).to_equal(gui.value.to_text())
+        expect(frames[0].origin_kind).to_equal(WM_CONTENT_ORIGIN_GUI)
+        expect(frames[1].window_id).to_equal(web.to_text())
+        expect(frames[1].origin_kind).to_equal(WM_CONTENT_ORIGIN_SIMPLE_WEB)
+        expect(frames[2].window_id).to_equal(pixel.to_text())
+        expect(frames[2].origin_kind).to_equal(WM_CONTENT_ORIGIN_PIXEL_SURFACE)
+        for frame in frames:
+            expect(frame.scene_revision).to_equal(revision)
+            expect(frame.width).to_equal(44)
+            expect(frame.height).to_equal(44)
+            expect(frame.pixels.len()).to_equal(44 * 44)
+        expect(frames[2].pixels[0]).to_equal(0xff102030u32)
+        expect(frames[2].pixels[44 * 44 - 1]).to_equal(0xff102030u32)
+        shell.compositor.destroy_window(gui.value.to_i32())
+        shell.compositor.destroy_window(web)
+        shell.compositor.destroy_window(pixel)
+        expect(shell.compositor.gui_content_count()).to_equal(0)
+        expect(shell.compositor.pixel_content_count()).to_equal(0)
+
+    it "presents pixel content through the actual shared executor backend":
+        step("Exercise the repaired owner")
+        var compositor = content_dispatch_compositor()
+        val pixel = compositor.create_window("Pixel", 8, 10, 52, 80)
+        val handle = compositor.create_pixel_content(44, 44, 0xff102030u32)
+        expect(compositor.attach_window_pixel_content(pixel.to_u64(), handle)).to_equal(true)
+        var shell = DesktopShell.new(compositor)
+        var executor = Engine2dWmFrameExecutor.create(
+            Engine2D.create_with_backend(160, 240, "cpu"),
+            FramebufferDriver.from_buffer(160, 240), 160, 240)
+        val revision = shell.runtime_scene_revision()
+        expect(shell.render_baremetal_frame(executor)).to_equal(revision)
+        expect(shell.last_rendered_scene_revision).to_equal(revision)
+        val pixels = executor.engine.read_pixels()
+        expect(pixels.len()).to_equal(160 * 240)
+        expect(pixels[50 * 160 + 20]).to_equal(0xff102030u32)
+        shell.compositor.destroy_window(pixel)
+
+describe "p2_p3_adjacent_regression":
+    it "retains GUI input state and publishes its changed frame revision":
+        step("Reject the adjacent regression")
+        var compositor = content_dispatch_compositor()
+        val gui = compositor.create_window_with_tree(
+            "Action", 1, 1, 52, 80,
+            build_tree(column("root", [with_height(button("run", "Run", "demo.run"), 20)])))
+        var shell = DesktopShell.new(compositor)
+        val before = shell.runtime_scene_revision()
+        val before_content = shell.compositor.get_surface(gui.value).content_revision
+        expect(shell.compositor.dispatch_gui_pointer_event(
+            gui.value.to_i32(), 8, 34, "left", "down")).to_equal(true)
+        expect(shell.compositor.take_gui_content_action(gui.value.to_i32())).to_equal("demo.run")
+        val after = shell.runtime_scene_revision()
+        expect(after == before).to_equal(false)
+        val frames = shell.runtime_content_frames(after)
+        expect(frames.len()).to_equal(1)
+        expect(frames[0].origin_kind).to_equal(WM_CONTENT_ORIGIN_GUI)
+        expect(frames[0].scene_revision).to_equal(after)
+        expect(frames[0].content_revision).to_equal(before_content + 1)
+        expect(shell.compositor.dispatch_gui_pointer_event(0, 159, 239, "left", "up")).to_equal(true)
+        expect(shell.compositor.gui_pointer_capture_window_id).to_equal(0)
+        shell.compositor.destroy_window(gui.value.to_i32())
+
+    it "omits empty unknown and minimized content instead of inventing Web frames":
+        var compositor = content_dispatch_compositor()
+        compositor.create_window("Empty", 0, 10, 52, 80)
+        val unknown = compositor.create_window("Unknown", 52, 10, 52, 80)
+        val index = compositor.surface_index(unknown.to_u64())
+        var surface = compositor.surfaces[index]
+        surface.content_kind = 99
+        compositor.surfaces[index] = surface
+        val hidden = compositor.create_window("Hidden", 104, 10, 52, 80)
+        compositor.update_window_content(hidden.to_u64(), "<p>hidden</p>")
+        compositor.minimize_window(hidden.to_u64())
+        var shell = DesktopShell.new(compositor)
+        expect(shell.runtime_content_frames(shell.runtime_scene_revision()).len()).to_equal(0)
+
+    it "does not advance successful shell revisions after executor rejection":
+        var shell = DesktopShell.new(content_dispatch_compositor())
+        var executor = Engine2dWmFrameExecutor.create(
+            Engine2D.create_with_backend(160, 240, "cpu"),
+            FramebufferDriver.from_buffer(160, 240), 160, 240)
+        executor.host_gpu_required = true
+        shell.last_rendered_scene_revision = 17
+        shell.last_rendered_taskbar_revision = 23
+        expect(shell.render_baremetal_frame(executor)).to_equal(0)
+        expect(shell.last_rendered_scene_revision).to_equal(17)
+        expect(shell.last_rendered_taskbar_revision).to_equal(23)
+
+    it "keeps the legacy loop on the canonical frame path after input dispatch":
+        val source = file_read("src/os/desktop/_DesktopShell/shell_runtime_methods.spl")
+        expect(source).to_contain("me run(executor: Engine2dWmFrameExecutor)")
+        val loop_end = source.index_of("    me launch_app_baremetal")
+        val body = source.slice(0, loop_end)
+        expect(body).to_contain("self.compositor.handle_input()")
+        expect(body).to_contain("self.handle_pending_wm_pointer_step()")
+        expect(body).to_contain("self.handle_pending_shell_input(false)")
+        expect(body).to_contain("self.reconcile_dead_process_windows()")
+        expect(body).to_contain("self.render_baremetal_frame(executor)")
+        expect(body.contains("self.compositor.render_all()")).to_equal(false)
+        expect(body.index_of("self.compositor.handle_input()") < body.index_of("self.render_baremetal_frame(executor)")).to_equal(true)
+        expect(source).to_contain("val content_frames = self.runtime_content_frames(scene_revision)")
+        expect(source.contains("_WM_CONTENT_FRAMES_ENABLED")).to_equal(false)

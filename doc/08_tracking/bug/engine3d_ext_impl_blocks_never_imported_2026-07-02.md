@@ -75,3 +75,36 @@ occlusion pixel loop rather than asserting placeholder buffer behavior.
 ## Canonical database reconciliation — 2026-11-03
 
 OPEN umbrella; partial source candidate PR #6299 MERGED at 621609a09580be96d70467632df79d8efba1561c. Software/CUDA/ROCm trait methods and compatibility imports received source checks, but other backends and unsupported texture behavior remain outside the repair. TEST_BLOCKED: three behavioral occlusion cases and required core/native checks UNRUN. Await qualified runtime verification; no GPU qualification or umbrella closure.
+
+## Remaining required trait owners — 2026-11-03 follow-up candidate
+
+Session `p2-engine3d-ext-20261103` inspected release source after merged PR
+#6299. Baremetal, Intel, OpenGL, Qualcomm, Virtio GPU and WebGPU still each
+lacked 26 required RenderBackend3D methods in their primary trait block.
+This candidate moves those 156 existing method signatures and bodies unchanged
+into the six primary owners. All twelve primary backends now contain the
+required method set in source. This is source trait completeness, not GPU
+capability qualification.
+
+Baremetal/Intel/OpenGL/Qualcomm/Virtio extension paths remain compatibility
+re-exports, including their existing gc_sync_mut facades. The gc_sync_mut CPU
+extension facade now targets the real primary CPU owner instead of the deleted
+CPU extension. WebGPU retains its 21 optional extension methods and explicit
+Engine3DExtended import; this change does not attach or implement its optional
+GPU features. Existing unsupported providers and other optional extensions
+retain their previous behavior. No configured family selection is changed.
+
+Scoped source verification: six owners contain all 74 required methods with
+no duplicate method names; 156 moved signatures/bodies are preserved and 156
+single-method omission negative controls detect the missing requirement.
+WebGPU's 21 remaining optional method bodies are preserved. Each modified
+primary owner stays below 800 lines.
+
+`backend_remaining_primary_trait_spec.spl` adds six primary-only admission
+cases with actual fallback occlusion counts 0/2/1/0. The separate
+`backend_extension_compatibility_spec.spl` adds six CPU and sync-extension
+import controls so those imports cannot mask a broken primary-only case.
+These twelve authored behavioral cases are **TEST_BLOCKED**, with zero tests
+executed: no qualified self-hosted CLI is available. Required compiler/lib/
+MCP/LSP checks and native smokes are likewise unrun; no seed fallback or runtime
+PASS is claimed. The umbrella remains open pending those gates and parent review.

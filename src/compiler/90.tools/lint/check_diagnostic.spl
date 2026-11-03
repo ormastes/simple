@@ -1,0 +1,58 @@
+# Structured check diagnostics: keep inference payloads until rendering.
+use common.text.{escape_json}
+use compiler.hir.hir.{HirType, HirTypeKind}
+use compiler.types.type_infer_types.{TypeInferError}
+
+pub struct CheckDiagnostic:
+    path: text
+    code: text
+    message: text
+    line: i64 = 0
+    column: i64 = 0
+    expected: text = ""
+    found: text = ""
+    help: text = ""
+
+pub fn check_type_name(type_: HirType) -> text:
+    match type_.kind:
+        case Int(bits, signed):
+            val prefix = if signed: "i" else: "u"
+            "{prefix}{bits}"
+        case Float(bits): "f{bits}"
+        case Bool: "bool"
+        case Char: "char"
+        case Str: "text"
+        case Unit: "()"
+        case Optional(inner): "{check_type_name(inner)}?"
+        case _: "{type_.kind}"
+
+pub fn check_inference_diagnostic(path: text, error: TypeInferError) -> CheckDiagnostic:
+    val span = error.span()
+    match error:
+        case TypeInferError.Mismatch(expected, found, _):
+            val expected_name = check_type_name(expected)
+            val found_name = check_type_name(found)
+            CheckDiagnostic(path: path, code: "E1003",
+                message: "type mismatch: expected {expected_name}, found {found_name}",
+                line: span.line, column: span.col, expected: expected_name, found: found_name,
+                help: "change the annotation or use a value with the declared type")
+        case _:
+            CheckDiagnostic(path: path, code: "semantic", message: error.message(),
+                line: span.line, column: span.col)
+
+pub fn check_diagnostic_text(diagnostic: CheckDiagnostic) -> text:
+    var rendered = "{diagnostic.path}:{diagnostic.line}:{diagnostic.column}: error[{diagnostic.code}]: {diagnostic.message}"
+    if diagnostic.expected != "":
+        rendered = rendered + "\nexpected: {diagnostic.expected}\nfound:    {diagnostic.found}"
+    if diagnostic.help != "":
+        rendered = rendered + "\n= help: {diagnostic.help}"
+    rendered
+
+pub fn check_diagnostic_json(diagnostic: CheckDiagnostic) -> text:
+    val path = escape_json(diagnostic.path)
+    val code = escape_json(diagnostic.code)
+    val message = escape_json(diagnostic.message)
+    val expected = escape_json(diagnostic.expected)
+    val found = escape_json(diagnostic.found)
+    val help = escape_json(diagnostic.help)
+    "{\"type\": \"check-diagnostic\", \"severity\": \"error\", \"file\": \"{path}\", \"line\": {diagnostic.line}, \"column\": {diagnostic.column}, \"code\": \"{code}\", \"message\": \"{message}\", \"expected\": \"{expected}\", \"found\": \"{found}\", \"help\": \"{help}\"}"

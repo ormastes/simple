@@ -9,8 +9,7 @@ run.
 
 ## Operator workflow
 
-Run this spec and confirm the Results line reports exactly 1 failed (the
-documented OPEN f64-miss canary, see Compatibility). The first two
+Run this spec and confirm the Results line reports 0 failed. The first two
 describes drive real dicts through the interpreter lane; the third describe
 spawns `dict_get_miss_returns_nil_jit_probe.spl` -- a runnable program, so
 it is not subject to the layers that force a spec body onto the
@@ -21,12 +20,11 @@ interpreter -- under each NAMED engine and scores its verdict line.
 The defect this file is named for is compiled-lane only: the tree-walking
 interpreter has always been correct here, so interpreter-lane examples are
 green both before and after any MIR fix and cannot gate the native lane by
-themselves. One gap remains deliberately open: `d.get(k)` on a MISS for
-`V = f64` under the JIT decodes to a real float bit pattern instead of nil
-(`rt_value_as_float` cannot round-trip the flat-Option nil sentinel;
-`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:987-991` excludes
-the F64 decode arm on purpose). The last-but-one scenario pins that gap as
-an engine-reach canary and stays RED until it is fixed.
+themselves. The former f64 gap is fixed in the seed (2026-08-18): `d.get(k)` on a MISS for
+`V = f64` yields nil under the JIT as on the interpreter; the last-but-one
+scenario pins both arms as an engine-reach canary. The pure-Simple MIR path
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`, guardable_value_type)
+still excludes F64 and is unverified until a self-hosted binary runs this probe.
 
 Mechanism: `src/lib/nogc_sync_mut/spec/engine_probe.spl`
 Pattern:   `doc/07_guide/infra/testing/spec_engine_reach.md`
@@ -36,9 +34,7 @@ Guard:     `scripts/check/check-engine-claiming-specs-use-probe.shs`
 
 If the interpreter control arm fails, the probe or harness broke, not
 codegen. If the JIT arm fails, a decode-arm regression landed. If the
-f64 canary goes green on the JIT arm, the gap was fixed: update that
-scenario to expect `PROBE F64MISS: true` on both engines -- it pins current
-reality, not approval.
+f64 canary goes red on either arm, the nil-vs-float guard regressed.
 """
 # Lifecycle: research: doc/01_research/language/type_inference/type_inference_architecture.md ; plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md ; architecture: doc/04_architecture/adr/ADR-004-indexed-access-value-semantics.md ; design: doc/05_design/language/collections/fixed_size_arrays.md
 # @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
@@ -132,10 +128,10 @@ describe "Dict.get() miss vs stored zero":
         else:
             assert_true(false, "expected a hit, got nil")
 
-    it "reproduces the OPEN f64-miss gap on the native/JIT lane (interpreter-only green here)":
+    it "returns nil for an f64-valued miss (interpreter lane)":
         # @req REQ-DICT-GET-MISS-001
         # @capture(protocol_json): f64 miss/hit decode results on the interpreter lane
-        step("Verify: reproduces the OPEN f64-miss gap on the native/JIT lane (interpreter-only green here)")
+        step("Verify: returns nil for an f64-valued miss (interpreter lane)")
         """
         `d.get(k)` on a MISS for `V = f64` is a documented, still-open gap
         (dict_native_pitfalls.md's truth table, and the deliberate exclusion
@@ -234,27 +230,18 @@ describe "Dict.get() miss decoding holds on the JIT lane (out of process)":
         # compiled rather than interpreted.
         expect(engine_stdout(_PROBE, "jit")).to_contain(_PASS)
 
-    it "still observes the documented OPEN f64-miss gap under the JIT only":
+    it "returns nil for an f64-valued miss on both the interpreter and the JIT":
         # @req REQ-DICT-GET-MISS-003
         # @capture(protocol_json): F64MISS verdict lines from both engine arms
-        step("Verify: still observes the documented OPEN f64-miss gap under the JIT only")
-        # NOTE: legitimate RED by design -- this is the ENGINE-REACH CANARY,
-        # not a wish. The open defect is the unguarded F64 decode arm at
-        # src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:987-991
-        # (rt_value_as_float cannot round-trip the flat-Option nil sentinel
-        # RT_NIL == 3 through a float bit pattern). Measured 2026-08-09, same
-        # probe, same binary, both engines:
-        #   interpret -> PROBE F64MISS: true    (correct)
-        #   jit       -> PROBE F64MISS: false   (the open gap)
-        #
-        # Asserting BOTH answers is what proves each arm reached the engine it
-        # names. If the "jit" arm ever silently fell back to the interpreter,
-        # this example goes RED differently instead of quietly going vacuous.
-        #
-        # When the f64 gap is FIXED, this example must be updated to expect
-        # `true` on both arms -- it is a pin on current reality, not approval.
+        step("Verify: returns nil for an f64-valued miss on both the interpreter and the JIT")
+        # RESOLVED 2026-08-18 in the seed (lowering_expr_ops.rs float-vs-nil arm,
+        # compares against the f64 whose BITS are the nil word). Both arms must
+        # answer true; asserting BOTH proves each arm reached the engine it names.
+        # The pure-Simple MIR path (expr_dispatch.spl guardable_value_type) still
+        # excludes F64 -- not reachable from this probe until a self-hosted binary
+        # runs it; see dict_native_pitfalls.md.
         expect(engine_stdout(_PROBE, "interpret")).to_contain("PROBE F64MISS: true")
-        expect(engine_stdout(_PROBE, "jit")).to_contain("PROBE F64MISS: false")
+        expect(engine_stdout(_PROBE, "jit")).to_contain("PROBE F64MISS: true")
 
     it "rejects an unrecognised engine name instead of silently using the JIT":
         # @req REQ-DICT-GET-MISS-003

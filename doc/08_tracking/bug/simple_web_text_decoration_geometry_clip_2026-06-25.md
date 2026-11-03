@@ -15,6 +15,31 @@ Date: 2026-06-25
 
 Open.
 
+## Repair candidate 2026-11-03 — behavioral verification blocked
+
+Current source already parses both properties and emits independent decoration
+rectangles. Ancestor clips come from `build_ancestor_clip_cache`; they are not
+glyph ink clips and must remain intact for `overflow:hidden`.
+
+The candidate repairs two concrete current geometry defects in
+`simple_web_html_layout_renderer_paint_raster.spl`: normal raster multiplied
+resolved CSS pixel thickness by bitmap glyph scale, and tile text bounds
+omitted decoration thickness (including the second stroke of `double`). The
+candidate uses CSS pixel thickness directly and includes decoration ink in
+conservative tile bounds, without expanding ancestor clips.
+
+`text_decoration_geometry_clip_spec.spl` adds five examples for exact thickness,
+positive/negative offsets, default geometry, ancestor clipping, and a thick
+double underline reaching a live tile while its glyph node is outside the
+viewport and tile margin. These are real raster calls and color/row witnesses,
+not screenshots or fabricated DOM output.
+
+Verification: `git diff --check` passed. Behavioral tests, compiler/library
+checks and the required runtime smoke gates are **TEST_BLOCKED**: this Windows
+checkout has no qualified self-hosted CLI. The tracked `bin/simple.exe` Rust
+seed was not used. Zero behavioral examples executed; do not mark this bug
+fixed or move support inventory based on this candidate.
+
 ## Summary
 
 `text-decoration-thickness` and `text-underline-offset` cannot be safely marked

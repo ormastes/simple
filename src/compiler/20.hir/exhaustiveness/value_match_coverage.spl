@@ -298,3 +298,69 @@ pub fn vm_desugar_verdict_at(sp: Span) -> text:
     if VM_DESUGAR_VERDICTS.has(key):
         return VM_DESUGAR_VERDICTS[key]
     ""
+
+# ---------------------------------------------------------------------------
+# W-MATCH-NONE-SCALAR: `case None` on a non-Option scalar subject
+# ---------------------------------------------------------------------------
+#
+# A `None` arm against an i64 / f64 / bool / text / char subject can never be
+# an Option variant test; it used to be accepted silently (a bare `None` binds
+# like a catch-all). Staged exactly like E-MATCH-NONEXHAUSTIVE-VALUE: mode
+# `warn` (default; codegen unchanged) | `error` (fatal). Precedence: env
+# SIMPLE_CASE_NONE_SCALAR, default warn; SIMPLE_SAFETY_PROFILE=critical|verified
+# forces `error`. Flip tracked by bug row
+# case_none_on_scalar_subject_silent_2026-11-03.
+
+pub fn cn_code() -> text:
+    "W-MATCH-NONE-SCALAR"
+
+pub fn cn_env_name() -> text:
+    "SIMPLE_CASE_NONE_SCALAR"
+
+pub fn cn_mode_resolve(env: text, profile: text) -> text:
+    """Pure precedence: critical/verified profile > env > default `warn`."""
+    val p = profile.trim().lower()
+    if p == "critical" or p == "verified":
+        return "error"
+    if env.trim().lower() == "error":
+        return "error"
+    "warn"
+
+pub fn cn_scalar_label(t: HirType) -> text:
+    """Scalar type label for a non-Option subject, "" for anything else."""
+    match t.kind:
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Int(_, _): "int"
+        case HirTypeKind.Float(_): "float"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Char: "char"
+        case _: ""
+
+pub fn cn_pattern_is_none(p: HirPattern, symbols: SymbolTable) -> bool:
+    match p.kind:
+        case HirPatternKind.Enum(_, variant, _):
+            variant == "None"
+        case HirPatternKind.Binding(sym, _):
+            symbols.symbol_name_scalar_raw(sym.id) == "None"
+        case HirPatternKind.Literal(value):
+            match value.kind:
+                case HirExprKind.NilLit: true
+                case _: false
+        case HirPatternKind.Or(patterns):
+            var i = 0
+            while i < patterns.len():
+                val alt: HirPattern = patterns[i]
+                if cn_pattern_is_none(alt, symbols):
+                    return true
+                i = i + 1
+            false
+        case _: false
+
+pub fn cn_arms_have_none(arms: [HirMatchArm], symbols: SymbolTable) -> bool:
+    var i = 0
+    while i < arms.len():
+        val arm: HirMatchArm = arms[i]
+        if cn_pattern_is_none(arm.pattern, symbols):
+            return true
+        i = i + 1
+    false

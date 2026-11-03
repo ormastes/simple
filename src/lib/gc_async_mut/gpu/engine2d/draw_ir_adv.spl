@@ -146,6 +146,13 @@ struct Engine2dDrawIrAdvResult:
     async_packet_checksum: i64 = 0
     async_claim: bool = false
 
+# Explicit continuation boundary for ordinary rendering. Callers retain engine
+# for subsequent frames; result.pixels is evidence from this execution rather
+# than an assumption that a by-value argument received every state change.
+struct Engine2dDrawIrAdvOwnerResult:
+    engine: Engine2D
+    result: Engine2dDrawIrAdvResult
+
 # A strict Vulkan submission receipt deliberately carries no framebuffer
 # pixels.  The retained Engine2D and composition let an evidence caller make
 # the separately timed/recorded readback explicit without replaying DrawIR.
@@ -2861,6 +2868,11 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
     engine2d_draw_ir_adv_batch_with_images(engine, batch, gpu_available, images)
 
 fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    val owned = engine2d_draw_ir_adv_batch_owner_with_images(engine, batch, gpu_available, images)
+    owned.result
+
+fn engine2d_draw_ir_adv_batch_owner_with_images(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvOwnerResult:
+    """Render once and return the updated engine with its readback receipt."""
     val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
     val outcome = _engine2d_draw_ir_render_batch_embedded(
         engine, batch, images, 0, false,
@@ -2890,7 +2902,7 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, 
     result.glass_execution_target = outcome.glass_execution_target
     result.glass_backend_handle = outcome.glass_backend_handle
     result.glass_device_identity = outcome.glass_device_identity
-    result
+    Engine2dDrawIrAdvOwnerResult(engine: eng, result: result)
 
 fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool) -> Engine2dDrawIrAdvResult:
     var images: [Engine2dResolvedDrawIrImage] = []
@@ -3242,6 +3254,21 @@ fn _engine2d_draw_ir_composition_has_text(composition: DrawIrComposition) -> boo
     false
 
 fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool) -> Engine2dDrawIrAdvResult:
+    val owned = _engine2d_draw_ir_adv_composition_owner_with_images(
+        engine, composition, gpu_available, images,
+        allow_parent_image, present_frame, readback_frame, true)
+    owned.result
+
+fn engine2d_draw_ir_adv_composition_owner_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvOwnerResult:
+    """Render and present once; continue with the returned engine.
+
+    The owner includes retained backend, font, clip and frame state. Receipt
+    pixels alone cannot transfer those states to the next execution.
+    """
+    _engine2d_draw_ir_adv_composition_owner_with_images(
+        engine, composition, gpu_available, images, false, true, true, false)
+
+fn _engine2d_draw_ir_adv_composition_owner_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool, legacy_writeback: bool) -> Engine2dDrawIrAdvOwnerResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
     # Preserve the public fallback invariant from the original inputs. The
     # native cross-module aggregate path can lose this bool from `plan`.
@@ -3336,6 +3363,9 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         # unsatisfiable (see the ordering note in
         # web_engine2d_lane_matrix_parity_spec.spl).
         readback = eng.read_pixels_with_source()
+    # Compatibility writeback for legacy receipt-only entrypoints. The owner
+    # entrypoint presents and returns eng directly, without copying pixels
+    # into the old argument or claiming that pixel copying transfers state.
     # Caller-visible frame writeback for host-memory backends. Interpreter
     # assignment semantics deep-copy a class on `var eng = engine` (see
     # doc/08_tracking/bug/engine2d_draw_ir_free_function_state_visibility_2026-06-05.md),
@@ -3347,8 +3377,9 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     # there. Device-resident backends (vulkan/metal/cuda/virtio/baremetal)
     # share native handles across the copy and keep their existing path.
     val writeback_backend = eng.backend_name()
-    val host_memory_writeback = (writeback_backend == "cpu" or
-        writeback_backend == "cpu_simd" or writeback_backend == "software")
+    val host_memory_writeback = (legacy_writeback and
+        (writeback_backend == "cpu" or writeback_backend == "cpu_simd" or
+            writeback_backend == "software"))
     if host_memory_writeback:
         engine.draw_image(0, 0, eng.width(), eng.height(), eng.read_pixels())
     if present_frame:
@@ -3424,7 +3455,7 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         readback.device_identity > 0): 1 else: 0
     result.device_submit_count = device_receipt_count
     result.device_fence_count = device_receipt_count
-    result
+    Engine2dDrawIrAdvOwnerResult(engine: eng, result: result)
 
 # ---------------------------------------------------------------------------
 # T4 tile lane (tile_render_culling_plan): per-tile replay of one DrawIR
@@ -4181,6 +4212,9 @@ fn engine2d_draw_ir_render_tiled(
     )
 
 export Engine2dDrawIrAdvResult
+export Engine2dDrawIrAdvOwnerResult
+export engine2d_draw_ir_adv_batch_owner_with_images
+export engine2d_draw_ir_adv_composition_owner_with_images
 export Engine2dDrawIrAdvSubmitResult
 export Engine2dDrawIrWindowPresentOwnerResult
 export Engine2dVulkanObservedDelta

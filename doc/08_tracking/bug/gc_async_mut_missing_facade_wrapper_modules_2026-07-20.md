@@ -113,3 +113,27 @@ about — GENUINE-BUG, needs its own investigation of the dbfs_engine
 checkpoint/pager call chain, not filed as a separate doc here since it was
 only spot-checked, not root-caused.
 
+
+## Repair candidate 2026-11-03 — behavioral verification pending
+
+The current release still lacked the reported GC compression and SQL module
+paths. Added 39 forwarding modules matching the complete existing
+`nogc_async_mut/compression` and `nogc_async_mut/database/sql` inventories.
+Each leaf explicitly delegates to its existing pure-Simple implementation;
+no resolver priority or global configured-family selection changed. Brotli's
+package facade delegates to its real `brotli.mod` export owner rather than
+the compatibility placeholder `brotli.spl`. The family root stays unchanged:
+it does not enumerate the existing package paths either.
+
+Both SQL facade specifications had bypassed the defect by importing the no-GC
+owner directly. Restored their GC imports. Existing exact regression scenarios
+cover RLE, LZ77, gzip, Brotli, SQL leaf helpers and the SQL package. Adjacent
+scenarios assert empty and binary RLE values, malformed Brotli rejection,
+SQL parameter values, empty placeholders and identifier quote escaping.
+
+Static owner-target validation found 39 wrappers and zero missing targets;
+`git diff --check` passed and the tracked `doc/06_spec` tree contains zero
+executable `_spec.spl` files. These are source checks, not execution evidence.
+Behavioral verification is **TEST_BLOCKED**: no admitted self-hosted full CLI
+is available; the tracked Rust seed is bootstrap-only. No behavioral tests
+were executed and this report does not mark the bug fixed.

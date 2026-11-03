@@ -387,6 +387,55 @@ pub(super) fn eval_call_expr(
                     }
                     // Evaluate the outer receiver to get its current value
                     let outer_val = evaluate_expr(outer_receiver, env, functions, classes, enums, impl_methods)?;
+                    // Reference `class` receiver: the field lives behind the
+                    // instance's shared lock, so a mutating method on it
+                    // (`self.parts.push(x)`) must be written back in place.
+                    if let Value::ClassInstance(ref instance) = outer_val {
+                        // Move the field out (not clone) so the callee's mutator
+                        // owns the only Arc and does not deep-copy per call — but
+                        // only when no argument can observe the instance while
+                        // the field is moved out (`self.xs.push(self.xs.len())`).
+                        let args_are_inert = args.iter().all(|a| match &a.value {
+                            Expr::Identifier(n) => n != var_name,
+                            Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Bool(_) => true,
+                            _ => false,
+                        });
+                        let taken = if args_are_inert {
+                            instance.field_mut(field, |v| std::mem::replace(v, Value::Nil))
+                        } else {
+                            instance.field(field)
+                        };
+                        if let Some(field_val) = taken {
+                            let temp_var = format!("__nested_field_{}__", field);
+                            env.insert(temp_var.clone(), field_val);
+                            let temp_receiver = Box::new(Expr::Identifier(temp_var.clone()));
+                            let call = super::super::evaluate_method_call_with_self_update(
+                                &temp_receiver,
+                                method,
+                                args,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            );
+                            let after = env.remove(&temp_var);
+                            return match call {
+                                Ok((result, updated_field)) => {
+                                    if let Some(new_field_val) = updated_field.or(after) {
+                                        instance.set_field(field.clone(), new_field_val);
+                                    }
+                                    Ok(Some(result))
+                                }
+                                Err(e) => {
+                                    if let Some(v) = after {
+                                        instance.set_field(field.clone(), v);
+                                    }
+                                    Err(e)
+                                }
+                            };
+                        }
+                    }
                     if let Value::Object { class, fields } = outer_val {
                         let mut fields = fields;
                         // Get the field value (can be Object, Array, Dict, String, etc.)
