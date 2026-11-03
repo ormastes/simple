@@ -1,7 +1,7 @@
 # ARM64 framebuffer `Color.rgb` struct return faults before SimpleOS desktop-ready
 
 Date: 2026-08-21
-Status: OPEN — focused native owner fixed; fresh attested QEMU evidence pending
+Status: fix-implemented-verification-pending — FbColor rename landed in #5982 (merge b21cf9956cb); board/QEMU verification steps below
 Owner: native aggregate-return ABI / SimpleOS ARM64 rendering
 Severity: P0 for the resumed QEMU desktop-rendering goal
 

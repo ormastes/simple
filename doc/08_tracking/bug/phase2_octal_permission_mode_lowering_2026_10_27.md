@@ -21,3 +21,5 @@ Remove the source workaround only after the deployed producer proves octal and d
 The standard SSpec suite, all runtime-family combinations and any claim not explicitly tied to an actual artifact remain unqualified. Record the workaround commit in the canonical BugDatabase investigation log after integration; never retire it from a source-only review.
 
 **Revalidated 2026-11-02: still plausible because open; an active source workaround is not a compiler/provider fix; no merged fix commit with a passing regression is cited in this doc.**
+
+**Triage 2026-11-03 (group C):** front-end is correct (`0o600`/`0o700` -> 384/448 under the seed interpreter; parse_int_literal_text primary_expr.spl:219). Defect is in native lowering on the pinned P2 producer; needs a native build to isolate. Still open.
