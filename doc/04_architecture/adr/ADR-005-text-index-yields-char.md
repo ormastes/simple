@@ -30,7 +30,9 @@ and digit characters gave their digit value (7) rather than their code point
    byte, not a grapheme cluster). It is a value type and never allocates.
    Printing a `char`, or interpolating it, shows the character.
 2. **Char literals** are written `'x'`, including escapes (`'\n'`, `'\''`,
-   `'\u{e9}'`). `c == '7'` is the comparison form.
+   `'\u{e9}'`). `c == '7'` is the comparison form. Single quotes mean ONLY
+   char; raw text is `r"..."` (see "Char literal syntax"). A `char` is never a
+   condition: `if c:` is a type error, write `c != '\0'`.
 3. **No implicit conversion to text or int.**
    - `c == "7"` is a compile error. Use `c.to_text() == "7"`, or compare with
      `'7'`.
@@ -124,10 +126,10 @@ stage2-compiled path still needs the old behaviour until a rebuild.
 - **JIT out of range:** `rt_string_index_char` raises the same runtime
   index-out-of-bounds abort that array indexing uses. It does not return `""`
   or nil, because neither is a `char`.
-- **Lexer:** `'x'` is a char literal only when the quotes enclose exactly one
-  scalar or one escape. Longer single-quoted text keeps lexing as a raw string.
-  `'ident` with no closing quote stays a label. Multi-scalar `'...'` raw
-  strings are unaffected.
+- **Lexer (amended 2026-11-03, see "Char literal syntax" below):** after the
+  switch, `'...'` is a char literal only: exactly one Unicode scalar or one
+  escape. Any other content between single quotes is a lex error that points
+  to `r"..."`. `'ident` with no closing quote stays a label.
 - **ASCII flag:** `RT_STRING_FLAG_ASCII` is set lazily today, on the first
   `char_code_at`, so the first `s[i]` on a fresh non-literal text costs O(n).
   The deliverable is to set it eagerly at construction (literals, concat,
@@ -145,3 +147,50 @@ stage2-compiled path still needs the old behaviour until a rebuild.
 | seed interpreter and seed JIT switch | land **together** in one PR, so the seed never disagrees with itself | — |
 | interpreter vs pure-Simple native divergence while codegen is held | accepted and recorded. Call sites are converted first, so no compiler-source site observes it | closed |
 | a single-scalar `'x'` literal (today a 1-char raw string) | lexes as `char` once the lexer change lands. Existing `'x'` sites compared with text are converted to `"x"` in the call-site PR, before the lexer switch | — |
+| `if c:` / `while c:` with a `char` condition | type error (a char is not a bool; write `c != '\0'`) | type error |
+| staged warnings (non-exhaustive match, `Any`/erased access outside `unsafe:`, `case None` on a scalar, `char` used as `i64`, char-vs-text comparison, new `'...'` raw strings) | warning | **error once Windows, macOS and Linux all have a working self-hosted Simple binary** (the promotion trigger; "phase 3" above is the first gate, this is the last) |
+
+## Char literal syntax (decision 2026-11-03)
+
+A char literal is the plain single-quoted form `'x'` (Rust/C style). Single
+quotes mean **only** char. Text forms:
+
+| form | meaning |
+|---|---|
+| `"..."` | text, interpolates `{expr}`, escapes processed |
+| `r"..."`, `r"""..."""` | raw text: no interpolation, no escapes |
+| `"""..."""` | multi-line text, braces literal |
+| `'x'` | `char`: one Unicode scalar (U+0000..U+10FFFF minus surrogates, 1-4 UTF-8 bytes) or one escape (`'\n'`, `'\''`, `'\u{1F600}'`) |
+
+Why plain `'x'` and not a prefixed `c'x'`:
+
+- Familiar to Rust and C readers; no new prefix to learn or lex.
+- Single quotes are freed once the legacy raw-string meaning moves out.
+- `r"..."` already exists, so raw text needs no new syntax.
+
+Scalar rules: `'é'`, `'한'`, `'😀'` are one char each. A user-perceived
+character can be several scalars (decomposed `e` + U+0301, a ZWJ emoji
+sequence): that is **not** a valid char literal and stays text
+(`"é"`). Grapheme handling is a separate API. `s[i]` indexes by code point,
+`.len()` counts code points (staged, see above), `.byte_len()` / `byte_at` are
+byte-level.
+
+A `char` is not a condition: `if c:` is a type error; compare explicitly
+(`c != '\0'`).
+
+### Migration plan
+
+1. A rewrite tool converts the ~7.8k legacy `'...'` raw-string sites to
+   `r"..."`, in per-directory batches. Each batch is verified token-neutral:
+   the lexer token stream (kind and value) before and after is identical, so a
+   batch cannot change behavior.
+2. `scripts/check/check-no-single-quoted-raw-string.shs` ratchets new sites out
+   of `src/**/*.spl` (advisory now, blocking after the lexer switch).
+3. **The lexer switch lands only after the stage3 self-build passes.** The
+   frozen stage2 compiles the compiler's own lexer; changing what `'...'` means
+   before every compiler-source site is converted would break the bootstrap.
+4. After the switch, a multi-scalar `'...'` is a lex error. The staged warnings
+   become errors once Windows, macOS and Linux all have a self-hosted binary.
+
+Tracking: bug row `char_literal_lexer_switch_staged_2026-11-03` (blocked on the
+stage3 self-build).
