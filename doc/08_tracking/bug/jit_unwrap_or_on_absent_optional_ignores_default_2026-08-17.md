@@ -1,6 +1,6 @@
 # JIT: `.unwrap_or(default)` on an absent optional returns nil instead of the default
 
-- **Status:** OPEN
+- **Status:** FIX-IMPLEMENTED, verification-pending (seed redeploy). 2026-11-03: `rt_unwrap_or_value` (runtime objects.rs) now returns `default` for bare nil (flat-nullable absent optional) instead of returning nil; unit test `test_unwrap_or_value_nil_flat_nullable_returns_default` (red before, green after). End-to-end repro above must be re-run after next seed deploy.
 - **Severity:** P1 — silent wrong result. No error, no diagnostic, exit 0. The
   caller receives `nil` where it asked for a concrete fallback, so the defect
   propagates into whatever consumes the value.

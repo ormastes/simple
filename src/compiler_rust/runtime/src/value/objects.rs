@@ -567,6 +567,10 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
 /// `Ok` or `Err`, and remains an opaque present value just like the interpreter.
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue) -> RuntimeValue {
+    // Absent flat-nullable optional (`i64? = nil`, failed `parse_int`): nil IS None.
+    if value.is_nil() {
+        return default;
+    }
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
         // Not a boxed enum — bare/flat-nullable payload convention: return
         // the raw value unchanged (matches `rt_unwrap_or_self`/`rt_unwrap_or_trap`).
