@@ -4,8 +4,8 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, SymbolId, SymbolKind}
 use compiler.hir.hir_symbol_table_methods.*
-use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
-use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, MethodResolution}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return, hir_binding_method_call_return}
 
 fn binding_type(kind: HirTypeKind) -> HirType:
     HirType(kind: kind, span: Span.empty())
@@ -56,3 +56,28 @@ describe "declared direct-call type transport for bindings":
         val unknown = table.define("unknown", SymbolKind.Function,
             binding_type(HirTypeKind.Function([], unsettled, [])), Span.empty(), Visibility.Public, false, nil)
         expect(hir_binding_direct_call_return(direct_binding_call(unknown, "unknown"), table) == nil).to_equal(true)
+
+    it "transports an owner method's declared return through a receiver binding":
+        # layout_symbol_function_pattern_owner_2026_10_11: `val sym = self.get_symbol(id)`
+        # must keep `HirSymbol?` so `if val found = sym` / `found.kind` keeps its enum owner.
+        val table = SymbolTable.new()
+        val owner = table.define("Table", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, nil)
+        val payload = binding_type(HirTypeKind.Named(owner, []))
+        val optional_payload = binding_type(HirTypeKind.Optional(payload))
+        table.define(table.method_symbol_name(owner, "lookup"), SymbolKind.Method,
+            binding_type(HirTypeKind.Function([], optional_payload, [])), Span.empty(), Visibility.Public, false, nil)
+        val receiver_sym = table.define("self", SymbolKind.Parameter, payload, Span.empty(), Visibility.Private, false, nil)
+        val receiver = HirExpr(kind: HirExprKind.Var(receiver_sym), has_type_: false, type_: nil, span: Span.empty())
+        val call = HirExpr(kind: HirExprKind.MethodCall(receiver, "lookup", [], MethodResolution.Unresolved),
+            has_type_: false, type_: nil, span: Span.empty())
+        val found = hir_binding_method_call_return(call, table)
+        expect(found != nil).to_equal(true)
+        match found.unwrap().kind:
+            case HirTypeKind.Optional(inner):
+                match inner.kind:
+                    case HirTypeKind.Named(id, _): expect(id.id).to_equal(owner.id)
+                    case _: panic("payload lost its owner")
+            case _: panic("method return lost Optional")
+        val missing = HirExpr(kind: HirExprKind.MethodCall(receiver, "absent", [], MethodResolution.Unresolved),
+            has_type_: false, type_: nil, span: Span.empty())
+        expect(hir_binding_method_call_return(missing, table) == nil).to_equal(true)

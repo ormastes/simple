@@ -1709,9 +1709,8 @@ fn write_back_mutable_arguments(
                 }
                 if let Some(callee_val) = local_env.get(&param_name) {
                     // Value-type structs (task #91) keep VALUE semantics: never
-                    // write callee mutations back to the caller's binding, unless the
-                    // parameter is an explicit `mut` one (then full write-back).
-                    if (param_is_mut || !is_value_type_struct(callee_val, classes))
+                    // write callee mutations back to the caller's binding.
+                    if !is_value_type_struct(callee_val, classes)
                         && matches!(
                             callee_val,
                             Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
@@ -1724,7 +1723,7 @@ fn write_back_mutable_arguments(
                             mut_written.insert(caller_name.clone());
                         }
                         outer_env.insert(caller_name, new_val);
-                    } else if !param_is_mut && is_value_type_struct(callee_val, classes) {
+                    } else if is_value_type_struct(callee_val, classes) {
                         // Value-type struct: fields stay value-copied, but its
                         // container-valued fields are shared handles. See
                         // merge_shared_collection_fields.
