@@ -267,3 +267,18 @@ seed in a private `CARGO_TARGET_DIR`, add a MIR-level spec where
 `var t = Cls.create(...)` (class with a trait impl, `static fn` constructor) then
 `t.field = v`, assert the emitted `FieldSet.owner_has_vtable == Some(true)`;
 then confirm with a stage3 native-build.
+
+## 2026-11-03 (lane p01-c): MIR-level repro does NOT reproduce; upstream owner-recovery hypothesis refuted for this shape
+
+Added `field_access_on_static_ctor_inferred_local_keeps_owner_identity`
+(`mir/lower/tests/branch_coverage/calls.rs`): `var t = Sq.create(3); t.side = 4; t.side`
+on a `class Sq with Shape`. Built test-only (own CARGO_TARGET_DIR, clang-cl): it
+PASSES on unmodified origin code, i.e. `FieldGet/FieldSet.owner_name == Some("Sq")`
+already holds for a static-constructor-inferred local at MIR lowering. A speculative
+fix (fall back to `erased_local_class_types` for the owner name) was therefore
+dropped as unproven. The `owner_name: None` path seen in stage2 must come from a
+different shape (cross-module `MirToLlvm.create(name, CodegenTarget.Host, nil)` with
+imported types, or an unnamed type id after module merge). Next step: dump
+`owner_name` for the two `translator` sites in `driver_bootstrap.spl` under a
+stage2 `SIMPLE_DEBUG` MIR print, then extend this test to that exact shape.
+Status stays `open`; test kept as a regression guard.
