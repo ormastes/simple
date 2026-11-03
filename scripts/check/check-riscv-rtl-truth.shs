@@ -22,7 +22,8 @@
 #   lane=<dir> class=absent
 # and lane directories that exist but contain zero .vhd files print
 #   lane=<dir> class=empty
-# — never a crash, never a silent skip either way.
+# — never a crash, never a silent skip either way. Explicit --lane inputs
+# must exist and contain VHDL; unavailable inputs and a zero-file audit exit 2.
 #
 # Classification heuristic (path + testbench-name based, documented so it is
 # auditable rather than a black box):
@@ -174,22 +175,36 @@ echo "$LANES" | while IFS= read -r lane; do
     [ -n "$lane" ] || continue
     if [ ! -d "$lane" ]; then
         echo "lane=$lane class=absent"
+        if [ -n "$LANE_OVERRIDE" ]; then
+            printf '%s\n' "$lane" >> "$SCRATCH_DIR/invalid_lanes"
+        fi
         continue
     fi
     lane_files=$(find "$lane" -name '*.vhd' | sort)
     if [ -z "$lane_files" ]; then
         echo "lane=$lane class=empty"
+        if [ -n "$LANE_OVERRIDE" ]; then
+            printf '%s\n' "$lane" >> "$SCRATCH_DIR/invalid_lanes"
+        fi
         continue
     fi
     printf '%s\n' "$lane_files" >>"$ALL_FILES"
 done >"$SCRATCH_DIR/lane_report.txt"
 cat "$SCRATCH_DIR/lane_report.txt"
 
+if [ -s "$SCRATCH_DIR/invalid_lanes" ]; then
+    echo "riscv_rtl_truth_ok=false"
+    echo "check-riscv-rtl-truth: explicit lane missing or contains no .vhd files" >&2
+    exit 2
+fi
+
 if [ ! -s "$ALL_FILES" ]; then
     echo "check-riscv-rtl-truth: no .vhd files found in any present lane"
-    echo "riscv_rtl_truth_ok=true (nothing to check)"
-    exit 0
+    echo "riscv_rtl_truth_checked_files=0"
+    echo "riscv_rtl_truth_ok=false"
+    exit 2
 fi
+echo "riscv_rtl_truth_checked_files=$(wc -l < "$ALL_FILES" | tr -d ' ')"
 
 # ---------------------------------------------------------------------------
 # Step 2: per-file structural analyzer (single pass, gawk word-boundary
