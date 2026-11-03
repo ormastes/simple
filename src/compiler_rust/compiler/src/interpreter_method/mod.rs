@@ -1261,9 +1261,7 @@ pub(crate) fn evaluate_method_call(
             // Methods defined directly in the enum body (or merged from impl blocks).
             // Try the local `enums` map first, then fall back to GLOBAL_ENUMS so
             // that methods on cross-module enums stored as struct fields are found.
-            let enum_def_opt = enums
-                .get(enum_name)
-                .cloned()
+            let enum_def_opt = crate::interpreter::owner_module_enum(enum_name).or_else(|| enums.get(enum_name).cloned())
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
             if let Some(enum_def) = enum_def_opt {
                 for m in &enum_def.methods {
@@ -1318,9 +1316,7 @@ pub(crate) fn evaluate_method_call(
         // EnumName.VariantName(args) -> create enum with payload
         Value::EnumType { enum_name } => {
             // Check module-local, block-scoped, and imported enums.
-            let enum_def = enums
-                .get(enum_name)
-                .cloned()
+            let enum_def = crate::interpreter::owner_module_enum(enum_name).or_else(|| enums.get(enum_name).cloned())
                 .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
             if let Some(enum_def) = enum_def {
