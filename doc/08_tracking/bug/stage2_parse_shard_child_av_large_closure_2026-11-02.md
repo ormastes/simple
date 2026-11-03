@@ -1,6 +1,6 @@
 # stage2_parse_shard_child_av_large_closure_2026-11-02
 
-- Status: **open** (worked around by env flags; parent in-process fallback completes)
+- Status: **deferred-by-design** (phase-split parse shards contradict the one-process-per-file design; AV not patched; see Design decision)
 - Severity: P1 (phase-3 targeted builds: wasted parse time, noisy failures)
 - Owner area: `src/app/cli/parse_shard_main.spl` / `src/compiler/80.driver` parse shard
 - Workaround: `SIMPLE_PARSE_SHARDING=0` and `SIMPLE_FILE_FIBERS=0` (inventory row
@@ -37,3 +37,20 @@ tracks closure size.
   the parse AVs; it stays local and is not landed.
 - Real fix: root-cause the child fault in the parse-shard child entry (`parse_shard_main.spl`) with a stage
   built from current source; revert the env flags once a stage3 shows zero child AVs on the CompilerDriver closure.
+
+## Design decision (2026-11-03)
+
+User design: ONE PROCESS PER FILE (each file parse -> HIR -> MIR -> obj in one process, like cc1); no
+phase-split shard children. The parse-shard child is exactly the phase-split model: `native_build_main.spl`
+(`run_parse_shards`, ~line 787) spawns `simple run src/app/cli/parse_shard_main.spl --parse-shard=i/n`, a slim
+parse-only process that only warms the front-end parse cache ("sharding is a cache warm-up and can never
+change the build's output"; it never loads HIR/MIR/backend). It is NOT a per-file pipeline process.
+
+The shard path is still ON by default in code (`native_build_parse_shard_count` returns >0 unless
+`SIMPLE_PARSE_SHARDING=0`, `--collection-profile`, no frontend cache, or streaming surfaces; cap 1 only in
+interpret mode). Phase-3 targeted builds already disable it via `p3-targeted-stage2-build.shs`.
+
+Resolution: the access violation is not root-caused or patched here. Design todo: retire the parse-shard
+children (default `SIMPLE_PARSE_SHARDING` to off, then delete `parse_shard_main.spl`, `parse_shard_queue` and the
+spawn path) in favour of the per-file pipeline; the in-process parse fallback is already correct. Keep the
+env-flag workaround until then. No code changed, no seed/stage2 rebuild.
