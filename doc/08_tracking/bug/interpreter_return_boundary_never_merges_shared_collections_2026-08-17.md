@@ -3,7 +3,7 @@
 - **Date:** 2026-08-17
 - **Severity:** P1 — silently wrong results, no diagnostic
 - **Root cause:** `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:1203`
-- **Status:** OPEN, reproduced. Collapses at least two separately-filed rows.
+- **Status:** FIXED for the struct/self-field sibling (re-verified 2026-11-03); enum-payload residual split to `enum_payload_dict_copied_on_function_return_2026-07-28` (still OPEN).
 
 ## The mechanism
 
@@ -100,3 +100,25 @@ does not re-derive it. `interpreter_call/**` was not on the claimed-path list at
 time of writing.
 
 **Revalidated 2026-11-02: still plausible because OPEN, reproduced. Collapses at least two separately-filed rows; no merged fix commit with a passing regression is cited in this doc.**
+
+## Re-verification 2026-11-03 (release/1.0.0 seed, interpreter)
+
+- `test/01_unit/compiler/interpreter/self_field_assign_spec.spl`: 13 examples,
+  0 failures (was 11/13). "preserves struct dictionary-field mutations through
+  returning free functions" and "preserves self.field mutations passed through
+  free functions" now pass; standalone repro (struct `Dict` field written by a
+  free fn returning an enum) reads `has("b") == true` after the call.
+  The current `merge_shared_collection_fields` (`function_exec.rs:1202`) is
+  also handle-identity (`Arc::ptr_eq`) based, O(1) per field.
+- NOT fixed, and not fixable by a return-side merge: a `Dict` carried as an
+  ENUM payload. `Value::Dict` is `Arc<HashMap>` with copy-on-write
+  (`Arc::make_mut`), so a write through a `match` binding forks the map; there
+  is no shared handle to merge back into. Even the in-frame case (`Box.Dict(m)`
+  then `put(d, k, v)` inside `match`) leaves `m` unchanged on this seed. Fixing
+  that needs reference-semantic collection handles (interior mutability) in
+  the seed `Value` model -- a design change, tracked by
+  `enum_payload_dict_copied_on_function_return_2026-07-28.md`, which stays OPEN.
+  The "extend the merge to enum payloads" suggestion above is therefore
+  withdrawn: a merge cannot recover a write that was applied to a forked Arc.
+- `test/01_unit/lib/common/sdn_coverage_spec.spl` no longer exists in the tree,
+  so the second reproduction cannot be re-run.
