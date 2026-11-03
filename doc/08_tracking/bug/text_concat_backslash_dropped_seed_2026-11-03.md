@@ -1,8 +1,7 @@
-# Seed drops backslash in text concat
+# Seed drops backslash in text concat -- INVALID
 
 - **ID:** text_concat_backslash_dropped_seed_2026-11-03
-- **Severity:** P2, open
-- **Repro:** `bin/simple.exe test test/01_unit/compiler/50.mir/text_concat_backslash_spec.spl`
-- **Observed (seed, interpreter):** `"x" + "\lld"` has len 4 ("xlld"-like, backslash lost); `"C:\dev" + "\simple"` has len 11, expected 13. Fails for const-folded and runtime operands.
-- **Expected:** backslash escapes decode to one byte and survive concat.
-- Spec is tagged @tag:in-development until fixed.
+- **Status:** invalid (premise was the escape sequence, not concat)
+- Single-backslash literals are escape sequences and may drop the backslash by design. With escaped backslashes (two in source = one byte), const-folded and runtime concat keep it.
+- Pinned as a passing regression: `bin/simple.exe test test/01_unit/compiler/50.mir/text_concat_backslash_spec.spl` (4/4 on the seed interpreter).
+- A native/seed-compiled lane (native-build the spec) is not verified here.
