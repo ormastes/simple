@@ -5,6 +5,9 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
 use std.spec.{describe, it, expect}
 
 fn string_builder_owner_surfaces() -> ModuleSurfacesByName:
@@ -14,10 +17,11 @@ fn string_builder_owner_surfaces() -> ModuleSurfacesByName:
     val app = parse_full_frontend(app_source, "common.string_builder", "src/app/common/string_builder.spl", log)
     val lib = parse_full_frontend(lib_source, "lib.common.string_builder", "src/lib/common/string_builder.spl", log)
     var modules: Dict<text, Module> = {}
+    modules["app.common.string_builder"] = app
     modules["common.string_builder"] = app
     modules["lib.common.string_builder"] = lib
     val result = module_surfaces_from_test_modules(modules, [
-        SourceFile(path: "src/app/common/string_builder.spl", content: app_source, module_name: "common.string_builder"),
+        SourceFile(path: "src/app/common/string_builder.spl", content: app_source, module_name: "app.common.string_builder"),
         SourceFile(path: "src/lib/common/string_builder.spl", content: lib_source, module_name: "lib.common.string_builder")
     ])
     expect(result.is_ok()).to_equal(true)
@@ -37,12 +41,13 @@ describe "spreadsheet string builder explicit owner":
         val hir = lowering.lower_module(consumer)
         expect(lowering.errors.len()).to_equal(0)
         expect(hir.symbols.lookup("RtStringBuilder") != nil).to_equal(true)
-
     it "does not search the library to forgive an item missing from the short owner":
+        # Selective-import misses are tolerated since the 2026-10-20 seed-parity
+        # change (no hard 'has no exported item' error); the invariant kept here
+        # is that the short alias never falls through to the library provider.
         val surfaces = string_builder_owner_surfaces()
         val source = "use common.string_builder.\{RtStringBuilder\}\nfn main() -> i64:\n    0"
         val consumer = parse_full_frontend(source, "app.office.sheets.ascii_width", "src/app/office/sheets/ascii_width.spl", Logger(level: 0))
         var lowering = hirlowering_for_module("app.office.sheets.ascii_width", surfaces)
-        lowering.lower_module(consumer)
-        expect(lowering.errors.len()).to_equal(1)
-        expect(lowering.errors[0].message).to_contain("module common.string_builder has no exported item RtStringBuilder")
+        val hir = lowering.lower_module(consumer)
+        expect(hir.symbols.lookup("RtStringBuilder") == nil).to_equal(true)
