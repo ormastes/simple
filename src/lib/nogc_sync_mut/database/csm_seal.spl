@@ -25,7 +25,7 @@ use std.nogc_sync_mut.compression.gzip.crc.{crc32_text, crc32_update}
 use std.common.hash.xxh3.{xxh3_64_hex_lf, xxh3_64_hex_bytes}
 use std.common.crypto.blake3.{blake3_hex_lf, blake3_hex, blake3_hash}
 use std.io_runtime.{dir_list_optional, file_delete, read_file_text_result}
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_atomic_write}
 
 val CSM_OK: text = "OK"
 val CSM_CORRUPT: text = "CORRUPT"
@@ -335,3 +335,20 @@ fn csm_policy_listed(path: text) -> bool:
 # Algorithm a writer seals `path` with: the policy row, else the default.
 fn csm_writer_algo(path: text) -> text:
     csm_policy_algo(path)
+
+# Write `content` to `path` atomically and keep the sidecar seal in step: the
+# new seal is added first (a crash leaves MERGED_UNSEALED, never MISSING), the
+# data is published, then the older seals are pruned. Every writer of a sealed
+# *.sdn (test_db, todo_db, ...) must go through this so a write can never leave a
+# stale seal that makes the loader read the whole file as nil. Non-.sdn paths are
+# written unsealed. Returns true when the data was published.
+fn csm_write_sealed(path: text, content: text) -> bool:
+    if not path.ends_with(".sdn"):
+        return file_atomic_write(path, content)
+    val seal = csm_seal_add(path, content, csm_writer_algo(path))
+    if seal == "":
+        return false
+    val published = file_atomic_write(path, content)
+    if published:
+        csm_seal_prune(path, seal)
+    published
