@@ -1,6 +1,6 @@
 # Explicit generic arguments lost in canonical compiler interpolation
 
-Status: OPEN. Root cause before rich AST bridge remains unproved.
+Status: CLOSED 2026-11-03 (not reproducible; premise unproved). The six typed helper calls are no longer inside interpolation: function_field_call.spl (f9487416d09, 49daf595b38) uses concrete non-generic _function_field_*_enum_discriminant helpers, and mono is removed (erased generics), so E-MONO-033 cannot arise from erased explicit args. The report itself established no general interpolation failure (local and imported fixtures retain explicit args). Reopen with a fresh stage3 repro if it recurs.
 
 Current release_phase3 source contains six explicitly typed generic helper calls inside function_field_call.spl diagnostic interpolation. Actual producer a713, source8b4cc355, canonical381-module closure records six flat_count=0/rich_count=0/HIR_count=0 calls before monomorphization. Four calls infer their arguments; two refuse specialization with E-MONO-033. Local six-call and imported two-module native fixtures retain explicit arguments and pass, so a general interpolation/import/impl failure is not established.
 
