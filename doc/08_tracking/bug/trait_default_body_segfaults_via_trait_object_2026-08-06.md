@@ -293,3 +293,20 @@ requirement.
 Out of lane: already root-caused, not fixed; the record's own status says the precise blocker needs a compiler-level trait-object dispatch fix. No change made.
 
 **Revalidated 2026-11-02: still plausible because Root-caused, not fixed — see "Investigation notes (2026-08-06)" below for the precise blocker; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 — no longer reproduces on the seed; native verification pending
+
+- `bin/simple.exe run test/fixtures/repro/compiler/trait_default_body_segfault/probe3_trait_default_body_crashes.spl`
+  on the current Windows Rust seed prints `ctrl=true`, `char=t`, `done` and
+  exits 0. It used to SIGSEGV.
+- The mitigation is in source: `module_pass.rs:2053-2062` lowers a per-impl
+  copy of every non-overridden default body (`"{type}.{method}"`), so the
+  vtable slot is filled. The remaining hole is `common_backend.rs:2099`: for a
+  cross-module impl whose func_id is not found, the slot stays zero. That one
+  needs a self-hosted native/JIT build to exercise.
+- Regression spec (tagged `native`):
+  `test/01_unit/compiler/trait_dispatch/trait_default_body_via_trait_object_spec.spl`.
+  A default body calling `fn` methods gives mods=6; a default body calling
+  `me`+`fn` methods with an enum payload gives "t". 2/2 pass (interpreter).
+- **Verify with stage3:** run that spec and probe3 with the self-hosted
+  `bin/release/<triple>/simple run` (JIT) and `native-build`. Exit 0 and 2/2 → set fixed.
