@@ -120,7 +120,9 @@ fn parse_email_shared_config_value(root: JsonValue, path: text) -> EmailConfig:
                 provider = "outlook"
             elif protocol == "" or protocol == "imap":
                 if configured_provider == "outlook":
-                    provider = "outlook"
+                    # Legacy mail-cli JSON uses outlook for IMAP; shared SDN
+                    # retains the facade's Outlook Graph provider spelling.
+                    provider = if path.ends_with(".json"): "outlook_imap" else: "outlook"
                 elif configured_provider == "gmail":
                     provider = "gmail"
             else:
@@ -159,6 +161,25 @@ fn load_email_config_from(path: text) -> EmailConfig:
         case Err(_):
             EmailConfig.default()
 
+fn _email_shared_json_shape_error(root: JsonValue) -> text:
+    if json_value_type(root) != "object":
+        return "MAIL_CONFIG_ROOT"
+    val entries = json_value_field(root, "accounts")
+    if json_value_type(entries) != "object":
+        return "MAIL_CONFIG_ACCOUNTS"
+    if json_value_has(root, "default_account") and json_value_type(json_value_field(root, "default_account")) != "string":
+        return "MAIL_CONFIG_DEFAULT"
+    for name in json_value_keys(entries):
+        val entry = json_value_field(entries, name)
+        if name == "" or json_value_type(entry) != "object":
+            return "MAIL_CONFIG_ACCOUNT"
+        for key in json_value_keys(entry):
+            val kind = json_value_type(json_value_field(entry, key))
+            val numeric_port = kind == "number" and (key == "imap_port" or key == "pop3_port" or key == "smtp_port")
+            if kind != "string" and not numeric_port:
+                return "MAIL_CONFIG_FIELD_TYPE"
+    ""
+
 fn load_email_config_checked(path: text) -> Result<EmailConfig, text>:
     if not sosix_file_exists(path):
         return Err("MAIL_CONFIG_MISSING")
@@ -170,10 +191,9 @@ fn load_email_config_checked(path: text) -> Result<EmailConfig, text>:
         val root = json_value_parse_opt(content)
         if root == nil:
             return Err("MAIL_CONFIG_SYNTAX")
-        if json_value_type(root.unwrap()) != "object":
-            return Err("MAIL_CONFIG_ROOT")
-        if json_value_type(json_value_field(root.unwrap(), "accounts")) != "object":
-            return Err("MAIL_CONFIG_ACCOUNTS")
+        val shape_error = _email_shared_json_shape_error(root.unwrap())
+        if shape_error != "":
+            return Err(shape_error)
         return Ok(parse_email_shared_config_value(root.unwrap(), path))
     match parse_email_sdn_json(content):
         case Ok(root):

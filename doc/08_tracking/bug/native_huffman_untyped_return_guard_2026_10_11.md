@@ -11,3 +11,6 @@ The prevention fixture checks fourteen fixed-table/distance boundaries and empty
 Bitstream remains independently broken: see native_huffman_bitstream_nested_array_abi_2026_10_11.md. Do not infer that return annotations repair nested array ABI.
 
 **Revalidated 2026-11-02: still plausible because OPEN (P1); tagged application-source workaround, compiler type inference unresolved; no merged fix commit with a passing regression is cited in this doc.**
+
+## Lane note 2026-11-03 (wl01 lane)
+Landed tagged source workaround (typed params on huffman_lookup, src/lib/nogc_sync_mut/compression/gzip/huffman.spl:17-18, tag bug=native_huffman_untyped_return_guard_2026_10_11). Compiler-side fix (untyped iterable params typed i64 by MIR) remains open: needs a native-build producer to qualify (no native-build available on the Windows seed lane; the interpreter gzip spec does not exercise native MIR). Row stays open.

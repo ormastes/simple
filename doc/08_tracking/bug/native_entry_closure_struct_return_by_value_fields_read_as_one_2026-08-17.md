@@ -193,3 +193,6 @@ requires a completed build plus two RED specs going green, which is
 well beyond this lane's per-item budget. Leaving OPEN, no new attempt.
 
 **Revalidated 2026-11-02: still plausible because OPEN — root cause isolated; the seed-side fail-open IS now fixed in; no merged fix commit with a passing regression is cited in this doc.**
+
+## Lane note 2026-11-03 (wl01 lane)
+Deferred: frontend fail-open already fixed in source (access.rs, see re-check above). Remaining defect is in the native aggregate-return transport and cannot be measured here: both RED specs need a completed native-build --entry-closure, which aborts at parse (2 GiB alloc) on the seed. Blocker is the missing runnable producer, not analysis; no source change is justified without a measurement.

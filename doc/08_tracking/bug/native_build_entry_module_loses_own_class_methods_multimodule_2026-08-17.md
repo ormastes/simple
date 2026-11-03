@@ -140,3 +140,6 @@ a `7200s` timeout:
 `doc/08_tracking/bug/native_build_source_closure_zero_sources_2026-08-17.md`.
 
 **Revalidated 2026-11-02: still plausible because OPEN, diagnosed and bisected, unfixed; no merged fix commit with a passing regression is cited in this doc.**
+
+## Lane note 2026-11-03 (wl01 lane)
+Deferred: the existing row records a source repair/workaround already exists and needs a rebuilt producer plus native requalification run; no native-build producer is runnable on this lane.

@@ -1,0 +1,103 @@
+# BLAKE3 os binary compression oracles
+
+AUTHORED_UNRUN. Authored manual, not generated; docgen zero-stub and runtime/branch qualification remain unverified.
+
+Spec SHA256 (LF canonical bytes): `fd3fbbf2864eb6df520c23f7d2c11ef9164a1212d5e4510594a507810f0bac30`.
+Reference output artifact SHA256: `3ddfcee9f807a02ba00fc89bea01cdd47f287e0b85b53c2dca0ef71fcf9547b4`.
+No Simple run artifact exists.
+
+Load independently derived binary vectors, call the os production owner, compare every expected byte. Reference vectors are generated from pinned upstream source, not official published cases. All values and provenance are in the lane plan.
+
+<details><summary>Authored executable scenarios</summary>
+
+```simple
+"""
+BLAKE3 high-bit binary compression gap. AUTHORED_UNRUN for Simple production.
+Differential oracles from pinned official upstream reference implementation,
+NOT published test-vector cases. Input repeats exactly [00,7f,80,ff].
+Provenance: doc/03_plan/sys_test/blake3_binary_oracles_20261103.md.
+Reference was qualified against 30 published 131-byte outputs, separate from
+production execution. No runtime or branch coverage is claimed here.
+"""
+# codex-system-test
+use std.spec.*
+use os.crypto.blake3.{blake3, blake3_keyed, blake3_kdf, blake3_xof}
+
+# @inline
+fn load_blake3_vectors(n: i64) -> [u8]:
+    val pattern: [u8] = [0u8, 127u8, 128u8, 255u8]
+    var data: [u8] = []
+    for i in 0..n:
+        data.push(pattern[i % 4])
+    data
+
+describe "BLAKE3 os independent binary oracles":
+    it "should match independent hash for 4 binary bytes and 32 output bytes":
+        # @req REQ-HASH-BLAKE3-001
+        step("Load the independently derived binary vector")
+        val data = load_blake3_vectors(4)
+        step("Hash through the production API")
+        val digest = blake3(data)
+        step("Compare the expected digest")
+        expect(digest).to_equal([112u8, 145u8, 255u8, 168u8, 221u8, 183u8, 84u8, 75u8, 103u8, 192u8, 154u8, 239u8, 181u8, 26u8, 37u8, 110u8, 141u8, 131u8, 147u8, 151u8, 40u8, 139u8, 62u8, 26u8, 127u8, 238u8, 37u8, 60u8, 51u8, 149u8, 204u8, 146u8])
+
+    it "should match independent keyed_hash for 65 binary bytes and 32 output bytes":
+        # @req REQ-HASH-BLAKE3-003
+        step("Load the independently derived binary vector")
+        val data = load_blake3_vectors(65)
+        step("Hash through the production API")
+        val digest = blake3_keyed("whats the Elvish word for friend".bytes(), data)
+        step("Compare the expected digest")
+        expect(digest).to_equal([143u8, 61u8, 243u8, 250u8, 39u8, 169u8, 80u8, 143u8, 117u8, 148u8, 190u8, 205u8, 20u8, 38u8, 124u8, 128u8, 133u8, 7u8, 211u8, 242u8, 26u8, 147u8, 164u8, 167u8, 34u8, 179u8, 13u8, 150u8, 200u8, 31u8, 134u8, 7u8])
+
+    it "should match independent derive_key for 1025 binary bytes and 32 output bytes":
+        # @req REQ-HASH-BLAKE3-003
+        step("Load the independently derived binary vector")
+        val data = load_blake3_vectors(1025)
+        step("Hash through the production API")
+        val digest = blake3_kdf("BLAKE3 2019-12-27 16:29:52 test vectors context".bytes(), data)
+        step("Compare the expected digest")
+        expect(digest).to_equal([82u8, 6u8, 142u8, 178u8, 64u8, 203u8, 66u8, 119u8, 11u8, 230u8, 253u8, 187u8, 32u8, 4u8, 92u8, 255u8, 56u8, 108u8, 237u8, 78u8, 127u8, 63u8, 41u8, 127u8, 172u8, 255u8, 96u8, 177u8, 30u8, 249u8, 87u8, 229u8])
+
+    it "should match independent hash for 1025 binary bytes and 65 output bytes":
+        # @req REQ-HASH-BLAKE3-004
+        step("Load the independently derived binary vector")
+        val data = load_blake3_vectors(1025)
+        step("Hash through the production API")
+        val digest = blake3_xof(data, 65)
+        step("Compare the expected digest")
+        expect(digest).to_equal([141u8, 66u8, 149u8, 186u8, 60u8, 97u8, 63u8, 70u8, 143u8, 239u8, 82u8, 25u8, 223u8, 22u8, 126u8, 130u8, 197u8, 5u8, 189u8, 70u8, 111u8, 176u8, 137u8, 11u8, 224u8, 70u8, 57u8, 141u8, 18u8, 239u8, 150u8, 45u8, 212u8, 210u8, 243u8, 198u8, 85u8, 144u8, 44u8, 16u8, 16u8, 134u8, 141u8, 146u8, 191u8, 130u8, 104u8, 233u8, 219u8, 136u8, 114u8, 230u8, 207u8, 130u8, 200u8, 105u8, 124u8, 2u8, 249u8, 233u8, 150u8, 254u8, 19u8, 1u8, 135u8])
+
+    it "should truncate the published empty-input XOF to 0 bytes":
+        # @req REQ-HASH-BLAKE3-004
+        step("Load the published vector")
+        val data: [u8] = []
+        step("Hash through the production API")
+        val digest = blake3_xof(data, 0)
+        step("Compare the expected digest")
+        expect(digest).to_equal([])
+
+    it "should truncate the published empty-input XOF to 31 bytes":
+        # @req REQ-HASH-BLAKE3-004
+        step("Load the published vector")
+        val data: [u8] = []
+        step("Hash through the production API")
+        val digest = blake3_xof(data, 31)
+        step("Compare the expected digest")
+        expect(digest).to_equal([175u8, 19u8, 73u8, 185u8, 245u8, 249u8, 161u8, 166u8, 160u8, 64u8, 77u8, 234u8, 54u8, 220u8, 201u8, 73u8, 155u8, 203u8, 37u8, 201u8, 173u8, 193u8, 18u8, 183u8, 204u8, 154u8, 147u8, 202u8, 228u8, 31u8, 50u8])
+
+    it "should truncate the published empty-input XOF to 33 bytes":
+        # @req REQ-HASH-BLAKE3-004
+        step("Load the published vector")
+        val data: [u8] = []
+        step("Hash through the production API")
+        val digest = blake3_xof(data, 33)
+        step("Compare the expected digest")
+        expect(digest).to_equal([175u8, 19u8, 73u8, 185u8, 245u8, 249u8, 161u8, 166u8, 160u8, 64u8, 77u8, 234u8, 54u8, 220u8, 201u8, 73u8, 155u8, 203u8, 37u8, 201u8, 173u8, 193u8, 18u8, 183u8, 204u8, 154u8, 147u8, 202u8, 228u8, 31u8, 50u8, 98u8, 224u8])
+
+    it "should return no output for the negative-length OS API contract":
+        # @req REQ-HASH-BLAKE3-004
+        step("Request the production API negative-length contract")
+        expect(blake3_xof([255u8], -1)).to_equal([])
+```
+</details>
