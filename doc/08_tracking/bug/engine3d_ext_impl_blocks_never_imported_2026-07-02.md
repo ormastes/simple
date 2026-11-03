@@ -28,3 +28,46 @@ files, so the methods never attach and the backend fails trait checking —
 - `gc_sync_mut/gpu/engine3d/backend_cpu_ext.spl`
 - `nogc_sync_mut/engine/render/gpu_mesh3d.spl` also still declares the
   nonexistent `rt_f64_*` externs (fixed elsewhere as `rt_math_*`).
+
+
+## Recovered Windows repair candidate (2026-11-03)
+
+Owner: codex-engine3d-recovery-20261103. Isolated branch
+`work/engine3d-trait-recovery-20261103`. This owner is **gc_async_mut**, so
+this candidate belongs to the later other-libraries group after nogc_async_mut
+and common in the requested Windows repair order. Draft candidate only; not landed.
+
+SoftwareBackend3D, CudaBackend3D and RocmBackend3D each lacked 26 of the 74
+RenderBackend3D methods, not merely the seven extended core texture methods.
+All 26 existing methods move unchanged from each backend's plain sibling impl
+into its primary `impl RenderBackend3D for ...` block. The extension modules become compatibility re-exports of their primary same-family
+owners because gc_sync_mut facades still import those paths. Existing family selection
+and generic imports remain unchanged; this does not globally pin gc/nogc owners.
+
+Validation of the candidate: source structural checks PASS for all 74 trait
+methods per backend, no duplicate primary method names, exact preservation of
+all 26 moved signatures/bodies, and 26 omission negative controls per backend.
+`git diff --check` passes. These checks establish source placement only.
+
+New regression: `test/01_unit/lib/gpu/engine3d/backend_primary_trait_spec.spl`
+imports only the three primary owners and checks names plus real fallback occlusion counts through a
+RenderBackend3D-typed argument: empty framebuffer 0, two colored pixels 2,
+partly clipped rectangle 1, fully outside rectangle 0. This uses fallback
+framebuffer initialization without GPU hardware.
+Behavioral status: **TEST_BLOCKED**; no qualified Pure-Simple runtime was
+available. The Rust seed was not used. Compiler/lib/MCP/LSP gates and native
+smokes remain unrun. No runtime or GPU functionality PASS is claimed.
+
+Existing emu_create_texture_ex/create_sampler/etc providers still return
+unsupported sentinels or no-op. Their semantics are preserved, not repaired;
+this is trait completeness only. Other backend families/extensions in the
+original report remain outside this candidate and the overall bug stays open.
+Do not close the bug or land this later-family candidate before the earlier
+requested Windows groups and parent review.
+
+Parent review caught compatibility callers before PR: bounded owned-code rg
+found gc_sync_mut/gpu/engine3d/backend_{software,cuda,rocm}_ext.spl importing
+these paths. All three backing paths now remain as same-family re-exports;
+no duplicate extension impls are retained. Existing storage-buffer emulation
+is unsupported too, so the regression deliberately exercises the real
+occlusion pixel loop rather than asserting placeholder buffer behavior.
