@@ -44,15 +44,31 @@ use simple_runtime::debug;
 /// module-level `val`/`var`, `const`, `static`, and declared function returns
 /// (scalars only there; see `function_exec.rs`).
 /// Bug: doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md
+/// Let-binding coercion: a `bool`-declared local initialised by `expr.?`
+/// takes presence exactly like a `bool` parameter (`present_value_as_bool_arg`),
+/// so `val has: bool = Some(0).?` is true; everything else goes through
+/// [`coerce_to_declared_type`].
+pub(crate) fn coerce_let_value(value: Value, ty: Option<&Type>, init: Option<&simple_parser::ast::Expr>) -> Value {
+    if matches!(init, Some(simple_parser::ast::Expr::ExistsCheck(_))) {
+        if let Some(b) = crate::interpreter::interpreter_call::present_value_as_bool_arg(&value, ty) {
+            return b;
+        }
+    }
+    coerce_to_declared_type(value, ty)
+}
+
 pub(crate) fn coerce_to_declared_type(value: Value, ty: Option<&Type>) -> Value {
     match ty {
-        // A `bool`-declared binding fed by `.?` (payload or `Value::Nil`) takes
-        // presence, exactly as a `bool` parameter does
-        // (`present_value_as_bool_arg`). Before, `val has: bool = a.?` bound
-        // nil / the raw payload. Bug: stage2_dotq_presence_value_is_nil_sentinel_2026-11-03.
-        Some(Type::Simple(name)) if name == "bool" => {
-            crate::interpreter::interpreter_call::present_value_as_bool_arg(&value, ty).unwrap_or(value)
-        }
+        // A `bool`-declared binding: absent (`Value::Nil`) is false and an
+        // Option wrapper is its presence. Other payloads pass through (an
+        // extern's bool-as-Int keeps its value); a `.?` initializer is
+        // handled by `coerce_let_value`, which knows the expression.
+        // Bug: stage2_dotq_presence_value_is_nil_sentinel_2026-11-03.
+        Some(Type::Simple(name)) if name == "bool" => match &value {
+            Value::Nil => Value::Bool(false),
+            Value::Enum { enum_name, variant, .. } if enum_name == "Option" => Value::Bool(variant == "Some"),
+            _ => value,
+        },
         Some(Type::Simple(_)) => coerce_to_declared_unsigned(value, ty),
         Some(Type::Array { element, size: None }) if matches!(element.as_ref(), Type::Simple(name) if name == "u8") => {
             pack_u8_array(value)
@@ -329,7 +345,7 @@ pub(crate) fn exec_node(
                 let value = match type_annotation {
                     // `bool` locals take `.?` presence (see `coerce_to_declared_type`).
                     Some(ty @ Type::Simple(type_name)) if type_name == "bool" => {
-                        coerce_to_declared_type(value, Some(ty))
+                        coerce_let_value(value, Some(ty), let_stmt.value.as_ref())
                     }
                     // Coerce to Value::UInt when the annotation is an unsigned integer type
                     // so subsequent arithmetic on the bound variable applies modulo-2^width
