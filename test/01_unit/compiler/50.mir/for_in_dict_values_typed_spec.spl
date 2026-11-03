@@ -1,0 +1,46 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# for-in over `Dict<K,V>.values()` iterates a typed array
+
+Bug for_in_dict_values_i64_2026-10-24: `for x in self.field.values()` over a
+`Dict<i64, text>` struct field lowered with collection MIR type I64 and failed
+with "for-in over non-array iterables is not supported (#143)". This probe
+checks the for-in lowers without that diagnostic.
+"""
+
+# @tag: unit, compiler, mir, hir, for
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+val forin_src = "struct Holder:\n    names: Dict<i64, text>\n\nimpl Holder:\n    fn has_name(folded: text) -> bool:\n        for n in self.names.values():\n            if n == folded:\n                return true\n        false\n"
+
+fn forin_lower(src: text) -> [text]:
+    val file = "testdata/fixture_forin_values.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_forin_values", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push(e.message)
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    messages
+
+describe "for-in over Dict.values()":
+    it "lowers without the non-array iterable diagnostic":
+        var all = ""
+        for m in forin_lower(forin_src):
+            all = all + m + "\n"
+        print "errors: [{all}]"
+        expect(all.contains("non-array")).to_equal(false)
+        expect(all.contains("#143")).to_equal(false)
