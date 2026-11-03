@@ -1,0 +1,42 @@
+# Timeout propagation contract; runtime execution pending qualification.
+use std.spec
+use app.io.mod.{sleep_ms}
+use app.llm_caret.retry.{RetryPolicy, retry_remaining_ms, with_retry, with_retry_timeout}
+
+describe "HTTP retry remaining budget":
+    it "never turns an exhausted positive budget into unbounded zero":
+        expect(retry_remaining_ms(100, 100)).to_equal(-1)
+        expect(retry_remaining_ms(100, 101)).to_equal(-1)
+        expect(retry_remaining_ms(100, 99)).to_equal(1)
+        expect(retry_remaining_ms(100, 0)).to_equal(100)
+
+    it "preserves disabled deadline semantics including negative policies":
+        expect(retry_remaining_ms(0, 100)).to_equal(0)
+        expect(retry_remaining_ms(-1, 100)).to_equal(0)
+        val policy = RetryPolicy(max_attempts: 1, base_delay_ms: 0, max_delay_ms: 0, timeout_ms: -1)
+        val outcome = with_retry_timeout(policy, fn(attempt: i64, remaining_ms: i64) -> (i64, text, text, i64):
+            (200, "unbounded={remaining_ms}", "", 0)
+        )
+        expect(outcome.body).to_equal("unbounded=0")
+        expect(outcome.attempts).to_equal(1)
+
+    it "subtracts prior transport time and retry backoff from the next attempt":
+        val policy = RetryPolicy(max_attempts: 2, base_delay_ms: 20, max_delay_ms: 20, timeout_ms: 1000)
+        val outcome = with_retry_timeout(policy, \attempt, remaining_ms:
+            if attempt == 1:
+                sleep_ms(30)
+                (503, "retry", "", 20)
+            else:
+                (remaining_ms, "remaining", "", 0)
+        )
+        expect(outcome.attempts).to_equal(2)
+        expect(outcome.status).to_be_greater_than(0)
+        expect(outcome.status).to_be_less_than(971)
+
+    it "keeps one argument callbacks working":
+        val policy = RetryPolicy(max_attempts: 1, base_delay_ms: 0, max_delay_ms: 0, timeout_ms: 0)
+        val outcome = with_retry(policy, fn(attempt: i64) -> (i64, text, text, i64):
+            (200, "attempt={attempt}", "", 0)
+        )
+        expect(outcome.status).to_equal(200)
+        expect(outcome.body).to_equal("attempt=1")

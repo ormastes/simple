@@ -322,7 +322,12 @@ impl Lowerer {
             Expr::New { kind, expr, .. } => self.lower_new(kind, expr, ctx),
             Expr::MethodCall {
                 receiver, method, args, ..
-            } => self.lower_method_call(receiver, method, args, ctx),
+            } => {
+                if let Some(lowered) = self.lower_trait_field_method_call(receiver, method, args, ctx)? {
+                    return Ok(lowered);
+                }
+                self.lower_method_call(receiver, method, args, ctx)
+            }
             Expr::StructInit { name, fields, spread } => self.lower_struct_init(name, fields, spread.as_deref(), ctx),
             // Simple Math: Grid and Tensor literals (#1920-#1929)
             Expr::GridLiteral { rows, device } => self.lower_grid_literal(rows, device, ctx),
@@ -926,6 +931,55 @@ impl Lowerer {
             method,
             file
         );
+    }
+
+    /// `base.field.method(..)` where `field` is declared with a TRAIT type.
+    /// Trait names alias to ANY in HIR, so the field read carries no owner and
+    /// MIR used to emit a bare `method` that the native linker matched against
+    /// every same-named impl (AMBIGUOUS-METHOD). Bind the field to a synthetic
+    /// local that carries the declared trait dispatch owner -- exactly what an
+    /// explicitly typed local (`val s: Trait = base.field`) gets -- so MIR
+    /// lowers the call through the trait vtable path.
+    /// doc/08_tracking/bug/native_codegen_trait_field_receiver_erased_ambiguous_2026_10_26.md
+    fn lower_trait_field_method_call(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        let Expr::FieldAccess { receiver: base, field } = receiver else { return Ok(None) };
+        if !matches!(base.as_ref(), Expr::Identifier(_)) {
+            return Ok(None);
+        }
+        let Some(dispatch) = self.trait_field_dispatch(base, field, ctx) else { return Ok(None) };
+        let value = self.lower_expr(receiver, ctx)?;
+        let tmp_name = format!("__trait_field_recv_{}", ctx.locals.len());
+        let local_idx = ctx.add_local(tmp_name.clone(), value.ty, simple_parser::ast::Mutability::Immutable);
+        ctx.locals[local_idx].trait_dispatch_owner = Some(dispatch);
+        let body = self.lower_method_call(&Expr::Identifier(tmp_name), method, args, ctx)?;
+        let ty = body.ty;
+        Ok(Some(HirExpr {
+            kind: HirExprKind::LetIn { local_idx, value: Box::new(value), body: Box::new(body) },
+            ty,
+        }))
+    }
+
+    /// Declared trait dispatch of `base.field`, when `base` is a local of a
+    /// class/struct whose `field` was authored with a trait type name.
+    fn trait_field_dispatch(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<crate::hir::HirTraitDispatch> {
+        let Expr::Identifier(name) = base else { return None };
+        let idx = ctx.lookup(name)?;
+        let mut ty = ctx.locals.get(idx)?.ty;
+        if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(ty) {
+            ty = *inner;
+        }
+        let owner = match self.module.types.get(ty)? {
+            HirType::Struct { name, .. } => name.clone(),
+            _ => return None,
+        };
+        let trait_name = self.struct_field_type_names.get(&owner)?.get(field)?;
+        self.trait_declaration_for_current_owner(trait_name)
     }
 
     fn lower_method_call(
