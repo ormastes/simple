@@ -31,8 +31,10 @@ if [ -d "$lm/bin" ]; then
     PATH="$lm_bin:$PATH"; CC="$lm/bin/clang.exe"; SIMPLE_LLVM_MINGW_ROOT=$lm
     export PATH CC SIMPLE_LLVM_MINGW_ROOT
 fi
-# Phase-3 launchers (r11/run.ps1) put the clang64 runtime DLL dir first; the
-# frozen stage2 fails 0xC0000139 (entry point not found) without it.
+# Keep the admitted runtime DLL dir available for compiler subprocesses. The
+# candidate itself is bundled and separately launched under the conflicting
+# llvm-mingw-first PATH below, so the smoke proves it no longer depends on this
+# PATH workaround.
 dll_dir=${P3_RUNTIME_DLL_DIR:-C:/msys64/clang64/bin}
 if [ -d "$dll_dir" ]; then PATH="$(cygpath -u "$dll_dir" 2>/dev/null || echo "$dll_dir"):$PATH"; export PATH; fi
 unset LIB 2>/dev/null || true
@@ -56,8 +58,26 @@ work=${P3_SMOKE_WORK:-$exe.smoke}
 rm -rf "$work"
 mkdir -p "$work/cache"
 
-# 1. --version
-ver=$(timeout 60 "$exe" --version 2>&1); rc=$?
+# 1. --version. Windows LLVM-built stage compilers import the full CLANG64
+# libLLVM-23.dll, while llvm-mingw ships a partial DLL with the same name.
+# Bundle the admitted DLL closure next to the candidate, then deliberately
+# put llvm-mingw first and set SIMPLE_PROJECT_ROOT for this launch. Windows
+# searches the executable directory before PATH, so this checks that the
+# candidate survives both historical failure conditions without relying on
+# the launcher's PATH workaround.
+if [ "$ext" = ".exe" ]; then
+    [ -d "$lm/bin" ] || fail "missing LLVM-MinGW tools for Windows stage smoke: $lm/bin"
+    [ -f "$dll_dir/libLLVM-23.dll" ] || fail "missing admitted LLVM runtime DLL: $dll_dir/libLLVM-23.dll"
+    lm_bin=$(cygpath -u "$lm/bin" 2>/dev/null || echo "$lm/bin")
+    sh "$here/tests/stage2-dll-path-independence-test.shs" "$exe" || \
+        fail "stage candidate failed the DLL path independence check"
+    sh "$here/../setup/bundle-llvm-runtime-dlls.shs" "$exe" "$dll_dir" || \
+        fail "could not bundle the admitted libLLVM-23.dll closure"
+    project_root=${SIMPLE_PROJECT_ROOT:-$root}
+    ver=$(PATH="$lm_bin:$PATH" SIMPLE_PROJECT_ROOT="$project_root" timeout 60 "$exe" --version 2>&1); rc=$?
+else
+    ver=$(timeout 60 "$exe" --version 2>&1); rc=$?
+fi
 echo "version: rc=$rc $(printf '%s' "$ver" | head -n 1)"
 [ "$rc" -eq 0 ] && [ -n "$ver" ] || fail "--version rc=$rc"
 
