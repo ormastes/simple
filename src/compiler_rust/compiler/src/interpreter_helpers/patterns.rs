@@ -12,7 +12,7 @@ use super::super::{
     resolve_object_method, ResolvedMethod, Enums, ImplMethods, CONST_NAMES, MODULE_GLOBALS,
 };
 
-use super::args::{eval_arg, eval_arg_usize};
+use super::args::{eval_arg, eval_arg_int, eval_arg_usize};
 use super::collections::bind_sequence_pattern;
 use super::method_dispatch::call_method_on_value;
 use crate::value::{OptionVariant, ResultVariant};
@@ -192,6 +192,7 @@ pub(crate) const ARRAY_MUTATING_METHODS: &[&str] = &[
     "extend",
     "clear",
     "write_span",
+    "set",
 ];
 
 /// Apply an array mutating method to a `&mut Vec<Value>` in place.
@@ -220,6 +221,25 @@ fn apply_array_mutation_in_place(
             Ok(None)
         }
         "pop" => Ok(Some(vec.pop().unwrap_or(Value::Nil))),
+        // `[T].set(i, v)`: same semantics as codegen `rt_array_set` (negative `i`
+        // counts from the end). `idx` carries the i64 bits (see
+        // `eval_array_mutator_args`). Out of range fails closed with an error.
+        "set" => {
+            let raw = idx.unwrap_or(0) as i64;
+            let len = vec.len() as i64;
+            let i = if raw < 0 { len + raw } else { raw };
+            if i < 0 || i >= len {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                    .with_help("Array.set(i, v) requires -len <= i < len");
+                return Err(CompileError::semantic_with_context(
+                    format!("Array.set index {} out of bounds (len {})", raw, len),
+                    ctx,
+                ));
+            }
+            vec[i as usize] = second.unwrap_or(Value::Nil);
+            Ok(None)
+        }
         "insert" => {
             let i = idx.unwrap_or(0);
             if i <= vec.len() {
@@ -314,6 +334,20 @@ fn eval_array_mutator_args(
         _ => None,
     };
     let (idx, second) = match method {
+        "set" => (
+            // i64 bits carried in a usize so a negative index survives to the kernel.
+            Some(eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)? as usize),
+            Some(eval_arg(
+                args,
+                1,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
+        ),
         "insert" => (
             Some(eval_arg_usize(
                 args,
@@ -1614,6 +1648,20 @@ fn handle_method_call_with_self_update_inner(
                         _ => None,
                     };
                     let (idx, second) = match m {
+                        "set" => (
+                            // i64 bits in a usize so a negative index reaches the kernel.
+                            Some(eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)? as usize),
+                            Some(eval_arg(
+                                args,
+                                1,
+                                Value::Nil,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                        ),
                         "insert" => (
                             Some(eval_arg_usize(
                                 args,
@@ -1849,6 +1897,20 @@ fn handle_method_call_with_self_update_inner(
                         _ => None,
                     };
                     let (idx, second) = match m {
+                        "set" => (
+                            // i64 bits in a usize so a negative index reaches the kernel.
+                            Some(eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)? as usize),
+                            Some(eval_arg(
+                                args,
+                                1,
+                                Value::Nil,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                        ),
                         "insert" => (
                             Some(eval_arg_usize(
                                 args,
