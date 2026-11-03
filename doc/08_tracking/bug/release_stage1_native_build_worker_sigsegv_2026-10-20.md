@@ -86,3 +86,9 @@ defined in the Windows stage1 link on release/1.0.0. Covered by
 `src/runtime/test/rt_secure_temp_split_native_all_selfcheck.c`. Still needed:
 a release.yml Windows rerun to confirm, then drop the Windows seed fallback.
 The Linux HIR-worker SIGSEGV half remains open.
+
+## 2026-11-03 follow-up (status: fix-implemented-verification-pending)
+
+Windows: C owners (runtime_native.c; bootstrap archive via runtime_secure_staging.c) already define the symbol (e8186daac75). The Rust runtime crate lacked an `extern "C"` twin; added in `value/sffi/file_io/file_ops.rs` with a unit test. NOT compiled here (disk < 15 GB): run `cargo test -p simple-runtime secure_temp_dir_set_parent` in an own target dir. Needs a release.yml Windows rerun.
+
+Linux HIR-worker SIGSEGV: NOT explained by this symbol (a missing symbol aborts with "called unresolved symbol", not SIGSEGV, and the Linux link uses runtime_native.c which always defined it). Still needed: `ulimit -c unlimited; gdb -batch -ex run -ex bt -ex "info sharedlibrary" --args <stage1 native-build worker cmd from release.yml>`; record the faulting frame and whether it is in HIR lowering.
