@@ -1,0 +1,195 @@
+# Actual query serializers and live LSP conversion share these regressions.
+# @req REQ-LSP-CODEACTION-EDIT-001
+use std.spec
+use std.spec.step
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
+    json_value_items, json_value_has, json_value_object_from, json_value_object_set,
+    json_value_serialize, json_value_pretty, json_value_as_i64, json_value_text_or}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_code_actions_from_query_output}
+use std.nogc_sync_mut.lsp.lsp_code_action.{lsp_edit_source_map, lsp_code_action_text_edit,
+    lsp_query_code_action, lsp_constructor_code_action, lsp_code_action_request,
+    lsp_code_action_query_args, lsp_pass_code_action}
+
+fn wire_parse(source: text) -> JsonValue:
+    val parsed = json_parse_value_strict(source)
+    expect(parsed.is_ok()).to_equal(true)
+    parsed.unwrap()
+
+fn wire_actions(actions: [JsonValue]) -> [JsonValue]:
+    val output = json_value_serialize(JsonValue.Array(actions))
+    json_value_items(wire_parse(lsp_code_actions_from_query_output(output, "file:///requested.spl")))
+
+fn wire_edits(action: JsonValue) -> [JsonValue]:
+    val workspace = json_value_field(action, "edit")
+    val documents = json_value_items(json_value_field(workspace, "documentChanges"))
+    expect(documents.len()).to_equal(1)
+    val document = json_value_field(documents[0], "textDocument")
+    expect(json_value_field(document, "uri")).to_equal(JsonValue.Str("file:///requested.spl"))
+    json_value_items(json_value_field(documents[0], "edits"))
+
+fn wire_character(edit: JsonValue, endpoint: text) -> i64:
+    val range = json_value_field(edit, "range")
+    val position = json_value_field(range, endpoint)
+    json_value_as_i64(json_value_field(position, "character")).unwrap()
+
+fn wire_line(edit: JsonValue, endpoint: text) -> i64:
+    val range = json_value_field(edit, "range")
+    val position = json_value_field(range, endpoint)
+    json_value_as_i64(json_value_field(position, "line")).unwrap()
+
+fn apply_ascii_edit(source: text, edit: JsonValue) -> text:
+    expect(wire_line(edit, "start")).to_equal(0)
+    expect(wire_line(edit, "end")).to_equal(0)
+    val new_text = json_value_text_or(json_value_field(edit, "newText"), "missing")
+    source.substring(0, wire_character(edit, "start")) + new_text + source.substring(wire_character(edit, "end"))
+
+describe "p2_p3_bug_reproduction":
+    it "uses codeAction range and requests the real JSON query array":
+        step("Exercise the repaired owner")
+        val document = json_value_object_from([("uri", JsonValue.Str("file:///space%20name.spl"))])
+        val start = json_value_object_from([("line", JsonValue.Int(7)), ("character", JsonValue.Int(2))])
+        val end = json_value_object_from([("line", JsonValue.Int(7)), ("character", JsonValue.Int(8))])
+        val range = json_value_object_from([("start", start), ("end", end)])
+        val params = json_value_object_from([("textDocument", document), ("range", range)])
+        val request = json_value_object_from([("params", params)])
+        val actual = lsp_code_action_request(json_value_pretty(request))
+        expect(actual != nil).to_equal(true)
+        expect(actual.unwrap().uri).to_equal("file:///space%20name.spl")
+        expect(actual.unwrap().line).to_equal(7)
+        expect(lsp_code_action_query_args("space name.spl", actual.unwrap().line)).to_equal(
+            ["code-actions", "space name.spl", "8", "--format", "json"])
+
+    it "applies the exact Foo.new() quickfix after builder and LSP roundtrip":
+        step("Reproduce the exact failure")
+        val source = "val item = Foo.new()"
+        val query = lsp_constructor_code_action(lsp_edit_source_map(source), "source.spl", 0, 15)
+        val actions = wire_actions([query])
+        expect(actions.len()).to_equal(1)
+        val edits = wire_edits(actions[0])
+        expect(edits.len()).to_equal(1)
+        expect(apply_ascii_edit(source, edits[0])).to_equal("val item = Foo()")
+        expect(json_value_field(edits[0], "newText")).to_equal(JsonValue.Str(""))
+
+    it "preserves both replacements and applies the whole constructor rewrite":
+        step("Exercise the repaired owner")
+        val source = "Point(x: 1)"
+        val map = lsp_edit_source_map(source)
+        val opening = lsp_code_action_text_edit(map, 5, 6, " {").unwrap()
+        val closing = lsp_code_action_text_edit(map, 10, 11, "}").unwrap()
+        val query = lsp_query_code_action("Repair", "refactor.rewrite", true, "source.spl", [opening, closing])
+        val actions = wire_actions([query])
+        val edits = wire_edits(actions[0])
+        expect(edits.len()).to_equal(2)
+        val changed_end = apply_ascii_edit(source, edits[1])
+        expect(apply_ascii_edit(changed_end, edits[0])).to_equal("Point {x: 1}")
+        expect(json_value_field(actions[0], "kind")).to_equal(JsonValue.Str("refactor.rewrite"))
+
+describe "p2_p3_adjacent_regression":
+    it "preserves every action and its preferred flag command and data":
+        step("Reject the adjacent regression")
+        val edit = lsp_code_action_text_edit(lsp_edit_source_map("x"), 0, 1, "y").unwrap()
+        val first = lsp_query_code_action("first", "quickfix", true, "source.spl", [edit])
+        var second = lsp_query_code_action("second", "refactor", false, "source.spl", [edit])
+        val command = json_value_object_from([("title", JsonValue.Str("follow up")), ("command", JsonValue.Str("simple.refresh"))])
+        second = json_value_object_set(second, "command", command)
+        second = json_value_object_set(second, "data", JsonValue.Str("resolve-token"))
+        val actions = wire_actions([first, second])
+        expect(actions.len()).to_equal(2)
+        expect(json_value_field(actions[0], "isPreferred")).to_equal(JsonValue.Bool(true))
+        expect(json_value_field(actions[1], "command")).to_equal(command)
+        expect(json_value_field(actions[1], "data")).to_equal(JsonValue.Str("resolve-token"))
+
+    it "parses pretty reordered edits and preserves escapes and misleading field text":
+        val replacement = "quoted \"text\"\\path\n},\"newText\":\"wrong\""
+        val edit = lsp_code_action_text_edit(lsp_edit_source_map("x"), 0, 1, replacement).unwrap()
+        val reversed = json_value_object_from([("newText", json_value_field(edit, "newText")), ("range", json_value_field(edit, "range"))])
+        val query = lsp_query_code_action("Repair \"quoted\"", "quickfix", true, "source.spl", [reversed])
+        val output = json_value_pretty(JsonValue.Array([query]))
+        val actions = json_value_items(wire_parse(lsp_code_actions_from_query_output(output, "file:///requested.spl")))
+        val edits = wire_edits(actions[0])
+        expect(json_value_field(edits[0], "newText")).to_equal(JsonValue.Str(replacement))
+        expect(json_value_field(actions[0], "title")).to_equal(JsonValue.Str("Repair \"quoted\""))
+
+    it "rejects the whole edit if a later replacement has missing null or nonstring text":
+        val edit = lsp_code_action_text_edit(lsp_edit_source_map("xy"), 0, 1, "").unwrap()
+        val range_only = json_value_object_from([("range", json_value_field(edit, "range"))])
+        val null_text = json_value_object_set(edit, "newText", JsonValue.Null)
+        val numeric_text = json_value_object_set(edit, "newText", JsonValue.Int(42))
+        for invalid in [range_only, null_text, numeric_text]:
+            val query = lsp_query_code_action("Repair", "quickfix", true, "source.spl", [edit, invalid])
+            val actions = wire_actions([query])
+            expect(actions.len()).to_equal(1)
+            expect(json_value_has(actions[0], "edit")).to_equal(false)
+
+    it "rejects negative inverted fractional and missing range positions":
+        val edit = lsp_code_action_text_edit(lsp_edit_source_map("xy"), 0, 1, "").unwrap()
+        val end = json_value_object_from([("line", JsonValue.Int(0)), ("character", JsonValue.Int(0))])
+        for bad in [JsonValue.Int(-1), JsonValue.Int(2), JsonValue.Float(0.5), JsonValue.Null]:
+            val start = json_value_object_from([("line", JsonValue.Int(0)), ("character", bad)])
+            val invalid_range = json_value_object_from([("start", start), ("end", end)])
+            val invalid = json_value_object_set(edit, "range", invalid_range)
+            val actions = wire_actions([lsp_query_code_action("Repair", "quickfix", true, "source.spl", [invalid])])
+            expect(json_value_has(actions[0], "edit")).to_equal(false)
+
+    it "counts supplementary Unicode as two UTF16 units and handles CRLF multiline edits":
+        val map = lsp_edit_source_map("a😀é\r\n  pass\r\n")
+        val unicode = lsp_code_action_text_edit(map, 5, 7, "e").unwrap()
+        expect(wire_character(unicode, "start")).to_equal(3)
+        expect(wire_character(unicode, "end")).to_equal(4)
+        val multiline = lsp_code_action_text_edit(map, 5, 15, "replacement").unwrap()
+        expect(wire_line(multiline, "start")).to_equal(0)
+        expect(wire_line(multiline, "end")).to_equal(1)
+        expect(wire_character(multiline, "end")).to_equal(6)
+        val pass_edit = lsp_code_action_text_edit(map, 11, 15, "pass_do_nothing").unwrap()
+        expect(wire_line(pass_edit, "start")).to_equal(1)
+        expect(wire_character(pass_edit, "start")).to_equal(2)
+
+    it "rejects offsets inside Unicode or CRLF and outside source bounds":
+        val map = lsp_edit_source_map("a😀é\r\nx")
+        expect(lsp_code_action_text_edit(map, 2, 5, "") == nil).to_equal(true)
+        expect(lsp_code_action_text_edit(map, 7, 8, "") == nil).to_equal(true)
+        expect(lsp_code_action_text_edit(map, -1, 0, "") == nil).to_equal(true)
+        expect(lsp_code_action_text_edit(map, 0, 99, "") == nil).to_equal(true)
+        expect(lsp_code_action_text_edit(map, 5, 1, "") == nil).to_equal(true)
+
+    it "applies the bare-pass action without counting trailing whitespace or expanding tabs":
+        val source = "\tpass   # keep comment"
+        val query = lsp_pass_code_action(lsp_edit_source_map(source), "source.spl", 0).unwrap()
+        val actions = wire_actions([query])
+        val edits = wire_edits(actions[0])
+        expect(wire_character(edits[0], "start")).to_equal(1)
+        expect(apply_ascii_edit(source, edits[0])).to_equal("\tpass_do_nothing   # keep comment")
+        expect(lsp_pass_code_action(lsp_edit_source_map("pass_todo()"), "source.spl", 0) == nil).to_equal(true)
+
+    it "retains already standard documentChanges and its document version":
+        val edit = lsp_code_action_text_edit(lsp_edit_source_map("x"), 0, 0, "insert").unwrap()
+        val document = json_value_object_from([("uri", JsonValue.Str("file:///other.spl")), ("version", JsonValue.Int(9))])
+        val change = json_value_object_from([("textDocument", document), ("edits", JsonValue.Array([edit]))])
+        val workspace = json_value_object_from([("documentChanges", JsonValue.Array([change]))])
+        val query = json_value_object_from([("title", JsonValue.Str("Repair")), ("edit", workspace)])
+        val actions = wire_actions([query])
+        expect(json_value_field(actions[0], "edit")).to_equal(workspace)
+
+    it "retains separate URI targets in multifile changes":
+        val edit = lsp_code_action_text_edit(lsp_edit_source_map("x"), 0, 1, "y").unwrap()
+        val changes = json_value_object_from([("file:///one.spl", JsonValue.Array([edit])), ("file:///two.spl", JsonValue.Array([edit]))])
+        val query = json_value_object_from([("title", JsonValue.Str("Repair")), ("edit", json_value_object_from([("changes", changes)]))])
+        val actions = wire_actions([query])
+        val documents = json_value_items(json_value_field(json_value_field(actions[0], "edit"), "documentChanges"))
+        expect(documents.len()).to_equal(2)
+        expect(json_value_field(json_value_field(documents[1], "textDocument"), "uri")).to_equal(JsonValue.Str("file:///two.spl"))
+
+    it "does not offer an empty constructor edit for unmapped arguments":
+        val query = lsp_constructor_code_action(lsp_edit_source_map("Foo.new(42)"), "source.spl", 0, 4)
+        val actions = wire_actions([query])
+        expect(json_value_has(actions[0], "edit")).to_equal(false)
+        expect(json_value_has(actions[0], "disabled")).to_equal(true)
+
+    it "rejects malformed arrays and ignores child diagnostics instead of making titles":
+        expect(lsp_code_actions_from_query_output("[not JSON]", "file:///requested.spl")).to_equal("[]")
+        expect(lsp_code_actions_from_query_output("warning: child diagnostic\nNo code actions available", "file:///requested.spl")).to_equal("[]")
+
+    it "rejects requests without a valid codeAction range":
+        val document = json_value_object_from([("uri", JsonValue.Str("file:///source.spl"))])
+        val request = json_value_object_from([("textDocument", document)])
+        expect(lsp_code_action_request(json_value_serialize(request)) == nil).to_equal(true)

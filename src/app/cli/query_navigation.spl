@@ -11,6 +11,9 @@ use compiler.driver.driver_api_core.{check_file}
 use compiler.driver.driver_types.{CompileResult}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source}
 use std.report.emitter.lsp.{LspEmitter}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_object_set, json_value_serialize}
+use std.nogc_sync_mut.lsp.lsp_code_action.{lsp_edit_source_map, lsp_code_action_text_edit,
+    lsp_query_code_action, lsp_constructor_code_action, lsp_pass_code_action}
 use lazy app.cli.query_rename_references_v1.{query_rename_resolved_references_v1}
 
 fn query_rename(symbol: text, file: text, line_num: i64, cmd_args: [text]) -> i64:
@@ -92,7 +95,6 @@ fn query_rename(symbol: text, file: text, line_num: i64, cmd_args: [text]) -> i6
 fn query_code_actions(file: text, line_num: i64, cmd_args: [text]) -> i64:
     val format = _extract_flag(cmd_args, "--format", "text")
     val line_str = "{line_num}"
-    val emitter = LspEmitter.default_emitter()
 
     var actions: [text] = []
 
@@ -113,50 +115,42 @@ fn query_code_actions(file: text, line_num: i64, cmd_args: [text]) -> i64:
                     val err_msg = parsed.2
                     # Only include errors on the requested line
                     if err_line == line_num:
-                        var parts: [text] = []
-                        parts.push("{\"title\":{emitter.encode_string(\"Fix: \" + err_msg)}")
-                        parts.push(",\"kind\":\"quickfix\"")
-                        parts.push(",\"isPreferred\":false")
-                        parts.push(",\"diagnostics\":[{\"message\":{emitter.encode_string(err_msg)},\"line\":{err_line},\"col\":{err_col}}]")
-                        parts.push("}")
-                        actions.push(parts.join(""))
+                        val diagnostic = json_value_object_from([("message", JsonValue.Str(err_msg)),
+                            ("line", JsonValue.Int(err_line)), ("col", JsonValue.Int(err_col))])
+                        val action = lsp_query_code_action("Fix: " + err_msg, "quickfix", false, file, [])
+                        val with_diagnostic = json_value_object_set(action, "diagnostics", JsonValue.Array([diagnostic]))
+                        actions.push(json_value_serialize(with_diagnostic))
 
     # Run fix tool to collect suggested fixes with text edits
     var has_fixes = false
     if query_file_exists(file):
         val source = query_file_read_rich(file) ?? ""
         if source != "":
+            # Index line starts once, then convert only each edited line's
+            # prefix to UTF-16. No per-edit file reads or full-source scans.
+            val edit_map = lsp_edit_source_map(source)
             val fixes = collect_fixes_from_source(file, source)
             if fixes.len() > 0:
                 for fix in fixes:
                     has_fixes = true
                     if format == "json":
-                        var parts: [text] = []
-                        parts.push("{\"title\":{emitter.encode_string(fix.description)}")
-                        # Determine action kind based on fix ID
                         val action_kind = if fix.id.starts_with("L:"): "quickfix" else: "refactor"
-                        parts.push(",\"kind\":{emitter.encode_string(action_kind)}")
-                        val is_safe = fix.is_safe()
-                        if is_safe:
-                            parts.push(",\"isPreferred\":true")
-                        else:
-                            parts.push(",\"isPreferred\":false")
-                        # Include text edits from replacements
-                        if fix.replacements.len() > 0:
-                            var edit_parts: [text] = []
-                            for rep in fix.replacements:
-                                var ep: [text] = []
-                                ep.push("{\"range\":{")
-                                ep.push("\"start\":{\"line\":{rep.line},\"character\":{rep.column}},")
-                                ep.push("\"end\":{\"line\":{rep.line},\"character\":{rep.column + (rep.end - rep.start)}}")
-                                ep.push("},\"newText\":{emitter.encode_string(rep.new_text)}}")
-                                edit_parts.push(ep.join(""))
-                            parts.push(",\"edit\":{\"changes\":{")
-                            parts.push("{emitter.encode_string(file)}:[")
-                            parts.push(edit_parts.join(","))
-                            parts.push("]}}")
-                        parts.push("}")
-                        actions.push(parts.join(""))
+                        var edits: [JsonValue] = []
+                        var valid = true
+                        var on_requested_line = false
+                        for rep in fix.replacements:
+                            if rep.line == line_num: on_requested_line = true
+                            if rep.file != file:
+                                valid = false
+                            else:
+                                val edit = lsp_code_action_text_edit(edit_map, rep.start, rep.end, rep.new_text)
+                                if edit == nil:
+                                    valid = false
+                                else:
+                                    edits.push(edit.unwrap())
+                        if valid and on_requested_line and edits.len() > 0:
+                            actions.push(json_value_serialize(lsp_query_code_action(
+                                fix.description, action_kind, fix.is_safe(), file, edits)))
 
             # Also run source-level lint to surface EasyFix actions
             val source_lines = source.split("\n")
@@ -165,9 +159,10 @@ fn query_code_actions(file: text, line_num: i64, cmd_args: [text]) -> i64:
                 val sline = source_lines[sli]
                 val strimmed = sline.trim()
                 # DEPR002: .new() -> suggest StructName(field: value)
-                if deprecated_new_column_at(source_lines, sli) > 0:
+                val new_column = deprecated_new_column_at(source_lines, sli)
+                if new_column > 0:
                     if format == "json":
-                        actions.push("{\"title\":\"Replace .new() with constructor syntax\",\"kind\":\"quickfix\",\"isPreferred\":true}")
+                        actions.push(json_value_serialize(lsp_constructor_code_action(edit_map, file, sli, new_column)))
                     else:
                         has_fixes = true
 
@@ -175,14 +170,9 @@ fn query_code_actions(file: text, line_num: i64, cmd_args: [text]) -> i64:
                 if (strimmed == "pass" or strimmed.starts_with("pass ") or strimmed.starts_with("pass#")):
                     if not strimmed.starts_with("pass_"):
                         if format == "json":
-                            val indent_len = sline.len() - strimmed.len()
-                            var ep: [text] = []
-                            ep.push("{\"title\":\"Replace 'pass' with 'pass_do_nothing'\",\"kind\":\"quickfix\",\"isPreferred\":true")
-                            ep.push(",\"edit\":{\"changes\":{")
-                            ep.push("{emitter.encode_string(file)}:[")
-                            ep.push("{\"range\":{\"start\":{\"line\":{sli},\"character\":{indent_len}},\"end\":{\"line\":{sli},\"character\":{indent_len + 4}}},\"newText\":\"pass_do_nothing\"}")
-                            ep.push("]}}}")
-                            actions.push(ep.join(""))
+                            val action = lsp_pass_code_action(edit_map, file, sli)
+                            if action != nil:
+                                actions.push(json_value_serialize(action.unwrap()))
                         else:
                             has_fixes = true
 
