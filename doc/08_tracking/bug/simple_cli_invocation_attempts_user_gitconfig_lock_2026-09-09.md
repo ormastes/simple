@@ -74,3 +74,7 @@ Run on Windows 11 with `bin/simple.exe` (v1.0.0-rc.1 seed). With `HOME`/`USERPRO
 ## Fix 2026-11-03 (fix-implemented-verification-pending)
 
 The only in-tree writer of the user-global git config is `scripts/setup/setup-ci-receipt-key.shs:141`, which defaulted to `git config --global` for `simple.ciReceiptKey`/`simple.ciReceiptIdentity`; the CLI binary itself never touches git config. Default is now `--local`; `--global-config` is the explicit opt-in. Guard: `scripts/check/check-no-global-git-config-write.shs` (standalone, not push-wired: full scan ~2.5 min on Windows). Regression: `sh scripts/check/check-gitconfig-lock-untouched.shs` (locked HOME; before fix FAIL exit 1 "git config --global failed", after fix PASS). Verification pending: the original smoke argv was never retained, so a Windows session should re-run its smoke with HOME pointing at a locked scratch dir.
+
+## Closure 2026-11-03
+
+Fix landed in #6072 (setup no longer writes user-global gitconfig). Re-check with deployed bin/simple.exe: `--version`, `run`, `lint` under a 50 ms poll for `~/.gitconfig.lock`: no lock seen, `~/.gitconfig` sha256 unchanged. Startup git spawns in src/compiler/80.driver are `git -C <repo>` ancestry probes in cache promotion only (not on the plain startup path, no `git config`). Closed as fixed.
