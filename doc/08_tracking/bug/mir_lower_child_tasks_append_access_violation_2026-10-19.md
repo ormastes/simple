@@ -1,7 +1,7 @@
 # MIR lowering access violation in `_assistant_child_tasks_append` (mcp closure)
 
 - **id:** `mir_lower_child_tasks_append_access_violation_2026-10-19`
-- **status:** open (workaround active, root cause not localized)
+- **status:** fix-implemented-verification-pending (source fix landed; workaround tag kept until a rebuilt native producer passes the repro)
 - **severity:** blocks Phase 4 `src/app/mcp/main.spl` native build on Windows
 - **DB reconciliation:** pending — the qualified `simple check-dbs` / bug DB
   command was not available on this host; this dated record carries the fields.
@@ -90,3 +90,30 @@ Workaround commit: see the PR that introduced this record.
 - Condition path read: `lower_if` (`src/compiler/50.mir/mir_lowering_stmts.spl:3656`) -> `lower_mcdc_decision` (:3103, returns `lower_cond_expr` when MC/DC is off) -> `lower_cond_expr` (:3368) -> `lower_cond_operand`; `present_collection_binding` (:3584) returns `missing` immediately for this cond (right side is not `NilLit`). None of these read per-function state left by a previous function. Every `Dict<i64,...>` lowering field not cleared by `reset_function_local_tracking` (`_MirLowering/function_lowering.spl:350`) is module/symbol-scoped (globals, externs, field maps), not LocalId-scoped.
 - New prevention spec `test/01_unit/compiler/mir/child_tasks_append_lowering_spec.spl` lowers the ORIGINAL form (`cd6206a31bf`) right after a same-param-name `items`/`value` function with `value.trim()` + early `return items`, 3 rounds: **PASS** under the seed interpreter (`bin/simple.exe run <spec>`). The MIR lowering logic is therefore correct for this shape; the 0xC0000005 is a memory-safety defect in the **natively compiled** producer (codegen/runtime of the compiler binary), consistent with facts 1-3 above (heap-layout dependent, suppressed by any extra thread).
 - Concrete blocker: reproducing needs the native strict producer (`simple-scope-diagnostic-strict.exe` / stage2) run without a debugger plus a faulting PC; lane rules forbid touching stage2 and no WER LocalDumps (admin) are available on this host. Status stays open, workaround tag kept. Repro once a stage3 producer exists: native-compile `src/app/mcp/main.spl` with the workaround reverted to `cd6206a31bf`'s form, 10 runs, no debugger; any 0xC0000005 in `app.mcp.assistant.session_store_helpers` reproduces it.
+
+## Source audit and fix 2026-11-03 (comp-mirav2)
+
+Dumping the MIR of the original form (seed interpreter) showed the real defect:
+a statement-position `if ...: <unit stmt> else: <value stmt>` is lowered by
+`lower_if_chain` (`src/compiler/50.mir/mir_lowering_stmts.spl`), which copies each
+arm's value into a shared `result` temp only in arms yielding a non-unit value.
+Then-arm ends in `found = true` (unit); else-arm ends in `out.push(item)` (value),
+so `Copy 14 <- 4` exists only on the else edge and `if_chain_merge` (bb5) has an
+operand (14) undefined on the then edge (bb9 -> bb5). Backends that materialise
+the merge operand (phi / value lookup) dereference a NULL value there; this is
+layout/heap dependent, which matches the earlier "extra thread suppresses it"
+observations. `lower_if` has the same pattern (`merge` block).
+
+Fix: when the if/chain has an else and no expected type, emit a dominating default
+`Const 0` for `result` in the entry block before the branch; arms overwrite it.
+
+Spec: `test/01_unit/compiler/mir/child_tasks_append_lowering_spec.spl` second
+example runs a forward must-defined dataflow over the lowered MIR and asserts
+that every Copy-defined arm result at a `merge` / `if_chain_merge` join is defined
+on every incoming edge. Before: FAIL (`local 14 undefined on edge bb9 -> join bb5`);
+after: PASS (seed interpreter, `bin/simple.exe test <spec>`).
+
+Native verification (needs a stage3 producer): native-compile `src/app/mcp/main.spl`
+with `_assistant_child_tasks_append` reverted to the form of `cd6206a31bf`, 10 runs
+without a debugger; no 0xC0000005 in `app.mcp.assistant.session_store_helpers`
+expected. Then retire the `@workaround` tag.

@@ -27,3 +27,129 @@ describe "child tasks append MIR lowering":
             expect(lowering.errors.len()).to_equal(0)
             expect(mir.functions.len()).to_be_greater_than(2)
             round = round + 1
+
+# ---------------------------------------------------------------------------
+# MIR-shape check (source audit of lower_if, same bug id).
+#
+# lower_if copies each arm's value into a shared `result` temp, but only in
+# arms that yield a non-unit value. In the loop-tail form the then-arm ends in
+# `found = true` (unit) while the else-arm ends in `out.push(item)` (a value),
+# so `result` was defined on the else edge only and the join block saw an
+# operand undefined on the then edge (native backends deref a NULL value there).
+# Invariant: a local defined on one incoming edge of a join must be defined on
+# every incoming edge of that join (checked at lower_if `merge` and lower_if_chain `if_chain_merge` blocks only;
+# loop headers legitimately see body-local defs on the back edge alone).
+
+fn block_copy_dests(block: MirBlock) -> [i64]:
+    # Arm-result candidates: only Copy/Move dests, not arm-local call/const temps.
+    var dests: [i64] = []
+    for inst in block.instructions:
+        match inst.kind:
+            case MirInstKind.Copy(dest, _): dests = dests.push(dest.id)
+            case MirInstKind.Move(dest, _): dests = dests.push(dest.id)
+            case _: ()
+    dests
+
+fn inst_dest(kind: MirInstKind) -> i64:
+    match kind:
+        case MirInstKind.Const(dest, _, _): dest.id
+        case MirInstKind.Copy(dest, _): dest.id
+        case MirInstKind.Move(dest, _): dest.id
+        case MirInstKind.Call(dest, _, _):
+            if val d = dest: d.id else: -1
+        case _: -1
+
+fn block_defs(block: MirBlock) -> [i64]:
+    var defs: [i64] = []
+    for inst in block.instructions:
+        val d = inst_dest(inst.kind)
+        if d >= 0:
+            defs = defs.push(d)
+    defs
+
+fn block_succs(block: MirBlock) -> [i64]:
+    match block.terminator:
+        case MirTerminator.Goto(t): [t.id]
+        case MirTerminator.If(_, a, b): [a.id, b.id]
+        case _: []
+
+fn id_in(xs: [i64], x: i64) -> bool:
+    for v in xs:
+        if v == x:
+            return true
+    false
+
+# Returns "" when the invariant holds, else a description of the first violation.
+fn undefined_join_edge(function: MirFunction) -> text:
+    var out_defs: Dict<i64, [i64]> = {}
+    var seen: Dict<i64, bool> = {}
+    var round = 0
+    while round < 64:
+        var changed = false
+        for block in function.blocks:
+            var in_defs: [i64] = []
+            var have_pred = false
+            for pred in function.blocks:
+                if seen.contains_key(pred.id.id) and id_in(block_succs(pred), block.id.id):
+                    val pd = out_defs[pred.id.id]
+                    if not have_pred:
+                        in_defs = pd
+                        have_pred = true
+                    else:
+                        var inter: [i64] = []
+                        for x in in_defs:
+                            if id_in(pd, x):
+                                inter = inter.push(x)
+                        in_defs = inter
+            var cur = in_defs
+            for d in block_defs(block):
+                if not id_in(cur, d):
+                    cur = cur.push(d)
+            if not seen.contains_key(block.id.id) or cur.len() != out_defs[block.id.id].len():
+                seen[block.id.id] = true
+                out_defs[block.id.id] = cur
+                changed = true
+        if not changed:
+            break
+        round = round + 1
+    var report = ""
+    for join in function.blocks:
+        var preds: [MirBlock] = []
+        for pred in function.blocks:
+            if seen.contains_key(pred.id.id) and id_in(block_succs(pred), join.id.id):
+                preds = preds.push(pred)
+        val join_label = join.label ?? ""
+        if preds.len() >= 2 and (join_label == "merge" or join_label == "if_chain_merge"):
+            var union_defs: [i64] = []
+            for pred in preds:
+                for d in block_copy_dests(pred):
+                    if not id_in(union_defs, d):
+                        union_defs = union_defs.push(d)
+            for d in union_defs:
+                for pred in preds:
+                    if report == "" and not id_in(out_defs[pred.id.id], d):
+                        report = "local " + d.to_string() + " undefined on edge bb" + pred.id.id.to_string() + " -> join bb" + join.id.id.to_string()
+    report
+
+describe "child tasks append MIR shape":
+    it "defines the if-result local on every edge of the loop-tail merge":
+        val filename = "child_tasks_shape.spl"
+        val parsed = parse_full_frontend(CHILD_TASKS_SOURCE, filename, "child_tasks_shape", Logger(level: 0))
+        var hir_owner = HirLowering.with_filename(filename)
+        val hir = hir_owner.lower_module(parsed)
+        var lowering = MirLowering.new(hir.symbols)
+        val mir = lowering.lower_module(hir)
+        expect(lowering.errors.len()).to_equal(0)
+        var checked = 0
+        var violations = ""
+        for function in mir.functions.values():
+            if function.name == "child_tasks_append" or function.name.ends_with(".child_tasks_append"):
+                checked = checked + 1
+                violations = undefined_join_edge(function)
+                for block in function.blocks:
+                    match block.terminator:
+                        case MirTerminator.Unreachable:
+                            violations = violations + " unterminated bb" + block.id.id.to_string()
+                        case _: ()
+        expect(checked).to_equal(1)
+        expect(violations).to_equal("")
