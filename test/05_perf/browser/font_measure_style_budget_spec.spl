@@ -1,0 +1,68 @@
+"""
+Purpose: Perf budget for the per-text-node font measure that the CSS style pass
+pays once per DISTINCT string. web_showcase_vector_font_evidence_style_budget_truncation_2026-08-01
+measured ~2.45 s per distinct node (30 nodes ~ 74 s) against a 10 s stage-partitioned
+budget, so the style pass broke at node 74 of 151 and the evidence marker kept the
+default style. Current steady state is ~25-30 ms per node (run memo, live-face memo,
+ASCII advance slots, kern cache). This spec pins explicit numbers, with margin, so a
+regression back toward per-node face re-parse or uncached shaping fails loudly instead
+of silently truncating the cascade again.
+Method: every string is DISTINCT (a repeated string would only measure the resolved-
+metrics memo). The first resolve is excluded (cold face load, budgeted separately).
+Budgets (measured on the seed-interpreted lane, 2026-11-03; old behaviour = 2450 ms/node):
+  warm distinct nodes : 24 nodes total < 4000 ms  (measured 700-1000 ms, ~4x margin; old ~59000 ms)
+  per-node worst case : < 1500 ms                 (measured 35-250 ms; old 2450 ms)
+  cold first resolve  : < 20000 ms                (measured ~1500 ms)
+  repeated pass       : served by the front memo (hit counter rises, no new misses)
+Audience: browser engine / text layout maintainers.
+"""
+use std.spec.*
+use std.nogc_sync_mut.text_layout.font_renderer.{font_renderer_debug_resolve,
+    resolved_font_front_memo_hits, resolved_font_front_memo_misses}
+
+extern fn rt_time_now_micros() -> i64
+
+val NODE_COUNT = 24
+val WARM_TOTAL_BUDGET_US = 4000000
+val PER_NODE_BUDGET_US = 1500000
+val COLD_BUDGET_US = 20000000
+
+fn node_text(i: i64) -> text:
+    "Distinct node text number {i} of the page body"
+
+describe "font measure cost per distinct style-pass text node":
+    it "stays inside the style-pass budget and caches repeats":
+        val cold_start = rt_time_now_micros()
+        val warmup = font_renderer_debug_resolve("sans-serif", "Warm up face", 16, "en")
+        val cold_us = rt_time_now_micros() - cold_start
+        expect(warmup.contains("valid=true")).to_equal(true)
+        expect(cold_us < COLD_BUDGET_US).to_equal(true)
+        # One more distinct string absorbs any first-measure lazy init.
+        val _settle = font_renderer_debug_resolve("sans-serif", "Settle the first measure", 16, "en")
+
+        var worst_us = 0
+        val warm_start = rt_time_now_micros()
+        var i = 0
+        while i < NODE_COUNT:
+            val a = rt_time_now_micros()
+            val r = font_renderer_debug_resolve("sans-serif", node_text(i), 16, "en")
+            val spent = rt_time_now_micros() - a
+            expect(r.contains("valid=true")).to_equal(true)
+            if spent > worst_us:
+                worst_us = spent
+            i = i + 1
+        val warm_total_us = rt_time_now_micros() - warm_start
+        print "font-measure-budget cold_us={cold_us} warm_total_us={warm_total_us} worst_node_us={worst_us}"
+        expect(warm_total_us < WARM_TOTAL_BUDGET_US).to_equal(true)
+        expect(worst_us < PER_NODE_BUDGET_US).to_equal(true)
+
+        # Repeat pass: identical requests must be answered by the memo.
+        val hits_before = resolved_font_front_memo_hits()
+        val misses_before = resolved_font_front_memo_misses()
+        var j = 0
+        while j < NODE_COUNT:
+            val again = font_renderer_debug_resolve("sans-serif", node_text(j), 16, "en")
+            expect(again.contains("valid=true")).to_equal(true)
+            j = j + 1
+        expect(resolved_font_front_memo_hits() - hits_before >= NODE_COUNT).to_equal(true)
+        expect(resolved_font_front_memo_misses()).to_equal(misses_before)
