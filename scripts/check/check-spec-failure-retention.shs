@@ -11,20 +11,21 @@ if [ ! -x "$runtime" ]; then
   printf '%s\n' 'STATUS: FAIL (runtime is not executable)' >&2
   exit 1
 fi
-version=$("$runtime" --version) || exit 1
+runtime=$(CDPATH= cd -- "$(dirname -- "$runtime")" && printf '%s/%s\n' "$(pwd)" "$(basename -- "$runtime")")
+command -v timeout >/dev/null 2>&1 || {
+  printf '%s\n' 'STATUS: UNRUN (timeout utility unavailable)' >&2
+  exit 77
+}
+version=$(timeout -k 1s 5s "$runtime" --version) || exit 1
 case "$version" in
   *'bootstrap seed'*|*'Rust seed'*|*'rust seed'*)
     printf '%s\n' 'STATUS: UNRUN (seed runtime is forbidden)' >&2
     exit 77 ;;
 esac
-command -v timeout >/dev/null 2>&1 || {
-  printf '%s\n' 'STATUS: UNRUN (timeout utility unavailable)' >&2
-  exit 77
-}
 evidence=$(mktemp -d "${TMPDIR:-/tmp}/spec-failure-retention.XXXXXX")
 printf 'evidence=%s\n' "$evidence"
 set +e
-(cd "$ROOT" && SIMPLE_LIB=src timeout 30s "$runtime" run \
+(cd "$ROOT" && SIMPLE_LIB=src timeout -k 1s 30s "$runtime" run \
   test/fixtures/spec_failure_retention/two_failures.spl) >"$evidence/output.log" 2>&1
 status=$?
 set -e
@@ -38,13 +39,17 @@ for required in \
   'Expected 22, got 11' \
   'Expected 44, got 33' \
   'FAILURE_RETENTION_BODY_COMPLETED' \
-  'FAILURE_RETENTION_NEXT_EXAMPLE_COMPLETED' \
-  '  Total:   2' \
-  '  Passed:  1' \
-  '  Failed:  1'
+  'FAILURE_RETENTION_NEXT_EXAMPLE_COMPLETED'
 do
   if ! grep -F "$required" "$evidence/output.log" >/dev/null; then
     printf 'STATUS: FAIL (missing output: %s)\n' "$required" >&2
+    exit 1
+  fi
+done
+for summary in 'Total:[[:space:]]+2' 'Passed:[[:space:]]+1' 'Failed:[[:space:]]+1'
+do
+  if ! grep -E "^[[:space:]]*${summary}[[:space:]]*$" "$evidence/output.log" >/dev/null; then
+    printf 'STATUS: FAIL (missing exact summary: %s)\n' "$summary" >&2
     exit 1
   fi
 done
