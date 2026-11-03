@@ -82,3 +82,34 @@ jobs:
           if errorlevel 1 exit /b 16
           xray_native_integration.exe
           if errorlevel 1 exit /b 17
+
+      - name: Check x64 full YMM and MXCSR state regression
+        if: matrix.arch == 'x64'
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath > "%TEMP%\xray_vs_path.txt"
+          set /p VSDIR=<"%TEMP%\xray_vs_path.txt"
+          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" amd64
+          if errorlevel 1 exit /b 21
+          clang --target=x86_64-pc-windows-msvc -c -x assembler-with-cpp test\integration\xray\abi_state_regression.S -o abi_state_regression.obj
+          if errorlevel 1 exit /b 22
+          clang --target=x86_64-pc-windows-msvc -c -x assembler-with-cpp test\integration\xray\trampoline_x64_bounded.S -o trampoline_x64_bounded.obj
+          if errorlevel 1 exit /b 23
+          cl /nologo /std:c++17 /EHsc /O2 /guard:cf /Fe:xray_abi_regression.exe test\integration\xray\abi_state_regression.cpp abi_state_regression.obj trampoline_x64_bounded.obj xray_trampoline.obj /link /GUARD:CF /DYNAMICBASE /CETCOMPAT
+          if errorlevel 1 exit /b 24
+          xray_abi_regression.exe
+          if errorlevel 1 exit /b 25
+
+      - name: Check process-isolated mitigation enforcement
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath > "%TEMP%\xray_vs_path.txt"
+          set /p VSDIR=<"%TEMP%\xray_vs_path.txt"
+          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b 31
+          clang --target=${{ matrix.target_triple }} -c -x assembler test\integration\xray\security_${{ matrix.arch }}.S -o security_enforcement.obj
+          if errorlevel 1 exit /b 32
+          cl /nologo /std:c++17 /EHsc /O2 /guard:cf /Fe:xray_security_enforcement.exe test\integration\xray\security_enforcement_probe.cpp security_enforcement.obj /link /GUARD:CF /DYNAMICBASE ${{ matrix.cetflags }}
+          if errorlevel 1 exit /b 33
+          xray_security_enforcement.exe
+          if errorlevel 1 exit /b 34
