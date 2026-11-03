@@ -13,6 +13,7 @@ P0 companion inventories:
 - `immutable_hir_p0_ownership_inventory_20261103.md`: ownership, freezing, publication, container aliasing, and pin primitives.
 - `immutable_hir_p0_mir_inventory_20261103.md`: entry points, target context, mutation, streaming, and transient/archive ownership.
 - `immutable_hir_p0_cache_inventory_20261103.md`: semantic target dependence, cache/codec admission, transitions, and final-object reuse.
+- `immutable_hir_p0_field_classification_20261103.md`: field ownership and semantic-versus-target classification at the subsequent pinned release revision.
 
 ## Existing bootstrap evidence inspected
 
@@ -63,3 +64,13 @@ The first source increment must follow PR-A: nominal IDs and read-only facades w
 The mandatory TargetHIR-only MIR boundary is a staged destination. Keep legacy adapters available until the migration matrix and native gates pass. Preserve fused per-region source-to-object execution; do not replace it with the previous experiment's whole-closure serialization/admission barrier.
 
 Documentation review and a documentation-only merge do not establish compiler verification PASS, P0 runtime-baseline completion, or permission to enable the refactor by default.
+
+## Follow-up observation: 2026-11-03 00:07 UTC
+
+The governing plan and initial inventories landed through documentation-only PR #5973, merge `2425a95cc1772b5e4c4b1a4d45474f1feac4ad2d`. The source findings above remain observations of their recorded revisions. The field-classification follow-up uses this merge as its source pin; it does not silently refresh earlier source claims.
+
+The separate bootstrap lane was rebased onto that merge. Its new frozen candidate is `0ec4fe1b0854d437c8112092a91a58ab689df300`, tree `94347e7a3ebdf5bfc0c75c59d93a055f9e3a19d5`. Upstream now supplies the tuple production corrections; the candidate's sole production delta removes a duplicate enum-provider method. Astra approved this exact candidate for freeze/build, with landing still conditional on fresh Phase 3 link and exact-candidate Hello.
+
+Attempt 6 stopped without launching a compiler. Attempt 7 started its resource scheduler at 00:05:51 UTC, retaining producer `e087…1553`, the 12 GiB reserve, 13.5 GiB launch threshold, one build job, and original 00:24:52 UTC deadline. At that first sample, narrow available memory was 11,751,260,160 bytes and canonical available memory was 12,136,136,704 bytes. Both were below the launch threshold; no compiler child had started. This is a scheduler observation, not execution or performance qualification.
+
+The candidate contains no TargetHIR implementation. This follow-up adds no runtime pass, does not complete P0, and does not admit the frozen host-view experiment.
