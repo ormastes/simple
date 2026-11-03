@@ -20,7 +20,8 @@ use app.io._CliCompile.native_build_closure_request_admit.{native_build_closure_
 use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
-use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1,
+    native_build_snapshot_drop_missing_default_roots_v1}
 use app.bug.workaround_store.{refresh_workarounds}
 # Unambiguous, non-builtin stderr write for the worker-failure relay path
 # (eprint_bounded / native_build_print_failure_hints / the `code != 0` branch
@@ -1794,7 +1795,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
             val selection = native_build_entry_and_sources_v1(args)
             log_build_trace("coordinator:admission root={scv_root} selection={build_trace_list(selection)} source_roots={build_trace_list(source_roots)}")
         if source_roots.len() == 0:
-            eprint "SCV-E-ADMISSION: source-inventory-scope-unsupported"
+            eprint "SCV-E-ADMISSION: source-inventory-scope-unsupported (entry and --source dirs must live under the git checkout root " + scv_root + ")"
             log_build_trace("coordinator:admission:refused reason=source-inventory-scope-unsupported (entry and --source dirs must live under root)")
             return 1
         val cold_init = (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1"
@@ -2377,6 +2378,10 @@ pub fn native_build_authority_source_roots_v1(args: [text], root: text) -> [text
     val relative = absolute.substring(root.len() + 1)
     var roots = native_build_snapshot_source_roots_v1(relative, sources)
     if roots.len() == 0: return []
+    # Default roots (no explicit --source) that this checkout lacks are skipped
+    # with a warning; explicit roots are kept so an empty one stays an error.
+    if sources.len() == 0:
+        roots = native_build_snapshot_drop_missing_default_roots_v1(root, roots)
     if not roots.contains(relative): roots.push(relative)
     roots
 
