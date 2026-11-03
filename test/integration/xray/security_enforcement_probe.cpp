@@ -13,6 +13,9 @@
 #include <cstring>
 #include <cwchar>
 
+// Documented import library for SetProcessValidCallTargets.
+#pragma comment(lib, "WindowsApp.lib")
+
 // SDK 26100 or later is recommended. Use the SDK enum/type, not an invented
 // feature-number or a silent fallback for ProcessUserPointerAuthPolicy.
 extern "C" int security_return_control();
