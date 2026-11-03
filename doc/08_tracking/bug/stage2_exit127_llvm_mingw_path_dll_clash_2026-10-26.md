@@ -34,3 +34,7 @@ that it starts under the same conflicting environment.
 Not the DLL clash itself but the silent failure: no diagnostic names the
 conflicting DLL, the loader error, or the workaround. A launcher/wrapper should
 detect the loader failure (or pin its DLL directory) and print a one-line cause.
+
+## Triage 2026-11-03 (boot-script-fixes lane)
+
+Deferred: DLL bundling repair is already in p3-smoke-stage3.shs; the remaining ask (launcher that names the loader failure) needs a Windows stage2 run to verify. Still open.

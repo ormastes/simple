@@ -25,3 +25,7 @@ Owner: bootstrap/native-build CLI maintainer. Decide and test whether zero means
 unlimited or is rejected during argument validation. Acceptance requires one
 source-matched Stage-3 artifact, its provenance/sanity receipt, then a Stage-4
 artifact before normal test/docgen verification.
+
+## Triage 2026-11-03 (boot-script-fixes lane)
+
+Deferred: the coordinator (src/app/cli/native_build_main.spl native_build_timeout_ms) already documents 0 as disabled; the immediate "timeout (0s)" is raised in the per-file worker/driver path (80.driver, off-limits for this lane) and needs a stage2 run to prove. Still open.

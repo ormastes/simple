@@ -178,3 +178,7 @@ that dirties the tree under every one of them.
 Note step 2 succeeds in acquiring its own `${output_dir}.lock` — the guard does
 not fire, which is the point of this report.
 
+
+## Triage 2026-11-03 (boot-script-fixes lane)
+
+Already fixed on origin: bootstrap-from-scratch.sh:2857-2893 guards the shared seed path with a worktree-level Rust authority lock (rust_authority_lock_root, bootstrap_acquire_rust_authority) plus immutable bootstrap.generations publication, independent of --output. Row closed fixed.
