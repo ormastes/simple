@@ -2004,6 +2004,18 @@ fn try_compile_builtin_method_call<M: Module>(
     // A BARE (unqualified) name is only emitted for an erased receiver, whose
     // value is a tagged RuntimeValue (see compile_method_call_static).
     let erased_receiver = !method.contains('.');
+    // primitive_receiver_trait_impl_dispatch_2026-08-07 Defect A: a qualified
+    // `<numeric|bool>.hash` call must reach the user's `impl Hash for <T>`;
+    // the name-keyed `hash => rt_hash_text` builtin below would pass the raw
+    // scalar as a text pointer (silent 0) and shadow the impl.
+    if let Some((qual, "hash")) = method.rsplit_once('.') {
+        if matches!(
+            qual,
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool"
+        ) {
+            return Ok(None);
+        }
+    }
     // Extract plain method name from qualified name (e.g., "text.len" -> "len")
     let method = method.rsplit('.').next().unwrap_or(method);
 

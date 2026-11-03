@@ -217,3 +217,11 @@ Probe: scratchpad `p_opt3.spl` (see CRIT C4 report).
 Record explicitly marks this TRACKED, NOT PARALLEL-CLAIMABLE with a named fix owner. No change made.
 
 **Revalidated 2026-11-02: still plausible because the report title (Inlined Option return uses a different representation than the caller expects o) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 s3g4 lane: pinned repro, root cause still open
+
+Added `test/fixtures/repro/compiler/option_if_val_text_unwrap_native_repro.spl`
+(the `if val lbl = r` text-Option shape; interpreter prints `option-struct-method-ok`).
+Seed `native-build` of the repo is >40 min on this host, so the native divergence
+was not re-observed; blocker: need a native run of this fixture to disassemble the
+`if val` bind path. Stays open.
