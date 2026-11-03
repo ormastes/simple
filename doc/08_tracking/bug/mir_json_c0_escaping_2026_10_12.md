@@ -1,6 +1,6 @@
 # MIR JSON C0 escaping and Unicode preservation — 2026-10-12
 
-Status: OPEN; source repair and native fixture AUTHORED_UNEXECUTED. No compiler admission or RSS-fix claim.
+Status: FIXED in source (9e60ec274c9 C0 escaping; f1015d98e39 + serialize_mir_function/block part-joins); regression spec test/01_unit/compiler/50.mir/mir_json_escaping_spec.spl added 2026-11-02. Native stage3 qualification of the original 218-module repro still pending.
 
 Production owner: `src/compiler/50.mir/mir_json.spl:693`, `escape_json_string`; public serializers for string constants, function/local names, block labels and other MIR payloads use it. Original source `f34d789031e37bd38e81e8ce1c109682c075f16b`, file SHA256 `75a5b999fbc4e77e2668755bb6d07553059a8cb702c53b843acff606d85393c2`.
 
