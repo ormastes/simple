@@ -1071,6 +1071,51 @@ fn read_then_write(mut owner: OwnedFields) -> i64:
 }
 
 #[test]
+fn field_access_on_static_ctor_inferred_local_keeps_owner_identity() {
+    // doc/08_tracking/bug/stage3_selfhost_vtable_field_offset_relro_segv_2026-08-06.md
+    // `var t = Cls.create(..)` (no annotation) must still name its owner, so
+    // the native layout pass can resolve the vtable header; an unnamed
+    // owner is guessed header-less and shifts every field by one slot.
+    let mir = compile_to_mir(
+        r#"trait Shape:
+    fn area() -> i64
+
+class Sq with Shape:
+    side: i64
+    static fn create(side: i64) -> Sq:
+        Sq(side: side)
+    fn area() -> i64:
+        self.side
+
+fn use_inferred() -> i64:
+    var t = Sq.create(3)
+    t.side = 4
+    t.side
+"#,
+    )
+    .unwrap();
+    let f = mir
+        .functions
+        .iter()
+        .find(|f| f.name.ends_with("use_inferred"))
+        .expect("use_inferred");
+    let owners: Vec<Option<&str>> = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter())
+        .filter_map(|i| match i {
+            MirInst::FieldGet { owner_name, .. } | MirInst::FieldSet { owner_name, .. } => Some(owner_name.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert!(!owners.is_empty(), "expected field get/set in use_inferred");
+    assert!(
+        owners.iter().all(|o| *o == Some("Sq")),
+        "inferred static-ctor local lost its owner identity: {owners:?}"
+    );
+}
+
+#[test]
 fn direct_call_boxes_integer_args_for_any_params() {
     let mir =
         compile_to_mir("fn add(a: Any, b: Any) -> Any:\n    return a + b\n\nfn test() -> Any:\n    return add(1, 2)\n")
