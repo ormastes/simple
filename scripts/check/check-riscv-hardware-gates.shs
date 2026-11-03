@@ -24,8 +24,10 @@
 # stdout is always one of
 #   PASS  — <n> gate(s) checked, ...   exit 0   (n is always > 0)
 #   FAIL  — ...                        exit 1
-#   ERROR — nothing was checked: ...   exit 2
-# A run that checked zero gates is an ERROR, never a PASS.
+#   ERROR — missing/unqualified evidence: ... exit 2
+# A run that checked zero gates is an ERROR, never a PASS. Until an admitted
+# producer receipt is integrated, even green measurements remain diagnostic
+# and exit 2; only the explicit fixture selftest can return PASS/0.
 #
 # PROVENANCE (fixed 2026-08-17, see
 # doc/08_tracking/bug/riscv_gate_evidence_seed_attributed_bin_release_clobbered_2026-07-27.md):
@@ -39,10 +41,12 @@
 #
 # The gate printed only `simple binary: <path>` and then `RISCV-HW-GATES: n/m
 # PASS`, so a green run read as a self-hosted result. That is a misattribution,
-# not a crash. Fixed: the engine is probed and CLASSIFIED before any gate runs,
+# not a crash. The engine is probed and classified before any Simple probe runs,
 # the classification is carried into the final verdict line (`engine=rust-seed`
-# / `engine=self-hosted`), and a binary whose provenance cannot be determined is
-# an ERROR (exit 2) -- absence of evidence is never a pass.
+# / `engine=unverified-simple`). A version banner does not establish compiler
+# lineage, source identity or release admission. Seed tools are refused, and
+# unfamiliar output is ERROR (exit 2). Recognized Simple tools may supply only
+# diagnostic gate results, never self-hosted/release qualification.
 #
 # Missing OPTIONAL inputs warn; missing REQUIRED inputs fail (fail-closed).
 #
@@ -66,7 +70,7 @@ else
 fi
 
 # classify_engine <bin>
-# Echoes "rust-seed" or "self-hosted" and returns 0; on an indeterminate binary
+# Echoes "rust-seed" or "unverified-simple" and returns 0; on an indeterminate binary
 # echoes a reason and returns 2. rc is assigned on the line AFTER the command --
 # never through a pipe, whose $? is the last stage's.
 classify_engine() {
@@ -80,11 +84,15 @@ classify_engine() {
         echo "--version produced no output"
         return 2
     fi
-    if printf '%s\n' "$_ce_out" | grep -q "bootstrap seed only"; then
-        echo "rust-seed"
-    else
-        echo "self-hosted"
-    fi
+    case "$_ce_out" in
+        *"bootstrap seed only"*|*"Rust-built Simple binary"*|*"Rust-built"*)
+            echo "rust-seed" ;;
+        "Simple Language v"*|"simple-bootstrap "*)
+            echo "unverified-simple" ;;
+        *)
+            echo "unrecognized --version output"
+            return 2 ;;
+    esac
     return 0
 }
 
@@ -112,10 +120,14 @@ selftest() {
     # Incident replay: the real bin/release/<triple>/simple prints exactly this.
     mk seed 0 'WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.'
     mk hosted 0 'Simple Language v1.0.0-RC'
+    mk unrelated 0 'unrelated tool version 1.0'
+    mk rust_alias 0 'WARNING: Rust-built Simple binary'
     mk broken 1 'segfault'
     mk silent 0 ''
     expect "seed banner must classify as rust-seed, never self-hosted" seed 0 "rust-seed"
-    expect "no seed banner must classify as self-hosted" hosted 0 "self-hosted"
+    expect "version text cannot establish self-hosted provenance" hosted 0 "unverified-simple"
+    expect "unrelated version output must not establish Simple provenance" unrelated 2 "unrecognized --version output"
+    expect "alternate Rust seed banner remains seed-attributed" rust_alias 0 "rust-seed"
     expect "unrunnable binary must be indeterminate (ERROR), never a pass" broken 2 "--version exited 1"
     expect "silent --version must be indeterminate, never self-hosted" silent 2 "--version produced no output"
 
@@ -219,12 +231,12 @@ fi
 # 2. soc/core probes via `simple run`
 # ---------------------------------------------------------------------------
 resolve_simple() {
-    if [ -n "${SIMPLE_BIN:-}" ] && [ -x "${SIMPLE_BIN}" ]; then
+    if [ -n "${SIMPLE_BIN:-}" ]; then
+        [ -f "$SIMPLE_BIN" ] && [ -x "$SIMPLE_BIN" ] || return 1
         echo "$SIMPLE_BIN"; return 0
     fi
     for cand in \
         "$ROOT_DIR/bin/simple" \
-        "$ROOT_DIR/src/compiler_rust/target/bootstrap/simple" \
         "$ROOT_DIR"/bin/release/*/simple; do
         if [ -x "$cand" ]; then echo "$cand"; return 0; fi
     done
@@ -280,13 +292,17 @@ if [ -z "$SIMPLE" ]; then
     done
     IFS=$OLDIFS
 else
-    # --- Provenance, BEFORE any gate runs -------------------------------------
+    # --- Tool identity, BEFORE any Simple probe runs --------------------------
     # rc is assigned on the line AFTER the command; a pipeline's $? would be the
     # last stage's, which has produced false greens in this repo before.
     SIMPLE_REAL="$(readlink -f "$SIMPLE" 2>/dev/null || echo "$SIMPLE")"
     ENGINE="$(classify_engine "$SIMPLE")" && crc=0 || crc=$?
     if [ "$crc" -ne 0 ]; then
-        echo "ERROR — nothing was checked: cannot determine engine provenance of $SIMPLE_REAL ($ENGINE)"
+        echo "ERROR — Simple probes not run: cannot determine engine identity of $SIMPLE_REAL ($ENGINE)"
+        exit 2
+    fi
+    if [ "$ENGINE" = rust-seed ]; then
+        echo "ERROR — Simple probes not run: Rust bootstrap seed is not admitted for hardware gates (engine=rust-seed, qualification=unavailable)"
         exit 2
     fi
     echo "simple binary: $SIMPLE_REAL"
@@ -359,10 +375,10 @@ if [ $TOTAL -eq 0 ]; then
     exit 2
 fi
 if [ $FAIL -gt 0 ] || [ $PASS -ne $TOTAL ]; then
-    echo "FAIL — $TOTAL gate(s) checked, $FAIL failed (engine=$ENGINE)"
+    echo "FAIL — $TOTAL gate(s) checked, $FAIL failed (engine=$ENGINE, qualification=diagnostic-only)"
     exit 1
 fi
-# The engine is stated IN the verdict so a green line can never be read as a
-# self-hosted result when it was produced by the Rust seed.
-echo "PASS — $TOTAL gate(s) checked, 0 failed (engine=$ENGINE)"
-exit 0
+# Version text cannot issue a self-hosted or release qualification, including
+# for callers that consume only the exit status or first verdict word.
+echo "ERROR — $TOTAL gate(s) measured, 0 failed; producer admission unavailable (engine=$ENGINE, qualification=diagnostic-only)"
+exit 2
