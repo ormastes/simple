@@ -1,8 +1,16 @@
 # Supervised builder: not yet wired to a front end, and peak RSS is always 0
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN (all four gaps re-confirmed 2026-08-17 by an independent lane —
-  see *Re-confirmation* at the bottom; no code change made)
+- **Status:** FIX IMPLEMENTED, VERIFICATION PENDING (2026-11-03, branch work/mem-child-rusage).
+  Extern `rt_process_last_child_peak_rss_kib() -> i64` (-1 = not measured) added in the C runtime
+  (`runtime_process.c`: POSIX wraps `rt_fork_parent_peak_rss_bytes` = wait4 `ru_maxrss`; Windows reads
+  `PeakWorkingSetSize` from the child handle before close) and the Rust twins
+  (`runtime/src/child_peak_rss.rs`, interpreter `system.rs` bounded/timeout loops use `wait4` on unix and
+  `GetProcessMemoryInfo` on Windows). Simple API: `process_last_child_peak_rss_kib()` in `process_ops.spl`.
+  Spec: `test/01_unit/lib/nogc_sync_mut/io/process_child_peak_rss_spec.spl` (200 MB child -> [180,400) MB).
+  Verify after a seed redeploy: `bin/simple test test/01_unit/lib/nogc_sync_mut/io/process_child_peak_rss_spec.spl`.
+  NOT done here: threading `peak_rss_kib` into `TestFileResult` / `BuildUnitOutcome` (R6/R5 reporting), builder
+  front-end wiring (Gap 1), Win32 owned-observation rusage (still ENOTSUP in `runtime_process_owned.c`).
 - **Domain:** compiler / driver
 - **Severity:** P2
 
