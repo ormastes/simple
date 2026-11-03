@@ -26,7 +26,8 @@ separate processes that share only files.
   and its scenario-manual guidance. Preserve primary-source revision/hash,
   clause provenance and independent expected values; distinguish standard rules
   from repository contracts. TDD claims require observed RED/GREEN receipts;
-  authored tests/manuals remain AUTHORED_UNRUN until executed/generated. Label
+  unexecuted tests remain AUTHORED_UNRUN; authored manuals remain labeled
+  AUTHORED until docgen-generated, with test execution status recorded separately. Label
   injection versus real-provider evidence and scope branch coverage to the
   actual owner/backend/target. This link is the maintained procedure, not the
   historical implementation inventory below.
