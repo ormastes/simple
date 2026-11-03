@@ -72,6 +72,7 @@ fn test_file_outcome_tag(result: TestFileResult) -> text:
         case "NOT_RUN": "NRUN"
         case "VACUOUS": "VACU"
         case "SKIP": "SKIP"
+        case "ADMISSION": "GATE"
         case "OK": "PASS"
         case _: "FAIL"
 
@@ -81,7 +82,7 @@ fn print_result_default(result: TestFileResult):
         # Feature-gated: its one per-file line is the `FEATURE SKIP` line the
         # runner printed when it decided not to run it. Never a PASS line.
         return
-    if tag == "CRASH" or tag == "TERM" or tag == "NRUN":
+    if tag == "CRASH" or tag == "TERM" or tag == "NRUN" or tag == "GATE":
         print "  {tag}  {result.path} ({result.duration_ms}ms)"
         if result.error != "":
             print "        Error: {result.error}"
@@ -118,6 +119,9 @@ fn print_result_default(result: TestFileResult):
 
 fn print_result_doc(result: TestFileResult):
     val name = path_basename(result.path)
+    if test_file_outcome_class(result) == "ADMISSION":
+        print "  {name}: coverage admission failed; test not executed"
+        return
     if test_file_outcome_class(result) == "SKIP":
         # Feature-gated: the `FEATURE SKIP` line is its only output. Never
         # "0 examples, 0 failures", which reads as a vacuous pass.
@@ -459,7 +463,8 @@ fn aggregate_failed_count(result: TestRunResult) -> i64:
     designated evidence surfaces of the SAME run contradicted each other, and
     the vacuous one is the one CI and agents grep.
 
-    Rule: every file that does not classify OK contributes at least 1. Adding
+    Rule: every bad execution contributes at least 1; policy admission is
+    reported separately and contributes no executed examples. Adding
     the class counters directly would DOUBLE COUNT -- an ordinary failing spec
     classifies "ERROR" while already contributing to total_failed -- so the
     increment applies only to bad files that contributed NOTHING
@@ -469,7 +474,7 @@ fn aggregate_failed_count(result: TestRunResult) -> i64:
     var uncounted_bad = 0
     for f in result.files:
         val cls = test_file_outcome_class(f)
-        if cls != "OK" and cls != "SKIP" and f.failed == 0:
+        if cls != "OK" and cls != "SKIP" and cls != "ADMISSION" and f.failed == 0:
             uncounted_bad = uncounted_bad + 1
     # Executors that report timeouts without producing per-file results at all:
     # with no files to classify the loop above sees nothing, so fall back to the
@@ -478,8 +483,15 @@ fn aggregate_failed_count(result: TestRunResult) -> i64:
         uncounted_bad = result.total_timed_out
     result.total_failed + uncounted_bad
 
+fn cover_admission_failure_count(result: TestRunResult) -> i64:
+    var rejected = 0
+    for file in result.files:
+        if test_file_outcome_class(file) == "ADMISSION":
+            rejected = rejected + 1
+    rejected
+
 fn run_aborted_before_execution(result: TestRunResult) -> bool:
-    """True when a run claims failures while having executed NOTHING.
+    """True for an all-rejected admission selection or a preflight abort.
 
     Structural, not gate-specific, so it covers every present and future
     preflight abort: no per-file result exists, nothing passed, yet a nonzero
@@ -489,8 +501,14 @@ fn run_aborted_before_execution(result: TestRunResult) -> bool:
     un-annotated specs into `Results: 587 total, 0 passed, 587 failed` in
     ~3 minutes with `Time: 0ms` and not one `SPEC FILE VERDICT:` line.
 
+    Admission rows are explicit policy verdicts with zero executed examples.
     A genuine empty selection (0 files, 0 failures) is NOT this shape and is
     deliberately excluded -- it still prints "No tests selected."."""
+    if result.carried_from_checkpoint:
+        return false
+    val admission_failed = cover_admission_failure_count(result)
+    if admission_failed > 0 and admission_failed == result.files.len():
+        return true
     result.files.len() == 0 and result.total_passed == 0 and result.total_failed > 0
 
 # Pure summary line for MC/DC degrades: empty when no file degraded. A file
@@ -518,6 +536,15 @@ fn print_summary(result: TestRunResult, format: text):
         return
     print ""
     print "========================================="
+    val admission_failed = cover_admission_failure_count(result)
+    if admission_failed > 0:
+        print "Coverage gate: FAIL -- {admission_failed} file(s) missing # @cover; not executed"
+    if admission_failed > 0 and run_aborted_before_execution(result):
+        print "ABORTED BEFORE EXECUTION"
+        print "Units executed:     0"
+        print "Units not admitted: {admission_failed}"
+        print "========================================="
+        return
     # ZERO-EXECUTED ABORT: refuse to emit a `Results:` line at all.
     #
     # A preflight gate that aborts before any spec runs used to return
@@ -600,7 +627,7 @@ fn print_summary(result: TestRunResult, format: text):
     # designated evidence line: it must never report a unit that produced no
     # verdict as zero-of-everything.
     #
-    # Rule: every file that does NOT classify OK contributes at least 1 to the
+    # Rule: every bad execution (excluding admission policy verdicts) contributes at least 1 to the
     # head's failed figure. Adding the class counters directly would DOUBLE
     # COUNT -- an ordinary failing spec classifies "ERROR" while already
     # contributing to total_failed -- so the increment is applied only to bad
@@ -650,6 +677,8 @@ fn print_summary(result: TestRunResult, format: text):
         print "Some tests failed."
     elif unverified > 0:
         print "INCONCLUSIVE: {unverified} unit(s) were terminated or timed out and never produced a verdict."
+    elif admission_failed > 0:
+        print "Coverage admission failed; executed test verdicts are reported above."
     elif gated > 0 and gated == result.files.len() and result.is_ok():
         # Every selected file was feature-gated: nothing ran, so nothing passed.
         print "No tests ran: {gated} file(s) feature-gated (build feature off)."
