@@ -59,3 +59,33 @@ fixture from a bad parser without touching either.
 - `nested_fn_in_spec_block_loses_captured_local_2026-08-04.md` — the record that
   carried these three until now; its 2026-09-19 fix note records the measurement
   that separated them.
+
+
+## 2026-11-03 source investigation (candidate; behavioral verification blocked)
+
+Current release source was inspected at `074d5611e1dfb53286fb1acb2e3e457957047013`.
+The pure reader owners are `src/os/kernel/acpi/hpet_table.spl` and
+`src/os/kernel/acpi/fadt.spl`; both accept table-relative readers and deliberately
+permit `base = 0`. FADT fixture writes and parser accesses agree at 76 and
+208/212. No evidence attributes these failures to nested-function capture.
+
+An independent production HPET layout defect was found: the code invented four
+reserved bytes after EventTimerBlockID. The HPET specification 1.0a section 3.2.4
+places the 12-byte GAS at byte 40, hence its address at byte 44. The parser and
+fixture now use these standard offsets. Source reference:
+[Intel HPET specification](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/software-developers-hpet-spec-1-0a.pdf).
+This layout correction alone does **not** explain the historical zero result,
+because the old fixture agreed with the old parser's wrong layout.
+
+The three positive examples now assert fixture words before calling the parser,
+and inspect the optional payload with `?? 0` before retaining the original
+numeric cast assertion. A payload/cast disagreement can therefore identify the
+assertion boundary without removing the reported failure operation. Adjacent
+fixtures cover a nonzero high HPET address word and nonzero legacy fallback for
+wrong-space/zero-address FADT extended GAS. No physical MMIO is accessed.
+
+**TEST_BLOCKED:** no qualified self-hosted Simple CLI is available on this host;
+`bin/simple.exe` is the bootstrap-only Rust seed. Zero behavioral examples were
+executed. The 13 authored examples and their output/cast boundaries still require
+execution through a qualified producer. This bug remains open; neither a hardware
+PASS nor a diagnosis/closure of the historical three zero reads is claimed.
