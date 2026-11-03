@@ -1,0 +1,112 @@
+# signature_spec_boundaries_spec
+
+Status: **AUTHORED_UNRUN**. Branch coverage: **UNMEASURED**.
+
+Authored companion; admitted execution and zero-stub spipe-docgen generation remain pending.
+
+Executable: `test/01_unit/lib/common/crypto/signature_spec_boundaries_spec.spl`
+
+Spec SHA-256: `8f8939b3747231a1f1a38be0144918b10f218bc6976333fd5e9672c255ff8463`
+
+Execution artifact SHA-256: absent. Proof class: production API assertions authored, not executed.
+
+## Scenario flow
+
+- REQ-TLS-RSAPSS-BOUNDARY-001: reject invalid PSS dimensions
+- should reject negative salt length before processing an encoding
+  - Submit an invalid salt length to the production verifier
+- should reject mismatched encoded length
+  - Declare 1023 bits with absent and truncated encoded messages
+- should reject insufficient room for the hash salt and delimiters
+  - Supply 65 bytes where SHA-256 with 32 salt bytes requires 66
+- REQ-TLS-RSAPSS-BOUNDARY-002: reject invalid RSA representatives
+- should reject empty and all-zero moduli
+  - Submit absent and zero-valued RSA moduli
+- should reject signatures equal to or greater than the modulus
+  - Exercise the representative range before modular exponentiation
+- should reject an oversized signature after stripping modulus padding
+  - Strip the modulus leading zero without accepting signature padding
+- REQ-TLS-ECDSA-BOUNDARY-001: preserve malformed input errors
+- should reject signatures immediately below and above fixed width
+  - Call the common verifier with 63 and 65 byte signatures
+- should reject SPKI lengths on either side of 91 bytes
+  - Keep signature framing valid while varying SPKI framing
+- should reject a non-uncompressed point tag at the SPKI point offset
+  - Submit correctly sized framing with an invalid point tag
+
+<details><summary>Executable SSpec</summary>
+
+```simple
+"""
+# Signature verification boundary requirements
+For maintainers of the common crypto APIs. AUTHORED_UNRUN; branch coverage
+UNMEASURED. RFC 8017 sections 8.1.2 and 9.1.2 specify RSA-PSS rejection;
+ECDSA fixed-width input framing is this API's contract, not TLS DER framing.
+"""
+use std.spec.*
+use std.spec.step
+use std.common.crypto.rsa_pss.{rsa_pss_verify_sha256, rsa_pss_emsa_verify_sha256}
+use std.common.crypto.ecdsa_p256.{ecdsa_p256_verify as verify_common_p256}
+
+fn signature_boundary_bytes(count: i64, byte: u8) -> [u8]:
+    var output: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        output.push(byte)
+        i = i + 1
+    output
+
+fn signature_boundary_error(result: Result<bool, text>) -> text:
+    match result:
+        Ok(value):
+            fail("Expected malformed-input error, received a verification result")
+            "unexpected success"
+        Err(error): error
+
+describe "REQ-TLS-RSAPSS-BOUNDARY-001: reject invalid PSS dimensions":
+    it "should reject negative salt length before processing an encoding":
+        step("Submit an invalid salt length to the production verifier")
+        expect(rsa_pss_emsa_verify_sha256([], [], 0, -1)).to_equal(false)
+
+    it "should reject mismatched encoded length":
+        step("Declare 1023 bits with absent and truncated encoded messages")
+        expect(rsa_pss_emsa_verify_sha256([], [], 1023, 32)).to_equal(false)
+        expect(rsa_pss_emsa_verify_sha256([], signature_boundary_bytes(127, 0u8), 1023, 32)).to_equal(false)
+
+    it "should reject insufficient room for the hash salt and delimiters":
+        step("Supply 65 bytes where SHA-256 with 32 salt bytes requires 66")
+        expect(rsa_pss_emsa_verify_sha256([], signature_boundary_bytes(65, 0u8), 520, 32)).to_equal(false)
+
+describe "REQ-TLS-RSAPSS-BOUNDARY-002: reject invalid RSA representatives":
+    it "should reject empty and all-zero moduli":
+        step("Submit absent and zero-valued RSA moduli")
+        expect(rsa_pss_verify_sha256([], [3u8], [], [])).to_equal(false)
+        expect(rsa_pss_verify_sha256([0u8, 0u8], [3u8], [], [])).to_equal(false)
+
+    it "should reject signatures equal to or greater than the modulus":
+        step("Exercise the representative range before modular exponentiation")
+        expect(rsa_pss_verify_sha256([128u8, 1u8], [3u8], [], [128u8, 1u8])).to_equal(false)
+        expect(rsa_pss_verify_sha256([128u8, 1u8], [3u8], [], [128u8, 2u8])).to_equal(false)
+
+    it "should reject an oversized signature after stripping modulus padding":
+        step("Strip the modulus leading zero without accepting signature padding")
+        expect(rsa_pss_verify_sha256([0u8, 128u8, 1u8], [3u8], [], [0u8, 1u8, 2u8])).to_equal(false)
+
+describe "REQ-TLS-ECDSA-BOUNDARY-001: preserve malformed input errors":
+    it "should reject signatures immediately below and above fixed width":
+        step("Call the common verifier with 63 and 65 byte signatures")
+        expect(signature_boundary_error(verify_common_p256([], [], signature_boundary_bytes(63, 0u8)))).to_equal("E-SFFI-010: invalid ECDSA P-256 signature length")
+        expect(signature_boundary_error(verify_common_p256([], [], signature_boundary_bytes(65, 0u8)))).to_equal("E-SFFI-010: invalid ECDSA P-256 signature length")
+
+    it "should reject SPKI lengths on either side of 91 bytes":
+        step("Keep signature framing valid while varying SPKI framing")
+        val signature = signature_boundary_bytes(64, 0u8)
+        expect(signature_boundary_error(verify_common_p256(signature_boundary_bytes(90, 0u8), [], signature))).to_equal("E-SFFI-010: invalid ECDSA P-256 SPKI length")
+        expect(signature_boundary_error(verify_common_p256(signature_boundary_bytes(92, 0u8), [], signature))).to_equal("E-SFFI-010: invalid ECDSA P-256 SPKI length")
+
+    it "should reject a non-uncompressed point tag at the SPKI point offset":
+        step("Submit correctly sized framing with an invalid point tag")
+        expect(signature_boundary_error(verify_common_p256(signature_boundary_bytes(91, 0u8), [], signature_boundary_bytes(64, 0u8)))).to_equal("E-SFFI-010: invalid ECDSA P-256 SPKI point encoding")
+```
+
+</details>
