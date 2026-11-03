@@ -4,6 +4,7 @@ mod bdd;
 mod block_execution;
 mod builtins;
 mod core;
+pub(crate) use core::arg_binding::present_value_as_bool_arg;
 pub(crate) use core::aop_runtime;
 mod mock;
 

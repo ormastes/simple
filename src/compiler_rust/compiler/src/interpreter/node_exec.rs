@@ -46,6 +46,13 @@ use simple_runtime::debug;
 /// Bug: doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md
 pub(crate) fn coerce_to_declared_type(value: Value, ty: Option<&Type>) -> Value {
     match ty {
+        // A `bool`-declared binding fed by `.?` (payload or `Value::Nil`) takes
+        // presence, exactly as a `bool` parameter does
+        // (`present_value_as_bool_arg`). Before, `val has: bool = a.?` bound
+        // nil / the raw payload. Bug: stage2_dotq_presence_value_is_nil_sentinel_2026-11-03.
+        Some(Type::Simple(name)) if name == "bool" => {
+            crate::interpreter::interpreter_call::present_value_as_bool_arg(&value, ty).unwrap_or(value)
+        }
         Some(Type::Simple(_)) => coerce_to_declared_unsigned(value, ty),
         Some(Type::Array { element, size: None }) if matches!(element.as_ref(), Type::Simple(name) if name == "u8") => {
             pack_u8_array(value)
@@ -320,6 +327,10 @@ pub(crate) fn exec_node(
 
                 // Validate and constrain value based on type annotation
                 let value = match type_annotation {
+                    // `bool` locals take `.?` presence (see `coerce_to_declared_type`).
+                    Some(ty @ Type::Simple(type_name)) if type_name == "bool" => {
+                        coerce_to_declared_type(value, Some(ty))
+                    }
                     // Coerce to Value::UInt when the annotation is an unsigned integer type
                     // so subsequent arithmetic on the bound variable applies modulo-2^width
                     // wrap. See doc/08_tracking/bug/interpreter_u32_wrap_subtraction_2026-05-01.md.
