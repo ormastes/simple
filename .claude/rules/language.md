@@ -16,6 +16,11 @@ alwaysApply: false
 - **NO inheritance** - `class Child(Parent)` is NOT supported. Use composition, alias forwarding, traits, or mixins instead
 - **SDN format** for all config/data files, not JSON/YAML
 - **Error handling:** Use `Result<T, E>` + `?` operator (no try/catch/throw keywords — by design)
+- **nil only inside `unsafe:`** - use `Option`/`None` elsewhere; match arms are `None:`, never `nil:`
+- **No `Any` / erased access outside `unsafe:`** - it is a compile error
+- **Generics are erased** - there is no monomorphization pass
+- **Exhaustive match (staged):** a non-exhaustive value match is a WARNING now and becomes an ERROR after phase 3
+- **`text[i]` yields `char`** (code point value, `'x'` literal). Use `.ord()` / `as i64` for the code point, `.to_digit()` for a digit, `.to_text()` for text, `byte_at(i)` for bytes, and `chars()` in loops. Using `s[i]` as an int is a WARNING now and an ERROR after phase 3 (staged). See `doc/04_architecture/adr/ADR-005-text-index-yields-char.md`
 
 ## Runtime Limitations
 - **Multi-line booleans** continue naturally after a trailing `and`/`or` — no parentheses needed. Do NOT add `(...)` merely for line continuation (user directive 2026-09-05: it hurts readability); parens are for precedence grouping only. See `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`.

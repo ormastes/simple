@@ -216,7 +216,7 @@ print "Result: {compute()}"         # Expressions allowed
 ### Raw Strings (No Interpolation)
 
 ```text
-# Single quotes = raw string
+# Single quotes = raw string (exactly one scalar in single quotes is a char literal, see Text Indexing)
 val regex = '[a-z]+\d{2,3}'         # No escaping needed
 val path = 'C:\Users\name'          # Backslashes are literal
 
@@ -397,6 +397,37 @@ s[0:5]                              # "Hello"
 s[7:]                               # "World!"
 s[-6:-1]                            # "World"
 ```
+
+### Text Indexing and `char` ([ADR-005](../../04_architecture/adr/ADR-005-text-index-yields-char.md))
+
+`s[i]` yields a `char`: a 4-byte Unicode code point value that never
+allocates. It is never an integer and never a 1-character `text`.
+
+```text
+val s = "72é"
+s[0] == '7'                     # char literal: exactly one scalar or escape in single quotes
+s[2] == 'é'                     # per code point, not per byte
+s[-1] == 'é'                    # negative index counts from the end
+s[0].ord()                          # 55 (code point); same as s[0] as i64
+s[0].to_digit()                     # Some(7); 'a'.to_digit() is None
+s[0].to_text()                      # "7"
+char.from_code(233)                 # 'é'
+s.char_code_at(0)                   # 55 (kept)
+s.byte_at(2)                        # 195 (u8, O(1))
+for c in s.chars(): use(c)          # O(n) iteration yielding char
+s[0..2]                             # "72" (slices stay text)
+s[99]                               # runtime error: index out of bounds
+s.char_at(99)                       # "" (char_at keeps its over-run policy)
+```
+
+- `c == "7"` and `c + 1` are compile errors: compare with `'7'` or use
+  `c.to_text()` / `c.ord()`.
+- **Staged:** using `s[i]` where an `i64` is expected is a WARNING now and an
+  ERROR after phase 3. `s.len()` still counts bytes until phase 3; use
+  `s.byte_len()` for bytes. `s[i]` is O(1) on ASCII text and O(i) otherwise, so
+  use `s.chars()` or `s.byte_at(i)` in loops (a lint warns on `s[i]` inside
+  `for i in 0..s.len()`). Lexers must use `byte_at` / `char_code_at`.
+- Longer single-quoted text is still a raw string (below).
 
 ### Bitfield Slicing (`int.bits[lo..hi]`)
 
@@ -896,7 +927,7 @@ A bare comma pattern is **always** a tuple destructure, of any arity, and
 means exactly what the parenthesized spelling means: `for a, b in xs:` ==
 `for (a, b) in xs:`. The iterable is never consulted. There is no
 "enumerate shorthand" — `for i, x in xs:` over a plain array does NOT give
-you the index; it tries to unpack each element and binds `nil` for the parts
+you the index; it tries to unpack each element and fails to bind the parts
 a non-tuple does not have. Write `xs.enumerate()` when you want positions.
 
 ### While Loops
@@ -908,7 +939,7 @@ while condition:
 loop:
     match iterator.next():
         Some(item): process(item)
-        nil: break
+        None: break
 ```
 
 ### With Statement (Context Managers)
@@ -936,14 +967,14 @@ with File.open("in.txt") as input, File.create("out.txt") as output:
 match value:
     Some(x):
         process(x)
-    nil:
+    None:
         ()  # Do nothing, return unit value
 
 # pass keyword - statement style (Python-like)
 match value:
     Some(x):
         process(x)
-    nil:
+    None:
         pass  # Do nothing
 
 # Both are synonyms - choose based on preference:

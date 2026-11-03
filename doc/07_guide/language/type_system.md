@@ -112,6 +112,24 @@ val display: text = name ?? "Unknown" # text (not optional)
 
 ---
 
+## `char` and Text Indexing
+
+`char` is a 4-byte Unicode code point value type, written `'x'`. `s[i]` on
+`text` yields a `char` (per code point, negative indices from the end, out of
+range is a runtime index error). There is no implicit conversion: `c == "7"`
+and `c + 1` are compile errors. Convert explicitly with `c.ord()` / `c as i64`
+(code point), `c.to_digit()` (`Option<i64>`), `c.to_text()`, and
+`char.from_code(n)`. Using `s[i]` where an `i64` is expected is a WARNING now
+and an ERROR after phase 3 (staged). See
+[ADR-005](../../04_architecture/adr/ADR-005-text-index-yields-char.md).
+
+## Current Type Rules
+
+- `nil` only inside `unsafe:`; use `Option<T>` / `None` (match arm `None:`).
+- `Any` / erased access outside `unsafe:` is a compile error.
+- Generics are erased; there is no monomorphization pass.
+- Non-exhaustive value match: WARNING now, ERROR after phase 3 (staged).
+
 ## Union Types
 
 A union type means a value can be one of several types:
