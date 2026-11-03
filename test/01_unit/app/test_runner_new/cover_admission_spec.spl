@@ -1,7 +1,8 @@
-# Coverage admission preserves failed files while independent tests keep running.
+# Coverage admission preserves policy verdicts while independent tests keep running.
 use std.spec.*
 use app.test_runner_new.cover_admission.{cover_admitted_files, cover_append_failures}
 use std.test_runner.test_runner_types.{TestFileResult, TestRunResult, classify_test_run_result, test_run_outcome_exit_code}
+use std.test_runner.test_runner_output.{aggregate_failed_count, run_aborted_before_execution, cover_admission_failure_count, test_file_outcome_tag}
 
 fn empty_cover_run() -> TestRunResult:
     TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0,
@@ -13,15 +14,21 @@ describe "coverage admission failures":
         val admitted = cover_admitted_files(["z.spl", "bad.spl", "a.spl"], ["bad.spl"])
         expect(admitted).to_equal(["z.spl", "a.spl"])
 
-    it "reports an all rejected selection as named failures, not an empty run":
+    it "reports an all rejected selection as a gate failure with no executed assertions":
         val result = cover_append_failures(empty_cover_run(), ["bad.spl", "other.spl"])
         expect(result.files.len()).to_equal(2)
-        expect(result.total_failed).to_equal(2)
+        expect(result.total_failed).to_equal(0)
         expect(result.total_passed).to_equal(0)
         expect(result.files[0].path).to_equal("bad.spl")
         expect(result.files[0].error).to_contain("test not executed")
         expect(result.files[0].cached).to_equal(false)
-        expect(test_run_outcome_exit_code(classify_test_run_result(result, false))).to_equal(1)
+        expect(result.files[0].failed).to_equal(0)
+        expect(cover_admission_failure_count(result)).to_equal(2)
+        expect(aggregate_failed_count(result)).to_equal(0)
+        expect(run_aborted_before_execution(result)).to_equal(true)
+        expect(result.is_ok()).to_equal(false)
+        expect(test_file_outcome_tag(result.files[0])).to_equal("GATE")
+        expect(test_run_outcome_exit_code(classify_test_run_result(result, false))).to_equal(2)
 
     it "retains executed results and timings when adding admission failures":
         val row = TestFileResult(path: "good.spl", passed: 2, failed: 0, skipped: 0,
@@ -32,18 +39,63 @@ describe "coverage admission failures":
         val result = cover_append_failures(executed, ["bad.spl"])
         expect(result.files.len()).to_equal(2)
         expect(result.files[0].passed).to_equal(2)
-        expect(result.files[1].failed).to_equal(1)
+        expect(result.files[1].failed).to_equal(0)
         expect(result.total_passed).to_equal(2)
-        expect(result.total_failed).to_equal(1)
+        expect(result.total_failed).to_equal(0)
+        expect(aggregate_failed_count(result)).to_equal(0)
+        expect(run_aborted_before_execution(result)).to_equal(false)
         expect(result.total_duration_ms).to_equal(7)
         expect(result.total_setup_ms).to_equal(3)
+        expect(test_run_outcome_exit_code(classify_test_run_result(result, false))).to_equal(2)
+
+    it "preserves a real assertion failure independently from policy rejection":
+        val row = TestFileResult(path: "failing.spl", passed: 0, failed: 1, skipped: 0,
+            pending: 0, duration_ms: 1, setup_ms: 0, error: "", timed_out: false, cached: false)
+        val executed = TestRunResult(files: [row], total_passed: 0, total_failed: 1,
+            total_skipped: 0, total_pending: 0, total_timed_out: 0,
+            total_duration_ms: 1, total_setup_ms: 0, total_cached: 0)
+        val result = cover_append_failures(executed, ["bad.spl"])
+        expect(result.total_failed).to_equal(1)
+        expect(aggregate_failed_count(result)).to_equal(1)
+        expect(cover_admission_failure_count(result)).to_equal(1)
         expect(test_run_outcome_exit_code(classify_test_run_result(result, false))).to_equal(1)
+
+    it "retains checkpoint verdicts without admitting rejected paths":
+        val carried = TestRunResult(files: [], total_passed: 3, total_failed: 0,
+            total_skipped: 0, total_pending: 0, total_timed_out: 0,
+            total_duration_ms: 0, total_setup_ms: 0, total_cached: 0, carried_from_checkpoint: true)
+        val result = cover_append_failures(carried, ["bad.spl"])
+        expect(result.carried_from_checkpoint).to_equal(true)
+        expect(result.total_passed).to_equal(3)
+        expect(run_aborted_before_execution(result)).to_equal(false)
+        expect(test_run_outcome_exit_code(classify_test_run_result(result, false))).to_equal(2)
+        expect(cover_append_failures(carried, []).carried_from_checkpoint).to_equal(true)
+
+    it "retains strict timeout classification next to rejected files":
+        val row = TestFileResult(path: "timeout.spl", passed: 0, failed: 0, skipped: 0,
+            pending: 0, duration_ms: 1, setup_ms: 0, error: "TIMEOUT: child expired", timed_out: true, cached: false)
+        val executed = TestRunResult(files: [row], total_passed: 0, total_failed: 0,
+            total_skipped: 0, total_pending: 0, total_timed_out: 1,
+            total_duration_ms: 1, total_setup_ms: 0, total_cached: 0)
+        val result = cover_append_failures(executed, ["bad.spl"])
+        expect(aggregate_failed_count(result)).to_equal(1)
+        expect(test_run_outcome_exit_code(classify_test_run_result(result, false))).to_equal(124)
 
     it "keeps clean selections unchanged":
         val result = cover_append_failures(empty_cover_run(), [])
         expect(result.files.len()).to_equal(0)
         expect(result.total_failed).to_equal(0)
         expect(cover_admitted_files(["a.spl"], [])).to_equal(["a.spl"])
+
+    it "does not turn unknown runtime errors into admission verdicts":
+        val row = TestFileResult(path: "error.spl", passed: 0, failed: 0, skipped: 0,
+            pending: 0, duration_ms: 1, setup_ms: 0, error: "unexpected runtime error", timed_out: false, cached: false)
+        val executed = TestRunResult(files: [row], total_passed: 0, total_failed: 0,
+            total_skipped: 0, total_pending: 0, total_timed_out: 0,
+            total_duration_ms: 1, total_setup_ms: 0, total_cached: 0)
+        val result = cover_append_failures(executed, ["bad.spl"])
+        expect(aggregate_failed_count(result)).to_equal(1)
+        expect(test_run_outcome_exit_code(classify_test_run_result(result, false))).to_equal(3)
 
     it "preserves a checkpoint verdict when no coverage files are rejected":
         val prior = TestRunResult(files: [], total_passed: 7, total_failed: 0,
@@ -64,7 +116,7 @@ describe "coverage admission failures":
         val result = cover_append_failures(prior, ["bad.spl"])
         expect(result.carried_from_checkpoint).to_equal(true)
         expect(result.total_passed).to_equal(7)
-        expect(result.total_failed).to_equal(3)
+        expect(result.total_failed).to_equal(2)
         expect(result.files.len()).to_equal(1)
         expect(result.files[0].error).to_contain("test not executed")
         expect(test_run_outcome_exit_code(classify_test_run_result(result, false))).to_equal(1)

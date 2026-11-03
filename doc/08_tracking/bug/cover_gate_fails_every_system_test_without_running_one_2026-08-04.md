@@ -114,3 +114,21 @@ lack the # @cover annotation the gate now requires, and adding it
 requires measured coverage data per file (not mechanical). Leaving
 OPEN as recorded, no attempt.
 
+
+## 2026-11-03 source repair candidate — execution pending
+
+The runner now dispatches annotated files in normal and unstable modes, while
+unannotated files remain unexecuted and make the command fail its coverage gate.
+Admission rows carry zero assertion failures and classify as `ADMISSION`; their
+nonzero command verdict is separate from `Results:`. An all-rejected selection
+prints an explicit gate abort without a test-results line. Mixed selections keep
+actual example verdicts and a separate coverage-gate failure. Existing annotation
+requirements and measured coverage thresholds remain enforced.
+
+Regression owners: `test/01_unit/app/test_runner_new/cover_admission_spec.spl`
+and `scripts/check/check-test-runner-cover-admission.shs`. They cover mixed normal,
+unstable sequential/parallel, all-rejected, clean, genuine assertion failure,
+checkpoint totals, timeout, and unknown runtime error controls.
+
+Status remains OPEN / TEST_BLOCKED: no qualified self-hosted CLI is available.
+Shell syntax/static guards do not substitute for executing these regressions.
