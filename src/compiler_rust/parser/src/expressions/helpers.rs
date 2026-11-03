@@ -441,6 +441,7 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_arguments(&mut self) -> Result<Vec<Argument>, ParseError> {
+        let args_are_higher_order = std::mem::take(&mut self.next_args_higher_order);
         self.expect(&TokenKind::LParen)?;
         let mut args = Vec::new();
 
@@ -619,7 +620,9 @@ impl<'a> Parser<'a> {
             }
 
             self.call_arg_depth += 1;
+            self.ho_arg_depth += usize::from(args_are_higher_order);
             let parsed_value = self.parse_expression();
+            self.ho_arg_depth -= usize::from(args_are_higher_order);
             self.call_arg_depth -= 1;
             let mut value = parsed_value?;
 
