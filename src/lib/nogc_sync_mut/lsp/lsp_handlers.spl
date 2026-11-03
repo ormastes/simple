@@ -665,6 +665,10 @@ fn lsp_handle_code_action(id: text, body: text) -> text:
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
+    make_json_result(id=id, result=lsp_code_actions_from_query_output(out, uri))
+
+fn lsp_code_actions_from_query_output(out: text, uri: text) -> text:
+    """Convert query code-action rows to LSP actions without launching a query process."""
     val lines = out.split("\n")
     var actions: [text] = []
     for action_line in lines:
@@ -674,7 +678,7 @@ fn lsp_handle_code_action(id: text, body: text) -> text:
         val action = _parse_code_action(line=trimmed, uri=uri)
         if action != "":
             actions.push(action)
-    make_json_result(id=id, result=SB_L() + actions.join(",") + SB_R())
+    SB_L() + actions.join(",") + SB_R()
 
 # Extract the emitted LSP Range object value from a code-action JSON. query_code_actions
 # emits {..,"edit":{"changes":{<path>:[{"range":{...},"newText":".."}]}}}, so the Range
@@ -710,7 +714,10 @@ fn _parse_code_action(line: text, uri: text) -> text:
     if line.starts_with("{"):
         val title = extract_field(json=line, key="title")
         val kind = extract_field(json=line, key="kind")
-        val new_text = extract_field(json=line, key="newText")
+        # Empty JSON strings are valid deletion edits; missing/null values are not.
+        # Preserve the serialized string so escapes survive forwarding unchanged.
+        val new_text_raw = extract_field_raw(json=line, key="newText")
+        val has_new_text = new_text_raw.len() >= 2 and new_text_raw.starts_with(Q()) and new_text_raw.ends_with(Q())
         if title == "":
             return ""
         var action_kind = "quickfix"
@@ -720,8 +727,8 @@ fn _parse_code_action(line: text, uri: text) -> text:
         # emitted Range object is already LSP-shaped; reuse it and rebuild the workspace
         # edit with the request URI (the emitted changes key is a file path, not a URI).
         val range_obj = _extract_emitted_range(line)
-        if range_obj != "" and new_text != "":
-            val nested_edit = jo2(jp("range", range_obj), jp("newText", js(new_text)))
+        if range_obj != "" and has_new_text:
+            val nested_edit = jo2(jp("range", range_obj), jp("newText", new_text_raw))
             val nested_doc = jo2(jp("textDocument", jo2(jp("uri", js(uri)), jp("version", "null"))), jp("edits", SB_L() + nested_edit + SB_R()))
             val nested_ws = jo1(jp("documentChanges", SB_L() + nested_doc + SB_R()))
             return jo3(jp("title", js(title)), jp("kind", js(action_kind)), jp("edit", nested_ws))
@@ -731,7 +738,7 @@ fn _parse_code_action(line: text, uri: text) -> text:
         val edit_end_line = extract_field(json=line, key="editEndLine")
         val edit_end_col = extract_field(json=line, key="editEndCol")
         # Build workspace edit if edit details are present
-        if new_text != "" and edit_line != "":
+        if has_new_text and edit_line != "":
             var start_ln = 0
             val sln = int(edit_line)
             if sln > 0:
@@ -751,7 +758,7 @@ fn _parse_code_action(line: text, uri: text) -> text:
                 jp("start", jo2(jp("line", str(start_ln)), jp("character", str(start_col)))),
                 jp("end", jo2(jp("line", str(end_ln)), jp("character", str(end_col))))
             )
-            val text_edit = jo2(jp("range", edit_range), jp("newText", js(new_text)))
+            val text_edit = jo2(jp("range", edit_range), jp("newText", new_text_raw))
             val doc_changes = jo2(jp("textDocument", jo2(jp("uri", js(uri)), jp("version", "null"))), jp("edits", SB_L() + text_edit + SB_R()))
             val workspace_edit = jo1(jp("documentChanges", SB_L() + doc_changes + SB_R()))
             return jo3(jp("title", js(title)), jp("kind", js(action_kind)), jp("edit", workspace_edit))

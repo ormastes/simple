@@ -1,0 +1,59 @@
+# Purpose: verify query-to-LSP workspace edits retain deletion and insertion values.
+# @req REQ-LSP-CODEACTION-EDIT-001
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_code_actions_from_query_output}
+use std.nogc_sync_mut.lsp.lsp_json.{jo1, jo2, jo3, jp, js, SB_L, SB_R}
+
+fn edit_test_range() -> text:
+    jo2(jp("start", jo2(jp("line", "2"), jp("character", "3"))),
+        jp("end", jo2(jp("line", "2"), jp("character", "7"))))
+
+fn nested_query_action(edit: text) -> text:
+    val changes = jo1(jp("/tmp/source.spl", SB_L() + edit + SB_R()))
+    jo3(jp("title", js("Repair")), jp("kind", js("quickfix")), jp("edit", jo1(jp("changes", changes))))
+
+fn expected_action(edit: text) -> text:
+    val document = jo2(jp("uri", js("file:///requested.spl")), jp("version", "null"))
+    val change = jo2(jp("textDocument", document), jp("edits", SB_L() + edit + SB_R()))
+    val workspace = jo1(jp("documentChanges", SB_L() + change + SB_R()))
+    SB_L() + jo3(jp("title", js("Repair")), jp("kind", js("quickfix")), jp("edit", workspace)) + SB_R()
+
+fn expected_action_without_edit() -> text:
+    SB_L() + jo2(jp("title", js("Repair")), jp("kind", js("quickfix"))) + SB_R()
+
+describe "Query code-action edit roundtrip":
+    it "retains a nested deletion range and request URI":
+        step("retains a nested deletion range and request URI")
+        val edit = jo2(jp("range", edit_test_range()), jp("newText", js("")))
+        val actual = lsp_code_actions_from_query_output(nested_query_action(edit), "file:///requested.spl")
+        expect(actual).to_equal(expected_action(edit))
+
+    it "retains a nonempty insertion including JSON escapes":
+        step("retains a nonempty insertion including JSON escapes")
+        val edit = jo2(jp("range", edit_test_range()), jp("newText", js("quoted \"text\"\n")))
+        val actual = lsp_code_actions_from_query_output(nested_query_action(edit), "file:///requested.spl")
+        expect(actual).to_equal(expected_action(edit))
+
+    it "does not turn a missing nested newText into a deletion":
+        step("does not turn a missing nested newText into a deletion")
+        val query = nested_query_action(jo1(jp("range", edit_test_range())))
+        expect(lsp_code_actions_from_query_output(query, "file:///requested.spl")).to_equal(expected_action_without_edit())
+
+    it "does not turn a null nested newText into a deletion":
+        step("does not turn a null nested newText into a deletion")
+        val edit = jo2(jp("range", edit_test_range()), jp("newText", "null"))
+        expect(lsp_code_actions_from_query_output(nested_query_action(edit), "file:///requested.spl")).to_equal(expected_action_without_edit())
+
+    it "retains a legacy deletion and converts its one-based line":
+        step("retains a legacy deletion and converts its one-based line")
+        val prefix = jo3(jp("title", js("Repair")), jp("kind", js("quickfix")), jp("newText", js("")))
+        val fields = jp("editLine", "3") + "," + jp("editCol", "3") + "," + jp("editEndLine", "3") + "," + jp("editEndCol", "7")
+        val query = prefix.substring(0, prefix.len() - 1) + "," + fields + "}"
+        val edit = jo2(jp("range", edit_test_range()), jp("newText", js("")))
+        expect(lsp_code_actions_from_query_output(query, "file:///requested.spl")).to_equal(expected_action(edit))
+
+    it "does not fabricate a legacy deletion when newText is missing":
+        step("does not fabricate a legacy deletion when newText is missing")
+        val query = jo3(jp("title", js("Repair")), jp("kind", js("quickfix")), jp("editLine", "3"))
+        expect(lsp_code_actions_from_query_output(query, "file:///requested.spl")).to_equal(expected_action_without_edit())
