@@ -133,6 +133,82 @@ fn _simple_fetch_handlers(obj_id: i64, store: ObjectStore) -> i64:
         _:
             -1
 
+# Fetch host-object helpers and URL resolution restored after the tree wipe
+# (doc/08_tracking/bug/tree_wipe_module_damage_census_2026-08-04.md). The
+# async-family interpreter_native.spl files import them through the
+# nogc_async_mut/gc_async_mut facades.
+fn _simple_fetch_marker(obj_id: i64, store: ObjectStore) -> bool:
+    match store.get_property(obj_id, "__simple_fetch_host"):
+        JsValue.Boolean(v): v
+        _:
+            false
+
+fn _simple_fetch_base_url(obj_id: i64, store: ObjectStore) -> text:
+    match store.get_property(obj_id, "__simple_base_url"):
+        JsValue.String(v): v
+        _:
+            ""
+
+fn _simple_fetch_cookie_header(obj_id: i64, store: ObjectStore) -> text:
+    match store.get_property(obj_id, "__simple_cookie_header"):
+        JsValue.String(v): v
+        _:
+            ""
+
+fn _fetch_url_scheme(url: text) -> text:
+    val idx = url.index_of("://")
+    if idx >= 0: url.substring(0, idx) else: "https"
+
+fn _fetch_url_origin(url: text) -> text:
+    val scheme_end = url.index_of("://")
+    if scheme_end < 0:
+        return ""
+    val after_scheme = scheme_end + 3
+    val rel_idx = url.substring(after_scheme, url.len()).index_of("/")
+    if rel_idx >= 0: url.substring(0, after_scheme + rel_idx) else: url
+
+fn _fetch_url_without_fragment(url: text) -> text:
+    val idx = url.index_of("#")
+    if idx >= 0: url.substring(0, idx) else: url
+
+fn _fetch_url_without_query(url: text) -> text:
+    val clean = _fetch_url_without_fragment(url)
+    val idx = clean.index_of("?")
+    if idx >= 0: clean.substring(0, idx) else: clean
+
+fn _fetch_url_base_dir(url: text) -> text:
+    val clean = _fetch_url_without_query(url)
+    val origin = _fetch_url_origin(clean)
+    if origin == "":
+        return ""
+    if clean == origin:
+        return origin + "/"
+    val after_origin = clean.substring(origin.len(), clean.len())
+    var i = after_origin.len() - 1
+    while i >= 0:
+        if after_origin.slice(i, i + 1) == "/":
+            return origin + after_origin.substring(0, i + 1)
+        i = i - 1
+    origin + "/"
+
+fn _resolve_fetch_url(base_url: text, href: text) -> text:
+    if href == "":
+        return base_url
+    if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
+        return href
+    if href.starts_with("//"):
+        return _fetch_url_scheme(base_url) + ":" + href
+    if href.starts_with("#"):
+        return _fetch_url_without_fragment(base_url) + href
+    if href.starts_with("?"):
+        return _fetch_url_without_query(base_url) + href
+    if href.starts_with("/"):
+        val origin = _fetch_url_origin(base_url)
+        if origin != "":
+            return origin + href
+        return href
+    _fetch_url_base_dir(base_url) + href
+
 class PendingAsyncRequest:
     request_obj_id: i64
     script_cookie_writes: [text]

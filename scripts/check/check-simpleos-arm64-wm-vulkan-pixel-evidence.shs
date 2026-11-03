@@ -489,6 +489,31 @@ abspath() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s/%s\n' "$ROOT_DI
 KERNEL_ELF_ABS=$(abspath "$KERNEL_ELF")
 ESP_DIR_ABS=$(abspath "$ESP_DIR")
 
+# Linux Image handover consumes a flat payload, not the ELF container. Reject
+# invalid input before the optional host-daemon build or any firmware launch.
+KERNEL_IMAGE_ABS=$(abspath "$BUILD_DIR/kernel.Image")
+IMAGE_OBJCOPY=${LLVM_OBJCOPY:-llvm-objcopy}
+command -v "$IMAGE_OBJCOPY" >/dev/null 2>&1 || error_verdict "llvm-objcopy missing for flat ARM64 Image extraction"
+command -v python3 >/dev/null 2>&1 || error_verdict "python3 missing for ARM64 Image header validation"
+if [ "$KERNEL_ELF_ABS" -ef "$KERNEL_IMAGE_ABS" ]; then
+    error_verdict "flat ARM64 Image output aliases kernel input"
+fi
+rm -f "$KERNEL_IMAGE_ABS"
+"$IMAGE_OBJCOPY" -O binary "$KERNEL_ELF_ABS" "$KERNEL_IMAGE_ABS" || error_verdict "flat ARM64 Image extraction failed"
+python3 - "$KERNEL_ELF_ABS" "$KERNEL_IMAGE_ABS" <<'IMAGE_CHECK' || error_verdict "flat ARM64 Image header invalid"
+import pathlib, struct, sys
+with pathlib.Path(sys.argv[1]).open("rb") as stream:
+    elf = stream.read(20)
+with pathlib.Path(sys.argv[2]).open("rb") as stream:
+    image = stream.read(64)
+if len(elf) < 20 or elf[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", elf, 18)[0] != 183:
+    raise SystemExit("expected an AArch64 little-endian ELF64 kernel")
+if len(image) < 64 or image[56:60] != b"ARM\x64":
+    raise SystemExit("missing ARM64 Linux Image header")
+if struct.unpack_from("<Q", image, 16)[0] == 0:
+    raise SystemExit("zero ARM64 Linux Image size")
+IMAGE_CHECK
+
 # ---------------------------------------- build the host GPU Vulkan daemon --
 # Never with SIMPLE_ALLOW_STUB_FALLBACK / SIMPLE_ALLOW_UNRESOLVED_RUNTIME: a
 # stubbed daemon would be exactly the thing this gate exists to refuse.
@@ -532,7 +557,7 @@ printf 'simpleos_arm64_wm_vulkan_run_nonce=%s\n' "$RUN_NONCE"
 # Same -e lifting as the daemon build above: a failed ESP build must produce
 # ERROR (exit 2), not a bare non-zero exit with no verdict line.
 set +e
-env KERNEL_ELF="$KERNEL_ELF_ABS" OUT_DIR="$ESP_DIR_ABS" \
+env KERNEL_ELF="$KERNEL_IMAGE_ABS" OUT_DIR="$ESP_DIR_ABS" \
     BOOT_PROTOCOL=linux AAVMF_CODE="$AAVMF_CODE" \
     sh "$ROOT_DIR/scripts/os/build-simpleos-aarch64-efi-esp.shs" \
     >"$EVIDENCE_DIR/esp-build.log" 2>&1

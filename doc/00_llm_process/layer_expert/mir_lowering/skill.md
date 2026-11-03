@@ -611,3 +611,14 @@ The a52 producer's four native panic controls passed with clean compiler
 diagnostics, including runtime-concatenated text evaluated once and the cast's
 intended panic. Its separate full CLI matrix exceeded the enforced RSS cap;
 native SSpec/docgen and complete BuildRunner admission are not implied.
+
+## Tagged tuple projection contract
+
+`rt_tuple_get` returns an already-tagged runtime value. Keep its Simple
+declaration generic (`<T> -> T?`) and pass `<T>` explicitly through the MIR
+and LLVM decoder wrappers. A semantic i64 declaration causes aggregate
+handles to be integer-boxed, even though the physical C return word is 64-bit.
+Use `test/04_smoke/bootstrap_tuple_projection.spl` with exact stdout and
+empty-stderr checks; assert-only PASS markers missed the invalid-handle
+diagnostic in the negative control. Fresh compiler admission remains required.
+See `doc/08_tracking/bug/cross_bootstrap_stage2_p2_add_mir_sigbus_20261101.md`.

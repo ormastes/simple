@@ -35,3 +35,12 @@ byte-indexed `substring`. Red (4/7 failed: path truncated to `module.s`)
 -> green (7/7) in `test/01_unit/app/simple_lsp_mcp/lsp_non_ascii_paths_spec.spl`.
 Left over: `_char_at` is O(i), so scans remain O(n^2) in char count (no longer
 inflated by multibyte bytes); a single-pass char-array scanner would fix it.
+
+## Residual timeout-response repair candidate (2026-11-03)
+
+The nonposition timeout-success follow-up is now tracked independently as
+`lsp_mcp_nonposition_timeout_success_2026_11_03`. The source candidate routes all
+query results through shared timeout classification and normalizes diagnostic
+timeouts before aggregation. Authored helper and actual-child regressions remain
+unrun without an admitted runtime; this is not closure of this hang/symbol-resolution
+umbrella. See [the narrow bug record](lsp_mcp_nonposition_timeout_success_2026_11_03.md).

@@ -137,3 +137,6 @@ executable `_spec.spl` files. These are source checks, not execution evidence.
 Behavioral verification is **TEST_BLOCKED**: no admitted self-hosted full CLI
 is available; the tracked Rust seed is bootstrap-only. No behavioral tests
 were executed and this report does not mark the bug fixed.
+
+## Closed 2026-11-03 (verified fixed)
+Already fixed on release/1.0.0: facade restored by e72ff56c06e / core64_step defined in core.spl (88aac2ffe28). Specs pass: gc_async_mut compression_facade_spec 6/6, sql_facade_spec 4/4, core64_integration_spec 35/35.

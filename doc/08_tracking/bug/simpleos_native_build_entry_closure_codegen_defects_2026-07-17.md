@@ -1592,3 +1592,23 @@ C3 (`not a and call()`) does NOT reproduce under seed interpret/JIT
 run (seed redeploy forbidden; full-repo native-build >40 min). C1/C8 have their own
 landed root fixes above. Deferred with: freestanding cranelift repro + disasm of the
 fixture above required.
+
+## Host-JIT revalidation 2026-11-03 (work/entry-closure-codegen)
+
+New spec `src/compiler_rust/compiler/tests/entry_closure_defects_jit.rs` (static Cranelift JIT,
+host, default opt) runs minimal repros of C1-C6 on current release/1.0.0:
+`cargo test -p simple-compiler --test entry_closure_defects_jit` -> 7 passed, 0 failed
+(C1 call-init global + `[]` global with pushes, C2 `if val` hit payload, C3 `not a and call()`
+tests the LHS, C4 4-tuple positions, C5 enum `==`, C6 `b0 | (b1 << 8)`).
+
+Conclusion: C1-C6 do NOT reproduce on the host JIT path, so the defects (if still live) are specific
+to the freestanding `--entry-closure --target x86_64-unknown-none --backend cranelift
+--opt-level=aggressive` object path (module-global init emission, aggressive-opt/inlining) and
+cannot be fixed or disproved without that build. C7 (alias-bridge dispatch) and C8 (trait-object
+fault `cr2=0x0001e0ec8148e589`, load-base/`movabs` lead) are likewise freestanding-only.
+No code change; bug stays open.
+
+Repro steps needing a SimpleOS/stage3 run: build `gui_entry_desktop.spl` with the freestanding
+flags above, `objdump -d` check (C1) `_browser_default_font_lock` init stores, (C2) accessor hit
+path not `xor rax,rax; ret`, (C3) test of `registered_only` before the call; boot under QEMU with
+the vfs fat32 skip lifted for C8 and compare `cr2` / load base vs link base.

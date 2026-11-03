@@ -306,6 +306,20 @@ fn use_bare_module_fallback(receiver_in_env: bool, receiver_is_class: bool, rece
 
 /// Main entry point for method call evaluation
 #[allow(clippy::borrowed_box, clippy::too_many_arguments)] // reason: Box<dyn Trait> dispatch with ABI-locked entry; refactoring deferred
+/// ADR-005: `char.from_code(n)` inverts `.ord()`. A non-scalar code point
+/// (surrogate, > U+10FFFF) is an error, never a silent NUL. The value is a
+/// 1-char text until the char value type lands.
+pub(crate) fn char_from_code(args: &[Value]) -> Result<Value, CompileError> {
+    let code = match args.first() {
+        Some(v) => v.as_int()?,
+        None => return Err(CompileError::semantic("char.from_code expects one integer code point")),
+    };
+    match u32::try_from(code).ok().and_then(char::from_u32) {
+        Some(ch) => Ok(Value::text(ch.to_string())),
+        None => Err(CompileError::semantic(format!("char.from_code: {code} is not a Unicode scalar value"))),
+    }
+}
+
 pub(crate) fn evaluate_method_call(
     receiver: &Box<Expr>,
     method: &str,
@@ -376,14 +390,7 @@ pub(crate) fn evaluate_method_call(
                 .iter()
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .collect::<Result<Vec<_>, _>>()?;
-            let code = match evaluated_args.first() {
-                Some(v) => v.as_int()?,
-                None => return Err(CompileError::semantic("char.from_code expects one integer code point")),
-            };
-            return match u32::try_from(code).ok().and_then(char::from_u32) {
-                Some(ch) => Ok(Value::text(ch.to_string())),
-                None => Err(CompileError::semantic(format!("char.from_code: {code} is not a Unicode scalar value"))),
-            };
+            return char_from_code(&evaluated_args);
         }
         if module_name == "text" && method == "from_char_code" {
             let evaluated_args: Vec<Value> = args
@@ -2069,14 +2076,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
                 .iter()
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .collect::<Result<Vec<_>, _>>()?;
-            let code = match evaluated_args.first() {
-                Some(v) => v.as_int()?,
-                None => return Err(CompileError::semantic("char.from_code expects one integer code point")),
-            };
-            return match u32::try_from(code).ok().and_then(char::from_u32) {
-                Some(ch) => Ok((Value::text(ch.to_string()), None)),
-                None => Err(CompileError::semantic(format!("char.from_code: {code} is not a Unicode scalar value"))),
-            };
+            return Ok((char_from_code(&evaluated_args)?, None));
         }
         if module_name == "text" && method == "from_char_code" {
             let evaluated_args: Vec<Value> = args

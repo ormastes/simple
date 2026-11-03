@@ -92,3 +92,28 @@ that lane to settle.
 `ERROR — nothing was checked: arm64 desktop/WM kernel missing:
 build/os/simpleos_arm64_desktop_engine2d.elf`.
 The gate cannot move until blocker 4 is cleared.
+
+## 2026-11-03 explicit media compiler admission repair
+
+The current architecture-neutral server media builder still assigned
+`SIMPLE_BUILD_COMPILER` directly when present. This bypassed the canonical
+selector's seed identity, release provenance, environment-write and target
+capability checks. Automatic selection already used that selector. Route both
+explicit and discovered compilers through `simple_compiler_select`; the selector
+already honors an explicit choice and rejects it when admission fails.
+
+The focused shell contract is
+`test/01_unit/scripts/simpleos_server_payload_compiler_admission_test.shs`. It
+copies the real builder and selector into a private fixture root and checks
+explicit seed rejection, unsupported-target rejection, and a valid fixture
+reaching the missing-sysroot boundary for ARM64, x86_64 and RISC-V. Compiler
+fixtures are simulated; no payload compilation or target execution is claimed.
+The old bypass fails its seed-refusal assertion.
+
+This repair closes one admission hole, not this composite record. Current
+scenario registration, target fields and WCHAR typedef fixes remain present.
+An admitted pure-Simple compiler must still produce the ARM64 sysroot/runtime,
+server payload and desktop kernel; AAVMF-to-BOOTAA64.EFI-to-kernel handover and
+fresh native pixel/input evidence remain unverified. The historical
+`arm64-wm-ramfb` versus Engine2D source-contract disagreement also remains a
+separate scope decision; this change does not repoint either lane.

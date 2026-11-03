@@ -1,0 +1,37 @@
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+# bug stage2_local_symbol_index_bucket_tagged_id_2026-11-03: under the frozen
+# phase-3 stage2 the hashed local-symbol index buckets a binding by a value that
+# disagrees with the lookup's (symbol 8 landed in bucket 1 of 16, the probe used
+# bucket 8), so every `val`-then-use was "undefined variable". The binding is
+# mirrored into the runtime-canonicalized `local_map` Dict and find_local falls
+# back to it after an index miss. This pins both halves of that mirror.
+fn fn_body(src: text, header: text, stop: text) -> text:
+    val start = src.index_of(header)
+    if start < 0:
+        return ""
+    val rest = src.substring(start, src.len())
+    val end = rest.index_of(stop)
+    if end < 0:
+        return rest
+    rest.substring(0, end)
+
+describe "MIR local-symbol index is mirrored into local_map":
+    it "bind_local writes every binding into local_map":
+        val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
+        val body = fn_body(src, "me bind_local(symbol_id: i64, local: LocalId):", "fn find_local(")
+        expect(body.len() > 0).to_equal(true)
+        expect(body).to_contain("self.local_map[symbol_id] = local")
+
+    it "find_local falls back to local_map after an index miss":
+        val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
+        val body = fn_body(src, "fn find_local(symbol_id: i64) -> LocalId:", "fn hir_type_mentions_type_param(")
+        expect(body.len() > 0).to_equal(true)
+        expect(body).to_contain("if self.local_map.has(symbol_id):")
+        expect(body).to_contain("return self.local_map[symbol_id]")
+
+    it "local_map is still reset together with the index at function start":
+        val src = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        expect(src).to_contain("self.local_map = {}")
+        expect(src).to_contain("self.local_symbol_ids = []")

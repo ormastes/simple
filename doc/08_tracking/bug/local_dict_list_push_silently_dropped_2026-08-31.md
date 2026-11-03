@@ -65,3 +65,7 @@ Reduce to a minimal spec under `test/01_unit/compiler/`, confirm the
 interpreter/native split, then fix. Until then, prefer an owner class over a
 bare local dict-of-list anywhere correctness depends on the push landing.
 
+
+## Closed stale 2026-11-03
+
+Re-verified on the deployed Rust seed (bin/simple.exe, built 2026-11-03) on origin/release/1.0.0 with both `SIMPLE_EXECUTION_MODE=interpret` and `=jit`: the documented repro now produces the correct result on both lanes (see lane seed-interp-p23 evidence: float `0.0/0.0 1.0/0.0 -1.0/0.0` -> `NaN inf -inf`; `d["k"].push` twice on a 1-element list -> len 3; `elif val Some(x) = o` in an if-expression -> binds 7). Closed as stale.

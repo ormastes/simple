@@ -636,8 +636,10 @@ impl HirLowering:
                     var arm_idx = 0
                     while arm_idx < arms.len():
                         val arm: IfArm = arms[arm_idx]
+                        val arm_hir_cond = self.lower_hir_expr(arm.cond)
+                        self.check_char_condition(arm_hir_cond)
                         hir_arms = hir_arms.push(HirIfArm(
-                            cond: self.lower_hir_expr(arm.cond),
+                            cond: arm_hir_cond,
                             then_: self.lower_hir_block(arm.then_),
                             span: arm.span
                         ))
@@ -664,6 +666,7 @@ impl HirLowering:
                         val single_else: Block? = else_
                         return self.lower_cfg_when_chain([single_arm], single_else, e.span)
                     val hir_cond = self.lower_hir_expr(cond)
+                    self.check_char_condition(hir_cond)
                     val hir_then = self.lower_hir_block(then_)
                     val else_opt: Block? = else_
                     if val else_block_src = else_opt:
@@ -1020,13 +1023,22 @@ impl HirLowering:
                 else:
                     val lowered_left: HirExpr = self.lower_hir_expr(bin_left_t)
                     val lowered_right: HirExpr = self.lower_hir_expr(bin_right_t)
+                    match hir_op:
+                        case HirBinOp.And | HirBinOp.Or:
+                            self.check_char_condition(lowered_left)
+                            self.check_char_condition(lowered_right)
+                        case _: pass
                     HirExprKind.Binary(hir_op, lowered_left, lowered_right)
 
             case ExprKind.Unary(op, operand):
                 val un_op_t: UnaryOp = op
                 val un_operand_t: Expr = operand
                 val hir_op = self.lower_unaryop(un_op_t)
-                HirExprKind.Unary(hir_op, self.lower_hir_expr(un_operand_t))
+                val un_lowered: HirExpr = self.lower_hir_expr(un_operand_t)
+                match hir_op:
+                    case HirUnaryOp.Not: self.check_char_condition(un_lowered)
+                    case _: pass
+                HirExprKind.Unary(hir_op, un_lowered)
 
             case ExprKind.MethodCall(receiver, method, args):
                 # Same #130 fix as the Call arm: the former SIMPLE_BOOTSTRAP branch
