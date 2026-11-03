@@ -45,3 +45,25 @@ Related: `src/lib/nogc_sync_mut/desktop/lifecycle.spl:30` compares a `text?` val
 with `""`, so an unset `XDG_RUNTIME_DIR` builds a bad lock path.
 
 **Revalidated 2026-11-02: still plausible because OPEN. Severity: P1. Date: 2026-10-31; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 update: fix implemented, verification pending (full seed)
+
+Root cause narrowed. The seed INTERPRETER already honours `use` bindings
+(`import_bound_candidate`, 2026-08-31) and was re-checked correct on direct,
+aliased and `export use` facade imports. The wrong body was chosen in the
+flattened HIR/JIT lane: `Lowerer::resolve_flatten_owned_callable`
+(`hir/lower/lowerer.rs`) looked up the caller's import bindings only when the
+caller had a flatten owner, but the ENTRY module's imports are recorded under
+the `<entry>` importer (as `resolve_flatten_owned_global` already handled). So a
+bare `env_get(...)` from the entry module bound to the last-registered
+definition. Repro before: `scratchpad` fixtures mod_a (`-> text`) / mod_b
+(`-> text?`), `fn main` importing `mod_b.{env_get as bb}` and `mod_a.{env_get}`
+printed `b=A` (wrong).
+
+Fix: resolve entry-module callers through the `<entry>` binding table.
+Regression test (failed before, passes after):
+`mir::lower::tests::seed_regression_tests::entry_module_use_binding_selects_import_among_differing_signature_duplicates`.
+NOT changed: ambiguous no-binding collisions stay a warning, not a hard error;
+373 such collisions exist in a single spec run today, so an error would break
+the stdlib (tracked in duplicate_public_symbols_differing_return_types_jit_misdispatch_2026-08-09).
+Verification pending: end-to-end rerun of the fixtures on a redeployed seed.

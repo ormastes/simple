@@ -116,3 +116,16 @@ evidence for this source composition or the current ARM/RISC-V compiler.
 Status remains OPEN; full Phase3 and required verification remain pending.
 
 **Revalidated 2026-11-02: still plausible because OPEN. Real native failure and causal input boundary confirmed; narrow; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 s3g4 lane: fix IS in source; verification pending
+
+The NUL-only `Ptr(U8)` constructor operand fix is present in
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (StringLit arm, ~line 6070;
+`literal_has_nul` selects `MirTypeKind.Ptr(U8)` for the raw `rt_string_new` input,
+authored byte count, result marked tagged text). Earlier lanes mislabelled this
+"needs stage3"; the frontend contract is checkable without it:
+`bin/simple.exe run test/01_unit/compiler/50.mir/nul_literal_raw_constructor_operand_spec.spl`
+-> `2 examples, 0 failures` (real parser/HirLowering/MirLowering). Only the native
+byte probe remains: stage3 verify with
+`<stage3> native-build --source test/02_integration/compiler --entry test/02_integration/compiler/nul_literal_raw_constructor_native_probe.spl --entry-closure -o probe && ./probe`
+(expect exit 0, no `FAIL NUL literal local`). Status: fix-implemented-verification-pending.

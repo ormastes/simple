@@ -89,3 +89,17 @@ ambiguous resolution candidate invalidates consumers. Compare native outputs,
 peak RSS and elapsed/CPU time. These new qualification cases are UNRUN.
 
 **Revalidated 2026-11-02: still plausible because OPEN performance limitation; no cache correctness weakening proposed; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 update: pre-compile diagnostic landed (first step only)
+
+Source re-read: the whole-build fingerprint key no longer folds `layout`
+(per-module interface slices decide, see `InterfaceSliceIndex`), so the
+"layout/signature => full rebuild" premise above is partly superseded.
+Landed the diagnostic step: under the existing `[native-rust-trace]` flag the
+seed now prints, BEFORE compilation, `step 4 global fingerprint: <changed
+component | layout changed | unchanged | no previous manifest> (dirty N/M)`
+(`GlobalBuildFingerprint::describe_change`, native_project/mod.rs). Cache keys
+are unchanged. Test:
+`test_global_build_fingerprint_describe_change_names_component`.
+Remaining (open): dependency-safe per-module interface fingerprints for a real
+latency reduction; a measured before/after needs a ~30 min native build.

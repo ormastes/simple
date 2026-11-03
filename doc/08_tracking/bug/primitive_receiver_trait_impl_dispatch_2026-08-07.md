@@ -859,3 +859,15 @@ changes or deep interpreter/JIT dispatch work. Out of pure-Simple
 scope. Leaving OPEN.
 
 **Revalidated 2026-11-02: still plausible because OPEN (diagnosed, root cause located, not fixed) — re-verified; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 s3g4 lane: Defect A (seed JIT) fix landed; verification pending
+
+`closures_structs.rs::try_compile_builtin_method_call` now returns `Ok(None)` for
+qualified `<i8..i64|u8..u64|f32|f64|bool>.hash` calls, so they fall through to the
+user's `impl Hash for <T>` instead of the name-keyed `"hash" => "rt_hash_text"`
+builtin (raw scalar passed as text pointer -> silent 0). `text.hash` is unchanged
+(no user-impl bypass change; separate follow-up if the FNV impl must win).
+Verify after a seed rebuild: `SIMPLE_EXECUTION_MODE=jit bin/simple run
+test/fixtures/repro/compiler/primitive_trait_impl_dispatch_repro.spl` must show the
+user sentinels for i64/bool/f32/f64. Remaining open: the interpreter i32->i64-impl
+collapse row (spec 6/7, Defect B tail). Status: fix-implemented-verification-pending (Defect A).
