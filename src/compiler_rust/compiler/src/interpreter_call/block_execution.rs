@@ -458,7 +458,7 @@ pub(super) fn exec_block_closure_into(
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     // Use bind_pattern_value to handle all pattern types including tuples
                     let is_mutable = let_stmt.mutability.is_mutable();
-                    let val = crate::interpreter::coerce_to_declared_type(val, declared_let_type(let_stmt));
+                    let val = crate::interpreter::coerce_let_value(val, declared_let_type(let_stmt), let_stmt.value.as_ref());
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, &mut local_env);
                 }
                 last_value = Value::Nil;
@@ -1555,7 +1555,7 @@ fn exec_block_closure_mut_inner(
                     // Mark the names local first; see the `exec_block_closure_into` twin.
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     let is_mutable = let_stmt.mutability.is_mutable();
-                    let val = crate::interpreter::coerce_to_declared_type(val, declared_let_type(let_stmt));
+                    let val = crate::interpreter::coerce_let_value(val, declared_let_type(let_stmt), let_stmt.value.as_ref());
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, local_env);
                 }
                 last_value = Value::Nil;
