@@ -1,4 +1,27 @@
 # image_builder: nvfs rootfs backend marker assertion fails (pre-existing)
+## Repair candidate 2026-11-03 — behavioral verification blocked
+
+Current source already assigns the per-call backend before constructing the
+image. The remaining source failure boundary is unchecked metadata writes:
+`_populate_root_partition` ignored both write statuses and advertised the files
+in its manifest even when staging failed. `image_rootfs_markers.spl` now checks
+directory creation, both writes, and actual readback against the selected
+backend. The builder captures that backend for the build and validates again
+after package/installer population, before publishing manifests or the image.
+Existing stale marker files are replaced; missing, empty, malformed or wrong
+backend metadata fails validation.
+
+`image_rootfs_markers_spec.spl` authors seven real temporary staged-image cases:
+fresh nvfs, preexisting dbfs replacement, missing boot marker, malformed/empty
+boot marker, a file blocking `SYS`, malformed rootfs configuration, and a
+directory blocking the marker file write. The
+original artifact spec now uses `MIN_IMAGE_SIZE_MB_V1` instead of the obsolete
+64 MB size that fails before marker staging under today's 67 MB minimum.
+
+**TEST_BLOCKED:** no qualified self-hosted CLI is available on this host.
+Authored cases are not passing execution evidence (executed test count: 0).
+Run both marker and artifact specs with an admitted producer before closure.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
