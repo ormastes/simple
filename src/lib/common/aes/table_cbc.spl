@@ -1,0 +1,264 @@
+# AES-CBC (no padding) over 32-bit T-tables.
+#
+# Why this exists: the byte-oriented block primitive in std.common.crypto.aes_gcm
+# costs ~600 interpreted operations per block (per-byte push/rt_bytes_u8_at,
+# per-round array rebuilds). A 4016-byte SQLCipher page is 251 blocks, which made
+# every page encode/decode take tens of seconds and timed out the DevHub
+# messenger specs. The T-table form below does 16 table lookups + xors per round.
+#
+# Algorithm: FIPS 197 equivalent cipher (T-tables, big-endian column words,
+# byte index = 4*column + row). The S-box tables are the aes_gcm ones (verified
+# against FIPS 197); only the round structure is re-expressed. Callers validate
+# lengths: key 16 or 32 bytes, iv 16 bytes, data a multiple of 16 bytes.
+
+use std.common.crypto.aes_gcm.{
+    aes128_key_expansion,
+    aes256_key_expansion,
+    aes_sbox_table,
+    aes_inv_sbox_table
+}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _tc_xt(a: i64) -> i64:
+    val x = (a << 1) & 0xFF
+    if (a & 0x80) != 0:
+        x ^ 0x1b
+    else:
+        x
+
+# a * k in GF(2^8) for k in {1,2,3,9,11,13,14}.
+fn _tc_mul(a: i64, k: i64) -> i64:
+    val a2 = _tc_xt(a)
+    val a4 = _tc_xt(a2)
+    val a8 = _tc_xt(a4)
+    if k == 1:
+        return a
+    if k == 2:
+        return a2
+    if k == 3:
+        return a2 ^ a
+    if k == 9:
+        return a8 ^ a
+    if k == 11:
+        return a8 ^ a2 ^ a
+    if k == 13:
+        return a8 ^ a4 ^ a
+    a8 ^ a4 ^ a2
+
+fn _tc_ror8(x: i64) -> i64:
+    ((x >> 8) | (x << 24)) & 0xFFFFFFFF
+
+fn _tc_word(b0: i64, b1: i64, b2: i64, b3: i64) -> i64:
+    ((b0 & 0xFF) << 24) | ((b1 & 0xFF) << 16) | ((b2 & 0xFF) << 8) | (b3 & 0xFF)
+
+fn _tc_u8_list(src: [u8]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < src.len():
+        out.push(rt_bytes_u8_at(src, i) & 0xFF)
+        i = i + 1
+    out
+
+# Flat table: [0,1024) T0..T3 (index t*256+x), [1024,1280) the S-box used.
+# `inverse` selects Td (InvSubBytes + InvMixColumns) instead of Te.
+fn _tc_tables(inverse: bool) -> [i64]:
+    val sb = _tc_u8_list(aes_sbox_table())
+    val isb = _tc_u8_list(aes_inv_sbox_table())
+    var t0: [i64] = []
+    var t1: [i64] = []
+    var t2: [i64] = []
+    var t3: [i64] = []
+    var x = 0
+    while x < 256:
+        var w = 0
+        if inverse:
+            val s = isb[x]
+            w = _tc_word(_tc_mul(s, 14), _tc_mul(s, 9), _tc_mul(s, 13), _tc_mul(s, 11))
+        else:
+            val s = sb[x]
+            w = _tc_word(_tc_mul(s, 2), s, s, _tc_mul(s, 3))
+        val w1 = _tc_ror8(w)
+        val w2 = _tc_ror8(w1)
+        val w3 = _tc_ror8(w2)
+        t0.push(w)
+        t1.push(w1)
+        t2.push(w2)
+        t3.push(w3)
+        x = x + 1
+    var out: [i64] = []
+    var i = 0
+    while i < 256:
+        out.push(t0[i])
+        i = i + 1
+    i = 0
+    while i < 256:
+        out.push(t1[i])
+        i = i + 1
+    i = 0
+    while i < 256:
+        out.push(t2[i])
+        i = i + 1
+    i = 0
+    while i < 256:
+        out.push(t3[i])
+        i = i + 1
+    val last = if inverse: isb else: sb
+    i = 0
+    while i < 256:
+        out.push(last[i])
+        i = i + 1
+    out
+
+fn _tc_schedule(key: [i64]) -> [i64]:
+    var kb: [u8] = []
+    var i = 0
+    while i < key.len():
+        kb.push((key[i] & 0xFF).to_u8())
+        i = i + 1
+    val sched = if key.len() == 32: aes256_key_expansion(kb) else: aes128_key_expansion(kb)
+    var words: [i64] = []
+    var j = 0
+    val n = sched.len() / 4
+    while j < n:
+        words.push(_tc_word(rt_bytes_u8_at(sched, 4 * j), rt_bytes_u8_at(sched, 4 * j + 1), rt_bytes_u8_at(sched, 4 * j + 2), rt_bytes_u8_at(sched, 4 * j + 3)))
+        j = j + 1
+    words
+
+fn _tc_zero(a: [i64]) -> bool:
+    var i = 0
+    while i < a.len():
+        a[i] = 0
+        i = i + 1
+    true
+
+fn _tc_push_word(out: [i64], w: i64):
+    out.push((w >> 24) & 0xFF)
+    out.push((w >> 16) & 0xFF)
+    out.push((w >> 8) & 0xFF)
+    out.push(w & 0xFF)
+
+# CBC encrypt, no padding. Output length == plaintext length.
+fn aes_cbc_encrypt_tbl(key: [i64], plaintext: [i64], iv: [i64]) -> [i64]:
+    val rounds = if key.len() == 32: 14 else: 10
+    val rk = _tc_schedule(key)
+    val tb = _tc_tables(false)
+    var p0 = _tc_word(iv[0], iv[1], iv[2], iv[3])
+    var p1 = _tc_word(iv[4], iv[5], iv[6], iv[7])
+    var p2 = _tc_word(iv[8], iv[9], iv[10], iv[11])
+    var p3 = _tc_word(iv[12], iv[13], iv[14], iv[15])
+    var out: [i64] = []
+    val n = plaintext.len()
+    var off = 0
+    while off < n:
+        var w0 = _tc_word(plaintext[off], plaintext[off + 1], plaintext[off + 2], plaintext[off + 3]) ^ p0 ^ rk[0]
+        var w1 = _tc_word(plaintext[off + 4], plaintext[off + 5], plaintext[off + 6], plaintext[off + 7]) ^ p1 ^ rk[1]
+        var w2 = _tc_word(plaintext[off + 8], plaintext[off + 9], plaintext[off + 10], plaintext[off + 11]) ^ p2 ^ rk[2]
+        var w3 = _tc_word(plaintext[off + 12], plaintext[off + 13], plaintext[off + 14], plaintext[off + 15]) ^ p3 ^ rk[3]
+        var r = 1
+        while r < rounds:
+            val k = 4 * r
+            val t0 = tb[w0 >> 24] ^ tb[256 + ((w1 >> 16) & 255)] ^ tb[512 + ((w2 >> 8) & 255)] ^ tb[768 + (w3 & 255)] ^ rk[k]
+            val t1 = tb[w1 >> 24] ^ tb[256 + ((w2 >> 16) & 255)] ^ tb[512 + ((w3 >> 8) & 255)] ^ tb[768 + (w0 & 255)] ^ rk[k + 1]
+            val t2 = tb[w2 >> 24] ^ tb[256 + ((w3 >> 16) & 255)] ^ tb[512 + ((w0 >> 8) & 255)] ^ tb[768 + (w1 & 255)] ^ rk[k + 2]
+            val t3 = tb[w3 >> 24] ^ tb[256 + ((w0 >> 16) & 255)] ^ tb[512 + ((w1 >> 8) & 255)] ^ tb[768 + (w2 & 255)] ^ rk[k + 3]
+            w0 = t0
+            w1 = t1
+            w2 = t2
+            w3 = t3
+            r = r + 1
+        val kf = 4 * rounds
+        val c0 = _tc_word(tb[1024 + (w0 >> 24)], tb[1024 + ((w1 >> 16) & 255)], tb[1024 + ((w2 >> 8) & 255)], tb[1024 + (w3 & 255)]) ^ rk[kf]
+        val c1 = _tc_word(tb[1024 + (w1 >> 24)], tb[1024 + ((w2 >> 16) & 255)], tb[1024 + ((w3 >> 8) & 255)], tb[1024 + (w0 & 255)]) ^ rk[kf + 1]
+        val c2 = _tc_word(tb[1024 + (w2 >> 24)], tb[1024 + ((w3 >> 16) & 255)], tb[1024 + ((w0 >> 8) & 255)], tb[1024 + (w1 & 255)]) ^ rk[kf + 2]
+        val c3 = _tc_word(tb[1024 + (w3 >> 24)], tb[1024 + ((w0 >> 16) & 255)], tb[1024 + ((w1 >> 8) & 255)], tb[1024 + (w2 & 255)]) ^ rk[kf + 3]
+        _tc_push_word(out, c0)
+        _tc_push_word(out, c1)
+        _tc_push_word(out, c2)
+        _tc_push_word(out, c3)
+        p0 = c0
+        p1 = c1
+        p2 = c2
+        p3 = c3
+        off = off + 16
+    _tc_zero(rk)
+    out
+
+# CBC decrypt, no padding. Output length == ciphertext length.
+fn aes_cbc_decrypt_tbl(key: [i64], ciphertext: [i64], iv: [i64]) -> [i64]:
+    val rounds = if key.len() == 32: 14 else: 10
+    val rk = _tc_schedule(key)
+    val tb = _tc_tables(true)
+    # Equivalent inverse cipher: InvMixColumns on round keys 1..rounds-1.
+    # InvMix(w) = Td0[S[b0]] ^ Td1[S[b1]] ^ Td2[S[b2]] ^ Td3[S[b3]]. The
+    # forward S-box is recovered from the inverse one: S[InvS[y]] = y.
+    var sfwd: [i64] = []
+    var z = 0
+    while z < 256:
+        sfwd.push(0)
+        z = z + 1
+    var y = 0
+    while y < 256:
+        sfwd[tb[1024 + y]] = y
+        y = y + 1
+    var dk: [i64] = []
+    var i = 0
+    while i < rk.len():
+        dk.push(rk[i])
+        i = i + 1
+    var rr = 1
+    while rr < rounds:
+        var c = 0
+        while c < 4:
+            val w = rk[4 * rr + c]
+            dk[4 * rr + c] = tb[sfwd[w >> 24]] ^ tb[256 + sfwd[(w >> 16) & 255]] ^ tb[512 + sfwd[(w >> 8) & 255]] ^ tb[768 + sfwd[w & 255]]
+            c = c + 1
+        rr = rr + 1
+    var p0 = _tc_word(iv[0], iv[1], iv[2], iv[3])
+    var p1 = _tc_word(iv[4], iv[5], iv[6], iv[7])
+    var p2 = _tc_word(iv[8], iv[9], iv[10], iv[11])
+    var p3 = _tc_word(iv[12], iv[13], iv[14], iv[15])
+    var out: [i64] = []
+    val n = ciphertext.len()
+    var off = 0
+    while off < n:
+        val e0 = _tc_word(ciphertext[off], ciphertext[off + 1], ciphertext[off + 2], ciphertext[off + 3])
+        val e1 = _tc_word(ciphertext[off + 4], ciphertext[off + 5], ciphertext[off + 6], ciphertext[off + 7])
+        val e2 = _tc_word(ciphertext[off + 8], ciphertext[off + 9], ciphertext[off + 10], ciphertext[off + 11])
+        val e3 = _tc_word(ciphertext[off + 12], ciphertext[off + 13], ciphertext[off + 14], ciphertext[off + 15])
+        val kn = 4 * rounds
+        var w0 = e0 ^ dk[kn]
+        var w1 = e1 ^ dk[kn + 1]
+        var w2 = e2 ^ dk[kn + 2]
+        var w3 = e3 ^ dk[kn + 3]
+        var r = rounds - 1
+        while r >= 1:
+            val k = 4 * r
+            val t0 = tb[w0 >> 24] ^ tb[256 + ((w3 >> 16) & 255)] ^ tb[512 + ((w2 >> 8) & 255)] ^ tb[768 + (w1 & 255)] ^ dk[k]
+            val t1 = tb[w1 >> 24] ^ tb[256 + ((w0 >> 16) & 255)] ^ tb[512 + ((w3 >> 8) & 255)] ^ tb[768 + (w2 & 255)] ^ dk[k + 1]
+            val t2 = tb[w2 >> 24] ^ tb[256 + ((w1 >> 16) & 255)] ^ tb[512 + ((w0 >> 8) & 255)] ^ tb[768 + (w3 & 255)] ^ dk[k + 2]
+            val t3 = tb[w3 >> 24] ^ tb[256 + ((w2 >> 16) & 255)] ^ tb[512 + ((w1 >> 8) & 255)] ^ tb[768 + (w0 & 255)] ^ dk[k + 3]
+            w0 = t0
+            w1 = t1
+            w2 = t2
+            w3 = t3
+            r = r - 1
+        val d0 = _tc_word(tb[1024 + (w0 >> 24)], tb[1024 + ((w3 >> 16) & 255)], tb[1024 + ((w2 >> 8) & 255)], tb[1024 + (w1 & 255)]) ^ dk[0]
+        val d1 = _tc_word(tb[1024 + (w1 >> 24)], tb[1024 + ((w0 >> 16) & 255)], tb[1024 + ((w3 >> 8) & 255)], tb[1024 + (w2 & 255)]) ^ dk[1]
+        val d2 = _tc_word(tb[1024 + (w2 >> 24)], tb[1024 + ((w1 >> 16) & 255)], tb[1024 + ((w0 >> 8) & 255)], tb[1024 + (w3 & 255)]) ^ dk[2]
+        val d3 = _tc_word(tb[1024 + (w3 >> 24)], tb[1024 + ((w2 >> 16) & 255)], tb[1024 + ((w1 >> 8) & 255)], tb[1024 + (w0 & 255)]) ^ dk[3]
+        _tc_push_word(out, d0 ^ p0)
+        _tc_push_word(out, d1 ^ p1)
+        _tc_push_word(out, d2 ^ p2)
+        _tc_push_word(out, d3 ^ p3)
+        p0 = e0
+        p1 = e1
+        p2 = e2
+        p3 = e3
+        off = off + 16
+    _tc_zero(rk)
+    _tc_zero(dk)
+    out
+
+export aes_cbc_encrypt_tbl
+export aes_cbc_decrypt_tbl

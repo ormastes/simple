@@ -1,0 +1,96 @@
+# SQLCipher 4 page codec — decode/encode wall-time budget.
+#
+# Regression guard for the DevHub messenger spec timeouts: every page decode
+# used pure-Simple SHA-512 (HMAC over ~4 KB) and pure-Simple AES-CBC. Three
+# pages must round-trip within an explicit budget (<= 5 s/page, 15 s total).
+
+"""
+## Purpose and audience
+Purpose: bound per-page SQLCipher 4 encode+decode cost.
+Audience: codec maintainers.
+"""
+
+# @req: REQ-CIPHER-PAGE-001 — perf budget for the page codec.
+
+use std.spec.*
+use nogc_sync_mut.database.codec.sqlcipher4_page.{
+    SQLCIPHER4_PAGE_BODY_BYTES,
+    sqlcipher4_encode_page,
+    sqlcipher4_decode_page,
+    sqlcipher4_page_hmac
+}
+use std.common.time_utils.{timestamp_now}
+
+val BUDGET_US_THREE_PAGES: i64 = 15000000
+
+fn _body(page_no: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < SQLCIPHER4_PAGE_BODY_BYTES:
+        out.push(((i * 11 + page_no) & 0xFF).to_u8())
+        i = i + 1
+    out[16] = 0x10u8
+    out[17] = 0x00u8
+    out
+
+fn _key(seed: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 32:
+        out.push(((seed + i) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _iv(seed: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 16:
+        out.push(((seed * 3 + i) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _same(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# Encode+decode page_no; returns true when the body round-trips.
+fn _roundtrip(page_no: i64) -> bool:
+    val body = _body(page_no)
+    match sqlcipher4_encode_page(page_no, body, _iv(page_no), _key(1), _key(160)):
+        case Err(_):
+            false
+        case Ok(page):
+            match sqlcipher4_decode_page(page_no, page, _key(1), _key(160)):
+                case Err(_):
+                    false
+                case Ok(out):
+                    _same(out, body)
+
+describe "SQLCipher 4 page codec - wall-time budget":
+    it "round-trips 3 pages within 15 s total":
+        val t0 = timestamp_now()
+        val ok1 = _roundtrip(1)
+        val t1 = timestamp_now()
+        val ok2 = _roundtrip(2)
+        val t2 = timestamp_now()
+        val ok3 = _roundtrip(3)
+        val t3 = timestamp_now()
+        print "page_us p1={t1 - t0} p2={t2 - t1} p3={t3 - t2}"
+        expect(ok1).to_equal(true)
+        expect(ok2).to_equal(true)
+        expect(ok3).to_equal(true)
+        expect((t3 - t0) < BUDGET_US_THREE_PAGES).to_equal(true)
+
+    it "times the HMAC term alone":
+        val ct = _body(5)
+        val t0 = timestamp_now()
+        val mac = sqlcipher4_page_hmac(ct, _iv(5), 5, _key(160))
+        val t1 = timestamp_now()
+        print "hmac_us={t1 - t0}"
+        expect(mac.len()).to_equal(64)
