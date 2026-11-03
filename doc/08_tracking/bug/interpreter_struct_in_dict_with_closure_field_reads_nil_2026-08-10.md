@@ -1,5 +1,23 @@
 # Interpreter: struct-in-Dict field with a closure-typed sibling field reads back nil
 
+## 2026-11-03 retained public-API detector; no source workaround
+
+Added `test/01_unit/lib/nogc_async_mut/actor_singleton_closure_persistence_spec.spl`
+against the production `make_handlers`, `spawn_actor`, and `get_actor_runtime`
+owners. Separate scenarios retain named-function handlers, lambda-literal
+handlers, and the adjacent empty-handler control. Each records the prior actor
+count, reacquires the singleton after spawning, requires an exact increment,
+and checks the actor's stats by its actual integer id. No local actor double or
+library workaround replaces the struct/Dict/closure boundary.
+
+Execution is **TEST_BLOCKED** until a qualified pure-Simple test runtime is
+available. The tracked Windows `bin/simple.exe` is the Rust seed and was not
+run. This does not re-establish the historical failure on current source and
+does not prove an interpreter fix; status remains OPEN. Resume with:
+`<qualified-selfhosted-runtime> test test/01_unit/lib/nogc_async_mut/actor_singleton_closure_persistence_spec.spl --mode=interpreter`.
+Retain producer/source/backend/runtime identities and all three scenario
+results before choosing the faulty owner or changing the actor library.
+
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
