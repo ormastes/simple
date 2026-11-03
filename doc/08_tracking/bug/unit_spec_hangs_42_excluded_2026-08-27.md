@@ -323,8 +323,7 @@ Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (full 42-spec re-sweep not run).
   (`sync_prop_slots`/`find_prop_slot`, nogc_sync_mut commit 511a02d9b2b) and mutate through
   `self.object_store.<field>` (no COW alias round trip); `create_object` and the gc frozen check
   (`_get_internal_object_property`) no longer scan/copy the whole table.
-- Root cause C: the stray `js_to_string(value)` is removed from the two async families'
-  `_filter_request_headers` (nogc_sync_mut was already fixed).
+- Root cause C stays OPEN: the stray `js_to_string(value)` is retained in the async families (section 5: removal exposes a JIT stack overflow).
 - Budget specs: `test/01_unit/lib/{gc,nogc}_async_mut/js/engine/object_property_write_budget_spec.spl`
   (20k inserts over 2k objects + rewrites + reads; budget 40 s; old code >600 s timeout, new ~13 s).
 - Remaining: the 4096-timer specs run on the nogc_sync_mut family; re-sweep them to close.
