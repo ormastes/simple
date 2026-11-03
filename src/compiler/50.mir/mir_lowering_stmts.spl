@@ -3721,6 +3721,15 @@ impl MirLowering:
         var inferred_known = false
         var inferred_ty = MirType.i64()
         var merged_arm_locals: [LocalId] = []
+        # bug=mir_lower_child_tasks_append_access_violation_2026-10-19:
+        # arms copy into `result` only when they yield a non-unit value. In a
+        # statement-position if (no expected type) one arm commonly ends in a
+        # unit statement (`found = true`) while the other ends in a value
+        # (`out.push(item)`), leaving `result` defined on one edge of the merge
+        # only; native backends then read an undefined operand there. A
+        # dominating default def makes every edge define it; arms overwrite it.
+        if expected_type == nil:
+            b.emit_const(result, MirConstValue.Int(0), MirType.i64())
         b.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
         self.builder = b
 
@@ -3841,6 +3850,12 @@ impl MirLowering:
         val chain_has_else = else_.?
         val result_type = if chain_has_else: self.match_result_mir_type(expected_type) else: MirType.unit()
         val result = b.new_temp(result_type)
+        # bug=mir_lower_child_tasks_append_access_violation_2026-10-19: same as
+        # lower_if -- a statement-position chain with an else whose arms mix a
+        # unit statement and a value-yielding one defines `result` on one merge
+        # edge only. Dominating default def; arms overwrite it.
+        if chain_has_else and expected_type == nil:
+            b.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b
         var result_defined = false
         var inferred_known = false
