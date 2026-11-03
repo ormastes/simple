@@ -79,3 +79,47 @@ llm_caret logic. Tracked here; fix belongs in the compiler, not this app.
 Root-cause and repair the interpreter's `Option<i64>` boxing so `index_of` /
 `to_int` are usable directly. Until then, prefer bare-`i64` scans over the
 Option-returning stdlib forms in hot parsing paths.
+
+
+## Current-owner audit — 2026-11-03 (UNRUN, not a closure)
+
+Source baseline: d591d1df36f4bad9692c8eeab65c1a3a7ba69e6e. The historical
+statement that `index_of` / `to_int` return `Option<i64>` is not the current
+compiler contract. Both are raw `i64`; a search miss is `-1`. `parse_int`
+is the strict optional conversion. Do not introduce an application workaround
+or classify every integer search miss as `None` based on the old title.
+
+Existing production repairs are present:
+
+- `src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl`
+  passes raw `s.index_of(...)` directly to `val_make_int`, without the prior
+  `?? -1` that mistook raw index three for the nil sentinel.
+- `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` remembers
+  non-optional `i64` HIR type for search and `to_int` results, while marking
+  `parse_int` separately as a runtime-valued optional integer.
+- `test/01_unit/compiler/codegen/probe_coalesce_sentinel_collision_jit.spl`
+  already checks the same-module search/coalesce shape. The app's
+  `json_helpers_spec.spl` exercises the actual manual-scan workaround; that
+  is not proof of the compiler method's correctness.
+
+Missing qualification is now specified across an imported function boundary:
+`test/02_integration/compiler/llm_caret_option_i64_owner_spec.spl`, with fixture
+`test/02_integration/compiler/fixtures/llm_caret_option_i64_owner.spl` and authored
+manual `doc/06_spec/02_integration/compiler/llm_caret_option_i64_owner_spec.md`.
+No copied text scanner/parser is used.
+
+- REQ-CARET-TEXT-BOX-001: imported actual search returns 0/3/-1 intact, including
+  non-optional coalescing at the method's module boundary.
+- REQ-CARET-TEXT-BOX-002: imported actual `to_int` returns decimal 7/42 as usable
+  integers, including arithmetic result 49.
+- REQ-CARET-TEXT-BOX-003: genuine optional `parse_int` distinguishes Some(0),
+  Some(3), and absent invalid input with an explicit fallback.
+
+TDD disposition: regressions authored before any proposed repair; runtime RED
+and GREEN are both UNRUN because no admitted source-matched producer was
+available. No speculative production change, bootstrap, or seed fallback.
+Native LLVM, Cranelift and self-hosted interpreter qualification remain required;
+these tests do not claim to qualify the historical cross-module `char.to_i64`
+or composite `extract_json_int` residuals. Keep the canonical shared SDN row
+open, with the compiler boxing/coalescing family as the underlying ownership.
+No new failure has been demonstrated and no coverage percentage is claimed.
