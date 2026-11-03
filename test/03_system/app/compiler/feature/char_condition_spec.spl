@@ -1,0 +1,65 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# W-CHAR-CONDITION: a char used as a condition (ADR-005)
+
+A char has no truthiness. `if c:`, `elif c:`, `while c:`, `not c`, `c and x`
+lower with a recovered HIR diagnostic (mode `warn`, default) or a fatal one
+(SIMPLE_CHAR_CONDITION=error). Bool conditions produce no diagnostic.
+Flip tracked by bug row char_condition_type_check_staged_2026-11-03.
+"""
+
+# @tag: system, compiler, hir
+
+use std.spec
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.exhaustiveness.char_condition.{cc_mode_resolve}
+
+val CODE: text = "W-CHAR-CONDITION"
+
+fn count_diag(body: text, mode: text) -> i64:
+    val src = "fn f(c: char, b: bool) -> i64:\n" + body + "    0\n"
+    val saved_mode = env_get("SIMPLE_CHAR_CONDITION")
+    val saved_profile = env_get("SIMPLE_SAFETY_PROFILE")
+    val _a = env_set("SIMPLE_CHAR_CONDITION", mode)
+    val _b = env_set("SIMPLE_SAFETY_PROFILE", "")
+    val parsed = parse_full_frontend(src, "testdata/char_condition.spl", "char_condition", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/char_condition.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var n = 0
+    for m in hir_lowering.diagnostic_messages:
+        if m.contains(CODE):
+            n = n + 1
+    val _c = env_set("SIMPLE_CHAR_CONDITION", saved_mode)
+    val _d = env_set("SIMPLE_SAFETY_PROFILE", saved_profile)
+    n
+
+describe "char as a condition":
+    it "warns for if":
+        expect(count_diag("    if c:\n        return 1\n", "warn")).to_equal(1)
+    it "warns for elif":
+        expect(count_diag("    if b:\n        return 1\n    elif c:\n        return 2\n", "warn")).to_equal(1)
+    it "warns for while":
+        expect(count_diag("    while c:\n        return 1\n", "warn")).to_equal(1)
+    it "warns for not":
+        expect(count_diag("    val x = not c\n", "warn")).to_equal(1)
+    it "warns for and / or operands":
+        expect(count_diag("    val x = c and b\n", "warn")).to_equal(1)
+        expect(count_diag("    val x = b or c\n", "warn")).to_equal(1)
+    it "warns by default when the mode is unset":
+        expect(count_diag("    if c:\n        return 1\n", "")).to_equal(1)
+    it "is silent for bool conditions and char comparisons":
+        expect(count_diag("    if b:\n        return 1\n", "warn")).to_equal(0)
+        expect(count_diag("    if c == 'a':\n        return 1\n", "warn")).to_equal(0)
+
+describe "char condition staging mode":
+    it "defaults to warn and honours error":
+        expect(cc_mode_resolve("", "")).to_equal("warn")
+        expect(cc_mode_resolve("bogus", "")).to_equal("warn")
+        expect(cc_mode_resolve("error", "")).to_equal("error")
+    it "is forced to error by critical or verified profiles":
+        expect(cc_mode_resolve("warn", "critical")).to_equal("error")
+        expect(cc_mode_resolve("", "verified")).to_equal("error")
