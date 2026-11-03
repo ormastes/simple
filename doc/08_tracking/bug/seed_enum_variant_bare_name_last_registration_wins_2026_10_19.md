@@ -74,3 +74,14 @@ Repro: `bin/simple run test/fixtures/enum_bare_name_prefer_module/main.spl` agai
 built from this commit; expect `alpha` / `gamma` (before: `unknown variant ... 'Alpha' on enum Mode`).
 Residual: MIR lowering (`enum_declares_variant`, `type_registry.lookup(enum_name)`) is still bare-name keyed;
 the module falls back to the interpreter via jit-fallback.
+
+## 2026-11-03 status: fix-implemented-verification-pending (isl-seed-enum)
+
+Stage 1 (7cd222d7585) and stage 2 (8c7d63e2c36) are on release/1.0.0; the
+current-module preference sites are present in interpreter_method/mod.rs:1264,1319
+and interpreter/expr/calls.rs:853,938. No seed build was possible (C: free < 15 GB),
+so the fix is unverified. Row moved from open to fix-implemented-verification-pending.
+Verify: build the seed, `simple run test/fixtures/enum_bare_name_prefer_module/main.spl`
+(expect `alpha` / `gamma`), then `simple test test/03_system/compiler/text_byte_order_enum_collision_spec.spl`.
+Residual: MIR lowering still bare-name keyed; sibling pure-Simple bug
+enum_bare_name_collision_registry_2026-08-01 owned separately.

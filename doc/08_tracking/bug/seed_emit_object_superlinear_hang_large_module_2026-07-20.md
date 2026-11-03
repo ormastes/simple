@@ -1,7 +1,7 @@
 # Seed interp: `native-build --emit-object` never completes IR emission on a large module (superlinear, single-threaded)
 
 - **Date:** 2026-07-20
-- **Status:** open — BLOCKS the rv32 NVMe firmware QEMU gate (no ELF is produced)
+- **Status:** fix-implemented-verification-pending (2026-11-03; see Update) — BLOCKS the rv32 NVMe firmware QEMU gate (no ELF is produced)
 - **Severity:** high (a 479-function module cannot be built at all; three runs
   killed at 1h, 3h, and 6h ceilings with zero object output)
 - **Area:** seed interpreter execution of
@@ -236,3 +236,23 @@ remain correct — this is a throughput/termination defect in interpreted
 emission, not a correctness defect in the emitted code.
 
 **Revalidated 2026-11-02: still plausible because open — BLOCKS the rv32 NVMe firmware QEMU gate (no ELF is produced); no merged fix commit with a passing regression is cited in this doc.**
+
+## Update 2026-11-03: dominant-cost candidate fixed (verification pending)
+
+`133e0c0241e` replaced `mir_module_functions_sorted` / `mir_module_statics_sorted`'s
+O(N^2) selection sort, which swapped whole `MirFunction` values (479 fns ->
+~115k whole-struct swaps per module, each a deep clone under the seed), with a
+stable merge sort over index positions (`mir_sorted_positions`). It also added
+`SIMPLE_EMIT_TRACE=<file>` per-function file-append timing.
+
+Budget spec (explicit numbers):
+`test/01_unit/compiler/50.mir/mir_sorted_positions_spec.spl` -
+"mir_sorted_positions scaling budget": 4x input must cost < 8x time
+(linear 4x, N log N ~4.8x, quadratic 16x) and 4000 entries must sort in < 30 s.
+Passes (4/4) on the seed.
+
+Verification pending (needs a quiet host, ~10+ min): rerun the SMP NVMe build
+from the Resume recipe above with `SIMPLE_EMIT_TRACE=<file>`; success = a
+`.ll`/ELF is produced. If emission still stalls, the trace names the function
+and phase to look at next. Not claimed via bug-claim.shs: the row lives in the
+`bugs` table and the script reports "unknown bug" for it.
