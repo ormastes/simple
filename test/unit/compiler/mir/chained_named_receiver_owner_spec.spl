@@ -1,0 +1,43 @@
+# mir_chained_named_receiver_owner_2026_10_10: a chained call on a named
+# receiver must keep the declared owner (ByteSpan) of the inner call's result.
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.MirLowering
+use compiler.mir._MirLowering.module_lowering.*
+
+fn chained_owner_calls(function: MirFunction) -> [text]:
+    var names: [text] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _): names.push(name)
+                        case _: ()
+                case _: ()
+    names
+
+describe "chained named receiver owner":
+    it "dispatches slice and equals to the declared struct methods":
+        val source = "struct Sp:\n    data: [u8]\n    off: i64\n    span_len: i64\n\nimpl Sp:\n    fn slice(start: i64, length: i64) -> Sp:\n        var want = length\n        Sp(data: self.data, off: self.off + start, span_len: want)\n    fn equals(other: Sp) -> bool:\n        self.span_len == other.span_len\n    fn starts_with(prefix: Sp) -> bool:\n        if prefix.span_len > self.span_len:\n            return false\n        self.slice(0, prefix.span_len).equals(prefix)\n"
+        val ast = parse_full_frontend(source, "chain.spl", "chain.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("chain.spl")
+        val hir = hir_lowering.lower_module(ast)
+        var lowering = MirLowering.new(hir.symbols)
+        val module = lowering.lower_module(hir)
+        expect(lowering.errors.len()).to_equal(0)
+        var checked = 0
+        for function in module.functions.values():
+            if function.name.ends_with("starts_with"):
+                checked = checked + 1
+                val calls = chained_owner_calls(function)
+                print "CALLS {calls}"
+                expect(calls.contains("chain.Sp.slice")).to_equal(true)
+                expect(calls.contains("chain.Sp.equals")).to_equal(true)
+                expect(calls.contains("spl_str_slice")).to_equal(false)
+        expect(checked).to_equal(1)
