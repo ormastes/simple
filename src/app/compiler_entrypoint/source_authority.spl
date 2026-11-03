@@ -6,7 +6,8 @@ use app.io.mod.{file_read_regular_no_follow_bounded}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_traced_cost_v1,
     compiler_inventory_admit_extra_roots_v1, compiler_inventory_cursor_present_v1}
 use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
-use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow, is_dir}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
 use app.compiler_entrypoint.inventory_trace.{inventory_trace_cost_create_v1, inventory_trace_cost_emit_v1}
 use std.scv.compile_cost_v1.{scv_cost_now_v1, scv_cost_elapsed_v1}
 use app.compiler_entrypoint.inventory_families.{compiler_inventory_family_v1}
@@ -203,6 +204,8 @@ fn compiler_source_authority_validate_unscoped_v1(
 fn compiler_source_authority_acquire_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool
 ) -> CompilerSourceAuthorityV1:
+    val git_reason = compiler_source_authority_root_git_reason_v1(root)
+    if git_reason != "": return compiler_source_authority_invalid_v1(git_reason)
     val resolved = compiler_source_authority_selectors_v1(root, source_roots)
     if resolved.is_err(): return compiler_source_authority_invalid_v1(resolved.unwrap_err())
     val selectors = resolved.unwrap()
@@ -268,6 +271,16 @@ fn compiler_source_authority_acquire_v1(
         refresh.inventory_digest, refresh.inventory_generation, false)
     inventory_trace_cost_emit_v1(trace_token, cost)
     result
+
+pub fn compiler_source_authority_root_git_reason_v1(root: text) -> text:
+    # The inventory is listed with `git ls-files`, so the admission root must be
+    # a git repository (a worktree has a `.git` FILE, a clone a `.git` dir).
+    # Filesystem inventory of a non-git root is not supported; say so clearly
+    # instead of failing later with an opaque listing error.
+    if is_dir(root + "/.git") or file_exists(root + "/.git"): return ""
+    "source-inventory-root-not-git: admission root '" + root +
+        "' is not a git repository; run `git init` and commit the sources there, " +
+        "or build from a git checkout/worktree"
 
 pub fn compiler_source_authority_uncovered_root_v1(
     root: text, source_roots: [text], snapshot_root: text
