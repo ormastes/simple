@@ -229,6 +229,41 @@ fn project_mut<'a>(root: &'a mut Value, projections: &[Projection]) -> Option<&'
     Some(slot)
 }
 
+/// Write `value` at the end of `projections`, starting from `slot`.
+///
+/// The COW hops (`Object`, `Array`, `Dict`, tuples) are `step_mut` +
+/// `store_last`, unchanged. A `Value::ClassInstance` hop is the reference
+/// carrier (`SIMPLE_INTERP_CLASS_REF=1`): its field lives behind an `RwLock`,
+/// so no `&mut Value` can be handed down the path. The field value is moved out
+/// (`replace_field`), the nested write runs with NO lock held, and the value
+/// is put back. Holding the write lock across the recursion instead would
+/// deadlock on any path that revisits the same instance (`a.self_ref.v = 1`,
+/// `a.items[0].v = 1` with `items[0] == a`), which cyclic class graphs do.
+/// A nested `ClassInstance` is shared through its Arc, so the write lands in
+/// the shared cell and the put-back stores the same Arc; a nested COW
+/// container is uniquely held while moved out, so `Arc::make_mut` mutates it
+/// in place rather than deep-copying.
+fn write_through(slot: &mut Value, projections: &[Projection], value: Value) -> bool {
+    let Some((head, rest)) = projections.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        return store_last(slot, head, value);
+    }
+    if let (Value::ClassInstance(instance), Projection::Field(name)) = (&*slot, head) {
+        let Some(mut inner) = instance.replace_field(name, Value::Nil) else {
+            return false;
+        };
+        let written = write_through(&mut inner, rest, value);
+        instance.replace_field(name, inner);
+        return written;
+    }
+    match step_mut(slot, head) {
+        Some(next) => write_through(next, rest, value),
+        None => false,
+    }
+}
+
 /// Store `value` at the final projection of `container`.
 ///
 /// The last step is an *insert*, not a navigation: assigning a field that does
@@ -284,6 +319,13 @@ fn store_last(container: &mut Value, projection: &Projection, value: Value) -> b
                 .insert(key.to_key_string(), Value::wrap_dict_entry(key, value));
             true
         }
+        // Reference carrier: the write lands in the shared cell, so every
+        // holder of the instance (`val e = d["k"]`, the dict entry, a list
+        // element) observes it — the JIT's class semantics.
+        (Value::ClassInstance(instance), Projection::Field(name)) => {
+            instance.set_field(name.clone(), value);
+            true
+        }
         (other, _) => {
             classinstance_tripwire("place::store_last", other);
             false
@@ -299,19 +341,16 @@ fn store_last(container: &mut Value, projection: &Projection, value: Value) -> b
 /// place after all" and fall back to their previous behavior rather than
 /// erroring, so this never turns a previously-working program into a failure.
 pub(crate) fn write_place(env: &mut Env, place: &Place, value: Value) -> bool {
-    let Some((last, parents)) = place.projections.split_last() else {
+    if place.projections.is_empty() {
         // No projections: a bare variable write.
         env.insert(place.root.clone(), value);
         sync_module_global(env, &place.root);
         return true;
-    };
+    }
     let Some(root_slot) = env.get_mut(&place.root) else {
         return false;
     };
-    let Some(container) = project_mut(root_slot, parents) else {
-        return false;
-    };
-    if !store_last(container, last, value) {
+    if !write_through(root_slot, &place.projections, value) {
         return false;
     }
     sync_module_global(env, &place.root);
@@ -366,12 +405,10 @@ fn sync_module_global(env: &mut Env, root: &str) {
 /// in that shape.
 pub(crate) fn updated_root(env: &Env, place: &Place, value: Value) -> Option<Value> {
     let mut root = env.get(&place.root)?.clone();
-    let (last, parents) = place.projections.split_last()?;
-    let container = project_mut(&mut root, parents)?;
-    if !store_last(container, last, value) {
+    if place.projections.is_empty() {
         return None;
     }
-    Some(root)
+    write_through(&mut root, &place.projections, value).then_some(root)
 }
 
 /// Borrow the storage the place designates, **without** touching ownership.
@@ -454,6 +491,9 @@ fn step_exists(slot: &Value, projection: &Projection) -> bool {
         (Value::Array(items), Projection::Index(index)) if items.is_packed() => {
             normalize_index(items.len(), index).is_some()
         }
+        // The reference carrier's fields sit behind a lock, so there is no
+        // reference to hand out; existence is answered by a read.
+        (Value::ClassInstance(instance), Projection::Field(name)) => instance.field(name).is_some(),
         _ => step_ref(slot, projection).is_some(),
     }
 }
@@ -568,6 +608,89 @@ mod tests {
                 other => panic!("not an object: {:?}", other),
             },
             other => panic!("not an array: {:?}", other),
+        }
+    }
+
+    fn class_instance(class: &str, fields: Vec<(&str, Value)>) -> (Arc<crate::value::ClassInstance>, Value) {
+        let inst = Arc::new(crate::value::ClassInstance::new(
+            class.to_string(),
+            fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        ));
+        (Arc::clone(&inst), Value::ClassInstance(inst))
+    }
+
+    /// `d["k"].v = 2` on the reference carrier: the write lands in the SHARED
+    /// cell, so a binding taken earlier (`val e = d["k"]`) sees it too.
+    /// Bug: interp_dict_class_value_index_mutation_loss_2026-11-03.
+    #[test]
+    fn write_through_dict_value_class_instance_is_shared() {
+        let (inst, value) = class_instance("Inner", vec![("v", Value::Int(0))]);
+        let dict: HashMap<String, Value> = [("k".to_string(), value)].into_iter().collect();
+        let mut env = Env::new();
+        env.insert("d".into(), Value::Dict(Arc::new(dict)));
+
+        let place = Place {
+            root: "d".into(),
+            projections: vec![Projection::Index(Value::text("k")), Projection::Field("v".into())],
+        };
+        assert!(place_is_live(&env, &place), "an existing class field is a live leaf");
+        assert!(write_place(&mut env, &place, Value::Int(2)));
+        assert_eq!(inst.field("v"), Some(Value::Int(2)), "the earlier holder observes the write");
+        match env.get("d").unwrap() {
+            Value::Dict(entries) => match entries.get("k").unwrap() {
+                Value::ClassInstance(stored) => assert!(Arc::ptr_eq(stored, &inst), "entry identity kept"),
+                other => panic!("not a class instance: {:?}", other),
+            },
+            other => panic!("not a dict: {:?}", other),
+        }
+    }
+
+    /// A ClassInstance as an INTERMEDIATE hop (`o.d["k"].v = 2`, `o.items[0].n = 9`):
+    /// the COW container inside it is written in place, not deep-copied.
+    #[test]
+    fn write_through_class_instance_hop_into_cow_container() {
+        let elem = object("Elem", vec![("n", Value::Int(1))]);
+        let (inst, holder) = class_instance("Holder", vec![("items", Value::array(vec![elem]))]);
+        let mut env = Env::new();
+        env.insert("h".into(), holder);
+
+        let place = Place {
+            root: "h".into(),
+            projections: vec![
+                Projection::Field("items".into()),
+                Projection::Index(Value::Int(0)),
+                Projection::Field("n".into()),
+            ],
+        };
+        assert!(write_place(&mut env, &place, Value::Int(99)));
+        match inst.field("items") {
+            Some(Value::Array(values)) => match &values[0] {
+                Value::Object { fields, .. } => assert_eq!(fields.get("n").unwrap().clone(), Value::Int(99)),
+                other => panic!("not an object: {:?}", other),
+            },
+            other => panic!("not an array: {:?}", other),
+        }
+    }
+
+    /// A path that revisits the same instance (`a.me.v = 7` with `a.me == a`)
+    /// must complete instead of deadlocking on the instance's own lock.
+    #[test]
+    fn write_through_cyclic_class_instance_does_not_deadlock() {
+        let (inst, value) = class_instance("Node", vec![("v", Value::Int(0)), ("me", Value::Nil)]);
+        inst.set_field("me".into(), Value::ClassInstance(Arc::clone(&inst)));
+        let mut env = Env::new();
+        env.insert("a".into(), value);
+
+        let place = Place {
+            root: "a".into(),
+            projections: vec![Projection::Field("me".into()), Projection::Field("v".into())],
+        };
+        // Holding `a`'s write lock across the nested hop would block here forever.
+        assert!(write_place(&mut env, &place, Value::Int(7)));
+        assert_eq!(inst.field("v"), Some(Value::Int(7)));
+        match inst.field("me") {
+            Some(Value::ClassInstance(me)) => assert!(Arc::ptr_eq(&me, &inst), "self link restored"),
+            other => panic!("self link lost: {:?}", other),
         }
     }
 
