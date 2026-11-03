@@ -1,0 +1,92 @@
+# Non-atomic developer preview: freeze exact bytes once, detect observable races.
+# No claim of a simultaneous repository snapshot or hostile-filesystem confinement.
+use std.common.traceability.model.*
+use std.common.traceability.schema.{trace_path_valid}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
+    file_is_regular_no_follow, file_size_raw, file_modified_time}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use app.io.minimal_runtime_ops.{cwd, time_now_unix_micros}
+use app.traceability.snapshot.query_scope_v1.{trace_query_closure_paths_v1}
+
+fn worktree_path_observed_v1(path: text) -> bool:
+    if not trace_path_valid(path): return false
+    val parts = path.split("/")
+    var prefix = ""
+    for index in 0..(parts.len() - 1):
+        prefix = if prefix == "": parts[index] else: prefix + "/" + parts[index]
+        if not dir_is_real_no_follow(prefix): return false
+    file_is_regular_no_follow(path)
+
+fn worktree_read_query_v1(path: text, remaining: i64) -> Result<(SnapshotArtifact, i64, i64), text>:
+    if remaining < 0 or not worktree_path_observed_v1(path):
+        return Err("TRACE-WORKTREE-CAPTURE: select real repository-relative files without symlinks")
+    val size = file_size_raw(path)
+    val modified = file_modified_time(path)
+    if size < 0 or modified <= 0 or size > 1048576 or size > remaining:
+        return Err("TRACE-WORKTREE-CAPTURE: metadata unavailable or file/scope byte budget exceeded")
+    # One byte of read capacity also admits an empty file on providers which
+    # reject a zero allocation. The exact expected byte count is checked below.
+    val content = file_read_regular_no_follow_bounded(path, if size == 0: 1 else: size)?
+    if content.bytes().len() != size or not worktree_path_observed_v1(path) or
+        file_size_raw(path) != size or file_modified_time(path) != modified:
+        return Err("TRACE-WORKTREE-CHANGED: selected file changed while capturing")
+    Ok((SnapshotArtifact(path: path, blob_id: "sha256:" + sha256_text(content),
+        content: content, visibility: "selected_content"), size, modified))
+
+pub fn trace_worktree_query_inputs_v1(declarations: [text], extra: [text]) -> Result<SnapshotInput, text>:
+    if declarations.len() == 0 or declarations.len() > 32 or extra.len() > 128:
+        return Err("TRACE-WORKTREE-CAPTURE: invalid selected declaration scope")
+    val root = cwd()
+    if root == "" or not dir_is_real_no_follow(root):
+        return Err("TRACE-WORKTREE-CAPTURE: working directory unavailable or symbolic")
+    val repository = "repository:local:" + sha256_text(root)
+    val started = time_now_unix_micros()
+    val provisional = SnapshotSubject(repository_id: repository, snapshot_id: "worktree:capture-pending",
+        kind: "worktree_preview", revision_id: "", tree_id: "capture-pending", object_format: "sha256")
+    var artifacts: [SnapshotArtifact] = []
+    var sizes: Dict<text, i64> = {}
+    var modified: Dict<text, i64> = {}
+    var total = 0
+    for path in declarations:
+        if sizes.contains_key(path): return Err("TRACE-WORKTREE-CAPTURE: duplicate declaration")
+        if time_now_unix_micros() - started > 30000000:
+            return Err("TRACE-WORKTREE-CAPTURE: capture time budget exhausted")
+        val (artifact, size, stamp) = worktree_read_query_v1(path, 2097152 - total)?
+        artifacts.push(artifact)
+        sizes[path] = size
+        modified[path] = stamp
+        total = total + size
+    val initial = SnapshotInput(subject: provisional, artifacts: artifacts, complete: true)
+    val paths = trace_query_closure_paths_v1(initial, declarations, extra)?
+    for path in paths:
+        if sizes.contains_key(path): continue
+        if time_now_unix_micros() - started > 30000000:
+            return Err("TRACE-WORKTREE-CAPTURE: capture time budget exhausted")
+        val (artifact, size, stamp) = worktree_read_query_v1(path, 2097152 - total)?
+        artifacts.push(artifact)
+        sizes[path] = size
+        modified[path] = stamp
+        total = total + size
+    var by_path: Dict<text, SnapshotArtifact> = {}
+    for artifact in artifacts: by_path[artifact.path] = artifact
+    var ordered: [SnapshotArtifact] = []
+    var rows: [SdnValue] = []
+    for path in paths:
+        if not worktree_path_observed_v1(path) or file_size_raw(path) != sizes[path] or file_modified_time(path) != modified[path]:
+            return Err("TRACE-WORKTREE-CHANGED: selected inventory changed before capture completed")
+        ordered.push(by_path[path])
+        rows.push(SdnValue.Dict({"path": SdnValue.String(path),
+            "content_sha256": SdnValue.String(by_path[path].blob_id)}))
+    val now = time_now_unix_micros()
+    if cwd() != root or not dir_is_real_no_follow(root) or now < started or now - started > 30000000:
+        return Err("TRACE-WORKTREE-CAPTURE: capture clock or time budget invalid")
+    val identity = sha256_text(sdn_encode_canonical(SdnValue.Dict({
+        "domain": SdnValue.String("simple.trace.worktree-preview/v1"),
+        "repository": SdnValue.String(repository), "files": SdnValue.Array(rows)})))
+    Ok(SnapshotInput(subject: SnapshotSubject(repository_id: repository,
+        snapshot_id: "worktree:sha256:" + identity, kind: "worktree_preview",
+        revision_id: "", tree_id: "content:sha256:" + identity, object_format: "sha256"),
+        artifacts: ordered, complete: true))
