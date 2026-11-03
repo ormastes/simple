@@ -1,0 +1,90 @@
+"""
+# Web renderer step budget is load-independent
+
+Regression for doc/08_tracking/bug/web_paint_wallclock_budget_flake_2026-07-31.md.
+The render budget used to be a pure wall-clock deadline, so a trivial page
+degraded (blank pixels) whenever the host was loaded. The primary budget is now
+a deterministic step count derived from budget_ms; wall-clock is only a generous
+safety ceiling. These examples drive the budget with injected clocks so the
+verdict cannot depend on real host load.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{simple_web_layout_set_budget_clock, simple_web_layout_reset_budget_clock}
+use lib.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_result, SimpleWebLayoutPixelResult}
+
+val W: i32 = 160
+val H: i32 = 120
+
+# Simulates a heavily loaded host: every clock read costs 500 ms of wall time.
+class LoadedClock:
+    var t: i64
+
+impl FrameClock for LoadedClock:
+    me now_micros() -> i64:
+        self.t = self.t + 500000
+        self.t
+
+    me sleep_until(deadline_us: i64):
+        self.t = deadline_us
+
+# A clock that never advances: wall-clock expiry is impossible, so only the
+# deterministic step budget can stop a render.
+class FrozenClock:
+    var t: i64
+
+impl FrameClock for FrozenClock:
+    me now_micros() -> i64:
+        self.t
+
+    me sleep_until(deadline_us: i64):
+        self.t = deadline_us
+
+fn _style_heavy_page(n: i32) -> text:
+    var s = "<html><body style=\"margin:0\">"
+    var k = 0
+    while k < n:
+        s = s + "<div style=\"color:#101010;background:#eef2ff;border:1px solid #334155;padding:2px;margin:1px;font-size:12px\">n</div>"
+        k = k + 1
+    s + "</body></html>"
+
+val SMALL_PAGE: text = "<html><body style=\"margin:0\"><div style=\"background:#ff0000;width:40px;height:40px\"></div><p style=\"color:#101010;font-size:16px\">ok</p></body></html>"
+
+fn _loaded(html: text) -> SimpleWebLayoutPixelResult:
+    simple_web_layout_set_budget_clock(LoadedClock(t: 1000000))
+    val r = simple_web_layout_render_html_software_result(html, W, H, 10000)
+    simple_web_layout_reset_budget_clock()
+    r
+
+fn _frozen(html: text, budget_ms: i64) -> SimpleWebLayoutPixelResult:
+    simple_web_layout_set_budget_clock(FrozenClock(t: 1000000))
+    val r = simple_web_layout_render_html_software_result(html, W, H, budget_ms)
+    simple_web_layout_reset_budget_clock()
+    r
+
+describe "web renderer step budget":
+    it "does not degrade a trivial page when the host is heavily loaded":
+        # @req REQ-SSPEC-LIB
+        step("Render a two-box page with a clock that costs 500 ms per read")
+        val r = _loaded(SMALL_PAGE)
+        expect(r.render_degraded).to_equal(false)
+        expect(r.degrade_reason).to_equal("")
+
+    it "gives the same verdict for the same page under different load":
+        # @req REQ-SSPEC-LIB
+        step("Loaded and frozen clocks agree on a trivial page")
+        val a = _loaded(SMALL_PAGE)
+        val b = _frozen(SMALL_PAGE, 10000)
+        expect(a.render_degraded).to_equal(b.render_degraded)
+        expect(a.pixels.len()).to_equal(b.pixels.len())
+
+    it "still bounds a hostile page by work even when the clock never advances":
+        # @req REQ-SSPEC-LIB
+        step("A 1 ms budget on a style-heavy page trips the step budget")
+        val r = _frozen(_style_heavy_page(200), 1)
+        expect(r.render_degraded).to_equal(true)
+        expect(r.degrade_reason == "").to_equal(false)

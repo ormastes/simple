@@ -69,3 +69,18 @@ Found by: unified 2D campaign, web-gap lane; confirmed independently by the
 coordinator (fail 2/6 then pass 6/6 with no code change).
 
 **Revalidated 2026-11-02: still plausible because OPEN — not fixed, out of scope of the campaign that found it; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 — fixed: deterministic step budget
+
+`_web_budget_expired()` (`simple_web_html_layout_renderer_foundation.spl`) now
+counts every guard check as one step; a render may spend
+`budget_ms * WEB_RENDER_STEPS_PER_MS` (1000/ms, so the 10 s default = 10M steps)
+before it degrades. The wall-clock deadline survives only as a safety ceiling at
+`WEB_RENDER_WALLCLOCK_CEILING_FACTOR` (10x) the budget, so host load no longer
+decides the verdict. Regression:
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_step_budget_determinism_spec.spl`
+(loaded clock 500 ms/read -> not degraded; frozen clock + 1 ms on a hostile page
+-> degraded by steps). Failed 3/3 before, 3/3 after. The existing budget specs
+(site_family 4/4, hardening 4/4, cpu_oracle_budget_exhaustion 7/7) still pass.
+`browser_renderer_web_gap_close_spec.spl` fails the same 3 filter examples
+before and after: that's a deterministic filter gap, not this flake.
