@@ -116,3 +116,11 @@ Repro: `cd src/compiler_rust && cargo test -p simple-compiler --lib leaf_edit_re
 (prints `[iface-cache-budget] cold/nochange/leaf_edit` seconds). Sibling search:
 no other whole-project term remains in `object_cache_key` (content, backend, opt,
 cpu, simd, compiler fp, lane only).
+
+## 2026-11-03 triage: status fix-implemented-verification-pending
+
+Fix = 115692d2b4e + a0bc4efc782 (per-module InterfaceSliceIndex; `layout` no
+longer in any object key). Budget spec = f4a432c56d9
+`leaf_edit_recompile_count_and_time_budget` (no-edit rebuild 0 compiled; leaf
+edit <= 1 compiled; warm builds <= 30 s). Spec not yet executed (seed cargo test
+build deferred); run the Repro command above and record numbers, then close.

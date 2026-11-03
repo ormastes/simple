@@ -36,5 +36,3 @@ these modules; all native execution is UNRUN in this checkpoint. No frozen
 source916be, active build, or previous failure receipt was modified.
 
 **Revalidated 2026-11-02: still plausible because source repair authored; current-producer compilation UNRUN; no merged fix commit with a passing regression is cited in this doc.**
-
-**Revalidated 2026-11-03: fix-implemented-verification-pending.** Owner imports landed in fa36e345f43 (ancestor of release/1.0.0): gui_shell.spl lines 16-21, gui_sdl_bridge.spl line 36 (`char_from_code`), and `draw_ir_rect_clipped` in the paint_layout draw_ir import (line 34). Verify: rebuild the stage3/Phase 4 full CLI and confirm the 14 unresolved-owner HIR diagnostics for these 3 modules are gone. Source-level premise unchanged under current policy (explicit imports, no erased-generic/nil/Any dependence).
