@@ -396,3 +396,17 @@ Retained evidence: `build/wm_lane_evidence/run_2026-08-09_0324_cssvar_receipt/`
 Out of lane: needs a live SimpleOS x86_64 WM guest render + QEMU evidence to verify CSS var() resolution. No change made.
 
 **Revalidated 2026-11-02: still plausible because the report title (Guest renders theme sheet with var() UNRESOLVED) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 — host pin on the full current sheet; still guest-only
+
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/css_var_aetheric_theme_sheet_host_spec.spl`
+feeds the full current `aetheric_dark_theme_render_snapshot().composed_css` (the
+sheet the guest window renderer uses) to the pure-Simple resolver on the host,
+on a `.wm-window` node. It passes 2/2: `background_color` = `0xCC1F1F21`
+(`--app-surface`, not the guest's `0x14FFFFFF`), and the backdrop has
+`blur(30px)` with no `var(` left. So the sheet and the resolver logic are
+correct on identical input. The defect is still the guest-only `props=0`
+divergence inside `_css_collect_custom_props`
+(`simple_web_html_layout_renderer_core_css_rules.spl:32`). Next step is still a
+guest lane re-run with the receipts. Stays OPEN until the guest admits the
+window material.
