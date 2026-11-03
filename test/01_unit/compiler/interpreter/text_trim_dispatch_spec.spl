@@ -1,0 +1,50 @@
+# Direct coverage of the live core interpreter, independent of the test runner's
+# own execution engine. The doctest discovery workaround is intentionally kept.
+# Bug: phase1_docstring_trim_start_dispatch_2026_10_12
+# @cover src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl
+use std.spec.*
+use std.spec.step
+use compiler.core.interpreter.mod.{core_interpret_expr}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_get_text, val_is_text}
+
+fn expect_core_trim(source: text, expected: text):
+    val result = core_interpret_expr(source)
+    expect(eval_has_error()).to_equal(false)
+    expect(val_is_text(result)).to_equal(true)
+    expect(val_get_text(result)).to_equal(expected)
+
+describe "core interpreter one-sided text trimming":
+    it "dispatches the doctest indentation trim without removing trailing bytes":
+        step("Reproduce the exact failure")
+        expect_core_trim("\"    print 7  \".trim_start()", "print 7  ")
+        expect_core_trim("\"  repeated repeated  \".trim_start()", "repeated repeated  ")
+
+    it "preserves the opposite boundary for right trimming and aliases":
+        step("Exercise the repaired owner")
+        expect_core_trim("\"  payload  \".trim_end()", "  payload")
+        expect_core_trim("\"  payload  \".trim_left()", "payload  ")
+        expect_core_trim("\"  payload  \".trim_right()", "  payload")
+
+    it "handles empty and whitespace-only text without returning the receiver":
+        step("Reject the adjacent regression")
+        expect_core_trim("\"\".trim_start()", "")
+        expect_core_trim("\"\".trim_end()", "")
+        expect_core_trim("\" \\t\\r\\n\".trim_start()", "")
+        expect_core_trim("\" \\t\\r\\n\".trim_end()", "")
+
+    it "retains embedded whitespace and Unicode payload on either boundary":
+        step("Reject the adjacent regression")
+        expect_core_trim("\"\\t café 中 \\t\".trim_start()", "café 中 \t")
+        expect_core_trim("\"\\t café 中 \\t\".trim_end()", "\t café 中")
+        expect_core_trim("\"café 中\".trim_start()", "café 中")
+        expect_core_trim("\"café 中\".trim_end()", "café 中")
+
+    it "keeps two-sided trim behavior and rejects an unknown trim spelling":
+        step("Reject the adjacent regression")
+        expect_core_trim("\"  payload  \".trim()", "payload")
+        expect_core_trim("\"  payload  \".strip()", "payload")
+        val rejected = core_interpret_expr("\"  payload  \".trim_unknown()")
+        expect(rejected).to_equal(-1)
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error()).to_contain("trim_unknown")
