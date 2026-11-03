@@ -73,3 +73,16 @@ Workaround commit: the release.yml change that introduces the marker on
   change. The provenance file must then say `stage1`.
 
 **Revalidated 2026-11-02: still plausible because OPEN. A workaround is active in .github/workflows/release.yml; no merged fix commit with a passing regression is cited in this doc.**
+
+## Windows stage1 unresolved symbol — 2026-11-03 trace
+
+The Windows stage1 abort `called unresolved symbol rt_secure_temp_dir_set_parent`
+came from the boxed secure-temp adapters being defined only in
+`runtime_native.c` (full-C owner). `e8186daac75` (2026-10-24, "provide boxed
+secure-temp adapters in bootstrap archive") moved them into
+`runtime_secure_temp_split_private.h`, which `runtime_secure_staging.c` (the
+bootstrap archive owner, built on Windows) now includes, so the symbol is
+defined in the Windows stage1 link on release/1.0.0. Covered by
+`src/runtime/test/rt_secure_temp_split_native_all_selfcheck.c`. Still needed:
+a release.yml Windows rerun to confirm, then drop the Windows seed fallback.
+The Linux HIR-worker SIGSEGV half remains open.
