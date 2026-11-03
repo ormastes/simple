@@ -79,3 +79,49 @@ describe "MirLowering transient owner promotion roots":
     it "promotes the four roots that were freed by the scoped prescan":
         for field in ["rti", "rti_last_error", "runtime_value_extern_abis", "erased_callback_record_bindings"]:
             expect(owner_source.contains("promote_and_release_transient_owner_roots([self.{field}])")).to_equal(true)
+
+# Regression for doc/08_tracking/bug/erased_generic_body_mir_transient_scope_ice_2026_11_01.md:
+# `self.rti` is a class created with the lowering (older scope than the prescan
+# transient scope), so promoting it as ONE root does not make its children
+# traversable. The Dict children that the scoped prescan_module_functions_v1
+# fills with ReturnTypeRow/HirType values must each be enumerated, exactly as
+# SymbolTable / MirBuilder / MirModule children are.
+fn return_type_table_class_fields(source: text) -> [text]:
+    var fields: [text] = []
+    var in_class = false
+    for line in source.split("\n"):
+        if line.starts_with("class ReturnTypeInterfaceTable:"):
+            in_class = true
+            continue
+        if not in_class:
+            continue
+        if line.len() > 0 and not line.starts_with(" "):
+            break
+        if not line.starts_with("    ") or line.starts_with("     "):
+            continue
+        val body = line.substring(4, line.len())
+        if body.starts_with("#") or body.starts_with("fn ") or body.starts_with("me "):
+            continue
+        val colon = body.index_of(":")
+        if colon <= 0:
+            continue
+        fields = fields.push(body.substring(0, colon))
+    fields
+
+describe "MirLowering transient owner promotion of rti children":
+    val rti_source = rt_file_read_text("src/compiler/20.hir/return_type_interface_v1.spl") ?? ""
+    val owner_file2 = rt_file_read_text("src/compiler/50.mir/_MirLowering/transient_owner.spl") ?? ""
+    val owner_source2 = promote_transient_owner_body(owner_file2)
+
+    it "finds the ReturnTypeInterfaceTable fields":
+        val fields = return_type_table_class_fields(rti_source)
+        expect(fields.contains("rows_by_module")).to_equal(true)
+        expect(fields.contains("rows_by_key")).to_equal(true)
+        expect(fields.contains("aliases")).to_equal(true)
+
+    it "promotes every ReturnTypeInterfaceTable field as a root":
+        var missing: [text] = []
+        for field in return_type_table_class_fields(rti_source):
+            if not owner_source2.contains("promote_and_release_transient_owner_roots([self.rti.{field}])"):
+                missing = missing.push(field)
+        expect(missing).to_equal([])

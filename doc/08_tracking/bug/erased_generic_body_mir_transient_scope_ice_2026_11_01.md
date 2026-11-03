@@ -1,6 +1,6 @@
 # Erased generic body ICE: invalid HirType kind carrier after MIR prescan transient scopes (2026-11-01)
 
-status: OPEN (P1) — self-hosted stage2 built from release/1.0.0 HEAD cannot
+status: FIX-IMPLEMENTED-VERIFICATION-PENDING (P1) — needs a stage3/stage2 rebuild to verify; self-hosted stage2 built from release/1.0.0 HEAD cannot
 native-build generic library code that the erased-body model now emits
 
 ## Symptom
@@ -86,3 +86,28 @@ template bodies again.
 
 Tracked by: `test/01_unit/compiler/generics/erased_generic_fixture_spec.spl`
 ("sorts three record layouts through array_sort_by") on the self-hosted binary.
+
+## Fix (2026-11-02, work/p1-erased-generic-ice)
+
+Root cause: `MirLowering.promote_transient_owner`
+(`src/compiler/50.mir/_MirLowering/transient_owner.spl`) promoted `self.rti` as
+ONE root. The `ReturnTypeInterfaceTable` is created with the lowering, i.e. in
+an older scope than the #5709 prescan transient scope, so its children are not
+traversable through the table root (the same reason SymbolTable, MirBuilder,
+MirModule and MirTargetContext children are enumerated individually).
+`prescan_module_functions_v1` fills `rti.rows_by_module` / `rows_by_key` /
+`aliases` with `ReturnTypeRow` values (each holding HirType trees) inside the
+scope, so they were freed at scope end and read dangling when the erased
+generic body `array_rotate_left<T>` was lowered (`caller_disc=-2`).
+The earlier "ruled out" attempt added only `rti` itself, which is why it did not
+change the outcome.
+
+Change: enumerate `self.rti.rows_by_module`, `self.rti.rows_by_key`,
+`self.rti.aliases` as roots; also the three `vm_*` MirLowering fields the
+existing field gate flagged (`vm_mode`, `vm_stmt_match_keys`, `vm_reported`).
+Spec: `test/01_unit/compiler/mir/transient_owner_promotes_every_field_spec.spl`
+(source-shape gate; failed before, 6/6 after, on `bin/simple-interp`).
+
+Verification pending (needs a rebuilt stage2): run the Reproduce steps above;
+expect `PASS production array_sort_by three record layouts ...` with no
+`[mir-type-invariant]` line.
