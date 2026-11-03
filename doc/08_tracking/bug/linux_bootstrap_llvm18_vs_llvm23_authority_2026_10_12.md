@@ -13,3 +13,7 @@ Other platforms remain unqualified: nativeMac multiplatform still llvm@18/LLVM_S
 Official archive Polly/PollyISL and static LLVM availability is unexecuted. Installer requires those archive-owned libraries before publication; no floating apt Polly may be mixed. Native Mac multiplatform and cross-platform LLVM18 contracts remain outside this Linux candidate.
 
 **Revalidated 2026-11-02: still plausible because OPEN; source and focused fixtures qualified, real installation/bootstrap pending; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolution (2026-11-03)
+
+2026-11-03: workflow now installs the exact LLVM 23.1.1 archive via scripts/setup/install-linux-phase23-llvm23.shs + pin-linux-phase23-llvm23.shs; real CI run still pending.

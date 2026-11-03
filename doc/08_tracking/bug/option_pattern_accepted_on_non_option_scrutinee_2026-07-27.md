@@ -977,3 +977,26 @@ receipt were available for native/interpreter proof. Keep `bug_db.sdn` at
 `P1, open` until those gaps and admitted cross-engine evidence are resolved.
 
 **Revalidated 2026-11-02: still plausible because open — owner ruling 2026-09-27: staged migration (error for new code first, then convert existing sites in batches, then hard error). Plan:; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 (lane p01-c): why no pure-Simple runtime fix in `eval_calls.spl` is possible
+
+Triage pointed at `eval_calls.spl` as a pure-Simple fix. Re-checked at
+`origin/release/1.0.0` `0cf067f2871`; the premise does not hold, so no code
+change was made and the row stays `open` (stage 1 of the staged plan).
+
+- The pure-Simple interpreter uses the FLAT Option encoding. The Option/Result
+  accessors live in `_EvalOps/call_method_eval.spl` (`eval_option_result_method`,
+  `option_result_tag`), not `eval_calls.spl`. `option_result_tag` documents it:
+  "Flat form: nil is None, and any other raw word is its own Some payload."
+  At runtime a bare `i64` `6` and `Some(6)` are the same word, so a runtime
+  check cannot reject `n.unwrap_or(-99)` or `case Some(v)` on `n` without also
+  rejecting every legitimate flat `Option<i64>`. The defect is only decidable
+  from the STATIC type, i.e. in the type checker (plan stage 1, "mirror the check
+  in the pure-Simple type checker") plus the seed's
+  `option_pattern_shape_diag.rs`.
+- The class spec `option_on_non_option_scrutinee_class_spec.spl` is
+  `@tag:in-development`; its probes need a rejecting compile step, which no
+  runtime-side edit can provide, and verifying a pure-Simple type-checker change
+  needs a full-CLI self-hosted binary (none deployed; `bin/simple.exe` is the seed).
+- Next step is unchanged: stage 0 measurement (`SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1`
+  full build) -> baseline -> ratchet gate. Do not attempt a runtime special-case.

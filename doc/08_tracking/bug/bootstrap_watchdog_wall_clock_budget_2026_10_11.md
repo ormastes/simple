@@ -111,3 +111,7 @@ References: [Time::HiRes contract](https://perldoc.perl.org/Time::HiRes),
 [OpenBSD clock contract](https://man.openbsd.org/clock_gettime.2).
 
 **Revalidated 2026-11-02: still plausible because OPEN (P1). Source repair and controlled-clock contracts; release and; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolution (2026-11-03)
+
+Fixed in source: scripts/resource/process-tree-rss-watchdog.pl uses one CLOCK_MONOTONIC accessor. The Python verifier was ported to scripts/check/check-watchdog-monotonic-budget.shs (12 controlled-clock assertions PASS) and the .py removed (no-Python rule).

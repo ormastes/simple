@@ -44,3 +44,7 @@ three CUDA modes is authored but UNEXECUTED. The recorded native failure is not
 claimed fixed until a new changed-input bootstrap attempt qualifies it.
 
 **Revalidated 2026-11-02: still plausible because OPEN — constructor correction authored; newly built producer and native; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolution (2026-11-03)
+
+Fixed in source: bootstrap-from-scratch.sh now resolves and admits the src/plugins root (plugin_policy_source_root) alongside the CUDA composition root.

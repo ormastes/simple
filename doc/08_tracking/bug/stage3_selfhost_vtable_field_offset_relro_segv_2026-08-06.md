@@ -238,3 +238,32 @@ Left **OPEN**, unverified either way, per the wave rule that a wrong close loses
 a real defect permanently. The next lane should re-take the backtrace only after
 `sh scripts/check/check-no-call-zero.shs` reports `PASS` on the binaries under
 test; otherwise the measurement is not interpretable.
+
+## 2026-11-03 (lane p01-c): fail-closed at `compiler.rs` is not a safe local edit
+
+Re-read `native_project/compiler.rs` (~:2070-2120) at `origin/release/1.0.0`
+`0cf067f2871`. Line numbers moved; the two fail-open arms remain (unresolved
+named owner -> `Some(false)`; `owner_name: None` -> `Some(false)`). Ambiguous
+names already fail closed. No code change was made, for these reasons:
+
+- The `owner_name: None` arm cannot distinguish "erased/builtin/generic owner,
+  correctly header-less" from "class-typed local whose name inference lost". At
+  this pass `MirInst::FieldGet`/`FieldSet` carry only `owner_name`; the receiver's
+  type is not available. Turning the arm into an `Err` would reject every
+  legitimate erased access.
+- The discriminating information exists one step earlier, in
+  `mir/lower/lowering_expr_struct.rs` (~:329): `owner_name` comes from
+  `type_registry.get_type_name(receiver_ty)`. The fix belongs there: when
+  `receiver_ty` resolves to a class/struct in the registry but yields no name (or
+  is recovered via `recover_receiver_type`, as `lower_index_expr` does for ANY
+  receivers), derive the name from the recovered type, and only then fail closed
+  for a class-typed owner with no resolvable name.
+- Verification needs a rebuilt seed plus a stage3 self-host run
+  (`emit_module_header` write fault at ~394 s); no current stage3 binary is
+  available, so neither a red nor a green could be shown.
+
+Status: `fix-not-implemented`, still `open`. Repro for the next lane: build the
+seed in a private `CARGO_TARGET_DIR`, add a MIR-level spec where
+`var t = Cls.create(...)` (class with a trait impl, `static fn` constructor) then
+`t.field = v`, assert the emitted `FieldSet.owner_has_vtable == Some(true)`;
+then confirm with a stage3 native-build.
