@@ -3,6 +3,23 @@
 Date: 2026-09-16
 Status: OPEN
 
+## 2026-11-03 partial repair: non-inline multicore submission
+
+The missing `multicore_green_try_spawn` facade is implemented using the existing
+runtime pool submission boundary. It submits once, never calls the closure on
+rejection, and returns a rejected handle with no native task and no inline
+completion. `ran_inline_fallback()` now requires an actual inline completion;
+joining a rejected handle fails explicitly instead of inventing a zero result.
+Ordinary `multicore_green_spawn` keeps its existing inline fallback behavior.
+
+The focused contract spec covers rejected and inline handle states and actual
+runtime submission. Execution is **TEST_BLOCKED**: the canonical
+`bin/release/<triple>/simple` self-hosted runtime is absent; `bin/simple.exe` is
+the Rust seed and is not an authorized verification substitute. Authored tests
+are not a PASS. Provider rejection and accepted task execution still require
+self-hosted runtime evidence. The other missing modules/functions and ArcBox
+provider obligations below remain open; this umbrella bug is not resolved.
+
 ## Observed
 
 Worklist specs fail on symbols with no implementation anywhere in `src/lib`

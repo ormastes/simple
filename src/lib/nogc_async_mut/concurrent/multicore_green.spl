@@ -32,7 +32,7 @@ class MulticoreGreenHandle:
 
     fn ran_inline_fallback() -> bool:
         """Return true when this task ran inline because no runtime pool was available."""
-        self.native_handle == 0
+        self.native_handle == 0 and self.inline_done
 
     fn is_done() -> bool:
         if self.native_handle > 0:
@@ -42,6 +42,8 @@ class MulticoreGreenHandle:
     fn join() -> i64:
         if self.native_handle > 0:
             return rt_pool_join(self.native_handle)
+        if not self.inline_done:
+            panic("cannot join a rejected multicore green task")
         self.inline_result
 
 class MulticoreGreenSliceResult:
@@ -97,6 +99,20 @@ fn multicore_green_run_slices_inline(initial_state: i64, step_fn: fn(i64) -> Mul
         if next.done:
             return next.value
         state = next.state
+
+fn multicore_green_try_spawn(task: fn() -> i64) -> MulticoreGreenHandle:
+    """Submit once without running the task inline on rejection.
+
+    A rejected handle reports false for used_runtime_pool, ran_inline_fallback,
+    and is_done. Check used_runtime_pool before joining it. The runtime owns an
+    accepted closure; rejection leaves the task unexecuted by this facade.
+    """
+    val native_handle = rt_pool_submit(task, 0)
+    MulticoreGreenHandle(
+        native_handle: if native_handle > 0: native_handle else: 0,
+        inline_done: false,
+        inline_result: 0
+    )
 
 fn multicore_green_spawn(task: fn() -> i64) -> MulticoreGreenHandle:
     """Spawn a value task on the bounded runtime worker pool when available."""
