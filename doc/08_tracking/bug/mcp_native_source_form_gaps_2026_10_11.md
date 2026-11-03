@@ -1,6 +1,6 @@
 # MCP native source-form lowering gaps
 
-Status: OPEN. Canonical ID: `mcp_native_source_form_gaps_2026_10_11`.
+Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (2026-11-03; workarounds kept). Canonical ID: `mcp_native_source_form_gaps_2026_10_11`.
 GitHub: https://github.com/ormastes/simple/issues/3080 (registered before source edits).
 
 The actual failed MCP build uses frozen source
@@ -73,3 +73,12 @@ Declared-array/SdnRow transport belongs to #3079. Optional JSON flatten and the
 unlocated trim diagnostic belong to another owner. They are not edited here.
 
 Source workaround commit: `cf5adec6dfdd192ca2150291401451ad1ba16243`; recovery parent `a51194b96b5f5ce3fa57670bc62a15c2414388bf`. Canonical OPEN row is registered in `doc/08_tracking/bug/bug_db.sdn`. This isolated candidate has not been integrated/pushed to `release_phase3`; remote push requires actual Phase3PASS.
+
+## 2026-11-03 triage (stage3-free)
+
+- f64.to_int: fixed by `c850e96472e` (saturating float->i64 lowering, `float_to_int_saturation_*_spec.spl`).
+- aggregate Result.map: fixed by `1f5894db743` (`builtin_result_mapper_hir_type`, `result_map_record_payload_spec.spl`).
+- brace StructLit: lowered since `34724cefe99`; remaining hazard was declaration-order evaluation. Now fail-closed: `struct_literal_order.spl` rejects duplicate/unknown fields and out-of-order literals with effectful values (expr_dispatch.spl StructLit arm). Spec `test/01_unit/compiler/mir/struct_literal_order_source_spec.spl`; native fixture `test/fixtures/compiler/struct_literal_order/main.spl`.
+- array.extend: `lower_unresolved_array_merge` (merge|extend) already exists in method_calls_literals.spl; no retained failing repro (evidence was under /home/yoon). Unproven, stage3 check below.
+
+Stage3 verify: `native-build test/fixtures/compiler/struct_literal_order/main.spl` and run (expect `ok`); then revert each WORKAROUND tag (main_static_tools.spl:228, main_lazy_caret_tools.spl:94, storage_roots/resolver.spl, ctx score helper) one at a time and native-build `src/app/mcp/main.spl`.

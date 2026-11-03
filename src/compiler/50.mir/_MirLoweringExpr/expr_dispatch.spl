@@ -9,6 +9,7 @@ use compiler.semantics.match_exhaustiveness.{match_coverage_profile_is_critical}
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir._MirLoweringExpr.result_tuple_payload.*
 use compiler.mir._MirLoweringExpr.tuple_projection_types.*
+use compiler.mir._MirLoweringExpr.struct_literal_order.*
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: expression dispatch, match-case, gpu lane, bitfield helpers
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLowering.native_trait_conversion.*
@@ -680,6 +681,20 @@ impl MirLowering:
                 return true
             return false
         false
+
+    fn borrowed_runtime_array_inner_mir_type(container_type: MirType) -> MirType?:
+        # `Ref(Array)` / `Ref(Slice)` borrowed parameter -> the array type it
+        # borrows (same runtime handle; mirrors runtime_dict_value_mir_type).
+        if _sffi_enum_discriminant<MirTypeKind>(container_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Ref(MirType.i64(), false)):
+            match container_type.kind:
+                case MirTypeKind.Ref(inner, _):
+                    val inner_disc = _sffi_enum_discriminant<MirTypeKind>(inner.kind)
+                    if inner_disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Array(MirType.i64(), 0)):
+                        return Some(inner)
+                    if inner_disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Slice(MirType.i64())):
+                        return Some(inner)
+                case _: ()
+        nil
 
     fn runtime_dict_value_mir_type(container_type: MirType) -> MirType?:
         # A borrowed Dict parameter carries the same runtime handle as Dict.
@@ -7244,6 +7259,9 @@ impl MirLowering:
                             if literal_owner.kind == SymbolKind.Class:
                                 struct_name = mir_class_identity(literal_owner)
                             if self.struct_field_order.has(struct_name):
+                                val literal_problem = struct_literal_order_problem(fields, self.struct_field_order[struct_name])
+                                if literal_problem != "":
+                                    return self.unsupported_expr_kind("E-MIR-EXPR-StructLit", literal_problem, expr_value.span)
                                 var literal_args: [HirCallArg] = []
                                 for field in fields:
                                     literal_args = literal_args.push(HirCallArg(has_name: true, name: field.0, value: field.1, span: field.1.span))
