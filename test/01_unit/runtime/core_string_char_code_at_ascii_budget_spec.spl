@@ -1,0 +1,43 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_time_now_unix_micros() -> i64
+
+# Bug: char_code_at_quadratic_scan_and_core_string_ascii_probe_2026-07-30
+# ADR-005: text[i] is a char; an is-ASCII flag gives O(1) indexing on ASCII.
+#
+# The pure-Simple runtime lane (src/runtime/simple_core/core_string.spl) is
+# not executable under `bin/simple test` (it runs on the seed), so the
+# core_string half is held STRUCTURALLY: rt_string_char_code_at must consult
+# a cached per-string is-ASCII header bit and return the byte directly,
+# instead of walking UTF-8 from the cursor/start (O(index) per call, so a
+# reverse or random-access scan is quadratic).
+#
+# The executable half is a wall-clock budget on the lane that does run: a
+# REVERSE scan (the shape a forward-only char cursor cannot rescue) over
+# 20,000 ASCII chars must stay linear. Budget 2.0 s; measured ~0.1 s.
+
+describe "core_string char_code_at ASCII fast path":
+    it "rt_string_char_code_at reads a cached is-ASCII header flag":
+        val src = rt_file_read_text("src/runtime/simple_core/core_string.spl") ?? ""
+        expect(src).to_contain("fn string_ascii_state(ptr: i64) -> i64:")
+        expect(src).to_contain("if string_ascii_state(ptr) == 1:")
+        # flag bits must not collide with the transient bit (1 << 32)
+        expect(src).to_contain("val STRING_ASCII_KNOWN_BIT = 8589934592")
+        expect(src).to_contain("val STRING_ASCII_YES_BIT = 17179869184")
+
+    it "a reverse ASCII char_code_at scan stays within a linear budget":
+        var s = ""
+        var k = 0
+        while k < 2000:
+            s = s + "abcdefghij"
+            k = k + 1
+        val t0 = rt_time_now_unix_micros()
+        var acc = 0
+        var i = s.len() - 1
+        while i >= 0:
+            acc = acc + s.char_code_at(i)
+            i = i - 1
+        val elapsed_us = rt_time_now_unix_micros() - t0
+        expect(acc).to_equal(2000 * 1015)
+        expect(elapsed_us < 2000000).to_equal(true)
