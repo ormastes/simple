@@ -8,7 +8,7 @@ OPEN.
 
 
 **Date:** 2026-08-11
-Status: OPEN (P1)
+Status: FIXED (2026-11-03) — fail-closed: stubs report VULKAN_FEATURE_DISABLED_ERROR via rt_vulkan_get_last_error (landed d7213eb6174); verified on release/1.0.0 by cargo test vulkan_feature_disabled_tests (2 passed, CC=clang-cl, Windows). Enabling the feature in the deployed seed is a separate deploy decision.
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** High — blocks all pixel-level host-GPU evidence (SCCT image comparison, offscreen readback), while presenting as a silent, error-free zero
 **Area:** host GPU / Vulkan runtime FFI, seed build configuration
