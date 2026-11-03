@@ -114,3 +114,7 @@ the array-of-struct field read and sort in one native executable, then inspect
 the emitted comparison path before changing MIR or SCV publication.
 
 **Revalidated 2026-11-02: still plausible because OPEN. These are the two blockers left on the FreeBSD QEMU self-host lane after the lane fixes in PR 1141; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolution (2026-11-03)
+
+2026-11-03: marked fix-implemented-verification-pending. Section 1 reproduces only on a FreeBSD Stage 2 -> Stage 3 cold-init; needs a stage3-capable binary to remeasure. Not re-verified here.

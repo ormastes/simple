@@ -233,3 +233,7 @@ file identities come from the parse closure order, which only a stage-2 binary
 run produces. Unchanged; next owner needs a lane with a stage-2 binary.
 
 **Revalidated 2026-11-02: still plausible because OPEN, observed live; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolution (2026-11-03)
+
+2026-11-03: stale-pending. Measurement predates the streaming/entry-closure parse path; remeasure requires a stage3 binary. Not re-verified here.
