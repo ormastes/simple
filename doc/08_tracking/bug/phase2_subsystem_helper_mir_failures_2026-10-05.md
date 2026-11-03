@@ -54,3 +54,13 @@ The diagnostics (`helper-build-failures.json`, 27+11 error lines) live in a Wind
 evidence dir that is not in the repo or on this host, and the failures are in pure-Simple
 MIR lowering, which the seed cannot execute. Needs the helper builds re-run on the
 current producer to regenerate the diagnostic lines before a per-site fix can be written.
+
+## 2026-11-03 blocker (lane p1blk)
+
+The cited site `src/compiler/10.frontend/core/flat_pool_codec.spl:37` is now a comment.
+The codec was reworked to the v4 frame (`flat_pool_codec.spl:30-45`), so the
+`FlatPoolReader` diagnostic premise may be stale. It cannot be confirmed or closed without
+re-running the six-lane generator/verdict helper builds on a current Phase 2 producer.
+`helper-build-failures.json` from producer 916be6c2 is the only diagnostic, and it predates
+the rework. Next step: rerun the helper builds on the current candidate and re-scope from
+the fresh diagnostics.

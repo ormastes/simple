@@ -225,3 +225,14 @@ Added `test/fixtures/repro/compiler/option_if_val_text_unwrap_native_repro.spl`
 Seed `native-build` of the repo is >40 min on this host, so the native divergence
 was not re-observed; blocker: need a native run of this fixture to disassemble the
 `if val` bind path. Stays open.
+
+## 2026-11-03 blocker (lane p1blk)
+
+Not fixed on origin/release/1.0.0. The free-function shape is still not reproducible
+(2026-08-08 note). The remaining shape is an `@always_inline` helper whose `Option`
+return is lowered through `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:64-88`
+(the `@always_inline` scalar-canonicalisation helpers). The reporting check,
+`scripts/check/check-native-option-eq-representation.shs`, needs a native-built
+compiler to run. The seed refuses `test`, and no deployed self-hosted native binary exists
+in this lane, so no failing reproduction can be produced. Next step: run that check
+against the next Phase 2 candidate and record the MIR dump of the inlined call site.
