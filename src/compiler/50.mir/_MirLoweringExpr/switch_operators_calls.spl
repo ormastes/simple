@@ -5447,10 +5447,24 @@ impl MirLowering:
         retains migration handling for an unpromoted flat value, while typed
         producers and boundaries use ensure_option_handle so payload `3` is
         unambiguous."""
-        if val base_type = self.enum_match_expr_type(base):
+        var try_base_type = self.enum_match_expr_type(base)
+        # Method return metadata can become available only while lowering the
+        # call. Evaluate it once and retain its Optional payload declaration,
+        # as the Result path below already does for imported methods.
+        val base_local = self.lower_expr(base)
+        var static_optional = false
+        if val static_type = try_base_type:
+            match static_type.kind:
+                case HirTypeKind.Optional(_): static_optional = true
+                case _: ()
+        if not static_optional:
+            if val lowered_type = self.find_local_hir_type(base_local.id):
+                match lowered_type.kind:
+                    case HirTypeKind.Optional(_): try_base_type = Some(lowered_type)
+                    case _: ()
+        if val base_type = try_base_type:
             match base_type.kind:
                 case HirTypeKind.Optional(inner):
-                    val base_local = self.lower_expr(base)
 
                     # Determine the physical lane FIRST via rt_enum_discriminant
                     # (-1 = not a registered boxed enum = flat raw payload; see
@@ -5609,9 +5623,15 @@ impl MirLowering:
                                 self.decode_runtime_value(raw_payload_local, self.lower_type(inner))
                             else:
                                 self.enum_payload_value(raw_payload_local, self.lower_type(inner))
-                    return payload_local
+                    # The physical payload is already decoded. Preserve its
+                    # declared nominal owner exactly as Result `?` does; an
+                    # inferred binding must not need a leaf type annotation.
+                    match inner.kind:
+                        case HirTypeKind.Named(_, _):
+                            return self.decode_declared_enum_payload_slot(payload_local, inner)
+                        case _: return payload_local
                 case _: ()
-        val res_local = self.lower_expr(base)
+        val res_local = base_local
         var b = self.builder
         val disc_func = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_discriminant"),
