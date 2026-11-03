@@ -1,6 +1,6 @@
 # Stage 2 test-runner build: imported enum owner text is overwritten
 
-- Status: OPEN
+- Status: fix-implemented-verification-pending (2026-11-03): no source change proven; root cause (dangling defining_module text root, main-process HIR path) cannot be established without a stage2/stage3 native binary. Verify by re-running the Reproduce command with a stage2 built from current release/1.0.0 and checking test_runner_build.log for `schema=` owner text.
 - Bug DB: reconciliation pending. `bug-add` (src/app/bug_add/main.spl) run
   on the Rust seed built from this tree dies in save with `stack overflow:
   recursion depth 1000 exceeded limit 1000 in function 'rename_path'`
