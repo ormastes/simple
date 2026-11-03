@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { atomicWriteDurable } from "../storage/directory_fsync.js";
 import { canonicalJson, freezeDeep, sha256Hex } from "../storage/canonical.js";
 import { ImmutableSnapshotStore } from "../storage/snapshot_store.js";
 import { WorkspaceRegistry } from "../workspace/registry.js";
@@ -79,7 +80,7 @@ function verifyRecord(record) {
     return freezeDeep({ inventory, authority });
   } catch { return null; }
 }
-function atomic(path, bytes) { mkdirSync(dirname(path), { recursive: true }); const temp = `${path}.tmp-${process.pid}-${Date.now()}`; writeFileSync(temp, bytes, { encoding: "utf8", flag: "wx" }); renameSync(temp, path); }
+function atomic(path, bytes) { atomicWriteDurable(path, bytes, { mode: 0o644 }); }
 
 /** Durable, content-addressed authority manifests selected only by exact tuple. */
 export class AuthorityManifestStoreV1 {

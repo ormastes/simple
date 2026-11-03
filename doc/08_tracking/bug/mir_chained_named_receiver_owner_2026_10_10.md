@@ -25,3 +25,12 @@ Second source workaround candidate: retain an explicit typed ByteSpan receiver b
 Receiver/input/result annotation candidate `df4abc1a2` also fails actual runtime: object16696B, link0, run1, emitted string-slice callee remains wrong. No recovery claimed. Permanent compiler dispatch repair is required; no further unchanged source spelling retries.
 
 **Revalidated 2026-11-02: still plausible because OPEN. Tagged source workaround and regressions AUTHORED_UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-03 triage (groupB):** a single-module MIR lowering of the same shape
+(`self.slice(0, p.span_len).equals(p)` on a struct with `[u8]` data) dispatches to
+`Struct.slice` / `Struct.equals` with no `spl_str_slice` (spec
+`test/unit/compiler/mir/chained_named_receiver_owner_spec.spl`, passing). The failure
+therefore needs the cross-module closure (`common.bytes.span` imported into the
+Postgres build): the inner `slice` resolves as `resolution_is_unresolved` and falls
+into the erased text-slice fallback at `method_calls_literals.spl:3702`. Needs a
+stage3 multi-module repro; workaround retained.

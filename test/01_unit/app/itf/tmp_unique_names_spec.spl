@@ -1,0 +1,35 @@
+# tmp_unique_names_spec
+"""Regression: itf atomic writers must stage via unique temp names.
+
+Two processes saving the same token cache / watermark concurrently must not
+share a staging file (`<path>.tmp`), or one rename can publish the other's
+half-written bytes or fail with ENOENT.
+"""
+
+use std.spec
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.nogc_sync_mut.file_system.file_ops.{file_exists, file_delete}
+use app.itf.adapter_outlook_curl.{outlook_curl_token_cache_save, outlook_curl_token_cache_load}
+
+describe "itf atomic writers use unique staging names":
+    it "adapter_outlook_curl has no fixed .tmp staging path":
+        val src = file_read_nullable("src/app/itf/adapter_outlook_curl.spl") ?? ""
+        expect(src != "").to_equal(true)
+        expect(src.contains("\"\{path\}.tmp\"")).to_equal(false)
+        expect(src.contains("getpid()")).to_equal(true)
+
+    it "cmd_daily_debug has no fixed .tmp staging path":
+        val src = file_read_nullable("src/app/itf/cmd_daily_debug.spl") ?? ""
+        expect(src != "").to_equal(true)
+        expect(src.contains("\"\{path\}.tmp\"")).to_equal(false)
+        expect(src.contains("getpid()")).to_equal(true)
+
+    it "token cache save/load roundtrips and leaves no fixed .tmp file":
+        val p = "build/tmp_unique_names_token_cache.json"
+        val ok = outlook_curl_token_cache_save(p, "tok-abc", 12345)
+        expect(ok).to_equal(true)
+        expect(file_exists(p + ".tmp")).to_equal(false)
+        val (tok, exp) = outlook_curl_token_cache_load(p)
+        expect(tok).to_equal("tok-abc")
+        expect(exp).to_equal(12345)
+        file_delete(p)
