@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - **Id:** gui_8k_native_renderer_artifact_build_timeout_2026-08-13
-- Status: OPEN (P1)
+- Status: FIX-IMPLEMENTED, VERIFICATION PENDING (P1) - see "Fix 2026-11-03"
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** P1 — blocks a valid pure-Simple 8K/80 dynamic-render claim on an
   available GPU host
@@ -104,3 +104,27 @@ benchmarks before it is fixed would only re-derive the same blocker. Detail:
 `doc/08_tracking/bug/aot_llvm_void_type_struct_probe_2026-08-10.md`.
 
 **Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**
+
+## Fix 2026-11-03 (work/gui-8k-build-budget)
+
+- The 30 s bound is NOT a product limit: it came from the repro command's own
+  `BENCH_TIMEOUT_SECS=30` (the harness default is 180, `run_all_benchmarks.shs:17`).
+  The entry file `backend_measurement_software_export.spl` was the right entry; the
+  hot spot is in its `--entry-closure`, not the entry itself.
+- Hot spot (same class as PR #5796, `stage2_codegen_large_array_literal_2026-11-02`):
+  huge module-level `[text]` array literals pulled in through the HTML tokenizer /
+  cookie-policy imports of the renderer closure:
+  `html_named_character_references.spl:11,2245` (2231 elements each) and
+  `src/lib/common/web/public_suffix_data.spl` (10409 + 281 + 8 elements).
+  They are now comma-separated text constants decoded once into memoized tables
+  (`html_named_reference_names()/values()`, `public_suffix_exact_rules()/...`).
+- Guard/spec: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/large_literal_build_budget_spec.spl`
+  (<= 64 quoted entry lines per module; before 4462 / 10700, after 0; decode <= 5 s;
+  parity of lookups). Generator `scripts/generate/generate-html-named-character-references.shs`
+  emits the new form.
+- Sibling sites left (see stage2 bug doc): `query_error_pattern_matcher.spl` [u16]
+  ~1.16k x5, `webp_vp8_decode.spl` [i64] ~1k x3.
+- Verification pending (needs Linux + stage3/native-build): run
+  `BENCH_TIMEOUT_SECS=30 bash tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 1 --dpi 300`
+  and confirm `gui_perf_benchmark_artifact_build_status=completed`. The interpreter
+  spec run cannot show the native-codegen gain (11 s wall, 193 MB RSS before and after).

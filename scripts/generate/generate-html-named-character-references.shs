@@ -79,11 +79,43 @@ print {$out} "# License: PSF-2.0; see html_named_character_references.LICENSE.tx
 print {$out} "# 2231 exact references; 2125 names; 106 legacy no-semicolon forms.\n\n";
 print {$out} "pub val HTML_NAMED_REFERENCE_SOURCE_SHA256: text = \"$digest\"\n";
 print {$out} "pub val HTML_NAMED_REFERENCE_MAX_LENGTH: i32 = $maximum\n\n";
-print {$out} "pub val HTML_NAMED_REFERENCE_NAMES: [text] = [\n";
-print {$out} "    " . simple_quote($_) . ",\n" for @names;
-print {$out} "]\n\npub val HTML_NAMED_REFERENCE_VALUES: [text] = [\n";
-print {$out} "    " . simple_quote($entities{$_}) . ",\n" for @names;
-print {$out} "]\n";
+print {$out} "use std.common.encoding.utf8.{text_from_codepoints}
+
+";
+print {$out} "# \@workaround bug=gui_8k_native_renderer_artifact_build_timeout_2026-08-13 reason=large module-level [text] array literals dominate native-build time; text-encoded and decoded once into a memoized table
+";
+print {$out} "val _html_named_reference_names_text = \"" . join(",", @names) . "\"
+";
+print {$out} "val _html_named_reference_values_text = \"" . join(",", map { join("+", map { ord($_) } split //, $entities{$_}) } @names) . "\"
+
+";
+print {$out} <<'"'"'SPL'"'"';
+var _html_named_reference_names_cache: [text] = []
+var _html_named_reference_names_ready = false
+var _html_named_reference_values_cache: [text] = []
+var _html_named_reference_values_ready = false
+
+pub fn html_named_reference_names() -> [text]:
+    if not _html_named_reference_names_ready:
+        _html_named_reference_names_cache = _html_named_reference_names_text.split(",")
+        _html_named_reference_names_ready = true
+    _html_named_reference_names_cache
+
+fn _html_named_reference_decode_value(entry: text) -> text:
+    var codepoints: [i64] = []
+    for part in entry.split("+"):
+        codepoints.push(part.to_int())
+    text_from_codepoints(codepoints)
+
+pub fn html_named_reference_values() -> [text]:
+    if not _html_named_reference_values_ready:
+        var decoded: [text] = []
+        for entry in _html_named_reference_values_text.split(","):
+            decoded.push(_html_named_reference_decode_value(entry))
+        _html_named_reference_values_cache = decoded
+        _html_named_reference_values_ready = true
+    _html_named_reference_values_cache
+SPL
 close $out;
 print "generated $output references=" . scalar(@names) .
     " names=" . scalar(keys %unique) . " legacy=$legacy\n";
