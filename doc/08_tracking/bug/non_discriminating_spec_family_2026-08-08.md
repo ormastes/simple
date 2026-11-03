@@ -13,6 +13,42 @@ due to scanning gitignored `build/` scratch worktrees).
 **Corpus:** 19,499 `*_spec.spl` files at that sha
 **Detector:** `scripts/check/check-vacuous-specs.shs`
 
+## 2026-11-03 detector lexical repair (family remediation remains open)
+
+The current detector had a reproducible Tier-A false negative: assertion-like
+text inside an ordinary quoted fixture counted as an executed assertion.
+A two-file independent corpus contained only quoted `expect(...)`,
+`assert_true(...)`, and local `check(...)` calls inside its spec bodies.
+The original detector passed its eight self-tests and reported **2 files
+scanned, 0 flagged**, although neither spec body executed any assertion.
+
+The detector now masks quoted contents while retaining character positions
+for raw balanced-argument extraction. Builtin, local-helper, assertion-subject,
+failure-stub and constant-assertion lookup use those tokens. Actual assertions
+keep their original quoted arguments for literal, matcher and tautology checks.
+Both quote styles, backslash escapes and embedded comment markers are covered.
+
+Four added self-test fixtures bring the gate to **12/12**: quoted builtin text
+must produce V0 and V1; a quoted asserting-helper name must produce V1; real
+computed assertions containing assertion-shaped fixture strings must stay
+clean; and quoted fail text inside an ordinary helper must produce V0/V1
+rather than count as an assertion or V6 stub.
+
+Executed evidence on Windows through Git Bash, without a Simple seed:
+
+- Updated detector: **12/12 self-test fixtures pass**, followed by the same
+  independent two-file corpus producing **3 findings** (V1 for the quoted
+  helper, V0 plus V1 for the quoted builtins).
+- An isolated mutant removing quote masking from builtin/helper recognition
+  is rejected by five new fixture expectations; it prints
+  `SELFTEST FAILED` and `ERROR — nothing was checked`, with nonzero exit.
+- Shell syntax and whitespace checks pass.
+
+This verifies the shell detector change, not the Simple specs as behavioral
+tests. No broad corpus sweep or semantic Tier-B qualification was performed.
+The historical family remediation below remains open; this is not evidence
+that all previously flagged specs discriminate correctly.
+
 ## Why
 
 Four non-discriminating specs were found in a single day, each passing
