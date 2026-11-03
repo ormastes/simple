@@ -37,3 +37,12 @@ A single bad marker should not abort the refresh of every other marker.
 ## Repro
 
 `bin/simple native-build --entry <any> --source src/lib ...` and read stderr.
+
+## 2026-11-04 update
+
+`escape_string`, `structural_hash_text` and `hex_to_bytes` carried a stacked
+`methods_mir_2026-10-31` marker ("untyped-param-recv") although each takes a
+typed `value: text` parameter; those three markers were removed, leaving the
+adjacent `rti007` marker, so the refresh no longer aborts. The scanner still
+rejects any stacked pair (`src/app/bug/workaround_index.spl`: the affected line
+may not start with `#`, and one marker carries one `bug=`), so this stays open.
