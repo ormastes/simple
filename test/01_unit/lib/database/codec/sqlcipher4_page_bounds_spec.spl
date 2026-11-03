@@ -1,0 +1,37 @@
+# AUTHORED_UNRUN. Distinct signed/upper-bound geometry cases; no crypto oracle needed.
+"""
+## Purpose and audience
+Reject page numbers that cannot be represented as the codec's one-based LE32 field.
+Audience: SQLCipher4 codec maintainers.
+"""
+use std.spec.*
+use nogc_sync_mut.database.codec.sqlcipher4.{Sqlcipher4Error, sqlcipher4_error_code}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{sqlcipher4_encode_page, sqlcipher4_decode_page}
+
+fn page_bound_zeros(n: i64) -> [u8]:
+    var out: [u8] = []
+    for i in 0..n:
+        out.push(0u8)
+    out
+
+fn page_bound_code(result: Result<[u8], Sqlcipher4Error>) -> text:
+    match result:
+        case Err(error): sqlcipher4_error_code(error)
+        case Ok(bytes): "unexpected-success:{bytes.len()}"
+
+describe "REQ-CIPHER-PAGE-BOUNDS-001: raw page numbers never wrap into LE32":
+    # @req REQ-CIPHER-PAGE-BOUNDS-001
+    it "should reject negative, first-too-large and maximum signed page numbers in both directions":
+        step("Load values outside the one-based unsigned 32-bit page-number domain")
+        val key = page_bound_zeros(32)
+        for page_no in [-1, 4294967296, 9223372036854775807]:
+            step("Submit the page number through production encode and decode")
+            expect(page_bound_code(sqlcipher4_encode_page(page_no, page_bound_zeros(4016), page_bound_zeros(16), key, key))).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+            expect(page_bound_code(sqlcipher4_decode_page(page_no, page_bound_zeros(4096), key, key))).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+
+    # @req REQ-CIPHER-PAGE-BOUNDS-001
+    it "should admit the maximum LE32 page number through geometry and reach authentication":
+        step("Present a full-width zero page at the largest raw codec page number")
+        val key = page_bound_zeros(32)
+        step("Require authentication failure rather than a range failure")
+        expect(page_bound_code(sqlcipher4_decode_page(4294967295, page_bound_zeros(4096), key, key))).to_equal("SQLCIPHER4_AUTHENTICATION_FAILED")
