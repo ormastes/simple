@@ -69,4 +69,4 @@ and the three arg-evaluation sites in `interpreter_helpers/patterns.rs`). Writes
 class field, module global). Negative index counts from the end (as `rt_array_set`); out of range raises
 `E3002` (codegen's `rt_index_set` returns false silently; interpreter fails closed instead).
 Spec: `test/01_unit/interpreter/array_set_method_spec.spl` (5/5; 5/5 failed before).
-Open sibling: JIT lane still reports `Method 'set' not found on type 'Array'` (SIMPLE_EXECUTION_MODE=jit).
+Status: fix-implemented-partial. Remaining gap: JIT lane (`SIMPLE_EXECUTION_MODE=jit`) still reports `Method 'set' not found on type 'Array'`; interpreter lane is fixed.

@@ -3265,3 +3265,30 @@ mod cow_alias_mechanism_tests {
         assert_eq!(arr_len(field_of(&env, "o", "xs")), 2, "pop must shrink the field array");
     }
 }
+
+#[cfg(test)]
+mod array_set_kernel_tests {
+    use super::*;
+
+    fn ints(xs: &[i64]) -> Vec<Value> {
+        xs.iter().map(|x| Value::Int(*x)).collect()
+    }
+
+    #[test]
+    fn set_in_range_and_negative_index_mutate_in_place() {
+        let mut v = ints(&[1, 2, 3]);
+        apply_array_mutation_in_place("set", &mut v, None, Some(1usize), Some(Value::Int(9))).unwrap();
+        apply_array_mutation_in_place("set", &mut v, None, Some((-1i64) as usize), Some(Value::Int(7))).unwrap();
+        assert_eq!(v, ints(&[1, 9, 7]));
+    }
+
+    #[test]
+    fn set_out_of_range_fails_closed_without_mutating() {
+        for raw in [3i64, 100, -4] {
+            let mut v = ints(&[1, 2, 3]);
+            let r = apply_array_mutation_in_place("set", &mut v, None, Some(raw as usize), Some(Value::Int(9)));
+            assert!(r.is_err(), "index {raw} must error");
+            assert_eq!(v, ints(&[1, 2, 3]));
+        }
+    }
+}
