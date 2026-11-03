@@ -72,3 +72,20 @@ One of these should become true:
   reliably, or
 - the test runner detects nested test-runner invocation and emits a fast,
   actionable error explaining that the wrapper must be run directly.
+
+
+## 2026-11-03 current-source review (no closure)
+
+Baseline cfef5fad47e. The current `light_daemon.spl` brackets worker execution
+with `enter_daemon_child_env` / `restore_daemon_child_env`. The client checks
+`SIMPLE_TEST_DAEMON_CHILD=1` before queueing and uses `run_daemon_child_direct`,
+preventing the documented same-single-worker queue cycle. Existing
+`test/01_unit/app/tooling/test_runner_failure_precedence_spec.spl` covers marker
+entry/restoration through those production functions. No duplicate marker test
+or timeout increase is added.
+
+This establishes source intent, not process-level nesting success. No admitted
+runtime is available; nested invocation remains UNRUN and this record stays
+open. Historic seed measurements are not current pure-Simple evidence. The
+related setup-cost guard false-pass is addressed separately in the fixed-cost
+record; successful guard fixtures do not close this daemon bug.
