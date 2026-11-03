@@ -15239,10 +15239,13 @@ static int rt_http_has_header(const char* headers, size_t len, const char* name)
     return 0;
 }
 
-static int rt_http_header_has_token(const char* headers, size_t len,
-                                    const char* name, const char* token) {
+/* This owner implements only chunked transfer coding. Never decode one layer
+ * of an unsupported coding chain and report the encoded bytes as content.
+ * 0 absent, 1 chunked, -1 invalid, -2 unsupported. */
+static int rt_http_response_transfer_coding(const char* headers, size_t len) {
+    const char* name = "Transfer-Encoding";
     size_t name_len = strlen(name);
-    size_t token_len = strlen(token);
+    int present = 0, chunked = 0;
     const char* line = headers;
     const char* end = headers + len;
     while (line < end) {
@@ -15250,19 +15253,26 @@ static int rt_http_header_has_token(const char* headers, size_t len,
         if (!next || next > end) next = end;
         if ((size_t)(next - line) > name_len &&
             strncasecmp(line, name, name_len) == 0 && line[name_len] == ':') {
+            present = 1;
             const char* value = line + name_len + 1;
             while (value < next) {
-                while (value < next && (*value == ' ' || *value == '\t' || *value == ',')) value++;
-                const char* token_end = value;
-                while (token_end < next && *token_end != ',' && *token_end != ' ' && *token_end != '\t') token_end++;
-                if ((size_t)(token_end - value) == token_len &&
-                    strncasecmp(value, token, token_len) == 0) return 1;
-                value = token_end < next ? token_end + 1 : next;
+                const char* separator = memchr(value, ',', (size_t)(next - value));
+                if (!separator) separator = next;
+                const char* token_end = separator;
+                while (value < token_end && (*value == ' ' || *value == '\t')) value++;
+                while (token_end > value && (token_end[-1] == ' ' || token_end[-1] == '\t')) token_end--;
+                /* RFC 9110 5.6.1.2 permits empty list elements. */
+                if (value < token_end) {
+                    if ((size_t)(token_end - value) != 7 ||
+                        strncasecmp(value, "chunked", 7) != 0) return -2;
+                    if (++chunked > 1) return -1;
+                }
+                value = separator < next ? separator + 1 : next;
             }
         }
         line = next < end ? next + 2 : end;
     }
-    return 0;
+    return present ? (chunked ? 1 : -1) : 0;
 }
 
 static int64_t rt_http_content_length(const char* headers, size_t len) {
@@ -15577,8 +15587,17 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     }
     const uint8_t* payload = (const uint8_t*)header_end + 4;
     size_t payload_len = received - (size_t)(payload - response);
-    if (rt_http_header_has_token(header_start, header_len,
-                                 "Transfer-Encoding", "chunked")) {
+    int transfer_coding = rt_http_response_transfer_coding(header_start, header_len);
+    if (transfer_coding != 0 && rt_http_has_header(header_start, header_len, "Content-Length")) {
+        free(headers_copy); free(reason_copy); free(response);
+        snprintf(error, error_cap, "conflicting HTTP response framing"); return 0;
+    }
+    if (transfer_coding < 0) {
+        free(headers_copy); free(reason_copy); free(response);
+        snprintf(error, error_cap, transfer_coding == -2 ?
+                 "unsupported HTTP transfer coding" : "invalid HTTP Transfer-Encoding"); return 0;
+    }
+    if (transfer_coding == 1) {
         uint8_t* decoded = NULL; size_t decoded_len = 0;
         if (!rt_http_decode_chunked(payload, payload_len, &decoded, &decoded_len)) {
             free(headers_copy); free(reason_copy); free(response);
