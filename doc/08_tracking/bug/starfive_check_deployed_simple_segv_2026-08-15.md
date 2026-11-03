@@ -43,3 +43,6 @@ available; this host is aarch64 with only the Rust seed) and physical JH7110
 board access. No change made. Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, sha 3d120a6f).
 
 **Revalidated 2026-11-02: still plausible because PARTIALLY FIXED / host source fixed; redeployed x86_64 and physical JH7110 evidence pending; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 status: fix-implemented-verification-pending
+Host source fix landed (see status above). Pending: redeployed x86_64 binary and physical JH7110 serial/SSH transcript (board-runnable rule).

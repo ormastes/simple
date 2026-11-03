@@ -55,3 +55,6 @@ Revert-ready: no (driver_bootstrap / lean / vhdl helpers must stay).
 - Workaround tags stay (driver_bootstrap / lean / vhdl helpers) until the
   stage3 self-build revert loop removes them.
 
+
+## 2026-11-03 status: fix-implemented-verification-pending
+Root fix present: `struct_value_provenance_key` prefers the module-qualified layout (`src/compiler/50.mir/_MirLowering/module_lowering.spl:757-772`, tag ownerlayout-mir-20261031). Verify on a rebuilt stage2: entry-closure build with two `CompileError` structs must not fall back to the bare name; then remove the `bug=ownerlayout-mir-20261031` workarounds in `src/compiler/70.backend/bitfield.spl` and `src/compiler/50.mir/mir_bitfield.spl`.
