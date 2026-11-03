@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** FIXED (2026-11-03) -- see "Closure 2026-11-03" at the end
 **Found:** 2026-08-04
 **Related — SAME gate, other tiers, found by parallel lanes the same day. Fix
 once, close all three:**
@@ -253,3 +253,28 @@ remains OPEN. The 791 legacy annotations require truthful owner-by-owner work;
 this narrow checkpoint fix neither resolves that backlog nor changes the
 existing accounting of policy failures as named failed-file rows. No compiler
 rebuild or seed execution was attempted.
+
+## Closure 2026-11-03 -- FIXED (strict default retained by decision)
+
+The blast-radius defect is fixed by c8bf2505768 (admission excludes only the
+un-annotated files and appends one named failed `TestFileResult` per rejected
+file on the daemon, parallel and sequential paths), da41c3991b5 (spec across
+checkpoint resume) and c34c5cdb6d6 (completed-resume path). Rejected files are
+reported by name ("COVER ADMISSION FAILED ... test not executed"), never as an
+empty run, and the exit code stays 1.
+
+Policy decision (reviewer, 2026-11-03): the strict default (`--no-unstable`,
+the interactive default) still refuses to execute ANY file when one is
+rejected. That is a deliberate fail-closed gate, pinned by
+`scripts/check/check-test-runner-cover-admission.shs` (case `stable`). `--unstable`
+(default on the bootstrap path) runs every admitted file. Not a defect.
+
+Verification: `bin/simple.exe test test/01_unit/app/test_runner_new/cover_admission_spec.spl`
+-> `Results: 6 total, 6 passed, 0 failed` (13.7 s, worktree on origin/release/1.0.0).
+The gate script could NOT be confirmed on Windows: it exits 1 because
+`validate_system_test_covers` (`src/app/test_runner_new/test_runner_files.spl:193`)
+matches `f.contains("/system/")`, and Windows-style `\system\` paths bypass the
+gate, so the rejected fixture executed (`Results: 2 total, 1 passed, 1 failed`
+with the rejected body running). This is a separate Windows path-separator
+fail-open in the gate predicate, not part of this closure; it needs its own bug.
+The 791 legacy annotations remain owner-by-owner work.
