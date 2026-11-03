@@ -739,6 +739,7 @@ impl RuntimeValue {
                 match payload {
                     tags::SPECIAL_NIL => ValueKind::Nil,
                     tags::SPECIAL_TRUE | tags::SPECIAL_FALSE => ValueKind::Bool,
+                    _ if self.is_char() => ValueKind::Char,
                     _ => ValueKind::Symbol,
                 }
             }

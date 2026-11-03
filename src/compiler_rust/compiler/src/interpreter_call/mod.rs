@@ -1696,6 +1696,24 @@ pub(crate) fn evaluate_call(
             }
 
             // Builtin text static methods
+            // ADR-005: `char.from_code(n)` inverts `.ord()`. A non-scalar code
+            // point (surrogate, > U+10FFFF) is an error, never a silent NUL.
+            // The value is a 1-char text until the char value type lands.
+            if type_name == "char" && method_name == "from_code" {
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let code = match evaluated_args.first() {
+                    Some(v) => v.as_int()?,
+                    None => return Err(CompileError::semantic("char.from_code expects one integer code point")),
+                };
+                return match u32::try_from(code).ok().and_then(char::from_u32) {
+                    Some(ch) => Ok(Value::text(ch.to_string())),
+                    None => Err(CompileError::semantic(format!("char.from_code: {code} is not a Unicode scalar value"))),
+                };
+            }
+
             if type_name == "text" && method_name == "from_char_code" {
                 let evaluated_args: Vec<Value> = args
                     .iter()

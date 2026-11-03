@@ -370,6 +370,21 @@ pub(crate) fn evaluate_method_call(
         }
 
         // Builtin text static methods
+        // ADR-005: `char.from_code(n)`; errors on a non-scalar code point.
+        if module_name == "char" && method == "from_code" {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            let code = match evaluated_args.first() {
+                Some(v) => v.as_int()?,
+                None => return Err(CompileError::semantic("char.from_code expects one integer code point")),
+            };
+            return match u32::try_from(code).ok().and_then(char::from_u32) {
+                Some(ch) => Ok(Value::text(ch.to_string())),
+                None => Err(CompileError::semantic(format!("char.from_code: {code} is not a Unicode scalar value"))),
+            };
+        }
         if module_name == "text" && method == "from_char_code" {
             let evaluated_args: Vec<Value> = args
                 .iter()
@@ -2047,6 +2062,21 @@ pub(crate) fn evaluate_method_call_with_self_update(
                 impl_methods,
             )?;
             return Ok((value, None));
+        }
+        // ADR-005: `char.from_code(n)`; errors on a non-scalar code point.
+        if module_name == "char" && method == "from_code" {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            let code = match evaluated_args.first() {
+                Some(v) => v.as_int()?,
+                None => return Err(CompileError::semantic("char.from_code expects one integer code point")),
+            };
+            return match u32::try_from(code).ok().and_then(char::from_u32) {
+                Some(ch) => Ok((Value::text(ch.to_string()), None)),
+                None => Err(CompileError::semantic(format!("char.from_code: {code} is not a Unicode scalar value"))),
+            };
         }
         if module_name == "text" && method == "from_char_code" {
             let evaluated_args: Vec<Value> = args
