@@ -1,7 +1,7 @@
 # LLVM loader returns an optional wrapper as a DynLib receiver
 
 - Canonical ID: `llvm_loader_optional_receiver_2026_11_03`.
-- Status: source repair authored; focused runtime regression unexecuted.
+- Status: FIXED 2026-11-03 — commit 292fee2b7ee (llvm_lib binds the optional payload); test/01_unit/lib/sffi/llvm_loader_optional_receiver_spec.spl 1/1 passing under bin/simple.exe test.
 - Severity: P1, native LLVM provider calls fail after a successful library load.
 - Owner: `src/lib/nogc_sync_mut/sffi/llvm_loader.spl`, `llvm_lib`.
 - Acceptance: `REQ-LLVM-LOADER-OPTIONAL-RECEIVER`, covered by

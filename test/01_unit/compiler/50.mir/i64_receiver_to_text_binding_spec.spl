@@ -1,0 +1,90 @@
+"""
+# i64 receiver `.to_text()` through optional/loop bindings
+
+Regression for bug native_identity_i64_receiver_type_loss_2026_10_11: i64
+locals bound from an enum-payload optional (`case Arr(el, size)` then
+`if val fixed_size = size`), from optional enum-payload pairs (`lo`/`hi`),
+and from a `for` over a nested `[i64]` field, used directly as `.to_text()`
+receivers (no typed alias), must lower without the unresolved-method
+const-0 placeholder.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn lowering_messages(src: text) -> [text]:
+    val file = "testdata/fixture_i64_receiver.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_i64_receiver", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        messages = messages.push("mir: " + e.message)
+    messages
+
+fn expect_resolved(src: text):
+    val messages = lowering_messages(src)
+    var all = ""
+    for m in messages:
+        all = all + m + "\n"
+    print "diagnostics: [{all}]"
+    expect(messages.len()).to_equal(0)
+
+val identity_shapes_src = "enum Ty:\n" +
+    "    Unit\n" +
+    "    Arr(el: i64, size: i64?)\n" +
+    "\n" +
+    "enum Dim:\n" +
+    "    Lit(value: i64)\n" +
+    "    Named(name: text, lo: i64?, hi: i64?)\n" +
+    "\n" +
+    "struct Manifest:\n" +
+    "    device_ids: [i64]\n" +
+    "\n" +
+    "struct Func:\n" +
+    "    manifest: Manifest\n" +
+    "\n" +
+    "fn ty_identity(t: Ty) -> text:\n" +
+    "    match t:\n" +
+    "        case Unit: \"unit\"\n" +
+    "        case Arr(el, size):\n" +
+    "            var size_identity = \"dynamic\"\n" +
+    "            if val fixed_size = size:\n" +
+    "                size_identity = fixed_size.to_text()\n" +
+    "            size_identity\n" +
+    "\n" +
+    "fn dim_identity(d: Dim) -> text:\n" +
+    "    match d:\n" +
+    "        case Lit(value): \"literal\"\n" +
+    "        case Named(name, lo, hi):\n" +
+    "            var lo_identity = \"none\"\n" +
+    "            var hi_identity = \"none\"\n" +
+    "            if val lo_value = lo:\n" +
+    "                lo_identity = lo_value.to_text()\n" +
+    "            if val hi_value = hi:\n" +
+    "                hi_identity = hi_value.to_text()\n" +
+    "            lo_identity + \":\" + hi_identity\n" +
+    "\n" +
+    "fn device_rows(f: Func) -> [text]:\n" +
+    "    var rows: [text] = []\n" +
+    "    for device_id in f.manifest.device_ids:\n" +
+    "        rows.push(device_id.to_text())\n" +
+    "    rows\n"
+
+describe "MIR lowering: i64 receiver to_text through optional/loop bindings":
+    it "lowers to_text on enum-payload optional, lo/hi and for-loop i64 binders":
+        expect_resolved(identity_shapes_src)

@@ -3,6 +3,8 @@
 export use std.nogc_sync_mut.io.http_get_core.{rt_http_get}
 export use std.nogc_sync_mut.io.http_client_types.{HttpMethod, HttpStatus, HttpResponse, method_to_string, status_to_code, code_to_status, make_http_response}
 export use std.nogc_sync_mut.http.url.{url_encode, url_decode}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 
 # Advanced request with headers
 @unsafe(reason: "raw method/URL/header-array/body ABI and runtime-owned response tuple", capabilities: [ffi])
@@ -45,6 +47,21 @@ fn http_request_v2_raw(method: text, url: text, headers: [text], body: [u8],
         return (-1, "", "", [], "HTTP timeout cannot be negative")
     unsafe(capabilities: [ffi]):
         rt_http_request_v2(method, url, headers, body, timeout_ms)
+
+fn http_request_raw_timeout(method: text, url: text, headers_text: text, body: text,
+                            timeout_ms: i64) -> (i64, text, text):
+    """Text request with an explicit millisecond deadline; zero is unbounded."""
+    if timeout_ms < 0:
+        return (-1, "", "HTTP timeout cannot be negative")
+    var headers: [text] = []
+    if headers_text != "":
+        headers = headers_text.split("\n")
+    val response = http_request_v2_raw(method, url, headers, text_to_utf8_bytes(body), timeout_ms)
+    if response.4 != "":
+        return (response.0, "", response.4)
+    match io_legacy_utf8(response.3):
+        case Ok(decoded): (response.0, decoded, "")
+        case Err(error): (-1, "", error)
 
 fn http_get(url: text) -> HttpResponse:
     """

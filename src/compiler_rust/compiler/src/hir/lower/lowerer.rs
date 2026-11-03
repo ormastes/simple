@@ -259,6 +259,10 @@ pub struct Lowerer {
     /// a field with NO declared default keeps the `Nil` placeholder exactly as
     /// before.
     pub(super) struct_field_defaults: HashMap<String, HashMap<String, Expr>>,
+    /// Authored simple type name of each class/struct field, keyed by owner
+    /// then field. Lets `self.field.m()` recover a TRAIT field type, which
+    /// `resolve_type` erases to ANY.
+    pub(super) struct_field_type_names: HashMap<String, HashMap<String, String>>,
     /// Local bindings authored as untyped empty array literals (`var xs = []`).
     ///
     /// These start as `[Any]` placeholders in HIR so later builtin `append`
@@ -336,6 +340,7 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
+            struct_field_type_names: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),
@@ -409,6 +414,7 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
+            struct_field_type_names: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),
@@ -505,6 +511,7 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
+            struct_field_type_names: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),

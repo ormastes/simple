@@ -1,6 +1,6 @@
 # MCP score text-local inference corrupts native formatting
 
-Status: OPEN. This is distinct from unresolved f64.to_int dispatch.
+Status: OPEN. 2026-11-03: test/01_unit/compiler/mir/tagged_text_concat_reassignment_spec.spl runs 8/10 under the seed; failing: "leaves indirect user str callbacks on the normal call path" (MIR emits 0 indirect calls for a parameter named str; expected 1) and "preserves custom callback precedence" (seed interpreter returns =7, expected =custom). A parameter named str is resolved to the builtin. Distinct from unresolved f64.to_int dispatch.
 
 The exact PR3175 formatter compiled with the provisional pure-Simple a45 producer (object5776 bytes) and strictly linked against its generated core-C47/backfill935 pair (ELF2203480 bytes). Native assertions failed. A second source-bound diagnostic preserved the formatter and printed actual results: 0.0 => `0.<decimal pointer>`, 1.25 => `1.<decimal pointer>`, and all six samples had pointer digits as their fraction.
 

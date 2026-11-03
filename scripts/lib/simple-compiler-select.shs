@@ -256,6 +256,24 @@ simple_compiler_env_write_ok() {
     [ "$_scs_verdict" -eq 0 ]
 }
 
+# Run tier: callers that execute `"$SIMPLE_BIN" run <script>.spl` must not be
+# handed a bootstrap CLI (stage2) that answers `run` with "unknown command".
+# Bug simple_compiler_select_promotes_stage2_binary_without_run_subcommand_2026-08-06.
+simple_compiler_can_run() {
+    _scs_bin="$1"
+    case "$_scs_bin" in /*) ;; *) _scs_bin="$PWD/$_scs_bin" ;; esac
+    [ -n "${SIMPLE_WORKTREE_STORAGE_ROOT:-}" ] || return 1
+    mkdir -p "${SIMPLE_WORKTREE_STORAGE_ROOT}/tmp/compiler-select" || return 1
+    _scs_rdir="$(mktemp -d "${SIMPLE_WORKTREE_STORAGE_ROOT}/tmp/compiler-select/simple-run-probe.XXXXXX")" || return 1
+    printf 'fn main():\n    print("ok")\n' > "$_scs_rdir/p.spl" || { rm -rf "$_scs_rdir"; return 1; }
+    _scs_rout="$( cd "$_scs_rdir" && ulimit -c 0 2>/dev/null; timeout "$SIMPLE_COMPILER_PROBE_TIMEOUT" "$_scs_bin" run p.spl 2>/dev/null )"
+    _scs_rrc=$?
+    rm -rf "$_scs_rdir"
+    [ "$_scs_rrc" -eq 0 ] || return 1
+    case "$_scs_rout" in *ok*) return 0 ;; esac
+    return 1
+}
+
 # Builder tier: prove the native-build contract for a concrete target triple.
 simple_compiler_can_build_target() {
     _scs_out="$( ulimit -c 0 2>/dev/null
@@ -300,12 +318,13 @@ simple_compiler_usable() {
     return 0
 }
 
-# simple_compiler_select [--root <dir>] [--builder-target <triple>] [--quiet]
+# simple_compiler_select [--root <dir>] [--builder-target <triple>] [--require-run] [--quiet]
 # Prints the selected path on stdout; diagnostics go to stderr. rc0 on success.
 simple_compiler_select() {
     _scs_sel_root="."
     _scs_sel_target=""
     _scs_quiet=0
+    _scs_need_run=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --root) shift; _scs_sel_root="${1:-.}" ;;
@@ -313,6 +332,7 @@ simple_compiler_select() {
             --builder-target) shift; _scs_sel_target="${1:-}" ;;
             --builder-target=*) _scs_sel_target="${1#*=}" ;;
             --quiet) _scs_quiet=1 ;;
+            --require-run) _scs_need_run=1 ;;
             *) break ;;
         esac
         shift
@@ -354,6 +374,10 @@ simple_compiler_select() {
             echo "error: SIMPLE_BUILD_COMPILER failed the native-build --target probe: $SIMPLE_BUILD_COMPILER" >&2
             return 1
         fi
+        if [ "$_scs_need_run" -eq 1 ] && ! simple_compiler_can_run "$SIMPLE_BUILD_COMPILER"; then
+            echo "error: SIMPLE_BUILD_COMPILER failed the run probe: $SIMPLE_BUILD_COMPILER" >&2
+            return 1
+        fi
         printf '%s\n' "$SIMPLE_BUILD_COMPILER"
         return 0
     fi
@@ -386,6 +410,10 @@ simple_compiler_select() {
         if [ -n "$_scs_sel_target" ] \
            && ! simple_compiler_can_build_target "$_scs_cand" "$_scs_sel_target"; then
             [ "$_scs_quiet" -eq 1 ] || echo "  skip (failed native-build --target probe): $_scs_cand" >&2
+            continue
+        fi
+        if [ "$_scs_need_run" -eq 1 ] && ! simple_compiler_can_run "$_scs_cand"; then
+            [ "$_scs_quiet" -eq 1 ] || echo "  skip (no working run subcommand): $_scs_cand" >&2
             continue
         fi
         printf '%s\n' "$_scs_cand"
@@ -448,6 +476,27 @@ EOF
         _scs_st_fail=$((_scs_st_fail + 1))
     else
         echo "  PASS  bootstrap fallback refusal is rejected"
+    fi
+
+    # --require-run: a bootstrap CLI that answers `run` with "unknown command"
+    # must fail the run probe; one that runs the fixture must pass it.
+    _scs_norun="$_scs_fake_dir/simple-norun"
+    printf '#!/bin/sh\necho "error: unknown command '"'"'run'"'"'" >&2\nexit 1\n' >"$_scs_norun"
+    _scs_yesrun="$_scs_fake_dir/simple-run"
+    printf '#!/bin/sh\n[ "$1" = run ] && { echo ok; exit 0; }\nexit 1\n' >"$_scs_yesrun"
+    chmod +x "$_scs_norun" "$_scs_yesrun"
+    _scs_st_ran=$((_scs_st_ran + 2))
+    if SIMPLE_WORKTREE_STORAGE_ROOT="${SIMPLE_WORKTREE_STORAGE_ROOT:-$_scs_fake_dir}" simple_compiler_can_run "$_scs_norun"; then
+        echo "  FAIL  binary without run was admitted by --require-run" >&2
+        _scs_st_fail=$((_scs_st_fail + 1))
+    else
+        echo "  PASS  binary without run is rejected by --require-run"
+    fi
+    if SIMPLE_WORKTREE_STORAGE_ROOT="${SIMPLE_WORKTREE_STORAGE_ROOT:-$_scs_fake_dir}" simple_compiler_can_run "$_scs_yesrun"; then
+        echo "  PASS  binary with run passes --require-run"
+    else
+        echo "  FAIL  binary with run was rejected by --require-run" >&2
+        _scs_st_fail=$((_scs_st_fail + 1))
     fi
 
     _scs_good="$_scs_fake_dir/simple-native"

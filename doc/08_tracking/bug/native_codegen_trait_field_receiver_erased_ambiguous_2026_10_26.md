@@ -50,3 +50,18 @@ verified with the full-CLI native-build.
   trait name alone must not bind an arbitrary implementer (`qualified_method_owner_matches`). A real fix
   needs a seed codegen decision (emit fail-closed trait call vs. synthesize the vtable) plus a seed rebuild
   and a full-CLI native-build to confirm; not attempted without that loop. Workaround tags stay.
+
+## 2026-11-03: root fix implemented (verification pending)
+Root cause: trait names alias to `TypeId::ANY` in HIR (`import_loader.rs` `Node::Trait` arm), and
+only typed LOCALS carried the declared trait owner (`LocalVar.trait_dispatch_owner` ->
+MIR `local_trait_dispatch`, `lowering_expr_method.rs` `declared_trait_owner`). A field receiver
+`self.store.read(..)` had no such side channel, so MIR emitted a bare `read`.
+Fix (seed HIR): `Lowerer.struct_field_type_names` records each class/struct field's authored simple
+type name (`type_registration.rs`); `lower_trait_field_method_call` (`hir/lower/expr/mod.rs`) binds a
+trait-typed `ident.field` receiver to a synthetic `LetIn` local carrying the trait dispatch owner,
+which is exactly what the typed-local workaround did, so MIR emits `MethodCallVirtual`.
+Guards: `hir/lower/tests/trait_field_receiver_tests.rs` (MIR has a vtable call, no bare `read`),
+`test/01_unit/compiler/50.mir/trait_field_receiver_dispatch_spec.spl`.
+Verify: rebuild seed; `cargo test -p simple-compiler --lib trait_field_receiver`; then remove the
+typed-local workaround in `virtual_source_consumer_v1.spl` and run the full-CLI native-build with
+`SIMPLE_NATIVE_BUILD_RUST=1` -> expect no AMBIGUOUS-METHOD/STUB-FALLBACK for `read`.

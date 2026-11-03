@@ -173,6 +173,7 @@ impl PlatformLinkConfig {
             libraries: vec![
                 "kernel32",
                 "ws2_32",
+                "winhttp",
                 "mswsock",
                 "bcrypt",
                 "userenv",
@@ -223,6 +224,7 @@ impl PlatformLinkConfig {
                 "ntdll",
                 "userenv",
                 "ws2_32",
+                "winhttp",
                 "mswsock",
                 "dbghelp",
                 "advapi32",
@@ -348,6 +350,7 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
             "msvcrt".into(),
             "kernel32".into(),
             "ws2_32".into(),
+            "winhttp".into(),
             "mswsock".into(),
             "advapi32".into(),
             "d3d11".into(),

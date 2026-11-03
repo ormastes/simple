@@ -144,3 +144,11 @@ rather than resolving it dynamically on each access when the enclosing frame lat
 rebinds it.
 
 **Revalidated 2026-11-02: still plausible because open (worked around in test/01_unit/lib/std/concurrency/promise_spec.spl;; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolved 2026-11-03 — no longer reproduces; regression spec added
+
+**Status:** fixed (stale on current engine). The minimal repro above, run on the
+current `bin/simple.exe` (seed, interpreter fallback) prints `42` and `[42]`.
+Pinned by `test/01_unit/compiler/interpreter/module_array_push_reassign_nested_closure_spec.spl`
+(2 passed, 0 failed). Pure-Simple interpreter not separately runnable (no
+deployed full-CLI pure-Simple binary); re-run the spec there when available.

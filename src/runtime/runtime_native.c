@@ -15195,6 +15195,7 @@ static int rt_http_send_all(int fd, const void* data, size_t len, int64_t deadli
     }
     return 1;
 }
+#endif /* !_WIN32 socket helpers */
 
 static int rt_http_append(char** dst, size_t* len, size_t* cap,
                           const char* text, size_t text_len) {
@@ -15217,6 +15218,7 @@ static int rt_http_append(char** dst, size_t* len, size_t* cap,
     return 1;
 }
 
+#if !defined(_WIN32)
 static const char* rt_http_header_end(const uint8_t* data, size_t len) {
     if (!data || len < 4) return NULL;
     for (size_t i = 0; i + 4 <= len; i++) {
@@ -15239,10 +15241,13 @@ static int rt_http_has_header(const char* headers, size_t len, const char* name)
     return 0;
 }
 
-static int rt_http_header_has_token(const char* headers, size_t len,
-                                    const char* name, const char* token) {
+/* This owner implements only chunked transfer coding. Never decode one layer
+ * of an unsupported coding chain and report the encoded bytes as content.
+ * 0 absent, 1 chunked, -1 invalid, -2 unsupported. */
+static int simple_http_response_transfer_coding(const char* headers, size_t len) {
+    const char* name = "Transfer-Encoding";
     size_t name_len = strlen(name);
-    size_t token_len = strlen(token);
+    int present = 0, chunked = 0;
     const char* line = headers;
     const char* end = headers + len;
     while (line < end) {
@@ -15250,19 +15255,26 @@ static int rt_http_header_has_token(const char* headers, size_t len,
         if (!next || next > end) next = end;
         if ((size_t)(next - line) > name_len &&
             strncasecmp(line, name, name_len) == 0 && line[name_len] == ':') {
+            present = 1;
             const char* value = line + name_len + 1;
             while (value < next) {
-                while (value < next && (*value == ' ' || *value == '\t' || *value == ',')) value++;
-                const char* token_end = value;
-                while (token_end < next && *token_end != ',' && *token_end != ' ' && *token_end != '\t') token_end++;
-                if ((size_t)(token_end - value) == token_len &&
-                    strncasecmp(value, token, token_len) == 0) return 1;
-                value = token_end < next ? token_end + 1 : next;
+                const char* separator = memchr(value, ',', (size_t)(next - value));
+                if (!separator) separator = next;
+                const char* token_end = separator;
+                while (value < token_end && (*value == ' ' || *value == '\t')) value++;
+                while (token_end > value && (token_end[-1] == ' ' || token_end[-1] == '\t')) token_end--;
+                /* RFC 9110 5.6.1.2 permits empty list elements. */
+                if (value < token_end) {
+                    if ((size_t)(token_end - value) != 7 ||
+                        strncasecmp(value, "chunked", 7) != 0) return -2;
+                    if (++chunked > 1) return -1;
+                }
+                value = separator < next ? separator + 1 : next;
             }
         }
         line = next < end ? next + 2 : end;
     }
-    return 0;
+    return present ? (chunked ? 1 : -1) : 0;
 }
 
 static int64_t rt_http_content_length(const char* headers, size_t len) {
@@ -15347,6 +15359,7 @@ static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
     /* Exhausting the input after a data chunk is not a last-chunk. */
     free(result); return 0;
 }
+#endif /* !_WIN32 response parsing helpers */
 
 static int rt_http_token_char(unsigned char value) {
     return ('0' <= value && value <= '9') || ('A' <= value && value <= 'Z') ||
@@ -15382,6 +15395,7 @@ static int rt_http_headers_valid(RtCoreArray* headers) {
     return 1;
 }
 
+#if !defined(_WIN32)
 static int rt_http_perform(const char* method, const char* url, RtCoreArray* headers,
                            const uint8_t* body, size_t body_len, int64_t timeout_ms,
                            int64_t* status_out,
@@ -15577,8 +15591,17 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     }
     const uint8_t* payload = (const uint8_t*)header_end + 4;
     size_t payload_len = received - (size_t)(payload - response);
-    if (rt_http_header_has_token(header_start, header_len,
-                                 "Transfer-Encoding", "chunked")) {
+    int transfer_coding = simple_http_response_transfer_coding(header_start, header_len);
+    if (transfer_coding != 0 && rt_http_has_header(header_start, header_len, "Content-Length")) {
+        free(headers_copy); free(reason_copy); free(response);
+        snprintf(error, error_cap, "conflicting HTTP response framing"); return 0;
+    }
+    if (transfer_coding < 0) {
+        free(headers_copy); free(reason_copy); free(response);
+        snprintf(error, error_cap, transfer_coding == -2 ?
+                 "unsupported HTTP transfer coding" : "invalid HTTP Transfer-Encoding"); return 0;
+    }
+    if (transfer_coding == 1) {
         uint8_t* decoded = NULL; size_t decoded_len = 0;
         if (!rt_http_decode_chunked(payload, payload_len, &decoded, &decoded_len)) {
             free(headers_copy); free(reason_copy); free(response);
@@ -15605,14 +15628,298 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     if (headers_len_out) *headers_len_out = header_len;
     return 1;
 }
+#else /* _WIN32: WinHTTP provider (bug windows_core_http_client_unavailable_2026_10_27) */
+#include <winhttp.h>
+
+/* UTF-8 -> freshly allocated NUL-terminated UTF-16; NULL on failure. */
+static wchar_t* rt_http_win_wide(const char* text, size_t len) {
+    if (len > (size_t)INT_MAX) return NULL;
+    int need = len ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, (int)len, NULL, 0) : 0;
+    if (len && need <= 0) return NULL;
+    wchar_t* out = (wchar_t*)rt_observed_malloc_v1(((size_t)need + 1) * sizeof(wchar_t));
+    if (!out) return NULL;
+    if (need) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, (int)len, out, need);
+    out[need] = L'\0';
+    return out;
+}
+
+/* UTF-16 (len wchar_t) -> allocated UTF-8 bytes (not NUL-counted). */
+static uint8_t* rt_http_win_narrow(const wchar_t* text, size_t len, size_t* out_len) {
+    *out_len = 0;
+    if (len > (size_t)INT_MAX) return NULL;
+    int need = len ? WideCharToMultiByte(CP_UTF8, 0, text, (int)len, NULL, 0, NULL, NULL) : 0;
+    if (len && need <= 0) return NULL;
+    uint8_t* out = (uint8_t*)rt_observed_malloc_v1((size_t)need + 1);
+    if (!out) return NULL;
+    if (need) WideCharToMultiByte(CP_UTF8, 0, text, (int)len, (char*)out, need, NULL, NULL);
+    out[need] = '\0';
+    *out_len = (size_t)need;
+    return out;
+}
+
+static void rt_http_win_error(DWORD code, char* error, size_t error_cap, const char* fallback) {
+    switch (code) {
+    case ERROR_WINHTTP_TIMEOUT: snprintf(error, error_cap, "HTTP request timed out"); break;
+    case ERROR_WINHTTP_NAME_NOT_RESOLVED: snprintf(error, error_cap, "HTTP host lookup failed"); break;
+    case ERROR_WINHTTP_CANNOT_CONNECT:
+    case ERROR_WINHTTP_CONNECTION_ERROR: snprintf(error, error_cap, "HTTP connection failed"); break;
+    case ERROR_WINHTTP_SECURE_FAILURE: snprintf(error, error_cap, "HTTPS certificate validation failed"); break;
+    case ERROR_WINHTTP_INVALID_URL:
+    case ERROR_WINHTTP_UNRECOGNIZED_SCHEME: snprintf(error, error_cap, "invalid HTTP URL"); break;
+    case ERROR_WINHTTP_INVALID_SERVER_RESPONSE: snprintf(error, error_cap, "invalid HTTP response"); break;
+    default: snprintf(error, error_cap, "%s (winhttp error %lu)", fallback, (unsigned long)code); break;
+    }
+}
+
+/* WinHTTP's per-phase timeouts are not an overall deadline (measured: a
+ * 500 ms receive timeout still blocked 3 s on loopback), so a timer-queue
+ * watchdog closes the request handle at the deadline, which aborts the
+ * blocked synchronous call. */
+typedef struct {
+    HINTERNET request;
+    volatile LONG fired;
+} RtHttpWinWatchdog;
+
+static VOID CALLBACK rt_http_win_watchdog_fire(PVOID context, BOOLEAN timer_fired) {
+    (void)timer_fired;
+    RtHttpWinWatchdog* dog = (RtHttpWinWatchdog*)context;
+    if (InterlockedExchange(&dog->fired, 1) == 0) WinHttpCloseHandle(dog->request);
+}
+
+static int rt_http_win_timeout(int64_t deadline_ms) {
+    if (deadline_ms == 0) return 0; /* 0 = WinHTTP infinite for that phase */
+    int64_t left = deadline_ms - rt_time_now_monotonic_ms();
+    if (left <= 0) return -1;
+    return left > INT_MAX ? INT_MAX : (int)left;
+}
+
+/* Same contract as the POSIX rt_http_perform: http:// (and https:// with
+ * WinHTTP's default certificate validation, never relaxed), no redirect
+ * following, 64 MiB body cap, exact binary bodies, overall deadline. */
+static int rt_http_perform(const char* method, const char* url, RtCoreArray* headers,
+                           const uint8_t* body, size_t body_len, int64_t timeout_ms,
+                           int64_t* status_out,
+                           uint8_t** body_out, size_t* body_len_out,
+                           uint8_t** reason_out, size_t* reason_len_out,
+                           uint8_t** headers_out, size_t* headers_len_out,
+                           char* error, size_t error_cap) {
+    *status_out = -1; *body_out = NULL; *body_len_out = 0;
+    if (reason_out) *reason_out = NULL;
+    if (reason_len_out) *reason_len_out = 0;
+    if (headers_out) *headers_out = NULL;
+    if (headers_len_out) *headers_len_out = 0;
+    int64_t deadline_ms = 0;
+    if (timeout_ms > 0) {
+        int64_t now = rt_time_now_monotonic_ms();
+        deadline_ms = timeout_ms > INT64_MAX - now ? INT64_MAX : now + timeout_ms;
+    }
+    if (!rt_http_method_is_token(method) || !url) {
+        snprintf(error, error_cap, "invalid HTTP method or URL"); return 0;
+    }
+    for (const unsigned char* p = (const unsigned char*)url; *p; p++) {
+        if (*p <= 0x20 || *p == 0x7f) { snprintf(error, error_cap, "invalid HTTP URL"); return 0; }
+    }
+    int secure = strncmp(url, "https://", 8) == 0;
+    if (!secure && strncmp(url, "http://", 7) != 0) {
+        snprintf(error, error_cap, "native HTTP supports http:// and https:// only"); return 0;
+    }
+    if (body_len > (size_t)0xFFFFFFFFu) { snprintf(error, error_cap, "HTTP request body too large"); return 0; }
+
+    int ok = 0;
+    HINTERNET session = NULL, connect = NULL, request = NULL;
+    RtHttpWinWatchdog watchdog = {NULL, 0};
+    HANDLE watchdog_timer = NULL;
+    wchar_t *wurl = NULL, *wmethod = NULL, *whost = NULL, *wpath = NULL, *wheaders = NULL;
+    char* header_block = NULL; size_t header_block_len = 0, header_block_cap = 0;
+    uint8_t* response = NULL;
+    wchar_t* raw_headers = NULL;
+
+    wurl = rt_http_win_wide(url, strlen(url));
+    wmethod = rt_http_win_wide(method, strlen(method));
+    if (!wurl || !wmethod) { snprintf(error, error_cap, "invalid HTTP URL"); goto done; }
+    URL_COMPONENTS parts; memset(&parts, 0, sizeof(parts));
+    parts.dwStructSize = sizeof(parts);
+    parts.dwHostNameLength = (DWORD)-1; parts.dwUrlPathLength = (DWORD)-1; parts.dwExtraInfoLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(wurl, 0, 0, &parts) || parts.dwHostNameLength == 0) {
+        snprintf(error, error_cap, "HTTP URL has no host"); goto done;
+    }
+    whost = (wchar_t*)rt_observed_malloc_v1(((size_t)parts.dwHostNameLength + 1) * sizeof(wchar_t));
+    size_t path_len = (size_t)parts.dwUrlPathLength + (size_t)parts.dwExtraInfoLength;
+    wpath = (wchar_t*)rt_observed_malloc_v1((path_len + 2) * sizeof(wchar_t));
+    if (!whost || !wpath) { snprintf(error, error_cap, "out of memory"); goto done; }
+    memcpy(whost, parts.lpszHostName, parts.dwHostNameLength * sizeof(wchar_t));
+    whost[parts.dwHostNameLength] = L'\0';
+    {
+        size_t at = 0;
+        if (parts.dwUrlPathLength == 0) wpath[at++] = L'/';
+        if (parts.dwUrlPathLength) { memcpy(wpath + at, parts.lpszUrlPath, parts.dwUrlPathLength * sizeof(wchar_t)); at += parts.dwUrlPathLength; }
+        if (parts.dwExtraInfoLength) { memcpy(wpath + at, parts.lpszExtraInfo, parts.dwExtraInfoLength * sizeof(wchar_t)); at += parts.dwExtraInfoLength; }
+        /* a URL fragment is never sent on the wire */
+        for (size_t i = 0; i < at; i++) if (wpath[i] == L'#') { at = i; break; }
+        if (at == 0) wpath[at++] = L'/';
+        wpath[at] = L'\0';
+    }
+
+    if (headers) {
+        for (int64_t i = 0; i < headers->len; i++) {
+            RtCoreString* header = rt_core_as_string(((int64_t*)headers->data)[i]);
+            if (!header || memchr(header->data, '\r', header->len) || memchr(header->data, '\n', header->len)) continue;
+            if (!rt_http_append(&header_block, &header_block_len, &header_block_cap, header->data, header->len) ||
+                !rt_http_append(&header_block, &header_block_len, &header_block_cap, "\r\n", 2)) {
+                snprintf(error, error_cap, "out of memory"); goto done;
+            }
+        }
+        if (header_block_len) {
+            wheaders = rt_http_win_wide(header_block, header_block_len);
+            if (!wheaders) { snprintf(error, error_cap, "invalid HTTP v2 headers"); goto done; }
+        }
+    }
+
+    /* Direct connection, matching the POSIX socket provider (no implicit proxy). */
+    session = WinHttpOpen(L"simple-runtime/1", WINHTTP_ACCESS_TYPE_NO_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) { rt_http_win_error(GetLastError(), error, error_cap, "HTTP session failed"); goto done; }
+    {
+        int t = rt_http_win_timeout(deadline_ms);
+        if (t < 0) { snprintf(error, error_cap, "HTTP request timed out"); goto done; }
+        WinHttpSetTimeouts(session, t, t, t, t);
+    }
+    connect = WinHttpConnect(session, whost, parts.nPort, 0);
+    if (!connect) { rt_http_win_error(GetLastError(), error, error_cap, "HTTP connection failed"); goto done; }
+    request = WinHttpOpenRequest(connect, wmethod, wpath, NULL, WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0);
+    if (!request) { rt_http_win_error(GetLastError(), error, error_cap, "HTTP request failed"); goto done; }
+    {
+        DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        if (!WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy))) {
+            rt_http_win_error(GetLastError(), error, error_cap, "HTTP redirect policy failed"); goto done;
+        }
+        DWORD no_cookies = WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_AUTHENTICATION;
+        (void)WinHttpSetOption(request, WINHTTP_OPTION_DISABLE_FEATURE, &no_cookies, sizeof(no_cookies));
+        int t = rt_http_win_timeout(deadline_ms);
+        if (t < 0) { snprintf(error, error_cap, "HTTP request timed out"); goto done; }
+        if (t > 0 && !WinHttpSetTimeouts(request, t, t, t, t)) {
+            rt_http_win_error(GetLastError(), error, error_cap, "HTTP timeout setup failed"); goto done;
+        }
+        if (t > 0) {
+            watchdog.request = request;
+            if (!CreateTimerQueueTimer(&watchdog_timer, NULL, rt_http_win_watchdog_fire, &watchdog,
+                                       (DWORD)t, 0, WT_EXECUTEONLYONCE)) {
+                watchdog_timer = NULL;
+                snprintf(error, error_cap, "HTTP timeout setup failed"); goto done;
+            }
+        }
+    }
+    if (!WinHttpSendRequest(request, wheaders ? wheaders : WINHTTP_NO_ADDITIONAL_HEADERS,
+                            wheaders ? (DWORD)-1L : 0,
+                            body_len ? (LPVOID)body : WINHTTP_NO_REQUEST_DATA,
+                            (DWORD)body_len, (DWORD)body_len, 0) ||
+        !WinHttpReceiveResponse(request, NULL)) {
+        rt_http_win_error(GetLastError(), error, error_cap, "HTTP request write failed"); goto done;
+    }
+    {
+        DWORD status = 0, size = sizeof(status);
+        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                 WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX) ||
+            status < 100 || status > 999) {
+            snprintf(error, error_cap, "invalid HTTP status"); goto done;
+        }
+        *status_out = (int64_t)status;
+    }
+    if (reason_out || headers_out) {
+        DWORD bytes = 0;
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX,
+                            WINHTTP_NO_OUTPUT_BUFFER, &bytes, WINHTTP_NO_HEADER_INDEX);
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || bytes == 0 || bytes > 2u * 1024u * 1024u) {
+            snprintf(error, error_cap, bytes > 2u * 1024u * 1024u ? "HTTP response metadata too large" : "invalid HTTP headers");
+            goto done;
+        }
+        raw_headers = (wchar_t*)rt_observed_malloc_v1((size_t)bytes + sizeof(wchar_t));
+        if (!raw_headers) { snprintf(error, error_cap, "out of memory"); goto done; }
+        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX,
+                                 raw_headers, &bytes, WINHTTP_NO_HEADER_INDEX)) {
+            snprintf(error, error_cap, "invalid HTTP headers"); goto done;
+        }
+        size_t wlen = bytes / sizeof(wchar_t);
+        raw_headers[wlen] = L'\0';
+        /* status line: "HTTP/1.1 200 OK\r\n"; header block follows, ends "\r\n\r\n" */
+        size_t line_end = 0;
+        while (line_end < wlen && raw_headers[line_end] != L'\r' && raw_headers[line_end] != L'\n') line_end++;
+        size_t sp1 = 0;
+        while (sp1 < line_end && raw_headers[sp1] != L' ') sp1++;
+        size_t sp2 = sp1 + 1;
+        while (sp2 < line_end && raw_headers[sp2] != L' ') sp2++;
+        size_t hstart = line_end;
+        while (hstart < wlen && (raw_headers[hstart] == L'\r' || raw_headers[hstart] == L'\n') && hstart < line_end + 2) hstart++;
+        size_t hend = wlen;
+        while (hend > hstart && (raw_headers[hend - 1] == L'\r' || raw_headers[hend - 1] == L'\n' || raw_headers[hend - 1] == L'\0')) hend--;
+        if (reason_out && sp2 < line_end) {
+            size_t n = 0;
+            uint8_t* reason = rt_http_win_narrow(raw_headers + sp2 + 1, line_end - sp2 - 1, &n);
+            if (!reason) { snprintf(error, error_cap, "out of memory"); goto done; }
+            if (n == 0) { free(reason); reason = NULL; }
+            *reason_out = reason; if (reason_len_out) *reason_len_out = n;
+        }
+        if (headers_out && hend > hstart) {
+            size_t n = 0;
+            uint8_t* block = rt_http_win_narrow(raw_headers + hstart, hend - hstart, &n);
+            if (!block) { snprintf(error, error_cap, "out of memory"); goto done; }
+            *headers_out = block; if (headers_len_out) *headers_len_out = n;
+        }
+    }
+    {
+        size_t received = 0, capacity = 8192;
+        response = (uint8_t*)rt_observed_malloc_v1(capacity + 1);
+        if (!response) { snprintf(error, error_cap, "out of memory"); goto done; }
+        for (;;) {
+            if (deadline_ms != 0 && rt_http_win_timeout(deadline_ms) < 0) {
+                snprintf(error, error_cap, "HTTP request timed out"); goto done;
+            }
+            if (received == capacity) {
+                if (capacity >= 64 * 1024 * 1024) { snprintf(error, error_cap, "HTTP response too large"); goto done; }
+                capacity *= 2;
+                uint8_t* grown = (uint8_t*)rt_observed_realloc_v1(response, capacity + 1);
+                if (!grown) { snprintf(error, error_cap, "out of memory"); goto done; }
+                response = grown;
+            }
+            DWORD got = 0;
+            DWORD want = (DWORD)(capacity - received > 0x7FFFFFFF ? 0x7FFFFFFF : capacity - received);
+            if (!WinHttpReadData(request, response + received, want, &got)) {
+                rt_http_win_error(GetLastError(), error, error_cap, "HTTP response read failed"); goto done;
+            }
+            if (got == 0) break;
+            received += got;
+        }
+        response[received] = '\0';
+        *body_out = response; *body_len_out = received; response = NULL;
+    }
+    ok = 1;
+done:
+    /* INVALID_HANDLE_VALUE: wait for an in-flight callback before reading `fired`. */
+    if (watchdog_timer) DeleteTimerQueueTimer(NULL, watchdog_timer, INVALID_HANDLE_VALUE);
+    if (InterlockedExchange(&watchdog.fired, 1) != 0) {
+        request = NULL; /* already closed by the watchdog */
+        if (!ok) snprintf(error, error_cap, "HTTP request timed out");
+    }
+    if (!ok) {
+        *status_out = -1;
+        if (reason_out && *reason_out) { free(*reason_out); *reason_out = NULL; }
+        if (reason_len_out) *reason_len_out = 0;
+        if (headers_out && *headers_out) { free(*headers_out); *headers_out = NULL; }
+        if (headers_len_out) *headers_len_out = 0;
+    }
+    if (request) WinHttpCloseHandle(request);
+    if (connect) WinHttpCloseHandle(connect);
+    if (session) WinHttpCloseHandle(session);
+    free(response); free(raw_headers); free(header_block);
+    free(wurl); free(wmethod); free(whost); free(wpath); free(wheaders);
+    return ok;
+}
 #endif
 
 int64_t rt_http_get(int64_t url_value) {
     RtCoreString* url = rt_core_as_string(url_value);
     if (!url) return rt_http_tuple(-1, NULL, 0, "invalid HTTP URL text argument");
-#if defined(_WIN32)
-    return rt_http_tuple(-1, NULL, 0, "native HTTP is unavailable on Windows core runtime");
-#else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
     int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
                              &status, &body, &body_len, NULL, NULL, NULL, NULL,
@@ -15620,7 +15927,6 @@ int64_t rt_http_get(int64_t url_value) {
     int64_t result = ok ? rt_http_tuple(status, body, body_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(body); return result;
-#endif
 }
 
 static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_value,
@@ -15630,9 +15936,6 @@ static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_va
     RtCoreString* url = rt_core_as_string(url_value);
     RtCoreString* body = rt_core_as_string(body_value);
     if (!method || !url) return rt_http_tuple(-1, NULL, 0, "invalid HTTP text argument");
-#if defined(_WIN32)
-    return rt_http_tuple(-1, NULL, 0, "native HTTP is unavailable on Windows core runtime");
-#else
     int64_t status = -1; uint8_t* response = NULL; size_t response_len = 0; char error[160] = {0};
     int ok = rt_http_perform(method->data, url->data, rt_core_as_array(headers_value),
                              body ? (const uint8_t*)body->data : NULL, body ? (size_t)body->len : 0,
@@ -15642,7 +15945,6 @@ static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_va
     int64_t result = ok ? rt_http_tuple(status, response, response_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(response); return result;
-#endif
 }
 
 int64_t rt_http_request(int64_t method_value, int64_t url_value, int64_t headers_value,
@@ -15663,11 +15965,6 @@ int64_t rt_http_request_v2(int64_t method_value, int64_t url_value,
         return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
                                 "invalid HTTP v2 argument");
     }
-#if defined(_WIN32)
-    (void)headers; (void)headers_value; (void)timeout_ms;
-    return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
-                            "native HTTP is unavailable on Windows core runtime");
-#else
     if (!rt_http_headers_valid(headers)) {
         return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
                                 "invalid HTTP v2 headers");
@@ -15687,7 +15984,6 @@ int64_t rt_http_request_v2(int64_t method_value, int64_t url_value,
         : rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0, error);
     free(reason); free(response_headers); free(response);
     return result;
-#endif
 }
 
 int64_t rt_http_client_request(int64_t client, int64_t method, int64_t url,
@@ -15703,9 +15999,6 @@ int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
     RtCoreString* url = rt_core_as_string(url_value);
     RtCoreString* output_path = rt_core_as_string(output_path_value);
     if (!url || !output_path) return rt_http_download_tuple(-1, 0, "invalid HTTP download text argument");
-#if defined(_WIN32)
-    return rt_http_download_tuple(-1, 0, "native HTTP is unavailable on Windows core runtime");
-#else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
     int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
                              &status, &body, &body_len, NULL, NULL, NULL, NULL,
@@ -15725,7 +16018,6 @@ int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
     int64_t result = ok ? rt_http_download_tuple(status, body_len, "")
                         : rt_http_download_tuple(-1, 0, error);
     free(body); return result;
-#endif
 }
 
 static void rt_glyph_pattern(uint8_t ch, uint8_t out[7]) {

@@ -138,3 +138,13 @@ directories in the multiplicity map, not just the five tiers.
 that work.
 
 **Revalidated 2026-11-02: still plausible because stage 1 landed — the resolver now emits a default-on, NON-FATAL; no merged fix commit with a passing regression is cited in this doc.**
+
+## Stage 2 verified 2026-11-03 — deterministic precedence is in place
+
+**Status:** fixed (stage 2). Tier-less `use std.X` resolution uses the fixed
+`TIER_PRECEDENCE` order via `tier_ordered_subdirs`
+(`src/compiler/99.loader/module_resolver/resolution.spl`), plus the stage-1
+warning naming candidate tiers. `tierless_std_import_order_spec.spl`: 12 passed,
+0 failed. Stage 3 (hard error) is deliberately not done: 21k ambiguous
+occurrences remain, so an error would break the build; track as a follow-up
+once the warning list is drained.

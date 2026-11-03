@@ -447,6 +447,20 @@ fn parse_type_params_with_trait_bounds() -> ([text], [[text]]):
                 file_generic_constraints[param_name] = filtered
                 file_generic_constraint_modes[param_name] = mode_str
 
+        # Generic type-parameter default: `T = Type` (after any bound).
+        # Transported as one "=<type text>" entry at the END of this param's
+        # bound row; convert_decl_function_type_params splits it back out
+        # into ParserTypeParam.default.
+        if par_kind_get() == 100:
+            parser_advance()
+            val default_start = lex_token_start_get()
+            parser_parse_type()
+            val default_text = lex_source_slice(default_start, lex_token_start_get()).trim()
+            if default_text == "":
+                parser_error("expected default type after = in type parameter list")
+            else:
+                trait_bounds.push("=" + default_text)
+
         trait_rows.push(trait_bounds)
 
     # Keep accepting the legacy square form until the source migration is
@@ -969,8 +983,10 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     val previous_collection_owner = parser_collection_site_owner_push(struct_name)
     # Stage1 bootstrap cannot safely mutate imported text-array parser state here.
 
-    # Parse optional type parameters: class Box<T>:, struct Node<T>:
-    val type_params = parse_type_params()
+    # Parse optional type parameters: class Box<T: Bound = Default>:, struct Node<T>:
+    val parsed_type_params = parse_type_params_with_trait_bounds()
+    val type_params = parsed_type_params.0
+    val inline_trait_bounds = parsed_type_params.1
 
     # Pre-register struct name so type references resolve during parsing
     val struct_type_id = named_type_register(struct_name, [], [])
@@ -1000,7 +1016,12 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     # The same where grammar applies to generic structs/classes. Keep the
     # body colon intact for parser_expect below; semantic bound enforcement
     # remains a separate gate before these types are instantiated.
-    val where_bounds = parser_skip_where_clause(type_params)
+    var where_bounds = parser_skip_where_clause(type_params)
+    for wi in 0..type_params.len():
+        var merged = inline_trait_bounds[wi]
+        for bound in where_bounds[wi]:
+            merged.push(bound)
+        where_bounds[wi] = merged
     representation_declaration_header_v1(representation_owner)
     parser_expect(161)
     parser_skip_newlines()
