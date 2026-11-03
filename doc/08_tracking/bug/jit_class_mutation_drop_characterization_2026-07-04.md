@@ -292,3 +292,9 @@ Design: `doc/05_design/compiler/interpreter/class_instance_reference_storage_202
 Spec (RED on tree-walk, 2 of 4 fail; tagged in-development):
 `test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`.
 No narrow fix: needs `Value::ClassInstance` producers in the Rust seed + redeploy. Stays OPEN.
+## 2026-11-03: REOPENED (stale-seed evidence)
+
+Retired by commit e21824a4ed4 on the verdict of a probe guard that hardcoded the stale
+`bin/simple` seed (see guards_hardcode_stale_seed_binary_census_2026-08-17.md). The
+retirement measured a binary older than the code, so it is not evidence. Re-retire only
+with a verdict from a fresh self-hosted build via `SIMPLE_BIN`.

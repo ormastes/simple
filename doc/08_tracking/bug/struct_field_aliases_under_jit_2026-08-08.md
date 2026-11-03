@@ -221,3 +221,10 @@ The **sibling** row `class_field_reference_semantics_diverge_2026-08-06.md` (the
 opposite direction: the interpreter value-copying *class* fields) is a separate
 root cause and is NOT addressed here. Nothing in this closure should be read as
 evidence about that row.
+
+## 2026-11-03: REOPENED (stale-seed evidence)
+
+Retired by commit e21824a4ed4 on the verdict of a probe guard that hardcoded the stale
+`bin/simple` seed (see guards_hardcode_stale_seed_binary_census_2026-08-17.md). The
+retirement measured a binary older than the code, so it is not evidence. Re-retire only
+with a verdict from a fresh self-hosted build via `SIMPLE_BIN`.
