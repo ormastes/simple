@@ -1,0 +1,43 @@
+# Regression: engine3d_ext_impl_blocks_never_imported_2026-07-02.
+# Import only primary backend owners: required methods must belong to the trait impl.
+# These cases exercise trait admission and real fallback occlusion, not GPU/texture availability.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.gpu.engine3d.backend.{RenderBackend3D}
+use std.gpu.engine3d.backend_software.{SoftwareBackend3D}
+use std.gpu.engine3d.backend_cuda.{CudaBackend3D}
+use std.gpu.engine3d.backend_rocm.{RocmBackend3D}
+
+fn primary_trait_backend_name(backend: RenderBackend3D) -> text:
+    backend.name()
+
+fn primary_trait_occlusion_counts(backend: RenderBackend3D) -> [i32]:
+    expect(backend.init(2, 2)).to_be(true)
+    backend.clear(0xFF000000u32)
+    val empty = backend.occlusion_query(0, 0, 2, 2)
+    backend.draw_image(0, 0, 2, 2,
+        [0xFFFFFFFFu32, 0xFF000000u32, 0xFF000000u32, 0xFF123456u32])
+    val occupied = backend.occlusion_query(0, 0, 2, 2)
+    val clipped = backend.occlusion_query(-1, -1, 2, 2)
+    val outside = backend.occlusion_query(2, 2, 1, 1)
+    backend.shutdown()
+    [empty, occupied, clipped, outside]
+
+describe "Engine3D primary backend trait completeness":
+    it "admits the software backend without importing an extension module":
+        step("Construct software backend and dispatch through the complete rendering trait")
+        val backend = SoftwareBackend3D.create()
+        expect(primary_trait_backend_name(backend)).to_equal("software3d")
+        expect(primary_trait_occlusion_counts(backend)).to_equal([0, 2, 1, 0])
+
+    it "admits the CUDA backend without initializing GPU hardware":
+        step("Construct CUDA backend and dispatch through the complete rendering trait")
+        val backend = CudaBackend3D.create()
+        expect(primary_trait_backend_name(backend)).to_equal("cuda3d")
+        expect(primary_trait_occlusion_counts(backend)).to_equal([0, 2, 1, 0])
+
+    it "admits the ROCm backend without initializing GPU hardware":
+        step("Construct ROCm backend and dispatch through the complete rendering trait")
+        val backend = RocmBackend3D.create()
+        expect(primary_trait_backend_name(backend)).to_equal("rocm3d")
+        expect(primary_trait_occlusion_counts(backend)).to_equal([0, 2, 1, 0])
