@@ -1,6 +1,6 @@
 # Compatibility loader leaks partial executable mappings on load failure
 
-Status: open
+Status: fixed (2026-11-03)
 
 ## Evidence
 
@@ -30,3 +30,13 @@ is unavailable in this worktree; no numeric impact is claimed.
 - mapping count/bytes and global-symbol state return to their pre-load values;
 - successful-load timing, allocation count, and peak RSS do not regress beyond
   the repository's loader threshold.
+
+## Resolution (2026-11-03)
+
+`module_loader_compat.spl` load now keeps a one-array rollback ledger of
+candidate mappings (code + GOT), unmaps each exactly once through
+`_compat_load_fail` on every failure, and publishes `global_symbols` only after
+all relocations validate. Spec: `test/01_unit/compiler/loader/module_loader_partial_mapping_rollback_spec.spl`
+(budget 0 leaked mappings / bytes / global symbols; fails before fix with
+leak=1). Not covered: `unload` of a successful module still never frees its
+exec mappings (existing lifetime contract, noted in the loader source).
