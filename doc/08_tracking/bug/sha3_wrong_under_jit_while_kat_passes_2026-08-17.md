@@ -230,3 +230,12 @@ truncation. No regression vs the isolated build (which also only closed the wide
 **Status: wide-int family RESOLVED on the deployed seed; SHA3-under-JIT STILL OPEN.**
 
 **Revalidated 2026-11-02: still plausible because PARTIALLY FIXED 2026-08-17 — the 61-bit wide-int family defect this; no merged fix commit with a passing regression is cited in this doc.**
+
+## Verified FIXED 2026-11-03 (no code change in this lane)
+
+The remaining "tuple element handed back as raw heap handle" lead is the same
+defect as `jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17`, fixed
+by ee815637f72. On a seed built from release/1.0.0 source, a standalone copy of
+`sha3.spl` (rotl64 inlined; JIT genuinely compiles it, no fallback line) prints
+the NIST SHA3-256("abc") bytes `[58, 152, 93, 167, 79, 226, ...]` under both
+`interpret` and `jit`.

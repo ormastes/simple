@@ -247,3 +247,16 @@ requiring a seed rebuild to fix and verify — out of scope for a pure-Simple
 shard fix. No change made. Leaving OPEN.
 
 **Revalidated 2026-11-02: still plausible because (superseded below): UNABLE-still-open — architecturally plausible per; no merged fix commit with a passing regression is cited in this doc.**
+
+## Verified FIXED 2026-11-03 (no code change in this lane)
+
+Seed built from release/1.0.0 source (`cargo build --release --bin simple`, own
+target dir, CC=clang-cl). Standalone copy of `sha1.spl` scalar path (no
+imports, so the JIT genuinely compiles it; the stdlib import path currently
+drops the module to the interpreter on unresolved `rt_text_eq_any` /
+`crypto_text_to_bytes`, which would mask the bug) prints
+`[169, 153, 62, 54, 71, 6, 129, 106, 186, 62, 37, 113, 120, 80, 194, 108, 156, 208, 216, 157]`
+(= a9993e36..., RFC 3174) under BOTH `SIMPLE_EXECUTION_MODE=interpret` and `jit`.
+Contributing fixes: wide-int unbox (value_ops.rs), tuple `.get()` typed unbox
+(ee815637f72). Separate observation: the full stdlib import path JIT-falls-back
+on unresolved externals (not this bug).
