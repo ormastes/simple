@@ -617,11 +617,26 @@ fn peel_bdd_negation(receiver_eid: i64) -> i64:
 # seed. Fails closed: a method with no ExpectHelper matcher, a missing
 # `not_()`, or an expect() that recorded no subject is an error, never a pass.
 fn eval_negated_bdd_matcher(expect_eid: i64, method_name: text, arg_eids: [i64], arg_names: [text]) -> i64:
+    eval_bdd_matcher(expect_eid, method_name, arg_eids, arg_names, true)
+
+fn bdd_nil_matcher_receiver(receiver_eid: i64) -> i64:
+    if is_bare_expect_call(receiver_eid):
+        return receiver_eid
+    peel_bdd_negation(receiver_eid)
+
+fn eval_bdd_nil_matcher(receiver_eid: i64, method_name: text) -> i64:
+    val expect_eid = bdd_nil_matcher_receiver(receiver_eid)
+    val no_eids: [i64] = []
+    val no_names: [text] = []
+    val negate_link = not is_bare_expect_call(receiver_eid)
+    eval_bdd_matcher(expect_eid, method_name, no_eids, no_names, negate_link)
+
+fn eval_bdd_matcher(expect_eid: i64, method_name: text, arg_eids: [i64], arg_names: [text], negate_link: bool) -> i64:
     var matcher = method_name
-    var negate = true
+    var negate = negate_link
     if method_name.starts_with("to_not_"):
         matcher = "to_" + method_name.substring(7)
-        negate = false
+        negate = not negate
     val matcher_decl = func_table_lookup("ExpectHelper__" + matcher)
     if matcher_decl < 0:
         eval_set_error("`expect(..).not." + method_name + "` is not a BDD matcher: no ExpectHelper." + matcher)
@@ -657,6 +672,12 @@ fn eval_method_call(eid: i64) -> i64:
     val method_name = e_node.s_val
     val arg_eids = e_node.args
     val arg_names = expr_get_arg_names(eid)
+
+    # Route both call spellings through the same nil-matcher owner as the
+    # paren-less field form. User object methods retain ordinary dispatch.
+    if (method_name == "to_be_nil" or method_name == "to_not_be_nil") and arg_eids.len() == 0:
+        if bdd_nil_matcher_receiver(receiver_eid) >= 0:
+            return eval_bdd_nil_matcher(receiver_eid, method_name)
 
     # BDD negation link: `expect(x).not.to_equal(y)`. Without this the `.not`
     # is evaluated as a field of the expect() handle ("cannot access field on

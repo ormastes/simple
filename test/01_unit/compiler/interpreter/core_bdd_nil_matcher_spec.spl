@@ -1,0 +1,60 @@
+# Exact matcher dispatch and adjacent ordinary-field contracts.
+# The local prelude records which actual matcher ran and how often expect ran;
+# it does not substitute a passing result for interpreter execution.
+use std.spec.{describe, it, expect, step}
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_int}
+use compiler.frontend.core.interpreter.eval.{eval_get_error}
+
+val NIL_PRELUDE: text = """
+var failures = 0
+var evaluations = 0
+class ExpectHelper:
+    value: any
+    negated: bool
+    fn not_() -> ExpectHelper:
+        ExpectHelper(value: self.value, negated: true)
+    fn to_be_nil():
+        val matches = self.value == nil
+        if self.negated:
+            if matches: failures = failures + 1
+        else:
+            if not matches: failures = failures + 1
+var _expect_helper_slots: [ExpectHelper] = []
+fn expect(value) -> i64:
+    evaluations = evaluations + 1
+    _expect_helper_slots = [ExpectHelper(value: value, negated: false)]
+    1
+"""
+
+fn nil_matcher_result(body: text, result_expr: text) -> i64:
+    val result = core_interpret(NIL_PRELUDE + body + result_expr + "\n", "core_bdd_nil_probe.spl")
+    if eval_get_error() != "": return -1
+    val_get_int(result)
+
+describe "core interpreter argument-free BDD nil matchers":
+    it "executes positive paren-less nil matchers and detects mismatches":
+        step("Reproduce the exact failure")
+        expect(nil_matcher_result("expect(nil).to_be_nil\nexpect(1).to_be_nil\n", "failures")).to_equal(1)
+
+    it "executes the direct negated nil spelling in both directions":
+        step("Exercise the repaired owner")
+        expect(nil_matcher_result("expect(1).to_not_be_nil\nexpect(nil).to_not_be_nil\n", "failures")).to_equal(1)
+
+    it "preserves the negation link and double negation for nil fields":
+        expect(nil_matcher_result("expect(1).not.to_be_nil\nexpect(nil).not.to_be_nil\nexpect(nil).not.to_not_be_nil\nexpect(1).not.to_not_be_nil\n", "failures")).to_equal(2)
+
+    it "uses the same matcher for parentheses and not_ links":
+        expect(nil_matcher_result("expect(nil).to_be_nil()\nexpect(1).to_not_be_nil()\nexpect(1).not_().to_be_nil\nexpect(nil).not_().to_be_nil\n", "failures")).to_equal(1)
+
+    it "evaluates the subject and consumes the matcher exactly once":
+        expect(nil_matcher_result("expect(1).to_not_be_nil\n", "evaluations * 10 + failures")).to_equal(10)
+
+    it "preserves ordinary custom fields with nil matcher names":
+        step("Reject the adjacent regression")
+        val body = "class Box:\n    to_be_nil: i64\n    to_not_be_nil: i64\nval box = Box(to_be_nil: 17, to_not_be_nil: 23)\n"
+        expect(nil_matcher_result(body, "box.to_be_nil + box.to_not_be_nil")).to_equal(40)
+
+    it "fails closed on an unrecognized argument-free field":
+        val _ = core_interpret(NIL_PRELUDE + "expect(1).to_unknown\n", "core_bdd_nil_probe.spl")
+        expect(eval_get_error() != "").to_equal(true)

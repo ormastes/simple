@@ -3,6 +3,7 @@ use os.packages.os_packages.{list_all_packages}
 use os.tools.pkg.pkg_format.{ExtendedManifest, PkgArch, PackageType, pkg_arch_to_text, pkg_arch_from_text}
 use os.port.font_bundle.{simpleos_font_bundle_entries, load_simpleos_font_bundle_entry}
 use os.installer.path_utils.{parent_dir_chain}
+use os.installer.image_rootfs_markers.{image_stage_rootfs_markers, image_validate_rootfs_markers}
 use os.installer.image_package_payload_policy.{IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1, image_package_payload_decision_v1, image_native_executable_payload_admitted_v1, image_package_metadata_payload_v1}
 use os.installer.image_builder_payloads.{
     IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS, IMAGE_CLANG_GUEST_BIN_PATHS,
@@ -16,8 +17,7 @@ use os.installer.image_builder_payloads.{
     image_simple_toolchain_manifest, image_clang_fixture_payload,
     image_clang_embedded_payload, image_rust_fixture_payload,
     image_rust_embedded_payload, image_fstab_payload,
-    image_normalized_rootfs_backend, image_rootfs_backend_payload,
-    image_rootfs_boot_marker, image_rc_conf_payload,
+    image_normalized_rootfs_backend, image_rc_conf_payload,
     image_default_bootloader_config, image_installer_bootloader_config,
 }
 use os.installer.image_bounded_file_reader.{IMAGE_MAX_PACKAGE_ARCHIVE_BYTES_V1, IMAGE_MAX_BUILD_STAMP_BYTES_V1, image_read_file_bounded_v1, image_read_text_bounded_v1}
@@ -949,6 +949,7 @@ impl ImageBuilder:
         val efi_root = "{staging_root}/efi"
         val rootfs_root = "{staging_root}/rootfs"
         val reports_root = "{staging_root}/reports"
+        val rootfs_backend = image_normalized_rootfs_backend(_image_builder_rootfs_backend)
         _ensure_dir(staging_root)
         _ensure_dir(efi_root)
         _ensure_dir(rootfs_root)
@@ -957,11 +958,12 @@ impl ImageBuilder:
         deploy_manifest = deploy_manifest + self._populate_efi_partition(efi_root, kernel_bytes)
         val root_manifest = self._populate_root_partition(
             rootfs_root, kernel_bytes, font_guest_paths, font_blobs,
-            simplebox_decision)?
+            simplebox_decision, rootfs_backend)?
         deploy_manifest = deploy_manifest + root_manifest
 
         if self.config.include_installer:
             deploy_manifest = deploy_manifest + self._populate_install_media(rootfs_root, kernel_bytes)?
+        image_validate_rootfs_markers(rootfs_root, rootfs_backend)?
         _validate_staged_rootfs_budget_v1(rootfs_root, self.layout)?
         val manifest_path = "{reports_root}/deployed-files.sdn"
         write_text(manifest_path, deploy_manifest)
@@ -1003,6 +1005,7 @@ impl ImageBuilder:
         rootfs_root: text, kernel_bytes: [u8],
         font_guest_paths: [text], font_blobs: [[u8]],
         simplebox_decision: ImageSimpleboxValidatedDecisionV1,
+        rootfs_backend: text,
     ) -> Result<text, text>:
         if font_guest_paths.len() != font_blobs.len():
             return Err("SimpleOS font asset staging input mismatch")
@@ -1015,9 +1018,7 @@ impl ImageBuilder:
         _image_builder_reset_screen()
         write_text("{rootfs_root}/etc/pkg/repos.sdn", _pkg_repo_template())
         write_text("{rootfs_root}/etc/shell/profile.sdn", "shell = \"/bin/shell\"\n")
-        write_text("{rootfs_root}/etc/rootfs.sdn", image_rootfs_backend_payload(_image_builder_rootfs_backend))
-        _ensure_dir("{rootfs_root}/SYS")
-        write_text("{rootfs_root}/SYS/ROOTFS.CFG", image_rootfs_boot_marker(_image_builder_rootfs_backend))
+        image_stage_rootfs_markers(rootfs_root, rootfs_backend)?
 
         var manifest = ""
         manifest = manifest + _manifest_file("/etc/hostname", "system-config", "simpleos-core")

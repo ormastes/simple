@@ -13,6 +13,8 @@ use app.check.targets.{expand_check_targets}
 use app.check.check_options.{check_option_error}
 use app.check.concurrency_lint.{run_concurrency_api_lint}
 use compiler.tools.lint.semantic_check.{simple_semantic_check_source, simple_check_is_clean}
+use compiler.tools.lint.check_diagnostic.{CheckDiagnostic, check_diagnostic_text, check_diagnostic_json}
+use common.text.{escape_json}
 
 use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists}
@@ -214,6 +216,18 @@ fn check_one(path: text, as_json: bool) -> i64:
     """
     check_one_profiled(path, as_json, false, false, 0, 0)
 
+fn emit_check_diagnostic(diagnostic: CheckDiagnostic, as_json: bool):
+    if as_json:
+        # Keep stdout's existing single summary object machine-readable.
+        # Diagnostic events use stderr and are emitted before the transient
+        # file scope ends, so no reclaimed parser/source values escape it.
+        eprint check_diagnostic_json(diagnostic)
+    else:
+        print check_diagnostic_text(diagnostic)
+
+fn emit_check_message(path: text, message: text, as_json: bool):
+    emit_check_diagnostic(CheckDiagnostic(path: path, code: "check", message: message), as_json)
+
 fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_only: bool, done: i64, total: i64) -> i64:
     var file_started_us: i64 = 0
     var phase_started_us: i64 = 0
@@ -223,14 +237,14 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_onl
     if not file_exists(path):
         if phase_profile:
             val _marked = check_phase_mark(true, "preflight", phase_started_us, path, done, total, "failed")
-        if not as_json:
-            print "ERROR: file not found: {path}"
+        emit_check_diagnostic(CheckDiagnostic(path: path, code: "E0001",
+            message: "cannot read file: {path}",
+            help: "check that the path exists and is readable"), as_json)
         return 1
     if not checker_begin_file_scope():
         if phase_profile:
             val _marked = check_phase_mark(true, "scope_setup", phase_started_us, path, done, total, "failed")
-        if not as_json:
-            print "ERROR: checker transient parse scope unavailable: {path}"
+        emit_check_message(path, "checker transient parse scope unavailable", as_json)
         return 1
     if phase_profile:
         phase_started_us = check_phase_mark(true, "scope_setup", phase_started_us, path, done, total, "running")
@@ -241,8 +255,7 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_onl
     val sspec_guidance = check_sspec_guidance(source, path)
     var failure_count = 0
     if sspec_guidance != "":
-        if not as_json:
-            print sspec_guidance
+        emit_check_message(path, sspec_guidance, as_json)
         failure_count = 1
     else:
         parse_module(source, path)
@@ -253,13 +266,12 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_onl
         if phase_profile:
             phase_started_us = check_phase_mark(true, "lint", phase_started_us, path, done, total, "running")
         if errors.len() > 0 or concurrency_errors.len() > 0 or parser_has_errors():
-            if not as_json:
-                for err in errors:
-                    print "{path}: {err}"
-                for concurrency_err in concurrency_errors:
-                    print "{path}: {concurrency_err}"
-                if errors.len() == 0 and concurrency_errors.len() == 0:
-                    print "{path}: check failed"
+            for err in errors:
+                emit_check_message(path, err, as_json)
+            for concurrency_err in concurrency_errors:
+                emit_check_message(path, concurrency_err, as_json)
+            if errors.len() == 0 and concurrency_errors.len() == 0:
+                emit_check_message(path, "check failed", as_json)
             val total = errors.len() + concurrency_errors.len()
             failure_count = if total > 0: total else: 1
         elif not syntax_only:
@@ -271,17 +283,24 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_onl
             if not as_json:
                 for warning in semantic_result.warnings:
                     print warning
+            else:
+                for warning in semantic_result.warnings:
+                    eprint "{\"type\": \"check-diagnostic\", \"severity\": \"warning\", \"file\": \"{escape_json(path)}\", \"message\": \"{escape_json(warning)}\"}"
             if not simple_check_is_clean(semantic_result):
                 if not as_json:
                     for diagnostic in semantic_result.diagnostics:
                         print diagnostic
                     if semantic_result.diagnostics.len() == 0:
                         print "{path}: semantic check incomplete"
+                else:
+                    for diagnostic in semantic_result.diagnostic_records:
+                        emit_check_diagnostic(diagnostic, true)
+                    if semantic_result.diagnostics.len() == 0:
+                        emit_check_message(path, "semantic check incomplete", true)
                 failure_count = if semantic_result.diagnostics.len() > 0: semantic_result.diagnostics.len() else: 1
 
     if not checker_end_file_scope():
-        if not as_json:
-            print "ERROR: checker transient parse scope teardown failed: {path}"
+        emit_check_message(path, "checker transient parse scope teardown failed", as_json)
         failure_count = failure_count + 1
     if phase_profile:
         val terminal = if failure_count == 0: "succeeded" else: "failed"

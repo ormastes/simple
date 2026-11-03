@@ -6,7 +6,6 @@
 # @tag: unit, gpu, engine2d, backend, strict, diagnostics
 
 use std.gpu.engine2d.backend_probe.{BackendProber, BackendStatus, StrictBackendFactory}
-use std.gc_async_mut.cuda.{cuda_available}
 
 describe "Engine2D strict backend probe diagnostics":
     # @manual scenario evidence
@@ -38,21 +37,24 @@ describe "Engine2D strict backend probe diagnostics":
         expect(probe.is_hardware()).to_equal(false)
         expect(probe.strict_failure_without_fallback()).to_equal(true)
 
-    it "reports CUDA selectable when runtime and device are available":
+    it "reports the CUDA factory outcome without predicting it from another probe":
+        step("Reproduce the exact failure")
         val probe = StrictBackendFactory.strict().create_backend("cuda")
-
         expect(probe.requested_name).to_equal("cuda")
         expect(probe.selected_name).to_equal("cuda")
         expect(probe.api_name).to_equal("cuda")
         expect(probe.shader_format).to_equal("ptx")
-        expect(probe.has_compute).to_equal(true)
         expect(probe.strict_failure_without_fallback()).to_equal(true)
-        if cuda_available():
-            expect(probe.status).to_equal(BackendStatus.Initialized)
-            expect(probe.feature_gate).to_equal("cuda_context")
-            expect(probe.reason).to_contain("context initialized")
-        else:
-            expect(probe.status).to_equal(BackendStatus.Unavailable)
+        # The current factory has no device-context creation route. Its own
+        # unavailable diagnostic is authoritative; cuda_available() cannot
+        # turn this outcome into a claim that a context was initialized.
+        step("Reject the adjacent regression")
+        expect(probe.status).to_equal(BackendStatus.Unavailable)
+        expect(probe.available).to_equal(false)
+        expect(probe.has_compute).to_equal(false)
+        expect(probe.feature_gate).to_equal("cuda_runtime")
+        expect(probe.reason).to_equal("cuda runtime evidence not available")
+        print "[cuda-factory] GPU BRANCH SKIPPED: factory has no device evidence; proves NOTHING about GPU execution"
 
     it "reports architecture-specific CPU SIMD probes without fallback":
         # @req REQ-SSPEC-UNIT

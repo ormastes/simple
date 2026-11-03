@@ -3,8 +3,8 @@
 # Uses shared mcp_sdk for JSON, shell helpers, and tool result building.
 
 use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _char_len, _slice_text, _is_ws, _find_json_value_start}
-use app.io.minimal_runtime_ops.{cwd, env_get, process_run_timeout, process_run_bounded}
-# Import process_run_timeout from the light std module, NOT app.io.mod — the
+use app.io.minimal_runtime_ops.{cwd, env_get, process_run_bounded}
+# Import process operations from the light owner, NOT app.io.mod — the
 # latter is a CLI/compiler re-export hub whose graph makes `bin/simple run` skip
 # main() (LSP MCP server never starts). See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
@@ -96,7 +96,9 @@ fn run_lsp_diagnostics(file: text) -> text:
     val enabled = env_get("SIMPLE_LSP_ENABLE_DIAGNOSTICS") ?? ""
     if enabled != "1":
         return "diagnostics unavailable in source mode (process_run deadlocks on the `simple check` subcommand spawn). Run `simple check " + file + "` directly, or set SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 on a working native build."
-    val (stdout, stderr, code) = process_run_timeout(find_simple_binary(), ["check", file], 10000)
+    # `simple check` may spawn a delegate. The bounded owner terminates the
+    # process tree on timeout and caps captured output, including descendants.
+    val (stdout, stderr, code) = process_run_bounded(find_simple_binary(), ["check", file], 10000, LSP_COMMAND_OUTPUT_CAPTURE_BYTES)
     val clean = clean_command_output(stdout)
     if code == 0:
         return clean

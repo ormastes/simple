@@ -1,0 +1,73 @@
+# Regression: field reads on a reassigned `var` struct local.
+# Frozen stage2 lowered every field read of such a local at offset 0
+# (bug stage2_var_hir_module_field_access_offset0_2026-11-03; LINK_NOTES S3N-4).
+# Interpreter lane here; native lane: scripts/check/check-native-regress-a.shs.
+use std.spec
+
+struct RvP:
+    a: i64
+    b: i64
+
+struct RvMixed:
+    id: i64
+    name: text
+    flag: bool
+    score: i64
+
+struct RvWide:
+    f0: i64
+    f1: i64
+    f2: i64
+    f3: i64
+    f4: i64
+
+fn rv_make(a: i64, b: i64) -> RvP:
+    RvP(a: a, b: b)
+
+describe "field reads on a reassigned var struct local":
+    it "reads the second field after reassignment":
+        var p = RvP(a: 1, b: 2)
+        p = RvP(a: 3, b: 4)
+        expect(p.b).to_equal(4)
+        expect(p.a).to_equal(3)
+
+    it "reads both fields after reassignment from fn return":
+        var p = rv_make(1, 2)
+        p = rv_make(30, 40)
+        expect(p.a).to_equal(30)
+        expect(p.b).to_equal(40)
+
+    it "reads mixed-type fields after reassignment":
+        var m = RvMixed(id: 1, name: "old", flag: false, score: 5)
+        m = RvMixed(id: 2, name: "new", flag: true, score: 99)
+        expect(m.id).to_equal(2)
+        expect(m.name).to_equal("new")
+        expect(m.flag).to_equal(true)
+        expect(m.score).to_equal(99)
+
+    it "reads every field of a wide struct after repeated reassignment":
+        var w = RvWide(f0: 0, f1: 1, f2: 2, f3: 3, f4: 4)
+        w = RvWide(f0: 10, f1: 11, f2: 12, f3: 13, f4: 14)
+        w = RvWide(f0: 20, f1: 21, f2: 22, f3: 23, f4: 24)
+        expect(w.f0).to_equal(20)
+        expect(w.f2).to_equal(22)
+        expect(w.f4).to_equal(24)
+
+    it "reads a field after reassignment inside a loop":
+        var p = RvP(a: 0, b: 0)
+        var total = 0
+        for i in 0..3:
+            p = RvP(a: i, b: i * 10)
+            total = total + p.b
+        expect(total).to_equal(30)
+
+    it "reads a field after reassignment in a branch":
+        var p = RvP(a: 1, b: 2)
+        if p.a == 1:
+            p = RvP(a: 7, b: 8)
+        expect(p.b).to_equal(8)
+
+    it "reads a typed var param copy after reassignment":
+        var p: RvP = RvP(a: 5, b: 6)
+        p = RvP(a: 9, b: 10)
+        expect(p.b).to_equal(10)

@@ -4,13 +4,16 @@
 # Zero external dependencies
 # BatchNorm1d, LayerNorm, Embedding, and helpers are in nn_layers.spl
 #
-# NOTE: This module uses generics (PureTensor<f64>) and will only work
+# Linear, ReLU, Sigmoid, Tanh and Sequential use tracked autograd Tensor.
+# Remaining raw layers are not compatible with that tracked Sequential.
+# NOTE: Raw layers use generics (PureTensor<f64>) and will only work
 # in compiled mode, not in the interpreter (runtime parser limitation).
 
 use std.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros, tensor_ones, tensor_randn}
 use std.pure.tensor_ops.{add, mul, mul_scalar, relu, sigmoid, tanh, softmax, tensor_exp, tensor_sum, tensor_div_scalar}
 use std.pure.nn.pooling.{MaxPool2d, AvgPool2d, maxpool2d_create, avgpool2d_create}
 use std.gc_async_mut.pure.nn_layers.*
+use std.pure.autograd.{Tensor, tensor_linear, tensor_relu, tensor_sigmoid, tensor_tanh}
 
 # ============================================================================
 # Layer Classes
@@ -18,48 +21,34 @@ use std.gc_async_mut.pure.nn_layers.*
 
 class Linear:
     """Fully-connected layer: y = xW^T + b"""
-    weight: PureTensor<f64>
-    bias: PureTensor<f64>?
+    weight: Tensor
+    bias: Tensor?
     in_features: i64
     out_features: i64
     training: bool
 
     static fn create(in_features: i64, out_features: i64, bias: bool) -> Linear:
         """Create Linear layer with simple initialization."""
+        assert in_features > 0 and out_features > 0
         var w_data: [f64] = []
         var i = 0
         while i < in_features * out_features:
             w_data.push(0.1)
             i = i + 1
 
-        val weight = tensor_from_data(w_data, [out_features, in_features])
+        val weight = Tensor.from_data(w_data, [out_features, in_features], requires_grad: true)
         val bias_tensor = if bias:
-            Some(tensor_zeros([out_features]))
+            Some(Tensor.zeros([out_features], requires_grad: true))
         else:
             nil
 
         Linear(weight: weight, bias: bias_tensor, in_features: in_features, out_features: out_features, training: true)
 
-    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
-        """Forward: y = xW^T + b"""
-        var result: [f64] = []
-        var i = 0
-        while i < self.out_features:
-            var sum = 0.0
-            var j = 0
-            while j < self.in_features and j < x.data.len():
-                sum = sum + self.weight.data[i * self.in_features + j] * x.data[j]
-                j = j + 1
+    fn forward(x: Tensor) -> Tensor:
+        """Apply the tracked affine operation to the last input dimension."""
+        tensor_linear(x, self.weight, self.bias)
 
-            if self.bias.?:
-                sum = sum + self.bias.unwrap().data[i]
-
-            result.push(sum)
-            i = i + 1
-
-        tensor_from_data(result, [self.out_features])
-
-    fn parameters() -> [PureTensor<f64>]:
+    fn parameters() -> [Tensor]:
         """Get list of parameters (weight, bias if exists)."""
         if self.bias.?:
             [self.weight, self.bias.unwrap()]
@@ -85,10 +74,10 @@ class ReLU:
     static fn create() -> ReLU:
         ReLU(training: true)
 
-    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
-        relu(x)
+    fn forward(x: Tensor) -> Tensor:
+        tensor_relu(x)
 
-    fn parameters() -> [PureTensor<f64>]:
+    fn parameters() -> [Tensor]:
         []
 
     me train():
@@ -107,10 +96,10 @@ class Sigmoid:
     static fn create() -> Sigmoid:
         Sigmoid(training: true)
 
-    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
-        sigmoid(x)
+    fn forward(x: Tensor) -> Tensor:
+        tensor_sigmoid(x)
 
-    fn parameters() -> [PureTensor<f64>]:
+    fn parameters() -> [Tensor]:
         []
 
     me train():
@@ -129,10 +118,10 @@ class Tanh:
     static fn create() -> Tanh:
         Tanh(training: true)
 
-    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
-        tanh(x)
+    fn forward(x: Tensor) -> Tensor:
+        tensor_tanh(x)
 
-    fn parameters() -> [PureTensor<f64>]:
+    fn parameters() -> [Tensor]:
         []
 
     me train():
@@ -226,16 +215,16 @@ class Sequential:
     static fn create(layers: [any]) -> Sequential:
         Sequential(layers: layers, training: true)
 
-    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+    fn forward(x: Tensor) -> Tensor:
         """Forward pass through all layers."""
         var result = x
         for layer in self.layers:
             result = layer.forward(result)
         result
 
-    fn parameters() -> [PureTensor<f64>]:
+    fn parameters() -> [Tensor]:
         """Collect parameters from all layers."""
-        var all_params: [PureTensor<f64>] = []
+        var all_params: [Tensor] = []
         for layer in self.layers:
             val layer_params = layer.parameters()
             all_params = all_params + layer_params

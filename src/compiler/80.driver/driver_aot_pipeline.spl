@@ -197,28 +197,41 @@ impl CompilerDriver:
             log_debug("evicting HIR modules after MIR lowering")
             self.ctx.evict_hir()
 
+        # Earlier phase failures stay fatal, but are not borrow diagnostics.
+        # borrow_check() answers with the whole context's error state, so this
+        # gate must run before attributing a later failure to the checker.
+        if self.ctx.has_errors():
+            for err in self.ctx.errors:
+                log_error("Pre-borrow pipeline error: {err}")
+            if go_to_end_enabled_v1():
+                self.go_to_end_absorb_errors_v1("mir")
+                return self.go_to_end_finish_v1(0, [])
+            return CompileResult.CodegenError(self.ctx.errors.join("\n"))
+
+        # Bootstrap may skip optional post-MIR transforms; borrow safety still
+        # runs unless the caller explicitly selected --no-borrow-check.
+        log_phase("aot:borrow_check:start")
+        log_build_progress("borrow_check", "modules", 0,
+            self.ctx.mir_modules.len(), "start", 4, 6, 0, 0, "running")
+        if not self.borrow_check():
+            for err in self.ctx.errors:
+                log_error("Borrow error: {err}")
+            log_build_progress("borrow_check", "modules", -1,
+                self.ctx.mir_modules.len(), "start", 4, 6, 1, 0, "failed")
+            if go_to_end_enabled_v1():
+                self.go_to_end_absorb_errors_v1("borrow")
+                return self.go_to_end_finish_v1(0, [])
+            return CompileResult.BorrowError(self.ctx.errors)
+        log_phase("aot:borrow_check:done")
+        log_build_progress("borrow_check", "modules",
+            self.ctx.mir_modules.len(), self.ctx.mir_modules.len(),
+            "done", 4, 6, 0, 0, "running")
+
         val bootstrap_flat_aot = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
         if bootstrap_flat_aot:
             log_phase("aot:flat_mir_passes:skipped")
             log_bootstrap_flat_warning("aot:flat_mir_passes:skipped")
         else:
-            log_phase("aot:borrow_check:start")
-            log_build_progress("borrow_check", "modules", 0,
-                self.ctx.mir_modules.len(), "start", 4, 6, 0, 0, "running")
-            if not self.borrow_check():
-                for err in self.ctx.errors:
-                    log_error("Borrow error: {err}")
-                log_build_progress("borrow_check", "modules", -1,
-                    self.ctx.mir_modules.len(), "start", 4, 6, 1, 0, "failed")
-                if go_to_end_enabled_v1():
-                    self.go_to_end_absorb_errors_v1("borrow")
-                    return self.go_to_end_finish_v1(0, [])
-                return CompileResult.BorrowError(self.ctx.errors)
-            log_phase("aot:borrow_check:done")
-            log_build_progress("borrow_check", "modules",
-                self.ctx.mir_modules.len(), self.ctx.mir_modules.len(),
-                "done", 4, 6, 0, 0, "running")
-
             log_phase("aot:process_async:start")
             log_build_progress("process_async", "modules", 0,
                 self.ctx.mir_modules.len(), "start", 4, 6, 0, 0, "running")

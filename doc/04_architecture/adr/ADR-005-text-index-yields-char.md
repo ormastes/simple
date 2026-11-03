@@ -194,3 +194,18 @@ A `char` is not a condition: `if c:` is a type error; compare explicitly
 
 Tracking: bug row `char_literal_lexer_switch_staged_2026-11-03` (blocked on the
 stage3 self-build).
+
+## Char truthiness and construction (2026-11-03 decision)
+
+- **Truthiness:** a `char` has no truthiness. `if c:`, `while c:`, `not c`,
+  `c and x` are type errors in every engine; write an explicit comparison.
+  Checker diagnostic is staged: a warning now, an error once Windows, macOS and
+  Linux each have a self-hosted binary (same staging as exhaustive match; bug row
+  `char_condition_type_check_staged_2026-11-03`).
+- **Runtime:** until the checker enforces it, `truthy()` on a char tag fails
+  closed (Rust `panic!`, C `spl_panic`) with the same message in both runtimes
+  instead of silently returning false (previous behaviour, even for `'a'`).
+- **Construction:** only Unicode scalar values form a char. Rust
+  `from_char_code` returns `None` for surrogates (U+D800..U+DFFF) and values
+  above U+10FFFF; C `RT_CHAR_FROM_CODE` returns `RT_NIL` for the same inputs.
+  `RT_CHAR` is the unchecked constructor for known-valid scalars only.
