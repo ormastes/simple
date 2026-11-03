@@ -1,0 +1,26 @@
+# @tag:in-development
+# Requirement: ADR-005 section Decision.2 and "Lexer" (char literal = exactly one scalar or one escape)
+# Every scenario asserts TARGET behaviour and is expected to FAIL today:
+# single-quoted escapes are lexed as raw text and multi-scalar literals are accepted.
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{env_get, process_run}
+
+fn _lane(mode: text, probe: text) -> text:
+    val runner = env_get("SIMPLE_BIN")
+    val verb = if mode == "interpreter": "run " else: ""
+    val (out, err, code) = process_run("sh", ["-c", "SIMPLE_EXECUTION_MODE={mode} '{runner}' {verb}'{probe}' 2>&1"])
+    "{out}{err}\nexit={code}\n"
+
+describe "char literal escapes and rejected literals (in development)":
+    it "each single-quoted escape counts as one char on both lanes":
+        val probe = "test/03_system/language/policy/probe/char_escape_lit.spl"
+        expect(_lane("interpreter", probe)).to_contain("PROBE|ESC=233 10 39")
+        expect(_lane("jit", probe)).to_contain("PROBE|ESC=233 10 39")
+    it "decomposed e + U+0301 literal is rejected with a diagnostic":
+        val out = _lane("interpreter", "test/03_system/language/policy/probe/char_lit_decomposed.spl")
+        expect(out.contains("PROBE|ACCEPTED=")).to_be_false()
+        expect(out).to_contain("char")
+    it "ZWJ emoji sequence literal is rejected with a diagnostic":
+        val out = _lane("interpreter", "test/03_system/language/policy/probe/char_lit_zwj.spl")
+        expect(out.contains("PROBE|ACCEPTED=")).to_be_false()
+        expect(out).to_contain("char")

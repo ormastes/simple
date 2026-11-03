@@ -11,7 +11,7 @@
 - **Static methods:** `static fn name()` - no self access
 - **Generics:** Use `<>` not `[]` - `Option<T>`, `List<Int>`
 - **No `pub fn`:** Functions are public by default. Use `_prefix` for private.
-- **Strings:** Double-quoted = interpolated (`"Hello {name}"`), single-quoted = raw
+- **Strings:** Double-quoted = interpolated (`"Hello {name}"`), raw = `r"..."` / `r"""..."""`, single-quoted = `char` only (`'x'`, one Unicode scalar or escape; never new multi-scalar `'...'`)
 - **Constructors:** `Point(x: 3, y: 4)` (direct), not `.new()`
 - **Pattern binding:** `if val Some(x) = expr:` (not `if let`)
 - **Empty body:** Use `()` or `pass`
