@@ -1,0 +1,35 @@
+# phase3_compiler_unit_or_workaround_2026-10-10: bare unit alternatives in an
+# OR arm must resolve against the subject enum, not become bindings.
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+
+fn or_unit_lower_errors(source: text) -> i64:
+    val ast = parse_full_frontend(source, "or_unit.spl", "or_unit.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("or_unit.spl")
+    val hir = hir_lowering.lower_module(ast)
+    hir_lowering.errors.len()
+
+describe "bare unit alternatives in OR arms":
+    it "resolves unit variants beside a payload variant (param subject)":
+        val source = "enum Mode:\n    Native\n    Host\n    Other(n: i64)\n\nfn pick(m: Mode) -> i64:\n    match m:\n        case Native | Host:\n            1\n        case Other(n):\n            n\n"
+        expect(or_unit_lower_errors(source)).to_equal(0)
+
+    it "resolves unit variants beside payload variants binding the same name":
+        val source = "enum Mode:\n    Native\n    Host\n    A(n: i64)\n    B(n: i64)\n\nfn pick(m: Mode) -> i64:\n    match m:\n        case Native | Host:\n            1\n        case A(n) | B(n):\n            n\n"
+        expect(or_unit_lower_errors(source)).to_equal(0)
+
+    it "resolves unit variants when the subject is a call result":
+        val source = "enum Mode:\n    Native\n    Host\n    Other(n: i64)\n\nfn make() -> Mode:\n    Mode.Native\n\nfn pick() -> i64:\n    match make():\n        case Native | Host:\n            1\n        case Other(n):\n            n\n"
+        expect(or_unit_lower_errors(source)).to_equal(0)
+
+    it "resolves unit variants when the subject is a field":
+        val source = "enum Mode:\n    Native\n    Host\n    Other(n: i64)\n\nstruct S:\n    m: Mode\n\nfn pick(s: S) -> i64:\n    match s.m:\n        case Native | Host:\n            1\n        case Other(n):\n            n\n"
+        expect(or_unit_lower_errors(source)).to_equal(0)
+
+    it "still rejects alternatives that bind different names":
+        val source = "enum Mode:\n    A(n: i64)\n    B(m: i64)\n\nfn pick(x: Mode) -> i64:\n    match x:\n        case A(n) | B(m):\n            1\n"
+        expect(or_unit_lower_errors(source) > 0).to_equal(true)

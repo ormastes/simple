@@ -18,3 +18,7 @@ The diagnostic fixture emitted six phases. The driver wrongly expected an additi
 Source-only investigation binds frozen82 constructor/accessor and validator paths. First spawn reaches BCrypt/Windows process APIs; stdout validation reaches SIMD tier selection, which can resolve CPU configuration through dirs_next cache directories and filesystem metadata. Those are candidate chains, not observed handle ownership. No cold baseline was weakened, no provider eligibility advanced, and no full compiler/core/MCP/whole-test PASS is claimed.
 
 **Revalidated 2026-11-02: still plausible because OPEN, P1 qualification blocker; heap/OS owner attribution unresolved; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 handle accounting (C provider)
+
+`test/01_unit/runtime/process_piped_handle_stress_test.c` (runner `run_process_piped_handle_stress_test.shs`) drives `rt_process_spawn_piped`/`write_stdin`/`read_stdout`/`close_piped` for 3 warmup + 100 serial + 4x15 concurrent cycles and asserts `GetProcessHandleCount` returns to the post-warmup baseline. Result on Windows 11 (clang): baseline=79 serial=79 concurrent=79, 0 failures, peak RSS 5 MB, wall 21 s. The C provider (`runtime_process.c` spawn/close/is_alive paths) does NOT leak per cycle; the 128->158 cold growth is therefore one-time lazy initialisation outside this primitive (Rust-side first-spawn/SIMD-tier/dirs init), not per-process. Bug remains open for the Rust fixture's cold baseline; use this spec as the guard.

@@ -599,3 +599,13 @@ fn try_is_absent_equals_is_none_or_err_check() {
         }
     }
 }
+
+#[test]
+fn test_unwrap_or_value_nil_flat_nullable_returns_default() {
+    // Absent flat-nullable optional (`i64? = nil`, failed parse_int) is bare nil.
+    let default = RuntimeValue::from_int(-1);
+    assert_eq!(super::rt_unwrap_or_value(RuntimeValue::NIL, default), default);
+    // A present bare payload is still returned unchanged.
+    let five = RuntimeValue::from_int(5);
+    assert_eq!(super::rt_unwrap_or_value(five, default), five);
+}

@@ -3,6 +3,7 @@ import { dirname, join, relative } from "node:path";
 
 import { assertSha256, contentHash, sha256Hex } from "./canonical.js";
 import { canonicalRoot } from "../workspace/paths.js";
+import { fsyncDirectory, mkdirDurable } from "./directory_fsync.js";
 
 function bytesOf(value) {
   if (Buffer.isBuffer(value)) return Buffer.from(value);
@@ -57,7 +58,7 @@ export class ContentAddressedObjectStore {
       if (sha256Hex(existing) !== hash.slice(7)) throw new Error(`CAS corruption at ${hash}`);
       return Object.freeze({ hash, size: existing.length, path: this.relativePath(hash), existed: true });
     }
-    mkdirSync(dirname(target), { recursive: true });
+    mkdirDurable(dirname(target));
     const temporary = join(dirname(target), `.${hash.slice(7)}.${process.pid}.${Date.now()}.tmp`);
     let descriptor = -1;
     try {
@@ -66,7 +67,7 @@ export class ContentAddressedObjectStore {
       fsyncSync(descriptor);
       closeSync(descriptor);
       descriptor = -1;
-      if (!isRegular(target)) renameSync(temporary, target);
+      if (!isRegular(target)) { renameSync(temporary, target); fsyncDirectory(dirname(target)); }
       else unlinkSync(temporary);
     } finally {
       if (descriptor !== -1) closeSync(descriptor);

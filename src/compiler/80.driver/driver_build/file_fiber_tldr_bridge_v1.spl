@@ -61,7 +61,7 @@ pub class FileFiberTldrBridgeV1:
         if fiber_count < 0 or waiter_capacity < 0:
             return Err(FileFiberTldrBridgeErrorV1.Capacity)
         val capacity = if fiber_count > 0: fiber_count else: 1
-        # @workaround bug=ctor-mir-20261031 reason=stage2 leaves generic static-call Result unsubstituted; annotate binder
+        # @workaround bug=ctor_mir_2026-10-31 reason=stage2 leaves generic static-call Result unsubstituted; annotate binder
         val created: Result<SimpleRing<i64, i64>, SimpleRingError> = SimpleRing<i64, i64>.create(ring_id, owner_id, capacity)
         match created:
             case Err(error): Err(FileFiberTldrBridgeErrorV1.Ring(error))
@@ -104,7 +104,7 @@ pub class FileFiberTldrBridgeV1:
             case AsyncRefStateI64.Failed(_): return Ok(false)
             case AsyncRefStateI64.InvalidReference: return Err(FileFiberTldrBridgeErrorV1.Closed)
             case AsyncRefStateI64.Pending: ()
-        # @workaround bug=rti004-mono-20261101 reason=bind the generic-self call to a typed local; stage2 RTI cannot resolve the mono specialization symbol (E-RTI-004) when the call itself is the match subject
+        # @workaround bug=rti004_mono_specialization_match_subject_2026-11-01 reason=bind the generic-self call to a typed local; stage2 RTI cannot resolve the mono specialization symbol (E-RTI-004) when the call itself is the match subject
         val reserve_result: Result<RingReservation, SimpleRingError> = self.ring.reserve(self.owner_id, (fiber + 1).to_u64())
         val reservation = match reserve_result:
             case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
@@ -165,7 +165,7 @@ pub class FileFiberTldrBridgeV1:
             case Some(value): value
             # @workaround bug=seed_case_nil_pattern_eq_2026-11-02
             case None: return Err(FileFiberTldrBridgeErrorV1.Busy)
-        # @workaround bug=rti004-mono-20261101 reason=see reserve_result
+        # @workaround bug=rti004_mono_specialization_match_subject_2026-11-01 reason=see reserve_result
         val commit_result: Result<RingToken, SimpleRingError> = self.ring.commit(self.owner_id, reservation, fiber)
         val committed = match commit_result:
             case Err(error):
@@ -181,7 +181,7 @@ pub class FileFiberTldrBridgeV1:
             return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
         self.waits[index].reservation = nil
         self.waits[index].state = _FF_WAIT_ARMED
-        # @workaround bug=ctor-mir-20261031 reason=annotate binder; stage2 leaves Op unsubstituted in generic-self method Result
+        # @workaround bug=ctor_mir_2026-10-31 reason=annotate binder; stage2 leaves Op unsubstituted in generic-self method Result
         val taken: Result<RingSubmission<i64>?, SimpleRingError> = self.ring.provider_take(1)
         match taken:
             case Err(error):
@@ -201,7 +201,7 @@ pub class FileFiberTldrBridgeV1:
                         case Err(error): return Err(error)
                         case Ok(_): ()
                     return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
-            # @workaround bug=ctor-mir-20261031 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
+            # @workaround bug=ctor_mir_2026-10-31 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
             case Ok(_):
                 match self._cancel_and_release(index, "provider admission returned no work"):
                     case Err(error): return Err(error)
@@ -261,13 +261,13 @@ pub class FileFiberTldrBridgeV1:
             if val cursor = self.cursors[i]:
                 match cursor.next_pending(1):
                     case AsyncWakeScanI64.Wake(wake):
-                        # @workaround bug=ctor-mir-20261031 reason=explicit type arg; stage2 cannot infer Op from SimpleRing<i64,i64> field
-                        # @workaround bug=rti004-mono-20261101 reason=see reserve_result (specialized free fn as match subject)
+                        # @workaround bug=ctor_mir_2026-10-31 reason=explicit type arg; stage2 cannot infer Op from SimpleRing<i64,i64> field
+                        # @workaround bug=rti004_mono_specialization_match_subject_2026-11-01 reason=see reserve_result (specialized free fn as match subject)
                         val delivered: Result<AsyncWakeCursorI64, SimpleRingError> = async_ref_deliver_wake_i64<i64>(self.ring, wake)
                         match delivered:
-                            # @workaround bug=enumowner-mir-20261031 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
+                            # @workaround bug=enumowner_mir_2026-10-31 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
                             case Result.Ok(next): self.cursors[i] = Some(next)
-                            # @workaround bug=enumowner-mir-20261031 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
+                            # @workaround bug=enumowner_mir_2026-10-31 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
                             case Result.Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
                     case AsyncWakeScanI64.More(next): self.cursors[i] = Some(next)
                     case AsyncWakeScanI64.Done: self.cursors[i] = nil
@@ -299,14 +299,14 @@ pub class FileFiberTldrBridgeV1:
             val completion = if val retained = self.pending_completion:
                 retained
             else:
-                # @workaround bug=ctor-mir-20261031 reason=annotate binder; stage2 leaves Cpl unsubstituted in generic-self method Result
+                # @workaround bug=ctor_mir_2026-10-31 reason=annotate binder; stage2 leaves Cpl unsubstituted in generic-self method Result
                 val taken_completion: Result<RingCompletion<i64>?, SimpleRingError> = self.ring.take_completion_retained(self.owner_id)
                 match taken_completion:
                     case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
                     case Ok(Some(value)):
                         self.pending_completion = Some(value)
                         value
-                    # @workaround bug=ctor-mir-20261031 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
+                    # @workaround bug=ctor_mir_2026-10-31 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
                     case Ok(_): return Ok(())
             var found = -1
             for i in 0..self.waits.len():
@@ -328,9 +328,9 @@ pub class FileFiberTldrBridgeV1:
                     case Err(TldrAsyncErrorV1.Source(message)): error_text = message
                     case Err(error): return Err(FileFiberTldrBridgeErrorV1.Table(error))
                     case Ok(Some(_)): ()
-                    # @workaround bug=ctor-mir-20261031 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
+                    # @workaround bug=ctor_mir_2026-10-31 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
                     case Ok(_): return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
-            # @workaround bug=rti004-mono-20261101 reason=see reserve_result
+            # @workaround bug=rti004_mono_specialization_match_subject_2026-11-01 reason=see reserve_result
             val released_completion: Result<(), SimpleRingError> = self.ring.release_retained_completion(self.owner_id, completion.token)
             match released_completion:
                 case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
@@ -343,14 +343,14 @@ pub class FileFiberTldrBridgeV1:
 
     me _release_reserved(index: i64) -> Result<(), SimpleRingError>:
         if val reservation = self.waits[index].reservation:
-            # @workaround bug=rti004-mono-20261101 reason=see reserve_result
+            # @workaround bug=rti004_mono_specialization_match_subject_2026-11-01 reason=see reserve_result
             val release_result: Result<(), SimpleRingError> = self.ring.release(self.owner_id, reservation)
             match release_result:
-                # @workaround bug=enumowner-mir-20261031 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
+                # @workaround bug=enumowner_mir_2026-10-31 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
                 case Result.Ok(_):
                     self.waits[index].reservation = nil
                     Ok(())
-                # @workaround bug=enumowner-mir-20261031 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
+                # @workaround bug=enumowner_mir_2026-10-31 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
                 case Result.Err(error): Err(error)
         else:
             Ok(())
@@ -362,7 +362,7 @@ pub class FileFiberTldrBridgeV1:
                 case Err(error): return Err(FileFiberTldrBridgeErrorV1.Reference(error))
                 case Ok(_): ()
         if val reservation = self.waits[index].reservation:
-            # @workaround bug=rti004-mono-20261101 reason=see reserve_result
+            # @workaround bug=rti004_mono_specialization_match_subject_2026-11-01 reason=see reserve_result
             val release_result: Result<(), SimpleRingError> = self.ring.release(self.owner_id, reservation)
             match release_result:
                 case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
@@ -370,11 +370,11 @@ pub class FileFiberTldrBridgeV1:
             self.waits.remove(index)
             return Ok(true)
         else:
-            # @workaround bug=rti004-mono-20261101 reason=see reserve_result
+            # @workaround bug=rti004_mono_specialization_match_subject_2026-11-01 reason=see reserve_result
             val cancel_outcome: RingCancelOutcome = self.ring.cancel(self.owner_id, self.waits[index].token)
             match cancel_outcome:
                 case RingCancelOutcome.ProviderCancelRequested(token):
-                    # @workaround bug=rti004-mono-20261101 reason=see reserve_result
+                    # @workaround bug=rti004_mono_specialization_match_subject_2026-11-01 reason=see reserve_result
                     val cancelled: Result<(), SimpleRingError> = self.ring.complete_cancelled(token, reason)
                     match cancelled:
                         case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
