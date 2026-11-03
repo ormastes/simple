@@ -477,6 +477,19 @@ impl Lowerer {
         arms: &[MatchArm],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        self.lower_match_with(subject, arms, true, ctx)
+    }
+
+    /// `exhaust_panic` is false for a match used as a statement (value
+    /// discarded): falling through every arm stays silent there, like
+    /// statement-match lowering, so self-hosted code relying on it is safe.
+    pub(in crate::hir::lower) fn lower_match_with(
+        &mut self,
+        subject: &Expr,
+        arms: &[MatchArm],
+        exhaust_panic: bool,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
         // Lower the subject once and store in a local variable to avoid re-evaluation
         let subject_hir = self.lower_expr(subject, ctx)?;
         let subject_ty = subject_hir.ty;
@@ -487,7 +500,7 @@ impl Lowerer {
         self.carry_optional_trait_subject(subject, subject_idx, ctx);
 
         // Build the chain of If-Else expressions from the arms
-        let if_chain = self.lower_match_arms(subject_idx, subject_ty, arms, ctx)?;
+        let if_chain = self.lower_match_arms(subject_idx, subject_ty, arms, exhaust_panic, ctx)?;
         let result_ty = if_chain.ty;
 
         // Wrap in LetIn to store the subject before evaluating the if-else chain
@@ -507,12 +520,31 @@ impl Lowerer {
         subject_idx: usize,
         subject_ty: TypeId,
         arms: &[MatchArm],
+        exhaust_panic: bool,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         if arms.is_empty() {
-            // No more arms - return Nil
+            if !exhaust_panic {
+                return Ok(HirExpr {
+                    kind: HirExprKind::Nil,
+                    ty: TypeId::NIL,
+                });
+            }
+            // No arm matched and no wildcard: fail closed at runtime, like the
+            // interpreter ("match expression exhausted"). Yielding Nil here let
+            // JIT/native code produce garbage for a value-position match whose
+            // subject hit no arm. Type stays NIL (bottom), so the join type
+            // still comes from the real arms.
             return Ok(HirExpr {
-                kind: HirExprKind::Nil,
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_panic".to_string(),
+                    args: vec![HirExpr {
+                        kind: HirExprKind::String(
+                            "invalid pattern: match expression exhausted without matching any pattern".to_string(),
+                        ),
+                        ty: TypeId::STRING,
+                    }],
+                },
                 ty: TypeId::NIL,
             });
         }
@@ -563,7 +595,7 @@ impl Lowerer {
         self.restore_match_bindings(previous_bindings, ctx);
 
         // Recursively build the else branch from remaining arms
-        let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, ctx)?;
+        let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, exhaust_panic, ctx)?;
         // Class 5: a BOTTOM arm — a return-only arm, a bare `nil`, or
         // `panic(...)` (which lowers to `rt_panic` typed `TypeId::NIL`) —
         // does not contribute a value to the match join. Using its type as
