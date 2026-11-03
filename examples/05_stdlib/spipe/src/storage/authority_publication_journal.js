@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import { canonicalJson, contentHash, freezeDeep, sha256Hex } from "./canonical.js";
 import { canonicalRoot, safeNamespace } from "../workspace/paths.js";
-import { fsyncDirectory } from "./directory_fsync.js";
+import { fsyncDirectory, mkdirDurable } from "./directory_fsync.js";
 
 const JOURNAL_BRAND = new WeakSet();
 const JOURNAL_STATE = new WeakMap();
@@ -19,7 +19,7 @@ function digest(value, name) {
   return text;
 }
 function writeDurable(path, bytes, checkpoint = () => {}) {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirDurable(dirname(path));
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
   checkpoint("stage");
   let fd;
@@ -55,7 +55,7 @@ export class AuthorityPublicationJournalV1 {
     this.fault_injector = faultInjector;
     this.root = join(this.cache_root, "worktrees", this.worktree_uid, "authority-publications");
     this.records_root = join(this.root, "records"); this.objects_root = join(this.root, "objects"); this.current_path = join(this.root, "current.sdn"); this.lock_path = join(this.root, "writer.lock");
-    mkdirSync(this.records_root, { recursive: true }); mkdirSync(this.objects_root, { recursive: true }); fsyncDirectory(this.records_root); fsyncDirectory(this.objects_root);
+    mkdirDurable(this.records_root); mkdirDurable(this.objects_root);
     JOURNAL_BRAND.add(this); JOURNAL_STATE.set(this, { id: randomBytes(16).toString("hex") });
   }
   current() {
@@ -118,7 +118,7 @@ export class AuthorityPublicationJournalV1 {
   }
   recoverAuthorityPublicationV1() { return freezeDeep({ status: "recovered", record: this.current() }); }
   #lock() {
-    mkdirSync(dirname(this.lock_path), { recursive: true });
+    mkdirDurable(dirname(this.lock_path));
     try { return openSync(this.lock_path, "wx"); } catch { throw new Error("SPK901 authority publication writer is busy"); }
   }
   #checkpoint(boundary) { if (this.fault_injector !== null) this.fault_injector(boundary); }
