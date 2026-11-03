@@ -163,6 +163,17 @@ fn _hir_cache_cfg_select_on() -> bool:
 # unknown digest is non-neutral.
 var hir_closure_all_neutral: Dict<text, bool> = {}
 
+# Count bound for the two digest-keyed side tables below (closure digest ->
+# neutral flag, source digest -> text hash). Keys change with every edit, so a
+# long-lived process (LSP/MCP/watch) would otherwise grow them without limit.
+# Entries are a 64-char digest plus a bool/i64 (~150 B), so the cap bounds each
+# table to ~2.5 MB. Overflow drops the whole table: both are pure recompute
+# caches (an unknown closure digest is non-neutral; a missing hash is re-read).
+val HIR_CACHE_SIDE_TABLE_MAX_ENTRIES_V1: i64 = 16384
+
+fn hir_cache_side_table_counts_v1() -> [i64]:
+    [hir_closure_all_neutral.len(), hir_source_text_hash_cache.len()]
+
 # rows: per-surface identity lines; tokens: hir_cache_surface_neutral_token per row.
 fn hir_cache_closure_digest_from_rows(rows: [text], tokens: [text]) -> text:
     var parts: [text] = ["{rows.len()}\n"]
@@ -175,6 +186,8 @@ fn hir_cache_closure_digest_from_rows(rows: [text], tokens: [text]) -> text:
             all_neutral = false
         i = i + 1
     val digest = sha256_text(parts.join(""))
+    if hir_closure_all_neutral.len() >= HIR_CACHE_SIDE_TABLE_MAX_ENTRIES_V1:
+        hir_closure_all_neutral = {}
     hir_closure_all_neutral[digest] = all_neutral
     digest
 
@@ -238,6 +251,8 @@ fn _hir_cache_key_target_part(source_path: text, source_digest: text, closure_di
         # the answer unknown (non-neutral, target fold kept).
         val text_now = file_read_nullable(source_path) ?? ""
         h = rt_hash_text(text_now)
+        if hir_source_text_hash_cache.len() >= HIR_CACHE_SIDE_TABLE_MAX_ENTRIES_V1:
+            hir_source_text_hash_cache = {}
         hir_source_text_hash_cache[source_digest] = h
         pp_ensure_marker_strip_decisions(text_now, native_target)
         n = pp_marker_strip_count(h, native_target)
