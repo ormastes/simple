@@ -59,3 +59,18 @@ plus `[engine-demotion]` lines, then correct output (len=20). Under `SIMPLE_JIT_
 
 ## Status 2026-11-03
 Status set to fix-implemented-verification-pending: `rt_text_eq_any` backing landed in f2e108e32d3 (PR #6238, merge 35c826061af); verify with `test/01_unit/app/cli/jit_text_eq_any_resolves_spec.spl` on a seed rebuilt with that change. Residual (not fixed here): `crypto_text_to_bytes` cross-module Simple-call limitation of per-module JIT; the `[jit-fallback]` diagnostic and `SIMPLE_JIT_STRICT=1` remain the guard.
+
+## Fix 2026-11-03 part 2 (cross-module Simple fn: fail loud, fix-implemented-verification-pending)
+Resolving imported Simple fns inside the per-module JIT is not small (needs
+the imported module compiled/linked into the JIT module), so the de-JIT is
+made explicit instead of generic. `codegen/jit.rs` `unresolved_import_kind`
+now classifies the unresolved import in the `[jit-fallback]` line, the
+`SIMPLE_JIT_STRICT:` error and the lenient deferral error: `rt_*`/`spl_*` =
+"runtime extern with no JIT-resolvable backing", anything else = "cross-module
+Simple function; per-module JIT does not link imported Simple functions".
+Cargo test: `test_jit_unresolved_cross_module_simple_fn_error_names_the_cause`
+(codegen/jit_tests.rs). Repro: `use std.crypto.sha1.{sha1_bytes}; sha1_bytes("abc".bytes())`
+-> stderr names `crypto_text_to_bytes (cross-module Simple function ...)`;
+with `SIMPLE_JIT_STRICT=1` non-zero exit with the same text. Needs a rebuilt seed.
+Sibling silent sites: `driver/src/exec_core.rs` jit-compile-error / jit-panic
+fallbacks already print `[INFO]` + record an engine demotion; left unchanged.
