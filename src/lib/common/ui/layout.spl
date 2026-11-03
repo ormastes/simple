@@ -32,7 +32,13 @@ fn _scaled_max(v: i32, scale_permille: i32) -> i32:
         return v
     _apply_scale(v, scale_permille)
 
-fn compute_layout(node: WidgetNode, x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000) -> [WidgetRect]:
+val PIXEL_PANEL_TITLE_HEIGHT: i32 = 18
+
+# Pixel hosts reserve a title band; terminals retain one-cell borders.
+fn compute_pixel_layout(node: WidgetNode, x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000) -> [WidgetRect]:
+    compute_layout(node, x, y, w, h, scale_permille, PIXEL_PANEL_TITLE_HEIGHT)
+
+fn compute_layout(node: WidgetNode, x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
     """Compute layout rectangles for a widget tree.
 
     `scale_permille` is an integer DPI/UI scale factor in permille (1000 =
@@ -53,12 +59,12 @@ fn compute_layout(node: WidgetNode, x: i32, y: i32, w: i32, h: i32, scale_permil
         _apply_scale(y, scale_permille),
         _apply_scale(w, scale_permille),
         _apply_scale(h, scale_permille),
-        scale_permille)
+        scale_permille, panel_title_height)
 
 # Layout body. (x, y, w, h) are ALREADY in device units; `scale_permille` is
 # passed down purely to convert authored logical-unit props at their read
 # sites. See compute_layout's docstring for why the two are separated.
-fn _layout_scaled(node: WidgetNode, sx: i32, sy: i32, sw: i32, sh: i32, scale_permille: i32) -> [WidgetRect]:
+fn _layout_scaled(node: WidgetNode, sx: i32, sy: i32, sw: i32, sh: i32, scale_permille: i32, panel_title_height: i32) -> [WidgetRect]:
     var rects: [WidgetRect] = [WidgetRect(id: node.id, x: sx, y: sy, w: sw, h: sh)]
 
     if not node.is_visible():
@@ -80,6 +86,10 @@ fn _layout_scaled(node: WidgetNode, sx: i32, sy: i32, sw: i32, sh: i32, scale_pe
         inner_y = sy + 1
         inner_w = sw - 2
         inner_h = sh - 2
+        if node.get_prop("title") != "" and panel_title_height > 0:
+            val title_h = _apply_scale(panel_title_height, scale_permille)
+            inner_y = inner_y + title_h
+            inner_h = inner_h - title_h
 
     # Scroll container clips inner height to max_height.
     #
@@ -107,19 +117,19 @@ fn _layout_scaled(node: WidgetNode, sx: i32, sy: i32, sw: i32, sh: i32, scale_pe
 
     # Layout children based on layout kind
     if node.layout_name() == "vbox":
-        val child_rects = layout_vbox(visible_children, inner_x, inner_y, inner_w, inner_h, scale_permille)
+        val child_rects = layout_vbox(visible_children, inner_x, inner_y, inner_w, inner_h, scale_permille, panel_title_height)
         for cr in child_rects:
             rects.push(cr)
     elif node.layout_name() == "hbox":
-        val child_rects = layout_hbox(visible_children, inner_x, inner_y, inner_w, inner_h, scale_permille)
+        val child_rects = layout_hbox(visible_children, inner_x, inner_y, inner_w, inner_h, scale_permille, panel_title_height)
         for cr in child_rects:
             rects.push(cr)
     elif node.layout_name() == "grid":
-        val child_rects = layout_grid(visible_children, inner_x, inner_y, inner_w, inner_h, get_grid_columns(node), scale_permille)
+        val child_rects = layout_grid(visible_children, inner_x, inner_y, inner_w, inner_h, get_grid_columns(node), scale_permille, panel_title_height)
         for cr in child_rects:
             rects.push(cr)
     else:
-        val child_rects = layout_fixed(visible_children, inner_x, inner_y, inner_w, inner_h, scale_permille)
+        val child_rects = layout_fixed(visible_children, inner_x, inner_y, inner_w, inner_h, scale_permille, panel_title_height)
         for cr in child_rects:
             rects.push(cr)
 
@@ -140,7 +150,7 @@ fn get_visible_children(node: WidgetNode) -> [WidgetNode]:
 # (x, y, w, h) are in DEVICE units; `scale_permille` converts the authored
 # logical-unit height props (height/min_height/max_height) at their read sites.
 # It defaults to identity so a caller that lays out at 1.0x can omit it.
-fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000) -> [WidgetRect]:
+fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
     var rects: [WidgetRect] = []
     val count = children.len()
     if count == 0:
@@ -196,7 +206,7 @@ fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_per
             _apply_scale(get_min_height(child), scale_permille),
             _scaled_max(get_max_height(child), scale_permille))
         if actual_h > 0:
-            val child_rects = _layout_scaled(child, x, cur_y, w, actual_h, scale_permille)
+            val child_rects = _layout_scaled(child, x, cur_y, w, actual_h, scale_permille, panel_title_height)
             for cr in child_rects:
                 rects.push(cr)
             cur_y = cur_y + actual_h
@@ -210,7 +220,7 @@ fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_per
 # (x, y, w, h) are in DEVICE units; `scale_permille` converts the authored
 # logical-unit width props (width/min_width/max_width) at their read sites.
 # It defaults to identity so a caller that lays out at 1.0x can omit it.
-fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000) -> [WidgetRect]:
+fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
     var rects: [WidgetRect] = []
     val count = children.len()
     if count == 0:
@@ -273,7 +283,7 @@ fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_per
             _apply_scale(get_min_width(child), scale_permille),
             _scaled_max(get_max_width(child), scale_permille))
         if actual_w > 0:
-            val child_rects = _layout_scaled(child, cur_x, y, actual_w, h, scale_permille)
+            val child_rects = _layout_scaled(child, cur_x, y, actual_w, h, scale_permille, panel_title_height)
             for cr in child_rects:
                 rects.push(cr)
             cur_x = cur_x + actual_w
@@ -287,7 +297,7 @@ fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_per
 # Grid tracks are derived from the container rect, and `columns`/`col_span`
 # are counts rather than lengths, so nothing here needs converting — but
 # `scale_permille` still has to reach the children, whose own props do.
-fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, columns: i32 = 0, scale_permille: i32 = 1000) -> [WidgetRect]:
+fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, columns: i32 = 0, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
     var rects: [WidgetRect] = []
     val count = children.len()
     if count == 0:
@@ -368,7 +378,7 @@ fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, columns: 
         val cell_span_w = cell_right - cell_x
         val cell_span_h = cell_bottom - cell_y
 
-        val child_rects = _layout_scaled(child, cell_x, cell_y, cell_span_w, cell_span_h, scale_permille)
+        val child_rects = _layout_scaled(child, cell_x, cell_y, cell_span_w, cell_span_h, scale_permille, panel_title_height)
         for cr in child_rects:
             rects.push(cr)
         idx = idx + 1
@@ -402,7 +412,7 @@ fn get_col_span(node: WidgetNode) -> i32:
 # (x, y, w, h) are in DEVICE units; `scale_permille` converts each child's
 # authored logical-unit width/height props at their read sites. It defaults to
 # identity so a caller that lays out at 1.0x can omit it.
-fn layout_fixed(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000) -> [WidgetRect]:
+fn layout_fixed(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000, panel_title_height: i32 = 0) -> [WidgetRect]:
     val child_count = children.len()
     if child_count == 0:
         return []
@@ -411,7 +421,7 @@ fn layout_fixed(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_pe
     val first_h = _apply_scale(get_fixed_height(first), scale_permille)
     val first_actual_w = if first_w > 0: first_w else: w
     val first_actual_h = if first_h > 0: first_h else: h
-    var rects: [WidgetRect] = _layout_scaled(first, x, y, first_actual_w, first_actual_h, scale_permille)
+    var rects: [WidgetRect] = _layout_scaled(first, x, y, first_actual_w, first_actual_h, scale_permille, panel_title_height)
     var idx = 1
     while idx < child_count:
         # Fixed layout uses the full parent area for each child
@@ -420,7 +430,7 @@ fn layout_fixed(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, scale_pe
         val child_h = _apply_scale(get_fixed_height(child), scale_permille)
         val actual_w = if child_w > 0: child_w else: w
         val actual_h = if child_h > 0: child_h else: h
-        val child_rects = _layout_scaled(child, x, y, actual_w, actual_h, scale_permille)
+        val child_rects = _layout_scaled(child, x, y, actual_w, actual_h, scale_permille, panel_title_height)
         for cr in child_rects:
             rects.push(cr)
         idx = idx + 1

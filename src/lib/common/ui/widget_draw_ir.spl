@@ -1,6 +1,6 @@
 # widget_draw_ir.spl — Widget-tree → Draw-IR converter.
 #
-# Walks a laid-out WidgetNode tree (via compute_layout) and emits shared
+# Walks a laid-out WidgetNode tree (via compute_pixel_layout) and emits shared
 # Draw-IR commands (rect / text / image) that engine2d `draw_ir_adv` can
 # render directly. This is the preferred pipeline the UI docs call for:
 # interactive apps stop hand-rolling draw calls and instead lay out widgets,
@@ -14,7 +14,7 @@
 # and applies clipping per-batch (batch.embedding.clip). Scroll areas therefore
 # become their own clipped batch with content offset by the scroll amount.
 #
-use common.ui.layout.{compute_layout, find_rect_index}
+use common.ui.layout.{compute_pixel_layout, find_rect_index, PIXEL_PANEL_TITLE_HEIGHT}
 use common.ui.widget.{WidgetNode, WidgetRect}
 use common.ui.theme_render_snapshot.{ThemeRenderSnapshot, theme_role_color}
 use common.ui.theme_draw_ir_material.{
@@ -517,6 +517,12 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
     else:
         # container / panel / unknown -> background surface
         result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.surface))
+        if kind == "panel" and node.get_prop("title") != "" and rect.h >= PIXEL_PANEL_TITLE_HEIGHT + 2:
+            result.push(_default_text_centered(
+                node, "{rect.id}-title", x + 4,
+                y + 1 + PIXEL_PANEL_TITLE_HEIGHT / 2, y + 1,
+                PIXEL_PANEL_TITLE_HEIGHT, node.get_prop("title"), theme.text_primary
+            ))
 
 # =========================================================================
 # Main-batch walk (absolute coords). Scroll subtrees are handled separately,
@@ -647,7 +653,7 @@ fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: 
     `engine2d_draw_ir_adv_composition[_with_images]`.
     """
     val theme = widget_draw_ir_theme_from_snapshot(snapshot)
-    val rects = compute_layout(root, 0, 0, w, h)
+    val rects = compute_pixel_layout(root, 0, 0, w, h)
     var main_cmds: [DrawIrCommand] = []
     _walk_main(root, rects, main_cmds, theme)
     main_cmds = _widget_draw_ir_root_surface_commands(
@@ -662,7 +668,7 @@ fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: 
 
 fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
     val theme = _widget_draw_ir_theme_for_root(root)
-    val rects = compute_layout(root, 0, 0, w, h)
+    val rects = compute_pixel_layout(root, 0, 0, w, h)
     var main_cmds: [DrawIrCommand] = []
     _walk_main(root, rects, main_cmds, theme)
     val embedding = draw_ir_embedding_config("widget-root", root.id, 0, 0, w, h, 0, 1000, false)
