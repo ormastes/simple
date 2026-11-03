@@ -8,18 +8,24 @@ use compiler.types.type_infer.format_error.{format_type_infer_error_v1}
 use compiler.semantics.visibility_integration.{check_module_visibility}
 use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, frontend_diag_enabled}
 use compiler.types.cfg_decl_check.{cfg_decl_check_module}
+use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1}
+use compiler.types.type_infer.api_signature_projection_v1.{project_api_signatures_v1}
 
 # The only values a typecheck body lease may retain. No HIR/type/symbol roots.
 struct HirTypecheckReceiptV1:
     messages: [text]
     warnings: [text]
     errors: [text]
+    # Retained path only; archive leases keep their existing diagnostic payload.
+    # Owned flat observations, never HIR/type/symbol roots or admission evidence.
+    api_signatures: ApiSignatureFactsV1? = nil
 
 export HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1
 
 # Shared actual-body consumer. Policy is resolved by the caller outside scratch.
 pub fn collect_module_typecheck_receipt_v1(
-    name: text, m: HirModule, severity: TypecheckPassSeverity
+    name: text, m: HirModule, severity: TypecheckPassSeverity,
+    collect_api_signatures: bool = false
 ) -> HirTypecheckReceiptV1:
     var warnings: [text] = []
     var errors: [text] = []
@@ -28,6 +34,9 @@ pub fn collect_module_typecheck_receipt_v1(
     # including declared-vs-actual return type mismatches.
     var ictx = HmInferContext.with_builtins()
     ictx.infer_module(m)
+    val signature_facts = if collect_api_signatures:
+        Some(project_api_signatures_v1(m, ictx))
+    else: nil
     var e_idx = 0
     while e_idx < ictx.errors.len():
         val msg = "[typecheck] {name}: " +
@@ -79,4 +88,5 @@ pub fn collect_module_typecheck_receipt_v1(
         val cmsg = "[cfg-check] {name}: {cfg_msg}"
         out = out.push(cmsg)
         errors.push(cmsg)
-    HirTypecheckReceiptV1(messages: out, warnings: warnings, errors: errors)
+    HirTypecheckReceiptV1(messages: out, warnings: warnings, errors: errors,
+        api_signatures: signature_facts)

@@ -84,3 +84,12 @@ traceability-check behavior and baseline qualification claims are unchanged.
 P0 now has a [source implementation candidate guide](trace_query_p0.md) for
 registered list/show queries. Runtime admission, execution and deployment remain
 pending; this does not change existing qualification claims.
+
+The 2026-11-02 E1 source candidate now captures bounded signature observations
+inside the retained production HIR typecheck consumer, preserving compiler type
+kinds and declaration owner plus module-local symbol IDs in flat records.
+CompileContext retains the current pass only. Export closure, generic guarantees,
+nominal public operations and generated/other-engine surfaces remain unknown;
+archive/no-op paths do not collect these facts. This is neither a new CLI nor
+fatal enforcement, and execution is unverified. See the
+[implementation status and bounds](../../05_design/extreme_typing_traceability.md#e1-retained-signature-observation-candidate-2026-11-02).

@@ -155,3 +155,34 @@ record is source evidence, not proof of an executed check. Proof obligations
 must bind actual production IR/transform versions and durable reviewed proof
 artifacts; unsupported properties remain blocked. See the test and phase plans
 for deliberate-red, engine-parity and qualification gates.
+
+## E1 retained signature observation candidate (2026-11-02)
+
+The first source slice adds `00.common/api_signature_facts_v1.spl` flat records
+and `30.types/type_infer/api_signature_projection_v1.spl`. The production
+`hir_typecheck_consumer_v1` projects while its actual HM context is alive when
+the retained typecheck pass requests collection. Primitive kind variants,
+container/callback edges and declaration owner plus module-local SymbolId are
+preserved without text classification. Bounded substitution following reports
+cycles/unresolved variables. The unannotated-return sentinel remains Unknown.
+
+The projection retains only scalar/enum/text/array records. Immutable text
+values are retained by value, not through HIR roots; transient consumers must
+promote the returned record before reclaiming scratch. Existing archive body
+leases do not request collection and their receipts default to absent facts;
+their diagnostic digest/admission contract is unchanged. A dedicated authored
+spec promotes only the projected records then reads them after scratch ends.
+
+CompileContext stores at most 256 modules / 16384 nodes. Each projection has
+at most 128 callables / 1024 nodes / depth 32; identity text lengths are bounded.
+Compile entry and every retained typecheck pass clear the preceding generation.
+Repeated module publication replaces its previous row and adjusts the budget.
+Missing means NotCollected. Collection follows the existing profile/env-gated
+typecheck path and is absent from cached/no-op/streaming paths, not silently
+complete. Performance targets remain unmeasured.
+
+These are incomplete observations: effective export closure, generic domain
+guarantees, nominal public operations, non-callable/generated surfaces and all
+engine admission remain explicit unknowns. No fatal rule or Safe verdict is
+introduced. E1 and E2 remain unfinished. New execution/negative specs are
+authored but unrun because a source-matched admitted runtime is unavailable.
