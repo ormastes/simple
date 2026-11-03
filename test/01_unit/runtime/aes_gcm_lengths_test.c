@@ -145,5 +145,8 @@ int main(void) {
     out=rt_rsa_decrypt("bad","bad");
     CHECK(out && out[0]==0); free((void*)out);
 #endif
+#ifdef TEST_EVP_FAILURES
+    CHECK(test_evp_failures()==0);
+#endif
     printf("PASS %u AES-GCM assertions\n",checks); return 0;
 }
