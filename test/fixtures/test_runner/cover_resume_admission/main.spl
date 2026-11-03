@@ -1,0 +1,52 @@
+# AUTHORED_UNRUN: invoke only in a fresh scratch cwd with the marker below.
+# Calls the real runner and checkpoint owner; no child is dispatched because
+# the sole admitted file is checkpoint-complete. No bootstrap is required.
+use app.test_runner_new.test_runner_main.{run_tests}
+use app.test_runner_new.test_runner_args.{parse_test_args}
+use app.test_runner_new.checkpoint.{checkpoint_save, checkpoint_exists, checkpoint_delete}
+use std.test_runner.test_runner_types.{classify_test_run_result, test_run_outcome_exit_code}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+
+fn main() -> i64:
+    # Never overwrite a real session checkpoint or use a repository cwd.
+    if not file_exists("cover-resume-isolated-root") or file_exists(".git"):
+        return 90
+    if checkpoint_exists():
+        return 91
+    val directory = "test/03_system/cover_resume"
+    assert(dir_create_all(directory))
+    val admitted = directory + "/admitted_spec.spl"
+    val rejected = directory + "/rejected_spec.spl"
+    assert(file_write(admitted, "# @cover src/covered.spl 80%\nuse std.spec.*\ndescribe \"checkpoint-complete\":\n    it \"must not execute\":\n        expect(1).to_equal(2)\n"))
+    assert(file_write(rejected, "use std.spec.*\ndescribe \"rejected\":\n    it \"must not execute\":\n        expect(1).to_equal(2)\n"))
+    checkpoint_save([admitted], 7, 0, 2, "fixture")
+    val resumed = run_tests(parse_test_args([directory, "--resume", "--unstable", "--no-cache"]))
+    assert(resumed.total_passed == 7)
+    assert(resumed.total_failed == 1)
+    assert(resumed.total_skipped == 2)
+    assert(resumed.files.len() == 1)
+    assert(resumed.files[0].path == rejected)
+    assert(resumed.files[0].error.contains("test not executed"))
+    assert(test_run_outcome_exit_code(classify_test_run_result(resumed, false)) == 1)
+    assert(not checkpoint_exists())
+    file_delete(rejected)
+    checkpoint_save([admitted], 7, 0, 2, "fixture")
+    val clean = run_tests(parse_test_args([directory, "--resume", "--unstable", "--no-cache"]))
+    assert(clean.total_passed == 7)
+    assert(clean.total_failed == 0)
+    assert(clean.files.len() == 0)
+    assert(clean.carried_from_checkpoint)
+    assert(test_run_outcome_exit_code(classify_test_run_result(clean, false)) == 0)
+    assert(not checkpoint_exists())
+    assert(file_write(rejected, "use std.spec.*\n"))
+    checkpoint_save([admitted], 7, 0, 2, "fixture")
+    val strict = run_tests(parse_test_args([directory, "--resume", "--no-unstable", "--no-cache"]))
+    assert(strict.total_passed == 0)
+    assert(strict.total_failed == 1)
+    assert(strict.files.len() == 1)
+    assert(test_run_outcome_exit_code(classify_test_run_result(strict, false)) == 1)
+    assert(checkpoint_exists())
+    checkpoint_delete()
+    print("cover-resume-admission-ok")
+    0
