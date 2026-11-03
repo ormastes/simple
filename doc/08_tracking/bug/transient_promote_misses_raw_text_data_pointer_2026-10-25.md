@@ -52,3 +52,16 @@ next blocker (hc_enc_hir_module SEGV).
 - Selfcheck gap (review P2): the negative case does not exercise an int whose
   bits equal a live string's data address, nor the shared/non-transient
   `return 0` arm.
+
+## Update 2026-11-03 (comp-transtext): recognizer, not workaround
+The inline `@workaround` block in `rt_core_transient_classify` is replaced by a
+named recognizer `rt_core_transient_text_data_pointer` (runtime_native.c) with
+cheap rejects first (tag/size/alignment, empty-and-unfrozen registry) which also
+addresses the recorded perf follow-up; registry membership is still checked
+before any header read. The Simple twin (`transient_classify` in
+`src/runtime/simple_core/core_memory.spl`) now has the same rule. Spec:
+`test/01_unit/runtime/transient_text_data_pointer_twin_spec.spl` (3/3 pass).
+Verification pending: run `rt_transient_heap_scope_selfcheck.c`
+(`check_raw_text_data_pointer_promotes`) with the capsule flags, and Stage 3
+hello world after the next Phase 3 rebuild. The codegen root cause (untagged
+`char*` stored in fields) and the Rust runtime twin remain open follow-ups.
