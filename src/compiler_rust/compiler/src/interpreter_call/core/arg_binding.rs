@@ -152,7 +152,7 @@ static EMPTY_INJECTED: std::sync::LazyLock<HashMap<String, Value>> = std::sync::
 /// call sites into hard errors at once; that belongs in its own change.
 ///
 /// Returns `None` when the rule does not apply, so callers fall through.
-fn present_value_as_bool_arg(value: &Value, ty: Option<&Type>) -> Option<Value> {
+pub(crate) fn present_value_as_bool_arg(value: &Value, ty: Option<&Type>) -> Option<Value> {
     if !matches!(ty, Some(Type::Simple(n)) if n == "bool") {
         return None;
     }
