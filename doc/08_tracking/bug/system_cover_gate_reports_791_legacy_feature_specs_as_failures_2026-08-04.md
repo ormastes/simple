@@ -118,3 +118,35 @@ policy question (gate violations counted as failed tests vs. a separate
 verdict category) — architectural, not a shard-scale fix. No change made.
 Leaving OPEN.
 
+
+## 2026-11-03 bounded checkpoint continuation repair
+
+Current source already contains c8bf2505768: strict default admission aborts,
+while explicit `--unstable` excludes rejected files and appends named admission
+failures to daemon, parallel and sequential results. The library entry is a
+facade, not a second divergent runner. Historical unchanged-source descriptions
+above do not describe this current implementation.
+
+A remaining early return was found: `--resume --unstable` with all admitted
+files checkpoint-complete returned the checkpoint totals before appending
+current missing-cover failures. This could report a passing checkpoint despite
+rejected files. The return now uses the same admission combiner; the combiner
+preserves `carried_from_checkpoint`, including the clean no-rejection case.
+Strict-default refusal, exit-failure policy and Results counters are unchanged.
+No legacy annotations or percentages are fabricated.
+
+Spec-first commit: 35a348796ad. Two focused combiner regressions plus a real
+`run_tests` fixture cover mixed rejected/resumed, clean resumed and strict
+refusal paths. Fixture: test/fixtures/test_runner/cover_resume_admission/main.spl.
+Run it only in a fresh scratch cwd with marker `cover-resume-isolated-root`,
+no existing checkpoint, and an admitted runner resolving the repository module
+closure. Expected stdout ends `cover-resume-admission-ok`, exit0. The fixture
+creates its own files/checkpoint, and deliberate failing child bodies detect
+accidental execution of checkpoint-complete or rejected files.
+
+AUTHORED_UNRUN: no admitted runtime was available; no baseline RED, fixed GREEN,
+compiled fixture, docgen or full-run coverage result is claimed. Original bug
+remains OPEN. The 791 legacy annotations require truthful owner-by-owner work;
+this narrow checkpoint fix neither resolves that backlog nor changes the
+existing accounting of policy failures as named failed-file rows. No compiler
+rebuild or seed execution was attempted.
