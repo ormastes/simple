@@ -15,3 +15,15 @@ See macos-host.md and tooling-portability.md for source owners and exact remaini
 ## Final reconciliation checkpoint
 
 `current_inventory.md` and `current_inventory.sdn` supersede initial counts for this scoped checkpoint. PR6384 firmware source repair is merged and waiting for real firmware acceptance. Explicit waiting-verification receipts also track the two previously repaired launcher/test causes. Only source-confirmed ARM64 PCI/ivshmem is reopened. Eight historical native acceptance gaps are linked separately without erasing closure history. Unexecuted direct-native float candidate remains unlanded.
+
+## Active PCI checkpoint
+
+Current claim-aware counts are 29 open, 3 fixing, 11 verification-pending, 18 fixed and 12 closed. PCI fixing reflects ongoing DTB/provider work, not a landed fix. LLD lightweight object/link diagnostics demonstrate the arbitrary-symbol quoting hazard but both canonical compiler path owners sanitize hyphens; the historical path-trigger recurrence is not established. No gratuitous linker patch or status reopening follows.
+
+## Expanded assignments
+
+User-requested parallel assignments now track25open7fixing11verification-pending18fixed12closed. Assignment is distinct from runtime acceptance; Mac owns only the window-registration record. Source candidates requiring an admitted Simple runtime remain unlanded.
+
+## Fifteen additional owner assignments
+
+The current inventory supersedes earlier checkpoint counts:10open22fixing11verification-pending18fixed12closed. All15 remaining ARM64/shared IDs have concrete dispatched owners, with execution-blocked work explicitly retained. Ten macOS-only IDs remain open under this priority. NetTX PR6393 and rawDTB PR6394 are narrow landed repairs, not whole umbrella closures.
