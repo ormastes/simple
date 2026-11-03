@@ -1,6 +1,6 @@
 # Current ARM64/macOS bug inventory — 2026-11-03
 
-Snapshot base `15dd3173e19c621396a8a4f0ba817bcc88e460b9` plus this reviewed reconciliation. 73 unique tracked records: 12 closed, 11 fix-implemented-verification-pending, 18 fixed, 2 fixing, 30 open. This is the initial 71-record platform-term inventory plus two newly diagnosed compiler defects; not 73 reproduced native failures. Windows-only historical context is excluded from platform defect totals; Linux Metal emulation is a capability request. Shared language staging and deployment dependencies remain labeled. Historical fixed/closed records are not newly qualified.
+Snapshot base `15dd3173e19c621396a8a4f0ba817bcc88e460b9` plus this reviewed reconciliation. 73 unique tracked records: 12 closed, 11 fix-implemented-verification-pending, 18 fixed, 3 fixing, 29 open. This is the initial 71-record platform-term inventory plus two newly diagnosed compiler defects; not 73 reproduced native failures. Windows-only historical context is excluded from platform defect totals; Linux Metal emulation is a capability request. Shared language staging and deployment dependencies remain labeled. Historical fixed/closed records are not newly qualified.
 
 Firmware PR [6384](https://github.com/ormastes/simple/pull/6384) merged; real firmware boot remains pending. Registry checkpoint PR [6385](https://github.com/ormastes/simple/pull/6385) merged. The float rejection candidate `f93c5e7dca4` remains unlanded and unexecuted without an admitted full CLI. Seed suffix fix has a native 5-check post-fix pass but rebuilt Phase2 sanity remains pending; its record stays fixing.
 
@@ -32,7 +32,7 @@ Eight historical acceptance followups live in `native_acceptance_followups.sdn`;
 | P2 | fixed | ARM64: platform/shared context; native acceptance not inferred | `aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14` |
 | P2 | fix-implemented-verification-pending | ARM64: platform/shared context; native acceptance not inferred | `app_launchers_no_admitted_runtime_aarch64_linux_2026_10_19` |
 | P2 | fix-implemented-verification-pending | ARM64: platform/shared context; native acceptance not inferred | `arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11` |
-| P2 | open | ARM64: platform/shared context; native acceptance not inferred | `arm64_qemu_ivshmem_preboot_2026-07-12` |
+| P2 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_qemu_ivshmem_preboot_2026-07-12` |
 | P2 | open | ARM64: platform/shared context; native acceptance not inferred | `arm64_simpleos_virtio_blk_durable_write_gap_2026-08-14` |
 | P2 | open | macOS: shared dependency; not platform-exclusive | `char_condition_type_check_staged_2026-11-03` |
 | P2 | open | macOS: shared dependency; not platform-exclusive | `char_literal_lexer_switch_staged_2026-11-03` |
@@ -81,3 +81,9 @@ Eight historical acceptance followups live in `native_acceptance_followups.sdn`;
 | P3 | open | macOS, ARM64: platform/shared context; native acceptance not inferred | `stage3_selfhost_zerokind_compile_specialized_template_release_macos_2026-09-05` |
 | P0 | fixing | ARM64: shared seed resolver; ARM64 Linux observed, macOS not reproduced | `seed_native_numeric_conversion_suffix_rebinds_private_reader_2026-11-03` |
 | P2 | fixing | ARM64: direct native backend; separate from historical LLVM failure | `native_aarch64_scalar_float_silent_integer_lowering_2026_11_03` |
+
+## Active repair checkpoint
+
+PCI/ivshmem is now claimed by `simpleos-arm64-pci-20261103`; 29 registry-open records have no fixing claim. Three records are fixing: seed numeric suffix resolution, direct-native scalar floats (candidate held without admitted execution), and PCI/ivshmem. The 29 open rows divide by platform mentions into 13 ARM64-only, 11 macOS-only and 5 both; these categories include shared/deployment/capability work, not only reproduced source defects. Eight historical acceptance followups remain separate.
+
+PCI source trace found the active CRT loses firmware DTB x0 before C startup; the existing FDT helper has no PCI ranges decoder/ARM64 descriptor producer. The repair must preserve the handoff and use validated firmware topology, never an invented ECAM address. A narrow raw-pointer handoff prerequisite is being designed and tested; no PCI source fix or native boot pass is claimed.
