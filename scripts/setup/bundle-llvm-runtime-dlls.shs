@@ -26,17 +26,39 @@ n=$(wc -l < "$tmp/imp" | tr -d ' ')
 [ "$n" -gt 0 ] || { echo "ERROR — nothing was checked: $exe imports no libLLVM-23.dll symbols"; exit 2; }
 miss=$(comm -23 "$tmp/imp" "$tmp/exp" | wc -l | tr -d ' ')
 [ "$miss" -eq 0 ] || { echo "FAIL — $miss of $n libLLVM-23.dll imports missing from $src/libLLVM-23.dll: $(comm -23 "$tmp/imp" "$tmp/exp" | head -5 | tr '\n' ' ')..."; exit 1; }
-# Transitive closure of non-system DLLs that actually exist in $src.
+# Resolve the transitive closure of non-system DLLs that actually exist in
+# $src. Do not write until the entire destination has passed the overwrite
+# check: stage2 admission directories may also contain the currently admitted
+# compiler and its lineage fallbacks.
 todo="libLLVM-23.dll libunwind.dll"; done=""; copied=0
+needed=""
 while [ -n "$todo" ]; do
   set -- $todo; d=$1; shift; todo="$*"
   case " $done " in *" $d "*) continue ;; esac
   done="$done $d"
   [ -f "$src/$d" ] || continue
-  cp -f "$src/$d" "$out/$d" || { echo "ERROR — cannot copy $d to $out"; exit 2; }
-  copied=$((copied + 1))
+  needed="$needed $d"
   for dep in $(llvm-objdump -p "$src/$d" | sed -n 's/.*DLL Name: //p' | tr -d '\r'); do
     case "$dep" in api-ms-win-*|[Kk][Ee][Rr][Nn][Ee][Ll]32.dll|[Nn][Tt][Dd][Ll][Ll].dll) ;; *) todo="$todo $dep" ;; esac
   done
+done
+
+# Refuse any differing destination before copying the first DLL. In particular
+# never replace a runtime that an admitted/fallback stage compiler already
+# resolves from this directory.
+for d in $needed; do
+  if [ -f "$out/$d" ] && ! cmp -s "$src/$d" "$out/$d"; then
+    echo "ERROR — refusing to overwrite different runtime DLL: $out/$d"
+    exit 2
+  fi
+done
+
+# Copy only missing files; -n keeps a concurrent writer from replacing a DLL
+# after the preflight comparison.
+for d in $needed; do
+  [ -f "$out/$d" ] && continue
+  cp -n "$src/$d" "$out/$d" || { echo "ERROR — cannot copy $d to $out"; exit 2; }
+  cmp -s "$src/$d" "$out/$d" || { echo "ERROR — runtime DLL changed during copy: $out/$d"; exit 2; }
+  copied=$((copied + 1))
 done
 echo "PASS — $n libLLVM-23.dll imports satisfied, $copied DLL(s) bundled into $out"

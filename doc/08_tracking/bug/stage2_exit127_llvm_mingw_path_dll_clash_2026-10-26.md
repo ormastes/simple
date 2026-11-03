@@ -19,6 +19,16 @@ entry point not found) when:
 
 Put `PATH=/c/msys64/clang64/bin` first.
 
+## Repair
+
+`p3-smoke-stage3.shs` now bundles the admitted LLVM runtime DLL closure beside
+each Windows stage candidate before executing it. Its version smoke then
+deliberately puts llvm-mingw first on `PATH` and sets `SIMPLE_PROJECT_ROOT`, so
+the candidate is tested without relying on the workaround above. The focused
+`scripts/check/check-stage2-dll-path-independence.shs <stage.exe>` checker
+reproduces the unbundled loader failure, bundles the candidate, and verifies
+that it starts under the same conflicting environment.
+
 ## The bug
 
 Not the DLL clash itself but the silent failure: no diagnostic names the
