@@ -1,0 +1,76 @@
+# Regression: bug native_pattern_payload_text_interpolation_2026_10_31.
+# A text payload bound by a user-enum pattern (`case MalformedSchema(message)`)
+# was rendered through rt_raw_i64_to_string in `"{message}"` / `"x: " + message`,
+# printing the heap handle as a 13-digit integer, while `.len()` worked.
+# The fixture has NO construction site, matching the cross-module shape where
+# the payload is only known to be text from its declared slot type.
+# The `g` arm is a raw ('...') segment so `{message}` reaches the fixture as text.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+val ep_source = "enum StoreError:\n    MalformedSchema(text)\n    Missing\nfn g(e: StoreError) -> text:\n    match e:\n" + '        case MalformedSchema(message): "bad: {message}"' + "\n        case _: \"missing\"\nfn h(e: StoreError) -> text:\n    match e:\n        case MalformedSchema(message): \"x: \" + message\n        case _: \"missing\"\n"
+
+fn ep_callee_is(callee: MirOperand, name: text) -> bool:
+    match callee.kind:
+        case MirOperandKind.Const(MirConstValue.Str(actual), _):
+            return actual == name or actual.ends_with("." + name)
+        case _: return false
+
+fn ep_call_count(function: MirFunction, name: text) -> i64:
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    if ep_callee_is(callee, name): count = count + 1
+                case _: ()
+    count
+
+fn ep_fatal_errors(errors: [MirError]) -> i64:
+    var count = 0
+    for error in errors:
+        if error.fatal: count = count + 1
+    count
+
+fn ep_lowered(name: text) -> MirFunction:
+    val parsed = parse_full_frontend(ep_source, "enumpayload.spl", "enumpayload", Logger(level: 0))
+    var hir = HirLowering.new()
+    val module = hir.lower_module(parsed)
+    expect(hir.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(module.symbols)
+    val mir = lowering.lower_module(module, [module])
+    expect(ep_fatal_errors(lowering.errors)).to_equal(0)
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name): return function
+    fail("missing lowered function {name}")
+
+enum EpError:
+    MalformedSchema(text)
+    Missing
+
+fn ep_run(e: EpError) -> text:
+    match e:
+        case MalformedSchema(message): "bad: {message}" + " / " + "x: " + message
+        case _: "missing"
+
+describe "native_pattern_payload_text_interpolation: enum text payload in text contexts":
+    it "does not render the bound text payload as an integer in interpolation":
+        val function = ep_lowered("g")
+        expect(ep_call_count(function, "rt_raw_i64_to_string")).to_equal(0)
+
+    it "does not render the bound text payload as an integer in concat":
+        val function = ep_lowered("h")
+        expect(ep_call_count(function, "rt_raw_i64_to_string")).to_equal(0)
+
+    it "produces text when executed":
+        expect(ep_run(EpError.MalformedSchema("schema"))).to_equal("bad: schema / x: schema")
