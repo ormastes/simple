@@ -76,3 +76,26 @@ because two `native-build` processes from another lane (PIDs 449611, 449861,
 concurrently. Projected full-HIR RSS at this slope: ~78 GB.
 
 **Revalidated 2026-11-02: still plausible because the report title (Stage 2 matrix full-CLI build peaks above 40 GiB in MIR lowering (41.8 GiB) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 retention audit (mem-mir-retention): fix-implemented-verification-pending
+
+Audited process-global datasets in `src/compiler/50.mir` and `80.driver`.
+- The `_bootstrap_fn_*` registries (`mir_data.spl`) accumulate across modules by
+  design (cross-module callee types) and are already owned by BuildSession end
+  (`build_session_end_reset_globals_v1`, BSM P6). Re-registration is idempotent,
+  so they track DISTINCT names, not modules. Their census
+  `bootstrap_fn_registries_entry_count_v1` only counted 7 of 20 registries; it
+  now counts all, so the budget spec can see a leak in any of them.
+- `driver_hir_cache.spl` `hir_closure_all_neutral` / `hir_source_text_hash_cache`
+  were digest-keyed with no bound and no reset (grow per edit in LSP/MCP/watch
+  processes). Now count-bounded at `HIR_CACHE_SIDE_TABLE_MAX_ENTRIES_V1` (16384,
+  ~2.5 MB each); overflow drops the table (pure recompute caches).
+- Budget spec: `test/01_unit/compiler/80.driver/build_global_retention_budget_spec.spl`.
+- NOT fixed here (needs stage3 to measure/verify): the dominant term in this
+  bug, the full MIR set resident through codegen for output format `Both`
+  (`driver_aot_pipeline.spl:492`), plus the ~29 GB codegen growth. Repro: stage3
+  `native-build --mode dynload` on the full CLI, watch `[mir] rss_mib`; launch
+  workaround in `stage2_whole_program_mir_memory_growth_2026-11-01.md`.
+- Unbounded-but-small siblings left (session-keyed, no per-edit growth):
+  `BITFIELD_REGISTRY`, `_smf_cached_modules`, `_bootstrap_llvm_*_key_*`,
+  `_g_entry_scan_*` (has reset), `_bootstrap_type_runtime_names` (has reset).
