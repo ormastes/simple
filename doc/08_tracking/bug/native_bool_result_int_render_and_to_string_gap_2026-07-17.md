@@ -145,3 +145,9 @@ this lane's mandate says never to do.
   `env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH bin/simple native-build`
   (native).
 
+
+## Triage 2026-11-04 (mir slice 16)
+Doc already states source-fixed with focused MIR regressions; the starts_with/ends_with/contains
+owner-precedence path exists in `method_calls_literals.spl` (~line 2549). Status
+fix-implemented-verification-pending. Verify (stage3 native-build): build the Part A/B repros
+and expect `O9:true|END` and `T4:7|END`.
