@@ -13,3 +13,7 @@ Evidence: `/home/yoon/dev/simple-bootstrap-c06-20261011/build/native_probe/phase
 Removal: Repair native array copy dispatch and aggregate-field scalar/iterator owner propagation; restore original copy/field comparisons/section loops only after both actual entries pass HIR/MIR/object and byte/bounds/sorting/order regressions execute. Keep OPEN; no automatic retirement/admission. For #3014, original range forms and malformed/UTF8/page/section bounds also need qualified native controls. Neither issue is closed by this workaround.
 
 Regressions: `test/01_unit/compiler/cache/cache_contract_codec_spec.spl` and `test/01_unit/compiler/cache/package_init_tld_physical_binding_v1_spec.spl`; unexecuted.
+
+## 2026-11-03 triage (lane-bugs-a)
+
+DEFERRED. Blocker: the failing evidence is a native HIR/MIR run of the canonical-cache-codec and physical-tld entries on a Linux self-hosted producer (artifacts under /home/yoon/..., not present here); this Windows host has only the Rust seed, which cannot reproduce the MIR owner failures. Interpreter run: cache_contract_codec_spec 6/6 pass; package_init_tld_physical_binding_v1_spec 4/8 pass (4 failures are the #3054 original-form owner qualification examples). Next step: run the two entries through a deployed stage3 native-build and bisect the Array.copy receiver / record operator owner in 50.mir.

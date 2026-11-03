@@ -65,3 +65,5 @@ This is focused provisional LLVM evidence, not a full application or release
 qualification; producer remains unadmitted.
 
 **Revalidated 2026-11-02: still plausible because OPEN; source repair and regressions AUTHORED_UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-03 (sonB): deferred.** Source repairs are authored; the remaining items (enum payload, local binding, collection method failures) need the Caret closure HIR run on stage3 to enumerate; workaround kept.

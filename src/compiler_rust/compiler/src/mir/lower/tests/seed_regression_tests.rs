@@ -751,3 +751,45 @@ fn void_receiver_builtin_collection_method_is_not_void_qualified() {
         "erased receiver must stay bare: {dump}"
     );
 }
+
+/// Entry-module callers (untagged, no flatten owner) record their `use`
+/// bindings under the `<entry>` importer. A bare call of a name defined by
+/// several co-compiled modules with DIFFERENT return types must follow the
+/// entry's own `use`, not the last-registered definition
+/// (env_get_cocompiled_signature_collision_2026_10_31).
+#[test]
+fn entry_module_use_binding_selects_import_among_differing_signature_duplicates() {
+    let text_mod = "mod_text.spl";
+    let int_mod = "mod_int.spl";
+    // int_mod is defined LAST, so bare-name last-write-wins picks it.
+    for import_from in [text_mod, int_mod] {
+        let ret = if import_from == text_mod { "text" } else { "i64" };
+        let src = format!(
+            "fn flatten_entry_anchor() -> i64:\n    return 0\n\nfn entry_caller() -> {ret}:\n    return env_get(\"x\")\n"
+        );
+        let mut module = simple_parser::Parser::new(&src).parse().expect("parse failed");
+        module
+            .items
+            .push(import_binding_marker("<entry>", "env_get", import_from, "env_get"));
+        module
+            .items
+            .extend(flattened_items("fn env_get(key: text) -> text:\n    return key\n", text_mod));
+        module
+            .items
+            .extend(flattened_items("fn env_get(key: text) -> i64:\n    return 7\n", int_mod));
+        let hir = crate::hir::lower(&module).expect("hir lower failed");
+        let mir = super::super::lower_to_mir(&hir).expect("mir lower failed");
+        let caller = mir_fn(&mir, "entry_caller");
+        let text_symbol = crate::interpreter::flatten_owner_mangled_name(text_mod, "env_get");
+        if import_from == text_mod {
+            assert!(
+                has_call(caller, &text_symbol),
+                "entry importing env_get from {text_mod} must call {text_symbol}"
+            );
+            assert!(!has_call(caller, "env_get"), "must not call the last-registered bare env_get");
+        } else {
+            assert!(has_call(caller, "env_get"), "entry importing from {int_mod} keeps the bare symbol");
+            assert!(!has_call(caller, &text_symbol), "must not call {text_mod}'s env_get");
+        }
+    }
+}

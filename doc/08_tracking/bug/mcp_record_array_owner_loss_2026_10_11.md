@@ -48,3 +48,14 @@ Separate MCP StructLit, extend, Result.map, float conversion, JSON optional
 array, and unlocated trim errors remain outside this change.
 
 **Revalidated 2026-11-02: still plausible because OPEN. Canonical ID: mcp_record_array_owner_loss_2026_10_11; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 lane s3g3: fix-implemented-verification-pending
+- The candidate repair is in the tree (squashed sync `3d6a3b7a0f6`, refined by `b33f2740173` and later
+  pass-through rules in `rebind_record_element_owner`: no provider key or a generic element is passed
+  through un-rebound instead of failing the build).
+- `test/01_unit/compiler/mir/record_array_owner_provenance_spec.spl` was stale (4 of 6 failed on the seed):
+  the provider symbol was never bound in the qualified-type table, the two rejection examples contradicted
+  the deliberate pass-through behavior, and `lower_for_array_indexed` gained 2 parameters. Fixed the spec;
+  now 6/6 pass: `bin/simple.exe run test/01_unit/compiler/mir/record_array_owner_provenance_spec.spl`.
+- Remaining: stage3 native build of the MCP sources (`main_lazy_assistant.spl:719,738` etc.) with zero
+  I64/non-array for-in diagnostics.

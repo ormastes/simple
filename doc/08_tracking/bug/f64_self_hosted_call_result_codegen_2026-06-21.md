@@ -88,3 +88,15 @@ without claiming Stage 4 authority.
 4. Confirm `scripts/check/check-f64-call-abi.shs` reports PASS.
 
 **Revalidated 2026-11-02: still plausible because OPEN (seed fixed & landed; self-hosted port blocked by bootstrap breakage); no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 lane s3g3: fix-implemented-verification-pending (NOT stage3-blocked)
+- The "needs stage3 to port" premise is stale. The self-hosted adapter was reworked: commit `bf56b71044f`
+  (2026-10-20) builds every import signature from the callee's DECLARED types (`cl_import_call_signature`,
+  `sig_type_to_cl`), local definitions use `build_signature` (real `CL_TYPE_F64` return), and any
+  caller/callee register-class disagreement (f64 vs i64, either direction, args or result) is a compile error
+  (`E-BACKEND-CRANELIFT-CALL-ABI`) instead of silent `0.0`/garbage. Call results are stored with their native
+  f64 type and reloaded as F64 (`load_local`).
+- Pinned by `test/02_integration/compiler/backend/cranelift_cross_module_call_abi_spec.spl` (matching
+  `half_f64(3)` f64 -> f64 call computes the right value; the mismatch cases are clear compile errors).
+- Static review only: not executed against a full-CLI stage3 here. Verify:
+  `SIMPLE_BIN=<full-CLI self-hosted simple> sh scripts/check/check-f64-call-abi.shs` must exit 0; then close.

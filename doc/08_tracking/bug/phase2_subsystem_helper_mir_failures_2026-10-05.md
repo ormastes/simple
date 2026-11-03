@@ -47,3 +47,10 @@ workarounds on an isolated later rebuild. Check memory and behavior for every
 performance-related repair, and performance and behavior for memory repairs.
 
 **Revalidated 2026-11-02: still plausible because OPEN (P1). No subsystem test binary or test execution is proved by this run; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 s3g4 lane: deferred (concrete blocker)
+
+The diagnostics (`helper-build-failures.json`, 27+11 error lines) live in a Windows
+evidence dir that is not in the repo or on this host, and the failures are in pure-Simple
+MIR lowering, which the seed cannot execute. Needs the helper builds re-run on the
+current producer to regenerate the diagnostic lines before a per-site fix can be written.

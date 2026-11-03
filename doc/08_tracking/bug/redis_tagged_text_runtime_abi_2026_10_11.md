@@ -72,3 +72,5 @@ runtime coverage is claimed. All executable checks remain UNEXECUTED until a
 qualified producer/runtime executes them; normal source hooks are separate.
 
 **Revalidated 2026-11-02: still plausible because OPEN — source repair authored; native fixtures and platform tests UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-03 (sonB): fix-implemented-verification-pending.** Verified on release/1.0.0: `src/compiler/50.mir/text_extern_abi.spl:271-272` registers `rt_text_to_bytes`/`rt_io_tcp_bind` arg0 and `rt_io_tcp_write_text` arg1 as boxed text; `src/runtime/runtime_native.c:19105-19120` `rt_io_tcp_bind` now calls `listen(fd,128)` and closes on failure. Spec `test/01_unit/compiler/mir/redis_tagged_text_extern_spec.spl` and fixtures `test/fixtures/compiler/redis_startup_contract/` exist. Verify: run that spec on stage3; native-build the fixtures and run listener.spl.
