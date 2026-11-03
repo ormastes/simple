@@ -649,6 +649,10 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 let arc_e = Arc::new(e.clone());
                 enums.insert(e.name.clone(), Arc::clone(&arc_e));
                 GLOBAL_ENUMS.with(|cell| {
+                    crate::interpreter::interpreter_module::module_evaluator::evaluation_helpers::warn_on_ambiguous_bare_enum_name(
+                        cell.borrow().get(&e.name),
+                        &arc_e,
+                    );
                     cell.borrow_mut().insert(e.name.clone(), arc_e.clone());
                 });
                 env.insert(

@@ -71,10 +71,26 @@ classify_target() {
     else
         _has_errline=0
     fi
+    # A verdict that exists but is followed by >5 non-blank lines of noise reads
+    # as NO verdict to any caller that tails the output (rv64_arch_import_closure
+    # spec on Windows: verdict at line 175/222 of 448, ~226 gc-warning lines
+    # after). The verdict must be among the last 5 non-blank lines.
+    _buried=0
+    if [ "$_has_verdict" -eq 1 ]; then
+        grep -v '^[[:space:]]*$' "$_out" >"$_out.nb"
+        if ! tail -n 5 "$_out.nb" | grep -Eq "$VERDICT_RE"; then
+            _buried=1
+        fi
+        rm -f "$_out.nb"
+    fi
     rm -f "$_out"
 
     if [ "$_rc" -ge 128 ] || [ "$_rc" -eq 124 ]; then
         echo ERROR
+        return 0
+    fi
+    if [ "$_rc" -lt 128 ] && [ "$_rc" -ne 124 ] && [ "$_buried" -eq 1 ]; then
+        echo BURIED
         return 0
     fi
     if [ "$_rc" -eq 0 ] && [ "$_has_verdict" -eq 0 ]; then
@@ -126,7 +142,27 @@ echo "ERROR: test file not found: x.spl"
 exit 1
 EOF
 
-    for _f in ok:OK silent:SILENT killed:ERROR red:OK silentnz:SILENTNZ errline:OK; do
+    # Fixture 7: verdict present but buried under 30 trailing warning lines ->
+    # BURIED (the rv64_arch_import_closure_spec Windows shape)
+    cat >"$_d/buried.sh" <<'EOF'
+echo "SPEC FILE VERDICT: x.spl outcome=ERROR executed=3 passed=1 failed=2"
+echo "Results: 3 total, 1 passed, 2 failed"
+i=0
+while [ $i -lt 30 ]; do echo "[gc-warning] Higher-layer module m$i imported in restricted context"; i=$((i + 1)); done
+exit 1
+EOF
+    # Fixture 8: same, but the runner re-emitted the verdict last -> OK
+    cat >"$_d/recap.sh" <<'EOF'
+echo "SPEC FILE VERDICT: x.spl outcome=ERROR executed=3 passed=1 failed=2"
+i=0
+while [ $i -lt 30 ]; do echo "[gc-warning] m$i"; i=$((i + 1)); done
+echo "--- verdict recap ---"
+echo "SPEC FILE VERDICT: x.spl outcome=ERROR executed=3 passed=1 failed=2"
+echo "Results: 3 total, 1 passed, 2 failed"
+exit 1
+EOF
+
+    for _f in ok:OK silent:SILENT killed:ERROR red:OK silentnz:SILENTNZ errline:OK buried:BURIED recap:OK; do
         _name=${_f%%:*}
         _want=${_f##*:}
         _got=$(SIMPLE_TEST_CMD="sh $_d/$_name.sh" classify_target dummy)
@@ -154,7 +190,7 @@ done
 
 [ "$DO_SELFTEST" -ge 1 ] && selftest
 if [ "$DO_SELFTEST" -eq 2 ] && [ -z "${TARGETS# }" ]; then
-    echo "PASS — selftest only, 6 fixture(s) checked"
+    echo "PASS — selftest only, 8 fixture(s) checked"
     exit 0
 fi
 
@@ -174,7 +210,7 @@ for t in $TARGETS; do
     checked=$((checked + 1))
     v=$(classify_target "$t")
     case "$v" in
-        SILENT) silent=$((silent + 1)); silent_names="$silent_names $t" ;;
+        SILENT|BURIED) silent=$((silent + 1)); silent_names="$silent_names $t" ;;
         SILENTNZ) silentnz=$((silentnz + 1)); silentnz_names="$silentnz_names $t" ;;
         ERROR)  errored=$((errored + 1)); error_names="$error_names $t" ;;
     esac
