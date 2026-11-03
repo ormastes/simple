@@ -29,6 +29,13 @@ crc32_of_body() { # file -> crc32 of everything after line 1
 
 reseal() { # file -> prints "resealed <crc>" or "already <crc>"
     _f="$1"
+    # Merge resolutions that keep both sides' headers leave stray
+    # `#sdn-crc32:` lines right after line 1; drop them before sealing.
+    if sed -n '2p' "$_f" | grep -q '^#sdn-crc32:'; then
+        _tmp="$_f.strip.$$"
+        { head -1 "$_f"; tail -n +2 "$_f" | awk 'f || !/^#sdn-crc32:/ {f=1; print}'; } > "$_tmp" || return 1
+        mv "$_tmp" "$_f" || return 1
+    fi
     _crc=$(crc32_of_body "$_f")
     [ -n "$_crc" ] || return 1
     _hdr=$(head -1 "$_f")
@@ -71,6 +78,13 @@ selftest() {
         echo "selftest FAIL: non-sdn file accepted ($_r)"; _fails=$((_fails+1))
     fi
 
+    # 3b stray merge-leftover headers after line 1 are removed
+    printf '#sdn-crc32:1\n#sdn-crc32:2\n#sdn-crc32:3\nbugs |id, status, valid|\n    a, open, true\n' > "$_t/f3b.sdn"
+    reseal "$_t/f3b.sdn" >/dev/null
+    if [ "$(grep -c '^#sdn-crc32:' "$_t/f3b.sdn")" != "1" ] || ! tail -n +2 "$_t/f3b.sdn" | cmp -s "$_t/want" -; then
+        echo "selftest FAIL: stray headers not stripped"; _fails=$((_fails+1))
+    fi
+
     # 4 the computed value matches the known-good real bug_db.sdn header
     _real="$(git rev-parse --show-toplevel 2>/dev/null)/doc/08_tracking/bug/bug_db.sdn"
     if [ -f "$_real" ]; then
@@ -83,7 +97,7 @@ selftest() {
 
     rm -rf "$_t"
     [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
-    echo "selftest: 4 fixtures passed"
+    echo "selftest: 5 fixtures passed"
 }
 
 SELFTEST_ONLY=0
