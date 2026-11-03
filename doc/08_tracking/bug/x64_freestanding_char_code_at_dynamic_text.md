@@ -45,3 +45,23 @@ LLVM backend path (correct). Add the probe above as a regression gate once fixed
 - `doc/08_tracking/bug/x64_freestanding_rt_string_to_int_stub.md`
 
 **Revalidated 2026-11-02: still plausible because the report title (x86_64 freestanding char_code_at mis-decodes at scattered indices on dynamicall) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Fix 2026-11-03 (fix-implemented, verification-pending)
+Root cause in the freestanding runtime, not cranelift:
+`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+`rt_string_char_code_at` was BYTE-indexed (hosted `runtime_native.c` and the
+aarch64 freestanding runtime are CODEPOINT-indexed UTF-8), and the compiled-lane
+symbols `__simple_rt_string_char_code_at`, `rt_string_byte_at`,
+`__simple_rt_string_byte_at` were missing on x86_64. Now: no-alloc decoder in
+`x86_64_text_codepoint.h`, used by `rt_string_char_code_at`, tagged
+`char_code_at`, and the new byte_at / `__simple_*` aliases.
+Siblings checked: `rt_string_len` and `rt_string_char_at` are byte-based on the
+hosted runtime too — consistent, no gap.
+
+Evidence (Windows, no QEMU):
+- `clang -std=c11 -Wall -Werror -Iexamples/09_embedded/simple_os/arch/x86_64/boot test/01_unit/runtime/x86_64_freestanding_char_code_at_test.c -o t && ./t` -> PASS (fails to build before the fix).
+- `clang --target=x86_64-unknown-none -ffreestanding -fno-builtin -nostdlib -mno-red-zone -O1 -c baremetal_stubs.c` + `llvm-nm` -> all five symbols `T`.
+
+QEMU steps still owed (not run): `sh scripts/os/clang_argv_tokenize_probe_run.shs`
+on the real-firmware lane; the `char_code_at` codes must equal the `[u8]`-idiom
+codes. Then drop the `[u8]` workaround in `_sshd_tokenize_command`.

@@ -4,6 +4,7 @@
 #include "embedded_ssh_host_rsa.h"
 #include "embedded_ssh_host_rsa_crt.h"
 #include "x86_64_nonce_slot_contract.h"
+#include "x86_64_text_codepoint.h"
 
 typedef int64_t RuntimeValue;
 
@@ -914,14 +915,35 @@ RuntimeValue rt_for_iterable(RuntimeValue collection)
     return collection;
 }
 
+/* CODEPOINT-indexed UTF-8, matching hosted runtime_native.c (bug
+ * x64_freestanding_char_code_at_dynamic_text: was byte-indexed). Raw idx,
+ * raw result; non-heap values return 0 (a raw pointer is indistinguishable
+ * from TAG_INT here, so it is never dereferenced). */
 RuntimeValue rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
 {
     if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
     if (!s || s->hdr.type != HEAP_STRING) return 0;
-    int64_t i = (int64_t)idx;
-    if (i < 0 || (uint64_t)i >= s->len) return 0;
-    return (RuntimeValue)(uint8_t)s->data[i];
+    return (RuntimeValue)x64_text_code_at((const unsigned char *)s->data, s->len, (int64_t)idx);
+}
+
+RuntimeValue __simple_rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
+{
+    return rt_string_char_code_at(str, idx);
+}
+
+/* BYTE-indexed raw byte read (text.byte_at); see x86_64_text_codepoint.h. */
+RuntimeValue rt_string_byte_at(RuntimeValue str, RuntimeValue idx)
+{
+    if (!IS_HEAP(str)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING) return 0;
+    return (RuntimeValue)x64_text_byte_at((const unsigned char *)s->data, s->len, (int64_t)idx);
+}
+
+RuntimeValue __simple_rt_string_byte_at(RuntimeValue str, RuntimeValue idx)
+{
+    return rt_string_byte_at(str, idx);
 }
 
 int64_t rt_pool_safepoint(void)
@@ -931,12 +953,8 @@ int64_t rt_pool_safepoint(void)
 
 RuntimeValue char_code_at(RuntimeValue str, RuntimeValue idx)
 {
-    if (!IS_HEAP(str)) return 0;
-    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s || !IS_INT(idx)) return 0;
-    int64_t i = DECODE_INT(idx);
-    if (i < 0 || (uint32_t)i >= s->len) return 0;
-    return ENCODE_INT((unsigned char)s->data[i]);
+    if (!IS_HEAP(str) || !IS_INT(idx)) return ENCODE_INT(0);
+    return ENCODE_INT(rt_string_char_code_at(str, (RuntimeValue)DECODE_INT(idx)));
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
