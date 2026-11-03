@@ -10,7 +10,7 @@ evidence found in the body. This is bookkeeping, not verification.
 I/O) silently only works when the caller passes an untyped/`[i64]` integer
 array, and rejects the natural, statically-typed `[u8]` value real code
 produces (e.g. any `wire.spl`-style `ByteWriter.to_bytes()` codec output)
-**Status:** FIXED (68157645f47: extract_bytes accepts UInt width 8; unit test extract_bytes_accepts_typed_u8_elements) — was open, worked around at the call site in
+**Status:** Open — worked around at the call site in
 `src/lib/nogc_sync_mut/game_net/udp_transport.spl`; no interpreter fix yet
 
 ## Summary
