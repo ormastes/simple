@@ -25,7 +25,7 @@ prefix='''#include <stdint.h>
 static char* test_strdup(const char* s) { size_t n=strlen(s)+1; char* p=malloc(n); if(p) memcpy(p,s,n); return p; }
 #define SPL_STRDUP(s,t) test_strdup(s)
 '''
-if a.openssl: prefix += '#include <openssl/evp.h>\n'
+if a.openssl: prefix += '#define SPL_HAVE_OPENSSL 1\n#include <openssl/evp.h>\n'
 fixture=a.root/'test/01_unit/runtime/aes_gcm_lengths_test.c'
 unit=a.output/'aes_gcm_owner.c'
 unit.write_text(prefix+src[start:end]+'\n'+fixture.read_text())

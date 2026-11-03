@@ -81,5 +81,69 @@ int main(void) {
     CHECK(empty_failure(out,n));
     out=rt_aes_gcm_decrypt_with_len(key,15,iv,12,(const char*)kat,32,NULL,0,&n);
     CHECK(empty_failure(out,n));
+    /* Legacy string entrypoints reject each missing required pointer. Their
+     * strlen contract intentionally cannot carry binary ciphertext. */
+    const char* text_key="0123456789abcdef";
+    const char* text_iv="0123456789ab";
+    for(int missing=0;missing<3;missing++) {
+        const char* k=missing==0 ? NULL : text_key;
+        const char* v=missing==1 ? NULL : text_iv;
+        const char* p=missing==2 ? NULL : "sample";
+        out=rt_aes_gcm_encrypt(k,v,p,NULL);
+        CHECK(out && out[0]==0); free((void*)out);
+        out=rt_aes_gcm_decrypt(k,v,p,NULL);
+        CHECK(out && out[0]==0); free((void*)out);
+        out=rt_aes_gcm_encrypt_with_len(k,16,v,12,p,6,NULL,0,&n);
+        CHECK(empty_failure(out,n));
+        out=rt_aes_gcm_decrypt_with_len(k,16,v,12,p,16,NULL,0,&n);
+        CHECK(empty_failure(out,n));
+    }
+    for(int with_aad=0;with_aad<2;with_aad++) {
+        const char* a=with_aad ? "aad" : NULL;
+        int64_t expected_len;
+        const char* expected=rt_aes_gcm_encrypt_with_len(text_key,16,text_iv,12,"sample",6,a,with_aad?3:0,&expected_len);
+        out=rt_aes_gcm_encrypt(text_key,text_iv,"sample",a);
+        CHECK(expected_len==22 && memcmp(out,expected,22)==0);
+        free((void*)out); free((void*)expected);
+        out=rt_aes_gcm_decrypt(text_key,text_iv,"unauthenticated!",a);
+        CHECK(out && out[0]==0); free((void*)out);
+    }
+    out=rt_aes_gcm_decrypt_with_len(key,16,iv,12,(const char*)kat,32,NULL,0,NULL);
+    CHECK(out && memcmp(out,"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",16)==0);
+    free((void*)out);
+    /* Exercise the general IV GHASH path, including a partial final block. */
+    char extended_iv[60]; memset(extended_iv,0x80,sizeof(extended_iv));
+    int iv_lengths[]={16,17,60};
+    for(unsigned i=0;i<sizeof(iv_lengths)/sizeof(iv_lengths[0]);i++) {
+        int64_t cn;
+        char* ct=(char*)rt_aes_gcm_encrypt_with_len(key,16,extended_iv,iv_lengths[i],msg,33,msg,17,&cn);
+        CHECK(cn==49);
+        out=rt_aes_gcm_decrypt_with_len(key,16,extended_iv,iv_lengths[i],ct,cn,msg,17,&n);
+        CHECK(n==33 && memcmp(out,msg,33)==0); free((void*)out);
+        ct[cn-1]^=0x80;
+        out=rt_aes_gcm_decrypt_with_len(key,16,extended_iv,iv_lengths[i],ct,cn,msg,17,&n);
+        CHECK(empty_failure(out,n)); free(ct);
+    }
+#ifndef SPL_HAVE_OPENSSL
+    /* Direct actual-owner helper tests reach defensive key checks and counter
+     * carry without allocating a 64-GiB record. No helper is substituted. */
+    uint8_t scratch[16]={0}, tag[16]={0}, counter[16]={0};
+    CHECK(aes_gcm_encrypt_impl((const uint8_t*)key,15,(const uint8_t*)iv,12,scratch,0,scratch,0,scratch,tag)==-1);
+    CHECK(aes_gcm_decrypt_impl((const uint8_t*)key,15,(const uint8_t*)iv,12,scratch,0,scratch,0,tag,scratch)==-1);
+    memset(counter+12,0xff,4); counter[0]=0x7f;
+    gcm_inc32(counter);
+    CHECK(counter[0]==0x7f && counter[12]==0 && counter[13]==0 && counter[14]==0 && counter[15]==0);
+    counter[14]=0x7f; counter[15]=0xff;
+    gcm_inc32(counter);
+    CHECK(counter[14]==0x80 && counter[15]==0);
+    /* RSA's unsupported fallback is included by the contiguous production
+     * slice. Assert its error contract without claiming RSA crypto coverage. */
+    out=rt_rsa_decrypt_with_len("bad",3,"bad",3,&n);
+    CHECK(empty_failure(out,n));
+    out=rt_rsa_decrypt_with_len("bad",3,"bad",3,NULL);
+    CHECK(out && out[0]==0); free((void*)out);
+    out=rt_rsa_decrypt("bad","bad");
+    CHECK(out && out[0]==0); free((void*)out);
+#endif
     printf("PASS %u AES-GCM assertions\n",checks); return 0;
 }
