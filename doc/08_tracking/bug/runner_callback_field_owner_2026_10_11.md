@@ -29,3 +29,5 @@ Exact qualified/failing source attribution: Narrow ARM/RISC-V fixture source 1de
 Traceability annotation base: `64b8854eaa6eee9470470ddbcef5fa2165902d13`. No earlier source or retained build evidence was modified; native qualifications remain bound to their exact sources above.
 
 Additional consumer workaround: Additional source workaround 64b8854eaa6eee9470470ddbcef5fa2165902d13 (recovery parent f7fdafdea3b251b4fa6f84b7203bd319cce8bc6c) replaces 11 remaining actual process_task_arena callback calls and retains 7 typed host locals. Source reviewed; changed-consumer native qualification PENDING. This is UNLANDED as of release 95c12f073ffefa99ac774264beeedd68a47e7676 and does not extend prior narrow fixture PASS. Source link https://github.com/ormastes/simple/commit/64b8854eaa6eee9470470ddbcef5fa2165902d13.
+
+**2026-11-03 (sonB): deferred.** Needs the permanent method-field layout/indirect-call return provenance owner in MIR; requires C36 consumer MIR repro on stage3; workaround kept.
