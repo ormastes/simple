@@ -1,0 +1,197 @@
+#!/bin/sh
+# check-arch-import-closure.shs
+#
+# Static guard: the transitive `use os.*` / `use std.*` import closure of an
+# arch boot entry must not reach another architecture's CPU intrinsics.
+# Incident: rv64 boot -> sandbox_boot_apply -> arch_adapt/arm64_sandbox_paging
+# -> arch/arm64/paging -> arch/arm64/cpu -> rt_arm64_* (undefined in the
+# riscv64 link). Fixed by the CPU-free arch/arm64/sandbox_pte_bits.spl split;
+# this guard keeps it from regressing.
+#
+# FAIL when a closure file outside the target family's own arch dirs
+#   (a) lives under src/os/kernel/arch/<other>/ AND mentions rt_<other>_* or
+#       imports os.kernel.arch.<other>.cpu, or
+#   (b) contains `extern fn rt_<other>_` (other in arm/x86/riscv families).
+#
+# Verdict is ALWAYS the last stdout line:
+#   PASS — <n> file(s) in closure checked          exit 0
+#   FAIL — <offenders with import chain>           exit 1
+#   ERROR — nothing was checked (<reason>)         exit 2
+#
+# Usage:
+#   sh scripts/check/check-arch-import-closure.shs [--root DIR] [--entry F --arch A]
+#   sh scripts/check/check-arch-import-closure.shs --all      # every arch boot.spl
+#   sh scripts/check/check-arch-import-closure.shs --selftest
+
+set -u
+
+# scan_one ROOT ENTRY ARCH -> stdout: "COUNT n" plus "OFF ..." lines
+scan_one() {
+    _lst="${TMPDIR:-/tmp}/aic.list.$$"; find "$1/src/os" -name "*.spl" > "$_lst" 2>/dev/null
+    awk -v root="$1" -v entry="$2" -v arch="$3" -v lst="$_lst" '
+    function fam(a) {
+        if (a ~ /^(arm|aarch|cortex)/) return "arm"
+        if (a ~ /^x86/) return "x86"
+        if (a ~ /^(riscv|rv)/) return "riscv"
+        return a
+    }
+    function exists(p) { return (p in have) }
+    function resolve(kind, mod,   n, c, i, j, base, p) {
+        n = split(mod, c, ".")
+        base = (kind == "os") ? root "/src/os/" : root "/src/lib/"
+        for (i = n; i >= 1; i--) {
+            p = c[1]; for (j = 2; j <= i; j++) p = p "/" c[j]
+            if (exists(base p ".spl")) return base p ".spl"
+            if (exists(base p "/__init__.spl")) return base p "/__init__.spl"
+            if (exists(base p "/mod.spl")) return base p "/mod.spl"
+        }
+        return ""
+    }
+    function archdir(f) {
+        if (match(f, /src\/os\/kernel\/arch\/[A-Za-z0-9_]+\//))
+            return substr(f, RSTART + 19, RLENGTH - 20)
+        return ""
+    }
+    function chain(f,   s) {
+        s = f
+        while (f in parent && parent[f] != "") { f = parent[f]; s = f " -> " s }
+        while ((i = index(s, root "/")) > 0) s = substr(s, 1, i - 1) substr(s, i + length(root) + 1)
+        return s
+    }
+    BEGIN {
+        while ((getline l < lst) > 0) { sub(/$/, "", l); have[l] = 1 }
+        close(lst)
+        tf = fam(arch)
+        nf = split("arm x86 riscv", fl, " ")
+        pfx["arm"] = "arm64|aarch64|arm32"
+        pfx["x86"] = "x86_64|x86_32"
+        pfx["riscv"] = "riscv64|riscv32|rv64"
+        other = ""
+        for (k = 1; k <= nf; k++) if (fl[k] != tf) other = other (other == "" ? "" : "|") pfx[fl[k]]
+        qh = 1; q[1] = root "/" entry; parent[q[1]] = ""; seen[q[1]] = 1; qt = 1
+        if (!exists(q[1])) { print "COUNT 0"; exit }
+        cnt = 0
+        while (qh <= qt) {
+            f = q[qh++]; cnt++
+            d = archdir(f)
+            own = (d != "" && fam(d) == tf)
+            foreign = (d != "" && !own && d !~ /^(common|hal)/)
+            body = ""
+            while ((getline line < f) > 0) {
+                sub(/\r$/, "", line)
+                sub(/#.*/, "", line)
+                body = body line "\n"
+                if (match(line, /^[ \t]*use[ \t]+(os|std)\.[A-Za-z0-9_.]+/)) {
+                    s = substr(line, RSTART, RLENGTH); sub(/^[ \t]*use[ \t]+/, "", s)
+                    kind = substr(s, 1, index(s, ".") - 1); mod = substr(s, index(s, ".") + 1)
+                    r = resolve(kind, mod)
+                    if (r != "" && !(r in seen)) { seen[r] = 1; parent[r] = f; q[++qt] = r }
+                    if (kind == "os" && mod ~ /^kernel\.arch\.[A-Za-z0-9_]+\.cpu/) {
+                        split(mod, mp, ".")
+                        if (fam(mp[3]) != tf && !own)
+                            print "OFF " chain(f) " imports foreign cpu os." mod
+                    }
+                }
+            }
+            close(f)
+            if (other != "" && !own) {
+                if (foreign && body ~ ("rt_(" other ")_"))
+                    print "OFF " chain(f) " [foreign arch dir uses foreign rt_*]"
+                else if (body ~ ("extern fn rt_(" other ")_"))
+                    print "OFF " chain(f) " [declares foreign extern rt_*]"
+            }
+        }
+        print "COUNT " cnt
+    }' ; rm -f "$_lst"
+}
+
+# verdict_for ROOT ENTRY ARCH -> prints verdict line; returns exit code
+verdict_for() {
+    _out=$(scan_one "$1" "$2" "$3")
+    _n=$(printf '%s\n' "$_out" | sed -n 's/^COUNT //p' | tail -n 1)
+    _off=$(printf '%s\n' "$_out" | grep '^OFF ' | sed 's/^OFF //' | sort -u)
+    # drop offenders recorded in the ratchet baseline ("<arch> <file>" per line)
+    _bl="${AIC_BASELINE:-$1/scripts/check/arch_import_closure_baseline.txt}"
+    if [ -n "$_off" ] && [ -f "$_bl" ]; then
+        _off=$(printf '%s\n' "$_off" | awk -v a="$3" -v bl="$_bl" '
+            BEGIN { while ((getline l < bl) > 0) base[l] = 1 }
+            { f = $0; sub(/ \[.*/, "", f); sub(/ imports .*/, "", f); sub(/.* -> /, "", f)
+              if (!((a " " f) in base)) print }')
+    fi
+    if [ -z "${_n:-}" ] || [ "$_n" = "0" ]; then
+        echo "ERROR — nothing was checked (entry $2 missing or empty closure)"; return 2
+    fi
+    if [ -n "$_off" ]; then
+        echo "FAIL — $(printf '%s' "$_off" | tr '\n' ';') ($_n file(s) in closure)"; return 1
+    fi
+    echo "PASS — $_n file(s) in closure checked"; return 0
+}
+
+mk() { mkdir -p "$(dirname "$1")"; printf '%s\n' "$2" > "$1"; }
+
+selftest() {
+    AIC_BASELINE=/nonexistent; export AIC_BASELINE
+    t=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/aic.$$"); mkdir -p "$t"
+    a="$t/src/os/kernel/arch"
+    e=src/os/kernel/arch/riscv64/boot.spl
+    mk "$a/riscv64/boot.spl" "use os.kernel.neutral.apply.{x}"
+    mk "$t/src/os/kernel/neutral/apply.spl" "use os.kernel.arch.arm64.pte_bits.{b}"
+    mk "$a/arm64/pte_bits.spl" "fn b(): 1"
+    v=$(verdict_for "$t" $e riscv64); rc=$?
+    case "$v" in "PASS — "*) [ $rc = 0 ] || { echo "selftest: clean rc $rc"; return 1; } ;; *) echo "selftest: clean closure not PASS: $v"; return 1 ;; esac
+    mk "$a/arm64/pte_bits.spl" "use os.kernel.arch.arm64.paging.{p}"
+    mk "$a/arm64/paging.spl" "use os.kernel.arch.arm64.cpu.{isb}"
+    mk "$a/arm64/cpu.spl" "extern fn rt_arm64_isb()"
+    v=$(verdict_for "$t" $e riscv64); rc=$?
+    case "$v" in
+        "FAIL — "*"boot.spl -> "*"apply.spl -> "*"paging.spl -> "*"cpu.spl"*) [ $rc = 1 ] || { echo "selftest: rc $rc"; return 1; } ;;
+        *) echo "selftest: incident chain not reported: $v"; return 1 ;;
+    esac
+    mk "$t/src/os/kernel/neutral/ext.spl" "extern fn rt_x86_64_hlt()"
+    mk "$a/riscv64/boot.spl" "use os.kernel.neutral.ext.{h}"
+    v=$(verdict_for "$t" $e riscv64); rc=$?
+    case "$v" in "FAIL — "*"foreign extern"*) ;; *) echo "selftest: rule (b) not FAIL: $v"; return 1 ;; esac
+    v=$(verdict_for "$t" src/os/kernel/arch/nope.spl riscv64); rc=$?
+    [ $rc = 2 ] || { echo "selftest: missing entry rc $rc"; return 1; }
+    rm -rf "$t"; unset AIC_BASELINE
+    return 0
+}
+
+ROOT="."; ENTRY=""; ARCH=""; ALL=0; ST=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT=$2; shift ;;
+        --entry) ENTRY=$2; shift ;;
+        --arch) ARCH=$2; shift ;;
+        --all) ALL=1 ;;
+        --selftest) ST=1 ;;
+        *) echo "ERROR — nothing was checked (unknown arg $1)"; exit 2 ;;
+    esac
+    shift
+done
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+if [ $ST = 1 ]; then echo "PASS — selftest, 4 fixture(s) checked"; exit 0; fi
+
+if [ $ALL = 1 ]; then
+    worst=0; tot=0; fails=""
+    for d in "$ROOT"/src/os/kernel/arch/*/boot.spl; do
+        [ -f "$d" ] || continue
+        a=$(basename "$(dirname "$d")")
+        v=$(verdict_for "$ROOT" "src/os/kernel/arch/$a/boot.spl" "$a"); rc=$?
+        echo "$a: $v"
+        case "$rc" in
+            0) tot=$((tot+1)) ;;
+            1) worst=1; fails="$fails $a" ;;
+            *) [ $worst = 0 ] && worst=2 ;;
+        esac
+    done
+    if [ $worst = 0 ] && [ $tot -gt 0 ]; then echo "PASS — $tot arch entr(ies) checked, no cross-arch leak"; exit 0; fi
+    if [ $worst = 1 ]; then echo "FAIL — cross-arch leak in:$fails"; exit 1; fi
+    echo "ERROR — nothing was checked (no arch boot entries)"; exit 2
+fi
+
+[ -z "$ARCH" ] && ARCH=riscv64
+[ -z "$ENTRY" ] && ENTRY=src/os/kernel/arch/riscv64/boot.spl
+verdict_for "$ROOT" "$ENTRY" "$ARCH"
+exit $?
