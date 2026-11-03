@@ -80,3 +80,9 @@ Related standing traps: bare `assert x == y` in an `it` block is inert (use
 at daemon start (pass `--no-session-daemon`); only the final
 `Results: N total, ...` line is an authoritative verdict.
 
+
+## Re-probe 2026-11-03 (tr-sspec lane)
+Still reproduces on the seed `bin/simple.exe test`: an `it` with two failing expects (1==2, 3==4)
+prints only `expected 3 to equal 4` (1 example, 1 failure). Root cause: scalar `BDD_FAILURE_MSG` in
+seed bdd.rs overwritten per failure. Fix needs seed Rust change (append/join in the matcher-fail
+sites) + seed rebuild; deferred. Pure-Simple framework already accumulates (see audit above).

@@ -29,3 +29,10 @@ or discarded per-expect rather than per-test).
 Debugging closure_captured_instance_loses_method_self_mutation_2026-08-19 — the
 secondary defect made the primary failure's message unreadable.
 
+
+## Triage 2026-11-03 (tr-sspec lane)
+Verdict: FIXED in source. `src/compiler_rust/compiler/src/interpreter_call/bdd.rs` now keeps the
+provisional hollow-expect message in its own slot `BDD_PROVISIONAL_MSG` (bdd.rs:134), cleared per
+example (:990) and promoted only when `BDD_FAILURE_MSG` is still None (:1076), so it can no longer
+clobber a real failure. Sibling record: spec_runner_provisional_truthy_message_clobbers_real_failure_2026-08-21.
+Seed rebuild not run in this lane; verify on next seed build.

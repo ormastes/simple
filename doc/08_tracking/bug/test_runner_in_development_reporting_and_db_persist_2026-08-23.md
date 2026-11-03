@@ -132,3 +132,11 @@ A gate asserting, on the three-spec fixture above, that (a) no line labelled
 `PASS` names a file that also produced an `IN-DEVELOPMENT NEUTRALISED` line,
 (b) `Results: <n> total` equals the number of files run, and (c) a neutralised
 file's verdict line reports `executed>=1`.
+
+## Re-probe 2026-11-03 (tr-sspec lane, bin/simple.exe test on 3-file fixture)
+D1 FIXED: neutralised file prints `IN-DEVELOPMENT SKIP ...`, no `PASS` line for it.
+D3 FIXED: verdict line is `outcome=OK executed=1 ... in_development=1` (test_runner_main.spl:1034-1042).
+D2 PARTIAL: `Results: 2 total, 1 passed, 1 failed, 1 skipped` - total is passed+failed
+(test_runner_output.spl:638-640); the in-dev file shows only as `skipped`. No `States:` line seen on
+this run. D4 (test_db.sdn never persisted) NOT re-verified. Remains OPEN: next step is to add
+in-development to `total` (or print it as its own addend) in test_runner_output.spl and verify D4.
