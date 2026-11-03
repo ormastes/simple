@@ -582,3 +582,16 @@ fn test_char_tag_roundtrip_and_disjointness() {
     assert!(RuntimeValue::from_char_code(0x110000).is_none());
     assert_eq!(RuntimeValue::from_char_code(55).and_then(|v| v.as_char()), Some('7'));
 }
+
+#[test]
+#[should_panic(expected = "truthiness of a char is a type error")]
+fn test_char_truthiness_fails_closed() {
+    // ADR-005: a char is never a condition; truthy() must not return false/true.
+    let _ = RuntimeValue::from_char('7').truthy();
+}
+
+#[test]
+#[should_panic(expected = "truthiness of a char is a type error")]
+fn test_char_nul_truthiness_fails_closed() {
+    let _ = RuntimeValue::from_char('\0').truthy();
+}

@@ -1,0 +1,250 @@
+# Pure query/LSP code-action boundary. JSON is the explicit wire protocol.
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
+    json_value_has, json_value_items, json_value_keys, json_value_text_or,
+    json_value_object_from, json_value_object_set, json_value_serialize}
+
+pub struct LspEditSourceMap:
+    source: text
+    line_starts: [i64]
+
+pub fn lsp_edit_source_map(source: text) -> LspEditSourceMap:
+    var starts: [i64] = [0]
+    var i = 0
+    while i < source.len():
+        val byte = source.byte_at(i)
+        if byte == 13 and i + 1 < source.len() and source.byte_at(i + 1) == 10:
+            i = i + 1
+            starts.push(i + 1)
+        elif byte == 10 or byte == 13:
+            starts.push(i + 1)
+        i = i + 1
+    LspEditSourceMap(source: source, line_starts: starts)
+
+fn edit_position(map: LspEditSourceMap, offset: i64) -> JsonValue?:
+    if offset < 0 or offset > map.source.len(): return nil
+    if offset < map.source.len():
+        val byte = map.source.byte_at(offset)
+        if byte >= 128 and byte < 192: return nil
+        if byte == 10 and offset > 0 and map.source.byte_at(offset - 1) == 13: return nil
+    var low = 0
+    var high = map.line_starts.len()
+    while low + 1 < high:
+        val mid = (low + high) / 2
+        if map.line_starts[mid] <= offset:
+            low = mid
+        else:
+            high = mid
+    var units = 0
+    for ch in map.source.substring(map.line_starts[low], offset).chars():
+        val width = if ch.char_code_at(0) > 0xFFFF: 2 else: 1
+        units = units + width
+    Some(json_value_object_from([("line", JsonValue.Int(low)), ("character", JsonValue.Int(units))]))
+
+pub fn lsp_code_action_text_edit(map: LspEditSourceMap, start: i64, end: i64, new_text: text) -> JsonValue?:
+    if end < start: return nil
+    val start_position = edit_position(map, start)?
+    val end_position = edit_position(map, end)?
+    val range = json_value_object_from([("start", start_position), ("end", end_position)])
+    Some(json_value_object_from([("range", range), ("newText", JsonValue.Str(new_text))]))
+
+pub fn lsp_query_code_action(title: text, kind: text, preferred: bool, file: text, edits: [JsonValue]) -> JsonValue:
+    var action = json_value_object_from([("title", JsonValue.Str(title)),
+        ("kind", JsonValue.Str(kind)), ("isPreferred", JsonValue.Bool(preferred))])
+    if edits.len() > 0:
+        val changes = json_value_object_from([(file, JsonValue.Array(edits))])
+        action = json_value_object_set(action, "edit", json_value_object_from([("changes", changes)]))
+    action
+
+pub fn lsp_constructor_code_action(map: LspEditSourceMap, file: text, line: i64, column: i64) -> JsonValue:
+    val title = "Replace .new() with constructor syntax"
+    if line >= 0 and line < map.line_starts.len() and column > 0:
+        val offset = map.line_starts[line] + column - 1
+        if offset >= 0 and offset + 6 <= map.source.len() and map.source.substring(offset, offset + 6) == ".new()":
+            val edit = lsp_code_action_text_edit(map, offset, offset + 4, "")
+            if edit != nil:
+                return lsp_query_code_action(title, "quickfix", true, file, [edit.unwrap()])
+    # Mapping positional .new(args) to named constructor fields needs type
+    # information. Surface that limitation as disabled, never an empty fix.
+    val action = lsp_query_code_action(title, "quickfix", false, file, [])
+    val disabled = json_value_object_from([("reason", JsonValue.Str("constructor arguments require named field mapping"))])
+    json_value_object_set(action, "disabled", disabled)
+
+pub fn lsp_pass_code_action(map: LspEditSourceMap, file: text, line: i64) -> JsonValue?:
+    if line < 0 or line >= map.line_starts.len(): return nil
+    var start = map.line_starts[line]
+    while start < map.source.len() and (map.source.byte_at(start) == 32 or map.source.byte_at(start) == 9):
+        start = start + 1
+    if start + 4 > map.source.len() or map.source.substring(start, start + 4) != "pass": return nil
+    if start + 4 < map.source.len():
+        val next = map.source.byte_at(start + 4)
+        if next != 32 and next != 9 and next != 10 and next != 13 and next != 35: return nil
+    val edit = lsp_code_action_text_edit(map, start, start + 4, "pass_do_nothing")?
+    Some(lsp_query_code_action("Replace 'pass' with 'pass_do_nothing'", "quickfix", true, file, [edit]))
+
+pub fn lsp_code_action_query_args(file: text, zero_based_line: i64) -> [text]:
+    ["code-actions", file, str(zero_based_line + 1), "--format", "json"]
+
+pub struct LspCodeActionRequest:
+    uri: text
+    line: i64
+
+pub fn lsp_code_action_request(body: text) -> LspCodeActionRequest?:
+    match json_parse_value_strict(body):
+        case Ok(request):
+            var params = json_value_field(request, "params")
+            if not json_value_has(request, "params"): params = request
+            val document = json_value_field(params, "textDocument")
+            val uri = json_value_text_or(json_value_field(document, "uri"), "")
+            if uri == "": return nil
+            val range = json_value_field(params, "range")
+            val start = position_components(json_value_field(range, "start"))?
+            val end = position_components(json_value_field(range, "end"))?
+            if end.0 < start.0 or (end.0 == start.0 and end.1 < start.1): return nil
+            Some(LspCodeActionRequest(uri: uri, line: start.0))
+        case _: nil
+
+fn position_components(position: JsonValue) -> (i64, i64)?:
+    match (json_value_field(position, "line"), json_value_field(position, "character")):
+        case (Int(line), Int(character)) if line >= 0 and character >= 0:
+            Some((line, character))
+        case _: nil
+
+fn valid_text_edit(edit: JsonValue) -> bool:
+    match json_value_field(edit, "newText"):
+        case Str(_): pass
+        case _: return false
+    val range = json_value_field(edit, "range")
+    val start = position_components(json_value_field(range, "start"))
+    val end = position_components(json_value_field(range, "end"))
+    if start == nil or end == nil: return false
+    val s = start.unwrap()
+    val e = end.unwrap()
+    e.0 > s.0 or (e.0 == s.0 and e.1 >= s.1)
+
+fn valid_edit_array(value: JsonValue) -> bool:
+    match value:
+        case Array(edits):
+            if edits.len() == 0: return false
+            for edit in edits:
+                if not valid_text_edit(edit): return false
+            true
+        case _: false
+
+fn document_edit(uri: text, edits: JsonValue) -> JsonValue:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Null)])
+    json_value_object_from([("textDocument", document), ("edits", edits)])
+
+fn nested_workspace_edit(edit: JsonValue, uri: text) -> JsonValue?:
+    val changes = json_value_field(edit, "changes")
+    val keys = json_value_keys(changes)
+    if keys.len() > 0:
+        var documents: [JsonValue] = []
+        for key in keys:
+            val edits = json_value_field(changes, key)
+            if not valid_edit_array(edits): return nil
+            # The query owner emits a single source path. Rebind that path to
+            # its exact request URI; retain already-authoritative URI keys.
+            var target = key
+            if not key.starts_with("file://"):
+                if keys.len() != 1: return nil
+                target = uri
+            documents.push(document_edit(target, edits))
+        return Some(json_value_object_from([("documentChanges", JsonValue.Array(documents))]))
+    # Already-standard documentChanges need no URI rebinding. Validate edits
+    # atomically so an invalid second replacement cannot leave a half-fix.
+    val documents = json_value_field(edit, "documentChanges")
+    match documents:
+        case Array(items):
+            if items.len() == 0: return nil
+            for item in items:
+                val document = json_value_field(item, "textDocument")
+                if json_value_text_or(json_value_field(document, "uri"), "") == "": return nil
+                if not valid_edit_array(json_value_field(item, "edits")): return nil
+            Some(edit)
+        case _: nil
+
+fn legacy_integer(value: JsonValue) -> i64?:
+    match value:
+        case Int(number) if number >= 0: Some(number)
+        case Str(number):
+            if number == "": return nil
+            for ch in number.chars():
+                if ch < "0" or ch > "9": return nil
+            Some(number.to_int())
+        case _: nil
+
+fn legacy_workspace_edit(action: JsonValue, uri: text) -> JsonValue?:
+    val new_text = json_value_field(action, "newText")
+    match new_text:
+        case Str(_): pass
+        case _: return nil
+    val line = legacy_integer(json_value_field(action, "editLine"))?
+    val start_line = if line > 0: line - 1 else: 0
+    var start_col = 0
+    if json_value_has(action, "editCol"):
+        start_col = legacy_integer(json_value_field(action, "editCol"))?
+    var end_line = start_line
+    var end_col = start_col
+    if json_value_has(action, "editEndLine"):
+        val last = legacy_integer(json_value_field(action, "editEndLine"))?
+        end_line = if last > 0: last - 1 else: 0
+    if json_value_has(action, "editEndCol"):
+        end_col = legacy_integer(json_value_field(action, "editEndCol"))?
+    val start = json_value_object_from([("line", JsonValue.Int(start_line)), ("character", JsonValue.Int(start_col))])
+    val end = json_value_object_from([("line", JsonValue.Int(end_line)), ("character", JsonValue.Int(end_col))])
+    val range = json_value_object_from([("start", start), ("end", end)])
+    val edit = json_value_object_from([("range", range), ("newText", new_text)])
+    if not valid_text_edit(edit): return nil
+    val document = document_edit(uri, JsonValue.Array([edit]))
+    Some(json_value_object_from([("documentChanges", JsonValue.Array([document]))]))
+
+fn convert_action(value: JsonValue, uri: text) -> JsonValue?:
+    val title = json_value_text_or(json_value_field(value, "title"), "")
+    if title == "": return nil
+    var kind = json_value_text_or(json_value_field(value, "kind"), "quickfix")
+    if kind == "": kind = "quickfix"
+    var action = json_value_object_from([("title", JsonValue.Str(title)), ("kind", JsonValue.Str(kind))])
+    val workspace = if json_value_has(value, "edit"):
+        nested_workspace_edit(json_value_field(value, "edit"), uri)
+    else:
+        legacy_workspace_edit(value, uri)
+    if workspace != nil: action = json_value_object_set(action, "edit", workspace.unwrap())
+    for field in ["isPreferred", "diagnostics", "disabled", "command", "data"]:
+        if json_value_has(value, field):
+            action = json_value_object_set(action, field, json_value_field(value, field))
+    Some(action)
+
+fn convert_payload(value: JsonValue, uri: text) -> [JsonValue]:
+    val rows: [JsonValue] = match value:
+        case Array(items): items
+        case Object(_, _): [value]
+        case _: []
+    var actions: [JsonValue] = []
+    for row in rows:
+        val action = convert_action(row, uri)
+        if action != nil: actions.push(action.unwrap())
+    actions
+
+pub fn lsp_code_actions_convert_output(output: text, uri: text) -> text:
+    # Whole payload first supports compact arrays and ordinary pretty JSON.
+    match json_parse_value_strict(output.trim()):
+        case Ok(payload): return json_value_serialize(JsonValue.Array(convert_payload(payload, uri)))
+        case _: pass
+    if output.trim().starts_with("["): return "[]"
+    # Older queries emitted one object/tab row per line. Ignore child logging;
+    # never turn malformed JSON or human diagnostic headings into action titles.
+    var actions: [JsonValue] = []
+    for line in output.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("{") or trimmed.starts_with("["):
+            match json_parse_value_strict(trimmed):
+                case Ok(payload):
+                    for action in convert_payload(payload, uri): actions.push(action)
+                case _: pass
+        elif trimmed.contains("\t"):
+            val fields = trimmed.split("\t")
+            if fields[0] != "":
+                val row = json_value_object_from([("title", JsonValue.Str(fields[0])), ("kind", JsonValue.Str(fields[1].trim()))])
+                val action = convert_action(row, uri)
+                if action != nil: actions.push(action.unwrap())
+    json_value_serialize(JsonValue.Array(actions))

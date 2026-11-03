@@ -1,0 +1,123 @@
+# Genuine driver-seam regressions for the refuted-spurious-error bug's two
+# remaining fail-opens. These tests execute stage_emit_object, not an imitation.
+use std.spec.{describe, it, expect, step, fail}
+use std.io_runtime.{env_get_opt, env_set_process, env_remove_process}
+use compiler.common.driver_core_types.{CompileResult, driver_core_compile_options_default}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_pipeline.*
+use compiler.driver.driver_aot_pipeline.*
+
+fn _restore_borrow_gate_env(key: text, previous: text?) -> bool:
+    match previous:
+        case Some(value): env_set_process(key, value)
+        case _: env_remove_process(key)
+
+fn _emit_borrow_gate_in_environment(driver: CompilerDriver,
+        bootstrap: text, whole_program: text, stage4: text) -> CompileResult:
+    val old_bootstrap = env_get_opt("SIMPLE_BOOTSTRAP")
+    val old_whole_program = env_get_opt("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM")
+    val old_stage4 = env_get_opt("SIMPLE_BOOTSTRAP_STAGE4")
+    val old_go_to_end = env_get_opt("SIMPLE_NATIVE_GO_TO_END")
+    val set_bootstrap = env_set_process("SIMPLE_BOOTSTRAP", bootstrap)
+    val set_whole_program = env_set_process("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM", whole_program)
+    val set_stage4 = env_set_process("SIMPLE_BOOTSTRAP_STAGE4", stage4)
+    val set_go_to_end = env_set_process("SIMPLE_NATIVE_GO_TO_END", "0")
+    var active_driver = driver
+    val result = active_driver.stage_emit_object()
+    val restored_bootstrap = _restore_borrow_gate_env("SIMPLE_BOOTSTRAP", old_bootstrap)
+    val restored_whole_program = _restore_borrow_gate_env("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM", old_whole_program)
+    val restored_stage4 = _restore_borrow_gate_env("SIMPLE_BOOTSTRAP_STAGE4", old_stage4)
+    val restored_go_to_end = _restore_borrow_gate_env("SIMPLE_NATIVE_GO_TO_END", old_go_to_end)
+    expect(set_bootstrap and set_whole_program and set_stage4 and set_go_to_end).to_equal(true)
+    expect(restored_bootstrap and restored_whole_program and restored_stage4 and restored_go_to_end).to_equal(true)
+    result
+
+fn _driver_with_borrow_gate_mir(invalid_move: bool) -> CompilerDriver:
+    var driver = CompilerDriver.create(driver_core_compile_options_default())
+    val l0 = LocalId(id: 0)
+    val l1 = LocalId(id: 1)
+    val l2 = LocalId(id: 2)
+    var instructions: [MirInst] = [
+        MirInst(kind: MirInstKind.Const(l0, MirConstValue.Int(7), MirType.i64()), span: nil)
+    ]
+    if invalid_move:
+        instructions.push(MirInst(kind: MirInstKind.Move(l1, l0), span: nil))
+    instructions.push(MirInst(kind: MirInstKind.Copy(l2, l0), span: nil))
+    val function = MirFunction(
+        symbol: SymbolId(id: 9921), name: "borrow_gate_fixture",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [],
+        blocks: [MirBlock(id: BlockId.entry(), label: nil,
+            instructions: instructions, terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    driver.ctx.mir_modules["borrow_gate_fixture"] = MirModule(
+        name: "borrow_gate_fixture", functions: functions, statics: {}, constants: {}, types: {})
+    driver
+
+fn _expect_real_borrow_rejection(bootstrap: text, whole_program: text, stage4: text):
+    val driver = _driver_with_borrow_gate_mir(true)
+    expect(driver.ctx.mir_modules.len()).to_equal(1)
+    expect(driver.ctx.has_errors()).to_equal(false)
+    val result = _emit_borrow_gate_in_environment(driver, bootstrap, whole_program, stage4)
+    match result:
+        case CompileResult.BorrowError(errors):
+            expect(errors.len()).to_be_greater_than(0)
+            expect(driver.ctx.has_errors()).to_equal(true)
+        case _:
+            fail("use-after-move MIR must fail the real AOT borrow gate")
+
+describe "AOT mandatory borrow gate":
+    it "p2_p3_bug_reproduction":
+        step("Reproduce the exact failure")
+        # Previously the explicit whole-program bootstrap branch bypassed NLL.
+        _expect_real_borrow_rejection("1", "1", "0")
+        _expect_real_borrow_rejection("1", "1", "")
+
+    it "does not relabel accumulated earlier errors as borrow violations":
+        step("Exercise the repaired owner")
+        for bootstrap in ["0", "1"]:
+            var driver = _driver_with_borrow_gate_mir(false)
+            driver.ctx.add_error("MIR-PRIOR-FAILURE-A")
+            driver.ctx.add_error("MIR-PRIOR-FAILURE-B")
+            val result = _emit_borrow_gate_in_environment(driver, bootstrap, "1", "0")
+            match result:
+                case CompileResult.CodegenError(message):
+                    expect(message).to_contain("MIR-PRIOR-FAILURE-A")
+                    expect(message).to_contain("MIR-PRIOR-FAILURE-B")
+                    expect(message.contains("Borrow error")).to_equal(false)
+                case _:
+                    fail("existing pipeline failures must remain fatal CodegenError")
+            expect(driver.ctx.errors.len()).to_equal(2)
+
+    it "p2_p3_adjacent_regression":
+        step("Reject the adjacent regression")
+        _expect_real_borrow_rejection("0", "0", "0")
+        _expect_real_borrow_rejection("1", "0", "0")
+        _expect_real_borrow_rejection("1", "1", "1")
+        var clean_driver = _driver_with_borrow_gate_mir(false)
+        expect(clean_driver.borrow_check()).to_equal(true)
+        expect(clean_driver.ctx.has_errors()).to_equal(false)
+
+    it "retains the explicit no-borrow-check option without suppressing prior errors":
+        var driver = _driver_with_borrow_gate_mir(true)
+        driver.ctx.options.no_borrow_check = true
+        expect(driver.borrow_check()).to_equal(true)
+        expect(driver.ctx.has_errors()).to_equal(false)
+        driver.ctx.add_error("PRIOR-FAILURE-WITH-EXPLICIT-BYPASS")
+        val result = _emit_borrow_gate_in_environment(driver, "1", "1", "0")
+        match result:
+            case CompileResult.CodegenError(message):
+                expect(message).to_contain("PRIOR-FAILURE-WITH-EXPLICIT-BYPASS")
+            case _:
+                fail("explicit borrow bypass must not bypass prior phase failures")

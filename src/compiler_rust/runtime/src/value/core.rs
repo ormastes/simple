@@ -609,6 +609,11 @@ impl RuntimeValue {
     /// Check if this value is "truthy" (non-zero, non-nil, non-empty)
     #[inline]
     pub fn truthy(self) -> bool {
+        // ADR-005: a char has no truthiness (type error). Fail closed rather than
+        // silently returning false.
+        if self.is_char() {
+            panic!("truthiness of a char is a type error; compare explicitly");
+        }
         // Heap-boxed floats carry TAG_HEAP; a boxed 0.0 must be falsy, not
         // "truthy because the pointer exists".
         if self.is_float() {

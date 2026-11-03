@@ -11878,6 +11878,9 @@ int64_t rt_array_reduce(SplArray* array, int64_t init, int64_t closure_value) {
  * form and the legacy inline RT_VALUE_TAG_FLOAT form, so both of Rust's float
  * arms are subsumed by the one test. */
 static inline int rt_core_value_truthy(int64_t value) {
+    /* ADR-005 char (TAG_SPECIAL, payload = 1<<40 | code point; runtime_value.h RT_IS_CHAR): no truthiness, fail closed. */
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_SPECIAL && ((rt_core_special_payload(value) & ~0x1FFFFFULL) == (1ULL << 40)))
+        spl_panic("truthiness of a char is a type error; compare explicitly");
     if (rt_core_is_float(value)) return rt_core_as_float(value) != 0.0;
     RtCoreUInt* unsigned_value = rt_core_as_heap_uint(value);
     if (unsigned_value) return unsigned_value->value != 0;
