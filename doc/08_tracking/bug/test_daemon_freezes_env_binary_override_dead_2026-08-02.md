@@ -273,3 +273,12 @@ dispatch (`test_should_use_light_daemon_client`) — a cross-process protocol
 change too risky to land and verify safely within a shard pass on a host
 where `bin/simple test` invocations take 300-900s. No change made. Leaving
 OPEN as documented.
+
+## Update 2026-11-03: protocol-level fix present, verification pending
+67ee03994a5 landed the v2 request: the caller's full environment is hashed
+(environment_identity.spl); a daemon with a different digest answers reroute
+(code 75) and the spec runs directly with the caller env. Unit specs pass
+(environment_identity_spec 8/8, test_daemon_light_protocol_spec 6/6). The live
+daemon path is linux-only. Verify on linux: start the daemon, change
+SIMPLE_TEST_BINARY, run `bin/simple test <spec>`, expect "environment-identity:
+caller environment differs ... running directly".
