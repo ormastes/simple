@@ -1,0 +1,97 @@
+use std.spec.*
+use compiler.common.mir_target_context.{mir_target_context_from, mir_target_context_from_explicit, mir_collection_target_is_supported}
+
+describe "explicit MIR target context preparation":
+    it "binds six architecture widths to explicit Linux Windows and SimpleOS tuples":
+        # Recognition binds context only; it does not prove any backend can
+        # emit/link/execute all of these architecture and operating-system pairs.
+        for arch in ["x86", "x86_64", "arm", "aarch64", "riscv32", "riscv64"]:
+            val linux = mir_target_context_from_explicit(arch + "-unknown-linux-gnu", "llvm", 23)
+            expect(linux.is_ok()).to_be(true)
+            expect(linux.unwrap().arch).to_equal(arch)
+            expect(linux.unwrap().os).to_equal("linux")
+            expect(linux.unwrap().abi).to_equal("gnu")
+            val windows = mir_target_context_from_explicit(arch + "-pc-windows-msvc", "llvm", 23)
+            expect(windows.is_ok()).to_be(true)
+            expect(windows.unwrap().arch).to_equal(arch)
+            expect(windows.unwrap().os).to_equal("windows")
+            expect(windows.unwrap().abi).to_equal("msvc")
+            val simpleos = mir_target_context_from_explicit(arch + "-unknown-simpleos", "native", 23)
+            expect(simpleos.is_ok()).to_be(true)
+            expect(simpleos.unwrap().arch).to_equal(arch)
+            expect(simpleos.unwrap().os).to_equal("simpleos")
+            expect(simpleos.unwrap().abi).to_equal("none")
+
+    it "delegates canonical aliases and keeps ARM subarchitecture and backend version":
+        val mac = mir_target_context_from_explicit(" ARM64-APPLE-DARWIN ", " LLVM-LIB ", 19).unwrap()
+        expect(mac.arch).to_equal("aarch64")
+        expect(mac.os).to_equal("macos")
+        expect(mac.abi).to_equal("macho")
+        expect(mac.backend).to_equal("llvm")
+        expect(mac.version).to_equal(19)
+        val arm = mir_target_context_from_explicit("armv7-unknown-linux-gnueabihf", "llvm", 23).unwrap()
+        expect(arm.arch).to_equal("arm")
+        expect(arm.subarch).to_equal("armv7")
+        expect(arm.abi).to_equal("eabihf")
+        val thumb = mir_target_context_from_explicit("thumbv7em-none-eabi", "native", -1).unwrap()
+        expect(thumb.subarch).to_equal("thumbv7em")
+        expect(thumb.os).to_equal("baremetal")
+        expect(thumb.abi).to_equal("eabi")
+        expect(thumb.version).to_equal(-1)
+
+    it "rejects implicit hosts and does not borrow an operating system":
+        for requested in ["", " ", "host", " NATIVE "]:
+            val result = mir_target_context_from_explicit(requested, "llvm", 23)
+            expect(result.is_err()).to_be(true)
+            expect(result.unwrap_err()).to_start_with("explicit_target_required:")
+        for requested in ["x86_64", "x86_64-madeup", "x86_64-notlinux-gnu",
+            "x86_64-unknown-linux-gnu-extra", "aarch64--apple-darwin", "aarch64-apple-darwin-linux"]:
+            val result = mir_target_context_from_explicit(requested, "llvm", 23)
+            expect(result.is_err()).to_be(true)
+            expect(result.unwrap_err()).to_start_with("unsupported_explicit_target:")
+        # Existing general callers retain their compatibility behavior.
+        val legacy = mir_target_context_from("x86_64-madeup", "arm64", "darwin", "auto", 23)
+        expect(legacy.os).to_equal("macos")
+        expect(legacy.backend).to_equal("llvm")
+        expect(legacy.collection_target_admitted).to_be(false)
+
+    it "rejects unknown or lossy architecture names and unresolved backends":
+        for requested in ["mystery-unknown-linux-gnu", "riscv64gc-unknown-linux-gnu",
+            "rv32imac-unknown-none-elf", "armv999-unknown-linux-gnu", "i386-unknown-linux-gnu",
+            "i486-unknown-linux-gnu", "i586-unknown-linux-gnu", "i686-unknown-linux-gnu"]:
+            val result = mir_target_context_from_explicit(requested, "llvm", 23)
+            expect(result.is_err()).to_be(true)
+            expect(result.unwrap_err()).to_start_with("unsupported_explicit_arch:")
+        for backend in ["", "auto", "unknown", "llvm-typo"]:
+            val result = mir_target_context_from_explicit("aarch64-apple-darwin", backend, 23)
+            expect(result.is_err()).to_be(true)
+            expect(result.unwrap_err()).to_start_with("explicit_backend_required:")
+
+    it "enforces architecture-specific ABI widths without widening collection admission":
+        val rv32 = mir_target_context_from_explicit("riscv32-unknown-linux-ilp32d", "llvm", 23).unwrap()
+        expect(rv32.abi).to_equal("ilp32d")
+        expect(mir_collection_target_is_supported(rv32)).to_be(false)
+        val rv64 = mir_target_context_from_explicit("riscv64-unknown-linux-lp64d", "llvm", 23).unwrap()
+        expect(rv64.abi).to_equal("lp64d")
+        expect(mir_collection_target_is_supported(rv64)).to_be(false)
+        for requested in ["riscv32-unknown-linux-lp64d", "riscv64-unknown-linux-ilp32d",
+            "x86_64-unknown-linux-gnueabihf", "aarch64-none-eabihf", "x86-none-eabi"]:
+            val result = mir_target_context_from_explicit(requested, "llvm", 23)
+            expect(result.is_err()).to_be(true)
+            expect(result.unwrap_err()).to_start_with("unsupported_explicit_target:")
+
+    it "preserves every existing collection tuple spelling and its narrower backend gate":
+        for arch in ["x86_64", "amd64", "x64", "aarch64", "arm64"]:
+            for suffix in ["linux-gnu", "unknown-linux-gnu", "linux-musl", "unknown-linux-musl",
+                "pc-windows-msvc", "unknown-windows-msvc", "windows-msvc", "pc-windows-gnu",
+                "w64-windows-gnu", "apple-darwin", "apple-macos", "unknown-freebsd", "freebsd"]:
+                val target = arch + "-" + suffix
+                val explicit = mir_target_context_from_explicit(target, "llvm", 23).unwrap()
+                expect(mir_collection_target_is_supported(explicit)).to_be(true)
+                val other = mir_target_context_from_explicit(target, "cranelift", 23).unwrap()
+                expect(other.collection_target_admitted).to_be(false)
+        for target in ["x86_64-windows-gnu", "x86_64-w64-mingw32", "x86_64-unknown-simpleos",
+            "x86-unknown-linux-gnu", "armv7-unknown-linux-gnueabihf", "riscv64-unknown-linux-gnu"]:
+            val explicit = mir_target_context_from_explicit(target, "llvm", 23).unwrap()
+            expect(explicit.collection_target_admitted).to_be(false)
+            expect(mir_collection_target_is_supported(explicit)).to_be(false)
