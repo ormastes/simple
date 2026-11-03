@@ -99,3 +99,8 @@ Evidence (worktree at eaee86e1e4d + fix):
 "Failed to declare module statics" backend failure (fires at unmodified
 baseline for the same source; separate root, not a text-return typing issue).
 
+
+## Triage 2026-11-04 (mir slice 16)
+Resolution section records strict-llvm parity fixed (HIR signature predeclaration + self.field typing).
+Strict-cranelift is blocked by a separate backend failure. Status fix-implemented-verification-pending.
+Verify: `scripts/check/check-native-seed-parity.shs` case `method_text_return` on stage3, both backends.

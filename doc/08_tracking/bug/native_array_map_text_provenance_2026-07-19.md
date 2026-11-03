@@ -31,3 +31,10 @@ owner of this defect.
   not stolen.
 - The fixture prints `a,b` under default LLVM and explicit Cranelift.
 - Focused MIR coverage observes the array loop and excludes Option-map blocks.
+
+## Triage 2026-11-04 (mir slice 16)
+Source fix present on origin/release/1.0.0: `lower_array_map` in
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` builds the
+mapped array type from the callback result. Status fix-implemented-verification-pending.
+Verify (needs stage3 native-build): build `test/fixtures/compiler/native_array_map_text_provenance_open_bug.spl`
+with default LLVM and `--backend cranelift`; expected output `a,b`.
