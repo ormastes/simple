@@ -1,6 +1,6 @@
 # Stage2 native_compile memory blowup attributed to parser_preprocessor (2026-11-01)
 
-- Status: fix-implemented-verification-pending. DUPLICATE of `stage2_whole_program_mir_memory_growth_2026-11-01` (fixed by #5791). **No module-local construct found.** The attribution to
+- Status: OPEN. **No module-local construct found.** The attribution to
   `parser_preprocessor.spl` is a progress-label artifact. No source workaround
   was applied: nothing exists to work around.
 - Severity: P1 (blocks the Phase 3 stage3 build)
@@ -56,3 +56,7 @@ inside a unit's codegen or in the setup before it.
 1. Rerun with `SIMPLE_COMPILER_TRACE=1` to see whether the growth comes before the first unit or inside it.
 2. Fix in the driver: release HIR/MIR of other shards before `native_compile`, or allow staged
    codegen/eviction for `Both` output. Tracked with the related whole-program memory bug.
+
+## Status 2026-11-03: resolved-duplicate
+
+Superseded by `stage2_whole_program_mir_memory_growth_2026-11-01.md` (same cause: Both output format kept the full MIR set resident; fixed in #5791).
