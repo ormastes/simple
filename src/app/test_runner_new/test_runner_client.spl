@@ -372,6 +372,39 @@ fn fail_closed_on_no_examples(path: text, body: text, code: i64) -> i64:
     print timeout_verdict_line(path, "no-examples-executed", 0)
     no_examples_exit_code(body, code)
 
+# Re-emit the verdict as the LAST output when trailing noise buries it.
+# Measured on Windows: `test rv64_arch_import_closure_spec.spl` printed its
+# SPEC FILE VERDICT / Results lines at lines 175/222 of 448, followed by ~226
+# gc-warning lines from the relayed child stderr. Any caller reading the tail
+# (the repo convention is "verdict is the LAST line") saw NO verdict at all.
+# Bug: test_runner_verdict_buried_under_trailing_warnings_2026-11-03.
+fn print_verdict_recap(body: text):
+    val lines = body.split("\n")
+    var verdict_idx = -1
+    var results_idx = -1
+    var last_nonempty = -1
+    var i = 0
+    while i < lines.len():
+        val l = lines[i]
+        if l.starts_with("SPEC FILE VERDICT:"):
+            verdict_idx = i
+        if l.starts_with("Results:"):
+            results_idx = i
+        if l.trim() != "":
+            last_nonempty = i
+        i = i + 1
+    if verdict_idx < 0:
+        return
+    var last_wanted = verdict_idx
+    if results_idx > last_wanted:
+        last_wanted = results_idx
+    if last_nonempty <= last_wanted:
+        return
+    print "--- verdict recap (re-emitted after trailing output) ---"
+    print lines[verdict_idx]
+    if results_idx >= 0:
+        print lines[results_idx]
+
 fn print_response(path: text, content: text) -> i64:
     val newline = content.find("\n")
     if newline < 0:
@@ -384,6 +417,7 @@ fn print_response(path: text, content: text) -> i64:
         return client_result
     if body != "":
         print body
+        print_verdict_recap(body)
     fail_closed_on_no_examples(path, body, code)
 
 fn has_spl_doctest_flag(args: [text]) -> bool:
@@ -553,6 +587,7 @@ fn run_one_direct(binary: text, path: text, timeout_secs: i64, compiler: text = 
         print "error: test-runner: {exit_code_reason(code)} (outer bound {outer_timeout_ms}ms, elapsed {elapsed_ms}ms)"
         print timeout_verdict_line(path, "outer-bound-timeout", outer_timeout_ms)
         return if code == 0: 1 else: code
+    print_verdict_recap(out + "\n" + err)
     fail_closed_on_no_examples(path, out + err, code)
 
 # Run one spec file through the light daemon. `seq` disambiguates request ids

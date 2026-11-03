@@ -1,0 +1,46 @@
+# @cover scripts/check/check-arch-import-closure.shs 80%
+# Purpose and audience: executable guard evidence that the riscv64 boot import closure
+# never reaches another architecture's CPU intrinsics (rv64 web gate arm64 link leak).
+# @req REQ-SOS-RV64-IMPORT-CLOSURE
+# @tag:system
+
+use std.spec.step
+
+use std.spec.*
+
+"""rv64_web_gate_arm64_import_leak_and_storage_2026-06-15: static import-closure guard."""
+
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+
+# Measured 364 files on 2026-11-03; budget = 364 + 25% = 455.
+val RV64_CLOSURE_FILE_BUDGET: i64 = 455
+
+fn _guard(args: [text]) -> (text, i64):
+    val (stdout, stderr, status) = rt_process_run("sh", ["scripts/check/check-arch-import-closure.shs"] + args)
+    (stdout, status)
+
+fn _last_line(out: text) -> text:
+    val lines = out.trim().split("\n")
+    lines[lines.len() - 1]
+
+describe "rv64 arch import closure guard":
+    it "self-test (clean PASS, incident chain FAIL, foreign extern FAIL, missing entry ERROR) passes":
+        step("run guard --selftest")
+        val (out, rc) = _guard(["--selftest"])
+        expect(rc).to_equal(0)
+        expect(_last_line(out)).to_start_with("PASS")
+
+    it "riscv64 boot.spl closure has no arm64/x86 CPU leak":
+        step("run guard on riscv64 boot.spl")
+        val (out, rc) = _guard(["--entry", "src/os/kernel/arch/riscv64/boot.spl", "--arch", "riscv64"])
+        expect(rc).to_equal(0)
+        expect(_last_line(out)).to_start_with("PASS")
+
+    it "riscv64 boot closure stays within the size budget":
+        step("compare closure file count with budget")
+        val (out, rc) = _guard(["--entry", "src/os/kernel/arch/riscv64/boot.spl", "--arch", "riscv64"])
+        expect(rc).to_equal(0)
+        val parts = _last_line(out).split(" ")
+        val count = parts[2].to_i64()
+        if count > RV64_CLOSURE_FILE_BUDGET:
+            fail("riscv64 boot closure grew to {count} files (budget {RV64_CLOSURE_FILE_BUDGET})")

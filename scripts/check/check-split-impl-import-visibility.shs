@@ -1,0 +1,162 @@
+#!/bin/sh
+# check-split-impl-import-visibility.shs -- a module that calls a method living in
+# a SPLIT `impl` block (type impl'd in 2+ files) must import the module that
+# defines it. Origin: PR #6047 / stage2_split_impl_modules_missing_from_entry_closure
+# (CompilerDriver methods defined in driver_stage_hir_v1 etc. were called from
+# modules whose closure never reached the defining file).
+#
+# Heuristic (advisory): flags a call only when the method name has exactly one
+# owner in scope, that owner is a split type, the caller mentions the type, is
+# not one of its impl files, and imports no module whose segment equals a
+# definer file stem.
+#
+# Usage: check-split-impl-import-visibility.shs [--root DIR] [--baseline FILE]
+#        [--generate-baseline] [--selftest]
+# Verdict (last stdout line): PASS / FAIL / ERROR, exit 0 / 1 / 2.
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT_DIR="src/compiler"
+BASELINE="$HERE/split_impl_import_visibility_baseline.txt"
+GEN=0
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) ROOT_DIR=$2; shift 2;;
+    --baseline) BASELINE=$2; shift 2;;
+    --generate-baseline) GEN=1; shift;;
+    --selftest) SELFTEST_ONLY=1; shift;;
+    *) echo "ERROR - unknown argument $1"; exit 2;;
+  esac
+done
+
+TMPD=$(mktemp -d)
+trap 'rm -rf "$TMPD"' EXIT INT TERM
+
+# scan DIR: first line "#split_types N", then "file|Type.method|definers" lines.
+scan() {
+  dir=$1
+  find "$dir" -name '*.spl' -type f | LC_ALL=C sort > "$TMPD/files.txt"
+  [ -s "$TMPD/files.txt" ] || { echo "#split_types 0"; return; }
+  xargs awk '
+    FNR == 1 { cur = "" }
+    /^impl[ \t]/ {
+      t = $0; sub(/^impl[ \t]+/, "", t)
+      if (t ~ / for /) sub(/.* for /, "", t)
+      sub(/[^A-Za-z0-9_].*$/, "", t); cur = t
+      print "I\t" cur "\t" FILENAME; next
+    }
+    /^(pub[ \t]+)?(class|struct|enum|trait|actor|mixin)[ \t]/ {
+      t = $0; sub(/^(pub[ \t]+)?(class|struct|enum|trait|actor|mixin)[ \t]+/, "", t)
+      sub(/[^A-Za-z0-9_].*$/, "", t); cur = t; next
+    }
+    /^[^ \t#]/ {
+      if ($0 ~ /^(pub[ \t]+)?fn[ \t]+[A-Za-z_]/) {
+        m = $0; sub(/^(pub[ \t]+)?fn[ \t]+/, "", m); sub(/[^A-Za-z0-9_].*$/, "", m)
+        print "M\t<free>\t" m "\t" FILENAME
+      }
+      cur = ""; next
+    }
+    /^[ \t]+(pub[ \t]+)?(static[ \t]+)?(me|fn)[ \t]+[A-Za-z_]/ {
+      if (cur != "") {
+        m = $0; sub(/^[ \t]+(pub[ \t]+)?(static[ \t]+)?(me|fn)[ \t]+/, "", m); sub(/[^A-Za-z0-9_].*$/, "", m)
+        print "M\t" cur "\t" m "\t" FILENAME
+      }
+    }
+  ' < "$TMPD/files.txt" > "$TMPD/defs.tsv"
+  awk -F'\t' '
+    $1 == "I" { if (!(($2 SUBSEP $3) in ifile)) { ifile[$2, $3] = 1; nif[$2]++ } }
+    END { for (t in nif) if (nif[t] >= 2) print t }
+  ' "$TMPD/defs.tsv" | LC_ALL=C sort > "$TMPD/split_types.txt"
+  nsplit=$(wc -l < "$TMPD/split_types.txt" | tr -d ' ')
+  echo "#split_types $nsplit"
+  [ "$nsplit" -gt 0 ] || return
+  awk -F'\t' '
+    FILENAME == ARGV[1] { split_t[$1] = 1; next }
+    $1 == "M" {
+      k = $3
+      if (!((k SUBSEP $2) in own)) { own[k, $2] = 1; nown[k]++; ownr[k] = $2 }
+      dk = k SUBSEP $4
+      if (!(dk in df)) { df[dk] = 1; dfl[k] = dfl[k] "," $4 }
+    }
+    END { for (k in nown) if (nown[k] == 1 && (ownr[k] in split_t)) print ownr[k] "\t" k "\t" substr(dfl[k], 2) }
+  ' "$TMPD/split_types.txt" "$TMPD/defs.tsv" | LC_ALL=C sort > "$TMPD/cands.tsv"
+  awk -F'\t' '$1 == "I" { print $2 "\t" $3 }' "$TMPD/defs.tsv" | LC_ALL=C sort -u > "$TMPD/implfiles.tsv"
+  [ -s "$TMPD/cands.tsv" ] || return
+  # One awk over all files: per-file state is reset on FNR == 1 and flushed
+  # when the next file starts and at END.
+  xargs awk -F'\t' -v CANDS="$TMPD/cands.tsv" -v IMPLS="$TMPD/implfiles.tsv" '
+    function stem(p,   n, a, s) { n = split(p, a, "/"); s = a[n]; sub(/\.spl$/, "", s); return s }
+    function flush(   i, m, t, nd, d, j, ok) {
+      if (curf == "") return
+      for (i = 1; i <= npend; i++) {
+        m = pend[i]; t = T[m]
+        if (!(t in mention) || ((t SUBSEP curf) in isimpl)) continue
+        nd = split(ND[m], d, ","); ok = 0
+        for (j = 1; j <= nd; j++) if (stem(d[j]) in imp) ok = 1
+        if (!ok && !((curf "|" t "." m) in done)) { done[curf "|" t "." m] = 1; print curf "|" t "." m "|" ND[m] }
+      }
+    }
+    BEGIN {
+      while ((getline line < CANDS) > 0) { split(line, a, "\t"); T[a[2]] = a[1]; ND[a[2]] = a[3] }
+      while ((getline line < IMPLS) > 0) { split(line, a, "\t"); isimpl[a[1], a[2]] = 1 }
+    }
+    FNR == 1 { flush(); curf = FILENAME; delete imp; delete mention; delete pend; npend = 0 }
+    {
+      ln = $0; sub(/#.*/, "", ln)
+      if (ln ~ /^[ \t]*(pub[ \t]+)?use[ \t]/) {
+        u = ln; gsub(/[^A-Za-z0-9_]+/, " ", u); n = split(u, seg, " ")
+        for (i = 1; i <= n; i++) imp[seg[i]] = 1
+        next
+      }
+      rest = ln
+      while (match(rest, /\.[A-Za-z_][A-Za-z0-9_]*[ \t]*\(/)) {
+        m = substr(rest, RSTART + 1, RLENGTH - 1); sub(/[ \t]*\($/, "", m)
+        if (m in T) pend[++npend] = m
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      w = ln; gsub(/[^A-Za-z0-9_]+/, " ", w); n = split(w, ws, " ")
+      for (i = 1; i <= n; i++) mention[ws[i]] = 1
+    }
+    END { flush() }
+  ' < "$TMPD/files.txt" | LC_ALL=C sort -u
+}
+
+selftest() {
+  fx="$TMPD/fixture"; mkdir -p "$fx/pos" "$fx/neg" "$fx/none"
+  for d in pos neg; do
+    printf 'struct Driver:\n    n: i64\n\nimpl Driver:\n    me base_op():\n        self.n = 1\n' > "$fx/$d/owner_type.spl"
+    printf 'impl Driver:\n    me special_stage():\n        self.n = 2\n' > "$fx/$d/provider.spl"
+  done
+  printf 'fn run(d: Driver):\n    d.special_stage()\n' > "$fx/pos/caller.spl"
+  printf 'use fx.neg.provider.*\nfn run(d: Driver):\n    d.special_stage()\n' > "$fx/neg/caller.spl"
+  printf 'struct Solo:\n    n: i64\nimpl Solo:\n    me only():\n        self.n = 1\nfn run(s: Solo):\n    s.only()\n' > "$fx/none/solo.spl"
+  p=$(scan "$fx/pos")
+  echo "$p" | grep -q 'caller.spl|Driver.special_stage|' || { echo "ERROR - selftest: positive fixture not flagged"; return 1; }
+  n=$(scan "$fx/neg")
+  echo "$n" | grep -q '|' && { echo "ERROR - selftest: negative fixture flagged"; return 1; }
+  z=$(scan "$fx/none")
+  echo "$z" | grep -q '^#split_types 0' || { echo "ERROR - selftest: single-file impl counted as split"; return 1; }
+  echo "selftest: 3 fixtures passed"
+  return 0
+}
+
+selftest || exit 2
+if [ "$SELFTEST_ONLY" = 1 ]; then echo "PASS - selftest only"; exit 0; fi
+[ -d "$ROOT_DIR" ] || { echo "ERROR - nothing was checked (root $ROOT_DIR missing)"; exit 2; }
+out=$(scan "$ROOT_DIR")
+nsplit=$(echo "$out" | sed -n 's/^#split_types //p')
+[ "${nsplit:-0}" -gt 0 ] || { echo "ERROR - nothing was checked (0 split-impl types under $ROOT_DIR)"; exit 2; }
+viol=$(echo "$out" | grep -v '^#' | grep -v '^$' || true)
+total=$(printf '%s\n' "$viol" | grep -vc '^$' || true)
+if [ "$GEN" = 1 ]; then
+  printf '%s\n' "$viol" | grep -v '^$' | cut -d'|' -f1,2 > "$BASELINE"
+  echo "PASS - baseline written: $total entr(ies), $nsplit split type(s)"; exit 0
+fi
+[ -f "$BASELINE" ] || : > "$BASELINE"
+newv=$(printf '%s\n' "$viol" | grep -v '^$' | while IFS= read -r l; do
+  k=$(echo "$l" | cut -d'|' -f1,2); grep -qxF "$k" "$BASELINE" || echo "$l"; done)
+if [ -n "$newv" ]; then
+  printf '%s\n' "$newv"
+  echo "FAIL - $(printf '%s\n' "$newv" | wc -l | tr -d ' ') new unimported split-impl call(s) ($total total, $nsplit split types)"; exit 1
+fi
+echo "PASS - $nsplit split type(s) checked, $total baselined, 0 new"; exit 0

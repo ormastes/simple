@@ -70,3 +70,7 @@ Audited by the fix-pipeline classification review: **environment-blocked: window
 ## Windows triage 2026-11-03
 
 Run on Windows 11 with `bin/simple.exe` (v1.0.0-rc.1 seed). With `HOME`/`USERPROFILE` pointed at a scratch dir holding a `.gitconfig` and a pre-existing `.gitconfig.lock` (so any lock attempt would fail or alter it), `--version`, `--help` and `lint --help` all ran with no lock diagnostic, and both files kept identical sha256 before and after. `git grep` of `src/app/cli` and `src/compiler_rust/driver/src` on release/1.0.0 finds no `git config` invocation. Not reproduced for these argv; the original smoke argv/digest was never retained. No code change. Stays open pending the original invocation (tool-dispatch probe) with Process Monitor capture.
+
+## Fix 2026-11-03 (fix-implemented-verification-pending)
+
+The only in-tree writer of the user-global git config is `scripts/setup/setup-ci-receipt-key.shs:141`, which defaulted to `git config --global` for `simple.ciReceiptKey`/`simple.ciReceiptIdentity`; the CLI binary itself never touches git config. Default is now `--local`; `--global-config` is the explicit opt-in. Guard: `scripts/check/check-no-global-git-config-write.shs` (standalone, not push-wired: full scan ~2.5 min on Windows). Regression: `sh scripts/check/check-gitconfig-lock-untouched.shs` (locked HOME; before fix FAIL exit 1 "git config --global failed", after fix PASS). Verification pending: the original smoke argv was never retained, so a Windows session should re-run its smoke with HOME pointing at a locked scratch dir.
