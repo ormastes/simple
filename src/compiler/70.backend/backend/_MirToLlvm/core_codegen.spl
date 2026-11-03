@@ -266,7 +266,53 @@ pub fn llvm_first_duplicate_ssa_def(ir: text) -> text:
         seen[name] = true
     ""
 
+extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn rt_time_now_nanos() -> i64
+
+# SIMPLE_EMIT_TRACE=<file>: append one line per translated function / SSA prep
+# (name, block count, instruction count, nanoseconds). Open-append-close per
+# record so the log survives a kill (print is block-buffered and lost). Unset
+# => "" and the whole feature is a no-op.
+# doc/08_tracking/bug/seed_emit_object_superlinear_hang_large_module_2026-07-20.md
+fn llvm_emit_trace_path() -> text:
+    var path = ""
+    unsafe(capabilities: [ffi]):
+        path = rt_env_get("SIMPLE_EMIT_TRACE") ?? ""
+    path
+
+fn llvm_emit_trace_now() -> i64:
+    var now = 0
+    unsafe(capabilities: [ffi]):
+        now = rt_time_now_nanos()
+    now
+
+fn llvm_emit_trace_record(path: text, phase: text, name: text, blocks: i64, insts: i64, start_ns: i64):
+    val elapsed = llvm_emit_trace_now() - start_ns
+    unsafe(capabilities: [ffi]):
+        rt_file_append_text(path, "{phase} fn={name} blocks={blocks} insts={insts} ns={elapsed}
+")
+
+fn llvm_emit_trace_inst_count(blocks: [MirBlock]) -> i64:
+    var n = 0
+    var i = 0
+    while i < blocks.len():
+        n = n + blocks[i].instructions.len()
+        i = i + 1
+    n
+
 fn llvm_bootstrap_ssa_function(
+    fn_: MirFunction,
+    bootstrap_mode: bool
+) -> MirFunction:
+    val trace_path = llvm_emit_trace_path()
+    if trace_path == "":
+        return llvm_bootstrap_ssa_function_impl(fn_, bootstrap_mode)
+    val t0 = llvm_emit_trace_now()
+    val out = llvm_bootstrap_ssa_function_impl(fn_, bootstrap_mode)
+    llvm_emit_trace_record(trace_path, "ssa", fn_.name, fn_.blocks.len(), llvm_emit_trace_inst_count(fn_.blocks), t0)
+    out
+
+fn llvm_bootstrap_ssa_function_impl(
     fn_: MirFunction,
     bootstrap_mode: bool
 ) -> MirFunction:
@@ -738,6 +784,15 @@ impl MirTextCodegen for MirToLlvm:
         self.translate_function_with_ir_handle(name, body, span, -1, -1)
 
     me translate_function_with_ir_handle(name: text, body: MirBody, span: Span, module_index: i64, ir_handle: i64):
+        val trace_path = llvm_emit_trace_path()
+        if trace_path == "":
+            self.translate_function_with_ir_handle_impl(name, body, span, module_index, ir_handle)
+            return
+        val t0 = llvm_emit_trace_now()
+        self.translate_function_with_ir_handle_impl(name, body, span, module_index, ir_handle)
+        llvm_emit_trace_record(trace_path, "translate", name, body.blocks.len(), llvm_emit_trace_inst_count(body.blocks), t0)
+
+    me translate_function_with_ir_handle_impl(name: text, body: MirBody, span: Span, module_index: i64, ir_handle: i64):
         """Translate a MIR function with optimization attributes.
 
         Renames 'main' to '__simple_main' so the entry point wrapper

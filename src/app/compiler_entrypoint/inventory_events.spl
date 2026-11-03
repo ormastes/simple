@@ -156,6 +156,13 @@ fn compiler_inventory_cursor_read_v1(
         return compiler_inventory_cursor_invalid_v1()
     compiler_inventory_cursor_decode_v1(file_read(path))
 
+# Wall bound for any inventory git subprocess. Raised 10 s -> 300 s on 2026-09-13
+# while the Windows untracked walk measured 47 s; remeasured 2026-11-03 at
+# 0.6 s (--cached) + 3.5 s (--others), so 120 s keeps ~25x margin without
+# hiding a regression for five minutes.
+fn compiler_inventory_git_bound_ms_v1() -> i64:
+    120000
+
 fn compiler_inventory_git_lines_v1(root: text, args: [text]) -> text?:
     _compiler_inventory_git_lines_traced_v1(root, args, nil, 0)
 
@@ -164,7 +171,8 @@ fn _compiler_inventory_git_lines_traced_v1(root: text, args: [text],
     val (stdout, _stderr, status) = process_run_bounded(
         # 10s was too short: cold-init `ls-files` over ~60k files takes ~23s on
         # Windows and timed out, failing every refresh with git-event-refresh-failed.
-        "git", ["-C", root, "--no-optional-locks"] + args, 300000, 16 * 1024 * 1024)
+        "git", ["-C", root, "--no-optional-locks"] + args,
+        compiler_inventory_git_bound_ms_v1(), 16 * 1024 * 1024)
     if trace != nil: trace!.captured_query(query_kind, status, stdout)
     if status != 0:
         return nil
@@ -1101,6 +1109,7 @@ fn _compiler_inventory_admit_extra_roots_locked_v1(
     CompilerInventoryRefreshV1(
         true, "ok", inventory.digest, inventory.inventory!.generation)
 
+export compiler_inventory_git_lines_v1, compiler_inventory_git_bound_ms_v1
 export compiler_inventory_cursor_present_v1, compiler_inventory_admit_extra_roots_v1
 export compiler_inventory_refresh_traced_v1
 export compiler_inventory_refresh_traced_cost_v1

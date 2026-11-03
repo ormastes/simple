@@ -1,0 +1,49 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/10.frontend/core/compiler/cg_expr.spl
+"""
+# Core C codegen: omitted slice end is not an explicit -1
+
+Bug: text_slice_omitted_end_native_contract_2026_10_12. The parser encodes an
+omitted end (`s[1:]`, `s[:]`) as a synthetic IntLit(-1); `cg_slice_expr`
+forwarded it to `spl_str_slice`, whose runtime treats a negative end as
+`len+end`, so `s[1:]` dropped the last byte (legacy provider: empty string).
+
+Fix: the omitted end is emitted as `INT64_MAX` (all providers clamp to len); an
+explicit source `-1` is a Unary node and keeps its literal two-bound form.
+
+Status: fix-implemented-verification-pending (needs a stage3 binary to run).
+Array slices are not handled by this C codegen path (the flat bridge fails
+loudly for them), so there is no array twin to fix here.
+"""
+
+use std.spec.step
+use std.spec.*
+use compiler.core.parser.{parser_init}
+use compiler.core.parser_stmts.{parse_statement}
+use compiler.core.ast.{stmt_get_expr}
+use compiler.core.compiler.cg_expr.{cg_expr}
+
+fn gen(src: text) -> text:
+    parser_init(src)
+    return cg_expr(stmt_get_expr(parse_statement()))
+
+describe "core codegen slice end":
+    it "omitted end does not forward the -1 sentinel":
+        # @req REQ-SSPEC-COMPILER
+        step("omitted end does not forward the -1 sentinel")
+        val c = gen("s[1:]\n")
+        expect(c.contains("INT64_MAX")).to_equal(true)
+        expect(c.contains(", -1)")).to_equal(false)
+
+    it "[:] omitted end also uses the clamp bound":
+        # @req REQ-SSPEC-COMPILER
+        step("[:] omitted end also uses the clamp bound")
+        expect(gen("s[:]\n").contains("INT64_MAX")).to_equal(true)
+
+    it "explicit end keeps its literal bound":
+        # @req REQ-SSPEC-COMPILER
+        step("explicit end keeps its literal bound")
+        val c = gen("s[1:3]\n")
+        expect(c.contains("INT64_MAX")).to_equal(false)
+        expect(c.contains("3")).to_equal(true)
