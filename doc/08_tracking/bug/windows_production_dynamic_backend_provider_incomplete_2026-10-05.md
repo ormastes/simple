@@ -164,3 +164,31 @@ from canonical Phase 4 admission. Existing fixture PASS cannot close these gaps.
 **Revalidated 2026-11-02: still plausible because OPEN (P1). Windows bridge invocation repaired and fixture-tested below;; no merged fix commit with a passing regression is cited in this doc.**
 
 **Triage 2026-11-03 (grp03):** items 2-5 still open on origin/release/1.0.0 (no production provider DLL, request transport still drops config, foreign descriptor not admitted). They need real LLVM/Cranelift provider exports plus native Windows validation; not attempted in this triage pass.
+
+## Update 2026-11-03 (fixlane): semantic descriptor admission in the C bridge
+
+Item 3 (request transport) was already fixed: `backend_plugin_request_encode_v1` and
+`bridge_request_decode` carry backend/target/CPU/features/optimization/MIR digest.
+Item 4 is now implemented at the runtime bridge (`runtime_backend_plugin.c`,
+`bridge_descriptor_admits`, status 110, checked in both the single-call and batch
+open paths BEFORE `open_session`): the provider descriptor must advertise the requested
+role bit (role n = bit n-1), a capability superset of `required_capabilities`, and
+a `mir_abi_digest` equal to the request's. The provider `targets_wire` list is still
+NOT matched (provider-defined wire format) and the Simple-side `load_dynamic_backend_v1`
+still derives its receipt from the request (admission.spl not wired) -- remaining.
+Items 2 (real LLVM/Cranelift provider DLLs) and 5 (full-module MIR transport) are NOT
+addressed here and remain open under this id.
+
+Fixture: `backend_plugin_v1_fixture.c` now advertises caps=10, digest `mir-config-v1`
+and takes `-DSBP_DESCRIPTOR_{ROLES,CAPS,DIGEST}` overrides; both bridge scripts gained
+three negative cases expecting status 110.
+
+Verify (no MSVC, llvm-mingw clang):
+```
+CC=~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin/x86_64-w64-mingw32-clang.exe
+$CC -std=c11 -shared -DSBP_REQUIRE_CONFIG=1 -I<abi> fixtures/backend_plugin_v1_fixture.c -o provider.dll
+$CC -std=c11 -Isrc/runtime -I<abi> src/runtime/runtime_backend_plugin.c fixtures/backend_plugin_v1_bridge_host.c -o bridge.exe
+bridge.exe provider.dll 0                      # PASS
+# -DSBP_DESCRIPTOR_ROLES=1 | CAPS=2 | DIGEST='"mir-other"' -> bridge.exe <dll> 110   # PASS each
+```
+Executed 2026-11-03: all four plus the batch host PASS; `clang -fsyntax-only -Wall -Wextra -Werror` clean.

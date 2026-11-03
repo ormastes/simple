@@ -1,4 +1,4 @@
-use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.crypto.entropy_platform.{entropy_platform_bytes}
 # WebSocket Handshake Module
 # Implements HTTP upgrade handshake, key generation, and validation
 
@@ -246,20 +246,25 @@ fn sha1_process_block(block: List<i64>, h0: i64, h1: i64, h2: i64, h3: i64, h4: 
 # WebSocket Handshake Functions
 # ==============================================================================
 
-fn generate_websocket_key() -> text:
-    val bytes = []
-    # @workaround bug=websocket_timestamp_owner_and_entropy_2026_10_16 recover=c1f630e7a05d539852f53444231d4f90fd76d6a4 reason=undefined Platform timestamp owner; historical timestamp units unknown
-    val time = current_time_ms()
-    val seed = time % 256
-
+fn websocket_key_from_entropy(entropy: Result<[u8], text>) -> Result<text, text>:
+    # RFC 6455 section 4.1 requires a 16-byte random nonce. Preserve every
+    # octet directly: binary entropy must not pass through UTF-8 text.
+    if entropy.is_err():
+        return Err(entropy.unwrap_err())
+    val bytes = entropy.unwrap()
+    if bytes.len() != 16:
+        return Err("WebSocket nonce requires exactly 16 entropy bytes")
+    var encoded = ""
     var i = 0
-    while i < 16:
-        val value = ((seed * (i + 1) * 17) + (i * 23)) % 256
-        bytes.push(value)
-        i = i + 1
+    while i < 15:
+        encoded = encoded + base64_encode_triple(
+            bytes[i] as i64, bytes[i + 1] as i64, bytes[i + 2] as i64)
+        i = i + 3
+    Ok(encoded + base64_encode_single(bytes[15] as i64))
 
-    val text_bytes = ws_bytes_to_text(bytes)
-    base64_encode(text_bytes)
+fn generate_websocket_key() -> Result<text, text>:
+    # Never substitute a timestamp, zero nonce, or empty success on failure.
+    websocket_key_from_entropy(entropy_platform_bytes(16u64))
 
 fn compute_websocket_accept(key: text) -> text:
     val concatenated = key + WEBSOCKET_GUID

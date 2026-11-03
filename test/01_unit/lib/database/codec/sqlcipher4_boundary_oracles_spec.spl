@@ -1,0 +1,97 @@
+# AUTHORED_UNRUN. Independent oracle: test/fixtures/database/sqlcipher4/boundary_oracles.sdn.
+# No branch-coverage claim. Synthetic public inputs only.
+"""
+## Purpose and audience
+Verify binary secret preservation and full-width page-number authentication.
+Audience: SQLCipher4 codec maintainers and DevHub encrypted-storage reviewers.
+"""
+use std.spec.*
+use std.crypto.types.{bytes_to_hex}
+use std.nogc_sync_mut.database.codec.sqlcipher4_keys.{sqlcipher4_key_session_open, sqlcipher4_key_error_text}
+use std.nogc_sync_mut.database.codec.sqlcipher4_page.{sqlcipher4_page_hmac}
+use std.common.spec.evidence.model.{check_exact, oracle_spec, canonical_evidence, evidence_node, EvidenceStatus}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+
+fn boundary_bytes(n: i64) -> [u8]:
+    var out: [u8] = []
+    for i in 0..n:
+        out.push(i.to_u8())
+    out
+
+fn boundary_hex(bytes: [i64]) -> text:
+    bytes_to_hex(bytes)
+
+fn boundary_key_hex(bytes: [u8]) -> text:
+    var ints: [i64] = []
+    for b in bytes:
+        ints.push(b.to_i64())
+    boundary_hex(ints)
+
+describe "REQ-CIPHER-BOUNDARY-001: binary passphrase bytes survive the locked KDF":
+    # @req REQ-CIPHER-BOUNDARY-001
+    it "should derive both keys from embedded NUL and high-bit bytes":
+        step("Load the published derivation and independent binary vector")
+        val password: [u8] = [0u8, 127u8, 128u8, 255u8, 0u8, 65u8]
+        step("Derive through the production key-session API")
+        val opened = sqlcipher4_key_session_open(password, boundary_bytes(16))
+        match opened:
+            Ok(session):
+                val evidence = canonical_evidence("binary", "sqlcipher4-binary-key/1", [
+                    evidence_node("key.page", boundary_key_hex(session.page_key)),
+                    evidence_node("key.hmac", boundary_key_hex(session.hmac_key))
+                ])
+                val oracle = oracle_spec("sqlcipher4-binary-key/1", [
+                    check_exact("key.page", "7814411654c352a8a5a62069b8ef2aa9843da110f07296ffdb06b73c6c2945ec"),
+                    check_exact("key.hmac", "115ecccf554aed6d01a30fe41df7965150d8b2617a98bfee4cc84b7fd7151d94")
+                ])
+                step("Compare every derived key byte with the independent oracle")
+                expect(compare_evidence(evidence, oracle).status).to_equal(EvidenceStatus.passed)
+                expect(session.close()).to_equal(true)
+            Err(error):
+                fail("key session unexpectedly failed: {sqlcipher4_key_error_text(error)}")
+
+describe "REQ-CIPHER-BOUNDARY-002: HMAC binds all four little-endian page-number bytes":
+    # @req REQ-CIPHER-BOUNDARY-002
+    it "should bind page number 255 without truncation or sign extension":
+        step("Load the independent HMAC framing vector")
+        val ciphertext: [u8] = [0u8, 127u8, 128u8, 255u8]
+        step("Authenticate through the production page HMAC API")
+        val actual = sqlcipher4_page_hmac(ciphertext, boundary_bytes(16), 255, boundary_bytes(32))
+        step("Compare all 64 HMAC bytes with the independent oracle")
+        expect(boundary_hex(actual)).to_equal("d3541c5fa995044612bd4ee4e2c748acd663c2c8a2e2545061a2e075cf98fcc1d44c56edda9957b843a0ee089f6b34758291eb5881360b6624edbfb6681a4f48")
+
+    # @req REQ-CIPHER-BOUNDARY-002
+    it "should bind page number 256 without truncation or sign extension":
+        step("Load the independent HMAC framing vector")
+        val ciphertext: [u8] = [0u8, 127u8, 128u8, 255u8]
+        step("Authenticate through the production page HMAC API")
+        val actual = sqlcipher4_page_hmac(ciphertext, boundary_bytes(16), 256, boundary_bytes(32))
+        step("Compare all 64 HMAC bytes with the independent oracle")
+        expect(boundary_hex(actual)).to_equal("5bf92fd2ff1d9fbbc017478c8c472713872ecc83334043d1849ba8a22cc87fba02fe68cc898316a4207ba17abe5a8ebf81b69b494c1da40e2fff9fbe5d9a7f7f")
+
+    # @req REQ-CIPHER-BOUNDARY-002
+    it "should bind page number 65536 without truncation or sign extension":
+        step("Load the independent HMAC framing vector")
+        val ciphertext: [u8] = [0u8, 127u8, 128u8, 255u8]
+        step("Authenticate through the production page HMAC API")
+        val actual = sqlcipher4_page_hmac(ciphertext, boundary_bytes(16), 65536, boundary_bytes(32))
+        step("Compare all 64 HMAC bytes with the independent oracle")
+        expect(boundary_hex(actual)).to_equal("dff7669aae591faad21c61892b31a39581e17f71f9c762d40f60e5dd505769df5c98da4d062e18621440879a7920e0cc08a61cf9148db49c6aa99a81280f7425")
+
+    # @req REQ-CIPHER-BOUNDARY-002
+    it "should bind page number 2147483648 without truncation or sign extension":
+        step("Load the independent HMAC framing vector")
+        val ciphertext: [u8] = [0u8, 127u8, 128u8, 255u8]
+        step("Authenticate through the production page HMAC API")
+        val actual = sqlcipher4_page_hmac(ciphertext, boundary_bytes(16), 2147483648, boundary_bytes(32))
+        step("Compare all 64 HMAC bytes with the independent oracle")
+        expect(boundary_hex(actual)).to_equal("06dc265f6eb9f9579f779472e2b68211e5b3f72ce3b2878065ffafc7961ab82d7a28cacec657a50152588bb70d1952df5342a382a479f3f00be699e3805855a8")
+
+    # @req REQ-CIPHER-BOUNDARY-002
+    it "should bind page number 4294967295 without truncation or sign extension":
+        step("Load the independent HMAC framing vector")
+        val ciphertext: [u8] = [0u8, 127u8, 128u8, 255u8]
+        step("Authenticate through the production page HMAC API")
+        val actual = sqlcipher4_page_hmac(ciphertext, boundary_bytes(16), 4294967295, boundary_bytes(32))
+        step("Compare all 64 HMAC bytes with the independent oracle")
+        expect(boundary_hex(actual)).to_equal("db7ea0652564f1559a6cdef719cfd9a61724f22df7a75faebd595e50d76dff21e09e44e224442da9f2c081962fb6f7993a0a8230ade20b1e3788e7346f0c5126")

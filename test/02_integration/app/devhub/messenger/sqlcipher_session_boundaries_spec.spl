@@ -1,0 +1,83 @@
+# AUTHORED_UNRUN. Public synthetic session material only.
+# Proof class: production codec function-record integration, not Messenger end-to-end.
+"""
+## Purpose and audience
+Reject malformed opaque sessions and IV sources through the codec record used by
+DevHub encrypted storage. Existing dense_codec_page_auth_spec owns page tampering.
+Audience: storage integration maintainers.
+"""
+use std.spec.*
+use nogc_sync_mut.database.codec.codec_registry.{CodecSessionV1}
+use nogc_sync_mut.database.codec.sqlcipher4.{Sqlcipher4Error, sqlcipher4_error_code}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{sqlcipher4_page_factory}
+
+fn session_boundary_bytes(n: i64) -> [u8]:
+    var bytes: [u8] = []
+    for i in 0..n:
+        bytes.push((i & 255).to_u8())
+    bytes
+
+fn session_boundary_result(result: Result<[u8], Sqlcipher4Error>) -> text:
+    match result:
+        Ok(bytes): "unexpected-success:{bytes.len()}"
+        Err(error): sqlcipher4_error_code(error)
+
+fn session_boundary_rng(n: i64) -> [u8]:
+    session_boundary_bytes(n)
+
+fn session_boundary_short_rng(n: i64) -> [u8]:
+    session_boundary_bytes(n - 1)
+
+fn session_boundary_long_rng(n: i64) -> [u8]:
+    session_boundary_bytes(n + 1)
+
+fn session_boundary_empty_rng(n: i64) -> [u8]:
+    []
+
+describe "REQ-CIPHER-BOUNDARY-003: reject invalid session ownership before page processing":
+    # @req REQ-CIPHER-BOUNDARY-003
+    it "should reject empty, truncated and oversized opaque material on both record calls":
+        step("Construct open sessions with material lengths 0, 79 and 81")
+        val codec = sqlcipher4_page_factory("sqlcipher4")
+        for length in [0, 79, 81]:
+            val session = CodecSessionV1(codec_id: "sqlcipher4", open: true,
+                secret_material: session_boundary_bytes(length))
+            step("Pass malformed material through encode and decode record functions")
+            val decoded = codec.decode_page_fn(2, session_boundary_bytes(4096), session)
+            val encoded = codec.encode_page_fn(2, session_boundary_bytes(4016), session, session_boundary_rng)
+            step("Require corruption errors with no successful plaintext or ciphertext result")
+            expect(session_boundary_result(decoded)).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+            expect(session_boundary_result(encoded)).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+
+    # @req REQ-CIPHER-BOUNDARY-003
+    it "should reject closed sessions even when material has the valid 80-byte width":
+        step("Construct a closed session with full-width public material")
+        val codec = sqlcipher4_page_factory("sqlcipher4")
+        val session = CodecSessionV1(codec_id: "sqlcipher4", open: false,
+            secret_material: session_boundary_bytes(80))
+        step("Pass the closed session through both production record functions")
+        expect(session_boundary_result(codec.decode_page_fn(2, session_boundary_bytes(4096), session))).to_equal("SQLCIPHER4_MISSING_SECRET")
+        expect(session_boundary_result(codec.encode_page_fn(2, session_boundary_bytes(4016), session, session_boundary_rng))).to_equal("SQLCIPHER4_MISSING_SECRET")
+
+    # @req REQ-CIPHER-BOUNDARY-003
+    it "should reach page geometry validation for an open 80-byte session":
+        step("Construct an open full-width session as a positive control for session validation")
+        val codec = sqlcipher4_page_factory("sqlcipher4")
+        val session = CodecSessionV1(codec_id: "sqlcipher4", open: true,
+            secret_material: session_boundary_bytes(80))
+        step("Use empty pages to observe the subsequent geometry gate")
+        expect(session_boundary_result(codec.decode_page_fn(2, [], session))).to_equal("SQLCIPHER4_INVALID_PAGE_GEOMETRY")
+        expect(session_boundary_result(codec.encode_page_fn(2, [], session, session_boundary_rng))).to_equal("SQLCIPHER4_INVALID_PAGE_GEOMETRY")
+
+describe "REQ-CIPHER-BOUNDARY-004: IV generators must return exactly sixteen bytes":
+    # @req REQ-CIPHER-BOUNDARY-004
+    it "should reject empty, short and oversized generated IVs":
+        step("Prepare valid session material and a full-width virtual page")
+        val codec = sqlcipher4_page_factory("sqlcipher4")
+        val session = CodecSessionV1(codec_id: "sqlcipher4", open: true,
+            secret_material: session_boundary_bytes(80))
+        val body = session_boundary_bytes(4016)
+        step("Submit IV generators returning zero, fifteen and seventeen bytes")
+        expect(session_boundary_result(codec.encode_page_fn(2, body, session, session_boundary_empty_rng))).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+        expect(session_boundary_result(codec.encode_page_fn(2, body, session, session_boundary_short_rng))).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+        expect(session_boundary_result(codec.encode_page_fn(2, body, session, session_boundary_long_rng))).to_equal("SQLCIPHER4_CORRUPT_PAGE")

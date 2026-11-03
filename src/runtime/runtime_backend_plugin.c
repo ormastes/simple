@@ -149,8 +149,26 @@ typedef struct {
     int finalized;
 } simple_backend_bridge_batch_v1;
 
+/* Semantic descriptor admission (status 110): the provider must actually
+ * advertise the requested role, a superset of the required capabilities, and
+ * the MIR ABI digest the request carries. ABI/size/vtable checks (105) only
+ * prove the descriptor is callable, not that it supports this request.
+ * Role n is bit (n-1) of descriptor->roles. Target list matching is not done
+ * here (targets_wire is a provider-defined list; see the bug doc). */
+static int bridge_descriptor_admits(const simple_backend_descriptor_v1 *d,
+                                    const simple_backend_request_v1 *r) {
+    if (r->role < 1 || r->role > 2 || !(d->roles & (UINT64_C(1) << (r->role - 1)))) return 0;
+    if ((d->capabilities & r->required_capabilities) != r->required_capabilities) return 0;
+    if (d->mir_abi_digest.size != r->mir_abi_digest.size) return 0;
+    if (d->mir_abi_digest.size &&
+        (!d->mir_abi_digest.data || !r->mir_abi_digest.data ||
+         memcmp(d->mir_abi_digest.data, r->mir_abi_digest.data, (size_t)d->mir_abi_digest.size))) return 0;
+    return 1;
+}
+
 static int32_t bridge_resolve_provider(const uint8_t *provider,
                                        int64_t provider_len,
+                                       const simple_backend_request_v1 *request,
                                        void **library_out,
                                        int *owns_library_out,
                                        const simple_backend_vtable_v1 **vtable_out) {
@@ -192,6 +210,10 @@ static int32_t bridge_resolve_provider(const uint8_t *provider,
         if (owns_library) bridge_library_close(library);
         return 105;
     }
+    if (!bridge_descriptor_admits(descriptor, request)) {
+        if (owns_library) bridge_library_close(library);
+        return 110;
+    }
     *library_out = library;
     *owns_library_out = owns_library;
     *vtable_out = descriptor->vtable;
@@ -217,6 +239,7 @@ static int64_t bridge_run_loaded(void *library, const simple_backend_request_v1 
         !descriptor->vtable->close_session ||
         !descriptor->vtable->release_buffer)
         return bridge_envelope(105,0,NULL,0,NULL,0);
+    if (!bridge_descriptor_admits(descriptor, request)) return bridge_envelope(110,0,NULL,0,NULL,0);
     const simple_backend_vtable_v1 *v=descriptor->vtable;
     uint64_t session=0; int32_t status=v->open_session(request,&session);
     if (status || !session)
@@ -295,7 +318,7 @@ int64_t spl_backend_plugin_batch_open_v1(int64_t provider_value,
     if (!provider || provider_len <= 0 || !bridge_request_decode(request, request_len, &req)) return -100;
     simple_backend_bridge_batch_v1 *batch = calloc(1, sizeof(*batch));
     if (!batch) return -101;
-    int32_t status = bridge_resolve_provider(provider, provider_len, &batch->library,
+    int32_t status = bridge_resolve_provider(provider, provider_len, &req, &batch->library,
                                              &batch->owns_library, &batch->vtable);
     if (status) { free(batch); return -(int64_t)status; }
     status = batch->vtable->open_session(&req, &batch->provider_session);
