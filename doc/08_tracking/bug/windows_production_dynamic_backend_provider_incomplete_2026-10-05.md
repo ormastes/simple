@@ -162,3 +162,5 @@ startup/request latency with peak and steady RSS; distinguish diagnostic runs
 from canonical Phase 4 admission. Existing fixture PASS cannot close these gaps.
 
 **Revalidated 2026-11-02: still plausible because OPEN (P1). Windows bridge invocation repaired and fixture-tested below;; no merged fix commit with a passing regression is cited in this doc.**
+
+**Triage 2026-11-03 (grp03):** items 2-5 still open on origin/release/1.0.0 (no production provider DLL, request transport still drops config, foreign descriptor not admitted). They need real LLVM/Cranelift provider exports plus native Windows validation; not attempted in this triage pass.

@@ -121,3 +121,5 @@ identical to what this doc originally found. No fix attempted here per the
 "why this is not fixed" reasoning above, which still applies unchanged.
 
 **Revalidated 2026-11-02: still plausible because OPEN (partially fixed) — re-verified 2026-08-17 by content grep, not; no merged fix commit with a passing regression is cited in this doc.**
+
+**Fixed 2026-11-03 (grp03):** all symbols (WmCreateResponse, WmFocusEvent, WM_EVENT_FOCUS/RESIZE, wm_input_event, wm_focus_event, codecs) now exist in window_protocol.spl; `wm_protocol_status_contract_spec` 1/1 and `window_protocol_wire_spec` 4/4 pass.
