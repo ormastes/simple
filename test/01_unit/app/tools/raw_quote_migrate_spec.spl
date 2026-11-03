@@ -1,0 +1,149 @@
+# raw_quote_migrate: single-quoted raw strings -> r"..." (tokens come from the
+# real core lexer; comments, "..." strings and docstrings must never change).
+#
+# Fixtures are raw triple-quoted strings so the single quotes under test are
+# never lexed as tokens of this spec itself.
+
+use app.tools.raw_quote_migrate.rewrite.{migrate_source, verify_rewrite, count_scalars}
+
+fn mig(src: text) -> text:
+    migrate_source(src, false).output
+
+describe "raw_quote_migrate: conversion":
+    it "converts a plain word":
+        expect(mig(r"""val a = 'abc'
+""")).to_equal(r"""val a = r"abc"
+""")
+
+    it "converts the empty string":
+        expect(mig(r"""val a = ''
+""")).to_equal(r"""val a = r""
+""")
+
+    it "keeps backslashes byte-for-byte":
+        expect(mig(r"""val re = '[a-z]+\d{2,3}'
+""")).to_equal(r"""val re = r"[a-z]+\d{2,3}"
+""")
+
+    it "keeps braces literal":
+        expect(mig(r"""val t = 'hello {name}'
+""")).to_equal(r"""val t = r"hello {name}"
+""")
+
+    it "uses a triple raw string when the content has a double quote":
+        expect(mig(r"""val q = 'say "hi" now'
+""")).to_equal("val q = r\"\"\"say \"hi\" now\"\"\"\n")
+
+    it "skips content that cannot be spelled as r triple":
+        val r = migrate_source(r"""val q = 'ends with "'
+""", false)
+        expect(r.converted).to_equal(0)
+        expect(r.skipped.len()).to_equal(1)
+        expect(r.output).to_equal(r"""val q = 'ends with "'
+""")
+
+    it "skips escaped single quotes and reports them":
+        val r = migrate_source(r"""val q = 'it\'s ok'
+""", false)
+        expect(r.converted).to_equal(0)
+        expect(r.skipped.len()).to_equal(1)
+
+    it "converts several sites on one line and across lines":
+        expect(mig(r"""val a = 'x1' + 'y2'
+val b = 'zz'
+""")).to_equal(r"""val a = r"x1" + r"y2"
+val b = r"zz"
+""")
+
+    it "counts backslash sites as escapes and honours skip_escapes":
+        val r = migrate_source(r"""val p = 'C:\Users\name'
+""", false)
+        expect(r.converted).to_equal(1)
+        expect(r.escapes).to_equal(1)
+        val s = migrate_source(r"""val p = 'C:\Users\name'
+""", true)
+        expect(s.converted).to_equal(0)
+        expect(s.output).to_equal(r"""val p = 'C:\Users\name'
+""")
+
+describe "raw_quote_migrate: untouched code":
+    it "never touches comments (quotes and apostrophes inside)":
+        val src = r"""# it's a 'quoted' comment
+val a = 1  # don't 'touch'
+"""
+        expect(mig(src)).to_equal(src)
+
+    it "never touches single quotes inside double-quoted strings":
+        val src = r"""val s = "has 'inner' quotes and it's fine"
+"""
+        expect(mig(src)).to_equal(src)
+
+    it "never touches triple-quoted docstrings or r strings":
+        val src = r"""val d = '''docstring 'x' '''
+val r = r"raw 'y'"
+"""
+        val r = migrate_source(src, false)
+        expect(r.output).to_equal(src)
+        expect(r.triple_kept).to_equal(1)
+
+    it "converts only the literal when apostrophes sit in a trailing comment":
+        expect(mig(r"""val a = 'ab'  # it's
+""")).to_equal(r"""val a = r"ab"  # it's
+""")
+
+describe "raw_quote_migrate: char-like literals stay":
+    it "keeps ASCII and escape single scalars":
+        val src = r"""val a = 'x'
+val b = '\n'
+val c = '\''
+val d = '\\'
+val e = '\u{1F600}'
+val f = '\x41'
+"""
+        val r = migrate_source(src, false)
+        expect(r.output).to_equal(src)
+        expect(r.kept_char).to_equal(6)
+
+    it "keeps 2-, 3- and 4-byte scalars":
+        val src = "val a = '\u{e9}'\nval b = '\u{d55c}'\nval c = '\u{1F600}'\n"
+        val r = migrate_source(src, false)
+        expect(r.output).to_equal(src)
+        expect(r.kept_char).to_equal(3)
+
+    it "converts decomposed e-acute (2 scalars)":
+        val src = "val a = 'e\u{301}'\n"
+        val r = migrate_source(src, false)
+        expect(r.converted).to_equal(1)
+        expect(r.output).to_equal("val a = r\"e\u{301}\"\n")
+
+    it "converts ZWJ emoji sequences (multi scalar)":
+        val src = "val a = '\u{1F468}\u{200D}\u{1F469}'\n"
+        val r = migrate_source(src, false)
+        expect(r.converted).to_equal(1)
+
+    it "counts scalars after escape decoding, not bytes":
+        expect(count_scalars("x")).to_equal(1)
+        expect(count_scalars("\u{e9}")).to_equal(1)
+        expect(count_scalars("\u{1F600}")).to_equal(1)
+        expect(count_scalars("\\n")).to_equal(1)
+        expect(count_scalars("\\u{1F600}")).to_equal(1)
+        expect(count_scalars("\\d")).to_equal(2)
+        expect(count_scalars("ab")).to_equal(2)
+        expect(count_scalars("")).to_equal(0)
+
+describe "raw_quote_migrate: verify":
+    it "accepts a correct rewrite":
+        val src = r"""val a = 'abc'  # it's
+val b = "q 'z'"
+val c = 'x'
+"""
+        val r = migrate_source(src, false)
+        expect(verify_rewrite(src, r.output)).to_equal("")
+
+    it "rejects a rewrite that changes other tokens":
+        val src = r"""val a = 'abc'
+"""
+        expect(verify_rewrite(src, r"""val a = r"abd"
+""") != "").to_equal(true)
+        expect(verify_rewrite(src, r"""val b = r"abc"
+""") != "").to_equal(true)
