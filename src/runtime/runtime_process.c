@@ -167,7 +167,19 @@ static SplArray* process_timeout_result(const char* stdout_text, const char* std
 
 /* Windows process timeout/capture owner. */
 #include <windows.h>
+#ifndef PSAPI_VERSION
+#define PSAPI_VERSION 2
+#endif
+#include <psapi.h>
 #include "platform/windows_command_line_private.h"
+
+/* Peak working set (KiB) of the child reaped by the most recent
+ * win_process_run_capture on this thread; -1 = not measured. */
+#if defined(_MSC_VER)
+static __declspec(thread) int64_t win_last_child_peak_rss_kib = -1;
+#else
+static _Thread_local int64_t win_last_child_peak_rss_kib = -1;
+#endif
 
 struct WinCapture {
     char* data;
@@ -416,6 +428,7 @@ static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplA
     HANDLE job = NULL;
     LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
     int attributes_initialized = 0;
+    win_last_child_peak_rss_kib = -1;
     PROCESS_INFORMATION process = {0};
     struct WinCapture stdout_capture = {0};
     struct WinCapture stderr_capture = {0};
@@ -607,6 +620,12 @@ finish:
             process_done = WaitForSingleObject(process.hProcess, 5000) == WAIT_OBJECT_0;
         }
         if (!process_done) failure = "process termination failed";
+        /* Child handle is still open here, so PeakWorkingSetSize survives exit. */
+        PROCESS_MEMORY_COUNTERS child_counters = {0};
+        child_counters.cb = (DWORD)sizeof(child_counters);
+        if (K32GetProcessMemoryInfo(process.hProcess, &child_counters, child_counters.cb)) {
+            win_last_child_peak_rss_kib = (int64_t)(child_counters.PeakWorkingSetSize / 1024);
+        }
     }
     win_close_handle(&process.hThread);
     win_close_handle(&stdout_write);
@@ -648,6 +667,10 @@ finish:
  * twin below. */
 int64_t rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
     return (int64_t)(uintptr_t)win_process_run_capture(cmd, cmd_len, args, timeout_ms, -1, 0);
+}
+
+int64_t rt_process_last_child_peak_rss_kib(void) {
+    return win_last_child_peak_rss_kib;
 }
 
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
@@ -2246,6 +2269,14 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
  * gate flagged; this is a signature correction, not a behaviour change. */
 int64_t rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
     return (int64_t)(uintptr_t)posix_process_run_capture(cmd, cmd_len, args, timeout_ms, -1, 0);
+}
+
+/* Peak RSS (KiB) of the child reaped by the most recent run_timeout /
+ * run_bounded call: wait4() ru_maxrss captured in runtime_fork.c. -1 = not
+ * measured (0 is never a real peak). Shared fork-parent state, not per thread. */
+int64_t rt_process_last_child_peak_rss_kib(void) {
+    int64_t bytes = rt_fork_parent_peak_rss_bytes();
+    return bytes > 0 ? bytes / 1024 : -1;
 }
 
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,

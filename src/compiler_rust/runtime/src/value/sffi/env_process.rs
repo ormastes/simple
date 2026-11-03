@@ -605,6 +605,7 @@ fn finish_child_output_bounded_mode(
     use std::sync::mpsc::TryRecvError;
     use std::time::{Duration, Instant};
 
+    crate::child_peak_rss::reset();
     let child_pid = child.id();
     let stdout = spawn_bounded_output_reader(child.stdout.take(), max_output_bytes, raw_prefix);
     let stderr = spawn_bounded_output_reader(child.stderr.take(), max_output_bytes, raw_prefix);
@@ -617,7 +618,7 @@ fn finish_child_output_bounded_mode(
 
     loop {
         if status.is_none() {
-            match child.try_wait() {
+            match crate::child_peak_rss::reap(&mut child, true) {
                 Ok(child_status) => status = child_status,
                 Err(error) => {
                     #[cfg(windows)]
@@ -683,7 +684,7 @@ fn finish_child_output_bounded_mode(
                 let _ = child.kill();
             }
             if status.is_none() {
-                let _ = child.wait();
+                let _ = crate::child_peak_rss::reap(&mut child, false);
             }
             // Prefer the process-group close, but bound the drain in case an
             // escaped descendant still retains an inherited pipe.
