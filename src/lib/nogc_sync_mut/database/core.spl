@@ -22,7 +22,7 @@
 use nogc_sync_mut.database.atomic (atomic_write, atomic_write_exclusive, atomic_read)
 use std.convert (try_parse_int, try_parse_i32)
 
-use std.nogc_sync_mut.compression.gzip.crc.{crc32_text}
+use std.nogc_sync_mut.database.csm_seal.{csm_load_body, csm_seal_add, csm_seal_prune, csm_writer_algo}
 use nogc_sync_mut.database.wal (WriteAheadLog, WalEntry, WalEntryType, wal_payload_to_row)
 use nogc_sync_mut.database.db_metrics (DbMetrics)
 # Minimal StringId definition (avoids external dependency during bootstrap)
@@ -509,24 +509,12 @@ class SdnDatabase:
             return nil
 
         var content: text = raw_content
-        if content.starts_with("#sdn-crc32:"):
-            val newline_idx = content.index_of("\n")
-            if newline_idx > 0:
-                val header = content.slice(0, newline_idx)
-                val stored_crc_str = header.slice(11, header.len())
-                # Fail-CLOSED: a malformed CRC header must reject the file.
-                # `.to_int() ?? -1` could not do that -- `.to_int()` never
-                # yields nil, so "#sdn-crc32:garbage" parsed as 0 and would
-                # have matched any body whose crc32 is 0.
-                val parsed_crc = try_parse_int(stored_crc_str)
-                if parsed_crc == nil:
-                    return nil
-                val stored_crc: i64 = parsed_crc ?? -1
-                val body = content.slice(newline_idx + 1, content.len())
-                val computed_crc = crc32_text(body)
-                if stored_crc != computed_crc:
-                    return nil
-                content = body
+        # Sidecar seal (<stem>.<algo>_<hex>.csm): fail-CLOSED on CORRUPT, and on
+        # MISSING for policy-listed files. See database/csm_seal.spl.
+        val sealed_body = csm_load_body(path, raw_content)
+        if sealed_body == nil:
+            return nil
+        content = sealed_body ?? raw_content
 
         var db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false, wal: nil, metrics: nil)
 
@@ -611,16 +599,19 @@ class SdnDatabase:
             val typed_table: SdnTable = table
             sections.push(typed_table.to_sdn())
 
-        val body = sections.join("\n\n") + "\n\n"
-        val crc = crc32_text(body)
-        "#sdn-crc32:{crc}\n" + body
+        sections.join("\n\n") + "\n\n"
 
     # Save to disk (atomic with file locking)
     me save() -> bool:
         val content = self.serialized_content()
-
+        # Seal first (old + new sidecars => MERGED_UNSEALED, still loadable), publish
+        # the data, then prune the stale seals.
+        val seal = csm_seal_add(self.path, content, csm_writer_algo(self.path))
+        if seal == "":
+            return false
         if not atomic_write(self.path, content):
             return false
+        csm_seal_prune(self.path, seal)
 
         self.modified = false
 
@@ -640,8 +631,12 @@ class SdnDatabase:
     # the exclusive no-replace publish is the atomic absence proof.
     me save_exclusive() -> bool:
         val content = self.serialized_content()
+        val seal = csm_seal_add(self.path, content, csm_writer_algo(self.path))
+        if seal == "":
+            return false
         if not atomic_write_exclusive(self.path, content):
             return false
+        csm_seal_prune(self.path, seal)
         self.modified = false
         true
 

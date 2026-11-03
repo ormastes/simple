@@ -7,9 +7,8 @@ use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read, workaround_h
     workaround_host_unlock, workaround_host_mkdir, workaround_host_cwd, workaround_host_process}
 use std.nogc_async_mut.database.bug.{BugDatabase}
 use std.nogc_async_mut.database.core.{SdnDatabase, SdnRow, SdnTable, parse_sdn_table, interner_from_sdn}
-use std.nogc_sync_mut.compression.gzip.crc.{crc32_text, crc32_update}
+use std.nogc_sync_mut.database.csm_seal.{csm_verify_bytes, csm_strip_legacy_header, CsmVerdict, CSM_CORRUPT}
 use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
-use std.convert.{try_parse_int}
 
 fn workaround_source_candidate(path: text) -> bool:
     if not workaround_path_valid(path): return false
@@ -90,27 +89,24 @@ fn workaround_bug_snapshot(root: text) -> Result<BugDatabase, text>:
     if workaround_host_exists(path + ".wal"):
         val wal = workaround_host_read(path + ".wal", 16777216)?
         if wal.trim() != "": return Err("checkpoint the canonical bug database WAL before workaround refresh")
-    # Cycle-172: read the DB as RAW BYTES and CRC the exact body bytes of
+    # Cycle-172: read the DB as RAW BYTES and hash the exact bytes of
     # THIS read. The text round trip (read text -> substring -> crc32_text ->
     # s.bytes()) drew erased reads on candidate-seednew and refused a DB
     # whose body matches zlib crc32 exactly (verified 278564174; the pure
     # algorithm passes the 0xCBF43926 KAT). The gate stays fail-closed: the
-    # recorded CRC is compared against the body of the same bytes just
-    # read, so a drawn or truncated read still mismatches the header.
+    # recorded seal is compared against the same bytes just
+    # read, so a drawn or truncated read still mismatches the sidecar.
     val raw_bytes: [u8] = workaround_host_read_bytes(path, 33554432)?
     val full_text: text = bytes_to_text(raw_bytes)
     var content = full_text
-    if full_text.starts_with("#sdn-crc32:"):
-        val newline = full_text.index_of("\n")
-        if newline < 0: return Err("malformed canonical bug database CRC header")
-        val parsed_crc = try_parse_int(full_text.substring(11, newline).trim())
-        if parsed_crc == nil: return Err("invalid canonical bug database CRC")
-        var body_crc: i64 = 0xffffffff
-        body_crc = crc32_update(body_crc, raw_bytes[(newline + 1)..raw_bytes.len()])
-        body_crc = body_crc ^ 0xffffffff
-        if (parsed_crc ?? -1) != body_crc: return Err("canonical bug database CRC mismatch")
-        content = full_text.substring(newline + 1)
-    # Verify checksum over original bytes before normalizing Windows line ends
+    # Sidecar seal (.csm): hash THIS read's raw bytes, LF-normalized. Fail closed
+    # on CORRUPT (a header-less, sidecar-less DB loads as before; gates own MISSING).
+    val seal: CsmVerdict = csm_verify_bytes(path, raw_bytes, full_text)
+    if seal.state == CSM_CORRUPT:
+        return Err("canonical bug database CRC mismatch")
+    val unsealed_text: text = csm_strip_legacy_header(full_text)
+    content = unsealed_text
+    # Seal verified over the original bytes before normalizing Windows line ends
     # for the canonical blank-line table parser.
     content = content.replace("\r\n", "\n")
     var db = SdnDatabase.new(path)
