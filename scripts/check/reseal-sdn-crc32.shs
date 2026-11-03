@@ -26,7 +26,7 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 POLICY="$HERE/../../config/check/sdn_seal_policy.sdn"
 
 selftest() {
-    _t=$(mktemp -d) || return 1
+    _t=$(csm_mktemp_dir) || return 1
     _fails=0
     printf 'bugs |id, status, valid|\n    a, open, true\n' > "$_t/f1.sdn"
     _r=$(csm_seal_file "$_t/f1.sdn" crc32)
@@ -52,9 +52,40 @@ selftest() {
     printf '123456789' > "$_t/kat"
     [ "$(csm_hash_hex crc32 "$_t/kat")" = cbf43926 ] || { echo "selftest FAIL: crc32 KAT"; _fails=$((_fails+1)); }
 
+    # MERGED_UNSEALED across ALGORITHMS (a crc32 and an xxh3 seal side by side)
+    # collapses to the one policy-algorithm seal
+    printf 'bugs |id|\n    m\n' > "$_t/f4.sdn"
+    : > "$_t/f4.crc32_00000001.csm"; : > "$_t/f4.xxh3_0000000000000002.csm"
+    csm_seal_file "$_t/f4.sdn" crc32 >/dev/null
+    [ "$(csm_fs_tags "$_t/f4.sdn" | tr '\n' ' ')" = "crc32_$(csm_hash_hex crc32 "$_t/f4.sdn") " ] \
+        || { echo "selftest FAIL: cross-algorithm merged seals not collapsed to one"; _fails=$((_fails+1)); }
+
+    # native xxhsum output dialects: GNU `XXH3_<hex>  stdin` (0.8.3+), bare hex,
+    # and BSD `XXH3 (stdin) = <hex>` (0.8.2, the Ubuntu 24.04 package CI installs)
+    mkdir "$_t/bin"
+    for _d in gnu bare bsd; do
+        case "$_d" in
+            gnu) _o='XXH3_40f075e0241e0396  stdin' ;;
+            bare) _o='40f075e0241e0396  stdin' ;;
+            bsd) _o='XXH3 (stdin) = 40f075e0241e0396' ;;
+        esac
+        printf '#!/bin/sh\ncat >/dev/null\necho "%s"\n' "$_o" > "$_t/bin/xxhsum"; chmod +x "$_t/bin/xxhsum"
+        printf 'x\n' > "$_t/nat.sdn"
+        _fb=$(cygpath -u "$_t/bin" 2>/dev/null || echo "$_t/bin")
+        _got=$(PATH="$_fb:$PATH" csm_native_hash xxh3 "$_t/nat.sdn")
+        [ "$_got" = 40f075e0241e0396 ] || { echo "selftest FAIL: native xxhsum $_d dialect not parsed ($_got)"; _fails=$((_fails+1)); }
+    done
+
+    # Windows: under MSYS_NO_PATHCONV=1 native git/hasher get no /tmp or /c path
+    # conversion; re-run the whole selftest that way once (guarded against recursion).
+    if [ -z "${CSM_SELFTEST_NOCONV:-}" ] && command -v cygpath >/dev/null 2>&1; then
+        _r=$(CSM_SELFTEST_NOCONV=1 MSYS_NO_PATHCONV=1 sh "$HERE/reseal-sdn-crc32.shs" --selftest 2>&1 | tail -1)
+        case "$_r" in PASS*) ;; *) echo "selftest FAIL: not clean under MSYS_NO_PATHCONV=1 ($_r)"; _fails=$((_fails+1)) ;; esac
+    fi
+
     rm -rf "$_t"
     [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
-    echo "selftest: 5 fixtures passed"
+    echo "selftest: 8 fixtures passed"
 }
 
 SELFTEST_ONLY=0
@@ -70,7 +101,7 @@ done
 
 [ "$SKIP_SELFTEST" -eq 1 ] || selftest || { echo "ERROR — nothing was checked"; exit 2; }
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 5 fixture(s) checked, selftest only"
+    echo "PASS — 8 fixture(s) checked, selftest only"
     exit 0
 fi
 case "$FILE" in *.sdn) ;; *) echo "ERROR — nothing was checked"; exit 2 ;; esac
