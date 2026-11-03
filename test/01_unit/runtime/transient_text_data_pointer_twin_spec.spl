@@ -1,0 +1,32 @@
+use std.spec.*
+use std.io.{file_read}
+
+# Bug transient_promote_misses_raw_text_data_pointer_2026-10-25: promotion must
+# treat an untagged pointer to a transient string's data as a reference to that
+# string, in BOTH the C runtime and its pure-Simple twin.
+describe "transient promotion recognizes untagged text data pointers":
+    it "has a named recognizer in the C runtime, no inline workaround":
+        val c_src = file_read("src/runtime/runtime_native.c")
+        expect(c_src).to_contain("static int rt_core_transient_text_data_pointer(")
+        expect(c_src).to_contain("rt_core_transient_text_data_pointer(value, node)")
+        expect(c_src.contains("@workaround bug=transient_promote_misses_raw_text_data_pointer")).to_equal(false)
+
+    it "checks registry membership before dereferencing in C":
+        val c_src = file_read("src/runtime/runtime_native.c")
+        val start = c_src.find("static int rt_core_transient_text_data_pointer(") ?? -1
+        expect(start).to_be_greater_than(-1)
+        val body = c_src.substring(start)
+        val member = body.find("rt_core_is_registered_immortal_ptr(text)") ?? -1
+        val deref = body.find("text->reserved") ?? -1
+        expect(member).to_be_greater_than(-1)
+        expect(deref).to_be_greater_than(member)
+
+    it "mirrors the recognizer in the Simple twin before the tag check":
+        val spl = file_read("src/runtime/simple_core/core_memory.spl")
+        val start = spl.find("fn transient_classify(") ?? -1
+        expect(start).to_be_greater_than(-1)
+        val body = spl.substring(start)
+        val data_ptr = body.find("string_transient_state((value - 16) | 1)") ?? -1
+        val tag_check = body.find("if (value & 7) != 1:") ?? -1
+        expect(data_ptr).to_be_greater_than(-1)
+        expect(tag_check).to_be_greater_than(data_ptr)
