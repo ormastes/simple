@@ -1,0 +1,45 @@
+# One refresh owns at most one descriptor. Discovery owns copied snapshot
+# values, not the shared cursor or the membership record's on-disk lifetime.
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_pointer_content_v1}
+use std.common.crypto.sha256.{sha256_text}
+use app.compiler_entrypoint.inventory_trace.{CompilerInventoryTraceV1}
+use std.scv.compile_cost_v1.{ScvCompileCostV1}
+
+class CompilerInventoryRefreshLeaseV1:
+    cache_root: text
+    trace: CompilerInventoryTraceV1? = nil
+    cost: ScvCompileCostV1? = nil
+    handle: i64 = -1
+
+    me acquire(timeout_secs: i64) -> bool:
+        if self.handle >= 0:
+            return false
+        self.handle = file_lock(self.cache_root + "/compile-events/refresh.lock", timeout_secs)
+        if self.handle < 0:
+            return false
+        if self.trace != nil: self.trace!.lock_released = false
+        if self.cost != nil: self.cost!.lock_released = false
+        true
+
+    me release() -> bool:
+        if self.handle < 0:
+            return true
+        if not file_unlock(self.handle):
+            return false
+        self.handle = -1
+        if self.trace != nil: self.trace!.lock_released = true
+        if self.cost != nil: self.cost!.lock_released = true
+        true
+
+    me resume(expected_pointer: text, timeout_secs: i64 = 300) -> text:
+        if not self.acquire(timeout_secs):
+            return "compile-event-refresh-lock-unavailable"
+        val current = compile_source_inventory_read_pointer_content_v1(self.cache_root) ?? ""
+        # Full-byte digest comparison also rejects suffix changes after NUL.
+        # A superseded caller still owns this descriptor and must release it.
+        if sha256_text(current) != sha256_text(expected_pointer):
+            return "compile-event-refresh-snapshot-superseded"
+        ""
+
+export CompilerInventoryRefreshLeaseV1

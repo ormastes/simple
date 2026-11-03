@@ -16,7 +16,7 @@ use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists, file_atom
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.io_runtime.{get_args}
 
-use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult, TEST_OUTPUT_CAPTURE_BYTES, classify_test_run_result, test_run_outcome_exit_code, test_empty_selection_is_success, test_file_result_is_unverified}
+use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult, TEST_OUTPUT_CAPTURE_BYTES, classify_test_run_result, test_run_outcome_exit_code, test_empty_selection_is_success, test_file_result_is_unverified, test_file_result_outcome_class}
 use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
 use std.test_runner.native_compile_contract.{native_test_library_lanes_error, native_test_library_mode_error, native_test_library_resume_error}
 use std.test_runner.compiler_select.{select_test_child_binary}
@@ -417,9 +417,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
             print ""
             print "Bypass: --no-cover-check"
             print "Found {missing_covers.len()} system test(s) without # @cover."
-            if not updated_options.unstable_mode:
-                return cover_append_failures(summarize_test_results([]), missing_covers)
-            print "Continuing admitted files (--unstable); coverage admission failures remain failed."
+            print "Continuing admitted files; coverage gate failures remain a separate nonzero verdict."
 
     var files = cover_admitted_files(all_files, missing_covers)
     # --resume was a silent no-op from 2026-07-25 ("MEMORY DEBUG ... GROUP 6"
@@ -493,8 +491,8 @@ fn run_tests(options: TestOptions) -> TestRunResult:
             print "WARNING: test daemon unavailable; running directly [fallback]"
 
     # Windows async capture uses the pure-Simple owned JobObject facade.
-    # Preserve explicit parallel/worker requests; admission failures remain
-    # failed test rows rather than a silent switch to sequential execution.
+    # Preserve explicit parallel/worker requests; admission policy verdicts
+    # remain separate from executed tests in every worker lane.
 
     # Sequential flag overrides parallel for direct dispatch, as before.
     if updated_options.sequential:
@@ -1351,8 +1349,11 @@ fn emit_spec_file_verdicts(results: [TestFileResult]):
     independent emitter is what would let the lanes drift apart again.
     """
     for r in results:
-        print aggregate_spec_file_verdict_line(r.path, r.passed, r.failed,
-            r.in_development, r.error, r.degraded_reason, r.timed_out, r.duration_ms)
+        if test_file_result_outcome_class(r) == "ADMISSION":
+            print "COVER FILE VERDICT: {r.path} executed=0 passed=0 failed=0 admission_failed=1"
+        else:
+            print aggregate_spec_file_verdict_line(r.path, r.passed, r.failed,
+                r.in_development, r.error, r.degraded_reason, r.timed_out, r.duration_ms)
 
 fn summarize_test_results(results: [TestFileResult]) -> TestRunResult:
     var total_passed = 0

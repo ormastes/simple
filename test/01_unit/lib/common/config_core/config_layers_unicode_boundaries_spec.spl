@@ -1,0 +1,52 @@
+# Regression for divergence_byte_char_find_option_sweep_2026-08-01.
+# Delimiter byte offsets must not come from character ordinals.
+use std.spec.{describe, it, expect}
+use std.common.config_core.layers.{config_parse_line, config_parse_layer, config_strip_inline_comment, config_entries_to_sdn}
+
+describe "configuration delimiters preserve Unicode text boundaries":
+    it "preserves a multibyte key before the first colon":
+        val entry = config_parse_line("  café: 日本語: value  ", "workspace")
+        expect(entry.key).to_equal("café")
+        expect(entry.value).to_equal("日本語: value")
+        expect(entry.layer).to_equal("workspace")
+
+    it "strips a comment after multibyte text without truncating the value":
+        expect(config_strip_inline_comment("café 日本語 😀  # note")).to_equal("café 日本語 😀")
+        expect(config_strip_inline_comment("# café")).to_equal("")
+
+    it "preserves Unicode text without delimiters":
+        expect(config_parse_line("café 日本語 😀", "user").key).to_equal("")
+        expect(config_strip_inline_comment("  café 日本語 😀  ")).to_equal("  café 日本語 😀  ")
+
+    it "parses consecutive Unicode lines including an unterminated final line":
+        val entries = config_parse_layer("# 日本語\ncafé: 😀\n\nnext: naïve: value\nfinal: 終", "session")
+        expect(entries.len()).to_equal(3)
+        expect(entries[0].key).to_equal("café")
+        expect(entries[0].value).to_equal("😀")
+        expect(entries[1].key).to_equal("next")
+        expect(entries[1].value).to_equal("naïve: value")
+        expect(entries[2].key).to_equal("final")
+        expect(entries[2].value).to_equal("終")
+        expect(entries[2].layer).to_equal("session")
+
+    it "preserves CRLF trimming and a trailing newline":
+        val entries = config_parse_layer("café: 日本語\r\nnext: plain\r\n", "user")
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].value).to_equal("日本語")
+        expect(entries[1].key).to_equal("next")
+        expect(entries[1].value).to_equal("plain")
+
+    it "keeps ASCII first-colon and raw inline-comment semantics":
+        val entries = config_parse_layer("url: https://host:8443/path # raw\nempty:\n: ignored\ninvalid\n", "user")
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].key).to_equal("url")
+        expect(entries[0].value).to_equal("https://host:8443/path # raw")
+        expect(entries[1].key).to_equal("empty")
+        expect(entries[1].value).to_equal("")
+        expect(config_strip_inline_comment("plain # first # second")).to_equal("plain")
+
+    it "round-trips Unicode entries without changing the line content":
+        val content = "café: 日本語\nnext: 😀\n"
+        expect(config_entries_to_sdn(config_parse_layer(content, "user"))).to_equal(content)
+        expect(config_parse_layer("", "user").len()).to_equal(0)
+        expect(config_parse_layer("\n# café\n", "user").len()).to_equal(0)

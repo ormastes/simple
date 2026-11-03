@@ -1,0 +1,62 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Transient promotion of a text parameter keeps the caller's identity
+
+Regression for bug stage2_transient_promote_text_param_copy_2026-11-03 (S3N-8):
+transient_promote$str promoted a COPY of the text param, so the caller's text
+(a capsule mir_identity) was freed at scope end. Native-only symptom; the
+interpreter has no transient arena so these also pass there.
+"""
+
+# @tag: unit, compiler, mir, memory, native
+
+use std.spec.{describe, it, expect}
+use app.io.mod.{file_read}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn text_promote_build(index: i64) -> text:
+    "digest-{index}-" + "abcdef0123456789"
+
+fn text_promote_churn() -> i64:
+    var keep: [text] = []
+    var i = 0
+    while i < 512:
+        keep = keep.push("churn/path_{i}.spl")
+        i = i + 1
+    keep.len()
+
+fn text_promote_roundtrip(index: i64) -> text?:
+    if not transient_scope_begin():
+        return None
+    var digest = text_promote_build(index)
+    if not transient_scope_pause():
+        transient_scope_end()
+        return None
+    val retained = transient_promote<text>(digest)
+    val ended = transient_scope_end()
+    if not retained or not ended:
+        return None
+    Some(digest)
+
+describe "transient_promote of a text parameter":
+    it "keeps the caller's text readable after the scope's temporaries die":
+        var kept: [text] = []
+        var i = 0
+        while i < 8:
+            match text_promote_roundtrip(i):
+                case Some(t): kept = kept.push(t)
+                case _: ()
+            text_promote_churn()
+            i = i + 1
+        expect(kept.len()).to_equal(8)
+        var intact = 0
+        var j = 0
+        for t in kept:
+            if t == "digest-{j}-abcdef0123456789": intact = intact + 1
+            j = j + 1
+        expect(intact).to_equal(8)
+
+    it "declares the wrapper with a by-reference parameter":
+        val src = file_read("src/lib/nogc_sync_mut/sffi/transient.spl")
+        expect(src.contains("fn transient_promote<T>(mut value: T) -> bool:")).to_equal(true)
+

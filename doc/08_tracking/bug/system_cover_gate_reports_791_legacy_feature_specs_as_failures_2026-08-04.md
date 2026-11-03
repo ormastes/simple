@@ -150,3 +150,19 @@ remains OPEN. The 791 legacy annotations require truthful owner-by-owner work;
 this narrow checkpoint fix neither resolves that backlog nor changes the
 existing accounting of policy failures as named failed-file rows. No compiler
 rebuild or seed execution was attempted.
+
+## 2026-11-03 source repair candidate — execution pending
+
+Policy rejection is now represented separately from executed test failures:
+`ADMISSION` rows have zero example counters and a named coverage-gate verdict.
+The command remains nonzero (usage/gate exit 2 unless a real execution failure
+has a stronger outcome); SDN success remains false through the canonical result
+classifier. Annotated files run in normal mode even when neighboring files are
+rejected. Checkpoint figures are preserved without admitting rejected paths.
+No legacy coverage annotations or thresholds were fabricated or bypassed.
+
+Exact and adjacent regressions live in
+`test/01_unit/app/test_runner_new/cover_admission_spec.spl` and
+`scripts/check/check-test-runner-cover-admission.shs`.
+Status remains OPEN / TEST_BLOCKED pending execution with a qualified self-hosted
+CLI. No new behavioral PASS is claimed.
