@@ -1,7 +1,7 @@
 # `native-build` of a hello world fails in phase 3 with its diagnostics lost in transport
 
 - **Filed:** 2026-09-02
-- **Status:** OPEN
+- **Status:** FIXED (bc5abc26ce0, PR #320; gate check-phase3-diagnostics-reported.shs)
 - **Severity:** P1 — the build fails AND destroys the evidence of why, so the
   failure cannot be triaged from its own output
 - **Component:** seed `native-build` worker / diagnostic transport
@@ -60,3 +60,13 @@ build that cannot report its own errors will hide the next defect too.
 
 ## Lane note 2026-11-03 (wl01 lane)
 Deferred: reproduction needs native-build phase 3 output transport, not runnable on this lane (seed lacks entry-closure native-build).
+
+**Closed 2026-11-03 (already fixed):** `bc5abc26ce0` (#320) retired the
+unconditional "diagnostics unreadable" line in
+`src/compiler/80.driver/driver_stage_hir_v1.spl` (`stage_lower_hir_failure_v1`).
+It now reads `ctx.error_message_at(i)` through the `rt_heap_ref_wellformed`-guarded
+accessor and logs each surviving message verbatim (cap 20, plus a "further N"
+line); the "no readable diagnostics" line prints only when nothing survives. The
+string no longer exists in `src/`. Regression gate:
+`scripts/check/check-phase3-diagnostics-reported.shs` (asserts the specific HIR
+error text appears and the old wording does not).
