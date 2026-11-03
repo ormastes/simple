@@ -61,3 +61,32 @@ store `Tensor` parameters and route their forward passes through the autograd
 ops in `std.pure.autograd` rather than the raw ops in `std.pure.tensor_ops`.
 Adding a `shape()` accessor to `PureTensor` alone would not fix the
 `forward()` failure.
+
+## 2026-11-03 bounded source candidate (not resolved)
+
+Claim session: `p2-nn-tensor-20261103`. `Linear` now owns trainable autograd
+`Tensor` parameters and delegates to a tracked affine operation. The operation
+preserves every leading batch dimension and the vector case, validates the
+contract, and propagates input, weight and batch-reduced bias gradients.
+`ReLU`, `Sigmoid`, `Tanh` and `Sequential` retain that graph. Parameter counting
+uses `numel()` and gradient clearing uses the Tensor owner. The previously
+missing `tensor_f64_ops` owner delegates value operations below the tape to
+existing raw kernels; no Tensor-to-PureTensor conversion crosses a tape node.
+
+The seven exact/adjacent scenarios in `pure/test/nn_spec.spl` assert values,
+batch shapes, all three derivatives, nonlinear chains, frozen operands, empty
+batches, repeated backward accumulation, parameter enumeration and clearing.
+These replace the former bridge tests which detached gradients and weakened the
+original `[1, 2]` expected output to `[2]`.
+
+**TEST_BLOCKED:** no admitted pure-Simple self-hosted CLI is available. The
+tracked `bin/simple.exe` is a prohibited Rust seed for ordinary verification.
+Authored scenarios have not executed; no behavioral PASS or positive test count
+is claimed. Required core/lib/MCP/LSP checks and runtime/native smoke remain
+unrun. This candidate must remain a draft until those gates run.
+
+The umbrella remains OPEN: Conv2d, pooling, BatchNorm1d, LayerNorm, Embedding,
+Softmax, Dropout, LeakyReLU, ELU and GELU still use raw values. They must not be
+silently bridged into tracked Sequential. Their graph-aware migration is not
+included in this bounded candidate. The broad parked training suite is not
+unparked or represented as passing.

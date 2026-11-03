@@ -15,6 +15,7 @@ export tensor_sum, tensor_mean, tensor_mul_scalar
 export tensor_div, tensor_sigmoid, tensor_tanh
 export tensor_exp_op, tensor_log_op, tensor_neg, tensor_softmax
 export tensor_div_scalar, tensor_add_scalar
+export tensor_linear
 export detach, requires_grad
 export tensor_from_data, tensor_from_value, tensor_zeros, tensor_ones
 
@@ -46,6 +47,7 @@ enum OpType:
     Softmax
     DivScalar
     AddScalar
+    Linear
 
 # ============================================================================
 # Tensor with Gradient Tracking
@@ -175,6 +177,9 @@ fn propagate_grads(t: Tensor, grad_out: TensorF64):
 
     # Compute input gradients based on operation type
     match op:
+        OpType.Linear:
+            propagate_linear_grads(t, grad_out)
+
         OpType.Add:
             # da/dc = 1, db/dc = 1
             if inputs[0].requires_grad:
@@ -609,3 +614,71 @@ fn detach(x: Tensor) -> Tensor:
 
 fn requires_grad(x: Tensor, requires_grad: bool) -> Tensor:
     Tensor.from_value(x.value, requires_grad)
+
+fn tensor_linear(x: Tensor, weight: Tensor, bias: Tensor?) -> Tensor:
+    """Tracked affine map over the last dimension, retaining all batch axes."""
+    assert x.value.shape.len() > 0
+    assert weight.value.shape.len() == 2
+    val in_features = weight.value.shape[1]
+    val out_features = weight.value.shape[0]
+    assert in_features > 0 and out_features > 0
+    assert x.value.shape[x.value.shape.len() - 1] == in_features
+    if bias.?:
+        assert bias.unwrap().shape() == [out_features]
+    val rows = x.numel() / in_features
+    var data: [f64] = []
+    for row in 0..rows:
+        for output in 0..out_features:
+            var total = 0.0
+            for input in 0..in_features:
+                total = total + x.value.data[row * in_features + input] * weight.value.data[output * in_features + input]
+            if bias.?:
+                total = total + bias.unwrap().value.data[output]
+            data.push(total)
+    var shape: [i64] = []
+    for axis in 0..(x.value.shape.len() - 1):
+        shape.push(x.value.shape[axis])
+    shape.push(out_features)
+    var inputs = [x, weight]
+    var tracked = x.requires_grad or weight.requires_grad
+    if bias.?:
+        inputs.push(bias.unwrap())
+        tracked = tracked or bias.unwrap().requires_grad
+    var result = Tensor.from_data(data, shape, requires_grad: tracked)
+    if tracked:
+        result.op_type = Some(OpType.Linear)
+        result.inputs = Some(inputs)
+        result.op_name = "linear"
+    result
+
+fn propagate_linear_grads(t: Tensor, grad_out: TensorF64):
+    val inputs = t.inputs.unwrap()
+    val x = inputs[0]
+    val weight = inputs[1]
+    val in_features = weight.value.shape[1]
+    val out_features = weight.value.shape[0]
+    val rows = x.numel() / in_features
+    var dx = zeros(x.shape())
+    var dw = zeros(weight.shape())
+    var db = zeros([out_features])
+    for row in 0..rows:
+        for output in 0..out_features:
+            val gradient = grad_out.data[row * out_features + output]
+            db.data[output] = db.data[output] + gradient
+            for input in 0..in_features:
+                val xi = row * in_features + input
+                val wi = output * in_features + input
+                dx.data[xi] = dx.data[xi] + gradient * weight.value.data[wi]
+                dw.data[wi] = dw.data[wi] + gradient * x.value.data[xi]
+    if x.requires_grad:
+        x.backward_step(dx)
+        if x.inputs.?:
+            propagate_grads(x, dx)
+    if weight.requires_grad:
+        weight.backward_step(dw)
+        if weight.inputs.?:
+            propagate_grads(weight, dw)
+    if inputs.len() == 3 and inputs[2].requires_grad:
+        inputs[2].backward_step(db)
+        if inputs[2].inputs.?:
+            propagate_grads(inputs[2], db)
