@@ -32,6 +32,15 @@ use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 # Real callers get the identical default host clock as before this tranche.
 var _web_budget_clock: FrameClock = default_frame_clock()
 
+# Test seam: swap the wall clock the budget guards read. WEB_RENDER_STAGE_MIN_SLICE_MS
+# floors every stage at a real 2 s, so a tiny budget_ms can no longer starve a
+# render on the host clock; a spec drives exhaustion with a stepping clock instead.
+pub fn simple_web_layout_set_budget_clock(clock: FrameClock):
+    _web_budget_clock = clock
+
+pub fn simple_web_layout_reset_budget_clock():
+    _web_budget_clock = default_frame_clock()
+
 struct SimpleWebBackdropAdmission:
     admitted: bool
     realized_blur_px: i64
@@ -491,6 +500,8 @@ val WEB_IFRAME_PLACEHOLDER: u32 = 0xFF888888u32
 # Per-render mutable state (reset at the start of every public render entry).
 var _web_render_deadline_us: i64 = 0
 var _web_render_degraded: bool = false
+# Name of the first budget-exhaustion site taken in the current render ("" until then).
+var _web_render_degrade_site: text = ""
 
 # Platform budget floor: slow/emulated platforms (e.g. SimpleOS under QEMU
 # TCG, ~30x slower than native) legitimately need more wall-clock than the
@@ -543,6 +554,7 @@ pub fn simple_web_layout_last_render_degraded() -> bool:
 # cached, so this can never launder an exhausted render into a clean one.
 pub fn simple_web_layout_clear_render_degraded():
     _web_render_degraded = false
+    _web_render_degrade_site = ""
 
 # Short diagnostic suffix for the degrade_reason field callers append to their
 # "reason=budget-exhausted:" receipt string (see simple_web_html_layout_renderer.spl).
@@ -553,7 +565,7 @@ pub fn simple_web_layout_clear_render_degraded():
 # last render was not degraded, matching simple_web_layout_last_render_degraded().
 pub fn simple_web_layout_last_render_degrade_reason() -> text:
     if _web_render_degraded:
-        "deadline-exceeded"
+        if _web_render_degrade_site != "": _web_render_degrade_site else: "deadline-exceeded"
     else:
         ""
 
@@ -573,6 +585,7 @@ fn _web_budget_begin(budget_ms: i64):
     _web_render_deadline_us = begin_now + floored_ms * 1000
     _web_render_floor_deadline_us = if _web_render_budget_floor_ms > 0: begin_now + _web_render_budget_floor_ms * 1000 else: 0
     _web_render_degraded = false
+    _web_render_degrade_site = ""
 
 # Re-arm the deadline mid-render to hand the NEXT stage its own slice of the
 # total budget, without ever extending the overall wall-clock past whatever
@@ -647,7 +660,27 @@ val WEB_BUDGET_SITE_PAINT_TEXT: i32 = 7
 # attribution; the expiry check itself is the single shared wall-clock
 # deadline armed by _web_budget_begin/_web_budget_rearm above.
 fn _web_budget_expired_at(site: i32) -> bool:
-    _web_budget_expired()
+    val expired = _web_budget_expired()
+    if expired and _web_render_degrade_site == "":
+        _web_render_degrade_site = _web_budget_site_name(site)
+    expired
+
+fn _web_budget_site_name(site: i32) -> text:
+    if site == WEB_BUDGET_SITE_LAYOUT_SUBTREE: return "layout-subtree"
+    if site == WEB_BUDGET_SITE_PAINT_BACKGROUNDS: return "paint-backgrounds"
+    if site == WEB_BUDGET_SITE_PAINT_RELATIVE_ROOTS: return "paint-relative-roots"
+    if site == WEB_BUDGET_SITE_PAINT_ABSOLUTE_LOW_Z: return "paint-absolute-low-z"
+    if site == WEB_BUDGET_SITE_PAINT_ABSOLUTE_HIGH_Z: return "paint-absolute-high-z"
+    if site == WEB_BUDGET_SITE_PAINT_SCROLLBARS: return "paint-scrollbars"
+    if site == WEB_BUDGET_SITE_PAINT_TEXT: return "paint-text"
+    "unknown-site"
+
+# Style-cascade variant: same shared deadline, records which style loop tripped.
+fn _web_budget_expired_in(name: text) -> bool:
+    val expired = _web_budget_expired()
+    if expired and _web_render_degrade_site == "":
+        _web_render_degrade_site = name
+    expired
 
 # ---------------------------------------------------------------------------
 # Flat node arena

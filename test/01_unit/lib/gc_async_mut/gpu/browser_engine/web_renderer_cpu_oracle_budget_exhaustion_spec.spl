@@ -62,10 +62,12 @@ This spec pins the honest signal:
 use std.spec.step
 
 use std.spec.*
-use lib.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{simple_web_layout_set_budget_clock, simple_web_layout_reset_budget_clock}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 
     simple_web_layout_render_html_software_pixels,
-    simple_web_layout_render_html_software_result,
+    simple_web_layout_render_html_software_result, SimpleWebLayoutPixelResult,
     simple_web_layout_render_html_software_decision,
     simple_web_layout_software_pixels_presentable,
     simple_web_layout_software_present_decision,
@@ -74,6 +76,32 @@ use lib.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 
 val W: i32 = 96
 val H: i32 = 64
+
+# Stepping clock: every read jumps 3 s, beyond the 2 s per-stage minimum slice,
+# so each budget check sees an expired deadline. Deterministic starvation that
+# does not depend on host load or on the (now floored) budget_ms value.
+class SteppingClock:
+    var t: i64
+
+impl FrameClock for SteppingClock:
+    me now_micros() -> i64:
+        self.t = self.t + 3000000
+        self.t
+
+    me sleep_until(deadline_us: i64):
+        self.t = deadline_us
+
+fn _starved_result() -> SimpleWebLayoutPixelResult:
+    simple_web_layout_set_budget_clock(SteppingClock(t: 0))
+    val r = simple_web_layout_render_html_software_result(INK_HTML, W, H, 1)
+    simple_web_layout_reset_budget_clock()
+    r
+
+fn _starved_decision() -> text:
+    simple_web_layout_set_budget_clock(SteppingClock(t: 0))
+    val d = simple_web_layout_render_html_software_decision(INK_HTML, W, H, 1)
+    simple_web_layout_reset_budget_clock()
+    d
 
 # A page whose only content is text, so "did anything render" is answerable by
 # counting non-background pixels.
@@ -102,7 +130,7 @@ describe "CPU software oracle budget exhaustion":
         expect(complete.pixels.len()).to_equal(W * H)
         expect(_ink(complete.pixels) > 0).to_equal(true)
         step("Render the identical page under a 1ms budget: same size, but no ink at all")
-        val starved = simple_web_layout_render_html_software_result(INK_HTML, W, H, 1)
+        val starved = _starved_result()
         expect(starved.pixels.len()).to_equal(W * H)
         expect(_ink(starved.pixels)).to_equal(0)
         step("Confirm the two returns are pixel-buffer-indistinguishable in shape — the reason a status is required")
@@ -115,7 +143,7 @@ describe "CPU software oracle budget exhaustion":
         # This is the ordering that makes a module global useless: an oracle-vs-lane
         # comparison renders both sides before comparing. The global describes the
         # LAST render; the result fields describe their own render.
-        val starved = simple_web_layout_render_html_software_result(INK_HTML, W, H, 1)
+        val starved = _starved_result()
         val complete = simple_web_layout_render_html_software_result(INK_HTML, W, H, 600000)
         step("The global now reports the completed render, having forgotten the starved one")
         expect(simple_web_layout_last_render_degraded()).to_equal(false)
@@ -127,7 +155,7 @@ describe "CPU software oracle budget exhaustion":
         # @req REQ-SSPEC-LIB
         step("names a concrete exhaustion site rather than degrading anonymously")
         step("Render under a 1ms budget and read the reason recorded on the result")
-        val starved = simple_web_layout_render_html_software_result(INK_HTML, W, H, 1)
+        val starved = _starved_result()
         expect(starved.render_degraded).to_equal(true)
         step("The reason is non-empty and is one of the enumerated WEB_BUDGET_SITE_* names")
         expect(starved.degrade_reason == "").to_equal(false)
@@ -141,6 +169,7 @@ describe "CPU software oracle budget exhaustion":
             starved.degrade_reason == "paint-relative-roots" or
             starved.degrade_reason == "paint-absolute-low-z" or
             starved.degrade_reason == "paint-scrollbars" or
+            starved.degrade_reason == "paint-absolute-high-z" or
             starved.degrade_reason == "paint-text"
         )
         expect(known).to_equal(true)
@@ -149,7 +178,7 @@ describe "CPU software oracle budget exhaustion":
         # @req REQ-SSPEC-LIB
         step("refuses to present an exhausted render and names the decline with a reason")
         step("An exhausted render is not presentable")
-        val starved = simple_web_layout_render_html_software_result(INK_HTML, W, H, 1)
+        val starved = _starved_result()
         expect(simple_web_layout_software_pixels_presentable(starved)).to_equal(false)
         step("Its decision string declares the decline and carries the exhaustion site")
         val declined = simple_web_layout_software_present_decision(starved)
@@ -173,7 +202,7 @@ describe "CPU software oracle budget exhaustion":
         # @req REQ-SSPEC-LIB
         step("exposes the same verdict through the single-call probe entry")
         step("The probe entry declines under a starved budget")
-        expect(simple_web_layout_render_html_software_decision(INK_HTML, W, H, 1)).to_start_with("software-oracle:declined:")
+        expect(_starved_decision()).to_start_with("software-oracle:declined:")
         step("and presents under a generous one")
         expect(simple_web_layout_render_html_software_decision(INK_HTML, W, H, 600000)).to_equal("software-oracle:presented:full-frame:reason=budget-complete")
 
