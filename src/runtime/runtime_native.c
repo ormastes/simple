@@ -7630,6 +7630,17 @@ int64_t rt_any_to_int(int64_t value) {
  * rt_string_to_int's own behavior for its existing to_i64()/parse_int()/
  * to_int() callers. */
 int64_t rt_string_to_int_any(int64_t value) {
+    /* Length-bounded for tagged strings: never let strtoll read past s->len
+     * (bug native_int_text_unbounded_strtoll_2026_11_03). Raw char* literals
+     * are NUL-terminated by construction and keep the strtoll path. */
+    RtCoreString* s = rt_core_as_string(value);
+    if (s) {
+        char buf[64];
+        uint64_t n = s->len < sizeof(buf) - 1 ? s->len : sizeof(buf) - 1;
+        if (n) memcpy(buf, s->data, (size_t)n);
+        buf[n] = '\0';
+        return (int64_t)strtoll(buf, NULL, 10);
+    }
     const char* raw = rt_interp_cstr(value);
     if (!raw) return 0;
     return (int64_t)strtoll(raw, NULL, 10);

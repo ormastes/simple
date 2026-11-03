@@ -490,49 +490,79 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
 # functions laid out in different orders (2026-10-19, release_phase3 stage2
 # planner admission). Sort by name so emitted bytes are reproducible; the
 # symbol id breaks the (impossible for valid MIR) same-name tie.
+# Stable bottom-up merge sort of INDEX positions by (name, id). Sorting the
+# positions instead of swapping whole MirFunction/MirStatic values keeps the
+# sort O(N log N) compares with O(N) moves of small integers; the previous
+# selection sort swapped full values O(N^2) times.
+# doc/08_tracking/bug/seed_emit_object_superlinear_hang_large_module_2026-07-20.md
+pub fn mir_sorted_positions(names: [text], ids: [i64]) -> [i64]:
+    val n = names.len()
+    var order: [i64] = []
+    var k = 0
+    while k < n:
+        order = order.push(k)
+        k = k + 1
+    var width = 1
+    while width < n:
+        var merged: [i64] = []
+        var lo = 0
+        while lo < n:
+            var mid = lo + width
+            if mid > n:
+                mid = n
+            var hi = lo + 2 * width
+            if hi > n:
+                hi = n
+            var l = lo
+            var r = mid
+            while l < mid and r < hi:
+                val a = order[l]
+                val b = order[r]
+                val right_first = names[b] < names[a] or (names[b] == names[a] and ids[b] < ids[a])
+                if right_first:
+                    merged = merged.push(b)
+                    r = r + 1
+                else:
+                    merged = merged.push(a)
+                    l = l + 1
+            while l < mid:
+                merged = merged.push(order[l])
+                l = l + 1
+            while r < hi:
+                merged = merged.push(order[r])
+                r = r + 1
+            lo = lo + 2 * width
+        order = merged
+        width = width * 2
+    order
+
 pub fn mir_module_functions_sorted(module: MirModule) -> [MirFunction]:
     var ids: [i64] = []
+    var names: [text] = []
     var funcs: [MirFunction] = []
     for symbol in module.functions.keys():
+        val f = module.functions[symbol]
         ids = ids.push(symbol.id)
-        funcs = funcs.push(module.functions[symbol])
-    var i = 0
-    while i < funcs.len():
-        var j = i + 1
-        while j < funcs.len():
-            if funcs[j].name < funcs[i].name or
-                    (funcs[j].name == funcs[i].name and ids[j] < ids[i]):
-                val tmp_fn = funcs[i]
-                funcs[i] = funcs[j]
-                funcs[j] = tmp_fn
-                val tmp_id = ids[i]
-                ids[i] = ids[j]
-                ids[j] = tmp_id
-            j = j + 1
-        i = i + 1
-    funcs
+        names = names.push(f.name)
+        funcs = funcs.push(f)
+    var out: [MirFunction] = []
+    for pos in mir_sorted_positions(names, ids):
+        out = out.push(funcs[pos])
+    out
 
 pub fn mir_module_statics_sorted(module: MirModule) -> [MirStatic]:
     var ids: [i64] = []
+    var names: [text] = []
     var statics: [MirStatic] = []
     for symbol in module.statics.keys():
+        val st = module.statics[symbol]
         ids = ids.push(symbol.id)
-        statics = statics.push(module.statics[symbol])
-    var i = 0
-    while i < statics.len():
-        var j = i + 1
-        while j < statics.len():
-            if statics[j].name < statics[i].name or
-                    (statics[j].name == statics[i].name and ids[j] < ids[i]):
-                val tmp_static = statics[i]
-                statics[i] = statics[j]
-                statics[j] = tmp_static
-                val tmp_id = ids[i]
-                ids[i] = ids[j]
-                ids[j] = tmp_id
-            j = j + 1
-        i = i + 1
-    statics
+        names = names.push(st.name)
+        statics = statics.push(st)
+    var out: [MirStatic] = []
+    for pos in mir_sorted_positions(names, ids):
+        out = out.push(statics[pos])
+    out
 
 # Keep MirModule last.  The bootstrap parser currently leaves declaration
 # parsing in expression mode after generic Dict fields, which corrupts the

@@ -176,9 +176,31 @@ pub fn log_bootstrap_flat_warning(site: text):
             "SIMPLE_BOOTSTRAP_STAGE4=1) before citing it. See " +
             "doc/08_tracking/bug/stage3_clean_baseline_is_bootstrap_flat_artifact_2026-08-01.md")
 
+# Opt-in per-phase RSS instrumentation (SIMPLE_PHASE_RSS=1): every log_phase
+# line gains current RSS, process peak RSS and the retained native-object
+# count, so growth can be isolated per phase (item5_native_object_resource_growth).
+extern fn rt_process_rss_kib() -> i64
+extern fn rt_process_hwm_kib() -> i64
+
+var _g_phase_retained_objects: i64 = 0
+
+pub fn phase_rss_enabled_v1(raw: text) -> bool:
+    raw == "1"
+
+pub fn phase_rss_suffix_v1(rss_kib: i64, peak_kib: i64, retained_objs: i64) -> text:
+    " rss_kib={rss_kib} peak_kib={peak_kib} retained_objs={retained_objs}"
+
+pub fn phase_rss_set_retained_objects_v1(n: i64):
+    _g_phase_retained_objects = n
+
+pub fn phase_rss_retained_objects_v1() -> i64:
+    _g_phase_retained_objects
+
 pub fn log_phase(msg: text):
-    if driver_phase_trace_enabled():
-        val line = "[BOOTSTRAP-PHASE] +{_phase_elapsed_ms()}ms {msg}"
+    val rss_on = phase_rss_enabled_v1(env_get("SIMPLE_PHASE_RSS"))
+    if driver_phase_trace_enabled() or rss_on:
+        val rss_part = if rss_on: phase_rss_suffix_v1(rt_process_rss_kib(), rt_process_hwm_kib(), _g_phase_retained_objects) else: ""
+        val line = "[BOOTSTRAP-PHASE] +{_phase_elapsed_ms()}ms {msg}{rss_part}"
         eprint(line)
         # The native-build worker's stderr is dropped by the parent's
         # capture/relay chain (see memory: native-build eprint lost), so the
@@ -430,8 +452,6 @@ pub fn log_mem_snapshot(phase: text):
 # parent relays; the same line also goes to SIMPLE_COMPILER_PHASE_PROFILE_FILE
 # when set, which is the only live channel on Windows, where the parent
 # captures the worker's stdout until it exits.
-extern fn rt_process_rss_kib() -> i64
-
 pub const MIR_PROGRESS_INTERVAL: i64 = 50
 
 pub fn mir_progress_due(done: i64, total: i64) -> bool:

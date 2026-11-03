@@ -65,3 +65,10 @@ The bug remains OPEN until corrected-producer native qualification is
 completed. Database registration is owned by the final composition lane.
 
 **Revalidated 2026-11-02: still plausible because OPEN. Severity: P1. GitHub: https://github.com/ormastes/simple/issues/3114; no merged fix commit with a passing regression is cited in this doc.**
+
+## Status 2026-11-03: fix-implemented-verification-pending
+
+Source repair landed in 5990e2b0eb6 (`scripts/bootstrap/lib/stage3-source-policy.shs`, wired at
+resume-stage3-from-admitted.sh:607). Repro: `python scripts/bootstrap/tests/stage3-source-policy-test.py`
+on Linux (5/6 pass on Windows; `test_all_four_launches...` differs only in tmp/path env fields), then a
+stage3 resume run showing identical `--source` order in digest and worker argv.
