@@ -522,3 +522,26 @@ test/01_unit/os/apps/dbd/dbd_tls_spec.spl:127:1: warning SSDOC-EVD-001 [evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
+
+## Checked sealing addendum — AUTHORED_UNRUN
+
+Requirement: REQ-TLS-CHECKED-SEAL-002.
+Eight added scenarios were authored before implementation. Existing scenarios
+and their historical scorecard above are preserved; no prior execution claim
+is extended to this addendum.
+
+| Input or outcome | Required session behavior |
+|---|---|
+| Empty or oversized application plaintext | Error; established state and sequence unchanged |
+| Closed session | Error; closed state and sequence unchanged |
+| Exhausted sequence | Error; failed state without increment |
+| Malformed key or IV | Propagated record error; failed state without increment |
+| Unsupported suite | Propagated suite error; failed state without increment |
+| Valid compatible record | Ok containing unchanged wire bytes; sequence increments exactly once |
+
+Together with the separate record and writer specs, this repair adds 27
+authored cases: 17 record + 8 session cases before implementation, and 2 writer
+prevention cases afterward. Runtime RED/GREEN, coverage, socket behavior,
+generated-manual maintenance and complete TDD remain UNRUN. No syscall-count
+or no-send execution proof is claimed. Empty application refusal is the DBD
+API policy, not a blanket TLS prohibition.

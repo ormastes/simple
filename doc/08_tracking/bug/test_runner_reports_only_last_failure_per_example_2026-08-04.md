@@ -4,6 +4,26 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
+## Current-owner audit (2026-11-03)
+
+Status remains OPEN / verification pending. The historical reproduction below
+used the Rust seed's BDD interpreter, whose failure-message slot is scalar.
+The current pure-Simple framework in `src/lib/nogc_sync_mut/spec.spl` already
+appends failures to `current_test_errors`, joins all messages when `_execute_it`
+finishes, and increments the failed-example counter once. The other spec
+families re-export that owner. No duplicate owner repair is proposed.
+
+Regression: `test/fixtures/spec_failure_retention/two_failures.spl` and
+`scripts/check/check-spec-failure-retention.shs`. Supply an admitted self-hosted
+runtime path to the checker. It requires both independent assertion messages,
+continuation after the failures, the subsequent passing example, totals of two
+examples / one pass / one failure, and exit 1. The negative fixture is not an
+auto-discovered `_spec.spl`. No supplied runtime means UNRUN, not PASS, and the
+checker never discovers or falls back to a seed.
+
+Execution is AUTHORED_UNRUN until a qualified current runner is available;
+source accumulation alone does not establish output/count/exit behavior.
+
 **Found:** 2026-08-04, while sabotage-verifying the M6 gen-arena lane.
 **Severity:** measurement trap (not a product defect) — it makes sabotage logs
 and red-run triage understate what actually broke.
