@@ -82,7 +82,7 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
 use compiler.driver.driver_build.native_file_unit_loop_v1.{native_file_unit_worker_loop_v1}
 use std.nogc_sync_mut.io_runtime.{thread_sleep}
-use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_error_reason_publish_v1, native_file_worker_error_reason_read_v1, native_file_worker_first_error_line_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_error_reason_publish_v1, native_file_worker_error_reason_read_v1, native_file_worker_first_error_line_v1, native_file_worker_exit_receipt_publish_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_workers_of_v1}
 use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_ENV_V1}
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{
@@ -1699,7 +1699,19 @@ pub fn native_build_memory_gate_applies_v1(worker: text, shard_child: bool, grou
             return false
     true
 
+# A HIR/MIR ledger shard child that fails leaves an exit receipt beside its
+# ledger (Windows async spawn carries no child stderr; see
+# BUG-WIN-HIR-WORKER-DIAGNOSTICS-20261010).
 pub fn run_native_build_worker(raw_args: [text]) -> i64:
+    val code = run_native_build_worker_inner(raw_args)
+    if code != 0:
+        if (env_get("SIMPLE_HIR_SHARD") ?? "") != "":
+            val _h = native_file_worker_exit_receipt_publish_v1(env_get("SIMPLE_HIR_SHARD_QUEUE") ?? "", env_get("SIMPLE_HIR_SHARD_OWNER") ?? "", "hir-shard", code)
+        if (env_get("SIMPLE_MIR_SHARD") ?? "") != "":
+            val _m = native_file_worker_exit_receipt_publish_v1(env_get("SIMPLE_MIR_SHARD_QUEUE") ?? "", env_get("SIMPLE_MIR_SHARD_OWNER") ?? "", "mir-shard", code)
+    code
+
+fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     val request = match native_build_authority_request_v1(raw_args,
             (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") == "1"):
         case Ok(value): value
