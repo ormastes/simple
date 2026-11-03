@@ -7,7 +7,7 @@
 
 use os.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResult}
 use os.crypto.chacha20_poly1305.{chacha20_poly1305_encrypt, chacha20_poly1305_decrypt, Chacha20Poly1305Result}
-use os.tls13.handshake13.{CIPHER_CHACHA20_POLY1305_SHA256}
+use os.tls13.handshake13.{CIPHER_AES_128_GCM_SHA256, CIPHER_CHACHA20_POLY1305_SHA256}
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn rt_tls13_aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> [u8]
@@ -484,6 +484,30 @@ fn record13_decrypt_chacha20_poly1305(rk: RecordKey, seq_num: u64, raw_record: [
 # ChaCha20-Poly1305 (0x1303) are wired here. AES-256-GCM (0x1302) callers
 # invoke aes256_gcm_encrypt directly today — see crypto_recovery_status.
 # ============================================================================
+
+fn record13_encrypt_for_suite_checked(cipher_suite: u16, rk: RecordKey, seq_num: u64, content_type: u8, plaintext: [u8]) -> Result<[u8], text>:
+    """Validate record inputs before allocation or provider dispatch.
+
+    Keeps the configured provider and successful legacy wire representation.
+    Unsupported suites never fall back to AES. Callers commit sequence and
+    transport output only after receiving Ok.
+    """
+    val key_length = if cipher_suite == CIPHER_AES_128_GCM_SHA256:
+        16
+    elif cipher_suite == CIPHER_CHACHA20_POLY1305_SHA256:
+        32
+    else:
+        return Err("tls-record-cipher-suite-unsupported")
+    if rk.key.len() != key_length:
+        return Err("tls-record-key-shape-invalid")
+    if rk.iv.len() != 12:
+        return Err("tls-record-iv-shape-invalid")
+    if plaintext.len() > TLS_MAX_FRAGMENT:
+        return Err("tls-record-plaintext-too-large")
+    val record = record13_encrypt_for_suite(cipher_suite, rk, seq_num, content_type, plaintext)
+    if record.len() != plaintext.len() + 5 + 1 + AEAD_TAG_SIZE:
+        return Err("tls-record-provider-output-shape-invalid")
+    Ok(record)
 
 fn record13_encrypt_for_suite(cipher_suite: u16, rk: RecordKey, seq_num: u64, content_type: u8, plaintext: [u8]) -> [u8]:
     """Dispatch record encryption to the AEAD path for the negotiated suite."""
