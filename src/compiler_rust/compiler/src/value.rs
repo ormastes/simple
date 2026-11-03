@@ -3078,7 +3078,10 @@ impl Value {
     /// primary resolution paths plus an audit of the remaining `Value::Object`
     /// pattern matches in the interpreter. See
     /// `doc/08_tracking/bug/method_field_not_found_on_object_2026-08-18.md`.
-    pub fn aggregate(class: String, fields: HashMap<String, Value>, _is_value_type: bool) -> Self {
+    pub fn aggregate(class: String, fields: HashMap<String, Value>, is_value_type: bool) -> Self {
+        if !is_value_type && class_instance_storage_enabled() {
+            return Value::ClassInstance(Arc::new(ClassInstance::new(class, fields)));
+        }
         Value::Object {
             class,
             fields: Arc::new(fields),
@@ -3291,3 +3294,13 @@ include!("value_pointers.rs");
 
 // Include tests from separate file
 include!("value_tests.rs");
+
+/// Opt-in switch for reference-semantics `class` storage
+/// (doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md).
+/// Off by default: with `SIMPLE_INTERP_CLASS_REF` unset, `Value::aggregate`
+/// keeps producing `Value::Object` (no behavior change) until every
+/// `Value::Object` site has a `ClassInstance` arm.
+pub fn class_instance_storage_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SIMPLE_INTERP_CLASS_REF").map(|v| v == "1").unwrap_or(false))
+}
