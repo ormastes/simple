@@ -43,3 +43,41 @@ environment. No fix attempted; status remains OPEN/fail-closed as filed.
 
 Out of lane: missing NEON/RVV vector-kernel feature work, not a bounded bug fix. No change made.
 
+
+## Source repair candidate (2026-11-03; qualification pending)
+
+Current release source already contains genuine AVX2, NEON and RVV NTT/INTT
+kernels in `src/runtime/runtime_simd_dispatch.c`. The remaining first faulty
+boundary was `std.simd`: it still selected only AVX2 and independently executed
+old Vec8i butterflies instead of calling these native kernels. The candidate
+routes the public facade to the existing `rt_mlkem_ntt_simd_*` provider and its
+thread-local chunk/VLEN receipt. Unsupported hosts still return an empty batch;
+the provider's scalar reference is never admitted as SIMD through this facade.
+
+Contract: FIPS 203 Algorithms 9/10, 256 coefficients per polynomial, q=3329,
+canonical residues on entry/output, independent polynomial batches. NEON uses
+four i32 lanes, scalar stride-2 tails, and 192 butterfly chunks per polynomial.
+AVX2 uses eight lanes and 80 chunks. RVV uses actual e32m1 VL for each strip,
+records completed strips and observes VLEN through vsetvlmax; lane count is not
+assumed to equal four. Inverse scale is 3303, and does not count as a butterfly
+chunk. Reset, execution and receipt read must remain on one native thread.
+
+Authored native regression:
+`test/01_unit/os/crypto/mlkem_native_provider_boundary_spec.spl` compares the
+same three-polynomial fixture against the existing scalar FIPS implementation,
+checks inverse recovery, +/-2q representatives, alternating 0/q-1 values,
+impulses at SIMD/group/polynomial edges and invalid 0/1/255/257 lengths.
+This is scalar equivalence coverage, not an independently executed NIST KAT.
+Existing C baseline and pinned fixture remain available through
+`scripts/check/build-mlkem-simd-c-lane.shs`.
+
+Verification: scoped diff whitespace check passed. All authored Simple behavior
+checks are TEST_BLOCKED: no admitted self-hosted CLI is available on this host.
+No seed execution was substituted. Physical AArch64 and RVV execution, exact
+NIST vector qualification, retained Set A/B/C comparisons and at least 30 timing
+samples per hardware lane remain UNRUN. Status remains OPEN pending those gates;
+this source repair does not authorize SIMD promotion or a hardware PASS.
+
+An additional authored independent FIPS 203 factor-root oracle transforms X^2
+into pairs (17^(2*BitRev7(i)+1) mod 3329, 0), with inverse recovery. It is
+also unexecuted and is not represented as NIST KAT execution evidence.
