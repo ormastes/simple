@@ -14,3 +14,6 @@ Bitstream remains independently broken: see native_huffman_bitstream_nested_arra
 
 ## Lane note 2026-11-03 (wl01 lane)
 Landed tagged source workaround (typed params on huffman_lookup, src/lib/nogc_sync_mut/compression/gzip/huffman.spl:17-18, tag bug=native_huffman_untyped_return_guard_2026_10_11). Compiler-side fix (untyped iterable params typed i64 by MIR) remains open: needs a native-build producer to qualify (no native-build available on the Windows seed lane; the interpreter gzip spec does not exercise native MIR). Row stays open.
+
+## Lane note 2026-11-03 (comp-huffret)
+Typed the remaining untyped params (`code`/`length`/`distance`: i64) of deflate_length_decode_info, deflate_distance_decode_info, deflate_length_extra, deflate_distance_extra in huffman.spl; all functions now have explicit param and return types. Status: fix-implemented-verification-pending. Verify: native-build test/fixtures/compiler/huffman_workaround_probe/main.spl with a native producer (not available on the Windows seed lane). Compiler-side inference fix remains out of scope.
