@@ -1,5 +1,26 @@
 # RV64 web server gate blocked: arm64 import leak (link) + storage unavailable (runtime)
 
+## Status 2026-11-03 — fix-implemented-verification-pending
+- **Blocker 1 (arm64 leak): fixed in source.** `src/os/kernel/arch/arm64/sandbox_pte_bits.spl`
+  is the CPU-free split of the PTE-bit policy, so `sandbox_boot_apply` no longer reaches
+  `arch/arm64/paging.spl` -> `arch/arm64/cpu.spl` -> `rt_arm64_*`.
+- **Regression guard added:** `scripts/check/check-arch-import-closure.shs` (static transitive
+  `use os.*` closure; `--selftest` replays the incident chain; `--all` sweeps every arch
+  `boot.spl`), spec `test/03_system/os/rv64_arch_import_closure_spec.spl` (PASS + closure
+  budget 455 files = measured 364 + 25%), advisory gate row `push-arch-import-closure`.
+- **Sibling sweep:** arm32/arm64/cortex_m33 clean. riscv64, riscv32, x86_32, x86_64 closures
+  carry pre-existing declared-only cross-arch references in SHARED modules
+  (`boot/mmio_hardware.spl` arm cache externs, `loader/{process_image,segment_mapper}.spl`,
+  `memory/{user_address_space,user_copy}.spl`, and the `user_entry_bridge.spl` -> arm32/arm64/
+  x86 `user_entry`/`context`/`cpu` dispatch). Reachability in the riscv64 link is NOT verified;
+  they are frozen in `scripts/check/arch_import_closure_baseline.txt` (new ones FAIL).
+- **Blocker 2 (storage rc=-83): still open, separate feature gap** - no riscv NVMe write driver.
+  Not addressed here.
+- **Verification NOT run (needs Linux/QEMU host):**
+  `sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --smoke`, then
+  `sh scripts/qemu/qemu_rv64_http_test.shs --expect-http-only --with-storage`; board steps per
+  `.claude/rules/board-runnable.md` (board identity + boot path + serial/SSH transcript).
+
 ## Triage 2026-09-13 — STILL OPEN: host-blocked, explicitly NOT stale
 - **measured** — the lane is alive: `scripts/qemu/qemu_rv64_http_test.shs`,
   `test/03_system/os/simpleos_riscv_network_gate_spec.spl`,
