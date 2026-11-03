@@ -262,6 +262,19 @@ fn named_call_maps_slots_and_fills_defaults() {
 }
 
 #[test]
+fn named_call_to_variadic_fn_keeps_legacy_path() {
+    let ast = Parser::new("fn tot(base: i64, rest: i64...) -> i64:
+    base
+fn caller() -> i64:
+    tot(1, base: 2)
+").parse().unwrap();
+    // Must not be rejected with an arity error by named-arg binding.
+    if let Err(e) = crate::hir::lower(&ast) {
+        assert!(!format!("{e}").contains("beyond its arity"), "{e}");
+    }
+}
+
+#[test]
 fn named_call_errors_instead_of_nil_padding() {
     let head = "fn mk(a: i64, b: i64 = 1, c: text = \"{x}\") -> i64:\n    a + b\n";
     for (call, needle) in [

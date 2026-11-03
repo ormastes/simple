@@ -542,7 +542,7 @@ impl Lowerer {
                                 .insert(func_def.name.clone(), defaults);
                             self.imported_fn_param_names
                                 .entry(crate::interpreter::normalize_path_key(path)).or_default()
-                                .insert(func_def.name.clone(), func_def.params.iter().map(|p| p.name.clone()).collect());
+                                .insert(func_def.name.clone(), if func_def.params.iter().any(|p| p.variadic) { Vec::new() } else { func_def.params.iter().map(|p| p.name.clone()).collect() });
                         }
                         let ret_ty = self.resolve_type_opt(&func_def.return_type)?;
                         self.globals.insert(func_def.name.clone(), ret_ty);

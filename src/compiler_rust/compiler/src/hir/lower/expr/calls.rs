@@ -318,7 +318,10 @@ impl Lowerer {
                          pass the arguments positionally"
                     )));
                 };
-                args_hir = self.bind_named_call_args(symbol, &names, &params, args, args_hir, ctx)?;
+                // Empty names = variadic callee: keep the legacy path.
+                if !names.is_empty() {
+                    args_hir = self.bind_named_call_args(symbol, &names, &params, args, args_hir, ctx)?;
+                }
             }
         }
 

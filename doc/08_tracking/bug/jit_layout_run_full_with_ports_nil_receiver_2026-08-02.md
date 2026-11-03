@@ -93,3 +93,10 @@ Known siblings NOT covered: method calls and struct/class constructor calls with
 (`lower_method_call` fills defaults only when no arg is named; defaults tables for methods carry no param names).
 `layout_framework_spec.spl` (03_system) updated: 9-arg `layout_node`, defined `fixture_node`; two examples still
 fail for unrelated stale reasons (`ClaimOnlyGpuLayoutPort` undefined; fallback-reason expectation).
+
+Semantics notes (review 2026-11-03): (a) named args are now passed in declared slot order, so argument expressions
+with side effects evaluate in slot order, not source order (documented, not preserved). (b) Variadic callees skip
+named binding (legacy path). (c) `layout_input`'s omitted default `layout_oracle_artifacts([], [], [])` is a CALL,
+not a call-site constant, so the real probe now raises a hard lowering error ("omits argument ... not a call-site
+constant") in the JIT lowering; the driver then drops the module to the interpreter via the existing `[jit-fallback]`
+path (no segfault). Making call defaults fillable is the follow-up (not done here).
