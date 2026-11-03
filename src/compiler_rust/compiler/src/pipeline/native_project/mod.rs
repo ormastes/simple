@@ -1374,6 +1374,17 @@ impl NativeProjectBuilder {
                 use_incremental,
                 step_start.elapsed().as_secs_f64()
             );
+            if let Some(ref gfp) = global_fp {
+                let prev = std::fs::read_to_string(cache_dir.join("incremental_manifest.txt"))
+                    .ok()
+                    .and_then(|line| GlobalBuildFingerprint::from_manifest_line(&line));
+                eprintln!(
+                    "[native-rust-trace] step 4 global fingerprint: {} (dirty {}/{})",
+                    gfp.describe_change(prev.as_ref()),
+                    to_compile.len(),
+                    to_compile.len() + cached_count
+                );
+            }
             for (idx, path, _, _) in to_compile.iter().take(12) {
                 eprintln!("  compile[{idx}]={}", path.display());
             }
@@ -2600,6 +2611,24 @@ impl GlobalBuildFingerprint {
             Some("codegen instrumentation changed")
         } else {
             None
+        }
+    }
+
+    /// One-line, pre-compile description of how this build's global inputs
+    /// differ from the previous build's manifest (`None` = no manifest yet).
+    /// Names the changed whole-build component, or states that only the
+    /// per-module interface slices can invalidate objects. Diagnostic only: it
+    /// never influences a cache key.
+    pub(crate) fn describe_change(&self, prev: Option<&GlobalBuildFingerprint>) -> String {
+        match prev {
+            None => "no previous manifest (first build in this cache scope)".to_string(),
+            Some(prev) => match self.changed_reason(prev) {
+                Some(why) => format!("full rebuild expected: {why}"),
+                None if self.layout != prev.layout => {
+                    "interface layout changed; only modules whose interface slice covers it rebuild".to_string()
+                }
+                None => "global inputs unchanged".to_string(),
+            },
         }
     }
 

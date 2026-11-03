@@ -1094,11 +1094,14 @@ impl Lowerer {
         let current = self.current_function_owner.as_deref();
         let resolved = if self.flatten_is_collision(name) && self.flatten_owner_defines(current, name) {
             Some(self.flatten_emitted_symbol(current, name))
-        } else if let Some((source_owner, source_name)) = current
-            .and_then(|importer| self.flatten_owner_import_bindings.get(importer))
+        } else if let Some((source_owner, source_name)) = self
+            // Untagged (entry-module) callers record their imports under the
+            // `<entry>` importer, exactly like `resolve_flatten_owned_global`.
+            .flatten_owner_import_bindings
+            .get(current.unwrap_or("<entry>"))
             .and_then(|bindings| bindings.get(name))
             .and_then(|(source_owner, source_name)| {
-                self.flatten_reexport_definer(current.unwrap_or_default(), source_owner, source_name)
+                self.flatten_reexport_definer(current.unwrap_or("<entry>"), source_owner, source_name)
             })
         {
             Some(self.flatten_emitted_symbol(Some(&source_owner), &source_name))
