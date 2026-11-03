@@ -18,6 +18,7 @@
 # the ciphertext is always a whole number of 16-byte blocks (plus one PKCS#7
 # block on the padded path).
 
+use std.common.aes.table_cbc.{aes_cbc_encrypt_tbl, aes_cbc_decrypt_tbl}
 use std.common.crypto.aes_gcm.{
     aes128_key_expansion,
     aes256_key_expansion,
@@ -345,48 +346,9 @@ fn aes_cbc_encrypt_blocks_no_padding(key: [i64], plaintext: [i64], iv: [i64]) ->
     val n = plaintext.len()
     if n % 16 != 0:
         return Err(CbcNoPaddingError.InvalidDataLength(n))
-    val is_256 = key.len() == 32
-    val key_u8 = _i64_to_u8(key)
-    val schedule = if is_256: aes256_key_expansion(key_u8) else: aes128_key_expansion(key_u8)
-    # The native key copy is no longer needed once the schedule exists.
-    _zeroize_u8(key_u8)
-
-    # `prev` is the IV for the first block and the previous ciphertext block
-    # thereafter (the CBC chaining value). It is replaced, never mutated in
-    # place, so each generation is volatile-wiped before being dropped.
-    var prev: [i64] = []
-    var c = 0
-    while c < 16:
-        prev.push(iv[c] & 0xFF)
-        c = c + 1
-
-    var out: [i64] = []
-    var off = 0
-    while off < n:
-        # XOR the plaintext block with the chaining value, then encrypt it.
-        var block: [i64] = []
-        var b = 0
-        while b < 16:
-            block.push((plaintext[off + b] & 0xFF) ^ prev[b])
-            b = b + 1
-        val block_u8 = _i64_to_u8(block)
-        val enc = if is_256: aes256_encrypt_block(block_u8, schedule) else: aes128_encrypt_block(block_u8, schedule)
-        # Wipe the plaintext-derived staging block and its native copy.
-        _zeroize_u8(block_u8)
-        _zeroize_i64(block)
-        var next: [i64] = []
-        var e = 0
-        while e < 16:
-            val byte = rt_bytes_u8_at(enc, e)
-            next.push(byte)
-            out.push(byte)
-            e = e + 1
-        _zeroize_i64(prev)
-        prev = next
-        off = off + 16
-    _zeroize_i64(prev)
-    _zeroize_u8(schedule)
-    Ok(out)
+    # T-table path (std.common.aes.table_cbc): same FIPS 197 result as the
+    # per-block byte primitive, ~15x fewer interpreted operations per block.
+    Ok(aes_cbc_encrypt_tbl(key, plaintext, iv))
 
 # AES-CBC decryption WITHOUT padding over an exact multiple of 16 bytes.
 # key: 16 or 32 bytes; iv: 16 bytes. Ok(plaintext) has EXACTLY the same length
@@ -401,47 +363,9 @@ fn aes_cbc_decrypt_blocks_no_padding(key: [i64], ciphertext: [i64], iv: [i64]) -
     val n = ciphertext.len()
     if n % 16 != 0:
         return Err(CbcNoPaddingError.InvalidDataLength(n))
-    val is_256 = key.len() == 32
-    val key_u8 = _i64_to_u8(key)
-    val schedule = if is_256: aes256_key_expansion(key_u8) else: aes128_key_expansion(key_u8)
-    _zeroize_u8(key_u8)
-
-    var prev: [i64] = []
-    var c = 0
-    while c < 16:
-        prev.push(iv[c] & 0xFF)
-        c = c + 1
-
-    var out: [i64] = []
-    var off = 0
-    while off < n:
-        var block: [i64] = []
-        var b = 0
-        while b < 16:
-            block.push(ciphertext[off + b] & 0xFF)
-            b = b + 1
-        val block_u8 = _i64_to_u8(block)
-        # Inverse cipher, then XOR with the chaining value to undo the CBC XOR.
-        val dec = if is_256: aes256_decrypt_block(block_u8, schedule) else: aes128_decrypt_block(block_u8, schedule)
-        _zeroize_u8(block_u8)
-        _zeroize_i64(block)
-        var d = 0
-        while d < 16:
-            out.push(rt_bytes_u8_at(dec, d) ^ prev[d])
-            d = d + 1
-        # dec held plaintext material until the XOR above; wipe it now.
-        _zeroize_u8(dec)
-        var next: [i64] = []
-        var e = 0
-        while e < 16:
-            next.push(ciphertext[off + e] & 0xFF)
-            e = e + 1
-        _zeroize_i64(prev)
-        prev = next
-        off = off + 16
-    _zeroize_i64(prev)
-    _zeroize_u8(schedule)
-    Ok(out)
+    # T-table path (std.common.aes.table_cbc): same FIPS 197 result as the
+    # per-block byte primitive, ~15x fewer interpreted operations per block.
+    Ok(aes_cbc_decrypt_tbl(key, ciphertext, iv))
 
 export aes_ctr_encrypt
 export aes_ctr_decrypt

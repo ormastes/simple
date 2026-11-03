@@ -36,6 +36,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 DB="${BUG_CLAIM_DB:-$ROOT/doc/08_tracking/bug/bug_db.sdn}"
 RESEAL="$HERE/reseal-sdn-crc32.shs"
+. "$HERE/sdn-seal-lib.shs"
 TABLE_HDR='bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|'
 CLOSED_RE='^(closed|fixed|invalid|resolved-|wontfix|cannot_reproduce|documented)'
 
@@ -85,6 +86,7 @@ clean_note() { printf '%s' "$1" | tr '\r\n\t' '   ' | tr '"' ' ' | tr "'" ' ' | 
 
 # --- selftest ----------------------------------------------------------------
 selftest() {
+    SDN_SEAL_ALGO=crc32; export SDN_SEAL_ALGO   # fixtures need no external hasher
     _d=$(mktemp -d) || die "mktemp failed"
     _fx="$_d/bug_db.sdn"
     cat > "$_fx" <<'FX'
@@ -106,7 +108,7 @@ unindented_row_2026_11_03, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, t
 bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
 FX
     sed -i 's/@CR@$/\r/' "$_fx"
-    sh "$RESEAL" "$_fx" >/dev/null 2>&1
+    sh "$RESEAL" --no-selftest "$_fx" >/dev/null 2>&1
     _fails=0
     # Isolate each CLI operation without spawning another shell per assertion.
     # Git-for-Windows shell startup dominates these small fixtures under load.
@@ -253,7 +255,6 @@ load_current() { # bug
 }
 
 # --- table writers ---------------------------------------------------------
-reseal_db() { sh "$RESEAL" "$DB" >/dev/null 2>&1 || die "reseal failed for $DB"; }
 
 append_row() { # raw row text (without indent)
     _tmp="$DB.edit.$$"
@@ -349,9 +350,17 @@ lock() {
 }
 commit_db() {
     owns_lock || die "lost lock ownership for $REAL_DB"
-    reseal_db
+    # Sidecar seal: strip any legacy header, hash the work copy, create the new
+    # .csm FIRST (a crash then leaves MERGED_UNSEALED, never MISSING), publish
+    # with one mv, then prune the stale seals.
+    csm_strip_legacy "$WORK_DB" || die "cannot strip legacy header in $WORK_DB"
+    _alg=$(csm_policy_algo "$ROOT/config/check/sdn_seal_policy.sdn" "$REAL_DB")
+    _hx=$(csm_hash_hex "$_alg" "$WORK_DB") || die "cannot hash $WORK_DB with $_alg"
+    _new="$(csm_stem "$REAL_DB").${_alg}_$_hx.csm"
+    : > "$_new" || die "cannot write seal $_new"
     owns_lock || die "lost lock ownership before publishing $REAL_DB"
     mv "$WORK_DB" "$REAL_DB" || die "cannot publish $REAL_DB"
+    csm_prune_other_seals "$REAL_DB" "$_new"
     DB="$REAL_DB"
 }
 

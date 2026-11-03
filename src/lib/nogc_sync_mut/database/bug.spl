@@ -20,8 +20,7 @@ use std.convert (try_parse_int)
 use nogc_sync_mut.database.atomic.{FileLock}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists}
 use std.io_runtime.{read_file_text_result}
-use std.nogc_sync_mut.compression.gzip.crc.{crc32_update}
-use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.database.csm_seal.{csm_verify, csm_strip_legacy_header, csm_seal_add, csm_seal_prune, csm_writer_algo, CSM_MISSING, CSM_CORRUPT}
 use nogc_sync_mut.database.checker.{DbIssue, check_duplicate_ids, check_valid_column,
     check_empty_required, check_file_refs, check_enum_values, check_orphan_refs}
 # Removed 'use app.io' - it shadows core.spl's local function declarations
@@ -792,15 +791,14 @@ fn _bug_append_open_locked(path: text, records: [Bug]) -> bool:
     val original: text = match read_file_text_result(path):
         case Ok(value): value
         case Err(_): return false
-    if not original.starts_with("#sdn-crc32:") or original.len() > 33554432:
+    if original.len() > 33554432:
         return false
-    val newline = original.index_of("\n")
-    if newline < 0: return false
-    val expected = try_parse_int(original.substring(11, newline).trim())
-    if expected == nil: return false
-    val body: text = original.substring(newline + 1)
-    val initial_crc = crc32_update(0xffffffff, text_to_utf8_bytes(body)) ^ 0xffffffff
-    if initial_crc != (expected ?? -1): return false
+    # Only an already-sealed file is appended to: OK, MERGED_UNSEALED (writers
+    # reseal) or a still-valid legacy header. MISSING and CORRUPT fail closed.
+    val seal_state = csm_verify(path, original).state
+    if seal_state == CSM_MISSING or seal_state == CSM_CORRUPT:
+        return false
+    val body: text = csm_strip_legacy_header(original)
     val original_lines: [text] = body.split("\n")
     var pending: BugDatabase = create_bug_database(path)
     val columns: [text] = ["id", "severity", "status", "title", "file", "line", "reproducible_by", "created_at", "updated_at", "valid"]
@@ -840,8 +838,10 @@ fn _bug_append_open_locked(path: text, records: [Bug]) -> bool:
             updated = anchored.replace(crlf, crlf + rows).substring(1)
         else:
             updated = anchored.replace(lf, lf + rows).substring(1)
-    val final_crc = crc32_update(0xffffffff, text_to_utf8_bytes(updated)) ^ 0xffffffff
-    val prefix = if original.substring(0, newline).ends_with("\r"): "#sdn-crc32:{final_crc}\r\n" else: "#sdn-crc32:{final_crc}\n"
     # FileLock is already held across read/validation/publication. The real
     # native atomic publisher creates its own exclusive same-directory stage.
-    file_atomic_write(path, prefix + updated)
+    val seal = csm_seal_add(path, updated, csm_writer_algo(path))
+    if seal == "": return false
+    val published = file_atomic_write(path, updated)
+    if published: csm_seal_prune(path, seal)
+    published

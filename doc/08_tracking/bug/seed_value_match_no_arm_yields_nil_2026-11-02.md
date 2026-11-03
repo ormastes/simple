@@ -60,3 +60,19 @@ case nil: 1605 | case None: 691 | case true/false: 2/2 | negative int
 literal arms: 13 | float literal arms: 2 | char-literal arms: 16 |
 text or-pattern arms: 339 | `== nil`: 5339 | `!= nil`: 2601 |
 `== None`: 15 | `!= None`: 4
+
+## Fixed (2026-11-03)
+
+`lower_match_arms` (`src/compiler_rust/compiler/src/hir/lower/expr/control.rs`) now ends a
+value-position match chain with `rt_panic("invalid pattern: match expression exhausted ...")`
+instead of `Nil`, matching the interpreter, which already failed closed. A match used as an
+expression statement (`Node::Expression`, value discarded) keeps the silent fall-through
+(`lower_match_with(.., exhaust_panic=false)`), so self-hosted code relying on it is unaffected.
+An implicit tail-expression match is indistinguishable from a statement one in HIR and also
+stays silent.
+
+Tests: `test_value_match_without_wildcard_fails_closed`,
+`test_value_match_with_wildcard_has_no_exhaustion_panic`,
+`test_statement_match_without_wildcard_stays_silent` in
+`hir/lower/tests/control_flow_tests.rs` (56/56 pass). Status: verification pending a JIT run of
+`pick(4)` on a seed built from this change.

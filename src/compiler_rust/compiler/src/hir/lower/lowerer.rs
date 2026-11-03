@@ -122,6 +122,11 @@ pub struct Lowerer {
     /// Separate from local declarations so cached facades and aliases retain
     /// the selected import's contract without a process-wide bare-name lookup.
     pub(super) imported_fn_param_defaults: HashMap<PathBuf, HashMap<String, Vec<Option<Expr>>>>,
+    /// Declared parameter names, parallel to `fn_param_defaults` /
+    /// `imported_fn_param_defaults` (same keys, same order). Lets a call that
+    /// uses named arguments be mapped onto declared slots at the call site.
+    pub(super) fn_param_names: HashMap<String, Vec<String>>,
+    pub(super) imported_fn_param_names: HashMap<PathBuf, HashMap<String, Vec<String>>>,
     /// Whole-program map of free-function name -> declared return type,
     /// built by `build_import_map`. Functions reached via the global import map
     /// (called without a `use` import) otherwise have no return-type info, so
@@ -328,6 +333,8 @@ impl Lowerer {
             trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
+            fn_param_names: HashMap::new(),
+            imported_fn_param_names: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -403,6 +410,8 @@ impl Lowerer {
             trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
+            fn_param_names: HashMap::new(),
+            imported_fn_param_names: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -501,6 +510,8 @@ impl Lowerer {
             trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
+            fn_param_names: HashMap::new(),
+            imported_fn_param_names: HashMap::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,

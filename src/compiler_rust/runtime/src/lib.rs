@@ -82,6 +82,7 @@ pub mod webgpu_backfill_twins;
 pub mod gui_html_session_twins;
 pub mod host_gpu_lane;
 pub mod memory;
+pub mod child_peak_rss;
 pub mod mem_snapshot;
 #[cfg(feature = "monoio-net")]
 pub mod monoio_runtime;

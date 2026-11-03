@@ -200,7 +200,7 @@ fn _aes_gf_mul(a: u8, b: u8) -> u8:
     result
 
 fn _aes_mix_columns(state: [u8]) -> [u8]:
-    """Mix columns using GF(2^8) matrix multiplication."""
+    """Mix columns (xtime form: 2*a = xtime(a), 3*a = xtime(a) ^ a)."""
     var r: [u8] = []
     var c: u64 = 0
     while c < 4:
@@ -209,10 +209,14 @@ fn _aes_mix_columns(state: [u8]) -> [u8]:
         val s1 = _u8_at(state, base + 1)
         val s2 = _u8_at(state, base + 2)
         val s3 = _u8_at(state, base + 3)
-        r.push(_aes_gf_mul(0x02, s0) ^ _aes_gf_mul(0x03, s1) ^ s2 ^ s3)
-        r.push(s0 ^ _aes_gf_mul(0x02, s1) ^ _aes_gf_mul(0x03, s2) ^ s3)
-        r.push(s0 ^ s1 ^ _aes_gf_mul(0x02, s2) ^ _aes_gf_mul(0x03, s3))
-        r.push(_aes_gf_mul(0x03, s0) ^ s1 ^ s2 ^ _aes_gf_mul(0x02, s3))
+        val d0 = _aes_xtime(s0)
+        val d1 = _aes_xtime(s1)
+        val d2 = _aes_xtime(s2)
+        val d3 = _aes_xtime(s3)
+        r.push(d0 ^ d1 ^ s1 ^ s2 ^ s3)
+        r.push(s0 ^ d1 ^ d2 ^ s2 ^ s3)
+        r.push(s0 ^ s1 ^ d2 ^ d3 ^ s3)
+        r.push(d0 ^ s0 ^ s1 ^ s2 ^ d3)
         c = c + 1
     r
 
@@ -561,7 +565,11 @@ fn _aes_inv_shift_rows(state: [u8]) -> [u8]:
 
 fn _aes_inv_mix_columns(state: [u8]) -> [u8]:
     """InvMixColumns: multiply each column by the inverse matrix
-    [0e 0b 0d 09 / 09 0e 0b 0d / 0d 09 0e 0b / 0b 0d 09 0e] in GF(2^8)."""
+    [0e 0b 0d 09 / 09 0e 0b 0d / 0d 09 0e 0b / 0b 0d 09 0e] in GF(2^8).
+
+    Products are built from xtime: with x2=2a, x4=4a, x8=8a:
+    9a = x8^a, 11a = x8^x2^a, 13a = x8^x4^a, 14a = x8^x4^x2.
+    """
     var r: [u8] = []
     var c: u64 = 0
     while c < 4:
@@ -570,10 +578,38 @@ fn _aes_inv_mix_columns(state: [u8]) -> [u8]:
         val s1 = _u8_at(state, base + 1)
         val s2 = _u8_at(state, base + 2)
         val s3 = _u8_at(state, base + 3)
-        r.push(_aes_gf_mul(0x0e, s0) ^ _aes_gf_mul(0x0b, s1) ^ _aes_gf_mul(0x0d, s2) ^ _aes_gf_mul(0x09, s3))
-        r.push(_aes_gf_mul(0x09, s0) ^ _aes_gf_mul(0x0e, s1) ^ _aes_gf_mul(0x0b, s2) ^ _aes_gf_mul(0x0d, s3))
-        r.push(_aes_gf_mul(0x0d, s0) ^ _aes_gf_mul(0x09, s1) ^ _aes_gf_mul(0x0e, s2) ^ _aes_gf_mul(0x0b, s3))
-        r.push(_aes_gf_mul(0x0b, s0) ^ _aes_gf_mul(0x0d, s1) ^ _aes_gf_mul(0x09, s2) ^ _aes_gf_mul(0x0e, s3))
+        val a2 = _aes_xtime(s0)
+        val a4 = _aes_xtime(a2)
+        val a8 = _aes_xtime(a4)
+        val b2 = _aes_xtime(s1)
+        val b4 = _aes_xtime(b2)
+        val b8 = _aes_xtime(b4)
+        val c2 = _aes_xtime(s2)
+        val c4 = _aes_xtime(c2)
+        val c8 = _aes_xtime(c4)
+        val d2 = _aes_xtime(s3)
+        val d4 = _aes_xtime(d2)
+        val d8 = _aes_xtime(d4)
+        val a9 = a8 ^ s0
+        val a11 = a8 ^ a2 ^ s0
+        val a13 = a8 ^ a4 ^ s0
+        val a14 = a8 ^ a4 ^ a2
+        val b9 = b8 ^ s1
+        val b11 = b8 ^ b2 ^ s1
+        val b13 = b8 ^ b4 ^ s1
+        val b14 = b8 ^ b4 ^ b2
+        val c9 = c8 ^ s2
+        val c11 = c8 ^ c2 ^ s2
+        val c13 = c8 ^ c4 ^ s2
+        val c14 = c8 ^ c4 ^ c2
+        val d9 = d8 ^ s3
+        val d11 = d8 ^ d2 ^ s3
+        val d13 = d8 ^ d4 ^ s3
+        val d14 = d8 ^ d4 ^ d2
+        r.push(a14 ^ b11 ^ c13 ^ d9)
+        r.push(a9 ^ b14 ^ c11 ^ d13)
+        r.push(a13 ^ b9 ^ c14 ^ d11)
+        r.push(a11 ^ b13 ^ c9 ^ d14)
         c = c + 1
     r
 
@@ -611,6 +647,16 @@ fn aes192_decrypt_block(ciphertext: [u8], round_keys: [u8]) -> [u8]:
 fn aes256_decrypt_block(ciphertext: [u8], round_keys: [u8]) -> [u8]:
     """Decrypt one 16-byte block with AES-256 (pre-expanded 240-byte schedule)."""
     _aes_decrypt_block(_aes_gcm_aes_inv_sbox_table(), ciphertext, round_keys, 14)
+
+# S-box tables for callers that process many blocks (std.common.aes.table_cbc)
+# and so build their tables once rather than per aes256_*_block call.
+fn aes_sbox_table() -> [u8]:
+    """Forward S-box table, for use with aes_encrypt_block_tbl."""
+    _aes_gcm_aes_sbox_table()
+
+fn aes_inv_sbox_table() -> [u8]:
+    """Inverse S-box table, for use with aes_decrypt_block_tbl."""
+    _aes_gcm_aes_inv_sbox_table()
 
 # ============================================================================
 # GF(2^128) Multiplication for GHASH
@@ -1031,5 +1077,7 @@ export aes256_gcm_decrypt
 export aes192_key_expansion
 export aes192_encrypt_block
 export aes192_decrypt_block
+export aes_sbox_table
+export aes_inv_sbox_table
 export aes192_gcm_encrypt
 export aes192_gcm_decrypt

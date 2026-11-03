@@ -346,11 +346,33 @@ own merge-tree + CRC + rt-delta checks. Details:
   exact dispatch arm still required, fail-closed) and `MUST_CHECK_ADVISORY=1`
   runs all of them. The skip prints a count; it is never silent.
 - **New blocking rows:** `push-sdn-crc32-sealed` (every sealed `*.sdn` at the
-  pushed sha must verify — a stale `#sdn-crc32` header made the whole
-  `bug_db.sdn` load as nil), `push-rust-duplicate-reexport` (rustc E0252 class,
+  pushed sha must verify against its `.csm` sidecar seal — a stale seal made the
+  whole `bug_db.sdn` load as nil), `push-rust-duplicate-reexport` (rustc E0252 class,
   static, ~2 s; the full seed `cargo check` is outside the budget and belongs to
   CI), `push-no-stale-snapshot-rewind` (the e274cd33719 class itself).
-- **`bug_db.sdn` conflicts resolve automatically (2026-11-03).** Its line 1
+- **Sealed SDN files use `.csm` sidecar seals (2026-11-03).** `dir/X.sdn` is
+  sealed by an EMPTY sibling `dir/X.<algo>_<lowercase hex>.csm` (algo in
+  `crc32` 8 hex / `xxh3` 16 / `blake3` 64; per-file policy in
+  `config/check/sdn_seal_policy.sdn`, default `xxh3`); there is no line-1
+  `#sdn-crc32:` header any more (legacy headers still load with a deprecation
+  warning for one release). The hash is over the LF-normalized file (CR dropped),
+  through ONE function: `hash_hex` in
+  `src/lib/nogc_sync_mut/database/csm_seal.spl` and its shell twin
+  `scripts/check/sdn-seal-lib.shs`. States: one matching sidecar = OK; one
+  mismatching / unknown algo / wrong width = CORRUPT (fail closed); several =
+  MERGED_UNSEALED (loader accepts with a warning, writers reseal, the gate
+  FAILs with "run reseal"); none on a policy-listed file = MISSING (fail
+  closed). **Because the seal is a separate file, two PRs that touch rows no
+  longer conflict on line 1** — their differently named `.csm` files merge as
+  add/add. After any merge touching a sealed file run
+  `sh scripts/check/reseal-sdn-crc32.shs <file.sdn>` (it strips legacy headers
+  and keeps exactly one sidecar) and commit the `.csm` changes with the data.
+  On a `bug_db.sdn` conflict: union the rows, delete every `bug_db.*.csm`, run
+  reseal. `sdn-rows-merge.shs` / `gh-pr-sdn-sync.shs` still union rows; the
+  latter now leaves exactly one resealed `.csm` in the merge tree. Writers
+  (`bug.spl`, `todo.spl`, `core.spl`, `bug-claim.shs`, `sync-tracking-db-status.shs`)
+  add the new seal first, publish the data, then prune the old seals.
+- **`bug_db.sdn` row conflicts resolve automatically (2026-11-03).** Its (pre-sidecar) line 1
   `#sdn-crc32:` seal changes on every row edit, so any two PRs touching rows
   used to conflict. `.gitattributes` maps it to `merge=sdn-rows`;
   `scripts/setup/setup.shs` sets `merge.sdn-rows.driver = sh

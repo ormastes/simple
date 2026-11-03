@@ -1456,6 +1456,8 @@ impl Lowerer {
                 let symbol = self.flatten_emitted_symbol(owner.as_deref(), &f.name);
                 // An all-None vector is authoritative too: a declaration with
                 // no defaults must not borrow an imported namesake's defaults.
+                self.fn_param_names
+                    .insert(symbol.clone(), if f.params.iter().any(|p| p.variadic) { Vec::new() } else { f.params.iter().map(|p| p.name.clone()).collect() });
                 self.fn_param_defaults
                     .insert(symbol, f.params.iter().map(|p| p.default.clone()).collect());
             }
