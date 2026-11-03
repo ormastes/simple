@@ -3207,7 +3207,10 @@ RuntimeValue rt_arm64_virtio_net_send(RuntimeValue data_addr, RuntimeValue len_v
     g_arm64_net_tx_desc[slot].addr = (uint64_t)(uintptr_t)dst;
     g_arm64_net_tx_desc[slot].len = (uint32_t)(ARM64_NET_HEADER_SIZE + len);
     g_arm64_net_tx_desc[slot].flags = 0U;
-    g_arm64_net_tx_avail.ring[slot] = slot;
+    /* The producer cursor and reusable descriptor identity are independent:
+     * timed-out sends retain descriptors until their device completion. */
+    uint16_t avail_slot = (uint16_t)(g_arm64_net_tx_avail.idx % ARM64_NET_QUEUE_SIZE);
+    g_arm64_net_tx_avail.ring[avail_slot] = slot;
     g_arm64_net_tx_avail.idx++;
     g_arm64_net_tx_posted[slot] = 1U;
     arm64_clean_dcache_range((uint64_t)(uintptr_t)dst, ARM64_NET_HEADER_SIZE + len);
