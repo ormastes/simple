@@ -32,3 +32,5 @@ Already fixed in source by 0528a9ed3ac (see `stage2_try_unwrap_text_typed_as_i64
 
 ## Removal condition
 Stage2 has been rebuilt from a compiler with the try-type fix, and the smoke passes without this workaround.
+
+**Triage 2026-11-03 (group C):** root cause fixed in source by `0528a9ed3ac` (see stage2_try_unwrap_text_typed_as_i64_2026-11-02). Status: fix-implemented-verification-pending; remove tagged workaround after stage3 rebuild proves digest canonical.
