@@ -5,6 +5,7 @@
 #define NOMINMAX
 #define WIN32_NO_STATUS
 #include <windows.h>
+#include <winternl.h>
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
 #include <cstdio>
@@ -165,7 +166,7 @@ static ChildResult run_child(const wchar_t* executable, const char* mode,
     wchar_t wide_mode[64] = {};
     for (size_t i = 0; mode[i] && i + 1 < 64; ++i) wide_mode[i] = mode[i];
     wchar_t cmd[32768] = {};
-    if (_snwprintf_s(cmd, _countof(cmd), _TRUNCATE, L"\"%ls\" --child %ls",
+    if (_snwprintf_s(cmd, sizeof(cmd) / sizeof(cmd[0]), _TRUNCATE, L"\"%ls\" --child %ls",
                      executable, wide_mode) < 0) return result;
     STARTUPINFOEXW sx = {};
     sx.StartupInfo.cb = sizeof(sx);
@@ -281,8 +282,9 @@ int main(int argc, char** argv) {
     }
     print_policies("parent");
     wchar_t executable[32768] = {};
-    const DWORD length = GetModuleFileNameW(nullptr, executable, _countof(executable));
-    if (!length || length >= _countof(executable)) return kSetupFailure;
+    const DWORD capacity = sizeof(executable) / sizeof(executable[0]);
+    const DWORD length = GetModuleFileNameW(nullptr, executable, capacity);
+    if (!length || length >= capacity) return kSetupFailure;
     const auto cp = run_child(executable, "cfg-positive", request_native);
     const auto cn = run_child(executable, "cfg-negative", request_native);
     const bool cfg_pass = cp.launched && cn.launched && cp.exit_code == 0 &&
