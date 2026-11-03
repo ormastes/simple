@@ -41,3 +41,34 @@ entirely unresolved enum behaves like a real one.
 
 An unresolved imported type used as a value/pattern should be a hard error (or
 at minimum make `run` exit nonzero), not a WARN followed by symbolic execution.
+
+## Rejected selective-import candidate evidence (2026-11-03; no closure)
+
+A candidate validation patch was prepared against source base
+`deb089b0eae35329dcf8bcbb3782b483a6e79464`. The candidate file in its isolated
+worktree was
+`src/compiler_rust/compiler/src/hir/lower/import_loader.rs`, SHA-256
+`45B1D8D6D52200F9A82ACB4B470EAFC254AE919267DE96880A1DBF15C92B2039`. This
+source draft was rejected and is not included or proposed for landing.
+
+The four focused tests did not execute. The first bounded attempt stopped
+during setup because LLVM sys dynamic linking is unsupported in this Windows
+configuration; zero test assertions ran. Attempt 3 failed during Rust harness
+compilation after 174 seconds (rc 101), also with zero tests: the candidate
+passed a `PathBuf` to a `String` set, and the sparse checkout reported 11
+missing compile-time include-file references spanning fixtures and production
+Simple sources. This is a candidate/build setup failure, not a semantic test
+result. The retained attempt-3 receipt is
+`C:/dev/p3new/selective_import_validation_20261103/unit_attempt_03/result.sdn`,
+SHA-256
+`191E2680CBE34FBB71CE2AF94D0CCE053B24C97361F895C472254BF39C58C13E`; its
+stderr is `unit_attempt_03/cargo-no-run.log.err`, SHA-256
+`B630ED9C5C1EAFC20DB5CAD39BE1F8A451FEF36B0C229583F388D81DB6660FBB`.
+
+The four named focused tests—name validation, declarations and re-exports,
+missing re-export and cycle-only names, and incomplete package graphs—remain
+unexecuted. No retry or source repair is recorded here. The historical
+2026-08-18 behavior has not been remeasured against this release; this issue
+remains OPEN and unverified. Neither the rejected candidate nor its zero-test
+attempts establish runtime closure, and the existing bug database status
+remains open.
