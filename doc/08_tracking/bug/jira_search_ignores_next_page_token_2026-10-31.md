@@ -1,6 +1,6 @@
 # jira_curl_search stops after one page
 
-Status: fixed for Jira Cloud 2026-10-31, found by the emulated specs. Data Center `startAt` paging stays open.
+Status: fixed. Cloud 2026-10-31; Data Center `startAt`/`total` paging in d5d8f36613b (spec 09c67db88d9, `devhub_jira_dc_pagination_spec.spl`).
 
 `jira_curl_search` (`src/app/devhub/adapter_jira_curl.spl:431`) sends one POST to
 `/rest/api/3/search/jql` and never reads `nextPageToken`, although the file header
@@ -20,4 +20,4 @@ expected 2`, and ACME-3 absent from the output. The spec failed until the fix be
 
 ## Fix
 
-`jira_curl_search` follows `nextPageToken` until it is absent or `--limit` is reached. It fails loudly at `JIRA_SEARCH_MAX_PAGES` (100) or on a repeated token instead of truncating. Data Center `startAt` paging is still open and unexercised.
+`jira_curl_search` follows `nextPageToken` until it is absent or `--limit` is reached. It fails loudly at `JIRA_SEARCH_MAX_PAGES` (100) or on a repeated token instead of truncating. Data Center `startAt` paging landed in d5d8f36613b and is exercised by the DC pagination spec.
