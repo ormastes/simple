@@ -439,7 +439,7 @@ pub fn native_build_frontend_cache_dir_for_v1(args: [text], lane: text) -> text:
         i = i + 1
     ""
 
-fn native_build_normalize_exit_code(raw: i64) -> i64:
+pub fn native_build_normalize_exit_code(raw: i64) -> i64:
     """The worker's exit status, sign-restored.
 
     It is an i32 that arrives ZERO-EXTENDED across the wrapper boundary, so a
@@ -2088,52 +2088,59 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
             eprint_bounded(stdout)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
-        val windows_status = native_build_windows_status_label(code)
-        if code == -1 and (stderr.contains("dumped core") or stderr.contains("core dumped")):
-            # A crash, not a kill and not a wait failure. `timeout` reports
-            # WCOREDUMP on the monitored command, and that single line is the
-            # only evidence that survives to here -- the wrapper collapses the
-            # child's signal status to -1 (rt_process_wait's Rust twin does
-            # `status.code().unwrap_or(-1)`, discarding WTERMSIG), so the number
-            # alone cannot tell a SIGSEGV from a failed wait. Say which.
-            stderr_write("error: native-build worker CRASHED -- the child dumped core (see the 'dumped core' line above). NOT a timeout, NOT a kill, NOT a compile failure.\n")
-            stderr_write("  For a backtrace, let the crash reporter keep cores for unpackaged binaries, then re-run:\n")
-            stderr_write("    printf '[main]\\nunpackaged=true\\n' > ~/.config/apport/settings\n")
-            stderr_write("    apport-unpack /var/crash/<report>.crash /tmp/u\n")
-            # `bt` alone is not enough: measured 2026-09-05 on a real compiler
-            # SIGSEGV, the PC lands in a non-executable mimalloc heap mapping
-            # with no symbol and an unwindable-to-garbage stack. The registers
-            # and the PC's mapping are what identify the fault.
-            stderr_write("    gdb <worker-binary> /tmp/u/CoreDump -batch -ex bt -ex 'info registers pc lr x0 x8' -ex 'x/4xg $pc'\n")
-            stderr_write("    # then locate the PC in /tmp/u/ProcMaps: a rw-p [anon:mimalloc] hit means a branch to data, not a code bug at that address\n")
-        elif windows_status != "":
-            stderr_write("error: native-build worker terminated with Windows native status {windows_status} before producing a binary.\n")
-        elif native_build_posix_signal(code) > 0:
-            val signo = native_build_posix_signal(code)
-            stderr_write("error: native-build worker terminated with signal {signo} before producing a binary; NOT a compile failure.\n")
-            if signo == 11 or signo == 6:
-                stderr_write("  A SIGSEGV/SIGABRT is a crash in the compiler itself; take a backtrace from the core (see /var/crash).\n")
-            elif signo == 9 or signo == 15:
-                stderr_write("  hint: check for an out-of-memory reaper (earlyoom/systemd-oomd: 'journalctl -t earlyoom').\n")
-        elif code == -1 and not stderr.contains("[TIMEOUT:"):
-            # -1 without the wrapper's [TIMEOUT:] marker is NOT a timeout: the
-            # wrapper died by a signal (status.code() is None) or the wait
-            # itself failed. Say so instead of blaming --timeout (run6, 2026-08-21:
-            # reported "timed out after 569328s" at 2742 s of wall).
-            stderr_write("error: native-build worker wrapper exited abnormally (signal or wait failure, code -1) before producing a binary; its process group has been terminated.\n")
-        elif code == -1:
-            val secs = native_build_timeout_ms(args) / 1000
-            stderr_write("error: native-build worker timed out after {secs}s before producing a binary.\n")
-            stderr_write("  The interpreted worker loads the whole compiler + LLVM import graph before any\n")
-            stderr_write("  codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget.\n")
-            stderr_write("  Read the last '[build] N/6' progress line to see which phase ran out of time.\n")
-            stderr_write("  Steps 4 (mir, driver_pipeline_lowering.spl:262) and 5 (native_compile,\n")
-            stderr_write("  driver_build/parallel.spl:480) are both SEQUENTIAL regardless of --threads.\n")
-            stderr_write("  Options: shrink --source, keep build/native_cache warm, pass --low-memory,\n")
-            stderr_write("  use --backend llvm-lib (in-process LLVM C API), or raise --timeout.\n")
-        else:
-            stderr_write("  interpreter: {simple_bin} (exit code {code})\n")
+        for tail_line in native_build_worker_failure_lines_v1(code, stderr, simple_bin, native_build_timeout_ms(args) / 1000):
+            stderr_write(tail_line)
     code as i64
+
+pub fn native_build_worker_failure_lines_v1(code: i64, stderr: text, simple_bin: text, timeout_secs: i64) -> [text]:
+    """Tail diagnostic lines for a failed (non-zero) worker, by exit-status class."""
+    var lines: [text] = []
+    val windows_status = native_build_windows_status_label(code)
+    if code == -1 and (stderr.contains("dumped core") or stderr.contains("core dumped")):
+        # A crash, not a kill and not a wait failure. `timeout` reports
+        # WCOREDUMP on the monitored command, and that single line is the
+        # only evidence that survives to here -- the wrapper collapses the
+        # child's signal status to -1 (rt_process_wait's Rust twin does
+        # `status.code().unwrap_or(-1)`, discarding WTERMSIG), so the number
+        # alone cannot tell a SIGSEGV from a failed wait. Say which.
+        lines.push("error: native-build worker CRASHED -- the child dumped core (see the 'dumped core' line above). NOT a timeout, NOT a kill, NOT a compile failure.\n")
+        lines.push("  For a backtrace, let the crash reporter keep cores for unpackaged binaries, then re-run:\n")
+        lines.push("    printf '[main]\\nunpackaged=true\\n' > ~/.config/apport/settings\n")
+        lines.push("    apport-unpack /var/crash/<report>.crash /tmp/u\n")
+        # `bt` alone is not enough: measured 2026-09-05 on a real compiler
+        # SIGSEGV, the PC lands in a non-executable mimalloc heap mapping
+        # with no symbol and an unwindable-to-garbage stack. The registers
+        # and the PC's mapping are what identify the fault.
+        lines.push("    gdb <worker-binary> /tmp/u/CoreDump -batch -ex bt -ex 'info registers pc lr x0 x8' -ex 'x/4xg $pc'\n")
+        lines.push("    # then locate the PC in /tmp/u/ProcMaps: a rw-p [anon:mimalloc] hit means a branch to data, not a code bug at that address\n")
+    elif windows_status != "":
+        lines.push("error: native-build worker terminated with Windows native status {windows_status} before producing a binary.\n")
+    elif native_build_posix_signal(code) > 0:
+        val signo = native_build_posix_signal(code)
+        lines.push("error: native-build worker terminated with signal {signo} before producing a binary; NOT a compile failure.\n")
+        if signo == 11 or signo == 6:
+            lines.push("  A SIGSEGV/SIGABRT is a crash in the compiler itself; take a backtrace from the core (see /var/crash).\n")
+        elif signo == 9 or signo == 15:
+            lines.push("  hint: check for an out-of-memory reaper (earlyoom/systemd-oomd: 'journalctl -t earlyoom').\n")
+    elif code == -1 and not stderr.contains("[TIMEOUT:"):
+        # -1 without the wrapper's [TIMEOUT:] marker is NOT a timeout: the
+        # wrapper died by a signal (status.code() is None) or the wait
+        # itself failed. Say so instead of blaming --timeout (run6, 2026-08-21:
+        # reported "timed out after 569328s" at 2742 s of wall).
+        lines.push("error: native-build worker wrapper exited abnormally (signal or wait failure, code -1) before producing a binary; its process group has been terminated.\n")
+    elif code == -1:
+        val secs = timeout_secs
+        lines.push("error: native-build worker timed out after {secs}s before producing a binary.\n")
+        lines.push("  The interpreted worker loads the whole compiler + LLVM import graph before any\n")
+        lines.push("  codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget.\n")
+        lines.push("  Read the last '[build] N/6' progress line to see which phase ran out of time.\n")
+        lines.push("  Steps 4 (mir, driver_pipeline_lowering.spl:262) and 5 (native_compile,\n")
+        lines.push("  driver_build/parallel.spl:480) are both SEQUENTIAL regardless of --threads.\n")
+        lines.push("  Options: shrink --source, keep build/native_cache warm, pass --low-memory,\n")
+        lines.push("  use --backend llvm-lib (in-process LLVM C API), or raise --timeout.\n")
+    else:
+        lines.push("  interpreter: {simple_bin} (exit code {code})\n")
+    lines
 
 fn native_build_has_help(args: [text]) -> bool:
     for arg in args:
