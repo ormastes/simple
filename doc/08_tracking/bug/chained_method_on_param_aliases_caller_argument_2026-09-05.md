@@ -3,7 +3,7 @@
 - **Filed-on:** 2026-09-05
 - **Area:** compiler / interpreter (Rust seed, `src/compiler_rust/target/debug/simple`)
 - **Priority:** P1
-- **Status:** open
+- **Status:** fixed (stale)
 
 ## Symptom
 
@@ -59,3 +59,5 @@ current source). Not reproduced against a deployed pure-Simple binary — none i
 deployed on this host.
 
 **Revalidated 2026-11-02: still plausible because the report title (Chained method call on a function PARAMETER aliases and clobbers the caller's a) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+**Closed-stale 2026-11-03:** not reproducible on current release/1.0.0 with the real NDArray chain (f1/f3 leave caller `a` at [1,2]); regression spec `test/03_system/plan_acceptance/chained_method_param_alias_spec.spl` passes 2/2 (bin/simple.exe test). The `try_axpy` local-binding workaround in linalg/mod.spl is harmless and left in place.
