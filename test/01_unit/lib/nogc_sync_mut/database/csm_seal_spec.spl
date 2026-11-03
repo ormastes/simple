@@ -8,7 +8,7 @@ use std.nogc_sync_mut.compression.gzip.{crc32_text}
 use std.spec.{describe, it, assert_equal, assert_true}
 use std.io_runtime.{dir_create_all, dir_remove_all, file_delete}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_exists}
-use std.nogc_sync_mut.database.csm_seal.{hash_hex, csm_hash_hex_bytes, csm_verify, csm_load_body, csm_seal, csm_list, csm_sidecar_path, csm_policy_algo_from, csm_policy_row_from, csm_hex_len, CSM_OK, CSM_CORRUPT, CSM_MERGED_UNSEALED, CSM_MISSING, CSM_LEGACY}
+use std.nogc_sync_mut.database.csm_seal.{hash_hex, csm_hash_hex_bytes, csm_verify, csm_load_body, csm_seal, csm_write_sealed, csm_list, csm_sidecar_path, csm_policy_algo_from, csm_policy_row_from, csm_hex_len, CSM_OK, CSM_CORRUPT, CSM_MERGED_UNSEALED, CSM_MISSING, CSM_LEGACY}
 
 val DIR: text = "build/csm_seal_spec_tmp"
 val BODY: text = "bugs |id, status|\n    a, open\n"
@@ -118,3 +118,21 @@ describe "csm sidecar seal":
         assert_equal(csm_list(p).len(), 1)
         assert_equal(csm_verify(p, BODY).algo, "blake3")
         assert_equal(csm_verify(p, BODY + "x").state, CSM_CORRUPT)
+
+    it "csm_write_sealed: every write leaves the file verifying OK with exactly one seal":
+        step("write sealed")
+        val p = fresh("ws")
+        assert_true(csm_write_sealed(p, BODY))
+        assert_equal(csm_verify(p, BODY).state, CSM_OK)
+        assert_equal(csm_list(p).len(), 1)
+        val body2 = BODY + "    b, closed\n"
+        assert_true(csm_write_sealed(p, body2))
+        assert_equal(csm_verify(p, body2).state, CSM_OK)
+        assert_equal(csm_list(p).len(), 1)
+        assert_equal(csm_verify(p, BODY).state, CSM_CORRUPT)
+
+    it "csm_write_sealed: non-sdn paths are written but never sealed":
+        step("write non-sdn")
+        val q = fresh("plain").replace(".sdn", ".md")
+        assert_true(csm_write_sealed(q, "hello\n"))
+        assert_equal(csm_list(q).len(), 0)

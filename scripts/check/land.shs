@@ -67,6 +67,23 @@ if [ -z "$BASE" ]; then
     exit 2
 fi
 
+# Auto-reseal (2026-11-04): another session may have edited a sealed .sdn
+# (bug_db.sdn ...) without resealing. Before gating/pushing, reseal every sealed
+# file THIS range touches and add the reseal as a NEW commit on top of TIP
+# (never amends anyone's commit). Only on --submit: a dry-run must not move the
+# branch. The pre-push hook and CI never mutate; they print this command.
+if [ "$SUBMIT" -eq 1 ]; then
+    RESEAL_OUT=$(sh scripts/check/reseal-range.shs --base "$BASE" --commit 2>&1)
+    RESEAL_CODE=$?
+    printf '%s
+' "$RESEAL_OUT" >&2
+    case "$(printf '%s
+' "$RESEAL_OUT" | tail -1)" in
+        PASS*) [ "$RESEAL_CODE" -eq 0 ] || { echo "land.shs: REFUSING TO PUSH -- reseal-range.shs exited $RESEAL_CODE" >&2; exit 1; } ;;
+        *) echo "land.shs: REFUSING TO PUSH -- reseal-range.shs did not PASS" >&2; exit 1 ;;
+    esac
+    TIP=$(git rev-parse "refs/heads/$WORK_BRANCH" 2>/dev/null) || { echo "land.shs: lost TIP after reseal" >&2; exit 2; }
+fi
 echo "land.shs: gating BASE=$BASE TIP=$TIP" >&2
 
 RULES_OUT=$(sh scripts/check/check-rules-sdl.shs --group quick --ref "$TIP" 2>&1)
