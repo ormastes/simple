@@ -25,3 +25,5 @@ Provenance mapping and landing status: Workaround provenance: d9719ec82230788751
 Exact qualified/failing source attribution: Affected ARM object source aeb2517fac0a3f287aed4347d75235ac8976161d includes d9719ec822307887511eb3637f35a3b4fc48f8d5; behavioral spec unexecuted.
 
 Traceability annotation base: `64b8854eaa6eee9470470ddbcef5fa2165902d13`. No earlier source or retained build evidence was modified; native qualifications remain bound to their exact sources above.
+
+**Triage 2026-11-03 (group C):** root fix landed: `ad6ec58497a` (parser tracks locally proven contextual `new` bindings, `parser_lexical_has_new_value`). `parser_contextual_new_scope_spec` under bin/simple.exe: 19/22 pass; the 3 failures are `do:` block flat-bridge tag=44 and typed-var-without-initializer (seed/interp gaps, not `new[index]`). Status: fix-implemented-verification-pending; workaround retirement after stage3.

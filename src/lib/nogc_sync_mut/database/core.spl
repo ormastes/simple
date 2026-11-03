@@ -133,6 +133,10 @@ class StringInterner:
             table.add_row(row)
         table
 
+# Hidden row field holding raw extra fields of an overwide legacy row.
+fn sdn_opaque_tail_key() -> text:
+    "__opaque_tail"
+
 # ============================================================================
 # SdnRow - Single row in SDN table
 # ============================================================================
@@ -279,10 +283,20 @@ class SdnTable:
             # Parse row with quote-aware CSV splitting
             # Handles quoted values that contain commas
             val parts = split_sdn_row(line)
-            if parts.len() != columns_parsed.len():
+            # Underwide rows are corrupt: fail closed. Overwide legacy rows keep
+            # their extra raw fields as an opaque tail so a save round trip is
+            # lossless (bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27).
+            if parts.len() < columns_parsed.len():
                 return nil
 
             val row = SdnRow(fields: {}, _version: 0)
+            if parts.len() > columns_parsed.len():
+                var tail: [text] = []
+                var k = columns_parsed.len()
+                while k < parts.len():
+                    tail.push(parts[k].trim())
+                    k = k + 1
+                row.set(sdn_opaque_tail_key(), tail.join(", "))
             var j = 0
             while j < columns_parsed.len():
                 val col: text = columns_parsed[j]
@@ -312,6 +326,10 @@ class SdnTable:
                 val formatted = quote_if_needed(value)
                 values.push(formatted)
             parts.push(values.join(", "))
+            val opaque_tail = row.get(sdn_opaque_tail_key()) ?? ""
+            if opaque_tail != "":
+                parts.push(", ")
+                parts.push(opaque_tail)
             parts.push("\n")
 
         parts.join("")
