@@ -3,8 +3,16 @@
 # Does not use the old rt_io_tcp_* provider or an interpreter fallback.
 use std.nogc_sync_mut.io.windows_tcp.*
 use std.common.text_bytes.{text_to_bytes}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetTickCount64}
 
 fn check_connection(listener: i64, client: i64, server: i64) -> i64:
+    # No client bytes are queued. A stream inheriting listener nonblocking mode
+    # returns immediately; a normalized stream waits for its receive deadline.
+    if not io_tcp_set_read_timeout(server, 200): return 60
+    val started = unsafe(capabilities: [ffi]): GetTickCount64()
+    val quiet_read = io_tcp_read(server, 1)
+    val finished = unsafe(capabilities: [ffi]): GetTickCount64()
+    if quiet_read != nil or finished - started < 50u64: return 61
     if not io_tcp_set_nodelay(client, true): return 20
     if not io_tcp_set_read_timeout(server, 1000): return 21
     if io_tcp_set_reuseport(server, true): return 22
@@ -82,6 +90,7 @@ fn main() -> i64:
         if code == 0: client = io_tcp_connect_timeout(address, 1000)
     else: code = 10
     if code == 0 and client < 0: code = 11
+    if code == 0 and not io_tcp_set_nonblocking(listener, true): code = 62
     if code == 0: server = io_tcp_accept_timeout(listener, 1000)
     if code == 0 and server < 0: code = 12
     if code == 0 and windows_tcp_registry_live_v1() != 3: code = 15
