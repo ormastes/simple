@@ -5,6 +5,8 @@
 # so `rt_migrate` can rewrite product call sites mechanically. Product code
 # imports these instead of declaring `extern fn rt_*` itself. Signatures come
 # from the majority extern declaration in the tree (see the map's decl census).
+# Timeout accept additionally restores the synchronous stream contract: foreign
+# providers may accept while their listener is temporarily nonblocking.
 
 @unsafe(reason: "raw runtime ABI for rt_http_get", capabilities: [ffi])
 extern fn rt_http_get(url: text) -> (i64, text, text)
@@ -36,7 +38,14 @@ extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 @always_inline
 pub fn io_tcp_accept_timeout(fd: i64, ms: i64) -> i64:
     unsafe(capabilities: [ffi]):
-        rt_io_tcp_accept_timeout(fd, ms)
+        val accepted = rt_io_tcp_accept_timeout(fd, ms)
+        if accepted < 0: return accepted
+        # Windows inherits the listener's mode. Normalize the NEW stream only;
+        # do not modify or close the listener on normalization failure.
+        if not rt_io_tcp_set_nonblocking(accepted, false):
+            val _closed = rt_io_tcp_close(accepted)
+            return -1
+        accepted
 
 @unsafe(reason: "raw runtime ABI for rt_io_tcp_bind", capabilities: [ffi])
 extern fn rt_io_tcp_bind(addr: text) -> i64
