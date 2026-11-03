@@ -98,3 +98,9 @@ error, add the corresponding install rather than reclassifying this record.
 | #253 (`52f6af5b9a7`) | queued | expected YES — triggers the same workflow |
 | #247 (`bee1f952460`) | no macOS check-run | no — workflow not triggered by its paths |
 | #235 (`a2475e29cc2`) | no macOS check-run | no — workflow not triggered by its paths |
+
+## Source reconciliation — 2026-11-03
+
+At release `8b473cc8b35a634a291f8d815888558dd7f9fffd`, the native workflow's macOS dependency step already runs `brew install coreutils freetype zstd llvm`, adds the freetype library to `RUSTFLAGS` and `LIBRARY_PATH`, and exports its include directory in `CPATH`. The original missing-install diagnosis above is historical. No duplicate installation patch was made.
+
+Registry status is now `fix-implemented-verification-pending`. This reconciliation inspected source; it did not execute the macOS workflow or establish native link qualification. A native job covering the existing `spl_fonts` link remains the closure evidence.
