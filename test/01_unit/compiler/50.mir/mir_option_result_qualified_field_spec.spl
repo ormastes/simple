@@ -1,0 +1,173 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR shape pins: Option/Result returns, qualified field keys, nil-payload patterns
+
+Pins the intended MIR for three lowering families, each previously only
+discriminated by native-only fixtures (test/fixtures/compiler/
+mir_qualified_field_key, native_entry_own_class_methods):
+
+1. Option (`T?`) and `Result<T, E>` returning functions lower without
+   diagnostics and keep their branch shape.
+2. Two modules declaring the same class name `Config` with different layouts:
+   the importer's field reads resolve through the module-qualified
+   `struct_value_syms` provenance, so `.gamma` is slot 1 of mod_b's Config and
+   `.errors` of mod_a's Config is slot 2 (never the bare-name collision).
+3. A `case nil:` / `case Some(v):` match over an Option subject lowers to a
+   branching match with no diagnostics.
+"""
+
+# @tag: unit, compiler, mir, option, result, struct_value_syms
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+
+struct Lowered:
+    mir: MirModule
+    errors: text
+
+fn lower_with_providers(provider_names: [text], provider_sources: [text], source: text) -> Lowered:
+    val logger = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+    var asts: [ParserModule] = []
+    var index = 0
+    while index < provider_names.len():
+        val module_name = provider_names[index]
+        val path = "lib/" + module_name + ".spl"
+        val ast = parse_full_frontend(provider_sources[index], path, "lib." + module_name, logger)
+        modules["lib." + module_name] = ast
+        sources = sources + [SourceFile(path: path, content: provider_sources[index], module_name: "lib." + module_name)]
+        asts = asts + [ast]
+        index = index + 1
+    val consumer_ast = parse_full_frontend(source, "app/consumer.spl", "app.consumer", logger)
+    modules["app.consumer"] = consumer_ast
+    sources = sources + [SourceFile(path: "app/consumer.spl", content: source, module_name: "app.consumer")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var providers = []
+    index = 0
+    while index < provider_names.len():
+        var provider_lowering = hirlowering_for_module("lib/" + provider_names[index] + ".spl", surfaces)
+        providers = providers + [provider_lowering.lower_module(asts[index])]
+        index = index + 1
+    var consumer_lowering = hirlowering_for_module("app/consumer.spl", surfaces)
+    val consumer = consumer_lowering.lower_module(consumer_ast)
+    var lowering = MirLowering.new_for_target(consumer.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(consumer, providers, true)
+    var errors = ""
+    for e in consumer_lowering.errors: errors = errors + "hir: " + e.message + "\n"
+    for e in lowering.errors: errors = errors + "mir: " + e.message + "\n"
+    Lowered(mir: mir, errors: errors)
+
+fn lower_single(source: text) -> Lowered:
+    lower_with_providers([], [], source)
+
+fn find_fn(mir: MirModule, name: text) -> MirFunction?:
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return Some(function)
+    nil
+
+# Single-module lowering has no prelude Option/Result enum registry, so the
+# exhaustive Some/None and Ok/Err arms draw the advisory "non-exhaustive enum
+# match" diagnostic (for_in_runtime_tuple_decode_spec filters it the same way).
+# Every OTHER diagnostic is still a failure.
+fn errors_except_enum_advisory(errors: text) -> text:
+    var out = ""
+    for line in errors.split("\n"):
+        if line == "" or line.contains("non-exhaustive enum match on '"):
+            continue
+        out = out + line + "\n"
+    out
+
+fn get_field_indices(function: MirFunction) -> [i64]:
+    var out: [i64] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.GetField(_, _, field_index): out = out + [field_index]
+                case _: pass
+    out
+
+fn has_branch(function: MirFunction) -> bool:
+    for block in function.blocks:
+        match block.terminator:
+            case MirTerminator.If(_, _, _): return true
+            case MirTerminator.Switch(_, _, _): return true
+            case _: pass
+    false
+
+val mod_a_source = "class Config:\n    alpha: i64\n    beta: i64\n    errors: i64\n\nfn a_make() -> Config:\n    Config(alpha: 111, beta: 222, errors: 333)\n"
+val mod_b_source = "class Config:\n    errors: i64\n    gamma: i64\n\nfn b_make() -> Config:\n    Config(errors: 777, gamma: 888)\n"
+val qualified_consumer = "use lib.mod_a.\{a_make\}\nuse lib.mod_b.\{Config, b_make\}\n\nfn direct_gamma() -> i64:\n    val c = Config(errors: 777, gamma: 888)\n    c.gamma\n\nfn via_b_gamma() -> i64:\n    val d = b_make()\n    d.gamma\n\nfn via_a_errors() -> i64:\n    val e = a_make()\n    e.errors\n"
+
+describe "Option and Result returning functions":
+    it "lowers an Option-returning branch without diagnostics and keeps a branch":
+        val low = lower_single("fn pick(x: i64) -> i64?:\n    if x > 0:\n        Some(x)\n    else:\n        nil\n")
+        expect(low.errors).to_equal("")
+        val f = find_fn(low.mir, "pick")
+        expect(f == nil).to_equal(false)
+        expect(has_branch(f.unwrap())).to_equal(true)
+
+    it "lowers a Result-returning branch without diagnostics and keeps a branch":
+        val low = lower_single("fn check(x: i64) -> Result<i64, text>:\n    if x > 0:\n        Ok(x)\n    else:\n        Err(\"negative\")\n")
+        expect(low.errors).to_equal("")
+        val f = find_fn(low.mir, "check")
+        expect(f == nil).to_equal(false)
+        expect(has_branch(f.unwrap())).to_equal(true)
+
+    it "lowers a straight-line Some return as a non-branching function":
+        val low = lower_single("fn wrap(x: i64) -> i64?:\n    Some(x)\n")
+        expect(low.errors).to_equal("")
+        val f = find_fn(low.mir, "wrap")
+        expect(f == nil).to_equal(false)
+        expect(has_branch(f.unwrap())).to_equal(false)
+
+describe "enum nil-payload patterns":
+    it "lowers case Some(v) / case nil over an Option subject":
+        val low = lower_single("fn unwrap_or_zero(o: i64?) -> i64:\n    match o:\n        case Some(v):\n            v\n        case nil:\n            0\n")
+        expect(errors_except_enum_advisory(low.errors)).to_equal("")
+        val f = find_fn(low.mir, "unwrap_or_zero")
+        expect(f == nil).to_equal(false)
+        expect(has_branch(f.unwrap())).to_equal(true)
+
+    it "lowers case Ok(v) / case Err(_) over a Result subject":
+        val low = lower_single("fn ok_or_neg(r: Result<i64, text>) -> i64:\n    match r:\n        case Ok(v):\n            v\n        case Err(_):\n            -1\n")
+        expect(errors_except_enum_advisory(low.errors)).to_equal("")
+        val f = find_fn(low.mir, "ok_or_neg")
+        expect(f == nil).to_equal(false)
+        expect(has_branch(f.unwrap())).to_equal(true)
+
+describe "module-qualified struct field keys (struct_value_syms)":
+    it "resolves .gamma to mod_b's slot 1 on a directly constructed Config":
+        val low = lower_with_providers(["mod_a", "mod_b"], [mod_a_source, mod_b_source], qualified_consumer)
+        expect(low.errors).to_equal("")
+        val f = find_fn(low.mir, "direct_gamma")
+        expect(f == nil).to_equal(false)
+        expect(get_field_indices(f.unwrap())).to_equal([1])
+
+    it "resolves .gamma to mod_b's slot 1 on a value returned by b_make":
+        val low = lower_with_providers(["mod_a", "mod_b"], [mod_a_source, mod_b_source], qualified_consumer)
+        val f = find_fn(low.mir, "via_b_gamma")
+        expect(f == nil).to_equal(false)
+        expect(get_field_indices(f.unwrap())).to_equal([1])
+
+    it "resolves .errors to mod_a's slot 2 on a value returned by a_make":
+        val low = lower_with_providers(["mod_a", "mod_b"], [mod_a_source, mod_b_source], qualified_consumer)
+        val f = find_fn(low.mir, "via_a_errors")
+        expect(f == nil).to_equal(false)
+        expect(get_field_indices(f.unwrap())).to_equal([2])
+
+    it "is provider-order independent":
+        val low = lower_with_providers(["mod_b", "mod_a"], [mod_b_source, mod_a_source], qualified_consumer)
+        val f = find_fn(low.mir, "via_a_errors")
+        expect(f == nil).to_equal(false)
+        expect(get_field_indices(f.unwrap())).to_equal([2])
