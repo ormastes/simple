@@ -290,3 +290,23 @@ and this record documents why.
 Reconfirmed: needs additional physical/QEMU board architectures to prove
 cross-arch boundary capture beyond x86_64. Hardware/board-evidence gap,
 not reproducible in this environment. Left OPEN (P3), no code change.
+
+## 2026-11-03 evidence-gate candidate (not device qualification)
+
+Source review at c348b50e13b confirms Adreno submit/readback remains false in
+`backend_adreno.spl`, and no independent Turnip adapter exists. This host is
+aarch64 with an NVIDIA DRM device, not an msm/Adreno target. No hardware or
+QEMU device execution was attempted for this record.
+
+The Adreno system spec previously gated on msm presence but then only built
+and walked an in-memory packet stream, including explicitly placeholder
+register/draw operands. It never submitted to or read back from the device;
+its ordinary `return "skip: ..."` path was also not the framework skip API.
+The prepared candidate registers an explicit canonical `std.spec.skip` for
+the unavailable device provider, regardless of mere hardware presence. CPU
+encoder coverage remains in the existing unit spec and earns no system
+submit/readback assertion.
+
+This candidate is unexecuted until an admitted full CLI can verify zero
+passing device assertions and a real skipped (or critical-profile rejected)
+result. It is not an Adreno driver, cross-architecture capture, or bug closure.
