@@ -45,3 +45,74 @@ Run admitted native runner with `--native-backend=llvm --assert-ran --no-cache -
 No custom-secret streaming constructor is exposed, so none is invented. Invalid secret lengths never enter upstream C; empty-array rejection is the local Simple contract, not an upstream digest.
 
 Merge owner: root. Review: root/Astra phase 3. Sidecar lanes: N/A. No unrelated source, vendor code or shared bug database edits.
+
+
+## Coverage re-audit and default-scope repair — 2026-11-03
+
+Source baseline: 4c1c754912e498f91f11a63a4d7f1c873bfdbd23, current release at
+this bounded audit. Existing XXH3 additions are already landed through PR6075:
+`6d87c5351a6` (vectors/specs) and `2a187727695` (canonical requirement alignment).
+The production owners are unchanged from those additions; no algorithm repair
+or duplicate vector suite is warranted by this review.
+
+**99% is not measured.** Numerator, instrumented denominator and zero-hit
+inventory are unavailable for both pure-Simple LLVM and Cranelift targets and
+for the self-hosted interpreter. No coverage is borrowed from AES, upstream C,
+the runtime text bridge, or any other implementation. Current source hashes:
+
+- `src/lib/common/crypto/xxh3.spl`: SHA-256
+  `840ce9cb15892f66c6ff14fc3837cd32ff2b523d611cf1d78fbc102e3f31635e`.
+- `src/lib/common/hash/xxh3.spl`: SHA-256
+  `a7e25139229e6d35a978167579077b46323561c2ac62835b667250d4d59ecc14`.
+
+The companion `xxh3_128_source_decisions_20261103.sdn` records 35 lexical
+if/elif/while statements in the kernel owner and 13 in the wrapper/streaming
+owner, including function names, source lines and conditions. **These 48
+source rows are not an instrumented denominator or a zero-hit report.** They
+include 64-bit-only and shared functions and cannot establish execution,
+short-circuit condition coverage, optimized native mapping or branch counts.
+
+The existing coverage gate's default scope omitted `common/hash/xxh3.spl`,
+and its default driving list omitted the existing public/streaming suite and
+the three newly landed XXH3 specs. This made a default gate result insufficient
+to describe both XXH3 owners even if the selected kernel rows passed. The gate
+now includes the public owner and those four suites. No coverage exclusions,
+thresholds, metrics, probes, timeout settings or production algorithms change.
+
+Source decision stimuli already authored:
+
+| Owner decisions | Existing stimulus |
+|---|---|
+| `_core128`, `_len17to128_128`, `_len129to240_128` | Existing official KAT/reference length classes; new binary seeded intermediate round boundaries |
+| `_k_xxh3_128_seeded`, `_custom_secret`, `_secret_for`, public seeded dispatch | Seed zero/nonzero/high-bit and input 240/241 in existing and landed suites |
+| `_hash_long_acc` final stripe/full-block scramble | 575/576/577 and 1152/1153 for minimum secrets; default-secret 1023/1024/1025 and multiblock vectors |
+| `_k_xxh3_128_with_secret` | Rejected 0/1/64/135 and exact accepted 136/137 secret vectors |
+| `_absorb`, `_consume`, `update`, `_short_bytes`, `digest128` | Existing split-point coverage plus independent 240/241/1024/1025 checkpoints; varied 1/63/64/65/255/256/257-byte updates and empty updates; reset |
+| `_hex64` | Existing canonical known answers plus binary 00/7f/80/ff canonical digest |
+
+No missing boolean outcome is claimed solely from this source-to-stimulus map.
+The next test additions must follow actual zero-hit rows or a newly identified
+specification gap; duplicating boundary vectors cannot demonstrate 99%.
+
+Measurement remains blocked on an admitted, source-matched pure-Simple
+producer/runner and complete inventory+counts association. The current native
+runtime collector creates rows when probes run; it must be joined with the
+compiler's complete zero-count AST inventory (or equivalent LLVM mapping) so
+uncalled functions remain in the denominator. First qualify the existing gate
+selftest with its never-called function, then retain raw reports before cleanup.
+Its metric is 100% both-outcomes-covered decision sites and condition sites,
+not a 99% branch-outcome ratio. Report these metrics separately. Windows path
+normalization and same-line decision identities also need actual admission.
+
+Focused XXH3 overrides after admission:
+
+```sh
+HASH_COV_SCOPE='src/lib/common/crypto/xxh3.spl src/lib/common/hash/xxh3.spl'
+HASH_COV_SPECS='test/01_unit/lib/common/crypto/xxh3_kat_spec.spl test/01_unit/lib/common/crypto/xxh3_reference_vectors_spec.spl test/01_unit/lib/common/hash/xxh3_spec.spl test/01_unit/lib/common/crypto/xxh3_128_spec_boundaries_spec.spl test/02_integration/lib/common/hash/xxh3_128_stream_contract_spec.spl test/03_system/lib/hash/xxh3_128_published_contract_spec.spl'
+export HASH_COV_SCOPE HASH_COV_SPECS
+SIMPLE_COV_BIN=<admitted-runtime> sh scripts/check/check-hash-algos-coverage.shs --report
+```
+
+Static shell syntax and default-path inclusion are the only checks applicable
+without that runtime. They are not test execution or branch-coverage evidence.
+All previously authored SSpec/manual statuses remain AUTHORED_UNRUN.
