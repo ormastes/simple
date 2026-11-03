@@ -250,6 +250,24 @@ fn try_dunder_unaryop(
     None
 }
 
+/// Equality between a 64-bit `Value::UInt` and a NEGATIVE `Value::Int`.
+///
+/// An unsuffixed literal above `i64::MAX` (`0xFFFF_FFFF_FFFF_FFF0`) lexes to
+/// its 64-bit pattern stored as a negative `i64`, so `u64_field == 0xFFFF...`
+/// compared `UInt` against `Int(-16)` and was always false, while the JIT and
+/// native lanes compare the machine words and say true
+/// (interp_u64_above_i64_max_signed_compare_and_print_2026-11-03). Compare
+/// the bit patterns for exactly that shape, as the compiled lanes do; every
+/// other pair keeps `Value` equality.
+fn uint64_word_eq(left: &Value, right: &Value) -> Option<bool> {
+    match (left, right) {
+        (Value::UInt { value, width: 64 }, Value::Int(i)) | (Value::Int(i), Value::UInt { value, width: 64 }) if *i < 0 => {
+            Some(*value == *i as u64)
+        }
+        _ => None,
+    }
+}
+
 /// Ordering for comparisons where at least one side is an UNSIGNED integer
 /// (`Value::UInt`), returning `None` when neither side is unsigned so the
 /// caller falls through to its existing arms.
@@ -1019,7 +1037,9 @@ pub(super) fn eval_op_expr(
                     // them so `opt == nil` works whether `opt` is a bare nil or a
                     // function-returned Option::None. Checked before __eq__ so a
                     // user enum's operator overload can't shadow nil semantics.
-                    if left_val.is_nil_like() || right_val.is_nil_like() {
+                    if let Some(eq) = uint64_word_eq(&left_val, &right_val) {
+                        Ok(Value::Bool(eq))
+                    } else                     if left_val.is_nil_like() || right_val.is_nil_like() {
                         Ok(Value::Bool(left_val.is_nil_like() && right_val.is_nil_like()))
                     } else if let Some(result) = try_object_binop_method(
                         "__eq__",
@@ -1045,7 +1065,9 @@ pub(super) fn eval_op_expr(
                 }
                 BinOp::NotEq => {
                     // See BinOp::Eq above: nil literal and Option::None compare equal.
-                    if left_val.is_nil_like() || right_val.is_nil_like() {
+                    if let Some(eq) = uint64_word_eq(&left_val, &right_val) {
+                        Ok(Value::Bool(!eq))
+                    } else                     if left_val.is_nil_like() || right_val.is_nil_like() {
                         Ok(Value::Bool(!(left_val.is_nil_like() && right_val.is_nil_like())))
                     } else if let Some(result) = try_object_binop_method(
                         "__ne__",
