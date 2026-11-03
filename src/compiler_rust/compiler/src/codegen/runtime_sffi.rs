@@ -639,6 +639,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // there was no equivalent for ordering, so string `<`/`>` fell through to a
     // raw pointer/handle icmp. See doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md.
     RuntimeFuncSpec::new("rt_text_cmp_any", &[I64, I64], &[I64]),
+    // Representation-aware equality for statically typed text, including
+    // raw extern strings and tagged runtime strings. Returns an i64 0/1.
+    RuntimeFuncSpec::new("rt_text_eq_any", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_data", &[I64], &[I64]), // RuntimeValue string -> raw ptr
     RuntimeFuncSpec::new("rt_string_char_at", &[I64, I64], &[I64]),
