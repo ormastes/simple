@@ -1,0 +1,49 @@
+"""
+Step injection must preserve the scenario's encoded string literal exactly.
+These cases exercise the production converter, including its evidence gate and
+idempotence, rather than a second implementation of its escaping rules.
+"""
+use std.spec.*
+use app.spec_to_sspec.main.{inject_step_flow}
+
+fn literal_scenario(label: text) -> text:
+    "it \"" + label + "\":\n    capture_output()\n    assert_equal(actual, expected)\n"
+
+describe "step literal preservation":
+    it "copies an ordinary label without changing the original body":
+        # @req REQ-SSPEC-APP
+        val source = literal_scenario("captures output")
+        val expected = "it \"captures output\":\n    step(\"captures output\")\n    capture_output()\n    assert_equal(actual, expected)\n"
+        expect(inject_step_flow(source)).to_equal(expected)
+
+    it "preserves escaped quotes and the text after them":
+        # @req REQ-SSPEC-APP
+        val source = literal_scenario("bucket=\\\"\\\", key=\\\"tail\\\"")
+        val expected = "it \"bucket=\\\"\\\", key=\\\"tail\\\"\":\n    step(\"bucket=\\\"\\\", key=\\\"tail\\\"\")\n    capture_output()\n    assert_equal(actual, expected)\n"
+        expect(inject_step_flow(source)).to_equal(expected)
+
+    it "preserves backslashes and encoded newline escapes":
+        # @req REQ-SSPEC-APP
+        val source = literal_scenario("C:\\\\tmp\\nnext")
+        val expected = "it \"C:\\\\tmp\\nnext\":\n    step(\"C:\\\\tmp\\nnext\")\n    capture_output()\n    assert_equal(actual, expected)\n"
+        expect(inject_step_flow(source)).to_equal(expected)
+
+    it "preserves meaningful whitespace and is idempotent":
+        # @req REQ-SSPEC-APP
+        val source = literal_scenario("  spaced  ")
+        val expected = "it \"  spaced  \":\n    step(\"  spaced  \")\n    capture_output()\n    assert_equal(actual, expected)\n"
+        val converted = inject_step_flow(source)
+        expect(converted).to_equal(expected)
+        expect(inject_step_flow(converted)).to_equal(expected)
+
+    it "does not inject steps without evidence or assertions":
+        # @req REQ-SSPEC-APP
+        val no_evidence = "it \"assert only\":\n    assert_equal(actual, expected)\n"
+        val no_assertion = "it \"capture only\":\n    capture_output()\n"
+        expect(inject_step_flow(no_evidence)).to_equal(no_evidence)
+        expect(inject_step_flow(no_assertion)).to_equal(no_assertion)
+
+    it "does not treat trailing comment quotes as a scenario label":
+        # @req REQ-SSPEC-APP
+        val source = "it \"captures output\": # comment with \"quotes\"\n    capture_output()\n    assert_equal(actual, expected)\n"
+        expect(inject_step_flow(source)).to_equal(source)
