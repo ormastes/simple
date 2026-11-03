@@ -1254,14 +1254,12 @@ SPL_RUNTIME_NATIVE_TWIN bool rt_file_is_regular_no_follow(const uint8_t* path_pt
     const char* path = path_buf;
 #if defined(_WIN32)
     if (!path) return 0;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return 0;
-    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    /* Long-path widened, like rt_file_read_regular_no_follow_bounded: the
+     * plain UTF-16 conversion failed past MAX_PATH, so a long
+     * package-module index path read as "not a regular file" and admission
+     * failed package-index:generation-unavailable (2026-09-25). */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
     if (!wide_path) return 0;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, wide_len)) {
-        free(wide_path);
-        return 0;
-    }
     DWORD attributes = GetFileAttributesW(wide_path);
     free(wide_path);
     return attributes != INVALID_FILE_ATTRIBUTES &&
