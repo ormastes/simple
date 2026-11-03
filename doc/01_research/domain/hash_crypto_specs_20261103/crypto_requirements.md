@@ -34,6 +34,14 @@ Existing candidate inventory (read coverage and assertions before mapping):
 
 Open source obligations: source exact AES/GCM independent KAT corpora; acquire
 P-256 domain/key-agreement guidance (SP 800-186 and SP 800-56A as applicable),
-and PKCS #1/RFC 8017 when RSA encoding is exercised. Review current errata before
+and use newly acquired PKCS #1/RFC 8017 when RSA encoding is exercised. Review current errata before
 claiming full standard conformance. These missing references do not prevent
 authoring bounded tests grounded in the sources already pinned.
+
+## Additional pinned references
+
+See [supplemental sources](supplemental_sources.md) for SQLCipher, CBC, PBKDF2,
+HMAC-SHA512 and RSA source identities. RFC 8017 section 8.1.2 starts printed
+page 34 (signature length/range verification), section 9.1.2 page 44 (PSS encoded
+message verification). RFC 8446 section 4.2.8.2 starts page 51; it specifies
+ECDHE parameter handling. There is no section 7.4.2 in RFC 8446.

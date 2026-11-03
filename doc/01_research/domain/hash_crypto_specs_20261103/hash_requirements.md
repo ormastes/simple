@@ -40,6 +40,7 @@ Reference: `xxhash_spec.md`, version 0.2.0 from pinned xxHash v0.8.3; headings
 | REQ-HASH-XXH3-003 | Large input: blocks, stripes, last 64 bytes, finalization | Independent results around 64-byte stripe boundaries and secret-dependent block length. Default secret gives 1024-byte block; custom secret length changes it. Include one less/exact/one more and multi-block remainder. |
 | REQ-HASH-XXH3-004 | Seed and Secret; reference `XXH3_SECRET_SIZE_MIN` | Custom secret 136/137/192 bytes where supported; reject shorter input through production validation rather than invoking upstream undefined/precondition-violating API. |
 | REQ-HASH-XXH3-005 | XXH128 canonical reference API | Assert digest serialization byte order and both halves; 64-bit equality alone cannot establish 128-bit correctness. |
+| REQ-HASH-XXH3-006 | Reference streaming/reset APIs; production API contract | Where exported, split updates around short/stripe/block boundaries, empty updates and reset with full-width seed; exact independent 128-bit result and seed preservation. Streaming availability is a repository API requirement, not a new digest algorithm. |
 
 Production owner identified by worker: `src/lib/common/crypto/xxh3.spl`,
 `_k_xxh3_128` family. `test/01_unit/lib/common/crypto/xxhash_kat_spec.spl` is only
@@ -75,3 +76,12 @@ gxHash implementation (SCVN-H03); retain BLOCKED until that owner is established
 Missing oracle, unsupported API, unexercised production branch or revision mismatch
 stays an explicit gap. Do not manufacture malformed-input cases for an arbitrary
 byte-string hash whose API has no malformed byte-string domain.
+
+## Supplemental repository evidence contracts
+
+These IDs supplement standard-derived obligations without renumbering them.
+
+| ID | Scope | Required assertion |
+|---|---|---|
+| REQ-HASH-BLAKE3-ADAPTER-001 | Repository byte adapter | Preserve exact input byte values and length across the adapter, including 00/7f/80/ff; this does not prove production BLAKE3 hashes all those bytes correctly. |
+| REQ-HASH-EVIDENCE-001 | Typed oracle controls | Corrupted digest evidence and missing required evidence must fail closed; a capture or adapter-only pass cannot satisfy algorithm conformance. |
