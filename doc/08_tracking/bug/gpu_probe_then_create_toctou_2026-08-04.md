@@ -454,3 +454,34 @@ exit 1, the same red as before the widening.
 `web_gpu_first_present_decision_spec.spl` 7/7 ·
 `web_gpu_present_paint_coverage_spec.spl` 23/23 ·
 `web_showcase_full_gpu_offload_spec.spl` 13/13
+
+## 2026-11-03 remaining gate repair candidate (runtime validation pending)
+
+The release source still had three kinds of prediction gates after the earlier
+CUDA/WebGPU strict integration repairs. This candidate changes tests only; a
+probe remains a diagnostic observation and does not reserve or cache a device.
+
+- Modern and legacy `backend_cuda_renderbackend_spec.spl` now attempt strict
+  creation unconditionally and branch on that Result. Previously the success arm
+  referenced `result` declared only in the probe-predicted failure arm. Both
+  outcomes retain requested-backend/typed-failure assertions.
+- Modern and legacy `backend_probe_strict_spec.spl` no longer ask an independent
+  `cuda_available()` to predict the factory outcome. The current factory has no
+  CUDA context route; its actual unavailable diagnostic is checked without
+  pretending it supplies device evidence.
+- `x25519mlkem768_backend_matrix_spec.spl` independently checks each executed
+  forward/inverse Result. Full CUDA/Metal exchanges branch on the first actual
+  keygen Result and reuse it rather than create again. Successful branches retain
+  scalar parity, lifecycle and device-evidence checks. Only explicit physical
+  admission failures disclose unavailable GPU coverage; artifact, pipeline,
+  submission, readback and unknown errors fail. A negative classification
+  regression prevents those failures becoming silent skips. This crypto matrix
+  has no tracked legacy twin.
+
+Verification status: **TEST_BLOCKED**. The Windows host has no qualified
+self-hosted full CLI, so these specs and GPU fault-injection runs have not been
+executed. Source checks are not GPU proof, and this appendix does not mark the
+family fixed. Resume with all five changed specs plus device/fd-pressure and
+unavailable-device runs on a qualified producer; verify skipped coverage remains
+explicit and provenance sabotage fails. The independent historical module-load
+startup timing report is unchanged and needs a current producer reproduction.
