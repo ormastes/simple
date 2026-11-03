@@ -1,0 +1,90 @@
+# @tag:in-development
+# Bug: seed_interp_u64_field_store_not_coerced_2026-11-03
+#
+# Seed interpreter: a value stored into a class/struct field whose DECLARED
+# type is `u64` (or any unsigned width) stayed the raw `Value::Int`, both at
+# construction (`Hdr(magic: expr)`, positional and defaults) and at assignment
+# (`h.magic = expr`, `self.magic = expr`, `arr[i].magic = expr`,
+# `a.b.magic = expr`). A field holding a value >= 2^63 was therefore a
+# NEGATIVE i64, while the same bits parsed from bytes (a `u64` local/return)
+# are `Value::UInt`; the mixed Int/UInt ordering says a negative Int is less
+# than every UInt, so `parsed == field` was false for identical bits
+# (`src/compiler/70.backend/linker/test/smf_layout_parity_spec.spl` 5/7:
+# "expected 16045690984503111693 to equal -2401053089206439923").
+# Typed locals already coerce (`val x: u64 = expr`), so the field boundary is
+# the only declared-type store that did not. Fix: `coerce_to_declared_field*`
+# in `src/compiler_rust/compiler/src/interpreter/node_exec.rs`, applied at
+# construction and every field-assignment site. Expected to FAIL on a seed
+# without that fix.
+use std.spec
+
+val HIGH_BIT: i64 = (1 as i64) << 63
+
+class Hdr:
+    magic: u64
+    size: u64
+
+impl Hdr:
+    me set_magic(v: i64):
+        self.magic = v
+
+struct Trailer:
+    tag: u64
+
+class Wrap:
+    hdr: Hdr
+
+# Rebuild the high-bit value through a typed `u64` local, the same shape a
+# little-endian byte parse produces.
+fn parsed_high() -> u64:
+    var acc: u64 = 0
+    acc = acc | HIGH_BIT
+    acc = acc | 0xDEADBEEF
+    acc
+
+describe "u64 class/struct fields hold the declared unsigned width":
+    it "constructor named field equals the parsed u64 of the same bits":
+        val h = Hdr(magic: HIGH_BIT | 0xDEADBEEF, size: 0)
+        expect(h.magic).to_equal(parsed_high())
+        assert_true(h.magic >= 0)
+
+    it "constructor positional field equals the parsed u64 of the same bits":
+        val h = Hdr(HIGH_BIT | 0xDEADBEEF, 0)
+        expect(h.magic).to_equal(parsed_high())
+
+    it "field assignment on a local coerces to u64":
+        val h = Hdr(magic: 0, size: 0)
+        h.magic = HIGH_BIT | 0xDEADBEEF
+        expect(h.magic).to_equal(parsed_high())
+        assert_true(h.magic >= 0)
+
+    it "self.field assignment inside a method coerces to u64":
+        val h = Hdr(magic: 0, size: 0)
+        h.set_magic(HIGH_BIT | 0xDEADBEEF)
+        expect(h.magic).to_equal(parsed_high())
+
+    it "struct (value type) field assignment coerces to u64":
+        var t = Trailer(tag: 0)
+        t.tag = HIGH_BIT | 0xDEADBEEF
+        expect(t.tag).to_equal(parsed_high())
+
+    it "nested a.b.field assignment coerces to u64":
+        val o = Wrap(hdr: Hdr(magic: 0, size: 0))
+        o.hdr.magic = HIGH_BIT | 0xDEADBEEF
+        expect(o.hdr.magic).to_equal(parsed_high())
+
+    it "indexed arr[i].field assignment coerces to u64":
+        val arr = [Hdr(magic: 0, size: 0)]
+        arr[0].magic = HIGH_BIT | 0xDEADBEEF
+        expect(arr[0].magic).to_equal(parsed_high())
+
+    it "a parsed u64 stored into the field reads back unchanged":
+        val h = Hdr(magic: 0, size: 0)
+        h.magic = parsed_high()
+        expect(h.magic).to_equal(parsed_high())
+
+    it "a small non-negative value is unaffected":
+        val h = Hdr(magic: 42, size: 7)
+        h.size = h.size + 1
+        expect(h.magic).to_equal(42)
+        expect(h.size).to_equal(8)

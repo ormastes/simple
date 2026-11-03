@@ -1827,13 +1827,31 @@ impl Lowerer {
                 // the JIT lane, silently). The local's declared type must
                 // agree, or the raw value would be stored into a tagged slot.
                 // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+                //
+                // The subject may carry EITHER optional representation: the
+                // `T?` Pointer form (`register_optional`), or the generic-enum
+                // form `HirType::Enum { name: "Option", .. }` that an explicit
+                // `Option<T>` annotation on a local, class field or return
+                // type resolves to (`instantiate_builtin_generic_enum`). Both
+                // hold the same runtime value, so the binding must be typed
+                // as the payload in both cases. Only the Pointer form was
+                // handled, so `if val c = lt` with `val lt: Option<Class>`
+                // kept `c` typed as the Option enum: a field read on it was
+                // a wild load (SEGV rc=139), a method call dispatched to
+                // `Option.<method>` (not found), and a scalar payload stayed
+                // a tagged word (`c + 1` printed `<invalid-heap:0x29>`).
+                // Bug: seed_if_val_typed_option_class_binds_option_or_segv_2026-11-03 (bug_db.sdn);
+                // spec test/01_unit/language/if_val_typed_option_class_unwrap_spec.spl
                 let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or_else(|| {
                     match self.module.types.get(subject_ty) {
                         // Presence guards the optional subject; a bound bool is
                         // its value, not another optional-presence condition.
                         Some(HirType::Pointer { kind: PointerKind::Shared, inner, .. })
                             if *inner == TypeId::BOOL => TypeId::BOOL,
-                        _ => self.optional_reference_payload_inner(subject_ty).unwrap_or(subject_ty),
+                        _ => self
+                            .optional_reference_payload_inner(subject_ty)
+                            .or_else(|| self.optional_enum_payload_inner(subject_ty))
+                            .unwrap_or(subject_ty),
                     }
                 });
                 if binding_ty != subject_ty {
@@ -1866,6 +1884,49 @@ impl Lowerer {
     /// can have the same HIR shape but are not source-level `T?` values.
     fn optional_reference_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
         let inner = self.module.types.optional_inner(subject_ty)?;
+        match self.module.types.get(inner) {
+            Some(HirType::Array { .. } | HirType::String | HirType::Struct { .. } | HirType::Enum { .. }) => {
+                Some(inner)
+            }
+            _ => None,
+        }
+    }
+
+    /// Payload type of the generic-enum optional form `Option<T>`
+    /// (`HirType::Enum { name: "Option", variants: [Some(T), None] }`), the
+    /// representation an explicit `Option<T>` annotation resolves to. Applies
+    /// the same payload policy as the `T?` Pointer form — BoxInt-family
+    /// scalars, `bool`, and reference payloads (array/text/struct/enum) are
+    /// bound as the raw inner; anything else (an unresolved `Option<ANY>`,
+    /// floats, `u64`) keeps the subject type so the value is not retyped on a
+    /// guess. `None` for any subject that is not this Option form.
+    fn optional_enum_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
+        let Some(HirType::Enum { name, variants, .. }) = self.module.types.get(subject_ty) else {
+            return None;
+        };
+        if name.as_str() != "Option" {
+            return None;
+        }
+        let inner = variants.iter().find_map(|(variant, payload)| match (variant.as_str(), payload) {
+            ("Some", Some(payload)) if payload.len() == 1 => Some(payload[0]),
+            _ => None,
+        })?;
+        if inner == TypeId::ANY {
+            return None;
+        }
+        if matches!(
+            inner,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::BOOL
+        ) {
+            return Some(inner);
+        }
         match self.module.types.get(inner) {
             Some(HirType::Array { .. } | HirType::String | HirType::Struct { .. } | HirType::Enum { .. }) => {
                 Some(inner)
