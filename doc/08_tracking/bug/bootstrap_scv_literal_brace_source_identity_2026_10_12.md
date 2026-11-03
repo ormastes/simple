@@ -14,3 +14,9 @@ Both are literal Git-tracked names; no brace expansion is intended. Frozen paylo
 Narrow proposal adds literal escaped `{`/`}` bytes to the existing src/test alphabet and retains exact traversal/empty-component/NUL/backslash/colon/framing restrictions, digest checks and symlink/unbound auxiliary rejection. Same expanded host fixture fails old validator with unsafe SCV source identity; proposed external validator passes24 authenticated auxiliary checks once, including exact brace paths, traversal/NUL, linked source/auxiliary directory and unknown members.
 
 Status OPEN: external source/host-control proof only. No new native allocation, compiler build, actual generator retry, runtime/callback/link/Phase3 success, source-tree edits or gate waiver. A newly sealed canonical tool bundle and actual post-verification must still qualify the retained generator product. Old scope/runtime qualification remains HOLD.
+
+## Status 2026-11-03: fix-implemented-verification-pending
+
+Braces are in the `source_path` alphabet (scripts/bootstrap/lib/BootstrapProductScv.pm:88). Repro:
+`sh scripts/bootstrap/tests/product-scv-auxiliary-test.shs` on Linux (Windows run trips on the
+embedded-newline argv case before the brace checks matter); then the actual generator SCV post-verification.
