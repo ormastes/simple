@@ -10,8 +10,8 @@
 # were found by hand before this scanner existed (Q24, e46ebc94f10..5de52d5ae0c).
 #
 # WHAT IT DOES
-#   For every *_spec.spl under test/, extract every string literal that looks
-#   like a repo-relative product path, and report the ones that do not exist in
+#   For every *_spec.spl under test/, extract literal paths consumed by file-read/existence APIs
+#   (directly or through literal val/var bindings), and report the ones that do not exist in
 #   the committed tree (git ls-files) nor on disk.
 #
 # NON-VACUITY / FAIL-CLOSED CONTRACT
@@ -28,8 +28,11 @@
 #
 # EXTRACTION RULES (hand-verified against a sample; see the header note in
 # doc/08_tracking/ for the audit)
-#   * Comment lines in the SPEC ITSELF are skipped --- a prior scanner in this
-#     repo harvested its own commentary as needles and produced noise.
+#   * Comments (including trailing comments), docstrings, content assertions,
+#     and categorizer/example strings are not file-read subjects.
+#   * Direct literal arguments and literal val/var bindings consumed by the
+#     named file APIs are inspected; dynamic/alias/interprocedural paths are
+#     outside this lexical detector. A clean scan is not proof of those paths.
 #   * Only literals with a '/' and a known repo root prefix are considered:
 #     src/ scripts/ test/ tools/ examples/ config/ bin/ doc/ .spipe/
 #   * Literals containing interpolation ({...}), globs (*?[]), or a trailing
@@ -65,27 +68,81 @@ sort -u "$TRACKED" "$WORK/dirs.txt" > "$WORK/known.txt"
 # extract_paths <specfile> -> stdout: one candidate path per line
 extract_paths() {
   awk '
-    # skip comment lines in the spec itself
-    /^[ \t]*#/ { next }
+    BEGIN { scope_stack[0] = 0; indents[0] = 0; scope = 0 }
+    function token(kind, value) { count++; kinds[count] = kind; values[count] = value; scopes[count] = scope }
+    function path(value) {
+      if (value !~ /\// || value ~ /[{}*?\[\]\\]/ || value ~ /\/$/) return
+      if (value ~ /^(src|scripts|test|tools|examples|config|bin|doc)\// || value ~ /^\.spipe\//)
+        print value
+    }
+    function reader(value) {
+      return value ~ /(^|\.)(read_file|read_text|read_bytes|file_read|file_read_text|file_read_bytes|rt_file_read_text|rt_file_read_bytes|file_exists|rt_file_exists)$/
+    }
     {
-      line = $0
-      # strip trailing line comments conservatively: only when # follows
-      # whitespace and no quote is open is hard to know, so we rely on the
-      # per-literal filters below instead.
-      n = split(line, parts, "\"")
-      for (i = 2; i <= n; i += 2) {
-        s = parts[i]
-        if (s !~ /\//) continue
-        if (s ~ /[{}*?\[\]]/) continue
-        if (s ~ /\/$/) continue
-        if (s ~ /[ \t]/) continue
-        # reject bare "<prefix>/<digits>" literals (e.g. "config/1", "rules/1")
-        # -- these are test fixture/default-param values, not real paths: no
-        # tracked file in this repo is a single numeric segment with no
-        # extension directly under a top-level prefix.
-        if (s ~ /^[a-zA-Z_]+\/[0-9]+$/) continue
-        if (s ~ /^(src|scripts|test|tools|examples|config|bin|doc)\// ||
-            s ~ /^\.spipe\//) print s
+      if (!doc && !literal && $0 !~ /^[ \t]*(#|$)/) {
+        match($0, /^[ \t]*/); indent = RLENGTH
+        while (depth > 0 && indent < indents[depth]) depth--
+        if (indent > indents[depth]) {
+          parent[++scope_count] = scope_stack[depth]
+          depth++; indents[depth] = indent; scope_stack[depth] = scope_count
+        }
+        scope = scope_stack[depth]
+      }
+      # Tokenize before interpreting calls: quotes inside comments/docstrings
+      # and escaped quotes inside literals must not invent read operations.
+      for (pos = 1; pos <= length($0); pos++) {
+        ch = substr($0, pos, 1)
+        if (doc) {
+          if (substr($0, pos, 3) == "\"\"\"") { doc = 0; pos += 2 }
+          continue
+        }
+        if (literal) {
+          if (escaped) { text = text "\\" ch; escaped = 0; continue }
+          if (ch == "\\") { escaped = 1; continue }
+          if (ch == "\"") { token("string", text); literal = 0; text = "" }
+          else text = text ch
+          continue
+        }
+        if (ch == "#") break
+        if (substr($0, pos, 3) == "\"\"\"") { doc = 1; pos += 2; continue }
+        if (ch == "\"") { literal = 1; text = ""; continue }
+        if (ch ~ /[A-Za-z_]/) {
+          name = ch
+          while (substr($0, pos + 1, 1) ~ /[A-Za-z0-9_.]/) {
+            pos++; name = name substr($0, pos, 1)
+          }
+          token("name", name)
+        } else if (ch !~ /[ \t\r]/) token(ch, ch)
+      }
+      token("newline", "")
+    }
+    END {
+      # Resolve literal bindings in their lexical indentation scope. A path
+      # used only as an example in a sibling scenario must not leak into a
+      # read of a same-named variable in another scenario.
+      for (i = 1; i <= count; i++) {
+        if (kinds[i] == "name" && (values[i] == "val" || values[i] == "var")) {
+          binding = values[i + 1]
+          j = i + 2
+          while (j <= count && kinds[j] != "=" && kinds[j] != "newline") j++
+          if (kinds[j] == "=") {
+            bound[scopes[i], binding] = ""
+            if (kinds[j + 1] == "string" && kinds[j + 2] == "newline")
+              bound[scopes[i], binding] = values[j + 1]
+          }
+        }
+        if (kinds[i] != "name" || !reader(values[i]) || kinds[i + 1] != "(") continue
+        j = i + 2
+        while (kinds[j] == "newline") j++
+        endarg = j + 1
+        while (kinds[endarg] == "newline") endarg++
+        if (kinds[endarg] != ")" && kinds[endarg] != ",") continue
+        if (kinds[j] == "string") path(values[j])
+        else if (kinds[j] == "name") {
+          lookup = scopes[i]
+          while (!((lookup, values[j]) in bound) && lookup + 0 != 0) lookup = parent[lookup]
+          path(bound[lookup, values[j]])
+        }
       }
     }
   ' "$1"
@@ -148,13 +205,46 @@ describe "comment control":
     it "asserts nothing about a path":
         expect(1).to_equal(1)
 EOF
+  # Read positions stay visible across newlines and through literal bindings.
+  cat > "$st/bound_spec.spl" <<'EOF'
+val SUBJECT: text = "src/compiler/__q28_selftest_absent__/bound.spl"
+val source = read_file(SUBJECT)
+val other = rt_file_read_text(
+    "src/compiler/__q28_selftest_absent__/multiline.spl"
+)
+EOF
+  # These strings describe content/examples, rather than files being read.
+  cat > "$st/nonread_spec.spl" <<'EOF'
+"""
+read_file("src/compiler/__q28_selftest_absent__/docstring.spl")
+"""
+val description = "read_file(\"src/compiler/__q28_selftest_absent__/escaped.spl\")"
+expect(source).to_contain("src/compiler/__q28_selftest_absent__/content.spl")
+expect(categorize("src/compiler/__q28_selftest_absent__/category.spl")).to_equal("source")
+val present = read_file("scripts/check/check-spec-missing-path-vacuity.shs") # read_file("src/compiler/__q28_selftest_absent__/trailing.spl")
+val PRESENT = "scripts/check/check-spec-missing-path-vacuity.shs"
+val bound_present = read_file(PRESENT)
+val dynamic = make_path()
+val outside_lexical_scope = read_file(dynamic)
+describe "sibling scope control":
+    it "only categorizes a path":
+        val path = "src/compiler/__q28_selftest_absent__/scoped_example.spl"
+        expect(categorize(path)).to_equal("source")
+    it "reads a different path with the same variable name":
+        val path = "scripts/check/check-spec-missing-path-vacuity.shs"
+        val source = read_file(path)
+EOF
   echo "$st/pos_spec.spl" > "$st/pos.list"
   echo "$st/neg_spec.spl" > "$st/neg.list"
   echo "$st/cmt_spec.spl" > "$st/cmt.list"
+  echo "$st/bound_spec.spl" > "$st/bound.list"
+  echo "$st/nonread_spec.spl" > "$st/nonread.list"
 
   np=$(scan "$st/pos.list" "$st/pos.hits")
   nn=$(scan "$st/neg.list" "$st/neg.hits")
   nc=$(scan "$st/cmt.list" "$st/cmt.hits")
+  nb=$(scan "$st/bound.list" "$st/bound.hits")
+  nr=$(scan "$st/nonread.list" "$st/nonread.hits")
 
   ok=1
   [ "$np" = "1" ] || { echo "selftest: positive spec not counted"; ok=0; }
@@ -162,8 +252,14 @@ EOF
   [ "$nn" = "1" ] || { echo "selftest: negative spec not counted"; ok=0; }
   [ -s "$st/neg.hits" ] && { echo "selftest: FAILED -- existing path was flagged (false positive)"; ok=0; }
   [ -s "$st/cmt.hits" ] && { echo "selftest: FAILED -- path inside a spec comment was harvested"; ok=0; }
+  [ "$nb" = "1" ] && [ "$(wc -l < "$st/bound.hits" | tr -d " ")" = "2" ] || {
+    echo "selftest: FAILED -- bound/multiline missing reads not both flagged"; ok=0;
+  }
+  [ "$nr" = "1" ] && [ ! -s "$st/nonread.hits" ] || {
+    echo "selftest: FAILED -- non-read/comment/docstring literals harvested"; ok=0;
+  }
   [ "$ok" = "1" ] || return 1
-  echo "selftest: OK -- 3 controls (missing flagged, present silent, comment ignored)"
+  echo "selftest: OK -- 5 controls (missing, present, comment, bound/multiline, non-read discrimination)"
   return 0
 }
 
@@ -174,7 +270,7 @@ fi
 
 case "${1:-}" in
   --selftest-only)
-    echo "PASS -- selftest only, 3 controls checked"
+    echo "PASS -- selftest only, 5 controls checked"
     exit 0
     ;;
 esac
