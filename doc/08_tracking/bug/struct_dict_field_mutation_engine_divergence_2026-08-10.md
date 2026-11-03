@@ -11,7 +11,7 @@
 > `interpreter_return_boundary_never_merges_shared_collections_2026-08-17.md`.
 
 
-- **Status:** OPEN — engine divergence (defect) + undocumented language semantics (design question)
+- **Status:** FIXED for interpreter vs JIT 2026-11-03 (shared-handle semantics (B); `self_field_assign_spec.spl` 13/13 green after the return-boundary merge, #5990); native/AOT lane verification-pending (needs a native-build of the spec). Was: OPEN — engine divergence (defect) + undocumented language semantics (design question)
 - **Filed:** 2026-08-10
 - **Supersedes the framing of:** `struct_field_dict_mutation_through_free_function_is_a_noop_2026-08-10.md`
   (that report is correct about the interpreter, but concluded "value semantics,
