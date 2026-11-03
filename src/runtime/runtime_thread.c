@@ -484,8 +484,14 @@ static int spl_exec_segment_probe(struct dl_phdr_info* info, size_t size, void* 
  * the range test. */
 static int rt_native_address_is_code(int64_t raw_addr) {
 #if defined(_WIN32) || defined(_WIN64)
-    (void)raw_addr;
-    return 0;
+    MEMORY_BASIC_INFORMATION region;
+    if (VirtualQuery((const void *)(uintptr_t)raw_addr, &region, sizeof(region)) == 0 ||
+        region.State != MEM_COMMIT || (region.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+        return 0;
+    }
+    DWORD protection = region.Protect & 0xff;
+    return protection == PAGE_EXECUTE || protection == PAGE_EXECUTE_READ ||
+           protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
 #elif defined(SPL_THREAD_HAVE_PHDR_ITERATE)
     SplExecSegmentProbe probe;
     probe.addr = (uintptr_t)((uint64_t)raw_addr & ~RT_NATIVE_PTR_TAG_BITS);
@@ -562,9 +568,9 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
  * Known divergences: Rust deep-copies `data` (clone_for_isolated_thread) and
  * honours raw_worker_args; C shares `data` and passes it unchanged. Both
  * lanes decode the closure word alike (user-VA ceiling, TAG_HEAP strip,
- * executable-segment test). On Windows rt_native_address_is_code is a no-op
- * in both lanes, so a raw code pointer is read as a closure record; on macOS
- * it falls back to dladdr, which also resolves data addresses. */
+ * executable-segment test). Windows checks committed executable pages with
+ * VirtualQuery; on macOS it falls back to dladdr, which also resolves data
+ * addresses. */
 int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data) {
     int64_t data_value = data;
     int64_t payload = rt_native_closure_payload(closure);

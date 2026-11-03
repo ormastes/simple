@@ -1,0 +1,50 @@
+# Run with scripts/check/check-caret-http-attempt-timeout.py and a qualified
+# POSIX self-hosted runtime. This spec requires its live server; never skip it.
+# Execution status: AUTHORED_UNRUN. Bug llm_caret_http_attempt_timeout stays OPEN.
+use std.spec
+use app.io.mod.{env_get, current_time_ms}
+use app.llm_caret.claude_api.{ClaudeApiRequest, claude_api_retry_transport}
+use app.llm_caret.openai_api.{OpenAIApiRequest, openai_retry_transport}
+use app.llm_caret.openai_compat.{CompatRequest, compat_transport}
+use std.nogc_sync_mut.io.http_client_core.{http_request_raw_timeout}
+
+fn timeout_test_url(path: text) -> text:
+    val base = env_get("CARET_TIMEOUT_TEST_URL") ?? ""
+    expect(base.len()).to_be_greater_than(0)
+    base + path
+
+describe "Caret actual HTTP adapters enforce attempt deadlines":
+    it "interrupts a stalled Claude response":
+        val request = ClaudeApiRequest(method: "POST", url: timeout_test_url("/slow"), headers: "Content-Type: application/json", body: "{}")
+        val started = current_time_ms()
+        val response = claude_api_retry_transport(request, 1, 100)
+        expect(response.0).to_equal(-1)
+        expect(response.2).to_contain("timed out")
+        expect(current_time_ms() - started).to_be_less_than(1500)
+
+    it "interrupts a stalled OpenAI response":
+        val request = OpenAIApiRequest(method: "POST", url: timeout_test_url("/slow"), headers: "Content-Type: application/json", body: "{}")
+        val started = current_time_ms()
+        val response = openai_retry_transport(request, 1, 100)
+        expect(response.0).to_equal(-1)
+        expect(response.2).to_contain("timed out")
+        expect(current_time_ms() - started).to_be_less_than(1500)
+
+    it "interrupts a stalled compatible endpoint without retrying":
+        val request = CompatRequest(method: "POST", url: timeout_test_url("/slow"), headers: "Content-Type: application/json", body: "{}")
+        val started = current_time_ms()
+        val response = compat_transport(request, 100)
+        expect(response.0).to_equal(-1)
+        expect(response.2).to_contain("timed out")
+        expect(current_time_ms() - started).to_be_less_than(1500)
+
+    it "preserves UTF8 bytes and permits explicit unbounded zero":
+        val response = http_request_raw_timeout("POST", timeout_test_url("/echo"), "Content-Type: text/plain", "hello 서울", 0)
+        expect(response.0).to_equal(200)
+        expect(response.1).to_equal("hello 서울")
+        expect(response.2).to_equal("")
+
+    it "rejects a negative transport timeout before issuing a request":
+        val response = http_request_raw_timeout("POST", timeout_test_url("/negative"), "", "", -1)
+        expect(response.0).to_equal(-1)
+        expect(response.2).to_equal("HTTP timeout cannot be negative")
