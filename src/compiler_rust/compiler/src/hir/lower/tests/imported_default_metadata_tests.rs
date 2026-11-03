@@ -136,7 +136,11 @@ fn imported_defaults_do_not_attach_to_local_callable_or_named_call() {
     let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
     let module = Lowerer::with_module_resolver(resolver, src.join("main.spl")).lower_module(&ast).unwrap();
     assert_eq!(call_args(&module, "local_call").len(), 1);
-    assert_eq!(call_args(&module, "named_call").len(), 1);
+    // Named call to the imported fn: slot-mapped and its omitted default filled
+    // (formerly left unfilled -> nil slot, bug jit_layout_run_full_with_ports_nil_receiver).
+    let named = call_args(&module, "named_call");
+    assert_eq!(named.len(), 2);
+    assert!(matches!(&named[1].kind, HirExprKind::String(s) if s == "owner"));
 }
 
 #[test]
