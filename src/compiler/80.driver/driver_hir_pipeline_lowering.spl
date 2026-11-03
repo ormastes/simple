@@ -206,6 +206,32 @@ fn driver_hir_loop_aux_scope_begin_v1(step: text, name: text) -> bool:
         return false
     true
 
+# The frozen phase-3 stage2 (ef0681fc0e1) lowers EVERY field access on the
+# reassigned `var hir_module: HirModule` of the streaming and retained HIR loops
+# at offset 0 (object aot-c73261: `.functions`, `.path`, `.structs`, `.symbols`
+# all compile to `movq (%rdx)`), so value_struct_layout_declarations_v1 received
+# the module's first word as `symbols` and the stage3 hello smoke died with
+# 0xC0000005 at s3.exe+0x568613. Field access through a TYPED PARAMETER lowers
+# correctly in the same object, so every read of that var goes through these
+# accessors and the one write rebinds through driver_hir_module_typed_v1 first.
+# Remove when stage3 is built by a stage2 that types reassigned annotated vars
+# (any seed-built stage2 from release/1.0.0 at or after this change).
+# @workaround bug=stage2_var_hir_module_field_access_offset0_2026-11-03 reason=frozen stage2 lowers field access on the reassigned var hir_module at offset 0; typed-parameter accessors lower correctly
+fn driver_hir_module_typed_v1(m: HirModule) -> HirModule:
+    m
+
+fn driver_hir_module_path_v1(m: HirModule) -> text:
+    m.path
+
+fn driver_hir_module_structs_v1(m: HirModule) -> Dict<SymbolId, HirStruct>:
+    m.structs
+
+fn driver_hir_module_symbols_v1(m: HirModule) -> SymbolTable:
+    m.symbols
+
+fn driver_hir_module_functions_v1(m: HirModule) -> Dict<SymbolId, HirFunction>:
+    m.functions
+
 fn driver_hir_abi_interface_trace_enabled() -> bool:
     driver_phase_trace_enabled() and (env_get("SIMPLE_HIR_ABI_INTERFACE_TRACE")) == "1"
 
@@ -1393,8 +1419,11 @@ impl CompilerDriver:
                     if parser_record != "" and hir_cache_store(hir_stream_key, hir_module, hir_module_warnings, parser_record, self.ctx.options.library_mode):
                         hir_shard_lowered = hir_shard_lowered + 1
                         hir_cache_stored = true
-            hir_module.representation_declarations = representation_bind_module_facts_v1(
-                representation_contexts, source.module_name, hir_module)
+            # @workaround bug=stage2_var_hir_module_field_access_offset0_2026-11-03 reason=field write on the reassigned var lowers at offset 0; rebind through the typed identity first
+            var typed_stream_module: HirModule = driver_hir_module_typed_v1(hir_module)
+            typed_stream_module.representation_declarations = representation_bind_module_facts_v1(
+                representation_contexts, source.module_name, typed_stream_module)
+            hir_module = typed_stream_module
             val representation_receipt = collect_module_representation_receipt_v1(
                 source.module_name, hir_module, self.ctx.assurance_policy.strictness)
             publish_module_typecheck_receipt_v1(self.ctx, representation_receipt)
@@ -1433,9 +1462,11 @@ impl CompilerDriver:
             # surface name preserves the defining-module provenance.
             validation_module_keys.push(
                 surfaces.surfaces[surface_index].logical_name)
+            # @workaround bug=stage2_var_hir_module_field_access_offset0_2026-11-03 reason=typed accessors, see driver_hir_module_typed_v1
             validation_module_values.push(value_struct_layout_declarations_v1(
                 surfaces.surfaces[surface_index].logical_name,
-                source.path, hir_module.structs, hir_module.symbols))
+                source.path, driver_hir_module_structs_v1(hir_module),
+                driver_hir_module_symbols_v1(hir_module)))
             if is_requested_bootstrap_entry:
                 phase_entry_hir = Some(hir_module)
             if not driver_hir_mem_snapshot(
@@ -1451,7 +1482,7 @@ impl CompilerDriver:
             # returns -1 from Dict.len() on aarch64 (every one of the 771
             # Stage-3 modules logged funcs=-1), which the non-streaming loop
             # already sidesteps the same way.
-            val streaming_function_count: i64 = driver_dict_entry_count(hir_module.functions)
+            val streaming_function_count: i64 = driver_dict_entry_count(driver_hir_module_functions_v1(hir_module))
             log_phase("phase3:hir:file:done {source.path} module={source.module_name} funcs={streaming_function_count}")
             # Report EVERY module, not a 16-module cadence: a stall inside a
             # batch was indistinguishable from normal work, and `current` was
@@ -2141,7 +2172,8 @@ impl CompilerDriver:
                 hir_shard_guard_block("HIR completion receipt publication failed")
                 self.ctx.add_error("HIR completion receipt publication failed")
                 return false
-            val hir_function_count: i64 = driver_dict_entry_count(hir_module.functions)
+            # @workaround bug=stage2_var_hir_module_field_access_offset0_2026-11-03 reason=typed accessors, see driver_hir_module_typed_v1
+            val hir_function_count: i64 = driver_dict_entry_count(driver_hir_module_functions_v1(hir_module))
             if focused_future_driver_diag:
                 eprint("[driver-hir] functions={hir_function_count}")
 
@@ -2250,9 +2282,11 @@ impl CompilerDriver:
                     # after the scope has ended. Opt out:
                     # SIMPLE_HIR_LOOP_AUX_SCOPE=0.
                     val layout_scoped: bool = driver_hir_loop_aux_scope_begin_v1("layout-projection", name)
+                    # @workaround bug=stage2_var_hir_module_field_access_offset0_2026-11-03 reason=typed accessors, see driver_hir_module_typed_v1
                     var layout_projection: ValueStructLayoutModuleV1 = value_struct_layout_declarations_v1(
-                        name, hir_module.path, hir_module.structs,
-                        hir_module.symbols)
+                        name, driver_hir_module_path_v1(hir_module),
+                        driver_hir_module_structs_v1(hir_module),
+                        driver_hir_module_symbols_v1(hir_module))
                     if layout_scoped:
                         # @workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23 reason=stage2 compiler cannot infer T from a field-access argument to transient_promote<T>; typed locals carry the same handles
                         val layout_structs_v: [ValueStructLayoutStructV1] = layout_projection.structs
@@ -2265,8 +2299,9 @@ impl CompilerDriver:
                         if not layout_paused or not layout_owned or not layout_ended:
                             eprint("[hir-loop-scope] WARNING layout projection promotion failed (paused={layout_paused} owned={layout_owned} ended={layout_ended}); recomputing UNSCOPED: module={name}")
                             layout_projection = value_struct_layout_declarations_v1(
-                                name, hir_module.path, hir_module.structs,
-                                hir_module.symbols)
+                                name, driver_hir_module_path_v1(hir_module),
+                                driver_hir_module_structs_v1(hir_module),
+                                driver_hir_module_symbols_v1(hir_module))
                     validation_module_values = validation_module_values.push(layout_projection)
                     # Shards publish cache entries and exit before aggregate
                     # validation. Keep identity/layout receipts above, but
