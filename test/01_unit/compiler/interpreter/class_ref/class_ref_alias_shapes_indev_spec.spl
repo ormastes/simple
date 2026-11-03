@@ -1,0 +1,80 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# @tag:in-development
+# Tracks bug_db: interp_class_field_and_nested_element_alias_copy_2026-11-03 (default carrier copies; SIMPLE_INTERP_CLASS_REF=1 #6262 pending).
+# design: doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md
+
+# Class-reference aliasing across class field, function parameter, nested
+# field chains and branchy access shapes (guard/else arms). Complements
+# class_element_reference_spec (list element) and PR #6290's dict-value spec;
+# the dict cases here are only the nested/other access shapes.
+# Classes are reference types, structs are value types.
+
+class Cell:
+    v: i64
+
+class Holder:
+    inner: Cell
+    cells: [Cell]
+    by_name: Dict<text, [Cell]>
+
+struct Pt:
+    x: i64
+
+struct PtBox:
+    p: Pt
+
+fn set_v(c: Cell, n: i64):
+    c.v = n
+
+fn set_if_pos(c: Cell, n: i64) -> bool:
+    if n > 0:
+        c.v = n
+        true
+    else:
+        false
+
+fn set_struct(p: Pt):
+    var q = p
+    q.x = 9
+
+fn mk_holder() -> Holder:
+    Holder(inner: Cell(v: 0), cells: [Cell(v: 0), Cell(v: 0)], by_name: {"a": [Cell(v: 0)]})
+
+describe "class field alias":
+    it "val a = h.inner; a.v = n is visible through h.inner":
+        val h = mk_holder()
+        val a = h.inner
+        a.v = 2
+        expect(h.inner.v).to_equal(2)
+
+    it "two aliases of one field observe each other":
+        val h = mk_holder()
+        val a = h.inner
+        val b = h.inner
+        a.v = 4
+        expect(b.v).to_equal(4)
+
+describe "list element alias in a field":
+    it "h.cells[i] alias writes through":
+        val h = mk_holder()
+        val e = h.cells[1]
+        e.v = 7
+        expect(h.cells[1].v).to_equal(7)
+        expect(h.cells[0].v).to_equal(0)
+
+    it "alias taken inside a loop writes through":
+        val h = mk_holder()
+        for c in h.cells:
+            c.v = 8
+        expect(h.cells[0].v).to_equal(8)
+        expect(h.cells[1].v).to_equal(8)
+
+describe "dict value holding a list of class instances":
+    it "d[k][i] alias writes through":
+        val h = mk_holder()
+        val lst = h.by_name["a"]
+        val e = lst[0]
+        e.v = 9
+        expect(h.by_name["a"][0].v).to_equal(9)
+
