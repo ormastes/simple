@@ -1,0 +1,62 @@
+"""
+## Purpose and audience
+Purpose: Budget spec for gc_async_mut JsInterpreter.set_object_property /
+get_object_property. Each write used to scan (and copy) every stored property,
+so N writes were O(N^2); the 4096-timer workload (~100k writes) never finished.
+Audience: maintainers of the JS engine object heap.
+## Operator workflow
+Run with the test runner. The wall budget is explicit and recorded below.
+## Compatibility and limitations
+Pure in-memory. Budget: 2,000 objects x 10 keys (20,000 inserts) + 20,000
+in-place rewrites + 20,000 reads. Measured on the indexed implementation on the
+shared Windows dev host (loaded): see BUDGET_MS; budget = 3x measurement.
+Bug record: doc/08_tracking/bug/unit_spec_hangs_42_excluded_2026-08-27.md (root cause A)
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+# @cover src/lib/gc_async_mut/js/engine/interpreter_object.spl
+
+use std.spec.*
+use std.js.engine.js_error.{JsLogger, LogLevel}
+use std.js.types.js_types.{JsValue}
+use std.gc_async_mut.js.engine.interpreter as gc_js
+use std.gc_async_mut.js.engine.interpreter_object.*
+
+extern fn rt_time_now_unix_micros() -> i64
+
+val OBJECTS = 2000
+val KEYS = 10
+val BUDGET_MS = 40000
+
+describe "gc_async_mut JS object property write budget":
+    it "writes 20k properties over 2k objects within the wall budget":
+        var interp = gc_js.JsInterpreter.new(JsLogger.new("gc-write-budget", LogLevel.Error))
+        val start = rt_time_now_unix_micros()
+        var ids: [i64] = []
+        var o = 0
+        while o < OBJECTS:
+            ids.push(interp.create_object())
+            o = o + 1
+        step("insert {OBJECTS * KEYS} properties")
+        var k = 0
+        while k < KEYS:
+            var j = 0
+            while j < OBJECTS:
+                interp.set_object_property(ids[j], "key{k}", JsValue.Number(v: (j + k).to_f64()))
+                j = j + 1
+            k = k + 1
+        step("rewrite and read back")
+        var j2 = 0
+        while j2 < OBJECTS:
+            interp.set_object_property(ids[j2], "key3", JsValue.Number(v: 7.0))
+            match interp.get_object_property(ids[j2], "key3"):
+                JsValue.Number(v): expect(v).to_equal(7.0)
+                _: fail("key3 missing")
+            j2 = j2 + 1
+        val elapsed_ms = (rt_time_now_unix_micros() - start) / 1000
+        print("object_property_write_budget gc elapsed_ms={elapsed_ms}")
+        step("semantics: keys isolated per object, rewrite did not append")
+        match interp.get_object_property(ids[5], "key4"):
+            JsValue.Number(v): expect(v).to_equal(9.0)
+            _: fail("key4 wrong")
+        expect(interp.object_store.prop_keys.len()).to_equal(OBJECTS * KEYS)
+        expect(elapsed_ms).to_be_less_than(BUDGET_MS)
