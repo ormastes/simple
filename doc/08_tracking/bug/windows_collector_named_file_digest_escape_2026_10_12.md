@@ -11,3 +11,7 @@ The receipt log hash comparison used the same named-file rendering and could rej
 Evidence: /mnt/c/Temp/simple-windows-collector-path-hash-fix-20261012/{test-cycle2.log,source-receipt.json}; failedjoblog and retained compiler/archive authority under /mnt/c/Temp/simple-windows-bootstrap-integration-20261012. No full bootstrap or release PASS claimed.
 
 **Revalidated 2026-11-02: still plausible because OPEN. Source-derived producer/consumer contract passes; actual native Windows Job launch and receipt admission pass; full bootstrap remains; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolution (2026-11-03)
+
+Fixed in source: both digest sites in scripts/bootstrap/bootstrap-logged-process.shs hash via stdin (sha256sum <file), so no GNU filename escaping.
