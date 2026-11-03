@@ -431,9 +431,24 @@ fn jira_curl_view_issue(client: JiraClient, issue_key: text) -> (bool, JiraIssue
     (true, _parse_jira_issue(parsed), body)
 
 
+fn _jira_page_integer(value: JsonValue) -> i64:
+    # Missing, negative, fractional and non-numeric fields must not become zero.
+    match value:
+        case JsonValue.Int(n):
+            if n >= 0: n else: -1
+        case JsonValue.Float(n):
+            if n >= 0.0 and n <= 9007199254740991.0:
+                val whole = n as i64
+                if (whole as f64) == n:
+                    return whole
+            -1
+        case _:
+            -1
+
+
 fn jira_curl_search(client: JiraClient, jql: text, fields: text, limit: i64) -> (bool, [JiraIssue], text):
-    """Search via POST /rest/api/3/search/jql (the enhanced replacement
-    for the deprecated GET /rest/api/2/search; see file header note).
+    """Search Cloud POST /rest/api/3/search/jql with nextPageToken, or
+    Data Center POST /rest/api/2/search with startAt/total offset pagination.
 
     Returns: (success, issues, raw_body).
     """
@@ -441,8 +456,9 @@ fn jira_curl_search(client: JiraClient, jql: text, fields: text, limit: i64) -> 
     if auth == "":
         return (false, [], "missing email or api_token")
 
-    # Cloud: POST /search/jql — Data Center: POST /search (same body).
+    # Deployment selects both the endpoint and its pagination protocol.
     val url = jira_search_url(_jira_site(client))
+    val datacenter = _jira_site(client).is_datacenter()
 
     # Fields array, shared by every page. "*all" means everything; "" the default.
     var fields_json = ""
@@ -465,12 +481,15 @@ fn jira_curl_search(client: JiraClient, jql: text, fields: text, limit: i64) -> 
     var first_body = ""
     var token = ""
     var seen_tokens: [text] = []
+    var start_at: i64 = 0
     var pages = 0
     while true:
         if pages >= JIRA_SEARCH_MAX_PAGES:
             return (false, issues, "jira search: stopped after {JIRA_SEARCH_MAX_PAGES} pages with results remaining; narrow the JQL or lower --limit")
         var body = "\{\"jql\":\"{esc_jql}\",\"maxResults\":{limit - issues.len()}" + fields_json
-        if token != "":
+        if datacenter:
+            body = body + ",\"startAt\":{start_at}"
+        else if token != "":
             body = body + ",\"nextPageToken\":\"{escape_json(token)}\""
         body = body + "\}"
 
@@ -491,6 +510,16 @@ fn jira_curl_search(client: JiraClient, jql: text, fields: text, limit: i64) -> 
             first_body = resp_body
 
         val issues_arr = json_value_field(parsed, "issues")
+        var page_count: i64 = 0
+        var total: i64 = 0
+        if datacenter:
+            val returned_start = _jira_page_integer(json_value_field(parsed, "startAt"))
+            total = _jira_page_integer(json_value_field(parsed, "total"))
+            if returned_start != start_at or total < 0 or json_value_type(issues_arr) != "array":
+                return (false, issues, "jira search: invalid Data Center pagination metadata")
+            page_count = json_value_len(issues_arr)
+            if page_count > 9223372036854775807 - start_at:
+                return (false, issues, "jira search: Data Center page offset overflow")
         if json_value_type(issues_arr) == "array":
             val n = json_value_len(issues_arr)
             var i = 0
@@ -499,6 +528,15 @@ fn jira_curl_search(client: JiraClient, jql: text, fields: text, limit: i64) -> 
                 issues = issues + [_parse_jira_issue(item)]
                 raw_items = raw_items + [json_value_serialize(item)]
                 i = i + 1
+
+        if datacenter:
+            val next_start = start_at + page_count
+            if issues.len() >= limit or next_start >= total:
+                break
+            if page_count == 0:
+                return (false, issues, "jira search: Data Center page made no progress with results remaining")
+            start_at = next_start
+            continue
 
         val next_token = if json_value_type(json_value_field(parsed, "nextPageToken")) == "string": _jstr(parsed, "nextPageToken") else: ""
         if next_token == "" or issues.len() >= limit:
