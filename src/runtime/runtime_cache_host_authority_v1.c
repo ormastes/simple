@@ -447,7 +447,6 @@ UNSUPPORTED(rt_cache_host_quarantine_v1, (int64_t r, int64_t o, const uint8_t *p
 #endif
 
 enum cache_cap_kind { CAP_ROOT=1, CAP_DIR=2, CAP_READ=3, CAP_TEMP=4, CAP_CAS_ROOT=5, CAP_CAS_KIND=6, CAP_CAS_SHARD1=7, CAP_CAS_SHARD2=8, CAP_TEMP_CAS=9, CAP_SEALED=10 };
-struct cache_cap { int64_t token; int fd; int parent_fd; enum cache_cap_kind kind; int sealed; char temp_name[96]; struct cache_cap *next; };
 /* Locking model: caps_lock guards ONLY the capability list and the refs
  * counters.  Every operation takes a counted reference (find_cap_ref) and then
  * does its descriptor I/O (fsync, pread, verify re-read, rename) under the

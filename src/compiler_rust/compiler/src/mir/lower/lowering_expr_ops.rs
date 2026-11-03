@@ -336,6 +336,36 @@ impl<'a> MirLowerer<'a> {
                 });
             }
 
+            // Statically typed text can arrive either as a tagged runtime
+            // string (for example, a literal) or as a raw C string from an
+            // extern such as stdin_read_line. Compare through the runtime's
+            // representation-aware helper only when both operands are known
+            // text. Keep identity (`is`), ANY dispatch, and all other types on
+            // their existing paths.
+            if matches!(op, BinOp::Eq | BinOp::NotEq) && left.ty == TypeId::STRING && right.ty == TypeId::STRING {
+                return self.with_func(|func, current_block| {
+                    let equal = func.new_vreg();
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                        dest: Some(equal),
+                        target: crate::mir::CallTarget::from_name("rt_text_eq_any"),
+                        args: vec![left_reg, right_reg],
+                    });
+                    if op == BinOp::Eq {
+                        return equal;
+                    }
+                    let one = func.new_vreg();
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::ConstInt { dest: one, value: 1 });
+                    let dest = func.new_vreg();
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::BinOp {
+                        dest,
+                        op: BinOp::BitXor,
+                        left: equal,
+                        right: one,
+                    });
+                    dest
+                });
+            }
+
             // When both operands are ANY-typed (untyped fn params), dispatch
             // to rt_any_add which does a runtime tag check: string operands
             // go through rt_string_concat, integers use arithmetic addition.
