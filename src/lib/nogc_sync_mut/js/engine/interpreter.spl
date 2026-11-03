@@ -100,6 +100,80 @@ fn text_equals_exact(left: text, right: text) -> bool:
         i = i + 1
     true
 
+fn _simple_fetch_marker(obj_id: i64, store: ObjectStore) -> bool:
+    match store.get_property(obj_id, "__simple_fetch_host"):
+        JsValue.Boolean(v): v
+        _:
+            false
+
+fn _simple_fetch_base_url(obj_id: i64, store: ObjectStore) -> text:
+    match store.get_property(obj_id, "__simple_base_url"):
+        JsValue.String(v): v
+        _:
+            ""
+
+fn _simple_fetch_cookie_header(obj_id: i64, store: ObjectStore) -> text:
+    match store.get_property(obj_id, "__simple_cookie_header"):
+        JsValue.String(v): v
+        _:
+            ""
+
+fn _scheme(url: text) -> text:
+    match url.index_of("://"):
+        Some(idx): url.substring(0, idx)
+        None: "https"
+
+fn _origin(url: text) -> text:
+    match url.index_of("://"):
+        Some(scheme_end):
+            val after_scheme = scheme_end + 3
+            match url.substring(after_scheme).index_of("/"):
+                Some(rel_idx): url.substring(0, after_scheme + rel_idx)
+                None: url
+        None:
+            ""
+
+fn _without_fragment(url: text) -> text:
+    match url.index_of("#"):
+        Some(idx): url.substring(0, idx)
+        None: url
+
+fn _without_query(url: text) -> text:
+    val clean = _without_fragment(url)
+    match clean.index_of("?"):
+        Some(idx): clean.substring(0, idx)
+        None: clean
+
+fn _base_dir(url: text) -> text:
+    val clean = _without_query(url)
+    val origin = _origin(clean)
+    if origin == "":
+        return ""
+    if clean == origin:
+        return origin + "/"
+    val after_origin = clean.substring(origin.len())
+    match after_origin.last_index_of("/"):
+        Some(rel_idx): origin + after_origin.substring(0, rel_idx + 1)
+        None: origin + "/"
+
+fn _resolve_fetch_url(base_url: text, href: text) -> text:
+    if href == "":
+        return base_url
+    if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
+        return href
+    if href.starts_with("//"):
+        return _scheme(base_url) + ":" + href
+    if href.starts_with("#"):
+        return _without_fragment(base_url) + href
+    if href.starts_with("?"):
+        return _without_query(base_url) + href
+    if href.starts_with("/"):
+        val origin = _origin(base_url)
+        if origin != "":
+            return origin + href
+        return href
+    _base_dir(base_url) + href
+
 fn _simple_fetch_state(obj_id: i64, store: ObjectStore) -> text:
     var i = store.prop_obj_ids.len() - 1
     while i >= 0:
