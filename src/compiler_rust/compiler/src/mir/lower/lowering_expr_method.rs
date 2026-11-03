@@ -421,9 +421,9 @@ impl<'a> MirLowerer<'a> {
         // payload is the stored tagged word, the same shape `Some(v)` boxes.
         if method == "get"
             && args.len() == 1
-            && self.type_registry.is_some_and(|tr| {
-                matches!(tr.get(receiver.ty), Some(HirType::Dict { value, .. }) if *value != TypeId::U64)
-            })
+            && self.type_registry.is_some_and(
+                |tr| matches!(tr.get(receiver.ty), Some(HirType::Dict { value, .. }) if *value != TypeId::U64),
+            )
         {
             let value_ty = self
                 .type_registry
@@ -2742,7 +2742,10 @@ impl<'a> MirLowerer<'a> {
         self.with_func(|func, current_block| {
             let some = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
-            block.instructions.push(MirInst::OptionSome { dest: some, value: payload });
+            block.instructions.push(MirInst::OptionSome {
+                dest: some,
+                value: payload,
+            });
             block.instructions.push(MirInst::Store {
                 addr: slot_addr,
                 value: some,

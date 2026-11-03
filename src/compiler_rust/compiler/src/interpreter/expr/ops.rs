@@ -261,7 +261,9 @@ fn try_dunder_unaryop(
 /// other pair keeps `Value` equality.
 fn uint64_word_eq(left: &Value, right: &Value) -> Option<bool> {
     match (left, right) {
-        (Value::UInt { value, width: 64 }, Value::Int(i)) | (Value::Int(i), Value::UInt { value, width: 64 }) if *i < 0 => {
+        (Value::UInt { value, width: 64 }, Value::Int(i)) | (Value::Int(i), Value::UInt { value, width: 64 })
+            if *i < 0 =>
+        {
             Some(*value == *i as u64)
         }
         _ => None,
@@ -1039,7 +1041,7 @@ pub(super) fn eval_op_expr(
                     // user enum's operator overload can't shadow nil semantics.
                     if let Some(eq) = uint64_word_eq(&left_val, &right_val) {
                         Ok(Value::Bool(eq))
-                    } else                     if left_val.is_nil_like() || right_val.is_nil_like() {
+                    } else if left_val.is_nil_like() || right_val.is_nil_like() {
                         Ok(Value::Bool(left_val.is_nil_like() && right_val.is_nil_like()))
                     } else if let Some(result) = try_object_binop_method(
                         "__eq__",
@@ -1067,7 +1069,7 @@ pub(super) fn eval_op_expr(
                     // See BinOp::Eq above: nil literal and Option::None compare equal.
                     if let Some(eq) = uint64_word_eq(&left_val, &right_val) {
                         Ok(Value::Bool(!eq))
-                    } else                     if left_val.is_nil_like() || right_val.is_nil_like() {
+                    } else if left_val.is_nil_like() || right_val.is_nil_like() {
                         Ok(Value::Bool(!(left_val.is_nil_like() && right_val.is_nil_like())))
                     } else if let Some(result) = try_object_binop_method(
                         "__ne__",
