@@ -60,6 +60,7 @@ impl std::fmt::Debug for RuntimeValue {
                 match payload {
                     tags::SPECIAL_NIL => write!(f, "RuntimeValue::Nil"),
                     tags::SPECIAL_TRUE => write!(f, "RuntimeValue::Bool(true)"),
+                    _ if self.is_char() => write!(f, "RuntimeValue::Char({:?})", self.as_char().unwrap_or(char::REPLACEMENT_CHARACTER)),
                     tags::SPECIAL_FALSE => write!(f, "RuntimeValue::Bool(false)"),
                     _ => write!(f, "RuntimeValue::Symbol({})", payload),
                 }
@@ -501,6 +502,40 @@ impl RuntimeValue {
     }
 
     // =========================================================================
+    // Char operations (ADR-005)
+    // =========================================================================
+
+    /// Create a char value from a Unicode scalar value. Returns None for a
+    /// surrogate or a value above U+10FFFF.
+    #[inline]
+    pub fn from_char_code(code: u32) -> Option<Self> {
+        char::from_u32(code).map(|c| Self::from_char(c))
+    }
+
+    /// Create a char value.
+    #[inline]
+    pub const fn from_char(c: char) -> Self {
+        Self::from_special(tags::SPECIAL_CHAR_BASE | (c as u64))
+    }
+
+    /// Check if this is a char value.
+    #[inline]
+    pub const fn is_char(self) -> bool {
+        self.tag() == tags::TAG_SPECIAL
+            && (self.payload() & !tags::SPECIAL_CHAR_MASK) == tags::SPECIAL_CHAR_BASE
+    }
+
+    /// The char, if this is a char value.
+    #[inline]
+    pub fn as_char(self) -> Option<char> {
+        if self.is_char() {
+            char::from_u32((self.payload() & tags::SPECIAL_CHAR_MASK) as u32)
+        } else {
+            None
+        }
+    }
+
+    // =========================================================================
     // Heap pointer operations
     // =========================================================================
 
@@ -640,6 +675,7 @@ impl RuntimeValue {
                 match payload {
                     tags::SPECIAL_NIL => "nil",
                     tags::SPECIAL_TRUE | tags::SPECIAL_FALSE => "bool",
+                    _ if self.is_char() => "char",
                     _ => "symbol",
                 }
             }

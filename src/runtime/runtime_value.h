@@ -22,6 +22,14 @@ typedef uint64_t RuntimeValue;
 #define RT_FALSE ((SPECIAL_FALSE << 3) | TAG_SPECIAL)
 #define RT_ERROR ((SPECIAL_ERROR << 3) | TAG_SPECIAL)
 
+/* Char values (ADR-005): TAG_SPECIAL sub-kind, payload = SPECIAL_CHAR_BASE | code
+ * point. Parity with src/compiler_rust/runtime/src/value/tags.rs. Never TAG_INT. */
+#define SPECIAL_CHAR_BASE (1ULL << 40)
+#define SPECIAL_CHAR_MASK 0x1FFFFFULL
+#define RT_CHAR(cp) ((((SPECIAL_CHAR_BASE | ((uint64_t)(cp) & SPECIAL_CHAR_MASK))) << 3) | TAG_SPECIAL)
+#define RT_IS_CHAR(v) ((((v) & TAG_MASK) == TAG_SPECIAL) && ((((v) >> 3) & ~SPECIAL_CHAR_MASK) == SPECIAL_CHAR_BASE))
+#define RT_CHAR_CODE(v) ((uint32_t)(((v) >> 3) & SPECIAL_CHAR_MASK))
+
 /* Starting any user-visible thread must tell the Rust seed runtime, which packs
  * `[i64]` arrays in place only while no other thread can see them. Weak, so
  * standalone C builds (no seed runtime, no packing) link without it. On
