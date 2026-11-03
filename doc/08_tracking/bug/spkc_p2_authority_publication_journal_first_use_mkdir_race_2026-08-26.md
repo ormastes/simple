@@ -1,6 +1,6 @@
 # SPKC P2 authority-publication journal first-use mkdir race
 
-Status: OPEN (P1)
+Status: FIXED 2026-11-03 (P1). Journal now builds its ledger via mkdirDurable (EEXIST-tolerant, every created ancestor + parent entry fsynced); stress spec: examples/05_stdlib/spipe/test/unit/authority_publication_journal_first_use_test.js
 
 ## Defect
 
