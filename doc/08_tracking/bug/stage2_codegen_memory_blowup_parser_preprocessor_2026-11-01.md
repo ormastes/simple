@@ -56,3 +56,7 @@ inside a unit's codegen or in the setup before it.
 1. Rerun with `SIMPLE_COMPILER_TRACE=1` to see whether the growth comes before the first unit or inside it.
 2. Fix in the driver: release HIR/MIR of other shards before `native_compile`, or allow staged
    codegen/eviction for `Both` output. Tracked with the related whole-program memory bug.
+
+## Status 2026-11-03: resolved-duplicate
+
+Superseded by `stage2_whole_program_mir_memory_growth_2026-11-01.md` (same cause: Both output format kept the full MIR set resident; fixed in #5791).

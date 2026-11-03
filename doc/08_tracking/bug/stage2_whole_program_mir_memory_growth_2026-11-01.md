@@ -114,3 +114,7 @@ the same SMF bytes (per-batch MIR passes apply as for native objects). SMF-only 
 Spec: `test/01_unit/compiler/driver/smf_staged_parts_spec.spl`.
 Takes effect after the next stage2 rebuild; the `--mode one-binary` launch
 workaround above remains valid until then.
+
+## Status 2026-11-03: fix-implemented-verification-pending
+
+Fix landed in 728ddb0170f (#5791); spec `test/01_unit/compiler/driver/smf_staged_parts_spec.spl` 6/6 pass on origin/release/1.0.0 (bin/simple.exe). RSS verification needs a stage2 rebuilt with #5791 (not yet deployed). Repro: build stage2 from release/1.0.0 head, run stage3 native_compile with default `--mode=dynload` and watch peak RSS; expect no 35->66 GB growth (staged codegen + MIR sharding active for Both). The parser_preprocessor memory-blowup bug is a duplicate of this one.

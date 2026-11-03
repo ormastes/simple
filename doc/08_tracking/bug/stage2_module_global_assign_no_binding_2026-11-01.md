@@ -2,7 +2,7 @@
 
 - **ID:** stage2_module_global_assign_no_binding_2026-11-01
 - **Priority:** P1 (blocks phase-3 stage3 MIR)
-- **Status:** workaround in source (tagged); root fix open
+- **Status:** fix-implemented-verification-pending. Root fix landed in 404747cc60a (Optional arm in `runtime_module_initializer_type_fallback`, module_lowering.spl:412). The tagged `= nil` workaround at incremental.spl:1922 MUST stay until a stage2 built with this fix exists (frozen stage2 still lacks it). Verify: run the two-file repro below with a stage2/stage3 built from >= 404747cc60a; expect no "assignment target has no local binding". Seed-interpreter spec test/01_unit/compiler/50.mir/module_global_optional_none_static_spec.spl: 1/3 pass on seed (seed-interpreter limitations on `Inv?` and fail-closed case; not valid evidence).
 - **Owner area:** `src/compiler/50.mir/_MirLowering/module_lowering.spl`
   (`runtime_module_initializer_supported` / `lower_static`)
 - **Found by:** phase-3 run 14c, frozen stage2 `C:/dev/p3new/stage2.exe`

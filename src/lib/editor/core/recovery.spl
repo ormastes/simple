@@ -1,7 +1,8 @@
 # Editor Recovery — lock and WAL replay coordination.
 
 use std.editor.core.session_db.*
-use std.io_runtime.{file_read, file_write, file_delete, file_exists, getpid}
+use std.io_runtime.{file_read, file_delete, file_exists, getpid}
+use std.nogc_sync_mut.daemon_sdk.lock.{try_acquire_daemon_lock, release_daemon_lock, is_daemon_running}
 
 struct RecoveryState:
     needs_recovery: bool
@@ -22,10 +23,11 @@ class RecoveryManager:
         RecoveryState(needs_recovery: wal != "", stale_lock: lock_exists, lock_path: me.lock_path, wal_path: me.wal_path)
 
     me acquire_lock() -> bool:
-        file_write(me.lock_path, getpid().to_text())
+        try_acquire_daemon_lock(me.lock_path) > 0
 
     me release_lock():
-        file_delete(me.lock_path)
+        if not release_daemon_lock(getpid(), me.lock_path) and not is_daemon_running(me.lock_path):
+            file_delete(me.lock_path)
 
     me recover(session_db: SessionDb) -> bool:
         val ok = session_db.checkpoint()

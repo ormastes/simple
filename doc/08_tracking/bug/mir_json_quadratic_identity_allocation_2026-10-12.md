@@ -1,6 +1,6 @@
 # Quadratic MIR JSON identity allocation
 
-Status: **OPEN; source candidate, native qualification blocked**. This patch is not an admitted compiler repair. No aggregate runner retry is authorized by the measurements below.
+Status: **FIXED in source** (locals/blocks/instructions/escape fragments joined once); spec test/01_unit/compiler/50.mir/mir_json_escaping_spec.spl added 2026-11-02; native stage3 qualification and original 218-module OOM repro pending (verification-pending).
 
 ## Confirmed failure
 
