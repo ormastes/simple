@@ -1,0 +1,159 @@
+# REQ-EAPI-001/002: export-route observations preserve identity, not a verdict.
+# These specs exercise parsed module surfaces and the production retained pass.
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.api_export_route_facts_v1.{ApiExportJoinV1}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_hir_pipeline_passes.{run_typecheck_warn_pass}
+use compiler.hir.hir_lowering.api_export_route_projection_v1.{project_api_export_routes_v1}
+use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1}
+
+struct RouteFixtureV1:
+    registry: ModuleSurfacesByName
+    modules: Dict<text, HirModule>
+    context: CompileContext
+
+fn route_origin_kind_v1(registry: ModuleSurfacesByName,
+        exporter_index: i64, export_name: text) -> text:
+    val origins = registry.surfaces[exporter_index].export_origin_index
+    var index = 0
+    while index < origins.names.len():
+        if origins.names[index] == export_name:
+            return origins.resolution_kinds[index]
+        index = index + 1
+    ""
+
+fn route_fixture_v1() -> RouteFixtureV1:
+    val logger = Logger(level: 0)
+    val leaf_name = "fixture.leaf"
+    val facade_name = "fixture.__init__"
+    val leaf_path = "fixture/leaf.spl"
+    val facade_path = "fixture/__init__.spl"
+    val leaf_source = "pub fn flag() -> bool:\n    true\nexport flag\n"
+    val facade_source = "export use fixture.leaf.\{flag\}\n"
+    var parsed: Dict<text, Module> = {}
+    parsed[leaf_name] = parse_full_frontend(leaf_source, leaf_path, leaf_name, logger)
+    parsed[facade_name] = parse_full_frontend(facade_source, facade_path, facade_name, logger)
+    val sources: [SourceFile] = [
+        SourceFile(path: leaf_path, content: leaf_source, module_name: leaf_name),
+        SourceFile(path: facade_path, content: facade_source, module_name: facade_name)]
+    val surfaces_result = module_surfaces_from_modules(parsed, sources)
+    expect(surfaces_result.is_ok()).to_equal(true)
+    val registry = surfaces_result.unwrap()
+    var modules: Dict<text, HirModule> = {}
+    val leaf = parse_full_frontend(leaf_source, leaf_path, leaf_name, logger)
+    var leaf_lowering = hirlowering_for_module(leaf_path, registry)
+    modules[leaf_name] = leaf_lowering.lower_module(leaf)
+    expect(leaf_lowering.errors.len()).to_equal(0)
+    val facade = parse_full_frontend(facade_source, facade_path, facade_name, logger)
+    var facade_lowering = hirlowering_for_module(facade_path, registry)
+    modules[facade_name] = facade_lowering.lower_module(facade)
+    expect(facade_lowering.errors.len()).to_equal(0)
+    val context = CompileContext.create(driver_core_compile_options_default())
+    run_typecheck_warn_pass(context, modules, Some(registry))
+    RouteFixtureV1(registry, modules, context)
+
+describe "frozen API export-route observations":
+    it "joins direct and facade exports to the same production callable identity":
+        # @req REQ-EAPI-001
+        val fixture = route_fixture_v1()
+        val facts = fixture.context.api_export_route_facts.unwrap()
+        expect(facts.registry_generation).to_equal(fixture.registry.generation)
+        expect(facts.routes.len()).to_be_greater_than(0)
+        var direct_found = false
+        var facade_found = false
+        var direct_index = -1
+        var facade_index = -1
+        var direct_terminal = -1
+        var facade_terminal = -1
+        var direct_symbol = -1
+        var facade_symbol = -1
+        var direct_resolution_kind = ""
+        var facade_resolution_kind = ""
+        for route in facts.routes:
+            if route.terminal_module == "fixture.leaf" and route.source_name == "flag" and route.join_status == ApiExportJoinV1.Joined:
+                if route.exporter_module == "fixture.leaf":
+                    direct_found = true
+                    direct_index = route.exporter_index
+                    direct_terminal = route.terminal_index
+                    direct_symbol = route.local_symbol
+                    direct_resolution_kind = route.resolution_kind
+                if route.exporter_module == "fixture.__init__":
+                    facade_found = true
+                    facade_index = route.exporter_index
+                    facade_terminal = route.terminal_index
+                    facade_symbol = route.local_symbol
+                    facade_resolution_kind = route.resolution_kind
+                # Joined means identity only; ancestor visibility is explicitly unknown.
+                expect(route.unknown_reason).to_equal("ancestor-visibility-not-collected")
+        expect(direct_found).to_equal(true)
+        expect(facade_found).to_equal(true)
+        expect(direct_index).to_be_greater_than(-1)
+        expect(facade_index).to_be_greater_than(-1)
+        expect(direct_index == facade_index).to_equal(false)
+        expect(direct_terminal).to_equal(facade_terminal)
+        expect(direct_symbol).to_be_greater_than(-1)
+        expect(facade_symbol).to_equal(direct_symbol)
+        expect(direct_resolution_kind).to_equal(route_origin_kind_v1(fixture.registry, direct_index, "flag"))
+        expect(facade_resolution_kind).to_equal(route_origin_kind_v1(fixture.registry, facade_index, "flag"))
+
+    it "rejects a stale signature binding and retains an explicit unknown route":
+        # @req REQ-EAPI-001
+        val fixture = route_fixture_v1()
+        val signatures = fixture.context.api_signature_facts
+        var leaf_facts: ApiSignatureFactsV1 = signatures["fixture.leaf"]
+        leaf_facts.surface_generation = leaf_facts.surface_generation + 1
+        signatures["fixture.leaf"] = leaf_facts
+        val routes = project_api_export_routes_v1(fixture.registry, signatures)
+        expect(routes.unknown_reasons).to_contain("signature-surface-binding-mismatch")
+        var unavailable = false
+        for route in routes.routes:
+            if route.terminal_module == "fixture.leaf" and route.source_name == "flag":
+                if route.join_status == ApiExportJoinV1.Unknown and route.unknown_reason == "callable-observation-unavailable":
+                    unavailable = true
+        expect(unavailable).to_equal(true)
+
+    it "clears route facts when a later legacy typecheck pass omits the registry":
+        # @req REQ-EAPI-001
+        val fixture = route_fixture_v1()
+        expect(fixture.context.api_export_route_facts.is_some()).to_equal(true)
+        run_typecheck_warn_pass(fixture.context, fixture.modules)
+        expect(fixture.context.api_export_route_facts).to_be_nil()
+
+    it "returns no routes from an unfrozen registry":
+        # @req REQ-EAPI-001
+        val empty = ModuleSurfacesByName.empty()
+        val routes = project_api_export_routes_v1(empty, {})
+        expect(routes.routes.len()).to_equal(0)
+        expect(routes.unknown_reasons).to_contain("registry-not-frozen")
+
+    it "rejects duplicate callable observations instead of choosing one symbol":
+        # @req REQ-EAPI-001
+        val fixture = route_fixture_v1()
+        val signatures = fixture.context.api_signature_facts
+        var leaf_facts: ApiSignatureFactsV1 = signatures["fixture.leaf"]
+        leaf_facts.callables.push(leaf_facts.callables[0])
+        signatures["fixture.leaf"] = leaf_facts
+        val routes = project_api_export_routes_v1(fixture.registry, signatures)
+        var ambiguous = false
+        for route in routes.routes:
+            if route.terminal_module == "fixture.leaf" and route.source_name == "flag":
+                if route.join_status == ApiExportJoinV1.Unknown and route.unknown_reason == "ambiguous-callable-observation":
+                    ambiguous = true
+        expect(ambiguous).to_equal(true)
+
+    it "rejects malformed frozen origin arrays without returning partial routes":
+        # @req REQ-EAPI-001
+        val fixture = route_fixture_v1()
+        fixture.registry.surfaces[0].export_origin_index.owner_modules.push("misaligned")
+        val routes = project_api_export_routes_v1(fixture.registry, fixture.context.api_signature_facts)
+        expect(routes.routes.len()).to_equal(0)
+        expect(routes.unknown_reasons).to_contain("surface-index-malformed")
