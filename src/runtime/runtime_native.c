@@ -5475,11 +5475,11 @@ int64_t rt_text_eq_fast(int64_t left, int64_t right) {
  * expr_dispatch.spl, which now routes here whenever local_is_str() says
  * either operand is string-shaped).
  *
- * Root fix: normalize BOTH operands to a raw null-terminated buffer via the
- * same tagged-or-raw runtime detection rt_interp_cstr already uses for
- * string-interpolation operands (bug #136), then compare byte content. This
- * handles all four combinations (tagged/tagged, tagged/raw, raw/tagged,
- * raw/raw) without any compile-time guess about which side is which --
+ * Root fix: normalize BOTH operands to a byte view via the same tagged-or-raw
+ * runtime detection used for string-interpolation operands (bug #136). Tagged
+ * strings retain their stored length (including embedded NUL bytes); raw C
+ * strings use strlen. This handles all four combinations (tagged/tagged,
+ * tagged/raw, raw/tagged, raw/raw) without any compile-time guess about which side is which --
  * unlike rt_string_eq/rt_native_eq above, which require BOTH sides already
  * tagged and so silently return 0 (never equal) for a raw literal operand. */
 int64_t rt_text_eq_any(int64_t left, int64_t right) {
@@ -5494,11 +5494,30 @@ int64_t rt_text_eq_any(int64_t left, int64_t right) {
      * selfcheck: src/runtime/test/rt_text_eq_any_nil_sentinel_selfcheck.c).
      * nil == nil is EQUAL; nil vs any real string is NOT. */
     if (left == rt_core_nil() || right == rt_core_nil()) return left == right ? 1 : 0;
-    const char* a = rt_interp_cstr(left);
-    const char* b = rt_interp_cstr(right);
-    if (!a || !b) return 0;
-    if (a == b) return 1;
-    return strcmp(a, b) == 0 ? 1 : 0;
+    const char* a;
+    const char* b;
+    size_t a_len;
+    size_t b_len;
+    RtCoreString* left_string = rt_core_as_string(left);
+    RtCoreString* right_string = rt_core_as_string(right);
+    if (left_string) {
+        a = left_string->data;
+        a_len = (size_t)left_string->len;
+    } else {
+        a = rt_interp_cstr(left);
+        if (!a) return 0;
+        a_len = strlen(a);
+    }
+    if (right_string) {
+        b = right_string->data;
+        b_len = (size_t)right_string->len;
+    } else {
+        b = rt_interp_cstr(right);
+        if (!b) return 0;
+        b_len = strlen(b);
+    }
+    if (a_len != b_len) return 0;
+    return a_len == 0 || memcmp(a, b, a_len) == 0;
 }
 
 int64_t rt_native_neq(int64_t left, int64_t right) {

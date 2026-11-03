@@ -1,0 +1,68 @@
+# daemon_sdk lock — check-then-write was not exclusive
+#
+# try_acquire_daemon_lock did file_exists -> file_write, so concurrent callers
+# both "acquired", and a reader that saw an in-flight (empty) lock read pid -1
+# and deleted a fresh live lock. Acquisition must be an exclusive create; only
+# complete + dead-pid (or long-abandoned partial) locks may be broken.
+
+use std.io_runtime.{file_write, file_delete, file_exists, getpid, read_file_text, mkdir_p}
+use std.nogc_sync_mut.daemon_sdk.lock.{try_acquire_daemon_lock, release_daemon_lock}
+
+fn _path(name: text) -> text:
+    "build/tmp/daemon_lock_excl_{getpid()}_{name}.lock"
+
+fn _win(n: i64) -> i64:
+    if n > 0: 1 else: 0
+
+fn _clean(p: text):
+    mkdir_p("build/tmp")
+    file_delete(p)
+    file_delete(p + ".break")
+
+describe "daemon_sdk lock exclusivity":
+    it "grants exactly one of two acquirers on a fresh path":
+        val p = _path("fresh")
+        _clean(p)
+        val a = try_acquire_daemon_lock(p)
+        val b = try_acquire_daemon_lock(p)
+        expect(_win(a) + _win(b)).to_equal(1)
+        _clean(p)
+
+    it "does not delete a lock another acquirer is still writing (empty content)":
+        val p = _path("inflight")
+        _clean(p)
+        # Forced interleaving: the competitor has created the lock but not yet
+        # written its pid. The old code read pid -1, deleted it and took over.
+        file_write(p, "")
+        val got = try_acquire_daemon_lock(p)
+        expect(got).to_equal(-1)
+        expect(file_exists(p)).to_equal(true)
+        _clean(p)
+
+    it "does not break a live-pid lock":
+        val p = _path("live")
+        _clean(p)
+        file_write(p, "{getpid()}\n1")
+        expect(try_acquire_daemon_lock(p)).to_equal(-1)
+        expect(read_file_text(p)).to_equal("{getpid()}\n1")
+        _clean(p)
+
+    it "lets exactly one of two breakers take over a dead-pid lock":
+        val p = _path("stale")
+        _clean(p)
+        file_write(p, "999999999\n1")
+        val a = try_acquire_daemon_lock(p)
+        val b = try_acquire_daemon_lock(p)
+        expect(_win(a) + _win(b)).to_equal(1)
+        _clean(p)
+
+    it "releases only when the pid matches":
+        val p = _path("release")
+        _clean(p)
+        val a = try_acquire_daemon_lock(p)
+        expect(a > 0).to_equal(true)
+        expect(release_daemon_lock(a + 1, p)).to_equal(false)
+        expect(file_exists(p)).to_equal(true)
+        expect(release_daemon_lock(a, p)).to_equal(true)
+        expect(file_exists(p)).to_equal(false)
+        _clean(p)

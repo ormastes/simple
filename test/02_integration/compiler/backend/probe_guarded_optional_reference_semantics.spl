@@ -1,0 +1,64 @@
+# Native LLVM source probe for source-level optional payload narrowing.
+# Keep present arrays, empty arrays, nil guards, text builtins, and a custom
+# struct len() method in this fixture so each path has an observable result.
+
+extern fn rt_exit(code: i32)
+
+fn fail(message: text):
+    print "FAIL guarded optional reference: {message}"
+    rt_exit(1)
+
+var checks: i64 = 0
+var array_guard_entries: i64 = 0
+
+fn check_i64(actual: i64, expected: i64, label: text):
+    if actual != expected:
+        fail(label)
+    checks = checks + 1
+
+fn check_text(actual: text, expected: text, label: text):
+    if actual != expected:
+        fail(label)
+    checks = checks + 1
+
+fn optional_array_len(value: [i64]?) -> i64:
+    if val items = value:
+        array_guard_entries = array_guard_entries + 1
+        return items.len()
+    -1
+
+fn optional_text_len(value: text?) -> i64:
+    if val text_value = value:
+        return text_value.len()
+    -1
+
+struct Measure:
+    count: i64
+    fn len() -> text:
+        "custom-measure-len"
+
+fn optional_measure_label(value: Measure?) -> text:
+    if val measure = value:
+        return measure.len()
+    "nil-measure"
+
+print "BEGIN guarded optional reference fixture"
+
+val populated: [i64] = [11, 23]
+val empty: [i64] = []
+check_i64(optional_array_len(populated), 2, "present array length")
+check_i64(optional_array_len(empty), 0, "empty array is present")
+check_i64(optional_array_len(nil), -1, "nil array skips guard")
+check_i64(array_guard_entries, 2, "array guard entry count")
+
+check_i64(optional_text_len("hello"), 5, "present optional text length")
+check_i64(optional_text_len(nil), -1, "nil optional text skips guard")
+
+val measure = Measure(count: 7)
+check_text(optional_measure_label(measure), "custom-measure-len", "custom len signature")
+check_text(optional_measure_label(nil), "nil-measure", "nil custom receiver skips guard")
+
+if checks != 8:
+    fail("expected exactly eight checks")
+print "END guarded optional reference fixture checks={checks}"
+rt_exit(0)
