@@ -1,4 +1,5 @@
-import { closeSync as defaultCloseSync, fsyncSync as defaultFsyncSync, lstatSync as defaultLstatSync, mkdirSync as defaultMkdirSync, openSync as defaultOpenSync } from "node:fs";
+import { closeSync as defaultCloseSync, fsyncSync as defaultFsyncSync, lstatSync as defaultLstatSync, mkdirSync as defaultMkdirSync, openSync as defaultOpenSync, renameSync as defaultRenameSync, unlinkSync as defaultUnlinkSync, writeFileSync as defaultWriteFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
 // Windows does not provide a durable directory fsync operation for every
@@ -63,4 +64,27 @@ export function mkdirDurable(path, {
   requireRealDirectory(path);
   fsyncDir(dirname(path));
   fsyncDir(path);
+}
+
+/**
+ * Durable atomic publish: mkdirDurable parent, unique pid+random temp, fsync
+ * file, rename, fsync parent directory; temp is removed on failure.
+ */
+export function atomicWriteDurable(path, bytes, { mode = 0o600 } = {}) {
+  mkdirDurable(dirname(path));
+  const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
+  let descriptor = -1;
+  try {
+    descriptor = defaultOpenSync(temporary, "wx", mode);
+    defaultWriteFileSync(descriptor, bytes);
+    defaultFsyncSync(descriptor);
+    defaultCloseSync(descriptor);
+    descriptor = -1;
+    defaultRenameSync(temporary, path);
+  } catch (error) {
+    if (descriptor !== -1) { try { defaultCloseSync(descriptor); } catch { /* original error wins */ } }
+    try { defaultUnlinkSync(temporary); } catch { /* temp may already be gone */ }
+    throw error;
+  }
+  fsyncDirectory(dirname(path));
 }
