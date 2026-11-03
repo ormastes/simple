@@ -1,0 +1,57 @@
+#!/bin/sh
+# Controlled-clock contract for scripts/resource/process-tree-rss-watchdog.pl:
+# extracts the real monotonic accessor and elapsed-budget expressions and runs
+# them against independent fake monotonic/civil clocks. Never runs the watchdog
+# main or a workload. Replaces check-watchdog-monotonic-budget.py (no Python).
+# Usage: sh check-watchdog-monotonic-budget.shs [watchdog.pl]
+here=$(cd "$(dirname "$0")" && pwd -P)
+target=${1:-$here/../resource/process-tree-rss-watchdog.pl}
+[ -f "$target" ] || { echo "ERROR - nothing was checked: $target missing" >&2; exit 2; }
+command -v perl >/dev/null 2>&1 || { echo "ERROR - nothing was checked: perl missing" >&2; exit 2; }
+WATCHDOG_PL=$target exec perl -e '
+use strict; use warnings;
+my $p = $ENV{WATCHDOG_PL};
+open(my $fh, "<", $p) or die "cannot read $p\n"; local $/; my $s = <$fh>; close $fh;
+sub grab { my ($re,$n)=@_; $s =~ $re or die "FAIL - contract expression not found: $n\n"; return defined($1) ? $1 : $&; }
+my $helper = grab(qr/^(sub monotonic_time \{[^\n]+\})/m, "monotonic_time");
+my $startup_helper = grab(qr/^(sub checked_monotonic_startup_time \{[^\n]+\})/m, "checked_monotonic_startup_time");
+my $startup = grab(qr/^(my \$started = checked_monotonic_startup_time\(\);)$/m, "startup");
+my $si = index($s, $startup); $s =~ /\bfork\s*\(/ or die "FAIL - no fork site\n";
+die "FAIL - checked startup must precede every fork site\n" unless $si < $-[0];
+my $timeout = grab(qr/if \((\$opt\{\x27timeout-seconds\x27\} && monotonic_time\(\) - \$started >= \$opt\{\x27timeout-seconds\x27\})\)/, "timeout");
+my $grace = grab(qr/while \((monotonic_time\(\) < \$grace_end)\)/, "grace");
+my $duration = grab(qr/my \$duration_ms = (\(monotonic_time\(\) - \$sample_started_at\) \* 1000);/, "duration");
+my $remaining = grab(qr/my \$remaining = (\$opt\{\x27interval-ms\x27\} \/ 1000 - \(monotonic_time\(\) - \$sample_started\));/, "remaining");
+my $prog = q{use strict;use warnings;use Test::More tests => 12;
+our ($mono,$wall,$provider_throw)=(100,1000,0);
+sub CLOCK_MONOTONIC(){ 7 }
+sub clock_gettime { die "wrong clock" unless $_[0]==CLOCK_MONOTONIC; die "provider failure" if $provider_throw; return $mono; }
+sub time { return $wall; }
+} . $helper . "\n" . $startup_helper . qq{
+my %opt=(\x27timeout-seconds\x27=>10,\x27interval-ms\x27=>100);
+my \$started=100;
+\$mono=109;\$wall=1000000;
+ok(!($timeout), \x27forward civil jump cannot prematurely expire monotonic timeout\x27);
+\$mono=111;\$wall=-1000000;
+ok(($timeout), \x27backward civil jump cannot extend timeout\x27);
+my \$sample_started_at=200;\$mono=200.05;\$wall=9000000;
+ok(abs(($duration)-50)<0.001,\x27sample duration uses monotonic delta after forward jump\x27);
+\$wall=-9000000;
+ok(abs(($duration)-50)<0.001,\x27sample duration survives backward jump\x27);
+my \$sample_started=200;
+ok(abs(($remaining)-0.05)<0.001,\x27sampling cadence remaining budget is monotonic\x27);
+my \$grace_end=305;\$mono=304;\$wall=9999999;
+ok(($grace),\x27forward civil jump does not cut grace period\x27);
+\$mono=306;\$wall=-9999999;
+ok(!($grace),\x27backward civil jump does not extend grace period\x27);
+\$mono=123.25;is(monotonic_time(),123.25,\x27helper requests CLOCK_MONOTONIC\x27);
+\$mono=-1;my \$n=eval { checked_monotonic_startup_time(); 1 };my \$ne=\$@;
+ok(!\$n && \$ne =~ /CLOCK_MONOTONIC unavailable before workload/,\x27negative startup provider fails before workload\x27);
+\$mono=undef;my \$u=eval { checked_monotonic_startup_time(); 1 };my \$ue=\$@;
+ok(!\$u && \$ue =~ /CLOCK_MONOTONIC unavailable before workload/,\x27undefined startup provider fails before workload\x27);
+\$provider_throw=1;my \$t=eval { checked_monotonic_startup_time(); 1 };my \$te=\$@;
+ok(!\$t && \$te =~ /provider failure/,\x27startup provider exception propagates\x27);
+\$provider_throw=0;\$mono=0;is(checked_monotonic_startup_time(),0,\x27zero monotonic startup accepted\x27);
+};
+eval $prog; die $@ if $@;
+'

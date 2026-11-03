@@ -13,3 +13,7 @@ Proposed repair: resolve the effective limit to 0 for keep-going full-strategy o
 Changed-input synthetic regression passed once: full failed-tool selection includes all 14,133 entries; exact synthetic seals for seven PASS and one FAIL resume all 14,125 pending with retained-failure exit 3; the actual production scheduler runs all twelve fake queue commands after an initial failure while invalid authority/fail-fast run none. This is harness evidence only, not compiler/object/bootstrap qualification. Independent source review pending; bug remains OPEN.
 
 **Revalidated 2026-11-02: still plausible because the report title (Full keep-going bootstrap truncates diagnostic inventory after tool failure) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolution (2026-11-03)
+
+Fixed in source: bootstrap_verification_module_limit (scripts/bootstrap/bootstrap-campaign*.shs) resolves keep-going full runs to limit 0; pinned by scripts/bootstrap/tests/full-inventory-selection-test.py. Closed on source evidence.
