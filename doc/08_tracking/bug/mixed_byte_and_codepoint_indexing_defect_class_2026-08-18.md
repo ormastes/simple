@@ -307,3 +307,15 @@ all three forms already produce the literal `{NL2}`:
 bare `"use std.text.{NL2}"` and fails with `variable NL2 not found` is a
 spec-authoring bug, not a product bug. Gap: none of these three escape forms is
 documented in `doc/07_guide/quick_reference/syntax_quick_reference.md`.
+
+## Fixed 2026-11-03 (text-index-family lane)
+
+- Instance 1 remainder: `str_split(s, "")` now walks UTF-8 lead bytes and slices
+  byte offsets (`src/lib/common/string_core.spl`); spec
+  `test/01_unit/lib/common/str_split_empty_sep_multibyte_spec.spl` (failed before,
+  passes after).
+- Instance 3 (`path_ext` / `last_component`): already byte-consistent on
+  release/1.0.0 (`.substring(i, i+1)` only, no `.char_at`).
+- Prevention: decided by ADR-005 (`doc/04_architecture/adr/ADR-005-text-index-yields-char.md`)
+  — `len()` becomes code points, `byte_len`/`byte_at` explicit; the remaining switch is
+  tracked by `text_len_codepoint_switch_2026-11-03`.
