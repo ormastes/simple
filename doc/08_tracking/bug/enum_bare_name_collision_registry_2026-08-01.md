@@ -585,3 +585,7 @@ artifact-compatibility plan. The three controls above are the tripwire that
 keeps it honest in the meantime.
 
 **Revalidated 2026-11-02: still plausible because ENUMERATION LANDED — no fix applied. Needs an owner decision on the; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 staged rollout, stage 1 (warning only)
+
+Seed interpreter now emits `warning[enum-bare-name-ambiguous]` on stderr when an enum name is registered again with a different variant set (`warn_on_ambiguous_bare_enum_name`, evaluation_helpers.rs; hooked at GLOBAL_ENUMS/global_enums registration). No rejection yet; lookup is still last-wins. Unit tests: `cargo test -p simple-compiler --lib enum_bare_name_warning` (2 pass). Stage 2 (module-keyed lookup / hard error) still open.

@@ -394,6 +394,7 @@ pub(super) fn register_definitions(
                 tag_methods_owner(&mut enum_def.methods, module_ident.as_ref());
                 let arc_e = Arc::new(enum_def);
                 local_enums.insert(e.name.clone(), Arc::clone(&arc_e));
+                warn_on_ambiguous_bare_enum_name(global_enums.get(&e.name), &arc_e);
                 global_enums.insert(e.name.clone(), Arc::clone(&arc_e));
                 // Export enum as EnumType so EnumName.VariantName syntax works
                 let enum_type = Value::EnumType {
@@ -974,4 +975,77 @@ pub(super) fn process_bare_exports(
         }
     }
     trace!(total_exports = exports.retained_len(), "Finished processing bare exports");
+}
+
+/// Staged diagnostic for `enum_bare_name_collision_registry_2026-08-01` /
+/// `seed_enum_variant_bare_name_last_registration_wins_2026_10_19`: enum lookup
+/// is keyed by bare name, so a second enum with the same name but a different
+/// variant set silently replaces the first. Stage 1 only WARNS (no rejection).
+/// Returns true when a warning was emitted.
+pub(crate) fn warn_on_ambiguous_bare_enum_name(
+    previous: Option<&Arc<simple_parser::ast::EnumDef>>,
+    new_def: &simple_parser::ast::EnumDef,
+) -> bool {
+    let Some(prev) = previous else { return false };
+    let names = |d: &simple_parser::ast::EnumDef| -> Vec<String> {
+        let mut v: Vec<String> = d.variants.iter().map(|x| x.name.clone()).collect();
+        v.sort();
+        v
+    };
+    if names(prev) == names(new_def) {
+        return false;
+    }
+    eprintln!(
+        "warning[enum-bare-name-ambiguous]: enum `{}` is registered again with a different variant set \
+         ([{}] replaces [{}]); enum lookup is keyed by bare name and the last registration wins. \
+         Rename one enum (see seed_enum_variant_bare_name_last_registration_wins_2026_10_19)",
+        new_def.name,
+        names(new_def).join(", "),
+        names(prev).join(", ")
+    );
+    true
+}
+
+#[cfg(test)]
+mod enum_bare_name_warning_tests {
+    use super::*;
+    use simple_parser::ast::EnumDef;
+
+    fn parse_enum(src: &str) -> Arc<EnumDef> {
+        let mut parser = simple_parser::Parser::new(src);
+        let module = parser.parse().expect("parse");
+        for n in module.items {
+            if let Node::Enum(e) = n {
+                return Arc::new(e);
+            }
+        }
+        panic!("no enum in source");
+    }
+
+    #[test]
+    fn warns_when_same_name_has_different_variants() {
+        let a = parse_enum("enum ByteOrder:
+    NotApplicable
+    LittleEndian
+");
+        let b = parse_enum("enum ByteOrder:
+    LittleEndian
+    Native
+");
+        assert!(warn_on_ambiguous_bare_enum_name(Some(&a), &b));
+    }
+
+    #[test]
+    fn silent_for_first_registration_and_identical_redefinition() {
+        let a = parse_enum("enum E:
+    A
+    B
+");
+        let b = parse_enum("enum E:
+    B
+    A
+");
+        assert!(!warn_on_ambiguous_bare_enum_name(None, &a));
+        assert!(!warn_on_ambiguous_bare_enum_name(Some(&a), &b));
+    }
 }
