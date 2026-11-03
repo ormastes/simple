@@ -68,3 +68,8 @@ the self-hosted parser's statement dispatch, most likely in
 raised (`src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl`,
 `_ParserPrimary/primary_expr.spl`). Needs a self-hosted-build verification
 loop this shard cannot run. Leaving OPEN with this direction recorded.
+
+## Re-probe 2026-11-03 (tr-sspec lane)
+The current Windows seed `bin/simple.exe test` parses and runs `describe "x":` / `it "a":` fine.
+The reported failure is specific to the macOS arm64 self-hosted binary of 2026-08-08; cannot be
+re-verified here (no self-hosted binary on this host). Left OPEN pending a self-hosted run.

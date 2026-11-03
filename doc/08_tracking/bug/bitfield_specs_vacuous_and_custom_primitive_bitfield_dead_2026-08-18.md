@@ -219,3 +219,8 @@ cannot be closed in this lane until the Rust seed compiles again. The existing
 evidence (compiler modules still load; `custom_primitive_sffi_spec.spl` 20/20;
 `bitfield_mir_spec.spl` 14/14) stands unchanged and is still the limit of what
 has been proven.
+
+## Re-probe 2026-11-03 (tr-sspec lane)
+Finding 2 RESOLVED: `src/compiler/50.mir/custom_primitive_bitfield.spl` no longer exists and no
+`BitfieldValidator` references remain outside an unrelated census scanner. Finding 1 still OPEN:
+`test/01_unit/compiler/mir/bitfield_mir_spec.spl` still has 31 `contains(` assertions on literals.
