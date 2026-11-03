@@ -1,0 +1,139 @@
+# Purpose and audience: branch-coverage evidence for the pure-Simple lld / tool
+# discovery used on the Windows llvm-mingw lane.
+# @req REQ-SSPEC-COMPILER
+#
+# Scope note: no pure-Simple code looks under ~/.simple/toolchains/llvm-mingw-*
+# (that is done by scripts/setup and the Rust seed); the pure-Simple discovery is
+# backend_tool_on_path (PATH walk, direct-path candidates, PATHEXT) plus the
+# SIMPLE_NM / SIMPLE_AR / SIMPLE_OBJDUMP / SIMPLE_OBJCOPY env overrides. A fake
+# llvm-mingw tree with spaces in its path is built in a temp dir and exercised
+# through both routes. PATH / env are restored before any assertion.
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get, env_get_nullable, env_set, env_remove_process,
+    cwd, host_os, file_write, dir_create_all, dir_remove_all, process_run}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use compiler.backend.io_compat.{backend_tool_on_path}
+use compiler.backend.llvm_capability.{find_tool_portable, find_nm_portable,
+    find_archive_portable, find_objdump_portable, find_objcopy_portable}
+
+fn _windows() -> bool:
+    host_os() == "windows"
+
+fn _norm(path: text) -> text:
+    var out = ""
+    var index = 0
+    while index < path.len():
+        val ch = path.char_at(index)
+        out = out + (if ch == "\\": "/" else: ch)
+        index = index + 1
+    if _windows(): out.lower() else: out
+
+fn _tool(dir: text, name: text) -> bool:
+    val path = "{dir}/{name}"
+    if not file_write(path, "#!/bin/sh\nexit 0\n"):
+        return false
+    if _windows():
+        return true
+    val (out, err, code) = process_run("/bin/sh", ["-c", "chmod +x '{path}'"])
+    code == 0
+
+fn _sep() -> text:
+    if _windows(): ";" else: ":"
+
+describe "llvm-mingw lld discovery":
+    it "finds lld in a toolchain bin dir with spaces, via PATH and via direct path":
+        val root = "{cwd()}/build/test/llvm_mingw_disc_{getpid()}/my home"
+        val bin = "{root}/.simple/toolchains/llvm-mingw-20250101-ucrt-x86_64/bin"
+        val exe = if _windows(): ".exe" else: ""
+        var ok = dir_create_all(bin)
+        ok = ok and _tool(dir: bin, name: "ld.lld" + exe)
+        ok = ok and _tool(dir: bin, name: "lld-link" + exe)
+        val saved = env_get("PATH")
+        val saved_ext = env_get_nullable("PATHEXT")
+        val set1 = env_set("PATH", bin + _sep() + saved)
+        val via_path = find_tool_portable(["ld.lld-99", "ld.lld"])
+        # quoted PATH entry (cmd strips the quotes) on Windows
+        val set2 = env_set("PATH", "\"" + bin + "\"" + _sep() + _sep() + saved)
+        val via_quoted = backend_tool_on_path(["lld-link"])
+        # trailing slash entry
+        val set3 = env_set("PATH", bin + "/" + _sep() + saved)
+        val via_slash = backend_tool_on_path(["ld.lld"])
+        # direct path, as written (with an extension) and without (PATHEXT fallback)
+        val direct_exact = backend_tool_on_path(["{bin}/ld.lld{exe}"])
+        val direct_noext = backend_tool_on_path(["{bin}/ld.lld"])
+        val bs = "\\"
+        val direct_back = backend_tool_on_path([bin.replace("/", bs) + bs + "lld-link"])
+        # a directory is not a tool
+        val direct_dir = backend_tool_on_path([bin])
+        val empty_cand = backend_tool_on_path([""])
+        val none = backend_tool_on_path([])
+        val missing = backend_tool_on_path(["{bin}/no-such-lld"])
+        # custom PATHEXT with empty entries; blank PATHEXT falls back to default
+        val pe1 = env_set("PATHEXT", ";.EXE;;")
+        val custom_ext = backend_tool_on_path(["ld.lld"])
+        val pe2 = env_set("PATHEXT", "  ")
+        val blank_ext = backend_tool_on_path(["ld.lld"])
+        val restored = env_set("PATH", saved)
+        val ext_restored = env_set("PATHEXT", saved_ext ?? "")
+        val removed = dir_remove_all("{cwd()}/build/test/llvm_mingw_disc_{getpid()}")
+        expect(ok).to_equal(true)
+        expect(set1 and set2 and set3 and pe1 and pe2).to_equal(true)
+        expect(restored and ext_restored and removed).to_equal(true)
+        expect(_norm(via_path)).to_equal(_norm("{bin}/ld.lld{exe}"))
+        expect(_norm(via_quoted)).to_equal(if _windows(): _norm("{bin}/lld-link{exe}") else: "")
+        expect(_norm(via_slash)).to_equal(_norm("{bin}/ld.lld{exe}"))
+        expect(_norm(direct_exact)).to_equal(_norm("{bin}/ld.lld{exe}"))
+        expect(_norm(direct_noext)).to_equal(if _windows(): _norm("{bin}/ld.lld.exe") else: _norm("{bin}/ld.lld"))
+        expect(_norm(direct_back)).to_equal(if _windows(): _norm("{bin}/lld-link.exe") else: "")
+        expect(direct_dir).to_equal("")
+        expect(empty_cand).to_equal("")
+        expect(none).to_equal("")
+        expect(missing).to_equal("")
+        if _windows():
+            expect(_norm(custom_ext)).to_equal(_norm("{bin}/ld.lld.exe"))
+            expect(_norm(blank_ext)).to_equal(_norm("{bin}/ld.lld.exe"))
+
+    it "reports not found when no lld exists on PATH":
+        val root = "{cwd()}/build/test/llvm_mingw_empty_{getpid()}"
+        val ok = dir_create_all("{root}/bin")
+        val saved = env_get("PATH")
+        val set1 = env_set("PATH", "{root}/bin")
+        val none = find_tool_portable(["ld.lld", "lld", "lld-link"])
+        val restored = env_set("PATH", saved)
+        val removed = dir_remove_all(root)
+        expect(ok and set1 and restored and removed).to_equal(true)
+        expect(none).to_equal("")
+
+    it "honours SIMPLE_NM / SIMPLE_AR / SIMPLE_OBJDUMP / SIMPLE_OBJCOPY overrides":
+        val names = ["SIMPLE_NM", "SIMPLE_AR", "SIMPLE_OBJDUMP", "SIMPLE_OBJCOPY"]
+        var saved: [text] = []
+        for n in names:
+            saved.push(env_get_nullable(n) ?? "")
+        var sets = true
+        for n in names:
+            sets = sets and env_set(n, "C:/tool dir/llvm-" + n + ".exe")
+        val nm = find_nm_portable()
+        val ar = find_archive_portable()
+        val od = find_objdump_portable()
+        val oc = find_objcopy_portable()
+        # unset (empty) falls through to the PATH walk; must not crash
+        for n in names:
+            sets = sets and env_set(n, "")
+        val nm2 = find_nm_portable()
+        val ar2 = find_archive_portable()
+        val od2 = find_objdump_portable()
+        val oc2 = find_objcopy_portable()
+        var index = 0
+        for n in names:
+            env_set(n, saved[index])
+            index = index + 1
+        expect(sets).to_equal(true)
+        expect(nm).to_equal("C:/tool dir/llvm-SIMPLE_NM.exe")
+        expect(ar).to_equal("C:/tool dir/llvm-SIMPLE_AR.exe")
+        expect(od).to_equal("C:/tool dir/llvm-SIMPLE_OBJDUMP.exe")
+        expect(oc).to_equal("C:/tool dir/llvm-SIMPLE_OBJCOPY.exe")
+        expect(nm2 != nm).to_equal(true)
+        expect(ar2 != ar).to_equal(true)
+        expect(od2 != od).to_equal(true)
+        expect(oc2 != oc).to_equal(true)

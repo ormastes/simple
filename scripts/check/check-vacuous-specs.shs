@@ -85,6 +85,31 @@ function strip_comment(s,   i, c, q, out) {
 function trim(s) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", s); return s }
 function indent_of(s,   m) { match(s, /^[ \t]*/); return RLENGTH }
 
+# Assertion names inside fixture strings are data, not executed calls. Keep
+# byte positions unchanged so balanced_arg can still read the original source
+# arguments after a token is found. Both quote styles and escapes are handled.
+function mask_strings(s,   i, c, q, out, single_quote) {
+    single_quote = sprintf("%c", 39)
+    if (index(s, "\"") == 0 && index(s, single_quote) == 0) return s
+    q = ""; out = ""
+    for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q != "") {
+            out = out " "
+            if (c == "\\") {
+                i++
+                if (i <= length(s)) out = out " "
+                continue
+            }
+            if (c == q) q = ""
+        } else if (c == "\"" || c == single_quote) {
+            q = c
+            out = out " "
+        } else out = out c
+    }
+    return out
+}
+
 function is_literal(s) {
     s = trim(s)
     if (s == "true" || s == "false" || s == "nil" || s == "none") return 1
@@ -117,6 +142,7 @@ function balanced_arg(s, p,   depth, i, c, q, out) {
 }
 
 function builtin_assert(s) {
+    s = mask_strings(s)
     if (s ~ /(^|[^a-zA-Z0-9_])expect[ \t]*\(/) return 1
     if (s ~ /(^|[^a-zA-Z0-9_])assert[a-zA-Z0-9_]*[ \t]*\(/) return 1
     if (s ~ /(^|[^a-zA-Z0-9_])fail[ \t]*\(/) return 1
@@ -136,6 +162,7 @@ function builtin_assert(s) {
 
 # Does this line call a local helper that was resolved to "ultimately asserts"?
 function calls_assertfn(s,   nm) {
+    s = mask_strings(s)
     for (nm in ASSERTFN) {
         if (s ~ ("(^|[^a-zA-Z0-9_])" nm "[ \t]*\\(")) return 1
     }
@@ -153,20 +180,20 @@ function has_assert(s) {
 # when the line is not that shape.
 function assert_subject(s,   nm, p, q, a) {
     for (nm in ASSERTFN) {
-        p = match(s, ("(^|[^a-zA-Z0-9_])" nm "[ \t]*\\("))
+        p = match(mask_strings(s), ("(^|[^a-zA-Z0-9_])" nm "[ \t]*\\("))
         if (p == 0) continue
         q = index(substr(s, p), "(") + p - 1
         a = balanced_arg(s, q + 1)
         if (G_end == 0) continue
         return a
     }
-    if (match(s, /(^|[^a-zA-Z0-9_])assert_(true|false)[ \t]*\(/)) {
+    if (match(mask_strings(s), /(^|[^a-zA-Z0-9_])assert_(true|false)[ \t]*\(/)) {
         q = index(substr(s, RSTART), "(") + RSTART - 1
         a = balanced_arg(s, q + 1)
         if (G_end != 0) return a
     }
     # paren-less `expect <expr>` — the rest of the line is the subject
-    if (match(s, /(^|[^a-zA-Z0-9_])expect[ \t]+[^ \t(=]/)) {
+    if (match(mask_strings(s), /(^|[^a-zA-Z0-9_])expect[ \t]+[^ \t(=]/)) {
         a = substr(s, RSTART)
         sub(/^[^a-zA-Z]*expect[ \t]+/, "", a)
         return a
@@ -250,7 +277,7 @@ function process_file(   i, s, raw, ind, in_doc, n, itstart, itindent, itname,
                 if (trim(CODE[j]) == "") continue
                 if (indent_of(CODE[j]) <= ind) break
                 n++
-                if (CODE[j] !~ /(^|[^a-zA-Z0-9_])fail[ \t]*\(/) only_call = 0
+                if (mask_strings(CODE[j]) !~ /(^|[^a-zA-Z0-9_])fail[ \t]*\(/) only_call = 0
             }
             FN_START[hname] = i + 1
             FN_END[hname] = j - 1
@@ -302,7 +329,7 @@ function process_file(   i, s, raw, ind, in_doc, n, itstart, itindent, itname,
             body_assert++
 
             # --- tautology / const-subject on expect(...) ---
-            p = match(s, /(^|[^a-zA-Z0-9_])expect[ \t]*\(/)
+            p = match(mask_strings(s), /(^|[^a-zA-Z0-9_])expect[ \t]*\(/)
             if (p > 0) {
                 q = index(substr(s, p), "(") + p - 1
                 a = balanced_arg(s, q + 1)
@@ -342,7 +369,7 @@ function process_file(   i, s, raw, ind, in_doc, n, itstart, itindent, itname,
                 }
             }
             # --- assert_true(true) / assert_false(false) family ---
-            if (s ~ /assert_true[ \t]*\([ \t]*true[ \t]*\)/ || s ~ /assert_false[ \t]*\([ \t]*false[ \t]*\)/) {
+            if (mask_strings(s) ~ /assert_true[ \t]*\([ \t]*true[ \t]*\)/ || mask_strings(s) ~ /assert_false[ \t]*\([ \t]*false[ \t]*\)/) {
                 flag("V2_CONST_ASSERT", CUR, j, "it=" itname " | constant assert_true/false")
             }
             if (s ~ /^[ \t]*assert[ \t]+true[ \t]*$/) {
@@ -518,6 +545,53 @@ describe "parenless":
             case nil: expect false
 EOF
 
+    # F9: assertion-looking quoted data never executes an assertion. Escaped
+    # quotes and comment markers must not expose tokens inside that data.
+    mkdir -p "$st_dir/f9"
+    cat > "$st_dir/f9/quoted_assertion_spec.spl" <<'EOF'
+use std.spec.*
+describe "quoted assertion":
+    it "contains source text without executing it":
+        val fixture = "expect(actual).to_equal(\"expected\") # assert_true(actual)"
+        val statement = "expect actual == expected"
+EOF
+
+    # F10: a string mentioning an asserting local helper is not delegation.
+    mkdir -p "$st_dir/f10"
+    cat > "$st_dir/f10/quoted_helper_spec.spl" <<'EOF'
+use std.spec.*
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+describe "quoted helper":
+    it "does not actually call the helper":
+        val fixture = "check(actual)"
+        val alternate = 'check(other)'
+EOF
+
+    # F11: real computed assertions retain their original quoted arguments.
+    # In particular, the nested assert_true(true) text must not create V2.
+    mkdir -p "$st_dir/f11"
+    cat > "$st_dir/f11/real_quoted_argument_spec.spl" <<'EOF'
+use std.spec.*
+describe "real quoted arguments":
+    it "compares parser output with assertion-looking fixture data":
+        val actual = parse_fixture("expect(actual).to_equal(\"value\")")
+        expect(actual).to_equal("assert_true(true) # check(actual)")
+EOF
+
+    # F12: quoted fail text does not turn an ordinary helper into an asserting
+    # helper or an unconditional-failure stub.
+    mkdir -p "$st_dir/f12"
+    cat > "$st_dir/f12/quoted_fail_helper_spec.spl" <<'EOF'
+use std.spec.*
+fn fixture_text():
+    val sample = "fail(\"TODO\")"
+    sample
+describe "quoted fail helper":
+    it "returns data without an assertion":
+        fixture_text()
+EOF
+
     st_fail=0
     st_raw=$(find "$st_dir" -name '*_spec.spl' | sort | xargs awk "$AWK_PROG" 2>/dev/null)
     st_scanned=$(echo "$st_raw" | sed -n 's/^#SCANNED\t//p' | awk '{t+=$1} END{print t+0}')
@@ -527,7 +601,18 @@ EOF
     # "was flagged" check regardless of whether V-codes were actually emitted.
     st_out=$(echo "$st_raw" | /usr/bin/grep -av '^#SCANNED' | /usr/bin/grep -av '^#FILE')
 
-    [ "$st_scanned" = "8" ] || { echo "selftest: expected 8 files scanned, got '$st_scanned'"; st_fail=1; }
+    [ "$st_scanned" = "12" ] || { echo "selftest: expected 12 files scanned, got '$st_scanned'"; st_fail=1; }
+    echo "$st_out" | /usr/bin/grep -aq "V0_NO_ASSERT_FILE.*f9/quoted_assertion_spec.spl" || { echo "selftest: F9 quoted builtin text counted as a file assertion"; st_fail=1; }
+    echo "$st_out" | /usr/bin/grep -aq "V1_ZERO_ASSERT.*f9/quoted_assertion_spec.spl" || { echo "selftest: F9 quoted builtin text counted as a block assertion"; st_fail=1; }
+    echo "$st_out" | /usr/bin/grep -aq "V1_ZERO_ASSERT.*f10/quoted_helper_spec.spl" || { echo "selftest: F10 quoted helper text counted as delegation"; st_fail=1; }
+    if echo "$st_out" | /usr/bin/grep -aq "f11/real_quoted_argument_spec.spl"; then
+        echo "selftest: F11 real assertion with quoted arguments WAS flagged"; st_fail=1
+    fi
+    echo "$st_out" | /usr/bin/grep -aq "V0_NO_ASSERT_FILE.*f12/quoted_fail_helper_spec.spl" || { echo "selftest: F12 quoted fail text counted as a file assertion"; st_fail=1; }
+    echo "$st_out" | /usr/bin/grep -aq "V1_ZERO_ASSERT.*f12/quoted_fail_helper_spec.spl" || { echo "selftest: F12 quoted fail text counted as an asserting helper"; st_fail=1; }
+    if echo "$st_out" | /usr/bin/grep -aq "V6_STUB_HELPER.*f12/quoted_fail_helper_spec.spl"; then
+        echo "selftest: F12 quoted fail text classified as a failure stub"; st_fail=1
+    fi
     if echo "$st_out" | /usr/bin/grep -aq "f8/parenless_spec.spl"; then
         echo "selftest: F8 paren-less expect WAS flagged (the form does assert)"; st_fail=1
     fi
@@ -552,7 +637,7 @@ EOF
         echo "SELFTEST FAILED — detector is not trustworthy, refusing to scan"
         return 1
     fi
-    echo "selftest: 8/8 fixtures behaved correctly (F1,F3,F4,F6 flagged; F2,F5,F7,F8 clean)"
+    echo "selftest: 12/12 fixtures behaved correctly (F1,F3,F4,F6,F9,F10,F12 flagged; F2,F5,F7,F8,F11 clean)"
     return 0
 }
 
@@ -563,7 +648,7 @@ if ! run_selftest; then
 fi
 
 if [ "$SELFTEST" -eq 1 ]; then
-    echo "PASS — selftest only, 8 fixtures checked, 0 flagged in corpus"
+    echo "PASS — selftest only, 12 fixtures checked, 0 flagged in corpus"
     exit 0
 fi
 
