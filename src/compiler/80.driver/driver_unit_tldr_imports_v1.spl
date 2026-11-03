@@ -13,8 +13,12 @@
 # Imported generic bodies are never loaded on demand: the template-body seam
 # was removed (2026-10-31).
 use std.io_runtime.{file_exists, file_read}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use compiler.driver.cache.tldr_summary_v1.{tldr_summary_ensure_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+# Split impl provider of CompilerDriver.stage_lower_hir_check_v1 (narrow: no
+# driver_orchestration -> driver_aot_pipeline -> backend_vhdl closure).
+use compiler.driver.driver_stage_hir_v1.*
 # @workaround bug=ctor_mir_2026-10-31 reason=import CompileResult so MIR gets its runtime enum identity
 use compiler.common.driver_compile_result.{CompileResult}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_route_import_specs_v1, unit_tldr_imports_enabled_v1}
@@ -110,8 +114,17 @@ pub fn unit_lower_v1(driver: CompilerDriver, unit_id: text, root: text, picked: 
             val line = unit_tldr_log_line_v1(unit_id, parsed, summaries, fallbacks, 0)
             return UnitLowerResultV1(gap: "register-failed:" + registered, parsed: parsed, summaries: summaries,
                 fallbacks: fallbacks, import_hir_lowered: 0, line: line)
+    # @workaround bug=stage2_split_impl_modules_missing_from_entry_closure_2026-08-22 reason=frozen stage2 unverified on the driver_stage_hir_v1 provider edge
+    # Fail-closed: until a stage3 built from this source proves the provider
+    # edge, the release phase-3 build skips HIR lowering here and reports a
+    # named gap (nothing consumes this result). SIMPLE_UNIT_TLDR_STAGE_HIR=1
+    # opts into the real provider route. Delete this block once verified.
+    if env_get("SIMPLE_UNIT_TLDR_STAGE_HIR") != "1":
+        val gap_line = unit_tldr_log_line_v1(unit_id, parsed, summaries, fallbacks, 0)
+        return UnitLowerResultV1(gap: "stage-lower-hir-gap:split-impl-provider-unverified", parsed: parsed,
+            summaries: summaries, fallbacks: fallbacks, import_hir_lowered: 0, line: gap_line)
     var gap = ""
-    match driver.stage_lower_hir("check"):
+    match driver.stage_lower_hir_check_v1():
         case Some(stop):
             match stop:
                 # @workaround bug=ctor_mir_2026-10-31 reason=qualified variants (CompileResult)

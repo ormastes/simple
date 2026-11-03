@@ -1,6 +1,6 @@
 # macOS Stage3 full-graph HIR crashes with SIGSEGV after 104 of 848 modules
 
-Status: OPEN (bug_db id `stage3_macos_full_graph_hir_sigsegv_2026_09_21`)
+Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (bug_db id `stage3_macos_full_graph_hir_sigsegv_2026_09_21`)
 Priority: P0
 Platform: aarch64-apple-darwin
 Observed: 2026-09-21
@@ -58,32 +58,32 @@ Not reproducible on Windows x86_64; source reading only.
 
 Suggested bug_db status: keep open, reproducibility `target_only`.
 
-TODO(p0f-3): obtain an IPS/lldb backtrace for the compiler process on macOS and
-rerun with a Stage2 built by a post-`2c89727c11c` seed.
+## Fix implemented (2026-11-03, opus-macos-hir) — verification pending on macOS
 
-## Re-review (2026-11-02, opus, release/1.0.0 74cdbef8e6b)
+Acting on Hypothesis A. The crash site is unknown, so no guard was added at a
+guessed HIR site (a guard on the wrong operation would only hide the fault).
 
-- Darwin thread-stack difference ruled out. Phase-3 HIR runs on the main
-  thread, and no runtime `pthread_create` sets a stack size. The 8 MiB Darwin
-  main stack is larger than the 1 MiB Windows default, so a recursion-depth
-  overflow would show up on Windows first.
-- After the mono removal, the bug is neither obsolete nor confirmed. The
-  failing source `a31729a` predates the monomorphization deletion, but the
-  `resolve_import_symbols` path behind the last probe still exists
-  (`hir_lowering/_Items/module_build.spl:320`). Validity on the current head is
-  unknown.
-- There is no fault, so no code change was made. Status stays `open`.
-- Exact macOS repro: on aarch64-apple-darwin, rebuild the seed and Stage2 from
-  `release/1.0.0`, then run
-  `sh scripts/bootstrap/resume-stage3-from-admitted.sh <OUTPUT_DIR>` under
-  `lldb` (or keep the ReportCrash IPS). It passes when HIR reaches 848/848; if
-  it crashes, attach the symbolized backtrace here.
+- **Seed gate:** `bootstrap_seed_has_aggregate_nil_fix`
+  (`scripts/bootstrap/bootstrap-seed-handoff.shs`) refuses the seed handoff
+  unless the seed source's `codegen/llvm/functions/objects.rs` carries the
+  `2c89727c11c` select (`src_is_valid, tagged, src_tagged, "aggcopy_result"`).
+  Content-keyed, so rebased/cherry-picked fixes pass. A Stage2 built by a
+  pre-fix seed can no longer be produced by the sanctioned bootstrap.
+  Test: `scripts/bootstrap/tests/seed-aggregate-nil-fix-gate-test.shs`
+  (before: exit 127, function absent; after: PASS 4 cases).
+- **macOS spec:** `test/01_unit/compiler/bootstrap/nil_optional_aggregate_copy_macos_spec.spl`
+  (`# @tag:macos`) — nil `Optional<aggregate>` through a call, struct copy and
+  array; 3/3 pass on Windows x86_64.
 
-## 2026-11-03 status: open, macOS-only, needs-macos-backtrace
+### macOS repro / check steps (Mac checker)
 
-No generic cause on release/1.0.0: the types.spl:1017-1023 guard (PR #5855)
-is in place and the crash does not reproduce on Windows. Likely cause: a stale
-Stage2 built from a seed older than 2c89727c11c.
-
-macOS repro: rebuild Stage2 from a seed that includes 2c89727c11c, run Stage3
-under `lldb -o run`, and save the crash report (symbolized backtrace) here.
+1. On aarch64-apple-darwin, at current `release/1.0.0` (contains `2c89727c11c`),
+   rebuild the seed: `cd src/compiler_rust && cargo build --release --bin simple`;
+   confirm `grep -c 'src_tagged, "aggcopy_result"' compiler/src/codegen/llvm/functions/objects.rs` = 1.
+2. Rebuild Stage2 from that seed via `scripts/bootstrap/bootstrap-from-scratch.sh`
+   (the handoff gate must pass).
+3. Native-build and run the macOS spec with that Stage2; all 3 examples must pass.
+4. Run Stage3 under lldb: `lldb -o run -o bt -o quit -- <stage2> <stage3 args from the Stage3 command transcript>`;
+   keep `~/Library/Logs/DiagnosticReports/*.ips` and the lldb `bt` output.
+5. Stage3 passes 848/848 HIR modules -> close as fixed. A SIGSEGV again ->
+   Hypothesis A is false; attach the backtrace to this doc and reopen.

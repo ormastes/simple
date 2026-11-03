@@ -1,19 +1,13 @@
 use compiler.common.native_output_intent.{NativeOutputIntentV1, native_output_intent_decode_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+# Split impl provider: stage_lower_hir_{run,failure,done}_v1 + build_trace_first_error.
+use compiler.driver.driver_stage_hir_v1.*
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_handoff_take_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.session.build_session.{SessionKept, session_kept_begin, keep}
 use compiler.driver.driver_backend_plugin_selection.{driver_cuda_plugin_request_error_v1}
-
-# Formation probe, NOT a liveness proof. `== nil` cannot be used to validate a
-# context here: the nil sentinel is raw 3, so a ZEROED value is not the nil
-# representation and every `!= nil` guard reports "present" on it. That is the
-# documented defect class rt_heap_ref_wellformed was written for -- see
-# doc/08_tracking/bug/rt_heap_ref_wellformed_lost_in_stale_snapshot_clobber_2026-08-31.md
-# and the same extern in driver_hir_pipeline_lowering.spl.
-extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_pipeline_lowering.*
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
@@ -159,11 +153,6 @@ impl CompilerDriver:
         self.ctx.vhdl_hardware_metadata_rows = metadata_rows
         if env_get("SIMPLE_COMPILER_TRACE") == "1":
             eprint("[vhdl-driver] captured-metadata={metadata_rows.len()}")
-
-    fn build_trace_first_error() -> text:
-        """First recorded diagnostic for a `[build-trace] ...:failed` line, or an
-        empty text; the count is reported beside it by the caller."""
-        if self.ctx.error_count_value > 0: self.ctx.error_message_at(0) else: ""
 
     me compile() -> CompileResult:
         # Clear before any no-op/cache/early-error path. A missing observation
@@ -496,20 +485,11 @@ impl CompilerDriver:
 
     # Phase 3: lower AST to target-neutral typed HIR.
     me stage_lower_hir(compile_mode_text: text) -> Option<CompileResult>:
-        log_phase("phase3:hir_typecheck:start")
-        log_trace("BEFORE phase 3")
-        # Derive routing from stable configuration, not the adjacent mutable
-        # readiness boolean that native value semantics can lose between phase
-        # methods. lower_and_check_streaming_surfaces_impl validates/rebuilds
-        # the frozen owner before doing any work.
-        val hir_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
-        var analyze_ok_effective = false
-        if hir_streaming_in_place:
-            analyze_ok_effective = self.lower_and_check_streaming_surfaces_impl()
-        else:
-            analyze_ok_effective = self.lower_and_check_retained_owner_impl()
-        # Both HIR routes commit through self.ctx; a false verdict stays false.
-        log_trace("AFTER phase 3")
+        # Route, failure report and success tail live in the narrow split impl
+        # provider driver_stage_hir_v1 (also used by check-mode callers that
+        # must not pull this module's aot/vhdl closure). Only the aot
+        # go-to-end recovery, which needs driver_aot_pipeline, stays here.
+        var analyze_ok_effective = self.stage_lower_hir_run_v1()
         if not analyze_ok_effective and compile_mode_text == "aot" and go_to_end_enabled_v1():
             # go-to-end (driver_build/go_to_end.spl): drop the failed modules
             # and every module importing one, then go on with the rest.
@@ -525,92 +505,8 @@ impl CompilerDriver:
                 self.go_to_end_absorb_errors_v1("hir")
                 return Some(self.go_to_end_finish_v1(0, []))
         if not analyze_ok_effective:
-            log_error("phase 3 FAILED")
-            log_build_trace("driver:hir:failed errors={self.ctx.error_count_value} first={self.build_trace_first_error()}")
-            if env_get("SIMPLE_BOOTSTRAP_DEBUG") == "1":
-                val phase3_error_count = self.ctx.errors.len()
-                eprint("[bootstrap-phase3-errors] count={phase3_error_count}")
-                var phase3_error_index = 0
-                while phase3_error_index < phase3_error_count and phase3_error_index < 20:
-                    val phase3_error = self.ctx.error_message_at(phase3_error_index)
-                    eprint("[bootstrap-phase3-error] index={phase3_error_index} len={phase3_error.len()} text={phase3_error}")
-                    phase3_error_index = phase3_error_index + 1
-            log_build_progress("hir", "modules", -1, -1,
-                "failed", 2, 6, 1, 0, "failed")
-            # A diagnostic path must never be the thing that crashes. If the
-            # context did not survive phase 3 there are no errors to read, but
-            # the failure is still real, so report it instead of dereferencing.
-            if not rt_heap_ref_wellformed(self.ctx):
-                log_error("phase 3 FAILED with no surviving compile context")
-                return Some(CompileResult.TypeError([]))
-            # The historical refusal to read the diagnostics here is RETIRED,
-            # and the reason is that the hazard it was avoiding was fixed in the
-            # accessor rather than at this call site.
-            #
-            # The measured defect was real: `errors` and `error_count_value` are
-            # transported SEPARATELY out of `lower_and_check_impl`'s staged
-            # native tuple, so has_errors() could read the intact SCALAR while
-            # `self.errors` arrived as a zeroed reference, faulting at offset
-            # 0xb8. The response at the time was to make no call at all.
-            #
-            # But `error_message_at` / `errors_safe`
-            # (driver_types.spl:1115-1134) now probe formation with
-            # `rt_heap_ref_wellformed(self.errors)` FIRST and return ""/[]
-            # instead of dereferencing a zeroed reference. The crash this
-            # branch was dodging can no longer happen, while the cost of
-            # dodging it was total: an unconditional "unreadable" line was
-            # printed WITHOUT EVER ATTEMPTING A READ, so every phase-3 failure
-            # lost its diagnostics -- including the overwhelmingly common case
-            # where the array survived perfectly well. The non-native sibling
-            # path in this same file (`:335-337`) has always read them.
-            #
-            # So: attempt the guarded read, report whatever survived, and emit
-            # the "no readable diagnostics" line only when nothing came back -- with
-            # the surviving scalar count in it, so an operator can tell "N
-            # diagnostics were lost in transport" apart from "there were none".
-            # Read through the TEXT projection `error_message_at`, not the
-            # aggregate-returning `errors_safe`. Both are guarded identically,
-            # but driver_hir_pipeline_lowering.spl:806-808 records that owner
-            # methods returning only scalar/text projections are the shape that
-            # survives this ABI, and `error_message_at` already has proven call
-            # sites in this file (`:335`, `:356`) whereas `errors_safe` has
-            # none. The reporting list is assembled locally from those reads.
-            val phase3_recorded_count: i64 = self.ctx.error_count()
-            val phase3_show_cap = if phase3_recorded_count < 20: phase3_recorded_count else: 20
-            var phase3_surviving_errors: [text] = []
-            var phase3_report_idx = 0
-            while phase3_report_idx < phase3_show_cap:
-                val phase3_message: text = self.ctx.error_message_at(phase3_report_idx)
-                if phase3_message.len() > 0:
-                    log_error("  {phase3_message}")
-                    phase3_surviving_errors.push(phase3_message)
-                phase3_report_idx = phase3_report_idx + 1
-            if phase3_surviving_errors.len() > 0:
-                if phase3_recorded_count > phase3_show_cap:
-                    val phase3_hidden = phase3_recorded_count - phase3_show_cap
-                    log_error("  ... and {phase3_hidden} further phase 3 error(s)")
-                # Restores the ResolveError/TypeError distinction that the
-                # no-read branch had to give up.
-                if phase3_surviving_errors[0].contains("Method resolution"):
-                    return Some(CompileResult.ResolveError(phase3_surviving_errors))
-                return Some(CompileResult.TypeError(phase3_surviving_errors))
-            # Reached only when nothing readable came back. The recorded scalar
-            # count is included deliberately: count>0 here means N diagnostics
-            # were lost in transport, count==0 means the phase failed without
-            # recording any -- two very different bugs that the old fixed
-            # string conflated.
-            log_error("phase 3 FAILED (no readable diagnostics; recorded error_count={phase3_recorded_count}; per-module root causes were emitted above as [hir-fatal])")
-            return Some(CompileResult.TypeError([]))
-        log_debug("phase 3 done")
-        log_phase("phase3:hir_typecheck:done")
-        if build_trace_enabled():
-            log_build_trace("driver:hir:done n_hir_modules={self.ctx.hir_modules.len()} modules={build_trace_list(self.ctx.hir_modules.keys())}")
-        log_build_progress("hir", "modules", -1, -1,
-            "complete", 3, 6, 0, 0, "running")
-
-        if self.ctx.options.low_memory:
-            log_debug("low-memory: evicting AST modules")
-            self.ctx.evict_ast()
+            return Some(self.stage_lower_hir_failure_v1())
+        self.stage_lower_hir_done_v1()
         None
 
     # Phase 4: collection-plan analysis over the admitted HIR (still
