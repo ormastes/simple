@@ -112,3 +112,16 @@ the probe-timeout fix that surfaced it.
   — the probe-timeout bug fixed alongside this discovery.
 
 **Revalidated 2026-11-02: still plausible because the report title (os test --scenario fails with no runnable pure-Simple compiler because every ca) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 Windows host verification
+
+The runner already fails closed (`phase=compiler-admission FAILED: no admitted
+self-hosted compiler for <backend>`) and admits only stage3/stage4-provenanced
+candidates via `qemu_compiler_select_v1`. On Windows
+`simpleos_compiler_admission_spec.spl` failed 2/6: the shim wrote
+`printf $result` inside single quotes (never expanded), and the canary was
+exec'd directly, which cannot run a shebang file on Windows. Fixed the shim and
+exec the canary through `env` like the candidate. Now 6/6;
+`qemu_compiler_selection_v1_spec.spl` 2/2.
+Owed (not run): with a deployed stage3/stage4 binary, `bin/simple os test
+--scenario=riscv64-smoke` must pass `phase=tooling`/`compiler-admission`.

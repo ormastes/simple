@@ -342,3 +342,14 @@ Current sysroot inputs require LLC/LLD relink rather than reuse of older binarie
 ## 2026-11-03 triage (lane-bugs-a)
 
 DEFERRED. Blocker: reproduction needs a Linux self-hosted release binary and native crash/backtrace tooling (gdb/lldb on the dumping binary); none available on this Windows host (seed only). Per the iteration guard above, do not retry the native-build command; next step is a core backtrace from the deployed self-hosted binary.
+
+## 2026-11-03 re-check (Windows)
+
+The stale-binary premise still applies: the deployed Windows `bin/simple.exe`
+is the Rust seed (test runner reports it), so no self-hosted target build can
+be exercised here. Guards already exist and were not duplicated:
+`scripts/os/simpleos-native-build.shs` admits a builder only by positive
+capability probe plus Stage2 admission receipt, and the QEMU runner rejects
+seed banners (spec above, 6/6 on Windows). Owed (not run): after a stage3
+redeploy, rerun the Reproduction command and require a static
+`x86_64-unknown-simpleos` ELF and non-crashing `--version`.

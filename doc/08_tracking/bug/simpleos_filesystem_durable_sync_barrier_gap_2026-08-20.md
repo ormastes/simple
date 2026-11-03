@@ -117,3 +117,21 @@ durability and cross-backend image construction remain unproved. No manual
 verification was run for this update.
 
 **Revalidated 2026-11-02: still plausible because PARTIAL — portable FAT32/NVFS recovery slice implemented; mounted; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 host barrier-ordering spec (Windows, no QEMU)
+
+`test/01_unit/lib/fs_driver/nvfs_arena_sync_barrier_order_spec.spl` drives
+`arena_fsync_impl` over a host fake `BlockDevice` that logs every write/flush.
+It pins the event order `data write, flush, header write, flush` and proves a
+failed flush at either barrier is never a durability claim (no header after a
+failed data flush; a failed metadata flush leaves the sequence unadvanced so a
+retry republishes sequence 1). 3/3 pass on Windows `bin/simple.exe`; deleting
+the data-barrier flush in `nvfs_arena.spl` makes all 3 fail (mutation check).
+`fs_recovery_conformance_spec.spl` NVFS-POSIX row was comparing a `Result` to an
+int; fixed with `.unwrap()`, now 6/6.
+
+Status: fix-implemented-verification-pending. Still open in scope: mounted
+`NvfsDriver`/`NvfsPosixDriver` are not bound to the arena commit owner.
+Owed (not run): x86_64 SimpleOS QEMU (OVMF pflash) NVMe write+fsync, hard
+power-off (`quit` via QMP mid-write), remount and check durable length; then the
+same on the board with a real NVMe controller flush, serial transcript retained.
