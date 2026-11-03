@@ -1,0 +1,136 @@
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_event_codec_v1.{trace_event_encode_v1}
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_ptr_read_i64, rt_ptr_write_i64}
+
+# Real raw storage and runtime atomics. No fallback when the selected runner
+# lacks lock-free cells. Tiny arenas deliberately remain resident, as required
+# by production lifetime. Forced gate/index states below are test-only and
+# occur with no concurrent callback; they exercise otherwise rare boundaries.
+fn native_channel_event_v1(sequence: u64) -> TraceEventV1:
+    TraceEventV1(kind: TraceEventKindV1.Entry, flags: 32769, generation: 7,
+        module_instance: 9223372036854775809u64, function_id: 2147483649u32,
+        site_id: 4294967295u32, context_id: 9, sequence: sequence,
+        timestamp: 18446744073709551615u64, span_token: 0,
+        payload0: 9223372036854775808u64, payload1: 13, payload2: 17)
+
+fn native_channel_fixture_v1(capacity: i64) -> i64:
+    val bytes = trace_native_channel_bytes_v1(capacity)
+    val arena = rt_alloc(bytes)
+    expect(arena > 0).to_equal(true)
+    unsafe(capabilities: [ffi]):
+        expect(trace_native_channel_initialize_v1(arena, bytes, capacity, 7, 9)).to_equal(1)
+    arena
+
+describe "resident native observer channel V1":
+    it "validates bounds without native pointer dereference":
+        expect(trace_native_channel_bytes_v1(0)).to_equal(0)
+        expect(trace_native_channel_bytes_v1(4097)).to_equal(0)
+        expect(trace_native_channel_bytes_v1(2)).to_equal(320)
+        unsafe(capabilities: [ffi]):
+            expect(trace_native_channel_initialize_v1(0, 224, 1, 7, 9)).to_equal(-4)
+            expect(trace_native_channel_initialize_v1(3, 224, 1, 7, 9)).to_equal(-4)
+            expect(trace_native_channel_initialize_v1(8, 223, 1, 7, 9)).to_equal(-4)
+
+    it "publishes all twelve words with canonical high-bit scalar values":
+        val arena = native_channel_fixture_v1(2)
+        val output = rt_alloc(96)
+        expect(output > 0).to_equal(true)
+        val event = native_channel_event_v1(1)
+        val encoded = trace_event_encode_v1(event)
+        unsafe(capabilities: [ffi]):
+            expect(trace_native_channel_record_v1(arena, event)).to_equal(1)
+            expect(trace_native_channel_poll_into_v1(arena, output, 96)).to_equal(1)
+            for word in 0..12:
+                val value = rt_ptr_read_i64(output, word * 8) as u64
+                for byte in 0..8:
+                    expect(((value >> (byte * 8)) & 255u64) as u8).to_equal(encoded[word * 8 + byte])
+            expect(trace_native_channel_poll_into_v1(arena, output, 96)).to_equal(0)
+
+    it "preserves FIFO across wrapping and does not overwrite a full queue":
+        val arena = native_channel_fixture_v1(2)
+        val output = rt_alloc(96)
+        unsafe(capabilities: [ffi]):
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(1))).to_equal(1)
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(2))).to_equal(1)
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(3))).to_equal(-3)
+            expect(trace_native_channel_lost_v1(arena)).to_equal(1u64)
+            expect(trace_native_channel_poll_into_v1(arena, output, 96)).to_equal(1)
+            expect(rt_ptr_read_i64(output, 40)).to_equal(1)
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(4))).to_equal(1)
+            for sequence in [2, 4]:
+                expect(trace_native_channel_poll_into_v1(arena, output, 96)).to_equal(1)
+                expect(rt_ptr_read_i64(output, 40)).to_equal(sequence)
+            expect(trace_native_channel_close_v1(arena)).to_equal(1)
+            expect(trace_native_channel_drained_v1(arena)).to_equal(true)
+
+    it "rejects wrong generation and context without consuming capacity":
+        val arena = native_channel_fixture_v1(1)
+        var wrong = native_channel_event_v1(1)
+        unsafe(capabilities: [ffi]):
+            wrong.generation = 8
+            expect(trace_native_channel_record_v1(arena, wrong)).to_equal(-4)
+            wrong.generation = 7
+            wrong.context_id = 10
+            expect(trace_native_channel_record_v1(arena, wrong)).to_equal(-4)
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(1))).to_equal(1)
+
+    it "rejects malformed scalar record headers before admission":
+        val arena = native_channel_fixture_v1(1)
+        unsafe(capabilities: [ffi]):
+            for header in [0u64, 6291457u64, 47250931713u64]:
+                expect(trace_native_channel_record_words_v1(arena, header, 7, 1,
+                    4294967297u64, 9, 1, 10, 0, 0, 0, 0)).to_equal(-4)
+            expect(rt_ptr_read_i64(arena, 40)).to_equal(0)
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(1))).to_equal(1)
+
+    it "keeps in-flight reservation after close and rejects reentry without holes":
+        val arena = native_channel_fixture_v1(1)
+        unsafe(capabilities: [ffi]):
+            rt_ptr_write_i64(arena, 0, 1)
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(1))).to_equal(-2)
+            expect(rt_ptr_read_i64(arena, 40)).to_equal(0)
+            expect(trace_native_channel_lost_v1(arena)).to_equal(1u64)
+            expect(trace_native_channel_close_v1(arena)).to_equal(1)
+            expect(rt_ptr_read_i64(arena, 0)).to_equal(3)
+            expect(trace_native_channel_drained_v1(arena)).to_equal(false)
+            # Model exactly the pending producer's final release3->2.
+            rt_ptr_write_i64(arena, 0, 2)
+            expect(trace_native_channel_drained_v1(arena)).to_equal(true)
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(2))).to_equal(-1)
+            expect(trace_native_channel_close_v1(arena)).to_equal(1)
+
+    it "rejects output aliases and consumer reentry before consuming a record":
+        val arena = native_channel_fixture_v1(1)
+        val output = rt_alloc(96)
+        unsafe(capabilities: [ffi]):
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(1))).to_equal(1)
+            expect(trace_native_channel_poll_into_v1(arena, arena + 128, 96)).to_equal(-4)
+            expect(trace_native_channel_poll_into_v1(arena, output, 95)).to_equal(-4)
+            rt_ptr_write_i64(arena, 32, 1)
+            expect(trace_native_channel_poll_into_v1(arena, output, 96)).to_equal(-2)
+            rt_ptr_write_i64(arena, 32, 0)
+            expect(trace_native_channel_poll_into_v1(arena, output, 96)).to_equal(1)
+            expect(rt_ptr_read_i64(output, 40)).to_equal(1)
+
+    it "closes at cursor exhaustion and reports saturated loss as inexact":
+        val arena = native_channel_fixture_v1(1)
+        unsafe(capabilities: [ffi]):
+            rt_ptr_write_i64(arena, 40, 9223372036854775807)
+            rt_ptr_write_i64(arena, 48, 9223372036854775807)
+            rt_ptr_write_i64(arena, 56, 9223372036854775807)
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(1))).to_equal(-5)
+            expect(trace_native_channel_lost_v1(arena)).to_equal(9223372036854775807u64)
+            expect(trace_native_channel_loss_inexact_v1(arena)).to_equal(true)
+            expect(trace_native_channel_drained_v1(arena)).to_equal(true)
+
+    it "does not call closed admission drained until queued records are consumed":
+        val arena = native_channel_fixture_v1(1)
+        val output = rt_alloc(96)
+        unsafe(capabilities: [ffi]):
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(1))).to_equal(1)
+            expect(trace_native_channel_close_v1(arena)).to_equal(1)
+            expect(trace_native_channel_drained_v1(arena)).to_equal(false)
+            expect(trace_native_channel_record_v1(arena, native_channel_event_v1(2))).to_equal(-1)
+            expect(trace_native_channel_poll_into_v1(arena, output, 96)).to_equal(1)
+            expect(trace_native_channel_drained_v1(arena)).to_equal(true)

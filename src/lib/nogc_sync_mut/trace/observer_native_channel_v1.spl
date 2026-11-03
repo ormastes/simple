@@ -1,0 +1,202 @@
+# Native retained-arena transport; not a TraceObserverV1 provider/admission.
+# No allocator, TLS initialization or backend import occurs in this module.
+# The process session owner must loan a disjoint, aligned resident arena for
+# each attached context BEFORE hooks run, enforce its total memory cap, and
+# keep it until process exit. These unsafe addresses are not public handles.
+# Reinitializing or recycling a published arena is forbidden, including after
+# close/drain: a late callback may still hold its address.
+use std.nogc_sync_mut.ptr.raw.{rt_ptr_read_i64, rt_ptr_write_i64}
+use std.nogc_sync_mut.atomic.{rt_par_atomic_i64_is_lock_free, rt_par_atomic_load_i64}
+use std.common.trace.observer_contract_v1.{TraceEventV1, trace_event_kind_code_v1}
+
+@unsafe(reason: "aligned live resident atomic cell; returns the observed old value", capabilities: [ffi])
+extern fn rt_par_atomic_cmpxchg_i64(addr: i64, expected: i64, value: i64) -> i64
+@unsafe(reason: "aligned live resident atomic cell; sequentially consistent exchange", capabilities: [ffi])
+extern fn rt_par_atomic_xchg_i64(addr: i64, value: i64) -> i64
+@unsafe(reason: "release exactly one successful producer reservation", capabilities: [ffi])
+extern fn rt_par_atomic_sub_i64(addr: i64, value: i64) -> i64
+
+pub const TRACE_NATIVE_CHANNEL_HEADER_V1: i64 = 128
+pub const TRACE_NATIVE_CHANNEL_RECORD_V1: i64 = 96
+pub const TRACE_NATIVE_CHANNEL_MAX_RECORDS_V1: i64 = 4096
+pub const TRACE_NATIVE_CHANNEL_OK_V1: i64 = 1
+pub const TRACE_NATIVE_CHANNEL_EMPTY_V1: i64 = 0
+pub const TRACE_NATIVE_CHANNEL_CLOSED_V1: i64 = -1
+pub const TRACE_NATIVE_CHANNEL_BUSY_V1: i64 = -2
+pub const TRACE_NATIVE_CHANNEL_FULL_V1: i64 = -3
+pub const TRACE_NATIVE_CHANNEL_INVALID_V1: i64 = -4
+pub const TRACE_NATIVE_CHANNEL_EXHAUSTED_V1: i64 = -5
+pub const TRACE_NATIVE_CHANNEL_UNSUPPORTED_V1: i64 = -6
+const _TRACE_CHANNEL_I64_MAX: i64 = 9223372036854775807
+
+# Fixed native layout, offsets in bytes:
+# 0 atomic gate: 0 open, 1 open+producer, 2 closed, 3 closed+producer.
+# 8 generation, 16 context, 24 capacity (immutable after publication).
+# 32 atomic consumer reservation; 40 published write; 48 released read.
+# 56 saturating lost; 64 loss-count-inexact flag; 72 arena bytes (immutable).
+# 80..127 reserved zero; 128.. are 12-word records in canonical field order.
+# Payload words are native scalars, not wire bytes. Copy them through the
+# canonical codec for interchange; this transport makes no endian ABI claim.
+
+pub fn trace_native_channel_bytes_v1(capacity: i64) -> i64:
+    if capacity <= 0 or capacity > TRACE_NATIVE_CHANNEL_MAX_RECORDS_V1: return 0
+    TRACE_NATIVE_CHANNEL_HEADER_V1 + capacity * TRACE_NATIVE_CHANNEL_RECORD_V1
+
+fn _trace_channel_range_v1(base: i64, size: i64) -> bool:
+    base > 0 and base % 8 == 0 and size > 0 and base <= _TRACE_CHANNEL_I64_MAX - size
+
+# Caller proves actual writable allocation extent, exclusive unpublished
+# ownership and permanent lifetime. Arithmetic checks cannot prove a mapping.
+@unsafe(reason: "exclusive unpublished resident arena; never reinitialize after publishing", capabilities: [ffi])
+pub fn trace_native_channel_initialize_v1(base: i64, actual_bytes: i64,
+        capacity: i64, generation: u64, context: u64) -> i64:
+    val needed = trace_native_channel_bytes_v1(capacity)
+    if (needed == 0 or actual_bytes < needed or generation == 0 or context == 0 or
+            not _trace_channel_range_v1(base, actual_bytes)):
+        return TRACE_NATIVE_CHANNEL_INVALID_V1
+    unsafe(capabilities: [ffi]):
+        # Probe each concurrently accessed cell before touching the arena.
+        for offset in [0, 32, 40, 48, 56, 64]:
+            if rt_par_atomic_i64_is_lock_free(base + offset) != 1:
+                return TRACE_NATIVE_CHANNEL_UNSUPPORTED_V1
+        for offset in 0..16:
+            rt_ptr_write_i64(base, offset * 8, 0)
+        rt_ptr_write_i64(base, 8, generation as i64)
+        rt_ptr_write_i64(base, 16, context as i64)
+        rt_ptr_write_i64(base, 24, capacity)
+        rt_ptr_write_i64(base, 72, needed)
+    TRACE_NATIVE_CHANNEL_OK_V1
+
+# A bounded best-effort counter. Contention/saturation never wraps or blocks a
+# hook: flag64 makes the retained count explicitly a lower bound, not exact.
+@unsafe(reason: "internal resident channel counters", capabilities: [ffi])
+fn _trace_channel_loss_v1(base: i64):
+    unsafe(capabilities: [ffi]):
+        var current = rt_par_atomic_load_i64(base + 56)
+        for attempt in 0..8:
+            if current == _TRACE_CHANNEL_I64_MAX: break
+            val seen = rt_par_atomic_cmpxchg_i64(base + 56, current, current + 1)
+            if seen == current: return
+            current = seen
+        rt_par_atomic_xchg_i64(base + 64, 1)
+
+# Admission and producer serialization are ONE CAS. No separate check-open /
+# increment race, token allocation, spinning or holes in the publication index.
+# The generation/context comparison is against immutable resident metadata;
+# it does not prove the caller's manifest or source identity.
+@unsafe(reason: "live initialized resident arena; callback closure must be excluded from instrumentation", capabilities: [ffi])
+pub fn trace_native_channel_record_words_v1(base: i64, header: u64, generation: u64,
+        module_instance: u64, function_site: u64, context: u64, sequence: u64,
+        timestamp: u64, span_token: u64, payload0: u64, payload1: u64, payload2: u64) -> i64:
+    val kind = (header >> 32) & 65535u64
+    if (header & 4294967295u64) != 6291457u64 or kind < 1u64 or kind > 10u64:
+        return TRACE_NATIVE_CHANNEL_INVALID_V1
+    unsafe(capabilities: [ffi]):
+        if ((rt_ptr_read_i64(base, 8) as u64) != generation or
+                (rt_ptr_read_i64(base, 16) as u64) != context):
+            return TRACE_NATIVE_CHANNEL_INVALID_V1
+        val state = rt_par_atomic_cmpxchg_i64(base, 0, 1)
+        if (state & 2) != 0: return TRACE_NATIVE_CHANNEL_CLOSED_V1
+        if state != 0:
+            _trace_channel_loss_v1(base)
+            return TRACE_NATIVE_CHANNEL_BUSY_V1
+        val write = rt_par_atomic_load_i64(base + 40)
+        val read = rt_par_atomic_load_i64(base + 48)
+        val capacity = rt_ptr_read_i64(base, 24)
+        if write == _TRACE_CHANNEL_I64_MAX:
+            # Close while this reservation is held. Concurrent stop may have
+            # already changed1->3; exchange3 preserves that closed state.
+            rt_par_atomic_xchg_i64(base, 3)
+            _trace_channel_loss_v1(base)
+            rt_par_atomic_sub_i64(base, 1)
+            return TRACE_NATIVE_CHANNEL_EXHAUSTED_V1
+        if write - read >= capacity:
+            _trace_channel_loss_v1(base)
+            rt_par_atomic_sub_i64(base, 1)
+            return TRACE_NATIVE_CHANNEL_FULL_V1
+        val slot = base + TRACE_NATIVE_CHANNEL_HEADER_V1 + (write % capacity) * 96
+        rt_ptr_write_i64(slot, 0, header as i64)
+        rt_ptr_write_i64(slot, 8, generation as i64)
+        rt_ptr_write_i64(slot, 16, module_instance as i64)
+        rt_ptr_write_i64(slot, 24, function_site as i64)
+        rt_ptr_write_i64(slot, 32, context as i64)
+        rt_ptr_write_i64(slot, 40, sequence as i64)
+        rt_ptr_write_i64(slot, 48, timestamp as i64)
+        rt_ptr_write_i64(slot, 56, span_token as i64)
+        rt_ptr_write_i64(slot, 64, payload0 as i64)
+        rt_ptr_write_i64(slot, 72, payload1 as i64)
+        rt_ptr_write_i64(slot, 80, payload2 as i64)
+        rt_ptr_write_i64(slot, 88, 0)
+        # Release publication follows ALL payload writes. SeqCst native owner
+        # is stronger than required release/acquire; no advisory handle atomic.
+        rt_par_atomic_xchg_i64(base + 40, write + 1)
+        rt_par_atomic_sub_i64(base, 1)
+    TRACE_NATIVE_CHANNEL_OK_V1
+
+# Cold typed convenience adapter, NOT the machine callback entrypoint. A
+# Simple struct may require allocation/boxing in a producer, so the native hook
+# must call the scalar words entry above directly, after map/event validation.
+@unsafe(reason: "cold adapter borrows live resident channel; retains all raw ownership preconditions", capabilities: [ffi])
+pub fn trace_native_channel_record_v1(base: i64, event: TraceEventV1) -> i64:
+    val header = (1u64 | (96u64 << 16) |
+        ((trace_event_kind_code_v1(event.kind) as u64) << 32) |
+        ((event.flags as u64) << 48))
+    val function_site = (event.function_id as u64) | ((event.site_id as u64) << 32)
+    unsafe(capabilities: [ffi]):
+        trace_native_channel_record_words_v1(base, header, event.generation,
+            event.module_instance, function_site, event.context_id, event.sequence,
+            event.timestamp, event.span_token, event.payload0, event.payload1, event.payload2)
+
+# A caller-owned writable output loan of96bytes. Never alias any channel byte,
+# including header: consuming into the ring would race or corrupt ownership.
+@unsafe(reason: "live resident channel and disjoint writable output loan; output retained by caller", capabilities: [ffi])
+pub fn trace_native_channel_poll_into_v1(base: i64, output: i64, output_bytes: i64) -> i64:
+    if output_bytes < 96 or not _trace_channel_range_v1(output, output_bytes):
+        return TRACE_NATIVE_CHANNEL_INVALID_V1
+    unsafe(capabilities: [ffi]):
+        val bytes = rt_ptr_read_i64(base, 72)
+        if output < base + bytes and base < output + output_bytes:
+            return TRACE_NATIVE_CHANNEL_INVALID_V1
+        if rt_par_atomic_cmpxchg_i64(base + 32, 0, 1) != 0:
+            return TRACE_NATIVE_CHANNEL_BUSY_V1
+        val read = rt_par_atomic_load_i64(base + 48)
+        val write = rt_par_atomic_load_i64(base + 40)
+        if read == write:
+            rt_par_atomic_xchg_i64(base + 32, 0)
+            return TRACE_NATIVE_CHANNEL_EMPTY_V1
+        val capacity = rt_ptr_read_i64(base, 24)
+        val slot = base + TRACE_NATIVE_CHANNEL_HEADER_V1 + (read % capacity) * 96
+        for word in 0..12:
+            rt_ptr_write_i64(output, word * 8, rt_ptr_read_i64(slot, word * 8))
+        # The producer cannot reuse this slot before the complete copy is out.
+        rt_par_atomic_xchg_i64(base + 48, read + 1)
+        rt_par_atomic_xchg_i64(base + 32, 0)
+    TRACE_NATIVE_CHANNEL_OK_V1
+
+# Bounded control operation. BUSY means closure did NOT linearize; caller may
+# retry outside hooks. Success is admission-closed, NOT callback-drained.
+@unsafe(reason: "live resident channel; control caller retains all reachable storage", capabilities: [ffi])
+pub fn trace_native_channel_close_v1(base: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        var state = rt_par_atomic_load_i64(base)
+        for attempt in 0..8:
+            if (state & 2) != 0: return TRACE_NATIVE_CHANNEL_OK_V1
+            val seen = rt_par_atomic_cmpxchg_i64(base, state, state | 2)
+            if seen == state: return TRACE_NATIVE_CHANNEL_OK_V1
+            state = seen
+    TRACE_NATIVE_CHANNEL_BUSY_V1
+
+@unsafe(reason: "live resident channel; drained never grants executable or arena reclamation", capabilities: [ffi])
+pub fn trace_native_channel_drained_v1(base: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        if rt_par_atomic_load_i64(base) != 2: return false
+        if rt_par_atomic_load_i64(base + 32) != 0: return false
+        rt_par_atomic_load_i64(base + 40) == rt_par_atomic_load_i64(base + 48)
+
+@unsafe(reason: "live resident channel; loss is lower-bound when loss_inexact is true", capabilities: [ffi])
+pub fn trace_native_channel_lost_v1(base: i64) -> u64:
+    unsafe(capabilities: [ffi]): rt_par_atomic_load_i64(base + 56) as u64
+
+@unsafe(reason: "live resident channel; sticky counter saturation/contention indication", capabilities: [ffi])
+pub fn trace_native_channel_loss_inexact_v1(base: i64) -> bool:
+    unsafe(capabilities: [ffi]): rt_par_atomic_load_i64(base + 64) != 0
