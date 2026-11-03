@@ -1,0 +1,51 @@
+# Purpose: retain a filled, bounded list viewport after resize and deselection.
+# Runtime execution intentionally deferred under the 2026-11-03 user waiver.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.tui.style.{tui_default_style}
+use std.tui.widget.{make_rect}
+use std.tui.widgets.list.{ListWidget, make_list_widget, list_select, list_ensure_visible, list_render}
+
+fn viewport_list() -> ListWidget:
+    val style = tui_default_style()
+    make_list_widget(["a", "b", "c", "d", "e"], style, style)
+
+describe "list viewport bounds":
+    it "fills a grown viewport without hiding earlier items":
+        step("Scroll to the final item in a two row viewport, then grow it")
+        val selected = list_select(viewport_list(), 4)
+        val narrow = list_ensure_visible(selected, 2)
+        expect(narrow.scroll_offset).to_equal(3)
+        val grown = list_ensure_visible(narrow, 4)
+        expect(grown.scroll_offset).to_equal(1)
+        val rows = list_render(narrow, make_rect(0, 0, 1, 4))
+        expect(rows.len()).to_equal(4)
+        expect(rows[0].segments[0].content).to_equal("b")
+        expect(rows[3].segments[0].content).to_equal("e")
+
+    it "normalizes a stale viewport even after selection is cleared":
+        step("Deselect a scrolled list and expand beyond its item count")
+        val narrow = list_ensure_visible(list_select(viewport_list(), 4), 2)
+        val cleared = list_select(narrow, -1)
+        val grown = list_ensure_visible(cleared, 8)
+        expect(grown.scroll_offset).to_equal(0)
+        expect(grown.selected_index).to_equal(-1)
+
+    it "resets collapsed viewports and restores selection when reopened":
+        step("Collapse and reopen while retaining the selected final item")
+        val selected = list_select(viewport_list(), 4)
+        expect(list_ensure_visible(selected, 0).scroll_offset).to_equal(0)
+        val collapsed = list_ensure_visible(selected, -2)
+        expect(collapsed.scroll_offset).to_equal(0)
+        expect(list_ensure_visible(collapsed, 2).scroll_offset).to_equal(3)
+        expect(list_render(selected, make_rect(0, 0, 1, 0)).len()).to_equal(0)
+
+    it "clamps negative offsets and emptied item collections":
+        step("Normalize public widget state without indexing outside its items")
+        val style = tui_default_style()
+        val negative = ListWidget(items: ["a"], item_style: style, selected_style: style, selected_index: -1, scroll_offset: -3)
+        val rows = list_render(negative, make_rect(0, 0, 1, 1))
+        expect(rows[0].segments[0].content).to_equal("a")
+        val empty = ListWidget(items: [], item_style: style, selected_style: style, selected_index: 4, scroll_offset: 3)
+        expect(list_ensure_visible(empty, 2).scroll_offset).to_equal(0)
+        expect(list_render(empty, make_rect(0, 0, 1, 2)).len()).to_equal(2)
