@@ -107,3 +107,40 @@ identifier 'string' (not a global, function, const-data name, or import)
 `str_repeat`. The namespace dict served to `import string` callers still ignores
 all of it. Root cause is in the resolver's `import <bare-name>` namespace-object
 construction (Rust seed), not in `src/lib/**`; out of scope for stdlib lanes.
+
+## 2026-11-03 — Pure-Simple source candidate, behavioral verification blocked
+
+Claim: `p2-string-20261103`; base release source
+`89d4e41ec88d781ec7191f2f3fe5b7334560ee21`.
+
+Current Pure-Simple source has two attributable compatibility gaps:
+
+- A bare import from outside the library tree never probes the root
+  `src/lib/<module>.spl` facade after caller-relative/source lookup misses.
+- Full unaliased imports bind exported bare names but do not register their
+  module namespace, although explicit aliases already use a caller/physical
+  owner namespace table.
+
+The candidate probes the actual root facade only after existing caller/family
+lookup and binds the full module's final path component to its resolved physical
+owner. Existing facade re-export bindings supply the members; no string-specific
+member table or fabricated implementation is introduced. `src/lib/string.spl`
+already contains the real `char_at` wrapper and remains unchanged. Explicit
+family resolution ordering is unchanged.
+
+Authored regressions:
+
+- `test/01_unit/compiler/interpreter/full_module_source_namespace_spec.spl`:
+  exact bare-string path/owner, retained bare exports, arbitrary renamed facade
+  forwarding, missing-member/caller isolation, and caller-local source precedence.
+- `test/02_integration/compiler/interpreter/legacy_string_source_namespace_spec.spl`:
+  actual `char_at`/`str_char_at` values and adjacent arbitrary source functions,
+  renamed re-exports, explicit module alias and caller-name collision.
+
+**TEST_BLOCKED:** this Windows environment has no qualified self-hosted full
+CLI in `bin/release`. The tracked Rust seed and frozen diagnostic artifacts are
+not behavioral substitutes. No regression cases have executed (positive executed
+count: 0). The historical deployed Rust dictionary symptom therefore remains
+unverified; this source candidate alone does not establish that its original
+producer was repaired. Keep the bug open pending admitted interpreter/native
+regressions and the compiler/core/lib/MCP checks required by repository policy.
