@@ -1,0 +1,33 @@
+# Registered declarations define authored intent only, never trusted admission.
+use std.common.traceability.model.*
+use std.common.traceability.sdn_codec.{decode_trace_declarations}
+use std.common.traceability.schema.{trace_path_valid}
+
+pub fn trace_query_default_declarations_v1() -> [text]:
+    # Existing canonical registered scope, not all legacy feature/bug DB rows.
+    ["doc/08_tracking/trace/features/simple_traceability_sdn_slop.sdn"]
+
+pub fn trace_query_closure_paths_v1(snapshot: SnapshotInput, declarations: [text], extra: [text]) -> Result<[text], text>:
+    var paths: Dict<text, bool> = {}
+    for path in extra:
+        if not trace_path_valid(path): return Err("TRACE-QUERY-SCOPE: unsafe selected path")
+        paths[path] = true
+    for path in declarations:
+        if not trace_path_valid(path): return Err("TRACE-QUERY-SCOPE: unsafe declaration path")
+        paths[path] = true
+        var found = false
+        for artifact in snapshot.artifacts:
+            if artifact.path != path: continue
+            if found: return Err("TRACE-QUERY-SCOPE: repeated declaration artifact")
+            found = true
+            val facts = match decode_trace_declarations(artifact.content, snapshot.subject, path, artifact.blob_id):
+                case Ok(value): value
+                case Err(_): return Err("TRACE-QUERY-DECLARATION: invalid registered declaration " + path)
+            for locator in facts.locators:
+                if not trace_path_valid(locator.path): return Err("TRACE-QUERY-SCOPE: unsafe declaration locator")
+                paths[locator.path] = true
+                if paths.len() > 256: return Err("TRACE-QUERY-BUDGET: locator closure exceeds 256 files")
+        if not found: return Err("TRACE-QUERY-DECLARATION: registered declaration was not captured")
+    if paths.len() == 0 or paths.len() > 256:
+        return Err("TRACE-QUERY-BUDGET: selected closure must contain 1..256 files")
+    Ok(trace_sorted_ids(paths.keys()))

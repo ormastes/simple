@@ -35,8 +35,15 @@ use compiler.blocks.value.{BlockValue}
 
 extern fn rt_enum_payload(value: TypeKind) -> i64
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
-extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
+@unsafe(reason: "caller proves live tuple variant and index-to-T schema; nil means absent", capabilities: [ffi])
+extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?
 extern fn rt_println(msg: text)
+
+# T is the selected variant's slot type; the tuple is borrowed from its live owner.
+@always_inline
+fn _sffi_tuple_get<T>(tuple: i64, index: i64) -> T?:
+    unsafe(capabilities: [ffi]):
+        rt_tuple_get<T>(tuple, index)
 
 fn parser_types_trace_enabled() -> bool:
     """Level gate for TypeKind payload-decode tracing (default off).
@@ -116,7 +123,7 @@ fn parser_type_kind_named_name(kind: TypeKind) -> text:
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return ""
-    val name: text = rt_tuple_get(payload, 0)
+    val name: text = _sffi_tuple_get<text>(payload, 0)
     name
 
 fn parser_type_kind_named_args(kind: TypeKind) -> [Type]:
@@ -125,7 +132,7 @@ fn parser_type_kind_named_args(kind: TypeKind) -> [Type]:
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return []
-    val args: [Type] = rt_tuple_get(payload, 1)
+    val args: [Type] = _sffi_tuple_get<[Type]>(payload, 1)
     args
 
 fn parser_type_kind_array_discriminant() -> i64:
@@ -150,7 +157,7 @@ fn parser_type_kind_array_element(kind: TypeKind, fallback: Type) -> Type:
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return fallback
-    val element: Type = rt_tuple_get(payload, 0)
+    val element: Type = _sffi_tuple_get<Type>(payload, 0)
     if element == nil:
         return fallback
     element
@@ -173,7 +180,7 @@ fn parser_type_kind_array_element_name(kind: TypeKind) -> text:
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return ""
-    val element: Type = rt_tuple_get(payload, 0)
+    val element: Type = _sffi_tuple_get<Type>(payload, 0)
     if element == nil:
         if parser_types_trace_enabled():
             rt_println("[typekind] array payload slot0 nil disc={disc}")
@@ -207,7 +214,7 @@ fn parser_type_kind_pointer_inner(kind: TypeKind, fallback: Type) -> Type:
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return fallback
-    val inner: Type = rt_tuple_get(payload, 0)
+    val inner: Type = _sffi_tuple_get<Type>(payload, 0)
     if inner == nil:
         return fallback
     inner
@@ -219,7 +226,7 @@ fn parser_type_kind_pointer_is_mutable(kind: TypeKind) -> bool:
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return false
-    val mutable: bool = rt_tuple_get(payload, 1)
+    val mutable: bool = _sffi_tuple_get<bool>(payload, 1)
     mutable
 
 fn parser_type_kind_is_pointer(kind: TypeKind) -> bool:
@@ -236,7 +243,7 @@ fn parser_type_kind_reference_inner(kind: TypeKind, fallback: Type) -> Type:
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return fallback
-    val inner: Type = rt_tuple_get(payload, 0)
+    val inner: Type = _sffi_tuple_get<Type>(payload, 0)
     if inner == nil:
         return fallback
     inner
@@ -247,7 +254,7 @@ fn parser_type_kind_reference_is_mutable(kind: TypeKind) -> bool:
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return false
-    val mutable: bool = rt_tuple_get(payload, 1)
+    val mutable: bool = _sffi_tuple_get<bool>(payload, 1)
     mutable
 
 fn parser_type_kind_is_unique(kind: TypeKind) -> bool:
@@ -319,7 +326,7 @@ fn parser_type_kind_function_params(kind: TypeKind) -> [Type]:
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return []
-    val params: [Type] = rt_tuple_get(payload, 0)
+    val params: [Type] = _sffi_tuple_get<[Type]>(payload, 0)
     params
 
 fn parser_type_kind_function_return(kind: TypeKind, fallback: Type) -> Type:
@@ -328,7 +335,7 @@ fn parser_type_kind_function_return(kind: TypeKind, fallback: Type) -> Type:
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return fallback
-    val ret: Type = rt_tuple_get(payload, 1)
+    val ret: Type = _sffi_tuple_get<Type>(payload, 1)
     if ret == nil:
         return fallback
     ret
@@ -370,8 +377,8 @@ fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
     val payload = rt_enum_payload(kind)
     if payload == nil: return
     if disc == rt_enum_discriminant(TypeKind.Function([], placeholder)):
-        val params: [Type] = rt_tuple_get(payload, 0)
-        val return_type: Type = rt_tuple_get(payload, 1)
+        val params: [Type] = _sffi_tuple_get<[Type]>(payload, 0)
+        val return_type: Type = _sffi_tuple_get<Type>(payload, 1)
         for param in params:
             parser_type_named_dependencies_into(param, names)
         parser_type_named_dependencies_into(return_type, names)
@@ -381,7 +388,7 @@ fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
         parser_type_named_dependencies_into(inner, names)
         return
     if disc == rt_enum_discriminant(TypeKind.Reference(placeholder, false)):
-        val inner: Type = rt_tuple_get(payload, 0)
+        val inner: Type = _sffi_tuple_get<Type>(payload, 0)
         parser_type_named_dependencies_into(inner, names)
         return
     if disc == rt_enum_discriminant(TypeKind.Atomic(placeholder)):
@@ -405,11 +412,11 @@ fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
         parser_type_list_named_dependencies_into(members, names)
         return
     if disc == rt_enum_discriminant(TypeKind.Projection(placeholder, "")):
-        val base: Type = rt_tuple_get(payload, 0)
+        val base: Type = _sffi_tuple_get<Type>(payload, 0)
         parser_type_named_dependencies_into(base, names)
         return
     if disc == rt_enum_discriminant(TypeKind.Pointer(placeholder, false)):
-        val inner: Type = rt_tuple_get(payload, 0)
+        val inner: Type = _sffi_tuple_get<Type>(payload, 0)
         parser_type_named_dependencies_into(inner, names)
 
 fn parser_type_named_dependencies(type_: Type) -> [text]:

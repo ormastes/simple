@@ -454,6 +454,15 @@ pub fn rt_string_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(a == b))
 }
 
+/// Representation-aware text equality with the native runtime's `i64` 0/1
+/// return ABI. MIR calls this only when both operands are statically `text`.
+pub fn rt_text_eq_any_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match rt_string_eq_fn(args)? {
+        Value::Bool(equal) => Ok(Value::Int(i64::from(equal))),
+        _ => unreachable!("rt_string_eq_fn always returns Bool"),
+    }
+}
+
 // ============================================================================
 // Incremental String Builder
 // (bug rt_string_concat_quadratic_2026-06-12: O(1) amortized push)
@@ -743,6 +752,28 @@ mod tests {
         assert_eq!(
             rt_string_eq_fn(&[handle, Value::text("beta".to_string())]).unwrap(),
             Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn text_eq_any_matches_native_integer_abi_for_tagged_and_handles() {
+        assert_eq!(
+            rt_text_eq_any_fn(&[Value::text("same".to_string()), Value::text("same".to_string())]).unwrap(),
+            Value::Int(1)
+        );
+        assert_eq!(
+            rt_text_eq_any_fn(&[Value::text("same".to_string()), Value::text("different".to_string())]).unwrap(),
+            Value::Int(0)
+        );
+
+        let handle = rt_string_new_fn(&[Value::text("same".to_string())]).unwrap();
+        assert_eq!(
+            rt_text_eq_any_fn(&[Value::text("same".to_string()), handle]).unwrap(),
+            Value::Int(1)
+        );
+        assert_eq!(
+            rt_text_eq_any_fn(&[Value::text("a\0x".to_string()), Value::text("a\0y".to_string())]).unwrap(),
+            Value::Int(0)
         );
     }
 
