@@ -20,6 +20,23 @@ use crate::hir::{HirExpr, HirExprKind, HirType, PointerKind, TypeId};
 use crate::mir::instructions::VReg;
 
 impl<'a> MirLowerer<'a> {
+    /// Class identity for a struct `FieldGet`/`FieldSet`: the first NAMED
+    /// type among `primary` (usually the recovered local/param type), the
+    /// expression's own `receiver.ty`, and a structural recovery. A local
+    /// slot typed ANY/unnamed must not mask a named `receiver.ty`: a `None`
+    /// owner makes native layout skip the vtable header word and write field
+    /// N over slot N-1 (stage3_selfhost_vtable_field_offset_relro_segv).
+    pub(super) fn field_owner_name(&mut self, receiver: &HirExpr, primary: TypeId) -> Option<String> {
+        let registry = self.type_registry?;
+        for ty in [primary, receiver.ty] {
+            if let Some(name) = registry.get_type_name(ty) {
+                return Some(name.to_owned());
+            }
+        }
+        let recovered = self.recover_receiver_type(receiver)?;
+        registry.get_type_name(recovered).map(str::to_owned)
+    }
+
     /// Recover a named type for a method-call receiver whose own
     /// `receiver.ty` does not resolve to a named class via
     /// `TypeRegistry::get_type_name`.

@@ -203,6 +203,10 @@ pub struct Lowerer {
     /// at registration so a module-level `val G = f` (lowered before any body)
     /// is typed as a function value rather than ANY.
     pub(super) declared_function_value_types: HashMap<String, TypeId>,
+    /// Generic free functions `fn f<T>(.., x: T, ..) -> T`: name -> index of
+    /// the first parameter typed by the returned type param. Erased generics
+    /// type the call as Any; a class argument recovers the class identity.
+    pub(super) generic_identity_param: HashMap<String, usize>,
     /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
     /// Canonical `module_prefix__Type` -> declared field `= default` exprs,
@@ -333,6 +337,7 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
+            generic_identity_param: HashMap::new(),
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -407,6 +412,7 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
+            generic_identity_param: HashMap::new(),
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -504,6 +510,7 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
+            generic_identity_param: HashMap::new(),
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,

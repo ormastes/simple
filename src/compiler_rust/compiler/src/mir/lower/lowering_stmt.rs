@@ -638,10 +638,7 @@ impl<'a> MirLowerer<'a> {
                             })?;
                         } else {
                             let byte_offset = (field_index as u32) * 8;
-                            let owner_name = self
-                                .type_registry
-                                .and_then(|registry| registry.get_type_name(receiver_ty))
-                                .map(str::to_owned);
+                            let owner_name = self.field_owner_name(receiver, receiver_ty);
                             // Native-project lowering replaces this with an
                             // authoritative module-qualified layout decision.
                             let owner_has_vtable = None;

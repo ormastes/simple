@@ -1563,3 +1563,100 @@ fn di_builtin_type_name() {
     assert_eq!(builtin_type_name(hir::TypeId::F32), Some("f32"));
     assert_eq!(builtin_type_name(hir::TypeId(999)), None);
 }
+
+/// Bug stage3_selfhost_vtable_field_offset_relro_segv_2026-08-06: every
+/// field get/set on a vtable-bearing class must carry the class as owner,
+/// whatever shape produced the receiver (call result with an enum/nil arg,
+/// a field-held instance, a call-result receiver). A `None` owner makes
+/// native layout skip the vtable slot and write field N over slot N-1.
+#[test]
+fn field_access_owner_identity_survives_driver_receiver_shapes() {
+    let mir = compile_to_mir(
+        r#"trait Gen:
+    fn run_it() -> i64
+
+enum Tgt:
+    Host
+    Other
+
+class Tr with Gen:
+    name: text
+    tgt: Tgt
+    hook: i64?
+    count: i64
+    static fn create(name: text, tgt: Tgt, hook: i64?) -> Tr:
+        Tr(name: name, tgt: tgt, hook: hook, count: 0)
+    fn run_it() -> i64:
+        self.count
+
+class Drv:
+    tr: Tr
+
+fn make() -> Tr:
+    Tr.create("m", Tgt.Host, nil)
+
+fn shape_nil_arg() -> i64:
+    var t = Tr.create("x", Tgt.Host, nil)
+    t.count = 1
+    t.count
+
+fn shape_field_held(mut d: Drv) -> i64:
+    d.tr.count = 2
+    d.tr.count
+
+fn shape_call_receiver() -> i64:
+    make().count
+
+fn shape_var_reassigned() -> i64:
+    var t = make()
+    t = Tr.create("y", Tgt.Other, nil)
+    t.count = 3
+    t.count
+
+fn idg<T>(x: T) -> T:
+    x
+
+fn shape_generic_id() -> i64:
+    var t = idg(make())
+    t.count = 5
+    t.count
+
+fn shape_if_expr(c: bool) -> i64:
+    var t = if c: make() else: Tr.create("z", Tgt.Host, nil)
+    t.count = 6
+    t.count
+
+fn shape_for_elem(xs: [Tr]) -> i64:
+    var s = 0
+    for t in xs:
+        s = s + t.count
+    s
+"#,
+    )
+    .unwrap();
+    let mut bad = Vec::new();
+    for shape in ["shape_nil_arg", "shape_field_held", "shape_call_receiver", "shape_var_reassigned", "shape_generic_id", "shape_if_expr", "shape_for_elem"] {
+        let f = mir
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with(shape))
+            .unwrap_or_else(|| panic!("{shape}"));
+        let owners: Vec<Option<String>> = f
+            .blocks
+            .iter()
+            .flat_map(|b| b.instructions.iter())
+            .filter_map(|i| match i {
+                MirInst::FieldGet { owner_name, byte_offset, .. } | MirInst::FieldSet { owner_name, byte_offset, .. }
+                    if *byte_offset == 24 =>
+                {
+                    Some(owner_name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if owners.is_empty() || !owners.iter().all(|o| o.as_deref() == Some("Tr")) {
+            bad.push(format!("{shape}: {owners:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "field owner identity lost: {bad:?}");
+}

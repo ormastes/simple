@@ -1224,10 +1224,7 @@ impl<'a> MirLowerer<'a> {
                 let object_reg = self.lower_expr(object)?;
                 let field_index = *field_index;
                 let byte_offset = (field_index as u32) * 8;
-                let owner_name = self
-                    .type_registry
-                    .and_then(|registry| registry.get_type_name(object.ty))
-                    .map(str::to_owned);
+                let owner_name = self.field_owner_name(object, object.ty);
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::FieldSet {

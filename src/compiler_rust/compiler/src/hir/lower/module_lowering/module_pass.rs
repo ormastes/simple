@@ -492,6 +492,19 @@ impl Lowerer {
                     let fn_ty = self.module.types.register(HirType::Function { params, ret: ret_ty });
                     self.declared_function_value_types.insert(f.name.clone(), fn_ty);
                 }
+                if owner.is_none() {
+                    if let Some(ast::Type::Simple(ret_param)) = &f.return_type {
+                        if f.generic_params.iter().any(|g| g == ret_param) {
+                            let idx = f
+                                .params
+                                .iter()
+                                .position(|p| matches!(&p.ty, Some(ast::Type::Simple(n)) if n == ret_param));
+                            if let Some(idx) = idx {
+                                self.generic_identity_param.insert(f.name.clone(), idx);
+                            }
+                        }
+                    }
+                }
                 // Track pure functions for CTR-030-032
                 if f.is_pure() {
                     self.pure_functions.insert(symbol.clone());
