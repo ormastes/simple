@@ -136,7 +136,11 @@ fn imported_defaults_do_not_attach_to_local_callable_or_named_call() {
     let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
     let module = Lowerer::with_module_resolver(resolver, src.join("main.spl")).lower_module(&ast).unwrap();
     assert_eq!(call_args(&module, "local_call").len(), 1);
-    assert_eq!(call_args(&module, "named_call").len(), 1);
+    // Named call to the imported fn: slot-mapped and its omitted default filled
+    // (formerly left unfilled -> nil slot, bug jit_layout_run_full_with_ports_nil_receiver).
+    let named = call_args(&module, "named_call");
+    assert_eq!(named.len(), 2);
+    assert!(matches!(&named[1].kind, HirExprKind::String(s) if s == "owner"));
 }
 
 #[test]
@@ -233,4 +237,58 @@ fn imported_container_and_typed_defaults_fill_and_non_constant_default_errors() 
     let err = Lowerer::with_module_resolver(resolver, src.join("main.spl")).lower_module(&bad)
         .expect_err("callee-module global default cannot be materialised in the caller");
     assert!(format!("{err}").contains("`needs_global` omits argument 2"), "{err}");
+}
+
+fn int_of(e: &crate::hir::HirExpr) -> i64 {
+    match &e.kind { HirExprKind::Integer(v) => *v, other => panic!("expected int literal, got {other:?}") }
+}
+
+#[test]
+fn named_call_maps_slots_and_fills_defaults() {
+    // jit_layout_run_full_with_ports_nil_receiver: a call with named args used
+    // to skip the default fill and pass source-order args, leaving omitted
+    // slots as tagged nil (rc=139). Every slot must now be filled in
+    // declared order.
+    let head = "fn mk(a: i64, b: i64 = 1, c: i64 = 2, d: i64 = 3) -> i64:\n    a + b + c + d\n";
+    let cases = [
+        ("mk(10, c: 5)", [10, 1, 5, 3]),
+        ("mk(10, d: 9, b: 7)", [10, 7, 2, 9]),
+        ("mk(a: 4)", [4, 1, 2, 3]),
+        ("mk(10, 20, d: 30)", [10, 20, 2, 30]),
+        ("mk(1, b: 2, c: 3, d: 4)", [1, 2, 3, 4]),
+    ];
+    for (call, expected) in cases {
+        let ast = Parser::new(&format!("{head}fn caller() -> i64:\n    {call}\n")).parse().unwrap();
+        let module = crate::hir::lower(&ast).unwrap_or_else(|e| panic!("{call}: {e}"));
+        let got: Vec<i64> = call_args(&module, "caller").iter().map(int_of).collect();
+        assert_eq!(got, expected, "{call}");
+    }
+}
+
+#[test]
+fn named_call_to_variadic_fn_keeps_legacy_path() {
+    let ast = Parser::new("fn tot(base: i64, rest: i64...) -> i64:
+    base
+fn caller() -> i64:
+    tot(1, base: 2)
+").parse().unwrap();
+    // Must not be rejected with an arity error by named-arg binding.
+    if let Err(e) = crate::hir::lower(&ast) {
+        assert!(!format!("{e}").contains("beyond its arity"), "{e}");
+    }
+}
+
+#[test]
+fn named_call_errors_instead_of_nil_padding() {
+    let head = "fn mk(a: i64, b: i64 = 1, c: text = \"{x}\") -> i64:\n    a + b\n";
+    for (call, needle) in [
+        ("mk(b: 2)", "omits required argument 1"),
+        ("mk(1, zz: 2)", "unknown parameter `zz`"),
+        ("mk(1, a: 2)", "more than once"),
+        ("mk(1, b: 2)", "omits argument 3 whose default is not a call-site constant"),
+    ] {
+        let ast = Parser::new(&format!("{head}fn caller() -> i64:\n    {call}\n")).parse().unwrap();
+        let err = crate::hir::lower(&ast).expect_err(call);
+        assert!(format!("{err}").contains(needle), "{call}: {err}");
+    }
 }
