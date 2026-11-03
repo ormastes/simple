@@ -42,3 +42,9 @@ A spec that times `char_code_at` over a 256 KB string whose first byte is `é`
 against the same string prefixed with an ASCII byte; the ratio must stay bounded
 (< 3x), not grow with length.
 
+
+## Deferred 2026-11-03 (text-index-family lane)
+
+Fix lives in C runtime `rt_string_char_code_at` (runtime_native.c) and needs a runtime
+rebuild to verify; deferred while C: has < 15 GB free and the ADR-005 char lane
+(#6269) is changing runtime text values. Suggested fix above (resume cache) stands.
