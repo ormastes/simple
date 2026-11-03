@@ -3799,19 +3799,32 @@ char* rt_stdin_read_line(void) {
 /* Hosted text ABI: unlike the legacy raw/4096-byte helpers, read one complete
  * UTF-8 line, preserve embedded NUL, and distinguish EOF (empty text) from an
  * I/O or decoding error (NIL). Core-C has no Rust stdin-mock owner. */
+/* Single raw fd-0 byte reader shared by all stdin readers below. stdio
+ * read-ahead would swallow bytes that the other readers (or raw read(0)
+ * users) expect. Returns 1 (byte stored), 0 (EOF) or -1 (error). */
+static int stdin_raw_byte(uint8_t *out) {
+    for (;;) {
+#if defined(_WIN32)
+        int n = _read(0, out, 1);
+#else
+        ssize_t n = read(0, out, 1);
+#endif
+        if (n == 1) return 1;
+        if (n == 0) return 0;
+        if (errno == EINTR) continue;
+        return -1;
+    }
+}
+
 int64_t rt_read_stdin_line(void) {
     uint8_t *bytes = NULL;
     size_t length = 0, capacity = 0;
     int failed = 0;
-#ifdef _WIN32
-    _lock_file(stdin);
-#else
-    flockfile(stdin);
-#endif
     for (;;) {
-        int ch = fgetc(stdin);
-        if (ch == EOF) {
-            failed = ferror(stdin) != 0;
+        uint8_t ch = 0;
+        int got = stdin_raw_byte(&ch);
+        if (got <= 0) {
+            failed = got < 0;
             break;
         }
         if (length == capacity) {
@@ -3828,14 +3841,9 @@ int64_t rt_read_stdin_line(void) {
             bytes = next;
             capacity = next_capacity;
         }
-        bytes[length++] = (uint8_t)ch;
+        bytes[length++] = ch;
         if (ch == '\n') break;
     }
-#ifdef _WIN32
-    _unlock_file(stdin);
-#else
-    funlockfile(stdin);
-#endif
     int64_t result = 0; /* RuntimeValue::NIL */
     if (!failed && splc_utf8_valid_up_to(bytes, (int64_t)length) == (int64_t)length) {
         if (length && bytes[length - 1] == '\n') {
@@ -3849,11 +3857,24 @@ int64_t rt_read_stdin_line(void) {
 }
 
 int64_t rt_stdin_read_line_text(void) {
-    char buf[4096];
-    if (!fgets(buf, sizeof(buf), stdin)) {
-        return rt_string_new(NULL, 0);
+    uint8_t *bytes = NULL;
+    size_t length = 0, capacity = 0;
+    for (;;) {
+        uint8_t ch = 0;
+        if (stdin_raw_byte(&ch) <= 0) break;
+        if (length == capacity) {
+            size_t next_capacity = capacity ? capacity * 2 : 256;
+            uint8_t *next = (uint8_t *)rt_observed_realloc_v1(bytes, next_capacity);
+            if (!next) break;
+            bytes = next;
+            capacity = next_capacity;
+        }
+        bytes[length++] = ch;
+        if (ch == '\n') break;
     }
-    return rt_string_new((const uint8_t*)buf, (int64_t)strlen(buf));
+    int64_t value = rt_string_new(bytes, (uint64_t)length);
+    free(bytes);
+    return value;
 }
 
 int64_t rt_stdin_read_chars_text(int64_t count) {
@@ -3864,27 +3885,22 @@ int64_t rt_stdin_read_chars_text(int64_t count) {
     if (!buf) {
         return rt_string_new(NULL, 0);
     }
-    size_t n = fread(buf, 1, (size_t)count, stdin);
+    size_t n = 0;
+    while (n < (size_t)count) {
+        uint8_t ch = 0;
+        if (stdin_raw_byte(&ch) <= 0) break;
+        buf[n++] = (char)ch;
+    }
     int64_t value = rt_string_new((const uint8_t*)buf, (int64_t)n);
     free(buf);
     return value;
 }
 
 int64_t stdin_read_char(void) {
-    /* Raw fd read, not stdio fgetc: fgetc's read-ahead swallows bytes that
-     * other raw read(0) users expect, and hung on macOS ARM64 core-c. EOF and
-     * errors yield the empty string, as before. */
+    /* EOF and errors yield the empty string. */
     uint8_t byte = 0;
-    for (;;) {
-#if defined(_WIN32)
-        int n = _read(0, &byte, 1);
-#else
-        ssize_t n = read(0, &byte, 1);
-#endif
-        if (n == 1) return rt_string_new(&byte, 1);
-        if (n < 0 && errno == EINTR) continue;
-        return rt_string_new(NULL, 0);
-    }
+    if (stdin_raw_byte(&byte) == 1) return rt_string_new(&byte, 1);
+    return rt_string_new(NULL, 0);
 }
 
 #if defined(_WIN32)
