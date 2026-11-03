@@ -1,0 +1,139 @@
+# ECDSA P-256 SPKI header validation
+
+Status: **AUTHORED_UNRUN**. Branch coverage: **UNMEASURED**.
+
+Authored companion. RFC 5480 sections 2.1.1 (p. 4), 2.1.1.1 (p. 6), and 2.2 (p. 7).
+
+Executable: `test/01_unit/lib/common/crypto/ecdsa_spki_header_validation_spec.spl`
+
+Spec SHA-256: `fefc4ae8a40cfef4177b85a94ee4268c74be840339daeb7275989032106c9224`
+
+Execution artifact SHA-256: absent. Proof class: production API regression authored; source-discovered header-validation gap. Native execution and zero-stub docgen remain pending.
+
+## Scenario flow
+
+- REQ-TLS-ECDSA-SPKI-001: bind the point to its DER algorithm identifier
+- should accept the existing independently specified canonical P-256 key
+  - Load the existing NIST CAVP SigVer public key message and signature
+  - Verify through the common SPKI production API
+- should reject an algorithm OID other than id-ecPublicKey
+  - Keep the valid point and signature while changing the algorithm OID
+- should reject a named curve OID other than secp256r1
+  - Keep the valid point and signature while changing the curve OID
+- should reject a BIT STRING declaring unused bits
+  - Change only the BIT STRING unused-bit count
+- should reject an inconsistent outer DER length
+  - Preserve the 91-byte buffer but corrupt its sequence length
+- should reject a non-sequence outer DER tag
+  - Preserve the point while changing the outer ASN.1 tag
+
+<details><summary>Executable SSpec</summary>
+
+```simple
+"""
+# ECDSA P-256 SPKI algorithm binding
+REQ-TLS-ECDSA-SPKI-001. RFC 5480 sections 2.1.1 and 2.2.
+AUTHORED_UNRUN / UNMEASURED. Existing NIST CAVP SigVer fixture is reused
+as a positive control so header rejection cannot pass by rejecting every key.
+The API requires 91-byte DER SPKI and fixed-width r||s, not TLS signature DER.
+"""
+use std.spec.*
+use std.spec.step
+use std.common.crypto.ecdsa_p256.{ecdsa_p256_verify as verify_spki_common}
+fn _cavp_spki() -> [u8]:
+    val b: [u8] = [
+        0x30u8, 0x59u8, 0x30u8, 0x13u8, 0x06u8, 0x07u8, 0x2au8, 0x86u8,
+        0x48u8, 0xceu8, 0x3du8, 0x02u8, 0x01u8, 0x06u8, 0x08u8, 0x2au8,
+        0x86u8, 0x48u8, 0xceu8, 0x3du8, 0x03u8, 0x01u8, 0x07u8, 0x03u8,
+        0x42u8, 0x00u8, 0x04u8, 0xe4u8, 0x24u8, 0xdcu8, 0x61u8, 0xd4u8,
+        0xbbu8, 0x3cu8, 0xb7u8, 0xefu8, 0x43u8, 0x44u8, 0xa7u8, 0xf8u8,
+        0x95u8, 0x7au8, 0x0cu8, 0x51u8, 0x34u8, 0xe1u8, 0x6fu8, 0x7au8,
+        0x67u8, 0xc0u8, 0x74u8, 0xf8u8, 0x2eu8, 0x6eu8, 0x12u8, 0xf4u8,
+        0x9au8, 0xbfu8, 0x3cu8, 0x97u8, 0x0eu8, 0xedu8, 0x7au8, 0xa2u8,
+        0xbcu8, 0x48u8, 0x65u8, 0x15u8, 0x45u8, 0x94u8, 0x9du8, 0xe1u8,
+        0xddu8, 0xdau8, 0xf0u8, 0x12u8, 0x7eu8, 0x59u8, 0x65u8, 0xacu8,
+        0x85u8, 0xd1u8, 0x24u8, 0x3du8, 0x6fu8, 0x60u8, 0xe7u8, 0xdfu8,
+        0xaeu8, 0xe9u8, 0x27u8
+    ]
+    b
+
+fn _cavp_msg() -> [u8]:
+    val b: [u8] = [
+        0xe1u8, 0x13u8, 0x0au8, 0xf6u8, 0xa3u8, 0x8cu8, 0xcbu8, 0x41u8,
+        0x2au8, 0x9cu8, 0x8du8, 0x13u8, 0xe1u8, 0x5du8, 0xbfu8, 0xc9u8,
+        0xe6u8, 0x9au8, 0x16u8, 0x38u8, 0x5au8, 0xf3u8, 0xc3u8, 0xf1u8,
+        0xe5u8, 0xdau8, 0x95u8, 0x4fu8, 0xd5u8, 0xe7u8, 0xc4u8, 0x5fu8,
+        0xd7u8, 0x5eu8, 0x2bu8, 0x8cu8, 0x36u8, 0x69u8, 0x92u8, 0x28u8,
+        0xe9u8, 0x28u8, 0x40u8, 0xc0u8, 0x56u8, 0x2fu8, 0xbfu8, 0x37u8,
+        0x72u8, 0xf0u8, 0x7eu8, 0x17u8, 0xf1u8, 0xadu8, 0xd5u8, 0x65u8,
+        0x88u8, 0xddu8, 0x45u8, 0xf7u8, 0x45u8, 0x0eu8, 0x12u8, 0x17u8,
+        0xadu8, 0x23u8, 0x99u8, 0x22u8, 0xddu8, 0x9cu8, 0x32u8, 0x69u8,
+        0x5du8, 0xc7u8, 0x1fu8, 0xf2u8, 0x42u8, 0x4cu8, 0xa0u8, 0xdeu8,
+        0xc1u8, 0x32u8, 0x1au8, 0xa4u8, 0x70u8, 0x64u8, 0xa0u8, 0x44u8,
+        0xb7u8, 0xfeu8, 0x3cu8, 0x2bu8, 0x97u8, 0xd0u8, 0x3cu8, 0xe4u8,
+        0x70u8, 0xa5u8, 0x92u8, 0x30u8, 0x4cu8, 0x5eu8, 0xf2u8, 0x1eu8,
+        0xedu8, 0x9fu8, 0x93u8, 0xdau8, 0x56u8, 0xbbu8, 0x23u8, 0x2du8,
+        0x1eu8, 0xebu8, 0x00u8, 0x35u8, 0xf9u8, 0xbfu8, 0x0du8, 0xfau8,
+        0xfdu8, 0xccu8, 0x46u8, 0x06u8, 0x27u8, 0x2bu8, 0x20u8, 0xa3u8
+    ]
+    b
+
+fn _cavp_sig() -> [u8]:
+    # R || S — 64 bytes fixed-width
+    val b: [u8] = [
+        0xbfu8, 0x96u8, 0xb9u8, 0x9au8, 0xa4u8, 0x9cu8, 0x70u8, 0x5cu8,
+        0x91u8, 0x0bu8, 0xe3u8, 0x31u8, 0x42u8, 0x01u8, 0x7cu8, 0x64u8,
+        0x2fu8, 0xf5u8, 0x40u8, 0xc7u8, 0x63u8, 0x49u8, 0xb9u8, 0xdau8,
+        0xb7u8, 0x2fu8, 0x98u8, 0x1fu8, 0xd9u8, 0x34u8, 0x7fu8, 0x4fu8,
+        0x17u8, 0xc5u8, 0x50u8, 0x95u8, 0x81u8, 0x90u8, 0x89u8, 0xc2u8,
+        0xe0u8, 0x3bu8, 0x9cu8, 0xd4u8, 0x15u8, 0xabu8, 0xdfu8, 0x12u8,
+        0x44u8, 0x4eu8, 0x32u8, 0x30u8, 0x75u8, 0xd9u8, 0x8fu8, 0x31u8,
+        0x92u8, 0x0bu8, 0x9eu8, 0x0fu8, 0x57u8, 0xecu8, 0x87u8, 0x1cu8
+    ]
+    b
+
+fn spki_mutation(index: u64, byte: u8) -> [u8]:
+    val original = _cavp_spki()
+    var output: [u8] = []
+    var i: u64 = 0
+    while i < original.len():
+        if i == index:
+            output.push(byte)
+        else:
+            output.push(original[i])
+        i = i + 1
+    output
+
+fn assert_spki_header_rejected(key: [u8]):
+    match verify_spki_common(key, _cavp_msg(), _cavp_sig()):
+        Ok(accepted): fail("Malformed SPKI header reached cryptographic verification")
+        Err(error): expect(error).to_equal("E-SFFI-010: invalid ECDSA P-256 SPKI header")
+
+describe "REQ-TLS-ECDSA-SPKI-001: bind the point to its DER algorithm identifier":
+    it "should accept the existing independently specified canonical P-256 key":
+        step("Load the existing NIST CAVP SigVer public key message and signature")
+        step("Verify through the common SPKI production API")
+        expect(verify_spki_common(_cavp_spki(), _cavp_msg(), _cavp_sig()).unwrap()).to_equal(true)
+
+    it "should reject an algorithm OID other than id-ecPublicKey":
+        step("Keep the valid point and signature while changing the algorithm OID")
+        assert_spki_header_rejected(spki_mutation(12, 2u8))
+
+    it "should reject a named curve OID other than secp256r1":
+        step("Keep the valid point and signature while changing the curve OID")
+        assert_spki_header_rejected(spki_mutation(22, 8u8))
+
+    it "should reject a BIT STRING declaring unused bits":
+        step("Change only the BIT STRING unused-bit count")
+        assert_spki_header_rejected(spki_mutation(25, 1u8))
+
+    it "should reject an inconsistent outer DER length":
+        step("Preserve the 91-byte buffer but corrupt its sequence length")
+        assert_spki_header_rejected(spki_mutation(1, 88u8))
+
+    it "should reject a non-sequence outer DER tag":
+        step("Preserve the point while changing the outer ASN.1 tag")
+        assert_spki_header_rejected(spki_mutation(0, 49u8))
+```
+
+</details>
