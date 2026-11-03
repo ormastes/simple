@@ -25,6 +25,38 @@ fn pattern_enum_name_matches(pattern_name: &str, value_name: &str) -> bool {
     })
 }
 
+
+/// Number of times an Option pattern (`Some(..)` / `None` / `nil`) was tested
+/// against a `Result` value. Counted on every detection; the stderr warning is
+/// printed once per process so a hot loop cannot flood the log.
+pub(crate) static OPTION_PATTERN_OVER_RESULT_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static OPTION_PATTERN_OVER_RESULT_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// An Option-shaped pattern (`Some(..)`, `None`, `nil`) can never match a
+/// `Result` value (`Ok`/`Err`): the arm silently matches nothing and the
+/// binding keeps its previous value.
+/// See doc/08_tracking/bug/option_pattern_against_result_value_matches_nothing_2026-09-19.md.
+/// Returns true when `value` is a `Result` enum value (the caller then
+/// falls through to "no match").
+fn warn_option_pattern_over_result(pattern_text: &str, value: &Value) -> bool {
+    use std::sync::atomic::Ordering;
+    let is_result = matches!(value, Value::Enum { enum_name, .. } if enum_name == "Result");
+    if !is_result {
+        return false;
+    }
+    OPTION_PATTERN_OVER_RESULT_HITS.fetch_add(1, Ordering::Relaxed);
+    if !OPTION_PATTERN_OVER_RESULT_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "warning[option-pattern-on-result]: `case {}` is an Option pattern tested against a \
+             `Result` value (Ok/Err); it can never match. Use `case Ok(..)`/`case Err(..)`. \
+             (reported once per process)",
+            pattern_text
+        );
+    }
+    true
+}
+
 /// Check if a pattern is a catch-all that covers any value.
 pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
     match pattern {
@@ -251,8 +283,13 @@ pub(crate) fn pattern_matches(
                         Ok(false)
                     }
                 }
-                Expr::Nil => Ok(matches!(value, Value::Nil)
-                    || matches!(value, Value::Enum { ref variant, .. } if variant == "None")),
+                Expr::Nil => {
+                    if warn_option_pattern_over_result("nil", value) {
+                        return Ok(false);
+                    }
+                    Ok(matches!(value, Value::Nil)
+                        || matches!(value, Value::Enum { ref variant, .. } if variant == "None"))
+                }
                 _ => Ok(false),
             }
         }
@@ -311,6 +348,12 @@ pub(crate) fn pattern_matches(
                     variant,
                     value.type_name()
                 );
+            }
+
+            if matches!(variant.as_str(), "Some" | "None") && matches!(enum_name.as_str(), "Option" | "_") {
+                if warn_option_pattern_over_result(variant.as_str(), value) {
+                    return Ok(false);
+                }
             }
 
             // Special case: Nil matches Option::None
@@ -668,13 +711,13 @@ pub(crate) fn check_enum_exhaustiveness(
 mod tests {
     use std::collections::HashMap;
 
-    use simple_parser::ast::Pattern;
+    use simple_parser::ast::{Expr, Pattern};
     use simple_parser::Parser;
     use crate::interpreter::MODULE_GLOBALS;
     use crate::interpreter::evaluate_module;
     use crate::value::Value;
 
-    use super::pattern_matches;
+    use super::{pattern_matches, OPTION_PATTERN_OVER_RESULT_HITS};
 
     /// Run a Simple snippet and return the exit code.
     /// Use `main = <expr>` to set a numeric exit code (0 = ok, non-zero = error).
@@ -1405,5 +1448,53 @@ main = construct()
             "a real static method on the class must still be called normally, not shadowed \
              by the enum-variant fallback"
         );
+    }
+
+    // --- Option pattern against a `Result` value (diagnosed, matches nothing) ---
+    // doc/08_tracking/bug/option_pattern_against_result_value_matches_nothing_2026-09-19.md
+
+    fn result_ok() -> Value {
+        Value::Enum {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            payload: Some(Box::new(Value::Int(1))),
+        }
+    }
+
+    #[test]
+    fn option_patterns_over_result_value_match_nothing_and_are_counted() {
+        use std::sync::atomic::Ordering;
+        let enums = HashMap::new();
+        let classes = HashMap::new();
+        let some = Pattern::Enum {
+            name: "Option".to_string(),
+            variant: "Some".to_string(),
+            payload: Some(vec![Pattern::Identifier("v".to_string())]),
+        };
+        let none = Pattern::Enum {
+            name: "Option".to_string(),
+            variant: "None".to_string(),
+            payload: None,
+        };
+        let nil = Pattern::Literal(Box::new(Expr::Nil));
+        for pat in [&some, &none, &nil] {
+            let before = OPTION_PATTERN_OVER_RESULT_HITS.load(Ordering::Relaxed);
+            let mut bindings = HashMap::new();
+            assert!(!pattern_matches(pat, &result_ok(), &mut bindings, &enums, &classes).unwrap());
+            assert!(bindings.is_empty(), "an Option pattern over a Result must not bind");
+            assert!(OPTION_PATTERN_OVER_RESULT_HITS.load(Ordering::Relaxed) > before);
+        }
+    }
+
+    #[test]
+    fn option_patterns_over_real_option_values_are_not_diagnosed() {
+        use std::sync::atomic::Ordering;
+        let enums = HashMap::new();
+        let classes = HashMap::new();
+        let nil = Pattern::Literal(Box::new(Expr::Nil));
+        let before = OPTION_PATTERN_OVER_RESULT_HITS.load(Ordering::Relaxed);
+        let mut bindings = HashMap::new();
+        assert!(pattern_matches(&nil, &Value::Nil, &mut bindings, &enums, &classes).unwrap());
+        assert_eq!(OPTION_PATTERN_OVER_RESULT_HITS.load(Ordering::Relaxed), before);
     }
 }

@@ -1659,10 +1659,11 @@ fn function_owner_module(f: &FunctionDef) -> &str {
 
 /// Env gate for the same-signature half of the collision diagnostic.
 ///
-/// Default OFF. The same-signature family is far larger than the differing-signature
+/// Default: summary only. The same-signature family is far larger than the differing-signature
 /// family (every module pair that re-declares an identically-typed helper trips it),
 /// so turning it on unconditionally would bury the existing warning under noise on a
-/// full test/bootstrap run. Opt in with `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1`.
+/// full test/bootstrap run. Default is therefore a compact one-line summary
+/// (`render_same_signature_summary`); `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` lists each symbol.
 fn same_signature_diag_enabled() -> bool {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -1671,6 +1672,33 @@ fn same_signature_diag_enabled() -> bool {
             .map(|v| v != "0" && !v.is_empty())
             .unwrap_or(false)
     })
+}
+
+/// One-line default report for same-signature cross-module collisions.
+///
+/// These are the shape no other tool can detect (one definition silently wins,
+/// no type/arity error), so they must not be silent by default; but the family is
+/// large (hundreds in a full run), so the default is a single compact summary
+/// naming up to `LIMIT` symbols. `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` prints
+/// the full per-symbol listing with owner modules instead.
+fn render_same_signature_summary(names: &[String]) -> Option<String> {
+    const LIMIT: usize = 12;
+    if names.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = names.iter().take(LIMIT).map(|n| format!("`{n}`")).collect();
+    let more = names.len().saturating_sub(LIMIT);
+    let tail = if more > 0 { format!(", ... and {more} more") } else { String::new() };
+    Some(format!(
+        "warning: {} function name(s) have co-compiled definitions across modules with the SAME \
+         signature: {}{}; one silently wins and the rest are discarded, so a call may run a \
+         different module's body than the one it imported (set \
+         SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1 for per-symbol owners). \
+         [compiler_cross_module_private_symbol_collision]",
+        names.len(),
+        shown.join(", "),
+        tail,
+    ))
 }
 
 fn warn_duplicate_private_signatures(module: &Module) {
@@ -1715,6 +1743,9 @@ fn warn_duplicate_private_signatures(module: &Module) {
     static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
 
+    // Same-signature collisions found in this module, listed compactly in ONE summary
+    // warning unless `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` asks for per-symbol detail.
+    let mut samesig_compact: Vec<String> = Vec::new();
     let mut names: Vec<&str> = by_name.keys().copied().collect();
     names.sort();
     for name in names {
@@ -1758,9 +1789,6 @@ fn warn_duplicate_private_signatures(module: &Module) {
             // Warn-only and default-off (see `same_signature_diag_enabled`); this
             // is deliberately NOT promoted to an error here.
             // ------------------------------------------------------------------
-            if !same_signature_diag_enabled() {
-                continue;
-            }
             let mut owners: Vec<&str> = entries.iter().map(|(_, owner)| *owner).collect();
             owners.sort();
             owners.dedup();
@@ -1776,6 +1804,10 @@ fn warn_duplicate_private_signatures(module: &Module) {
                 if !set.insert(key) {
                     continue;
                 }
+            }
+            if !same_signature_diag_enabled() {
+                samesig_compact.push(name.to_string());
+                continue;
             }
             eprintln!(
                 "warning: {} `{}` has {} co-compiled definitions across {} modules with the \
@@ -1815,6 +1847,10 @@ fn warn_duplicate_private_signatures(module: &Module) {
             distinct.len(),
             distinct.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" vs "),
         );
+    }
+
+    if let Some(summary) = render_same_signature_summary(&samesig_compact) {
+        eprintln!("{summary}");
     }
 
     // Class-name collisions. Unlike functions there is no signature to compare —
@@ -4140,5 +4176,18 @@ impl Wrapper:
                 out.push(path);
             }
         }
+    }
+
+    #[test]
+    fn same_signature_summary_is_default_visible_compact_and_tagged() {
+        assert!(super::render_same_signature_summary(&[]).is_none());
+        let two = vec!["_shared_helper".to_string(), "shared_public".to_string()];
+        let s = super::render_same_signature_summary(&two).unwrap();
+        assert!(s.contains("`_shared_helper`") && s.contains("`shared_public`"));
+        assert!(s.contains("[compiler_cross_module_private_symbol_collision]"));
+        let many: Vec<String> = (0..40).map(|i| format!("f{i}")).collect();
+        let s = super::render_same_signature_summary(&many).unwrap();
+        assert!(s.contains("40 function name(s)") && s.contains("and 28 more"));
+        assert!(!s.contains("`f20`"), "summary must stay compact");
     }
 }
