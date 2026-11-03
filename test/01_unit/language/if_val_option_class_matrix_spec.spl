@@ -1,0 +1,177 @@
+# Branch matrix: `if val` / `while val` binding on typed Option<Class> (interpreter path).
+# Companion of if_val_typed_option_class_unwrap_spec.spl (bug
+# seed_if_val_typed_option_class_binds_option_or_segv_2026-11-03: method-call
+# mutation through a field unwrap), which this file does not duplicate.
+use std.spec
+
+class MxBox:
+    n: i64
+
+class MxHolder:
+    slot: Option<MxBox>
+
+fn mx_some(v: i64) -> Option<MxBox>:
+    Some(MxBox(n: v))
+
+fn mx_none() -> Option<MxBox>:
+    nil
+
+fn mx_early(o: Option<MxBox>) -> i64:
+    if val b = o:
+        return b.n
+    -1
+
+describe "if val on Option<Class> (untyped-local / fn-return forms)":
+    it "Some branch taken, field readable":
+        val o = Some(MxBox(n: 4))
+        var seen = -1
+        if val b = o:
+            seen = b.n
+        expect(seen).to_equal(4)
+
+    it "None takes else branch":
+        val o = mx_none()
+        var seen = 0
+        if val b = o:
+            seen = b.n
+        else:
+            seen = -5
+        expect(seen).to_equal(-5)
+
+    it "Some with else: then branch only":
+        val o = mx_some(9)
+        var tag = ""
+        if val b = o:
+            tag = "some"
+        else:
+            tag = "none"
+        expect(tag).to_equal("some")
+
+    it "Option from fn return":
+        var seen = -1
+        if val b = mx_some(11):
+            seen = b.n
+        expect(seen).to_equal(11)
+
+    it "early return from Some branch":
+        expect(mx_early(mx_some(3))).to_equal(3)
+
+    it "fallthrough when None":
+        expect(mx_early(mx_none())).to_equal(-1)
+
+    it "nested if val":
+        val a = mx_some(1)
+        val b = mx_some(2)
+        var sum = 0
+        if val x = a:
+            if val y = b:
+                sum = x.n + y.n
+        expect(sum).to_equal(3)
+
+    it "nested if val inner None":
+        val a = mx_some(1)
+        val b = mx_none()
+        var sum = 0
+        if val x = a:
+            if val y = b:
+                sum = 100
+            else:
+                sum = x.n
+        expect(sum).to_equal(1)
+
+    it "Option from list element":
+        val xs = [mx_some(5), mx_none()]
+        var total = 0
+        for o in xs:
+            if val b = o:
+                total = total + b.n
+        expect(total).to_equal(5)
+
+    it "reassigned Option var is re-tested":
+        var o = mx_none()
+        var first = 0
+        if val b = o:
+            first = 1
+        o = mx_some(8)
+        var second = 0
+        if val b = o:
+            second = b.n
+        expect(first).to_equal(0)
+        expect(second).to_equal(8)
+
+describe "while val on Option<Class>":
+    it "terminates immediately on None":
+        var o = mx_none()
+        var iters = 0
+        while val b = o:
+            iters = iters + 1
+            o = mx_none()
+        expect(iters).to_equal(0)
+
+    it "loops until reassigned to None":
+        var o = mx_some(3)
+        var iters = 0
+        var acc = 0
+        while val b = o:
+            iters = iters + 1
+            acc = acc + b.n
+            if b.n > 1:
+                o = mx_some(b.n - 1)
+            else:
+                o = mx_none()
+        expect(iters).to_equal(3)
+        expect(acc).to_equal(6)
+
+    it "break out of while val":
+        var o = mx_some(1)
+        var iters = 0
+        while val b = o:
+            iters = iters + 1
+            break
+        expect(iters).to_equal(1)
+
+class MxHolder2:
+    slot: Option<MxBox>
+
+describe "if val on typed Option<Class> (typed local / field / param)":
+    it "typed local Some branch":
+        val o: Option<MxBox> = Some(MxBox(n: 4))
+        var seen = -1
+        if val b = o:
+            seen = b.n
+        expect(seen).to_equal(4)
+
+    it "typed local None takes else":
+        val o: Option<MxBox> = nil
+        var seen = 0
+        if val b = o:
+            seen = b.n
+        else:
+            seen = -5
+        expect(seen).to_equal(-5)
+
+    it "typed field Some and None":
+        val h = MxHolder2(slot: Some(MxBox(n: 6)))
+        val e = MxHolder2(slot: nil)
+        var seen = -1
+        var none_hits = 0
+        if val b = h.slot:
+            seen = b.n
+        if val b = e.slot:
+            none_hits = 1
+        expect(seen).to_equal(6)
+        expect(none_hits).to_equal(0)
+
+    it "typed param early return":
+        expect(mx_early(Some(MxBox(n: 3)))).to_equal(3)
+
+    it "while val over typed var":
+        var o: Option<MxBox> = Some(MxBox(n: 2))
+        var iters = 0
+        while val b = o:
+            iters = iters + 1
+            if b.n > 1:
+                o = Some(MxBox(n: b.n - 1))
+            else:
+                o = nil
+        expect(iters).to_equal(2)
