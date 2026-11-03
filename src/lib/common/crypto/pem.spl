@@ -27,45 +27,49 @@ fn _b64_decode_to_u8(b64_text: text) -> [u8]:
     Inline implementation to produce [u8] directly without text-byte-cliff.
     Mirrors the proven pattern from x509_typed.spl.
     """
-    # Strip whitespace — use intermediate vars (chained methods broken in interpreter)
-    val no_lf = b64_text.replace("\n", "")
-    val no_cr = no_lf.replace("\r", "")
-    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    val raw_clean = no_cr.replace(" ", "")
-    # Kept characters are collected then joined once. Text is a value type, so
-    # `clean = clean + ch` copied the whole accumulator on every iteration,
-    # making this quadratic in the base64 body length: measured 1.70s / 4.17s /
-    # 14.01s for 4000 / 8000 / 16000 base64 chars before this change.
-    var kept: [text] = []
-    var ci: i64 = 0
-    val raw_len = raw_clean.length()
-    while ci < raw_len:
-        val ch = raw_clean.char_at(ci)
-        if ch == "=" or alphabet.index_of(ch) >= 0:
-            kept.push(ch)
-        ci = ci + 1
-    val clean = kept.join("")
-
+    # Scan UTF-8 bytes once: indexed char_at rescans the prefix of the text.
+    # Non-ASCII bytes cannot belong to the base64 alphabet and are ignored,
+    # just like the old character filter. Keep only one quartet of state.
     var result: [u8] = []
-    var i: i64 = 0
-    val clen = clean.length()
-
-    while i < clen - 3:
-        val c0 = clean.char_at(i)
-        val c1 = clean.char_at(i + 1)
-        val c2 = clean.char_at(i + 2)
-        val c3 = clean.char_at(i + 3)
-        val v0 = alphabet.index_of(c0)
-        val v1 = alphabet.index_of(c1)
-        val v2 = if c2 == "=": 0 else: alphabet.index_of(c2)
-        val v3 = if c3 == "=": 0 else: alphabet.index_of(c3)
-        result.push(((v0 << 2) | (v1 >> 4)).to_u8())
-        if c2 != "=":
-            result.push((((v1 & 0x0F) << 4) | (v2 >> 2)).to_u8())
-        if c3 != "=":
-            result.push((((v2 & 0x03) << 6) | v3).to_u8())
-        i = i + 4
-
+    var count: i64 = 0
+    var v0: i64 = 0
+    var v1: i64 = 0
+    var v2: i64 = 0
+    for byte in b64_text.bytes():
+        val code = byte.to_i64()
+        var value: i64 = -2
+        if code >= 65 and code <= 90:
+            value = code - 65
+        elif code >= 97 and code <= 122:
+            value = code - 97 + 26
+        elif code >= 48 and code <= 57:
+            value = code - 48 + 52
+        elif code == 43:
+            value = 62
+        elif code == 47:
+            value = 63
+        elif code == 61:
+            value = -1
+        if value == -2:
+            continue
+        if count == 0:
+            v0 = value
+        elif count == 1:
+            v1 = value
+        elif count == 2:
+            v2 = value
+        else:
+            # Preserve permissive historical padding behavior, including
+            # complete quartets after padding and ignored trailing fragments.
+            val third = if v2 == -1: 0 else: v2
+            val fourth = if value == -1: 0 else: value
+            result.push(((v0 << 2) | (v1 >> 4)).to_u8())
+            if v2 != -1:
+                result.push((((v1 & 0x0F) << 4) | (third >> 2)).to_u8())
+            if value != -1:
+                result.push((((third & 0x03) << 6) | fourth).to_u8())
+            count = -1
+        count = count + 1
     result
 
 fn _find_begin_marker(text_content: text, start_pos: i64) -> i64:
