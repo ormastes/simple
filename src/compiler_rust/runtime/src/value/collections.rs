@@ -6381,7 +6381,8 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
                 Some(idx) => match string_index_checked(collection, idx) {
                     Some(v) => v,
                     None => {
-                        eprintln!("error: string index {idx} out of bounds");
+                        let msg = format!("error: string index {idx} out of bounds");
+                        unsafe { super::sffi::contracts::rt_panic(msg.as_ptr(), msg.len() as u64) };
                         std::process::abort();
                     }
                 },
