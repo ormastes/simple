@@ -151,3 +151,10 @@ All four documented symptoms are green. The `ReferenceError: zzz` line is the
 probe deliberately referencing an undeclared name for the J4 `typeof` case, not
 a residual defect. Nothing was changed for this record; it is closed by
 measurement on the current seed.
+
+## 2026-11-03: REOPENED (stale-seed evidence)
+
+Retired by commit e21824a4ed4 on the verdict of a probe guard that hardcoded the stale
+`bin/simple` seed (see guards_hardcode_stale_seed_binary_census_2026-08-17.md). The
+retirement measured a binary older than the code, so it is not evidence. Re-retire only
+with a verdict from a fresh self-hosted build via `SIMPLE_BIN`.
