@@ -17,7 +17,7 @@ Concurrent agents must not fix the same bug. A bug being fixed is marked
 3. Never fix a bug that is `fixing` under another session.
 4. While working call `heartbeat <bug_id> <session>` at least every 2 h. A claim
    with no heartbeat for more than 24 h is STALE and may be taken over or reaped.
-5. When finished: `done <bug_id> <session> <pr>` once the PR is merged (status
+5. When finished: `done <bug_id> <session> [--pr <n> | <n>]` (PR optional) once the PR is merged (status
    becomes `fixed`, note records the PR), or `release <bug_id> <session>` if you
    stop (status returns to the previous value).
 6. Session id: first 8 chars of the Claude session id or agent id plus a lane,
