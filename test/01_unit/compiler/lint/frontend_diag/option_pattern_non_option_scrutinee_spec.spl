@@ -1,0 +1,46 @@
+# @req REQ-COMPILER-OPTION-PATTERN-001
+"""
+Option pattern on a statically non-Option scrutinee (end-to-end, self-hosted checker)
+
+Bugs: option_pattern_accepted_on_non_option_scrutinee_2026-07-27,
+option_pattern_against_result_value_matches_nothing_2026-09-19.
+
+The pure-Simple type checker (`infer_option_pattern`, inference_control.spl)
+already rejects `Some(..)` on a concrete non-Option scrutinee (scalar, Result)
+as an error, which is stricter than the requested warning, so it is NOT
+downgraded. This spec pins that behaviour through the full
+`simple_semantic_check_source` path (lowering + inference), complementing the
+unit-level option_pattern_scrutinee_spec.
+"""
+
+# @tag: unit, compiler, lint, type_infer, option
+
+use std.spec.*
+use compiler.tools.lint.semantic_check.{simple_semantic_check_source, SimpleSemanticCheckResult}
+
+fn check(src: text) -> SimpleSemanticCheckResult:
+    simple_semantic_check_source(src, "optpat.spl")
+
+fn option_pattern_diags(r: SimpleSemanticCheckResult) -> [text]:
+    var out: [text] = []
+    for d in r.diagnostics:
+        if d.contains("requires an optional scrutinee"):
+            out = out.push(d)
+    out
+
+describe "Option pattern on non-Option scrutinee":
+    it "flags `Some(i)` on an i64 parameter":
+        val r = check("fn f(n: i64) -> i64:\n    match n:\n        case Some(i): i\n        case _: 0\n")
+        val ds = option_pattern_diags(r)
+        expect(ds.len()).to_equal(1)
+        expect(ds[0]).to_contain("Option pattern 'Some'")
+
+    it "flags `Some(v)` on a Result-typed value":
+        val r = check("fn g() -> Result<text, text>:\n    Ok(\"a\")\n\nfn f() -> i64:\n    val r = g()\n    match r:\n        case Some(v): 1\n        case _: 2\n")
+        val ds = option_pattern_diags(r)
+        expect(ds.len()).to_equal(1)
+        expect(ds[0]).to_contain("Result")
+
+    it "accepts `Some(v)` on a genuine Option scrutinee":
+        val r = check("fn f(o: i64?) -> i64:\n    match o:\n        case Some(v): v\n        case _: 0\n")
+        expect(option_pattern_diags(r).len()).to_equal(0)

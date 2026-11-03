@@ -2,6 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Status:** open — owner ruling 2026-09-27: staged migration (error for new code first, then convert existing sites in batches, then hard error). Plan: `doc/03_plan/compiler/type_system/option_pattern_non_option_scrutinee_migration_2026-09-27.md`; todo 339. The class spec carries `@tag:in-development` until stage 3.
+- **Update 2026-11-03 (fix-implemented-verification-pending):** the self-hosted checker (`infer_option_pattern`, `src/compiler/30.types/type_infer/inference_control.spl:611`) ALREADY rejects `Some(..)` on a concrete non-Option scrutinee (scalar, Result) as an error, stricter than the requested warning, so it is not downgraded. Pinned end to end by `test/01_unit/compiler/lint/frontend_diag/option_pattern_non_option_scrutinee_spec.spl` (3/3 pass). Remaining: the Rust seed/interpreter still accept it (staged plan above), and the `case nil`/`None` forms on a scalar are not named (generic `type mismatch` / `unsupported expression kind: Block`, span 0:0). Repro: `bin/simple.exe test test/01_unit/compiler/lint/frontend_diag/option_pattern_non_option_scrutinee_spec.spl`.
 - **Severity:** high (silent wrong answers; type error degraded into bad data; engines disagree)
 - **Found by:** lane OPTNIL, reproduced independently by the coordinator
 - **Reconstructed:** the lane's original doc was clobbered off disk by a parallel
