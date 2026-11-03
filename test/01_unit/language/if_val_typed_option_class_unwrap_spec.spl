@@ -1,35 +1,151 @@
 # @tag:in-development
 # Bug: seed_if_val_typed_option_class_binds_option_or_segv_2026-11-03
-# Seed interpreter: `if val c = opt` where `opt` is a local explicitly typed
-# `Option<Class>` (or an Option<Class> class field) binds the Option itself
-# ("Function 'Option.bump_self' not found") or SEGVs (rc=139). The untyped
-# `val lo = Some(x)` form unwraps correctly. Expected to FAIL until fixed.
+#
+# Seed JIT (`bin/simple run`, the default `SIMPLE_EXECUTION_MODE=jit` lane):
+# `if val c = opt` / `while val c = f()` where the subject is EXPLICITLY typed
+# `Option<T>` (an annotated local, a class field, or a function return type)
+# left `c` typed as the `Option` enum instead of its payload. The HIR
+# if-let binder (`hir/lower/stmt_lowering.rs build_if_let_binding_stmts`)
+# only recognised the `T?` Pointer optional form; an `Option<T>` annotation
+# resolves to the generic-enum form (`type_resolver.rs
+# instantiate_builtin_generic_enum`). Measured on the unfixed seed:
+#   Option<Class> local, `c.n`      -> SEGV rc=139
+#   Option<Class> field, `c.show()` -> "Function 'Option.show' not found" rc=70
+#   Option<Class> return, while val -> SEGV rc=139
+#   Option<i64>, `c + 1`            -> `int <invalid-heap:0x29>` (tagged word)
+#   Option<text>, `c.len()`         -> `text 0.0`
+#   Option<struct>, `c.x`           -> SEGV rc=139
+# The sspec runner forces `SIMPLE_EXECUTION_MODE=interpret`, under which every
+# shape below already passes, so an in-spec repro cannot see the defect: each
+# case runs a fixture through the compiler binary in JIT mode and asserts its
+# exit status and stdout. Expected to FAIL until a seed carrying the fix is
+# deployed; do not weaken the assertions.
 use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
 
-class IfValCounter:
+val COUNTER_CLASS = """class Counter:
     n: i64
+impl Counter:
+    me show():
+        print("n={self.n}")
+"""
 
-impl IfValCounter:
-    me bump_self():
-        self.n = self.n + 1
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val temp = env_get("TEMP")
+    val root = if tmp != "": tmp elif temp != "": temp else: "/tmp"
+    val dir = root + "/simple-spec-if-val-typed-option"
+    dir_create_all(dir)
+    dir
 
-class IfValHolder:
-    counter: Option<IfValCounter>
+fn compiler_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured == "": "bin/simple" else: configured
 
-describe "if val unwrap of typed Option<Class>":
-    it "unwraps an annotated Option<Class> local and reads the payload":
-        val counter = IfValCounter(n: 7)
-        val lt: Option<IfValCounter> = Some(counter)
-        var seen = -1
-        if val c = lt:
-            seen = c.n
-        expect(seen).to_equal(7)
+# Run `source` through the seed's JIT lane. Strict JIT so a codegen failure
+# surfaces as a non-zero exit instead of a silent interpreter fallback.
+fn run_jit(name: text, source: text) -> (text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", "jit")
+    env_set("SIMPLE_JIT_STRICT_ALL", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val ran = process_run(compiler_binary(), ["run", path])
+    (ran[0].trim(), ran[2])
 
-    it "mutates the same instance through an Option<Class> field unwrap":
-        val counter = IfValCounter(n: 0)
-        val h = IfValHolder(counter: Some(counter))
-        if val c = h.counter:
-            c.bump_self()
-        if val c = h.counter:
-            c.bump_self()
-        expect(counter.n).to_equal(2)
+describe "if val unwrap of an explicitly typed Option<T> subject (seed JIT)":
+    it "reads a field through an annotated Option<Class> local":
+        val (out, rc) = run_jit("local_class", COUNTER_CLASS + """fn main():
+    val lt: Option<Counter> = Some(Counter(n: 7))
+    if val c = lt:
+        print("field {c.n}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "field 7")
+
+    it "dispatches a method on the payload of an Option<Class> class field":
+        val (out, rc) = run_jit("field_class", COUNTER_CLASS + """class Holder:
+    counter: Option<Counter>
+fn main():
+    val h = Holder(counter: Some(Counter(n: 4)))
+    if val c = h.counter:
+        c.show()
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "n=4")
+
+    it "while val over a function returning Option<Class>":
+        val (out, rc) = run_jit("while_class", COUNTER_CLASS + """fn next_of(i: i64) -> Option<Counter>:
+    if i < 2: Some(Counter(n: i)) else: None
+fn main():
+    var i = 0
+    var total = 0
+    while val c = next_of(i):
+        total = total + c.n + 10
+        i = i + 1
+    print("while {total}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "while 21")
+
+    it "binds an annotated Option<i64> payload as a raw integer":
+        val (out, rc) = run_jit("local_int", """fn main():
+    val li: Option<i64> = Some(5)
+    if val c = li:
+        print("int {c + 1}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "int 6")
+
+    it "binds an annotated Option<text> payload as text":
+        val (out, rc) = run_jit("local_text", """fn main():
+    val lt: Option<text> = Some("hi")
+    if val c = lt:
+        print("text {c.len()}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "text 2")
+
+    it "reads a field through an annotated Option<struct> local":
+        val (out, rc) = run_jit("local_struct", """struct P:
+    x: i64
+fn main():
+    val lp: Option<P> = Some(P(x: 3))
+    if val c = lp:
+        print("struct {c.x}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "struct 3")
+
+    it "keeps a nested Option<Option<i64>> payload as an Option":
+        val (out, rc) = run_jit("nested", """fn main():
+    val ln: Option<Option<i64>> = Some(Some(7))
+    if val c = ln:
+        if val d = c:
+            print("nested {d}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "nested 7")
+
+    it "takes the else branch for an annotated None and never crashes":
+        val (out, rc) = run_jit("none_else", COUNTER_CLASS + """fn main():
+    val c2: Option<Counter> = None
+    if val c = c2:
+        print("wrong")
+    else:
+        print("none ok")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "none ok")
+
+    it "a non-Option subject binds as-is instead of trapping":
+        val (out, rc) = run_jit("plain_subject", """fn main():
+    val n: i64 = 5
+    if val c = n:
+        print("plain {c}")
+    else:
+        print("absent")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "plain 5")

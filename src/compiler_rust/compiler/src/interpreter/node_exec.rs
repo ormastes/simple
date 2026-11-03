@@ -82,6 +82,46 @@ pub(crate) fn coerce_to_declared_unsigned(value: Value, ty: Option<&Type>) -> Va
     }
 }
 
+/// Field half of [`coerce_to_declared_unsigned`]: a value stored into a class
+/// or struct field whose DECLARED type is an unsigned width is coerced to
+/// `Value::UInt` of that width, exactly as a `val x: u64 = ...` local is.
+///
+/// Both class-field stores — construction (`Hdr(magic: expr)`, defaults) and
+/// assignment (`h.magic = expr`, `self.magic = expr`, `arr[i].magic = expr`,
+/// `a.b.magic = expr`) — used to insert the raw `Value::Int`, so a `u64` field
+/// holding a value >= 2^63 stayed a NEGATIVE `i64`. Comparing it with a `u64`
+/// produced by a byte-parse (`Value::UInt`) then went through the mixed
+/// `Int`/`UInt` ordering, where a negative `Int` is less than every `UInt`:
+/// `p.module_hash == h.module_hash` was false for the same 64 bits
+/// (`src/compiler/70.backend/linker/test/smf_layout_parity_spec.spl` 5/7).
+/// Coercion at the declared-type boundary is the existing policy for every
+/// other binding site (locals, consts, statics, args, returns); widening the
+/// comparison instead would make `-1 == 0xFFFF_FFFF_FFFF_FFFF` true for
+/// genuinely signed operands. Unknown class or field: the value passes
+/// through unchanged (dynamic field, bitfield, or an un-registered class).
+/// Bug: seed_interp_u64_field_store_not_coerced_2026-11-03 (bug_db.sdn); spec
+/// test/01_unit/compiler/95.interp/interpreter/u64_field_store_coerces_to_declared_width_spec.spl
+pub(crate) fn coerce_to_declared_field(
+    class_name: &str,
+    field: &str,
+    value: Value,
+    classes: &HashMap<String, Arc<ClassDef>>,
+) -> Value {
+    match classes.get(class_name) {
+        Some(class_def) => coerce_to_declared_field_of(class_def, field, value),
+        None => value,
+    }
+}
+
+/// [`coerce_to_declared_field`] with the class definition already in hand
+/// (construction, where the picked `ClassDef` may be a same-name overload).
+pub(crate) fn coerce_to_declared_field_of(class_def: &ClassDef, field: &str, value: Value) -> Value {
+    match class_def.fields.iter().find(|f| f.name == field) {
+        Some(decl) => coerce_to_declared_unsigned(value, Some(&decl.ty)),
+        None => value,
+    }
+}
+
 fn pack_u8_array(value: Value) -> Value {
     let Value::Array(data) = &value else {
         return value;
@@ -1142,6 +1182,7 @@ pub(crate) fn exec_assignment(
             if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                 match obj_val {
                     Value::ClassInstance(instance) => {
+                        let value = coerce_to_declared_field(instance.class(), field, value, classes);
                         instance.set_field(field.clone(), value);
                         env.insert(obj_name.clone(), Value::ClassInstance(instance));
                     }
@@ -1156,6 +1197,7 @@ pub(crate) fn exec_assignment(
                                 return Ok(Control::Next);
                             }
                         }
+                        let value = coerce_to_declared_field(&class, field, value, classes);
                         Arc::make_mut(&mut fields).insert(field.clone(), value);
                         env.insert(obj_name.clone(), Value::Object { class, fields });
                     }
@@ -1179,6 +1221,7 @@ pub(crate) fn exec_assignment(
                 if let Some(obj_val) = global_obj.map(Value::into_option_payload) {
                     match obj_val {
                         Value::ClassInstance(instance) => {
+                            let value = coerce_to_declared_field(instance.class(), field, value, classes);
                             instance.set_field(field.clone(), value);
                             MODULE_GLOBALS.with(|cell| {
                                 cell.borrow_mut()
@@ -1199,6 +1242,7 @@ pub(crate) fn exec_assignment(
                                     return Ok(Control::Next);
                                 }
                             }
+                            let value = coerce_to_declared_field(&class, field, value, classes);
                             Arc::make_mut(&mut fields).insert(field.clone(), value);
                             MODULE_GLOBALS.with(|cell| {
                                 cell.borrow_mut()
@@ -1267,12 +1311,14 @@ pub(crate) fn exec_assignment(
                     }
                     match items[idx].clone() {
                         Value::ClassInstance(instance) => {
+                            let value = coerce_to_declared_field(instance.class(), field, value, classes);
                             instance.set_field(field.clone(), value);
                             items[idx] = Value::ClassInstance(instance);
                             env.insert(array_name.clone(), Value::Array(values));
                             Ok(Control::Next)
                         }
                         Value::Object { class, mut fields } => {
+                            let value = coerce_to_declared_field(&class, field, value, classes);
                             Arc::make_mut(&mut fields).insert(field.clone(), value);
                             items[idx] = Value::Object { class, fields };
                             env.insert(array_name.clone(), Value::Array(values));
@@ -1359,6 +1405,7 @@ pub(crate) fn exec_assignment(
                                     } => {
                                         // Set the field on the inner object
                                         let mut inner_fields = inner_fields;
+                                        let value = coerce_to_declared_field(&inner_class, field, value, classes);
                                         Arc::make_mut(&mut inner_fields).insert(field.clone(), value);
                                         // Update the inner object in the outer object
                                         Arc::make_mut(&mut fields).insert(
@@ -1402,6 +1449,7 @@ pub(crate) fn exec_assignment(
                             let inner_val = instance.field(inner_field);
                             let result = match inner_val {
                                 Some(Value::ClassInstance(inner_inst)) => {
+                                    let value = coerce_to_declared_field(inner_inst.class(), field, value, classes);
                                     inner_inst.set_field(field.clone(), value);
                                     Ok(Control::Next)
                                 }
@@ -1410,6 +1458,7 @@ pub(crate) fn exec_assignment(
                                     fields: inner_fields,
                                 }) => {
                                     let mut inner_fields = inner_fields;
+                                    let value = coerce_to_declared_field(&inner_class, field, value, classes);
                                     Arc::make_mut(&mut inner_fields).insert(field.clone(), value);
                                     instance.set_field(
                                         inner_field.clone(),
