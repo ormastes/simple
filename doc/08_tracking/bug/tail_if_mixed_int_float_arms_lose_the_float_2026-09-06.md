@@ -1,7 +1,7 @@
 # Tail `if` with one float arm and one integer arm loses the value (JIT)
 
 - **Date:** 2026-09-06
-- **Status:** OPEN
+- **Status:** FIX-IMPLEMENTED 2026-11-03, verification-pending (seed redeploy). MIR-side: float+int tail-if arms merge as f64 and the int arm gets an int->float Cast before the merge store (lowering_stmt.rs `if_merge_int_arm_to_float`); test `tail_if_statement_merge_slot_is_f64_when_float_and_int_arms_mix`. Re-run the repro above after seed deploy.
 - **Severity:** P1 — silent wrong value, no diagnostic at any level
 - **Area:** Rust bootstrap seed, MIR lowering of `HirStmt::If` / HIR numeric
   literal coercion

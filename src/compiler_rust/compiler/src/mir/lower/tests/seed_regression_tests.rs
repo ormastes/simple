@@ -488,27 +488,24 @@ fn tail_if_statement_merge_slot_stays_i64_for_text_arms() {
     );
 }
 
-/// Arms with disagreeing value types (`1.5` vs the int literal `2` in an
-/// f64-returning function) keep the historical I64 slot. This pins CURRENT
-/// behaviour, not correct behaviour: that shape is still wrong at runtime
-/// (`mixed(-1)` yields `0.0`, `mixed(1)` yields a denormal), exactly as it was
-/// before this fix — see
+/// Float + integer-literal arms (`1.5` vs `2` in an f64 fn) merge as f64 with the
+/// integer arm converted before its store; see
 /// `doc/08_tracking/bug/tail_if_mixed_int_float_arms_lose_the_float_2026-09-06.md`.
-/// Picking one arm's float type here would silently bitcast the OTHER arm's
-/// integer, which is a different wrong answer; the real repair is an HIR-level
-/// numeric coercion of the int arm and is out of this fix's scope. The test
-/// exists so that repair has to update it deliberately.
 #[test]
-fn tail_if_statement_merge_slot_stays_i64_when_arms_disagree() {
-    let mir = compile_to_mir("fn mixed(x: i64) -> f64:\n    if x < 0:\n        1.5\n    else:\n        2\n").unwrap();
+fn tail_if_statement_merge_slot_is_f64_when_float_and_int_arms_mix() {
+    let mir = compile_to_mir("fn mixed(x: i64) -> f64:
+    if x < 0:
+        1.5
+    else:
+        2
+").unwrap();
     let func = mir.functions.iter().find(|f| f.name == "mixed").expect("mixed fn");
 
-    assert_eq!(
-        if_merge_local_ty(func),
-        Some(TypeId::I64),
-        "arms with disagreeing value types keep the historical I64 slot rather than \
-         picking one arm's type and mis-storing the other"
-    );
+    assert_eq!(if_merge_local_ty(func), Some(TypeId::F64), "float+int arms must merge as f64");
+    let has_int_to_float_cast = func.blocks.iter().flat_map(|b| b.instructions.iter()).any(|i| {
+        matches!(i, crate::mir::MirInst::Cast { to_ty: TypeId::F64, from_ty, .. } if *from_ty != TypeId::F64)
+    });
+    assert!(has_int_to_float_cast, "the integer arm must be converted to f64 before the merge store");
 }
 
 #[test]
