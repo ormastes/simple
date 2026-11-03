@@ -1,4 +1,4 @@
-# AUTHORED_UNRUN. Reserve mismatch expectations expose a source-traced admission gap.
+# AUTHORED_UNRUN. Reserve mismatch regression for the source-repaired admission guard.
 """
 ## Purpose and audience
 Reject an authenticated SQLite header that contradicts the locked 80-byte SQLCipher
@@ -70,3 +70,23 @@ describe "REQ-CIPHER-RESERVE-002: authentication failure precedes structural res
         expect(file_hash_sha256_or_empty(reserve_fixture_path("reserve_79_bad_tag"))).to_equal("d8c7b8821e62d953f1e09cf9b7ee4dca594301cf37c251c7f7214a96ba279992")
         step("Open through the production authenticated storage path")
         expect(reserve_open_code("reserve_79_bad_tag")).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+
+describe "REQ-CIPHER-RESERVE-003: preserve plaintext SQLite reserve semantics":
+    # @req REQ-CIPHER-RESERVE-003
+    it "should preserve plaintext SQLite admission with a zero-byte reserve":
+        step("Pin the independent valid plaintext SQLite control")
+        val path = "test/fixtures/database/sqlcipher4/reserve_0_plain.sqlite"
+        expect(file_hash_sha256_or_empty(path)).to_equal("cb2a842f5e03920b74f948284638e14d2254c781f6bf319e1b44e5f625efc165")
+        step("Open through the plaintext SQLite backend without a secret")
+        val port = database_storage_port_v1()
+        match port.open(path, "sqlite3", ""):
+            case Err(error):
+                fail("plaintext SQLite control rejected: {error.code()}")
+            case Ok(opened):
+                match opened:
+                    case StorageOpenResult.SqliteView(view):
+                        step("Require zero reserve to remain valid outside the SQLCipher backend")
+                        expect(view.reserved_bytes).to_equal(0)
+                        port.close_view(view)
+                    case StorageOpenResult.NativeStore(_):
+                        fail("plaintext SQLite control resolved to native store")

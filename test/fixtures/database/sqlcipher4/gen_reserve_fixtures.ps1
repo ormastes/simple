@@ -21,6 +21,13 @@ foreach ($reserve in @(0,79,80,81)) {
     $body[15]=1; $body[31]=4; $body[43]=1
     # Empty table leaf page at file offset100; content area starts at4016.
     $body[84]=13; $body[89]=15; $body[90]=176
+    if ($reserve -eq 0) {
+        [byte[]]$plain=[Text.Encoding]::ASCII.GetBytes("SQLite format 3`0")+$body+([byte[]]::new(80))
+        # Plain SQLite reserve0 has a full 4096-byte usable page.
+        $plain[105]=16; $plain[106]=0
+        [IO.File]::WriteAllBytes((Join-Path $fixtureDir 'reserve_0_plain.sqlite'),$plain)
+        $records.Add('reserve_0_plain_sha256: "'+[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($plain)).ToLowerInvariant()+'"')
+    }
     $aes=[Security.Cryptography.Aes]::Create()
     $aes.Key=$key; $aes.IV=$iv; $aes.Mode=[Security.Cryptography.CipherMode]::CBC
     $aes.Padding=[Security.Cryptography.PaddingMode]::None
@@ -42,4 +49,4 @@ foreach ($reserve in @(0,79,80,81)) {
     }
 }
 [IO.File]::WriteAllText((Join-Path $fixtureDir 'reserve_fixtures.sdn'),($records -join "`n")+"`n",[Text.UTF8Encoding]::new($false))
-Write-Output 'Generated five independent .NET page fixtures; no Simple execution'
+Write-Output 'Generated five encrypted pages and one plaintext SQLite control; no Simple execution'
