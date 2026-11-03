@@ -41,7 +41,8 @@ use std.database.core.{SdnDatabase}
 use std.database.sql.types.{DbRow}
 use std.io_runtime.{file_read_bytes_result}
 use nogc_sync_mut.database.codec.sqlcipher4.{
-    Sqlcipher4Error, sqlcipher4_profile, SQLCIPHER4_PAGE_SIZE
+    Sqlcipher4Error, sqlcipher4_profile, SQLCIPHER4_PAGE_SIZE,
+    SQLCIPHER4_PAGE_RESERVED_BYTES
 }
 use nogc_sync_mut.database.codec.sqlcipher4_manifest.{
     SQLCIPHER4_INTERFACE_VERSION
@@ -222,6 +223,10 @@ fn storage_wipe_plaintext_owner(image: [u8]) -> bool:
 fn _view_from_image(format_name: text, path: text, image: [u8]) -> Result<StorageReadView, StoragePortError>:
     match sqlite_header_parse(image):
         Ok(info):
+            # SQLCipher reconstructs a fixed-width reserve after authentication.
+            # Reject header geometry that would give its pager a different usable size.
+            if format_name == STORAGE_FORMAT_SQLCIPHER4 and info.reserved_bytes != SQLCIPHER4_PAGE_RESERVED_BYTES:
+                return Err(StoragePortError.CorruptSource(detail: "SQLCipher header reserve does not match the locked profile"))
             Ok(StorageReadView(
                 format: format_name,
                 source_path: path,
