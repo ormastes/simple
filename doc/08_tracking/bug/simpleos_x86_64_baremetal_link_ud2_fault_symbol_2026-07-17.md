@@ -167,3 +167,24 @@ TODO(deferred-environment): after Linux bootstrap succeeds, run the x86_64
 SimpleOS guest-kernel UD2 scenario in QEMU and retain its serial fault receipt.
 
 **Revalidated 2026-11-02: still plausible because the report title (C fallback and fatal UD2 hook are restored; post-restore SysV stack pad is cove) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 — re-restored after release/1.0 transplant; Windows contract added
+
+`88aac2ffe28` (release/1.0 transplant) rewound `baremetal_stubs.c` and dropped
+both the weak `spl_x86_on_kernel_ud2_fault` fallback and the hardened ud2
+branch of `_rich_fault_entry` (cross-page guard, SysV `andq $-16,%rsp` pad).
+Restored verbatim from `04c8ae5291a^` (lineage of `62f6c8ee638`).
+
+Host proof (no QEMU/VM): `sh test/01_unit/os/simpleos_ud2_fault_link_contract_win_test.shs`
+— extracts the real code, cross-compiles `x86_64-unknown-none`, checks
+`llvm-nm` ` W ` definition (never ` U `), `llvm-objdump` `cmp $0xb0f`,
+`R_X86_64_PLT32 spl_x86_on_kernel_ud2_fault`, `andq $-0x10,%rsp`, and strong
+override via `ld.lld -r`. Fails before (missing-weak-fallback), passes after.
+Whole TU `clang -c` for x86_64-unknown-none: 0 errors.
+
+Status: fix-implemented-verification-pending. Later (not run here):
+1. QEMU real-firmware proxy (OVMF pflash, no `-kernel`):
+   `sh scripts/check/check-simpleos-memory-leveling-qemu.shs` — expect the
+   `[fault] FATAL: kernel #UD (ud2) trap at rip=` serial line, no fault storm.
+2. Board: build the same x86_64 image, boot via UEFI USB, trigger the duck
+   dispatch sentinel probe, capture serial transcript (board id + boot path).
