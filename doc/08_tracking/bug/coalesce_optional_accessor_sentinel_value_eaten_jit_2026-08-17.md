@@ -107,3 +107,13 @@ must carry a distinguishable `T?` with a BOXED payload across the JIT call
 boundary), not a local patch — suppressing the nil check for these accessors
 would trade this bug for the strictly worse `[].first() ?? -1` leak. Not
 attempted; standing workaround unchanged.
+
+## Fixed 2026-11-03
+
+Seed HIR lowering: `Lowerer::lower_optional_subject` / `optionalize_array_accessor`
+(`src/compiler_rust/compiler/src/hir/lower/expr/helpers.rs`). For `[intN].first/last/pop/min/max/get(i)/remove(i)`
+used as the subject of `??`, `if val`, `match` (expr and stmt forms), the accessor is
+lowered to the runtime call itself (`rt_array_*`) typed `T?` (tagged), so presence is
+the runtime tag, not a raw value compare. Collateral also fixed: `if val x = xs.first()`
+and `match xs.first(): case Some(v)` lost a present 3, and `[].get(0) ?? -1` returned 0
+on the JIT. Probe extended (`ifval_*`, `match_*`, `empty_get_default`); class spec 3/3 green.

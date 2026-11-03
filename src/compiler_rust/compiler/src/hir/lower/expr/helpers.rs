@@ -176,4 +176,75 @@ impl Lowerer {
             _ => None,
         }
     }
+
+    /// Lower an expression that is about to be tested for ABSENCE (`??`,
+    /// `if val`, `match Some(..)`), keeping genuinely-optional array accessors
+    /// in their tagged `T?` form.
+    ///
+    /// `[i64].first()/last()/get(i)/min()/max()/pop()/remove(i)` are typed as the
+    /// bare element `T` and MIR unboxes the runtime's tagged result. The
+    /// unboxed word then reached the runtime nil test, which treats the raw
+    /// words 0/3 as nil: a PRESENT element 3 read as absent under the JIT.
+    /// Here the accessor is lowered to the runtime call itself, typed
+    /// `Pointer<T>` (what a `T?` slot holds), so presence is the runtime's tag
+    /// (NIL vs boxed int), never a value comparison.
+    /// Bug: doc/08_tracking/bug/coalesce_optional_accessor_sentinel_value_eaten_jit_2026-08-17.md
+    pub(in crate::hir::lower) fn lower_optional_subject(
+        &mut self,
+        expr: &ast::Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let lowered = self.lower_expr(expr, ctx)?;
+        Ok(self.optionalize_array_accessor(lowered))
+    }
+
+    pub(in crate::hir::lower) fn optionalize_array_accessor(&mut self, lowered: HirExpr) -> HirExpr {
+        let HirExprKind::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } = &lowered.kind
+        else {
+            return lowered;
+        };
+        let element = match self.module.types.get(receiver.ty) {
+            Some(HirType::Array { element, .. }) => *element,
+            _ => return lowered,
+        };
+        if !matches!(
+            element,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32
+        ) || lowered.ty != element
+        {
+            return lowered;
+        }
+        let (rt_name, arity) = match method.as_str() {
+            "first" => ("rt_array_first", 0),
+            "last" => ("rt_array_last", 0),
+            "pop" => ("rt_array_pop", 0),
+            "min" => ("rt_array_min", 0),
+            "max" => ("rt_array_max", 0),
+            "get" => ("rt_array_get", 1),
+            "remove" => ("rt_array_remove", 1),
+            _ => return lowered,
+        };
+        if args.len() != arity || (arity == 1 && args[0].ty != TypeId::I64) {
+            return lowered;
+        }
+        let mut call_args = vec![(**receiver).clone()];
+        call_args.extend(args.iter().cloned());
+        let optional_ty = self.module.types.register(HirType::Pointer {
+            kind: PointerKind::Shared,
+            capability: ast::ReferenceCapability::Shared,
+            inner: element,
+        });
+        HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: rt_name.to_string(),
+                args: call_args,
+            },
+            ty: optional_ty,
+        }
+    }
 }
