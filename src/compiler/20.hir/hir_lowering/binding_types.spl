@@ -44,6 +44,43 @@ pub fn hir_binding_direct_call_return(source: HirExpr, symbols: SymbolTable) -> 
         case _: ()
     nil
 
+# Instance-method transport (layout_symbol_function_pattern_owner_2026_10_11):
+# `val sym = self.get_symbol(id)` is an Unresolved MethodCall at lowering time,
+# so the binding was typed Infer, `if val found = sym` lost the HirSymbol
+# payload, and `match found.kind` had no SymbolKind owner -- a bare `Function`
+# arm then resolved against parser TypeKind/HirTypeKind.Function instead.
+# When the receiver's declared type names a non-generic owner that declares
+# the method, carry that method's declared (settled) return type.
+pub fn hir_binding_method_call_return(source: HirExpr, symbols: SymbolTable) -> HirType?:
+    match source.kind:
+        case HirExprKind.MethodCall(receiver, method, _, _):
+            var receiver_id: i64 = -1
+            match receiver.kind:
+                case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _): receiver_id = symbol.id
+                case _: return nil
+            var receiver_type: HirType? = nil
+            if receiver.has_type_ and receiver.type_ != nil:
+                receiver_type = receiver.type_
+            else:
+                if val receiver_decl = symbols.get_symbol_raw(receiver_id):
+                    receiver_type = receiver_decl.type_
+            if val owner_type = receiver_type:
+                match owner_type.kind:
+                    case HirTypeKind.Named(owner, owner_args):
+                        val applied: [HirType] = owner_args
+                        if applied.len() != 0: return nil
+                        if val method_id = symbols.lookup_method_in_type_raw(owner.id, method):
+                            if val declaration = symbols.get_symbol_raw(method_id.id):
+                                if declaration.generic_param_count != 0: return nil
+                                if val signature = declaration.type_:
+                                    match signature.kind:
+                                        case HirTypeKind.Function(_, result, _):
+                                            if hir_const_type_settled(result): return result
+                                        case _: ()
+                    case _: ()
+        case _: ()
+    nil
+
 pub fn hir_const_type_settled(type_: HirType) -> bool:
     """True when `type_` is a concrete storage type for a module global:
     no `Infer`/`Error`/`Any`/`Never`/type parameter/unresolved projection
