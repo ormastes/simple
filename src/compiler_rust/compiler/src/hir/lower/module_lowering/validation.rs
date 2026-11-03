@@ -244,3 +244,67 @@ impl Lowerer {
         Ok(())
     }
 }
+
+/// Receiver-normalised parameter count, identical to `trait_conformance_arity`
+/// in `interpreter_eval.rs` (and `pcount` in `scripts/check/check-trait-arity.spl`).
+fn trait_conformance_arity(f: &simple_parser::ast::FunctionDef) -> usize {
+    f.params.iter().filter(|p| p.name != "self" && p.name != "me").count()
+}
+
+/// Trait-impl arity conformance on the HIR (JIT/native) path.
+///
+/// The interpreter checks this when it registers an impl block
+/// (`interpreter_eval.rs`); the JIT never went through that code, so a wrong-arity
+/// impl compiled and ran (bug trait_conformance_check_ignores_arity_2026-08-04).
+/// Only traits declared in this (flattened) module are checked, and an impl is
+/// conformant when it satisfies ANY same-named candidate — the same rule the
+/// interpreter applies. Missing methods are left to existing checks.
+pub(super) fn validate_trait_impl_arity(ast_module: &simple_parser::ast::Module) -> LowerResult<()> {
+    use simple_parser::ast::Node;
+    let mut traits: HashMap<&str, Vec<&simple_parser::ast::TraitDef>> = HashMap::new();
+    for item in &ast_module.items {
+        if let Node::Trait(t) = item {
+            traits.entry(t.name.as_str()).or_default().push(t);
+        }
+    }
+    let mut problems: Vec<String> = Vec::new();
+    for item in &ast_module.items {
+        let Node::Impl(impl_block) = item else { continue };
+        let Some(trait_name) = impl_block.trait_name.as_ref() else { continue };
+        let Some(candidates) = traits.get(trait_name.as_str()) else { continue };
+        let type_name = match &impl_block.target_type {
+            simple_parser::ast::Type::Simple(n) | simple_parser::ast::Type::Generic { name: n, .. } => n.clone(),
+            other => format!("{:?}", other),
+        };
+        let mut best: Option<Vec<String>> = None;
+        for trait_def in candidates {
+            let mut p = Vec::new();
+            for tm in &trait_def.methods {
+                if let Some(im) = impl_block.methods.iter().find(|m| m.name == tm.name) {
+                    let (declared, implemented) = (trait_conformance_arity(tm), trait_conformance_arity(im));
+                    if declared != implemented {
+                        p.push(format!(
+                            "type `{}` implements method `{}` from trait `{}` with {} parameter(s), but the trait declares {}",
+                            type_name, tm.name, trait_name, implemented, declared
+                        ));
+                    }
+                }
+            }
+            if p.is_empty() {
+                best = None;
+                break;
+            }
+            if best.as_ref().map_or(true, |b| p.len() < b.len()) {
+                best = Some(p);
+            }
+        }
+        if let Some(p) = best {
+            problems.extend(p);
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(LowerError::Unsupported(format!("trait conformance: {}", problems.join("; "))))
+    }
+}

@@ -755,3 +755,26 @@ section — that is unchanged by this fix).
 ## 2026-11-03 triage (lane-bugs-a)
 
 Verified on the seed: trait_conformance_param_type_spec 7/7 pass; trait_impl_arity_conformance_spec interpreter arm passes, JIT arm FAILS (impl with wrong arity runs and prints FIXTURE_RAN_WRONG_ARITY, exit 0). Remaining work, deferred: (1) the JIT/native path lives in the Rust seed and (2) ImplBlock.validate_methods in src/compiler/25.traits/trait_impl.spl still has zero callers; wiring it into the self-hosted semantic pass cannot be verified without a stage3 build and risks false diagnostics across the 3,928-pair census.
+
+## 2026-11-03 (lane-a6dffc9c) — JIT arm armed in the seed
+
+`validate_trait_impl_arity` (`src/compiler_rust/compiler/src/hir/lower/module_lowering/validation.rs`)
+runs at the top of both HIR module-lowering entry points (`module_pass.rs`,
+`lower_module_with_return_types` and `lower_module_with_warnings`). Same rule
+as the interpreter: receiver-normalised arity, local same-named trait
+candidates, conformant if ANY candidate matches. A JIT run of
+`probe_wrong_arity.spl` now fails HIR lowering with the arity diagnostic (the
+engine falls back to the interpreter, which rejects it too; rc=1).
+
+Verified with a test-only seed build (not deployed), `SIMPLE_BIN=<that seed>`:
+`trait_impl_arity_conformance_spec` 3/3 (was 2/3);
+`trait_conformance_enforced_class_spec` 4/5 (was 3/5; the remaining failure is
+the missing-method JIT arm, not arity); the other `test/01_unit/compiler/traits/*_spec.spl`
+unchanged vs the deployed seed (`trait_symbol_owner_spec` 1/1 fail and
+`trait_validation_symbol_shape_spec` 0/1 are pre-existing).
+
+Status: fix-implemented-verification-pending — verify after the next seed
+redeploy by running `trait_impl_arity_conformance_spec.spl` with `bin/simple`.
+Still open, separate: parameter TYPES, the JIT missing-method arm, and
+`ImplBlock.validate_methods` (`src/compiler/25.traits/trait_impl.spl:124`,
+zero callers) in the self-hosted compiler.

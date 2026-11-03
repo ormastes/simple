@@ -1728,6 +1728,7 @@ impl Lowerer {
         // See `nested_def_hoist.rs` for the rules and rationale.
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
+        super::validation::validate_trait_impl_arity(ast_module)?;
         // Same-named globals of different flattened modules get owner-exact
         // symbols before any registration (see `flatten_global_owner.rs`).
         let qualified = self.qualify_flattened_globals(ast_module);
@@ -2372,6 +2373,7 @@ impl Lowerer {
         // Hoist nested type definitions to module scope (see `lower_module`).
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
+        super::validation::validate_trait_impl_arity(ast_module)?;
         // Same-named globals of different flattened modules get owner-exact
         // symbols before any registration (see `flatten_global_owner.rs`).
         let qualified = self.qualify_flattened_globals(ast_module);
