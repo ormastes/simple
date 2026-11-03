@@ -2,6 +2,7 @@
 
 - **id:** option_pattern_against_result_value_matches_nothing_2026-09-19
 - **status:** OPEN (the language defect). The one production casualty found so far is FIXED — see "Casualty" below.
+- **Update 2026-11-03 (fix-implemented-verification-pending):** the self-hosted checker rejects `case Some(v)` over a `Result`-typed value with `Option pattern requires an optional scrutinee; found Result(..)` (error). Spec: `test/01_unit/compiler/lint/frontend_diag/option_pattern_non_option_scrutinee_spec.spl`. The seed interpreter/JIT lanes in the probe below still silently match nothing until the stage3 self-hosted binary is the default engine; verify by running the probe with a stage3 binary. `case nil` over Result is not yet named.
 - **severity:** P1 — a wrong answer with no diagnostic on one lane, and a non-zero exit with **no output at all** on the other
 - **found:** 2026-09-19, while landing an 8-day-old unpushed commit and discovering main had diverged
 
