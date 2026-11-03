@@ -303,3 +303,16 @@ half needs *more* write-back (honour `mut`), the JIT half needs *less* copying
 engine may be used as the oracle for the other's fix.
 
 **Revalidated 2026-11-02: still plausible because OPEN — re-reproduced on the 2026-08-17 12:58 seed. Both halves; no merged fix commit with a passing regression is cited in this doc.**
+
+## Closed 2026-11-03 (seedmut lane): by design, not a defect
+
+In Simple `fn` methods are immutable; mutating `self` requires `me` (strict mode
+rejects `self.n = ...` in a `fn` method with E1052, `memory_check.rs`
+`check_self_mutation_in_fn_method`; only lenient mode lets it through, which is
+why the probe compiled). The JIT already leaves the receiver of a `me` method
+uncopied (`lowering_core.rs` entry-copy loop skips `is_mutable()` params; the
+`me` receiver is mutable per `hir/lower/module_lowering/function.rs`).
+Evidence on the deployed seed (bin/simple.exe, 2026-11-02), `SIMPLE_EXECUTION_MODE=jit`:
+`me bump()` x3 on a struct local -> `depth0=3` (correct); `fn bump()` -> `depth0=0`
+(the by-design immutable copy). Probes were using `fn`; changed to `me`.
+The interpreter `mut`-parameter half is a separate worker's scope.
