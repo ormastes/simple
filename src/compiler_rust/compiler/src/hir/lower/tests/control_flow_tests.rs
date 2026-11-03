@@ -1265,3 +1265,46 @@ fn test_nil_literal_pattern_on_optional_text_uses_is_none() {
         "`case nil:` must lower to rt_is_none: {repr}"
     );
 }
+
+/// A value-position match with no matching arm and no wildcard must fail
+/// closed at runtime (like the interpreter), not yield Nil: JIT/native code
+/// printed garbage for `val r = match n: case 1: 10` with n == 4
+/// (seed_value_match_no_arm_yields_nil_2026-11-02).
+#[test]
+fn test_value_match_without_wildcard_fails_closed() {
+    let source = "fn pick(n: i64) -> i64:\n    val r = match n:\n        case 1: 10\n    return r\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        repr.contains("rt_panic") && repr.contains("match expression exhausted"),
+        "exhausted match must lower to rt_panic, not Nil: {repr}"
+    );
+}
+
+/// A match with a wildcard arm never reaches the exhaustion path.
+#[test]
+fn test_value_match_with_wildcard_has_no_exhaustion_panic() {
+    let source = "fn pick(n: i64) -> i64:\n    val r = match n:\n        case 1: 10\n        case _: 0\n    return r\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        !repr.contains("match expression exhausted"),
+        "wildcard match must not carry an exhaustion panic: {repr}"
+    );
+}
+
+/// Statement-position matches (value discarded) with no matching arm and no
+/// wildcard stay a silent fall-through: self-hosted compiler code relies on it.
+#[test]
+fn test_statement_match_without_wildcard_stays_silent() {
+    let source = "fn run(n: i64):\n    match n:\n        case 1: print \"one\"\n    print \"done\"\n";
+    let module = parse_and_lower(source).unwrap();
+    let func = module.functions.iter().find(|f| f.name == "run").unwrap();
+    let repr = format!("{:?}", func.body);
+    assert!(
+        !repr.contains("match expression exhausted"),
+        "statement-position match must not carry an exhaustion panic: {repr}"
+    );
+}
