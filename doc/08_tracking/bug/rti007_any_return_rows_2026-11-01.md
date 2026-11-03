@@ -1,6 +1,21 @@
 # rti007: declared returns that lower to `Any` get no RTI row in the frozen stage2 (2026-11-01)
 
-Status: FIXED IN SOURCE at release/1.0.0 (claims audited 2026-11-01, below); OPEN only in the frozen stage2 bootstrap compiler; tagged source workarounds stay until the stage2 refresh.
+Status: FIXED IN SOURCE at release/1.0.0 (claims audited 2026-11-01, below); OPEN only in the frozen stage2 bootstrap compiler. Workaround retention must also respect the tagged-value ABI; see the tuple-return correction below.
+
+## Tuple-return correction, 2026-11-01
+
+The `rt_tuple_get -> i64` workarounds in MIR expression dispatch and LLVM
+instruction decoding change the semantic return contract. The runtime returns
+an already-tagged value. A fresh Rust-seed bootstrap inserts integer boxing
+between that i64 declaration and the generic `T?` wrapper, corrupting aggregate
+handles and crashing Stage 2 admission. Restore `rt_tuple_get<T> -> T?` and
+explicit `<T>` calls in both owners. Other workarounds in this record are not
+reverted by that correction.
+
+Controlled native probes establish the contract mismatch; refreshed Stage 2
+RTI and admission gates remain required. Retain the frozen Windows producer's
+RTI limitation separately. Evidence and current status:
+`cross_bootstrap_stage2_p2_add_mir_sigbus_20261101.md`.
 
 Bug id: `rti007_any_return_rows_2026-11-01` (every `@workaround` tag of this family
 references it). Successor of `rti007_mir_2026-10-31.md` (bare `-> Result` in the linker
@@ -163,3 +178,14 @@ held for phase-3 memory.
 
 Status: FIXED IN SOURCE at release/1.0.0; OPEN only for the frozen stage2. Revert-ready:
 yes after the stage2 refresh named in "Removal condition" (keep `map_values<U>`).
+
+### 2026-11-03 release integration note
+
+Upstream `9cf71a74dbf` restores typed foreign tuple projections in the compiler
+owners, including the two production sites covered by the cross-bootstrap
+tuple regression. The rebased cross-bootstrap lane keeps those upstream files
+unchanged. This source integration does not qualify producer `e0876030…1553`:
+its narrow sanity/receiver probes passed, but full CLI and test-runner builds
+were rejected. Historical receipts are retained under
+`doc/09_report/evidence/immutable_hir_p0_20261103/`. A fresh Phase 3 candidate
+must link and compile/run its own Hello before that lane can land.

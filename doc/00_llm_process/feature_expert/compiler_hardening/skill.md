@@ -104,3 +104,15 @@ carry imported trait method signatures/slots into each unit. A generic
 `pipeline/native_project/imports.rs`: transport collision-safe trait definitions
 into HIR/MIR, then rerun the retained macOS Stage2 command once. See
 `native_imported_trait_method_metadata_absent_2026-09-08.md`.
+
+## Bootstrap aggregate return contracts
+
+Do not replace a tagged runtime-value extern return with semantic i64 merely
+to bypass an old producer's return-type-interface limitation. In tuple
+projection wrappers that change inserts integer boxing and corrupts array
+and record handles. Keep the typed extern contract in both MIR and LLVM
+decoders, retain the old-producer limitation separately, and verify array,
+record, nil, scalar and out-of-range outputs using an external oracle.
+The regression fixture is `test/04_smoke/bootstrap_tuple_projection.spl`;
+tracking and exact evidence are in
+`doc/08_tracking/bug/cross_bootstrap_stage2_p2_add_mir_sigbus_20261101.md`.

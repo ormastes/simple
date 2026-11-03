@@ -19,7 +19,7 @@
  * protocol's handover contract is bit-for-bit what this kernel already assumes
  * and what QEMU `-kernel` already provides — entered at EL1/EL2 with the MMU
  * and caches OFF, in the physical address space, with the boot arg in x0 (which
- * this kernel ignores; all its MMIO addresses are fixed for QEMU virt). The
+ * is preserved as an UNTRUSTED raw DTB address for a checked boot owner). The
  * Limine protocol instead hands over with the MMU ON in a higher-half virtual
  * mapping, which would require rewriting this kernel's early boot, its whole
  * physical-MMIO layer, and `arm64_enter_user_virtual` (which toggles SCTLR_EL1.M
@@ -65,6 +65,11 @@ _start:
  * above `link_base + load_size`) and executed from there.
  * --------------------------------------------------------------------------- */
 .Lreloc_check:
+    /* Preserve the raw Linux Image DTB argument before UART/relocation clobbers
+     * x0. Early boot and its relocation trampoline reserve x20 for this value.
+     * This does not validate or protect the pointed-to bytes from overlap.
+     */
+    mov     x20, x0
     adr     x9, _start              /* x9 = actual load base (PC-relative)     */
     ldr     x10, =_start            /* x10 = link base (absolute relocation)   */
     cmp     x9, x10
@@ -196,6 +201,13 @@ _start:
     str     xzr, [x0], #8
     b       .Lbss_loop
 .Lbss_done:
+    /* Publish only after BSS clear. The getter returns an UNTRUSTED scalar:
+     * zero is absent; a nonzero value still needs range/overlap/FDT validation.
+     * Never use it to dereference firmware memory without that owner check.
+     */
+    adrp    x9, .Larm64_boot_dtb_raw
+    add     x9, x9, :lo12:.Larm64_boot_dtb_raw
+    str     x20, [x9]
     adr     x0, .Lcrt0_bss
     bl      .Lserial_puts_early
 
@@ -938,3 +950,20 @@ _fault_handler:
 .Lfault_halt:
     wfe
     b       .Lfault_halt
+
+/* Raw boot handoff ABI. This is not a validated DTB handle or PCI admission. */
+    .section .text.boot_handoff, "ax", %progbits
+    .balign 4
+    .globl rt_arm64_boot_dtb_address
+    .type rt_arm64_boot_dtb_address, @function
+rt_arm64_boot_dtb_address:
+    adrp    x0, .Larm64_boot_dtb_raw
+    add     x0, x0, :lo12:.Larm64_boot_dtb_raw
+    ldr     x0, [x0]
+    ret
+    .size rt_arm64_boot_dtb_address, . - rt_arm64_boot_dtb_address
+
+    .section .bss.boot_handoff, "aw", %nobits
+    .balign 8
+.Larm64_boot_dtb_raw:
+    .skip 8

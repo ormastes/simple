@@ -56,3 +56,6 @@ plus `[engine-demotion]` lines, then correct output (len=20). Under `SIMPLE_JIT_
   the guard (correctly) drops the module. This is the cross-module Simple-call
   limitation of per-module JIT, not a crypto defect; fixing it needs imported
   Simple fns to be compiled/linked into the JIT module. Remains open.
+
+## Status 2026-11-03
+Status set to fix-implemented-verification-pending: `rt_text_eq_any` backing landed in f2e108e32d3 (PR #6238, merge 35c826061af); verify with `test/01_unit/app/cli/jit_text_eq_any_resolves_spec.spl` on a seed rebuilt with that change. Residual (not fixed here): `crypto_text_to_bytes` cross-module Simple-call limitation of per-module JIT; the `[jit-fallback]` diagnostic and `SIMPLE_JIT_STRICT=1` remain the guard.

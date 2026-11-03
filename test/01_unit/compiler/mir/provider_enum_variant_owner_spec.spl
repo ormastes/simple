@@ -1,0 +1,55 @@
+# Real compact-provider registration must publish constructor owner recovery.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolId, SymbolTable, HirSymbol, SymbolKind, ScopeId}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.hir_declaration_types_v1.{MirHirEnumDeclarationV1, MirHirVariantDeclarationV1}
+use compiler.mir._MirLowering.declaration_providers_v1.*
+
+fn compact_enum_owner_symbols() -> SymbolTable:
+    var symbols = SymbolTable.new()
+    for entry in [(77, "First"), (78, "Second")]:
+        symbols.register_preserved_symbol(HirSymbol(id: SymbolId(id: entry.0), name: entry.1,
+            kind: SymbolKind.Enum, type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
+            visibility: Visibility.Public, is_public: true, is_mutable: false,
+            defining_module: Some("provider")))
+    symbols
+
+fn compact_enum_owner_declaration(id: i64, name: text) -> MirHirEnumDeclarationV1:
+    val variant = MirHirVariantDeclarationV1(symbol: SymbolId(id: id + 100),
+        name: "Ready", kind: "unit", tuple_types: [], fields: [],
+        has_discriminant: false, discriminant_artifact: nil, span: Span.empty())
+    MirHirEnumDeclarationV1(symbol: SymbolId(id: id), name: name,
+        runtime_name: "provider." + name, type_params: [], variants: [variant],
+        attributes: [], complete_open: false, dyn_open: false,
+        visibility: Visibility.Public, is_public: true, is_generic_template: false,
+        span: Span.empty())
+
+describe "Compact enum provider variant-owner registration":
+    it "publishes a unique inverse owner and keeps repeat registration unique":
+        step("Register a body-free provider enum through its real MIR owner")
+        val symbols = compact_enum_owner_symbols()
+        var lowering = MirLowering.new(symbols)
+        val declaration = compact_enum_owner_declaration(77, "First")
+        lowering.register_provider_enum_from_declarations_v1(declaration, symbols)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.enum_variant_index_q["provider.First"]).to_equal(["Ready"])
+        expect(lowering.enum_variant_owners.has("Ready")).to_equal(true)
+        expect(lowering.enum_variant_owners["Ready"]).to_equal(["First"])
+        lowering.register_provider_enum_from_declarations_v1(declaration, symbols)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.enum_variant_owners["Ready"]).to_equal(["First"])
+
+    it "retains ambiguity when distinct providers share a variant spelling":
+        step("Keep both declaration owners so recovery cannot silently choose one")
+        val symbols = compact_enum_owner_symbols()
+        var lowering = MirLowering.new(symbols)
+        lowering.register_provider_enum_from_declarations_v1(compact_enum_owner_declaration(77, "First"), symbols)
+        lowering.register_provider_enum_from_declarations_v1(compact_enum_owner_declaration(78, "Second"), symbols)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.enum_variant_owners.has("Ready")).to_equal(true)
+        expect(lowering.enum_variant_owners["Ready"].len()).to_equal(2)
+        expect(lowering.enum_variant_owners["Ready"]).to_contain("First")
+        expect(lowering.enum_variant_owners["Ready"]).to_contain("Second")

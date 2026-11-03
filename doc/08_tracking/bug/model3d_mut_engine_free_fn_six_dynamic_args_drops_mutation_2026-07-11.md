@@ -88,3 +88,13 @@ the in-code pointer back to this doc.
   (argument dynamism/count here vs. a second class-typed argument there).
 
 **Revalidated 2026-11-02: still plausible because the report title (A free-function call taking mut Engine3D silently drops all mutation once 6 or ) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 re-check (interpreter / smf)
+
+Minimal repro `test/02_integration/app/model3d/mut_free_fn_six_args_spec.spl`
+(class + `fn f(mut e, 6 dynamic f32 args, u32)` called twice with array reads)
+PASSES on `bin/simple.exe test` under the interpreter and `--mode=smf` — the bug
+does NOT reproduce there. `--mode=native --native-backend cranelift` could not be
+exercised: the test daemon rejects it ("does not support pinned native
+execution"). Status therefore stays OPEN, scoped to native/JIT codegen; the spec
+is the regression check to run once a stage3 native toolchain is available.
