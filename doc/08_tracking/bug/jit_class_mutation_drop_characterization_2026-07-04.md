@@ -285,3 +285,10 @@ The coordinator rebuilds from main post-gate; once `bin/simple` runs cleanly:
    (grep was clean this session: only re-exports in `backend.spl`/`__init__.spl`).
 6. Companion defect (array-param `push` leaking to caller, item #4 above) is
    NOT addressed by this change and remains open.
+
+## 2026-11-03 — design + red spec landed; fix is seed value-model work (verification-pending)
+
+Design: `doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md`.
+Spec (RED on tree-walk, 2 of 4 fail; tagged in-development):
+`test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`.
+No narrow fix: needs `Value::ClassInstance` producers in the Rust seed + redeploy. Stays OPEN.

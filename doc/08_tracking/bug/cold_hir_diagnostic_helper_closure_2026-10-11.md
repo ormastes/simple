@@ -15,3 +15,6 @@ The repair extracts the helper verbatim from `src/compiler/80.driver/cache/cold_
 Closure requires running `scripts/check/check-cold-hir-path-diagnostic.shs` with an admitted producer/runtime and verifying the real fixture compilation/output, helper/driver/template stability, and producer identity. Current compiled/native/Stage 3/release qualification remains pending. Keep the issue OPEN.
 
 **Revalidated 2026-11-02: still plausible because OPEN; source/template controls PASS, native compilation and output verification UNRUN; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 status: fix-implemented-verification-pending
+Source/template repair is merged; remaining closure is `sh scripts/check/check-cold-hir-path-diagnostic.shs` with an admitted stage3 producer.
