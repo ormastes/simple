@@ -1,0 +1,38 @@
+"""
+DI flags must reach actual test subprocesses. AUTHORED_UNRUN.
+Requires POSIX /usr/bin/env and an admitted source-matched full CLI path in
+SIMPLE_TEST_ENV_RUNNER. No seed fallback, bootstrap or native build is performed.
+No parent environment is mutated; each fixture executes in a separate process.
+This tests the direct child route, not a persistent daemon's v2 handoff.
+"""
+# @req REQ-TEST-ENV-DI-001
+use std.spec.*
+use std.env.variables.{env_get}
+use app.io.mod.{process_run_timeout}
+
+# @inline
+fn run_di_environment_fixture(name: text, caller_system: text, caller_di: text) -> (text, text, i32):
+    val binary = env_get("SIMPLE_TEST_ENV_RUNNER")
+    expect(binary == "").to_equal(false)
+    val fixture = "test/fixtures/test_runner/feature/di_environment_" + name + "_spec.spl"
+    process_run_timeout("/usr/bin/env", ["SIMPLE_SYSTEM_TEST=" + caller_system,
+        "SIMPLE_DI_TEST=" + caller_di, binary, "test", fixture,
+        "--no-session-daemon", "--no-db", "--no-cache", "--assert-ran",
+        "--mode=interpreter", "--timeout", "30"], 45000)
+
+describe "DI runner flags reach the spawned production lock owner":
+    it "should deliver the tagged system exemption despite opposite caller flags":
+        # @req REQ-TEST-ENV-DI-001
+        step("Launch a tagged system fixture with caller lock flags disabled")
+        val result = run_di_environment_fixture("tagged", "0", "0")
+        step("Require real child assertions on both flags and the DI lock")
+        expect(result.2).to_equal(0)
+        expect(result.0).to_contain("DI_CHILD_TAGGED_ASSERTIONS_REACHED")
+
+    it "should remove an inherited exemption from an untagged system fixture":
+        # @req REQ-TEST-ENV-DI-001
+        step("Launch an untagged system fixture with an inherited caller exemption")
+        val result = run_di_environment_fixture("untagged", "0", "1")
+        step("Require real child assertions on both flags and the DI lock")
+        expect(result.2).to_equal(0)
+        expect(result.0).to_contain("DI_CHILD_UNTAGGED_ASSERTIONS_REACHED")

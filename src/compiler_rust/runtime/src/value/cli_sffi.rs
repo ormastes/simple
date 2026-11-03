@@ -151,7 +151,7 @@ pub extern "C" fn rt_cli_dispatch_rust(_cmd: RuntimeValue, _args: RuntimeValue, 
 
 #[no_mangle]
 pub extern "C" fn rt_compile_to_native(_source_path: RuntimeValue, _output_path: RuntimeValue) -> i64 {
-    0
+    native_compile_unavailable_result().to_raw() as i64
 }
 
 #[no_mangle]
@@ -160,7 +160,26 @@ pub extern "C" fn rt_compile_to_native_with_opt(
     _output_path: RuntimeValue,
     _opt_level: RuntimeValue,
 ) -> i64 {
-    0
+    native_compile_unavailable_result().to_raw() as i64
+}
+
+// Standalone Rust runtime has no compiler driver. Preserve the public
+// (bool, text) result representation without claiming compilation succeeded
+// or dispatching another executable. The exported ABI remains one I64 word.
+fn native_compile_unavailable_result() -> RuntimeValue {
+    let message = "Native compiler driver is unavailable in the standalone Rust runtime";
+    let diagnostic = rt_string_new(message.as_ptr(), message.len() as u64);
+    if diagnostic.is_nil() {
+        return RuntimeValue::NIL;
+    }
+    let result = super::rt_tuple_new(2);
+    if result.is_nil() {
+        super::rt_string_free(diagnostic);
+        return RuntimeValue::NIL;
+    }
+    super::rt_tuple_set(result, 0, RuntimeValue::from_bool(false));
+    super::rt_tuple_set(result, 1, diagnostic);
+    result
 }
 
 // Stub implementations for complex CLI functions
@@ -474,6 +493,36 @@ fn run_tests_with_args(arg_strings: &[String], gc_log: u8, gc_off: u8) -> i64 {
             eprintln!("Failed to run tests: {}", e);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod native_compile_result_tests {
+    use super::{extract_string, rt_compile_to_native, rt_compile_to_native_with_opt, RuntimeValue};
+    use crate::value::{rt_tuple_get, rt_tuple_len};
+
+    fn assert_unavailable_result(bits: i64) {
+        let result = RuntimeValue::from_raw(bits as u64);
+        assert_eq!(rt_tuple_len(result), 2);
+        let success = rt_tuple_get(result, 0);
+        assert!(success.is_bool());
+        assert!(!success.as_bool());
+        let diagnostic = extract_string(rt_tuple_get(result, 1)).expect("diagnostic must be runtime text");
+        assert!(diagnostic.contains("compiler driver is unavailable"));
+    }
+
+    #[test]
+    fn native_compile_returns_an_unavailable_result_without_a_driver() {
+        assert_unavailable_result(rt_compile_to_native(RuntimeValue::NIL, RuntimeValue::NIL));
+    }
+
+    #[test]
+    fn optimized_native_compile_returns_an_unavailable_result_without_a_driver() {
+        assert_unavailable_result(rt_compile_to_native_with_opt(
+            RuntimeValue::NIL,
+            RuntimeValue::NIL,
+            RuntimeValue::NIL,
+        ));
     }
 }
 

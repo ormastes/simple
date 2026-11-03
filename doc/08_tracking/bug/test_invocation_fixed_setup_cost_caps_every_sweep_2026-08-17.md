@@ -149,3 +149,41 @@ Guards: `scripts/check/check-test-setup-cost-budget.shs` pins this spec at a 30s
 budget (env `TEST_SETUP_BUDGET_S`); `scripts/check/check-test-verdict-not-silent.shs`
 now FAILs a non-zero exit that has neither a verdict line nor an explicit error
 line. Status above is unchanged.
+
+
+## 2026-11-03 bounded source and admission audit
+
+Baseline cfef5fad47e. Current `light_daemon.spl` still invokes the single-file
+runner as `run src/app/test_runner_new/test_runner_single.spl`. This is source
+evidence of the described dispatch shape, not a new measurement of its cost.
+No admitted pure-Simple producer was available. The old seed-specific claim
+that directory direct execution cannot work is not assumed current: the
+present `test_runner_main.spl` includes direct directory dispatch and separates
+session-enabled routing. No caching change or compiled-worker substitution is
+justified by current runtime evidence, and no timeout budget is increased.
+
+A separate concrete admission defect was reproduced before repair: both setup
+budget guards could accept a fast child with a verdict/summary despite nonzero
+exit. Added regression-first fixtures produced:
+
+- `check-test-setup-cost-budget.shs --selftest-only`: `selftest FAIL: stub crashed
+  expected FAIL got PASS`; error exit. The fixture actually prints a verdict and
+  exits 7.
+- `check-test-session-setup-budget.shs --selftest`: `selftest: nonzero child exit
+  must fail despite summary`; failure exit. The classifier received elapsed 4,
+  budget 90, a complete summary, and exit status 7.
+
+The repair preserves child failure precedence. The setup classifier checks all
+nonzero exits after its existing timeout classification. The session classifier
+receives the already-captured RUN_RC explicitly and returns `child_failed`, which
+its main branch reports as failure. Existing timing and verdict conditions are
+unchanged; neither guard can turn a child failure into timing-admission PASS.
+
+REQ-TEST-SETUP-EXIT-001: child exit must be zero before setup-cost admission.
+Executable SSpec: `test/02_integration/app/test_runner/setup_budget_exit_precedence_spec.spl`;
+manual: `doc/06_spec/02_integration/app/test_runner/setup_budget_exit_precedence_spec.md`.
+The Simple SSpec is AUTHORED_UNRUN; shell fixtures are independently runnable.
+Neither this repair nor fixture timing is an optimization result. The canonical
+fixed-setup-cost record remains open with current runner latency/RSS unmeasured.
+
+Post-repair shell GREEN (one repair cycle): setup-cost selftest reported 4 fixtures checked, selftest only/no setup cost measured; session setup selftest reported 5 fixtures checked. Both commands exited 0. This is actual shell-owner evidence; the Simple SSpec and runner performance remain UNRUN/UNMEASURED.
