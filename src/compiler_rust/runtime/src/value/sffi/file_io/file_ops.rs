@@ -378,6 +378,36 @@ pub extern "C" fn rt_file_read_regular_no_follow_last_failure() -> i64 {
     READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.get())
 }
 
+const SECURE_TEMP_PARENT_SLOT_BYTES: usize = 4096;
+
+thread_local! {
+    static SECURE_TEMP_PARENT_SLOT: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+/// Rust-runtime twin of C `rt_secure_temp_dir_set_parent`
+/// (runtime_secure_temp_split_private.h): slot the staging parent for the
+/// paired make. Takes ONE boxed text value. 1 = slotted, 0 = refused (nil,
+/// empty, embedded NUL, or >= 4096 bytes). A refused call clears any earlier
+/// parent so a stale one can never be used.
+#[no_mangle]
+pub extern "C" fn rt_secure_temp_dir_set_parent(parent: RuntimeValue) -> i64 {
+    SECURE_TEMP_PARENT_SLOT.with(|slot| *slot.borrow_mut() = None);
+    let len = rt_string_len(parent);
+    if len <= 0 || (len as usize) >= SECURE_TEMP_PARENT_SLOT_BYTES {
+        return 0;
+    }
+    let data = rt_string_data(parent);
+    if data.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) }.to_vec();
+    if bytes.contains(&0) {
+        return 0;
+    }
+    SECURE_TEMP_PARENT_SLOT.with(|slot| *slot.borrow_mut() = Some(bytes));
+    1
+}
+
 /// Open, classify, and bounded-read one regular file through the same handle.
 ///
 /// Rust twin of the C `rt_read_regular_no_follow_buffer` static helper in
@@ -2591,6 +2621,19 @@ mod tests {
     use crate::value::collections::{rt_string_data, rt_string_len};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn secure_temp_dir_set_parent_validates_and_replaces() {
+        let boxed = |s: &[u8]| rt_string_new(s.as_ptr(), s.len() as u64);
+        assert_eq!(rt_secure_temp_dir_set_parent(boxed(b"/tmp")), 1);
+        assert_eq!(rt_secure_temp_dir_set_parent(boxed(b"")), 0, "empty refused");
+        assert_eq!(rt_secure_temp_dir_set_parent(boxed(b"a\0b")), 0, "embedded NUL refused");
+        assert_eq!(rt_secure_temp_dir_set_parent(boxed(&[b'a'; 4096])), 0, "oversized refused");
+        assert_eq!(rt_secure_temp_dir_set_parent(RuntimeValue::NIL), 0, "nil refused");
+        assert_eq!(rt_secure_temp_dir_set_parent(boxed(b"C:\\Temp")), 1);
+        assert_eq!(rt_secure_temp_dir_set_parent(boxed(b"")), 0);
+        SECURE_TEMP_PARENT_SLOT.with(|s| assert!(s.borrow().is_none(), "refusal clears earlier parent"));
+    }
 
     fn canonicalize_text(path: &str) -> Option<String> {
         let value = unsafe { rt_file_canonicalize(path.as_ptr(), path.len() as u64) };
