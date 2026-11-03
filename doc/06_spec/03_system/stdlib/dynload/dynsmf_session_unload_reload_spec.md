@@ -1,216 +1,166 @@
 # dynSMF Session Unload Reload System Specification
 
-> Verifies the selected low_dependency_ui_dynsmf dynSMF lifecycle at the system boundary. The spec covers default stdlib-like autoload, per-id opt-out, and the interpreter-testable unload/stale/reload behavior needed for every selected stdlib-like dynSMF library to test itself without retaining stale session state.
+Authored manual, 2026-11-03. Five executable scenarios; behavioral status:
+TEST_BLOCKED (qualified self-hosted runtime unavailable). This document is not
+an execution receipt or generated PASS report.
 
-<!-- sdn-diagram:id=dynsmf_session_unload_reload_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
+Source: `test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl`.
 
-```sdn id=dynsmf_session_unload_reload_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
+The original six-entry startup assumptions predate merged demand-load startup
+commit `fef46c5dd3c8c472dea0c53fc8c42382d512754e`. Production bundles now remain
+on demand. The fixture copies each manifest entry with startup enabled without
+mutating production policy. Counts follow the selected manifest, required legacy
+IDs remain independently asserted, and the lifecycle covers every export.
 
-dynsmf_session_unload_reload_spec -> std
-dynsmf_session_unload_reload_spec -> os
-```
+| Scenario | Expected evidence |
+|---|---|
+| Demand-load defaults | Required IDs exist; every entry is on demand; checked startup publishes zero libraries and zero evidence |
+| Checked explicit startup | Build plans and real artifacts are ready; every selected library and export loads |
+| Disable policy | Exactly the two requested IDs skip with disabled evidence; every other selection loads |
+| Stale/reload evidence | Operation-relative rows identify tui_renderer, stale/unloaded, then reload; generation increases |
+| Full manifest lifecycle | Every export becomes stale after unload and resolves with a newer generation after reload; other slots remain intact |
 
-</details>
+The checked explicit-startup scenario intentionally requires actual
+`build/dynsmf/*.smf` artifacts. Missing artifacts must fail the prerequisite;
+it never silently skips or substitutes unchecked loading. Logical lifecycle
+scenarios use the existing public unchecked session API independently.
 
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
+## Complete executable source
 
-```ascii generated-from=dynsmf_session_unload_reload_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
+```simple
+# @cover src/os/smf/dynsmf_session.spl 80%
+# @req REQ-SSPEC-SYSTEM
+# @tag: spec, dynsmf, low_dependency_ui_dynsmf
+"""
 # dynSMF Session Unload Reload System Specification
 
-Verifies the selected low_dependency_ui_dynsmf dynSMF lifecycle at the system boundary. The spec covers default stdlib-like autoload, per-id opt-out, and the interpreter-testable unload/stale/reload behavior needed for every selected stdlib-like dynSMF library to test itself without retaining stale session state.
+Verifies demand-load defaults, explicit startup selection, per-id disable policy,
+and unload/stale/reload for every manifest entry and exported symbol.
+The checked-artifact scenario requires real build/dynsmf/*.smf outputs; the
+logical lifecycle scenarios deliberately use the public unchecked session API.
+Demand-load startup follows fef46c5dd3c; selecting startup in a copied test
+manifest does not change production policy.
 
-## At a Glance
+Requirements: doc/02_requirements/feature/low_dependency_ui_dynsmf.md
+Plan: doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md
+Design: doc/05_design/low_dependency_ui_dynsmf.md
+"""
 
-| Field | Value |
-|-------|-------|
-| Category | Other |
-| Status | Active |
-| Requirements | doc/02_requirements/nfr/low_dependency_ui_dynsmf.md |
-| Plan | doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md |
-| Design | doc/05_design/low_dependency_ui_dynsmf.md |
-| Research | doc/01_research/local/low_dependency_ui_dynsmf.md |
-| Source | `test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+use std.spec
+use std.spec.step
+use os.smf.dynsmf_session.{DynSmfManifestEntry, dynsmf_default_manifest, dynsmf_build_plans, dynsmf_build_plans_ready, dynsmf_artifacts_ready, dynsmf_policy_default, dynsmf_policy_from_args_env, dynsmf_session_new, dynsmf_session_autoload, dynsmf_session_autoload_checked, dynsmf_session_record_symbol, dynsmf_session_symbol, dynsmf_session_unload}
 
-## Overview
+# Copy values rather than mutating production manifest entries. Exercise all
+# current and future bundles as explicit startup selections in lifecycle tests.
+fn startup_manifest() -> [DynSmfManifestEntry]:
+    var selected: [DynSmfManifestEntry] = []
+    for entry in dynsmf_default_manifest():
+        selected.push(DynSmfManifestEntry(id: entry.id, path: entry.path,
+            source_module: entry.source_module, artifact_kind: entry.artifact_kind,
+            abi_version: entry.abi_version, default_autoload: true, exports: entry.exports))
+    selected
 
-Verifies the selected low_dependency_ui_dynsmf dynSMF lifecycle at the system
-boundary. The spec covers default stdlib-like autoload, per-id opt-out, and the
-interpreter-testable unload/stale/reload behavior needed for every selected
-stdlib-like dynSMF library to test itself without retaining stale session state.
+describe "low dependency UI dynSMF session lifecycle":
+    it "keeps production bundles demand-loaded without touching missing artifacts":
+        # @req REQ-004
+        step("Reject the adjacent regression")
+        val manifest = dynsmf_default_manifest()
+        expect(manifest.len()).to_be_greater_than(0)
+        val required = ["file_io", "net_io", "render2d", "web_renderer", "gui_renderer", "tui_renderer", "ui_html"]
+        for id in required:
+            var found = false
+            for entry in manifest:
+                if entry.id == id:
+                    found = true
+            expect(found).to_equal(true)
+        for entry in manifest:
+            expect(entry.default_autoload).to_equal(false)
+        val session = dynsmf_session_autoload_checked(dynsmf_session_new("system-default", dynsmf_policy_default()), manifest)
+        expect(session.loaded.len()).to_equal(0)
+        expect(session.evidence.len()).to_equal(0)
 
-## Examples
+    it "loads every explicitly selected startup artifact through the checked facade":
+        # @req REQ-005
+        # @req REQ-010
+        step("Exercise the repaired owner")
+        val manifest = startup_manifest()
+        expect(manifest.len()).to_be_greater_than(0)
+        expect(dynsmf_build_plans_ready(dynsmf_build_plans(manifest))).to_equal(true)
+        # This is an intentional build prerequisite, never a conditional skip.
+        expect(dynsmf_artifacts_ready(manifest)).to_equal(true)
+        val session = dynsmf_session_autoload_checked(dynsmf_session_new("system-artifacts", dynsmf_policy_default()), manifest)
+        expect(session.loaded.len()).to_equal(manifest.len())
+        for entry in manifest:
+            for symbol in entry.exports:
+                expect(dynsmf_session_symbol(session, entry.id, symbol).status).to_equal("ok")
 
-Default startup autoloads all six selected stdlib-like precompiled SMF
-libraries through the SMF dynlib facade after validating the generated
-`build/dynsmf/*.smf` artifacts. A per-id disable policy skips only the named
-entries. Unloading any selected default library makes symbol lookup stale until
-autoload reloads it with a newer generation.
+    it "disables only named startup selections independently of manifest size":
+        # @req REQ-006
+        # @req REQ-007
+        step("Reproduce the exact failure")
+        val manifest = startup_manifest()
+        val policy = dynsmf_policy_from_args_env(["--disable-dynsmf=web_renderer,tui_renderer"], "", "")
+        val session = dynsmf_session_autoload(dynsmf_session_new("system-disable", policy), manifest)
+        expect(session.loaded.len()).to_equal(manifest.len() - 2)
+        expect(session.evidence.len()).to_equal(manifest.len())
+        var idx = 0
+        while idx < manifest.len():
+            val entry = manifest[idx]
+            val row = session.evidence[idx]
+            expect(row.library_id).to_equal(entry.id)
+            if entry.id == "web_renderer" or entry.id == "tui_renderer":
+                expect(row.action).to_equal("skip")
+                expect(row.reason).to_equal("disabled")
+            else:
+                expect(row.action).to_equal("load")
+                expect(row.status).to_equal("loaded")
+            idx = idx + 1
 
-**Requirements:** doc/02_requirements/feature/low_dependency_ui_dynsmf.md
-**Requirements:** doc/02_requirements/nfr/low_dependency_ui_dynsmf.md
-**Traceability:** REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009, REQ-010, NFR-003, NFR-005, NFR-006
-**Plan:** doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md
-**Design:** doc/05_design/low_dependency_ui_dynsmf.md
-**Research:** doc/01_research/local/low_dependency_ui_dynsmf.md
+    it "records stale and reload evidence at operation-relative positions":
+        # @req REQ-008
+        step("Reproduce the exact failure")
+        val manifest = startup_manifest()
+        val loaded = dynsmf_session_autoload(dynsmf_session_new("system-reload", dynsmf_policy_default()), manifest)
+        val before = dynsmf_session_symbol(loaded, "tui_renderer", "render_tui_tree")
+        expect(before.status).to_equal("ok")
+        val unloaded = dynsmf_session_unload(loaded, "tui_renderer")
+        val stale_index = unloaded.evidence.len()
+        val with_stale = dynsmf_session_record_symbol(unloaded, "tui_renderer", "render_tui_tree")
+        expect(with_stale.evidence.len()).to_equal(stale_index + 1)
+        expect(with_stale.evidence[stale_index].library_id).to_equal("tui_renderer")
+        expect(with_stale.evidence[stale_index].action).to_equal("symbol")
+        expect(with_stale.evidence[stale_index].status).to_equal("stale")
+        expect(with_stale.evidence[stale_index].reason).to_equal("unloaded")
+        val reload_index = with_stale.evidence.len()
+        val reloaded = dynsmf_session_autoload(with_stale, manifest)
+        val after = dynsmf_session_symbol(reloaded, "tui_renderer", "render_tui_tree")
+        expect(after.status).to_equal("ok")
+        expect(after.generation).to_be_greater_than(before.generation)
+        expect(reloaded.evidence.len()).to_equal(reload_index + 1)
+        expect(reloaded.evidence[reload_index].library_id).to_equal("tui_renderer")
+        expect(reloaded.evidence[reload_index].action).to_equal("reload")
 
-## Scenarios
+    it "unloads and reloads every manifest entry and all its exports":
+        # @req REQ-009
+        step("Reject the adjacent regression")
+        val manifest = startup_manifest()
+        expect(manifest.len()).to_be_greater_than(0)
+        var session = dynsmf_session_autoload(dynsmf_session_new("system-all-reload", dynsmf_policy_default()), manifest)
+        for entry in manifest:
+            expect(entry.exports.len()).to_be_greater_than(0)
+            val before = dynsmf_session_symbol(session, entry.id, entry.exports[0])
+            expect(before.status).to_equal("ok")
+            val unloaded = dynsmf_session_unload(session, entry.id)
+            for symbol in entry.exports:
+                val stale = dynsmf_session_symbol(unloaded, entry.id, symbol)
+                expect(stale.status).to_equal("stale")
+                expect(stale.reason).to_equal("unloaded")
+            val reloaded = dynsmf_session_autoload(unloaded, manifest)
+            expect(reloaded.loaded.len()).to_equal(manifest.len())
+            for symbol in entry.exports:
+                val after = dynsmf_session_symbol(reloaded, entry.id, symbol)
+                expect(after.status).to_equal("ok")
+                expect(after.generation).to_be_greater_than(before.generation)
+            session = reloaded
 
-### low dependency UI dynSMF session lifecycle
-
-#### autoloads the six selected stdlib-like precompiled SMF libraries by default
-
-<details>
-<summary>Executable SPipe</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val manifest = dynsmf_default_manifest()
-val plans = dynsmf_build_plans(manifest)
-expect(manifest.len()).to_equal(6)
-expect(dynsmf_build_plans_ready(plans)).to_equal(true)
-expect(dynsmf_artifacts_ready(manifest)).to_equal(true)
-
-val session = dynsmf_session_autoload_checked(dynsmf_session_new("system-default", dynsmf_policy_default()), manifest)
-expect(session.loaded.len()).to_equal(6)
-expect(session.loaded[0].id).to_equal("file_io")
-expect(session.loaded[5].id).to_equal("tui_renderer")
-expect(session.evidence[0].reason).to_equal("smf_dlopen")
 ```
-
-</details>
-
-#### honors per-library dynSMF disable policy while loading other defaults
-
-<details>
-<summary>Executable SPipe</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val manifest = dynsmf_default_manifest()
-val policy = dynsmf_policy_from_args_env(["--disable-dynsmf=web_renderer,tui_renderer"], "", "")
-val session = dynsmf_session_autoload(dynsmf_session_new("system-disable", policy), manifest)
-expect(session.loaded.len()).to_equal(4)
-expect(session.evidence[3].library_id).to_equal("web_renderer")
-expect(session.evidence[3].action).to_equal("skip")
-expect(session.evidence[5].library_id).to_equal("tui_renderer")
-expect(session.evidence[5].action).to_equal("skip")
-```
-
-</details>
-
-#### unloads records stale symbol evidence and reloads with a newer generation
-
-<details>
-<summary>Executable SPipe</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val manifest = dynsmf_default_manifest()
-val loaded = dynsmf_session_autoload(dynsmf_session_new("system-reload", dynsmf_policy_default()), manifest)
-val before = dynsmf_session_symbol(loaded, "tui_renderer", "render_tui_tree")
-expect(before.status).to_equal("ok")
-
-val unloaded = dynsmf_session_unload(loaded, "tui_renderer")
-val with_stale = dynsmf_session_record_symbol(unloaded, "tui_renderer", "render_tui_tree")
-expect(with_stale.evidence[7].action).to_equal("symbol")
-expect(with_stale.evidence[7].status).to_equal("stale")
-expect(with_stale.evidence[7].reason).to_equal("unloaded")
-
-val reloaded = dynsmf_session_autoload(with_stale, manifest)
-val after = dynsmf_session_symbol(reloaded, "tui_renderer", "render_tui_tree")
-expect(after.status).to_equal("ok")
-expect(after.generation).to_be_greater_than(before.generation)
-expect(reloaded.evidence[8].action).to_equal("reload")
-```
-
-</details>
-
-#### unloads and reloads every selected default dynSMF library
-
-1. var session = dynsmf session autoload checked
-   - Expected: before.status equals `ok`
-   - Expected: stale.status equals `stale`
-   - Expected: stale.reason equals `unloaded`
-   - Expected: after.status equals `ok`
-
-
-<details>
-<summary>Executable SPipe</summary>
-
-Runnable source: 23 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val manifest = dynsmf_default_manifest()
-var session = dynsmf_session_autoload_checked(dynsmf_session_new("system-all-reload", dynsmf_policy_default()), manifest)
-val ids = ["file_io", "net_io", "render2d", "web_renderer", "gui_renderer", "tui_renderer"]
-val symbols = ["open", "connect", "draw", "render_html", "render_gui", "render_tui_tree"]
-
-var idx = 0
-while idx < ids.len():
-    val id = ids[idx]
-    val symbol = symbols[idx]
-    val before = dynsmf_session_symbol(session, id, symbol)
-    expect(before.status).to_equal("ok")
-
-    val unloaded = dynsmf_session_unload(session, id)
-    val stale = dynsmf_session_symbol(unloaded, id, symbol)
-    expect(stale.status).to_equal("stale")
-    expect(stale.reason).to_equal("unloaded")
-
-    val reloaded = dynsmf_session_autoload_checked(unloaded, manifest)
-    val after = dynsmf_session_symbol(reloaded, id, symbol)
-    expect(after.status).to_equal("ok")
-    expect(after.generation).to_be_greater_than(before.generation)
-    session = reloaded
-    idx = idx + 1
-```
-
-</details>
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-## Related Documentation
-
-- **Requirements:** [doc/02_requirements/nfr/low_dependency_ui_dynsmf.md](doc/02_requirements/nfr/low_dependency_ui_dynsmf.md)
-- **Plan:** [doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md](doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md)
-- **Design:** [doc/05_design/low_dependency_ui_dynsmf.md](doc/05_design/low_dependency_ui_dynsmf.md)
-- **Research:** [doc/01_research/local/low_dependency_ui_dynsmf.md](doc/01_research/local/low_dependency_ui_dynsmf.md)
-
-
-</details>
