@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-08-18
 - **Lane:** RUNFIX (Markdown fence tests). Runner/config are owned by other lanes — filed, not fixed.
-- **Status:** OPEN — 2 doctests left RED in
+- **Status:** FIXED 2026-11-03 — `build_accumulated_preambles` (extractor.spl) dedups top-level use/import lines; guard spec `test/01_unit/lib/test_runner/sdoctest_preamble_dedup_spec.spl`. Doc fences in import_quick_reference.md re-verification pending.
   `doc/07_guide/quick_reference/import_quick_reference.md` (fence lines 225 and 247).
 
 ## Mechanism
