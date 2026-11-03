@@ -38,3 +38,6 @@ natively by an affected compiler.
 
 ## Bug DB
 DB reconciliation pending: no `bug_db.sdn` row was added for this ID in this change.
+
+## Triage 2026-11-04 (MIR slice B)
+Compiler fix 3dc21f2b715 ("unwrap a T? record receiver before field read/store (O1)", ancestor of origin/release/1.0.0) with spec test/01_unit/compiler/codegen/native_optional_record_receiver_unwrap_spec.spl. Status: fix-implemented-verification-pending (needs a stage3-built compiler to confirm `x = x + k` accumulators; then drop the `if val present_type` workaround in mir_type_is_scalar_numeric). The census of `== nil` then `.field` sites is still not done.
