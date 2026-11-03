@@ -51,3 +51,15 @@ Cycle 8's stage2 (cbf3d3facb5 + 610110c1975) passed this same sanity gate, so
 610110c1975 (MIR erased-receiver/for-in fixes) is exonerated; the trigger was
 closure-order drift from the intervening commits exposing the latent
 first-wins ambiguity.
+
+## 2026-11-03 (lane p13): closed - fix already on release/1.0.0, regression test added
+
+`build_import_map` already prefers the extern identity (`mangled == raw`) over
+first-wins order (`imports.rs`, "Prefer an extern identity binding" block).
+Added `build_import_map_prefers_extern_identity_over_same_named_method_in_either_order`
+(`native_project/tests.rs`): both module orders must map `free -> free`.
+GREEN with the fix; sabotage (revert to `&mangled_list[0]`) is RED
+(assertion `left == right` failed). Run:
+`cargo test -p simple-compiler --lib build_import_map_prefers_extern_identity`
+(CC=clang-cl, own CARGO_TARGET_DIR). The end-to-end stage2 smoke needs a
+redeployed compiler and is not re-run here.
