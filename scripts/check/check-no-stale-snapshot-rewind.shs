@@ -65,9 +65,9 @@
 # bounded by the window size times the average commit footprint, and is
 # therefore independent of how enormous the snapshot is.
 #
-# A single-file rewind is a legitimate revert and is not interesting. FORTY is
-# a snapshot. So the file count carries the false-positive budget, not the
-# per-file test -- see FALSE POSITIVES below.
+# Broad historical loss requires --threshold files. Concentrated loss from the
+# direct parent requires two files each losing at least 50% of its additions;
+# single-file edits remain below that threshold. See FALSE POSITIVES below.
 #
 # SCOPE
 # -----
@@ -140,7 +140,8 @@
 #    large otherwise-preserved file is below the noise floor. This is the
 #    honest boundary of the signal, not a bug to tune away.
 #  * Renames are followed via `git diff -M` for the parent..commit edge only.
-#  * A clobber confined to fewer than --threshold files passes, by design.
+#  * Below --threshold, only concentrated loss from the direct parent is caught:
+#    at least two files each lose at least half of that parent's live additions.
 #  * A contributor whose own landing commit exceeds --bulk-max in-scope files is
 #    not protected. Because the window is a FIRST-PARENT walk, side-branch work
 #    is seen only through its merge commit, so a large legitimate merge is
@@ -191,6 +192,7 @@ usage() {
     cat <<EOF
 $SELF [--range A..B] [--commit SHA] [--window N] [--threshold N] [--selftest]
 Detects commits that rewind work their own parent already carried.
+Also detects >=2 files losing >=50% of the direct parent's live additions.
 Verdict is the last line of stdout: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
 EOF
 }
@@ -471,6 +473,12 @@ scan_commit() {
     [ -n "$_nflag" ] || _nflag=0
     _eff=$((_nflag - _allowed))
     [ "$_eff" -lt 0 ] && _eff=0
+    # A stale snapshot can discard a whole just-landed feature in two files.
+    # Keep the broad historical threshold, but protect concentrated loss from
+    # the direct parent. Revert exclusions have already removed their files;
+    # the explicit count allowance applies to both admission rules.
+    _parent_loss=$(awk -F'\t' -v p="$P" '$5 == p && $3 * 100 >= $4 * 50 { n++ } END { print n+0 }' "$_c/detail")
+    _parent_eff=$((_parent_loss - _allowed))
 
     # An accepted Rewind-Allowed is RECORDED for the final verdict line, not
     # just for this per-commit line — an escape that only shows up mid-scroll
@@ -490,7 +498,7 @@ scan_commit() {
         sort -t"$(printf '\t')" -k3,3nr "$_c/detail" 2>/dev/null | head -20 | while IFS="$(printf '\t')" read -r _ f l v x; do
             printf '    %s — drops %s of %s live line(s) landed by %s\n' "$f" "$l" "$v" "$(short "$_repo" "$x")"
         done
-        if [ "$_eff" -ge "$THRESHOLD" ]; then
+        if [ "$_eff" -ge "$THRESHOLD" ] || [ "$_parent_eff" -ge 2 ]; then
             sed "s|^|$C\t|" "$_c/flag" >> "$_work/findings"
         fi
     else
@@ -660,6 +668,65 @@ Rewind-Allowed: 6 reviewed rollback, see doc/08_tracking/bug/x.md" ) >/dev/null 
     if ! grep -q '^SCANERROR$' "$TMPROOT/result" 2>/dev/null; then
         echo "  [selftest FAIL] incomplete contributor pair was admitted"; _fail=$((_fail + 1))
     fi
+    # Concentrated parent loss: a two-file rewind is small but still destructive.
+    # These criteria concern only the direct parent; avoid rescoring the older
+    # fixture history on every check (particularly costly on Windows).
+    _saved_window=$WINDOW; WINDOW=1
+    F9=$_st/parent-loss; mkfixture "$F9"
+    mkdir -p "$F9/src"
+    for n in 1 2; do gen_lines 40 base > "$F9/src/f$n.spl"; done
+    fx_commit "$F9" base
+    for n in 1 2; do { gen_lines 40 base; gen_lines 20 landed; } > "$F9/src/f$n.spl"; done
+    fx_commit "$F9" "feat: parent contribution"
+    for n in 1 2; do gen_lines 40 base > "$F9/src/f$n.spl"; done
+    fx_commit "$F9" "stale two-file snapshot"
+    scan "$F9" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_REWINDS=2$' "$TMPROOT/result"; then
+        echo "  [selftest FAIL] two-file parent rewind escaped"; _fail=$((_fail + 1))
+    fi
+    # Losing one parent's file is still an ordinary focused edit.
+    git -C "$F9" reset --hard -q HEAD~1
+    gen_lines 40 base > "$F9/src/f1.spl"
+    fx_commit "$F9" "refactor: replace one file"
+    scan "$F9" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_REWINDS=0$' "$TMPROOT/result"; then
+        echo "  [selftest FAIL] focused one-file edit flagged"; _fail=$((_fail + 1))
+    fi
+    # Two substantive edits losing 40% of the parent's additions are allowed.
+    git -C "$F9" reset --hard -q HEAD~1
+    for n in 1 2; do
+        { gen_lines 40 base; gen_lines 12 landed; gen_lines 10 revised; } > "$F9/src/f$n.spl"
+    done
+    fx_commit "$F9" "refactor: revise part of both files"
+    scan "$F9" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_REWINDS=0$' "$TMPROOT/result"; then
+        echo "  [selftest FAIL] minority two-file edit flagged"; _fail=$((_fail + 1))
+    fi
+    git -C "$F9" reset --hard -q HEAD~1
+    for n in 1 2; do { gen_lines 40 base; gen_lines 10 landed; gen_lines 10 revised; } > "$F9/src/f$n.spl"; done
+    fx_commit "$F9" "stale snapshot at half-loss boundary"
+    scan "$F9" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_REWINDS=2$' "$TMPROOT/result"; then
+        echo "  [selftest FAIL] half-loss boundary escaped"; _fail=$((_fail + 1))
+    fi
+    git -C "$F9" commit --amend -q -m "reviewed two-file rollback
+
+Rewind-Allowed: 2 intentional rollback"
+    scan "$F9" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_REWINDS=0$' "$TMPROOT/result"; then
+        echo "  [selftest FAIL] two-file allowance ignored"; _fail=$((_fail + 1))
+    fi
+    git -C "$F9" reset --hard -q HEAD~1
+    _parent_sha=$(git -C "$F9" rev-parse HEAD)
+    for n in 1 2; do gen_lines 40 base > "$F9/src/f$n.spl"; done
+    fx_commit "$F9" "Revert parent
+
+This reverts commit $_parent_sha."
+    scan "$F9" "HEAD~1..HEAD"; _ran=$((_ran + 1))
+    if ! grep -q '^EV_REWINDS=0$' "$TMPROOT/result"; then
+        echo "  [selftest FAIL] two-file declared revert ignored"; _fail=$((_fail + 1))
+    fi
+    WINDOW=$_saved_window
     if [ "$_ran" -eq 0 ]; then
         echo "  [selftest FAIL] no fixture ran"
         return 1
