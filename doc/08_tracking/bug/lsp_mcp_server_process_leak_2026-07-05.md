@@ -58,3 +58,31 @@ The diagnostics risk is now fixed in source: the opt-in call uses
 cap, and a focused regression rejects restoration of `process_run_timeout`.
 This does not identify or resolve the external owner of the original 48 server
 processes; the tracked-PID EOF lifecycle gate remains pending.
+
+## 2026-11-03 current-release diagnostics correction
+
+The source audit at release `146b9c1d1619` found that `run_lsp_diagnostics`
+still called `process_run_timeout`, contrary to the earlier source-fix note.
+The correction routes that call through the existing `process_run_bounded`
+owner with its original 10-second timeout and the existing 1 MiB capture cap.
+The opt-in gate and success/error rendering remain unchanged. The runtime owner
+uses POSIX process groups or Windows job objects for descendant cleanup.
+
+`test/01_unit/app/simple_lsp_mcp/lsp_diagnostics_timeout_spec.spl` now pins the
+exact bounded call and exercises actual integer parsing instead of undefined
+example variables. The native integration gate is
+`test/02_integration/app/simple_lsp_mcp/lsp_process_lifecycle_test.cjs`:
+
+    node test/02_integration/app/simple_lsp_mcp/lsp_process_lifecycle_test.cjs --server ABSOLUTE_QUALIFIED_NATIVE_SERVER
+
+It initializes/closes stdin for three tracked server PIDs, checks empty EOF,
+checks independent clients, and drives diagnostics through a Node compiler
+fixture that records its live descendant PID. It requires timeout failure
+output, descendant termination, a subsequent successful ping, and EOF exit.
+It never scans or kills processes by name. No server path defaults to the seed.
+
+Qualification: AUTHORED_UNRUN / TEST_BLOCKED. No qualified self-hosted native
+server is available in this recovery environment. Node syntax validation and
+the missing-server rejection can run independently, but do not qualify native
+behavior. The original 48-process external launcher attribution remains open;
+this correction does not add a singleton or idle timeout.
