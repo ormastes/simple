@@ -98,12 +98,14 @@ round-trips a row through that enum writes `investigating` back; re-run `claim` 
 
 ### bug_fix_claims
 `bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|`
-- **state**: `fixing` | `released` | `done` (done means it landed; the PR number is in note)
+- **state**: `fixing` | `waiting_verify` | `released` | `done` (done means it landed; the PR number is in note)
 - **session_id**: short session/lane id, for example `a6dffc9c/p0f-1`
 - **claimed_at / heartbeat_at**: ISO 8601 UTC, for example `2026-11-02T05:40:00Z`
 - **prev_status**: main-table status before the claim (restored on release/reap)
 - **note**: quoted free text (`PR #N` for done, `abandoned (reaped)` for reaped)
-- Multiple rows per bug are allowed (history is kept). Holder rule, identical in the script and bug-gen: the earliest `fixing` row with `claimed_at` strictly after the newest `released`/`done` row; with none, the newest row is the current state. A stale takeover first appends a `released` (session `takeover`) row.
+- Multiple rows per bug are allowed (history is kept). Holder rule, identical in the script and bug-gen: the earliest `fixing` row with `claimed_at` strictly after the newest non-fixing row; with none, the newest row is the current state. A stale takeover first appends a `released` (session `takeover`) row.
+- A `waiting_verify` row is an ownership handoff event: `session_id` identifies who submitted it, `claimed_at`/`heartbeat_at` record the transition time, and `note` names the required verification. The prior fixing row retains the original start time. It sets main status `fix-implemented-verification-pending` and releases exclusive ownership.
+- The writer lock records its shell PID; it is never evicted automatically by age or an observed dead PID. Recovery requires all writers to be stopped before manual lock removal. `BUG_CLAIM_LOCK_RETRIES` controls bounded retry attempts (default 60; 0 is useful for lock-contention fixtures).
 - A `fixing` claim with `max(claimed_at, heartbeat_at)` older than 24 h is STALE: it may be
   taken over, and `reap` reverts it. Closed bugs need no claim.
 
@@ -111,6 +113,9 @@ round-trips a row through that enum writes `investigating` back; re-run `claim` 
 | Command | Effect |
 |---------|--------|
 | `claim <bug_id> <session_id> [note]` | status=fixing + claim row; exit 3 if another live session holds it; exit 4 if closed/unknown |
+| `wait-verify <bug_id> <session_id> <required-check>` | Holder-only transition to `fix-implemented-verification-pending`, records owner/check/time in a `waiting_verify` row |
+| `check <bug_id>` | Read-only validation of fixing/pending owner and timestamp links; exit 1 when required details are missing |
+| `environment <bug_id> <found-env> <repro-env> <unknown\|candidate\|verified> <evidence>` | Append observed/candidate environment metadata to `bug_environments`; found or verified environments require evidence; missing labels remain unknown |
 | `heartbeat <bug_id> <session_id>` | refresh `heartbeat_at` (call at least every 2 h) |
 | `release <bug_id> <session_id>` | state=released, status back to `prev_status` |
 | `done <bug_id> <session_id> <pr>` | state=done, status=`fixed`, note `PR #<pr>` |
