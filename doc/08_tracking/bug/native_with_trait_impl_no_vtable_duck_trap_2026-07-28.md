@@ -115,6 +115,16 @@ native builds and is tracked here.
 
 **Revalidated 2026-11-02: still plausible because source-side fix landed for the Draw IR executor; compiler gap OPEN; no merged fix commit with a passing regression is cited in this doc.**
 
+## Compiler gap FIXED (verified 2026-11-03)
+
+Fix `6da31428949` (`record_class_with_trait_impls`,
+`src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs`)
+records `class X with Trait` conformance as a HirImpl exactly like
+`impl Trait for X`, so the trait is no longer impl-less and the
+DUCK_DISPATCH_UNSUPPORTED_SLOT trap is not chosen. Regression:
+`src/compiler_rust/compiler/tests/imported_trait_vtable_attribution.rs` and
+`test/native/cross_unit_trait_dispatch/`. Limit: a class naming two traits in
+`with` keeps duck-typed behaviour (one vtable header per object).
 ## 2026-11-03 (lane p13): compiler gap partly fixed - verification-pending
 
 `6da31428949` (HIR records a trait impl/vtable for `class X with Trait`; imports.rs

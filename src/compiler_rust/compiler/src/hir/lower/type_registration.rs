@@ -59,6 +59,17 @@ impl Lowerer {
         if !defaults.is_empty() {
             self.struct_field_defaults.insert(c.name.clone(), defaults);
         }
+        let type_names: std::collections::HashMap<String, String> = c
+            .fields
+            .iter()
+            .filter_map(|f| match &f.ty {
+                ast::Type::Simple(n) => Some((f.name.clone(), n.clone())),
+                _ => None,
+            })
+            .collect();
+        if !type_names.is_empty() {
+            self.struct_field_type_names.insert(c.name.clone(), type_names);
+        }
 
         // F1/S3 — carry the declaration KIND the parser knew into HIR. `class`
         // decls arrive with `is_value_type == false`; a `struct … with Mixin`
@@ -181,6 +192,17 @@ impl Lowerer {
             .collect();
         if !defaults.is_empty() {
             self.struct_field_defaults.insert(s.name.clone(), defaults);
+        }
+        let type_names: std::collections::HashMap<String, String> = s
+            .fields
+            .iter()
+            .filter_map(|f| match &f.ty {
+                ast::Type::Simple(n) => Some((f.name.clone(), n.clone())),
+                _ => None,
+            })
+            .collect();
+        if !type_names.is_empty() {
+            self.struct_field_type_names.insert(s.name.clone(), type_names);
         }
 
         let mut fields = Vec::new();

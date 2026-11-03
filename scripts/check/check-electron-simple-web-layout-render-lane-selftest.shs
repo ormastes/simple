@@ -1,0 +1,81 @@
+#!/bin/sh
+# Subprocess contract tests for the real gate. These do NOT render pixels or
+# establish browser parity: the protocol fixture stops before artifact capture.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+mkdir -p "$WORK/repo/scripts/check" "$WORK/bin"
+GATE=check-electron-simple-web-layout-bitmap-evidence.shs
+cp "${BITMAP_GATE_UNDER_TEST:-$ROOT/scripts/check/$GATE}" "$WORK/repo/scripts/check/$GATE"
+cp "$ROOT/scripts/check/validate-electron-simple-web-layout-proof.js" "$WORK/repo/scripts/check/"
+cat > "$WORK/bin/simple-fixture" <<'FIXTURE'
+#!/bin/sh
+if [ "$1" = --version ]; then
+    echo 'self-hosted protocol fixture (not rendering evidence)'
+    exit 0
+fi
+printf '%s\n' "$SIMPLE_BROWSER_RENDER_LANE" > "$CALL_MARKER"
+[ "$1" = run ] || exit 91
+grep -Fq 'use app.browser.render_lane.{browser_render_html_to_pixel_array, browser_render_lane_selected}' "$2" || exit 92
+grep -Fq 'val pixels = browser_render_html_to_pixel_array(html, WIDTH, HEIGHT)' "$2" || exit 93
+grep -Fq 'print "render_lane={browser_render_lane_selected()}"' "$2" || exit 94
+if [ "$FIXTURE_MODE" = mismatch ]; then
+    echo render_lane=unexpected
+elif [ "$FIXTURE_MODE" != omit ]; then
+    echo "render_lane=${SIMPLE_BROWSER_RENDER_LANE:-vulkan}"
+fi
+# Deliberately refuse any rendering success; the real gate must reject this.
+echo simple_status=fail
+exit 0
+FIXTURE
+cat > "$WORK/bin/electron-fixture" <<'FIXTURE'
+#!/bin/sh
+echo unexpected-electron-capture >> "$CALL_MARKER"
+exit 95
+FIXTURE
+chmod +x "$WORK/bin/"*
+count=0
+run_case() {
+    label=$1 lane=$2 mode=$3 expected_code=$4 expected_reason=$5 invoked=$6
+    dir="$WORK/$label"
+    mkdir -p "$dir"
+    set +e
+    (
+        export SIMPLE_BIN="$WORK/bin/simple-fixture"
+        export ELECTRON_BIN="$WORK/bin/electron-fixture"
+        export BUILD_DIR="$dir/build" REPORT_PATH="$dir/report.md"
+        export CALL_MARKER="$dir/called" FIXTURE_MODE="$mode"
+        if [ "$lane" = UNSET ]; then
+            unset SIMPLE_BROWSER_RENDER_LANE
+        else
+            export SIMPLE_BROWSER_RENDER_LANE="$lane"
+        fi
+        sh "$WORK/repo/scripts/check/$GATE"
+    ) > "$dir/output" 2>&1
+    code=$?
+    set -e
+    if [ "$code" != "$expected_code" ] || ! grep -Fqx "electron_simple_web_layout_reason=$expected_reason" "$dir/output"; then
+        cat "$dir/output"
+        echo "FAIL: $label returned $code, expected $expected_code / $expected_reason"
+        exit 1
+    fi
+    if [ "$invoked" = yes ]; then
+        expected_lane=$lane
+        [ "$lane" != UNSET ] || expected_lane=
+        [ "$(cat "$dir/called")" = "$expected_lane" ] || { echo "FAIL: $label dispatch/capture"; exit 1; }
+    else
+        [ ! -e "$dir/called" ] || { echo "FAIL: $label invoked rendering"; exit 1; }
+    fi
+    count=$((count + 1))
+}
+for lane in live blink vulkan; do
+    run_case "$lane" "$lane" matching 1 simple-layout-status-failed yes
+done
+run_case unknown forbidden matching 1 invalid-render-lane no
+run_case unset UNSET matching 1 simple-layout-status-failed yes
+run_case empty '' matching 1 simple-layout-status-failed yes
+run_case mismatch blink mismatch 1 simple-render-lane-mismatch-failed yes
+run_case omitted blink omit 1 simple-render-lane-mismatch-failed yes
+run_case default_mismatch UNSET mismatch 1 simple-render-lane-mismatch-failed yes
+echo "PASS: $count bitmap gate lane contract cases (no rendering/parity claim)"

@@ -8,6 +8,7 @@ use app.io.mod.{file_read}
 val ORCHESTRATION = "src/compiler/80.driver/driver_orchestration.spl"
 val LOWERING = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
 val MIR_LOWERING = "src/compiler/80.driver/driver_pipeline_lowering.spl"
+val STAGE_HIR = "src/compiler/80.driver/driver_stage_hir_v1.spl"
 
 fn between(source: text, start_marker: text, end_marker: text) -> text:
     val start = source.index_of(start_marker)
@@ -19,7 +20,7 @@ fn between(source: text, start_marker: text, end_marker: text) -> text:
 describe "Phase 3 native tuple verdict recovery":
     it "should keep the streaming owner path off aggregate tuple transport":
         step("Read the Phase 3 routing and lowering owners")
-        val orchestration = file_read(ORCHESTRATION)
+        val orchestration = file_read(STAGE_HIR)
         val lowering = file_read(LOWERING)
         val streaming = between(
             lowering,
@@ -38,14 +39,16 @@ describe "Phase 3 native tuple verdict recovery":
 
     it "should consume the retained owner verdict without inventing recovery success":
         step("Read the retained owner verdict route")
-        val orchestration = file_read(ORCHESTRATION)
+        val orchestration = file_read(STAGE_HIR)
 
         step("Check direct verdict transport and absence of success recovery")
         expect(orchestration).to_contain("analyze_ok_effective = self.lower_and_check_retained_owner_impl()")
         expect(orchestration.contains("phase 3 recovered zeroed native tuple verdict")).to_be(false)
         expect(orchestration.contains("analyze_ok_effective = true")).to_be(false)
-        expect(orchestration).to_contain("if not analyze_ok_effective:")
-        expect(orchestration).to_contain(
+        expect(file_read(ORCHESTRATION).contains("phase 3 recovered zeroed native tuple verdict")).to_be(false)
+        expect(file_read(ORCHESTRATION)).to_contain("var analyze_ok_effective = self.stage_lower_hir_run_v1()")
+        expect(file_read(ORCHESTRATION)).to_contain("if not analyze_ok_effective:")
+        expect(file_read(ORCHESTRATION)).to_contain(
             "self.analyze_collections_before_mir(analyze_ok_effective)"
         )
 
@@ -66,6 +69,20 @@ describe "Phase 3 native tuple verdict recovery":
         expect(legacy.contains("val summary_ctx = self.ctx")).to_be(false)
         expect(legacy).to_contain("me lower_and_check_retained_owner_impl() -> bool:")
         expect(legacy).to_contain("self.ctx.error_count_value == 0")
+
+    it "should never return an aggregate tuple from the boolean retained owner":
+        step("Read the retained owner body")
+        val lowering = file_read(LOWERING)
+        val owner = between(
+            lowering,
+            "    me lower_and_check_retained_owner_impl() -> bool:",
+            "    fn lower_to_hir_impl() -> (CompileContext, bool):"
+        )
+
+        step("Check every early exit yields only the scalar verdict")
+        expect(owner.len()).to_be_greater_than(0)
+        expect(owner.contains("return (self.ctx,")).to_be(false)
+        expect(owner).to_contain("return streamed_ok")
 
     it "should read the MIR verdict directly from the retained context owner":
         step("Read the MIR lowering owner")

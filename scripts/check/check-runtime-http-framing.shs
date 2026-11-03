@@ -3,20 +3,24 @@
 # responses, no external services. POSIX only (the core-C HTTP client is POSIX).
 # Builds src/runtime/test/rt_http_framing_selfcheck.c (client over the real
 # runtime_native.c) and rt_http_framing_server.c (one-shot loopback server),
-# then runs 33 cases x write strides 1/7/4096 = 99 runs.
+# Default: 33 framing cases x write strides 1/7/4096 = 99 runs.
+# --matrix transfer-coding: 19 coding-list cases x those strides = 57 runs.
 # Valid cases: exit 0 and stdout byte-equal. Rejected cases: exit 2, empty
 # stdout, non-empty stderr. Last stdout line: cases=N passed=P failed=F.
-# Usage: sh scripts/check/check-runtime-http-framing.shs --output DIR
+# Usage: sh scripts/check/check-runtime-http-framing.shs --output DIR [--matrix transfer-coding]
 # Exit: 0 all pass / 1 failures / 2 usage or build error.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=
+MATRIX=framing
 while [ $# -gt 0 ]; do
     case "$1" in
         --output) OUT=$2; shift 2 ;;
+        --matrix) MATRIX=$2; shift 2 ;;
         *) echo "ERROR - unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+case "$MATRIX" in framing|transfer-coding) ;; *) echo 'ERROR - invalid matrix' >&2; exit 2 ;; esac
 [ -n "$OUT" ] || { echo "ERROR - --output DIR required" >&2; exit 2; }
 [ ! -e "$OUT" ] || { echo "ERROR - output exists: $OUT" >&2; exit 2; }
 mkdir -p "$OUT" || exit 2
@@ -44,6 +48,7 @@ add_case() {
     if [ "$4" = REJECT ]; then : > "$W/$1.reject"; else printf "$4" > "$W/$1.expect"; fi
 }
 CL='Content-Length: '; TE='Transfer-Encoding: chunked'
+if [ "$MATRIX" = framing ]; then
 add_case length-binary "${CL}4" "$BIN" "$BIN"
 add_case length-empty "${CL}0" '' ''
 add_case length-short "${CL}5" "$BIN" REJECT
@@ -75,6 +80,38 @@ while [ "$end" -lt 14 ]; do
     : > "$W/$name.reject"
     end=$((end + 1))
 done
+else
+    # RFC 9112 sections 6.1/6.3: codings are ordered, never repeated chunked.
+    # RFC 9110 section 5.6.1.2: tolerate reasonable empty list elements.
+    PAYLOAD="abcdef0123456789${BIN}"
+    CHUNK="14\r\n${PAYLOAD}\r\n0\r\n\r\n"
+    add_case te-case-ows 'tRaNsFeR-EnCoDiNg:\tChUnKeD\t' "$CHUNK" "$PAYLOAD"
+    add_case te-empty-elements 'Transfer-Encoding: , chunked, ,' "$CHUNK" "$PAYLOAD"
+    add_case te-empty-field-then-chunked 'Transfer-Encoding:\r\nTransfer-Encoding: chunked' "$CHUNK" "$PAYLOAD"
+    add_case te-duplicate-list 'Transfer-Encoding: chunked, chunked' "$CHUNK" REJECT
+    add_case te-duplicate-fields 'Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked' "$CHUNK" REJECT
+    add_case te-duplicate-case 'Transfer-Encoding: CHUNKED, chunked' "$CHUNK" REJECT
+    add_case te-missing-comma 'Transfer-Encoding: chunked chunked' "$CHUNK" REJECT
+    add_case te-empty 'Transfer-Encoding:' "$PAYLOAD" REJECT
+    add_case te-empty-list 'Transfer-Encoding: , ,' "$PAYLOAD" REJECT
+    add_case te-unknown 'Transfer-Encoding: madeup' "$PAYLOAD" REJECT
+    add_case te-parameter 'Transfer-Encoding: chunked; foo=bar' "$CHUNK" REJECT
+    add_case te-cl-after 'Transfer-Encoding: chunked\r\nContent-Length: 20' "$CHUNK" REJECT
+    add_case te-cl-before 'Content-Length: 20\r\nTransfer-Encoding: chunked' "$CHUNK" REJECT
+    add_case te-cl-malformed 'Transfer-Encoding: chunked\r\nContent-Length: invalid' "$CHUNK" REJECT
+    add_case te-cl-overflow 'Transfer-Encoding: chunked\r\nContent-Length: 18446744073709551616' "$CHUNK" REJECT
+    # Valid gzip transfer coding is unsupported by this owner; do not return
+    # undecoded transport bytes as successful application content.
+    printf "$PAYLOAD" | gzip -n > "$W/compressed"
+    add_case te-gzip 'Transfer-Encoding: gzip' '' REJECT
+    cp "$W/compressed" "$W/te-gzip.body"
+    add_case te-gzip-chunked 'Transfer-Encoding: gzip, chunked' '' REJECT
+    { printf '%x\r\n' "$(wc -c < "$W/compressed")"; cat "$W/compressed"; printf '\r\n0\r\n\r\n'; } > "$W/te-gzip-chunked.body"
+    add_case te-gzip-split 'Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked' '' REJECT
+    cp "$W/te-gzip-chunked.body" "$W/te-gzip-split.body"
+    add_case te-chunked-gzip 'Transfer-Encoding: chunked, gzip' '' REJECT
+    printf "$CHUNK" | gzip -n > "$W/te-chunked-gzip.body"
+fi
 
 RESULTS="$OUT/results.txt"; : > "$RESULTS"
 total=0; failed=0
@@ -84,6 +121,7 @@ while read -r name; do
         rm -f "$W/port"
         { printf 'HTTP/1.1 200 OK\r\n'; cat "$W/$name.hdr"
           printf '\r\nConnection: close\r\n\r\n'; cat "$W/$name.body"; } > "$W/wire"
+        cp "$W/wire" "$W/$name.wire"
         "$SERVER" "$W/port" "$stride" "$W/wire" &
         spid=$!
         i=0
@@ -112,7 +150,8 @@ while read -r name; do
 done < "$CASES"
 
 for f in "$ROOT/src/runtime/runtime_native.c" "$ROOT/src/runtime/test/rt_http_framing_selfcheck.c" \
-         "$ROOT/src/runtime/test/rt_http_framing_server.c" "$CLIENT"; do
+         "$ROOT/src/runtime/test/rt_http_framing_server.c" "$ROOT/scripts/check/check-runtime-http-framing.shs" "$CLIENT"; do
+    [ "$f" = "$CLIENT" ] || cp "$f" "$OUT/$(basename "$f")"
     echo "SHA256 $(sha256sum "$f" | cut -d' ' -f1) $f"
 done
 grep '^FAIL' "$RESULTS" | head -20
