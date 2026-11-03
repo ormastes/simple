@@ -146,3 +146,7 @@ compile-time checker after measuring 286 candidate sites and 336 enum names
 declared more than once. Any fix here deserves the same measurement first.
 `src/compiler/30.types/bidirectional_checking.spl` is where argument agreement
 lives; PR #1077 is open on the sibling `type_infer/*` files.
+
+## 2026-11-03 (lane-bugs-a)
+
+Fix landed in seed via PR #6026 (interpreter_patterns.rs, unit test user_enum_variant_pattern_looks_through_option_some). Status fix-implemented-verification-pending: needs a seed rebuild including #6026, then run test/01_unit/compiler/codegen/cross_engine_silent_divergence_spec.spl.

@@ -1,0 +1,114 @@
+#!/bin/sh
+# check-test-setup-cost-budget.shs — pin the fixed setup cost of `simple test`.
+#
+# Defect this guards:
+#   doc/08_tracking/bug/test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17.md
+#   Every `simple test <spec>` pays a fixed setup cost before the spec body runs
+#   (Linux daemon path: ~310s measured 2026-08-17). Nothing noticed drift.
+#
+# Windows remeasure 2026-11-03 (seed bin/simple.exe v1.0.0-rc.1, light daemon
+# skipped): test/01_unit/_mcdc_probe/plain_ok_spec.spl = 8.5s wall, spec body
+# 656ms, so fixed setup ~7.8s. Budget 30s = ~3.5x margin for load; override with
+# TEST_SETUP_BUDGET_S. A flaky perf gate gets disabled, so keep it loose.
+#
+# Rule: the run must print a `SPEC FILE VERDICT:` line AND finish in budget.
+# Exit status is read on the line after the invocation, never through a pipe.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — ...   exit 0
+#   FAIL  — ...   exit 1
+#   ERROR — nothing was checked   exit 2
+#
+# Usage: sh scripts/check/check-test-setup-cost-budget.shs [--selftest-only]
+#        [--spec PATH] [--simple-bin PATH]
+# Peak RSS is not measured here (n/a in this guard; sample externally).
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SPEC_DEFAULT="test/01_unit/_mcdc_probe/plain_ok_spec.spl"
+BUDGET=${TEST_SETUP_BUDGET_S:-30}
+SPEC=$SPEC_DEFAULT
+SIMPLE_BIN=""
+SELFTEST_ONLY=0
+VERDICT_RE='SPEC FILE VERDICT:'
+
+# time_test <bin> <spec> <budget> -> "<elapsed> <rc> <verdict_seen>"
+time_test() {
+    tt_out=$(mktemp)
+    tt_start=$(date +%s)
+    timeout "$3" "$1" test "$2" >"$tt_out" 2>&1
+    tt_rc=$?
+    tt_end=$(date +%s)
+    if grep -aq "$VERDICT_RE" "$tt_out"; then tt_v=1; else tt_v=0; fi
+    rm -f "$tt_out"
+    echo "$((tt_end - tt_start)) $tt_rc $tt_v"
+}
+
+# judge <elapsed> <rc> <verdict> <budget> -> PASS | FAIL:<reason>
+judge() {
+    if [ "$2" -eq 124 ]; then echo "FAIL:exceeded ${4}s budget"; return 0; fi
+    if [ "$3" -ne 1 ]; then echo "FAIL:no SPEC FILE VERDICT line (rc=$2)"; return 0; fi
+    if [ "$1" -gt "$4" ]; then echo "FAIL:${1}s over ${4}s budget"; return 0; fi
+    echo PASS
+}
+
+selftest() {
+    st_dir=$(mktemp -d)
+    st_fail=0
+    printf '#!/bin/sh\necho "SPEC FILE VERDICT: PASS"\nexit 0\n' >"$st_dir/fast"
+    printf '#!/bin/sh\nexit 0\n' >"$st_dir/silent"
+    printf '#!/bin/sh\nsleep 5\necho "SPEC FILE VERDICT: PASS"\nexit 0\n' >"$st_dir/slow"
+    chmod +x "$st_dir/fast" "$st_dir/silent" "$st_dir/slow"
+    for st_c in fast:PASS silent:FAIL slow:FAIL; do
+        st_n=${st_c%%:*}
+        st_want=${st_c##*:}
+        st_r=$(time_test "$st_dir/$st_n" x.spl 2)
+        st_got=$(judge $st_r 2)
+        case "$st_got" in "$st_want"*) ;; *)
+            echo "selftest FAIL: stub $st_n expected $st_want got $st_got"; st_fail=1 ;;
+        esac
+    done
+    rm -rf "$st_dir"
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    echo "selftest: 3 fixture(s) passed"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --spec) SPEC=$2; shift 2 ;;
+        --simple-bin) SIMPLE_BIN=$2; shift 2 ;;
+        --selftest-only) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1"; echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+selftest
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 3 fixture(s) checked, selftest only, no setup cost measured"
+    exit 0
+fi
+
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$SIMPLE_BIN" ]; then
+    if [ -f bin/simple.exe ]; then SIMPLE_BIN=bin/simple.exe; else SIMPLE_BIN=bin/simple; fi
+fi
+if [ ! -f "$SPEC" ]; then
+    echo "missing spec: $SPEC"; echo "ERROR — nothing was checked"; exit 2
+fi
+if [ ! -f "$SIMPLE_BIN" ]; then
+    echo "no simple binary at: $SIMPLE_BIN"; echo "ERROR — nothing was checked"; exit 2
+fi
+
+R=$(time_test "$SIMPLE_BIN" "$SPEC" "$BUDGET")
+ELAPSED=$(echo "$R" | cut -d' ' -f1)
+RC=$(echo "$R" | cut -d' ' -f2)
+V=$(echo "$R" | cut -d' ' -f3)
+J=$(judge "$ELAPSED" "$RC" "$V" "$BUDGET")
+case "$J" in
+    PASS) echo "PASS — 1 spec(s) checked, test setup took ${ELAPSED}s of a ${BUDGET}s budget (rc=$RC, peak RSS n/a)"; exit 0 ;;
+    *) echo "FAIL — 1 spec(s) checked, ${J#FAIL:} on $SPEC (${ELAPSED}s, rc=$RC)"; exit 1 ;;
+esac
