@@ -143,3 +143,33 @@ a `7200s` timeout:
 
 ## Lane note 2026-11-03 (wl01 lane)
 Deferred: the existing row records a source repair/workaround already exists and needs a rebuilt producer plus native requalification run; no native-build producer is runnable on this lane.
+
+## Lane note 2026-11-03 (comp-entrymeth2): interpreter harness does NOT reproduce; locus premise refuted
+
+Spec: `test/01_unit/compiler/50.mir/entry_module_own_class_method_with_import_spec.spl`
+(HIR+MIR lowering of a 2-module closure, entry class `Widget` with instance
+`bump` and `static fn stat`, entry `use`-imports the helper). Run with the seed
+(`bin/simple.exe test <spec>`): 3/3 pass. Control (no import) passes; the import
+case reports NO `unresolved method call` with providers `[helper, main]` or
+`[helper]`; the non-vacuity case (`w.nope_missing(1)`) does report it, so the
+harness would see the defect if it were present.
+
+Consequences:
+- The failure is NOT in source-level symbol registration that this harness
+  exercises (`SymbolTable.define` owner-qualified `Type::method` rows,
+  `lookup_method_in_type_raw`, `struct_method_syms` from `module.impls`). Those
+  resolve the entry class's own instance method in a multi-module lowering.
+- `35.semantics/resolve_strategies.spl:try_instance_method` is not the reaching
+  path: the failing arm is MIR `MethodResolution.Unresolved` recovery in
+  `50.mir/_MirLoweringExpr/method_calls_literals.spl` (~4487-4797).
+- Remaining suspects are native-driver-only: the `--entry` closure lowering in
+  `80.driver/driver_pipeline_lowering.spl` (ambient bootstrap branch of
+  `lower_module` returns before the `module.impls` -> `struct_method_syms`
+  registration at `module_lowering.spl:~3225`), and native-only corruption of the
+  recovery inputs (`struct_value_syms`, discriminant garbage 1337030607).
+- Status: still OPEN, no fix landed. Verification needs a native/stage3 run:
+  `test/fixtures/compiler/native_entry_own_class_methods/` (expected
+  `w.n=42`; known-bad `unresolved method call: bump`) with
+  `SIMPLE_MIR_METHOD_CALL_TRACE`-style `[mir-method-call]` probes enabled, and
+  check whether `struct_method_syms["Widget::bump"]` exists when the entry is
+  lowered with `SIMPLE_BOOTSTRAP=1`.
