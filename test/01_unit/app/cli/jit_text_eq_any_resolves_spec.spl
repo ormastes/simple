@@ -1,0 +1,31 @@
+"""
+# JIT resolves `rt_text_eq_any` (no whole-module interpreter fallback)
+
+Regression guard for
+doc/08_tracking/bug/jit_silent_interpreter_fallback_on_unresolved_extern_2026-11-03.md.
+Text `==` lowers to `rt_text_eq_any`. The seed had no JIT-resolvable symbol for
+it, so the module was de-JITted to the interpreter. Under `SIMPLE_JIT_STRICT=1`
+that now must not report `rt_text_eq_any` as unresolved.
+
+Verification-pending: needs a seed built with the Rust `rt_text_eq_any`
+(runtime/src/value/collections.rs).
+
+@manual_section cli/run_exit_codes
+"""
+
+use std.spec.*
+use std.io_runtime.{shell, file_write}
+
+val PROBE_DIR = "build/probe_jit_text_eq_any"
+val PROBE = "{PROBE_DIR}/text_eq_probe.spl"
+
+fn write_probe():
+    shell("mkdir -p {PROBE_DIR}")
+    file_write(PROBE, "fn same(a: text, b: text) -> bool:\n    a == b\n\nfn main():\n    print(same(\"abc\", \"abc\"))\n")
+
+describe "SIMPLE_JIT_STRICT=1 with text equality":
+    it "does not report rt_text_eq_any as an unresolved external":
+        write_probe()
+        val r = shell("env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 timeout 60 bin/simple run {PROBE} 2>&1")
+        val out = r.stdout + r.stderr
+        assert_equal(out.contains("unresolved external symbol 'rt_text_eq_any'"), false)
