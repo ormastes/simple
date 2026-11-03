@@ -1,0 +1,81 @@
+# Purpose and audience: compiler engineers owning multi-module MIR method dispatch.
+# @req REQ-SSPEC-COMPILER
+"""
+# An entry module keeps its OWN class's instance methods when it has a `use`
+
+Regression spec for native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17:
+`w.bump(1)` on a class declared in the entry module failed with
+`unresolved method call: bump` under multi-module lowering whenever the entry
+module had a `use` import (static methods resolved; no-import entry passed).
+Native repro: test/fixtures/compiler/native_entry_own_class_methods/.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec.{describe, it, expect, step}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val entry_helper_src = "pub fn helper_value() -> i64:\n    41\n"
+
+val entry_class_body = "class Widget:\n    n: i64\n\n    me bump(k: i64):\n        self.n = self.n + k\n\n    static fn stat(a: i64) -> i64:\n        a\n\nfn main():\n    var w = Widget(n: HELPER)\n    w.bump(1)\n    val s = Widget.stat(2)\n"
+
+fn entry_src(with_import: bool, extra: text) -> text:
+    if with_import:
+        return "use lib.helper.\{helper_value\}\n\n" + entry_class_body.replace("HELPER", "helper_value()") + extra
+    entry_class_body.replace("HELPER", "41") + extra
+
+fn entry_lower_errors(with_import: bool, extra: text) -> text:
+    val log = Logger(level: 0)
+    val main_src = entry_src(with_import, extra)
+    val helper_ast = parse_full_frontend(entry_helper_src, "lib/helper.spl", "lib.helper", log)
+    val main_ast = parse_full_frontend(main_src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.helper"] = helper_ast
+    modules["app.main"] = main_ast
+    val sources = [SourceFile(path: "lib/helper.spl", content: entry_helper_src, module_name: "lib.helper"), SourceFile(path: "app/main.spl", content: main_src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var helper_lowering = hirlowering_for_module("lib.helper", surfaces)
+    var main_lowering = hirlowering_for_module("app.main", surfaces)
+    val helper_hir = helper_lowering.lower_module(helper_ast)
+    val main_hir = main_lowering.lower_module(main_ast)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["lib.helper"] = helper_hir
+    hir_modules["app.main"] = main_hir
+    var mir_lowering = MirLowering.new(main_hir.symbols)
+    for module_key in hir_modules.keys():
+        mir_lowering.prescan_module_struct_names(hir_modules, module_key)
+    mir_lowering.lower_module(main_hir, [helper_hir])
+    var errors = ""
+    for e in main_lowering.errors:
+        errors = errors + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        errors = errors + "mir: " + e.message + "\n"
+    errors
+
+describe "entry module own class methods in a 2-module closure":
+    it "resolves instance and static methods when the entry has no import":
+        step("Control: passes before and after the fix")
+        expect(entry_lower_errors(false, "")).to_equal("")
+
+    it "resolves instance and static methods when the entry has a use import":
+        step("Known-bad before the fix: unresolved method call: bump")
+        val errors = entry_lower_errors(true, "")
+        expect(errors.contains("unresolved method call")).to_equal(false)
+        expect(errors).to_equal("")
+
+    it "harness detects a genuinely missing method (non-vacuity)":
+        step("A call to an undeclared method must still be reported")
+        val errors = entry_lower_errors(true, "    w.nope_missing(1)\n")
+        expect(errors.contains("unresolved method call")).to_equal(true)
