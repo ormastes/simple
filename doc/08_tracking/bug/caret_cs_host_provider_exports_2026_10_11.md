@@ -1,6 +1,6 @@
 # CS host provider facade exports
 
-Status: OPEN; changed-owner native qualification pending.
+Status: OPEN; changed-owner native qualification pending. Fix-implemented-verification-pending (2026-11-03): repro = native-build test/fixtures/lib/caret_cs_host_alias/main.spl with a stage3 binary and run; expect missing-file read Err and SoSix terminal write exit 0. Not runnable on the seed interpreter.
 
 Actual4cca CS closure reports missing print_raw and positionedfile names. CanonicalSoSix rawoutput alias and asyncIO reexports bind the existing syncIO positioned providers. Hostfixture then exposed an existing syncIO selfreexport for thread_sleep_ms without an imported provider. Canonical concurrent.thread.thread_sleep supplies the alias; concurrent.thread has no imports, so this adds no IOcycle. No appRT access or host implementation changed.
 

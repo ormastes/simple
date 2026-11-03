@@ -1,6 +1,6 @@
 # Caret essential leaf provider gaps
 
-Status: OPEN; source repair and regressions AUTHORED_UNEXECUTED.
+Status: OPEN; original leaf gaps (file_read, print_raw, manager adapters) verified 2026-11-03: test/01_unit/app/llm_caret/essential_leaf_provider_spec.spl 3/3 and test/01_unit/lib/smtp/recipient_array_type_spec.spl 3/3 passing. Remaining enum payload, local binding and collection method closure failures keep this open.
 
 Actual aa404/a0 Caret closure HIR errors: helpers_compat imports absent std.io.file_read; tui_io calls unbound print_raw; pane_team imports three functions not declared by multi_caret_manager. Retained evidence: /home/ormastes/simple-phase4-web-a0-parallel-20261010/caret/build/failure-summary.json. This is a source provider repair, not permission to suppress diagnostics.
 
