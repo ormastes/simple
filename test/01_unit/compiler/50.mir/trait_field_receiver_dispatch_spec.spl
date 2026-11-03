@@ -1,0 +1,58 @@
+# Purpose and audience: compiler engineers who own HIR method-call lowering
+# and MIR trait (vtable) dispatch.
+# @req REQ-SSPEC-COMPILER
+# Tracks: doc/08_tracking/bug/native_codegen_trait_field_receiver_erased_ambiguous_2026_10_26.md
+"""
+# Trait-typed field receiver dispatches through the trait
+
+`self.store.read(k)` where `store: Store` is a TRAIT used to lower to a bare
+`read` call (trait types alias to ANY in HIR and only typed locals carried the
+declared trait owner), so native codegen saw every same-named `*.read` as a
+candidate (AMBIGUOUS-METHOD) and could bind the wrong impl. The seed now binds
+the field to a synthetic local carrying the declared trait owner; the Rust
+guard is `hir/lower/tests/trait_field_receiver_tests.rs`. This spec pins the
+observable behaviour: each adapter reaches ITS store's impl, never a sibling
+`read`.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+# @tag:traits
+
+use std.spec.{describe, it, expect}
+
+trait FieldStore:
+    fn read(key: i64) -> i64
+
+class DiskStore:
+    var base: i64
+
+impl FieldStore for DiskStore:
+    fn read(key: i64) -> i64:
+        self.base + key
+
+class NetStore:
+    var base: i64
+
+impl FieldStore for NetStore:
+    fn read(key: i64) -> i64:
+        self.base * key
+
+class UnrelatedReader:
+    var n: i64
+    fn read(key: i64) -> i64:
+        -1
+
+class StoreAdapter:
+    var store: FieldStore
+    fn get(key: i64) -> i64:
+        self.store.read(key)
+
+describe "trait-typed field receiver":
+    it "dispatches self.field.method to the field's own trait impl":
+        val disk = StoreAdapter(store: DiskStore(base: 100))
+        val net = StoreAdapter(store: NetStore(base: 3))
+        expect(disk.get(5)).to_equal(105)
+        expect(net.get(5)).to_equal(15)
+        expect(UnrelatedReader(n: 0).read(5)).to_equal(-1)
