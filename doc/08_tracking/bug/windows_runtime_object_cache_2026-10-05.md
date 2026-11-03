@@ -39,3 +39,5 @@ time on hits; whole source admission and linking remain separate bottlenecks.
 Live bootstrap source snapshots and caches were not changed by this work.
 
 **Revalidated 2026-11-02: still plausible because source implementation prepared; native correctness, concurrency, memory,; no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-03 (rtobjcache lane):** implementation is on release/1.0.0 (b8201121d43, 15b5c8b8161, 506a01b127a). Seed `bin/simple.exe test` on a clean worktree: `test/01_unit/compiler/backend/runtime_object_cache_material_spec.spl` 6/6 pass (6.6 s wall), `test/02_integration/compiler/runtime_object_cache_io_spec.spl` 3/3 pass (6.8 s wall). Still pending (status fix-implemented-verification-pending): native clang-cl cold vs warm runtime-object compile on Windows with wall time and peak RSS, same-size preserved-mtime header edit, concurrent writers. Repro: build any hello module with `SIMPLE_RT_OBJ_CACHE_DIR=<dir>` twice using a pure-Simple stage3 and compare `[RT-COMPILE]` trace times.
