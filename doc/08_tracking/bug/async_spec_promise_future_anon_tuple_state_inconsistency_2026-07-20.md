@@ -1,4 +1,28 @@
 # async_spec: destructured Future from anon-tuple Promise.new() gives inconsistent poll() results
+
+## 2026-11-03 current-source triage: production behavior unverified
+
+The historical spec description below is no longer the current test source.
+`test/01_unit/lib/std/async_spec.spl` now declares `enum TaskState` and its
+local Future/Promise doubles use module-registry `state_id` handles. Those
+doubles no longer exercise the original embedded-state anonymous-tuple shape;
+their success cannot establish production `std.nogc_async_mut.async` behavior.
+The inventory's `async/task.spl` location is not evidence of a task-owner bug.
+
+Added `test/01_unit/lib/nogc_async_mut/async_promise_pair_persistence_spec.spl`
+imports the production Promise and Poll owners. It checks pending-to-ready
+completion followed by repeated polls, independent destructured pairs, and
+rejected second completion preserving the original payload. Current Poll's
+public payload helper is `poll_unwrap`; the removed `.unwrap()` method is not
+reintroduced merely to reproduce stale syntax.
+
+Execution is **TEST_BLOCKED**: no admitted pure-Simple test runtime is available
+on this Windows host. The tracked `bin/simple.exe` is a Rust seed and was not
+used as a substitute. No failure reproduction, repair, or PASS is claimed;
+this record remains OPEN. Resume once an admitted full CLI exists:
+`<qualified-selfhosted-runtime> test test/01_unit/lib/nogc_async_mut/async_promise_pair_persistence_spec.spl --mode=interpreter`.
+Record producer/source/backend/runtime hashes and actual scenario counts.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
