@@ -185,3 +185,9 @@ Build10 binary exists in this checkout; that is a missing-evidence gap, not a
 live symptom. Leaving OPEN only for that native confirmation.
 
 **Revalidated 2026-11-02: still plausible because Pure-Simple MIR/LLVM root-cause fix implemented; native rebuild and; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 status: fix-implemented-verification-pending
+Root fix is on release/1.0.0 (`rt_interp_cstr(i64) -> ptr` bridge declared/registered in
+`src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl`). No code change needed.
+Verify (needs a working stage3/Build10 binary): native-build the monomorphic numeric diagnostic probe with
+`SIMPLE_COMPILER_PHASE_PROFILE=1`, confirm no `ast_gen_harden_slot` corruption across two `ast_reset` cycles.
