@@ -308,28 +308,52 @@ refuse_held() { # prints holder info, exit 3
 REAL_DB="$DB"
 LOCKDIR="$REAL_DB.lock"
 WORK_DB="$REAL_DB.work.$$"
+LOCK_OWNER_FILE=''
+owns_lock() { [ -n "$LOCK_OWNER_FILE" ] && [ -f "$LOCK_OWNER_FILE" ]; }
 cleanup() {
     rm -f "$WORK_DB" "$WORK_DB".edit.* 2>/dev/null
-    if [ "$(cat "$LOCKDIR/owner.pid" 2>/dev/null)" = "$$" ]; then
-        rm -f "$LOCKDIR/owner.pid"; rmdir "$LOCKDIR" 2>/dev/null
+    # Only the owner can remove its marker. A replacement lock has a different
+    # mktemp token, so an old owner's cleanup cannot remove its directory.
+    if owns_lock && rm "$LOCK_OWNER_FILE" 2>/dev/null; then
+        rmdir "$LOCKDIR" 2>/dev/null || :
     fi
+}
+recover_dead_lock() {
+    for _owner in "$LOCKDIR"/owner.*; do
+        [ -f "$_owner" ] || continue
+        _pid=${_owner##*/owner.}; _pid=${_pid%%.*}
+        case "$_pid" in ''|*[!0-9]*) continue ;; esac
+        # Directory age is never evidence that a live owner has died. kill is
+        # the shell builtin, using the same POSIX PID namespace as shell $$.
+        if ! kill -0 "$_pid" 2>/dev/null && ! ps -p "$_pid" >/dev/null 2>&1; then
+            # Successful removal of this unique marker is the recovery claim.
+            # A racing reaper whose rm fails must not rmdir a replacement lock.
+            if rm "$_owner" 2>/dev/null; then rmdir "$LOCKDIR" 2>/dev/null || :; fi
+        fi
+    done
+    # Ownerless/legacy locks fail closed: age alone cannot distinguish a dead
+    # creator from a live process delayed before publishing its owner marker.
 }
 lock() {
     _i=0
     while ! mkdir "$LOCKDIR" 2>/dev/null; do
-        # Never rename an observed lock: another writer may have replaced it
-        # since inspection. Even dead-owner recovery needs external quiescence.
-        _pid=$(cat "$LOCKDIR/owner.pid" 2>/dev/null || true)
-        _i=$((_i + 1)); [ "$_i" -gt "$LOCK_RETRIES" ] && die "could not lock $REAL_DB (lock dir $LOCKDIR owner ${_pid:-unknown}); recover only after all writers are stopped"
+        recover_dead_lock
+        _i=$((_i + 1)); [ "$_i" -gt "$LOCK_RETRIES" ] && die "could not lock $REAL_DB (lock dir $LOCKDIR); recover ownerless legacy locks only after all writers are stopped"
         sleep 1
     done
+    LOCK_OWNER_FILE=$(mktemp "$LOCKDIR/owner.$$.XXXXXXXX") || die "cannot mark lock ownership for $REAL_DB"
     trap cleanup EXIT
     trap 'exit 130' INT TERM
-    echo "$$" > "$LOCKDIR/owner.pid" || die "cannot record lock owner"
     cp "$REAL_DB" "$WORK_DB" || die "cannot copy $REAL_DB"
     DB="$WORK_DB"
 }
-commit_db() { reseal_db; mv "$WORK_DB" "$REAL_DB" || die "cannot publish $REAL_DB"; DB="$REAL_DB"; }
+commit_db() {
+    owns_lock || die "lost lock ownership for $REAL_DB"
+    reseal_db
+    owns_lock || die "lost lock ownership before publishing $REAL_DB"
+    mv "$WORK_DB" "$REAL_DB" || die "cannot publish $REAL_DB"
+    DB="$REAL_DB"
+}
 
 cmd_claim() { # bug session [note]
     if [ $# -ge 1 ] && case "$*" in *--session*|*--note*) true ;; *) false ;; esac; then

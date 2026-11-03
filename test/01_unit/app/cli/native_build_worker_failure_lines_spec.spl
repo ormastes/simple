@@ -1,0 +1,101 @@
+# Branch-coverage spec for native-build worker-failure / link-failure message assembly.
+# @cover src/app/cli/native_build_main.spl 90%
+# @cover src/app/io/_CliCompile/compile_targets.spl 90%
+
+use std.spec.{describe, it, expect}
+use app.cli.native_build_main.{native_build_worker_failure_lines_v1, native_build_normalize_exit_code,
+    native_build_missing_output_is_failure_v1, native_build_artifact_valid,
+    native_build_worker_success_receipt, native_build_worker_binary_valid}
+use app.io._CliCompile.compile_targets.{cli_simpleos_link_failure_lines_v1}
+
+fn joined(lines: [text]) -> text:
+    var out = ""
+    for l in lines:
+        out = out + l
+    out
+
+describe "native-build worker failure lines":
+    it "reports a core-dumped crash when code is -1 and stderr says so":
+        val s = joined(native_build_worker_failure_lines_v1(-1, "Segfault (core dumped)", "simple", 60))
+        expect(s).to_contain("CRASHED")
+        expect(s).to_contain("apport-unpack")
+    it "also recognises the 'dumped core' spelling":
+        expect(joined(native_build_worker_failure_lines_v1(-1, "dumped core", "simple", 60))).to_contain("CRASHED")
+    it "reports a Windows native status":
+        val s = joined(native_build_worker_failure_lines_v1(-1073741819, "", "simple", 60))
+        expect(s).to_contain("Windows native status")
+        expect(s).to_contain("access violation")
+    it "reports SIGSEGV with crash hint":
+        val s = joined(native_build_worker_failure_lines_v1(-139, "", "simple", 60))
+        expect(s).to_contain("signal 11")
+        expect(s).to_contain("SIGSEGV/SIGABRT")
+    it "reports SIGABRT with crash hint":
+        expect(joined(native_build_worker_failure_lines_v1(-134, "", "simple", 60))).to_contain("signal 6")
+    it "reports SIGKILL with OOM hint":
+        expect(joined(native_build_worker_failure_lines_v1(-137, "", "simple", 60))).to_contain("earlyoom")
+    it "reports SIGTERM with OOM hint":
+        expect(joined(native_build_worker_failure_lines_v1(-143, "", "simple", 60))).to_contain("signal 15")
+    it "reports another signal without extra hint":
+        val s = joined(native_build_worker_failure_lines_v1(-130, "", "simple", 60))
+        expect(s).to_contain("signal 2")
+        expect(s.contains("earlyoom")).to_equal(false)
+    it "reports abnormal wrapper exit for -1 without TIMEOUT marker":
+        expect(joined(native_build_worker_failure_lines_v1(-1, "boom", "simple", 60))).to_contain("exited abnormally")
+    it "reports a timeout for -1 with TIMEOUT marker, using the supplied seconds":
+        val s = joined(native_build_worker_failure_lines_v1(-1, "[TIMEOUT: x]", "simple", 77))
+        expect(s).to_contain("timed out after 77s")
+        expect(s).to_contain("--timeout")
+    it "falls back to the interpreter/exit-code line for ordinary non-zero exits":
+        val s = joined(native_build_worker_failure_lines_v1(1, "", "bin/simple", 60))
+        expect(s).to_contain("interpreter: bin/simple (exit code 1)")
+    it "never yields an empty result for a failing code":
+        expect(native_build_worker_failure_lines_v1(2, "", "s", 1).len() > 0).to_equal(true)
+
+describe "native-build exit code normalisation":
+    it "keeps small codes":
+        expect(native_build_normalize_exit_code(0)).to_equal(0)
+        expect(native_build_normalize_exit_code(1)).to_equal(1)
+        expect(native_build_normalize_exit_code(-139)).to_equal(-139)
+    it "restores zero-extended -1":
+        expect(native_build_normalize_exit_code(4294967295)).to_equal(-1)
+    it "restores zero-extended signal codes":
+        expect(native_build_normalize_exit_code(4294967157)).to_equal(-139)
+    it "keeps the i32 maximum":
+        expect(native_build_normalize_exit_code(2147483647)).to_equal(2147483647)
+
+describe "native-build missing output / artifact checks":
+    it "flags exit 0 with a missing output as failure":
+        expect(native_build_missing_output_is_failure_v1(0, "out/a", false, false)).to_equal(true)
+    it "does not flag non-zero exits (already failing)":
+        expect(native_build_missing_output_is_failure_v1(1, "out/a", false, false)).to_equal(false)
+    it "does not flag an empty output path":
+        expect(native_build_missing_output_is_failure_v1(0, "", false, false)).to_equal(false)
+    it "does not flag a present output":
+        expect(native_build_missing_output_is_failure_v1(0, "out/a", true, false)).to_equal(false)
+    it "does not flag shard children":
+        expect(native_build_missing_output_is_failure_v1(0, "out/a", false, true)).to_equal(false)
+    it "rejects missing, empty and stale artifacts":
+        expect(native_build_artifact_valid(false, 10, true)).to_equal(false)
+        expect(native_build_artifact_valid(true, 0, true)).to_equal(false)
+        expect(native_build_artifact_valid(true, 10, false)).to_equal(false)
+        expect(native_build_artifact_valid(true, 10, true)).to_equal(true)
+    it "requires a worker success receipt matching the output path":
+        expect(native_build_worker_success_receipt("o/a", "", "")).to_equal(false)
+        expect(native_build_worker_success_receipt("o/a", "[native-build] Artifact published: o/b", "")).to_equal(false)
+    it "validates worker binary presence":
+        expect(native_build_worker_binary_valid("x", false)).to_equal(false)
+
+describe "simpleos link failure lines":
+    it "is empty when the primary linker succeeded":
+        expect(cli_simpleos_link_failure_lines_v1(0, 1, "e").len()).to_equal(0)
+    it "is empty when the fallback linker succeeded (missing ld.lld path)":
+        expect(cli_simpleos_link_failure_lines_v1(127, 0, "").len()).to_equal(0)
+    it "reports link failure with fallback stderr and install hint":
+        val lines = cli_simpleos_link_failure_lines_v1(1, 1, "undefined symbol: foo")
+        expect(lines.len()).to_equal(4)
+        expect(lines[0]).to_contain("Linking failed")
+        expect(lines[1]).to_equal("undefined symbol: foo")
+        expect(lines[3]).to_contain("apt install lld")
+    it "reports the error for a missing object file (linker cannot open input)":
+        val lines = cli_simpleos_link_failure_lines_v1(1, 1, "ld: cannot find missing.o: No such file")
+        expect(joined(lines)).to_contain("missing.o")

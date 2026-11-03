@@ -1,0 +1,68 @@
+# @tag: unit, compiler, native, trait
+# Regression for doc/08_tracking/bug/trait_default_body_segfaults_via_trait_object_2026-08-06.md:
+# a trait default body that calls the trait's own `me` and `fn` methods, invoked
+# through a trait-object binding, must return the right value (it used to
+# SIGSEGV through a null vtable slot under the JIT).
+
+use std.spec
+use std.spec.step
+
+enum TdKey:
+    T
+    Other
+
+enum TdKeyEvent:
+    Press(TdKey)
+    Release(TdKey)
+
+trait TdBackend:
+    me poll_key() -> TdKeyEvent?
+    fn alt_held() -> bool
+    fn shift_held() -> bool
+    fn ctrl_held() -> bool
+    fn key_to_char(key: TdKey) -> text?
+
+    me poll_mods() -> i64:
+        var mods = 0
+        if self.shift_held(): mods = mods + 1
+        if self.ctrl_held(): mods = mods + 2
+        if self.alt_held(): mods = mods + 4
+        mods
+
+    me poll_char() -> text:
+        val key_opt: TdKeyEvent? = self.poll_key()
+        if val key_event = key_opt:
+            if val Press(k) = key_event:
+                if val Some(c) = self.key_to_char(k):
+                    return c
+        ""
+
+class TdSi:
+    ch: text
+
+impl TdBackend for TdSi:
+    me poll_key() -> TdKeyEvent?:
+        Some(TdKeyEvent.Press(TdKey.T))
+
+    fn alt_held() -> bool:
+        true
+
+    fn shift_held() -> bool:
+        false
+
+    fn ctrl_held() -> bool:
+        true
+
+    fn key_to_char(key: TdKey) -> text?:
+        Some(self.ch)
+
+describe "trait default body through a trait object":
+    it "dispatches a default body that calls fn-declared trait methods":
+        step("poll_mods is a default body calling three fn methods")
+        val b: TdBackend = TdSi(ch: "t")
+        expect(b.poll_mods()).to_equal(6)
+
+    it "dispatches a default body that calls me and fn methods with enum payloads":
+        step("poll_char destructures the me-method result and calls a fn method")
+        val b: TdBackend = TdSi(ch: "t")
+        expect(b.poll_char()).to_equal("t")

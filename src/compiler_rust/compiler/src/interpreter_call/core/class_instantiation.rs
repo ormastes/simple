@@ -162,6 +162,10 @@ pub(crate) fn instantiate_class(
         } else {
             undefaulted_field_fill(&field.ty, class_def.is_value_type)
         };
+        // Declared-type boundary: a `u64`/`u32`/... field holds `Value::UInt`
+        // from construction on, exactly like a typed local (see
+        // `interpreter::coerce_to_declared_field_of`).
+        let val = crate::interpreter::coerce_to_declared_field_of(&class_def, &field.name, val);
         fields.insert(field.name.clone(), val);
     }
 
@@ -454,6 +458,7 @@ pub(crate) fn instantiate_class(
                     ctx,
                 ));
             }
+            let val = crate::interpreter::coerce_to_declared_field_of(&class_def, name, val);
             fields.insert(name.clone(), val);
         } else {
             while positional_idx < class_def.fields.len()
@@ -463,6 +468,7 @@ pub(crate) fn instantiate_class(
             }
             if positional_idx < class_def.fields.len() {
                 let field_name = &class_def.fields[positional_idx].name;
+                let val = crate::interpreter::coerce_to_declared_field_of(&class_def, field_name, val);
                 fields.insert(field_name.clone(), val);
                 positional_idx += 1;
                 continue;
