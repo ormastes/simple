@@ -1,0 +1,42 @@
+use compiler.mir.mir_instructions.{MirModule, MirBlock, BlockId, MirTerminator}
+use compiler.mir.mir_observer_site_intent_v1.*
+use std.common.trace.observer_contract_v1.{TraceEventKindV1, trace_event_kind_code_v1}
+
+fn observer_intent_block_v1(id: i64, terminal: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId(id: id), label: nil, instructions: [], terminator: terminal)
+
+fn observer_empty_mir_v1() -> MirModule:
+    MirModule(name: "fixture", functions: {}, statics: {}, constants: {}, types: {})
+
+describe "observer MIR semantic site intent V1":
+    it "MAP-01 uses the declared entry identity rather than first array block":
+        val blocks = [observer_intent_block_v1(4, MirTerminator.Ret(nil)),
+            observer_intent_block_v1(9, MirTerminator.Goto(BlockId(id: 4)))]
+        val intents = trace_mir_observer_block_plan_v1("subject", BlockId(id: 9), blocks).unwrap()
+        expect(intents.len()).to_equal(2)
+        expect(intents[0].block_id).to_equal(9)
+        expect(trace_event_kind_code_v1(intents[0].kind)).to_equal(1)
+        expect(intents[1].block_id).to_equal(4)
+        expect(trace_event_kind_code_v1(intents[1].kind)).to_equal(2)
+        expect(blocks[0].instructions.len()).to_equal(0)
+
+    it "MAP-01 records each ordinary return and no exit for unreachable":
+        val blocks = [observer_intent_block_v1(0, MirTerminator.Ret(nil)),
+            observer_intent_block_v1(1, MirTerminator.Ret(nil)),
+            observer_intent_block_v1(2, MirTerminator.Unreachable)]
+        val intents = trace_mir_observer_block_plan_v1("subject", BlockId(id: 0), blocks).unwrap()
+        expect(intents.len()).to_equal(3)
+        expect(intents[1].block_id).to_equal(0)
+        expect(intents[2].block_id).to_equal(1)
+
+    it "MAP-01 rejects absent entry duplicate block IDs and undefined functions":
+        val block = observer_intent_block_v1(4, MirTerminator.Ret(nil))
+        expect(trace_mir_observer_block_plan_v1("subject", BlockId(id: 0), [block]).is_err()).to_equal(true)
+        expect(trace_mir_observer_block_plan_v1("subject", BlockId(id: 4), [block, block]).is_err()).to_equal(true)
+        expect(trace_mir_observer_block_plan_v1("subject", BlockId(id: 0), []).is_err()).to_equal(true)
+
+    it "MAP-01 rejects missing function selections and leaves empty selection inert":
+        val module = observer_empty_mir_v1()
+        expect(trace_mir_observer_plan_v1(module, ["absent"]).is_err()).to_equal(true)
+        expect(trace_mir_observer_plan_v1(module, [""]).is_err()).to_equal(true)
+        expect(trace_mir_observer_plan_v1(module, []).unwrap().len()).to_equal(0)

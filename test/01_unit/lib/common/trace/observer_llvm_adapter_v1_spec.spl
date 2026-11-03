@@ -1,0 +1,121 @@
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_llvm_adapter_v1.*
+
+fn llvm_boundary_fixture_v1(edge: TraceLlvmEdgeV1, site: u32) -> TraceLlvmBoundaryV1:
+    TraceLlvmBoundaryV1(runtime_image: 101, llvm_function: 7, edge: edge,
+        module_instance: 201, function_id: 3, site_id: site)
+
+fn llvm_raw_fixture_v1(edge: TraceLlvmEdgeV1) -> TraceLlvmRawEdgeV1:
+    TraceLlvmRawEdgeV1(runtime_image: 101, llvm_function: 7, edge: edge,
+        generation: 11, context_id: 12, sequence: 13, timestamp: 14)
+
+describe "LLVM deferred observer adapter V1":
+    it "MAP-01 resolves LLVM image/function identities into canonical raw edges":
+        val rows = [llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 10),
+            llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Exit, 11),
+            llvm_boundary_fixture_v1(TraceLlvmEdgeV1.TailExit, 12)]
+        expect(trace_llvm_validate_boundaries_v1(rows, 3).unwrap()).to_equal(true)
+        val entry = trace_llvm_convert_raw_edge_v1(rows, 3, llvm_raw_fixture_v1(TraceLlvmEdgeV1.Entry)).unwrap()
+        expect(trace_event_kind_code_v1(entry.kind)).to_equal(1)
+        expect(entry.module_instance).to_equal(201)
+        expect(entry.function_id).to_equal(3)
+        expect(entry.site_id).to_equal(10)
+        expect(entry.generation).to_equal(11)
+        expect(entry.context_id).to_equal(12)
+        expect(entry.sequence).to_equal(13)
+        expect(entry.timestamp).to_equal(14)
+        expect(entry.span_token).to_equal(0)
+        expect(entry.payload0).to_equal(0)
+        expect(entry.payload1).to_equal(0)
+        expect(entry.payload2).to_equal(0)
+        val exit_event = trace_llvm_convert_raw_edge_v1(rows, 3, llvm_raw_fixture_v1(TraceLlvmEdgeV1.Exit)).unwrap()
+        val tail_event = trace_llvm_convert_raw_edge_v1(rows, 3, llvm_raw_fixture_v1(TraceLlvmEdgeV1.TailExit)).unwrap()
+        expect(trace_event_kind_code_v1(exit_event.kind)).to_equal(2)
+        expect(exit_event.site_id).to_equal(11)
+        expect(trace_event_kind_code_v1(tail_event.kind)).to_equal(3)
+        expect(tail_event.site_id).to_equal(12)
+
+    it "MAP-01 does not conflate LLVM IDs from different resident images":
+        val first = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 10)
+        var second = first
+        second.runtime_image = 102
+        second.module_instance = 202
+        val rows = [first, second]
+        var raw = llvm_raw_fixture_v1(TraceLlvmEdgeV1.Entry)
+        raw.runtime_image = 102
+        val converted = trace_llvm_convert_raw_edge_v1(rows, 2, raw).unwrap()
+        expect(converted.module_instance).to_equal(202)
+
+    it "MAP-01 rejects ambiguous callback boundaries and duplicate canonical sites":
+        val entry = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 10)
+        val duplicate_callback = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 11)
+        val duplicate_site = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Exit, 10)
+        expect(trace_llvm_validate_boundaries_v1([entry, duplicate_callback], 2).is_err()).to_equal(true)
+        expect(trace_llvm_validate_boundaries_v1([entry, duplicate_site], 2).is_err()).to_equal(true)
+
+    it "MAP-01 rejects inconsistent image and function identity relations":
+        val entry = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 10)
+        var bad_module = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Exit, 11)
+        bad_module.module_instance = 202
+        expect(trace_llvm_validate_boundaries_v1([entry, bad_module], 2).is_err()).to_equal(true)
+        var bad_image = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Exit, 11)
+        bad_image.runtime_image = 102
+        expect(trace_llvm_validate_boundaries_v1([entry, bad_image], 2).is_err()).to_equal(true)
+        var bad_function = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Exit, 11)
+        bad_function.function_id = 4
+        expect(trace_llvm_validate_boundaries_v1([entry, bad_function], 2).is_err()).to_equal(true)
+        var bad_llvm_function = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Exit, 11)
+        bad_llvm_function.llvm_function = 8
+        expect(trace_llvm_validate_boundaries_v1([entry, bad_llvm_function], 2).is_err()).to_equal(true)
+
+    it "MAP-01 rejects empty maps and explicit resource limit breaches":
+        val empty: [TraceLlvmBoundaryV1] = []
+        val entry = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 10)
+        val exit_row = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Exit, 11)
+        val absent = trace_llvm_validate_boundaries_v1(empty, 1).unwrap_err()
+        val invalid_limit = trace_llvm_validate_boundaries_v1([entry], 0).unwrap_err()
+        val exhausted = trace_llvm_validate_boundaries_v1([entry, exit_row], 1).unwrap_err()
+        expect(trace_failure_code_v1(absent)).to_equal(4)
+        expect(trace_failure_code_v1(invalid_limit)).to_equal(10)
+        expect(trace_failure_code_v1(exhausted)).to_equal(7)
+
+    it "MAP-01 rejects unknown callback identities instead of inventing a site":
+        val rows = [llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 10)]
+        expect(trace_llvm_convert_raw_edge_v1(rows, 1, llvm_raw_fixture_v1(TraceLlvmEdgeV1.Exit)).is_err()).to_equal(true)
+        var raw = llvm_raw_fixture_v1(TraceLlvmEdgeV1.Entry)
+        raw.runtime_image = 999
+        expect(trace_llvm_convert_raw_edge_v1(rows, 1, raw).is_err()).to_equal(true)
+        raw = llvm_raw_fixture_v1(TraceLlvmEdgeV1.Entry)
+        raw.generation = 0
+        expect(trace_llvm_convert_raw_edge_v1(rows, 1, raw).is_err()).to_equal(true)
+        raw = llvm_raw_fixture_v1(TraceLlvmEdgeV1.Entry)
+        raw.context_id = 0
+        expect(trace_llvm_convert_raw_edge_v1(rows, 1, raw).is_err()).to_equal(true)
+        raw = llvm_raw_fixture_v1(TraceLlvmEdgeV1.Entry)
+        raw.llvm_function = 0
+        expect(trace_llvm_convert_raw_edge_v1(rows, 1, raw).is_err()).to_equal(true)
+        raw = llvm_raw_fixture_v1(TraceLlvmEdgeV1.Entry)
+        raw.runtime_image = 0
+        expect(trace_llvm_convert_raw_edge_v1(rows, 1, raw).is_err()).to_equal(true)
+
+    it "MAP-01 rejects invalid map identities before translation":
+        var row = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 10)
+        row.runtime_image = 0
+        expect(trace_llvm_validate_boundaries_v1([row], 1).is_err()).to_equal(true)
+        row = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 10)
+        row.module_instance = 0
+        expect(trace_llvm_validate_boundaries_v1([row], 1).is_err()).to_equal(true)
+        row = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 10)
+        row.llvm_function = -1
+        expect(trace_llvm_validate_boundaries_v1([row], 1).is_err()).to_equal(true)
+
+    it "MAP-01 rejects zero canonical function identity":
+        var row = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 10)
+        row.function_id = 0
+        val failure = trace_llvm_validate_boundaries_v1([row], 1).unwrap_err()
+        expect(trace_failure_code_v1(failure)).to_equal(5)
+
+    it "MAP-01 rejects zero canonical site identity":
+        val row = llvm_boundary_fixture_v1(TraceLlvmEdgeV1.Entry, 0)
+        val failure = trace_llvm_validate_boundaries_v1([row], 1).unwrap_err()
+        expect(trace_failure_code_v1(failure)).to_equal(5)

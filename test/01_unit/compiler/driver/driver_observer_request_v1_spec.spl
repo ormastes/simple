@@ -1,0 +1,58 @@
+use compiler.driver.driver_observer_request_v1.{driver_observer_request_v1}
+use std.common.plugin.aspect_params.*
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.*
+use std.common.text_bytes.{text_to_bytes}
+
+fn observer_request_params_v1(config: TraceConfigV1) -> AspectParamsV1:
+    var params = AspectParamsV1.defaults()
+    val source = trace_config_format_sdn_v1(config).unwrap()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1,
+        text_to_bytes(source), TRACE_CONFIG_SCHEMA_HASH_V1))
+    params
+
+describe "observer extension compiler request intake":
+    it "leaves old parameters valid without a target or observer extension":
+        expect(driver_observer_request_v1(AspectParamsV1.defaults(), "")).to_equal(Ok(true))
+
+    it "accepts explicit off on Windows without resolving a Linux backend":
+        var config = trace_config_defaults_v1()
+        config.backend = TraceBackendV1.Llvm
+        val params = observer_request_params_v1(config)
+        expect(driver_observer_request_v1(params, "aarch64-pc-windows-msvc")).to_equal(Ok(true))
+
+    it "rejects a requested Windows route and an unqualified Linux profile":
+        var config = trace_config_defaults_v1()
+        config.instrumentation = TraceInstrumentationV1.Dynamic
+        config.abi_profile = "scalar-v1"
+        val params = observer_request_params_v1(config)
+        expect(driver_observer_request_v1(params, "x86_64-pc-windows-msvc")).to_equal(Err(TraceFailureV1.UnsupportedTarget))
+        expect(driver_observer_request_v1(params, "x86_64-unknown-linux-gnu")).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+
+    it "rejects duplicate observer extensions even when both are off":
+        var params = observer_request_params_v1(trace_config_defaults_v1())
+        params.ext.push(params.ext[1])
+        expect(driver_observer_request_v1(params, "")).to_equal(Err(TraceFailureV1.InvalidArgument))
+
+    it "rejects incompatible extension major and schema hash before parsing":
+        val payload = text_to_bytes("trace:\n    schema: 1\n")
+        var wrong_major = AspectParamsV1.defaults()
+        wrong_major.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 2, payload, TRACE_CONFIG_SCHEMA_HASH_V1))
+        expect(driver_observer_request_v1(wrong_major, "")).to_equal(Err(TraceFailureV1.InvalidArgument))
+        var wrong_schema = AspectParamsV1.defaults()
+        wrong_schema.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, payload, "stale"))
+        expect(driver_observer_request_v1(wrong_schema, "")).to_equal(Err(TraceFailureV1.InvalidArgument))
+
+    it "rejects malformed UTF8 and empty payloads instead of lossy decoding":
+        var malformed = AspectParamsV1.defaults()
+        malformed.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, [192, 175], TRACE_CONFIG_SCHEMA_HASH_V1))
+        expect(driver_observer_request_v1(malformed, "")).to_equal(Err(TraceFailureV1.InvalidArgument))
+        var empty = AspectParamsV1.defaults()
+        empty.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, [], TRACE_CONFIG_SCHEMA_HASH_V1))
+        expect(driver_observer_request_v1(empty, "")).to_equal(Err(TraceFailureV1.InvalidArgument))
+
+    it "ignores unrelated extension payloads and preserves their existing owner":
+        var params = AspectParamsV1.defaults()
+        params.ext.push(ParamExt("other-owner", 99, [255], "other-schema"))
+        expect(driver_observer_request_v1(params, "")).to_equal(Ok(true))

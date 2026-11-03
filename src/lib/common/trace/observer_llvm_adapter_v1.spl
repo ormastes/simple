@@ -1,0 +1,100 @@
+# Cold LLVM adapter data conversion only. No LLVM runtime import or activation.
+# This module is not a native callback: map validation and event construction
+# may allocate. A qualified handler must enqueue bounded native records first.
+use common.trace.observer_contract_v1.*
+
+# Adapter-local semantic tags, NOT LLVM's numeric callback ABI. The eventual
+# pinned native shim must decode its own runtime ABI into these tags.
+pub enum TraceLlvmEdgeV1:
+    Entry
+    Exit
+    TailExit
+
+# runtime_image is an owner-issued resident image identity, not a pathname.
+# LLVM function IDs alone are insufficient when different images reuse IDs.
+# A row describes a canonical callback boundary. Multiple physical exit sleds
+# sharing one LLVM callback identity cannot be presented as distinct sites.
+pub struct TraceLlvmBoundaryV1:
+    runtime_image: u64
+    llvm_function: i64
+    edge: TraceLlvmEdgeV1
+    module_instance: u64
+    function_id: u32
+    site_id: u32
+
+pub struct TraceLlvmRawEdgeV1:
+    runtime_image: u64
+    llvm_function: i64
+    edge: TraceLlvmEdgeV1
+    generation: u64
+    context_id: u64
+    sequence: u64
+    timestamp: u64
+
+pub fn trace_llvm_edge_kind_v1(edge: TraceLlvmEdgeV1) -> TraceEventKindV1:
+    match edge:
+        case Entry: TraceEventKindV1.Entry
+        case Exit: TraceEventKindV1.Exit
+        case TailExit: TraceEventKindV1.TailExit
+
+fn trace_llvm_edge_code_v1(edge: TraceLlvmEdgeV1) -> u16:
+    trace_event_kind_code_v1(trace_llvm_edge_kind_v1(edge))
+
+# Structural validation is NOT module authority or ABI qualification. The
+# resident manifest owner must establish these identities from the actual
+# produced image before use. No caller-supplied proof flag admits a profile.
+# Pairwise checks are cold and bounded by max_boundaries supplied by the
+# resource owner. The native hook must never call this routine.
+pub fn trace_llvm_validate_boundaries_v1(boundaries: [TraceLlvmBoundaryV1], max_boundaries: u32) -> Result<bool, TraceFailureV1>:
+    if max_boundaries == 0:
+        return Err(TraceFailureV1.InvalidArgument)
+    if boundaries.len() == 0:
+        return Err(TraceFailureV1.InstrumentationAbsent)
+    if boundaries.len() > max_boundaries as i64:
+        return Err(TraceFailureV1.ResourceExhausted)
+    var index = 0
+    while index < boundaries.len():
+        val row = boundaries[index]
+        if (row.runtime_image == 0 or row.module_instance == 0 or row.llvm_function <= 0 or
+            row.function_id == 0 or row.site_id == 0):
+            return Err(TraceFailureV1.InvalidMap)
+        var earlier = 0
+        while earlier < index:
+            val other = boundaries[earlier]
+            val same_image = row.runtime_image == other.runtime_image
+            val same_module = row.module_instance == other.module_instance
+            # Resident image and canonical module identity are one-to-one.
+            if same_image != same_module:
+                return Err(TraceFailureV1.InvalidMap)
+            if same_image:
+                val same_llvm_function = row.llvm_function == other.llvm_function
+                val same_function = row.function_id == other.function_id
+                if same_llvm_function != same_function:
+                    return Err(TraceFailureV1.InvalidMap)
+                if row.site_id == other.site_id:
+                    return Err(TraceFailureV1.InvalidMap)
+                if same_llvm_function and trace_llvm_edge_code_v1(row.edge) == trace_llvm_edge_code_v1(other.edge):
+                    return Err(TraceFailureV1.InvalidMap)
+            earlier = earlier + 1
+        index = index + 1
+    Ok(true)
+
+# Deferred consumer conversion. This function intentionally validates the map
+# on each call: its public value type is forgeable, so construction alone is
+# not a trusted validation cache. A native provider needs an owner-private
+# immutable indexed map before it may translate on its hot path.
+pub fn trace_llvm_convert_raw_edge_v1(boundaries: [TraceLlvmBoundaryV1], max_boundaries: u32, raw: TraceLlvmRawEdgeV1) -> Result<TraceEventV1, TraceFailureV1>:
+    trace_llvm_validate_boundaries_v1(boundaries, max_boundaries)?
+    if raw.generation == 0 or raw.context_id == 0 or raw.runtime_image == 0 or raw.llvm_function <= 0:
+        return Err(TraceFailureV1.InvalidArgument)
+    for row in boundaries:
+        if (row.runtime_image == raw.runtime_image and row.llvm_function == raw.llvm_function and
+            trace_llvm_edge_code_v1(row.edge) == trace_llvm_edge_code_v1(raw.edge)):
+            return Ok(TraceEventV1(
+                kind: trace_llvm_edge_kind_v1(raw.edge), flags: 0,
+                generation: raw.generation, module_instance: row.module_instance,
+                function_id: row.function_id, site_id: row.site_id,
+                context_id: raw.context_id, sequence: raw.sequence,
+                timestamp: raw.timestamp, span_token: 0,
+                payload0: 0, payload1: 0, payload2: 0))
+    Err(TraceFailureV1.InvalidMap)

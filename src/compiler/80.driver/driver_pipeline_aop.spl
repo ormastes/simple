@@ -32,6 +32,8 @@ use compiler.frontend.core.aop_predicate_parser.{
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_log_helpers.{log_debug, log_build_progress}
 use common.plugin.aspect_params.{AspectParamsV1, aspect_coverage_cutover_state_v1, aspect_log_level_to_text}
+use compiler.driver.driver_observer_request_v1.{driver_observer_request_v1}
+use common.trace.observer_contract_v1.{trace_failure_code_v1}
 
 impl CompilerDriver:
     me weave_aop():
@@ -44,6 +46,14 @@ impl CompilerDriver:
         self.weave_aop_with_params(allow_ambient_log_rules, self.ctx.options.aspect_params)
 
     me weave_aop_with_params(allow_ambient_log_rules: bool, aspect_params: AspectParamsV1):
+        # Validate named observer requests even when ordinary AOP has no rules.
+        # Off/absent stays independent of hosted Linux runtime dependencies.
+        match driver_observer_request_v1(aspect_params, self.ctx.options.native_target):
+            case Err(failure):
+                val code = trace_failure_code_v1(failure)
+                self.ctx.add_error("TRACE-E-REQUEST: observer V1 request rejected (status={code})")
+                return
+            case Ok(_): ()
         var all_advices: [HirAopAdvice] = []
         for saved_advice in self.ctx.hir_aop_advices_saved:
             all_advices.push(saved_advice)

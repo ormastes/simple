@@ -48,3 +48,60 @@ describe "canonical observer event bytes V1":
             var corrupt = trace_event_encode_v1(trace_codec_fixture_v1())
             corrupt[offset] = 255
             expect(trace_event_decode_v1(corrupt).is_err()).to_equal(true)
+
+    it "API-01 preserves upper words and bit 63 in every wide field":
+        # Construct bit 63 with a typed shift, independent of decimal literal
+        # parsing. Each wide value has a distinct low byte and high bit set.
+        val high: u64 = (1 as u64) << 63
+        val wide = TraceEventV1(kind: TraceEventKindV1.PairedSpan, flags: 32769,
+            generation: high | 1, module_instance: high | 2,
+            function_id: 4278190083, site_id: 4278190084,
+            context_id: high | 5, sequence: high | 6, timestamp: high | 7,
+            span_token: high | 8, payload0: high | 9, payload1: high | 10,
+            payload2: high | 11)
+        val bytes = trace_event_encode_v1(wide)
+        expect(bytes[4]).to_equal(9)
+        expect(bytes[6]).to_equal(1)
+        expect(bytes[7]).to_equal(128)
+        expect(bytes[8]).to_equal(1)
+        expect(bytes[16]).to_equal(2)
+        expect(bytes[32]).to_equal(5)
+        expect(bytes[40]).to_equal(6)
+        expect(bytes[48]).to_equal(7)
+        expect(bytes[56]).to_equal(8)
+        expect(bytes[64]).to_equal(9)
+        expect(bytes[72]).to_equal(10)
+        expect(bytes[80]).to_equal(11)
+        for offset in [8, 16, 32, 40, 48, 56, 64, 72, 80]:
+            expect(bytes[offset + 7]).to_equal(128)
+            for index in 1..7:
+                expect(bytes[offset + index]).to_equal(0)
+        expect(bytes[24]).to_equal(3)
+        expect(bytes[27]).to_equal(255)
+        expect(bytes[28]).to_equal(4)
+        expect(bytes[31]).to_equal(255)
+        val decoded = trace_event_decode_v1(bytes).unwrap()
+        expect(decoded.kind).to_equal(wide.kind)
+        expect(decoded.flags).to_equal(wide.flags)
+        expect(decoded.generation).to_equal(wide.generation)
+        expect(decoded.module_instance).to_equal(wide.module_instance)
+        expect(decoded.function_id).to_equal(wide.function_id)
+        expect(decoded.site_id).to_equal(wide.site_id)
+        expect(decoded.context_id).to_equal(wide.context_id)
+        expect(decoded.sequence).to_equal(wide.sequence)
+        expect(decoded.timestamp).to_equal(wide.timestamp)
+        expect(decoded.span_token).to_equal(wide.span_token)
+        expect(decoded.payload0).to_equal(wide.payload0)
+        expect(decoded.payload1).to_equal(wide.payload1)
+        expect(decoded.payload2).to_equal(wide.payload2)
+
+    it "API-01 round trips all predeclared tags and rejects high reserved bytes":
+        for code in 1..11:
+            var event = trace_codec_fixture_v1()
+            event.kind = trace_event_kind_from_code_v1(code as u64).unwrap()
+            val decoded = trace_event_decode_v1(trace_event_encode_v1(event)).unwrap()
+            expect(trace_event_kind_code_v1(decoded.kind)).to_equal(code)
+        for offset in [1, 3, 5, 89, 90, 91, 92, 93, 94, 95]:
+            var bytes = trace_event_encode_v1(trace_codec_fixture_v1())
+            bytes[offset] = 1
+            expect(trace_event_decode_v1(bytes).is_err()).to_equal(true)

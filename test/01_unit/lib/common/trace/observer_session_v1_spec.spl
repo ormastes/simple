@@ -1,0 +1,91 @@
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.*
+use std.common.trace.observer_session_v1.*
+
+fn reference_selection_v1() -> TraceSelectionV1:
+    TraceSelectionV1(manifest_incarnation: 17,
+        sites: [TraceSiteV1(module_instance: 11, site_id: 3)])
+
+fn reference_config_v1() -> TraceConfigV1:
+    var config = trace_config_defaults_v1()
+    config.instrumentation = TraceInstrumentationV1.Dynamic
+    config.abi_profile = "serial-reference-model"
+    config.buffer_bytes = 192
+    config.max_contexts = 2
+    config.max_resident_generations = 8
+    config
+
+fn reference_edge_v1(session: TraceSessionV1, sequence: u64) -> TraceEventV1:
+    TraceEventV1(kind: TraceEventKindV1.Entry, flags: 0, generation: session.generation,
+        module_instance: 11, function_id: 2, site_id: 3, context_id: 4,
+        sequence: sequence, timestamp: 99, span_token: 0,
+        payload0: 0, payload1: 0, payload2: 0)
+
+describe "serial observer reference lifecycle V1":
+    # One scenario intentionally owns the process registry through a terminal
+    # fault. Quarantine has no reset escape hatch, so later capture is forbidden.
+    it "retains generations, drains exact work, rejects stale handles, and quarantines faults":
+        val selection = reference_selection_v1()
+        val config = reference_config_v1()
+        val disabled = trace_reference_prepare_v1(trace_config_defaults_v1(), selection).unwrap_err()
+        expect(disabled).to_equal(TraceFailureV1.InstrumentationAbsent)
+        var paired = config
+        paired.consistency = TraceConsistencyV1.PairedSpans
+        val unsupported = trace_reference_prepare_v1(paired, selection).unwrap_err()
+        expect(unsupported).to_equal(TraceFailureV1.UnsupportedConsistency)
+        val prepared = trace_reference_prepare_v1(config, selection).unwrap()
+        val conflict = trace_reference_prepare_v1(config, selection).unwrap_err()
+        expect(conflict).to_equal(TraceFailureV1.Busy)
+        val forged_prepared = TracePreparedV1(slot: 2, incarnation: prepared.incarnation)
+        expect(trace_reference_start_v1(forged_prepared).is_err()).to_equal(true)
+        val session = trace_reference_start_v1(prepared).unwrap()
+        expect(trace_reference_start_v1(prepared).is_err()).to_equal(true)
+        val lease = trace_reference_begin_hook_v1(session, 4).unwrap()
+        expect(trace_reference_begin_hook_v1(session, 4).is_err()).to_equal(true)
+        expect(trace_reference_record_v1(lease, reference_edge_v1(session, 1)).unwrap()).to_equal(true)
+        val stop = trace_reference_request_stop_v1(session).unwrap()
+        expect(stop).to_equal(TraceSessionStateV1.Draining)
+        expect(trace_reference_request_stop_v1(session).unwrap()).to_equal(stop)
+        expect(trace_reference_begin_hook_v1(session, 5).is_err()).to_equal(true)
+        val recursive_drain = trace_reference_drain_once_v1(session, 4, 10, 10).unwrap_err()
+        expect(recursive_drain).to_equal(TraceFailureV1.Busy)
+        val waiting = trace_reference_drain_once_v1(session, 0, 9, 10).unwrap()
+        expect(waiting.state).to_equal(TraceSessionStateV1.Draining)
+        val timeout = trace_reference_drain_once_v1(session, 0, 10, 10).unwrap_err()
+        expect(timeout).to_equal(TraceFailureV1.TimedOut)
+        expect(trace_reference_release_v1(session).is_err()).to_equal(true)
+        # Work admitted before stop may finish, but only with its exact lease.
+        expect(trace_reference_record_v1(lease, reference_edge_v1(session, 2)).unwrap()).to_equal(true)
+        expect(trace_reference_end_hook_v1(lease).unwrap()).to_equal(true)
+        expect(trace_reference_end_hook_v1(lease).is_err()).to_equal(true)
+        expect(trace_reference_record_v1(lease, reference_edge_v1(session, 3)).is_err()).to_equal(true)
+        val flush_timeout = trace_reference_flush_once_v1(session, 0, 10, 10).unwrap_err()
+        expect(flush_timeout).to_equal(TraceFailureV1.TimedOut)
+        val batch = trace_reference_poll_v1(session, 8).unwrap()
+        expect(batch.events.len()).to_equal(2)
+        expect(batch.events[1].sequence).to_equal(2)
+        val drained = trace_reference_drain_once_v1(session, 0, 11, 10).unwrap()
+        expect(drained.state).to_equal(TraceSessionStateV1.Drained)
+        expect(drained.stats.lost).to_equal(1)
+        expect(trace_reference_release_v1(session).unwrap()).to_equal(true)
+        expect(trace_reference_stats_v1(session).is_err()).to_equal(true)
+        expect(trace_reference_resident_generations_v1()).to_equal(1)
+
+        var limited = config
+        limited.max_resident_generations = 1
+        val exhausted = trace_reference_prepare_v1(limited, selection).unwrap_err()
+        expect(exhausted).to_equal(TraceFailureV1.ResourceExhausted)
+        val next_prepared = trace_reference_prepare_v1(config, selection).unwrap()
+        val next = trace_reference_start_v1(next_prepared).unwrap()
+        expect(next.generation).to_be_greater_than(session.generation)
+        val stale = trace_reference_request_stop_v1(session).unwrap_err()
+        expect(stale).to_equal(TraceFailureV1.InvalidHandle)
+        expect(trace_reference_fault_v1(next).unwrap()).to_equal(TraceSessionStateV1.Faulted)
+        val fault_stats = trace_reference_stats_v1(next).unwrap()
+        expect(fault_stats.backend_errors).to_equal(1)
+        expect(trace_reference_request_stop_v1(next).unwrap()).to_equal(TraceSessionStateV1.Faulted)
+        val quarantined = trace_reference_drain_once_v1(next, 0, 12, 20).unwrap_err()
+        expect(quarantined).to_equal(TraceFailureV1.BackendFailure)
+        expect(trace_reference_release_v1(next).is_err()).to_equal(true)
+        expect(trace_reference_prepare_v1(config, selection).is_err()).to_equal(true)
+        expect(trace_reference_resident_generations_v1()).to_equal(2)

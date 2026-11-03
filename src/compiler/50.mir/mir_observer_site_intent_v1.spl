@@ -1,0 +1,66 @@
+# Semantic intent only. This planner never rewrites MIR or emits direct calls.
+# The late emitter must bind each surviving physical copy to a native map after
+# optimization and independently validate stack/ABI, return and tail placement.
+# In particular an exit intent MUST NOT be inserted between musttail and ret.
+use compiler.mir.mir_instructions.{MirModule, MirBlock, BlockId}
+use std.common.trace.observer_contract_v1.{TraceEventKindV1}
+
+pub struct TraceMirSiteIntentV1:
+    function_name: text
+    block_id: i64
+    instruction_index: i64
+    kind: TraceEventKindV1
+
+pub fn trace_mir_observer_block_plan_v1(function_name: text, entry: BlockId, blocks: [MirBlock]) -> Result<[TraceMirSiteIntentV1], text>:
+    if function_name.len() == 0 or blocks.len() == 0:
+        return Err("observer intent requires a named defined function")
+    var entry_found = false
+    for index in 0..blocks.len():
+        val block = blocks[index]
+        if block.id.id < 0:
+            return Err("observer intent rejects a negative block identity")
+        for earlier in 0..index:
+            if blocks[earlier].id.id == block.id.id:
+                return Err("observer intent rejects duplicate block identities")
+        if block.id.id == entry.id:
+            entry_found = true
+    if not entry_found:
+        return Err("observer intent entry block is absent")
+    var sites: [TraceMirSiteIntentV1] = [TraceMirSiteIntentV1(
+        function_name: function_name, block_id: entry.id, instruction_index: 0,
+        kind: TraceEventKindV1.Entry)]
+    for block in blocks:
+        match block.terminator:
+            case Ret(_):
+                sites.push(TraceMirSiteIntentV1(function_name: function_name,
+                    block_id: block.id.id, instruction_index: block.instructions.len(),
+                    kind: TraceEventKindV1.Exit))
+            case _:
+                # No fabricated Exit for unwind, abort or unreachable.
+                ()
+    Ok(sites)
+
+pub fn trace_mir_observer_plan_v1(module: MirModule, selected_functions: [text]) -> Result<[TraceMirSiteIntentV1], text>:
+    var planned: [TraceMirSiteIntentV1] = []
+    for index in 0..selected_functions.len():
+        val selected = selected_functions[index]
+        if selected.len() == 0:
+            return Err("observer selection contains an empty function name")
+        for earlier in 0..index:
+            if selected_functions[earlier] == selected:
+                return Err("observer selection contains a duplicate function")
+        var matches = 0
+        for symbol in module.functions.keys():
+            val function = module.functions[symbol]
+            if function.name == selected:
+                matches = matches + 1
+                if function.is_generic_template or function.is_kernel or function.is_naked or function.is_inline:
+                    return Err("observer intent requires a concrete non-kernel non-naked non-inline function")
+                val sites = trace_mir_observer_block_plan_v1(function.name, function.entry_block, function.blocks)?
+                for site in sites:
+                    planned.push(site)
+        if matches == 0:
+            return Err("observer selected function is absent from this MIR module")
+        if matches != 1:
+            return Err("observer selected function name is ambiguous")
+    Ok(planned)

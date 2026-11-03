@@ -1,0 +1,55 @@
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_build_route_v1.*
+
+describe "observer V1 early build route":
+    it "W3 keeps Windows tracing off for every backend request":
+        for target in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "x86_64-w64-windows-gnu"]:
+            for backend in [TraceBackendV1.Auto, TraceBackendV1.Llvm, TraceBackendV1.Simple, TraceBackendV1.None]:
+                val route = trace_build_route_v1(target, TraceInstrumentationV1.Off, backend).unwrap()
+                expect(route.kind).to_equal(TraceBuildRouteKindV1.Off)
+                expect(route.backend).to_equal(TraceBackendV1.None)
+                expect(route.target).to_equal(target)
+
+    it "W3 rejects explicit Windows instrumentation rather than falling back to Linux":
+        for target in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "x86_64-w64-windows-gnu"]:
+            for instrumentation in [TraceInstrumentationV1.Dynamic, TraceInstrumentationV1.AlwaysOn]:
+                for backend in [TraceBackendV1.Auto, TraceBackendV1.Llvm, TraceBackendV1.Simple]:
+                    val route = trace_build_route_v1(target, instrumentation, backend)
+                    expect(route).to_equal(Err(TraceFailureV1.UnsupportedTarget))
+
+    it "W3 keeps SimpleOS and unknown targets off without host inference":
+        for target in ["x86_64-unknown-simpleos", "aarch64-unknown-simpleos", "", "native", "unknown", "x86_64-apple-darwin"]:
+            val off = trace_build_route_v1(target, TraceInstrumentationV1.Off, TraceBackendV1.Auto).unwrap()
+            expect(off.kind).to_equal(TraceBuildRouteKindV1.Off)
+            expect(off.backend).to_equal(TraceBackendV1.None)
+            val active = trace_build_route_v1(target, TraceInstrumentationV1.Dynamic, TraceBackendV1.Auto)
+            expect(active).to_equal(Err(TraceFailureV1.UnsupportedTarget))
+
+    it "W3 requires canonical Linux targets instead of substring platform detection":
+        for target in ["linux", "x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu-windows", "aarch64-linux-gnu", "X86_64-UNKNOWN-LINUX-GNU"]:
+            val route = trace_build_route_v1(target, TraceInstrumentationV1.Dynamic, TraceBackendV1.Llvm)
+            expect(route).to_equal(Err(TraceFailureV1.UnsupportedTarget))
+
+    it "W3 chooses LLVM candidates without conferring profile qualification":
+        for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]:
+            for instrumentation in [TraceInstrumentationV1.Dynamic, TraceInstrumentationV1.AlwaysOn]:
+                for backend in [TraceBackendV1.Auto, TraceBackendV1.Llvm]:
+                    val route = trace_build_route_v1(target, instrumentation, backend).unwrap()
+                    expect(route.kind).to_equal(TraceBuildRouteKindV1.LinuxLlvmCandidate)
+                    expect(route.backend).to_equal(TraceBackendV1.Llvm)
+                    expect(route.target).to_equal(target)
+
+    it "W3 keeps explicit Simple selection separate from the LLVM candidate":
+        for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]:
+            val route = trace_build_route_v1(target, TraceInstrumentationV1.Dynamic, TraceBackendV1.Simple).unwrap()
+            expect(route.kind).to_equal(TraceBuildRouteKindV1.LinuxSimpleCandidate)
+            expect(route.backend).to_equal(TraceBackendV1.Simple)
+            expect(route.target).to_equal(target)
+
+    it "W3 rejects active tracing with no backend":
+        val route = trace_build_route_v1("x86_64-unknown-linux-gnu", TraceInstrumentationV1.Dynamic, TraceBackendV1.None)
+        expect(route).to_equal(Err(TraceFailureV1.InvalidArgument))
+
+    it "W3 rejects foreign targets before interpreting a backend request":
+        val route = trace_build_route_v1("x86_64-pc-windows-msvc", TraceInstrumentationV1.Dynamic, TraceBackendV1.None)
+        expect(route).to_equal(Err(TraceFailureV1.UnsupportedTarget))

@@ -1,0 +1,82 @@
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_collector_v1.*
+
+fn collector_edge_v1(context: u64, sequence: u64) -> TraceEventV1:
+    TraceEventV1(kind: TraceEventKindV1.Entry, flags: 0, generation: 7,
+        module_instance: 1, function_id: 2, site_id: 3, context_id: context,
+        sequence: sequence, timestamp: 99, span_token: 0,
+        payload0: 0, payload1: 0, payload2: 0)
+
+describe "serial observer reference collector V1":
+    it "rejects invalid storage bounds before allocation":
+        expect(TraceReferenceCollectorV1.create(0, 2, 2).is_err()).to_equal(true)
+        expect(TraceReferenceCollectorV1.create(7, 0, 2).is_err()).to_equal(true)
+        expect(TraceReferenceCollectorV1.create(7, 4097, 2).is_err()).to_equal(true)
+        expect(TraceReferenceCollectorV1.create(7, 2, 1025).is_err()).to_equal(true)
+
+    it "retains FIFO order across wrap and counts overflow without overwriting unread records":
+        var collector = TraceReferenceCollectorV1.create(7, 2, 2).unwrap()
+        expect(collector.record(collector_edge_v1(1, 1)).unwrap()).to_equal(true)
+        expect(collector.record(collector_edge_v1(1, 2)).unwrap()).to_equal(true)
+        expect(collector.record(collector_edge_v1(1, 3)).unwrap()).to_equal(false)
+        val zero = collector.poll(0)
+        expect(zero.len()).to_equal(0)
+        val first = collector.poll(1)
+        expect(first[0].sequence).to_equal(1)
+        expect(collector.record(collector_edge_v1(1, 4)).unwrap()).to_equal(true)
+        val rest = collector.poll(20)
+        expect(rest.len()).to_equal(2)
+        expect(rest[0].sequence).to_equal(2)
+        expect(rest[1].sequence).to_equal(4)
+        expect(collector.pending()).to_equal(0)
+        val counters = collector.stats()
+        expect(counters.recorded).to_equal(3)
+        expect(counters.lost).to_equal(1)
+        expect(counters.queue_high_water).to_equal(2)
+
+    it "rejects stale sequences and mismatched generation without consuming valid capacity":
+        var collector = TraceReferenceCollectorV1.create(7, 2, 1).unwrap()
+        expect(collector.record(collector_edge_v1(4, 8)).unwrap()).to_equal(true)
+        expect(collector.record(collector_edge_v1(4, 8)).is_err()).to_equal(true)
+        expect(collector.record(collector_edge_v1(4, 7)).is_err()).to_equal(true)
+        var wrong = collector_edge_v1(4, 9)
+        wrong.generation = 8
+        expect(collector.record(wrong).is_err()).to_equal(true)
+        expect(collector.record(collector_edge_v1(5, 1)).is_err()).to_equal(true)
+        expect(collector.record(collector_edge_v1(4, 9)).unwrap()).to_equal(true)
+        expect(collector.pending()).to_equal(2)
+
+    it "keeps raw edges distinct from paired spans and saturates diagnostic counters":
+        var collector = TraceReferenceCollectorV1.create(7, 2, 2).unwrap()
+        var paired = collector_edge_v1(1, 1)
+        paired.kind = TraceEventKindV1.PairedSpan
+        expect(collector.record(paired).is_err()).to_equal(true)
+        var token = collector_edge_v1(1, 1)
+        token.span_token = 12
+        expect(collector.record(token).is_err()).to_equal(true)
+        expect(collector.pending()).to_equal(0)
+        expect(trace_reference_next_counter_v1(18446744073709551615u64)).to_equal(18446744073709551615u64)
+
+    it "rejects zero raw identities before consuming sequence or capacity but permits control identities":
+        var collector = TraceReferenceCollectorV1.create(7, 2, 2).unwrap()
+        for kind in [TraceEventKindV1.Entry, TraceEventKindV1.Exit, TraceEventKindV1.TailExit]:
+            for field in 0..3:
+                var invalid = collector_edge_v1(1, 1)
+                invalid.kind = kind
+                if field == 0: invalid.module_instance = 0
+                if field == 1: invalid.function_id = 0
+                if field == 2: invalid.site_id = 0
+                val failure = collector.record(invalid).unwrap_err()
+                expect(failure).to_equal(TraceFailureV1.InvalidArgument)
+        expect(collector.pending()).to_equal(0)
+        expect(collector.record(collector_edge_v1(1, 1)).unwrap()).to_equal(true)
+        var control = collector_edge_v1(1, 2)
+        control.kind = TraceEventKindV1.Transition
+        control.module_instance = 0
+        control.function_id = 0
+        control.site_id = 0
+        expect(collector.record(control).unwrap()).to_equal(true)
+        val counters = collector.stats()
+        expect(counters.recorded).to_equal(2)
+        expect(counters.lost).to_equal(0)
+        expect(counters.transitions).to_equal(1)
