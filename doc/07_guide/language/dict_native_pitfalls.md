@@ -19,8 +19,8 @@
 > `.len()`, `expr_dispatch.spl` for `.get()`), not the C runtime — the
 > underlying `rt_dict_len`/`rt_dict_get` runtime entry points were already
 > correct; the bug was in the MIR lowering's receiver-type routing that fed
-> them. **The `f64`-value `.get()` miss gap and the class-field `d[k]`
-> bracket-read array-value segfault (see Truth table below) remain open** —
+> them. **The class-field `d[k]`
+> bracket-read array-value segfault (see Truth table below) remains open** (the `f64` miss gap was fixed in the seed 2026-08-18) —
 > only the two headline defects named in this doc's title are resolved.
 
 Two native-codegen defects **used to** make common `Dict` operations silently
@@ -29,7 +29,7 @@ Historically they were **native-only** — the interpreter and the Rust seed
 both behaved correctly, so a seed build or an interpreter-mode test run
 **could not** catch either bug; only a native build/run exercised the broken
 paths. The truth table below still lists the OTHER, still-open native-only
-gaps (`f64`-miss, class-field array bracket-read) for which that caveat still
+gap (class-field array bracket-read) for which that caveat still
 applies — treat "seed-build verified" or "interpreter test green" as no
 signal for those remaining rows.
 
@@ -170,7 +170,7 @@ exposure — always also search for `: {`-style dict declarations.
 | `d.len()` / `d.length()` | correct count since 2026-08-01 (measured: local **and** function parameter). The old **-1** does not reproduce; struct-field receivers remain unmeasured | yes for locals/params |
 | `d.get(k)` — miss, `V` = `i64` / `bool` | correct `nil` since 2026-08-01 — `== nil` true, `?? default` fires | yes |
 | `d.get(k)` — miss, `V` = `text` | correct `nil` — re-verified 2026-08-07 on current source (see re-verification note above); the row title below was stale | yes |
-| `d.get(k)` — miss, `V` = `f64` | **REPRODUCES — measured 2026-08-17, no longer unverified.** A miss decodes to `0.0` with `== nil` false and `??` not firing; **and, in the opposite direction, a STORED `3.0` is reported as nil** (`== nil` true, `??` fires). `d[k]` returns `3.0` correctly, so the value is stored fine and only `.get()`'s nil guard is broken. Measured interpreter-vs-Cranelift-JIT on the seed with a confirmed `[jit-addr]` engine witness. This is exactly the `emit_cast(3 → f64) == 3.0` landmine predicted in the note above — so a fix needs a **bitcast**, not just adding f64 to `guardable_value_type`. Standing guard: `scripts/check/check-dict-engine-differential.shs` (case `text_f64_local`). Record: `doc/08_tracking/bug/native_dict_f64_get_nil_sentinel_collides_with_stored_3_2026-08-17.md` | **NO** |
+| `d.get(k)` — miss, `V` = `f64` | **FIXED in the seed (2026-08-18)** by the float-vs-nil arm in `src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs` (compares against the f64 whose BITS are the nil word, not numeric 3.0). Re-verified 2026-11-03 on the deployed seed: probe `PROBE F64MISS: true` under both `interpret` and `jit`; canary `test/01_unit/compiler/dict_get_miss_returns_nil_spec.spl` 14/14. The pure-Simple MIR path (`expr_dispatch.spl` `guardable_value_type`) still excludes F64 and is unverified until a self-hosted binary runs the probe. Record: `doc/08_tracking/bug/native_dict_f64_get_nil_sentinel_collides_with_stored_3_2026-08-17.md` | **YES** (seed JIT) |
 | `d.get(k)` — hit, `V` = `bool`, value `true` | correct since 2026-08-01 (`.get()` on a bool dict now returns the raw 3-state word) | yes |
 | `d.get(k)` — hit, `V` = `i64` / `text` | correct since `7e83e92ce314` (was `7`→`56`) | yes |
 | `d.get(k)` — hit, `V` = struct/class/enum | correct since `7e83e92ce314` (was a segfaulting corrupt `Option`) | yes |
