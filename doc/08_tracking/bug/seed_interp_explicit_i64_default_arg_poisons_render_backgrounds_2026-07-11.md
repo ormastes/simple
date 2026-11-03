@@ -132,9 +132,3 @@ The only difference is the i64 value at the call boundary. White pixels (0xFFFFF
 Tracked in `doc/08_tracking/bug/bug_db.sdn` as `seed_interp_explicit_i64_default_arg_poisons_render_backgrounds`.
 
 **Revalidated 2026-11-02: still plausible because the report title (Passing explicit i64 budget_ms arg to software_pixels renderer paints all backg) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
-
-## 2026-11-03 — deferred (not reproducible on this host)
-
-Measured on aarch64 macOS with the browser-engine renderer; this Windows lane
-has no such repro. A reduced `fn f(a, b, budget: i64 = 5)` default-vs-explicit
-call is not enough evidence without the renderer. Needs the macOS repro.
