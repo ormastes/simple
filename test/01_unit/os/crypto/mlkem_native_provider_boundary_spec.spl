@@ -1,0 +1,102 @@
+# Native-only regression: do not count interpreter/seed execution as hardware evidence.
+# @req NFR-010
+use std.spec.{describe, it, expect, step}
+use std.simd.{mlkem_ntt_simd_batch, mlkem_ntt_simd_backend,
+    mlkem_ntt_simd_reset, mlkem_ntt_simd_receipt}
+use os.crypto.ml_kem_ntt.{ntt}
+
+fn _check_batch_fixture(kind: i64):
+    var input: [i64] = []
+    var expected: [i64] = []
+    var canonical: [i64] = []
+    var polynomial = 0
+    while polynomial < 3:
+        var block: [i64] = []
+        var i = 0
+        while i < 256:
+            var coefficient = (polynomial * 97 + i * 29 + 17) % 3329
+            if kind == 1:
+                coefficient = if i % 2 == 0: 0 else: 3328
+            elif kind == 2:
+                coefficient = if i == 0 or i == 3 or i == 4 or i == 7 or i == 8 or i == 127 or i == 128 or i == 255: 1 else: 0
+            block.push(coefficient)
+            canonical.push(coefficient)
+            # Equivalent representatives exercise signed reduction at entry.
+            input.push(coefficient + (if i % 2 == 0: -6658 else: 6658))
+            i = i + 1
+        val transformed = ntt(block)
+        for value in transformed:
+            expected.push(value)
+        polynomial = polynomial + 1
+    mlkem_ntt_simd_reset()
+    val actual = mlkem_ntt_simd_batch(input, false)
+    expect(actual).to_equal(expected)
+    val receipt = mlkem_ntt_simd_receipt()
+    expect(receipt.backend_code).to_equal(mlkem_ntt_simd_backend())
+    expect(receipt.chunk_hits).to_be_greater_than(0)
+    if receipt.backend_code == 1:
+        expect(receipt.chunk_hits).to_equal(240)
+    elif receipt.backend_code == 2:
+        expect(receipt.chunk_hits).to_equal(576)
+    elif receipt.backend_code == 3:
+        expect(receipt.observed_rvv_vlen_bits).to_be_greater_than(127)
+        expect(receipt.observed_rvv_vlen_bits % 32).to_equal(0)
+    if receipt.backend_code != 3:
+        expect(receipt.observed_rvv_vlen_bits).to_equal(0)
+    mlkem_ntt_simd_reset()
+    val recovered = mlkem_ntt_simd_batch(actual, true)
+    expect(recovered).to_equal(canonical)
+    val inverse_receipt = mlkem_ntt_simd_receipt()
+    expect(inverse_receipt.chunk_hits).to_be_greater_than(0)
+    # Native operation must preserve its source array.
+    expect(input.len()).to_equal(768)
+    expect(input[0]).to_equal(canonical[0] - 6658)
+
+describe "ML-KEM native provider boundary":
+    it "p2_p3_bug_reproduction":
+        step("Reproduce the exact failure")
+        # An unsupported host fails this native gate; it never silently skips.
+        expect(mlkem_ntt_simd_backend()).to_be_greater_than(0)
+        step("Exercise the repaired owner")
+        _check_batch_fixture(0)
+        _check_batch_fixture(1)
+        _check_batch_fixture(2)
+
+    it "p2_p3_adjacent_regression":
+        step("Reject the adjacent regression")
+        mlkem_ntt_simd_reset()
+        expect(mlkem_ntt_simd_batch([], false)).to_equal([])
+        expect(mlkem_ntt_simd_batch([1], false)).to_equal([])
+        var short: [i64] = []
+        for i in 0..255:
+            short.push(i)
+        expect(mlkem_ntt_simd_batch(short, true)).to_equal([])
+        short.push(255)
+        short.push(256)
+        expect(mlkem_ntt_simd_batch(short, false)).to_equal([])
+        val rejected_receipt = mlkem_ntt_simd_receipt()
+        expect(rejected_receipt.chunk_hits).to_equal(0)
+        expect(rejected_receipt.observed_rvv_vlen_bits).to_equal(0)
+
+    it "matches the FIPS 203 quadratic factor roots independently":
+        step("Exercise the repaired owner")
+        # X^2 modulo X^2 - 17^(2*BitRev7(i)+1) is that root.
+        var monomial: [i64] = []
+        for i in 0..256:
+            monomial.push(if i == 2: 1 else: 0)
+        var roots: [i64] = []
+        for i in 0..128:
+            var rest = i
+            var reversed = 0
+            for bit in 0..7:
+                reversed = reversed * 2 + rest % 2
+                rest = rest / 2
+            var root = 1
+            var exponent = 0
+            while exponent < 2 * reversed + 1:
+                root = root * 17 % 3329
+                exponent = exponent + 1
+            roots.push(root)
+            roots.push(0)
+        expect(mlkem_ntt_simd_batch(monomial, false)).to_equal(roots)
+        expect(mlkem_ntt_simd_batch(roots, true)).to_equal(monomial)
