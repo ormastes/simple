@@ -285,17 +285,42 @@ impl Lowerer {
         // at the call site is a compile error (`fill_omitted_default_args`):
         // codegen would otherwise pad the slot with tagged nil.
         if let (Expr::Identifier(name), HirExprKind::Global(symbol)) = (callee, &func_hir.kind) {
+            let own = self.own_declared_function_names.contains(name);
+            let params = self.fn_param_defaults.get(symbol).or_else(|| {
+                if own { return None; }
+                self.current_file.as_ref().and_then(|path| {
+                    self.imported_fn_param_defaults
+                        .get(&crate::interpreter::normalize_path_key(path))
+                        .and_then(|contracts| contracts.get(name))
+                })
+            }).cloned();
             if args.iter().all(|a| a.name.is_none()) {
-                let params = self.fn_param_defaults.get(symbol).or_else(|| {
-                    if self.own_declared_function_names.contains(name) { return None; }
+                if let Some(params) = params {
+                    self.fill_omitted_default_args(symbol, &params, &mut args_hir, ctx)?;
+                }
+            } else if let Some(params) = params {
+                // Named arguments: map every argument onto its declared slot
+                // and fill the rest from constant defaults. Without this the
+                // args were passed in source order with omitted slots left
+                // unset (tagged nil) - bug
+                // jit_layout_run_full_with_ports_nil_receiver (rc=139).
+                let names = self.fn_param_names.get(symbol).or_else(|| {
+                    if own { return None; }
                     self.current_file.as_ref().and_then(|path| {
-                        self.imported_fn_param_defaults
+                        self.imported_fn_param_names
                             .get(&crate::interpreter::normalize_path_key(path))
                             .and_then(|contracts| contracts.get(name))
                     })
                 }).cloned();
-                if let Some(params) = params {
-                    self.fill_omitted_default_args(symbol, &params, &mut args_hir, ctx)?;
+                let Some(names) = names else {
+                    return Err(LowerError::Unsupported(format!(
+                        "call to `{symbol}` uses named arguments but its parameter names are unknown here; \
+                         pass the arguments positionally"
+                    )));
+                };
+                // Empty names = variadic callee: keep the legacy path.
+                if !names.is_empty() {
+                    args_hir = self.bind_named_call_args(symbol, &names, &params, args, args_hir, ctx)?;
                 }
             }
         }
@@ -310,6 +335,70 @@ impl Lowerer {
             },
             ty: ret_ty,
         })
+    }
+
+    /// Map a call that uses named arguments onto the callee's declared slots.
+    /// Positional arguments fill slots 0..n, each named argument fills the
+    /// slot of the same name, and every remaining slot takes its constant
+    /// default (lowered in the caller, once). A required slot left unfilled,
+    /// an unknown or duplicated name, or a non-constant default is a hard
+    /// lowering error - never an unset slot that codegen pads with nil.
+    /// Arguments are passed in declared slot order.
+    pub(super) fn bind_named_call_args(
+        &mut self,
+        callee: &str,
+        names: &[String],
+        defaults: &[Option<Expr>],
+        args: &[ast::Argument],
+        args_hir: Vec<HirExpr>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirExpr>> {
+        let mut slots: Vec<Option<HirExpr>> = (0..names.len()).map(|_| None).collect();
+        let mut next_positional = 0usize;
+        for (arg, hir) in args.iter().zip(args_hir) {
+            let index = match arg.name.as_deref() {
+                None => {
+                    let i = next_positional;
+                    next_positional += 1;
+                    i
+                }
+                Some(n) => names.iter().position(|p| p == n).ok_or_else(|| {
+                    LowerError::Unsupported(format!("call to `{callee}` names unknown parameter `{n}`"))
+                })?,
+            };
+            match slots.get_mut(index) {
+                Some(slot @ None) => *slot = Some(hir),
+                _ => {
+                    return Err(LowerError::Unsupported(format!(
+                        "call to `{callee}` passes parameter {} more than once or beyond its arity",
+                        index + 1
+                    )));
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(slots.len());
+        for (index, slot) in slots.into_iter().enumerate() {
+            match slot {
+                Some(hir) => out.push(hir),
+                None => match defaults.get(index).and_then(|d| d.as_ref()) {
+                    Some(expr) if Self::is_constant_default(expr) => out.push(self.lower_expr(expr, ctx)?),
+                    Some(_) => {
+                        return Err(LowerError::Unsupported(format!(
+                            "call to `{callee}` omits argument {} whose default is not a call-site constant; \
+                             a cross-module/native call cannot evaluate it, pass the argument explicitly",
+                            index + 1
+                        )));
+                    }
+                    None => {
+                        return Err(LowerError::Unsupported(format!(
+                            "call to `{callee}` omits required argument {} (`{}`)",
+                            index + 1, names[index]
+                        )));
+                    }
+                },
+            }
+        }
+        Ok(out)
     }
 
     /// Append the callee's default for every omitted trailing positional

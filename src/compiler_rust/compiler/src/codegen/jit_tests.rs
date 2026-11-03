@@ -622,3 +622,36 @@ fn caller() -> i64:
          not silently accepted and left to SIGSEGV on first call"
     );
 }
+
+#[test]
+fn test_jit_unresolved_cross_module_simple_fn_error_names_the_cause() {
+    // jit_silent_interpreter_fallback_on_unresolved_extern: a call to a Simple
+    // function defined in ANOTHER module (e.g. `crypto_text_to_bytes`) is an
+    // undeclared import in the per-module JIT. The refusal must say so
+    // explicitly (not just "unresolved external symbol"), so the
+    // whole-module interpreter demotion is diagnosable from the message alone.
+    simple_runtime::register_static_runtime_symbols();
+    let source = r#"
+@unsafe(reason: "test unresolved cross-module fn", capabilities: [ffi])
+extern fn simple_seed_xmodule_fn_zzqq(x: i64) -> i64
+
+fn caller() -> i64:
+    simple_seed_xmodule_fn_zzqq(1)
+"#;
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse fixture");
+    let hir_module = hir::lower(&ast).expect("HIR lower fixture");
+    let mir_module = lower_to_mir(&hir_module).expect("MIR lower fixture");
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    let err = format!("{:?}", jit.compile_module(&mir_module).expect_err("must refuse"));
+    assert!(
+        err.contains("cross-module Simple function"),
+        "error must classify a non-runtime unresolved import as a cross-module \
+         Simple function limitation, got: {err}"
+    );
+    assert!(
+        super::unresolved_import_kind("rt_some_runtime_fn").contains("runtime extern"),
+        "rt_* names are runtime externs"
+    );
+}
