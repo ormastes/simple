@@ -71,3 +71,5 @@ distinguished by a fresh self-hosted build:
   (FIXED by #2943, same nil-guard pattern class).
 
 **Revalidated 2026-11-02: still plausible because OPEN — toolchain/binary drift; needs a rebuilt self-hosted compiler; no merged fix commit with a passing regression is cited in this doc.**
+
+**Closed 2026-11-03 (stale, group C triage):** candidate 1 (toolchain drift) applies: the cited binary is the 2026-09-18 rc.1 build. Candidate 2 is already addressed in source: `hc_enc_hir_module` (src/compiler/20.hir/generated/hir_codec.spl:5296) is nil-safe and rejects ill-formed/unregistered nodes via `rt_heap_ref_wellformed` / `rt_heap_ref_registered` before any field load. Reopen only if a freshly built current-tree binary reproduces.
