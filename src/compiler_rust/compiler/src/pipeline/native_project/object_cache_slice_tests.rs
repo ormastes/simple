@@ -599,3 +599,35 @@ fn default_value_change_recompiles_the_caller_and_relinks_correctly() {
     assert_eq!(recompiled_modules(&fixture, "d1", &before), set(&["cons", "prov"]));
     assert_eq!(run_consume(&fixture, "d1"), "consume=14", "caller must see the new default");
 }
+
+/// Perf budget (seed_global_interface_cache_rebuild_latency_2026-10-05): a
+/// no-edit rebuild must reuse every module, and a leaf body edit must
+/// recompile at most that one module. The cache key is per-module
+/// (`InterfaceSliceIndex`), never whole-project, so build cost after an edit
+/// must not scale with module count. Budgets are generous wall-time bounds on a
+/// 3-module archive: they trip only if the warm builds degrade toward a cold one.
+#[test]
+fn leaf_edit_recompile_count_and_time_budget() {
+    let _guard = crate::pipeline::execution::runtime_bundle_env_lock_for_tests()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new(&[("prov", PROV_BASE), ("cons", CONS), ("other", OTHER)]);
+    let t = std::time::Instant::now();
+    let cold = fixture.build("b1");
+    let cold_s = t.elapsed().as_secs_f64();
+    assert_eq!((cold.compiled, cold.cached), (3, 0));
+
+    let t = std::time::Instant::now();
+    let same = fixture.build("b1");
+    let same_s = t.elapsed().as_secs_f64();
+    assert_eq!((same.compiled, same.cached), (0, 3), "no-edit rebuild must be all cache hits");
+
+    fixture.write("other", &OTHER.replace("return 5", "return 6"));
+    let t = std::time::Instant::now();
+    let edit = fixture.build("b1");
+    let edit_s = t.elapsed().as_secs_f64();
+    assert!(edit.compiled <= 1, "leaf edit recompiled {} modules (budget 1)", edit.compiled);
+    eprintln!("[iface-cache-budget] cold={cold_s:.2}s nochange={same_s:.2}s leaf_edit={edit_s:.2}s");
+    assert!(same_s <= 30.0, "no-edit rebuild took {same_s:.1}s (budget 30s)");
+    assert!(edit_s <= 30.0, "leaf-edit rebuild took {edit_s:.1}s (budget 30s)");
+}

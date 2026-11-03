@@ -103,3 +103,16 @@ are unchanged. Test:
 `test_global_build_fingerprint_describe_change_names_component`.
 Remaining (open): dependency-safe per-module interface fingerprints for a real
 latency reduction; a measured before/after needs a ~30 min native build.
+
+## 2026-11-03 status: fix already landed (115692d2b4e, a0bc4efc782); budget spec added, verification-pending
+
+The whole-project `layout` digest was removed from every object key on
+2026-10-20 (per-module `InterfaceSliceIndex`); body-only/leaf edits recompile
+only the edited module (`object_cache_slice_tests.rs`, linux-only specs).
+Added `leaf_edit_recompile_count_and_time_budget` (no cfg gate): no-edit rebuild
+= 0 compiled / 3 cached; leaf edit compiled <= 1; both warm builds <= 30 s.
+NOT RUN: host disk had < 15 GB free, so no test-only cargo build was possible.
+Repro: `cd src/compiler_rust && cargo test -p simple-compiler --lib leaf_edit_recompile_count -- --nocapture`
+(prints `[iface-cache-budget] cold/nochange/leaf_edit` seconds). Sibling search:
+no other whole-project term remains in `object_cache_key` (content, backend, opt,
+cpu, simd, compiler fp, lane only).
