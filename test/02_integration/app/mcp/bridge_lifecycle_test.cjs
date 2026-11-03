@@ -51,7 +51,10 @@ async function launch(mode, missing = false) {
     }
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     assert.notEqual(await within(closed, 2000), null, 'owned bridge cleanup did not finish');
-    fs.rmSync(folder, { recursive: true, force: true });
+    const resolved = path.resolve(folder);
+    assert.equal(path.dirname(resolved), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(resolved).startsWith('simple-mcp-owned-'));
+    fs.rmSync(resolved, { recursive: true, force: true });
   } };
 }
 async function cooperativeSession() {
