@@ -228,3 +228,21 @@ Retired by commit e21824a4ed4 on the verdict of a probe guard that hardcoded the
 `bin/simple` seed (see guards_hardcode_stale_seed_binary_census_2026-08-17.md). The
 retirement measured a binary older than the code, so it is not evidence. Re-retire only
 with a verdict from a fresh self-hosted build via `SIMPLE_BIN`.
+
+## 2026-11-03: RE-CLOSED (fresh-binary evidence, live mode switch)
+
+The reopen above required a verdict from a binary newer than the code. Measured with
+`C:/dev/simple/bin/simple.exe` (Rust seed built 2026-11-03 12:23, i.e. current HEAD) on
+`test/fixtures/repro/compiler/class_identity/class_identity_corpus_probe.spl` and the
+SCell/StructHolder probe from the 2026-08-17 section:
+
+| shape | contract | `SIMPLE_EXECUTION_MODE=interpreter` | `SIMPLE_EXECUTION_MODE=jit` |
+|---|---|---|---|
+| F struct in class field | VAL | VAL (150) | VAL (150) |
+| local copy / array element copy | VAL | 1 / 2 | 1 / 2 |
+
+Liveness control (the previous 61-bit control no longer diverges, as predicted): the same
+probe's class rows differ by engine (A/B/C/D/E = COPY under interpreter, REF under jit),
+so `SIMPLE_EXECUTION_MODE` is provably honoured and the struct VAL result under jit is real.
+No code change needed; status set to fixed. Pin remains
+`test/01_unit/compiler/class_identity_corpus_spec.spl`.
