@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, openSync, closeSync, fsyncSync, readFileSync, re
 import { dirname } from "node:path";
 
 import { canonicalJson, freezeDeep, sha256Hex } from "./canonical.js";
+import { randomBytes } from "node:crypto";
 import { fsyncDirectory } from "./directory_fsync.js";
 
 const STORES = new WeakSet();
@@ -64,7 +65,7 @@ export class ReadReceiptPolicyStore {
       const current = this.read();
       if (current.digest !== expectedDigest) return null;
       if (!monotonic(current.policy, nextPolicy)) return null;
-      const next = record(nextPolicy), temporary = `${this.path}.tmp-${process.pid}-${Date.now()}`;
+      const next = record(nextPolicy), temporary = `${this.path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
       durableWrite(temporary, `${canonicalJson(next)}\n`);
       renameSync(temporary, this.path);
       fsyncDirectory(dirname(this.path));
