@@ -1,0 +1,35 @@
+# Purpose and audience: regression evidence for MIR JSON string escaping and linear assembly.
+# @req REQ-SSPEC-COMPILER
+# Bugs: mir_json_c0_escaping_2026_10_12, mir_json_quadratic_identity_allocation_2026_10_12
+use std.spec
+use std.spec.step
+use compiler.mir.mir_json.{escape_json_string}
+
+describe "MIR JSON escape_json_string":
+    it "keeps the short escape spellings":
+        step("escape quote, backslash, LF, CR, TAB")
+        expect(escape_json_string("a\"b\\c\nd\re\tf")).to_equal("a\\\"b\\\\c\\nd\\re\\tf")
+
+    it "escapes C0 control bytes as backslash-u00XX":
+        step("escape 0x01, 0x08, 0x0c, 0x1f")
+        expect(escape_json_string("a" + 1.chr() + "b")).to_equal("a\\u0001b")
+        expect(escape_json_string(8.chr())).to_equal("\\u0008")
+        expect(escape_json_string(12.chr())).to_equal("\\u000c")
+        expect(escape_json_string(31.chr())).to_equal("\\u001f")
+
+    it "escapes NUL and leaves printable and non-ASCII text intact":
+        step("escape NUL, keep plain and unicode")
+        expect(escape_json_string("x" + 0.chr() + "y")).to_equal("x\\u0000y")
+        expect(escape_json_string("plain {}")).to_equal("plain {}")
+        expect(escape_json_string("")).to_equal("")
+        expect(escape_json_string("héllo")).to_equal("héllo")
+
+    it "handles a large input in linear time":
+        step("escape 50000 mixed chunks")
+        var parts: [text] = []
+        var i = 0
+        while i < 50000:
+            parts.push("a\"" + 2.chr() + "\n")
+            i = i + 1
+        val out = escape_json_string(parts.join(""))
+        expect(out.len()).to_equal(50000 * 11)
