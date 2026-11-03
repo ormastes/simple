@@ -91,3 +91,7 @@ PASS, client application success, producer qualification, or closure of the
 historical emitter/brace-collapse report is claimed. Core/library/MCP checks and
 native smoke remain pending. See the authored manual at
 `doc/06_spec/01_unit/app/lsp/code_action_edit_roundtrip_spec.md`.
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN; source candidate PR #6293 MERGED at aea5d7eecfc57d497c0fb860be11782d18366055. It preserves empty deletion edits and serialized escaped text. TEST_BLOCKED: six authored protocol scenarios, compiler/lib/MCP/LSP checks and native smoke UNRUN without a qualified self-hosted runtime. Await those checks; static checks are not behavioral proof. This merged residual deletion-edit repair does not prove closure of the historical emitter/brace-collapse umbrella.

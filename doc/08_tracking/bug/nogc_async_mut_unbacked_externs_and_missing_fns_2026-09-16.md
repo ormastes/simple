@@ -93,3 +93,7 @@ The existing typed single-threaded `upgrade_rc()` repair does not qualify Arc.
 No new Arc API, fabricated extern, hardcoded failure, Rust/C implementation,
 build, or test execution was introduced in this follow-up. This lane is frozen
 pending the provider implementation; authored Rc tests remain unexecuted.
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN umbrella; partial source candidate PR #6292 MERGED at 9f8f65dd6376e9e53c4f137fab450dc531496f5b. It adds only multicore_green_try_spawn submission/rejected-join handling; other missing functions and ArcBox providers remain unresolved. TEST_BLOCKED: qualified self-hosted runtime unavailable; behavioral submission/rejection/join proof and required core/MCP checks UNRUN. Await producer-qualified verification; no umbrella closure.

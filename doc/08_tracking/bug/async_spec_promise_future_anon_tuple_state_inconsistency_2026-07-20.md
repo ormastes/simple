@@ -143,3 +143,7 @@ applied locally for clarity; that fix is not present in the committed file.
   `Future.poll()` inconsistency, which still blocks full green even after
   fix (1) is applied.
 
+
+## Canonical database reconciliation — 2026-11-03
+
+OPEN; PR #6301 MERGED at 5cec7885187661e950f941045cdb6b8d522a4884 and contributes production-owner Promise/Future detectors only, not a production repair. TEST_BLOCKED: real anonymous-tuple readiness/value/second-completion scenarios UNRUN without a qualified self-hosted runtime. Await detector execution and triage; historical surrogate-spec repairs are not production-state proof.
