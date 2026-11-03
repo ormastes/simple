@@ -133,6 +133,11 @@ impl<'a> Parser<'a> {
             .map(|block| Expr::UnsafeBlock(block.statements, capabilities))
     }
 
+    fn match_followed_by_adjacent_index(&mut self) -> bool {
+        let next = self.peek_next();
+        matches!(next.kind, TokenKind::LBracket) && next.span.start == self.current.span.end
+    }
+
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind.clone() {
             // Ellipsis as expression placeholder: `...` is equivalent to pass/unit ()
@@ -374,7 +379,7 @@ impl<'a> Parser<'a> {
                 || self.peek_is(&TokenKind::NotEq)
                 || self.peek_is(&TokenKind::Newline)
                 || self.peek_is(&TokenKind::Eof)
-                || self.peek_is(&TokenKind::LBracket)
+                || self.match_followed_by_adjacent_index()
                 || self.peek_is(&TokenKind::Semicolon)
                 || self.peek_is(&TokenKind::Plus)
                 || self.peek_is(&TokenKind::Minus)

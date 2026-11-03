@@ -200,3 +200,9 @@ fn unit_declarations_still_parse_as_declarations() {
     let mut parser = Parser::new("newunit velocity = length / time");
     assert!(parser.parse().is_err(), "newunit compound must still be rejected");
 }
+
+#[test]
+fn match_identifier_index_and_spaced_match_expression_disambiguate() {
+    parse_ok("var match = [7, 9]\nlet first = match[0]");
+    parse_ok("let selected = match [0]:\n    0 => 7\n    _ => 9");
+}
