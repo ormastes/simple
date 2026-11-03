@@ -198,6 +198,39 @@ impl Lowerer {
         Ok(self.optionalize_array_accessor(lowered))
     }
 
+    /// Like `lower_optional_subject`, but only when some pattern actually tests
+    /// optionality (`Some(..)`, `None`, `nil`, or - for `if val`/`while val` -
+    /// a payload binding). A literal-pattern `match xs.first(): case 3:` or any
+    /// other non-optional pattern keeps the plain `T` subject.
+    pub(in crate::hir::lower) fn lower_subject_for_patterns<'p>(
+        &mut self,
+        expr: &ast::Expr,
+        patterns: impl IntoIterator<Item = &'p ast::Pattern>,
+        binding_is_payload: bool,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        if patterns
+            .into_iter()
+            .any(|p| Self::pattern_tests_optional(p, binding_is_payload))
+        {
+            self.lower_optional_subject(expr, ctx)
+        } else {
+            self.lower_expr(expr, ctx)
+        }
+    }
+
+    fn pattern_tests_optional(pattern: &ast::Pattern, binding_is_payload: bool) -> bool {
+        match pattern {
+            ast::Pattern::Enum { variant, .. } => variant == "Some" || variant == "None",
+            ast::Pattern::Identifier(name) => name == "None" || binding_is_payload,
+            ast::Pattern::MutIdentifier(_) | ast::Pattern::MoveIdentifier(_) => binding_is_payload,
+            ast::Pattern::Literal(e) => matches!(**e, ast::Expr::Nil),
+            ast::Pattern::Or(ps) => ps.iter().any(|p| Self::pattern_tests_optional(p, binding_is_payload)),
+            ast::Pattern::Typed { pattern, .. } => Self::pattern_tests_optional(pattern, binding_is_payload),
+            _ => false,
+        }
+    }
+
     pub(in crate::hir::lower) fn optionalize_array_accessor(&mut self, lowered: HirExpr) -> HirExpr {
         let HirExprKind::MethodCall {
             receiver,

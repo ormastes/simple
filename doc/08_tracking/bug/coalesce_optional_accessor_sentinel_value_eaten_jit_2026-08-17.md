@@ -117,3 +117,10 @@ lowered to the runtime call itself (`rt_array_*`) typed `T?` (tagged), so presen
 the runtime tag, not a raw value compare. Collateral also fixed: `if val x = xs.first()`
 and `match xs.first(): case Some(v)` lost a present 3, and `[].get(0) ?? -1` returned 0
 on the JIT. Probe extended (`ifval_*`, `match_*`, `empty_get_default`); class spec 3/3 green.
+
+Follow-up (review, 2026-11-03): subject optionalization is gated on the patterns
+(`Some`/`None`/`nil`, or a payload binding for `if val`/`while val`), so
+`match xs.first(): case 3:` and plain `if xs.first() == 3:` keep plain `T`
+(probe: `literal_match_*`, `plain_if_*`). Remaining gap: `[u64]` elements are
+excluded (u64 boxing differs); `[3u64].first() ?? 9` still gives 9 on the JIT,
+byte-identical to the deployed seed (no regression). Needs a u64-aware tagged path.
