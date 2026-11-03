@@ -71,3 +71,23 @@ build-via-concatenation workaround.
 1. Open a `.spl` file with a fixable construct (e.g. `Foo.new()`).
 2. Request a code action on that line; accept the offered quickfix.
 3. Observed: no text change. Expected: the constructor rewrite applies.
+
+## 2026-11-03 residual deletion-edit repair candidate
+
+Current source already forwards nested range edits, but both nested and legacy
+branches require decoded `newText != ""`. This drops valid deletion edits. The
+candidate distinguishes a serialized JSON string (including `""`) from a missing
+or null field, and forwards that serialized string without decoding/re-escaping
+it. This also retains escaped insertion text through the existing raw-field owner.
+
+`lsp_code_actions_from_query_output` is the pure conversion boundary shared by
+the live request handler and six authored regression scenarios in
+`test/01_unit/app/lsp/code_action_edit_roundtrip_spec.spl`.
+
+Status: source candidate, **verification pending**. No qualified self-hosted
+runtime is deployed in `bin/release`; tracked `bin/simple.exe` was independently
+identified as a Rust bootstrap seed and was not used for normal tests. No runtime
+PASS, client application success, producer qualification, or closure of the
+historical emitter/brace-collapse report is claimed. Core/library/MCP checks and
+native smoke remain pending. See the authored manual at
+`doc/06_spec/01_unit/app/lsp/code_action_edit_roundtrip_spec.md`.
