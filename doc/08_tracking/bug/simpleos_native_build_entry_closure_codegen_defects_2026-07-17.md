@@ -1582,3 +1582,13 @@ full verification PASS.
 UNPROVEN by this lane. Every reproduction path for this row is a cross-target/freestanding `native-build` (riscv*-unknown-none / x86_64-unknown-none, LLVM or Cranelift, plus QEMU boot), and the fix sites fall in lanes claimed by concurrent sessions (`src/compiler/20.hir/hir_lowering/**`, `src/compiler/50.mir/**`, `src/compiler/70.backend/**`, `pipeline/native_project/**`). No content-level fix marker was found for it in current source, and no cheap hosted-engine proxy exists — the hosted engines do not exercise the failing path at all. Status left OPEN, unmodified; do not read this note as either a confirmation or a close.
 
 **Revalidated 2026-11-02: still plausible because the report title (Entry-closure cranelift drops module-global call initializers) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 s3g4 lane: triage
+
+C3 (`not a and call()`) does NOT reproduce under seed interpret/JIT
+(`test/fixtures/repro/compiler/short_circuit_and_call_rhs_repro.spl` prints
+`short-circuit-and-ok`); it needs the freestanding `x86_64-unknown-none --backend cranelift
+--opt-level=aggressive` entry-closure build and objdump to observe, which this lane cannot
+run (seed redeploy forbidden; full-repo native-build >40 min). C1/C8 have their own
+landed root fixes above. Deferred with: freestanding cranelift repro + disasm of the
+fixture above required.
