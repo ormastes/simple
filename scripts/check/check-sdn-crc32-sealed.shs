@@ -69,7 +69,7 @@ scan() {
             { rm -rf "$_work"; echo "ERROR — nothing was checked (cannot read $_rev:$_path)"; return 2; }
         case "$(head -1 "$_work/copy.sdn")" in '#sdn-crc32:'*) ;; *) continue ;; esac
         _n=$((_n + 1))
-        _res=$(sh "$RESEAL" "$_work/copy.sdn" 2>/dev/null | tail -1)
+        _res=$(sh "$RESEAL" --no-selftest "$_work/copy.sdn" 2>/dev/null | tail -1)
         case "$_res" in
             'PASS — '*' already sealed, crc32 '*) ;;
             'PASS — '*' resealed, crc32 '*) _k=$((_k + 1)); _stale="$_stale $_path" ;;
@@ -103,7 +103,7 @@ selftest() {
     # fixture repo: one good sealed, one stale, one malformed, one unsealed
     _mk "$_t/r1"; mkdir -p "$_t/r1/doc"
     printf '#sdn-crc32:0\nbugs |id, status|\n    a, open\n' > "$_t/r1/doc/good.sdn"
-    sh "$RESEAL" "$_t/r1/doc/good.sdn" >/dev/null 2>&1
+    sh "$RESEAL" --no-selftest "$_t/r1/doc/good.sdn" >/dev/null 2>&1
     printf '#sdn-crc32:12345\nbugs |id, status|\n    b, open\n' > "$_t/r1/doc/stale.sdn"
     printf '#sdn-crc32:garbage\nbugs |id, status|\n    c, open\n' > "$_t/r1/doc/bad.sdn"
     printf 'bugs |id, status|\n    d, open\n' > "$_t/r1/doc/unsealed.sdn"
@@ -117,8 +117,8 @@ selftest() {
     case "$_out" in *doc/unsealed.sdn*) echo "selftest FAIL 1c: unsealed file wrongly reported"; _fails=$((_fails + 1)) ;; esac
 
     # after resealing both offenders the same tree must PASS with 3 checked
-    sh "$RESEAL" "$_t/r1/doc/stale.sdn" >/dev/null 2>&1
-    sh "$RESEAL" "$_t/r1/doc/bad.sdn" >/dev/null 2>&1
+    sh "$RESEAL" --no-selftest "$_t/r1/doc/stale.sdn" >/dev/null 2>&1
+    sh "$RESEAL" --no-selftest "$_t/r1/doc/bad.sdn" >/dev/null 2>&1
     _commit "$_t/r1"
     _out=$(scan "$_t/r1" HEAD); _rc=$?
     case "$_rc:$(printf '%s' "$_out" | tail -1)" in
@@ -148,6 +148,8 @@ selftest() {
 
 [ -f "$RESEAL" ] || { echo "ERROR — nothing was checked (missing $RESEAL)"; exit 2; }
 selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
+# The CRC implementation is verified ONCE here; per-file calls above skip its selftest.
+sh "$RESEAL" --selftest >/dev/null 2>&1 || { echo "ERROR — nothing was checked (reseal-sdn-crc32 selftest failed)"; exit 2; }
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
     echo "PASS — 5 fixture(s) checked, selftest only"
     exit 0
