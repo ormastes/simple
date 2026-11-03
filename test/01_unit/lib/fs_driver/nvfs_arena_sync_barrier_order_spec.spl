@@ -1,0 +1,111 @@
+# NVFS arena durable-sync barrier ordering on a host fake block device.
+#
+# Bug: simpleos_filesystem_durable_sync_barrier_gap_2026-08-20.
+# The fake device records every write/flush as an ordered event so the spec
+# proves the barrier contract of arena_fsync_impl: data sectors are written,
+# then a device flush is acknowledged, then the header sector is published,
+# then a second flush is acknowledged. A failed flush at either barrier must
+# never become a durability claim. Host-run; no QEMU or board needed.
+
+use std.spipe.*
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.nvfs_arena.{
+    nvfs_arena_set_block_device, arena_create_nvme_impl, arena_append_impl,
+    arena_fsync_impl, arena_durable_len_impl, arena_durable_sequence_impl
+}
+
+struct BarrierLog:
+    sectors: [[u8]]
+    events: [text]
+    flush_calls: i64
+    fail_flush_at: i64
+
+var _barrier_logs: [BarrierLog] = []
+
+fn _zeros(n: i32) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(0u8)
+        i = i + 1
+    out
+
+fn _new_log(fail_flush_at: i64) -> i32:
+    var sectors: [[u8]] = []
+    var i = 0
+    while i < 128:
+        sectors.push(_zeros(512))
+        i = i + 1
+    _barrier_logs.push(BarrierLog(sectors: sectors, events: [], flush_calls: 0, fail_flush_at: fail_flush_at))
+    (_barrier_logs.len() - 1) as i32
+
+fn _log_events(id: i32) -> [text]:
+    _barrier_logs[id].events
+
+struct BarrierDevice:
+    log_id: i32
+
+impl BarrierDevice:
+    static fn new(fail_flush_at: i64) -> BarrierDevice:
+        BarrierDevice(log_id: _new_log(fail_flush_at))
+
+impl BlockDevice for BarrierDevice:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        if lba >= 128u64:
+            return Err("barrier device read out of range")
+        Ok(_barrier_logs[self.log_id].sectors[lba as i32])
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        if lba >= 128u64:
+            return Err("barrier device write out of range")
+        var log = _barrier_logs[self.log_id]
+        log.sectors[lba as i32] = data
+        log.events.push("w{lba}")
+        _barrier_logs[self.log_id] = log
+        Ok(true)
+
+    fn sector_size() -> u32:
+        512u32
+
+    fn flush() -> Result<bool, text>:
+        var log = _barrier_logs[self.log_id]
+        log.flush_calls = log.flush_calls + 1
+        val ok = log.fail_flush_at == 0 or log.flush_calls != log.fail_flush_at
+        log.events.push(if ok: "F" else: "F!")
+        _barrier_logs[self.log_id] = log
+        Ok(ok)
+
+describe "NVFS arena durable-sync barrier ordering":
+    it "orders data write, flush, header publish, flush":
+        val device = BarrierDevice.new(0)
+        nvfs_arena_set_block_device(device)
+        val base = 8
+        val arena = arena_create_nvme_impl(0, 4096, base, 16)
+        expect(arena).to_be_greater_than(0)
+        expect(arena_append_impl(arena, [0x41u8, 0x42u8], 0)).to_equal(2)
+        expect(arena_fsync_impl(arena)).to_be(true)
+        # Data lands on the first data sector after the header (base + 1).
+        expect(_log_events(device.log_id).join(",")).to_equal("w9,F,w8,F")
+        expect(arena_durable_len_impl(base)).to_equal(2)
+
+    it "publishes no header when the data barrier flush fails":
+        val device = BarrierDevice.new(1)
+        nvfs_arena_set_block_device(device)
+        val base = 8
+        val arena = arena_create_nvme_impl(0, 4096, base, 16)
+        expect(arena_append_impl(arena, [0x7Fu8], 0)).to_equal(1)
+        expect(arena_fsync_impl(arena)).to_be(false)
+        expect(_log_events(device.log_id).join(",")).to_equal("w9,F!")
+        expect(arena_durable_len_impl(base)).to_equal(-1)
+
+    it "does not claim durability when the metadata barrier flush fails":
+        val device = BarrierDevice.new(2)
+        nvfs_arena_set_block_device(device)
+        val base = 8
+        val arena = arena_create_nvme_impl(0, 4096, base, 16)
+        expect(arena_append_impl(arena, [0x55u8], 0)).to_equal(1)
+        expect(arena_fsync_impl(arena)).to_be(false)
+        expect(_log_events(device.log_id).join(",")).to_equal("w9,F,w8,F!")
+        # A retried fsync must reuse the same sequence, never skip ahead.
+        expect(arena_fsync_impl(arena)).to_be(true)
+        expect(arena_durable_sequence_impl(base)).to_equal(1u64)
