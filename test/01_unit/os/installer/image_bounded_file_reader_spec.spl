@@ -2,12 +2,6 @@
 # @req REQ-SSPEC-OS
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-OS
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-use std.spec.step
-
 use std.spec
 use std.spec.step
 use os.installer.image_bounded_file_reader.{
@@ -16,7 +10,6 @@ use os.installer.image_bounded_file_reader.{
 }
 use std.io_runtime.{file_write_bytes, process_run}
 
-
 fn _reader_fixture_dir() -> text:
     val path = "build/test-artifacts/image-bounded-file-reader"
     process_run("/bin/sh", ["-c", "rm -rf '" + path + "' && mkdir -p '" + path + "'"])
@@ -24,15 +17,17 @@ fn _reader_fixture_dir() -> text:
 
 describe "Installer bounded file reader":
     # @manual scenario evidence
-    it "fails closed before allocating from a regular changeable host file":
+    it "reads a regular file through the bound descriptor or fails closed without beneath-open":
         # @req REQ-SSPEC-OS
-        step("fails closed before allocating from a regular changeable host file")
+        step("reads a regular file through the bound descriptor or fails closed")
         val dir = _reader_fixture_dir()
         val path = "{dir}/payload.bin"
         expect(file_write_bytes(path, [0u8, 1u8, 2u8, 255u8])).to_be(true)
         val result = image_read_file_bounded_v1(path, 4, "test payload")
-        expect(result.is_err()).to_be(true)
-        if val Err(message) = result:
+        if val Ok(bytes) = result:
+            expect(bytes.len()).to_equal(4)
+            expect(bytes[3]).to_equal(255u8)
+        else if val Err(message) = result:
             expect(message).to_contain(IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1)
 
     it "rejects a symlink instead of following a changeable source name":
@@ -49,13 +44,40 @@ describe "Installer bounded file reader":
         if val Err(message) = result:
             expect(message).to_contain("symlink")
 
-    it "applies the same fail-closed owner boundary to installer text":
+    it "refuses a file larger than the admitted bound":
         # @req REQ-SSPEC-OS
-        step("applies the same fail-closed owner boundary to installer text")
+        step("refuses a file larger than the admitted bound")
+        val dir = _reader_fixture_dir()
+        val path = "{dir}/big.bin"
+        expect(file_write_bytes(path, [1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8])).to_be(true)
+        val result = image_read_file_bounded_v1(path, 4, "test payload")
+        expect(result.is_err()).to_be(true)
+
+    it "stress: concurrent growth never yields more than the bound (200 reads)":
+        # @req REQ-SSPEC-OS
+        step("stress: concurrent growth never yields more than the bound")
+        val dir = _reader_fixture_dir()
+        val path = "{dir}/grow.bin"
+        expect(file_write_bytes(path, [9u8, 9u8, 9u8, 9u8])).to_be(true)
+        process_run("/bin/sh", ["-c", "(i=0; while [ $i -lt 400 ]; do printf 'xxxxxxxx' >> '" + path + "'; i=$((i+1)); done) >/dev/null 2>&1 &"])
+        var violations = 0
+        var n = 0
+        while n < 200:
+            val r = image_read_file_bounded_v1(path, 4, "test payload")
+            if val Ok(bytes) = r:
+                if bytes.len() > 4:
+                    violations = violations + 1
+            n = n + 1
+        expect(violations).to_equal(0)
+
+    it "applies the same boundary to installer text":
+        # @req REQ-SSPEC-OS
+        step("applies the same boundary to installer text")
         val dir = _reader_fixture_dir()
         val path = "{dir}/package.spk"
         expect(file_write_bytes(path, [112u8, 107u8, 103u8])).to_be(true)
         val result = image_read_text_bounded_v1(path, 8, "test package")
-        expect(result.is_err()).to_be(true)
-        if val Err(message) = result:
+        if val Ok(text_value) = result:
+            expect(text_value).to_equal("pkg")
+        else if val Err(message) = result:
             expect(message).to_contain(IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1)
