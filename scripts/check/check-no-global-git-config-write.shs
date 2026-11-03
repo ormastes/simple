@@ -1,0 +1,86 @@
+#!/bin/sh
+# Reject code that WRITES the user-global or system git config
+# (`git config --global|--system <key> <value>`, `--add`, `--unset`, ...), which
+# takes a lock on ~/.gitconfig. Bug: simple_cli_invocation_attempts_user_gitconfig_lock_2026-09-09.
+# Reads (--get, --get-all, --get-regexp, --list, -l, --show-origin) are allowed.
+# A deliberate, user-opt-in writer marks its line with `gitconfig-global-optin`.
+#
+# Usage: sh scripts/check/check-no-global-git-config-write.shs [--root DIR] [--selftest]
+# Scope: src/ and scripts/ (*.spl *.shs *.sh), excluding vendor and this guard.
+# Verdict (last stdout line): PASS — n file(s) scanned ... / FAIL — ... / ERROR — nothing was checked
+set -u
+export LC_ALL=C
+ROOT=.
+SELFTEST_ONLY=0
+SELF_NAME=check-no-global-git-config-write.shs
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) shift; [ $# -gt 0 ] || { echo "ERROR — nothing was checked (--root needs a value)"; exit 2; }; ROOT=$1 ;;
+        --selftest) SELFTEST_ONLY=1 ;;
+        *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+    shift
+done
+
+# scan DIR: prints offending file:line:text lines to stdout, file count to FILES_N_FILE
+scan() {
+    _root=$1
+    _list=$(mktemp) || return 2
+    for d in src scripts; do
+        [ -d "$_root/$d" ] && find "$_root/$d" -type f \( -name '*.spl' -o -name '*.shs' -o -name '*.sh' \) \
+            -not -path '*/vendor/*' -not -path '*/.git/*' -not -name "$SELF_NAME" 2>/dev/null
+    done > "$_list"
+    wc -l < "$_list" | tr -d ' ' > "$_list.n"
+    xargs awk '
+            /^[ \t]*#/ { next }
+            {
+                l = $0
+                if (l ~ /gitconfig-global-optin/) next
+                w = (l ~ /(^|[^A-Za-z_-])config([^A-Za-z_-].*)?[ "\x27](--global|--system)([^A-Za-z-]|$)/) || (l ~ /=[ ]*--(global|system)([^A-Za-z-]|$)/)
+                if (!w) next
+                if (l ~ /--get|--list|--show-origin|[ "]-l[ "]/) next
+                printf "%s:%d:%s\n", FILENAME, FNR, l
+            }' < "$_list"
+    cat "$_list.n" > "${FILES_N_FILE:-/dev/null}"
+    rm -f "$_list" "$_list.n"
+}
+
+run_scan() {
+    FILES_N_FILE=$(mktemp)
+    export FILES_N_FILE
+    _out=$(scan "$1")
+    _n=$(cat "$FILES_N_FILE"); rm -f "$FILES_N_FILE"
+    SCANNED=${_n:-0}
+    OFFENDERS=$_out
+}
+
+if [ "$SELFTEST_ONLY" = 1 ] || true; then
+    T=$(mktemp -d) || { echo "ERROR — nothing was checked (no temp dir)"; exit 2; }
+    mkdir -p "$T/clean/scripts" "$T/dirty/src" "$T/dirty/scripts" "$T/empty" "$T/optin/scripts" "$T/vendor/src/vendor/x"
+    printf '#!/bin/sh\ngit config --global --get user.name\ngit config --list --system\n# git config --global a b\ngit config --local a b\n' > "$T/clean/scripts/a.shs"
+    printf 'git config --global user.name x\n' > "$T/dirty/scripts/w.shs"
+    printf 'val r = process_run("git", ["config", "--global", "--add", "safe.directory", p])\n' > "$T/dirty/src/w.spl"
+    printf '_scope=--system\n' > "$T/dirty/scripts/v.sh"
+    printf '_scope=--global   # gitconfig-global-optin: explicit flag\n' > "$T/optin/scripts/o.shs"
+    printf 'git config --global x y\n' > "$T/vendor/src/vendor/x/v.shs"
+    ok=1
+    run_scan "$T/clean";  [ "$SCANNED" -eq 1 ] && [ -z "$OFFENDERS" ] || { echo "selftest: clean fixture must pass ($SCANNED/$OFFENDERS)"; ok=0; }
+    run_scan "$T/dirty";  [ "$SCANNED" -eq 3 ] && [ "$(printf '%s\n' "$OFFENDERS" | wc -l | tr -d ' ')" -eq 3 ] || { echo "selftest: dirty fixture must flag 3 ($SCANNED/$OFFENDERS)"; ok=0; }
+    run_scan "$T/optin";  [ "$SCANNED" -eq 1 ] && [ -z "$OFFENDERS" ] || { echo "selftest: opt-in marker must pass"; ok=0; }
+    run_scan "$T/vendor"; [ -z "$OFFENDERS" ] || { echo "selftest: vendor must be excluded"; ok=0; }
+    run_scan "$T/empty";  [ "$SCANNED" -eq 0 ] || { echo "selftest: empty root must scan 0"; ok=0; }
+    rm -rf "$T"
+    [ "$ok" = 1 ] || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+    [ "$SELFTEST_ONLY" = 1 ] && { echo "PASS — 5 selftest fixture(s) passed"; exit 0; }
+fi
+
+run_scan "$ROOT"
+if [ "$SCANNED" -eq 0 ]; then echo "ERROR — nothing was checked (0 files under $ROOT/src or $ROOT/scripts)"; exit 2; fi
+if [ -n "$OFFENDERS" ]; then
+    printf '%s\n' "$OFFENDERS"
+    echo "FAIL — $SCANNED file(s) scanned, $(printf '%s\n' "$OFFENDERS" | wc -l | tr -d ' ') global/system git config write(s)"
+    exit 1
+fi
+echo "PASS — $SCANNED file(s) scanned, 0 global/system git config writes"
+exit 0

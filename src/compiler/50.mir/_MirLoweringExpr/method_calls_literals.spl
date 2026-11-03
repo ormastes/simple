@@ -5195,7 +5195,17 @@ impl MirLowering:
                     # `arr.copy()` / `arr.clone()`: a fresh shallow array,
                     # the same counted copy loop `val b = a` materializes.
                     if (method == "copy" or method == "clone") and args.len() == 0:
-                        val copy_type = self.local_mir_type_of(unresolved_receiver_local) ?? MirType.i64()
+                        var copy_type = self.local_mir_type_of(unresolved_receiver_local) ?? MirType.i64()
+                        # native_cache_contract_mir_lowering_gaps_2026_10_11: a
+                        # borrowed array parameter (`Ref(Array)`) carries the same
+                        # runtime handle as the array, but local_is_runtime_array
+                        # only sees the bare Array, so `values.copy()` fell through
+                        # to the unresolved-method failure. Note the handle and
+                        # copy through the element type; other receivers unchanged.
+                        if not self.local_is_runtime_array(unresolved_receiver_local):
+                            if val copy_ref_inner = self.borrowed_runtime_array_inner_mir_type(copy_type):
+                                self.runtime_array_locals[unresolved_receiver_local.id] = true
+                                copy_type = copy_ref_inner
                         if val copied_array = self.maybe_copy_array_value(unresolved_receiver_local, copy_type, true):
                             return copied_array
                     if method == "map" and args.len() == 1:
