@@ -94,3 +94,7 @@ grep -c 'execve("/bin/sh"' /tmp/warm.log                     # 0, post-fix
 /usr/bin/time -f 'wall=%e s' bin/simple test test/fixtures/concurrency/conc_a_spec.spl --no-session-daemon --no-session-share
 ```
 
+
+## Update 2026-11-03
+No change. The light daemon is bypassed on non-linux; a wall-time budget spec
+must be authored and measured on linux. Left open.

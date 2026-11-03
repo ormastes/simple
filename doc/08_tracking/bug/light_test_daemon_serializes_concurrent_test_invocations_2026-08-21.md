@@ -95,3 +95,10 @@ These emitted verdicts and are honest failures, not harness artifacts:
 | lib/common/web/browser_session_dom_generation_runtime_spec.spl | 1 total, 0 passed, 1 failed |
 | lib/common/web/browser_session_async_spec.spl | 24 executed, 22 passed, 2 failed |
 
+
+## Update 2026-11-03
+Mitigation (fix 2 above) is wired: the client calls daemon_backlog_bypass
+(test_runner_client.spl) so concurrent clients divert to the direct lane
+(daemon_backlog_bypass_spec 13/13). The worker pool (fix 1) is not done and the
+light daemon is bypassed on non-linux, so a budget spec must be authored on
+linux. Left open.
