@@ -1,10 +1,39 @@
-# arm64 WM+Vulkan real-firmware smoke lane is blocked: `arm64-desktop-engine2d` scenario is unregistered (2026-09-01)
+# ARM64 WM/Vulkan real-firmware admission remains pending
 
 Status: **OPEN**. Gate landed **ADVISORY** (honestly RED).
 Gate: `scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs`
 Arch scope: aarch64/arm64 only. x86_64 and riscv64 are other lanes.
 
-## Summary
+## Current source review — 2026-11-03
+
+The original registration blocker is stale: `scenario_catalog.spl` now
+constructs `arm64-desktop-engine2d` and dispatches both lookup routes. The
+historical observations below are retained as evidence of the earlier state.
+
+The remaining gate had a separate concrete artifact defect: it supplied the
+ELF container directly to `BOOT_PROTOCOL=linux`; the ESP builder copies its
+payload verbatim. The gate now extracts a flat Image with `llvm-objcopy`,
+checks ELF64 little-endian AArch64 input and the ARM64 Linux Image magic and
+nonzero declared image size, then supplies that Image to the ESP owner.
+Conversion/validation happens before the optional daemon build. Failures keep
+the gate's ERROR/exit-2 contract; no direct-kernel fallback or admission
+relaxation was added.
+
+`python3 scripts/check/check-arm64-wm-firmware-image.py` passed with a real
+clang/LLD-produced ARM64 ELF and the production conversion/ESP-handoff shell
+fragments. It verifies the exact flat bytes reaching the builder boundary,
+quoted paths, bad magic, zero size, truncated image, wrong machine, accidental
+raw-ELF copy, missing objcopy, and builder failure. The ESP boundary is a test
+capture, not a FAT/firmware execution claim. Shell syntax, whitespace and
+scoped env guards passed.
+
+Status remains **OPEN / ADVISORY**: full gate selftests requiring an admitted
+Simple runner, current-source kernel build, real-firmware handover and paired
+hardware Vulkan receipts were not run here. The PCI/ivshmem descriptor defect
+and other live-lane dependencies remain separate open records. Source artifact
+repair must not be reported as successful WM/Vulkan firmware admission.
+
+## Historical summary (2026-09-01)
 
 Goal item 2 asks for an "x86, arm, riscv simple os wm with vulkan backed smoke
 test". The aarch64 gate is written and its `--selftest` is green (25 fixtures,
