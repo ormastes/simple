@@ -26,3 +26,6 @@ Provenance mapping and landing status: Workaround provenance: 3ac1706cb94ac4ab35
 Exact qualified/failing source attribution: Passing narrow C36 ARM/RISC-V fixture source 9773949ac215c2cb8e8e1234db6b1bc40e967d12; actual C36 consumer integrationf7fdaf remains failing on callback ownership.
 
 Traceability annotation base: `64b8854eaa6eee9470470ddbcef5fa2165902d13`. No earlier source or retained build evidence was modified; native qualifications remain bound to their exact sources above.
+
+## Lane note 2026-11-03 (wl01 lane)
+Deferred: per the row the workaround stays active until original-form controls and the real consumer pass on a rebuilt producer; MIR enum literal-payload provenance owners cannot be qualified without native runs.
