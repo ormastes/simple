@@ -1,5 +1,5 @@
 use compiler.hir.hir_lowering.concat_copy_v1.{hir_stmt_concat_copy_v1}
-use compiler.hir.hir_lowering.binding_types.{hir_binding_type_or_infer, hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind}
 # HIR Lowering - Statement Lowering
 #
 # This module handles lowering of statements from AST to HIR.
@@ -51,7 +51,12 @@ impl HirLowering:
     # with Error as the unknown sentinel, avoiding optional aggregate transport.
     me binding_source_type(source: HirExpr, bind_optional_payload: bool = false) -> HirType:
         var resolved: HirType = HirType(kind: HirTypeKind.Error, span: source.span)
-        if source.has_type_ and source.type_ != nil:
+        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=the frozen stage2 loads (deep-copies) source.type_ even when has_type_ is false; the placeholder's packed span is then dereferenced (AV binding_source_type+0x194, addr 0x100000000). Test has_type_ in its own if.
+        var source_has_type: bool = false
+        if source.has_type_:
+            if source.type_ != nil:
+                source_has_type = true
+        if source_has_type:
             resolved = source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
         else:
             val symbol = _hir_expr_symbol_or_invalid(source.kind)
@@ -95,9 +100,26 @@ impl HirLowering:
         # Only the concrete Let payload substitutes the inference marker for
         # unknown types; symbol registration keeps its existing Error behavior.
         val resolved: HirType = self.binding_source_type(source, bind_optional_payload)
+        # Inlined hir_binding_type_or_infer (binding_types.spl). The frozen stage2
+        # deep-copies a by-value HirExpr argument at a second call hop and reads
+        # the packed HirType.span of the has_type_=false placeholder as a pointer
+        # (AV at hir_binding_type_or_infer+0x173; as a `me` method the same fault
+        # moved to binding_payload_type+0x137). Read `source` fields in place.
+        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=second by-value HirExpr hop faults on the packed span; read fields in place
         match resolved.kind:
             case HirTypeKind.Error:
-                hir_binding_type_or_infer(source, bind_optional_payload)
+                if source.has_type_:
+                    val source_type: HirType = source.type_
+                    if bind_optional_payload:
+                        match source_type.kind:
+                            case HirTypeKind.Optional(inner):
+                                val payload_type: HirType = inner
+                                return payload_type
+                            case _:
+                                pass
+                    return source_type
+                val infer_span: Span = resolved.span
+                HirType(kind: HirTypeKind.Infer(0, 0), span: infer_span)
             case _:
                 resolved
 
@@ -110,7 +132,7 @@ impl HirLowering:
         if discard:
             if op.?:
                 self.error("discard assignment does not support a compound operator", span)
-                return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: span))
+                return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span))
             # Lower exactly once. A unit block retains the RHS effects but
             # cannot accidentally promote a final discard to a value tail.
             val rhs = self.lower_hir_expr(value)
@@ -265,7 +287,7 @@ impl HirLowering:
                             if not range_resolves:
                                 val range_start = self.lower_hir_expr(range_args[0].value)
                                 val range_end = self.lower_hir_expr(range_args[1].value)
-                                return HirExpr(kind: HirExprKind.Range(range_start, range_end, false, None), has_type_: false, type_: nil, span: iter.span)
+                                return HirExpr(kind: HirExprKind.Range(range_start, range_end, false, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: iter.span), span: iter.span)
                     case _:
                         pass
             case _:
@@ -356,7 +378,7 @@ impl HirLowering:
                 if elements.len() != names.len():
                     # Ordinary lowering errors are fatal by default.
                     self.error("tuple destructure arity mismatch for `val (" + inner + ")`: " + names.len().to_text() + " name(s) on the left vs " + elements.len().to_text() + " value(s) on the right", span)
-                    [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: nil, span: span)), span: span)]
+                    [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)]
                 else:
                     var result: [HirStmt] = []
                     var i = 0
@@ -390,7 +412,7 @@ impl HirLowering:
                 if elements.len() != names.len():
                     # Ordinary lowering errors are fatal by default.
                     self.error("tuple destructure arity mismatch for `var (" + inner + ")`: " + names.len().to_text() + " name(s) on the left vs " + elements.len().to_text() + " value(s) on the right", span)
-                    [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: nil, span: span)), span: span)]
+                    [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)]
                 else:
                     var result: [HirStmt] = []
                     var i = 0
@@ -499,13 +521,13 @@ impl HirLowering:
             if not ta_is_hole:
                 val ta_idx_type: HirType? = if i < ta_elem_types.len(): ta_elem_types[i] else: nil
                 val ta_idx_expr = HirExpr(kind: HirExprKind.Index(
-                    HirExpr(kind: HirExprKind.Var(tmp_sym), has_type_: false, type_: nil, span: span),
-                    HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: nil, span: span)
+                    HirExpr(kind: HirExprKind.Var(tmp_sym), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span),
+                    HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
                 ), has_type_: i < ta_elem_types.len(), type_: ta_idx_type, span: span)
                 stmts = stmts.push(HirStmt(kind: HirStmtKind.Assign(
                     self.lower_hir_expr(targets[i]), None, ta_idx_expr), span: span))
             i = i + 1
-        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: span), span: span)), span: span)
+        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span)), span: span)
 
     me lower_tuple_destructure(name: text, hir_init: HirExpr, is_mut: bool, span: Span) -> HirStmt:
         val inner = name.slice(1, name.len() - 1)
@@ -549,14 +571,14 @@ impl HirLowering:
             if pname != "_":
                 val td_idx_type: HirType? = if i < td_elem_types.len(): td_elem_types[i] else: nil
                 val idx_expr = HirExpr(kind: HirExprKind.Index(
-                    HirExpr(kind: HirExprKind.Var(tmp_sym), has_type_: false, type_: nil, span: span),
-                    HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: nil, span: span)
+                    HirExpr(kind: HirExprKind.Var(tmp_sym), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span),
+                    HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
                 ), has_type_: i < td_elem_types.len(), type_: td_idx_type, span: span)
                 val binding_type = self.binding_payload_type(idx_expr)
                 val psym = self.symbols.define(pname, SymbolKind.Variable, binding_type, span, Visibility.Private, is_mut, nil)
                 stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(psym, binding_type, idx_expr), span: span))
             i = i + 1
-        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: span), span: span)), span: span)
+        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span)), span: span)
 
     me lower_hir_stmt(s: Stmt) -> HirStmt:
         # DIRECT typed field read, NOT `match s: case Stmt(k, _): k` — the
@@ -671,7 +693,7 @@ impl HirLowering:
             val vr_lowered_init = if vr_init.?:
                 self.lower_hir_expr(vr_init ?? sk_dummy)
             else:
-                HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: s.span)
+                HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)
             val vr_hir_init = self.retain_attributed_collection_type(vr_lowered_init, vr_hir_type)
             if not vr_has_annotation:
                 val inferred = self.binding_source_type(vr_hir_init, s.bind_optional_payload)
@@ -708,7 +730,7 @@ impl HirLowering:
                 rt_hir = self.lower_hir_expr(rt_val_e)
             if (rt_env_get("SIMPLE_MIR_RET_TRACE") ?? "") == "1":
                 print "[hir-ret-fast] ast_nil={rt_val == nil} hir_nil={rt_hir == nil}"
-            return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), has_type_: false, type_: nil, span: s.span)), span: s.span)
+            return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, None, sk_dummy)):
             val as_target: Expr = match stmt_kind_value:
                 case StmtKind.Assign(atarget, _, _):
@@ -755,7 +777,7 @@ impl HirLowering:
                 # which can turn a declared value return into NilLit and let
                 # native code fabricate an ABI default.
                 self.error("expression statement payload is malformed", s.span)
-                return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: nil, span: s.span)), span: s.span)
+                return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)), span: s.span)
             # The flat parser emits `target = value` as an EXPRESSION
             # statement (expr_assign), never StmtKind.Assign. Route it
             # into HirStmtKind.Assign so MIR's assignment lowering
@@ -833,7 +855,7 @@ impl HirLowering:
                 val lowered_init = if val init_expr = init:
                     self.lower_hir_expr(init_expr)
                 else:
-                    HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: s.span)
+                    HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)
                 val hir_init = self.retain_attributed_collection_type(lowered_init, hir_type)
                 if not has_annotation:
                     val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)
@@ -878,9 +900,9 @@ impl HirLowering:
                         val for_pname = for_parts[for_pi]
                         if for_pname != "_":
                             val for_idx_expr = HirExpr(kind: HirExprKind.Index(
-                                HirExpr(kind: HirExprKind.Var(for_elem_sym), has_type_: false, type_: nil, span: s.span),
-                                HirExpr(kind: HirExprKind.IntLit(for_pi, None), has_type_: false, type_: nil, span: s.span)
-                            ), has_type_: false, type_: nil, span: s.span)
+                                HirExpr(kind: HirExprKind.Var(for_elem_sym), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span),
+                                HirExpr(kind: HirExprKind.IntLit(for_pi, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)
+                            ), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)
                             val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
                             for_prefix = for_prefix.push(HirStmt(kind: HirStmtKind.Let(for_psym, self.binding_payload_type(for_idx_expr), for_idx_expr), span: s.span))
                         for_pi = for_pi + 1
@@ -908,7 +930,7 @@ impl HirLowering:
                 # Desugar to loop
                 HirStmtKind.Expr(HirExpr(
                     kind: hir_body_kind,
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                     span: s.span
                 ))
 
@@ -920,7 +942,7 @@ impl HirLowering:
                 self.loop_depth = self.loop_depth - 1
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.While(hir_cond, hir_body, None),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                     span: s.span
                 ))
 
@@ -930,7 +952,7 @@ impl HirLowering:
                 self.loop_depth = self.loop_depth - 1
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Loop(hir_body, None),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                     span: s.span
                 ))
 
@@ -943,21 +965,21 @@ impl HirLowering:
                     print "[hir-ret] StmtKind.Return ast_nil={value == nil} hir_nil={return_value == nil}"
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Return(return_value),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                     span: s.span
                 ))
 
             case StmtKind.Break(label):
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Break(label, None),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                     span: s.span
                 ))
 
             case StmtKind.Continue(label):
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Continue(label),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                     span: s.span
                 ))
 
@@ -965,14 +987,14 @@ impl HirLowering:
                 val yield_value: HirExpr? = Some(self.lower_hir_expr(value))
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Yield(yield_value),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                     span: s.span
                 ))
 
             case StmtKind.Throw(value):
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Throw(self.lower_hir_expr(value)),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                     span: s.span
                 ))
 
@@ -985,7 +1007,7 @@ impl HirLowering:
 
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.With(hir_items, hir_body),
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                     span: s.span
                 ))
 
@@ -993,7 +1015,7 @@ impl HirLowering:
                 self.error("unsupported statement kind", s.span)
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Error,
-                    has_type_: false, type_: nil,
+                    has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
                     span: s.span
                 ))
 
