@@ -1,0 +1,102 @@
+# Purpose and audience: executable specification of the .csm sidecar seal loader states.
+# @req REQ-SSPEC-LIB
+# @cover src/lib/nogc_sync_mut/database/csm_seal.spl 80%
+
+use std.spec.step
+use std.nogc_sync_mut.compression.gzip.{crc32_text}
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_exists}
+use std.nogc_sync_mut.database.csm_seal.{hash_hex, csm_verify, csm_load_body, csm_seal, csm_list, csm_sidecar_path, csm_policy_algo_from, csm_policy_row_from, csm_hex_len, CSM_OK, CSM_CORRUPT, CSM_MERGED_UNSEALED, CSM_MISSING, CSM_LEGACY}
+
+val DIR: text = "build/csm_seal_spec_tmp"
+val BODY: text = "bugs |id, status|\n    a, open\n"
+
+fn fresh(name: text) -> text:
+    dir_remove_all(DIR)
+    dir_create_all(DIR)
+    DIR + "/" + name + ".sdn"
+
+describe "csm sidecar seal":
+    it "hash_hex crc32 matches the CRC-32/ISO-HDLC KAT and is 8 lowercase hex":
+        step("hash_hex crc32 KAT")
+        assert_equal(hash_hex("123456789", "crc32"), "cbf43926")
+        assert_equal(csm_hex_len("crc32"), 8)
+        assert_equal(csm_hex_len("xxh3"), 16)
+        assert_equal(csm_hex_len("blake3"), 64)
+        assert_equal(csm_hex_len("md5"), -1)
+
+    it "OK: one matching sidecar":
+        step("OK")
+        val p = fresh("ok")
+        file_write(p, BODY)
+        assert_true(csm_seal(p, BODY, "crc32"))
+        assert_equal(csm_verify(p, BODY).state, CSM_OK)
+        assert_equal(csm_list(p).len(), 1)
+
+    it "CORRUPT: one mismatching sidecar":
+        step("CORRUPT")
+        val p = fresh("bad")
+        file_write(p, BODY)
+        csm_seal(p, BODY, "crc32")
+        assert_equal(csm_verify(p, BODY + "    b, open\n").state, CSM_CORRUPT)
+        assert_true(csm_load_body(p, BODY + "    b, open\n") == nil)
+
+    it "CORRUPT: unknown algorithm and wrong hex width fail closed":
+        step("unknown algo / bad width")
+        val p = fresh("unk")
+        file_write(p, BODY)
+        file_write(DIR + "/unk.md5_cbf43926.csm", "")
+        assert_equal(csm_verify(p, BODY).state, CSM_CORRUPT)
+        file_delete(DIR + "/unk.md5_cbf43926.csm")
+        file_write(DIR + "/unk.crc32_cbf4.csm", "")
+        assert_equal(csm_verify(p, BODY).state, CSM_CORRUPT)
+
+    it "MERGED_UNSEALED: several sidecars load with a warning, reseal collapses to one":
+        step("MERGED_UNSEALED")
+        val p = fresh("merged")
+        file_write(p, BODY)
+        file_write(csm_sidecar_path(p, "crc32", "00000001"), "")
+        file_write(csm_sidecar_path(p, "crc32", "00000002"), "")
+        assert_equal(csm_verify(p, BODY).state, CSM_MERGED_UNSEALED)
+        assert_true(csm_load_body(p, BODY) == BODY)
+        assert_true(csm_seal(p, BODY, "crc32"))
+        assert_equal(csm_list(p).len(), 1)
+        assert_equal(csm_verify(p, BODY).state, CSM_OK)
+
+    it "MISSING: no sidecar and no legacy header":
+        step("MISSING")
+        val p = fresh("missing")
+        file_write(p, BODY)
+        assert_equal(csm_verify(p, BODY).state, CSM_MISSING)
+        assert_true(csm_load_body(p, BODY) == BODY)  # unlisted path: legacy unsealed DB still loads
+        val pol = "seal_policy |glob, algo|\n    build/csm_seal_spec_tmp/missing.sdn, crc32\n"
+        assert_true(csm_policy_row_from(pol, p) == "crc32")
+
+    it "LEGACY: a matching #sdn-crc32 header is accepted, a wrong one is CORRUPT":
+        step("LEGACY")
+        val p = fresh("legacy")
+        val good = "#sdn-crc32:{crc32_text(BODY)}\n" + BODY
+        assert_equal(csm_verify(p, good).state, CSM_LEGACY)
+        assert_true(csm_load_body(p, good) == BODY)
+        val bad = "#sdn-crc32:12345\n" + BODY
+        assert_equal(csm_verify(p, bad).state, CSM_CORRUPT)
+        assert_true(csm_load_body(p, bad) == nil)
+
+    it "CRLF content verifies against the LF seal":
+        step("CRLF")
+        val p = fresh("crlf")
+        file_write(p, BODY)
+        csm_seal(p, BODY, "crc32")
+        val crlf = BODY.replace("\n", "\r\n")
+        assert_equal(csm_verify(p, crlf).state, CSM_OK)
+        assert_equal(hash_hex(crlf, "crc32"), hash_hex(BODY, "crc32"))
+
+    it "policy: first matching glob wins, default is crc32 until xxh3 lands":
+        step("policy")
+        val pol = "seal_policy |glob, algo|\n    doc/08_tracking/bug/bug_db.sdn, crc32\n    var/*.sdn, blake3\n"
+        assert_equal(csm_policy_algo_from(pol, "doc/08_tracking/bug/bug_db.sdn"), "crc32")
+        assert_equal(csm_policy_algo_from(pol, "C:/x/doc/08_tracking/bug/bug_db.sdn"), "crc32")
+        assert_equal(csm_policy_algo_from(pol, "var/a.sdn"), "blake3")
+        assert_equal(csm_policy_algo_from(pol, "other/a.sdn"), "crc32")

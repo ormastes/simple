@@ -1,0 +1,326 @@
+# Sidecar seals (.csm) for SDN data files.
+#
+# A sealed data file `dir/X.sdn` is accompanied by an EMPTY sibling file
+# `dir/X.<algo>_<lowercase hex>.csm`. The seal lives in the file NAME so that a
+# merge never has to reconcile a header line inside the data file: two sides that
+# reseal produce two differently named empty files (state MERGED_UNSEALED), which
+# git can union without a textual conflict.
+#
+# Hashing is LF-normalized: every CR is dropped before hashing, so a checkout with
+# CRLF line ends verifies against the same seal as the LF blob.
+#
+# Verify states (csm_verify):
+#   OK              exactly one sidecar and it matches
+#   CORRUPT         exactly one sidecar and it mismatches / names an unknown
+#                   algorithm / has the wrong hex length (fail closed)
+#   MERGED_UNSEALED more than one sidecar (loader accepts with a warning, writers
+#                   reseal, gates FAIL with a "run reseal" hint)
+#   MISSING         no sidecar and no legacy header (fail closed)
+#   LEGACY          no sidecar, line 1 is a matching `#sdn-crc32:` header
+#                   (deprecated, accepted for one release)
+#
+# Shell twin: scripts/check/sdn-seal-lib.shs (same names, same states).
+
+use std.nogc_sync_mut.compression.gzip.crc.{crc32_text, crc32_update}
+use std.io_runtime.{dir_list, file_delete, read_file_text_result}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write}
+
+val CSM_OK: text = "OK"
+val CSM_CORRUPT: text = "CORRUPT"
+val CSM_MERGED_UNSEALED: text = "MERGED_UNSEALED"
+val CSM_MISSING: text = "MISSING"
+val CSM_LEGACY: text = "LEGACY"
+
+# TODO: flip to "xxh3" once std.common.crypto.xxh3 lands (hash_hex has only crc32 today).
+val CSM_DEFAULT_ALGO: text = "crc32"
+val CSM_POLICY_PATH: text = "config/check/sdn_seal_policy.sdn"
+val CSM_LEGACY_PREFIX: text = "#sdn-crc32:"
+
+struct CsmVerdict:
+    state: text
+    algo: text
+    detail: text
+
+# Hex width per algorithm; -1 for an unknown tag (fail closed).
+fn csm_hex_len(algo: text) -> i64:
+    if algo == "crc32": return 8
+    if algo == "xxh3": return 16
+    if algo == "blake3": return 64
+    -1
+
+fn csm_strip_cr(content: text) -> text:
+    content.replace("\r", "")
+
+fn _csm_hex8(value: i64) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 28
+    while shift >= 0:
+        val nibble = (value >> shift) & 15
+        out = out + digits.substring(nibble, nibble + 1)
+        shift = shift - 4
+    out
+
+# The ONE hashing function for sidecar seals. LF-normalized.
+fn hash_hex(content: text, algo: text) -> text:
+    val lf = csm_strip_cr(content)
+    if algo == "crc32":
+        return _csm_hex8(crc32_text(lf))
+    # TODO: xxh3 -> std.common.crypto.xxh3.xxh3_64_hex_lf(content),
+    #       blake3 -> blake3_hex_lf(content); primitives land in a separate PR.
+    assert false, "csm_seal: hash algorithm not implemented yet: {algo}"
+    ""
+
+# `dir/X.sdn` -> `dir/X` (the sidecar stem).
+fn csm_stem(path: text) -> text:
+    if path.ends_with(".sdn"):
+        return path.substring(0, path.len() - 4)
+    path
+
+fn csm_sidecar_path(path: text, algo: text, hex: text) -> text:
+    csm_stem(path) + "." + algo + "_" + hex + ".csm"
+
+fn _csm_split_dir(path: text) -> (text, text):
+    val norm = path.replace("\\", "/")
+    var slash = -1
+    var i = 0
+    while i < norm.len():
+        if norm.substring(i, i + 1) == "/": slash = i
+        i = i + 1
+    if slash < 0: return (".", norm)
+    (norm.substring(0, slash), norm.substring(slash + 1))
+
+# Full paths of every sidecar `X.<tag>.csm` beside `path`.
+fn csm_list(path: text) -> [text]:
+    val (dir, base) = _csm_split_dir(path)
+    val stem = if base.ends_with(".sdn"): base.substring(0, base.len() - 4) else: base
+    val prefix = stem + "."
+    var found: [text] = []
+    for entry in dir_list(dir):
+        val name: text = entry
+        if name.starts_with(prefix) and name.ends_with(".csm") and name.len() > prefix.len() + 4:
+            val tag = name.substring(prefix.len(), name.len() - 4)
+            # Only `<algo>_<hex>` tags; `X.foo.sdn.csm`-style neighbours are not ours.
+            if tag.contains("_") and not tag.contains("."):
+                found.push(dir + "/" + name)
+    found
+
+# Tag of a sidecar path -> (algo, hex); algo "" when malformed.
+fn csm_parse_tag(sidecar: text) -> (text, text):
+    val (_dir, name) = _csm_split_dir(sidecar)
+    val stem = name.substring(0, name.len() - 4)
+    var dot = -1
+    var i = 0
+    while i < stem.len():
+        if stem.substring(i, i + 1) == ".": dot = i
+        i = i + 1
+    val tag = stem.substring(dot + 1)
+    var us = -1
+    var j = 0
+    while j < tag.len():
+        if us < 0 and tag.substring(j, j + 1) == "_": us = j
+        j = j + 1
+    if us < 0: return ("", "")
+    (tag.substring(0, us), tag.substring(us + 1))
+
+fn _csm_is_lower_hex(s: text) -> bool:
+    if s == "": return false
+    for ch in s.chars():
+        if not "0123456789abcdef".contains(ch): return false
+    true
+
+# Hash of the raw file bytes (LF-normalized) for callers that must not round-trip
+# the file through text (workaround_store reads bytes on purpose).
+fn csm_hash_hex_bytes(raw: [u8], algo: text) -> text:
+    if algo == "crc32":
+        var lf: [u8] = []
+        for b in raw:
+            if b != 13: lf.push(b)
+        return _csm_hex8(crc32_update(0xffffffff, lf) ^ 0xffffffff)
+    # TODO: xxh3 / blake3 byte entry points land with the primitives PR.
+    assert false, "csm_seal: hash algorithm not implemented yet: {algo}"
+    ""
+
+fn _csm_hash(content: text, raw: [u8], use_raw: bool, algo: text) -> text:
+    if use_raw: return csm_hash_hex_bytes(raw, algo)
+    hash_hex(content, algo)
+
+# Does ONE sidecar describe the content? Unknown algo / wrong width / bad hex =>
+# false (fail closed). Second element is a human-readable reason on false.
+fn _csm_sidecar_matches(sidecar: text, content: text, raw: [u8], use_raw: bool) -> (bool, text):
+    val (algo, hex) = csm_parse_tag(sidecar)
+    val want = csm_hex_len(algo)
+    if algo == "" or want < 0:
+        return (false, "unknown seal algorithm '{algo}' in {sidecar}")
+    if hex.len() != want or not _csm_is_lower_hex(hex):
+        return (false, "malformed {algo} hex in {sidecar} (want {want} lowercase hex)")
+    if _csm_hash(content, raw, use_raw, algo) == hex:
+        return (true, "")
+    (false, "{algo} mismatch for {sidecar}")
+
+# True when line 1 is `#sdn-crc32:<digits>` and equals the crc32 of the EXACT
+# remaining bytes (the legacy contract hashed the body unnormalized).
+fn _csm_legacy_ok(content: text, raw: [u8], use_raw: bool) -> bool:
+    if not content.starts_with(CSM_LEGACY_PREFIX): return false
+    val nl = content.index_of("\n")
+    if nl < 0: return false
+    var header = content.substring(0, nl)
+    if header.ends_with("\r"): header = header.substring(0, header.len() - 1)
+    val digits = header.substring(CSM_LEGACY_PREFIX.len())
+    if digits == "" or digits.len() > 10: return false
+    for ch in digits.chars():
+        if not "0123456789".contains(ch): return false
+    if use_raw:
+        return "{crc32_update(0xffffffff, raw[(nl + 1)..raw.len()]) ^ 0xffffffff}" == digits
+    "{crc32_text(content.substring(nl + 1))}" == digits
+
+# Body of a legacy `#sdn-crc32:<n>` file, or nil when absent/malformed/mismatched.
+fn csm_legacy_body(content: text) -> text?:
+    if not _csm_legacy_ok(content, [], false): return nil
+    csm_strip_legacy_header(content)
+
+# Strip a leading `#sdn-crc32:` line (no verification); used after verifying.
+fn csm_strip_legacy_header(content: text) -> text:
+    if not content.starts_with(CSM_LEGACY_PREFIX): return content
+    val nl = content.index_of("\n")
+    if nl < 0: return content
+    content.substring(nl + 1)
+
+fn _csm_verify_core(path: text, content: text, raw: [u8], use_raw: bool) -> CsmVerdict:
+    val sidecars = csm_list(path)
+    if sidecars.len() == 0:
+        if content.starts_with(CSM_LEGACY_PREFIX):
+            if _csm_legacy_ok(content, raw, use_raw):
+                return CsmVerdict(state: CSM_LEGACY, algo: "crc32", detail: "legacy #sdn-crc32 header is deprecated; run reseal to migrate {path}")
+            return CsmVerdict(state: CSM_CORRUPT, algo: "crc32", detail: "legacy #sdn-crc32 header does not match {path}")
+        return CsmVerdict(state: CSM_MISSING, algo: "", detail: "no .csm seal beside {path}")
+    if sidecars.len() == 1:
+        val (ok, why) = _csm_sidecar_matches(sidecars[0], content, raw, use_raw)
+        val (algo, _hex) = csm_parse_tag(sidecars[0])
+        if ok: return CsmVerdict(state: CSM_OK, algo: algo, detail: "")
+        return CsmVerdict(state: CSM_CORRUPT, algo: algo, detail: why)
+    CsmVerdict(state: CSM_MERGED_UNSEALED, algo: "", detail: "{sidecars.len()} .csm seals beside {path}; run reseal")
+
+# Classify `content` (the exact text of data file `path`).
+fn csm_verify(path: text, content: text) -> CsmVerdict:
+    _csm_verify_core(path, content, [], false)
+
+# Same, hashing the raw bytes of this read (no text round trip).
+fn csm_verify_bytes(path: text, raw: [u8], content: text) -> CsmVerdict:
+    _csm_verify_core(path, content, raw, true)
+
+# Loader entry point: the usable body of `content`, or nil when the file must be
+# rejected. Non-fatal diagnostics (legacy / merged) are printed.
+fn csm_load_body(path: text, content: text) -> text?:
+    val verdict = csm_verify(path, content)
+    if verdict.state == CSM_OK:
+        return csm_strip_legacy_header(content)
+    if verdict.state == CSM_MERGED_UNSEALED:
+        # Accept: a union merge legitimately leaves several seals and none of
+        # them need match. Writers reseal; gates FAIL until someone does.
+        _csm_warn(verdict.detail)
+        return csm_strip_legacy_header(content)
+    if verdict.state == CSM_MISSING:
+        # Unsealed generic DBs predate sidecars and still load; a path the
+        # policy names explicitly must be sealed, so there MISSING fails closed.
+        if csm_policy_listed(path): return nil
+        return content
+    if verdict.state == CSM_LEGACY:
+        _csm_warn(verdict.detail)
+        return csm_legacy_body(content)
+    nil
+
+
+fn _csm_warn(msg: text):
+    print "[csm] WARNING: {msg}"
+
+# ---------------------------------------------------------------------------
+# Policy: config/check/sdn_seal_policy.sdn maps path globs -> algorithm.
+# ---------------------------------------------------------------------------
+
+fn _csm_glob_match(pattern: text, s: text) -> bool:
+    val star = pattern.index_of("*")
+    if star < 0: return s == pattern
+    val head = pattern.substring(0, star)
+    var tail = pattern.substring(star)
+    while tail.starts_with("*") or tail.starts_with("/"):
+        tail = tail.substring(1)
+    s.starts_with(head) and s.ends_with(tail)
+
+# Algorithm of the first policy row matching `path`; "" when no row matches.
+fn csm_policy_row_from(policy_text: text, path: text) -> text:
+    val norm = path.replace("\\", "/")
+    for raw in policy_text.split("\n"):
+        val line: text = raw.replace("\r", "")
+        if not line.starts_with("    "): continue
+        val row = line.trim()
+        if row == "" or row.starts_with("#"): continue
+        val comma = row.index_of(",")
+        if comma < 0: continue
+        val pattern = row.substring(0, comma).trim()
+        val algo = row.substring(comma + 1).trim()
+        if _csm_glob_match(pattern, norm): return algo
+        # suffix match at every directory boundary (absolute paths)
+        var i = 0
+        while i < norm.len():
+            if norm.substring(i, i + 1) == "/" and _csm_glob_match(pattern, norm.substring(i + 1)):
+                return algo
+            i = i + 1
+    ""
+
+# Seal publication is two steps so a crash never leaves a data file with NO seal:
+# csm_seal_add creates the new sidecar first (old + new => MERGED_UNSEALED, which
+# the loader accepts), the caller publishes the data, csm_seal_prune deletes the
+# rest. Returns the new sidecar path, or "" on failure.
+fn csm_seal_add(path: text, content: text, algo: text) -> text:
+    val target = csm_sidecar_path(path, algo, hash_hex(content, algo))
+    if file_exists(target): return target
+    if not file_write(target, ""): return ""
+    target
+
+fn csm_seal_prune(path: text, keep: text):
+    for old in csm_list(path):
+        if old != keep:
+            file_delete(old)
+
+# Seal already-published `content`: add the new sidecar, delete all others.
+fn csm_seal(path: text, content: text, algo: text) -> bool:
+    val target = csm_seal_add(path, content, algo)
+    if target == "": return false
+    csm_seal_prune(path, target)
+    true
+
+# Algorithm for `path` per config/check/sdn_seal_policy.sdn, found in the cwd or
+# up to five parent directories; the default when no policy file is readable.
+fn csm_policy_algo(path: text) -> text:
+    var prefix = ""
+    var depth = 0
+    while depth < 6:
+        match read_file_text_result(prefix + CSM_POLICY_PATH):
+            case Ok(policy_text): return csm_policy_algo_from(policy_text, path)
+            case Err(_): pass
+        prefix = prefix + "../"
+        depth = depth + 1
+    CSM_DEFAULT_ALGO
+
+fn csm_policy_algo_from(policy_text: text, path: text) -> text:
+    val row = csm_policy_row_from(policy_text, path)
+    if row == "": return CSM_DEFAULT_ALGO
+    row
+
+# True when the policy names `path` explicitly: such a file must be sealed, so
+# the loader treats a missing seal as CORRUPT instead of an unsealed legacy DB.
+fn csm_policy_listed(path: text) -> bool:
+    var prefix = ""
+    var depth = 0
+    while depth < 6:
+        match read_file_text_result(prefix + CSM_POLICY_PATH):
+            case Ok(policy_text): return csm_policy_row_from(policy_text, path) != ""
+            case Err(_): pass
+        prefix = prefix + "../"
+        depth = depth + 1
+    false
+
+# Algorithm a writer seals `path` with: the policy row, else the default.
+fn csm_writer_algo(path: text) -> text:
+    csm_policy_algo(path)
