@@ -478,6 +478,36 @@ fn run_tests_with_args(arg_strings: &[String], gc_log: u8, gc_off: u8) -> i64 {
 }
 
 #[cfg(test)]
+mod native_compile_result_tests {
+    use super::{extract_string, rt_compile_to_native, rt_compile_to_native_with_opt, RuntimeValue};
+    use crate::value::{rt_tuple_get, rt_tuple_len};
+
+    fn assert_unavailable_result(bits: i64) {
+        let result = RuntimeValue::from_raw(bits as u64);
+        assert_eq!(rt_tuple_len(result), 2);
+        let success = rt_tuple_get(result, 0);
+        assert!(success.is_bool());
+        assert!(!success.as_bool());
+        let diagnostic = extract_string(rt_tuple_get(result, 1)).expect("diagnostic must be runtime text");
+        assert!(diagnostic.contains("compiler driver is unavailable"));
+    }
+
+    #[test]
+    fn native_compile_returns_an_unavailable_result_without_a_driver() {
+        assert_unavailable_result(rt_compile_to_native(RuntimeValue::NIL, RuntimeValue::NIL));
+    }
+
+    #[test]
+    fn optimized_native_compile_returns_an_unavailable_result_without_a_driver() {
+        assert_unavailable_result(rt_compile_to_native_with_opt(
+            RuntimeValue::NIL,
+            RuntimeValue::NIL,
+            RuntimeValue::NIL,
+        ));
+    }
+}
+
+#[cfg(test)]
 mod test_process_arg_bridge_tests {
     use super::test_args_from_process;
 
