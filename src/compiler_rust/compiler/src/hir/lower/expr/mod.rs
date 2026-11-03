@@ -708,6 +708,33 @@ impl Lowerer {
         }
     }
 
+    /// `ret` for a call, refined for an erased generic identity-shaped callee
+    /// (`fn f<T>(x: T) -> T`): when the erased return is Any and the matching
+    /// argument is a class/struct, the call yields that class. Without this a
+    /// local bound from the call loses its owner, and native layout then
+    /// places fields without the vtable header word
+    /// (stage3_selfhost_vtable_field_offset_relro_segv_2026-08-06).
+    fn refine_generic_identity_return(
+        &mut self,
+        callee: &Expr,
+        args: &[ast::Argument],
+        ret: TypeId,
+        ctx: &FunctionContext,
+    ) -> TypeId {
+        if ret != TypeId::ANY {
+            return ret;
+        }
+        let Expr::Identifier(name) = callee else { return ret };
+        let Some(&idx) = self.generic_identity_param.get(name) else { return ret };
+        let Some(arg) = args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(idx) else {
+            return ret;
+        };
+        match self.infer_type(&arg.value, ctx) {
+            Ok(ty) if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) => ty,
+            _ => ret,
+        }
+    }
+
     fn call_return_type(&self, callee: &Expr, fallback: TypeId) -> TypeId {
         // An imported callee typed from `imported_function_value_types` keeps
         // the bare-name return resolution it had before that map existed

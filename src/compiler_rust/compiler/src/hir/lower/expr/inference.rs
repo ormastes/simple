@@ -93,9 +93,10 @@ impl Lowerer {
                 ast::UnaryOp::Not => Ok(TypeId::BOOL),
                 _ => self.infer_type(operand, ctx),
             },
-            Expr::Call { callee, .. } => {
+            Expr::Call { callee, args } => {
                 let callee_ty = self.infer_type(callee, ctx)?;
-                Ok(self.call_return_type(callee, callee_ty))
+                let ret = self.call_return_type(callee, callee_ty);
+                Ok(self.refine_generic_identity_return(callee, args, ret, ctx))
             }
             Expr::If { then_branch, .. } => {
                 // Type of if-expression is the type of the then branch

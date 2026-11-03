@@ -242,6 +242,7 @@ impl Lowerer {
             }
             _ => self.call_return_type(callee, func_hir.ty),
         };
+        let ret_ty = self.refine_generic_identity_return(callee, args, ret_ty, ctx);
         // Check the RESOLVED symbol, not the bare callee name: in a flattened
         // unit with a cross-module same-named collision, `func_hir.kind` may
         // carry a different (owner-mangled) symbol than `callee`'s bare text,

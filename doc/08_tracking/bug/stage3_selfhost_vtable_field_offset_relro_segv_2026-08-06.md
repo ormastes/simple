@@ -312,3 +312,29 @@ Design for the real fix (needs a stage2 observation first):
    with trait impl, field N written via a call-result local), asserting
    `owner_has_vtable == Some(true)`.
 Verification-pending: needs seed rebuild + stage3 native-build redeploy.
+
+## 2026-11-03 (lane vtoff-fix): fix-implemented, verification-pending
+
+Red spec (seed MIR, fails before / passes after):
+`mir::lower::tests::branch_coverage::calls::field_access_owner_identity_survives_driver_receiver_shapes`.
+Seven receiver shapes on a trait-bearing class; the one that lost identity was an
+erased-generic call result (`var t = idg(make())`, `fn idg<T>(x: T) -> T`):
+FieldGet/FieldSet `owner_name: None` -> native layout `Some(false)` -> field N
+written over vtable slot N-1.
+
+Fix:
+- HIR `refine_generic_identity_return` (`hir/lower/expr/mod.rs`): a generic
+  free fn whose return is a type param `T` also used by a param types the call
+  as that argument's class/struct (inference + call lowering).
+- MIR `field_owner_name` (`mir/lower/lowering_expr.rs`): owner = first NAMED of
+  recovered type, `receiver.ty`, structural recovery; used by all three
+  struct FieldGet/FieldSet sites (expr_struct, stmt assign, core store-back,
+  which previously used `object.ty` only).
+- Sibling paths checked: native pass `resolve_exact_owner` arms and
+  `AggregateFieldCopy` resolution unchanged (already owner-set based).
+
+Verification steps (needs seed rebuild + stage3):
+1. Rebuild seed, rerun bootstrap to stage3 native-build.
+2. `SIMPLE_DEBUG` MIR print of `driver_bootstrap.spl` `translator` FieldSet:
+   `owner_name` must be `MirToLlvm`'s mangled owner.
+3. stage3 native-build of hello world must not SEGV in RELRO.
