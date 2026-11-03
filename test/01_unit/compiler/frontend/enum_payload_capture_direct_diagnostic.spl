@@ -1,0 +1,164 @@
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.parser_has_errors
+use compiler.frontend.parser_types_expr.parser_type_kind_named_name
+use compiler.frontend.parser_types.{Variant, VariantKind}
+
+fn variant_index(variants: [Variant], name: text) -> i64:
+    var i = 0
+    while i < variants.len():
+        if variants[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn variant_payload_types(v: Variant) -> [text]:
+    match v.kind:
+        case VariantKind.Tuple(types):
+            var names: [text] = []
+            for t in types:
+                names.push(parser_type_kind_named_name(t.kind))
+            names
+        case VariantKind.Struct(fields):
+            var names: [text] = []
+            for field in fields:
+                names.push(parser_type_kind_named_name(field.type_.kind))
+            names
+        case _:
+            []
+
+fn variant_payload_fields(v: Variant) -> [text]:
+    match v.kind:
+        case VariantKind.Struct(fields):
+            var names: [text] = []
+            for field in fields:
+                names.push(field.name)
+            names
+        case _:
+            []
+
+fn expect_named(v: Variant, expected_fields: [text], expected_types: [text]):
+    val fields = variant_payload_fields(v)
+    val types = variant_payload_types(v)
+    if fields.len() != expected_fields.len() or types.len() != expected_types.len():
+        panic("named payload arity mismatch")
+    var i = 0
+    while i < fields.len():
+        if fields[i] != expected_fields[i]:
+            panic("named payload field mismatch")
+        if types[i] != expected_types[i]:
+            panic("named payload type mismatch")
+        i = i + 1
+
+fn expect_empty_tuple(v: Variant):
+    match v.kind:
+        case VariantKind.Tuple(types):
+            if types.len() != 0:
+                panic("expected empty tuple payload")
+        case _:
+            panic("payloadless variant was not represented as Tuple([])")
+
+fn expect_positional_tuple(v: Variant, expected_types: [text]):
+    match v.kind:
+        case VariantKind.Tuple(types):
+            if types.len() != expected_types.len():
+                panic("positional tuple arity mismatch")
+            var i = 0
+            while i < types.len():
+                if parser_type_kind_named_name(types[i].kind) != expected_types[i]:
+                    panic("positional tuple type mismatch")
+                i = i + 1
+        case _:
+            panic("positional payload was not represented as Tuple")
+
+val src1 = "enum E:\n" + "    Some(payload: i64)\n" + "    None\n" + "\n" + "fn identity(n: i64) -> i64:\n" + "    n\n"
+val parsed1 = parse_full_frontend(src1, "testdata/fixture_epc1_some.spl", "fixture_epc1_some", Logger(level: 0))
+if parser_has_errors() or not parsed1.enums.contains_key("E"):
+    panic("scenario 1 parse failed")
+val e1 = parsed1.enums["E"]
+val some_idx = variant_index(e1.variants, "Some")
+if some_idx < 0:
+    panic("scenario 1 Some missing")
+expect_named(e1.variants[some_idx], ["payload"], ["i64"])
+
+val src2 = "enum E:\n" + "    Some(payload: i64)\n" + "    None\n" + "\n" + "fn identity(n: i64) -> i64:\n" + "    n\n"
+val parsed2 = parse_full_frontend(src2, "testdata/fixture_epc1_none.spl", "fixture_epc1_none", Logger(level: 0))
+if parser_has_errors() or not parsed2.enums.contains_key("E"):
+    panic("scenario 2 parse failed")
+val e2 = parsed2.enums["E"]
+val none_idx = variant_index(e2.variants, "None")
+if none_idx < 0:
+    panic("scenario 2 None missing")
+expect_empty_tuple(e2.variants[none_idx])
+
+val src3 = "enum Status:\n" + "    Ok(value: i64)\n" + "    Err(msg: text)\n" + "    Pending\n" + "\n" + "fn make() -> i64:\n" + "    1\n"
+val parsed3 = parse_full_frontend(src3, "testdata/fixture_epc1_mixed.spl", "fixture_epc1_mixed", Logger(level: 0))
+if parser_has_errors() or not parsed3.enums.contains_key("Status"):
+    panic("scenario 3 parse failed")
+val e3 = parsed3.enums["Status"]
+val ok_idx = variant_index(e3.variants, "Ok")
+val err_idx = variant_index(e3.variants, "Err")
+val pending_idx = variant_index(e3.variants, "Pending")
+if ok_idx < 0 or err_idx < 0 or pending_idx < 0:
+    panic("scenario 3 variant missing")
+expect_named(e3.variants[ok_idx], ["value"], ["i64"])
+expect_named(e3.variants[err_idx], ["msg"], ["text"])
+expect_empty_tuple(e3.variants[pending_idx])
+
+val src4 = "enum Pair:\n" + "    Both(a: i64, b: text)\n" + "\n" + "fn make() -> i64:\n" + "    1\n"
+val parsed4 = parse_full_frontend(src4, "testdata/fixture_epa1_pair.spl", "fixture_epa1_pair", Logger(level: 0))
+if parser_has_errors() or not parsed4.enums.contains_key("Pair"):
+    panic("scenario 4 parse failed")
+val e4 = parsed4.enums["Pair"]
+val both_idx = variant_index(e4.variants, "Both")
+if both_idx < 0:
+    panic("scenario 4 Both missing")
+expect_named(e4.variants[both_idx], ["a", "b"], ["i64", "text"])
+
+val src5 = "enum Triple:\n" + "    All(a: i64, b: text, c: bool)\n" + "\n" + "fn make() -> i64:\n" + "    1\n"
+val parsed5 = parse_full_frontend(src5, "testdata/fixture_epa1_triple.spl", "fixture_epa1_triple", Logger(level: 0))
+if parser_has_errors() or not parsed5.enums.contains_key("Triple"):
+    panic("scenario 5 parse failed")
+val e5 = parsed5.enums["Triple"]
+val all_idx = variant_index(e5.variants, "All")
+if all_idx < 0:
+    panic("scenario 5 All missing")
+expect_named(e5.variants[all_idx], ["a", "b", "c"], ["i64", "text", "bool"])
+
+val src6 = "enum Mixed:\n" + "    Zero\n" + "    One(x: i64)\n" + "    Two(x: i64, y: text)\n" + "    Three(x: i64, y: text, z: bool)\n" + "\n" + "fn make() -> i64:\n" + "    1\n"
+val parsed6 = parse_full_frontend(src6, "testdata/fixture_epa1_mixed_arity.spl", "fixture_epa1_mixed_arity", Logger(level: 0))
+if parser_has_errors() or not parsed6.enums.contains_key("Mixed"):
+    panic("scenario 6 parse failed")
+val e6 = parsed6.enums["Mixed"]
+val zero_idx = variant_index(e6.variants, "Zero")
+val one_idx = variant_index(e6.variants, "One")
+val two_idx = variant_index(e6.variants, "Two")
+val three_idx = variant_index(e6.variants, "Three")
+if zero_idx < 0 or one_idx < 0 or two_idx < 0 or three_idx < 0:
+    panic("scenario 6 variant missing")
+expect_empty_tuple(e6.variants[zero_idx])
+expect_named(e6.variants[one_idx], ["x"], ["i64"])
+expect_named(e6.variants[two_idx], ["x", "y"], ["i64", "text"])
+expect_named(e6.variants[three_idx], ["x", "y", "z"], ["i64", "text", "bool"])
+
+val src7 = "enum Color:\n" + "    Red\n" + "    Green\n" + "    Blue\n" + "\n" + "fn make() -> i64:\n" + "    1\n"
+val parsed7 = parse_full_frontend(src7, "testdata/fixture_epc1_clean.spl", "fixture_epc1_clean", Logger(level: 0))
+if parser_has_errors() or not parsed7.enums.contains_key("Color"):
+    panic("scenario 7 parse failed")
+val e7 = parsed7.enums["Color"]
+if e7.variants.len() != 3:
+    panic("scenario 7 variant count mismatch")
+for v in e7.variants:
+    expect_empty_tuple(v)
+
+val src8 = "enum Pair:\n" + "    Both(i64, text)\n" + "\n" + "fn make() -> i64:\n" + "    1\n"
+val parsed8 = parse_full_frontend(src8, "testdata/fixture_epa1_positional_pair.spl", "fixture_epa1_positional_pair", Logger(level: 0))
+if parser_has_errors() or not parsed8.enums.contains_key("Pair"):
+    panic("scenario 8 parse failed")
+val e8 = parsed8.enums["Pair"]
+val positional_idx = variant_index(e8.variants, "Both")
+if positional_idx < 0:
+    panic("scenario 8 Both missing")
+expect_positional_tuple(e8.variants[positional_idx], ["i64", "text"])
+
+print("ENUM_PAYLOAD_EIGHT_SCENARIOS_PASS scenarios=8 named_fields=14 tuple_fields=2")

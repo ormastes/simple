@@ -1,0 +1,163 @@
+"""Inspect registered trace facts through the real compiled CLI.
+
+Requires a source-matched admitted Stage4 CLI supplied by the external harness
+as SIMPLE_TRACE_QUERY_TEST_BINARY. Run from the repository root. Missing runtime
+fails explicitly; no fallback compiler or fake process result is used.
+The index scenario requires an externally prepared alternate GIT_INDEX_FILE
+under build/test-artifacts/trace_query_p0/ with a staged tree differing from HEAD.
+Its canonical declaration feature title must be "P0 staged feature title";
+no test edits the user's index or worktree.
+Execution and generated manual are pending admission.
+"""
+# @req REQ-TRC-021 REQ-TRC-023
+use std.spec.*
+use std.spec.step
+use app.io.minimal_runtime_ops.{env_get, process_run_timeout, cwd}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.sdn.value.{SdnValue}
+use app.traceability.query_options_v1.{trace_query_options_parse_v1}
+use app.traceability.query_snapshot_v1.{trace_query_build_snapshot_v1}
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
+use app.traceability.snapshot.git_provider.{GitSnapshotRequest, snapshot_git_inputs}
+
+fn actual_query_cli(args: [text]) -> (text, text, i32):
+    val binary = env_get("SIMPLE_TRACE_QUERY_TEST_BINARY")
+    expect(binary != "").to_be(true)
+    if binary == "":
+        return ("", "admitted source-matched Stage4 CLI is required", 2)
+    process_run_timeout(binary, ["trace"] + args, 30000)
+
+fn query_document(output: text) -> Dict<text, SdnValue>:
+    val parsed = parse_with_spans_and_issues(output).unwrap()
+    expect(parsed.2.len()).to_equal(0)
+    match parsed.0:
+        case SdnValue.Dict(fields): fields
+        case _:
+            expect(output).to_equal("a structured query dictionary was required")
+            {}
+
+fn git_object_oracle(args: [text]) -> text:
+    # Independent Git process output, not the query provider or emitted document.
+    val (output, errors, status) = process_run_timeout("git", args, 30000)
+    expect(status).to_equal(0)
+    val oid = output.trim()
+    expect(oid.len() == 40 or oid.len() == 64).to_be(true)
+    oid
+
+describe "Inspect registered facts from captured source":
+    it "lists the canonical feature with default worktree preview and exact captured identity":
+        # @ac AC-TRC-041
+        step("Capture the canonical declaration and its real locator closure")
+        val build = trace_query_build_snapshot_v1(trace_query_options_parse_v1(["list", "features"]).unwrap()).unwrap()
+        expect(build.graph.subject.kind).to_equal("worktree_preview")
+        expect(build.graph.subject.snapshot_id).to_start_with("worktree:sha256:")
+        # Default authored claims have no independently registered authority.
+        expect(build.graph.complete).to_be(false)
+        expect(build.admission_eligible).to_be(false)
+        val page = query_trace_nodes_v1(build.graph, TraceNodeQueryV1(snapshot_id: build.graph.subject.snapshot_id,
+            operation: "show", kind: "features", selected_id: "feature:traceability")).unwrap()
+        expect(page.nodes.len()).to_equal(1)
+        expect(page.nodes[0].id).to_equal("feature:traceability")
+
+    it "executes real CLI dispatch and keeps structured stdout separate from qualification":
+        # @ac AC-TRC-041
+        step("Run simple trace list features through the admitted CLI")
+        val (output, errors, status) = actual_query_cli(["list", "features", "--format=sdn"])
+        expect(status).to_equal(1)
+        val fields = query_document(output)
+        expect(fields["snapshot_kind"]).to_equal(SdnValue.String("worktree_preview"))
+        expect(fields["ingestion"]).to_equal(SdnValue.String("registered-declarations-only"))
+        expect(fields["legacy_database_ingestion"]).to_equal(SdnValue.String("unavailable"))
+        expect(fields["qualification"]).to_equal(SdnValue.String("unverified"))
+        expect(fields["admission_eligible"]).to_equal(SdnValue.Bool(false))
+        expect(fields["graph_complete"]).to_equal(SdnValue.Bool(false))
+        expect(output).to_contain("TRACE-AUTHORITY-CONFLICT")
+
+    it "uses the selected immutable Git subject for requirement pages":
+        # @ac AC-TRC-041 AC-TRC-044
+        step("Resolve an immutable commit and tree independently through Git")
+        val commit = git_object_oracle(["rev-parse", "--verify", "HEAD^{commit}"])
+        val tree = git_object_oracle(["rev-parse", "--verify", commit + "^{tree}"])
+        step("Read one requirement page from that exact commit through the CLI")
+        val (output, errors, status) = actual_query_cli(["list", "requirements", "--snapshot=git:" + commit, "--limit", "1", "--format=sdn"])
+        expect(status).to_equal(1)
+        val fields = query_document(output)
+        expect(fields["snapshot_kind"]).to_equal(SdnValue.String("git_commit"))
+        expect(fields["revision"]).to_equal(SdnValue.String(commit))
+        expect(fields["tree"]).to_equal(SdnValue.String(tree))
+        expect(fields["page_complete"]).to_equal(SdnValue.Bool(false))
+        expect(fields["total_count"]).to_equal(SdnValue.Int(20))
+
+    it "queries the index tree without substituting HEAD or worktree content":
+        # @ac AC-TRC-041 AC-TRC-010
+        step("Freeze the owned index tree independently without editing index entries")
+        # The harness must retain exclusive ownership of this fixture's index.
+        # write-tree may add immutable Git objects; it changes no staged entries.
+        val owned_prefix = cwd().replace("\\", "/") + "/build/test-artifacts/trace_query_p0/"
+        expect(env_get("GIT_INDEX_FILE").replace("\\", "/")).to_start_with(owned_prefix)
+        val expected_tree = git_object_oracle(["write-tree"])
+        val head_tree = git_object_oracle(["rev-parse", "--verify", "HEAD^{tree}"])
+        if expected_tree == head_tree:
+            fail("The owned index fixture must differ from HEAD")
+        step("Show the independently staged feature title through the CLI index route")
+        val (output, errors, status) = actual_query_cli(["show", "feature", "feature:traceability", "--snapshot", "index", "--format=sdn"])
+        expect(status).to_equal(1)
+        val fields = query_document(output)
+        expect(fields["snapshot_kind"]).to_equal(SdnValue.String("git_index"))
+        expect(fields["revision"]).to_equal(SdnValue.String(""))
+        expect(fields["tree"]).to_equal(SdnValue.String(expected_tree))
+        expect(fields["total_count"]).to_equal(SdnValue.Int(1))
+        match fields["nodes"]:
+            case SdnValue.Array(nodes):
+                expect(nodes.len()).to_equal(1)
+                if nodes.len() != 1: fail("Expected one staged feature node")
+                match nodes[0]:
+                    case SdnValue.Dict(node):
+                        expect(node["id"]).to_equal(SdnValue.String("feature:traceability"))
+                        expect(node["title"]).to_equal(SdnValue.String("P0 staged feature title"))
+                    case _: fail("Expected a structured feature node")
+            case _: fail("Expected a structured node array")
+        expect(fields["qualification"]).to_equal(SdnValue.String("unverified"))
+
+    it "keeps parse errors structured for the separate format option form":
+        step("Request SDN with a separate value and an invalid page limit")
+        val (output, errors, status) = actual_query_cli(["list", "features", "--format", "sdn", "--limit", "0"])
+        expect(status).to_equal(2)
+        val fields = query_document(output)
+        expect(fields["code"]).to_equal(SdnValue.String("TRACE-QUERY-INVALID"))
+        expect(fields["status"]).to_equal(SdnValue.String("error"))
+        expect(fields["snapshot_available"]).to_equal(SdnValue.Bool(false))
+
+    it "reports unavailable groups and missing explicit declarations as nonzero errors":
+        step("Request unsupported groups without silently returning an empty inventory")
+        val (groups, group_errors, group_status) = actual_query_cli(["list", "feature-groups", "--format=sdn"])
+        expect(group_status).to_equal(2)
+        expect(query_document(groups)["status"]).to_equal(SdnValue.String("error"))
+        expect(query_document(groups)["code"]).to_equal(SdnValue.String("TRACE-QUERY-UNAVAILABLE"))
+        step("Request a missing registered declaration")
+        val (missing, missing_errors, missing_status) = actual_query_cli(["list", "features", "--declaration=doc/missing-p0-declaration.sdn", "--format=sdn"])
+        expect(missing_status).to_equal(2)
+        expect(query_document(missing)["snapshot_available"]).to_equal(SdnValue.Bool(false))
+
+    it "returns a negative-query status for missing or wrong-kind identities":
+        step("Show an absent feature in a successfully captured snapshot")
+        val (missing, errors, status) = actual_query_cli(["show", "feature", "feature:p0-absent", "--format=sdn"])
+        expect(status).to_equal(1)
+        expect(query_document(missing)["snapshot_available"]).to_equal(SdnValue.Bool(true))
+        expect(query_document(missing)["code"]).to_equal(SdnValue.String("TRACE-QUERY-NOT-FOUND"))
+        step("Show a requirement identity as a feature")
+        val (wrong, wrong_errors, wrong_status) = actual_query_cli(["show", "features", "req:REQ-TRC-001", "--format=sdn"])
+        expect(wrong_status).to_equal(1)
+        expect(query_document(wrong)["status"]).to_equal(SdnValue.String("error"))
+
+    it "rejects a real tree object mislabeled as a frozen commit":
+        step("Pin the real HEAD and canonical declaration tree")
+        val path = "doc/08_tracking/trace/features/simple_traceability_sdn_slop.sdn"
+        val initial = snapshot_git_inputs(GitSnapshotRequest(repository: ".", selector: "HEAD", paths: [path],
+            max_entries: 256, max_blob_bytes: 1048576, max_total_bytes: 2097152)).unwrap()
+        step("Use the existing tree OID as both tree and alleged commit")
+        # The tree exists and contains the selected path. ls-tree alone, or
+        # merely resolving revision^{tree}, would incorrectly accept this pair.
+        expect(snapshot_git_inputs(GitSnapshotRequest(repository: ".", selector: "HEAD", paths: [path],
+            max_entries: 256, max_blob_bytes: 1048576, max_total_bytes: 2097152,
+            frozen_tree: initial.subject.tree_id, frozen_revision: initial.subject.tree_id)).is_err()).to_be(true)
