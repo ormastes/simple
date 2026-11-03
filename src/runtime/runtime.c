@@ -3484,6 +3484,9 @@ const char* rt_sha1(const char* data) {
  * functions are thin wrappers that call strlen on each argument.
  * ================================================================ */
 
+/* EVP lengths are int-sized; validate before narrowing in either backend. */
+#include <limits.h>
+
 /* --- OpenSSL is opt-in only ---
  * Pass -DSPL_HAVE_OPENSSL and link -lssl -lcrypto to enable.
  * Without it, AES-128-GCM uses the from-scratch implementation below
@@ -3561,7 +3564,9 @@ const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
                                          const char* aad, int64_t aad_len,
                                          int64_t* out_len) {
     if (out_len) *out_len = 0;
-    if (!key || !iv || !plaintext || key_len < 16 || iv_len < 12 || pt_len < 0)
+    if (!key || !iv || !plaintext || key_len < 16 || iv_len < 12 || iv_len > INT_MAX ||
+        pt_len < 0 || pt_len > INT_MAX - 16 || aad_len < 0 || aad_len > INT_MAX ||
+        (!aad && aad_len != 0))
         return SPL_STRDUP("", "str");
 
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
@@ -3633,7 +3638,9 @@ const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
                                          const char* aad, int64_t aad_len,
                                          int64_t* out_len) {
     if (out_len) *out_len = 0;
-    if (!key || !iv || !ciphertext || key_len < 16 || iv_len < 12 || ct_len < 16)
+    if (!key || !iv || !ciphertext || key_len < 16 || iv_len < 12 || iv_len > INT_MAX ||
+        ct_len < 16 || ct_len > INT_MAX || aad_len < 0 || aad_len > INT_MAX ||
+        (!aad && aad_len != 0))
         return SPL_STRDUP("", "str");
 
     int64_t actual_ct_len = ct_len - 16; /* last 16 bytes are the GCM tag */
@@ -3999,7 +4006,9 @@ const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
                                          const char* aad, int64_t aad_len,
                                          int64_t* out_len) {
     if (out_len) *out_len = 0;
-    if (!key || !iv || !plaintext || key_len < 16 || iv_len < 12 || pt_len < 0)
+    if (!key || !iv || !plaintext || key_len < 16 || iv_len < 12 || iv_len > INT_MAX ||
+        pt_len < 0 || pt_len > INT_MAX - 16 || aad_len < 0 || aad_len > INT_MAX ||
+        (!aad && aad_len != 0))
         return SPL_STRDUP("", "str");
 
     uint8_t* ct_buf = (uint8_t*)SPL_MALLOC((size_t)pt_len + 16 + 1, "str");
@@ -4038,7 +4047,9 @@ const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
                                          const char* aad, int64_t aad_len,
                                          int64_t* out_len) {
     if (out_len) *out_len = 0;
-    if (!key || !iv || !ciphertext || key_len < 16 || iv_len < 12 || ct_len < 16)
+    if (!key || !iv || !ciphertext || key_len < 16 || iv_len < 12 || iv_len > INT_MAX ||
+        ct_len < 16 || ct_len > INT_MAX || aad_len < 0 || aad_len > INT_MAX ||
+        (!aad && aad_len != 0))
         return SPL_STRDUP("", "str");
 
     int64_t actual_ct_len = ct_len - 16;
