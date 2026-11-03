@@ -282,3 +282,33 @@ imported types, or an unnamed type id after module merge). Next step: dump
 `owner_name` for the two `translator` sites in `driver_bootstrap.spl` under a
 stage2 `SIMPLE_DEBUG` MIR print, then extend this test to that exact shape.
 Status stays `open`; test kept as a regression guard.
+
+## 2026-11-03 (lane vtoff-design): premise "importer does not count the vtable slot" is refuted; design for the real fix
+
+Status: `fix-not-implemented`, `open`. No code change; stopping at design.
+
+Evidence (`native_project/compiler.rs` ~:2020-2146): the native object layout pass
+runs ONCE over the merged project MIR. `vtable_type_owners` is the project-wide set
+of vtable-bearing classes and `resolve_exact_owner` maps any (possibly imported)
+name to the defining module's mangled owner. Every `FieldGet`/`FieldSet` with a
+resolvable `owner_name` therefore already gets `owner_has_vtable` from the SAME set
+the defining module's `StructInit` uses. There is no separate importer-side layout
+function, so a two-module Rust unit test over this pass would pass today (a
+resolvable owner is always right; ambiguous owners already fail closed).
+
+The only wrong-offset paths are the two fail-open arms: `owner_name: None` and
+unresolved named owner -> `Some(false)`. Both mean MIR lowering lost the class
+identity, which is upstream of this pass (`mir/lower/lowering_expr_struct.rs`
+~:329, `type_registry.get_type_name(receiver_ty)`).
+
+Design for the real fix (needs a stage2 observation first):
+1. Under stage2 `SIMPLE_DEBUG` MIR print, dump `owner_name` for the `translator`
+   FieldSet sites in `driver_bootstrap.spl` (`MirToLlvm.create(name,
+   CodegenTarget.Host, nil)` result) to learn which shape yields `None`/unresolved.
+2. In MIR lowering, recover the receiver type (`recover_receiver_type`, as
+   `lower_index_expr` does) before naming the owner; in this pass, fail closed
+   only for a named owner that is a known class absent from `all_mangled`.
+3. Red test = MIR-level spec of that exact shape (cross-module imported class
+   with trait impl, field N written via a call-result local), asserting
+   `owner_has_vtable == Some(true)`.
+Verification-pending: needs seed rebuild + stage3 native-build redeploy.
