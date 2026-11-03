@@ -38,7 +38,7 @@ AES C scalar already has 138 passing assertions: **AES-only 155/156** branch
 outcomes. The larger extracted slice is **157/158**, including two unrelated RSA
 fallback outcomes; do not interchange those denominators. OpenSSL owned bridge
 has a 97/112 baseline and a one-extension 112/112 measurement with 208 assertions
-and 15 genuine EVP error injections. That is bridge coverage, not libcrypto
+and 15 controlled EVP failure injections. That is bridge coverage, not libcrypto
 internals, AES-256, Simple, or full-runtime ABI qualification. Tests landed in
 PR 6174; do not rerun them merely to refresh a ledger.
 
