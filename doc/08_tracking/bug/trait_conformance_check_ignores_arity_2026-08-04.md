@@ -751,3 +751,7 @@ one remaining hit is a known-good fixture. Left OPEN overall (parameter
 section — that is unchanged by this fix).
 
 **Revalidated 2026-11-02: still plausible because ARITY ARMED / TYPES STILL OPEN — mechanism confirmed; census; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 triage (lane-bugs-a)
+
+Verified on the seed: trait_conformance_param_type_spec 7/7 pass; trait_impl_arity_conformance_spec interpreter arm passes, JIT arm FAILS (impl with wrong arity runs and prints FIXTURE_RAN_WRONG_ARITY, exit 0). Remaining work, deferred: (1) the JIT/native path lives in the Rust seed and (2) ImplBlock.validate_methods in src/compiler/25.traits/trait_impl.spl still has zero callers; wiring it into the self-hosted semantic pass cannot be verified without a stage3 build and risks false diagnostics across the 3,928-pair census.

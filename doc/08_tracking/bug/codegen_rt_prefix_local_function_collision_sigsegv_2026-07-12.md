@@ -262,3 +262,7 @@ dedicated, carefully-scoped follow-up rather than a same-session patch.
 4. Once fixed, re-run the entry-closure redeploy build end-to-end and confirm
    the produced binary's own lexer works (smoke: `<binary> run
    <any-source-file>.spl` should not crash while lexing).
+
+## 2026-11-03 re-verification (lane-bugs-a)
+
+Seed interpreter regression spec added: test/01_unit/compiler/codegen/rt_prefix_local_function_collision_spec.spl (generic and non-generic local functions named rt_array_len_safe / rt_string_len call their own bodies, 2/2 pass). Native-link path still unverified: status fix-implemented-verification-pending (repro: native-build the spec with a self-hosted producer and run it).

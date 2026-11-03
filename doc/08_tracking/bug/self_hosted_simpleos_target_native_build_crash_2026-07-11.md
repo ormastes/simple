@@ -338,3 +338,7 @@ The canonical SimpleOS wrapper now creates a missing sysroot before target Simpl
 Current sysroot inputs require LLC/LLD relink rather than reuse of older binaries. The relinker must include full `libsimple_runtime.a` because current libc calls Simple runtime owners. LLC then narrowed to one strong undefined, `rt_math_pow`; SimpleOS libc now exports that ABI by delegating to its existing freestanding `pow`. Verification awaits a fresh libc/sysroot rebuild and capped LLC/LLD relink.
 
 **Revalidated 2026-11-02: still plausible because the report title (native-build --target x86_64-unknown-simpleos dumps core before writing any cac) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 triage (lane-bugs-a)
+
+DEFERRED. Blocker: reproduction needs a Linux self-hosted release binary and native crash/backtrace tooling (gdb/lldb on the dumping binary); none available on this Windows host (seed only). Per the iteration guard above, do not retry the native-build command; next step is a core backtrace from the deployed self-hosted binary.

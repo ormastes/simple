@@ -103,3 +103,5 @@ can get silently-wrong results. This is a correctness landmine for the OS,
 drivers, and firmware layers that run under freestanding native-build.
 
 **Revalidated 2026-11-02: still plausible because the report title (freestanding native-build returns 0 from a u64 range helper for an argument pro) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-03 (sonB): deferred.** 2026-09-21 conversion fix (`to_u64()` no longer re-cast to I64) is the only landed repair; the original cross-function freestanding repro needs a stage3 `native-build --target x86_64-unknown-elf` run of `_top_phys_for_vaddr` to confirm. Next step: add that function as a fixture, check LLVM IR for `icmp ult` vs `icmp slt` on the param compare.
