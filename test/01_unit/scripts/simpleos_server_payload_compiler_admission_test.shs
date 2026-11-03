@@ -1,0 +1,69 @@
+#!/bin/sh
+# Exercise actual media-builder and compiler-selector admission, without compiling.
+set -eu
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+work=$(mktemp -d)
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "FAIL: ${arch:-setup}/${kind:-setup}" >&2; fi; rm -rf "$work"' EXIT
+trap 'exit 1' HUP INT TERM
+mkdir -p "$work/scripts/os" "$work/scripts/lib" "$work/bin"
+cp "$ROOT_DIR/scripts/os/build_simpleos_servers_payload.shs" "$work/scripts/os/"
+cp "$ROOT_DIR/scripts/lib/simple-compiler-select.shs" "$ROOT_DIR/scripts/lib/simple-runtime-provenance.shs" "$work/scripts/lib/"
+cat > "$work/bin/compiler" <<'COMPILER'
+#!/bin/sh
+printf '%s\n' "$*" >> "$MEDIA_PROBE_LOG"
+case "$1" in
+    --version)
+        if [ "$MEDIA_COMPILER_KIND" = seed ]; then
+            echo 'WARNING: this Rust-built Simple binary is a bootstrap seed only'
+        else
+            echo 'Simple fixture'
+        fi
+        ;;
+    check) exit 0 ;;
+    native-build)
+        [ "$*" = "native-build --target $MEDIA_EXPECTED_TARGET --help" ] || exit 92
+        [ "$MEDIA_COMPILER_KIND" != target-fail ] || exit 1
+        echo 'Simple Native Build --runtime-bundle'
+        ;;
+    *) exit 93 ;;
+esac
+COMPILER
+chmod +x "$work/bin/compiler"
+for arch in arm64 x86_64 riscv64; do
+    case "$arch" in
+        arm64) target=aarch64-unknown-simpleos ;;
+        x86_64) target=x86_64-unknown-simpleos ;;
+        riscv64) target=riscv64-unknown-simpleos ;;
+    esac
+    for kind in seed target-fail accepted; do
+        : > "$work/probes"
+        rc=0
+        MEDIA_COMPILER_KIND=$kind MEDIA_EXPECTED_TARGET=$target \
+        MEDIA_PROBE_LOG="$work/probes" SIMPLE_WORKTREE_STORAGE_ROOT="$work/storage" \
+        SIMPLE_BUILD_COMPILER="$work/bin/compiler" \
+        sh "$work/scripts/os/build_simpleos_servers_payload.shs" "$arch" > "$work/out" 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || { echo "FAIL: fixture unexpectedly built media"; exit 1; }
+        case "$kind" in
+            seed)
+                grep -q 'Rust bootstrap seed, not an admitted self-hosted compiler' "$work/out"
+                [ "$(cat "$work/probes")" = --version ]
+                ;;
+            target-fail)
+                grep -q 'failed the native-build --target probe' "$work/out"
+                grep -Fxq "native-build --target $target --help" "$work/probes"
+                ;;
+            accepted)
+                grep -q "missing $arch SimpleOS server prerequisite: .*crt0.o" "$work/out"
+                grep -Fxq 'check p.spl' "$work/probes"
+                grep -Fxq "native-build --target $target --help" "$work/probes"
+                ;;
+        esac
+        if [ "$kind" != accepted ]; then
+            if grep -q 'server prerequisite' "$work/out"; then
+                echo "FAIL: rejected compiler crossed admission"; exit 1
+            fi
+        fi
+        echo "compiler_admission_case=$arch/$kind status=pass"
+    done
+done
+echo 'server_payload_compiler_admission_status=pass'
