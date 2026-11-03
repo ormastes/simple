@@ -11,3 +11,7 @@ Root-authorized reaping of three unrelated abandoned claims is preserved exactly
 The ARM64 firmware owner is independently claimed while its source repair is reviewed. Its claimed status is not a repair PASS. Existing native macOS CI run41613080079 is bound to frozen ccb7f128; no duplicate run was dispatched. Prior SIGKILL is not a demonstrated OOM cause.
 
 See macos-host.md and tooling-portability.md for source owners and exact remaining native gates; db-crosscheck.md/sdn for the 71-record ledger. These are source audits, not generated SPipe manuals or native qualification receipts.
+
+## Final reconciliation checkpoint
+
+`current_inventory.md` and `current_inventory.sdn` supersede initial counts for this scoped checkpoint. PR6384 firmware source repair is merged and waiting for real firmware acceptance. Explicit waiting-verification receipts also track the two previously repaired launcher/test causes. Only source-confirmed ARM64 PCI/ivshmem is reopened. Eight historical native acceptance gaps are linked separately without erasing closure history. Unexecuted direct-native float candidate remains unlanded.
