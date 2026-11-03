@@ -80,7 +80,7 @@ impl Age:
 
 match Age.new(25):
     Some(age): print "Valid: {age.value}"
-    nil: print "Invalid age"
+    None: print "Invalid age"
 ```
 
 ### Builder Pattern
@@ -247,6 +247,17 @@ val result = add_5(3)                 # 8
 
 ---
 
+## Char Literals and Text Indexing
+
+```text
+val c = '7'                        # char literal (exactly one scalar or escape)
+"72"[0] == '7'                   # s[i] yields char
+"72"[0].ord()                     # 55
+```
+
+See [ADR-005](../../04_architecture/adr/ADR-005-text-index-yields-char.md) and
+the quick reference for conversions and the staged warning.
+
 ## String Interpolation
 
 ```text
@@ -278,7 +289,7 @@ must not first create an eagerly interpolated `text`.
 ```simple:skip
 match value:
     Some(x): process(x)
-    nil: handle_missing()
+    None: handle_missing()
 
 match shape:
     Circle(r): pi * r * r
