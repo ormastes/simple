@@ -85,6 +85,32 @@ pub fn clear_ascii_memo() {
     });
 }
 
+/// Code-point length of `s` (ADR-005 item 5: user-facing `len()` counts code
+/// points). ASCII text (memoized) answers in O(1) from the byte length.
+pub(crate) fn text_cp_len(s: &Arc<String>) -> usize {
+    if shared_text_is_ascii(s) {
+        s.len()
+    } else {
+        s.chars().count()
+    }
+}
+
+/// Byte offset of code-point index `cp` in `s`; `s.len()` when `cp` is past the end.
+pub(crate) fn text_cp_to_byte(s: &str, cp: usize) -> usize {
+    if s.is_ascii() {
+        return cp.min(s.len());
+    }
+    s.char_indices().nth(cp).map(|(i, _)| i).unwrap_or(s.len())
+}
+
+/// Code-point index of byte offset `byte` in `s` (`byte` must be a char boundary).
+pub(crate) fn text_byte_to_cp(s: &str, byte: usize) -> usize {
+    if s.is_ascii() {
+        return byte;
+    }
+    s[..byte].chars().count()
+}
+
 // Thread-local storage for pinned strings used by the "ptr" method on strings.
 // Strings are kept alive here so that raw pointers returned to SFFI/codegen remain valid.
 // Call `clear_pinned_strings()` between test runs or when the interpreter resets to reclaim memory.

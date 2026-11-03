@@ -20,7 +20,7 @@ if let Value::Str(ref s) = recv_val {
         // `clone` on a StrBytes receiver arrives here already converted to a
         // lossy Str, the same display-boundary rule as to_string.
         "to_string" | "to_text" | "clone" => return Ok(Value::shared_text(s.clone())),
-        "len" | "length" => return Ok(Value::Int(s.len() as i64)),
+        "len" | "length" => return Ok(Value::Int(crate::interpreter_method::text_cp_len(s) as i64)),
         "char_count" => return Ok(Value::Int(s.chars().count() as i64)),
         "is_empty" => return Ok(Value::Bool(s.is_empty())),
         "chars" => {
@@ -61,22 +61,24 @@ if let Value::Str(ref s) = recv_val {
             // keeps the interpreter and the compiled lane in agreement.
             if args.len() >= 2 {
                 let start_raw = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods)?;
-                let start = start_raw.max(0) as usize;
+                let start_cp = start_raw.max(0) as usize;
+                // Code-point units (ADR-005): convert to a byte offset, search, convert back.
+                let start = crate::interpreter_method::text_cp_to_byte(s, start_cp);
                 let bytes = s.as_bytes();
                 let nb = needle.as_bytes();
                 if nb.is_empty() {
-                    return Ok(Value::Int(start.min(bytes.len()) as i64));
+                    return Ok(Value::Int(crate::interpreter_method::text_byte_to_cp(s, start.min(bytes.len())) as i64));
                 }
                 if start >= bytes.len() {
                     return Ok(Value::Int(-1));
                 }
                 return Ok(match bytes[start..].windows(nb.len()).position(|w| w == nb) {
-                    Some(idx) => Value::Int((start + idx) as i64),
+                    Some(idx) => Value::Int(crate::interpreter_method::text_byte_to_cp(s, start + idx) as i64),
                     None => Value::Int(-1),
                 });
             }
             return Ok(match s.find(&needle) {
-                Some(idx) => Value::Int(idx as i64),
+                Some(idx) => Value::Int(crate::interpreter_method::text_byte_to_cp(s, idx) as i64),
                 None => Value::Int(-1),
             });
         }
@@ -338,51 +340,26 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::text(s.replacen(&old, &new, 1)));
         }
         "slice" | "substring" => {
+            // CODE-POINT-indexed (ADR-005 item 5): agrees with `len()`, `s[i]`
+            // and `s[a:b]`. ASCII text is unchanged (byte == code point).
+            let cp_len = crate::interpreter_method::text_cp_len(s) as i64;
             let start_raw = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             let end_raw = args.get(1)
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .transpose()?
-                .map(|v| v.as_int().unwrap_or(s.len() as i64))
-                .unwrap_or(s.len() as i64);
+                .map(|v| v.as_int().unwrap_or(cp_len))
+                .unwrap_or(cp_len);
             let start = start_raw.max(0) as usize;
             let end = end_raw.max(0) as usize;
-            // Identity fast path: full-string slice avoids the chars() walk + Vec<char>.
-            // Byte-len upper-bounds char count, so end >= s.len() guarantees end >= chars().count().
-            if start == 0 && end >= s.len() {
+            // Identity fast path: full-string slice.
+            if start == 0 && end as i64 >= cp_len {
                 return Ok(Value::shared_text(s.clone()));
             }
-            // BYTE-indexed, matching the JIT/native lane (`rt_slice`, which
-            // slices `s->data + begin` raw) and this interpreter's own
-            // byte-valued `len` / `index_of`. Indexing by character here made
-            // an index produced by `len`/`index_of` invalid input to `slice`:
-            // for "caféZdef" (9 bytes / 8 chars) `index_of("Z")` is 5, and a
-            // char-indexed `slice(0, 5)` wrongly yielded "caféZ".
-            let bytes = s.as_bytes();
-            let end = end.min(bytes.len());
+            let end = end.min(cp_len as usize);
             let start = start.min(end);
-            // A range that splits a multi-byte codepoint cannot be held in
-            // Rust's UTF-8 `String`; preserve the RAW bytes (`Value::StrBytes`)
-            // exactly like the bracket-slice path in
-            // `interpreter/expr/collections.rs` and like the JIT/native lane's
-            // `rt_slice`, which slices `s->data + begin` raw. The previous
-            // `String::from_utf8_lossy` here substituted U+FFFD, which is
-            // valid-but-wrong: it CHANGES the byte length of the result
-            // (`"aé€𝄞z".slice(0, 2).len()` was 4, not 2) and makes the original
-            // byte unrecoverable at concat time. That was the sole remaining
-            // interpret-vs-jit divergence in
-            // `test/fixtures/engine_differential/utf8_slice_boundary.spl`.
-            // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off). Measured
-            // on the RAW range, which is now also what is returned.
-            if simple_runtime::text_slice_audit::enabled() {
-                simple_runtime::text_slice_audit::note(
-                    simple_runtime::text_slice_audit::site::INTERP_METHOD,
-                    start as i64,
-                    end as i64,
-                    bytes,
-                    &bytes[start..end],
-                );
-            }
-            return Ok(Value::text_from_bytes(bytes[start..end].to_vec()));
+            let b0 = crate::interpreter_method::text_cp_to_byte(s, start);
+            let b1 = crate::interpreter_method::text_cp_to_byte(s, end);
+            return Ok(Value::text(s[b0..b1].to_string()));
         }
         "repeat" => {
             // Read the count as a SIGNED integer and clamp. `eval_arg_usize`
@@ -404,7 +381,7 @@ if let Value::Str(ref s) = recv_val {
         "last_index_of" | "rfind" => {
             let needle = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(match s.rfind(&needle) {
-                Some(idx) => Value::Int(idx as i64),
+                Some(idx) => Value::Int(crate::interpreter_method::text_byte_to_cp(s, idx) as i64),
                 None => Value::Int(-1),
             });
         }

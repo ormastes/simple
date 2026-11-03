@@ -219,7 +219,7 @@ pub(super) fn eval_builtin(
                 Value::ByteArray(a) | Value::FrozenByteArray(a) => Ok(Some(Value::Int(a.len() as i64))),
                 Value::Tuple(t) => Ok(Some(Value::Int(t.len() as i64))),
                 Value::Dict(d) => Ok(Some(Value::Int(crate::interpreter::module_dict_len(&d) as i64))),
-                Value::Str(s) => Ok(Some(Value::Int(s.len() as i64))),
+                Value::Str(s) => Ok(Some(Value::Int(crate::interpreter_method::text_cp_len(&s) as i64))),
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_OPERATION)

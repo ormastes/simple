@@ -448,30 +448,23 @@ pub(super) fn eval_collection_expr(
                             Ok(Value::frozen_byte_array(sliced))
                         }
                         Value::Str(s) => {
-                            // BYTE-indexed, matching the native lane (`rt_slice`
-                            // slices `s->data` raw bytes), the byte-indexed
-                            // `.slice()`/`.substring()` methods, and the
-                            // Expr::Slice path below. Indexing by CHARACTER here
-                            // silently corrupted every byte-offset slice on
-                            // multi-byte text — the engine divergence behind
-                            // doc/08_tracking/bug/test_harness_execution_divergence_2026-07-29.md
-                            // (glob `_glob_at` false negatives, js `string_charAt`
-                            // returning empty for CJK under `bin/simple test`'s
-                            // forced SIMPLE_EXECUTION_MODE=interpret).
-                            let bytes = s.as_bytes();
-                            let len = bytes.len() as i64;
+                            // CODE-POINT-indexed (ADR-005 item 5), agreeing with
+                            // `len()` and `s[i]`. ASCII text slices bytes (same
+                            // result, O(1) index math).
+                            let len = crate::interpreter_method::text_cp_len(&s) as i64;
                             let (start_idx, end_idx) = compute_slice_indices(start, end, len, inclusive);
-                            // A range that splits a multi-byte codepoint cannot
-                            // be held in a Rust String; preserve the RAW bytes
-                            // (Value::StrBytes) so reassembly re-validates —
-                            // U+FFFD substitution here shredded every 1-unit
-                            // slice walk (json/toml tokenizers) because the
-                            // original byte was unrecoverable at concat time.
-                            let sliced: Vec<u8> = bytes
-                                .get(start_idx..end_idx.min(bytes.len()))
-                                .map(|b| b.to_vec())
-                                .unwrap_or_default();
-                            Ok(Value::text_from_bytes(sliced))
+                            if shared_text_is_ascii(&s) {
+                                let sliced: Vec<u8> = s
+                                    .as_bytes()
+                                    .get(start_idx..end_idx.min(s.len()))
+                                    .map(|b| b.to_vec())
+                                    .unwrap_or_default();
+                                Ok(Value::text_from_bytes(sliced))
+                            } else {
+                                let sliced: String =
+                                    s.chars().skip(start_idx).take(end_idx.saturating_sub(start_idx)).collect();
+                                Ok(Value::text(sliced))
+                            }
                         }
                         Value::Object {
                             ref class, ref fields, ..
@@ -872,7 +865,7 @@ pub(super) fn eval_collection_expr(
             let len = match &recv_val {
                 Value::Array(arr) => arr.len() as i64,
                 Value::ByteArray(arr) | Value::FrozenByteArray(arr) => arr.len() as i64,
-                Value::Str(s) => s.len() as i64,
+                Value::Str(s) => crate::interpreter_method::text_cp_len(s) as i64,
                 // Byte length for an already-raw-bytes text value, matching the
                 // `Value::Str` arm above (which is also byte-indexed) and the
                 // `Value::StrBytes` arm of the dispatch match further below.
@@ -1012,31 +1005,17 @@ pub(super) fn eval_collection_expr(
                     &bytes, start_idx, end_idx, step_val,
                 ))),
                 Value::Str(s) => {
-                    // BYTE-indexed slicing. The `len` these indices were
-                    // normalized against (above) is already the BYTE length
-                    // (`s.len()`), but this arm then sliced a CHAR vector with
-                    // those byte-derived indices — an internally mixed index
-                    // space that corrupted every multi-byte slice (e.g.
-                    // "日本語"[3:6] returned "" instead of "本"). Slicing the
-                    // byte slice makes the unit match the normalization and the
-                    // native lane; a range that splits a codepoint preserves
-                    // the RAW bytes (Value::StrBytes) so reassembly
-                    // re-validates, matching the compiled lane.
-                    let sliced = slice_collection(s.as_bytes(), start_idx, end_idx, step_val);
-                    // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off).
-                    // Preserving the RAW bytes is what makes a mid-codepoint
-                    // boundary invisible: `Value::StrBytes` holds them and the
-                    // byte length is the only tell. Record it; do not fail.
-                    if simple_runtime::text_slice_audit::enabled() {
-                        simple_runtime::text_slice_audit::note(
-                            simple_runtime::text_slice_audit::site::INTERP_BRACKET,
-                            start_idx,
-                            end_idx,
-                            s.as_bytes(),
-                            &sliced,
-                        );
+                    // CODE-POINT-indexed (ADR-005): `len` above was normalized
+                    // against the code-point count, so slice the chars. ASCII
+                    // text keeps the byte fast path (identical result).
+                    if shared_text_is_ascii(&s) {
+                        let sliced = slice_collection(s.as_bytes(), start_idx, end_idx, step_val);
+                        Ok(Value::text_from_bytes(sliced))
+                    } else {
+                        let chars: Vec<char> = s.chars().collect();
+                        let sliced = slice_collection(&chars, start_idx, end_idx, step_val);
+                        Ok(Value::text(sliced.into_iter().collect::<String>()))
                     }
-                    Ok(Value::text_from_bytes(sliced))
                 }
                 Value::StrBytes(b) => {
                     // Same BYTE-indexed slicing as the `Value::Str` arm above,

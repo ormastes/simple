@@ -147,7 +147,7 @@ fn get_field_value(val: &Value, field: &str) -> Result<Value, CompileError> {
             }
         }
         Value::Str(s) => match field {
-            "len" => Ok(Value::Int(s.len() as i64)),
+            "len" => Ok(Value::Int(crate::interpreter_method::text_cp_len(s) as i64)),
             "is_empty" => Ok(Value::Bool(s.is_empty())),
             _ => {
                 let ctx = ErrorContext::new()
