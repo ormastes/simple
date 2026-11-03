@@ -62,3 +62,14 @@ in the leveled chain: `parse_multiplication` → `parse_bitwise_and` → `parse_
 - M1 parser fix commit: landed infix &/^ + prefix ~ at multiplication level as deliberate
   short-term placement matching existing PIPE placement (1ea5249607 + follow-up fix commit).
 
+
+## Fix implemented 2026-11-04 (verification-pending)
+
+`parser_expr.spl`: `&`/`|`/`^` removed from `parse_multiplication` and
+`parse_binary_from`'s multiplication loop; new `parse_bit_or -> parse_bit_xor ->
+parse_bit_and -> parse_addition` levels sit between range and addition (matching
+the Rust seed: `comparison < range < bit_or < xor < and < term`). Spec:
+`test/01_unit/compiler/parser_bitwise_precedence_spec.spl` (3 source-structure
+examples fail pre-fix; 2 runtime examples need a stage built from the lean parser).
+Verify: after next stage3 deploy, `SIMPLE_BIN=<stage3> bin/simple test` that spec and
+run a bootstrap to confirm no source relied on the old precedence.

@@ -381,7 +381,7 @@ fn parser_range_endpoint_absent() -> bool:
 
 fn parse_range() -> i64:
     parser_expr_trace_step("range")
-    val left = parse_addition()
+    val left = parse_bit_or()
     if par_kind_get() == 165:
         parser_advance()
         # G43: open-ended range `start..` (e.g. `arr[1..]`). If `..` is followed
@@ -390,12 +390,39 @@ fn parse_range() -> i64:
         # negative bound and must remain distinct from an open-ended range.
         if parser_range_endpoint_absent():
             return expr_range(left, -1, 0, 0)
-        val right = parse_addition()
+        val right = parse_bit_or()
         return expr_range(left, right, 0, 0)
     if par_kind_get() == 166:
         parser_advance()
-        val right = parse_addition()
+        val right = parse_bit_or()
         return expr_range(left, right, 1, 0)
+    left
+
+fn parse_bit_or() -> i64:
+    parser_expr_trace_step("bit-or")
+    var left = parse_bit_xor()
+    while par_kind_get() == 121:
+        parser_advance()
+        val right = parse_bit_xor()
+        left = expr_binary(121, left, right, 0)
+    left
+
+fn parse_bit_xor() -> i64:
+    parser_expr_trace_step("bit-xor")
+    var left = parse_bit_and()
+    while par_kind_get() == 122:
+        parser_advance()
+        val right = parse_bit_and()
+        left = expr_binary(122, left, right, 0)
+    left
+
+fn parse_bit_and() -> i64:
+    parser_expr_trace_step("bit-and")
+    var left = parse_addition()
+    while par_kind_get() == 120:
+        parser_advance()
+        val right = parse_addition()
+        left = expr_binary(120, left, right, 0)
     left
 
 fn parse_addition() -> i64:
@@ -434,18 +461,6 @@ fn parse_multiplication() -> i64:
             parser_advance()
             val right = parse_unary()
             left = expr_binary(65, left, right, 0)
-        elif par_kind_get() == 120:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(120, left, right, 0)
-        elif par_kind_get() == 121:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(121, left, right, 0)
-        elif par_kind_get() == 122:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(122, left, right, 0)
         else:
             break
     left
@@ -521,18 +536,6 @@ fn parse_binary_from(base: i64) -> i64:
             parser_advance()
             val right = parse_unary()
             left = expr_binary(65, left, right, 0)
-        elif par_kind_get() == 120:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(120, left, right, 0)
-        elif par_kind_get() == 121:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(121, left, right, 0)
-        elif par_kind_get() == 122:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(122, left, right, 0)
         else:
             break
     # Addition level
@@ -549,14 +552,27 @@ fn parse_binary_from(base: i64) -> i64:
         else:
             break
     left = add_left
+    # Bitwise levels (looser than +/-, tighter than range/comparison): & then ^ then |
+    while par_kind_get() == 120:
+        parser_advance()
+        val bit_and_right = parse_addition()
+        left = expr_binary(120, left, bit_and_right, 0)
+    while par_kind_get() == 122:
+        parser_advance()
+        val bit_xor_right = parse_bit_and()
+        left = expr_binary(122, left, bit_xor_right, 0)
+    while par_kind_get() == 121:
+        parser_advance()
+        val bit_or_right = parse_bit_xor()
+        left = expr_binary(121, left, bit_or_right, 0)
     # Range
     if par_kind_get() == 165:
         parser_advance()
-        val right = if parser_range_endpoint_absent(): -1 else: parse_addition()
+        val right = if parser_range_endpoint_absent(): -1 else: parse_bit_or()
         left = expr_range(left, right, 0, 0)
     if par_kind_get() == 166:
         parser_advance()
-        val right = parse_addition()
+        val right = parse_bit_or()
         left = expr_range(left, right, 1, 0)
     # Null coalesce
     while true:
@@ -1535,7 +1551,7 @@ use compiler.core.parser_primary.*
 # ===== Exports =====
 export parse_expr, parse_assignment, parse_or, parse_and, parse_not
 export parse_comparison, parse_null_coalesce, parse_range
-export parse_addition, parse_multiplication, parse_unary, parse_postfix
+export parse_bit_or, parse_addition, parse_multiplication, parse_unary, parse_postfix
 export parse_call_arg, parse_postfix_on, parse_binary_from
 export parse_int_text
 
