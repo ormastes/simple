@@ -1704,14 +1704,7 @@ pub(crate) fn evaluate_call(
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                     .collect::<Result<Vec<_>, _>>()?;
-                let code = match evaluated_args.first() {
-                    Some(v) => v.as_int()?,
-                    None => return Err(CompileError::semantic("char.from_code expects one integer code point")),
-                };
-                return match u32::try_from(code).ok().and_then(char::from_u32) {
-                    Some(ch) => Ok(Value::text(ch.to_string())),
-                    None => Err(CompileError::semantic(format!("char.from_code: {code} is not a Unicode scalar value"))),
-                };
+                return super::interpreter_method::char_from_code(&evaluated_args);
             }
 
             if type_name == "text" && method_name == "from_char_code" {

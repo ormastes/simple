@@ -12627,6 +12627,34 @@ int64_t rt_clear(int64_t receiver) {
     return rt_string_new((const uint8_t*)"", 0);
 }
 
+/* Per-code-point text index (ADR-005), negative counts from the end, and an
+ * out-of-range index panics with the same message as the Rust runtime's
+ * rt_index_get and the interpreter. rt_string_char_at keeps its byte/nil
+ * over-run policy for char_at callers. */
+static int64_t rt_string_index_checked(int64_t string, int64_t index) {
+    RtCoreString* s = rt_core_as_string(string);
+    const uint8_t* p = s ? (const uint8_t*)s->data : NULL;
+    uint64_t n = s ? s->len : 0;
+    int64_t count = 0;
+    for (uint64_t i = 0; i < n; i++) if ((p[i] & 0xC0) != 0x80) count++;
+    int64_t want = index < 0 ? count + index : index;
+    if (want >= 0 && want < count) {
+        int64_t cp = -1;
+        for (uint64_t i = 0; i < n; i++) {
+            if ((p[i] & 0xC0) == 0x80) continue;
+            if (++cp == want) {
+                uint64_t j = i + 1;
+                while (j < n && (p[j] & 0xC0) == 0x80) j++;
+                return rt_string_new(p + i, j - i);
+            }
+        }
+    }
+    char msg[64];
+    int len = snprintf(msg, sizeof(msg), "error: string index %lld out of bounds", (long long)index);
+    rt_panic((const uint8_t*)msg, (uint64_t)(len > 0 ? len : 0));
+    return rt_core_nil();
+}
+
 int64_t rt_index_get(int64_t collection, int64_t idx) {
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) {
@@ -12637,7 +12665,7 @@ int64_t rt_index_get(int64_t collection, int64_t idx) {
     }
     if (rt_core_as_string(collection)) {
         if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_core_nil();
-        return rt_string_char_at(collection, idx >> 3);
+        return rt_string_index_checked(collection, idx >> 3);
     }
     RtCoreDict* d = rt_core_as_dict(collection);
     if (d) return rt_core_dict_lookup(d, idx);
