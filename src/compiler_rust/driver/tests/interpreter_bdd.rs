@@ -1,7 +1,6 @@
 use assert_cmd::Command;
 use predicates::str::contains;
 use std::fs;
-use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -237,7 +236,7 @@ describe "repro":
 
     let output = cmd.output().expect("spawn simple run");
     assert!(
-        output.status.signal().is_none(),
+        output.status.code().is_some(), // None == killed by a signal (unix); always Some on Windows
         "process was killed by a signal (crash) instead of exiting normally: {:?}",
         output.status
     );
