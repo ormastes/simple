@@ -20,7 +20,7 @@ use compiler.loader.module_loader_semantic.{
 }
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.obj_taker.{SymbolType}
-use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_alloc_rw_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
+use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_alloc_rw_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0, native_free_exec_memory}
 use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute_wire}
 use compiler.loader.aspect_pack_section.{smf_validate_optional_aspect_pack, smf_register_validated_aspect_pack}
 use compiler.loader.aspect_lifecycle_gate.{
@@ -68,6 +68,17 @@ use common.plugin.iface_id.{IfaceId, ParamHeader}
 use common.plugin.negotiation.{HostOfferV1}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.io_runtime.{file_read_bytes}
+
+# Roll back a failed load transaction: unmap every candidate mapping exactly
+# once (ledger is flat [addr, size, ...]) and return the error. Global symbol
+# state is only mutated after the commit point, so there is nothing to unpublish.
+fn _compat_load_fail(allocs: [i64], message: text) -> LoadResult:
+    var i = 0
+    while i + 1 < allocs.len():
+        unsafe(capabilities: [raw_ptr]):
+            _ = native_free_exec_memory(allocs[i], allocs[i + 1])
+        i = i + 2
+    LoadResult.Error(message: message)
 
 fn _jit_cached_loaded_symbol(sym_name: text, rec_cache: JitCacheRecord) -> LoadedSymbol:
     val code = rec_cache.code
@@ -1394,6 +1405,9 @@ impl ModuleLoader:
                     case Ok(candidate):
                         candidate
                 var symbols: Dict<text, LoadedSymbol> = {}
+                # Rollback ledger: flat [addr, size, addr, size, ...]; one array per
+                # load transaction (not per relocation).
+                var allocs: [i64] = []
                 val exported_smf_symbols: [SmfSymbol] = reader.exported_symbols()
                 for smf_sym in exported_smf_symbols:
                     val code_result = reader.read_code(smf_sym)
@@ -1401,22 +1415,24 @@ impl ModuleLoader:
                         case Ok(value):
                             value
                         case Err(err):
-                            return LoadResult.Error(message: err)
+                            return _compat_load_fail(allocs, err)
                     # A size-0 symbol has no code to enter; calling it jumps
                     # into an empty allocation (0xC0000005 on `main`).
                     if code.len() == 0:
-                        return LoadResult.Error(message: "SMF symbol {smf_sym.name} in {path} has no code (size 0); refusing to load it as executable")
+                        return _compat_load_fail(allocs, "SMF symbol {smf_sym.name} in {path} has no code (size 0); refusing to load it as executable")
                     val addr = native_alloc_exec_memory(code.len() as i64)
                     if addr == 0:
-                        return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                        return _compat_load_fail(allocs, "Failed to allocate executable memory for {smf_sym.name}")
+                    allocs.push(addr)
+                    allocs.push(code.len() as i64)
                     val written = unsafe(capabilities: [raw_ptr]):
                         native_write_exec_memory(addr, code, 0)
                     if written != code.len() as i64:
-                        return LoadResult.Error(message: "Failed to copy executable bytes for {smf_sym.name}")
+                        return _compat_load_fail(allocs, "Failed to copy executable bytes for {smf_sym.name}")
                     val executable = unsafe(capabilities: [raw_ptr]):
                         native_make_executable(addr, code.len() as i64)
                     if not executable:
-                        return LoadResult.Error(message: "Failed to mark executable memory for {smf_sym.name}")
+                        return _compat_load_fail(allocs, "Failed to mark executable memory for {smf_sym.name}")
                     native_flush_icache(addr, code.len() as i64)
                     val symbol_size: i64 = smf_sym.size as i64
                     val symbol_ty = _loader_symbol_type_from_smf(smf_sym.ty)
@@ -1430,20 +1446,19 @@ impl ModuleLoader:
                         file_offset: symbol_file_offset
                     )
                     symbols[smf_sym.name] = loaded_sym
-                    self.global_symbols[smf_sym.name] = (path, loaded_sym)
 
                 val ordered_symbols_result = reader.symbols_in_table_order()
                 val ordered_symbols = match ordered_symbols_result:
                     case Ok(value):
                         value
                     case Err(err):
-                        return LoadResult.Error(message: err)
+                        return _compat_load_fail(allocs, err)
                 val relocs_result = reader.read_relocations()
                 val relocs = match relocs_result:
                     case Ok(value):
                         value
                     case Err(err):
-                        return LoadResult.Error(message: err)
+                        return _compat_load_fail(allocs, err)
                 if relocs.len() > 0:
                     # Synthesize a per-module GOT for wire-4 (GotRel32) sites
                     # before patching anything: R_X86_64_GOTPCREL loads
@@ -1466,7 +1481,9 @@ impl ModuleLoader:
                     if got_target_names.len() > 0:
                         val got_base = native_alloc_rw_memory(got_target_names.len() as i64 * 8)
                         if got_base == 0:
-                            return LoadResult.Error(message: "Failed to allocate GOT for GotRel32 relocations")
+                            return _compat_load_fail(allocs, "Failed to allocate GOT for GotRel32 relocations")
+                        allocs.push(got_base)
+                        allocs.push(got_target_names.len() as i64 * 8)
                         var got_index = 0i64
                         for got_target_name in got_target_names:
                             val slot_addr = got_base + got_index * 8
@@ -1477,7 +1494,7 @@ impl ModuleLoader:
                                 if self.global_symbols.has(got_target_name):
                                     got_target_addr = self.global_symbols[got_target_name][1].address
                             if got_target_addr == 0:
-                                return LoadResult.Error(message: "Unresolved GOT symbol: {got_target_name}")
+                                return _compat_load_fail(allocs, "Unresolved GOT symbol: {got_target_name}")
                             unsafe(capabilities: [raw_ptr]):
                                 native_reloc_write_i64(slot_addr, 0, got_target_addr)
                             got_slot_addr[got_target_name] = slot_addr
@@ -1488,13 +1505,13 @@ impl ModuleLoader:
                         val writable = unsafe(capabilities: [raw_ptr]):
                             native_make_rw(loaded_sym.address, loaded_sym.size)
                         if not writable:
-                            return LoadResult.Error(message: "Failed to make memory writable for relocation at {sym_name}")
+                            return _compat_load_fail(allocs, "Failed to make memory writable for relocation at {sym_name}")
                         for reloc in relocs:
                             val write_width = if reloc.reloc_type == 1: 8 else: 4
                             if loaded_sym.address <= 0 or loaded_sym.size < write_width or reloc.offset < 0 or reloc.offset > loaded_sym.size - write_width:
-                                return LoadResult.Error(message: "Relocation offset {reloc.offset} with width {write_width} out of bounds")
+                                return _compat_load_fail(allocs, "Relocation offset {reloc.offset} with width {write_width} out of bounds")
                             if loaded_sym.address > 0x7FFFFFFFFFFFFFFF - reloc.offset:
-                                return LoadResult.Error(message: "Relocation address overflow at offset {reloc.offset}")
+                                return _compat_load_fail(allocs, "Relocation address overflow at offset {reloc.offset}")
                             var target_addr = 0i64
                             var target_name = ""
                             if reloc.symbol_index >= 0 and reloc.symbol_index < ordered_symbols.len():
@@ -1505,12 +1522,12 @@ impl ModuleLoader:
                                     if self.global_symbols.has(target_name):
                                         target_addr = self.global_symbols[target_name][1].address
                             if target_addr == 0:
-                                return LoadResult.Error(message: "Unresolved symbol at index {reloc.symbol_index}")
+                                return _compat_load_fail(allocs, "Unresolved symbol at index {reloc.symbol_index}")
                             val place = loaded_sym.address + reloc.offset
                             var reloc_s = target_addr
                             if reloc.reloc_type == 4:
                                 if not got_slot_addr.has(target_name):
-                                    return LoadResult.Error(message: "GotRel32 requires GOT synthesis but no slot found for {target_name}")
+                                    return _compat_load_fail(allocs, "GotRel32 requires GOT synthesis but no slot found for {target_name}")
                                 reloc_s = got_slot_addr[target_name]
                             val computed = loader_smf_reloc_value(reloc.reloc_type, reloc_s, place, reloc.addend)
                             match computed:
@@ -1532,21 +1549,27 @@ impl ModuleLoader:
                                             unsafe(capabilities: [raw_ptr]):
                                                 native_reloc_write_i32(loaded_sym.address, reloc.offset, value as i32)
                                         _:
-                                            return LoadResult.Error(message: "Unknown relocation type: {reloc.reloc_type}")
+                                            return _compat_load_fail(allocs, "Unknown relocation type: {reloc.reloc_type}")
                                 case Err(message):
-                                    return LoadResult.Error(message: message)
+                                    return _compat_load_fail(allocs, message)
                         val executable = unsafe(capabilities: [raw_ptr]):
                             native_make_executable(loaded_sym.address, loaded_sym.size)
                         if not executable:
-                            return LoadResult.Error(message: "Failed to restore executable memory for {sym_name}")
+                            return _compat_load_fail(allocs, "Failed to restore executable memory for {sym_name}")
                         native_flush_icache(loaded_sym.address, loaded_sym.size)
+
+                # Commit point: every symbol and relocation validated. Publish the
+                # whole symbol set to the global table at once; a failure before
+                # this line leaves global state untouched.
+                for publish_name in symbols.keys():
+                    self.global_symbols[publish_name] = (path, symbols[publish_name])
 
                 if not aspect_candidate.present:
                     val metadata_result = self.jit.load_smf_metadata(path)
                     match metadata_result:
                         case Err(err):
                             if symbols.is_empty():
-                                return LoadResult.Error(message: err)
+                                return _compat_load_fail(allocs, err)
                         case Ok(_):
                             pass
 
@@ -1561,8 +1584,8 @@ impl ModuleLoader:
                         _module_aspect_gate_key_v1(
                             self.aspect_owner.identity, "pack-register", path))
                     if not admission.acquired:
-                        return LoadResult.Error(
-                            message: "aspect-pack commit timed out waiting for lifecycle owner: " + path)
+                        return _compat_load_fail(allocs,
+                            "aspect-pack commit timed out waiting for lifecycle owner: " + path)
                     if not self.aspect_owner.loader_cell.has(0):
                         self.aspect_owner.loader_cell[0] = apk_loader_new()
                     var aspect_commit_error = ""
@@ -1573,10 +1596,10 @@ impl ModuleLoader:
                         case Ok(_):
                             self.aspect_owner.pack_paths[path] = true
                     if not _module_aspect_gate_exit_v1(admission):
-                        return LoadResult.Error(
-                            message: "aspect-pack commit lost lifecycle ownership: " + path)
+                        return _compat_load_fail(allocs,
+                            "aspect-pack commit lost lifecycle ownership: " + path)
                     if aspect_commit_error != "":
-                        return LoadResult.Error(message: "aspect-pack commit failed {path}: {aspect_commit_error}")
+                        return _compat_load_fail(allocs, "aspect-pack commit failed {path}: {aspect_commit_error}")
 
                 val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1)
                 self.modules[path] = m
