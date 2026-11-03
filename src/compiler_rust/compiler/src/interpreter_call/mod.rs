@@ -694,7 +694,11 @@ pub(crate) fn evaluate_call(
                 warn_prelude_shadow_once(name.as_str(), functions, false);
             }
         }
-        if is_extern && !has_local_def {
+        // A fn-typed local/parameter named like a prelude builtin (`fn f(str: fn(i64) -> text)`)
+        // is a value call and must win over the extern/builtin of the same name.
+        let local_callable_shadows = !super::interpreter_eval::PRELUDE_UNSHADOWABLE.contains(&name.as_str())
+            && matches!(env.get(name.as_str()), Some(Value::Function { .. }) | Some(Value::Lambda { .. }));
+        if is_extern && !has_local_def && !local_callable_shadows {
             if runtime_profile::is_profiling_active() {
                 runtime_profile::record_full_call(name, None, vec![], runtime_profile::CallType::Ffi);
             }
@@ -729,7 +733,7 @@ pub(crate) fn evaluate_call(
         if user_defined && !builtin_wins && super::interpreter_eval::is_user_facing_prelude(name.as_str()) {
             warn_prelude_shadow_once(name.as_str(), functions, false);
         }
-        if builtin_wins {
+        if builtin_wins && !local_callable_shadows {
             if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
                 return Ok(result);
             }

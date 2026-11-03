@@ -1,6 +1,6 @@
 # MCP score text-local inference corrupts native formatting
 
-Status: OPEN. 2026-11-03: test/01_unit/compiler/mir/tagged_text_concat_reassignment_spec.spl runs 8/10 under the seed; failing: "leaves indirect user str callbacks on the normal call path" (MIR emits 0 indirect calls for a parameter named str; expected 1) and "preserves custom callback precedence" (seed interpreter returns =7, expected =custom). A parameter named str is resolved to the builtin. Distinct from unresolved f64.to_int dispatch.
+Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (see 2026-11-03 section). Prior: OPEN. 2026-11-03: test/01_unit/compiler/mir/tagged_text_concat_reassignment_spec.spl runs 8/10 under the seed; failing: "leaves indirect user str callbacks on the normal call path" (MIR emits 0 indirect calls for a parameter named str; expected 1) and "preserves custom callback precedence" (seed interpreter returns =7, expected =custom). A parameter named str is resolved to the builtin. Distinct from unresolved f64.to_int dispatch.
 
 The exact PR3175 formatter compiled with the provisional pure-Simple a45 producer (object5776 bytes) and strictly linked against its generated core-C47/backfill935 pair (ELF2203480 bytes). Native assertions failed. A second source-bound diagnostic preserved the formatter and printed actual results: 0.0 => `0.<decimal pointer>`, 1.25 => `1.<decimal pointer>`, and all six samples had pointer digits as their fraction.
 
@@ -25,3 +25,10 @@ Astra found no P0/P1 in source review. Ten executable prevention cases inspect a
 Regression source: `test/01_unit/compiler/mir/tagged_text_concat_reassignment_spec.spl`. Source/evidence identities are in the adjacent `_source_proposal.json` attachment.
 
 **Revalidated 2026-11-02: still plausible because OPEN. This is distinct from unresolved f64.to_int dispatch; no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 status: fix-implemented-verification-pending
+
+The MIR provenance fix (96b6574e8b5) is correct; the 2 failing spec cases were not MIR defects:
+- "indirect user str callbacks": the spec's `tagged_indirect_call_count` ignored `MirInstKind.CallIndirect`; a fn-typed value call lowers to two CallIndirect arms (closure handle + raw fn pointer, `emit_function_value_call`). Helper and expectation (2) corrected.
+- "custom callback precedence" (`=7`): the Rust seed interpreter `evaluate_call` dispatched extern/builtin `str` before a fn-typed local/parameter named `str`. Fixed in `src/compiler_rust/compiler/src/interpreter_call/mod.rs` (`local_callable_shadows`, PRELUDE_UNSHADOWABLE names still win).
+Spec: 10/10 with a test-only seed build. Verification pending: native run of the `.spl.repro` (expects `MCP_SCORE_CAST_NATIVE_PASS`) on a stage3/stage2 producer carrying 96b6574e8b5; the deployed seed needs the interpreter fix to pass the spec.
