@@ -1,6 +1,38 @@
 # `parse_claude_json_response` likely global-registry name collision (2 modules, same name)
 ## Open 2026-09-16 — needs owner triage
 
+## 2026-11-03: library JSON search consumer repair, verification pending
+
+Current source inspection identifies an independent concrete defect in the
+NoGC async library parser's JSON helpers: all three text-search consumers pass
+the raw `text.index_of` integer result to a `Some`/`nil` matcher. The current
+string interpreter owner (`src/compiler_rust/compiler/src/interpreter_method/string.rs`)
+returns a byte offset or `-1`; this is also the contract recorded in
+`divergence_byte_char_find_option_sweep_2026-08-01`. Treating that integer as an
+Option can lose found fields without any cross-module name collision.
+
+The candidate consumes offsets directly in `extract_json_string`,
+`extract_json_value`, and `extract_nested_string`. The sibling-imported
+`_unwrap_idx` compatibility helper now has an explicit `i64 -> i64` contract;
+no library-family selection or parser symbol names change. Five authored
+regression scenarios cover zero/positive/missing offsets, actual extraction,
+integer/boolean/nested controls, and the library's response/error/stream parser.
+
+This does **not** prove or repair the original global-registry collision
+hypothesis. The app parser now uses structured JSON, and the canonical
+`test/01_unit/app/llm_caret/claude_cli_spec.spl` explicitly imports its production
+owner (contract restoration `9bb1acec43b`), unlike the legacy inline-copy spec
+cited below. The original record remains open pending a faithful current
+cross-module reproducer.
+
+Runtime verification is **TEST_BLOCKED**: no qualified self-hosted CLI/test
+runner is available; tracked `bin/simple.exe` is the Rust seed and was not used
+as a substitute. Authored tests are not a PASS. Resume with an admitted runtime:
+`<runtime> test test/01_unit/lib/nogc_async_mut/llm/claude_json_index_contract_spec.spl --mode=interpreter`,
+then the canonical app spec and a cross-module owner-isolation reproducer.
+Bind producer/source/backend/runtime/cache identities and keep this bug open
+until those boundaries are demonstrated.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
