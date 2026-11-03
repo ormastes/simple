@@ -1833,7 +1833,7 @@ impl Lowerer {
                         // its value, not another optional-presence condition.
                         Some(HirType::Pointer { kind: PointerKind::Shared, inner, .. })
                             if *inner == TypeId::BOOL => TypeId::BOOL,
-                        _ => subject_ty,
+                        _ => self.optional_reference_payload_inner(subject_ty).unwrap_or(subject_ty),
                     }
                 });
                 if binding_ty != subject_ty {
@@ -1859,6 +1859,19 @@ impl Lowerer {
             return binding_stmts;
         }
         self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, bindings, ctx)
+    }
+
+    /// Narrow only a guarded, explicitly declared Optional whose payload is
+    /// represented as an array, string, struct, or enum value. Raw pointers
+    /// can have the same HIR shape but are not source-level `T?` values.
+    fn optional_reference_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
+        let inner = self.module.types.optional_inner(subject_ty)?;
+        match self.module.types.get(inner) {
+            Some(HirType::Array { .. } | HirType::String | HirType::Struct { .. } | HirType::Enum { .. }) => {
+                Some(inner)
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn build_pattern_binding_stmts(
@@ -4093,5 +4106,73 @@ mod optional_bool_binding_tests {
         let binding = function.locals.iter().find(|local| local.name == "opened")
             .expect("if-val binding exists");
         assert_eq!(binding.ty, TypeId::BOOL, "payload condition must inspect bool value, not presence");
+    }
+
+    #[test]
+    fn if_val_binds_optional_array_inner_and_keeps_len_i64_inside_guard() {
+        let source = "fn inspect(values: [i64]?) -> i64:\n    if val items = values:\n        return items.len()\n    -1\n";
+        let ast = Parser::new(source).parse().expect("optional array fixture parses");
+        let module = lower(&ast).expect("optional array fixture lowers");
+        let function = module.functions.iter().find(|function| function.name == "inspect")
+            .expect("inspect function exists");
+        let binding = function.locals.iter().find(|local| local.name == "items")
+            .expect("if-val binding exists");
+        assert!(matches!(module.types.get(binding.ty), Some(crate::hir::types::HirType::Array { .. })));
+
+        let (condition, then_block) = function.body.iter().find_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::If { condition, then_block, .. } => Some((condition, then_block)),
+            _ => None,
+        }).expect("optional payload must remain nested under its presence guard");
+        assert_eq!(condition.ty, TypeId::BOOL, "presence guard remains boolean");
+        let local_index = function.params.len() + function.locals.iter().position(|local| local.name == "items")
+            .expect("if-val binding has a local slot");
+        let (ty, value) = then_block.iter().find_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::Let { local_index: idx, ty, value: Some(value) }
+                if *idx == local_index => Some((ty, value)),
+            _ => None,
+        }).expect("guard body binds the payload local");
+        assert_eq!(*ty, binding.ty, "binding statement uses the narrowed array type");
+        assert_eq!(value.ty, binding.ty, "unwrap expression uses the narrowed array type");
+        let call = then_block.iter().find_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        }).expect("guard body returns the array length");
+        assert_eq!(call.ty, TypeId::I64, "array length retains its builtin i64 type");
+    }
+
+    #[test]
+    fn if_val_narrows_optional_struct_but_preserves_its_len_signature() {
+        let source = "struct Measure:\n    count: i64\n    fn len() -> text:\n        \"measurement\"\n\nfn inspect(value: Measure?) -> text:\n    if val measure = value:\n        return measure.len()\n    \"missing\"\n";
+        let ast = Parser::new(source).parse().expect("optional struct fixture parses");
+        let module = lower(&ast).expect("optional struct fixture lowers");
+        let function = module.functions.iter().find(|function| function.name == "inspect")
+            .expect("inspect function exists");
+        let binding = function.locals.iter().find(|local| local.name == "measure")
+            .expect("if-val binding exists");
+        assert!(matches!(module.types.get(binding.ty), Some(crate::hir::types::HirType::Struct { name, .. }) if name == "Measure"));
+        let then_block = function.body.iter().find_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::If { then_block, .. } => Some(then_block),
+            _ => None,
+        }).expect("optional payload must remain nested under its presence guard");
+        let call = then_block.iter().find_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        }).expect("guard body returns the declared method result");
+        assert_eq!(call.ty, TypeId::STRING, "custom Measure.len return signature is preserved");
+    }
+
+    #[test]
+    fn if_val_binds_nil_optional_array_only_inside_guard() {
+        let source = "fn inspect() -> i64:\n    val values: [i64]? = nil\n    if val items = values:\n        return items.len()\n    17\n";
+        let ast = Parser::new(source).parse().expect("nil optional fixture parses");
+        let module = lower(&ast).expect("nil optional fixture lowers");
+        let function = module.functions.iter().find(|function| function.name == "inspect")
+            .expect("inspect function exists");
+        let guards: Vec<_> = function.body.iter().filter_map(|stmt| match stmt {
+            crate::hir::types::HirStmt::If { then_block, .. } => Some(then_block),
+            _ => None,
+        }).collect();
+        assert_eq!(guards.len(), 1, "nil optional binding has one presence guard");
+        assert!(guards[0].iter().any(|stmt| matches!(stmt, crate::hir::types::HirStmt::Let { .. })));
     }
 }

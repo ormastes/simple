@@ -9,7 +9,7 @@ use std.io_runtime.{file_exists}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{mkdir_p}
 use std.io_runtime.{getpid}
-use std.io_runtime.{file_write}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_lock, file_unlock, file_modified_time}
 use std.io_runtime.{time_now_unix_micros}
 extern fn rt_process_exists(pid: i64) -> bool
 
@@ -21,18 +21,49 @@ fn try_acquire_daemon_lock(lock_path: text) -> i64:
     val parent = lock_path_parent(lock_path)
     mkdir_p(parent)
 
-    if file_exists(lock_path):
-        val existing_pid = read_daemon_pid(lock_path)
-        if existing_pid > 0 and is_pid_alive(existing_pid):
-            return -1
-        file_delete(lock_path)
-
     val pid = getpid()
     val timestamp = time_now_unix_micros()
     val content = "{pid}\n{timestamp}"
-    if file_write(lock_path, content):
+    # Exclusive create is the only acquisition path: the kernel picks one winner.
+    if file_create_exclusive(lock_path, content):
+        return pid
+    # Held. Break only a provably stale lock, then retry the exclusive create once.
+    if not _break_stale_lock(lock_path):
+        return -1
+    if file_create_exclusive(lock_path, content):
         return pid
     -1
+
+# Empty or partial content means another acquirer is mid-write, not stale,
+# unless the file is older than this many seconds.
+val LOCK_PARTIAL_GRACE_SECS: i64 = 10
+
+fn _lock_is_complete(content: text) -> bool:
+    val lines = content.split("\n")
+    lines.len() >= 2 and (lines[0].trim().to_i64() ?? -1) > 0 and lines[1].trim() != ""
+
+# Serialize breakers with a kernel lock; under it re-read and delete only a
+# lock that is complete, unchanged since judged, and owned by a dead pid.
+# Returns true when the path is free (deleted or already gone).
+fn _break_stale_lock(lock_path: text) -> bool:
+    val handle = file_lock(lock_path + ".break", 5)
+    if handle < 0:
+        return false
+    var freed = false
+    val judged = read_file_text(lock_path)
+    if not file_exists(lock_path):
+        freed = true
+    elif _lock_is_complete(judged):
+        val owner = read_daemon_pid(lock_path)
+        if owner > 0 and not is_pid_alive(owner) and read_file_text(lock_path) == judged:
+            freed = file_delete(lock_path)
+    else:
+        val mtime = file_modified_time(lock_path)
+        val now_secs = time_now_unix_micros() / 1000000
+        if mtime > 0 and now_secs - mtime > LOCK_PARTIAL_GRACE_SECS and read_file_text(lock_path) == judged:
+            freed = file_delete(lock_path)
+    file_unlock(handle)
+    freed
 
 # ============================================================================
 # Lock Release

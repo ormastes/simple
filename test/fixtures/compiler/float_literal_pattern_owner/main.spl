@@ -1,0 +1,62 @@
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{expr_float_lit, expr_ident, expr_method_call, expr_unary}
+use compiler.frontend._FlatAstBridge.convert_nodes.{convert_flat_pattern}
+use compiler.frontend.parser_types_expr.{EnumPatternPayload, ExprKind, Pattern, PatternKind}
+
+fn require(ok: bool, label: text):
+    if not ok: panic("ASSERT_FAIL {label}")
+    print("ASSERT_PASS {label}")
+
+fn float_pattern_expr(pattern: Pattern) -> text:
+    match pattern.kind:
+        case PatternKind.Literal(value):
+            match value.kind:
+                case ExprKind.FloatLexeme(lexeme): return lexeme
+                case _: panic("ASSERT_FAIL frontend float literal kind")
+        case _: panic("ASSERT_FAIL frontend float pattern kind")
+
+fn nested_float_pattern_expr(pattern: Pattern) -> text:
+    match pattern.kind:
+        case PatternKind.Enum(_, variant, payload):
+            require(variant == "Circle", "enum variant preserved")
+            if val actual_payload = payload:
+                match actual_payload:
+                    case EnumPatternPayload.Tuple(elements):
+                        require(elements.len() == 1, "enum payload arity preserved")
+                        return float_pattern_expr(elements[0])
+                    case _: panic("ASSERT_FAIL frontend enum float payload shape")
+            else:
+                panic("ASSERT_FAIL frontend enum float payload absent")
+        case _: panic("ASSERT_FAIL frontend enum float payload kind")
+
+ast_reset()
+val positive = convert_flat_pattern(expr_float_lit("1.5", 0))
+require(float_pattern_expr(positive) == "1.5", "frontend retains 1.5 literal")
+
+ast_reset()
+val negative = convert_flat_pattern(expr_unary(61, expr_float_lit("1.5", 0), 0))
+var negative_is_literal = false
+match negative.kind:
+    case PatternKind.Literal(value):
+        match value.kind:
+            case ExprKind.Unary(_, operand):
+                match operand.kind:
+                    case ExprKind.FloatLexeme(lexeme): negative_is_literal = lexeme == "1.5"
+                    case _: ()
+            case _: ()
+    case _: ()
+require(negative_is_literal, "frontend retains negative float literal")
+
+ast_reset()
+val nested = convert_flat_pattern(expr_method_call(
+    expr_ident("Shape", 0), "Circle", [expr_float_lit("1.0", 0)], 0))
+require(nested_float_pattern_expr(nested) == "1.0", "frontend retains method-form enum payload")
+
+ast_reset()
+val fallback = convert_flat_pattern(expr_ident("_", 0))
+var fallback_is_wildcard = false
+match fallback.kind:
+    case PatternKind.Wildcard: fallback_is_wildcard = true
+    case _: ()
+require(fallback_is_wildcard, "frontend retains explicit wildcard fallback")
+print("FLOAT_PATTERN_OWNER_DIAGNOSTIC_PASS assertions=6")

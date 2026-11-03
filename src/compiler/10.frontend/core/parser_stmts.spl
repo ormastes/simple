@@ -77,6 +77,7 @@ use compiler.core.ast.{STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONT
 use compiler.core.ast.{STMT_RECEIVE, stmt_receive_stmt, STMT_BIND, stmt_bind_stmt}
 use compiler.core.ast.{stmt_defer_stmt, stmt_errdefer_stmt, stmt_defer_block_stmt, stmt_errdefer_block_stmt}
 use compiler.core.ast.{decl_extern_fn, decl_get_tag, decl_get_name, module_add_decl, module_decl_at, module_decl_count_get}
+use compiler.core.ast.{decl_get_param_types, decl_get_ret_type}
 use compiler.core.ast.{STMT_GPU_LAUNCH, stmt_gpu_launch}
 use compiler.core.ast.{STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT}
 use compiler.core.ast.{STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES}
@@ -95,6 +96,7 @@ use compiler.core.types.{TYPE_NIL}
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_NAMED_BASE}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_error_count}
+use compiler.core.parser.{parser_error_at}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
@@ -462,25 +464,36 @@ fn parse_block_lexical_body() -> [i64]:
 fn parse_use_stmt_inline() -> i64:
     stmt_use_import(parse_use_decl(), 0)
 
-# True when the module being parsed already declares a function named `name`:
-# a `fn` (tag 1) or an extern (tag 2), top-level or hoisted from an earlier
-# body. A body-local extern must never replace a real module function (e.g.
-# the @cfg(not(baremetal)) host twins in src/os/kernel/loader/segment_mapper.spl).
-fn _module_has_function_decl(name: text) -> bool:
+# Find a module declaration named `name` and return its declaration id, or -1
+# when there is no matching `fn` (tag 1) or extern (tag 2). A body-local extern
+# must never replace a real module function (e.g. the @cfg(not(baremetal)) host
+# twins in src/os/kernel/loader/segment_mapper.spl).
+fn _module_find_function_decl(name: text) -> i64:
     val count = module_decl_count_get()
     var i = 0
     while i < count:
         val d = module_decl_at(i)
         if d >= 0 and (decl_get_tag(d) == 1 or decl_get_tag(d) == 2) and decl_get_name(d) == name:
-            return true
+            return d
         i = i + 1
-    false
+    -1
+
+fn _extern_signatures_equal(existing_decl: i64, param_types: [i64], ret_type: i64) -> bool:
+    val existing_params = decl_get_param_types(existing_decl)
+    if existing_params.len() != param_types.len() or decl_get_ret_type(existing_decl) != ret_type:
+        return false
+    var i = 0
+    while i < existing_params.len():
+        if existing_params[i] != param_types[i]:
+            return false
+        i = i + 1
+    true
 
 # extern fn declaration inside a function body: register the signature as a
 # module declaration (same as a top-level extern) and emit a no-op statement.
 # The same extern is commonly re-declared in several bodies of one module, so
-# only the first declaration of a name is added (first signature wins); later
-# ones, and any that name an existing module `fn`, are no-ops. This registers
+# identical signatures share one declaration and conflicting signatures are
+# rejected. A same-named module `fn` remains authoritative. This registers
 # at module scope, not the lexical scope of the enclosing body
 # (pure_simple_nested_extern_registration_2026_10_12 asks for lexical scope).
 # A top-level extern of the same name that FOLLOWS the body is not deduped.
@@ -488,6 +501,8 @@ fn _module_has_function_decl(name: text) -> bool:
 # the decl-parsing modules, which import parse_block from this file.
 fn parse_extern_fn_stmt_inline() -> i64:
     val representation_owner = representation_declaration_begin_v1("nested_extern")
+    val declaration_line = par_line_get()
+    val declaration_col = par_col_get()
     parser_advance()  # consume 'extern'
     parser_expect(20)
     val ef_name = par_text_get()
@@ -514,8 +529,11 @@ fn parse_extern_fn_stmt_inline() -> i64:
         parser_advance()
         ef_ret = parser_parse_type()
     val ef_tparams: [text] = []
-    if not _module_has_function_decl(ef_name):
+    val existing_decl = _module_find_function_decl(ef_name)
+    if existing_decl < 0:
         module_add_decl(decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0))
+    else if decl_get_tag(existing_decl) == 2 and not _extern_signatures_equal(existing_decl, ef_ptypes, ef_ret):
+        parser_error_at(declaration_line, declaration_col, "conflicting extern declaration: " + ef_name)
     representation_declaration_end_v1(representation_owner, -1, ef_name)
     stmt_expr_stmt(expr_pass(0), 0)
 
