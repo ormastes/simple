@@ -602,7 +602,7 @@ pub fn clear_module_cache_selective() {
     MODULE_EXPORT_OWNERS.with(|cache| {
         cache
             .borrow_mut()
-            .retain(|_, owner| is_stdlib(Path::new(&*owner)));
+            .retain(|_, owner| is_stdlib(Path::new(&**owner)));
     });
     MODULE_CLASSES_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
     MODULE_FUNCTIONS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
@@ -612,23 +612,23 @@ pub fn clear_module_cache_selective() {
     MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| {
         cache
             .borrow_mut()
-            .retain(|owner, _| is_stdlib(Path::new(&*owner)));
+            .retain(|owner, _| is_stdlib(Path::new(&**owner)));
     });
     crate::interpreter::reset_owned_globals_from_initial();
     MODULE_ENV_BY_OWNER.with(|cache| {
         cache
             .borrow_mut()
-            .retain(|owner, _| is_stdlib(Path::new(&*owner)));
+            .retain(|owner, _| is_stdlib(Path::new(&**owner)));
     });
     MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cache| {
         cache
             .borrow_mut()
-            .retain(|owner, _| is_stdlib(Path::new(&*owner)));
+            .retain(|owner, _| is_stdlib(Path::new(&**owner)));
     });
     FUNCTION_MODULE_OWNER.with(|cache| {
         cache
             .borrow_mut()
-            .retain(|_, owner| is_stdlib(Path::new(&*owner)));
+            .retain(|_, owner| is_stdlib(Path::new(&**owner)));
     });
     // Always clear loading/depth state (transient per-file)
     MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
