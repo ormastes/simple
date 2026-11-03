@@ -158,3 +158,11 @@ Retired by commit e21824a4ed4 on the verdict of a probe guard that hardcoded the
 `bin/simple` seed (see guards_hardcode_stale_seed_binary_census_2026-08-17.md). The
 retirement measured a binary older than the code, so it is not evidence. Re-retire only
 with a verdict from a fresh self-hosted build via `SIMPLE_BIN`.
+
+## 2026-11-03: RE-RESOLVED (fresh-seed evidence)
+
+Re-verified on a seed newer than the code: `C:/dev/simple/bin/simple.exe` (Rust seed, mtime
+2026-11-03 12:23; last `interpreter/node_exec.rs` edit is 62151179b4d, 2026-10-26).
+`SIMPLE_EXECUTION_MODE=interpreter bin/simple.exe run test/01_unit/engine_divergence/probes/js_engine_assign_dispatch_probe.spl`
+-> `J1_for_accum=num:3.0 J2_nested_obj=num:42.0 J3_simple_assign=num:7.0 J4_typeof_undef=str:undefined`, rc=0.
+All four documented symptoms green; bug row set to `fixed`.

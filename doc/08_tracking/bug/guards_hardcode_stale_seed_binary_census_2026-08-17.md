@@ -3,7 +3,7 @@
 - **Filed:** 2026-08-17
 - **Severity:** P1 — these guards can pass BY CONSTRUCTION, and one of them has
   already been used to retire four real defects
-- **Status:** OPEN
+- **Status:** FIXED 2026-11-03 (items 1-3 landed; item 4 residuals listed below)
 
 ## The defect
 
@@ -128,3 +128,18 @@ the per-guard audit of item 4.
   check-caret-suite-bootstrap, check-sdoctest-bootstrap, check-nvme-firmware-remaining-gates,
   check-build-outcome-reason-attribution accepts both). Note the injectable gate only tests
   that a file mentions `SIMPLE_BIN`, so it cannot see a mere mention; tighten as follow-up.
+
+## 2026-11-03 (lane isl-seedcensus): close-out
+
+- The injectable gate (`check-guard-binary-injectable.shs`) was RED on
+  origin/release/1.0.0: 1 "offender" was
+  `test/01_unit/app/llm_caret/cs_smux_launcher_spec.spl`, a spec that asserts the
+  literal launcher text `"$ROOT/bin/simple"` and runs no compiler. `*_spec.spl`
+  string assertions are now skipped, with a selftest fixture that fails if a
+  spec string is flagged. Result: `PASS — 87 file(s) checked, 0 hardcoded`.
+- Windows: `guard_require_binary` accepts a bare `.../bin/simple` when only
+  `bin/simple.exe` exists (6th selftest fixture), instead of exiting 2 with
+  "not executable".
+- Residual (unchanged, listed above): the SIMPLE_BINARY-only guards and the
+  fallback-after-SIMPLE_BIN sites; the gate cannot see a mere mention of
+  `SIMPLE_BIN`. Track as follow-up if a concrete false green appears.
