@@ -559,3 +559,26 @@ fn test_weak_upgrade_returns_nil_after_freed() {
     // Just clean up the weak pointer
     rt_weak_free(weak);
 }
+
+// ADR-005: char is a TAG_SPECIAL sub-kind, never TAG_INT.
+#[test]
+fn test_char_tag_roundtrip_and_disjointness() {
+    for c in ['7', 'a', 'é', '€', '\u{10FFFF}', '\0'] {
+        let v = RuntimeValue::from_char(c);
+        assert!(v.is_char(), "{c:?} must be a char");
+        assert_eq!(v.as_char(), Some(c));
+        assert!(!v.is_int() && !v.is_nil() && !v.is_bool());
+        assert_eq!(v.type_name(), "char");
+    }
+    // '7' is not the int 55 and not nil/true/false.
+    assert_ne!(RuntimeValue::from_char('7'), RuntimeValue::from_int(55));
+    assert!(!RuntimeValue::NIL.is_char());
+    assert!(!RuntimeValue::TRUE.is_char());
+    assert!(!RuntimeValue::FALSE.is_char());
+    assert!(!RuntimeValue::from_int(55).is_char());
+    assert_eq!(RuntimeValue::from_int(55).as_char(), None);
+    // Non-scalar code points are rejected.
+    assert!(RuntimeValue::from_char_code(0xD800).is_none());
+    assert!(RuntimeValue::from_char_code(0x110000).is_none());
+    assert_eq!(RuntimeValue::from_char_code(55).and_then(|v| v.as_char()), Some('7'));
+}
