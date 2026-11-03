@@ -139,3 +139,14 @@ file:line.
 compile/runtime error. Silently returning 0 is the worst option. Until then,
 consider a lint/fence for `<string-typed>[i].to_i64()` once type-aware scanning
 is available.
+
+## Design check 2026-11-03: BLOCKED-ON-DESIGN
+
+No decided `text[i]` result type exists in doc/04_architecture, doc/05_design or doc/07_guide/language.
+`doc/05_design/compiler/char_utf8_storage_compatibility_20261019.md` plans physical Char storage but is
+NOT IMPLEMENTED, and says nothing on what `text[i]` yields. No parity fix landed (would need a type decision).
+Options for the owner:
+1. `text[i]` yields `char` (HIR type in `hir/lower/expr/index.rs`, plus runtime ABI); `char.to_i64()` = code point on both engines. Needs the Char UTF8 plan above first.
+2. Keep `text[i]` as `text`; make `.to_i64()` on text parse-only (JIT and interpreter both 0/None for non-numeric) and require `char_code_at` for code points. Interpreter change only; guard `check-string-index-char-to-i64.shs`.
+3. Lint/diagnose `text[i].to_i64()` at compile time (steer to `char_code_at`), no semantic change.
+Recommendation: option 3 now, option 1 after the Char plan lands.
