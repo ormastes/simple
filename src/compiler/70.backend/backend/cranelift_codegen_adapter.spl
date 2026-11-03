@@ -637,7 +637,8 @@ fn cl_translate_instruction(
         case BinOp(dest, op, left, right):
             val a = cl_translate_operand(ctx, cl_module, left, value_map, slot_map, func)
             val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
-            val result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
+            val raw_result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
+            val result = cl_canonicalize_unsigned_narrow(ctx, raw_result, local_type(dest.id, func))
             value_map[dest.id] = result
             if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
@@ -652,7 +653,8 @@ fn cl_translate_instruction(
 
         case UnaryOp(dest, op, operand):
             val a = cl_translate_operand(ctx, cl_module, operand, value_map, slot_map, func)
-            val result = cl_translate_unaryop(ctx, op, a, operand, func)
+            val raw_result = cl_translate_unaryop(ctx, op, a, operand, func)
+            val result = cl_canonicalize_unsigned_narrow(ctx, raw_result, local_type(dest.id, func))
             value_map[dest.id] = result
             store_local_result(ctx, dest, result, slot_map, func)
 
@@ -1893,3 +1895,22 @@ fn type_is_text(ty: MirType) -> bool:
 # ============================================================================
 # Exports
 # ============================================================================
+
+fn cl_canonicalize_unsigned_narrow(ctx: i64, value: i64, dest_type: MirType) -> i64:
+    """Re-establish the canonical zero-extended I64 form of a U8/U16/U32 result.
+
+    The lane keeps every int SSA value as I64 and treats widening casts as
+    no-ops (see cl_translate_cast), so an Add/Sub/Mul/Shl/Neg/BitNot result
+    typed U32 can carry bits above its width (`~x`, `a - b` wrap, `a << 8`),
+    which a later `.to_i64()` then exposes as a value off by 2^32 (bug
+    phase2_crc32_i64_width_spill_2026_10_27). Float and 64-bit results are
+    returned unchanged."""
+    match dest_type.kind:
+        case U8 | U16 | U32:
+            val narrow_cl = cl_cast_narrow_int_type(dest_type)
+            if narrow_cl == 0:
+                return value
+            val reduced = cranelift_ireduce(ctx, narrow_cl, value)
+            return cranelift_uextend(ctx, CL_TYPE_I64, reduced)
+        case _:
+            return value
