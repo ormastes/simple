@@ -124,3 +124,27 @@ fixed here" above). This is a design decision for the scene-assembler owner
 stays out of BUGFIX-12 scope. Leaving OPEN, no code change.
 
 **Revalidated 2026-11-02: still plausible because OPEN (filed, not fixed — see "Why not fixed here"); no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 — design note and fix
+
+**Design.** The command row (`DrawIrV3Command`) is a frozen packed struct, so
+producer identity is carried beside it, not on it.
+`ui_scene_route_event_scoped(scene, resolved, owners, command_producers: [u16], px, py)`
+takes a parallel `command_producers[i]` = producer_kind of `scene.commands[i]`.
+Only the assembler can supply it, since it concatenates each producer's command
+range. The owner lookup matches `(producer_kind, semantic_id)` when the
+producer is known. `ui_scene_route_event` keeps its signature and calls the
+scoped form with `[]`, which means unscoped. Unscoped, a `semantic_id` match
+that spans two different `producer_kind`s is refused with the new
+`UI_SCENE_ROUTE_REFUSE_AMBIGUOUS_OWNER` (4). It is never routed to the first row
+and never reported as `REFUSE_STALE_GENERATION`. Same-producer duplicates keep
+the old first-match behaviour.
+
+**Fix.** `src/lib/common/ui/ui_scene_event_route.spl`. Regression:
+`test/01_unit/lib/common/ui/ui_scene_route_producer_scope_spec.spl` (3
+examples: the scoped GUI route reaches the GUI owner/action 22; an unscoped
+collision gives AMBIGUOUS; WM-scoped reaches WM action 11). Before: it did not
+compile (no scoped API or refusal). After: 3/3. Collateral: ui_scene_event_route
+12/12, event_route_stack_boundary_agreement 18/18, ui_gui_packed_producer 10/10.
+Remaining follow-up (assembler owner): pass `command_producers` from the real
+multi-producer assembler once it exists.
