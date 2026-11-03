@@ -61,3 +61,16 @@ then, also check the pure-Simple compiler's enum tables for the same keying.
 ## 2026-11-03 staged rollout, stage 1 (warning only)
 
 Seed interpreter now emits `warning[enum-bare-name-ambiguous]` on stderr when an enum name is registered again with a different variant set (`warn_on_ambiguous_bare_enum_name`, evaluation_helpers.rs; hooked at GLOBAL_ENUMS/global_enums registration). No rejection yet; lookup is still last-wins. Unit tests: `cargo test -p simple-compiler --lib enum_bare_name_warning` (2 pass). Stage 2 (module-keyed lookup / hard error) still open.
+
+## 2026-11-03 stage 2: current-module preference (fix-implemented-verification-pending)
+
+Seed interpreter enum resolution now consults the enums declared by the CURRENTLY EXECUTING
+module first (`module_cache::owner_module_enum`, keyed by `CURRENT_EXEC_MODULE` over
+`MODULE_ENUMS_CACHE`), then the caller's `enums`, block-scoped and `GLOBAL_ENUMS` as before.
+Applied at the 7 enum-name sites in `interpreter_method/mod.rs`, `interpreter/expr/calls.rs`
+and `interpreter_call/mod.rs`. The `warning[enum-bare-name-ambiguous]` from stage 1 stays.
+NOT yet verified: no seed build was possible (C: full, build refused under the 15 GB rule).
+Repro: `bin/simple run test/fixtures/enum_bare_name_prefer_module/main.spl` against a seed
+built from this commit; expect `alpha` / `gamma` (before: `unknown variant ... 'Alpha' on enum Mode`).
+Residual: MIR lowering (`enum_declares_variant`, `type_registry.lookup(enum_name)`) is still bare-name keyed;
+the module falls back to the interpreter via jit-fallback.

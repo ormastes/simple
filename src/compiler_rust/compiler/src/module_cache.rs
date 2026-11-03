@@ -1650,3 +1650,18 @@ mod tests {
         assert_eq!(total_modules_loaded(), 0);
     }
 }
+
+/// Enum registered by the module that is currently executing (the importing /
+/// declaring module of the running function), if that module declares `name`.
+/// Used to resolve a bare enum name deterministically: the current module's own
+/// enum beats the cross-module `GLOBAL_ENUMS` last-registration-wins entry.
+/// See bug `seed_enum_variant_bare_name_last_registration_wins_2026_10_19`.
+pub fn owner_module_enum(name: &str) -> Option<Arc<EnumDef>> {
+    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone())?;
+    MODULE_ENUMS_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .get(Path::new(owner.as_ref()))
+            .and_then(|m| m.get(name).cloned())
+    })
+}
