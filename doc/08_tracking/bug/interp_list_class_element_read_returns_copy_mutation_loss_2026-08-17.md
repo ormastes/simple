@@ -198,11 +198,3 @@ Headline: 105 production `Value::Object` pattern sites in 37 files have no
 `class_instance_flip_uncovered_sites_2026-09-20.txt` (repo-root-relative
 paths). The blocker is verifiability, not effort — the tripwire in that
 record's step 1 is the prerequisite for any re-land.
-
-## 2026-11-03 — re-triaged, still deferred (seedinterp lane)
-
-Re-checked against origin/release/1.0.0: the class-value-identity plan
-(ClassInstance tripwire, `b7985a1ef56`) is step 1 of a multi-step value-model
-change (105 `Value::Object` sites). Option B (narrow `Expr::Index` aliasing)
-remains unsound as recorded above, so no narrow fix was attempted. Bug stays
-OPEN.

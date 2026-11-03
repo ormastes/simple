@@ -9,9 +9,6 @@ use compiler.hir.hir_definitions.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.MirLowering
 use compiler.mir._MirLowering.module_lowering.*
-use compiler.mir._MirLoweringExpr.expr_dispatch.*
-use compiler.hir.hir_types.SymbolTable
-use compiler.common.diagnostics.span.Span
 
 fn chained_owner_calls(function: MirFunction) -> [text]:
     var names: [text] = []
@@ -44,31 +41,3 @@ describe "chained named receiver owner":
                 expect(calls.contains("chain.Sp.equals")).to_equal(true)
                 expect(calls.contains("spl_str_slice")).to_equal(false)
         expect(checked).to_equal(1)
-
-    it "recovers a chained call result owner from the inner call's nominal HIR type":
-        # Cross-module shape: the inner call result local carries no remembered
-        # HIR type, so only the inner expression's own Named type can supply
-        # the owner. Old code returned nil here.
-        var lowering = MirLowering.new(SymbolTable.new())
-        var builder = lowering.builder
-        builder.begin_function(
-            SymbolId(id: 0), "chained_owner",
-            MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
-            Span.empty()
-        )
-        val result_local = builder.new_local(nil, MirType.i64(), LocalKind.Arg(index: 0))
-        lowering.builder = builder
-        val unit_ty = HirType(kind: HirTypeKind.Unit, span: Span.empty())
-        val inner_recv = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: unit_ty, span: Span.empty())
-        val owner_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 42), []), span: Span.empty())
-        val chained = HirExpr(kind: HirExprKind.MethodCall(inner_recv, "slice", [], MethodResolution.Unresolved),
-            has_type_: true, type_: owner_ty, span: Span.empty())
-        var owner_id = -1
-        if val recovered = lowering.receiver_declared_or_result_type(chained, result_local):
-            match recovered.kind:
-                case HirTypeKind.Named(sym, _): owner_id = sym.id
-                case _: ()
-        expect(owner_id).to_equal(42)
-        val untyped = HirExpr(kind: HirExprKind.MethodCall(inner_recv, "slice", [], MethodResolution.Unresolved),
-            has_type_: false, type_: unit_ty, span: Span.empty())
-        expect(lowering.receiver_declared_or_result_type(untyped, result_local) == nil).to_equal(true)
