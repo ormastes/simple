@@ -39,7 +39,7 @@ which was off-limits during this pass (concurrent bootstrap).
 
 
 - **Filed:** 2026-08-02
-- **Status:** OPEN
+- **Status:** fix-implemented-verification-pending (2026-11-04: `on` stays reserved; parser now says "`on` is a reserved keyword and cannot be used as an identifier"; spec: src/compiler_rust/parser/tests/on_reserved_keyword_diagnostic.rs; deployed bin/simple needs a seed redeploy to show it)
 - **Severity:** low (clear compile error, no silent miscompile) but it costs a
   confusing debug cycle and the message does not name the cause
 - **Evidence tier:** Rust seed (`bin/simple`; bootstrap-identity probe = 0)
