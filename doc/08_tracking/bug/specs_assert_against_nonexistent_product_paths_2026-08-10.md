@@ -352,3 +352,31 @@ remaining ~849 are DELETED-or-never-existed and deliberately left RED
 per the doc. Whole-corpus scope, not a single fixable bug. Leaving
 OPEN.
 
+
+
+## 2026-11-03 detector discrimination repair
+
+A scoped shell fixture reproduced three false positives in the current detector:
+a path used as `to_contain` content, a categorizer input, and a quoted path in a
+trailing comment. The old detector reported `FAIL -- 1 specs checked, 3
+missing-path references` while its three original self-controls passed.
+These are not file reads and cannot establish a missing read subject.
+
+The detector now tokenizes quoted literals, escaped quotes, comments and
+docstrings before identifying the first argument of named file-read/existence
+APIs. Direct literals and literal `val`/`var` bindings are inspected. Binding
+lookup respects indentation scopes, so same-named path variables in sibling
+examples cannot leak into one another. Content-assertion and categorizer strings
+are not harvested. Literal arguments split over lines remain visible.
+
+The fatal selftest retains its original three controls and adds two fixture
+families: missing bound/multiline reads must produce exactly two references;
+content, categorizer, trailing-comment, docstring, escaped-quote and sibling
+scope examples must remain silent, including direct and bound existing paths.
+Unresolved dynamic bindings terminate without claiming a concrete path.
+
+This remains a lexical detector: aliases, computed paths and interprocedural
+path flow need semantic/manual review. A clean scoped scan does not certify
+those inputs. No product assertions were deleted, weakened, or repointed, and
+no whole-corpus clean verdict or closure of the outstanding absent-product-path
+inventory is claimed. The broad bug remains OPEN.
