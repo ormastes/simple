@@ -21,7 +21,16 @@ int main(void) {
     CHECK(!RT_IS_CHAR(RT_FALSE));
     CHECK(!RT_IS_CHAR(RT_ERROR));
     CHECK(!RT_IS_CHAR((RuntimeValue)(55ULL << 3)));
+    /* from_char_code parity: surrogates and > U+10FFFF rejected as RT_NIL (Rust None). */
+    CHECK(RT_CHAR_FROM_CODE(0xD800) == RT_NIL);
+    CHECK(RT_CHAR_FROM_CODE(0xDFFF) == RT_NIL);
+    CHECK(RT_CHAR_FROM_CODE(0x110000) == RT_NIL);
+    CHECK(RT_CHAR_FROM_CODE(0xD7FF) == RT_CHAR(0xD7FF));
+    CHECK(RT_CHAR_FROM_CODE(0xE000) == RT_CHAR(0xE000));
+    CHECK(RT_CHAR_FROM_CODE(55) == RT_CHAR(0x37));
+    /* rt_value_truthy(RT_CHAR(..)) aborts (fail closed); not exercised in-process here. Rust twin:
+     * test_char_truthiness_fails_closed. */
     if (fails) return 1;
-    printf("PASS rt_value_char_tag_selfcheck\n");
+    printf("SELFCHECK PASSED (0 failures)\n");
     return 0;
 }

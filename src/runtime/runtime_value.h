@@ -29,6 +29,13 @@ typedef uint64_t RuntimeValue;
 #define RT_CHAR(cp) ((((SPECIAL_CHAR_BASE | ((uint64_t)(cp) & SPECIAL_CHAR_MASK))) << 3) | TAG_SPECIAL)
 #define RT_IS_CHAR(v) ((((v) & TAG_MASK) == TAG_SPECIAL) && ((((v) >> 3) & ~SPECIAL_CHAR_MASK) == SPECIAL_CHAR_BASE))
 #define RT_CHAR_CODE(v) ((uint32_t)(((v) >> 3) & SPECIAL_CHAR_MASK))
+/* Unicode scalar check, identical to Rust char::from_u32: rejects the UTF-16
+ * surrogate range and values above U+10FFFF. */
+#define RT_CHAR_CODE_VALID(cp) ((uint64_t)(cp) <= 0x10FFFFULL && !((uint64_t)(cp) >= 0xD800ULL && (uint64_t)(cp) <= 0xDFFFULL))
+/* C twin of RuntimeValue::from_char_code: a char value, or RT_NIL (Rust None)
+ * for a non-scalar code point. Use this for any untrusted code point; RT_CHAR
+ * is the unchecked constructor for known-valid scalars. */
+#define RT_CHAR_FROM_CODE(cp) (RT_CHAR_CODE_VALID(cp) ? RT_CHAR(cp) : RT_NIL)
 
 /* Starting any user-visible thread must tell the Rust seed runtime, which packs
  * `[i64]` arrays in place only while no other thread can see them. Weak, so
