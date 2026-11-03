@@ -2,7 +2,7 @@
 
 Canonical bug ID: `interp_option_unwrapped_text_starts_with_nil_2026_10_19`
 
-Status: OPEN (P1) — historical source fix merged; durable verification pending.
+Status: FIXED (P1) — verified 2026-11-03 under Cranelift JIT on the deployed Rust seed (jit-strict clean, no interpreter fallback): `a!` and `a ?? "x"` text starts_with/ends_with return correct bools; fix 51bbcd83e28.
 
 ## Corrected classification
 

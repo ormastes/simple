@@ -33,3 +33,10 @@ expect non-zero exit naming the unresolved symbol. Without it: grep stderr for
 Back the externals (`rt_text_eq_any`, fix `crypto_text_to_bytes` import) in the
 JIT path, then re-verify sha1/sha3 under `SIMPLE_JIT_STRICT=1`; run crypto
 specs with strict on in CI.
+
+## Verification 2026-11-03 (deployed seed, sha1 probe)
+`use std.crypto.sha1.{sha1_bytes}; sha1_bytes("abc".bytes())` under default JIT prints
+`[jit-fallback] unresolved external symbol 'crypto_text_to_bytes': whole module dropped to the interpreter ...`
+plus `[engine-demotion]` lines, then correct output (len=20). Under `SIMPLE_JIT_STRICT=1` it prints
+`error: ... SIMPLE_JIT_STRICT: unresolved external symbol 'crypto_text_to_bytes' ... refusing to fall back`
+(non-zero exit). Diagnostic needs no new code; residual gaps (backing the externs) remain open.
