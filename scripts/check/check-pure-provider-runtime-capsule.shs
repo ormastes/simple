@@ -1,0 +1,85 @@
+#!/bin/sh
+# Linux host execution proof. The caller supplies an admitted compiler and an
+# independently pinned complete capsule manifest, never a caller-supplied DSO.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+fail() { echo "pure_provider_capsule=fail reason=$*" >&2; exit 1; }
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+capsule=${SIMPLE_PROVIDER_RUNTIME_CAPSULE:-}
+pin=${SIMPLE_PROVIDER_RUNTIME_MANIFEST_SHA256:-}
+manifest=$capsule/capsule.manifest
+value() {
+    awk -F= -v key="$1" '$1 == key { v=substr($0,index($0,"=")+1); n++ } END { if(n==1) print v; else exit 1 }' "$manifest"
+}
+canonical_digest() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+[ -n "$capsule" ] && [ -s "$manifest" ] || fail capsule-missing
+canonical_digest "$pin" || fail manifest-pin-required
+[ "$(hash_file "$manifest")" = "$pin" ] || fail manifest-pin-mismatch
+[ "$(value provider_host_link_contract)" = core-c-provider-host-link-v1 ] || fail link-contract-missing
+[ "$(value provider_host_export_policy)" = required-symbols-only ] || fail export-policy-invalid
+# Never execute arbitrary manifest text as shell or compiler arguments.
+libs=$(value provider_host_link_libraries) || fail link-dependencies-missing
+[ "$libs" = '-lm -lpthread -ldl' ] || fail link-dependencies-unsupported
+[ "$(value platform)" = Linux ] || fail capsule-platform-unsupported
+[ "$(value arch)" = "$(uname -m)" ] || fail capsule-architecture-mismatch
+sh "$root/scripts/check/check-db-runtime-capsule-provenance.shs" "$capsule" >/dev/null || fail capsule-provenance
+# Admission-only mode exercises the same immutable contract before any tool
+# invocation; it deliberately does not report a host execution PASS.
+if [ "${1:-}" = --admission-only ]; then
+    echo 'pure_provider_capsule_admission=pass execution=unrun'
+    exit 0
+fi
+[ "$(uname -s)" = Linux ] || fail execution-requires-linux
+simple=${SIMPLE_ADMITTED_RUNTIME:-}
+compiler_pin=${SIMPLE_ADMITTED_RUNTIME_SHA256:-}
+[ -n "$simple" ] && [ -x "$simple" ] || fail admitted-compiler-required
+canonical_digest "$compiler_pin" || fail compiler-pin-required
+[ "$(hash_file "$simple")" = "$compiler_pin" ] || fail compiler-pin-mismatch
+out=${PURE_PROVIDER_CAPSULE_OUT:-$root/build/test-logs/pure-provider-capsule}
+[ ! -e "$out" ] || fail output-already-exists
+mkdir -p "$out"
+out=$(CDPATH= cd -- "$out" && pwd)
+archive=$capsule/libsimple_runtime.a
+cc=${CC:-cc}
+nm=${NM:-nm}
+# The provider is produced from the production Simple entry, not substituted
+# with the C fixture. Producer qualification remains the caller's admission.
+SIMPLE_LIB="$root/src" "$simple" native-build --source "$root/src/app" \
+    --source "$root/src/lib" --source "$root/src/os" --entry-closure \
+    --entry "$root/src/app/provider_cli/native_provider_v1.spl" \
+    --emit-archive --no-mangle --output "$out/provider.a" >"$out/compile.out" 2>&1
+printf '%s\n' '{ global: simple_provider_query_v1; simple_cli_command_invoke_v1; local: *; };' >"$out/provider.exports"
+"$cc" -shared -Wl,--whole-archive "$out/provider.a" -Wl,--no-whole-archive \
+    "-Wl,--version-script=$out/provider.exports" \
+    -o "$out/provider.so" >"$out/provider-link.out" 2>&1
+"$nm" -D --defined-only "$out/provider.so" | awk '{print $NF}' | LC_ALL=C sort >"$out/exports.txt"
+printf '%s\n' simple_cli_command_invoke_v1 simple_provider_query_v1 >"$out/expected-exports.txt"
+cmp -s "$out/exports.txt" "$out/expected-exports.txt" || fail provider-exports-not-exact
+"$nm" -g --defined-only "$archive" | awk 'NF>=3 {print $NF}' | LC_ALL=C sort -u >"$out/runtime-symbols.txt"
+"$nm" -D --undefined-only "$out/provider.so" | awk '$1 == "U" {print $NF}' | LC_ALL=C sort -u >"$out/undefined.txt"
+set --
+while IFS= read -r symbol; do
+    if grep -Fxq "$symbol" "$out/runtime-symbols.txt"; then
+        case "$symbol" in *[!a-zA-Z0-9_]*) fail invalid-runtime-symbol ;; esac
+        set -- "$@" "-Wl,--undefined=$symbol" "-Wl,--export-dynamic-symbol=$symbol"
+    else
+        case "$symbol" in rt_*|spl_*|simple_*) fail "runtime-owner-missing:$symbol" ;; esac
+    fi
+done <"$out/undefined.txt"
+[ "$#" -gt 0 ] || fail provider-runtime-surface-empty
+# No whole-runtime extraction, blanket export-dynamic, or unresolved-symbol
+# relaxation. Only the provider's recorded runtime roots are retained/exported.
+"$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    -DSIMPLE_PURE_PROVIDER_SELFCHECK=1 \
+    "$root/src/runtime/test/cli_provider_v1_host_selfcheck.c" \
+    "$@" "$archive" -Wl,--gc-sections -Wl,-z,defs $libs \
+    -o "$out/host" >"$out/host-link.out" 2>&1
+[ "$(hash_file "$manifest")" = "$pin" ] || fail manifest-changed-during-build
+sh "$root/scripts/check/check-db-runtime-capsule-provenance.shs" "$capsule" >/dev/null || fail capsule-changed-during-build
+"$out/host" "$out/provider.so" pure-simple-provider-ok >"$out/host.out"
+grep -Fxq 'PASS cli_provider_v1_host_selfcheck' "$out/host.out" || fail host-receipt-missing
+printf '%s\n' "pure_provider_capsule=pass" "compiler_sha256=$compiler_pin" \
+    "capsule_manifest_sha256=$pin" "provider_sha256=$(hash_file "$out/provider.so")"

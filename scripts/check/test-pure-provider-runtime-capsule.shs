@@ -1,0 +1,51 @@
+#!/bin/sh
+# Contract fixtures only. A positive synthetic fixture is not runtime proof.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+gate=$root/scripts/check/check-pure-provider-runtime-capsule.shs
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+expect_refusal() {
+    expected=$1
+    if sh "$gate" --admission-only >"$tmp/result" 2>&1; then
+        echo "FAIL expected refusal: $expected" >&2; exit 1
+    fi
+    grep -Fq "$expected" "$tmp/result" || { cat "$tmp/result"; exit 1; }
+}
+export SIMPLE_PROVIDER_RUNTIME_CAPSULE=$tmp/capsule
+unset SIMPLE_PROVIDER_RUNTIME_MANIFEST_SHA256
+expect_refusal capsule-missing
+mkdir -p "$tmp/capsule/objects"
+printf 'synthetic object, not executable\n' >"$tmp/capsule/objects/runtime_fixture.o"
+printf 'synthetic archive, not executable\n' >"$tmp/capsule/libsimple_runtime.a"
+object_hash=$(hash_file "$tmp/capsule/objects/runtime_fixture.o")
+archive_hash=$(hash_file "$tmp/capsule/libsimple_runtime.a")
+cat >"$tmp/capsule/capsule.manifest" <<EOF
+schema=core-c-bootstrap-runtime-capsule-v1
+status=pass
+platform=Linux
+arch=$(uname -m)
+repeated_build_equal=true
+archive_sha256=$archive_hash
+repeat_archive_sha256=$archive_hash
+object_runtime_fixture_o_sha256=$object_hash
+provider_host_link_contract=core-c-provider-host-link-v1
+provider_host_link_libraries=-lm -lpthread -ldl
+provider_host_export_policy=required-symbols-only
+EOF
+expect_refusal manifest-pin-required
+export SIMPLE_PROVIDER_RUNTIME_MANIFEST_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+expect_refusal manifest-pin-mismatch
+export SIMPLE_PROVIDER_RUNTIME_MANIFEST_SHA256=$(hash_file "$tmp/capsule/capsule.manifest")
+sh "$gate" --admission-only >"$tmp/result" 2>&1
+grep -Fxq 'pure_provider_capsule_admission=pass execution=unrun' "$tmp/result"
+cp "$tmp/capsule/capsule.manifest" "$tmp/correct.manifest"
+sed 's/provider_host_link_libraries=.*/provider_host_link_libraries=-lm -lpthread -ldl -lguessed/' "$tmp/correct.manifest" >"$tmp/capsule/capsule.manifest"
+export SIMPLE_PROVIDER_RUNTIME_MANIFEST_SHA256=$(hash_file "$tmp/capsule/capsule.manifest")
+expect_refusal link-dependencies-unsupported
+cp "$tmp/correct.manifest" "$tmp/capsule/capsule.manifest"
+export SIMPLE_PROVIDER_RUNTIME_MANIFEST_SHA256=$(hash_file "$tmp/capsule/capsule.manifest")
+printf 'tampered\n' >>"$tmp/capsule/libsimple_runtime.a"
+expect_refusal capsule-provenance
+printf '%s\n' 'pure_provider_capsule_contract_fixtures=pass checks=6 execution=unrun'
