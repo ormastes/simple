@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# design: doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md
+
+# Class-reference aliasing across class field, function parameter, nested
+# field chains and branchy access shapes (guard/else arms). Complements
+# class_element_reference_spec (list element) and PR #6290's dict-value spec;
+# the dict cases here are only the nested/other access shapes.
+# Classes are reference types, structs are value types.
+
+class Cell:
+    v: i64
+
+class Holder:
+    inner: Cell
+    cells: [Cell]
+    by_name: Dict<text, [Cell]>
+
+struct Pt:
+    x: i64
+
+struct PtBox:
+    p: Pt
+
+fn set_v(c: Cell, n: i64):
+    c.v = n
+
+fn set_if_pos(c: Cell, n: i64) -> bool:
+    if n > 0:
+        c.v = n
+        true
+    else:
+        false
+
+fn set_struct(p: Pt):
+    var q = p
+    q.x = 9
+
+fn mk_holder() -> Holder:
+    Holder(inner: Cell(v: 0), cells: [Cell(v: 0), Cell(v: 0)], by_name: {"a": [Cell(v: 0)]})
+
+describe "function parameter alias":
+    it "callee mutation is visible to the caller":
+        val c = Cell(v: 0)
+        set_v(c, 5)
+        expect(c.v).to_equal(5)
+
+    it "mutation on the taken branch is visible":
+        val c = Cell(v: 0)
+        val ok = set_if_pos(c, 6)
+        expect(ok).to_equal(true)
+        expect(c.v).to_equal(6)
+
+    it "no mutation on the not-taken branch":
+        val c = Cell(v: 1)
+        val ok = set_if_pos(c, -1)
+        expect(ok).to_equal(false)
+        expect(c.v).to_equal(1)
+
+    it "struct param stays a value copy":
+        val p = Pt(x: 1)
+        set_struct(p)
+        expect(p.x).to_equal(1)
+
+describe "struct field stays a value copy":
+    it "val q = box.p; q.x = n leaves the box untouched":
+        val b = PtBox(p: Pt(x: 1))
+        var q = b.p
+        q.x = 5
+        expect(b.p.x).to_equal(1)
+
+describe "class field direct mutation":
+    it "h.inner.v = n is visible through h.inner":
+        val h = mk_holder()
+        h.inner.v = 3
+        expect(h.inner.v).to_equal(3)
