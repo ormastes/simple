@@ -475,6 +475,18 @@ if let Value::Str(ref s) = recv_val {
                 None => return Ok(Value::text(String::new())),
             }
         }
+        "to_digit" => {
+            // ADR-005: explicit digit conversion of a single character.
+            // Some(0..=9) for an ASCII decimal digit, None otherwise.
+            let mut chars = s.chars();
+            return Ok(match (chars.next(), chars.next()) {
+                (Some(c), None) => match c.to_digit(10) {
+                    Some(d) => Value::some(Value::Int(d as i64)),
+                    None => Value::none(),
+                },
+                _ => Value::none(),
+            });
+        }
         "ord" | "codepoint" | "code_point" => {
             // Return the Unicode code point of the first character
             match s.chars().next() {

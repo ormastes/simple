@@ -80,3 +80,30 @@ The complete log and identity receipt are in
 Run the harness with the named seed using `run <harness> --mode=interpreter`
 against the recorded parser source. The broader issue and workaround remain
 open under the acceptance criteria above.
+
+## Nested extern declaration identity and location (2026-11-03)
+
+The inline declaration parser now uses the same `declaration_identifier_text`
+owner as top-level extern declarations. A contextual keyword such as `match`
+can therefore name an extern declaration in either position. Previously the
+inline path required an IDENT token even though the top-level path accepted
+contextual keyword names.
+
+Newly registered nested externs also retain their actual declaration start,
+end, line and column instead of span ID zero. The existing bridge already uses
+that span for `ParserFunction` and its parameter declarations. Repeated
+compatible declarations leave the first declaration and its span unchanged.
+The signature-conflict diagnostic still points to the later declaration.
+
+Four parser regression scenarios cover ordinary functions, static methods,
+repeated declarations and contextual keyword parity. They supplement the 11
+existing registration/signature scenarios without claiming lexical isolation.
+
+**TEST_BLOCKED:** no qualified self-hosted CLI is available in this Windows
+repair lane. The new scenarios have not executed; source review and whitespace
+checks are not behavioral qualification. Execute the complete 15-scenario
+`test/01_unit/compiler/frontend/inline_extern_fn_registration_spec.spl` using an
+admitted producer, then perform the required compiler/library/MCP checks before
+admission. The broader lexical-scope, generic/effect metadata and later
+module-declaration requirements remain OPEN. The `rt_cpu_count` hoisting
+workaround remains in place.

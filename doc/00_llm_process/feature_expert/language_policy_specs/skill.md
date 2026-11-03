@@ -18,3 +18,6 @@ Engine-parity specs (char group) need `SIMPLE_BIN` set to the admitted `simple` 
 - `char_literal_spec.spl` (+ `char_literal_in_dev_spec.spl`) - char/raw/interpolated/triple-quoted literals
 - `char_value_rules_spec.spl` (+ `char_value_rules_in_dev_spec.spl`) - never falsy, never int, surrogate rejection
 - Probes: `probe/char_*.spl`
+- test/03_system/language/policy/class_ref_interp_jit_consistency_spec.spl (+ _indev_spec.spl, probe/class_ref_probe.spl)
+- test/03_system/language/policy/dict_get_option_spec.spl (+ _indev_spec.spl, probe/dict_get_option_probe.spl)
+- test/03_system/language/policy/u64_field_store_spec.spl (+ _indev_spec.spl, probe/u64_field_probe.spl)

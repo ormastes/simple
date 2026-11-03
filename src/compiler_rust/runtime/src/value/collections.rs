@@ -6372,9 +6372,19 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
             _ => RuntimeValue::NIL,
         },
         Some(HeapObjectType::String) => {
-            // String indexing returns a single-char string (consistent with char_at)
+            // `s[i]` (ADR-005): per code point, negative from the end, and an
+            // out-of-range index is a runtime error, matching the interpreter
+            // (`indexed_string_char`). It used to return "" / nil through
+            // rt_string_char_at, so the JIT ran on where the interpreter stopped.
+            // `char_at` keeps its own "" over-run policy.
             match index.as_index_i64() {
-                Some(idx) => rt_string_char_at(collection, idx),
+                Some(idx) => match string_index_checked(collection, idx) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("error: string index {idx} out of bounds");
+                        std::process::abort();
+                    }
+                },
                 None => RuntimeValue::NIL,
             }
         }
@@ -9330,4 +9340,32 @@ pub(crate) fn rc_graph_scope_release(reachable: &super::heap::HeapPtrSet<u64>) {
             session.release_reachable(reachable);
         }
     });
+}
+
+/// `s[i]` element lookup with the interpreter's index policy (ADR-005):
+/// per code point, negative indices count from the end, and anything outside
+/// `-len..len` is `None` (the caller raises). Positive indices never count the
+/// whole text: `chars().nth` stops at `i`.
+pub(crate) fn string_index_checked(string: RuntimeValue, index: i64) -> Option<RuntimeValue> {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return None;
+    }
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return None;
+    }
+    let s = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize)) };
+    let c = if index >= 0 {
+        s.chars().nth(index as usize)?
+    } else {
+        let adjusted = s.chars().count() as i64 + index;
+        if adjusted < 0 {
+            return None;
+        }
+        s.chars().nth(adjusted as usize)?
+    };
+    let mut buf = [0u8; 4];
+    let cs = c.encode_utf8(&mut buf);
+    Some(rt_string_new(cs.as_ptr(), cs.len() as u64))
 }

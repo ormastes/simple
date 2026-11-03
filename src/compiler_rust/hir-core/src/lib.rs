@@ -920,6 +920,8 @@ pub enum ValueKind {
     Bool,
     /// Nil/None/null value
     Nil,
+    /// Unicode code point value (ADR-005)
+    Char,
 
     // Strings
     /// String value
@@ -1033,6 +1035,7 @@ impl ValueKind {
             ValueKind::Int => "int",
             ValueKind::Float => "float",
             ValueKind::Bool => "bool",
+            ValueKind::Char => "char",
             ValueKind::Nil => "nil",
             ValueKind::String => "string",
             ValueKind::Symbol => "symbol",
@@ -1084,7 +1087,7 @@ impl ValueKind {
     pub fn is_primitive(&self) -> bool {
         matches!(
             self,
-            ValueKind::Int | ValueKind::Float | ValueKind::Bool | ValueKind::Nil
+            ValueKind::Int | ValueKind::Float | ValueKind::Bool | ValueKind::Nil | ValueKind::Char
         )
     }
 
@@ -1306,6 +1309,8 @@ mod tests {
         assert!(ValueKind::Int.is_primitive());
         assert!(ValueKind::Float.is_primitive());
         assert!(ValueKind::Bool.is_primitive());
+        assert!(ValueKind::Char.is_primitive());
+        assert_eq!(ValueKind::Char.name(), "char");
         assert!(ValueKind::Nil.is_primitive());
         assert!(!ValueKind::String.is_primitive());
         assert!(!ValueKind::Array.is_primitive());

@@ -20,6 +20,57 @@ fn order_count(module: ParserModule, name: text) -> i64:
     n
 
 describe "function-body extern fn registration":
+    it "retains the exact nested extern declaration source span":
+        val prefix = "fn probe() -> i64:\n    "
+        val declaration = "extern fn rt_cpu_count() -> i64"
+        val src = prefix + declaration + "\n    rt_cpu_count()\n"
+        val module = parse_and_build_module(src, "inline_extern_span_probe.spl")
+        expect(parser_error_count()).to_equal(0)
+        val ext: ParserFunction = module.functions["rt_cpu_count"]
+        expect(ext.is_extern).to_equal(true)
+        expect(ext.span.line).to_equal(2)
+        expect(ext.span.col).to_equal(5)
+        expect(ext.span.start).to_equal(prefix.len())
+        expect(ext.span.end).to_equal(prefix.len() + declaration.len())
+        expect(ext.span.length).to_equal(declaration.len())
+
+    it "retains a nested extern span inside a static method":
+        val prefix = "class ParallelProbe:\n    static fn default_config() -> i64:\n        "
+        val declaration = "extern fn rt_cpu_count() -> i64"
+        val src = prefix + declaration + "\n        rt_cpu_count()\n"
+        val module = parse_and_build_module(src, "inline_extern_static_span_probe.spl")
+        expect(parser_error_count()).to_equal(0)
+        val ext: ParserFunction = module.functions["rt_cpu_count"]
+        expect(ext.span.line).to_equal(3)
+        expect(ext.span.col).to_equal(9)
+        expect(ext.span.start).to_equal(prefix.len())
+        expect(ext.span.end).to_equal(prefix.len() + declaration.len())
+
+    it "preserves the first declaration span when another body repeats an extern":
+        val prefix = "fn first() -> i64:\n    "
+        val declaration = "extern fn rt_cpu_count() -> i64"
+        val src = prefix + declaration + "\n    rt_cpu_count()\n\n" +
+            "fn second() -> i64:\n    extern fn rt_cpu_count() -> i64\n    rt_cpu_count()\n"
+        val module = parse_and_build_module(src, "inline_extern_repeated_span_probe.spl")
+        expect(parser_error_count()).to_equal(0)
+        expect(order_count(module, "rt_cpu_count")).to_equal(1)
+        val ext: ParserFunction = module.functions["rt_cpu_count"]
+        expect(ext.span.line).to_equal(2)
+        expect(ext.span.start).to_equal(prefix.len())
+        expect(ext.span.length).to_equal(declaration.len())
+
+    it "accepts the same contextual keyword declaration name at module and body scope":
+        val top = parse_and_build_module("extern fn match() -> i64\n", "extern_keyword_top_probe.spl")
+        expect(parser_error_count()).to_equal(0)
+        expect(top.functions.contains("match")).to_equal(true)
+        val src = "fn caller() -> i64:\n    extern fn match() -> i64\n    0\n"
+        val module = parse_and_build_module(src, "extern_keyword_nested_probe.spl")
+        expect(parser_error_count()).to_equal(0)
+        expect(module.functions.contains("match")).to_equal(true)
+        val ext: ParserFunction = module.functions["match"]
+        expect(ext.is_extern).to_equal(true)
+        expect(ext.span.line).to_equal(2)
+
     it "registers a body-local extern as a module extern function":
         val src = "fn probe(data: [u8]) -> u64:\n" +
             "    extern fn unsafe_addr_of(ref: any) -> u64\n" +

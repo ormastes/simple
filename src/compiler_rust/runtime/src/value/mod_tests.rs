@@ -569,6 +569,7 @@ fn test_char_tag_roundtrip_and_disjointness() {
         assert_eq!(v.as_char(), Some(c));
         assert!(!v.is_int() && !v.is_nil() && !v.is_bool());
         assert_eq!(v.type_name(), "char");
+        assert_eq!(v.value_kind(), crate::hir_core::ValueKind::Char);
     }
     // '7' is not the int 55 and not nil/true/false.
     assert_ne!(RuntimeValue::from_char('7'), RuntimeValue::from_int(55));

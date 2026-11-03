@@ -339,7 +339,11 @@ fn classify_test_run_result(result: TestRunResult, empty_is_success: bool) -> Te
         if not empty_is_success:
             return TestRunOutcome.EmptySelection
         return TestRunOutcome.Pass
+    var admission_failed = false
     for file_result in result.files:
+        if test_file_result_outcome_class(file_result) == "ADMISSION":
+            admission_failed = true
+            continue
         # Host interference (SIGTERM/SIGKILL/timeout) and never-executed specs
         # are UNVERIFIED, not failures. Checked BEFORE the InternalError rule
         # below so a contended host cannot manufacture a phantom code defect.
@@ -353,6 +357,8 @@ fn classify_test_run_result(result: TestRunResult, empty_is_success: bool) -> Te
             return TestRunOutcome.InternalError
     if result.total_failed > 0:
         return TestRunOutcome.AssertionOrChildFailure
+    if admission_failed:
+        return TestRunOutcome.UsageError
     TestRunOutcome.Pass
 
 # =========================================================================
@@ -386,9 +392,11 @@ fn test_outcome_class_token(err: text) -> text:
     head.trim().upper().replace("_", " ")
 
 # Total: every TestFileResult maps to exactly one of
-# OK / SKIP / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN / VACUOUS.
+# OK / SKIP / ADMISSION / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN / VACUOUS.
 fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
     val token = test_outcome_class_token(file_result.error)
+    if token == "COVER ADMISSION FAILED":
+        return "ADMISSION"
     if token == "CRASHED":
         return "CRASHED"
     if token == "TERMINATED":

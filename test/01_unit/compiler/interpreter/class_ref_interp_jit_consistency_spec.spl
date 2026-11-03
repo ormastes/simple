@@ -33,12 +33,15 @@ use std.io_runtime.{process_run, env_get}
 val PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_class_ref_consistency.spl"
 
 fn run_probe(env_prefix: text) -> text:
+    run_probe_file(PROBE_PATH, env_prefix)
+
+fn run_probe_file(path: text, env_prefix: text) -> text:
     var bin = env_get("SIMPLE_TEST_BINARY")
     if bin == "":
         bin = env_get("SIMPLE_BIN")
     if bin == "":
         bin = "bin/simple"
-    val cmd = "SIMPLE_RUST_SEED_WARNING=0 " + env_prefix + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 " + env_prefix + " " + bin + " run " + path + " 2>/dev/null"
     val out = process_run("sh", ["-c", cmd])
     out.0
 
@@ -102,3 +105,43 @@ describe "default interpreter carrier (copy-on-write Object)":
         step("Flag on and flag off must differ on the shapes only the reference carrier shares")
         val on = run_probe("SIMPLE_EXECUTION_MODE=interpreter SIMPLE_INTERP_CLASS_REF=1")
         expect(on).to_contain("list_element=2")
+
+val JIT_ENV: text = "SIMPLE_EXECUTION_MODE=jit"
+val INTERP_ENV: text = "SIMPLE_EXECUTION_MODE=interpreter SIMPLE_INTERP_CLASS_REF=1"
+
+describe "u64 field store and compare above i64 max (parity)":
+    # @manual scenario evidence
+    it "keeps 0xFFFF_FFFF_FFFF_FFF0 unsigned on the JIT (oracle)":
+        # @req REQ-SSPEC-COMPILER
+        val jit = run_probe_file("test/01_unit/compiler/interpreter/probe_u64_field_parity.spl", JIT_ENV)
+        expect(jit).to_contain("a=true")
+        expect(jit).to_contain("b=true")
+        expect(jit).to_contain("c=true")
+        expect(jit).to_contain("d=18446744073709551601")
+
+describe "Dict.get returns Option (parity)":
+    # @manual scenario evidence
+    it "reports hit and miss for text, class and struct values on both engines":
+        # @req REQ-SSPEC-COMPILER
+        val p = "test/01_unit/compiler/interpreter/probe_dict_get_option.spl"
+        val jit = run_probe_file(p, JIT_ENV)
+        val interp = run_probe_file(p, INTERP_ENV)
+        expect(jit).to_contain("t1=some:hello")
+        expect(jit).to_contain("t2=none")
+        expect(jit).to_contain("c1=some:7")
+        expect(jit).to_contain("c2=none")
+        expect(jit).to_contain("p1=some:9")
+        expect(jit).to_contain("p2=none")
+        expect(interp).to_equal(jit)
+
+describe "one class reference reached via list, dict, struct field and param":
+    # @manual scenario evidence
+    it "observes a mutation made through any carrier via all the others":
+        # @req REQ-SSPEC-COMPILER
+        val p = "test/01_unit/compiler/interpreter/probe_shared_class_ref.spl"
+        val jit = run_probe_file(p, JIT_ENV)
+        expect(jit).to_contain("shared_via_list_seen_dict=1")
+        expect(jit).to_contain("shared_via_dict_seen_holder=2")
+        expect(jit).to_contain("shared_via_field_seen_list=3")
+        expect(jit).to_contain("shared_via_param_seen_all=2222")
+        expect(run_probe_file(p, INTERP_ENV)).to_equal(jit)
