@@ -65,3 +65,7 @@ Evidence (Windows, no QEMU):
 QEMU steps still owed (not run): `sh scripts/os/clang_argv_tokenize_probe_run.shs`
 on the real-firmware lane; the `char_code_at` codes must equal the `[u8]`-idiom
 codes. Then drop the `[u8]` workaround in `_sshd_tokenize_command`.
+
+Perf note: the decode walk is O(index) per call (old byte read was O(1)), so a
+`while i < s.len(): s.char_code_at(i)` loop is O(n^2) on freestanding. Follow-up
+TODO: port the hosted ASCII-flag fast path once RuntimeString has a spare flag bit.
