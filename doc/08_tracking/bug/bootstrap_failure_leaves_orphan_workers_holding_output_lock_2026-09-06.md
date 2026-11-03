@@ -64,3 +64,7 @@ about one worker growing without bound, and does not address this bug at all.
   start time, is stale and may be broken rather than waited on.
 
 **Revalidated 2026-11-02: still plausible because the report title (A failed bootstrap leaves orphan workers running and its output lock held) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolution (2026-11-03)
+
+Fixed in source before this audit: d45d0e7a653 added bootstrap_reap_descendants (scripts/bootstrap/bootstrap-from-scratch.sh, process-group TERM/KILL on Linux, taskkill /T on Windows) wired into bootstrap_cleanup, plus stale-lock reclaim. Closed on source evidence.
