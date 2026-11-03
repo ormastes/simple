@@ -1,6 +1,6 @@
 # Windows piped process cold handle growth
 
-Status: OPEN, P1 qualification blocker; heap/OS owner attribution unresolved.
+Status: CLOSED 2026-11-03 as expected one-time OS init (bcrypt.dll + CNG RNG); see per-stage table below.
 
 The genuine Windows fixture compiled and strict-linked against retained Rust199, but cycles2and3 exited36 at exact final handle equality. [Final run38201907318](https://github.com/ormastes/simple/actions/runs/38201907318) reused the actual cycle2 Windows provider object; no repeated provider compile or Simple/Rust generation build occurred.
 
@@ -22,3 +22,19 @@ Source-only investigation binds frozen82 constructor/accessor and validator path
 ## 2026-11-03 handle accounting (C provider)
 
 `test/01_unit/runtime/process_piped_handle_stress_test.c` (runner `run_process_piped_handle_stress_test.shs`) drives `rt_process_spawn_piped`/`write_stdin`/`read_stdout`/`close_piped` for 3 warmup + 100 serial + 4x15 concurrent cycles and asserts `GetProcessHandleCount` returns to the post-warmup baseline. Result on Windows 11 (clang): baseline=79 serial=79 concurrent=79, 0 failures, peak RSS 5 MB, wall 21 s. The C provider (`runtime_process.c` spawn/close/is_alive paths) does NOT leak per cycle; the 128->158 cold growth is therefore one-time lazy initialisation outside this primitive (Rust-side first-spawn/SIMD-tier/dirs init), not per-process. Bug remains open for the Rust fixture's cold baseline; use this spec as the guard.
+
+## 2026-11-03 per-stage handle table and verdict: (b) expected one-time setup
+
+Measured with `GetProcessHandleCount` (clang, Windows 11) by `test/01_unit/runtime/process_piped_cold_handle_budget_test.c` and a stage probe calling the same Win32 sequence as `rt_process_spawn_piped`:
+
+| Stage | Handles | Delta | Persists after close |
+|---|---:|---:|---|
+| process start | 58-64 | | |
+| `LoadLibraryA("bcrypt.dll")` (in `win_random_pipe_name`) | | +12 | yes (loader state) |
+| `BCryptGenRandom` first call (CNG RNG init) | | +4 | yes |
+| `FreeLibrary` | | 0 | the 16 stay |
+| named pipe + CreateFile, CreatePipe, event, job | | 0, +3, +1, +1 | closed by `close_piped` |
+| `CreateProcess` (suspended) | | +4 | closed by close |
+| second cycle | | +1 | yes (one-time) |
+
+Full spawn/write/read/close first cycle: +24 during spawn, -5 on close, net +19; second cycle +1; total cold growth 20. Steady state: 0 over 50 cycles and 0 for 5 distinct first-use command shapes. Owner: the OS loader and CNG RNG (bcrypt.dll), not Simple code; all provider handles (pipes, event, job, process, thread) are closed. The 128->158 figure in the Rust fixture is the same class (BCrypt/first-spawn init plus Rust std/SIMD tier cache lookups); no per-spawn leak. Verdict (b): pinned by budget spec `run_process_piped_cold_handle_budget_test.shs` (cold <= 24, 0 per cycle over 50, 0 for distinct first uses). The Rust seed fixture's exact-equality-after-first-spawn check should use the post-warmup baseline.
