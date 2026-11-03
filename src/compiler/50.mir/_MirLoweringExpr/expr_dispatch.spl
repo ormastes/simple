@@ -1473,6 +1473,22 @@ impl MirLowering:
                 case _: ()
         nil
 
+    me null_coalesce_default_owner_type(right: HirExpr) -> HirType?:
+        """Resolved class/struct/enum type of the `??` default operand, used as
+        the merged value's owner when the left Option's inner type is unknown.
+        Nothing is lowered here; unresolved or non-nominal stays None."""
+        if not right.has_type_:
+            return None
+        val right_type = right.type_
+        if val present_type = right_type:
+            match present_type.kind:
+                case HirTypeKind.Named(owner, _):
+                    val nominal_kind = enum_payload_nominal_kind(owner, self.symbols)
+                    if nominal_kind == 1 or nominal_kind == 2 or nominal_kind == 3:
+                        return Some(present_type)
+                case _: ()
+        None
+
     me nil_compare_operand_is_plain_scalar(e: HirExpr, local: LocalId) -> bool:
         """True when `e` (one side of `== nil` / `!= nil`) is a STATICALLY
         non-optional primitive scalar whose lowered local is also a plain
@@ -6573,6 +6589,14 @@ impl MirLowering:
                     # variant "ambiguous") and an enum payload slot rejected it.
                     if val join_type = self.null_coalesce_nominal_join_type(left, left_local):
                         self.remember_local_hir_type(result_local.id, join_type, 0, 0)
+                    elif val default_owner = self.null_coalesce_default_owner_type(right):
+                        # bug mir_ret_optional_operand_owner_2026_10_11: when the
+                        # left side's Option inner type is not recoverable (flat
+                        # path, unannotated `(value ?? default).kind`), the
+                        # default operand's resolved nominal type is the same
+                        # payload owner. Materialize it on the merged temp so
+                        # field/match access keeps its owner.
+                        self.remember_local_hir_type(result_local.id, default_owner, 0, 0)
                 if result_struct_name != "":
                     self.struct_value_syms[result_local.id] = result_struct_name
 
