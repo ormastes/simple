@@ -151,7 +151,7 @@ pub extern "C" fn rt_cli_dispatch_rust(_cmd: RuntimeValue, _args: RuntimeValue, 
 
 #[no_mangle]
 pub extern "C" fn rt_compile_to_native(_source_path: RuntimeValue, _output_path: RuntimeValue) -> i64 {
-    0
+    native_compile_unavailable_result().to_raw() as i64
 }
 
 #[no_mangle]
@@ -160,7 +160,26 @@ pub extern "C" fn rt_compile_to_native_with_opt(
     _output_path: RuntimeValue,
     _opt_level: RuntimeValue,
 ) -> i64 {
-    0
+    native_compile_unavailable_result().to_raw() as i64
+}
+
+// Standalone Rust runtime has no compiler driver. Preserve the public
+// (bool, text) result representation without claiming compilation succeeded
+// or dispatching another executable. The exported ABI remains one I64 word.
+fn native_compile_unavailable_result() -> RuntimeValue {
+    let message = "Native compiler driver is unavailable in the standalone Rust runtime";
+    let diagnostic = rt_string_new(message.as_ptr(), message.len() as u64);
+    if diagnostic.is_nil() {
+        return RuntimeValue::NIL;
+    }
+    let result = super::rt_tuple_new(2);
+    if result.is_nil() {
+        super::rt_string_free(diagnostic);
+        return RuntimeValue::NIL;
+    }
+    super::rt_tuple_set(result, 0, RuntimeValue::from_bool(false));
+    super::rt_tuple_set(result, 1, diagnostic);
+    result
 }
 
 // Stub implementations for complex CLI functions
