@@ -1,0 +1,50 @@
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_event_codec_v1.*
+
+fn trace_codec_fixture_v1() -> TraceEventV1:
+    TraceEventV1(kind: TraceEventKindV1.Entry, flags: 0,
+        generation: 1, module_instance: 2, function_id: 16909060,
+        site_id: 5, context_id: 6, sequence: 7, timestamp: 8,
+        span_token: 0, payload0: 0, payload1: 0, payload2: 0)
+
+describe "canonical observer event bytes V1":
+    it "API-01 emits a fixed little-endian header and IDs independently of struct layout":
+        val bytes = trace_event_encode_v1(trace_codec_fixture_v1())
+        expect(bytes.len()).to_equal(96)
+        expect(bytes[0]).to_equal(1)
+        expect(bytes[1]).to_equal(0)
+        expect(bytes[2]).to_equal(96)
+        expect(bytes[3]).to_equal(0)
+        expect(bytes[4]).to_equal(1)
+        expect(bytes[8]).to_equal(1)
+        expect(bytes[16]).to_equal(2)
+        expect(bytes[24]).to_equal(4)
+        expect(bytes[25]).to_equal(3)
+        expect(bytes[26]).to_equal(2)
+        expect(bytes[27]).to_equal(1)
+        expect(bytes[28]).to_equal(5)
+        expect(bytes[32]).to_equal(6)
+        expect(bytes[40]).to_equal(7)
+        expect(bytes[48]).to_equal(8)
+        for index in 56..96:
+            expect(bytes[index]).to_equal(0)
+
+    it "API-01 round trips semantic fields without interpreting raw edges as spans":
+        val decoded = trace_event_decode_v1(trace_event_encode_v1(trace_codec_fixture_v1())).unwrap()
+        expect(decoded.generation).to_equal(1)
+        expect(decoded.module_instance).to_equal(2)
+        expect(decoded.function_id).to_equal(16909060)
+        expect(decoded.span_token).to_equal(0)
+
+    it "MAP-01 rejects truncated and oversized input before reading fields":
+        val empty: [u8] = []
+        expect(trace_event_decode_v1(empty).is_err()).to_equal(true)
+        var oversized = trace_event_encode_v1(trace_codec_fixture_v1())
+        oversized.push(0)
+        expect(trace_event_decode_v1(oversized).is_err()).to_equal(true)
+
+    it "API-01 rejects unknown versions tags sizes and nonzero reserved bytes":
+        for offset in [0, 2, 4, 88]:
+            var corrupt = trace_event_encode_v1(trace_codec_fixture_v1())
+            corrupt[offset] = 255
+            expect(trace_event_decode_v1(corrupt).is_err()).to_equal(true)

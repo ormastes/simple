@@ -1,0 +1,186 @@
+# Backend-neutral observer contract. No backend imports or implicit activation.
+# These are language-level values, NOT a native struct layout or pointer ABI.
+# A provider owns handle issuance, validates incarnation/generation on every
+# operation, and retains all executable code/maps until process exit.
+
+pub const TRACE_OBSERVER_SCHEMA_V1 = 1
+pub const TRACE_OBSERVER_EVENT_BYTES_V1 = 96
+
+pub enum TraceFailureV1:
+    UnsupportedTarget
+    UnsupportedProfile
+    UnsupportedConsistency
+    InstrumentationAbsent
+    InvalidMap
+    Busy
+    ResourceExhausted
+    TimedOut
+    BackendFailure
+    InvalidArgument
+    InvalidHandle
+
+pub enum TraceInstrumentationV1:
+    Off
+    Dynamic
+    AlwaysOn
+
+pub enum TraceBackendV1:
+    Auto
+    Llvm
+    Simple
+    None
+
+pub enum TraceConsistencyV1:
+    RawEdges
+    PairedSpans
+
+pub enum TracePatchModeV1:
+    Quiescent
+    Live
+
+pub enum TraceEventKindV1:
+    Entry
+    Exit
+    TailExit
+    Transition
+    Loss
+    UnmatchedEdge
+    TruncatedSpan
+    UnsupportedSite
+    PairedSpan
+    Completion
+
+# Numeric handles are opaque to callers, never addresses. Shape validity is
+# not issuance authority. The provider must check its resident handle table.
+pub struct TracePreparedV1:
+    slot: u64
+    incarnation: u64
+
+pub struct TraceSessionV1:
+    slot: u64
+    incarnation: u64
+    generation: u64
+
+pub struct TraceConfigV1:
+    instrumentation: TraceInstrumentationV1
+    backend: TraceBackendV1
+    consistency: TraceConsistencyV1
+    patch_mode: TracePatchModeV1
+    abi_profile: text
+    event_mask: u64
+    buffer_bytes: u64
+    max_contexts: u64
+    max_depth: u64
+    max_resident_generations: u64
+
+# Module instance and site IDs refer to an admitted resident manifest. A
+# pathname, LLVM ID, or semantic hash alone is not a selection authority.
+pub struct TraceSiteV1:
+    module_instance: u64
+    site_id: u32
+
+pub struct TraceSelectionV1:
+    manifest_incarnation: u64
+    sites: [TraceSiteV1]
+
+pub struct TraceCapabilitiesV1:
+    backend: TraceBackendV1
+    target: text
+    abi_profiles: [text]
+    event_mask: u64
+    live_patching: bool
+    paired_spans: bool
+    instrumentation_present: bool
+    max_buffer_bytes: u64
+    max_contexts: u64
+    max_depth: u64
+    max_resident_generations: u64
+    diagnostic: text
+
+# Wire encoding is little-endian, explicitly sized; do not memcpy this struct.
+# Offsets: header 0..7, generation 8, module 16, function 24, site 28,
+# context 32, sequence 40, timestamp 48, span 56, payload 64/72/80,
+# reserved-zero 88. Raw events use span_token=0. Event tags are assigned by
+# trace_event_kind_code_v1, never by the compiler's enum representation.
+pub struct TraceEventV1:
+    kind: TraceEventKindV1
+    flags: u16
+    generation: u64
+    module_instance: u64
+    function_id: u32
+    site_id: u32
+    context_id: u64
+    sequence: u64
+    timestamp: u64
+    span_token: u64
+    payload0: u64
+    payload1: u64
+    payload2: u64
+
+pub struct TraceStatsV1:
+    generation: u64
+    recorded: u64
+    lost: u64
+    transitions: u64
+    unsupported_sites: u64
+    queue_high_water: u64
+    backend_errors: u64
+
+pub enum TraceSessionStateV1:
+    Active
+    Draining
+    Drained
+    Faulted
+
+pub struct TraceDrainV1:
+    state: TraceSessionStateV1
+    stats: TraceStatsV1
+
+pub struct TraceBatchV1:
+    events: [TraceEventV1]
+    state: TraceSessionStateV1
+
+# Control/consumer port only; no operation allocates inside an instrumentation
+# hook. poll is bounded by caller-provided max_records. The native ABI will use
+# caller buffers with checked lengths, not these language-owned arrays.
+# One process capture session: conflicting start returns Busy.
+# request_stop is idempotent. TimedOut drain retains Draining and live storage.
+# release only accepts a drained session and NEVER unloads provider code.
+# Calling drain from a hook must return Busy instead of self-deadlocking.
+pub trait TraceObserverV1:
+    fn capabilities() -> TraceCapabilitiesV1
+    me prepare(config: TraceConfigV1, selection: TraceSelectionV1) -> Result<TracePreparedV1, TraceFailureV1>
+    me start(prepared: TracePreparedV1) -> Result<TraceSessionV1, TraceFailureV1>
+    me request_stop(session: TraceSessionV1) -> Result<TraceSessionStateV1, TraceFailureV1>
+    me drain(session: TraceSessionV1, deadline_ns: u64) -> Result<TraceDrainV1, TraceFailureV1>
+    me poll(session: TraceSessionV1, max_records: u32) -> Result<TraceBatchV1, TraceFailureV1>
+    me flush(session: TraceSessionV1, deadline_ns: u64) -> Result<TraceStatsV1, TraceFailureV1>
+    fn stats(session: TraceSessionV1) -> Result<TraceStatsV1, TraceFailureV1>
+    me release(session: TraceSessionV1) -> Result<bool, TraceFailureV1>
+
+pub fn trace_event_kind_code_v1(kind: TraceEventKindV1) -> u16:
+    match kind:
+        case Entry: 1
+        case Exit: 2
+        case TailExit: 3
+        case Transition: 4
+        case Loss: 5
+        case UnmatchedEdge: 6
+        case TruncatedSpan: 7
+        case UnsupportedSite: 8
+        case PairedSpan: 9
+        case Completion: 10
+
+pub fn trace_failure_code_v1(failure: TraceFailureV1) -> u32:
+    match failure:
+        case UnsupportedTarget: 1
+        case UnsupportedProfile: 2
+        case UnsupportedConsistency: 3
+        case InstrumentationAbsent: 4
+        case InvalidMap: 5
+        case Busy: 6
+        case ResourceExhausted: 7
+        case TimedOut: 8
+        case BackendFailure: 9
+        case InvalidArgument: 10
+        case InvalidHandle: 11

@@ -19,7 +19,7 @@ The separate, unlanded interface draft `common.trace.observer_contract_v1` decla
 
 The proposed 96-byte little-endian event format has an 8-byte header (u16 schema=1, u16 size=96, u16 kind, u16 flags), generation at 8, module instance at 16, u32 function/site at 24/28, context/sequence/timestamp/span at 32/40/48/56, three u64 kind-specific payload slots at 64/72/80 and reserved zero at 88. This is an explicit wire proposal, never the Simple struct layout. Typed allocation/access events remain unsupported; adding their semantics needs explicit capability admission.
 
-W0 is NOT complete: the event/config codecs, generated native ABI caller-buffer validation, golden byte fixtures and actual admitted-runtime compatibility execution remain required. The interface spec is authored, UNRUN. The trait deliberately has no fake backend implementation. Numeric handles are untrusted lookup keys; only a provider-issued resident table entry grants authority.
+W0 is NOT complete. A separate cold-path event codec and golden/malformed-record fixtures are now authored but UNRUN. Config encoding, generated native ABI caller-buffer validation and actual admitted-runtime compatibility execution remain required. The codec performs structural decoding only; it does not certify generation authority, paired-span validity or complete coverage. The interface spec is also UNRUN. The trait deliberately has no fake backend implementation. Numeric handles are untrusted lookup keys; only a provider-issued resident table entry grants authority.
 
 ## Ordered remaining work
 
