@@ -47,7 +47,7 @@ describe "entry-closure physical source deduplication":
     it "keeps colliding bucket keys exact and persistent":
         # @req REQ-SSPEC-COMPILER
         step("keeps colliding bucket keys exact and persistent")
-        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_entry_closure_core.spl") ?? ""
         var buckets = _driver_text_bucket_set_new(1)
         buckets = _driver_text_bucket_set_add(buckets, "std.alpha")
         buckets = _driver_text_bucket_set_add(buckets, "std.alphabet")
@@ -103,7 +103,7 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_not_contain("entry_modules = entry_modules.set(source.module_name")
         # Parser modules are retained once per physical source, while every
         # resolver spelling remains available through the compact surface map.
-        expect(driver).to_contain("var entry_surface_builder = ModuleSurfaceBuilder.new()")
+        expect(driver).to_contain("var entry_surface_builder = ModuleSurfaceBuilder.new(self.ctx.options.library_mode)")
         expect(driver).to_contain("for source in unique_entry_sources:")
         expect(driver).to_contain("for alias_source in entry_sources:")
         expect(driver).to_contain("if alias_is_poisoned:")
@@ -156,7 +156,7 @@ describe "entry-closure physical source deduplication":
         val unicode_imports = _driver_entry_import_module_paths("é\n# 文\n\tuse std.unicode\n")
         val comment_imports = _driver_entry_import_module_paths("# docs mention \"\"\"\nuse std.comment\nval x = 1 # \"\"\"\nimport std.after_inline\n")
         val doc_comment_close = _driver_entry_import_module_paths("\"\"\"\n# \"\"\"\nuse std.after_doc\n")
-        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_entry_closure_core.spl") ?? ""
 
         expect(imports).to_equal(["std.real", "app.live", "third.party"])
         expect(long_imports).to_equal(["std.tail"])
@@ -210,7 +210,7 @@ describe "entry-closure physical source deduplication":
 
         expect(inference).to_contain("case Call(callee, args, type_args):\n                self.infer_function_call(callee, args, type_args, span)")
         expect(calls).to_contain("me infer_function_call(callee: HirExpr, args: [HirCallArg], type_args: [HirType], span: Span)")
-        expect(calls).to_contain("self.generate_obligations_for_function_call(func_symbol, type_args, span)")
+        expect(calls).to_contain("self.instantiate_declared_call(function_symbol, type_args, span)")
         expect(inference).to_not_contain("call_type_args")
         expect(calls).to_not_contain("call_type_args")
 
@@ -255,26 +255,39 @@ describe "entry-closure physical source deduplication":
         expect(compile_end).to_be_greater_than(compile_start)
         val compile_body = driver.substring(compile_start, compile_end)
 
-        val load_call = compile_body.index_of("val (loaded_ctx, load_ok) = self.load_sources_impl(nil)") ?? -1
+        # compile() delegates phases 2-4 to stage_* helpers (each returns
+        # Some(stop) on failure); the phase verdict gates live in the helpers.
+        val load_call = compile_body.index_of("val (loaded_ctx, load_ok) = self.load_sources_impl(native_entry_closure_handoff_take_v1())") ?? -1
         val load_fail = compile_body.index_of("if not load_ok:\n            log_error(\"phase 1 FAILED\")") ?? -1
-        val parse_call = compile_body.index_of("val parse_ok = self.parse_all_committing_impl()") ?? -1
-        val parse_gate = compile_body.index_of("        if not parse_ok:\n") ?? -1
-        val parse_fail = compile_body.index_of("log_error(\"phase 2 FAILED (") ?? -1
-        val hir_call = compile_body.index_of("self.lower_and_check_retained_owner_impl()") ?? -1
-        val hir_fail = compile_body.index_of("log_error(\"phase 3 FAILED\")") ?? -1
-        val phase4_start = compile_body.index_of("phase4:monomorphize:start") ?? -1
+        val parse_stage = compile_body.index_of("match self.stage_parse():\n            case Some(stop): return stop") ?? -1
+        val hir_stage = compile_body.index_of("match self.stage_lower_hir(compile_mode_text):\n            case Some(stop): return stop") ?? -1
+        val analysis_stage = compile_body.index_of("match self.stage_collection_analysis(compile_mode_text):") ?? -1
         expect(load_call).to_be_greater_than(-1)
         expect(load_fail).to_be_greater_than(load_call)
-        expect(parse_call).to_be_greater_than(load_fail)
+        expect(parse_stage).to_be_greater_than(load_fail)
+        expect(hir_stage).to_be_greater_than(parse_stage)
+        expect(analysis_stage).to_be_greater_than(hir_stage)
+        val load_fail_body = compile_body.substring(load_fail)
+        expect(load_fail_body.index_of("return CompileResult.ParseError(self.ctx.errors)") ?? -1).to_be_less_than(load_fail_body.index_of("match self.stage_parse():") ?? -1)
+
+        val parse_start = driver.find("    me stage_parse() -> Option<CompileResult>:") ?? -1
+        expect(parse_start).to_be_greater_than(-1)
+        val parse_stage_body = driver.substring(parse_start)
+        val parse_call = parse_stage_body.index_of("val parse_ok = self.parse_all_committing_impl()") ?? -1
+        val parse_gate = parse_stage_body.index_of("        if not parse_ok:\n") ?? -1
+        val parse_fail = parse_stage_body.index_of("log_error(\"phase 2 FAILED (") ?? -1
+        expect(parse_call).to_be_greater_than(-1)
         expect(parse_gate).to_be_greater_than(parse_call)
         expect(parse_fail).to_be_greater_than(parse_gate)
-        val parse_fail_body = compile_body.substring(parse_fail)
-        expect(parse_fail_body.index_of("return CompileResult.ParseError(self.ctx.errors)") ?? -1).to_be_less_than(parse_fail_body.index_of("self.lower_and_check_retained_owner_impl()") ?? -1)
-        expect(hir_call).to_be_greater_than(parse_fail)
-        expect(hir_fail).to_be_greater_than(hir_call)
-        expect(phase4_start).to_be_greater_than(hir_fail)
-        val load_fail_body = compile_body.substring(load_fail)
-        expect(load_fail_body.index_of("return CompileResult.ParseError(self.ctx.errors)") ?? -1).to_be_less_than(load_fail_body.index_of("val parse_ok = self.parse_all_committing_impl()") ?? -1)
+        expect(parse_stage_body.substring(parse_fail).index_of("return Some(CompileResult.ParseError(self.ctx.errors))") ?? -1).to_be_greater_than(-1)
+
+        # Phase 3: stage_lower_hir fails closed through stage_lower_hir_failure_v1.
+        val hir_stage_body = rt_file_read_text("src/compiler/80.driver/driver_stage_hir_v1.spl") ?? ""
+        val hir_run = driver.index_of("var analyze_ok_effective = self.stage_lower_hir_run_v1()") ?? -1
+        val hir_failure_call = driver.index_of("return Some(self.stage_lower_hir_failure_v1())") ?? -1
+        expect(hir_run).to_be_greater_than(-1)
+        expect(hir_failure_call).to_be_greater_than(hir_run)
+        expect(hir_stage_body).to_contain("log_error(\"phase 3 FAILED\")")
 
         # Phase 1: unresolved import, then empty import, both recorded before
         # the sources commit; the verdict is the post-commit error count.
@@ -306,7 +319,7 @@ describe "entry-closure physical source deduplication":
     it "collects only the source roots supplied by its caller":
         # @req REQ-SSPEC-COMPILER
         step("collects only the source roots supplied by its caller")
-        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_entry_closure_core.spl") ?? ""
         val helpers = rt_file_read_text("src/compiler/80.driver/driver_helpers.spl") ?? ""
 
         # 37237cdf1e4 admits the exact requested native entry through the
