@@ -58,3 +58,20 @@ This diagnostic used the unadmitted Windows seed
 `FC56D4B5FC384EA93ED20BEFD4503FF6E27DB7734214CA45E072B4DF1B081828`) with
 `run ... --mode=interpreter`; source-provenance receipt is unavailable. It is
 parser-owner evidence only and does not qualify native/JIT behavior or Phase 2.
+
+## Dictionary diagnostic follow-up (2026-11-03)
+
+The leading-brace payload repair is already present in release/1.0.0 at
+`061ee2d4735`. A source follow-up rejects nonempty brace types without a colon
+(`{text}`) or without a value type (`{text: }`), instead of accepting an erased
+dictionary or relying on a generic type error. The legacy empty `{}` type is
+preserved. The existing HIR regression now asserts the complete nested array
+shape and adds nested generic dictionaries, adjacent named fields, following
+variants, and both malformed dictionary diagnostics.
+
+Behavioral verification: **TEST_BLOCKED**. No qualified self-hosted full CLI is
+available in this Windows recovery workspace; the tracked seed and frozen
+diagnostic artifacts are not admitted test producers. The original HIR/MIR
+construction gate remains unrun, and the five `Dict<K, V>` workaround spellings
+in `phase_memo_ownership.spl` remain until that gate passes on an admitted
+producer. This follow-up does not close the bug.

@@ -34,7 +34,7 @@ full type in positional position.
 use std.spec.{describe, it, expect, step, fail}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.core.parser.{parser_has_errors}
+use compiler.core.parser.{parser_has_errors, parser_first_error_get}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
@@ -49,6 +49,7 @@ fn brace_kind_name(t: HirType) -> text:
                 return "i{bits}"
             "u{bits}"
         case HirTypeKind.Str: "text"
+        case HirTypeKind.Array(element, _): "array<" + brace_kind_name(element) + ">"
         case HirTypeKind.Dict(k, v): "dict<" + brace_kind_name(k) + "," + brace_kind_name(v) + ">"
         case HirTypeKind.Tuple(elements):
             var parts: [text] = []
@@ -95,7 +96,32 @@ describe "positional enum payload spellings that are not bare names":
     it "registers {text: [i64]} as one Dict slot":
         step("HirPhaseMemoRoot.IndexLists shape")
         val shape = brace_variant_shape("enum Memo:\n    IndexLists(\{text: [i64]\})\n", "IndexLists")
-        expect(shape.starts_with("positional[dict<text,")).to_equal(true)
+        expect(shape).to_equal("positional[dict<text,array<i64>>]")
+
+    it "preserves nested generic dictionary payloads and adjacent named fields":
+        step("Reject the adjacent regression")
+        val source = "enum Memo:\n" +
+            "    Nested(\{text: Dict<text, [i64]>\}, i64)\n" +
+            "    Named(map: \{text: \{text: i64\}\}, count: i64)\n" +
+            "    After(i64)\n"
+        expect(brace_variant_shape(source, "Nested")).to_equal("positional[dict<text,dict<text,array<i64>>>;i64]")
+        expect(brace_variant_shape(source, "Named")).to_equal("named[map:dict<text,dict<text,i64>>;count:i64]")
+        expect(brace_variant_shape(source, "After")).to_equal("positional[i64]")
+
+    it "rejects a nonempty dictionary type without its key value separator":
+        step("Exercise the repaired owner")
+        val parsed = parse_full_frontend("enum Memo:\n    Invalid(\{text\})\n", "brace_payload.spl", "brace_payload", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(true)
+        expect(parser_first_error_get()).to_contain("expected ':' after dictionary key type")
+
+    it "rejects a dictionary type without its value type":
+        val parsed = parse_full_frontend("enum Memo:\n    Invalid(\{text: \})\n", "brace_payload.spl", "brace_payload", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(true)
+        expect(parser_first_error_get()).to_contain("expected dictionary value type after ':'")
+
+    it "retains the legacy empty dictionary type and following variant":
+        val source = "enum Memo:\n    Empty(\{\})\n    After(i64)\n"
+        expect(brace_variant_shape(source, "After")).to_equal("positional[i64]")
 
     it "keeps a positional dict distinct from a named dict field and following variant":
         val source = "enum Memo:\n" +
