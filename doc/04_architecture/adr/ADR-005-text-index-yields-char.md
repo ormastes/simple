@@ -199,7 +199,7 @@ stage3 self-build).
 
 - **Truthiness:** a `char` has no truthiness. `if c:`, `while c:`, `not c`,
   `c and x` are type errors in every engine; write an explicit comparison.
-  Checker diagnostic is staged: a warning now, an error once Windows, macOS and
+  Checker diagnostic `W-CHAR-CONDITION` (HIR lowering: if/elif/while, `not`, `and`/`or` operands; env `SIMPLE_CHAR_CONDITION=error`, `SIMPLE_SAFETY_PROFILE=critical|verified` fatal) is staged: a warning now, an error once Windows, macOS and
   Linux each have a self-hosted binary (same staging as exhaustive match; bug row
   `char_condition_type_check_staged_2026-11-03`).
 - **Runtime:** until the checker enforces it, `truthy()` on a char tag fails
