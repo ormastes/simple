@@ -1,0 +1,52 @@
+# @req REQ-COMPILER-OPTION-PATTERN-002
+"""
+`case nil` over a statically non-Option scrutinee gets a NAMED diagnostic
+(E-TYPE-NIL-COMPARE, with the scrutinee kind) in the self-hosted checker,
+instead of "unsupported expression kind: Block" at span 0:0.
+
+`case nil` desugars to `scrutinee == nil` inside a Block expression; the
+checker used to reject the Block before ever reaching the nil-compare check,
+and the check itself exempted Result.
+
+Bugs: option_pattern_against_result_value_matches_nothing_2026-09-19,
+option_pattern_accepted_on_non_option_scrutinee_2026-07-27.
+"""
+
+# @tag: unit, compiler, lint, type_infer, option
+
+use std.spec.*
+use compiler.tools.lint.semantic_check.{simple_semantic_check_source, SimpleSemanticCheckResult}
+
+fn check(src: text) -> SimpleSemanticCheckResult:
+    simple_semantic_check_source(src, "optnil.spl")
+
+fn named_diags(r: SimpleSemanticCheckResult) -> [text]:
+    var out: [text] = []
+    for d in r.diagnostics:
+        if d.contains("E-TYPE-NIL-COMPARE"):
+            out = out.push(d)
+    out
+
+fn unsupported_block_diags(r: SimpleSemanticCheckResult) -> [text]:
+    var out: [text] = []
+    for d in r.diagnostics:
+        if d.contains("unsupported expression kind"):
+            out = out.push(d)
+    out
+
+describe "case nil on non-Option scrutinee":
+    it "flags `case nil` on a Result-typed value by name":
+        val r = check("fn g() -> Result<text, text>:\n    Ok(\"a\")\n\nfn f() -> i64:\n    val r = g()\n    match r:\n        case nil: 1\n        case _: 2\n")
+        val ds = named_diags(r)
+        expect(ds.len()).to_equal(1)
+        expect(ds[0]).to_contain("Result")
+
+    it "flags `case nil` on an i64 parameter by name, with a real span":
+        val r = check("fn f(n: i64) -> i64:\n    match n:\n        case nil: 1\n        case _: 0\n")
+        expect(named_diags(r).len()).to_equal(1)
+        expect(unsupported_block_diags(r).len()).to_equal(0)
+
+    it "accepts `case nil` on a genuine Option scrutinee":
+        val r = check("fn f(o: i64?) -> i64:\n    match o:\n        case nil: 1\n        case _: 0\n")
+        expect(named_diags(r).len()).to_equal(0)
+        expect(unsupported_block_diags(r).len()).to_equal(0)

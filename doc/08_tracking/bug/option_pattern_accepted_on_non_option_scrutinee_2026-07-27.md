@@ -1001,3 +1001,12 @@ change was made and the row stays `open` (stage 1 of the staged plan).
   needs a full-CLI self-hosted binary (none deployed; `bin/simple.exe` is the seed).
 - Next step is unchanged: stage 0 measurement (`SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1`
   full build) -> baseline -> ratchet gate. Do not attempt a runtime special-case.
+
+## 2026-11-03 - `case nil` now named; seed warns on Result (fix-implemented-verification-pending)
+
+See the same-dated section of
+`option_pattern_against_result_value_matches_nothing_2026-09-19.md`: `case nil`
+over a non-Option scrutinee is a named `[E-TYPE-NIL-COMPARE]` error in the
+self-hosted checker, and the seed interpreter warns when Option arms meet a
+`Result` value. Remaining: bare `case None:` over scalars; scalar (non-Result)
+scrutinees in the seed stay env-gated (`SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1`).

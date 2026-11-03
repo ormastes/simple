@@ -198,3 +198,19 @@ Regression guard:
    the bar for a single symbol; a falling total is the bar for the campaign.
 
 **Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**
+
+## 2026-11-03 - fix-implemented-verification-pending (same-signature class no longer silent)
+
+Differing-signature collisions already warned; the same-signature class (the
+dangerous one) was default-off. Now both engines report it by default as ONE
+compact summary (not hundreds of lines): seed `module_loader.rs`
+`render_same_signature_summary` (unit test
+`same_signature_summary_is_default_visible_compact_and_tagged`), self-hosted twin
+`eval_tables.spl` `_ftr_warn_collision` (one `[WARN]` per process).
+`SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` still lists every symbol with owners.
+No monomorphisation involved. Last-write-wins order is unchanged (load order is
+deterministic); the definition-count-to-one consolidation described above remains
+the real fix. Verify (needs a rebuilt seed): `bin/simple test
+test/01_unit/compiler/pipeline/cross_module_collision_detection_spec.spl` (first
+example was red because `_shared_helper`/`shared_public` were not named by
+default).
