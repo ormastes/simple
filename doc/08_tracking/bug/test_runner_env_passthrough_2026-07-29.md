@@ -1,7 +1,7 @@
 # Bug: `bin/simple test` env passthrough to spec bodies is unreliable — root-caused, NOT fixed (architectural)
 
 - **Date:** 2026-07-29
-- **Status:** open — root cause confirmed deterministically, fix requires a
+- **Status:** CLOSED 2026-11-03 (fixed by 67ee03994a5, env digest + reroute) — was: open, root cause confirmed deterministically, fix requires a
   session-daemon protocol change (out of scope for a minimal/additive patch)
 - **Severity:** high (silently stale custom env vars inside `it` bodies;
   deterministic, not flaky, once you know the trigger condition)
