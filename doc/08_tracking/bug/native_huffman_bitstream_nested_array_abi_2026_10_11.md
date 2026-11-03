@@ -9,3 +9,6 @@ Minimal fixture: test/fixtures/compiler/huffman_bitstream_array_abi_probe/main.s
 Cause is unproven. Unannotated bs indexing and a nested byte array inside [Any] are candidate loss/boxing paths. Root triage: `/mnt/c/Temp/simple-manual-huffman-4cca-20261011/root-bitstream-triage.json`. A permanent compiler repair needs independent nested-array and typed-parameter controls. This record does not claim source return annotations fix bitstream behavior.
 
 **Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**
+
+## Lane note 2026-11-03 (wl01 lane)
+Not fixed: cause unproven (see above) and bitstream_new/bitstream_finish exist only in the fixture test/fixtures/compiler/huffman_bitstream_array_abi_probe/main.spl:6, not in src/. Blocker: needs a native-build run with ABI/array-handle tracing to locate the nested [Any] byte-array boxing path; unavailable on this host (seed refuses native-build entry-closure, 2 GiB alloc abort per native_build_source_closure_zero_sources_2026-08-17).

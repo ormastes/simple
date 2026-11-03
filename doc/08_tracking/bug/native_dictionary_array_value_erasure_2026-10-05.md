@@ -43,3 +43,6 @@ failing producer 916be6c2061 (not an ancestor). Regression:
 after 978e606e4a6, native-build `test/04_smoke/native_dictionary_array_direct.spl`
 with cranelift and llvm; expect no unresolved `contains` and no I64 for-in.
 The `[text]` local workaround in reverse_reference_facts.spl may then be removed.
+
+## Lane note 2026-11-03 (wl01 lane)
+Already fix-implemented-verification-pending; remaining step is a native trait-fixture run on a rebuilt producer. Nothing further to land from this lane.

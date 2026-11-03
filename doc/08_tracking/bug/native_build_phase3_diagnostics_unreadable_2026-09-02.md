@@ -57,3 +57,6 @@ Make the worker fail LOUD before fixing whatever phase 3 is unhappy about — a
 build that cannot report its own errors will hide the next defect too.
 
 **Revalidated 2026-11-02: still plausible because the report title (`native-build` of a hello world fails in phase 3 with its diagnostics lost in t) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Lane note 2026-11-03 (wl01 lane)
+Deferred: reproduction needs native-build phase 3 output transport, not runnable on this lane (seed lacks entry-closure native-build).

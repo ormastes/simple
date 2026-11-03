@@ -74,3 +74,6 @@ Evidence (seed `bin/simple.exe`, in-process HIR+MIR):
 `methods_mir_receiver_shapes_spec.spl` red 5/4 (pre-fix) -> green 10/10; 17 related
 MIR/HIR specs identical pass/fail before and after (pre-existing failures unchanged).
 Revert-ready: not yet (needs stage3 self-build).
+
+## Lane note 2026-11-03 (wl01 lane)
+Deferred: five receiver shapes need typed-HIR propagation into MIR method resolution (typed_module_owner_v1.spl); verification requires a stage3 closure build, not available on this lane. Workaround tags bug=methods-mir-20261031 kept.
