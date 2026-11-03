@@ -84,3 +84,51 @@ File:line list:
   mis-pass the length in seed-produced candidates (why `fs.spl` moved to
   two-arg twins); `spl_cranelift_new_aot_module_config_v2` mixes text and
   scalar args and is the highest-risk form.
+
+## Investigation 2026-11-03 (lane work/cranelift-text-abi) - premise NOT confirmed, status stays open
+
+Static finding (origin/release/1.0.0 `27e65c24371`):
+
+- Every `rt_cranelift_*` / `spl_cranelift_*` extern in `sffi/codegen.spl` is
+  declared with raw `i64` ptr/len params and has NO `text_arg_indices` row in
+  `codegen/instr/calls.rs:3132`, so the seed lowering performs no text
+  expansion for them; the only expansion is the wrapper's single
+  `rt_string_data(x)` / `rt_string_len(x)`. `rt_string_data` is registered as
+  `[I64] -> [I64]` (`runtime_sffi.rs:646`) taking the RuntimeValue string.
+- That is exactly the "two-arg twin" shape the accepted `fs.spl`
+  `rt_io_file_open_read/_write/_append` fix uses (same hand expansion, raw
+  `i64` externs, no text row). The `io_file_open` defect needed a *text*
+  declaration plus a `text_arg_indices` row (double expansion); the cranelift
+  family has neither, so no double-expansion path was found in source.
+- Therefore no source change was made. The bug can only be confirmed or closed
+  by a seed-built NATIVE run.
+
+Interpreter run of the probe below (seed `bin/simple.exe run`) fails
+differently: `spl_cranelift_aot_isa_feature_v2: argument 2 must be an integer`
+(interpreter bridge, separate from native lowering); not evidence for this bug.
+
+Why no native red/green on this Windows host (blockers, reproducible):
+
+1. `simple compile probe.spl --native` generates code but the legacy linker
+   (`linker/native.rs`) invokes `lld-link` with GNU args (`-o`,
+   `--whole-archive`, `-lkernel32`): `lld-link: error: could not open
+   '<out>.exe'`. Same with `--linker lld`, llvm-mingw clang first on PATH.
+2. `simple native-build probe.spl` (seed) is a whole-project build: needs a
+   worker binary (`native_build_worker_binary_valid`, set `SIMPLE_BINARY` to a
+   forward-slash path) and then fails with `SCV-E-ADMISSION:
+   source-inventory-root-empty: --source root 'src/os'` on a sparse worktree;
+   ~8 min per attempt.
+
+Repro to run on a Linux seed (or full checkout):
+
+```spl
+use std.nogc_sync_mut.sffi.codegen.{cranelift_new_aot_module_config_v2, cranelift_aot_isa_feature_v2}
+fn main():
+    val m = cranelift_new_aot_module_config_v2("probe", "x86_64-unknown-linux-gnu", "", 1, ["has_avx"])
+    print "avx={cranelift_aot_isa_feature_v2(m, "has_avx")} bogus={cranelift_aot_isa_feature_v2(m, "has_nonexistent_zzz")}"
+```
+
+Expect `avx=1 bogus=0`. If the seed-built native binary prints garbage, the
+defect is in seed call lowering of `rt_string_data(<text param>)` (not in
+`codegen.spl`); write a Rust test in `calls.rs` against that lowering. If it
+prints the expected values, close this bug as invalid with that transcript.

@@ -10,11 +10,65 @@ use std.spec
 use std.nogc_sync_mut.io.tcp.{TcpStream, tcp_fd_close, tcp_fd_write_text}
 use std.nogc_sync_mut.sosix.network.{
     sosix_tcp_bind, sosix_tcp_listen, sosix_tcp_local_addr, sosix_tcp_accept_timeout,
-    sosix_tcp_set_read_timeout, sosix_tcp_read_line, sosix_tcp_read,
+    sosix_tcp_set_read_timeout, sosix_tcp_set_nonblocking, sosix_tcp_read_line, sosix_tcp_read,
     sosix_tcp_peer_addr, sosix_tcp_shutdown, sosix_tcp_close, sosix_tcp_write_text
 }
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms}
 
 describe "hosted SOSIX TCP compatibility boundary":
+    it "returns a blocking stream after an idle listener timeout":
+        # bug: tcp_accept_timeout_nonblocking_stream_windows_2026-10-31
+        step("Accept from a nonblocking listener without sending client bytes")
+        val listener = sosix_tcp_bind("127.0.0.1:0")
+        var client: i64 = -1
+        var server: i64 = -1
+        var idle_expired = false
+        var mode_set = false
+        var receive_timeout_set = false
+        var read_timed_out = false
+        var elapsed_ms: i64 = -1
+        var payload_received = false
+        if listener >= 0:
+            val idle_result = sosix_tcp_accept_timeout(listener, 5)
+            idle_expired = idle_result < 0
+            if idle_result >= 0: sosix_tcp_close(idle_result)
+            mode_set = sosix_tcp_set_nonblocking(listener, true)
+            if val address = sosix_tcp_local_addr(listener):
+                client = TcpStream.connect_fd_timeout(address, 1000)
+            if client >= 0:
+                server = sosix_tcp_accept_timeout(listener, 1000)
+            if server >= 0:
+                receive_timeout_set = sosix_tcp_set_read_timeout(server, 200)
+                if receive_timeout_set:
+                    step("Wait for the receive deadline rather than immediate WouldBlock")
+                    val started = sosix_time_now_monotonic_ms()
+                    val quiet_read = sosix_tcp_read(server, 1)
+                    val finished = sosix_time_now_monotonic_ms()
+                    read_timed_out = quiet_read == nil
+                    if started >= 0 and finished >= started:
+                        elapsed_ms = finished - started
+                    step("Deliver a request after the quiet read has expired")
+                    if tcp_fd_write_text(client, "later-request\n"):
+                        val stream = TcpStream.from_accepted_fd(server)
+                        val line = stream.read_line_bounded(128)
+                        if line.is_ok(): payload_received = line.unwrap() == "later-request\n"
+        step("Close all owned sockets before checking the observed behavior")
+        val client_closed = if client >= 0: tcp_fd_close(client) else: false
+        val server_closed = if server >= 0: sosix_tcp_close(server) else: false
+        val listener_closed = if listener >= 0: sosix_tcp_close(listener) else: false
+        expect(listener).to_be_greater_than(-1)
+        expect(client).to_be_greater_than(-1)
+        expect(server).to_be_greater_than(-1)
+        expect(idle_expired).to_be(true)
+        expect(mode_set).to_be(true)
+        expect(receive_timeout_set).to_be(true)
+        expect(read_timed_out).to_be(true)
+        expect(elapsed_ms).to_be_greater_than(49)
+        expect(payload_received).to_be(true)
+        expect(client_closed).to_be(true)
+        expect(server_closed).to_be(true)
+        expect(listener_closed).to_be(true)
+
     it "exchanges loopback text through both production surfaces":
         step("Bind an ephemeral loopback listener and discover its address")
         val listener = sosix_tcp_bind("127.0.0.1:0")
