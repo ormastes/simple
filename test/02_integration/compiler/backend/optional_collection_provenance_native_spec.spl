@@ -1,0 +1,56 @@
+# Native LLVM regression for guarded payload narrowing on optional references.
+# SIMPLE_BIN selects the compiler under test; otherwise use the canonical
+# compiler selected for the active test run.
+use std.spec.*
+use std.io_runtime.{
+    process_run_timeout, env_get_opt, env_set, env_remove_process, file_exists,
+    file_copy, dir_create_all
+}
+use std.spec.engine_probe.{simple_binary}
+use app.io.sysinfo_ops.{getpid}
+
+val PROBE = "test/02_integration/compiler/backend/probe_optional_collection_provenance_semantics.spl"
+
+fn selected_compiler() -> text:
+    val configured = env_get_opt("SIMPLE_BIN") ?? ""
+    if configured != "": configured else: simple_binary()
+
+describe "LLVM optional collection provenance semantics":
+    slow_it "p2_p3_bug_reproduction and p2_p3_adjacent_regression preserve collection payloads":
+        val output_dir = "build/tmp/optional_collection_provenance_{getpid()}"
+        val source_root = output_dir + "/source"
+        val cache_dir = output_dir + "/cache"
+        val entry = source_root + "/main.spl"
+        val output_bin = output_dir + "/probe.exe"
+        expect(dir_create_all(source_root)).to_equal(true)
+        expect(dir_create_all(cache_dir)).to_equal(true)
+        expect(file_copy(PROBE, entry)).to_equal(true)
+
+        val previous_no_stub = env_get_opt("SIMPLE_NO_STUB_FALLBACK")
+        val stub_env_set = env_set("SIMPLE_NO_STUB_FALLBACK", "1")
+        val (build_out, build_err, build_code) = if stub_env_set:
+            process_run_timeout(selected_compiler(), [
+                "native-build", "--backend=llvm", "--mode=one-binary",
+                "--entry-closure", "--source", source_root,
+                "--cache-dir", cache_dir,
+                "--entry", entry, "--output", output_bin
+            ], 180000)
+        else:
+            ("", "failed to set SIMPLE_NO_STUB_FALLBACK", -1)
+        val env_restore_ok = if previous_no_stub == nil:
+            env_remove_process("SIMPLE_NO_STUB_FALLBACK")
+        else:
+            env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub!)
+
+        expect(stub_env_set).to_be(true)
+        expect(env_restore_ok).to_be(true)
+        expect(build_code).to_equal(0)
+        expect(file_exists(output_bin)).to_be(true)
+        expect((build_out + build_err).contains("stub fallback")).to_be(false)
+
+        val (run_out, run_err, run_code) = process_run_timeout(output_bin, [], 30000)
+        expect(run_code).to_equal(0)
+        expect(run_err.trim()).to_equal("")
+        expect(run_out.replace("\r\n", "\n").trim()).to_equal(
+            "BEGIN optional collection provenance\nEND optional collection provenance checks=15"
+        )
