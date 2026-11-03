@@ -206,3 +206,10 @@ Re-checked against origin/release/1.0.0: the class-value-identity plan
 change (105 `Value::Object` sites). Option B (narrow `Expr::Index` aliasing)
 remains unsound as recorded above, so no narrow fix was attempted. Bug stays
 OPEN.
+
+## 2026-11-03 — design + red spec landed; fix is seed value-model work (verification-pending)
+
+Design: `doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md`.
+Spec (RED on tree-walk, 2 of 4 fail; tagged in-development):
+`test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`.
+No narrow fix: needs `Value::ClassInstance` producers in the Rust seed + redeploy. Stays OPEN.
