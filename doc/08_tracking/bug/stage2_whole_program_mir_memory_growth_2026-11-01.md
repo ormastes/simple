@@ -1,6 +1,6 @@
 # Stage2 whole-program memory growth (38 GB -> 66.6 GB), 2026-11-01
 
-- Status: fix-implemented-verification-pending (fix landed in #5791, commit 728ddb0170f; takes effect after a stage2 rebuild; RSS not yet re-measured)
+- Status: OPEN (diagnosed by static/log analysis only; launch-only workaround proposed)
 - Severity: P1 (blocks Phase 3 stage3 build on the frozen stage2)
 - Frozen compiler: `C:/dev/p3new/stage2.exe` (built from `ef0681fc0e1`), unchanged across runs
 - Source range: `640144fa932` (run 12, peak 38.31 GB) .. `3273833de3d` (runs 15/16, killed at 64.34 / 66.58 GB)
@@ -115,10 +115,6 @@ Spec: `test/01_unit/compiler/driver/smf_staged_parts_spec.spl`.
 Takes effect after the next stage2 rebuild; the `--mode one-binary` launch
 workaround above remains valid until then.
 
-## Verification repro (pending)
+## Status 2026-11-03: fix-implemented-verification-pending
 
-1. Build stage3 with a stage2 that contains `728ddb0170f` (not the frozen `ef0681fc0e1` stage2).
-2. Run the default dynload stage3 build; confirm the log shows no `[mir-shard] disabled: output format re-reads MIR set` and that staged codegen is active.
-3. Record peak RSS (expect well under the 66 GB seen in runs 15/16) and wall time; also run
-   `test/01_unit/compiler/driver/smf_staged_parts_spec.spl`.
-Absorbs `stage2_codegen_memory_blowup_parser_preprocessor_2026-11-01` (duplicate).
+Fix landed in 728ddb0170f (#5791); spec `test/01_unit/compiler/driver/smf_staged_parts_spec.spl` 6/6 pass on origin/release/1.0.0 (bin/simple.exe). RSS verification needs a stage2 rebuilt with #5791 (not yet deployed). Repro: build stage2 from release/1.0.0 head, run stage3 native_compile with default `--mode=dynload` and watch peak RSS; expect no 35->66 GB growth (staged codegen + MIR sharding active for Both). The parser_preprocessor memory-blowup bug is a duplicate of this one.
