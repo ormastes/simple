@@ -107,3 +107,34 @@ digest) at admission, store it in the `DynLib` registry entry
 (`dynlib_lifetime_register_v1`), and have `dynlib_lifetime_begin_v1` reject a
 token that does not match; add a Linux-only spec using a sealed test provider.
 Status stays open; severity P0 unchanged.
+
+## Re-check 2026-11-03 against current design
+
+Status -> fix-implemented-verification-pending. The required closure is met in
+source on origin/release/1.0.0:
+
+- Unforgeable token: `SignatureVerifiedSffiAdmissionV1`
+  (`src/lib/nogc_sync_mut/sffi/admission.spl:41`) can only be constructed
+  after `pure_ed25519_verify` succeeds in `verify_sffi_evidence_v2` (`:238-270`).
+  Its fields are file-private, and no other `src/` site constructs it.
+- Handle bound to token: `SignatureVerifiedExactArtifactDynLib.load_signed_linux`
+  (`dynamic.spl:263`) opens the sealed memfd snapshot only against
+  `admission.artifact_digest()`. It pairs `sealed` with `admission` in
+  file-private fields, and slots resolve only through `self.sealed`.
+- Provider generation: every handle gets a monotonic, never-reused
+  `lifetime_identity` from `dynlib_lifetime_register_v1`. Each
+  `DynI64FnSlot` carries that identity, and `call_checked` re-checks it on
+  every call (E-SFFI-019 after retire). That is the generation binding the
+  cached thunks need.
+- Non-Linux: rejected fail-closed with E-SFFI-020, which is the alternative the
+  closure section allows.
+- `ExactArtifactDynLib.load_exact_linux` / `DynLib.load*` remain `@unsafe`
+  with caller digests. Under the current policy an unsafe API is not an
+  admission authority, so this is by design and not a gap.
+
+Verification still pending: a Linux sealed-provider run of
+`test/01_unit/lib/ffi/sffi_admission_spec.spl`. On this Windows host, on the
+seed, the spec does not even parse (`function arguments: expected Comma, found
+RawString`). That is a seed parser limit and is separate from this bug.
+Repro: on Linux, run `bin/simple test test/01_unit/lib/ffi/sffi_admission_spec.spl`
+with a self-hosted binary and expect all examples to pass.
