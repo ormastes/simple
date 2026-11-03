@@ -39,3 +39,5 @@ trait-typed field receiver takes the trait-dispatch path. Remove the workaround 
 verified with the full-CLI native-build.
 
 **Revalidated 2026-11-02: still plausible because - Severity: P1 (silent miscall class in seed) · Status: open (workaround active); no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-03 (sonB): deferred, concrete blocker.** Seed-side fix. Trait-typed field `store: VirtualSourceStoreV1` resolves to TypeId::ANY in HIR (traits are not HirType::Struct), so `try_resolve_receiver_struct_name_from_expr` (`src/compiler_rust/compiler/src/hir/lower/expr/access.rs` ~781-795, `try_named_struct_name_for_type`) returns None and codegen gets no type_qualifier. Even with a trait-name qualifier, `qualified_method_owner_matches` (closures_structs.rs ~1130) deliberately refuses trait names, so a vtable-dispatch path is also needed. Requires a seed cargo build to test; workaround (typed local) retained.

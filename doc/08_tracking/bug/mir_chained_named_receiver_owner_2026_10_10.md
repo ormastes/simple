@@ -34,3 +34,5 @@ therefore needs the cross-module closure (`common.bytes.span` imported into the
 Postgres build): the inner `slice` resolves as `resolution_is_unresolved` and falls
 into the erased text-slice fallback at `method_calls_literals.spl:3702`. Needs a
 stage3 multi-module repro; workaround retained.
+
+**2026-11-03 (sonB): deferred, concrete blocker.** Single-module spec passes (see groupB triage); failure is cross-module: inner `self.slice(..)` resolves Unresolved and the result local carries no struct owner, so `.equals` is unresolved. Candidate fix site: after the inner call is lowered in `method_calls_literals.spl` (~3640-3700), record the callee HIR return type (ByteSpan) on the result local (`local_hir_type`) so the outer call finds its owner. Needs a multi-module (common.bytes.span + importer) repro under stage3 to write the failing spec; not safe to edit blind.

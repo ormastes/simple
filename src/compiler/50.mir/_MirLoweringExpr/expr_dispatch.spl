@@ -2307,7 +2307,7 @@ impl MirLowering:
                 if val present_vt = optional_vt:
                     val concrete_vt: MirType = present_vt
                     match concrete_vt.kind:
-                        case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
+                        case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.Struct(_) | MirTypeKind.Dict(_, _):
                             elem_array_type = concrete_vt
                         case _:
                             ()
@@ -6704,7 +6704,15 @@ impl MirLowering:
                 # which (post-fix) `rt_is_none` no longer recognizes as nil,
                 # so an outer `if val v = x.?:` would wrongly treat the
                 # none-case result as `Some(0)`.
-                b_else.emit_const(result_local, MirConstValue.Int(3), result_type)
+                match result_type.kind:
+                    case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.Struct(_) | MirTypeKind.Dict(_, _):
+                        # Nil is a raw word. Let the normal copy coercion move
+                        # it into the pointer slot, just as the Some arm does.
+                        # Emitting Int(3) as Array/Slice creates invalid add ptr.
+                        val none_word = b_else.emit_const_int(3)
+                        b_else.emit_copy(result_local, none_word)
+                    case _:
+                        b_else.emit_const(result_local, MirConstValue.Int(3), result_type)
                 b_else.terminate_goto(merge_block)
                 self.builder = b_else
 

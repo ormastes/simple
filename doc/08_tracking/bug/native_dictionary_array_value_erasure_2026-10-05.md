@@ -29,3 +29,5 @@ the current producer and private source overlay/cache; preserve all failed
 receipts. Do not restart ongoing bootstrap phases for this workaround.
 
 **Revalidated 2026-11-02: still plausible because OPEN. Source workaround authored; native validation UNRUN; no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-03 (sonB): deferred, concrete blocker.** HIR Index typing already propagates Dict value types (`expression_core.spl` ~960-975 `case HirTypeKind.Dict(_, value)`, since 2026-08-21), so the erasure happens before that: the module-level `{text: [text]}` brace type or the module-var Var expr has no `type_` when `d[k]` is lowered. Need an HIR dump of `reverse_reference_facts.spl:36-44` on stage3 to see which; workaround ([text] locals) retained.
