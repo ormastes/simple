@@ -44,3 +44,29 @@ Open. Engine-divergence family
 (`doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`).
 
 **Revalidated 2026-11-02: still plausible because the report title (layout_run_full_with_ports core-dumps on nil-receiver field access under JIT) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Revalidation 2026-11-03 (still reproduces; Rust-seed JIT defect, not a Simple-source defect)
+
+Seed `bin/simple.exe run` (default JIT) on the probe below exits **rc=139 (segfault)** with no output; with
+`SIMPLE_EXECUTION_MODE=interpreter` it prints `boxes=2 backend=serial_cpu`. So the divergence is real, but
+the library code is correct under the interpreter; the fault is in seed Cranelift codegen for the trait-object
+port dispatch inside `_layout_snapshot_with_ports` (`src/lib/common/structural/layout/engine.spl:664`). Fix needs a
+Rust seed change + redeploy, so it is not fixable from `src/lib`. Note: a probe that omits `layout_input` defaults
+is demoted to the interpreter by `[jit-fallback]` (call-site-constant default rule) and does not crash - pass the
+named `oracle_boxes:` argument as below to stay on JIT.
+
+```simple
+use std.common.structural.layout.*
+fn main():
+    val nodes = [layout_node(1, 0, "block", true, false, 0, 40, false, layout_node_semantics_default("block")),
+                 layout_node(2, 1, "block", true, false, 0, 10, false, layout_node_semantics_default("block"))]
+    val prof = layout_execution_profile("hybrid_vector_gpu", 100, 40, 20, 1024, 1024, 2, 10, 5)
+    val inp = layout_input(nodes, [], [], prof, 4, oracle_boxes: [layout_box(1, 0, 0, 640, 480), layout_box(2, 8, 8, 624, 32)])
+    val snap = layout_run_full_with_ports(inp, layout_text_measure_port_unavailable(), layout_execution_port_oracle(inp.oracle_boxes), layout_execution_port_unavailable("hybrid_vector_gpu", "gpu-x"))
+    print "boxes={snap.boxes.len()} backend={snap.backend}"
+main()
+```
+
+Status stays open; owner = seed JIT codegen (needs `SIMPLE_JIT_STRICT`/Cranelift trait-object dispatch triage on a
+rebuilt seed). Also stale: `test/03_system/platform/structural_compute/layout_framework_spec.spl` calls `layout_node`
+with 10 args (9 expected) and `fixture_node` is undefined, so it cannot serve as the regression spec yet.
