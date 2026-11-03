@@ -15,7 +15,7 @@ not verification receipts. Every owner/backend needs its own execution evidence.
 | REQ-CRYPTO-CHACHA-001 | RFC 8439 2.1.1, 2.2.1, 2.3.2, 2.4.2 | Published quarter-round/block/encryption vectors; counter, little-endian encoding and 63/64/65-byte boundaries. |
 | REQ-CRYPTO-CHACHA-002 | RFC 8439 2.5.2, 2.8.1–2.8.2, Appendix A | Poly1305 and AEAD exact ciphertext/tag; AAD/ciphertext pad-to-16 and length encoding with 0/1/15/16/17 bytes; modified inputs rejected with no plaintext release. Preserve 256-bit key and 96-bit nonce contract. |
 | REQ-CRYPTO-ECDH-001 | RFC 7748 5, 5.2, 6.1–6.2 | X25519/X448 only where exported: published scalar/u-coordinate and Alice/Bob shared-secret vectors; scalar decoding, input mask, noncanonical u-coordinate handling. RFC 7748 does not specify P-256 ECDH. |
-| REQ-CRYPTO-ECDH-002 | RFC 7748 6–7; RFC 8446 4.2.8.2 | TLS X25519/X448 caller MUST reject all-zero shared secret. RFC 7748 standalone primitive permits the check; do not convert its MAY into a universal primitive MUST. Malformed encoding/key-share length uses the caller contract. |
+| REQ-CRYPTO-ECDH-002 | RFC 7748 6–7; RFC 8446 7.4.2 (shared secret), 4.2.8.2 (parameters) | TLS X25519/X448 caller MUST reject all-zero shared secret. RFC 7748 standalone primitive permits the check; do not convert its MAY into a universal primitive MUST. Malformed encoding/key-share length uses the caller contract. |
 | REQ-CRYPTO-SIGN-001 | FIPS 186-5 section 5 (RSA), section 6 (ECDSA) | Independent positive signatures plus wrong message/key, out-of-range r/s, malformed encoding and invalid key; identify exact hash, key parameters and encoding. RSA encoding needs its referenced PKCS #1 standard; FIPS 186-5 alone is not an encoded-signature vector corpus. |
 | REQ-CRYPTO-TLS-001 | RFC 8446 4.2.3, 4.2.8, 4.4.3, 5.2–5.3, 7.1 | Production handshake/record callers: negotiated supported group/signature/AEAD, transcript-bound CertificateVerify, key schedule and per-record nonce; reject unsupported negotiation, tampering and sequence exhaustion. Primitive KATs do not prove handshake correctness. |
 
@@ -44,4 +44,7 @@ See [supplemental sources](supplemental_sources.md) for SQLCipher, CBC, PBKDF2,
 HMAC-SHA512 and RSA source identities. RFC 8017 section 8.1.2 starts printed
 page 34 (signature length/range verification), section 9.1.2 page 44 (PSS encoded
 message verification). RFC 8446 section 4.2.8.2 starts page 51; it specifies
-ECDHE parameter handling. There is no section 7.4.2 in RFC 8446.
+ECDHE parameter handling. Section 7.4.2, printed page 96, specifies ECDH
+shared-secret calculations: fixed-width encoding without dropping leading zeros
+for the named NIST curves, and mandatory rejection of all-zero X25519/X448
+shared secrets in TLS.
