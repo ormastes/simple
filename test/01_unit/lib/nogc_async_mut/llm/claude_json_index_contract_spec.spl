@@ -1,0 +1,41 @@
+use std.spec
+use std.nogc_async_mut.llm.json_helpers.{_unwrap_idx, extract_json_string, extract_json_int, extract_json_bool, extract_nested_string}
+use std.nogc_async_mut.llm.claude_cli.{parse_claude_json_response, parse_claude_stream_line}
+use std.nogc_async_mut.mcp.helpers.{LB, RB}
+
+describe "NoGC async Claude JSON search offsets":
+    it "preserves zero positive and missing text offsets":
+        expect(_unwrap_idx(0)).to_equal(0)
+        expect(_unwrap_idx(7)).to_equal(7)
+        expect(_unwrap_idx(-1)).to_equal(-1)
+
+    it "extracts text at the start and after another field":
+        expect(extract_json_string("\"result\":\"hello\"", "result")).to_equal("hello")
+        expect(extract_json_string("\"other\":0,\"result\":\"hello\"", "result")).to_equal("hello")
+        expect(extract_json_string("\"other\":0", "result")).to_equal("")
+
+    it "extracts integer boolean and nested values with missing controls":
+        expect(extract_json_int("\"input_tokens\":42", "input_tokens")).to_equal(42)
+        expect(extract_json_int("\"other\":42", "input_tokens")).to_equal(0)
+        expect(extract_json_bool("\"is_error\":true", "is_error")).to_equal(true)
+        expect(extract_json_bool("\"other\":true", "is_error")).to_equal(false)
+        expect(extract_nested_string("\"message\":{\"model\":\"sonnet\"}", "message", "model")).to_equal("sonnet")
+        expect(extract_nested_string("\"other\":0", "message", "model")).to_equal("")
+
+    it "retains real library response fields without changing symbol names":
+        val response = parse_claude_json_response(LB() + "\"result\":\"hello\",\"model\":\"sonnet\",\"session_id\":\"session-1\",\"input_tokens\":42,\"output_tokens\":9,\"is_error\":false" + RB())
+        expect(response.content).to_equal("hello")
+        expect(response.model).to_equal("sonnet")
+        expect(response.session_id).to_equal("session-1")
+        expect(response.input_tokens).to_equal(42)
+        expect(response.output_tokens).to_equal(9)
+        expect(response.is_error).to_equal(false)
+
+    it "retains error and stream fields through the same search owner":
+        val response = parse_claude_json_response(LB() + "\"result\":\"denied\",\"is_error\":true" + RB())
+        expect(response.is_error).to_equal(true)
+        expect(response.error).to_equal("denied")
+        expect(response.stop_reason).to_equal("error")
+        val event = parse_claude_stream_line(LB() + "\"type\":\"content_block_delta\",\"text\":\"hello\"" + RB())
+        expect(event.event_type).to_equal("content_block_delta")
+        expect(event.content).to_equal("hello")
