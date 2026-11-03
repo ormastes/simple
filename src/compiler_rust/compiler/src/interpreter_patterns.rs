@@ -373,6 +373,21 @@ pub(crate) fn pattern_matches(
                         return Ok(true);
                     }
                 }
+                // A `T?` value holding a user enum is `Option::Some(<enum>)`. A
+                // variant pattern of that user enum (`Ev.Action(n)`) must look
+                // through the Some wrapper instead of falling to the wildcard
+                // (match_on_optional_enum_variant_falls_to_wildcard_2026-08-07).
+                if ve == "Option"
+                    && vv == "Some"
+                    && !matches!(variant.as_str(), "Some" | "None" | "Ok" | "Err")
+                    && !matches!(enum_name.as_str(), "Option" | "Result")
+                {
+                    if let Some(inner) = value_payload {
+                        if matches!(inner.as_ref(), Value::Enum { .. }) {
+                            return pattern_matches(pattern, inner.as_ref(), bindings, enums, classes);
+                        }
+                    }
+                }
             }
 
             // Positional class/struct pattern: `case ClassName(a, b, c)` where the value is
@@ -806,6 +821,26 @@ fn probe(v: i64?) -> i64:
 main = probe(Some(9)) - 9
 "#;
         assert_eq!(run(src), 0, "an explicit `Some(9)` must still destructure to 9");
+    }
+
+    #[test]
+    fn user_enum_variant_pattern_looks_through_option_some() {
+        let src = r#"
+enum Ev:
+    Action(name: text)
+    Other
+
+fn mk() -> Ev?:
+    return Ev.Action(name: "go")
+
+fn probe() -> i64:
+    match mk():
+        case Ev.Action(n): 1
+        case _: 0
+
+main = probe() - 1
+"#;
+        assert_eq!(run(src), 0, "`Ev.Action(n)` must match Option::Some(Ev.Action) from a `Ev?` fn");
     }
 
     #[test]
