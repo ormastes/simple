@@ -263,11 +263,11 @@ fn qemu_facade_preserves_exact_historical_public_surface_on_physical_owners() {
     let repo_root = repo_root_for_native_project_tests();
     let facade = std::fs::read_to_string(repo_root.join("src/os/qemu_runner.spl")).unwrap();
     let expected = [
-        ("os._QemuRunner.runner_targets.", "_MULTIARCH_RESULT_ROOT _OS_BUILD_DEFAULT_TIMEOUT_MS _OS_BUILD_DEFAULT_LOG_MODE _parse_timeout_ms _os_build_timeout_ms _normalize_os_log_mode _os_build_log_mode _os_build_backend_for_target default_os_build_backend_for_target _now_ms _result_arch_slug _result_arch_dir _smoke_result_path _smoke_serial_log_path _smoke_serial_sample_path _bootstrap_result_path _native_build_failure_log_path _json_bool _escape_json _status_text _loader_name_for_arch _backend_title_case _platform_name_for_arch _image_path_for_target _ensure_result_dir _smoke_result_body _bootstrap_result_body _write_smoke_result _write_bootstrap_result _write_native_build_failure_log _tail_lines native_build_prerequisite_hint _print_native_build_failure_hint is_qemu_success OsTarget QemuRunOptions qemu_run_options_default qemu_run_options_debug_gui qemu_run_options_headless _qemu_command_binary _lane_to_target catalog_os_target simpleos_platform_arch get_target get_qemu_target get_gui_target get_gpu_test_target get_tools_test_target get_fs_test_target get_browser_soft_target get_browser_probe_target get_desktop_browser_target get_desktop_gui_target get_ssh_live_target get_toolchain_vfs_probe_target get_ssh_x25519_probe_target get_desktop_probe_target get_wm_simple_web_check_target get_arm64_wm_qemu_target get_riscv64_ssh_live_target"),
+        ("os._QemuRunner.runner_targets.", "qemu_default_arch qemu_default_arch_from_facts_v1 _MULTIARCH_RESULT_ROOT _OS_BUILD_DEFAULT_TIMEOUT_MS _OS_BUILD_DEFAULT_LOG_MODE _parse_timeout_ms _os_build_timeout_ms _normalize_os_log_mode _os_build_log_mode _os_build_backend_for_target default_os_build_backend_for_target _now_ms _result_arch_slug _result_arch_dir _smoke_result_path _smoke_serial_log_path _smoke_serial_sample_path _bootstrap_result_path _native_build_failure_log_path _json_bool _escape_json _status_text _loader_name_for_arch _backend_title_case _platform_name_for_arch _image_path_for_target _ensure_result_dir _smoke_result_body _bootstrap_result_body _write_smoke_result _write_bootstrap_result _write_native_build_failure_log _tail_lines native_build_prerequisite_hint _print_native_build_failure_hint is_qemu_success OsTarget QemuRunOptions qemu_run_options_default qemu_run_options_debug_gui qemu_run_options_headless _qemu_command_binary _lane_to_target catalog_os_target simpleos_platform_arch get_target get_qemu_target get_gui_target get_gpu_test_target get_tools_test_target get_fs_test_target get_browser_soft_target get_browser_probe_target get_desktop_browser_target get_desktop_gui_target get_ssh_live_target get_toolchain_vfs_probe_target get_ssh_x25519_probe_target get_desktop_probe_target get_wm_simple_web_check_target get_arm64_wm_qemu_target get_riscv64_ssh_live_target"),
         ("os._QemuRunner.scenario_catalog.", "test_os run_all_architectures test_all_architectures QemuScenario scenario_lane_kind _acceptance_lane_scenario _scenario_from_target _arm_fs_exec_platform_name _riscv_fs_exec_platform_name _arm_fs_exec_scenario _riscv_fs_exec_target _riscv_fs_exec_scenario _desktop_disk_scenario_target _is_desktop_disk_scenario_name _desktop_disk_scenario_target_direct _desktop_scenario_timeout_ms _ensure_desktop_scenario_media scenario_rv64_base scenario_rv64_dtb_pci scenario_rv64_ssh scenario_rv64_x25519_probe scenario_x64_pci_lab scenario_x64_nvme scenario_x64_net_user scenario_x64_ssh scenario_x64_toolchain_vfs_probe scenario_x64_q35_pure_nvme_perf scenario_x64_gpu_2d scenario_x64_gui scenario_x64_gui_tablet scenario_x64_wm_input_test scenario_x64_wm_simple_web_check scenario_x64_nvme_fat32 scenario_arm64_virtio_fat32_smf scenario_arm64_wm_ramfb scenario_arm32_virtio_fat32_smf scenario_riscv64_virtio_fat32_smf scenario_riscv32_virtio_fat32_smf scenario_riscv64_hosted scenario_x64_full_stack scenario_x64_desktop_test arm_fs_exec_disk_image_path arm_fs_exec_kernel_bin_path _arm_virtio_blk_exec_disk_args riscv_fs_exec_disk_image_path _riscv_virtio_blk_exec_disk_args ovmf_code_candidates ovmf_code_path desktop_uefi_bootloader_candidates desktop_uefi_bootloader_path desktop_uefi_disk_image_path desktop_uefi_esp_dir_path desktop_uefi_boot_media_ready _x64_desktop_uefi_args scenario_x64_desktop_uefi get_all_scenarios get_scenario scenario_exists scenario_by_name_direct _arm_fs_exec_scenario_name _riscv_fs_exec_scenario_name"),
         ("os._QemuRunner.scenario_disks.", "_is_arm_fs_exec_scenario_name _is_arm_fs_exec_scenario _is_riscv_fs_exec_scenario_name _is_riscv_fs_exec_scenario _catalog_platform_name_for_scenario _catalog_lane_for_scenario _catalog_has_lane_for_scenario _catalog_lane_for_scenario_direct _ensure_catalog_scenario_media scenario_target get_arm64_fs_exec_target get_arm32_fs_exec_target get_riscv64_fs_exec_target get_riscv32_fs_exec_target get_riscv64_hosted_target get_riscv64_ssh_live_target get_riscv64_x25519_probe_target _desktop_release_version desktop_release_disk_image_path_in desktop_release_disk_image_path desktop_release_installer_iso_path_in desktop_release_installer_iso_path desktop_disk_image_candidates_in desktop_disk_image_candidates desktop_installer_iso_candidates_in desktop_installer_iso_candidates desktop_disk_image_path_in desktop_disk_image_path desktop_disk_make_script_args desktop_uefi_disk_make_script_args fs_test_disk_image_path _x64_nvme_fs_test_disk_args desktop_installer_iso_path_in desktop_installer_iso_path _x64_nvme_disk_args scenario_x64_desktop_disk scenario_x64_desktop_gui ensure_desktop_disk_image ensure_removable_disk_image desktop_uefi_disk_image_tool_app_validation_command _desktop_uefi_disk_image_has_required_tool_apps ensure_desktop_uefi_boot_image board_bundle_command _board_bundle_expected_artifact _board_bundle_output_path _board_qemu_linked_scenario_name board_lane_test_command ensure_board_bundle test_board_lane test_board ensure_fs_test_disk_image ensure_arm_fs_exec_disk_image"),
         ("os._QemuRunner.scenario_disks.", "_is_arm_fs_exec_scenario_name _is_arm_fs_exec_scenario _is_riscv_fs_exec_scenario_name _is_riscv_fs_exec_scenario _catalog_platform_name_for_scenario _catalog_lane_for_scenario _catalog_has_lane_for_scenario _catalog_lane_for_scenario_direct _ensure_catalog_scenario_media scenario_target get_arm64_fs_exec_target get_arm32_fs_exec_target get_riscv64_fs_exec_target get_riscv32_fs_exec_target get_riscv64_hosted_target get_riscv64_ssh_live_target get_riscv64_x25519_probe_target _desktop_release_version desktop_release_disk_image_path_in desktop_release_disk_image_path desktop_release_installer_iso_path_in desktop_release_installer_iso_path desktop_disk_image_candidates_in desktop_disk_image_candidates desktop_installer_iso_candidates_in desktop_installer_iso_candidates desktop_disk_image_path_in desktop_disk_image_path desktop_disk_make_script_args desktop_uefi_disk_make_script_args fs_test_disk_image_path _x64_nvme_fs_test_disk_args desktop_installer_iso_path_in desktop_installer_iso_path _x64_nvme_disk_args scenario_x64_desktop_disk scenario_x64_desktop_gui ensure_desktop_disk_image ensure_removable_disk_image desktop_uefi_disk_image_tool_app_validation_command _desktop_uefi_disk_image_has_required_tool_apps ensure_desktop_uefi_boot_image board_bundle_command _board_bundle_expected_artifact _board_bundle_output_path _board_qemu_linked_scenario_name board_lane_test_command ensure_board_bundle test_board_lane test_board ensure_fs_test_disk_image ensure_arm_fs_exec_disk_image"),
-        ("os._QemuRunner.scenario_exec.", "ensure_riscv_fs_exec_disk_image _fs_test_disk_image_has_required_fixtures _ensure_catalog_fs_exec_disk_image _catalog_fs_exec_disk_image_has_required_smf _staged_tool_app_smf_name _native_tool_version_path _native_tool_version_pattern _native_tool_pipeline_path _native_tool_pipeline_pattern _catalog_lane_disk_image_has_required_staged_apps _arm_fs_exec_disk_image_has_required_smf _riscv_fs_exec_disk_image_has_required_smf ensure_arm_fs_exec_kernel_binary scenario_kernel_path _desktop_disk_image_has_required_manifests build_scenario_command build_scenario_command_headless _build_scenario_command_impl build_scenario run_scenario run_scenario_headless _run_scenario_impl test_scenario scenario_qemu_exit_success arm64_wm_ramfb_serial_log_path arm_fs_exec_required_marker_fragments riscv64_hosted_required_marker_fragments arm64_wm_ramfb_required_marker_fragments _scenario_required_marker_fragments _scenario_uses_catalog_completion_contract _scenario_serial_accepts_completion _scenario_serial_accepts_completion_with_optional_protection fs_exec_lane_name_rejects_resident_fallback qemu_scenario_serial_acceptance_reason qemu_scenario_serial_accepts_completion _print_scenario_missing_markers qemu_protection_serial_reason qemu_protection_serial_accepts_hardening qemu_scenario_protection_board_id qemu_scenario_protection_serial_reason qemu_scenario_protection_serial_accepts_hardening scenario_test_timeout_ms ensure_scenario_media boot_disk_image_serial"),
+        ("os._QemuRunner.scenario_exec.", "run_scenario_sealed_v1 scenario_sealed_run_supported_v1 ensure_riscv_fs_exec_disk_image _fs_test_disk_image_has_required_fixtures _ensure_catalog_fs_exec_disk_image _catalog_fs_exec_disk_image_has_required_smf _staged_tool_app_smf_name _native_tool_version_path _native_tool_version_pattern _native_tool_pipeline_path _native_tool_pipeline_pattern _catalog_lane_disk_image_has_required_staged_apps _arm_fs_exec_disk_image_has_required_smf _riscv_fs_exec_disk_image_has_required_smf ensure_arm_fs_exec_kernel_binary scenario_kernel_path _desktop_disk_image_has_required_manifests build_scenario_command build_scenario_command_headless _build_scenario_command_impl build_scenario run_scenario run_scenario_headless _run_scenario_impl test_scenario scenario_qemu_exit_success arm64_wm_ramfb_serial_log_path arm_fs_exec_required_marker_fragments riscv64_hosted_required_marker_fragments arm64_wm_ramfb_required_marker_fragments _scenario_required_marker_fragments _scenario_uses_catalog_completion_contract _scenario_serial_accepts_completion _scenario_serial_accepts_completion_with_optional_protection fs_exec_lane_name_rejects_resident_fallback qemu_scenario_serial_acceptance_reason qemu_scenario_serial_accepts_completion _print_scenario_missing_markers qemu_protection_serial_reason qemu_protection_serial_accepts_hardening qemu_scenario_protection_board_id qemu_scenario_protection_serial_reason qemu_scenario_protection_serial_accepts_hardening scenario_test_timeout_ms ensure_scenario_media boot_disk_image_serial"),
     ];
     for (owner, historical_surface) in expected {
         assert_eq!(
@@ -511,10 +511,11 @@ fn pure_simple_lambda_inline_helper_has_both_callers() {
 fn folded_global_scalar_type_calls_keep_mir_lowering_receiver_ownership() {
     let dispatch = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl");
     assert!(dispatch.contains("fn folded_global_scalar_type(constant: MirConstant) -> MirType:"));
-    assert!(dispatch.contains("self.folded_global_scalar_type(constant)"));
-    assert!(dispatch.contains("self.folded_global_scalar_type(mir_const)"));
-    assert!(!dispatch.contains("= folded_global_scalar_type(constant)"));
-    assert!(!dispatch.contains("= folded_global_scalar_type(mir_const)"));
+    // The helper is module-level (8e84e2fa086): callers resolve it directly,
+    // and a `self.` call would look for a method that does not exist.
+    assert!(dispatch.contains("= folded_global_scalar_type(constant)"));
+    assert!(dispatch.contains("= folded_global_scalar_type(mir_const)"));
+    assert!(!dispatch.contains("self.folded_global_scalar_type("));
 }
 
 #[test]
@@ -2207,7 +2208,8 @@ fn test_incremental_cache_dir_custom() {
     let builder =
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
 
-    assert_eq!(builder.cache_dir().parent().unwrap(), PathBuf::from("/tmp/my_cache"));
+    // The cache root is extended-length-prefixed on Windows (`win_long_path`).
+    assert_eq!(builder.cache_dir().parent().unwrap(), win_long_path(Path::new("/tmp/my_cache")));
     assert!(builder
         .cache_dir()
         .file_name()
@@ -3083,7 +3085,14 @@ fn test_windows_gnu_target_flag_is_only_for_clang_drivers() {
     use simple_common::target::Target;
 
     let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
-    assert_eq!(target_c_compiler(target), "clang");
+    // Bootstrap publishes its admitted driver as CC (e.g. clang-cl on the
+    // Windows lane) and that authority wins; only without it is the fallback
+    // the Clang-only default.
+    let expected_driver = match std::env::var("CC") {
+        Ok(cc) if !cc.trim().is_empty() => simple_common::platform::path::to_native_owned(cc),
+        _ => "clang".to_string(),
+    };
+    assert_eq!(target_c_compiler(target), expected_driver);
     assert_eq!(
         windows_gnu_target_flag(target, "clang"),
         Some("--target=x86_64-w64-windows-gnu")
@@ -3607,7 +3616,7 @@ fn pure_simple_runtime_bundle_separates_memory_and_hosted_ownership() {
         );
         assert!(source.find(standalone_flag).unwrap() < source.find(dynload_flag).unwrap());
     }
-    assert!(source.contains("if include_dynload:\n                # Only the standalone core-C composition"));
+    assert!(source.contains("if include_dynload or core_c_profile:\n                # Only the standalone core-C composition"));
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -3960,7 +3969,10 @@ fn test_stage4_rust_runtime_selector_requires_staticlib() {
     );
     std::fs::remove_file(&staticlib).unwrap();
     let error = NativeProjectBuilder::stage4_rust_runtime_staticlib(temp.path()).unwrap_err();
-    assert!(error.contains(&staticlib.display().to_string()));
+    // The production message joins `deps/libsimple_runtime.a` verbatim, so on
+    // Windows it mixes separators; render the expected path the same way.
+    let reported = temp.path().join("deps/libsimple_runtime.a");
+    assert!(error.contains(&reported.display().to_string()), "{error}");
     assert!(error.contains("staticlib"));
 }
 
@@ -4704,11 +4716,17 @@ fn test_core_c_runtime_owns_tool_host_service_family() {
         "rt_array_max",
         "rt_array_sort",
         "max",
-        "f64.sqrt",
-        "f64.floor",
-        "f64.ceil",
     ] {
         assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
+    // ELF-spelling aliases; runtime_core_host_services.c compiles them out on _WIN32.
+    #[cfg(not(target_os = "windows"))]
+    for symbol in ["f64.sqrt", "f64.floor", "f64.ceil"] {
+        assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
+    #[cfg(target_os = "windows")]
+    for symbol in ["f64.sqrt", "f64.floor", "f64.ceil"] {
+        assert!(!symbols.contains(symbol), "`{symbol}` ELF alias must stay out of the Windows archive");
     }
 }
 
@@ -7068,6 +7086,8 @@ fn test_gcc_cpu_dispatch_symbols_are_not_stub_candidates() {
 /// `starts_with` silently false in every native-built binary on this host and
 /// left the Stage-3 admission planner rejecting its own valid
 /// `--bootstrap-reason`. These names must never be stub candidates.
+// glibc/POSIX libc names: Windows resolves its CRT through `is_windows_system_name`.
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn test_libc_names_are_not_stub_candidates() {
     for symbol in [
@@ -7217,6 +7237,7 @@ fn test_inline_asm_symbols_are_never_weak_stub_candidates() {
     assert!(!super::stubs::is_inline_asm_symbol("_app__main"));
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn test_versioned_termios_symbols_are_not_stub_candidates() {
     for symbol in [
