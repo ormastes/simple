@@ -3805,3 +3805,25 @@ fn module_scope_large_reclaim_preserves_session_and_promoted_roots() {
     assert!(bsm_p1_live(unrelated));
     super::rt_array_free(unrelated);
 }
+
+// ADR-005: `s[i]` index policy shared with the interpreter.
+#[test]
+fn string_index_checked_matches_interpreter_policy() {
+    use crate::value::collections::string_index_checked;
+    let s = rt_string_new("72é".as_ptr(), "72é".len() as u64);
+    let text_of = |v: RuntimeValue| {
+        let n = rt_string_len(v) as usize;
+        let p = rt_string_data(v);
+        String::from_utf8(unsafe { std::slice::from_raw_parts(p, n) }.to_vec()).unwrap()
+    };
+    assert_eq!(text_of(string_index_checked(s, 0).unwrap()), "7");
+    assert_eq!(text_of(string_index_checked(s, 2).unwrap()), "é");
+    assert_eq!(text_of(string_index_checked(s, -1).unwrap()), "é");
+    assert_eq!(text_of(string_index_checked(s, -3).unwrap()), "7");
+    // Out of range in code points, even though index 3 < byte length 4.
+    assert!(string_index_checked(s, 3).is_none());
+    assert!(string_index_checked(s, 99).is_none());
+    assert!(string_index_checked(s, -4).is_none());
+    let empty = rt_string_new("".as_ptr(), 0);
+    assert!(string_index_checked(empty, 0).is_none());
+}
