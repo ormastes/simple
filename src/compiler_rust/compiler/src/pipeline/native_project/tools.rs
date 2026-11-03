@@ -4901,7 +4901,9 @@ mod llvm_tool_policy_tests {
             .expect_err("a missing compiler must fail");
         assert!(error.contains("could not start"), "{error}");
         assert!(error.contains("runtime_native.c"), "{error}");
-        assert!(error.contains(missing.to_str().unwrap()), "{error}");
+        // The command is rendered with Debug formatting, which escapes Windows
+        // path separators; compare against the same rendering.
+        assert!(error.contains(&format!("{missing:?}")), "{error}");
     }
 
     #[cfg(unix)]
