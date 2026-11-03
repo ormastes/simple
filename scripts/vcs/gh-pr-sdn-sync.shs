@@ -1,0 +1,173 @@
+#!/bin/sh
+# gh-pr-sdn-sync.shs — make a GitHub PR mergeable when its only conflicts are in
+# sealed SDN row tables (bug_db.sdn, test_db.sdn, ...).
+#
+# WHY: github.com never runs custom merge drivers, so every PR that touches a
+# sealed `#sdn-crc32:` file shows DIRTY as soon as any other PR touching it
+# lands (line 1 is a whole-body checksum). This script does the merge GitHub
+# cannot: it merges origin/<base> into the PR head with the sdn-rows driver
+# (scripts/vcs/sdn-rows-merge.shs) active, verifies every sealed file at the
+# result, and pushes the merge commit to the PR branch (pre-push gates run;
+# never --no-verify).
+#
+# No worktree and no checkout: `git merge-tree --write-tree` merges in the
+# object store, the driver + attributes are injected with `git -c`, so the
+# repo's own config/.gitattributes need not carry them.
+#
+# FAIL-CLOSED: any conflict the driver could not resolve (a non-SDN file, or a
+# row edited on both sides with the same timestamp) stops with the list and
+# pushes nothing. A sealed file that does not verify after the merge stops too.
+#
+# Usage:
+#   sh scripts/vcs/gh-pr-sdn-sync.shs <pr> [--dry-run]
+#   sh scripts/vcs/gh-pr-sdn-sync.shs --all [--base <branch>] [--dry-run]
+#   sh scripts/vcs/gh-pr-sdn-sync.shs --selftest
+# Verdict is the last stdout line per PR:
+#   PASS — #<n> up to date | merged <base> -> <sha> pushed | ... (dry-run)   exit 0
+#   FAIL — #<n> <reason>                                                    exit 1
+#   ERROR — nothing was checked                                             exit 2
+# A GitHub Actions twin is deliberately not provided: the push must run this
+# repo's pre-push gates, which need a full clone and local tooling.
+
+set -u
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+DRIVER="$HERE/sdn-rows-merge.shs"
+SEALCHK="$HERE/../check/check-sdn-crc32-sealed.shs"
+REMOTE=${SDN_SYNC_REMOTE:-origin}
+DRY=0
+
+# git with the sdn-rows driver bound to every sealed SDN file of <rev>.
+# $1 = attributes file, rest = git args.
+sgit() {
+    _attrs=$(cygpath -m "$1" 2>/dev/null || echo "$1"); shift
+    git -c core.attributesFile="$_attrs" \
+        -c merge.sdn-rows.name="SDN row-union merge + reseal" \
+        -c merge.sdn-rows.driver="sh '$DRIVER' %O %A %B %P" "$@"
+}
+
+sealed_list() { # rev... -> sorted unique sealed SDN paths in any of them
+    for _r in "$@"; do
+        git grep -l '^#sdn-crc32:' "$_r" -- '*.sdn' 2>/dev/null | sed 's/^[^:]*://'
+    done | sort -u
+}
+
+# merge <head> <base> -> prints the merge tree on stdout line 1; on conflict
+# prints CONFLICT lines. rc 0 clean, 1 conflicts, 2 error.
+merge_sync() { # head base workdir -> sets M_TREE, M_CONFLICTS
+    _h=$1; _b=$2; _w=$3
+    sealed_list "$_h" "$_b" > "$_w/sealed.txt"
+    sed 's/$/ merge=sdn-rows/' "$_w/sealed.txt" > "$_w/attrs"
+    sgit "$_w/attrs" merge-tree --write-tree --name-only --no-messages "$_h" "$_b" > "$_w/mt.out" 2>"$_w/mt.err"
+    _rc=$?
+    M_TREE=$(head -1 "$_w/mt.out")
+    M_CONFLICTS=$(tail -n +2 "$_w/mt.out" | sed '/^$/d' | sort -u | tr '\n' ' ')
+    return $_rc
+}
+
+sync_pr() { # pr -> verdict
+    _pr=$1
+    _w=$(mktemp -d) || { echo "ERROR — nothing was checked"; return 2; }
+    _json=$(gh pr view "$_pr" --json headRefName,baseRefName,isCrossRepository,state 2>/dev/null) \
+        || { echo "ERROR — #$_pr: gh pr view failed"; rm -rf "$_w"; return 2; }
+    _head=$(printf '%s' "$_json" | sed -n 's/.*"headRefName":"\([^"]*\)".*/\1/p')
+    _base=$(printf '%s' "$_json" | sed -n 's/.*"baseRefName":"\([^"]*\)".*/\1/p')
+    case "$_json" in *'"isCrossRepository":true'*) echo "FAIL — #$_pr is from a fork; not pushing there"; rm -rf "$_w"; return 1 ;; esac
+    case "$_json" in *'"state":"OPEN"'*) ;; *) echo "FAIL — #$_pr is not open"; rm -rf "$_w"; return 1 ;; esac
+    [ -n "$_head" ] && [ -n "$_base" ] || { echo "ERROR — #$_pr: no head/base"; rm -rf "$_w"; return 2; }
+    git fetch -q "$REMOTE" "+refs/heads/$_base:refs/remotes/$REMOTE/$_base" "+refs/heads/$_head:refs/remotes/$REMOTE/$_head" \
+        || { echo "ERROR — #$_pr: fetch failed"; rm -rf "$_w"; return 2; }
+    _H=$(git rev-parse "refs/remotes/$REMOTE/$_head"); _B=$(git rev-parse "refs/remotes/$REMOTE/$_base")
+    if git merge-base --is-ancestor "$_B" "$_H"; then
+        echo "PASS — #$_pr up to date with $_base"; rm -rf "$_w"; return 0
+    fi
+    merge_sync "$_H" "$_B" "$_w"; _rc=$?
+    if [ $_rc -ne 0 ]; then
+        echo "FAIL — #$_pr conflicts the sdn-rows driver could not resolve: ${M_CONFLICTS:-$(head -3 "$_w/mt.err")}"
+        rm -rf "$_w"; return 1
+    fi
+    _msg="Merge $_base into $_head (sdn-rows: sealed SDN row union + reseal)"
+    _C=$(git commit-tree "$M_TREE" -p "$_H" -p "$_B" -m "$_msg") || { echo "ERROR — #$_pr: commit-tree failed"; rm -rf "$_w"; return 2; }
+    _v=$(sh "$SEALCHK" --rev "$_C" 2>/dev/null | tail -1)
+    case "$_v" in PASS*) ;; *) echo "FAIL — #$_pr seal check at $_C: $_v"; rm -rf "$_w"; return 1 ;; esac
+    # Anti-rewind: the merge must not change what the PR changes vs its base,
+    # other than sealed SDN files (whose rows are unioned).
+    git diff --name-only "$_B...$_H" | sort > "$_w/before"
+    git diff --name-only "$_B" "$_C" | sort > "$_w/after"
+    _extra=$(comm -13 "$_w/before" "$_w/after" | grep -vxF -f "$_w/sealed.txt" | tr '\n' ' ')
+    if [ -n "$_extra" ]; then
+        echo "FAIL — #$_pr merge result changes files outside the PR: $_extra"; rm -rf "$_w"; return 1
+    fi
+    if [ "$DRY" -eq 1 ]; then
+        echo "PASS — #$_pr merged $_base -> $_C, seals verified (dry-run, not pushed)"; rm -rf "$_w"; return 0
+    fi
+    _i=0
+    while [ $_i -lt 3 ]; do
+        _i=$((_i+1))
+        MUST_CHECK_PUSH_BUDGET_S=${MUST_CHECK_PUSH_BUDGET_S:-600} git push -q "$REMOTE" "$_C:refs/heads/$_head" >"$_w/push.log" 2>&1 && break
+    done
+    if [ "$(git ls-remote "$REMOTE" "refs/heads/$_head" | cut -f1)" != "$_C" ]; then
+        echo "FAIL — #$_pr push rejected: $(tail -3 "$_w/push.log" | tr '\n' ' ')"; rm -rf "$_w"; return 1
+    fi
+    echo "PASS — #$_pr merged $_base -> $_C pushed to $_head, seals verified"
+    rm -rf "$_w"; return 0
+}
+
+selftest() {
+    _t=$(mktemp -d) || return 1
+    _fails=0; _n=0
+    _g="$_t/r"
+    mkdir -p "$_g" && cd "$_g" && git init -q . || return 1; _g=$(pwd -W 2>/dev/null || pwd)
+    git config core.autocrlf false; git config user.name t; git config user.email t@t
+    H='bugs |id, status, updated_at|'
+    seal() { sh "$HERE/../check/reseal-sdn-crc32.shs" --no-selftest "$1" >/dev/null; }
+    printf '#sdn-crc32:0\n%s\n    a, open, 2026-11-01\n' "$H" > db.sdn; seal db.sdn
+    printf 'x\n' > f.txt; git add db.sdn f.txt; git commit -qm base; _O=$(git rev-parse HEAD)
+    printf '#sdn-crc32:0\n%s\n    a, open, 2026-11-01\n    b, open, 2026-11-02\n' "$H" > db.sdn; seal db.sdn
+    git commit -qam main; _M=$(git rev-parse HEAD)
+    git checkout -q -b pr "$_O"
+    printf '#sdn-crc32:0\n%s\n    a, open, 2026-11-01\n    c, open, 2026-11-02\n' "$H" > db.sdn; seal db.sdn
+    printf 'y\n' > g.txt; git add g.txt; git commit -qam pr; _P=$(git rev-parse HEAD)
+
+    # 1 SDN-only conflict -> clean merge tree, both rows, seal verifies
+    _n=$((_n+1)); mkdir "$_t/w1"
+    if merge_sync "$_P" "$_M" "$_t/w1"; then
+        _C=$(git commit-tree "$M_TREE" -p "$_P" -p "$_M" -m m)
+        _v=$(sh "$SEALCHK" --rev "$_C" --root "$_g" 2>/dev/null | tail -1)
+        git show "$_C:db.sdn" | grep -q '^    b,' && git show "$_C:db.sdn" | grep -q '^    c,' \
+            && case "$_v" in PASS*) true ;; *) false ;; esac \
+            || { echo "selftest FAIL: sdn-only merge rows/seal ($_v)"; _fails=$((_fails+1)); }
+    else echo "selftest FAIL: sdn-only conflict not resolved ($M_CONFLICTS)"; _fails=$((_fails+1)); fi
+
+    # 2 a non-SDN conflict -> rc 1 and the file is named
+    _n=$((_n+1)); mkdir "$_t/w2"
+    git checkout -q -b pr2 "$_O"; printf 'z\n' > f.txt; git commit -qam pr2; _P2=$(git rev-parse HEAD)
+    git checkout -q -b main2 "$_M"; printf 'w\n' > f.txt; git commit -qam main2; _M2=$(git rev-parse HEAD)
+    if merge_sync "$_P2" "$_M2" "$_t/w2"; then echo "selftest FAIL: text conflict passed"; _fails=$((_fails+1))
+    else case " $M_CONFLICTS" in *" f.txt "*) ;; *) echo "selftest FAIL: conflict list ($M_CONFLICTS)"; _fails=$((_fails+1)) ;; esac; fi
+
+    cd / && rm -rf "$_t"
+    if [ $_fails -ne 0 ]; then echo "FAIL — $_fails of $_n selftest fixture(s) failed"; return 1; fi
+    echo "PASS — $_n selftest fixture(s) passed"
+}
+
+MODE=""; BASE_FILTER=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest; exit $? ;;
+        --dry-run) DRY=1 ;;
+        --all) MODE=all ;;
+        --base) BASE_FILTER=$2; shift ;;
+        -h|--help) sed -n '2,30p' "$0"; exit 2 ;;
+        *) MODE=$1 ;;
+    esac
+    shift
+done
+[ -n "$MODE" ] || { echo "ERROR — nothing was checked (no PR given)"; exit 2; }
+if [ "$MODE" != all ]; then sync_pr "$MODE"; exit $?; fi
+_list=$(gh pr list --state open --limit 200 ${BASE_FILTER:+--base "$BASE_FILTER"} --json number --jq '.[].number' | sort -n)
+[ -n "$_list" ] || { echo "ERROR — nothing was checked (no open PRs)"; exit 2; }
+_bad=0
+for _p in $_list; do sync_pr "$_p" || _bad=$((_bad+1)); done
+[ $_bad -eq 0 ] || exit 1
+exit 0
