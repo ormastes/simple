@@ -69,7 +69,7 @@ function client(env = {}) {
   let sequence = 0;
   return {
     child,
-    async request(method, params = {}, timeout = 5000) {
+    async request(method, params = {}, timeout = 5000, expectedErrorCode) {
       const id = ++sequence;
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
       await until(() => error || exited || responses.has(id), timeout, `${method} timed out; ${stderr}`);
@@ -77,6 +77,12 @@ function client(env = {}) {
       assert(responses.has(id), `${method} exited before responding; ${stderr}`);
       const response = responses.get(id);
       assert.equal(response.jsonrpc, '2.0');
+      assert.equal(response.id, id);
+      if (expectedErrorCode !== undefined) {
+        assert.equal(response.result, undefined, JSON.stringify(response));
+        assert.equal(response.error?.code, expectedErrorCode, JSON.stringify(response));
+        return response.error;
+      }
       assert.equal(response.error, undefined, JSON.stringify(response));
       return response.result;
     },
@@ -123,16 +129,18 @@ async function run() {
   // Real diagnostics handler -> bounded native owner -> delegate + descendant.
   // Node interprets cwd/check as its script when invoked with ["check", file].
   const pidFile = path.join(directory, 'descendant.pid');
+  const queryPidFile = path.join(directory, 'query.pid');
   fs.writeFileSync(path.join(directory, 'check'), `
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'inherit', windowsHide: true });
 fs.writeFileSync(process.env.LSP_TEST_PID_FILE, String(child.pid));
+console.log('fixture.spl:2:3: warning: partial diagnostic');
 setInterval(() => {}, 1000);
 `);
-  const diagnostic = client({ SIMPLE_BINARY: process.execPath, SIMPLE_LSP_ENABLE_DIAGNOSTICS: '1', LSP_TEST_PID_FILE: pidFile });
+  const diagnostic = client({ SIMPLE_BINARY: process.execPath, SIMPLE_LSP_ENABLE_DIAGNOSTICS: '1', LSP_TEST_PID_FILE: pidFile, LSP_TEST_QUERY_PID_FILE: queryPidFile });
   await initialize(diagnostic);
-  const response = diagnostic.request('tools/call', { name: 'lsp_diagnostics', arguments: { file: 'fixture.spl' } }, 20000);
+  const response = diagnostic.request('tools/call', { name: 'lsp_diagnostics', arguments: { file: 'fixture.spl' } }, 20000, -32001);
   // Attach immediately so early request failures do not become unhandled rejections.
   response.catch(() => {});
   await until(() => fs.existsSync(pidFile), 5000, 'diagnostics never launched the delegate fixture');
@@ -141,10 +149,39 @@ setInterval(() => {}, 1000);
   descendants.add(pid);
   assert.equal(live(pid), true, 'fixture descendant was never live');
   const result = await response;
-  assert.match(JSON.stringify(result), /timeout|timed out/i, 'diagnostics must retain timeout failure output');
+  assert.equal(result.message, 'lsp request timed out after 10000 ms');
+  assert.equal(JSON.stringify(result).includes('partial diagnostic'), false);
   await until(() => !live(pid), 3000, `diagnostics leaked owned descendant ${pid}`);
   descendants.delete(pid);
   await diagnostic.request('ping');
+
+  // Each file-only/visibility dispatch must preserve the bounded owner's error.
+  // These are real child deadlines; no marker injection into the server.
+  const queryPath = path.join(directory, 'src', 'app', 'cli', 'query_visibility.spl');
+  const samlPath = path.join(directory, 'src', 'app', 'saml', 'main.spl');
+  fs.mkdirSync(path.dirname(queryPath), { recursive: true });
+  fs.mkdirSync(path.dirname(samlPath), { recursive: true });
+  const hangingQuery = "require('node:fs').writeFileSync(process.env.LSP_TEST_QUERY_PID_FILE, String(process.pid)); console.log('partial query'); setInterval(() => {}, 1000);\n";
+  fs.writeFileSync(queryPath, hangingQuery);
+  fs.writeFileSync(samlPath, hangingQuery);
+  for (const name of ['lsp_visibility', 'lsp_symbols', 'saml_analyze']) {
+    const queryResponse = diagnostic.request('tools/call', {
+      name, arguments: { file: 'fixture.spl', requester: 'fixture.spl:1' },
+    }, 40000, -32001);
+    queryResponse.catch(() => {});
+    await until(() => fs.existsSync(queryPidFile), 5000, `${name} never launched the query fixture`);
+    const queryPid = Number(fs.readFileSync(queryPidFile, 'utf8'));
+    assert(Number.isSafeInteger(queryPid) && queryPid > 0, 'invalid tracked query PID');
+    descendants.add(queryPid);
+    assert.equal(live(queryPid), true, 'fixture query was never live');
+    const error = await queryResponse;
+    assert.equal(error.message, 'lsp request timed out after 30000 ms');
+    await until(() => !live(queryPid), 3000, `${name} leaked owned query ${queryPid}`);
+    descendants.delete(queryPid);
+    fs.unlinkSync(queryPidFile);
+    await diagnostic.request('ping');
+    passed++;
+  }
   await diagnostic.close();
   passed++;
   console.log(`PASS: ${passed} native lifecycle/cleanup cases`);
