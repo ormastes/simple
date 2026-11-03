@@ -25,3 +25,12 @@ Provenance mapping and landing status: Workaround provenance: dbe243b1075b1d130e
 Exact qualified/failing source attribution: Affected tracker ARM object source f7fdafdea3b251b4fa6f84b7203bd319cce8bc6c includes f81ddc644cb9a49b84fe40fd6fdc1b287b830652; snapshot behavioral fixture pending.
 
 Traceability annotation base: `64b8854eaa6eee9470470ddbcef5fa2165902d13`. No earlier source or retained build evidence was modified; native qualifications remain bound to their exact sources above.
+
+**2026-11-03 (sonB): fix-implemented-verification-pending (PR #6030).** Same owner as
+optional_array_ifval_type_and_nil_constant_2026_10_12: the ExistsCheck absent arm in
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (~6707) now emits a raw int
+word + `emit_copy` for pointer-slot result types (Array/Slice/Ptr/Ref/Struct/Dict)
+instead of an `Int(3)` const typed as a pointer (`add ptr 3`). The if-val workaround
+at tracker.spl:138 is KEPT. Verify on stage3: run
+`test/01_unit/compiler/mir/optional_array_ifval_payload_spec.spl`, then llc-verify the
+tracker_finalize_snapshot fixture; only then restore the original if-val form.
