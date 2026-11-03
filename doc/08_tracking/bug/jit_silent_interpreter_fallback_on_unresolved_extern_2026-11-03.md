@@ -40,3 +40,19 @@ specs with strict on in CI.
 plus `[engine-demotion]` lines, then correct output (len=20). Under `SIMPLE_JIT_STRICT=1` it prints
 `error: ... SIMPLE_JIT_STRICT: unresolved external symbol 'crypto_text_to_bytes' ... refusing to fall back`
 (non-zero exit). Diagnostic needs no new code; residual gaps (backing the externs) remain open.
+
+## Fix 2026-11-03 (fix-implemented-verification-pending)
+- `rt_text_eq_any`: added a `#[no_mangle] extern "C"` Rust twin of the C
+  `runtime_native.c` function in `src/compiler_rust/runtime/src/value/collections.rs`
+  (next to `rt_text_cmp_any`). The JIT symbol provider resolves `#[no_mangle]`
+  runtime symbols, so the import now resolves. Cargo unit test
+  `text_eq_any_tests` covers content, empty, nil and non-text words.
+- Spec: `test/01_unit/app/cli/jit_text_eq_any_resolves_spec.spl` (runs under
+  `SIMPLE_JIT_STRICT=1`; needs a seed rebuilt with this change).
+- `crypto_text_to_bytes`: NOT a missing backing. It is an ordinary Simple fn in
+  `src/lib/common/crypto/types.spl` (body calls `rt_text_to_bytes`), imported by
+  `sha1.spl` etc. A JIT-compiled module that calls a Simple function defined in
+  ANOTHER module sees it as an undeclared `Linkage::Import` with no provider, so
+  the guard (correctly) drops the module. This is the cross-module Simple-call
+  limitation of per-module JIT, not a crypto defect; fixing it needs imported
+  Simple fns to be compiled/linked into the JIT module. Remains open.

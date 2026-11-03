@@ -5224,6 +5224,61 @@ pub extern "C" fn rt_text_cmp_any(string1: RuntimeValue, string2: RuntimeValue) 
     }
 }
 
+/// JIT-resolvable backing for `rt_text_eq_any` (bug
+/// jit_silent_interpreter_fallback_on_unresolved_extern_2026_11_03).
+/// MIR lowering emits this for text `==`/`!=`; before this existed the JIT
+/// had no symbol for it and dropped the whole module to the interpreter.
+/// Rust twin of runtime_native.c `rt_text_eq_any`: nil sentinel aware, tagged
+/// strings compared by content, a raw aligned C-string pointer is accepted
+/// (`rt_interp_cstr` semantics). Any other word (int/float/special) is never
+/// equal to text. Returns 1 if equal, else 0.
+#[no_mangle]
+pub extern "C" fn rt_text_eq_any(left: RuntimeValue, right: RuntimeValue) -> i64 {
+    if left.is_nil() || right.is_nil() {
+        return i64::from(left.to_raw() == right.to_raw());
+    }
+    unsafe fn bytes_of<'a>(v: RuntimeValue) -> Option<&'a [u8]> {
+        let len = rt_string_len(v);
+        if len >= 0 {
+            let data = rt_string_data(v);
+            if data.is_null() {
+                return None;
+            }
+            return Some(std::slice::from_raw_parts(data, len as usize));
+        }
+        let raw = v.to_raw();
+        if raw & 0x7 != 0 || raw < 0x10000 {
+            return None;
+        }
+        Some(std::ffi::CStr::from_ptr(raw as usize as *const std::ffi::c_char).to_bytes())
+    }
+    unsafe {
+        match (bytes_of(left), bytes_of(right)) {
+            (Some(a), Some(b)) => i64::from(a == b),
+            _ => 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod text_eq_any_tests {
+    use super::*;
+
+    fn s(t: &str) -> RuntimeValue {
+        rt_string_new(t.as_ptr(), t.len() as u64)
+    }
+
+    #[test]
+    fn compares_content_nil_and_non_text() {
+        assert_eq!(rt_text_eq_any(s("abc"), s("abc")), 1);
+        assert_eq!(rt_text_eq_any(s("abc"), s("abd")), 0);
+        assert_eq!(rt_text_eq_any(s(""), s("")), 1);
+        assert_eq!(rt_text_eq_any(RuntimeValue::NIL, RuntimeValue::NIL), 1);
+        assert_eq!(rt_text_eq_any(s("abc"), RuntimeValue::NIL), 0);
+        assert_eq!(rt_text_eq_any(s("abc"), RuntimeValue::from_int(5)), 0);
+    }
+}
+
 /// Get a single character from a string at the given index.
 /// Returns the character as a new single-character string (RuntimeValue).
 /// Returns nil (TAG_SPECIAL 3) if index is out of bounds.
