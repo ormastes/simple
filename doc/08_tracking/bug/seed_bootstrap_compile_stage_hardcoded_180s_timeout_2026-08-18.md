@@ -61,3 +61,7 @@ path passes `--source src/app` only and relies on `--entry-closure` to pull in
 closure expansion under-discovers, the seed path would both under-build and spend
 its whole budget in import-graph loading. Stated as a hypothesis; the
 source-closure discovery code was deliberately **not** edited by this lane.
+
+## Triage 2026-11-03 (boot-script-fixes lane)
+
+Deferred: the literal lives in the Rust seed (src/compiler_rust/driver/.../misc_commands.rs compile_stage), outside the script/cli scope of this lane, and the fix is only provable by a full seed Stage 1 run. Still open.

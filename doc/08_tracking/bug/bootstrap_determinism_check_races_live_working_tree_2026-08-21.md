@@ -158,3 +158,7 @@ Steps 1 and 2 landed in `src/compiler_rust/driver/src/cli/commands/misc_commands
   removal precondition (one VERIFIED run on a pinned snapshot). Step 3 of this record — the actual
   re-run — is still outstanding; a bootstrap was in flight and was not disturbed.
 
+
+## Triage 2026-11-03 (boot-script-fixes lane)
+
+Deferred: the stage-compare logic is in the Rust seed handle_bootstrap (misc_commands.rs), outside this lane scope; fix needs a source snapshot per stage and a seed build to verify. Still open.

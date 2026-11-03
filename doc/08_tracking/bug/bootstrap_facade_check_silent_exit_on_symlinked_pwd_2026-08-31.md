@@ -41,3 +41,7 @@ Either canonicalize both sides with `pwd -P` before comparing, or emit a
 typed error line (`bootstrap-policy-error: facade-path-alias-mismatch ...`)
 before returning, per the repo's fail-with-verdict convention.
 
+
+## Triage 2026-11-03 (boot-script-fixes lane)
+
+Already fixed on origin: scripts/check/lib/bootstrap-stage3-provenance.shs:31-33 now prints a typed message naming the non-canonical facade path and the physical-path remedy before returning 1. Row closed fixed.

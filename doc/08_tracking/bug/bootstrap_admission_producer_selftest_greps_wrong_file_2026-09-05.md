@@ -50,3 +50,7 @@ mutation (drop `--entry-closure` from the producer) going FAIL.
 Observed on macOS arm64, HEAD `7c292922592`, while running the adhoc
 bootstrap chain (stage2 trust root -> admission producer -> stage4 relink).
 
+
+## Triage 2026-11-03 (boot-script-fixes lane)
+
+Already fixed on origin: scripts/check/check-bootstrap-planner-admission-producer.shs:35 now sets producer to produce-bootstrap-planner-admission-v2.shs, the file holding the entry-closure strings. Row closed fixed.
