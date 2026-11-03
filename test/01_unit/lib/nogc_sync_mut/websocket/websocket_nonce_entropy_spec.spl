@@ -1,0 +1,33 @@
+# RFC 6455 section 4.1: a fresh, randomly selected 16-byte nonce, Base64 encoded.
+# https://www.rfc-editor.org/rfc/rfc6455.html#section-4.1
+# Source-only candidate: runtime RED/GREEN and provider-failure no-send UNRUN.
+use std.spec
+use std.nogc_sync_mut.websocket.handshake.{websocket_key_from_entropy, generate_websocket_key}
+
+describe "WebSocket handshake nonce entropy boundary":
+    it "encodes all sixteen binary octets without a UTF-8 text round trip":
+        val bytes: [u8] = [0u8, 127u8, 128u8, 255u8, 0u8, 127u8, 128u8, 255u8, 0u8, 127u8, 128u8, 255u8, 0u8, 127u8, 128u8, 255u8]
+        expect(websocket_key_from_entropy(Ok(bytes)).unwrap()).to_equal("AH+A/wB/gP8Af4D/AH+A/w==")
+
+    it "propagates entropy failure instead of constructing a nonce":
+        val result = websocket_key_from_entropy(Err("entropy unavailable"))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("entropy unavailable")
+
+    it "rejects empty short and oversized entropy results":
+        var bytes: [u8] = []
+        expect(websocket_key_from_entropy(Ok(bytes)).is_err()).to_equal(true)
+        for i in 0..15:
+            bytes.push(0u8)
+        expect(websocket_key_from_entropy(Ok(bytes)).is_err()).to_equal(true)
+        bytes.push(0u8)
+        expect(websocket_key_from_entropy(Ok(bytes)).unwrap()).to_equal("AAAAAAAAAAAAAAAAAAAAAA==")
+        bytes.push(0u8)
+        expect(websocket_key_from_entropy(Ok(bytes)).is_err()).to_equal(true)
+
+    it "uses the production entropy owner for a complete handshake nonce":
+        val result = generate_websocket_key()
+        expect(result.is_ok()).to_equal(true)
+        val key = result.unwrap()
+        expect(key.length()).to_equal(24)
+        expect(key.ends_with("==")).to_equal(true)
