@@ -360,6 +360,12 @@ own merge-tree + CRC + rt-delta checks. Details:
   same timestamp + different content exits 1 with standard markers (fail-closed);
   a clone without the config gets a plain text merge. Selftest:
   `sh scripts/vcs/sdn-rows-merge.shs --selftest` (row `local-sdn-rows-merge-selftest`).
+  **GitHub never runs merge drivers**, so on github.com such PRs still show
+  DIRTY: run `sh scripts/vcs/gh-pr-sdn-sync.shs <pr>` (or `--all --base <b>`).
+  It merges the base into the PR head in the object store (`git merge-tree`)
+  with the driver injected via `git -c`, verifies every seal, refuses any
+  non-SDN conflict or out-of-scope file change, and pushes the merge commit
+  to the PR branch through the normal pre-push gates.
 - **`push-rt-dual-implementation` is a DELTA vs the commit the push replaces**
   (`--baseline-rev`); frozen-baseline drift is printed as information. The
   frozen comparison blocked 15 unrelated pushes in one day once main was red.

@@ -194,6 +194,13 @@ row_merge() { # base ours theirs -> writes merged rows to stdout; rc 0 clean, 1 
 
 merge_files() { # base ours theirs [path] -> rewrites ours; rc 0 clean, 1 conflict
     _o=$1; _a=$2; _b=$3
+    # CRLF (core.autocrlf / Windows editors) would end up inside the last
+    # column and the CRC body; normalise every input to LF, and write LF.
+    for _f in "$_o" "$_a" "$_b"; do
+        if grep -q "$(printf '\r')" "$_f" 2>/dev/null; then
+            tr -d '\r' < "$_f" > "$_f.lf.$$" && mv "$_f.lf.$$" "$_f"
+        fi
+    done
     if ! is_sealed_sdn "$_o" || ! is_sealed_sdn "$_a" || ! is_sealed_sdn "$_b"; then
         text_merge "$_o" "$_a" "$_b"; return $?
     fi
@@ -203,7 +210,7 @@ merge_files() { # base ours theirs [path] -> rewrites ours; rc 0 clean, 1 confli
     _rc=$?
     case $_rc in
         0) mv "$_tmp" "$_a" || return 1
-           sh "$RESEAL" "$_a" >/dev/null || return 1
+           sh "$RESEAL" --no-selftest "$_a" >/dev/null || return 1
            return 0 ;;
         1) mv "$_tmp" "$_a" || return 1
            echo "sdn-rows-merge: ${4:-$_a}: unresolvable row conflict (same id, same timestamp); markers left" >&2
@@ -220,7 +227,7 @@ selftest() {
     H='bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|'
     L='bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|'
     mk() { # name, body (printf %b) -> sealed file
-        printf '#sdn-crc32:0\n%b' "$2" > "$_t/$1"; sh "$RESEAL" "$_t/$1" >/dev/null
+        printf '#sdn-crc32:0\n%b' "$2" > "$_t/$1"; sh "$RESEAL" --no-selftest "$_t/$1" >/dev/null
     }
     r() { echo "    $1, P2, $2, t, f, 0, -, 2026-11-01, $3, true"; }
     base="$H\n$(r a open 2026-11-01)\n$(r b open 2026-11-01)\n\n$L\n    a, claimed, s1, 2026-11-01, 2026-11-01, open, x\n"
@@ -233,7 +240,7 @@ selftest() {
     merge_files "$_t/o1" "$_t/a1" "$_t/b1" x 2>/dev/null; _rc=$?
     if [ $_rc -ne 0 ] || ! grep -q '^    c, P2' "$_t/a1" || ! grep -q '^    d, P2' "$_t/a1" \
         || ! grep -q 's2, 2026' "$_t/a1" || ! grep -q 's3, 2026' "$_t/a1" \
-        || ! sh "$RESEAL" "$_t/a1" | tail -1 | grep -q ' already sealed, '; then
+        || ! sh "$RESEAL" --no-selftest "$_t/a1" | tail -1 | grep -q ' already sealed, '; then
         echo "selftest FAIL: disjoint rows (rc=$_rc)"; _fails=$((_fails+1))
     fi
 
@@ -284,6 +291,18 @@ selftest() {
     merge_files "$_t/o6" "$_t/a6" "$_t/b6" x 2>/dev/null; _rc=$?
     if [ $_rc -ne 0 ] || [ "$(cat "$_t/a6")" != "$(printf 'z\nx\ny')" ]; then
         echo "selftest FAIL: text-merge fallback (rc=$_rc)"; _fails=$((_fails+1))
+    fi
+
+    # 7 CRLF inputs merge like LF ones, result is LF and its seal matches the LF body
+    _n=$((_n+1))
+    mk o7 "$base"
+    mk a7 "$H\n$(r a open 2026-11-01)\n$(r b open 2026-11-01)\n$(r c open 2026-11-02)\n\n$L\n    a, claimed, s1, 2026-11-01, 2026-11-01, open, x\n"
+    mk b7 "$H\n$(r a open 2026-11-01)\n$(r b open 2026-11-01)\n$(r d open 2026-11-02)\n\n$L\n    a, claimed, s1, 2026-11-01, 2026-11-01, open, x\n"
+    for _x in o7 a7 b7; do sed 's/$/\r/' "$_t/$_x" > "$_t/$_x.c" && mv "$_t/$_x.c" "$_t/$_x"; done
+    merge_files "$_t/o7" "$_t/a7" "$_t/b7" x 2>/dev/null; _rc=$?
+    if [ $_rc -ne 0 ] || grep -q "$(printf '\r')" "$_t/a7" || ! grep -q '^    c, P2' "$_t/a7" || ! grep -q '^    d, P2' "$_t/a7" \
+        || ! sh "$RESEAL" --no-selftest "$_t/a7" | tail -1 | grep -q ' already sealed, '; then
+        echo "selftest FAIL: CRLF inputs (rc=$_rc)"; _fails=$((_fails+1))
     fi
 
     rm -rf "$_t"
