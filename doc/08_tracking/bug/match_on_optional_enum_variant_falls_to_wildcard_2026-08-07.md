@@ -1,6 +1,6 @@
 # `match` on an `Option<enum>` value falls through to the wildcard arm
 
-Status: OPEN (P1)
+Status: FIXED in seed (2026-11-03, work/enum-registry-fixes): interpreter_patterns.rs looks through Option::Some for user-enum variant patterns; unit test user_enum_variant_pattern_looks_through_option_some. Verification-pending on deployed seed binary (repro: SIMPLE_EXECUTION_MODE=interpreter run a fn returning Ev? matched with Ev.Action(n)).
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## RE-ATTRIBUTION (2026-08-17) — this is an INTERPRETER defect, not a MIR one

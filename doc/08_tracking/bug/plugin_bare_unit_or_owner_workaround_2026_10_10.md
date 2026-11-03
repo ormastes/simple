@@ -88,3 +88,5 @@ The original d7 epoch still reports ten CUDA OR-binding fatals (five comparison 
 Tagged follow-up commits: CUDA `d3549ae48e83aa94a32721a090d81d9874e41a11`; VHDL `75940e190b7dd2eea1d3cc0b08147ffa9918e979`. Only proven declared unit alternatives are qualified; body guards and genuine binder rejection stay unchanged. Both new source changes are UNEXECUTED; underlying bug remains OPEN. No object or native PASS is claimed. Qualified bug-DB tool reconciliation remains pending because a full pure-Simple CLI is not built.
 
 **Revalidated 2026-11-02: still plausible because the report title (Plugin bare unit OR alternatives lose enum owner) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+**Verified 2026-11-03 (dfix lane):** compiler repair already landed (2fa065e682f, 9a53a0bfdd2, test f55d4e3a213). `test/unit/compiler/hir/bare_enum_unit_pattern_spec.spl` under the seed: 3 examples, 0 failures ("retains the subject owner on every bare unit OR alternative"). Plugin source workaround tag may be retired once a stage3 producer rebuilds the six plugin files.
