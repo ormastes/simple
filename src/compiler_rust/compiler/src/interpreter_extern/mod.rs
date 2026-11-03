@@ -1425,6 +1425,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ed25519_verify", signatures::rt_ed25519_verify);
     insert_simple!("rt_ed25519_verify_checked", signatures::rt_ed25519_verify_checked);
     insert_simple!("rt_entropy_hardware_ready", random::rt_entropy_hardware_ready_fn);
+    insert_simple!("rt_entropy_fill", random::rt_entropy_fill_fn);
     insert_simple!("rt_env_all", system::rt_env_all);
     insert_simple!("rt_env_vars", system::rt_env_all);
     insert_simple!("rt_env_cwd", system::rt_env_cwd);

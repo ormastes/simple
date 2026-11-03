@@ -20,3 +20,15 @@ case per spec is `unknown extern function: rt_entropy_fill`: the extern is
 declared in `entropy_platform.spl` / `rsa_pkcs1.spl` but has no runtime
 definition anywhere under `src/` — a runtime backing gap, not a websocket bug.
 Close once `rt_entropy_fill` is backed and both specs are green.
+
+## Resolution 2026-11-04
+
+`rt_entropy_fill` is now backed in all three lanes, with the ABI changed to
+`rt_entropy_fill(count: u64) -> [u8]?` (fresh array, nil on failure). The
+seed interpreter's arrays are immutable `Arc` values, so an in-place fill
+could never work there. The lanes: C (`runtime_native.c`, delegating to
+`rt_random_bytes_c`: BCryptGenRandom / `/dev/urandom`), the Rust runtime
+(`sffi/random.rs`), and the interpreter (`interpreter_extern/random.rs`, OsRng).
+Each fails closed and has a 1 MiB cap. Verified on a test-only seed build:
+`entropy_platform_spec` 5/5, `websocket_mask_entropy_spec` 12/12,
+`websocket_nonce_entropy_spec` 4/4.

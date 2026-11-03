@@ -189,9 +189,59 @@ pub fn rt_entropy_hardware_ready_fn(_args: &[Value]) -> Result<Value, CompileErr
     Ok(Value::Int(0))
 }
 
+/// rt_entropy_fill - Return `count` fresh OS CSPRNG bytes, or nil on failure.
+///
+/// Fails closed: a provider error or an out-of-range request yields nil, never
+/// a zero-filled buffer. Mirrors the C lane `rt_entropy_fill` in
+/// `src/runtime/runtime_native.c` and the Rust runtime lane in `sffi/random.rs`.
+pub fn rt_entropy_fill_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let count = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_entropy_fill expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+    Ok(entropy_fill_with(count, |dest| rand::rngs::OsRng.try_fill_bytes(dest)))
+}
+
+fn entropy_fill_with<F, E>(count: i64, fill: F) -> Value
+where
+    F: FnOnce(&mut [u8]) -> Result<(), E>,
+{
+    const MAX: i64 = 1 << 20;
+    if !(0..=MAX).contains(&count) {
+        return Value::Nil;
+    }
+    let mut bytes = vec![0u8; count as usize];
+    if !bytes.is_empty() && fill(&mut bytes).is_err() {
+        bytes.zeroize();
+        return Value::Nil;
+    }
+    Value::byte_array(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entropy_fill_fails_closed_and_honors_length() {
+        assert!(matches!(entropy_fill_with(8, |_d| Err::<(), ()>(())), Value::Nil));
+        assert!(matches!(entropy_fill_with(-1, |_d| Ok::<(), ()>(())), Value::Nil));
+        assert!(matches!(entropy_fill_with((1 << 20) + 1, |_d| Ok::<(), ()>(())), Value::Nil));
+        let empty = entropy_fill_with(0, |_d| Err::<(), ()>(()));
+        assert_eq!(empty.byte_array_view().map(|b| b.len()), Some(0));
+        let a = rt_entropy_fill_fn(&[Value::Int(32)]).unwrap();
+        let b = rt_entropy_fill_fn(&[Value::Int(32)]).unwrap();
+        let a = a.byte_array_view().unwrap().to_vec();
+        let b = b.byte_array_view().unwrap().to_vec();
+        assert_eq!(a.len(), 32);
+        assert!(a.iter().any(|x| *x != 0));
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn random_hex_provider_failure_returns_nil_parity() {

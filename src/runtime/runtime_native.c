@@ -9969,6 +9969,16 @@ int64_t rt_random_bytes_c(uint64_t count) {
     return (int64_t)(uintptr_t)result;
 }
 
+/* Platform entropy owner ABI (std.nogc_sync_mut.crypto.entropy_platform):
+ * `count` fresh OS CSPRNG bytes (BCryptGenRandom on Windows, /dev/urandom
+ * elsewhere via rt_random_bytes_c), or NIL on provider failure or a request
+ * over 1 MiB. Fails closed: never a zero-filled stand-in. Rust lane:
+ * src/compiler_rust/runtime/src/value/sffi/random.rs. */
+int64_t rt_entropy_fill(uint64_t count) {
+    if (count > (1u << 20)) return rt_core_nil();
+    return rt_random_bytes_c(count);
+}
+
 SplArray* rt_bytes_alloc(int64_t len) {
     if (len < 0) return NULL;
     return rt_byte_array_new_len((uint64_t)len);
