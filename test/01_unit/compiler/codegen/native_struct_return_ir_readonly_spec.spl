@@ -1,0 +1,52 @@
+# @req REQ-SSPEC-COMPILER
+# Bug: doc/08_tracking/bug/native_entry_closure_struct_return_by_value_fields_read_as_one_2026-08-17.md
+#
+# Codegen-output (LLVM IR text) gate, runs without native-build: a function that
+# constructs a struct (rt_alloc + field stores) and returns it by value must NOT
+# be declared `readonly` -- that attribute is UB for a callee that allocates and
+# writes, and let LLVM drop the stores so the caller read wrong field values.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val STRUCT_RET_SRC = "struct W3:\n    ok: bool\n    length: i64\n    tag: i64\n\nfn make(n: i64) -> W3:\n    W3(ok: n > 0, length: n, tag: 77)\n\nfn main():\n    val ret_v = make(3)\n    print(ret_v.length)\n    print(ret_v.tag)\n"
+
+fn struct_ret_ir() -> text:
+    val file = "testdata/struct_ret_ir.spl"
+    val parsed = parse_full_frontend(STRUCT_RET_SRC, file, "struct_ret_ir", Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    MirToLlvm.create("struct_ret_ir", CodegenTarget.X86_64, nil).translate_module(mir)
+
+fn define_line_containing(ir: text, needle: text) -> text:
+    for line in ir.split("\n"):
+        if line.starts_with("define ") and line.contains(needle):
+            return line
+    ""
+
+describe "struct returned by value (LLVM IR)":
+    it "does not mark an allocating, storing constructor readonly":
+        val ir = struct_ret_ir()
+        val def_line = define_line_containing(ir, ".make(")
+        expect(def_line != "").to_equal(true)
+        expect(def_line.contains("readonly")).to_equal(false)
+
+    it "heap-allocates and stores every field word in the constructor":
+        val ir = struct_ret_ir()
+        expect(ir.contains("call ptr @rt_alloc(i64 24)")).to_equal(true)
+        expect(ir.contains("store i64 %l4, ptr")).to_equal(true)
+
+    it "reads fields at distinct word offsets in the caller":
+        val ir = struct_ret_ir()
+        expect(ir.contains(", i32 1")).to_equal(true)
+        expect(ir.contains(", i32 2")).to_equal(true)
