@@ -105,3 +105,31 @@ serial markers as ARM64 network/database proof.
 - Still open: storage policy currently forbids builds/QEMU, so device init,
   cross-page EL0 copy, and host-visible HTTP remain unproved live criteria.
 
+## 2026-11-03 transmit-ring owner repair
+
+Current source contains the checked syscall shims, direct socket exports and
+the VirtIO-MMIO transport; the original unconditional-ENOSYS description is
+not the current implementation boundary. A concrete remaining transport bug
+was found in `rt_arm64_virtio_net_send`: it published a reusable descriptor at
+`avail.ring[descriptor_id]` instead of the split-ring producer position
+`avail.idx % queue_size`. Outstanding descriptors retained after timeouts make
+these values independent. The device can consume a stale descriptor ID and
+leave the newly submitted frame waiting until timeout.
+
+The publisher now indexes the ring by its producer cursor and stores the
+selected descriptor ID as the entry value. Descriptor ownership, timeout
+retention, completion validation and the shared network service are unchanged.
+
+`python3 scripts/check/check-arm64-net-tx-ring-cursor.py --negative-control`
+executes the extracted production C sender against a device-side available-ring
+consumer. All 56 cursor/descriptor combinations, including 16-bit wrap, pass;
+payload bytes and unrelated descriptor ownership are checked. Restoring the
+old publication expression fails the same fixture. Before the repair, the
+actual sender failed with producer 0, reusable descriptor 1 and timeout -110.
+The complete C capsule also passed ARM64 freestanding syntax checking (one
+pre-existing signed-shift warning at `_rt_int_fits_tagged`).
+
+This is bounded host transport-logic evidence, **not** live NIC, EL0 syscall,
+host-visible HTTP, firmware boot or durable database admission. The broader
+record stays open/in progress until its real target acceptance gates pass.
+
