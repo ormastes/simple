@@ -1,5 +1,5 @@
 # rfind: sentinel (-1) vs Optional contract split across stdlib call sites
-## Open 2026-09-16 — needs owner triage
+## Fixed — closed 2026-11-03
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -9,7 +9,7 @@ evidence found in the body. This is bookkeeping, not verification.
 - Priority: P1
 - Origin: todo_db.sdn row 559 — "Preserve Optional not-found semantics when
   bootstrap MIR lowers rfind on an erased text receiver."
-- Status: OPEN (root cause identified; fix deliberately NOT applied — see
+- Status: FIXED (2026-11-03 stale-close; resolution A applied in 2ec8e8af7fb)
   "Why no unilateral fix")
 
 ## Reproduction (Cranelift JIT, seed `bin/simple`)
@@ -118,3 +118,9 @@ bin/simple test test/01_unit/lib/text/rfind_optional_spec.spl
 ```
 
 **Revalidated 2026-11-02: still plausible because OPEN (root cause identified; fix deliberately NOT applied — see; no merged fix commit with a passing regression is cited in this doc.**
+
+**Closed 2026-11-03:** resolution A was landed by `2ec8e8af7fb` (all 6 Optional-shaped
+`rfind` sites in the three `std.path` copies now test `< 0`; specs
+`path_rfind_sentinel_not_found_spec.spl` and `text_search_sentinel_contract_spec.spl`
+added). Re-audit on origin/release/1.0.0: `src/lib/nogc_sync_mut/path.spl` consumes
+`rfind` as a sentinel; no `match <rfind>: Some/nil` site remains under `src/lib`.
