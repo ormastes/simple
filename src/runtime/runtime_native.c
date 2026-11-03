@@ -3871,12 +3871,20 @@ int64_t rt_stdin_read_chars_text(int64_t count) {
 }
 
 int64_t stdin_read_char(void) {
-    int ch = fgetc(stdin);
-    if (ch == EOF) {
+    /* Raw fd read, not stdio fgetc: fgetc's read-ahead swallows bytes that
+     * other raw read(0) users expect, and hung on macOS ARM64 core-c. EOF and
+     * errors yield the empty string, as before. */
+    uint8_t byte = 0;
+    for (;;) {
+#if defined(_WIN32)
+        int n = _read(0, &byte, 1);
+#else
+        ssize_t n = read(0, &byte, 1);
+#endif
+        if (n == 1) return rt_string_new(&byte, 1);
+        if (n < 0 && errno == EINTR) continue;
         return rt_string_new(NULL, 0);
     }
-    uint8_t byte = (uint8_t)ch;
-    return rt_string_new(&byte, 1);
 }
 
 #if defined(_WIN32)
