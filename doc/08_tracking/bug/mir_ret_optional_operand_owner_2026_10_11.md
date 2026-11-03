@@ -23,3 +23,11 @@ Removal condition: Permanent optional/coalesce owner propagation repair plus ori
   drops the owner; the seed interpreter does not reproduce it (it is a native-lane owner-table defect).
   Typing `NullCoalesce` at HIR lowering from the left's declared Optional inner is the candidate, but it
   changes every `??` in the compiler and must not land unverified. Keep the 4 `@workaround` markers.
+
+## 2026-11-03 comp-retopt2: fix-implemented-verification-pending
+- Added `null_coalesce_default_owner_type` and a fallback in NullCoalesce lowering
+  (`expr_dispatch.spl`): when neither the declared Option inner type nor the
+  container-read type is recoverable, the default operand's resolved nominal
+  type is remembered on the merged temp, so `(value ?? default).kind` keeps an owner.
+- Spec: `test/01_unit/compiler/mir/ret_optional_operand_owner_spec.spl` (2/2 pass on interpreter; source contract + accessor projection).
+- Workarounds kept. Verify: revert the four `@workaround` locals in `mir_instruction_graph.spl` to untyped `value ?? ...`, native-compile `test/fixtures/compiler/mir_ret_operand_owner/main.spl` on a stage3 with this change, run mir_verify; expect zero MIR19 owner errors.

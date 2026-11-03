@@ -13,7 +13,7 @@
 #   bug-claim.shs claim <bug_id> <session_id> [note]
 #   bug-claim.shs heartbeat <bug_id> <session_id>
 #   bug-claim.shs release <bug_id> <session_id>
-#   bug-claim.shs done <bug_id> <session_id> <pr>
+#   bug-claim.shs done <bug_id> <session_id> [--pr <n> | <n>]
 #   bug-claim.shs status <bug_id>
 #   bug-claim.shs list-active
 #   bug-claim.shs list                 (alias of list-active)
@@ -94,9 +94,13 @@ bugs |id, severity, status, title, file, line, reproducible_by, created_at, upda
     SP-A-1, high, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
     NOSP-B-2,high,open,"t",f.spl,1,x,2026-10-01,2026-10-01,true
     MIXED_C_3,  high ,  open , "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+unindented_row_2026_11_03, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+    after_unindented_2026-08-17, P1, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true
+    crlf-id-9_2026-08-10, P1, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true@CR@
 
 bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
 FX
+    sed -i 's/@CR@$/\r/' "$_fx"
     sh "$RESEAL" "$_fx" >/dev/null 2>&1
     _fails=0
     run() { BUG_CLAIM_DB="$_fx" BUG_CLAIM_NOW=2026-11-03T00:00:00Z sh "$0" "$@" 2>&1; }
@@ -115,6 +119,17 @@ FX
     chk "show --session=" "CLAIMED: MIXED_C_3 fixing by s5" "$(run show MIXED_C_3 --session=s5 --intent=for_fixing)"
     chk "show missing session value" "requires --session" "$(run show SP-A-1 --intent for_fixing --session)"
     chk "unknown bug" "unknown bug" "$(run claim NOPE-9 s1)"
+    for _id in unindented_row_2026_11_03 after_unindented_2026-08-17 crlf-id-9_2026-08-10; do
+        chk "claim $_id" "CLAIMED: $_id" "$(run claim "$_id" s1)"
+        chk "release $_id" "RELEASED: $_id" "$(run release "$_id" s1)"
+    done
+    chk "show after unindented" "== main row ==" "$(run show after_unindented_2026-08-17 --intent not_for_fixing)"
+    run claim after_unindented_2026-08-17 d1 >/dev/null; chk "done --pr" "PR #12" "$(run done after_unindented_2026-08-17 d1 --pr 12; run status after_unindented_2026-08-17)"
+    run claim crlf-id-9_2026-08-10 d2 >/dev/null; chk "done bare" "PR #34" "$(run done crlf-id-9_2026-08-10 d2 34; run status crlf-id-9_2026-08-10)"
+    run claim SP-A-1 s4 >/dev/null; chk "done no pr" "no PR" "$(run done SP-A-1 s4; run status SP-A-1)"
+    run claim MIXED_C_3 d3 >/dev/null; chk "done bad args" "usage: done <bug_id> <session_id> [--pr <n> | <n>]" "$(run done MIXED_C_3 d3 --pr abc)"
+    chk "done extra args" "usage: done" "$(run done MIXED_C_3 d3 1 2)"
+    chk "done --pr no value" "usage: done" "$(run done MIXED_C_3 d3 --pr)"
     chk "reap sees all as live" "reap: 0 abandoned" "$(run reap --report)"
     rm -rf "$_d"
     if [ "$_fails" -eq 0 ]; then echo "bug-claim selftest PASS"; exit 0; fi
@@ -130,8 +145,8 @@ claims_tsv() {
     awk -F'\n' '
     function trim(s) { gsub(/^[ \t\r]+/, "", s); gsub(/[ \t\r]+$/, "", s); return s }
     /^bug_fix_claims \|/ { t = 1; next }
-    t && /^[^ \t#]/ { t = 0 }
-    t && /^[ \t]+[^ \t#]/ {
+    t && /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 }
+    t && /^[ \t]*[^ \t#\r]/ {
         s = $0; sub(/^[ \t]+/, "", s); sub(/\r$/, "", s)
         for (i = 1; i <= 6; i++) { p = index(s, ","); if (p == 0) { f[i] = trim(s); s = "" } else { f[i] = trim(substr(s, 1, p - 1)); s = substr(s, p + 1) } }
         n = trim(s); gsub(/^"|"$/, "", n)
@@ -144,8 +159,8 @@ main_status() {
     awk -v id="$1" "$AWKLIB"'
     /^bugs_active \|/ { t = "bugs_active"; next }
     /^bugs \|/ { t = "bugs"; next }
-    /^[^ \t#]/ { t = "" }
-    t != "" && /^[ \t]+[^ \t#]/ && rowid($0) == id {
+    /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = "" }
+    t != "" && /^[ \t]*[^ \t#\r]/ && rowid($0) == id {
         s = $0; sub(/^[ \t]+/, "", s); p = index(s, ","); r = substr(s, p + 1)
         p = index(r, ","); r = substr(r, p + 1)
         q = index(r, ","); print trim(substr(r, 1, q - 1)) "\t" t; exit
@@ -158,8 +173,8 @@ set_main_status() { # bug status date
     awk -v id="$1" -v st="$2" -v dt="$3" "$AWKLIB"'
     /^bugs_active \|/ { t = 1; print; next }
     /^bugs \|/ { t = 1; print; next }
-    /^[^ \t#]/ { t = 0 }
-    t && /^[ \t]+[^ \t#]/ && rowid($0) == id {
+    /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 }
+    t && /^[ \t]*[^ \t#\r]/ && rowid($0) == id {
         s = $0; sub(/^[ \t]+/, "", s); p = index(s, ","); r = substr(s, p + 1)
         p = index(r, ","); sev = trim(substr(r, 1, p - 1)); r = substr(r, p + 1)
         q = index(r, ","); rest = substr(r, q)
@@ -210,7 +225,7 @@ append_row() { # raw row text (without indent)
     fi
     awk -v row="    $1" '
     /^bug_fix_claims \|/ { t = 1; print; next }
-    t && /^[^ \t#]/ { if (!done) { print row; done = 1 } t = 0 }
+    t && /^[A-Za-z_][A-Za-z0-9_]* [|]/ { if (!done) { print row; done = 1 } t = 0 }
     t && /^[ \t]*$/ { held = held $0 "\n"; next }
     { if (held != "") { printf "%s", held; held = "" } print }
     END { if (t && !done) print row; if (held != "") printf "%s", held }' "$DB" > "$_tmp" && mv "$_tmp" "$DB"
@@ -230,8 +245,8 @@ set_heartbeat() { # bug session ts : rewrite hb of the newest fixing row of sess
     function trim(s) { gsub(/^[ \t\r]+/, "", s); gsub(/[ \t\r]+$/, "", s); return s }
     { l[NR] = $0 }
     /^bug_fix_claims \|/ { t = 1; next }
-    t && /^[^ \t#]/ { t = 0 }
-    t && /^[ \t]+[^ \t#]/ {
+    t && /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 }
+    t && /^[ \t]*[^ \t#\r]/ {
         s = $0; sub(/^[ \t]+/, "", s)
         for (i = 1; i <= 6; i++) { p = index(s, ","); f[i] = trim(substr(s, 1, p - 1)); s = substr(s, p + 1) }
         if (f[1] == id && f[2] == "fixing" && f[3] == se) { last = NR; cl[NR] = f[4]; pv[NR] = f[6]; nt[NR] = trim(s) }
@@ -349,9 +364,19 @@ finish() { # bug session newstate main_status note
 }
 cmd_release() { [ $# -ge 2 ] || die "usage: release <bug_id> <session_id>"; finish "$1" "$2" released "" "released"; }
 cmd_done() {
-    [ $# -ge 3 ] || die "usage: done <bug_id> <session_id> <pr>"
-    case "$3" in ''|*[!0-9]*) die "pr must be a number";; esac
-    finish "$1" "$2" done fixed "PR #$3"
+    _du="usage: done <bug_id> <session_id> [--pr <n> | <n>]"
+    [ $# -ge 2 ] || die "$_du"
+    _db="$1"; _ds="$2"; shift 2; _pr=""
+    case "$#:${1:-}" in
+        0:) ;;
+        1:--pr=?*) _pr="${1#--pr=}" ;;
+        2:--pr) _pr="$2" ;;
+        1:*) _pr="${1#\#}" ;;
+        *) die "$_du" ;;
+    esac
+    case "$_pr" in *[!0-9]*) die "$_du" ;; esac
+    _dn="no PR"; [ -n "$_pr" ] && _dn="PR #$_pr"
+    finish "$_db" "$_ds" done fixed "$_dn"
 }
 
 cmd_status() {
@@ -378,8 +403,8 @@ reap_candidates() {
     awk "$AWKLIB"'
     /^bugs_active \|/ { t = 1; next }
     /^bugs \|/ { t = 1; next }
-    /^[^ \t#]/ { t = 0 }
-    t && /^[ \t]+[^ \t#]/ { s = $0; sub(/^[ \t]+/, "", s); id = rowid($0); p = index(s, ","); r = substr(s, p + 1)
+    /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 }
+    t && /^[ \t]*[^ \t#\r]/ { s = $0; sub(/^[ \t]+/, "", s); id = rowid($0); p = index(s, ","); r = substr(s, p + 1)
             q = index(r, ","); r = substr(r, q + 1); e = index(r, ","); if (trim(substr(r, 1, e - 1)) == "fixing") print id }' "$DB" | sort -u
 }
 
@@ -439,11 +464,11 @@ cmd_show() {
         ( cmd_claim "$_b" "$_s" "$_n" ) || exit $?
     fi
     echo "== main row =="
-    awk -v id="$_b" "$AWKLIB"'/^bugs(_active)? [|]/ { t = 1; next } /^[^ 	#]/ { t = 0 } t && /^[ 	]+[^ 	#]/ && rowid($0) == id { split($0, a, ","); st = trim(a[2]); if (st != "fixing" && st != "released" && st != "done") print }' "$DB" | head -4
+    awk -v id="$_b" "$AWKLIB"'/^bugs(_active)? [|]/ { t = 1; next } /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 } t && /^[ \t]*[^ \t#\r]/ && rowid($0) == id { split($0, a, ","); st = trim(a[2]); if (st != "fixing" && st != "released" && st != "done") print }' "$DB" | head -4
     echo "== description =="
-    awk -v id="$_b" "$AWKLIB"'/^bug_descriptions \|/ { t = 1; next } /^[^ \t#]/ { t = 0 } t && /^[ 	]+[^ 	#]/ && rowid($0) == id { print }' "$DB" | head -20
+    awk -v id="$_b" "$AWKLIB"'/^bug_descriptions \|/ { t = 1; next } /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 } t && /^[ \t]*[^ \t#\r]/ && rowid($0) == id { print }' "$DB" | head -20
     echo "== difficulty =="
-    awk -v id="$_b" "$AWKLIB"'/^bug_difficulty \|/ { t = 1; next } /^[^ \t#]/ { t = 0 } t && /^[ 	]+[^ 	#]/ && rowid($0) == id { l = $0 } END { if (l != "") print l; else print "(none)" }' "$DB"
+    awk -v id="$_b" "$AWKLIB"'/^bug_difficulty \|/ { t = 1; next } /^[A-Za-z_][A-Za-z0-9_]* [|]/ { t = 0 } t && /^[ \t]*[^ \t#\r]/ && rowid($0) == id { l = $0 } END { if (l != "") print l; else print "(none)" }' "$DB"
     echo "== claim =="
     cmd_status "$_b"
 }
