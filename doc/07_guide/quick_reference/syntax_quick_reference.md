@@ -216,11 +216,9 @@ print "Result: {compute()}"         # Expressions allowed
 ### Raw Strings (No Interpolation)
 
 ```text
-# Single quotes = raw string (exactly one scalar in single quotes is a char literal, see Text Indexing)
-val regex = '[a-z]+\d{2,3}'         # No escaping needed
-val path = 'C:\Users\name'          # Backslashes are literal
-
-# r"..." prefix also works
+# Raw text is r"..." (single quotes are char-only, see Text Indexing and ADR-005)
+val regex = r"[a-z]+\d{2,3}"        # No escaping needed
+val path = r"C:\Users\name"         # Backslashes are literal
 val pattern = r"no\escape"
 
 # Triple-quoted strings are raw and may span lines
@@ -405,7 +403,7 @@ allocates. It is never an integer and never a 1-character `text`.
 
 ```text
 val s = "72é"
-s[0] == '7'                     # char literal: exactly one scalar or escape in single quotes
+s[0] == '7'                     # char literal: exactly one scalar or escape in single quotes (r"..." is raw text)
 s[2] == 'é'                     # per code point, not per byte
 s[-1] == 'é'                    # negative index counts from the end
 s[0].ord()                          # 55 (code point); same as s[0] as i64
@@ -427,7 +425,23 @@ s.char_at(99)                       # "" (char_at keeps its over-run policy)
   `s.byte_len()` for bytes. `s[i]` is O(1) on ASCII text and O(i) otherwise, so
   use `s.chars()` or `s.byte_at(i)` in loops (a lint warns on `s[i]` inside
   `for i in 0..s.len()`). Lexers must use `byte_at` / `char_code_at`.
-- Longer single-quoted text is still a raw string (below).
+- **Single quotes mean ONLY `char`** (decision 2026-11-03): exactly one Unicode
+  scalar (U+0000..U+10FFFF minus surrogates, 1-4 UTF-8 bytes) or one escape
+  (`'\n'`, `'\''`, `'\u{1F600}'`). `'é'`, `'한'`, `'😀'` are each one char.
+  Multi-scalar text in single quotes is not a char: write `r"..."` (raw) or
+  `"..."`. A user-perceived character can be several scalars (decomposed
+  `e` + U+0301, ZWJ emoji), so `'é'` written decomposed is NOT a valid char
+  literal and stays text; grapheme handling is a separate API.
+- `s[i]` indexes by code point; `.len()` counts code points (staged);
+  `.byte_len()` / `byte_at` are byte-level.
+- A `char` is not a condition: `if c:` / `while c:` is a type error. Write
+  `c != '\0'`.
+- Staged warnings (non-exhaustive match, `Any` outside `unsafe:`, char used as
+  `i64`, char-vs-text compare, new `'...'` raw strings) become errors once
+  Windows, macOS and Linux all have a working self-hosted Simple binary.
+- **Lexer switch is staged:** until it lands (after the stage3 self-build
+  passes) the old multi-scalar `'...'` raw-string form still lexes; do not
+  write new ones (`scripts/check/check-no-single-quoted-raw-string.shs`).
 
 ### Bitfield Slicing (`int.bits[lo..hi]`)
 

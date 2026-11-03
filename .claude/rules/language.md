@@ -20,6 +20,7 @@ alwaysApply: false
 - **No `Any` / erased access outside `unsafe:`** - it is a compile error
 - **Generics are erased** - there is no monomorphization pass
 - **Exhaustive match (staged):** a non-exhaustive value match is a WARNING now and becomes an ERROR after phase 3
+- **Single quotes = `char` ONLY** (`'x'`: one Unicode scalar or one escape; decomposed é / ZWJ emoji are text). Raw text is `r"..."` / `r"""..."""`; interpolating text is `"..."`; multi-line literal-brace text is `"""..."""`. Never write new multi-scalar `'...'` raw strings (guard: `scripts/check/check-no-single-quoted-raw-string.shs`; the lexer switch lands after the stage3 self-build). A `char` is not a condition (`if c:` is a type error; write `c != '\0'`). All staged warnings become errors once Windows, macOS and Linux all have a self-hosted binary. See ADR-005
 - **`text[i]` yields `char`** (code point value, `'x'` literal). Use `.ord()` / `as i64` for the code point, `.to_digit()` for a digit, `.to_text()` for text, `byte_at(i)` for bytes, and `chars()` in loops. Using `s[i]` as an int is a WARNING now and an ERROR after phase 3 (staged). See `doc/04_architecture/adr/ADR-005-text-index-yields-char.md`
 
 ## Runtime Limitations
