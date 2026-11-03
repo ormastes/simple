@@ -56,11 +56,16 @@ pub fn trace_native_channel_initialize_v1(base: i64, actual_bytes: i64,
         return TRACE_NATIVE_CHANNEL_INVALID_V1
     unsafe(capabilities: [ffi]):
         # Probe each concurrently accessed cell before touching the arena.
-        for offset in [0, 32, 40, 48, 56, 64]:
-            if rt_par_atomic_i64_is_lock_free(base + offset) != 1:
-                return TRACE_NATIVE_CHANNEL_UNSUPPORTED_V1
-        for offset in 0..16:
+        var offset: i64 = 0
+        while offset <= 64:
+            if offset == 0 or offset >= 32:
+                if rt_par_atomic_i64_is_lock_free(base + offset) != 1:
+                    return TRACE_NATIVE_CHANNEL_UNSUPPORTED_V1
+            offset = offset + 8
+        offset = 0
+        while offset < 16:
             rt_ptr_write_i64(base, offset * 8, 0)
+            offset = offset + 1
         rt_ptr_write_i64(base, 8, generation as i64)
         rt_ptr_write_i64(base, 16, context as i64)
         rt_ptr_write_i64(base, 24, capacity)
@@ -73,11 +78,13 @@ pub fn trace_native_channel_initialize_v1(base: i64, actual_bytes: i64,
 fn _trace_channel_loss_v1(base: i64):
     unsafe(capabilities: [ffi]):
         var current = rt_par_atomic_load_i64(base + 56)
-        for attempt in 0..8:
+        var attempt: i64 = 0
+        while attempt < 8:
             if current == _TRACE_CHANNEL_I64_MAX: break
             val seen = rt_par_atomic_cmpxchg_i64(base + 56, current, current + 1)
             if seen == current: return
             current = seen
+            attempt = attempt + 1
         rt_par_atomic_xchg_i64(base + 64, 1)
 
 # Admission and producer serialization are ONE CAS. No separate check-open /
@@ -166,8 +173,10 @@ pub fn trace_native_channel_poll_into_v1(base: i64, output: i64, output_bytes: i
             return TRACE_NATIVE_CHANNEL_EMPTY_V1
         val capacity = rt_ptr_read_i64(base, 24)
         val slot = base + TRACE_NATIVE_CHANNEL_HEADER_V1 + (read % capacity) * 96
-        for word in 0..12:
+        var word: i64 = 0
+        while word < 12:
             rt_ptr_write_i64(output, word * 8, rt_ptr_read_i64(slot, word * 8))
+            word = word + 1
         # The producer cannot reuse this slot before the complete copy is out.
         rt_par_atomic_xchg_i64(base + 48, read + 1)
         rt_par_atomic_xchg_i64(base + 32, 0)
@@ -179,11 +188,13 @@ pub fn trace_native_channel_poll_into_v1(base: i64, output: i64, output_bytes: i
 pub fn trace_native_channel_close_v1(base: i64) -> i64:
     unsafe(capabilities: [ffi]):
         var state = rt_par_atomic_load_i64(base)
-        for attempt in 0..8:
+        var attempt: i64 = 0
+        while attempt < 8:
             if (state & 2) != 0: return TRACE_NATIVE_CHANNEL_OK_V1
             val seen = rt_par_atomic_cmpxchg_i64(base, state, state | 2)
             if seen == state: return TRACE_NATIVE_CHANNEL_OK_V1
             state = seen
+            attempt = attempt + 1
     TRACE_NATIVE_CHANNEL_BUSY_V1
 
 # Transport-only drain, NOT callback quiescence or a final loss snapshot. A
