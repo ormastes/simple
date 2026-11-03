@@ -70,3 +70,33 @@ main()
 Status stays open; owner = seed JIT codegen (needs `SIMPLE_JIT_STRICT`/Cranelift trait-object dispatch triage on a
 rebuilt seed). Also stale: `test/03_system/platform/structural_compute/layout_framework_spec.spl` calls `layout_node`
 with 10 args (9 expected) and `fixture_node` is undefined, so it cannot serve as the regression spec yet.
+
+## Fix 2026-11-03 (fix-implemented-verification-pending)
+
+Root cause (NOT trait-object dispatch): `src/compiler_rust/compiler/src/hir/lower/expr/calls.rs` (`lower_call`,
+omitted-default fill, ~line 282). A call using ANY named argument skipped `fill_omitted_default_args`, and named
+args were lowered in source order with no slot mapping, so omitted defaulted parameters reached codegen as tagged
+nil. `layout_input(..., oracle_boxes: x)` left `oracle_artifacts` (default `layout_oracle_artifacts([], [], [])`)
+nil and `_layout_selected_oracle_artifacts` (engine.spl:212) dereferenced it -> rc=139. Minimal pure-Simple repro:
+`fn mkin(n: i64, k: i64 = 0, art: Art = mk([], [])) -> Inp` called as `mkin(1, k: 5)` (also `oracle_boxes.len()` read 0
+because the named arg landed in the wrong slot).
+
+Fix: `bind_named_call_args` maps positional + named args onto declared slots (param names are now recorded in
+`fn_param_names` / `imported_fn_param_names`), fills the rest from constant defaults, and is a hard lowering error
+(never nil) for unknown/duplicate names, a missing required arg, or a non-constant omitted default.
+Regression: `named_call_maps_slots_and_fills_defaults`, `named_call_errors_instead_of_nil_padding` in
+`src/compiler_rust/compiler/src/hir/lower/tests/imported_default_metadata_tests.rs`.
+
+Verify (needs a rebuilt seed): `bin/simple run` on the probe above and on the `mkin(1, k: 5)` repro must print a
+result (rc=0), not segfault (rc=139). Reproduced 2026-11-03 on Windows `bin/simple.exe` (rc=139; interpreter rc=0).
+Known siblings NOT covered: method calls and struct/class constructor calls with partial named args
+(`lower_method_call` fills defaults only when no arg is named; defaults tables for methods carry no param names).
+`layout_framework_spec.spl` (03_system) updated: 9-arg `layout_node`, defined `fixture_node`; two examples still
+fail for unrelated stale reasons (`ClaimOnlyGpuLayoutPort` undefined; fallback-reason expectation).
+
+Semantics notes (review 2026-11-03): (a) named args are now passed in declared slot order, so argument expressions
+with side effects evaluate in slot order, not source order (documented, not preserved). (b) Variadic callees skip
+named binding (legacy path). (c) `layout_input`'s omitted default `layout_oracle_artifacts([], [], [])` is a CALL,
+not a call-site constant, so the real probe now raises a hard lowering error ("omits argument ... not a call-site
+constant") in the JIT lowering; the driver then drops the module to the interpreter via the existing `[jit-fallback]`
+path (no segfault). Making call defaults fillable is the follow-up (not done here).
