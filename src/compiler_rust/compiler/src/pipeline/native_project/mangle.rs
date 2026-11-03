@@ -1672,9 +1672,16 @@ mod tests {
             src.contains("let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);"),
             "cranelift enum_helper predicate must be keyed on the method segment, not the whole lookup name"
         );
+        // The enum-helper refusal is folded into `no_rebind`
+        // (`enum_helper || bare_builtin_collision`), which gates every
+        // unqualified cross-module scan.
         assert!(
-            src.contains("if resolved_name.is_none() && !enum_helper {\n                    resolved_name = ctx\n                        .use_map\n                        .get(method)"),
-            "the cranelift last-resort bare-method lookup lost its enum-helper guard"
+            src.contains("let no_rebind = enum_helper || bare_builtin_collision;"),
+            "the cranelift cross-module refusal lost its enum-helper predicate"
+        );
+        assert!(
+            src.matches("if resolved_name.is_none() && !no_rebind {").count() >= 3,
+            "the cranelift unqualified bare-method scans lost their enum-helper guard"
         );
     }
 

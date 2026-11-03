@@ -114,3 +114,10 @@ even after the type mismatch is rejected.
 - `duplicate_impl_method_definitions_silent_first_wins_2026-08-08` and
   `nested_fn_name_collision_across_scopes_2026-09-19` — the same theme: two
   declarations of one name that disagree, with nothing checking they agree.
+
+## JIT re-probe 2026-11-03 (deployed seed)
+JIT no longer exits 2: it exits 0 and the `Some(v)` arm WRONGLY matches the `Result` value (a `text`-typed
+scrutinee holding `Ok(..)`; `print r` shows `<enum@0x..>`), so `"Some:" + v` prints blank. Interpret prints `none`.
+Root cause is the missing static type error (scrutinee typed `text`, see
+`hir/lower/option_pattern_shape_diag.rs`, warn-only default OFF via SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1), owned by
+the type-checker worker; no JIT-only codegen fix is possible without changing that diagnostic's design.
