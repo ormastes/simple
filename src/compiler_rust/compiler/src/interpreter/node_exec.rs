@@ -1249,8 +1249,12 @@ pub(crate) fn exec_assignment(
         {
             if let Expr::Identifier(array_name) = array_expr.as_ref() {
                 let index_value = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
-                let idx = index_value.as_int()? as usize;
                 if let Some(Value::Array(mut values)) = env.get(array_name).cloned() {
+                    // The integer conversion belongs to the ARRAY arm only: it
+                    // used to run first, so `d["k"].v = 2` on a dict died with
+                    // "cannot convert string to int" before the place path
+                    // below could handle it.
+                    let idx = index_value.as_int()? as usize;
                     let items = Arc::make_mut(&mut values);
                     if idx >= items.len() {
                         let ctx = ErrorContext::new()
@@ -1289,10 +1293,17 @@ pub(crate) fn exec_assignment(
                     }
                 } else {
                     // Not a local array binding (dict-rooted, module global,
-                    // class instance, ...). It may still be a writable place.
-                    if let Some(place) =
-                        super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
-                    {
+                    // class instance, ...). It may still be a writable place:
+                    // the index is already evaluated, so build the place
+                    // directly instead of re-running the index expression.
+                    if env.contains_key(array_name) {
+                        let place = super::place::Place {
+                            root: array_name.clone(),
+                            projections: vec![
+                                super::place::Projection::Index(index_value),
+                                super::place::Projection::Field(field.clone()),
+                            ],
+                        };
                         if super::place::write_place(env, &place, value) {
                             return Ok(Control::Next);
                         }

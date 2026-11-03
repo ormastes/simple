@@ -2521,6 +2521,18 @@ impl ClassInstance {
     pub fn fields_snapshot(&self) -> HashMap<String, Value> {
         self.fields.read().unwrap().clone()
     }
+
+    /// Swap a field's value, returning the old one; `None` (nothing swapped)
+    /// when the field does not exist. Lets a nested place write move the
+    /// field out, mutate it with NO lock held, and put it back
+    /// (`interpreter/place.rs::write_through`).
+    pub fn replace_field(&self, name: &str, value: Value) -> Option<Value> {
+        self.fields
+            .write()
+            .unwrap()
+            .get_mut(name)
+            .map(|slot| std::mem::replace(slot, value))
+    }
 }
 
 /// Element storage of a mutable `Value::Array`.

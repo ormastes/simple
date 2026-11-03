@@ -1,0 +1,94 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Interpreter / JIT consistency guard for class-reference semantics.
+#
+# Bug interp_dict_class_value_index_mutation_loss_2026-11-03 (bug_db.sdn):
+# in the seed interpreter `val e = d["k"]; e.v = 2` left `d["k"].v` at 0 and
+# `d["k"].v = 2` died with "cannot convert string to int", while the JIT kept
+# the mutation. Policy (interpreter_binding_class_typed_field_snapshots_
+# instead_of_aliasing_2026-08-10.md, 2026-11-02 plan): classes are reference
+# types, structs are value types, and the two engines must agree.
+#
+# The oracle is the sibling run-path probe `probe_class_ref_consistency.spl`:
+# the same program reaches an instance four ways (list element, dict value,
+# class field, class param), mutates it through the binding and reads it back
+# through the container, printing one `name=value` line per shape. The spec
+# runs it under BOTH engines and compares the outputs line for line.
+#
+# ENGINE SCOPE. The interpreter's reference carrier (`Value::ClassInstance`)
+# is opt-in until plan step 5 flips `Value::aggregate()` for real
+# (`SIMPLE_INTERP_CLASS_REF=1`, src/compiler_rust/compiler/src/value.rs).
+# The consistency arm therefore runs the interpreter WITH that flag; the
+# default-carrier arm pins only what is fixed there today: `d["k"].v = 2` is
+# an assignment target instead of an error.
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+
+val PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_class_ref_consistency.spl"
+
+fn run_probe(env_prefix: text) -> text:
+    var bin = env_get("SIMPLE_TEST_BINARY")
+    if bin == "":
+        bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 " + env_prefix + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "interpreter and JIT agree on class-reference semantics":
+    # @manual scenario evidence
+    it "keeps a mutation through all four reach shapes in both engines":
+        # @req REQ-SSPEC-COMPILER
+        step("Run the probe on the JIT and on the interpreter's reference carrier")
+        val jit = run_probe("SIMPLE_EXECUTION_MODE=jit")
+        val interp = run_probe("SIMPLE_EXECUTION_MODE=interpreter SIMPLE_INTERP_CLASS_REF=1")
+
+        step("Every shape reads back the mutation on the JIT (the reference oracle)")
+        expect(jit).to_contain("list_element=2")
+        expect(jit).to_contain("dict_value=2")
+        expect(jit).to_contain("class_field=2")
+        expect(jit).to_contain("class_param=2")
+
+        step("The interpreter prints the same four lines")
+        expect(interp).to_contain("list_element=2")
+        expect(interp).to_contain("dict_value=2")
+        expect(interp).to_contain("class_field=2")
+        expect(interp).to_contain("class_param=2")
+
+        step("The whole probe output is identical line for line")
+        expect(interp).to_equal(jit)
+
+    it "treats d[k].field as an assignment target and shares dict siblings":
+        # @req REQ-SSPEC-COMPILER
+        step("Direct target, nested dict-in-class and dict iteration under both engines")
+        val jit = run_probe("SIMPLE_EXECUTION_MODE=jit")
+        val interp = run_probe("SIMPLE_EXECUTION_MODE=interpreter SIMPLE_INTERP_CLASS_REF=1")
+        expect(jit).to_contain("dict_direct_target=2")
+        expect(jit).to_contain("nested_dict_in_class=2")
+        expect(jit).to_contain("dict_iteration=2")
+        expect(interp).to_contain("dict_direct_target=2")
+        expect(interp).to_contain("nested_dict_in_class=2")
+        expect(interp).to_contain("dict_iteration=2")
+
+    it "keeps value types copied: a struct read from a dict is independent":
+        # @req REQ-SSPEC-COMPILER
+        val jit = run_probe("SIMPLE_EXECUTION_MODE=jit")
+        val interp = run_probe("SIMPLE_EXECUTION_MODE=interpreter SIMPLE_INTERP_CLASS_REF=1")
+        expect(jit).to_contain("struct_dict_value_copied=0")
+        expect(interp).to_contain("struct_dict_value_copied=0")
+
+describe "default interpreter carrier (copy-on-write Object)":
+    # @manual scenario evidence
+    it "accepts d[k].field = v as an assignment target instead of erroring":
+        # @req REQ-SSPEC-COMPILER
+        step("Before the fix the index was converted to int before the receiver kind was checked")
+        val out = run_probe("SIMPLE_EXECUTION_MODE=interpreter")
+        expect(out).to_contain("dict_direct_target=2")
+        expect(out).to_contain("class_param=2")
