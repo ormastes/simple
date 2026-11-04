@@ -53,3 +53,11 @@ match verifies both equality selection and non-exhaustive handling.
   `stage3 compile` a fn with a wildcard-less f64 match and expect
   E-MATCH-NONEXHAUSTIVE-VALUE.
 Status: fix-implemented-verification-pending.
+
+### 2026-11-04 — verified, closed (c28-w1b)
+
+On the 2026-11-04 seed (release 0b2c3d015b7, interpreter):
+- `test/01_unit/compiler/hir/float_literal_pattern_bridge_spec.spl`: 4/4 pass (19 s).
+- Real float match `match s: case 1.5: 10; case _: 20` selects 10 for 1.5 and 20 for 2.5.
+- `test/03_system/app/compiler/feature/exhaustive_value_match_spec.spl` gained two float-literal-arm
+  cases (partial `case 1.5:` reports E-MATCH-NONEXHAUSTIVE-VALUE; with `_` it is silenced): 28/28 pass (68 s).
