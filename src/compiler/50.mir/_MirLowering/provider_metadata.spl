@@ -9,10 +9,6 @@ use compiler.common.attributes.{FunctionAttr}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 
-fn mir_class_identity(symbol: HirSymbol) -> text:
-    val owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
-    if owner == "": symbol.name else: "{owner}.{symbol.name}"
-
 fn mir_class_identity_raw(symbols: SymbolTable, raw: i64) -> text:
     """mir_class_identity read through the scalar accessors: no HirSymbol
     struct value (or HirSymbol? transport) crosses a call boundary (F3 AV at
@@ -82,7 +78,7 @@ fn mir_provider_declares_value_method_owner(provider: SymbolTable, module_name: 
         return false
     if val declaration = provider.get_symbol_raw(owner_id):
         match declaration.kind:
-            case SymbolKind.Enum | SymbolKind.Struct: return mir_class_identity(declaration) == owner_key
+            case SymbolKind.Enum | SymbolKind.Struct: return mir_class_identity_raw(provider, owner_id) == owner_key
             case _: ()
     false
 
@@ -98,7 +94,7 @@ fn mir_provider_extension_owner_key(module_name: text, source_name: text) -> tex
     if sep <= 0:
         return ""
     # HIR spells a generic owner without its argument list (`impl Box<T>:`
-    # -> `D.Box::m`), so the owner already matches mir_class_identity.
+    # -> `D.Box::m`), so the owner already matches mir_class_identity_raw.
     val owner_name = source_name.substring(0, sep)
     val type_sep = owner_name.rfind(".")
     if type_sep <= 0:
@@ -348,7 +344,7 @@ impl MirLowering:
                 val optional_symbol: HirSymbol? = self.symbols.get_symbol_raw(id.id)
                 if val present_symbol = optional_symbol:
                     val symbol: HirSymbol = present_symbol
-                    return if symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Enum: mir_class_identity(symbol) else: symbol.name
+                    return if symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Enum: mir_class_identity_raw(self.symbols, id.id) else: symbol.name
             case _: ()
         ""
 
@@ -379,7 +375,7 @@ impl MirLowering:
                 case _: return SymbolId(id: -1)
             # Non-class define() retains legacy lexical deduplication. Allocate
             # through a private qualified spelling, then restore the source name.
-            val allocation_name = mir_class_identity(source)
+            val allocation_name = mir_class_identity_raw(provider, id.id)
             val relocated = self.symbols.define_with_binding(allocation_name, source.kind, nil,
                 source.span, source.visibility, source.is_mutable,
                 Some(owner), false)
@@ -594,7 +590,7 @@ impl MirLowering:
                         source_name = source.name
                         if source.kind == SymbolKind.Class:
                             source_is_class = true
-                            class_identity = mir_class_identity(source)
+                            class_identity = mir_class_identity_raw(provider, id.id)
                         elif source.kind == SymbolKind.Struct:
                             source_is_struct = true
                     if source_is_class:
@@ -750,7 +746,7 @@ impl MirLowering:
                 fields = fields.push(relocated)
                 flags = flags.push(field.has_default)
                 defaults = defaults.push(relocated.default)
-            val canonical = mir_class_identity(source)
+            val canonical = mir_class_identity_raw(provider, class_def.symbol.id)
             var keys = [canonical, self.composite_layout_key(source)]
             # Consumer-owned symbol spelling is an additional legacy raw alias.
             # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
@@ -1111,7 +1107,7 @@ impl MirLowering:
                     return nil
                 if val present_owner_symbol = optional_owner_symbol:
                     val owner_symbol: HirSymbol = present_owner_symbol
-                    for owner_key in [mir_class_identity(owner_symbol), owner_symbol.name]:
+                    for owner_key in [mir_class_identity_raw(self.symbols, owner_sym.id), owner_symbol.name]:
                         if self.struct_field_order.has(owner_key) and self.struct_field_hir_type.has(owner_key):
                             val names = self.struct_field_order[owner_key]
                             val types = self.struct_field_hir_type[owner_key]
@@ -1200,7 +1196,7 @@ impl MirLowering:
                     val optional_class_source: HirSymbol? = provider_module.symbols.get_symbol_raw(provider_class.symbol.id)
                     if val present_class_source = optional_class_source:
                         val class_source: HirSymbol = present_class_source
-                        val canonical = mir_class_identity(class_source)
+                        val canonical = mir_class_identity_raw(provider_module.symbols, provider_class.symbol.id)
                         val class_method_names: [text] = provider_class.methods.keys()
                         var class_method_i = 0
                         while class_method_i < class_method_names.len():

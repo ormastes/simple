@@ -1,0 +1,44 @@
+#!/bin/sh
+# Guard: mir_class_identity(<HirSymbol>) must not return. It took a HirSymbol by
+# value, which AVs on stage3 at mir_class_identity+0xd1. Callers use
+# mir_class_identity_raw(<SymbolTable>, <raw id>) (scalar accessors only).
+# Verdict is the last stdout line: PASS (0) / FAIL (1) / ERROR (2).
+# Usage: check-mir-class-identity-raw.shs [--root DIR] | --selftest
+
+scan() {
+    scan_dir=$1
+    [ -d "$scan_dir" ] || { echo "ERROR - nothing was checked (no such dir: $scan_dir)"; return 2; }
+    files=$(find "$scan_dir" -name '*.spl' 2>/dev/null)
+    [ -n "$files" ] || { echo "ERROR - nothing was checked (0 .spl files under $scan_dir)"; return 2; }
+    n=$(printf '%s\n' "$files" | wc -l | tr -d ' ')
+    hits=$(printf '%s\n' "$files" | xargs grep -nE '(^|[^A-Za-z0-9_])mir_class_identity\(' 2>/dev/null)
+    if [ -n "$hits" ]; then
+        printf '%s\n' "$hits"
+        echo "FAIL - $n file(s) scanned, by-value mir_class_identity( call/definition present"
+        return 1
+    fi
+    echo "PASS - $n file(s) scanned, 0 mir_class_identity( sites"
+    return 0
+}
+
+selftest() {
+    d=$(mktemp -d) || { echo "ERROR - mktemp failed"; return 2; }
+    mkdir -p "$d/bad" "$d/good"
+    printf 'fn f(s: HirSymbol) -> text:\n    mir_class_identity(s)\n' > "$d/bad/a.spl"
+    printf 'fn f(t: SymbolTable) -> text:\n    mir_class_identity_raw(t, 1)\n' > "$d/good/a.spl"
+    scan "$d/bad" >/dev/null; rc=$?
+    [ "$rc" = 1 ] || { echo "ERROR - selftest: dirty fixture rc=$rc, want 1"; rm -rf "$d"; return 2; }
+    scan "$d/good" >/dev/null; rc=$?
+    [ "$rc" = 0 ] || { echo "ERROR - selftest: clean fixture rc=$rc, want 0"; rm -rf "$d"; return 2; }
+    rm -rf "$d"
+    return 0
+}
+
+target_root=src/compiler
+case "$1" in
+    --selftest) selftest; rc=$?; [ $rc = 0 ] && echo "PASS - selftest 2 fixtures"; exit $rc ;;
+    --root) target_root=$2 ;;
+esac
+selftest || exit 2
+scan "$target_root"
+exit $?
