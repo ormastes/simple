@@ -1,0 +1,63 @@
+# Purpose and audience: perf budget regression for interpreter array-field writes (compiler/interpreter owners).
+#
+"""
+# Interpreter array-field write budget
+
+Bug interp_compositor_backend_put_pixel_clones_framebuffer_2026-07-03: a `me`
+method calling another `me` method that does `self.pixels[i] = v` cloned the
+whole `[u32]` per write (O(n) per pixel, ~28 ms/px at 1024x768). Writes through
+a class field, including me->me delegation and a nested `comp.backend` owner,
+must stay in place. Budget: 200k writes into a 786,432-element array within
+60 s (observed ~3 s on the seed; the clone-per-write behaviour needs hours).
+"""
+# @manual_section: interp-array-field-write-budget
+
+use std.spec.step
+use std.spec.*
+use std.nogc_sync_mut.sffi.time.{time_now_ms}
+
+class FbBackend:
+    pixels: [u32]
+    width: i64
+    height: i64
+
+    static fn make(w: i64, h: i64) -> FbBackend:
+        var p: [u32] = []
+        var i = 0
+        while i < w * h:
+            p.push(0u32)
+            i = i + 1
+        FbBackend(pixels: p, width: w, height: h)
+
+    me put_pixel(x: i64, y: i64, c: u32):
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return
+        self.pixels[y * self.width + x] = c
+
+    me fill_rect(x0: i64, y0: i64, w: i64, h: i64, c: u32):
+        var y = y0
+        while y < y0 + h:
+            var x = x0
+            while x < x0 + w:
+                self.put_pixel(x, y, c)
+                x = x + 1
+            y = y + 1
+
+class Comp:
+    backend: FbBackend
+
+    me render(w: i64, h: i64):
+        self.backend.fill_rect(0, 0, w, h, 0xFF223344u32)
+
+describe "interpreter array-field write budget":
+    it "200k me->me pixel writes through a nested class field stay in place":
+        step("Build a 1024x768 framebuffer and fill 500x400 (200k writes)")
+        val t0 = time_now_ms()
+        var comp = Comp(backend: FbBackend.make(1024, 768))
+        comp.render(500, 400)
+        val elapsed = time_now_ms() - t0
+        expect(comp.backend.pixels[0]).to_equal(0xFF223344u32)
+        expect(comp.backend.pixels[399 * 1024 + 499]).to_equal(0xFF223344u32)
+        expect(comp.backend.pixels[500]).to_equal(0u32)
+        step("elapsed {elapsed} ms must be under the 60000 ms budget")
+        expect(elapsed < 60000).to_equal(true)
