@@ -130,3 +130,10 @@ Real-API repro: under `fn main` (JIT) `actor_count=1`; same code in a non-`main`
 ## 2026-11-04 note (libbug-async lane)
 
 `actor_singleton_closure_persistence_spec` was NOT this interpreter bug: `ActorRuntime` was declared `struct`, so the module-level singleton (`get_actor_runtime()` returning a copy, then `.spawn_actor` mutating that copy) lost every spawn by value semantics. Lib-free repro `C:/tmp_lb/a2.spl`: a struct singleton keeps n=0, a class singleton keeps n=1 under `SIMPLE_INTERP_CLASS_REF=1`. Fixed by making `ActorRuntime` a `class` (3/3 under `SIMPLE_INTERP_CLASS_REF=1`). Without that flag the seed interpreter still copies class values (0/3), which is the remaining interpreter-side issue.
+
+## 2026-11-04 note (fix-classref lane): interpreter root fixed by default
+
+Class reference semantics are the seed-interpreter default now
+(`Value::ClassInstance`; `SIMPLE_INTERP_CLASS_REF=0` opts out). Rebuilt seed,
+default run: `actor_singleton_closure_persistence_spec` 3/3 (was 0/3).
+Coordinator owns the bug_db status change.

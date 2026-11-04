@@ -18,11 +18,11 @@
 # runs it under BOTH engines and compares the outputs line for line.
 #
 # ENGINE SCOPE. The interpreter's reference carrier (`Value::ClassInstance`)
-# is opt-in until plan step 5 flips `Value::aggregate()` for real
-# (`SIMPLE_INTERP_CLASS_REF=1`, src/compiler_rust/compiler/src/value.rs).
-# The consistency arm therefore runs the interpreter WITH that flag; the
-# default-carrier arm pins only what is fixed there today: `d["k"].v = 2` is
-# an assignment target instead of an error.
+# is the DEFAULT since 2026-11-04 (`Value::aggregate()` in
+# src/compiler_rust/compiler/src/value.rs); `SIMPLE_INTERP_CLASS_REF=0` is the
+# legacy copy-carrier opt-out kept for bisection. The consistency arm passes
+# `=1` explicitly (equal to unset); the legacy-carrier arm pins what the
+# opt-out still guarantees: `d["k"].v = 2` is an assignment target.
 
 use std.spec.step
 
@@ -87,24 +87,26 @@ describe "interpreter and JIT agree on class-reference semantics":
         expect(jit).to_contain("struct_dict_value_copied=0")
         expect(interp).to_contain("struct_dict_value_copied=0")
 
-describe "default interpreter carrier (copy-on-write Object)":
+describe "legacy interpreter carrier (copy-on-write Object, SIMPLE_INTERP_CLASS_REF=0)":
     # @manual scenario evidence
     it "accepts d[k].field = v as an assignment target instead of erroring":
         # @req REQ-SSPEC-COMPILER
         step("Before the fix the index was converted to int before the receiver kind was checked")
-        val out = run_probe("SIMPLE_EXECUTION_MODE=interpreter")
+        val out = run_probe("SIMPLE_EXECUTION_MODE=interpreter SIMPLE_INTERP_CLASS_REF=0")
         expect(out).to_contain("dict_direct_target=2")
         expect(out).to_contain("class_param=2")
 
-    it "keeps the default unchanged: SIMPLE_INTERP_CLASS_REF=0 behaves exactly like unset":
+    it "defaults to the reference carrier: unset behaves exactly like SIMPLE_INTERP_CLASS_REF=1":
         # @req REQ-SSPEC-COMPILER
-        step("The reference carrier is opt-in; only the literal value 1 enables it")
+        step("The reference carrier is the default; only the literal value 0 opts out")
         val unset = run_probe("SIMPLE_EXECUTION_MODE=interpreter")
-        val off = run_probe("SIMPLE_EXECUTION_MODE=interpreter SIMPLE_INTERP_CLASS_REF=0")
-        expect(off).to_equal(unset)
-        step("Flag on and flag off must differ on the shapes only the reference carrier shares")
         val on = run_probe("SIMPLE_EXECUTION_MODE=interpreter SIMPLE_INTERP_CLASS_REF=1")
-        expect(on).to_contain("list_element=2")
+        expect(unset).to_equal(on)
+        expect(unset).to_contain("list_element=2")
+        step("The opt-out restores the copy carrier on the shapes only the reference carrier shares")
+        val off = run_probe("SIMPLE_EXECUTION_MODE=interpreter SIMPLE_INTERP_CLASS_REF=0")
+        expect(off).to_contain("list_element=0")
+        expect(off).to_contain("dict_direct_target=2")
 
 val JIT_ENV: text = "SIMPLE_EXECUTION_MODE=jit"
 val INTERP_ENV: text = "SIMPLE_EXECUTION_MODE=interpreter SIMPLE_INTERP_CLASS_REF=1"
@@ -161,6 +163,24 @@ describe "Dict.get returns Option (parity)":
         expect(jit).to_contain("u=8")
         expect(jit).to_contain("mf=3.0")
         expect(jit).to_contain("g_some=true")
+        expect(interp).to_equal(jit)
+
+    it "compares a Dict.get miss equal to nil on both engines":
+        # @req REQ-SSPEC-COMPILER
+        # Bug stage2_own_struct_stale_declaration_dict_get_nil_compare_2026-11-04:
+        # the JIT compared the canonical Option::None word against the nil
+        # sentinel, so a miss was `!= nil` and the stage-2 HIR SymbolTable
+        # returned garbage ids for every struct declaration.
+        val p = "test/01_unit/compiler/interpreter/probe_dict_get_nil_compare.spl"
+        val jit = run_probe_file(p, JIT_ENV)
+        val interp = run_probe_file(p, INTERP_ENV)
+        expect(jit).to_contain("f_miss_eq=true")
+        expect(jit).to_contain("f_miss_ne=false")
+        expect(jit).to_contain("f_hit_eq=false")
+        expect(jit).to_contain("f_hit_ne=true")
+        expect(jit).to_contain("l_miss_ne=false")
+        expect(jit).to_contain("l_miss_rev=true")
+        expect(jit).to_contain("tail=ok")
         expect(interp).to_equal(jit)
 
 describe "one class reference reached via list, dict, struct field and param":

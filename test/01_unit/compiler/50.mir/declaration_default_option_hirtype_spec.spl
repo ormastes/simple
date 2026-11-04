@@ -1,0 +1,158 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Option-derived HirType must not reach the declaration-default type remap by value
+
+Sibling of #6651 (relocate_provider_type+0xdb, sweep 2026-11-04): a HirType
+narrowed out of an Option (`match ty: Some(t)`, `if val`, `??`, `.unwrap()`)
+keeps the Option transport word in its span slot on the stage3 lane; the
+by-value callee's copy-in prologue then dereferences it. The declaration-default
+rewrite had the same shape in `remap_declaration_default_type_opt_v1`
+(`Some(t): val tt: HirType = t` passed by value), the `Let` annotation path and
+the `if type_ == nil` compare in `remap_declaration_default_type_v1`.
+
+Three parts: (1) repro at the helper, (2) sibling prevention for every caller
+that narrows an optional type slot, (3) coverage of the remap arms.
+"""
+
+# @tag: unit, compiler, mir, provider, stage2-workaround
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.hir.hir_types.{SymbolTable, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir.*
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1}
+use compiler.mir._MirLowering.declaration_default_bindings_v1.{MirHirDefaultBindingFrameV1}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn ddo_lowering():
+    MirLowering.new_for_target(SymbolTable.new(), driver_mir_target_context(driver_core_compile_options_default()))
+
+fn ddo_frame() -> MirHirDefaultBindingFrameV1:
+    val provider = MirHirModuleDeclarationsV1(name: "ddo_provider", path: "ddo_provider.spl",
+        final_repository_authority: "", final_archive_key: "", final_body_digest: "",
+        symbols: SymbolTable.new(), functions: [], structs: [], classes: [], enums: [],
+        bitfields: [], traits: [], impls: [], globals: [], needs_initialization: false,
+        declaration_digest: "", stage: "binder-mechanics-only")
+    MirHirDefaultBindingFrameV1(provider: provider, links: {}, lexical_ids: {}, declaration_ids: {}, failed: false)
+
+fn ddo_payload_span() -> Span:
+    Span.new(70, 90, 30, 4)
+
+fn ddo_node_span() -> Span:
+    Span.new(7, 9, 3, 4)
+
+fn ddo_unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Tuple([]), span: ddo_payload_span())
+
+fn ddo_optional_unit() -> HirType?:
+    ddo_unit_type()
+
+fn ddo_is_tuple(kind: HirTypeKind) -> bool:
+    match kind:
+        case HirTypeKind.Tuple(_): true
+        case _: false
+
+fn ddo_nil_expr(span: Span) -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: span)
+
+describe "declaration-default optional type remap (repro)":
+    it "a Some(HirType) annotation is rebuilt bare with the enclosing node span before the by-value remap":
+        var lowering = ddo_lowering()
+        val frame = ddo_frame()
+        val remapped = lowering.remap_declaration_default_type_opt_v1(ddo_optional_unit(), ddo_node_span(), frame)
+        if val present = remapped:
+            expect(ddo_is_tuple(present.kind)).to_equal(true)
+            expect(present.span.start).to_equal(7)
+            expect(present.span.line).to_equal(3)
+        else:
+            expect(false).to_equal(true)
+
+    it "a nil annotation stays nil":
+        var lowering = ddo_lowering()
+        val none: HirType? = nil
+        val remapped = lowering.remap_declaration_default_type_opt_v1(none, ddo_node_span(), ddo_frame())
+        expect(remapped == nil).to_equal(true)
+
+describe "callers that narrow an optional type slot (similar-pattern prevention)":
+    it "ArrayLit's optional element type takes the literal's span":
+        var lowering = ddo_lowering()
+        val lit = HirExpr(kind: HirExprKind.ArrayLit([], ddo_optional_unit()), has_type_: false, type_: nil, span: ddo_node_span())
+        val out = lowering.remap_declaration_default_expr_v1(lit, ddo_frame())
+        match out.kind:
+            case HirExprKind.ArrayLit(_, elem_ty):
+                if val t = elem_ty:
+                    expect(ddo_is_tuple(t.kind)).to_equal(true)
+                    expect(t.span.start).to_equal(7)
+                else:
+                    expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "SetLit's optional element type takes the literal's span":
+        var lowering = ddo_lowering()
+        val lit = HirExpr(kind: HirExprKind.SetLit([], ddo_optional_unit()), has_type_: false, type_: nil, span: ddo_node_span())
+        val out = lowering.remap_declaration_default_expr_v1(lit, ddo_frame())
+        match out.kind:
+            case HirExprKind.SetLit(_, elem_ty):
+                if val t = elem_ty:
+                    expect(t.span.start).to_equal(7)
+                else:
+                    expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "DictLit's optional value type takes the literal's span and its key type keeps its kind":
+        var lowering = ddo_lowering()
+        val lit = HirExpr(kind: HirExprKind.DictLit([], ddo_unit_type(), ddo_optional_unit()), has_type_: false, type_: nil, span: ddo_node_span())
+        val out = lowering.remap_declaration_default_expr_v1(lit, ddo_frame())
+        match out.kind:
+            case HirExprKind.DictLit(_, key_ty, value_ty):
+                expect(ddo_is_tuple(key_ty.kind)).to_equal(true)
+                if val t = value_ty:
+                    expect(t.span.start).to_equal(7)
+                else:
+                    expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "an annotated Let is remapped through a bare type carrying the statement span":
+        var lowering = ddo_lowering()
+        val stmt = HirStmt(kind: HirStmtKind.Let(SymbolId(id: -1), ddo_unit_type(), ddo_nil_expr(ddo_node_span())), span: ddo_node_span())
+        val out = lowering.remap_declaration_default_stmt_v1(stmt, ddo_frame())
+        match out.kind:
+            case HirStmtKind.Let(_, ty, _):
+                expect(ddo_is_tuple(ty.kind)).to_equal(true)
+                expect(ty.span.start).to_equal(7)
+            case _: expect(false).to_equal(true)
+
+    it "the rewrite passes no Option payload straight into the by-value remap":
+        val src = file_read("src/compiler/50.mir/_MirLowering/declaration_default_rewrite_v1.spl")
+        expect(src.contains("val tt: HirType = t\n")).to_equal(false)
+        expect(src.contains("remap_declaration_default_type_opt_v1(elem_ty, frame)")).to_equal(false)
+        expect(src.contains("remap_declaration_default_type_opt_v1(value_ty, frame)")).to_equal(false)
+        expect(src.contains("val lt: HirType = ty\n")).to_equal(false)
+        val bindings = file_read("src/compiler/50.mir/_MirLowering/declaration_default_bindings_v1.spl")
+        expect(bindings.contains("if type_ == nil: return type_")).to_equal(false)
+
+describe "declaration-default type remap arms (coverage)":
+    it "a Tuple type remaps to itself":
+        var lowering = ddo_lowering()
+        val out = lowering.remap_declaration_default_type_v1(ddo_unit_type(), ddo_frame())
+        expect(ddo_is_tuple(out.kind)).to_equal(true)
+        expect(out.span.start).to_equal(70)
+
+    it "a Named type whose target is missing in the provider becomes Error":
+        var lowering = ddo_lowering()
+        val named = HirType(kind: HirTypeKind.Named(SymbolId(id: 99999), []), span: ddo_node_span())
+        val out = lowering.remap_declaration_default_type_v1(named, ddo_frame())
+        match out.kind:
+            case HirTypeKind.Error: expect(true).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "an Optional type remaps its inner type and keeps the optional shape":
+        var lowering = ddo_lowering()
+        val opt = HirType(kind: HirTypeKind.Optional(ddo_unit_type()), span: ddo_node_span())
+        val out = lowering.remap_declaration_default_type_v1(opt, ddo_frame())
+        match out.kind:
+            case HirTypeKind.Optional(inner): expect(ddo_is_tuple(inner.kind)).to_equal(true)
+            case _: expect(false).to_equal(true)

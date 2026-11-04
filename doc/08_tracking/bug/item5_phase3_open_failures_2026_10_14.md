@@ -52,6 +52,8 @@ Retained AOT message renders CompileFailed as opaque enum address. Actual backen
 
 Owner/source: `src/compiler/70.backend/backend_plugin/session_authority_v2.spl`.
 
+Status 2026-11-04: FIXED (closed stale). c69d0dbc09f added `backend_session_authority_error_text_v2`, which renders variant and payload (`CompileFailed: {detail}`); the AOT result/compile/use rejection messages at session_authority_v2.spl:719,732,740,771 use it. The `CompileFailed` payload is the backend `error.to_text()` text. No enum-address rendering remains.
+
 ## explicit_generic_interpolation_transport_2026_10_14
 
 P1: Canonical interpolation loses explicit helper type arguments.

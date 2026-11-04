@@ -449,10 +449,19 @@ pub(crate) fn bind_args_with_injected(
                         let ctx = ErrorContext::new()
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                             .with_help("check the function signature and provide the correct number of arguments");
+                        // Report the exact count when every argument is a plain
+                        // expression (no spread), matching the pre-evaluated
+                        // `bind_args_with_values` wording the diagnostics pin.
+                        let provided = if args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+                            "more".to_string()
+                        } else {
+                            args.len().to_string()
+                        };
                         return Err(CompileError::semantic_with_context(
                             format!(
-                                "function expects {} argument(s), but more were provided",
-                                params_to_bind.len()
+                                "function expects {} argument(s), but {} were provided",
+                                params_to_bind.len(),
+                                provided
                             ),
                             ctx,
                         ));

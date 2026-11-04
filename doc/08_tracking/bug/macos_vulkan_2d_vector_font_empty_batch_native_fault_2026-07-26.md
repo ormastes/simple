@@ -721,3 +721,48 @@ left as is. SimpleOS row untouched (needs a guest run).
 
 Status: Engine2D interpreter row green; Engine3D row blocker-documented
 (seed interpreter graphics externs stubbed); latency row needs evidence run.
+
+## 2026-11-04 vkrows lane: budgets row + SimpleOS capture row
+
+**Budgets row** (`should meet warm latency, ... budgets`) never measured
+anything. No latency was ever over budget: the durable record
+`build/shared_multilingual_gpu_fonts_perf/evidence.env` was missing, so the row
+reported "evidence unavailable". Its collector
+(`test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl`) could
+not run. Three defects were found and fixed, in order:
+
+1. Collector used the removed `engine.font_renderer = x` field write
+   (`semantic: undefined field 'font_renderer'`). Changed to
+   `engine.install_font_renderer(x)`.
+2. `_layout_feature_variations_valid` (`ot_parser_layout.spl`) rejected shared
+   alternate FeatureTables. OpenType allows sharing them, and fontTools
+   deduplicates them. NotoSansSC's GPOS FeatureVariations points features
+   33–43 at one table and 77–87 at another. As a result the whole GPOS plan
+   was invalid and every Latin/CJK run had `positioning_complete=false`. The
+   validator now checks each distinct alternate once.
+3. The GSUB work budget (`_budget`, `ot_layout_apply.spl`) was capped at
+   65536. Validation plus application of NotoSansDevanagari's 53 default
+   lookups ran it down to 36 on a 6-glyph run, and a Context format-3
+   coverage check then failed, so Devanagari was reported incomplete. The cap
+   now matches the GPOS twin `gpos_data_budget` (1048576).
+
+After these fixes, multi-face shaping succeeds for all witnesses.
+**Remaining blocker (budgets row):** the collector now stops at
+`semantic: unknown extern function: rt_font_glyph_bitmap_index`. That extern
+is backed only by the C runtime (`src/runtime/runtime_font.c`), not by the
+Rust-seed interpreter. So the evidence can only be produced by an admitted
+self-hosted macOS binary, or after a seed extern registration is added. No
+budget numbers exist yet. The budgets were not changed.
+
+**SimpleOS guest-capture row:** this row needs retained
+`build/simpleos_wm_fullscreen_evidence/evidence.env` from
+`scripts/check/check-simpleos-wm-fullscreen-evidence.shs`. It was not run in
+this lane because the shared host's bootstrap lane (boot2) was still
+`BOOTSTRAP RUNNING`, and landing was halted by the coordinator. The open
+question is whether the pinned `FONT_REGION_RGB_SHA256` was captured on
+x86_64 OVMF. If so, an aarch64 AAVMF lane may not reproduce it, and that must
+be checked before any run.
+
+Status: open. The shaper and collector defects are fixed (local branch
+`work/bug-vkrows-20261104`). The budgets row is blocked on the
+interpreter extern gap. The SimpleOS row has not been run.

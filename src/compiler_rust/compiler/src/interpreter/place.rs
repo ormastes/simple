@@ -359,7 +359,7 @@ pub(crate) fn write_place(env: &mut Env, place: &Place, value: Value) -> bool {
 
 /// Mirror a mutated root back into MODULE_GLOBALS when it is a module-level
 /// binding, matching what the identifier and two-level paths already do.
-fn sync_module_global(env: &mut Env, root: &str) {
+pub(crate) fn sync_module_global(env: &mut Env, root: &str) {
     // A global with owner provenance publishes to its defining owner's store,
     // which is what reads resolve through. The flat map's entry under this
     // bare name may be an unrelated module's, so an import never writes it.

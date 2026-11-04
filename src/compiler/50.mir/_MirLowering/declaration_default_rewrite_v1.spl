@@ -6,19 +6,26 @@ use compiler.hir.hir_definitions.*
 # not provide it under the Rust seed (self-hosted sibling visibility masked
 # this). Import it explicitly (stage-2 seed regression, 4bec5687ee6).
 use compiler.hir.hir_definitions.{HirConst}
+use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLowering.declaration_default_bindings_v1.*
 
 impl MirLowering:
-    me remap_declaration_default_type_opt_v1(ty: HirType?, frame: MirHirDefaultBindingFrameV1) -> HirType?:
-        """Remap inside an optional type annotation."""
-        match ty:
-            Some(t):
-                val tt: HirType = t
-                self.remap_declaration_default_type_v1(tt, frame)
-            nil:
-                nil
+    me remap_declaration_default_type_opt_v1(ty: HirType?, span: Span, frame: MirHirDefaultBindingFrameV1) -> HirType?:
+        """Remap inside an optional type annotation.
+
+        Stage2 workaround (sweep 2026-11-04, relocate_provider_type+0xdb AV,
+        #6651 sibling): a HirType narrowed out of an Option keeps the Option
+        transport word in its span slot when passed BY VALUE, and the callee's
+        copy-in prologue dereferences it. Narrow with `if val`, then pass a
+        BARE rebuilt type whose span is the enclosing node's `span`, never the
+        payload's own span word.
+        """
+        if val present = ty:
+            val bare: HirType = HirType(kind: present.kind, span: span)
+            return self.remap_declaration_default_type_v1(bare, frame)
+        nil
 
 
     me remap_declaration_default_expr_opt_v1(expr: HirExpr?, frame: MirHirDefaultBindingFrameV1) -> HirExpr?:
@@ -163,7 +170,9 @@ impl MirLowering:
                 # written annotation can mention a type parameter.
                 var new_ty = ty
                 if ty != nil:
-                    val lt: HirType = ty
+                    # Bare rebuild with the statement's span before the
+                    # by-value call (Option-word class, see the opt helper).
+                    val lt: HirType = HirType(kind: ty.kind, span: stmt.span)
                     new_ty = self.remap_declaration_default_type_v1(lt, frame)
                 val li: HirExpr = init
                 val mapped_init = self.remap_declaration_default_expr_v1(li, frame)
@@ -241,11 +250,11 @@ impl MirLowering:
                 else: out.kind = HirExprKind.Error
             # Collections
             case HirExprKind.ArrayLit(elements, elem_ty):
-                out.kind = HirExprKind.ArrayLit(self.remap_declaration_default_exprs_v1(elements, frame), self.remap_declaration_default_type_opt_v1(elem_ty, frame))
+                out.kind = HirExprKind.ArrayLit(self.remap_declaration_default_exprs_v1(elements, frame), self.remap_declaration_default_type_opt_v1(elem_ty, expr.span, frame))
             case HirExprKind.ArrayRepeat(value, count, elem_ty):
                 val v1: HirExpr = value
                 val c1: HirExpr = count
-                out.kind = HirExprKind.ArrayRepeat(self.remap_declaration_default_expr_v1(v1, frame), self.remap_declaration_default_expr_v1(c1, frame), self.remap_declaration_default_type_opt_v1(elem_ty, frame))
+                out.kind = HirExprKind.ArrayRepeat(self.remap_declaration_default_expr_v1(v1, frame), self.remap_declaration_default_expr_v1(c1, frame), self.remap_declaration_default_type_opt_v1(elem_ty, expr.span, frame))
             case HirExprKind.TupleLit(elements):
                 out.kind = HirExprKind.TupleLit(self.remap_declaration_default_exprs_v1(elements, frame))
             case HirExprKind.DictLit(entries, key_ty, value_ty):
@@ -256,9 +265,9 @@ impl MirLowering:
                     val vt: HirExpr = v
                     new_entries = new_entries.push((self.remap_declaration_default_expr_v1(kt, frame), self.remap_declaration_default_expr_v1(vt, frame)))
                 val ktype: HirType = key_ty
-                out.kind = HirExprKind.DictLit(new_entries, self.remap_declaration_default_type_v1(ktype, frame), self.remap_declaration_default_type_opt_v1(value_ty, frame))
+                out.kind = HirExprKind.DictLit(new_entries, self.remap_declaration_default_type_v1(ktype, frame), self.remap_declaration_default_type_opt_v1(value_ty, expr.span, frame))
             case HirExprKind.SetLit(elements, elem_ty):
-                out.kind = HirExprKind.SetLit(self.remap_declaration_default_exprs_v1(elements, frame), self.remap_declaration_default_type_opt_v1(elem_ty, frame))
+                out.kind = HirExprKind.SetLit(self.remap_declaration_default_exprs_v1(elements, frame), self.remap_declaration_default_type_opt_v1(elem_ty, expr.span, frame))
 
             # Access
             case HirExprKind.Field(base, field, resolved):
