@@ -77,3 +77,27 @@ describe "JS engine regex literals":
     it "does not treat / inside strings or character classes as a delimiter":
         expect(run_js("'a/b'.replace(/[/]/, '|')")).to_equal("a|b")
         expect(run_js("'a/b'.replace('/', '-')")).to_equal("a-b")
+
+    # Capture groups — the second half of bug item 1 (`$1` residual).
+    # `$<digit>` is positional interpolation in a Simple string literal, so
+    # the JS side builds the `$n` references with `D + 'n'`.
+    it "expands $1..$9 capture groups in string replacements":
+        expect(run_js("var D = '$'; '2024-11-05'.replace(/(\\d+)-(\\d+)-(\\d+)/, D + '3/' + D + '2/' + D + '1')")).to_equal("05/11/2024")
+        expect(run_js("var D = '$'; 'ab'.replace(/(a)(x)?/, '[' + D + '1|' + D + '2]')")).to_equal("[a|]b")
+        expect(run_js("var D = '$'; 'ab'.replace(/(a)/, D + '5' + D + '1')")).to_equal("$5ab")
+
+    it "passes capture groups to function replacers before offset and string":
+        expect(run_js("'key=val'.replace(/(\\w+)=(\\w+)/, (m, k, v) => v + '=' + k)")).to_equal("val=key")
+        expect(run_js("'a1'.replace(/(a)(x)?(1)/, function(m, p1, p2, p3, off) { return p1 + typeof p2 + p3 + off; })")).to_equal("aundefined10")
+
+    it "returns capture groups from match and exec":
+        expect(run_js("'abc'.match(/(b)(c)/).length")).to_equal("3")
+        expect(run_js("'abc'.match(/(b)(c)/)[2]")).to_equal("c")
+        expect(run_js("var m = /(a)(b)?/.exec('ac'); m.length + ':' + m[1] + ':' + typeof m[2]")).to_equal("3:a:undefined")
+        expect(run_js("'a1b2'.match(/(\\d)/g).join(',')")).to_equal("1,2")
+
+    it "matches alternation and quantified groups":
+        expect(run_js("'ab|cd'.replace(/b|c/g, 'X')")).to_equal("aX|Xd")
+        expect(run_js("'xay'.replace(/a|b/, 'Z')")).to_equal("xZy")
+        expect(run_js("/^(ab)+$/.test('abab') + ',' + /^(ab)+$/.test('aba')")).to_equal("true,false")
+        expect(run_js("var D = '$'; 'wxyxz'.replace(/(?:x|y)+(z)/, '<' + D + '1>')")).to_equal("w<z>")

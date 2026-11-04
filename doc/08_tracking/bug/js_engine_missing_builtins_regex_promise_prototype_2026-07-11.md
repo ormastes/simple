@@ -140,3 +140,51 @@ added to nogc_sync_mut. That took the pre-existing JS-engine specs from
 1/6 green to 4/6 (remaining: nogc_sync_mut `js_vm_reclamation` is an
 intentional RED placeholder; common `js_vm_reclamation` 2/4 reads the common
 family's `env_parent_ids` field against the nogc_sync_mut engine).
+
+## Note 2026-11-05 — capture groups, `new Promise(executor)`, `new C(args).m()` parsing
+
+On `work/feat-js-builtins-promise-proto-20261105` (PR against `release/1.0.0`):
+
+- **Item 1 residual (`$1` / capture groups) — DONE.** The 2026-11-04 note's
+  "the regexp engine records no groups" understated it: `_match_atom` treated
+  `(` as a literal character, so `(…)` never matched, and `_try_match` on
+  reaching a top-level `|` after a successful left branch re-ran the right
+  branch instead of succeeding, so plain alternation was a no-op too
+  (`'xay'.replace(/a|b/, 'Z')` returned `xay`). `src/lib/common/js/builtins/regexp.spl`
+  is now a compiled backtracking matcher (node arena + explicit continuation
+  stack): groups, `(?:…)`, nested/quantified groups, `|`, `{n}`/`{n,}`/`{n,m}`,
+  lazy quantifiers, `\b`/`\B`, class escapes inside `[...]`, `m` flag. `MatchResult`
+  carries `groups: [text]` + `group_set: [bool]` (unmatched group = JS `undefined`).
+  Engine side: `$1`..`$99` in string replacers, `(match, p1..pn, offset, string)` for
+  function replacers, groups at `[1..n]` on non-global `match` and `exec`.
+- **Item 2 (`new Promise`) — was NOT fixed by the 2026-08-10 change** despite the
+  "FIXED" line above: `Promise` is a plain host object, so `new Promise(fn)` fell
+  through `eval_new` to `undefined`. Now `eval_new` routes the host Promise object
+  to `_construct_promise` (`interpreter_async.spl`): executor runs synchronously
+  with native resolve/reject functions (ids `NATIVE_PROMISE_EXECUTOR_*`, target
+  promise id carried in the native's name), settle-once, thenable adoption, and
+  `then`/`catch` reactions stay microtask-deferred. A separate parser defect hid
+  this: the subset parser read `new C(args).then(...)` as `new (C(args).then(...))`
+  (`_js_parser_expression`, `new ` branch) — fixed by re-parsing as
+  `(new C(args)).then(...)`.
+- **Still open from this record's own list:** `async/await` — `AsyncFnDecl` /
+  `Await` are not handled anywhere in `src/lib/nogc_sync_mut/js/engine/` (the
+  subset parser emits neither), and the tree-walking interpreter has no
+  suspension point to resume after an `await`; this is a feature, not a patch.
+  Also not covered: `Promise.all`/`race` (not in this record), `throw`/`try` are
+  not parsed by the subset parser, so a `throw` inside an executor or a `.then`
+  handler cannot reject a promise (the full parser's `ThrowStmt` is a different
+  `ast_types` enum from the one this engine matches, so it is no route either),
+  `RegExp.prototype.exec` ignores `lastIndex` on `g` regexes, `C.prototype.m = fn`
+  methods are not found on `new C()` instances, and a *quantified group* (`(ab)+`)
+  recurses once per repetition, so several hundred repetitions hit the seed
+  interpreter's 1000-frame limit (single-character quantifiers such as `\s+` /
+  `\w+` are iterative and verified on 800-char inputs). `_run_promise_task` HIR-lowering
+  claim from the 2026-11-04 note was not re-verified here (no diagnostic surfaced
+  under `SIMPLE_JIT_TRACE=1`).
+
+Specs (Windows Rust seed `D:/dev/wt/seed/simple.exe`):
+`test/01_unit/lib/nogc_sync_mut/js/engine/regex_literal_replace_spec.spl`
+13/17 -> 17/17 (4 new cases RED on the unpatched lib);
+`test/01_unit/lib/nogc_sync_mut/js/engine/promise_constructor_spec.spl`
+1/6 -> 6/6.

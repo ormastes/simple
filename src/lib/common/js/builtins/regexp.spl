@@ -1,6 +1,13 @@
-# JavaScript RegExp — Minimal regex engine for basic pattern matching
-# Supports: . \d \w \s [abc] [a-z] [^abc] * + ? {n} {n,m} ^ $ | (...) (?:...)
+# JavaScript RegExp — backtracking regex engine with capture groups
+# Supports: . \d \D \w \W \s \S \b \B [abc] [a-z] [^abc] * + ? {n} {n,} {n,m}
+#           lazy quantifiers (*? +? ?? {n,m}?), ^ $ | (...) (?:...)
 # Flags: g (global), i (case-insensitive), m (multiline)
+#
+# A pattern is compiled once per match call into a small node arena
+# (`RxProgram`); matching is a recursive backtracking walk over that arena
+# with an explicit continuation stack (`[RxFrame]`), so alternation,
+# nested groups and quantified groups all backtrack correctly and every
+# capture span is recorded in the result.
 
 fn _substr(s: text, start: i64, end_idx: i64) -> text:
     """Subscript-based substring that works in interpreter mode."""
@@ -35,13 +42,16 @@ class MatchResult:
     matched: bool
     value: text
     index: i64
+    # Capture group texts, index 0 = group 1. An unmatched group is "" with
+    # `group_set` false (JS exposes it as `undefined`).
     groups: [text]
+    group_set: [bool]
 
     static fn no_match() -> MatchResult:
-        MatchResult(matched: false, value: "", index: -1, groups: [])
+        MatchResult(matched: false, value: "", index: -1, groups: [], group_set: [])
 
-    static fn found(value: text, index: i64) -> MatchResult:
-        MatchResult(matched: true, value: value, index: index, groups: [])
+    static fn found_with_groups(value: text, index: i64, groups: [text], group_set: [bool]) -> MatchResult:
+        MatchResult(matched: true, value: value, index: index, groups: groups, group_set: group_set)
 
 # ── Public API ─────────────────────────────────────────────────────────
 
@@ -51,270 +61,538 @@ fn regexp_test(re: RegExpObj, input: text) -> bool:
     result.matched
 
 fn regexp_exec(re: RegExpObj, input: text) -> MatchResult:
-    """RegExp.prototype.exec — returns first match."""
-    val pattern = re.source
+    """RegExp.prototype.exec — first match at or after `last_index` (global) or 0."""
     var start = 0
     if re.global:
         start = re.last_index
-
-    var i = start
-    val input_len = input.len()
-    while i <= input_len:
-        val result = _try_match(pattern, 0, input, i, re.ignore_case)
-        if result.matched:
-            return MatchResult.found(value: _substr(input, i, i + result.value.len()), index: i)
-        i = i + 1
-    MatchResult.no_match()
+    val prog = rx_compile(re.source, re.ignore_case, re.multiline)
+    rx_search(prog, input, start)
 
 fn string_match(input: text, pattern: text, flags: text) -> [text]:
-    """String.prototype.match — returns all matches or first match groups."""
+    """String.prototype.match — all match texts (g) or first match plus its groups."""
     val re = RegExpObj.create(pattern, flags)
+    val prog = rx_compile(re.source, re.ignore_case, re.multiline)
+    var results: [text] = []
     if re.global:
-        var results: [text] = []
         var i = 0
-        val input_len = input.len()
-        while i <= input_len:
-            val result = _try_match(pattern, 0, input, i, re.ignore_case)
-            if result.matched:
-                results.push(_substr(input, i, i + result.value.len()))
-                i = i + result.value.len()
-                if result.value.len() == 0:
-                    i = i + 1
-            else:
-                i = i + 1
+        while i <= input.len():
+            val m = rx_search(prog, input, i)
+            if not m.matched:
+                break
+            results.push(m.value)
+            i = m.index + (if m.value.len() == 0: 1 else: m.value.len())
         return results
-    # Non-global: return first match
-    val result = regexp_exec(re, input)
-    if result.matched:
-        return [result.value]
-    var empty_result: [text] = []
-    empty_result
+    val m = rx_search(prog, input, 0)
+    if m.matched:
+        results.push(m.value)
+        for g in m.groups:
+            results.push(g)
+    results
 
 fn string_replace(input: text, pattern: text, replacement: text, flags: text) -> text:
-    """String.prototype.replace with regex pattern."""
+    """String.prototype.replace with regex pattern (literal replacement text)."""
     val re = RegExpObj.create(pattern, flags)
+    val prog = rx_compile(re.source, re.ignore_case, re.multiline)
     var result = ""
-    var i = 0
-    val input_len = input.len()
-    var replaced_once = false
-    while i < input_len:
-        val m = _try_match(pattern, 0, input, i, re.ignore_case)
-        if m.matched and (re.global or not replaced_once):
-            result = result + replacement
-            val match_len = m.value.len()
-            i = i + (if match_len > 0: match_len else: 1)
-            replaced_once = true
-        else:
-            result = result + _substr(input, i, i + 1)
-            i = i + 1
-    result
+    var last = 0
+    var pos = 0
+    val n = input.len()
+    while pos <= n:
+        val m = rx_search(prog, input, pos)
+        if not m.matched:
+            break
+        result = result + _substr(input, last, m.index) + replacement
+        last = m.index + m.value.len()
+        if not re.global:
+            break
+        pos = if m.value.len() == 0: last + 1 else: last
+    result + _substr(input, last, n)
 
 fn string_split_regex(input: text, pattern: text) -> [text]:
     """String.prototype.split with regex pattern."""
+    val prog = rx_compile(pattern, false, false)
     var results: [text] = []
     var last = 0
-    var i = 0
-    val input_len = input.len()
-    while i < input_len:
-        val m = _try_match(pattern, 0, input, i, false)
-        if m.matched and m.value.len() > 0:
-            results.push(_substr(input, last, i))
-            i = i + m.value.len()
-            last = i
-        else:
-            i = i + 1
-    results.push(_substr(input, last, input_len))
+    var pos = 0
+    val n = input.len()
+    while pos < n:
+        val m = rx_search(prog, input, pos)
+        if not m.matched:
+            break
+        if m.value.len() == 0:
+            pos = m.index + 1
+            continue
+        results.push(_substr(input, last, m.index))
+        last = m.index + m.value.len()
+        pos = last
+    results.push(_substr(input, last, n))
     results
 
-# ── Pattern matching engine (recursive backtracking) ───────────────────
+# ── Compiled program ───────────────────────────────────────────────────
 
-fn _try_match(pattern: text, pi: i64, input: text, si: i64, ignore_case: bool) -> MatchResult:
-    """Try to match pattern starting at pi against input starting at si."""
-    val plen = pattern.len()
-    var p = pi
-    var s = si
-    val slen = input.len()
+val RX_CHAR: i64 = 0
+val RX_ANY: i64 = 1
+val RX_CLASS: i64 = 2
+val RX_BOL: i64 = 3
+val RX_EOL: i64 = 4
+val RX_GROUP: i64 = 5
+val RX_ESCAPE: i64 = 6
+val RX_WORDB: i64 = 7
+val RX_MANY: i64 = 100000
 
-    while p < plen:
-        val pch = _substr(pattern, p, p + 1)
+class RxNode:
+    kind: i64
+    ch: text          # RX_CHAR literal; RX_ESCAPE class letter (d/w/s/...); RX_WORDB "b"/"B"
+    cls: text         # RX_CLASS body between [ and ]
+    negate: bool      # RX_CLASS
+    alts: [i64]       # RX_GROUP alternative sequence ids
+    cap: i64          # RX_GROUP capture index (0-based) or -1 for (?:...)
+    min: i64
+    max: i64
+    greedy: bool
 
-        # Alternation
-        if pch == "|":
-            # Left side already tried; try right side from original si
-            return _try_match(pattern, p + 1, input, si, ignore_case)
+class RxProgram:
+    nodes: [RxNode]
+    seqs: [[i64]]
+    root: i64         # RX_GROUP node id wrapping the whole pattern (cap -1)
+    ncap: i64
+    ignore_case: bool
+    multiline: bool
 
-        # Anchors
-        if pch == "^":
-            if s != 0:
-                return MatchResult.no_match()
-            p = p + 1
-            continue
-        if pch == "$":
-            if s != slen:
-                return MatchResult.no_match()
-            p = p + 1
-            continue
+class RxFrame:
+    kind: i64         # 0 = continue sequence, 1 = after one repetition, 2 = group end
+    seq: i64
+    idx: i64
+    node: i64
+    count: i64
+    start_pos: i64
 
-        # Check for quantifier after current atom
-        var atom_end = p + 1
-        if pch == "\\":
-            atom_end = p + 2
-        elif pch == "[":
-            atom_end = _find_bracket_end(pattern, p)
-        elif pch == "(":
-            atom_end = _find_group_end(pattern, p)
+class RxOutcome:
+    ok: bool
+    end_pos: i64
+    caps: [i64]
 
-        var quantifier = ""
+# ── Parser ─────────────────────────────────────────────────────────────
+
+class RxParser:
+    pattern: text
+    pos: i64
+    nodes: [RxNode]
+    seqs: [[i64]]
+    ncap: i64
+
+    me peek() -> text:
+        if self.pos < self.pattern.len():
+            return _substr(self.pattern, self.pos, self.pos + 1)
+        ""
+
+    me add_node(node: RxNode) -> i64:
+        self.nodes.push(node)
+        self.nodes.len() - 1
+
+    me add_seq(seq: [i64]) -> i64:
+        self.seqs.push(seq)
+        self.seqs.len() - 1
+
+    me simple_node(kind: i64, ch: text) -> RxNode:
+        RxNode(kind: kind, ch: ch, cls: "", negate: false, alts: [], cap: -1, min: 1, max: 1, greedy: true)
+
+    # alternatives := sequence ('|' sequence)*   — stops at ')' or end
+    me parse_alternatives() -> [i64]:
+        var alts: [i64] = []
+        alts.push(self.parse_sequence())
+        while self.peek() == "|":
+            self.pos = self.pos + 1
+            alts.push(self.parse_sequence())
+        alts
+
+    me parse_sequence() -> i64:
+        var seq: [i64] = []
+        while self.pos < self.pattern.len():
+            val c = self.peek()
+            if c == "|" or c == ")":
+                break
+            val node = self.parse_quantifier(self.parse_atom())
+            seq.push(self.add_node(node))
+        self.add_seq(seq)
+
+    me parse_atom() -> RxNode:
+        val c = self.peek()
+        self.pos = self.pos + 1
+        if c == "(":
+            var cap = -1
+            if self.peek() == "?" and self.pos + 1 < self.pattern.len() and _substr(self.pattern, self.pos + 1, self.pos + 2) == ":":
+                self.pos = self.pos + 2
+            else:
+                cap = self.ncap
+                self.ncap = self.ncap + 1
+            val alts = self.parse_alternatives()
+            if self.peek() == ")":
+                self.pos = self.pos + 1
+            return RxNode(kind: RX_GROUP, ch: "", cls: "", negate: false, alts: alts, cap: cap, min: 1, max: 1, greedy: true)
+        if c == ".":
+            return self.simple_node(RX_ANY, "")
+        if c == "^":
+            return self.simple_node(RX_BOL, "")
+        if c == "$":
+            return self.simple_node(RX_EOL, "")
+        if c == "[":
+            val start = self.pos
+            var end_idx = self.pos
+            if _substr(self.pattern, end_idx, end_idx + 1) == "^":
+                end_idx = end_idx + 1
+            if _substr(self.pattern, end_idx, end_idx + 1) == "]":
+                end_idx = end_idx + 1
+            while end_idx < self.pattern.len() and _substr(self.pattern, end_idx, end_idx + 1) != "]":
+                if _substr(self.pattern, end_idx, end_idx + 1) == "\\":
+                    end_idx = end_idx + 1
+                end_idx = end_idx + 1
+            var body = _substr(self.pattern, start, end_idx)
+            var negate = false
+            if body.len() > 0 and _substr(body, 0, 1) == "^":
+                negate = true
+                body = _substr(body, 1, body.len())
+            self.pos = end_idx + 1
+            return RxNode(kind: RX_CLASS, ch: "", cls: body, negate: negate, alts: [], cap: -1, min: 1, max: 1, greedy: true)
+        if c == "\\":
+            val e = self.peek()
+            self.pos = self.pos + 1
+            if e == "d" or e == "D" or e == "w" or e == "W" or e == "s" or e == "S":
+                return self.simple_node(RX_ESCAPE, e)
+            if e == "b" or e == "B":
+                return self.simple_node(RX_WORDB, e)
+            return self.simple_node(RX_CHAR, _unescape_char(e))
+        self.simple_node(RX_CHAR, c)
+
+    # Apply a following quantifier (if any) to `node` and return it.
+    me parse_quantifier(node: RxNode) -> RxNode:
+        val q = self.peek()
         var min_rep = 1
         var max_rep = 1
-        if atom_end < plen:
-            val qch = _substr(pattern, atom_end, atom_end + 1)
-            if qch == "*":
-                quantifier = "*"
-                min_rep = 0
-                max_rep = 9999
-            elif qch == "+":
-                quantifier = "+"
-                min_rep = 1
-                max_rep = 9999
-            elif qch == "?":
-                quantifier = "?"
-                min_rep = 0
-                max_rep = 1
-
-        if quantifier != "":
-            # Greedy match
-            var count = 0
-            var best_s = s
-            while count < max_rep and s < slen:
-                if _match_atom(pattern, p, atom_end, input, s, ignore_case):
-                    s = s + 1
-                    count = count + 1
+        if q == "*":
+            min_rep = 0
+            max_rep = RX_MANY
+            self.pos = self.pos + 1
+        elif q == "+":
+            min_rep = 1
+            max_rep = RX_MANY
+            self.pos = self.pos + 1
+        elif q == "?":
+            min_rep = 0
+            max_rep = 1
+            self.pos = self.pos + 1
+        elif q == "{":
+            val close = self.find_brace_end()
+            if close < 0:
+                return node
+            val body = _substr(self.pattern, self.pos + 1, close)
+            var lo = ""
+            var hi = ""
+            var seen_comma = false
+            for ch in body:
+                if ch == ",":
+                    seen_comma = true
+                elif seen_comma:
+                    hi = hi + ch
                 else:
-                    break
-            # Try matching rest of pattern from s backwards (greedy backtrack)
-            var try_s = s
-            while try_s >= best_s + min_rep:
-                val rest = _try_match(pattern, atom_end + 1, input, try_s, ignore_case)
-                if rest.matched:
-                    return MatchResult.found(value: _substr(input, si, try_s + rest.value.len()), index: si)
-                try_s = try_s - 1
-            if min_rep == 0:
-                val rest = _try_match(pattern, atom_end + 1, input, best_s, ignore_case)
-                if rest.matched:
-                    return rest
-            return MatchResult.no_match()
+                    lo = lo + ch
+            if lo.len() == 0:
+                return node
+            min_rep = _parse_int(lo)
+            if not seen_comma:
+                max_rep = min_rep
+            elif hi.len() == 0:
+                max_rep = RX_MANY
+            else:
+                max_rep = _parse_int(hi)
+            self.pos = close + 1
         else:
-            # Single match required
-            if s >= slen:
-                return MatchResult.no_match()
-            if not _match_atom(pattern, p, atom_end, input, s, ignore_case):
-                return MatchResult.no_match()
-            s = s + 1
-            p = atom_end
+            return node
+        var greedy = true
+        if self.peek() == "?":
+            greedy = false
+            self.pos = self.pos + 1
+        RxNode(kind: node.kind, ch: node.ch, cls: node.cls, negate: node.negate, alts: node.alts, cap: node.cap, min: min_rep, max: max_rep, greedy: greedy)
 
-    MatchResult.found(value: _substr(input, si, s), index: si)
+    # Index of the `}` closing a `{n,m}` quantifier at self.pos, or -1 when
+    # the brace is not a well-formed quantifier (then it is a literal).
+    me find_brace_end() -> i64:
+        var i = self.pos + 1
+        var digits = 0
+        while i < self.pattern.len():
+            val ch = _substr(self.pattern, i, i + 1)
+            if ch == "}":
+                return if digits > 0: i else: -1
+            if _is_digit(ch):
+                digits = digits + 1
+            elif ch != ",":
+                return -1
+            i = i + 1
+        -1
 
-fn _match_atom(pattern: text, start: i64, end_idx: i64, input: text, si: i64, ignore_case: bool) -> bool:
-    """Match a single atom (char, escape, class) at position si."""
-    val pch = _substr(pattern, start, start + 1)
+fn _unescape_char(e: text) -> text:
+    if e == "n": return "\n"
+    if e == "t": return "\t"
+    if e == "r": return "\r"
+    e
 
-    # Dot: match any except newline
-    if pch == ".":
-        val ich = _substr(input, si, si + 1)
+fn _digit_value(ch: text) -> i64:
+    val digits = "0123456789"
+    var i = 0
+    while i < 10:
+        if _substr(digits, i, i + 1) == ch:
+            return i
+        i = i + 1
+    0
+
+fn _parse_int(s: text) -> i64:
+    var n = 0
+    for ch in s:
+        if _is_digit(ch):
+            n = n * 10 + _digit_value(ch)
+    n
+
+fn rx_compile(source: text, ignore_case: bool, multiline: bool) -> RxProgram:
+    """Compile a pattern into a node arena; `(?:)` and malformed input compile to a permissive program."""
+    var parser = RxParser(pattern: source, pos: 0, nodes: [], seqs: [], ncap: 0)
+    val alts = parser.parse_alternatives()
+    var root = parser.simple_node(RX_GROUP, "")
+    root.alts = alts
+    val root_id = parser.add_node(root)
+    RxProgram(nodes: parser.nodes, seqs: parser.seqs, root: root_id, ncap: parser.ncap, ignore_case: ignore_case, multiline: multiline)
+
+# ── Matcher ────────────────────────────────────────────────────────────
+
+fn rx_search(prog: RxProgram, input: text, start: i64) -> MatchResult:
+    """Leftmost match at or after `start`."""
+    var i = start
+    val n = input.len()
+    while i <= n:
+        val outcome = rx_match_at(prog, input, i)
+        if outcome.ok:
+            var groups: [text] = []
+            var group_set: [bool] = []
+            var g = 0
+            while g < prog.ncap:
+                val gs = outcome.caps[2 * g]
+                val ge = outcome.caps[2 * g + 1]
+                if gs >= 0 and ge >= 0:
+                    groups.push(_substr(input, gs, ge))
+                    group_set.push(true)
+                else:
+                    groups.push("")
+                    group_set.push(false)
+                g = g + 1
+            return MatchResult.found_with_groups(_substr(input, i, outcome.end_pos), i, groups, group_set)
+        i = i + 1
+    MatchResult.no_match()
+
+fn rx_match_at(prog: RxProgram, input: text, pos: i64) -> RxOutcome:
+    """Anchored match attempt at `pos`."""
+    var caps: [i64] = []
+    var k = 0
+    while k < 2 * prog.ncap:
+        caps.push(-1)
+        k = k + 1
+    val empty_cont: [RxFrame] = []
+    _rx_rep(prog, prog.root, 0, input, pos, caps, empty_cont)
+
+fn _rx_fail() -> RxOutcome:
+    RxOutcome(ok: false, end_pos: -1, caps: [])
+
+fn _rx_frame(kind: i64, seq: i64, idx: i64, node: i64, count: i64, start_pos: i64) -> RxFrame:
+    RxFrame(kind: kind, seq: seq, idx: idx, node: node, count: count, start_pos: start_pos)
+
+fn _rx_push(cont: [RxFrame], frame: RxFrame) -> [RxFrame]:
+    var out: [RxFrame] = []
+    for f in cont:
+        out.push(f)
+    out.push(frame)
+    out
+
+fn _rx_pop(cont: [RxFrame]) -> [RxFrame]:
+    var out: [RxFrame] = []
+    var i = 0
+    while i < cont.len() - 1:
+        out.push(cont[i])
+        i = i + 1
+    out
+
+# Resume the continuation stack at `pos`.
+fn _rx_cont(prog: RxProgram, input: text, pos: i64, caps: [i64], cont: [RxFrame]) -> RxOutcome:
+    if cont.len() == 0:
+        return RxOutcome(ok: true, end_pos: pos, caps: caps)
+    val frame = cont[cont.len() - 1]
+    val rest = _rx_pop(cont)
+    if frame.kind == 0:
+        return _rx_seq(prog, frame.seq, frame.idx, input, pos, caps, rest)
+    if frame.kind == 1:
+        # One repetition of `frame.node` just finished. An empty iteration
+        # cannot make progress, so stop repeating there.
+        if pos == frame.start_pos:
+            return _rx_cont(prog, input, pos, caps, rest)
+        return _rx_rep(prog, frame.node, frame.count + 1, input, pos, caps, rest)
+    # kind 2: capture group end
+    var new_caps: [i64] = []
+    for c in caps:
+        new_caps.push(c)
+    new_caps[2 * frame.node] = frame.start_pos
+    new_caps[2 * frame.node + 1] = pos
+    _rx_cont(prog, input, pos, new_caps, rest)
+
+# Match sequence `seq` from element `idx`.
+fn _rx_seq(prog: RxProgram, seq: i64, idx: i64, input: text, pos: i64, caps: [i64], cont: [RxFrame]) -> RxOutcome:
+    val items = prog.seqs[seq]
+    if idx >= items.len():
+        return _rx_cont(prog, input, pos, caps, cont)
+    val next_cont = _rx_push(cont, _rx_frame(0, seq, idx + 1, -1, 0, pos))
+    _rx_rep(prog, items[idx], 0, input, pos, caps, next_cont)
+
+# Match node `node_id` having already matched it `count` times.
+fn _rx_rep(prog: RxProgram, node_id: i64, count: i64, input: text, pos: i64, caps: [i64], cont: [RxFrame]) -> RxOutcome:
+    val node = prog.nodes[node_id]
+    if count == 0 and _rx_is_single(node.kind):
+        return _rx_rep_single(prog, node, input, pos, caps, cont)
+    if count < node.min:
+        return _rx_once(prog, node_id, input, pos, caps, _rx_push(cont, _rx_frame(1, -1, 0, node_id, count, pos)))
+    if node.greedy:
+        if count < node.max:
+            val r = _rx_once(prog, node_id, input, pos, caps, _rx_push(cont, _rx_frame(1, -1, 0, node_id, count, pos)))
+            if r.ok:
+                return r
+        return _rx_cont(prog, input, pos, caps, cont)
+    val lazy = _rx_cont(prog, input, pos, caps, cont)
+    if lazy.ok:
+        return lazy
+    if count < node.max:
+        return _rx_once(prog, node_id, input, pos, caps, _rx_push(cont, _rx_frame(1, -1, 0, node_id, count, pos)))
+    _rx_fail()
+
+# Match node once at `pos`, then run the continuation.
+fn _rx_once(prog: RxProgram, node_id: i64, input: text, pos: i64, caps: [i64], cont: [RxFrame]) -> RxOutcome:
+    val node = prog.nodes[node_id]
+    val n = input.len()
+    if node.kind == RX_GROUP:
+        var group_cont = cont
+        if node.cap >= 0:
+            group_cont = _rx_push(cont, _rx_frame(2, -1, 0, node.cap, 0, pos))
+        for alt in node.alts:
+            val r = _rx_seq(prog, alt, 0, input, pos, caps, group_cont)
+            if r.ok:
+                return r
+        return _rx_fail()
+    if node.kind == RX_BOL:
+        if pos == 0 or (prog.multiline and _substr(input, pos - 1, pos) == "\n"):
+            return _rx_cont(prog, input, pos, caps, cont)
+        return _rx_fail()
+    if node.kind == RX_EOL:
+        if pos == n or (prog.multiline and _substr(input, pos, pos + 1) == "\n"):
+            return _rx_cont(prog, input, pos, caps, cont)
+        return _rx_fail()
+    if node.kind == RX_WORDB:
+        val before = pos > 0 and _is_word(_substr(input, pos - 1, pos))
+        val after = pos < n and _is_word(_substr(input, pos, pos + 1))
+        val at_boundary = before != after
+        if at_boundary == (node.ch == "b"):
+            return _rx_cont(prog, input, pos, caps, cont)
+        return _rx_fail()
+    if pos >= n or not _rx_single_hit(prog, node, input, pos):
+        return _rx_fail()
+    _rx_cont(prog, input, pos + 1, caps, cont)
+
+# Does single-character atom `node` match the character at `pos`?
+fn _rx_single_hit(prog: RxProgram, node: RxNode, input: text, pos: i64) -> bool:
+    val ich = _substr(input, pos, pos + 1)
+    if node.kind == RX_ANY:
         return ich != "\n"
+    if node.kind == RX_CHAR:
+        return _char_eq(ich, node.ch, prog.ignore_case)
+    if node.kind == RX_ESCAPE:
+        return _match_escape(node.ch, ich)
+    _match_char_class(node.cls, node.negate, ich, prog.ignore_case)
 
-    # Escape sequences
-    if pch == "\\":
-        if start + 1 >= pattern.len():
-            return false
-        val ech = _substr(pattern, start + 1, start + 2)
-        val ich = _substr(input, si, si + 1)
-        match ech:
-            "d": return _is_digit(ich)
-            "D": return not _is_digit(ich)
-            "w": return _is_word(ich)
-            "W": return not _is_word(ich)
-            "s": return _is_space(ich)
-            "S": return not _is_space(ich)
-            _: return ich == ech
+fn _rx_is_single(kind: i64) -> bool:
+    kind == RX_CHAR or kind == RX_ANY or kind == RX_CLASS or kind == RX_ESCAPE
 
-    # Character class [...]
-    if pch == "[":
-        return _match_char_class(pattern, start, end_idx, input, si, ignore_case)
+# Quantified single-character atom: count the run iteratively and try the
+# continuation from the longest (greedy) or shortest (lazy) acceptable
+# length, so recursion depth does not grow with the input length.
+fn _rx_rep_single(prog: RxProgram, node: RxNode, input: text, pos: i64, caps: [i64], cont: [RxFrame]) -> RxOutcome:
+    val n = input.len()
+    var count = 0
+    while count < node.max and pos + count < n and _rx_single_hit(prog, node, input, pos + count):
+        count = count + 1
+    if count < node.min:
+        return _rx_fail()
+    if node.greedy:
+        var k = count
+        while k >= node.min:
+            val r = _rx_cont(prog, input, pos + k, caps, cont)
+            if r.ok:
+                return r
+            k = k - 1
+        return _rx_fail()
+    var k = node.min
+    while k <= count:
+        val r = _rx_cont(prog, input, pos + k, caps, cont)
+        if r.ok:
+            return r
+        k = k + 1
+    _rx_fail()
 
-    # Literal character
-    val ich = _substr(input, si, si + 1)
+fn _char_eq(a: text, b: text, ignore_case: bool) -> bool:
     if ignore_case:
-        return ich.lower() == pch.lower()
-    ich == pch
+        return a.lower() == b.lower()
+    a == b
 
-fn _match_char_class(pattern: text, start: i64, end_idx: i64, input: text, si: i64, ignore_case: bool) -> bool:
-    """Match a character class [abc], [a-z], [^abc]."""
-    val ich = _substr(input, si, si + 1)
-    var negate = false
-    var p = start + 1
-    if p < end_idx and _substr(pattern, p, p + 1) == "^":
-        negate = true
-        p = p + 1
+fn _match_escape(e: text, ich: text) -> bool:
+    if e == "d": return _is_digit(ich)
+    if e == "D": return not _is_digit(ich)
+    if e == "w": return _is_word(ich)
+    if e == "W": return not _is_word(ich)
+    if e == "s": return _is_space(ich)
+    if e == "S": return not _is_space(ich)
+    ich == e
+
+fn _match_char_class(body: text, negate: bool, ich: text, ignore_case: bool) -> bool:
+    """Match one char against a class body (`a-z`, `abc`, `\\d`, `\\]`)."""
     var matched = false
-    while p < end_idx - 1:
-        val c = _substr(pattern, p, p + 1)
-        # Range: a-z
-        if p + 2 < end_idx - 1 and _substr(pattern, p + 1, p + 2) == "-":
-            val c2 = _substr(pattern, p + 2, p + 3)
+    var p = 0
+    val blen = body.len()
+    while p < blen and not matched:
+        var c = _substr(body, p, p + 1)
+        var consumed = 1
+        if c == "\\" and p + 1 < blen:
+            val e = _substr(body, p + 1, p + 2)
+            consumed = 2
+            if e == "d" or e == "D" or e == "w" or e == "W" or e == "s" or e == "S":
+                if _match_escape(e, ich):
+                    matched = true
+                p = p + consumed
+                continue
+            c = _unescape_char(e)
+        if p + consumed + 1 < blen and _substr(body, p + consumed, p + consumed + 1) == "-":
+            var hi = _substr(body, p + consumed + 1, p + consumed + 2)
+            var hi_len = 1
+            if hi == "\\" and p + consumed + 2 < blen:
+                hi = _unescape_char(_substr(body, p + consumed + 2, p + consumed + 3))
+                hi_len = 2
             var ic = ich
             var lo = c
-            var hi = c2
             if ignore_case:
                 ic = ich.lower()
                 lo = c.lower()
-                hi = c2.lower()
+                hi = hi.lower()
             if ic >= lo and ic <= hi:
                 matched = true
-            p = p + 3
+            p = p + consumed + 1 + hi_len
         else:
-            var ic = ich
-            var cc = c
-            if ignore_case:
-                ic = ich.lower()
-                cc = c.lower()
-            if ic == cc:
+            if _char_eq(ich, c, ignore_case):
                 matched = true
-            p = p + 1
+            p = p + consumed
     if negate:
         return not matched
     matched
-
-fn _find_bracket_end(pattern: text, start: i64) -> i64:
-    """Find closing ] for character class."""
-    var i = start + 1
-    val plen = pattern.len()
-    if i < plen and _substr(pattern, i, i + 1) == "^":
-        i = i + 1
-    if i < plen and _substr(pattern, i, i + 1) == "]":
-        i = i + 1  # literal ]
-    while i < plen:
-        if _substr(pattern, i, i + 1) == "]":
-            return i + 1
-        i = i + 1
-    plen
-
-fn _find_group_end(pattern: text, start: i64) -> i64:
-    """Find closing ) for group."""
-    var depth = 0
-    var i = start
-    val plen = pattern.len()
-    while i < plen:
-        val ch = _substr(pattern, i, i + 1)
-        if ch == "(":
-            depth = depth + 1
-        elif ch == ")":
-            depth = depth - 1
-            if depth == 0:
-                return i + 1
-        i = i + 1
-    plen
 
 # ── Character class helpers ────────────────────────────────────────────
 

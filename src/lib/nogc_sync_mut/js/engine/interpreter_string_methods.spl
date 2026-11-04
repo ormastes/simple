@@ -8,8 +8,37 @@ use std.js.engine.vm_object_store.{ObjectStore}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use common.js.engine.string_trim.{js_trim_text}
-use std.js.builtins.regexp.{RegExpObj, regexp_exec}
+use std.js.builtins.regexp.{RegExpObj, MatchResult, regexp_exec}
 use std.nogc_sync_mut.js.engine.interpreter_exec.{JsInterpreter}
+
+# Capture groups of a match as JS values: matched text, or `undefined` for a
+# group that did not participate.
+fn _group_values(m: MatchResult) -> [JsValue]:
+    var out: [JsValue] = []
+    var i = 0
+    while i < m.groups.len():
+        if m.group_set.get(i):
+            out.push(JsValue.String(v: m.groups.get(i)))
+        else:
+            out.push(JsValue.Undefined)
+        i = i + 1
+    out
+
+fn _group_text(g: JsValue) -> text:
+    match g:
+        JsValue.String(v): v
+        _: ""
+
+# Value of a decimal digit character, or -1 (the family-mapped
+# `_digit_val` takes a code point, not a one-char text).
+fn _replace_digit(ch: text) -> i64:
+    val digits = "0123456789"
+    var i = 0
+    while i < 10:
+        if digits.slice(i, i + 1) == ch:
+            return i
+        i = i + 1
+    -1
 
 impl JsInterpreter:
     # String method dispatch
@@ -253,7 +282,7 @@ impl JsInterpreter:
                 val slen = str_val.len()
                 val needle_len = search_s.len()
                 if needle_len == 0:
-                    val head = self._replace_expand(replace_val, "", 0, str_val, env)?
+                    val head = self._replace_expand(replace_val, "", 0, str_val, [], env)?
                     return Ok(JsValue.String(v: head + str_val))
                 var i = 0
                 while i <= slen - needle_len:
@@ -270,7 +299,7 @@ impl JsInterpreter:
                         while bi < i:
                             result = result + str_val[bi]
                             bi = bi + 1
-                        result = result + self._replace_expand(replace_val, search_s, i, str_val, env)?
+                        result = result + self._replace_expand(replace_val, search_s, i, str_val, [], env)?
                         var ai = i + needle_len
                         while ai < slen:
                             result = result + str_val[ai]
@@ -297,6 +326,8 @@ impl JsInterpreter:
                     values.push(JsValue.String(v: m.value))
                     first_index = m.index
                     if not re.global:
+                        for g in _group_values(m):
+                            values.push(g)
                         break
                     pos = m.index + (if m.value.len() == 0: 1 else: m.value.len())
                 if values.len() == 0:
@@ -429,7 +460,7 @@ impl JsInterpreter:
             if not m.matched:
                 break
             result = result + input.slice(last, m.index)
-            result = result + self._replace_expand(replace_val, m.value, m.index, input, env)?
+            result = result + self._replace_expand(replace_val, m.value, m.index, input, _group_values(m), env)?
             last = m.index + m.value.len()
             if not re.global:
                 break
@@ -438,13 +469,16 @@ impl JsInterpreter:
         Ok(JsValue.String(v: result))
 
     # Replacement text for one match: a function replacer is called with
-    # (match, offset, string); a string replacer expands `$&` and `$$`.
-    # Capture groups (`$1`) are not available — the regexp engine does not
-    # record them.
-    me _replace_expand(replace_val: JsValue, matched: text, index: i64, input: text, env: i64) -> JsBrowserResult<text>:
+    # (match, p1..pn, offset, string); a string replacer expands `$&`, `$$`
+    # and `$1`..`$99` (an unmatched or out-of-range group expands to "").
+    me _replace_expand(replace_val: JsValue, matched: text, index: i64, input: text, groups: [JsValue], env: i64) -> JsBrowserResult<text>:
         match replace_val:
             JsValue.Function(fn_id):
-                val call_args = [JsValue.String(v: matched), JsValue.Number(v: index.to_f64()), JsValue.String(v: input)]
+                var call_args: [JsValue] = [JsValue.String(v: matched)]
+                for g in groups:
+                    call_args.push(g)
+                call_args.push(JsValue.Number(v: index.to_f64()))
+                call_args.push(JsValue.String(v: input))
                 val r = self._invoke_function(fn_id, call_args, env)?
                 return Ok(js_to_string(r))
             _: pass_dn
@@ -460,6 +494,23 @@ impl JsInterpreter:
             else if ch == "$" and nx == "$":
                 out = out + "$"
                 i = i + 2
+            else if ch == "$" and _replace_digit(nx) >= 0:
+                # `$nn` when both digits form a valid group number, else `$n`.
+                val nx2 = if i + 2 < tmpl.len(): tmpl.slice(i + 2, i + 3) else: ""
+                var num = _replace_digit(nx)
+                var width = 2
+                val d2 = _replace_digit(nx2)
+                if d2 >= 0:
+                    val two = num * 10 + d2
+                    if two >= 1 and two <= groups.len():
+                        num = two
+                        width = 3
+                if num >= 1 and num <= groups.len():
+                    out = out + _group_text(groups.get(num - 1))
+                    i = i + width
+                else:
+                    out = out + ch
+                    i = i + 1
             else:
                 out = out + ch
                 i = i + 1

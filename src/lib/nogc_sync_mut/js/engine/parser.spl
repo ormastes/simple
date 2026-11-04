@@ -340,7 +340,13 @@ fn _js_parser_expression(raw: text) -> JsExpression:
             right: _js_parser_expression(expr.slice(exponent.first + exponent.second.len(), expr.len()))
         )
     if expr.starts_with("new "):
-        val new_expr = _js_parser_postfix(expr.slice(4, expr.len()).trim())
+        val new_rest = expr.slice(4, expr.len()).trim()
+        # `new C(args).m(...)`: the constructor call binds tighter than the
+        # trailing member chain, so re-parse as `(new C(args)).m(...)`.
+        val new_close = _js_parser_new_call_end(new_rest)
+        if new_close >= 0 and new_rest.slice(new_close + 1, new_rest.len()).trim().len() > 0:
+            return _js_parser_expression("(new " + new_rest.slice(0, new_close + 1) + ")" + new_rest.slice(new_close + 1, new_rest.len()))
+        val new_expr = _js_parser_postfix(new_rest)
         match new_expr:
             JsExpression.Call(callee, args):
                 return JsExpression.NewExpr(callee: callee, args: args)
@@ -962,6 +968,30 @@ fn _js_parser_decode_string_literal(raw: text) -> text:
             i = i + 2
         seg_start = i
     out + raw.slice(seg_start, raw.len())
+
+# Index of the `)` closing the first top-level argument list in `expr`
+# (the constructor call of a `new` expression), or -1 when there is none.
+fn _js_parser_new_call_end(expr: text) -> i64:
+    var quote = ""
+    var i = 0
+    while i < expr.len():
+        val ch = expr.slice(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            else if ch == quote:
+                quote = ""
+        else if ch == "'" or ch == "\"":
+            quote = ch
+        else if ch == "(":
+            return _js_parser_matching_paren(expr, i)
+        else if ch == "[":
+            val close = _js_parser_matching_bracket(expr, i)
+            if close < 0:
+                return -1
+            i = close
+        i = i + 1
+    -1
 
 fn _js_parser_matching_paren(expr: text, start: i64) -> i64:
     var depth = 0
