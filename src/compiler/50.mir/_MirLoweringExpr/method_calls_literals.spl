@@ -2264,7 +2264,27 @@ impl MirLowering:
                 case _: ()
         -1
 
-    me reject_unresolved_method_call_v1(receiver: HirExpr, method: text, route: text) -> LocalId:
+    # Error-path-only: names which registry did or did not hold the
+    # module-qualified Owner::method key (route study section A).
+    me unresolved_method_lookup_detail_v1(method: text, owner: text, record_owner: i64) -> text:
+        val lookup_key = self.struct_owner_method_key(owner, method)
+        var in_struct_syms = "no"
+        if self.struct_method_key_present_v1(lookup_key):
+            in_struct_syms = "yes"
+        var in_record = "n/a"
+        if record_owner >= 0:
+            in_record = "no"
+            if self.symbols.record_instance_method_scalar_raw(record_owner, method) >= 0:
+                in_record = "yes"
+        var in_type = "no"
+        if owner != "":
+            val owner_type_id = self.symbols.lookup_or_invalid(owner)
+            if owner_type_id.is_valid():
+                if self.symbols.lookup_method_in_type(owner_type_id, method) != nil:
+                    in_type = "yes"
+        "key={lookup_key} owner={owner} struct_method_syms={in_struct_syms} record_instance_method={in_record} lookup_method_in_type={in_type}"
+
+    me reject_unresolved_method_call_v1(receiver: HirExpr, method: text, route: text, lookup_detail: text) -> LocalId:
         # SIMPLE_ENUM_REG_TRACE=1 (cycle-51/52 discriminator): an unresolved
         # static call whose receiver is an enum type (SdnValue.Bool et al.)
         # means the variant/constructor registry had no entry for the owner
@@ -2275,7 +2295,7 @@ impl MirLowering:
         # Diagnostics: pass the receiver's span instead of nil so the
         # driver's _format_mir_error can name the failing site --
         # every "unresolved method call" used to be location-blind.
-        self.error_fatal("unresolved method call: {method}", Some(receiver.span))
+        self.error_fatal("unresolved method call: {method} route={route} {lookup_detail}", Some(receiver.span))
         # Task #145: self.error only COLLECTS -- both the bootstrap
         # lane (driver_bootstrap.spl reads ctx.errors, never
         # MirLowering.errors) and the native-build worker drop the
@@ -4677,7 +4697,7 @@ impl MirLowering:
                     # A recovered nominal declaration has no runtime value.
                     # Its exact method lookup has failed; do not evaluate the
                     # type name as a local or try another owner's method.
-                    return self.reject_unresolved_method_call_v1(receiver, method, "static-nominal")
+                    return self.reject_unresolved_method_call_v1(receiver, method, "static-nominal", self.unresolved_method_lookup_detail_v1(method, static_receiver_name, -1))
 
                 # Keep this aggregate LocalId selection statement-shaped.
                 # The Stage 2 self-host compiler corrupted the result of the
@@ -4753,11 +4773,15 @@ impl MirLowering:
                         self.error("unresolved method call: {method} is ambiguous on {ambiguous_owner}: impl blocks in more than one module declare it", Some(receiver.span))
                     # Method symbols are owner-qualified during HIR lowering,
                     # so unrelated types may safely expose the same method name.
-                    val unresolved_method_id: SymbolId? = if declared_record_owner >= 0:
-                        val candidate: i64 = self.symbols.record_instance_method_scalar_raw(declared_record_owner, method)
-                        if candidate >= 0: Some(SymbolId(id: candidate)) else: nil
+                    # Statement-shaped (Stage 2 miscompiles an Option-valued
+                    # if/elif/else expression whose last arm is a nested match).
+                    # Resolution order: record owner scalar, struct_method_syms,
+                    # then the declared receiver type's own method.
+                    var resolved_instance_method_raw: i64 = -1
+                    if declared_record_owner >= 0:
+                        resolved_instance_method_raw = self.symbols.record_instance_method_scalar_raw(declared_record_owner, method)
                     elif self.struct_method_key_present_v1(unresolved_method_key):
-                        Some(self.struct_method_syms[unresolved_method_key])
+                        resolved_instance_method_raw = self.struct_method_syms[unresolved_method_key].id
                     else:
                         val found_receiver_type_result: HirType? = self.receiver_declared_or_result_type(receiver, unresolved_receiver_local)
                         match found_receiver_type_result:
@@ -4771,12 +4795,15 @@ impl MirLowering:
                                                 match instance_candidate_symbol_result:
                                                     case Option.Some(instance_candidate_symbol):
                                                         match instance_candidate_symbol.kind:
-                                                            case SymbolKind.Method: Some(instance_candidate_id)
-                                                            case _: nil
-                                                    case _: nil
-                                            case _: nil
-                                    case _: nil
-                            case _: nil
+                                                            case SymbolKind.Method: resolved_instance_method_raw = instance_candidate_id.id
+                                                            case _: ()
+                                                    case _: ()
+                                            case _: ()
+                                    case _: ()
+                            case _: ()
+                    var unresolved_method_id: SymbolId? = nil
+                    if resolved_instance_method_raw >= 0:
+                        unresolved_method_id = Some(SymbolId(id: resolved_instance_method_raw))
                     # Inline-class-method fallback (native_build_cross_module_
                     # result_payload_struct_name_collision_2026-08-09
                     # mechanism #2): struct_method_syms is module.impls-derived
@@ -5543,7 +5570,7 @@ impl MirLowering:
                                 args, self.resolved_call_hir_param_types(target))
                             return self.emit_scalar_or_resolved_trait_call_v1(target, scalar_args,
                                 wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
-                self.reject_unresolved_method_call_v1(receiver, method, "runtime-fallback")
+                self.reject_unresolved_method_call_v1(receiver, method, "runtime-fallback", self.unresolved_method_lookup_detail_v1(method, unresolved_struct_name ?? "", declared_record_owner))
 
     me emit_scalar_or_resolved_trait_call_v1(method_id: SymbolId, arg_operands: [MirOperand],
             wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64, wb_receiver: LocalId) -> LocalId:
