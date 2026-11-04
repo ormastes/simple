@@ -1,6 +1,6 @@
 # char_condition_type_check_staged_2026-11-03
 
-- **Status:** open — staged; warning stage DONE, error promotion BLOCKED
+- **Status:** fix-implemented-awaiting-gate — warning default + error mode done; default flip waits on the ADR-005 gate
 - **Priority:** P2
 - **Platform:** shared dependency (not macOS-exclusive)
 - **ADR:** `doc/04_architecture/adr/ADR-005-text-index-yields-char.md`
@@ -39,7 +39,24 @@ Windows, macOS **and** Linux each have a working self-hosted Simple binary
   it; Stage 3 blocked, see `arm64_macos_audit_20261103/current_inventory.md`).
 - Windows/Linux: not verified in this lane.
 
-Flip recipe when unblocked: change the default in `cc_mode_resolve`
-(`char_condition.spl`) to error, update the spec's default-mode expectation,
-and close this row. No code change is safe before then: the frozen stage2
+Flip recipe when unblocked (single switch point, 2026-11-04): in
+`src/compiler/20.hir/exhaustiveness/char_condition.spl` change
+`pub fn cc_default_mode() -> text: "warn"` to `"error"`, then update the
+spec's `cc_default_mode()`/default-mode expectations and close this row.
+Gate condition: an admitted self-hosted Simple binary on Windows, macOS and
+Linux (ADR-005). No code change is safe before then: the frozen stage2
 compiles compiler sources that may still contain char conditions.
+
+## Stage 1.5 — error path + flip-ready gate (2026-11-04)
+
+- Error mode emits `E-CHAR-CONDITION` as a fatal lowering error (warn mode
+  keeps `W-CHAR-CONDITION` as a recovered warning); both carry the site
+  `line:col` and a fix-it `help: compare explicitly, e.g. c != '\0' or c == 'a'`
+  (`cc_message`). `SIMPLE_CHAR_CONDITION=warn` is honoured explicitly, so after
+  the flip it is the opt-out (critical/verified profiles still force error).
+- Default lives only in `cc_default_mode()`.
+- Seed side: still not added, for the reason above (would need a second static
+  condition-type pass in the bootstrap-only seed; runtime fails closed).
+- Evidence: `char_condition_spec.spl` -> `outcome=OK executed=16 passed=16
+  failed=0` (warn and error modes for if/elif/while/not/and/or, default-mode
+  gate, message/hint) on `/Users/ormastes/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple` at release/1.0.0 base `5cc998f2043`.

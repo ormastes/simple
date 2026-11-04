@@ -44,6 +44,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_rect_upload_las
     vulkan_image_pack_counts, vulkan_image_pack_counts_reset}
 use std.gpu.engine2d.backend_vulkan_font
 use std.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_font_promote_flushed_batch}
 use std.gpu.engine2d.helpers_text.{text_aa_blit_buffer}
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gpu.engine2d.backend_directx.{DirectXBackend}
@@ -2572,6 +2573,17 @@ class Engine2D with DrawIrRenderTarget:
     me font_receipt_execution_target_cpu() -> bool:
         self.last_font_execution_target == "cpu"
 
+    me set_vulkan_font_oracle_mode(enabled: bool):
+        """Opt an evidence collector into the Vulkan font CPU-oracle path.
+
+        Production leaves this off (no full-surface readback, packed frame
+        batching). With it on, each font batch submits immediately and is
+        compared against the CPU raster, which is the only way the saved
+        evidence can reach `promoted`."""
+        if val Some(vulkan) = self.vulkan_backend:
+            vulkan.set_font_oracle_mode(enabled)
+            self.vulkan_backend = Some(vulkan)
+
     fn vulkan_font_performance_evidence() -> VulkanFontCompositeEvidence?:
         self.last_vulkan_font_evidence
 
@@ -3250,6 +3262,11 @@ class Engine2D with DrawIrRenderTarget:
             return dropped
         false
 
+    fn window_present_enabled() -> bool:
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan.window_present_enabled()
+        false
+
     me submit_batch() -> bool:
         """Flush any backend-buffered draw calls for this frame into one
         fenced submission. No-op (returns true) on backends that dispatch
@@ -3344,6 +3361,18 @@ class Engine2D with DrawIrRenderTarget:
             if vulkan.pending_compute_command != 0 or vulkan.pending_compute_count != 0:
                 vulkan.mark_cpu_fallback("pending-compute-state-contradicts-flush")
             val readback = vulkan.read_pixels_with_source()
+            # The batched font path saved `queued-packed-font-batch` evidence
+            # before any submit; the flush above is the one that executed it.
+            # Fold its real fence/wait and this device readback into the saved
+            # result (promotion still requires oracle parity).
+            if val Some(queued) = self.last_vulkan_font_evidence:
+                if vulkan.pending_font_descriptors.len() == 0:
+                    self.last_vulkan_font_evidence = Some(vulkan_font_promote_flushed_batch(queued,
+                        vulkan.last_font_flush_rc, vulkan.last_font_flush_glyphs,
+                        vulkan.last_font_flush_fence, vulkan.last_font_flush_waited,
+                        vulkan.last_font_flush_fence_destroyed, vulkan.last_font_flush_queue_ns,
+                        vulkan.last_font_flush_sync_ns, readback.source, readback.backend_handle,
+                        readback.pixels))
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
             readback
