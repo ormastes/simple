@@ -245,3 +245,20 @@ leaders (#4441), and #4525, which makes per-module lowering the default.
 - Merge a PR only when `gh pr checks <n> | grep '^Code Idiom'` is green.
 - Take host job counts from `~/.config/simple/host.sdn`.
 - Never GCC on Windows.
+
+## Stage3 entry admission requirements
+
+`native-build` (stage3 entry) admits sources through the SCV source authority and
+refuses with `SCV-E-ADMISSION`. Three requirements are easy to miss; the refusal
+now prints a `SCV-E-ADMISSION: hint:` line naming the one that failed
+(`native_build_admission_hint_v1`, `src/app/cli/native_build_main.spl`):
+
+1. **Root must be a git work tree.** Inventory events come from git; without
+   `.git` the refusal is `git-event-source-unavailable`. Run from inside a git
+   checkout.
+2. **Entry must live under the checkout root in a known family** (`test/`,
+   `src/`, or `examples/10_tooling/`). Other existing in-root paths are only
+   auto-admitted when they are real files/directories; outside the root is
+   refused as `source-inventory-scope-unsupported`.
+3. **One `--source` per path.** `--source a,b` or `--source "a b"` is a single
+   (nonexistent) path; write `--source a --source b`.
