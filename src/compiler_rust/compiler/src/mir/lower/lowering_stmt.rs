@@ -653,6 +653,33 @@ impl<'a> MirLowerer<'a> {
                             } else {
                                 val_reg
                             };
+                            // Bug seed_jit_class_field_array_assign_aliases_local_2026-11-04:
+                            // `obj.buf = local_arr` stored the source's rt_array
+                            // handle into the slot, so later writes through the
+                            // field mutated the local too (the interpreter's
+                            // Arc clone + make_mut keeps value semantics). Same
+                            // rule as the `var c = arr` Let arm above: an array
+                            // PLACE gets a private `rt_array_copy`; a fresh
+                            // literal / call result transfers directly.
+                            let is_array_place = Self::hir_expr_is_place(&value.kind)
+                                && self
+                                    .type_registry
+                                    .and_then(|tr| tr.get_array_element(target.ty).or_else(|| tr.get_array_element(ty)))
+                                    .is_some();
+                            let val_reg = if is_array_place {
+                                self.with_func(|func, current_block| {
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::Call {
+                                        dest: Some(dest),
+                                        target: CallTarget::from_name("rt_array_copy"),
+                                        args: vec![val_reg],
+                                    });
+                                    dest
+                                })?
+                            } else {
+                                val_reg
+                            };
 
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
