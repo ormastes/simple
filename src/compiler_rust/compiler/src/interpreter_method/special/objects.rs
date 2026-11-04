@@ -75,6 +75,21 @@ fn constructor_value_type_matches_name(value: &Value, expected: &str, type_param
 }
 
 fn constructor_value_matches_type(value: &Value, ty: &Type, type_params: &HashSet<String>) -> bool {
+    if constructor_value_matches_type_exact(value, ty, type_params) {
+        return true;
+    }
+    // Extern results arrive Option-wrapped (`rt_file_read_bytes` -> `Some([u8])`)
+    // while the declaration says bare `[u8]`; method dispatch and `??` already see
+    // through the wrapper, so scoring does too.
+    if let Value::Enum { enum_name, variant, payload: Some(inner) } = value {
+        if enum_name == "Option" && variant == "Some" {
+            return constructor_value_matches_type(inner, ty, type_params);
+        }
+    }
+    false
+}
+
+fn constructor_value_matches_type_exact(value: &Value, ty: &Type, type_params: &HashSet<String>) -> bool {
     match ty {
         Type::Generic { name, args } if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 => {
             match value {
@@ -375,9 +390,20 @@ pub fn handle_constructor_methods(
             .filter(|m| !m.params.iter().any(|p| p.name == "self"))
             .map(|m| m.name.as_str())
             .collect();
-        let mut msg = format!("unknown static method {method} on class {class_name}");
-        if let Some(suggestion) = crate::error::typo::format_suggestion(method, available) {
-            msg.push_str(&format!("; {}", suggestion));
+        let mut msg = if candidates.is_empty() {
+            format!("unknown static method {method} on class {class_name}")
+        } else {
+            // The name exists; only the arguments failed overload scoring.
+            let arg_types: Vec<String> = positional_values.iter().map(|v| v.type_name().to_string()).collect();
+            format!(
+                "no overload of {class_name}.{method} matches argument types ({})",
+                arg_types.join(", ")
+            )
+        };
+        if candidates.is_empty() {
+            if let Some(suggestion) = crate::error::typo::format_suggestion(method, available) {
+                msg.push_str(&format!("; {}", suggestion));
+            }
         }
         let ctx = ErrorContext::new()
             .with_code(codes::UNKNOWN_METHOD)
