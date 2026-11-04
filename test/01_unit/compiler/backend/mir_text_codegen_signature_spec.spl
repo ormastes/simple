@@ -101,3 +101,97 @@ describe "MIR text codegen function signature":
         expect(ir).to_contain("define i64 @__simple_main()")
         expect(ir.contains("@nil(")).to_equal(false)
         expect(ir.contains("@__simple_main_test_already_emitted_main(")).to_equal(false)
+
+    # Stage3 s3_fable38 (2026-11-04): `fn main():` printed `x` and exited rc=10.
+    # The entry file was not flagged entry_main_symbol, so its main was spelled
+    # `__simple_main_<mod>` and stayed `define void` / `ret void`; the hosted C
+    # main (and the smoke harness's objcopy rename to __simple_main) read
+    # print()'s leftover RAX as the exit code. Every main spelling that can
+    # become the process entry must return i64 0 for a unit body.
+    it "REPRO: a unit-returning module-suffixed main returns i64 0, never void":
+        var translator = MirToLlvm.create(
+            "test.unit_main_module",
+            CodegenTarget.X86_64,
+            nil
+        )
+        translator.builder.emit_module_header()
+        val body = MirBody(
+            name: "main",
+            blocks: [
+                MirBlock(
+                    id: BlockId.entry(),
+                    label: Some("entry"),
+                    instructions: [],
+                    terminator: MirTerminator.Ret(nil)
+                )
+            ],
+            locals: [],
+            arg_count: 0,
+            return_ty: MirType.unit()
+        )
+
+        translator.translate_function("__simple_main_test_unit_main_module", body, Span.empty())
+        val ir = translator.builder.build()
+
+        expect(ir).to_contain("define i64 @__simple_main_test_unit_main_module()")
+        expect(ir).to_contain("ret i64 0")
+        expect(ir.contains("define void @__simple_main_test_unit_main_module()")).to_equal(false)
+        expect(ir.contains("ret void")).to_equal(false)
+
+    it "sibling: the exact global entry spelling still returns i64 0 for a unit body":
+        var translator = MirToLlvm.create(
+            "test.unit_main_global",
+            CodegenTarget.X86_64,
+            nil
+        )
+        translator.builder.emit_module_header()
+        val body = MirBody(
+            name: "main",
+            blocks: [
+                MirBlock(
+                    id: BlockId.entry(),
+                    label: Some("entry"),
+                    instructions: [],
+                    terminator: MirTerminator.Ret(nil)
+                )
+            ],
+            locals: [],
+            arg_count: 0,
+            return_ty: MirType.unit()
+        )
+
+        translator.translate_function("__simple_main", body, Span.empty())
+        val ir = translator.builder.build()
+
+        expect(ir).to_contain("define i64 @__simple_main()")
+        expect(ir).to_contain("ret i64 0")
+        expect(ir.contains("ret void")).to_equal(false)
+
+    it "prevention: a unit function that merely resembles an entry name keeps its void signature":
+        var translator = MirToLlvm.create(
+            "test.unit_main_lookalike",
+            CodegenTarget.X86_64,
+            nil
+        )
+        translator.builder.emit_module_header()
+        val body = MirBody(
+            name: "helper",
+            blocks: [
+                MirBlock(
+                    id: BlockId.entry(),
+                    label: Some("entry"),
+                    instructions: [],
+                    terminator: MirTerminator.Ret(nil)
+                )
+            ],
+            locals: [],
+            arg_count: 0,
+            return_ty: MirType.unit()
+        )
+
+        translator.translate_function("__simple_mainframe_helper", body, Span.empty())
+        val ir = translator.builder.build()
+
+        expect(ir).to_contain("define void @__simple_mainframe_helper()")
+        expect(ir).to_contain("ret void")
+        expect(ir.contains("define i64 @__simple_mainframe_helper()")).to_equal(false)
