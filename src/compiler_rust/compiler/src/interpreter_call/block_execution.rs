@@ -459,6 +459,7 @@ pub(super) fn exec_block_closure_into(
                     // Use bind_pattern_value to handle all pattern types including tuples
                     let is_mutable = let_stmt.mutability.is_mutable();
                     let val = crate::interpreter::coerce_let_value(val, declared_let_type(let_stmt), let_stmt.value.as_ref());
+                    crate::interpreter::record_let_declared_width(let_stmt, &mut local_env);
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, &mut local_env);
                 }
                 last_value = Value::Nil;
@@ -838,7 +839,7 @@ pub(super) fn exec_block_closure_into(
                 // is why control_flow_spec's "creates new scope for loop
                 // variable" stayed red while a top-level repro passed.
                 // doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
-                let for_saved_scope = save_pattern_scope(&for_stmt.pattern, &local_env);
+                let for_saved_scope = save_pattern_scope(&for_stmt.pattern, &mut local_env);
                 'for_loop_own: for val in iter_values.into_iter() {
                     // A comma loop pattern is ALWAYS a tuple destructure,
                     // whatever the iterable is; there is no enumerate
@@ -1558,6 +1559,7 @@ fn exec_block_closure_mut_inner(
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     let is_mutable = let_stmt.mutability.is_mutable();
                     let val = crate::interpreter::coerce_let_value(val, declared_let_type(let_stmt), let_stmt.value.as_ref());
+                    crate::interpreter::record_let_declared_width(let_stmt, local_env);
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, local_env);
                 }
                 last_value = Value::Nil;

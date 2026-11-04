@@ -1297,6 +1297,43 @@ pub struct CowEnv {
     /// / `enter_block_local` so a genuine user declaration that shadows a
     /// field name is not misreported.
     field_prebinds: FrameSet<String>,
+    /// Declared sub-i64 SIGNED width (8/16/32) of frame-local integer
+    /// bindings: `val y: i32`, `val w = x as i32`, `fn f(x: i32)`.
+    ///
+    /// `Value::Int` carries no width (unlike `Value::UInt { width }`), and a
+    /// width-carrying signed variant would have to be honoured at every one of
+    /// the ~4,300 `Value::Int` match sites while `src/lib` alone declares
+    /// ~16,700 `i8/i16/i32` bindings — so the width is kept BESIDE the value,
+    /// the way the pure-Simple resolver keys `impl Trait for i32` on the
+    /// receiver's static `Int(bits, signed)` type
+    /// (`35.semantics/resolve_strategies.spl`), not on a runtime tag.
+    /// Consulted only by the trait-impl fallback of method dispatch for an
+    /// identifier receiver; arithmetic, equality and printing never read it.
+    /// Boxed and `None` until the first narrow binding in the frame, so the
+    /// common frame pays one pointer (an inline ahash `FrameMap` is 64 bytes,
+    /// measured +1.5 MB max RSS across the retained captured envs of a
+    /// stdlib-loading run). i64 is never recorded.
+    ///
+    /// INVARIANT: an entry belongs to exactly one binding of the name. Every
+    /// binder that introduces the name — `mark_local` (frame locals, function
+    /// and lambda params) and `enter_block_local` (block `val`s, `for` vars,
+    /// `if val`/`while val`, match arms) — clears it, and `exit_block_local`
+    /// restores the width the enclosing scope had, so a block-scoped
+    /// `val q: i32` never leaks onto the outer `q` and a `for y in ...` never
+    /// inherits the outer `y: i32`. Narrow Lets and params record AFTER that
+    /// clear.
+    /// Bug: doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md
+    declared_int_widths: Option<Box<DeclaredWidths>>,
+}
+
+/// Payload of [`CowEnv::declared_int_widths`]: the live `name -> width` map
+/// plus the LIFO of per-block markers (`name`, width the enclosing scope had)
+/// pushed by `shadow_declared_int_width` on block entry and popped by the
+/// matching `unshadow_declared_int_width` on block exit.
+#[derive(Clone, Debug, Default)]
+pub struct DeclaredWidths {
+    map: FrameMap<String, u8>,
+    shadows: Vec<(String, Option<u8>)>,
 }
 
 impl CowEnv {
@@ -1354,6 +1391,7 @@ impl CowEnv {
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
             field_prebinds: FrameSet::default(),
+            declared_int_widths: None,
         }
     }
 
@@ -1447,6 +1485,95 @@ impl CowEnv {
         self.uninit_names.contains(name)
     }
 
+    /// Sub-i64 signed width (8/16/32) of a declared integer type name, else
+    /// `None`. i64 is deliberately `None`: it is the untagged default and must
+    /// keep the existing `["i64", "i32", "int"]` dispatch order.
+    pub fn narrow_signed_width_of(ty: Option<&simple_parser::ast::Type>) -> Option<u8> {
+        match ty {
+            Some(simple_parser::ast::Type::Simple(name)) => match name.as_str() {
+                "i8" => Some(8),
+                "i16" => Some(16),
+                "i32" => Some(32),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Record (or, with `None`, forget) the declared narrow signed width of
+    /// a frame-local binding. A re-declaration without a narrow type clears
+    /// the entry so `val y: i32 = 1; val y = 2; y.m()` resolves as i64 again.
+    /// Allocates the table only on the first narrow binding of the frame.
+    pub fn set_declared_int_width(&mut self, name: &str, width: Option<u8>) {
+        match width {
+            Some(w) => {
+                let dw = self.declared_int_widths.get_or_insert_with(Default::default);
+                // A loop body re-executes its `val y: i32 = ...` every
+                // iteration: refresh in place rather than allocating a key.
+                match dw.map.get_mut(name) {
+                    Some(slot) => *slot = w,
+                    None => {
+                        dw.map.insert(name.to_string(), w);
+                    }
+                }
+            }
+            None => self.clear_declared_int_width(name),
+        }
+    }
+
+    /// Forget `name`'s declared width: every binder that introduces `name`
+    /// calls this (see the field's INVARIANT) before a narrow Let/param may
+    /// record a new one.
+    fn clear_declared_int_width(&mut self, name: &str) {
+        if let Some(dw) = self.declared_int_widths.as_mut() {
+            if !dw.map.is_empty() {
+                dw.map.remove(name);
+            }
+        }
+    }
+
+    /// The declared narrow signed width of `name` in this frame, if any.
+    pub fn declared_int_width(&self, name: &str) -> Option<u8> {
+        self.declared_int_widths.as_ref()?.map.get(name).copied()
+    }
+
+    /// Block entry for `name`: stash the enclosing scope's width (if any) so
+    /// `exit_block_local` can put it back, and clear the live entry.
+    pub(crate) fn shadow_declared_int_width(&mut self, name: &str) {
+        let Some(dw) = self.declared_int_widths.as_mut() else {
+            return;
+        };
+        let prior = dw.map.remove(name);
+        // One marker per enter, popped by the matching exit, so a nested
+        // block never pops an OUTER block's stash (block depth for a name is
+        // a single counter: the function body is depth 1, an `if` inside it
+        // depth 2, and the inner exit must restore the depth-1 state, not
+        // wait for depth 0). A marker is needed only while there is
+        // something to protect: a live width, or any stash at all (a `None`
+        // marker then keeps a deeper exit from popping a shallower entry).
+        // With nothing stashed and no width, exit's unconditional remove is
+        // already the right restore, so the common narrow-free block pays no
+        // allocation.
+        if prior.is_some() || !dw.shadows.is_empty() {
+            dw.shadows.push((name.to_string(), prior));
+        }
+    }
+
+    /// Block exit for `name`: drop the block's own entry and restore what the
+    /// matching `shadow_declared_int_width` stashed (if anything).
+    pub(crate) fn unshadow_declared_int_width(&mut self, name: &str) {
+        let Some(dw) = self.declared_int_widths.as_mut() else {
+            return;
+        };
+        dw.map.remove(name);
+        if let Some(pos) = dw.shadows.iter().rposition(|(n, _)| n == name) {
+            let (n, prior) = dw.shadows.remove(pos);
+            if let Some(w) = prior {
+                dw.map.insert(n, w);
+            }
+        }
+    }
+
     /// Record `name` as a method-entry field pre-bind. Call AFTER
     /// `mark_local`/`insert`, which clear the flag.
     pub fn mark_field_prebind(&mut self, name: impl Into<String>) {
@@ -1470,6 +1597,9 @@ impl CowEnv {
         }
         // Now local: it can never be published, so drop it from the superset.
         self.unnote_overlay_key(&name);
+        // A fresh frame-level binding (param, lambda param, frame local)
+        // starts without a declared width; a narrow one is recorded after.
+        self.clear_declared_int_width(&name);
         self.local_bindings.insert(name);
     }
 
@@ -1479,6 +1609,9 @@ impl CowEnv {
             self.field_prebinds.remove(&name);
         }
         self.unnote_overlay_key(&name);
+        // Block binder (`val` in a block, `for` var, `if val`, match arm):
+        // stash the enclosing width and start this binding without one.
+        self.shadow_declared_int_width(&name);
         *self.block_local_bindings.entry(name).or_default() += 1;
     }
 
@@ -1487,7 +1620,10 @@ impl CowEnv {
             return;
         };
         *depth -= 1;
-        if *depth == 0 {
+        // Every exit pairs with one enter: the block's own width goes with
+        // it and the enclosing scope's width returns, at ANY depth.
+        self.unshadow_declared_int_width(name);
+        if self.block_local_bindings.get(name).copied() == Some(0) {
             self.block_local_bindings.remove(name);
             // The name is publishable again unless the frame declares it.
             if self.overlay.contains_key(name) && !self.local_bindings.contains(name) {
@@ -2066,6 +2202,7 @@ impl CowEnv {
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
             field_prebinds: FrameSet::default(),
+            declared_int_widths: None,
         }
     }
 
@@ -2085,6 +2222,7 @@ impl CowEnv {
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
             field_prebinds: FrameSet::default(),
+            declared_int_widths: None,
         }
     }
 
@@ -2197,6 +2335,7 @@ impl Clone for CowEnv {
             dirty_names: self.dirty_names.clone(),
             uninit_names: self.uninit_names.clone(),
             field_prebinds: self.field_prebinds.clone(),
+            declared_int_widths: self.declared_int_widths.clone(),
         }
     }
 }

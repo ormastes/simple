@@ -87,6 +87,47 @@ pub(crate) fn coerce_to_declared_type(value: Value, ty: Option<&Type>) -> Value 
     }
 }
 
+/// The identifier a `let` pattern binds when it is a plain (optionally typed
+/// or `mut`) name; destructuring patterns yield `None`.
+fn plain_binding_name(pattern: &simple_parser::ast::Pattern) -> Option<&str> {
+    use simple_parser::ast::Pattern;
+    match pattern {
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) => Some(name.as_str()),
+        Pattern::Typed { pattern, .. } => match pattern.as_ref() {
+            Pattern::Identifier(name) | Pattern::MutIdentifier(name) => Some(name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Record a `let`'s declared narrow SIGNED width (i8/i16/i32) beside the
+/// value it binds. `Value::Int` carries no width, and `impl Trait for i32`
+/// dispatch on `y.m()` keys on the receiver's STATIC type exactly as the
+/// pure-Simple resolver does (`CowEnv::declared_int_widths`). The width comes
+/// from the annotation (`val y: i32`, `val y: i32 = ...` typed pattern) or,
+/// for an unannotated binding, from a cast initializer (`val w = x as i32`);
+/// any other re-declaration of the name clears the entry. Every Let executor
+/// must call this — there are two (`exec_node` and the block-body path in
+/// `interpreter_call/block_execution.rs`).
+pub(crate) fn record_let_declared_width(let_stmt: &simple_parser::ast::LetStmt, env: &mut Env) {
+    let Some(name) = plain_binding_name(&let_stmt.pattern) else {
+        return;
+    };
+    let annotation: Option<&Type> = match &let_stmt.ty {
+        Some(ty) => Some(ty),
+        None => match &let_stmt.pattern {
+            simple_parser::ast::Pattern::Typed { ty, .. } => Some(ty),
+            _ => None,
+        },
+    };
+    let width = Env::narrow_signed_width_of(annotation).or_else(|| match &let_stmt.value {
+        Some(simple_parser::ast::Expr::Cast { target_type, .. }) => Env::narrow_signed_width_of(Some(target_type)),
+        _ => None,
+    });
+    env.set_declared_int_width(name, width);
+}
+
 /// Scalar half of [`coerce_to_declared_type`]: only the unsigned widths.
 pub(crate) fn coerce_to_declared_unsigned(value: Value, ty: Option<&Type>) -> Value {
     let Some(Type::Simple(type_name)) = ty else {
@@ -438,6 +479,13 @@ pub(crate) fn exec_node(
                 } else {
                     value
                 };
+                // Record the binding's declared narrow SIGNED width (i8/i16/i32)
+                // beside the value: `Value::Int` carries no width, and
+                // `impl Trait for i32` dispatch on `y.m()` keys on the static
+                // type exactly as the pure-Simple resolver does
+                // (`CowEnv::declared_int_widths`). A `val w = x as i32` takes the
+                // cast's target; any other re-declaration clears the entry.
+                record_let_declared_width(let_stmt, env);
                 let is_mutable = let_stmt.mutability.is_mutable();
                 bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
             } else if strict_mem_enabled() {
