@@ -56,8 +56,21 @@ So the RSS kill is a consequence; the root cause is the poison.
   with the HIR errors already on stderr. Without the marker (transient/infra:
   no HIR inventory/cache) the fallback is kept. Spec:
   `test/01_unit/compiler/driver/native_mir_shard_spec.spl` (12/12).
-- Verification of both in a real Stage 2: pending the next sanctioned
-  bootstrap (s2e).
+- Verified in s2e (`/private/tmp/boot2-out/s2e`, PR #6708): Stage 2 sanity
+  PASSED; `git_provider` no longer poisoned; on the remaining HIR errors the
+  coordinator logged `HIR compile errors recorded by the shard frontend
+  (errors=396 poisoned_modules=3); deterministic, no in-process MIR retry` ->
+  `outcome=fail`, no second frontend pass, no rss-cap kill.
+- s2e blocker: 3 modules (`sprof_collection_profile`, `adaptive_map`,
+  `adaptive_set`) poisoned with `unresolved type: Eq` (71x). #6682 only
+  silenced the dependency check; the imported owner's type-parameter bounds
+  were still lowered as types in
+  `project_imported_owner_type_parameters` (`module_callable_types.spl`),
+  which lacked the builtin-bound erasure the local `lower_type_param` has.
+  Now erased when the bound is a bare Clone/Copy/Debug/Default/Drop/Eq/Ord the
+  owner does not declare (`hir_imported_bound_erases_builtin_v1`). Spec:
+  `test/01_unit/compiler/20.hir/builtin_trait_where_bound_spec.spl` (6/6).
+  Verification pending s2f.
 
 ## Remaining (not fixed here)
 - `SHARD_TREE_HEADROOM_KB_V1` (24 GiB default) >= host RAM on a 24 GiB Mac, so
