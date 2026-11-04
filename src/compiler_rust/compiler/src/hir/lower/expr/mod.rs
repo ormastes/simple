@@ -1342,9 +1342,27 @@ impl Lowerer {
                 }
             }
         }
-        // If receiver type is known, look up "TypeName.method"
-        if recv_ty != TypeId::ANY && recv_ty != TypeId::VOID {
-            if let Some(hir_ty) = self.module.types.get(recv_ty) {
+        // If receiver type is known, look up "TypeName.method".
+        // A flat-nullable `T?` receiver (`Pointer { inner: T }`, e.g. `var v =
+        // opt_field.?`) names its owner through `inner`: without peeling it,
+        // the lookup fell to the suffix search below, whose shortest-owner
+        // tiebreak typed `vulkan.end_frame()` (VulkanFontAdapter3D, returns
+        // evidence) as `Engine3D.end_frame() -> void`, and the next `.ready`
+        // dropped the module to the interpreter.
+        // doc/08_tracking/bug/seed_jit_nullable_receiver_method_typed_by_shorter_owner_2026-11-04.md
+        let owner_ty = match self.module.types.get(recv_ty) {
+            Some(HirType::Pointer { inner, .. })
+                if matches!(
+                    self.module.types.get(*inner),
+                    Some(HirType::Struct { .. }) | Some(HirType::Enum { .. })
+                ) =>
+            {
+                *inner
+            }
+            _ => recv_ty,
+        };
+        if owner_ty != TypeId::ANY && owner_ty != TypeId::VOID {
+            if let Some(hir_ty) = self.module.types.get(owner_ty) {
                 let type_name = match hir_ty {
                     HirType::Struct { name, .. } => Some(name.as_str()),
                     HirType::Enum { name, .. } => Some(name.as_str()),

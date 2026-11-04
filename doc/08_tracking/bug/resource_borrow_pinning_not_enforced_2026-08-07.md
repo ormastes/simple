@@ -190,3 +190,9 @@ short-borrow checker reports "call argument requires a checked non-retaining
 short contract" for the spec's indirect call (stale fixture vs newer checker).
 
 Update 2026-11-04: fixture fixed (branch work/g-pinning-lifetime-fixture). The checker is intended policy (indirect calls stay conservative: `record_indirect_call_contract_v1`, ea5f21cac2b/9bb344bb1cf). The spec now uses a direct call to a callee with a checked `read-short` contract in a strict body; 6/6 pass, assertions unchanged.
+
+## c28-w3 2026-11-04: no change
+
+Already re-triaged today (section above, lane g-borrow-pinning). Remaining scope is
+foreign-call pinning (call-scoped region + foreign-call marker), architectural;
+deferred, status stays open.

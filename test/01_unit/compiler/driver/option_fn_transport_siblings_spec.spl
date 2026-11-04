@@ -1,0 +1,115 @@
+# @cover src/compiler/80.driver/driver_build/parallel.spl
+# Repro + sibling fixtures for the stage3 sweep miscompile (2026-11-04): a function
+# value held in an Option<fn> and unwrapped with `if val` arrived with garbage args.
+# Workaround landed in #6617 (non-Option fn field + has_ flag). These specs pin the
+# exact values for the original shape and every sibling transport shape.
+
+use std.spec
+
+class Holder:
+    cb: Option<fn(text, text) -> text>
+
+    static fn create() -> Holder:
+        Holder(cb: None)
+
+    me set_cb(f: fn(text, text) -> text):
+        self.cb = Some(f)
+
+    fn run(a: text, b: text) -> text:
+        if val f = self.cb:
+            return f(a, b)
+        "none"
+
+struct FnBox:
+    cb: Option<fn(text, text) -> text>
+
+fn glue_pair(a: text, b: text) -> text:
+    "{a}+{b}"
+
+fn add2(a: i64, b: i64) -> i64:
+    a + b
+
+fn unwrap_and_call(o: Option<fn(text, text) -> text>, a: text, b: text) -> text:
+    if val f = o:
+        return f(a, b)
+    "none"
+
+fn make_opt() -> Option<fn(text, text) -> text>:
+    Some(glue_pair)
+
+fn make_none() -> Option<fn(text, text) -> text>:
+    None
+
+fn mix3(a: text, b: text, c: text, d: text) -> text:
+    "{a}|{b}|{c}|{d}"
+
+describe "Option<fn> transport":
+    it "class field set by me setter, unwrapped by if val, receives exact args":
+        var h = Holder.create()
+        h.set_cb(glue_pair)
+        expect(h.run("left", "right")).to_equal("left+right")
+
+    it "class field with closure value receives exact args":
+        var h = Holder.create()
+        h.set_cb(fn(x: text, y: text): "[{x}/{y}]")
+        expect(h.run("p", "q")).to_equal("[p/q]")
+
+    it "class field left None takes the else path":
+        val h = Holder.create()
+        expect(h.run("a", "b")).to_equal("none")
+
+    it "Option<fn> inside a struct is unwrapped with exact args":
+        val bx = FnBox(cb: Some(glue_pair))
+        var got = "unset"
+        if val f = bx.cb:
+            got = f("s1", "s2")
+        expect(got).to_equal("s1+s2")
+
+    it "Option<fn> passed as a function argument and unwrapped in the callee":
+        expect(unwrap_and_call(Some(glue_pair), "x", "y")).to_equal("x+y")
+        expect(unwrap_and_call(None, "x", "y")).to_equal("none")
+
+    it "Option<fn> returned from a function then unwrapped":
+        val o = make_opt()
+        var got = "unset"
+        if val f = o:
+            got = f("r1", "r2")
+        expect(got).to_equal("r1+r2")
+        val n = make_none()
+        var none_hit = true
+        if val g = n:
+            none_hit = false
+        expect(none_hit).to_be_true()
+
+    it "array of Option<fn> collected with exact results":
+        val fs: [Option<fn(i64, i64) -> i64>] = [Some(add2), None, Some(add2)]
+        var out: [i64] = []
+        for o in fs:
+            if val f = o:
+                out = out.push(f(3, 4))
+            else:
+                out = out.push(-1)
+        expect(out).to_equal([7, -1, 7])
+
+    it "Option<fn> items folded over an array accumulate exact values":
+        val fs: [Option<fn(i64, i64) -> i64>] = [Some(add2), Some(add2), None]
+        var acc = 10
+        for o in fs:
+            if val f = o:
+                acc = f(acc, 5)
+        expect(acc).to_equal(20)
+
+    it "array of fn values mapped with exact results":
+        val fs: [fn(i64, i64) -> i64] = [add2, fn(a: i64, b: i64): a * b]
+        val mapped = fs.map(fn(f: fn(i64, i64) -> i64): f(6, 7))
+        expect(mapped).to_equal([13, 42])
+
+    it "numbered-placeholder partial application stored and called later":
+        val p = mix3("A", "B", _1, _2)
+        expect(p("C", "D")).to_equal("A|B|C|D")
+
+    it "closure capturing two locals with two typed params":
+        val c1 = "cap1"
+        val c2 = "cap2"
+        val f = fn(x: text, y: text): "{c1}:{c2}:{x}:{y}"
+        expect(f("u", "v")).to_equal("cap1:cap2:u:v")

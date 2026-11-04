@@ -44,7 +44,7 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P2 | fixed | macOS: shared dependency; not platform-exclusive | `llm-caret-tui-extern-gaps` |
 | P2 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_bootstrap_copy_mem_provider_gap_2026-07-17` |
 | P2 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_stage4_full_cli_low_memory_runaway_2026-07-17` |
-| P2 | open | macOS: Engine2D Vulkan font row PASS under interpreter (2026-11-04); JIT row blocked on seed_jit_class_field_array_assign_aliases_local; Engine3D row open | `macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26` |
+| P2 | open | macOS: Engine2D Vulkan font row PASS under interpreter (2026-11-04); Engine2D CPU-oracle PASS under JIT too (collector-in-main probe, jitvoid 2026-11-04; spec files themselves still interpret: no-main-fn); Engine3D row open | `macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26` |
 | P2 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_vulkan_native_entry_blockers_2026-07-24` |
 | P2 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_vulkan_provider_availability_live_2026-07-26` |
 | P2 | fixed | ARM64: platform/shared context; native acceptance not inferred | `pristine_seed_cargo_build_broken_blocks_virtio_arm64_repro_2026-08-11` |

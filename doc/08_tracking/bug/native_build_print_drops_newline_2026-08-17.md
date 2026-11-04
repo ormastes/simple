@@ -75,3 +75,12 @@ shared main worktree), sha256 `3d120a6f9ab5`. Left OPEN; the native-build
 `rt_env_vars` breakage blocking this re-check is not filed separately here
 for time — flagged for whoever next touches native-build.
 
+
+## Triage 2026-11-04 (opus-n88b)
+
+Source no longer has the defect: `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`
+(~line 8481) lowers the language builtin `print` to `rt_println` (newline-terminated),
+`_cli_eprint` stays on `rt_print`. Status: fix-implemented-verification-pending.
+Repro (stage3 native): `bin/simple native-build --entry test/04_smoke/print_newline_native.spl --output build/print_nl && build/print_nl`
+-> exactly 3 lines `line-a`, `line-b`, `line-c`. Pass-level pin:
+`bin/simple.exe test test/01_unit/compiler/frontend/native_print_u8_repro_spec.spl` (reference semantics only).

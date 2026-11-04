@@ -661,7 +661,15 @@ impl<'a> MirLowerer<'a> {
                             // rule as the `var c = arr` Let arm above: an array
                             // PLACE gets a private `rt_array_copy`; a fresh
                             // literal / call result transfers directly.
-                            let is_array_place = Self::hir_expr_is_place(&value.kind)
+                            // A `var` local proven uniquely owned and dead after
+                            // this store hands its buffer over instead
+                            // (`array_move.rs`): the JIT lane never frees the
+                            // copy, so `st.buf = o` in a loop retained one per
+                            // iteration (bug seed_jit_field_store_array_copy_never_freed_2026-11-04).
+                            let handed_over = matches!(&value.kind,
+                                HirExprKind::Local(o) if self.array_move_sites.field_store_locals.contains(o));
+                            let is_array_place = !handed_over
+                                && Self::hir_expr_is_place(&value.kind)
                                 && self
                                     .type_registry
                                     .and_then(|tr| tr.get_array_element(target.ty).or_else(|| tr.get_array_element(ty)))
@@ -2178,9 +2186,7 @@ impl<'a> MirLowerer<'a> {
                     let current_idx = func.new_vreg();
                     let boxed_idx = func.new_vreg();
                     let raw_element = func.new_vreg();
-                    let element = if typed_u8_read
-                        || ((needs_int_unbox || needs_float_unbox) && !typed_raw_read)
-                    {
+                    let element = if typed_u8_read || ((needs_int_unbox || needs_float_unbox) && !typed_raw_read) {
                         func.new_vreg()
                     } else {
                         raw_element
