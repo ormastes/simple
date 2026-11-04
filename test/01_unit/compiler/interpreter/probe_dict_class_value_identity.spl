@@ -1,16 +1,19 @@
-# Run-path probe: class instances reached through a container have VALUE
-# semantics — every read is a copy, and a mutation through that copy never
-# reaches the container (or the caller) unless it is written back.
+# Run-path probe: class instances reached through a container have REFERENCE
+# semantics — every read yields the same handle, so a mutation through any
+# handle is visible through the container and the caller. `struct` values keep
+# VALUE semantics: a read is a copy and the original is untouched.
 #
 # Oracle for test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl
 # (doc/08_tracking/bug/interp_dict_class_value_copy_on_get_mutation_loss_2026-07-06.md).
 #
-# Owner ruling 2026-09-27: classes are value types
-# (doc/07_guide/language/capability_library_authoring.md:33 — "`val b = a`
-# copies"). The earlier version of this probe asserted reference identity and
-# was retargeted. Every expected value is an absolute literal; each check pins
-# BOTH halves — the copy did change, the original did not — so a probe that
-# mutates nothing cannot pass.
+# Contract: doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md
+# ("`class` values are reference types: one heap cell, many handles; `struct`
+# values are value types"). This supersedes the 2026-09-27 value-type ruling the
+# earlier version of this probe asserted; the interpreter's reference carrier
+# (`Value::ClassInstance`) is the default since 2026-11-04. Every expected
+# value is an absolute literal; each check pins BOTH halves — the handle did
+# change AND the container sees it (class) / does not (struct) — so a probe
+# that mutates nothing cannot pass.
 
 class Cache:
     hits: i64
@@ -18,6 +21,9 @@ class Cache:
 
 class Host:
     caches: Dict<i64, Cache>
+
+struct Counter:
+    n: i64
 
 var failures: i64 = 0
 
@@ -42,60 +48,74 @@ fn bump(h: Host, id: i64) -> i64:
     c.hits
 
 fn main():
-    # 1. The report's repro sketch: get, mutate, get again. The fetched copy
-    #    changes; the dict entry does not.
+    # 1. The report's repro sketch: get, mutate, get again. The fetched handle
+    #    is the dict entry, so the mutation is visible through the dict.
     var d: Dict<i64, Cache> = {}
     d.set(1, Cache(hits: 0, last: "none"))
     val c = d.get(1)
     c.hits = 5
-    check("dict_get_copy_mutated", c.hits, 5)
-    check("dict_get_original_unchanged", d.get(1).hits, 0)
-    check_text("dict_get_original_text_unchanged", d.get(1).last, "none")
+    check("dict_get_handle_mutated", c.hits, 5)
+    check("dict_get_entry_shared", d.get(1).hits, 5)
+    c.last = "seen"
+    check_text("dict_get_entry_text_shared", d.get(1).last, "seen")
 
-    # 2. The documented write-back idiom is how a mutation persists.
+    # 2. An explicit write-back is a no-op on a shared handle (no double count).
     d.set(1, c)
-    check("dict_write_back_persists", d.get(1).hits, 5)
+    check("dict_write_back_idempotent", d.get(1).hits, 5)
 
-    # 3. text-keyed dict — the key type must not change value semantics.
+    # 3. text-keyed dict — the key type must not change reference semantics.
     var dt: Dict<text, Cache> = {}
     dt.set("k", Cache(hits: 10, last: "a"))
     val ct = dt.get("k")
     ct.hits = 99
-    check("dict_text_key_copy_mutated", ct.hits, 99)
-    check("dict_text_key_original_unchanged", dt.get("k").hits, 10)
+    check("dict_text_key_handle_mutated", ct.hits, 99)
+    check("dict_text_key_entry_shared", dt.get("k").hits, 99)
 
-    # 4. Dict held as a FIELD, mutated inside a CALLEE: the callee works on a
-    #    copy, so the caller's object is untouched.
+    # 4. Dict held as a FIELD, mutated inside a CALLEE: the callee mutates the
+    #    shared cell, so the caller's object observes every bump.
     var hd: Dict<i64, Cache> = {}
     hd.set(7, Cache(hits: 0, last: "none"))
     val h = Host(caches: hd)
-    check("callee_copy_mutated", bump(h, 7), 1)
-    check("callee_copy_mutated_again", bump(h, 7), 1)
-    check("callee_field_dict_hits_unchanged", h.caches.get(7).hits, 0)
-    check_text("callee_field_dict_last_unchanged", h.caches.get(7).last, "none")
+    check("callee_handle_mutated", bump(h, 7), 1)
+    check("callee_handle_mutated_again", bump(h, 7), 2)
+    check("callee_field_dict_hits_shared", h.caches.get(7).hits, 2)
+    check_text("callee_field_dict_last_shared", h.caches.get(7).last, "seen")
 
     # 5. Same question via an ARRAY element rather than a dict.
     val arr: [Cache] = [Cache(hits: 1, last: "x")]
     val ae = arr[0]
     ae.hits = 42
-    check("array_elem_copy_mutated", ae.hits, 42)
-    check("array_elem_original_unchanged", arr[0].hits, 1)
+    check("array_elem_handle_mutated", ae.hits, 42)
+    check("array_elem_entry_shared", arr[0].hits, 42)
 
-    # 6. Two reads of the same key are two independent copies.
+    # 6. Two reads of the same key are two handles on one cell.
     var d2: Dict<i64, Cache> = {}
     d2.set(3, Cache(hits: 0, last: "n"))
     val h1 = d2.get(3)
     val h2 = d2.get(3)
     h1.hits = 77
     check("two_handles_first_mutated", h1.hits, 77)
-    check("two_handles_second_independent", h2.hits, 0)
+    check("two_handles_second_shared", h2.hits, 77)
 
-    # 7. Plain assignment copies too: `val b = a`.
+    # 7. Plain assignment aliases too: `val b = a`.
     val a = Cache(hits: 3, last: "a")
     val b = a
     b.hits = 4
-    check("val_assign_copy_mutated", b.hits, 4)
-    check("val_assign_original_unchanged", a.hits, 3)
+    check("val_assign_handle_mutated", b.hits, 4)
+    check("val_assign_original_shared", a.hits, 4)
+
+    # 8. `struct` stays a value type: the same shapes COPY.
+    var ds: Dict<i64, Counter> = {}
+    ds.set(1, Counter(n: 0))
+    val sc = ds.get(1)
+    sc.n = 5
+    check("struct_dict_get_copy_mutated", sc.n, 5)
+    check("struct_dict_get_original_unchanged", ds.get(1).n, 0)
+    val sa = Counter(n: 3)
+    val sb = sa
+    sb.n = 4
+    check("struct_val_assign_copy_mutated", sb.n, 4)
+    check("struct_val_assign_original_unchanged", sa.n, 3)
 
     if failures == 0:
         print("DICT_CLASS_VALUE PROBE: ALL PASS")

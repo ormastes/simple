@@ -126,3 +126,15 @@ with `expected true to equal false` because the direct interpreter probe still
 prints the identical 6-of-7 failure block quoted above. No change vs the
 2026-09-06 verdict — the interpreter-lane class-instance copy remains a
 semantics-change debt, deliberately not folded into the spawn-fix lane.
+
+## 2026-11-04 note (fix-classref lane): FIXED by the default flip
+
+`Dict.get` on a class value now returns the SAME handle in the seed interpreter:
+`Value::aggregate` yields `Value::ClassInstance` by default
+(`class_instance_storage_enabled`, src/compiler_rust/compiler/src/value.rs;
+`SIMPLE_INTERP_CLASS_REF=0` is the legacy opt-out). The gating spec
+`test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl` and its
+probe were retargeted from the 2026-09-27 value-type oracle to the reference
+contract (design: `class_instance_reference_storage_2026-11-03.md`) and pass
+5/5 on the rebuilt seed; the probe now also pins the `struct` copy half.
+Coordinator owns the bug_db status change.

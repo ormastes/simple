@@ -150,3 +150,14 @@ OPEN; PR #6301 MERGED at 5cec7885187661e950f941045cdb6b8d522a4884 and contribute
 
 ## 2026-11-04 triage (libbug-async): INTERPRETER-ROOT, lib is correct
 `async_promise_pair_spec.spl` under Rust-seed `run`: 0/4 pass. Not tuple-related and not Promise/Future: a class instance stored in another class's field is value-copied by the seed tree-walk interpreter when the entry is not `main` (JIT path under `fn main` aliases correctly). Lib-free repro: `class Fu: n:i64; me set(v)`, `class Pr: fu: Fu; fn complete(v): self.fu.set(v)`; `val f = Fu(n: 0); val p = Pr(fu: f); p.complete(42); print f.n` called from a non-`main` function prints 0 (expected 42); same code under `fn main` prints 42. No lib change made.
+
+## 2026-11-04 note (fix-classref lane): interpreter root fixed by default
+
+`SIMPLE_INTERP_CLASS_REF` is now ON by default (value.rs
+`class_instance_storage_enabled`). On the rebuilt seed, default run:
+`async_promise_pair_spec` 4/4 (was 0/4), `async_promise_pair_persistence_spec`
+3/3 (was 0/3), `host_promise_terminal_spec` 3/3 (was 0/3).
+`test/01_unit/lib/std/async_spec.spl` itself was already 46/0 on the fresh
+release seed default (measured 2026-11-04) and stays 46/0 — the "19 failures"
+in the record head predate that seed.
+Coordinator owns the bug_db status change.

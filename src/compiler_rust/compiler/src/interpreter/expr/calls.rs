@@ -391,21 +391,15 @@ pub(super) fn eval_call_expr(
                     // instance's shared lock, so a mutating method on it
                     // (`self.parts.push(x)`) must be written back in place.
                     if let Value::ClassInstance(ref instance) = outer_val {
-                        // Move the field out (not clone) so the callee's mutator
-                        // owns the only Arc and does not deep-copy per call — but
-                        // only when no argument can observe the instance while
-                        // the field is moved out (`self.xs.push(self.xs.len())`).
-                        let args_are_inert = args.iter().all(|a| match &a.value {
-                            Expr::Identifier(n) => n != var_name,
-                            Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Bool(_) => true,
-                            _ => false,
-                        });
-                        let taken = if args_are_inert {
-                            instance.field_mut(field, |v| std::mem::replace(v, Value::Nil))
-                        } else {
-                            instance.field(field)
-                        };
-                        if let Some(field_val) = taken {
+                        // The field is CLONED out of the shared cell (an Arc
+                        // handle), never moved: another handle — or another
+                        // thread (`Barrier.wait` on an isolated worker) — may
+                        // read the field while this call runs, and a moved-out
+                        // `Nil` is a silent wrong answer there. In-place array
+                        // mutators never reach here (handled above under the
+                        // instance lock); a method that returns an updated
+                        // receiver is written back through `set_field`.
+                        if let Some(field_val) = instance.field(field) {
                             let temp_var = format!("__nested_field_{}__", field);
                             env.insert(temp_var.clone(), field_val);
                             let temp_receiver = Box::new(Expr::Identifier(temp_var.clone()));
@@ -419,21 +413,14 @@ pub(super) fn eval_call_expr(
                                 enums,
                                 impl_methods,
                             );
+                            // An in-place mutator on the temp binding leaves its
+                            // result in the binding, not in `updated_field`.
                             let after = env.remove(&temp_var);
-                            return match call {
-                                Ok((result, updated_field)) => {
-                                    if let Some(new_field_val) = updated_field.or(after) {
-                                        instance.set_field(field.clone(), new_field_val);
-                                    }
-                                    Ok(Some(result))
-                                }
-                                Err(e) => {
-                                    if let Some(v) = after {
-                                        instance.set_field(field.clone(), v);
-                                    }
-                                    Err(e)
-                                }
-                            };
+                            let (result, updated_field) = call?;
+                            if let Some(new_field_val) = updated_field.or(after) {
+                                instance.set_field(field.clone(), new_field_val);
+                            }
+                            return Ok(Some(result));
                         }
                     }
                     if let Value::Object { class, fields } = outer_val {
@@ -1261,6 +1248,20 @@ pub(super) fn eval_call_expr(
                                 // through to the error below, so nil stays caught.
                                 if let Some(Value::Object { fields, .. }) = payload.as_deref() {
                                     Ok(fields.get(field).cloned().unwrap_or(Value::Nil))
+                                } else {
+                                    Ok(Value::Nil)
+                                }
+                            }
+                            // Same forwarding for a reference-semantics `class`
+                            // payload (Value::ClassInstance).
+                            _ if variant == "Some"
+                                && matches!(
+                                    payload.as_deref(),
+                                    Some(Value::ClassInstance(instance)) if instance.field(field).is_some()
+                                ) =>
+                            {
+                                if let Some(Value::ClassInstance(instance)) = payload.as_deref() {
+                                    Ok(instance.field(field).unwrap_or(Value::Nil))
                                 } else {
                                     Ok(Value::Nil)
                                 }

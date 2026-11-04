@@ -3307,12 +3307,14 @@ include!("value_pointers.rs");
 // Include tests from separate file
 include!("value_tests.rs");
 
-/// Opt-in switch for reference-semantics `class` storage
+/// Reference-semantics `class` storage switch
 /// (doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md).
-/// Off by default: with `SIMPLE_INTERP_CLASS_REF` unset, `Value::aggregate`
-/// keeps producing `Value::Object` (no behavior change) until every
-/// `Value::Object` site has a `ClassInstance` arm.
+/// ON by default since 2026-11-04: `Value::aggregate` yields
+/// `Value::ClassInstance` for `class` aggregates, so a class held in a field,
+/// an array element, or a local alias shares identity with its origin.
+/// `SIMPLE_INTERP_CLASS_REF=0` restores the legacy value-copy `Value::Object`
+/// storage (opt-out kept for bisection only).
 pub fn class_instance_storage_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SIMPLE_INTERP_CLASS_REF").map(|v| v == "1").unwrap_or(false))
+    *ON.get_or_init(|| std::env::var("SIMPLE_INTERP_CLASS_REF").map(|v| v != "0").unwrap_or(true))
 }

@@ -30,9 +30,17 @@ unreachable, this guide says so rather than describing the intent.
 
 ## The one hazard: assume every handle you hold is a copy
 
-Classes in this language are **value types**. `val b = a` copies. There is no
-compiler diagnostic anywhere in this area, so every symptom below presents as
-"this backend can't profile" rather than as an error.
+**Superseded 2026-11-04.** `class` values are **reference types** on every
+engine now — the seed tree-walk interpreter's reference carrier
+(`Value::ClassInstance`) is the default since PR "fix(interp): class reference
+semantics by default"; `struct` values are the value types
+(`doc/05_design/compiler/interpreter/class_instance_reference_storage_2026-11-03.md`).
+The traps below were measured while the interpreter still value-copied classes
+(`val b = a` copied); they are kept as history of that behaviour. The remaining
+hazard is only the `struct` half: a struct read from a container or bound to a
+second name is still a copy. There is no compiler diagnostic anywhere in this
+area, so every symptom below presents as "this backend can't profile" rather
+than as an error.
 
 It reads as three separate traps. It is one:
 
