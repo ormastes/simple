@@ -6227,6 +6227,12 @@ impl MirLowering:
                 case HirTypeKind.Array(_, _):
                     match expression.kind:
                         case HirExprKind.ArrayLit(_, _):
+                            # `items: [T]` of a generic struct: the template's
+                            # element type is no context (generics are erased;
+                            # the literal's own elements type the instance),
+                            # and checking `"a"` against `T` would refuse it.
+                            if self.hir_type_mentions_type_param(expected, self.symbols):
+                                return self.lower_expr(expression)
                             val errors_before = self.errors.len()
                             val slot = self.declared_field_type_in_current_table(owner, field_index, expected)
                             if self.errors.len() != errors_before: return nil
@@ -6355,6 +6361,17 @@ impl MirLowering:
                 val mk: text = marker
                 if mk != "":
                     instance_is_generic = true
+        # Type parameters bound from the stored values (`items: ["a"]` binds
+        # T=text), so the construct result remembers `Bag<text>`, the HIR
+        # type a field read substitutes from -- the same route an annotated
+        # `b: Bag<text>` takes (generics are erased; the instance is the use
+        # site's, never a specialization).
+        var construct_type_param_names: [text] = []
+        if self.struct_type_param_names.has(struct_name):
+            construct_type_param_names = self.struct_type_param_names[struct_name]
+            if construct_type_param_names.len() > 0:
+                instance_is_generic = true
+        var construct_bindings: Dict<text, HirType> = {}
         var instance_field_types: [MirType] = []
         var fi = 0
         var pos_i = 0
@@ -6537,6 +6554,10 @@ impl MirLowering:
                 instance_field_types.push(MirType.i64())
             else:
                 if fi < field_hir_types.len():
+                    if construct_type_param_names.len() > 0:
+                        # Bind before coercion/boxing replaces the value local.
+                        val chosen_source_hir = self.construct_field_source_hir_type(chosen, v, chosen.span)
+                        construct_bindings = self.bind_struct_type_params(field_hir_types[fi], chosen_source_hir, construct_type_param_names, construct_bindings)
                     v = self.coerce_native_trait_assignment(v, chosen.kind, field_hir_types[fi], chosen.span)
                     match field_hir_types[fi].kind:
                         case HirTypeKind.Optional(_):
@@ -6596,7 +6617,21 @@ impl MirLowering:
             if val present_declaration = optional_declaration:
                 val declaration: HirSymbol = present_declaration
                 if declaration.kind == SymbolKind.Class or declaration.kind == SymbolKind.Struct:
-                    val constructed_type = HirType(kind: HirTypeKind.Named(symbol, []), span: declaration.span)
+                    # The instance's arguments, when every parameter was
+                    # bound from a stored value; an argumentless `Bag`
+                    # otherwise (an unknown instance, as before).
+                    var constructed_args: [HirType] = []
+                    var constructed_complete = construct_type_param_names.len() > 0
+                    for tp in construct_type_param_names:
+                        val tp_name: text = tp
+                        if construct_bindings.has(tp_name):
+                            val bound_arg: HirType = construct_bindings[tp_name]
+                            constructed_args.push(bound_arg)
+                        else:
+                            constructed_complete = false
+                    if not constructed_complete:
+                        constructed_args = []
+                    val constructed_type = HirType(kind: HirTypeKind.Named(symbol, constructed_args), span: declaration.span)
                     self.remember_local_hir_type(dest.id, constructed_type, 2, 0)
         if instance_is_generic:
             self.generic_instance_field_types[dest.id] = instance_field_types
