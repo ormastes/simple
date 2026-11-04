@@ -32,8 +32,9 @@ use compiler.driver.driver_ice_boundary.{
 use compiler.driver.perf.compiler_work_counters.{compiler_work_mir_schedule_v1}
 use compiler.driver.driver_log_helpers.{log_build_trace, build_trace_detail}
 use compiler.driver.driver_log_helpers.{log_debug, log_phase, phase_rss_set_retained_objects_v1, log_build_progress, log_bootstrap_flat_warning,
-    mir_progress_due, log_mir_progress}
-use std.io_runtime.{time_now_monotonic_ms}
+    mir_progress_due, log_mir_progress, driver_phase_trace_enabled, phase_rss_enabled_v1}
+use std.io_runtime.{time_now_monotonic_ms, file_write}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.driver_phase_gates.{
     driver_source_entry_closure_enabled, driver_source_matches_entry,
     driver_source_entry_request
@@ -51,7 +52,8 @@ use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_build_a
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
 use compiler.mir._MirLowering.transient_owner_sffi.{
     transient_array_scope_begin_v1, transient_array_scope_pause_v1,
-    transient_array_scope_end_v1
+    transient_array_scope_end_v1, transient_heap_promote_share_begin_v1,
+    transient_heap_promote_share_end_v1
 }
 use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_registries_promote}
 use compiler.mir.mir_data.{bootstrap_fn_registries_promote}
@@ -103,15 +105,70 @@ fn _driver_mcdc_budget(ctx: CompileContext, key: text, fallback: i64) -> i64:
         return 0
     fallback
 
-fn _driver_mir_inventory_scope_end(lowering: MirLowering) -> bool:
+pub fn driver_mir_inventory_scope_end_v1(lowering: MirLowering) -> bool:
+    """End one MIR setup inventory scope: pause, promote the lowering's
+    retained roots plus the flat bootstrap registries, then free the arena.
+
+    Called ONCE PER SETUP PHASE (struct prescan, enum inventory, composite
+    inventory), not once per module. `promote_transient_owner` promotes ~280
+    field roots and every root walk descends the whole reachable registry
+    graph (rt_transient_heap_promote classifies any registered array/dict as
+    walkable, promoted or not), so a per-module scope end cost
+    O(roots x accumulated graph) per module -- quadratic in the closure.
+    Measured on the admitted aarch64 stage2 (2026-11-05): 319 modules =
+    2.1 s / 2.2 s / 2.4 s per phase, 3006-module CLI closure = 545-569 s for
+    the prescan alone, which starved the MIR shard workers past their 1800 s
+    budget (claimed=0). See
+    doc/08_tracking/bug/mir_setup_inventory_scope_quadratic_2026-11-05.md.
+    The share window mirrors lower_module_transient_scoped: nodes committed by
+    one root promotion are not re-walked by the next, O(roots x graph) ->
+    O(graph) for the one promotion this phase pays."""
     if not transient_array_scope_pause_v1():
         val _ended = transient_array_scope_end_v1()
         return false
+    val _owner_share_opened = transient_heap_promote_share_begin_v1()
     var promoted = lowering.promote_transient_owner()
+    val _owner_share_closed = transient_heap_promote_share_end_v1()
     promoted = bootstrap_mir_registries_promote() and promoted
     promoted = bootstrap_fn_registries_promote() and promoted
     val ended = transient_array_scope_end_v1()
     promoted and ended
+
+pub fn driver_mir_inventory_digest_v1(lowering: MirLowering) -> text:
+    """Deterministic digest of every NAME-keyed registry the three MIR setup
+    phases write (struct prescan, enum inventory, composite inventory), so a
+    change to the setup cadence can be checked byte-for-byte against the
+    previous one: rows are `registry|key|value`, sorted, so the digest is
+    independent of dict iteration order. The driver prints it through
+    log_phase after the composite inventory when a phase trace is on
+    (driver_phase_trace_enabled / SIMPLE_PHASE_RSS);
+    `SIMPLE_MIR_INVENTORY_DUMP=<path>` also writes the sorted rows so two
+    runs can be diffed line by line."""
+    var rows: [text] = []
+    for order_key in lowering.struct_field_order.keys():
+        rows = rows.push("struct_field_order|{order_key}|{lowering.struct_field_order[order_key].join(",")}")
+    for default_key in lowering.struct_field_has_default.keys():
+        val flags: [bool] = lowering.struct_field_has_default[default_key]
+        var flag_text = ""
+        var flag_i = 0
+        while flag_i < flags.len():
+            flag_text = flag_text + (if flags[flag_i]: "1" else: "0")
+            flag_i = flag_i + 1
+        rows = rows.push("struct_field_has_default|{default_key}|{flag_text}")
+    for class_key in lowering.class_type_names.keys():
+        rows = rows.push("class_type_names|{class_key}|{lowering.class_type_names[class_key]}")
+    for variant_key in lowering.enum_variant_index.keys():
+        rows = rows.push("enum_variant_index|{variant_key}|{lowering.enum_variant_index[variant_key].join(",")}")
+    for runtime_key in lowering.enum_registration_current.keys():
+        rows = rows.push("enum_registration_current|{runtime_key}|{lowering.enum_registration_current[runtime_key]}")
+    for payload_key in lowering.enum_variant_payload_kind.keys():
+        rows = rows.push("enum_variant_payload_kind|{payload_key}|{lowering.enum_variant_payload_kind[payload_key]}")
+    rows.sort()
+    val body = rows.join("\n")
+    val dump_path = env_get("SIMPLE_MIR_INVENTORY_DUMP") ?? ""
+    if dump_path != "":
+        val _written = file_write(dump_path, body)
+    "rows={rows.len()} sha256={sha256_text(body)}"
 
 # Diagnostics-plumbing: MirLowering.errors was silently dropped on the
 # native-build worker path (nothing outside 70.backend read it), so a bare
@@ -1186,34 +1243,37 @@ impl CompilerDriver:
                 # module itself (established precedent) and walks via the
                 # param-only codec getters.
                 val prescan_owner_keys = self.ctx.hir_modules.keys()
+                # One transient scope per setup PHASE, not per module: the
+                # scope end promotes the whole accumulated registry graph, so
+                # a per-module end was quadratic (see driver_mir_inventory_scope_end_v1).
+                val prescan_scope_active = transient_array_scope_begin_v1()
                 while prescan_owner_i < prescan_owner_keys.len():
-                    val prescan_scope_active = transient_array_scope_begin_v1()
                     direct_lowering.prescan_module_struct_names(
                         self.ctx.hir_modules, prescan_owner_keys[prescan_owner_i])
-                    if prescan_scope_active and not _driver_mir_inventory_scope_end(direct_lowering):
-                        self.ctx.add_error("MIR struct prescan transient scope failed for {prescan_owner_keys[prescan_owner_i]}")
-                        return false
                     prescan_owner_i = prescan_owner_i + 1
                     if prescan_owner_i % 64 == 0:
                         log_phase("aot:mir_setup:struct_prescan visited={prescan_owner_i} total={prescan_owner_keys.len()}")
+                if prescan_scope_active and not driver_mir_inventory_scope_end_v1(direct_lowering):
+                    self.ctx.add_error("MIR struct prescan transient scope failed (phase scope, {prescan_owner_keys.len()} modules)")
+                    return false
             else:
                 # Cycle-118: the flagged unwrap-bind branch -- same corruptor
                 # as cycle-117 (named binds of HirModule elements/values).
                 # Scalar key bind only; the module value is never bound:
                 # expression reads with .unwrap() feed the handle/scalar args.
                 var direct_prescan_idx = 0
+                val direct_prescan_scope_active = transient_array_scope_begin_v1()
                 while direct_prescan_idx < self.ctx.sources.len():
                     val prescan_key: text = self.ctx.sources[direct_prescan_idx].module_name
                     if self.ctx.hir_modules.has(prescan_key):
-                        val prescan_scope_active = transient_array_scope_begin_v1()
                         direct_lowering.prescan_module_struct_names(
                             self.ctx.hir_modules, prescan_key)
-                        if prescan_scope_active and not _driver_mir_inventory_scope_end(direct_lowering):
-                            self.ctx.add_error("MIR struct prescan transient scope failed for {prescan_key}")
-                            return false
                     direct_prescan_idx = direct_prescan_idx + 1
                     if direct_prescan_idx % 64 == 0:
                         log_phase("aot:mir_setup:struct_prescan visited={direct_prescan_idx} total={self.ctx.sources.len()}")
+                if direct_prescan_scope_active and not driver_mir_inventory_scope_end_v1(direct_lowering):
+                    self.ctx.add_error("MIR struct prescan transient scope failed (phase scope, {self.ctx.sources.len()} modules)")
+                    return false
             log_phase("aot:mir_setup:struct_prescan:done")
             log_phase("aot:mir_setup:enum_inventory:start")
             log_build_progress("mir", "modules", 0, mir_source_indices.len(),
@@ -1241,13 +1301,15 @@ impl CompilerDriver:
                     enum_inventory_modules = enum_inventory_modules.push(present_enum_hir)
                 enum_inventory_idx = enum_inventory_idx + 1
             enum_inventory_idx = 0
+            val enum_scope_active = transient_array_scope_begin_v1()
             while enum_inventory_idx < enum_inventory_modules.len():
-                val enum_scope_active = transient_array_scope_begin_v1()
                 direct_lowering.register_module_enum_inventory_v1([enum_inventory_modules[enum_inventory_idx]])
-                if enum_scope_active and not _driver_mir_inventory_scope_end(direct_lowering):
-                    self.ctx.add_error("MIR enum inventory transient scope failed for {enum_inventory_modules[enum_inventory_idx].name}")
-                    return false
                 enum_inventory_idx = enum_inventory_idx + 1
+                if enum_inventory_idx % 64 == 0:
+                    log_phase("aot:mir_setup:enum_inventory visited={enum_inventory_idx} total={enum_inventory_modules.len()}")
+            if enum_scope_active and not driver_mir_inventory_scope_end_v1(direct_lowering):
+                self.ctx.add_error("MIR enum inventory transient scope failed (phase scope, {enum_inventory_modules.len()} modules)")
+                return false
             log_phase("aot:mir_setup:enum_inventory:done")
             log_phase("aot:mir_setup:composite_inventory:start")
             log_build_progress("mir", "modules", 0, mir_source_indices.len(),
@@ -1260,14 +1322,18 @@ impl CompilerDriver:
             # module's own lower_module pass -- after the entry has already
             # lowered. See register_module_composite_inventory_v1.
             var composite_inventory_idx = 0
+            val composite_scope_active = transient_array_scope_begin_v1()
             while composite_inventory_idx < enum_inventory_modules.len():
-                val composite_scope_active = transient_array_scope_begin_v1()
                 direct_lowering.register_module_composite_inventory_v1([enum_inventory_modules[composite_inventory_idx]])
-                if composite_scope_active and not _driver_mir_inventory_scope_end(direct_lowering):
-                    self.ctx.add_error("MIR composite inventory transient scope failed for {enum_inventory_modules[composite_inventory_idx].name}")
-                    return false
                 composite_inventory_idx = composite_inventory_idx + 1
+                if composite_inventory_idx % 64 == 0:
+                    log_phase("aot:mir_setup:composite_inventory visited={composite_inventory_idx} total={enum_inventory_modules.len()}")
+            if composite_scope_active and not driver_mir_inventory_scope_end_v1(direct_lowering):
+                self.ctx.add_error("MIR composite inventory transient scope failed (phase scope, {enum_inventory_modules.len()} modules)")
+                return false
             log_phase("aot:mir_setup:composite_inventory:done")
+            if driver_phase_trace_enabled() or phase_rss_enabled_v1(env_get("SIMPLE_PHASE_RSS") ?? ""):
+                log_phase("aot:mir_setup:inventory_digest {driver_mir_inventory_digest_v1(direct_lowering)}")
             # Staged native codegen (driver_build/native_staged_codegen.spl):
             # record the whole schedule's module names (the frozen storage
             # registry must know modules lowered after it freezes), then flush
