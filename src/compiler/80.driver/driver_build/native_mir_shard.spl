@@ -129,6 +129,41 @@ pub fn native_mir_shard_outcome_v1(aggregate_code: i64, failed_modules: i64,
         return "fallback"
     "fail"
 
+# A MIR shard worker runs the ordinary frontend before claiming any module.
+# When that frontend stops on HIR compile diagnostics (deterministic: the
+# same sources fail the same way in any process), the worker claims nothing
+# and the aggregate looks exactly like "fallback" (no HIR inventory/cache).
+# Falling back to in-process unsharded MIR then re-runs load/parse/HIR in the
+# final worker and only reproduces the same errors -- in s2c it did so while
+# retaining the first pass and hit the 12 GiB RSS cap
+# (doc/08_tracking/bug/stage2_compiler_cli_build_rss_cap_after_hir_poison_retry_2026-11-04.md).
+# The worker therefore leaves this marker beside the ledger and the
+# coordinator turns that fallback into a fail-fast "fail". Transient/infra
+# stops (no marker) keep the fallback.
+pub const NATIVE_MIR_SHARD_HIR_COMPILE_ERRORS_FILE_V1: text = "HIR_COMPILE_ERRORS"
+
+pub fn native_mir_shard_hir_compile_errors_path_v1(queue: text) -> text:
+    "{queue}/{NATIVE_MIR_SHARD_HIR_COMPILE_ERRORS_FILE_V1}"
+
+# Worker side: no-op outside a MIR shard child or without diagnostics.
+# The first writer wins; the content is the human-readable summary.
+pub fn native_mir_shard_record_hir_compile_errors_v1(queue: text, error_count: i64, poisoned_count: i64) -> bool:
+    if queue == "" or error_count <= 0:
+        return false
+    val target = native_mir_shard_hir_compile_errors_path_v1(queue)
+    if file_exists(target):
+        return true
+    file_atomic_write(target, "errors={error_count} poisoned_modules={poisoned_count}")
+
+pub fn native_mir_shard_hir_compile_errors_recorded_v1(queue: text) -> bool:
+    queue != "" and file_exists(native_mir_shard_hir_compile_errors_path_v1(queue))
+
+# Coordinator side: a recorded HIR compile failure is never retried in process.
+pub fn native_mir_shard_outcome_after_hir_errors_v1(outcome: text, hir_compile_errors: bool) -> text:
+    if outcome == "fallback" and hir_compile_errors:
+        return "fail"
+    outcome
+
 fn native_mir_shard_record_base_v1(queue: text, module_name: text) -> text:
     "{queue}/{sha256_text(module_name)}"
 
