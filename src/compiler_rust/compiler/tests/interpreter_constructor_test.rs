@@ -173,3 +173,65 @@ main = if half(3) == 1.5: 0 else: 1
 
     assert_eq!(parse_and_eval(source).unwrap(), 0);
 }
+
+// Bug seed_overload_score_option_bytes_misleading_unknown_static_2026-07-20:
+// an Option-wrapped array (what `rt_file_read_bytes` returns) must score as the
+// array it wraps, so a bytes overload is chosen over a same-arity i64 overload.
+#[test]
+fn static_overload_scoring_sees_through_option_wrapped_array() {
+    let source = r#"
+class Out:
+    tag: i64
+
+    static fn make(name: text, n: i64) -> Out:
+        Out(tag: 1)
+
+    static fn make(name: text, bytes: [u8]) -> Out:
+        Out(tag: 2)
+
+val o = Out.make("x", Some([1, 2, 3]))
+main = if o.tag == 2: 0 else: 1
+"#;
+
+    assert_eq!(parse_and_eval(source).unwrap(), 0);
+}
+
+// When the method NAME exists but no overload accepts the arguments, the
+// diagnostic must say so instead of claiming the method is unknown.
+#[test]
+fn static_call_with_no_matching_overload_reports_overload_mismatch() {
+    let source = r#"
+class Out:
+    tag: i64
+
+    static fn make(name: text, n: i64) -> Out:
+        Out(tag: 1)
+
+    static fn make(name: text, flag: bool) -> Out:
+        Out(tag: 2)
+
+val o = Out.make(3, "y")
+main = 0
+"#;
+
+    let err = parse_and_eval(source).expect_err("no overload should match").to_string();
+    assert!(err.contains("no overload of Out.make matches argument types"), "got: {err}");
+    assert!(!err.contains("unknown static method"), "got: {err}");
+}
+
+#[test]
+fn static_call_with_missing_method_still_reports_unknown_static_method() {
+    let source = r#"
+class Out:
+    tag: i64
+
+    static fn make(n: i64) -> Out:
+        Out(tag: n)
+
+val o = Out.nothere(3)
+main = 0
+"#;
+
+    let err = parse_and_eval(source).expect_err("missing method").to_string();
+    assert!(err.contains("unknown static method nothere on class Out"), "got: {err}");
+}

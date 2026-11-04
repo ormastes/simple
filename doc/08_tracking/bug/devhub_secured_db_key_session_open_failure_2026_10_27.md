@@ -80,3 +80,5 @@ the database and fails reading rows: `text_from_codepoints` returns empty text, 
 rejection checks have not run on Phase 2. On Phase 1 the fixture has no final verdict.
 
 **Revalidated 2026-11-02: still plausible because OPEN. Severity: P1. Date: 2026-10-27; no merged fix commit with a passing regression is cited in this doc.**
+
+**2026-11-04:** root causes fixed (key session ace3ef1d00b/93a08ab43ab; text_from_codepoints da22bdea07a). text_codepoints_roundtrip_spec passes 5/5 interpreted. Verification pending: native-build test/fixtures/devhub/fresh_secured_db/main.spl on a current Phase-2 producer; close if it reaches a final verdict.

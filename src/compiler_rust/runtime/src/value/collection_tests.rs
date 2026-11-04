@@ -3827,3 +3827,23 @@ fn string_index_checked_matches_interpreter_policy() {
     let empty = rt_string_new("".as_ptr(), 0);
     assert!(string_index_checked(empty, 0).is_none());
 }
+
+// ADR-005: `to_digit` on a one-char text is Some(digit) or None, never 0.
+#[test]
+fn string_to_digit_is_option_not_silent_zero() {
+    use crate::value::collections::rt_string_to_digit;
+    let opt = |s: &str| rt_string_to_digit(rt_string_new(s.as_ptr(), s.len() as u64));
+    let payload = |v: RuntimeValue| {
+        let e = v.as_heap_ptr() as *const crate::value::objects::RuntimeEnum;
+        unsafe { ((*e).discriminant, (*e).payload) }
+    };
+    let none = payload(crate::value::objects::rt_option_none()).0;
+    let (d7, p7) = payload(opt("7"));
+    assert_ne!(d7, none);
+    assert_eq!(p7.as_int(), 7);
+    assert_eq!(payload(opt("0")).1.as_int(), 0);
+    assert_ne!(payload(opt("0")).0, none);
+    for bad in ["a", "", "72", "é"] {
+        assert_eq!(payload(opt(bad)).0, none, "{bad:?}");
+    }
+}

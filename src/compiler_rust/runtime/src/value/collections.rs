@@ -4350,6 +4350,25 @@ pub extern "C" fn rt_string_char_count(string: RuntimeValue) -> i64 {
     }
 }
 
+/// `to_digit` on a one-character text (ADR-005): `Some(0..=9)` for an ASCII
+/// decimal digit, `None` for anything else (non-digit, empty, multi-character,
+/// non-text). Twin of the interpreter arm in interpreter_method/string.rs; it is
+/// never a silent 0.
+#[no_mangle]
+pub extern "C" fn rt_string_to_digit(string: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return rt_option_none();
+    };
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => match c.to_digit(10) {
+            Some(d) => rt_option_some(RuntimeValue::from_int(d as i64)),
+            None => rt_option_none(),
+        },
+        _ => rt_option_none(),
+    }
+}
+
 /// `capitalize`: uppercase the first character, lowercase the rest.
 #[no_mangle]
 pub extern "C" fn rt_string_capitalize(string: RuntimeValue) -> RuntimeValue {

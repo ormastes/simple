@@ -257,7 +257,7 @@ pub(crate) fn evaluate_negated_bdd_matcher(
         return evaluate_method_call(expect_call, negated, args, env, functions, classes, enums, impl_methods);
     }
     use crate::interpreter::interpreter_call::{
-        finish_bdd_matcher, BDD_EXPECT_FAILED, BDD_EXPECT_PROVISIONAL, BDD_FAILURE_MSG, BDD_INSIDE_IT,
+        finish_bdd_matcher, BDD_EXPECT_FAILED, BDD_EXPECT_PROVISIONAL, BDD_FAILURE_MSG, push_bdd_failure, BDD_INSIDE_IT,
         BDD_PROVISIONAL_MSG, BDD_PROVISIONAL_SEQ,
     };
     // The positive form's failure state is suppressed wholesale: the hard
@@ -293,9 +293,7 @@ pub(crate) fn evaluate_negated_bdd_matcher(
     };
     if matched {
         BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-        BDD_FAILURE_MSG.with(|cell| {
-            *cell.borrow_mut() = Some(format!("expected `{method}` not to match, but it did"))
-        });
+        push_bdd_failure(format!("expected `{method}` not to match, but it did"));
     }
     finish_bdd_matcher(Value::Bool(!matched))
 }
@@ -606,7 +604,7 @@ pub(crate) fn evaluate_method_call(
             // `==` made `to_equal(nil)` a FALSE FAILURE on a genuinely-nil value
             // and `to_equal(x)` a false failure on a genuinely-matching one.
             let matched = recv_val.nullable_eq(&expected);
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -614,8 +612,7 @@ pub(crate) fn evaluate_method_call(
                     recv_val.to_display_string(),
                     expected.to_display_string()
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -632,7 +629,7 @@ pub(crate) fn evaluate_method_call(
                 Value::Array(arr) => arr.contains(&needle),
                 _ => false,
             };
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -640,30 +637,27 @@ pub(crate) fn evaluate_method_call(
                     recv_val.to_display_string(),
                     needle.to_display_string()
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
         "to_be_truthy" => {
             let matched = recv_val.truthy();
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!("expected {} to be truthy", recv_val.to_display_string());
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
         "to_be_falsy" => {
             let matched = !recv_val.truthy();
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!("expected {} to be falsy", recv_val.to_display_string());
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -673,12 +667,11 @@ pub(crate) fn evaluate_method_call(
             // (`self.value != true` fails), unlike `to_be_truthy` which
             // accepts any truthy value.
             let matched = recv_val == Value::Bool(true);
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!("expected true, got {}", recv_val.to_display_string());
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -688,12 +681,11 @@ pub(crate) fn evaluate_method_call(
             // (`self.value != false` fails), unlike `to_be_falsy` which
             // accepts any falsy value.
             let matched = recv_val == Value::Bool(false);
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!("expected false, got {}", recv_val.to_display_string());
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -703,19 +695,18 @@ pub(crate) fn evaluate_method_call(
             // `.to_be_none()` pass instead of failing with "expected Option::None
             // to be nil".
             let matched = recv_val.is_nil_like();
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!("expected {} to be nil", recv_val.to_display_string());
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
         "to_be_greater_than" => {
             let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
             let matched = numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_gt());
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -723,15 +714,14 @@ pub(crate) fn evaluate_method_call(
                     recv_val.to_display_string(),
                     expected.to_display_string()
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
         "to_be_less_than" => {
             let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
             let matched = numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_lt());
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -739,8 +729,7 @@ pub(crate) fn evaluate_method_call(
                     recv_val.to_display_string(),
                     expected.to_display_string()
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -748,7 +737,7 @@ pub(crate) fn evaluate_method_call(
             let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
             let matched =
                 numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_gt() || ordering.is_eq());
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -756,8 +745,7 @@ pub(crate) fn evaluate_method_call(
                     recv_val.to_display_string(),
                     expected.to_display_string()
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -765,7 +753,7 @@ pub(crate) fn evaluate_method_call(
             let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
             let matched =
                 numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_lt() || ordering.is_eq());
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -773,8 +761,7 @@ pub(crate) fn evaluate_method_call(
                     recv_val.to_display_string(),
                     expected.to_display_string()
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -793,7 +780,7 @@ pub(crate) fn evaluate_method_call(
                 (Value::Str(s), Value::Str(p)) => s.starts_with(p.as_str()),
                 _ => false,
             };
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -801,8 +788,7 @@ pub(crate) fn evaluate_method_call(
                     recv_val.to_display_string(),
                     prefix.to_display_string()
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -821,7 +807,7 @@ pub(crate) fn evaluate_method_call(
                 (Value::Str(s), Value::Str(p)) => s.ends_with(p.as_str()),
                 _ => false,
             };
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -829,8 +815,7 @@ pub(crate) fn evaluate_method_call(
                     recv_val.to_display_string(),
                     suffix.to_display_string()
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -840,7 +825,7 @@ pub(crate) fn evaluate_method_call(
             // dangerous direction: `to_not_equal(nil)` on a genuinely-nil value
             // and `to_not_equal(x)` on a genuinely-equal one both FALSE-PASSED.
             let matched = !recv_val.nullable_eq(&expected);
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -848,8 +833,7 @@ pub(crate) fn evaluate_method_call(
                     recv_val.to_display_string(),
                     expected.to_display_string()
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -867,7 +851,7 @@ pub(crate) fn evaluate_method_call(
                 _ => false,
             };
             let matched = !contains;
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -875,8 +859,7 @@ pub(crate) fn evaluate_method_call(
                     recv_val.to_display_string(),
                     needle.to_display_string()
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -884,12 +867,10 @@ pub(crate) fn evaluate_method_call(
             // Symmetric with to_be_nil: Option::None counts as nil-like, so
             // to_not_be_nil(None) correctly fails.
             let matched = !recv_val.is_nil_like();
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| {
-                    *cell.borrow_mut() = Some("expected value to not be nil, got nil".to_string())
-                });
+                push_bdd_failure("expected value to not be nil, got nil".to_string());
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
@@ -906,7 +887,7 @@ pub(crate) fn evaluate_method_call(
             let passed = if is_negated { !matched } else { matched };
 
             // Report to BDD framework
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
             if !passed {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!(
@@ -915,8 +896,7 @@ pub(crate) fn evaluate_method_call(
                     if is_negated { "not to match" } else { "to match" },
                     matcher
                 );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                push_bdd_failure(failure_msg);
             }
 
             break 'bdd_matcher Some(Value::Bool(passed));
