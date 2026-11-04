@@ -1,6 +1,9 @@
 # Regression: doc/08_tracking/bug/hir_generic_enum_self_match_2026-10-23.md
-# UNEXECUTED: written against the fixed src/compiler; stage2ref is prebuilt and cannot run it.
+#             doc/08_tracking/bug/generic_enum_pattern_self_subject_hir_2026_10_22.md
+# Drives the self-hosted HIR lowering (compiler.hir.hir_lowering, run as source)
+# on a snippet; the seed interpreter only hosts it. Executed 2026-11-04.
 use std.spec.{describe, it, expect, step}
+use std.io.{file_read}
 use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.core.parser.{parser_has_errors}
@@ -14,11 +17,51 @@ fn lower_errors(source: text) -> i64:
     val module = lowering.lower_module(parsed)
     lowering.errors.len()
 
+# Only this bug's diagnostics: a real lib module may carry unrelated
+# single-module lowering noise (unresolved imports), which is not under test.
+# `prelude` supplies a declaration the module imports (future.spl -> Poll) so
+# the declared generic enum pattern path is actually reached.
+fn generic_enum_pattern_errors(path: text, prelude: text) -> [text]:
+    val source = file_read(path)
+    expect(source.len() > 0).to_be(true)
+    val parsed = parse_full_frontend(prelude + "\n" + source, path, "gesm_lib", Logger(level: 0))
+    expect(parser_has_errors()).to_be(false)
+    var lowering = HirLowering.with_filename(path)
+    val module = lowering.lower_module(parsed)
+    var hits: [text] = []
+    for raw in lowering.errors:
+        val error = raw
+        val message: text = error.message
+        val lost_binder = message.starts_with("unresolved name: value ") or message.starts_with("unresolved name: v ") or message.starts_with("unresolved name: e ")
+        if message.contains("generic enum pattern") or message.contains("E-HIR-MATCH") or lost_binder:
+            hits = hits.push("{path}: {message}")
+    hits
+
 describe "match self inside a generic enum's own method":
     it "lowers Ok(_)/Err(_)/Ok(v)/Err(e) arms without HIR errors":
         step("FailSafeResult<T> shape from failsafe/core.spl")
         val src = "pub enum Res<T>:\n    Ok(T)\n    Err(text)\n\n    fn is_ok() -> bool:\n        match self:\n            case Ok(_): true\n            case Err(_): false\n\n    fn unwrap_or(default: T) -> T:\n        match self:\n            case Ok(v): v\n            case Err(_): default\n"
         expect(lower_errors(src)).to_equal(0)
+
+    it "lowers qualified Poll.Ready(_)/Poll.Pending arms on self inside impl Poll<T>":
+        step("Poll<T> shape from async/poll.spl: method in a separate impl block")
+        val src = "pub enum Poll<T>:\n    Ready(T)\n    Pending\n\nimpl Poll<T>:\n    fn is_ready() -> bool:\n        match self:\n            case Poll.Ready(_): true\n            case Poll.Pending: false\n\n    fn unwrap() -> T:\n        match self:\n            case Poll.Ready(value): value\n            case Poll.Pending: panic(\"pending\")\n"
+        expect(lower_errors(src)).to_equal(0)
+
+    it "lowers Poll.Ready(value) arms on a self field of type Poll<T> inside class Future<T>":
+        step("Future<T> shape from async/future.spl: subject is self.poll_result")
+        val src = "pub enum Poll<T>:\n    Ready(T)\n    Pending\n\nclass Future<T>:\n    poll_result: Poll<T>\n\n    fn is_ready() -> bool:\n        match self.poll_result:\n            case Poll.Ready(_): true\n            case Poll.Pending: false\n\n    fn map<U>(f: fn(T) -> U) -> U?:\n        match self.poll_result:\n            case Poll.Ready(value): f(value)\n            case Poll.Pending: nil\n"
+        expect(lower_errors(src)).to_equal(0)
+
+    it "lowers the real lib modules that used to carry the workaround":
+        step("poll.spl, future.spl and both failsafe cores match self/self.field directly")
+        val poll_path = "src/lib/nogc_async_mut/async/poll.spl"
+        var hits: [text] = []
+        hits = hits.concat(generic_enum_pattern_errors(poll_path, ""))
+        hits = hits.concat(generic_enum_pattern_errors("src/lib/nogc_async_mut/async/future.spl", file_read(poll_path)))
+        hits = hits.concat(generic_enum_pattern_errors("src/lib/nogc_sync_mut/failsafe/core.spl", ""))
+        hits = hits.concat(generic_enum_pattern_errors("src/lib/nogc_async_mut/failsafe/core.spl", ""))
+        expect(hits).to_equal([])
 
     it "still rejects a bare generic subject outside the enum's own methods":
         step("free function with an unparameterized subject keeps the diagnostic")
