@@ -2255,7 +2255,7 @@ impl Lowerer {
                 kind: PointerKind::Shared,
                 inner,
                 ..
-            }) if matches!(*inner, TypeId::BOOL | TypeId::F32 | TypeId::F64) => *inner,
+            }) if matches!(*inner, TypeId::BOOL | TypeId::F32 | TypeId::F64 | TypeId::U64) => *inner,
             // `text?` coalesces to plain text. Left as the `text?` pointer the
             // receiver was neither `is_string` nor `is_any` in the method
             // result-type tables (hir/lower/expr/mod.rs), so `(o ?? d)
