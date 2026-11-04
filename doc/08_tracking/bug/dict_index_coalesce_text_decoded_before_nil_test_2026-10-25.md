@@ -36,3 +36,18 @@ MIR NullCoalesce must test the raw rt_dict_get result for nil before any text
 decode of the Dict value (expr_dispatch.spl NullCoalesce arm; the Index
 lowering decodes eagerly). Not fixed here; takes effect only once Phase 3
 rebuilds itself.
+
+## c28-w2 triage 2026-11-04: root fix present in source, verification pending
+
+The compiler fix described under "Compiler fix (open)" exists in
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`:
+`lower_optional_probe_operand` (called by the `NullCoalesce` arm) lowers a
+`d[k]` left operand through `lower_index_expr(..., nil_probe=true)` so the
+undecoded `rt_dict_get` word is nil-tested before any text decode. The
+`driver_config_text_or` workaround in `driver_phase_gates.spl` is KEPT.
+Status: fix-implemented-verification-pending.
+
+Stage3 repro: rebuild stage3 from origin/release/1.0.0, native-build a probe
+with `val m: Dict<text, text> = {}; print(m["k"] ?? "dflt")` and expect `dflt`
+(not a NULL/0 word); also `(m["mcdc_mode"] ?? "off") == "off"` is true. Then
+remove the tagged `@workaround` in `driver_config_text_or` callers.
