@@ -1,6 +1,6 @@
-# char_literal_lexer_switch_staged_2026-11-03
+| lexer switch (seed + pure-Simple together) | behind `SIMPLE_CHAR_LITERAL_LEXER=1` (this PR) | implemented, **default OFF** |# char_literal_lexer_switch_staged_2026-11-03
 
-- **Status:** open — blocked (not fixable in this lane)
+- **Status:** implemented-behind-gate (default OFF; activation blocked on the stage3 self-build)
 - **Priority:** P2
 - **Decision:** ADR-005 § "Char literal syntax" (`doc/04_architecture/adr/ADR-005-text-index-yields-char.md`)
 - **Last checked:** 2026-11-04 on `origin/release/1.0.0`
@@ -51,3 +51,49 @@ State of the gate on 2026-11-04:
 
 The sibling `char_condition_type_check_staged_2026-11-03` is tracked
 separately and is not blocked by this item.
+
+## Implemented behind gate (2026-11-04)
+
+One opt-in gate, `SIMPLE_CHAR_LITERAL_LEXER` (`1`/`true`/`on`; default OFF),
+read once per lexer construction in both lexers:
+
+- Seed: `Lexer.char_literal_mode` (`src/compiler_rust/parser/src/lexer/mod.rs`,
+  `CHAR_LITERAL_LEXER_ENV`, test override `with_char_literals(bool)`);
+  `scan_single_quoted` / `scan_char_literal` in `lexer/strings.rs`; new
+  `TokenKind::CharLit(char)`. Escapes reuse `process_escape`.
+- Pure-Simple: `CoreLexer.char_literal_mode`
+  (`src/compiler/10.frontend/core/lexer_struct.spl`, override
+  `make_core_lexer_char_mode`), `scan_char_literal`, wire code 9
+  (`TokenKind.CharLit`, `TOK_CHAR_LIT`).
+
+ON: `'x'` is one scalar or one escape (`\n \t \r \0 \\ \' \"`, `\u{...}`,
+surrogates rejected). Empty, multi-scalar and unterminated forms are lex errors
+whose message names `r"..."`. `'ident` with no closing tick on the line keeps its
+current meaning (seed: `Label`). OFF: token stream unchanged (legacy raw string).
+
+Evidence:
+- `cargo test -p simple-parser --lib`: 420 passed (5 new `test_char_gate_*`, ON and OFF).
+- `cargo check --release --bin simple`: green.
+- `test/01_unit/compiler/frontend/lexer_char_literal_gate_spec.spl`: 5/5 (ON and OFF);
+  existing `lexer_indentation_eof_emits_token_spec` 6/6 and
+  `lexer_reference_tokens_v1_spec` 3/3 unchanged.
+- `raw_quote_migrate --dry-run --quiet src` (gate OFF, nothing written):
+  `files=18559 changed=30 converted=842 kept_char=1136 escapes=47 skipped=57
+  verify_failures=0`. So 842 of the 880 baselined sites are rewritable by the
+  tool as-is; the rest need review (escapes/skipped).
+- Guard `check-no-single-quoted-raw-string.shs` left **advisory**, baseline untouched.
+
+Known gap: neither parser accepts the CharLit token yet, so code lexed with the
+gate ON that contains `'x'` fails to parse. That wiring is activation step 1.
+
+## Activation steps (in order)
+
+1. Parser/type-checker: accept `CharLit` (seed `TokenKind::CharLit`, pure-Simple
+   kind 9) as a `char` literal expression in both front ends.
+2. The bootstrap lane records a passing stage3 self-build.
+3. Run `raw_quote_migrate --verify` per directory in batches (token-neutral),
+   hand-convert the escape/skipped sites, ratchet the baseline to 0.
+4. Flip the default: `SIMPLE_CHAR_LITERAL_LEXER` ON in both lexers in one PR.
+5. Make `check-no-single-quoted-raw-string.shs` blocking in that same PR.
+6. Promote staged warnings to errors once Windows, macOS and Linux each have a
+   self-hosted binary.
