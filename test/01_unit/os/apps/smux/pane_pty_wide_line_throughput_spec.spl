@@ -1,0 +1,64 @@
+"""
+Wide-line PTY delivery budget (bug smux_pty_input_throughput_wide_line_2026-11-04).
+
+The reported ~100 s "input throughput" was a capture artefact: the 300 char
+line reached the shell in ~0.2 s, but the pane (100 cols) hard-wrapped it and
+the history capture returned three rows, so a wait for the whole line never
+matched. tmux `capture-pane -J` rejoins soft-wrapped rows; smux history-joined
+does the same. Budget: delivery AND joined capture within 5 s; the legacy
+(unjoined) capture must still split at the pane width.
+"""
+use std.spec
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
+    smux_list_panes, smux_resize, smux_pane_spawn_pty, smux_pane_close_pty,
+    smux_send_command, smux_capture_history}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_async_mut.sosix.{sosix_platform}
+
+fn _shell() -> text:
+    if sosix_platform() == "windows": return "cmd.exe"
+    return "/bin/sh"
+
+fn _wide(n: i64) -> text:
+    var w = ""
+    while w.len() < n:
+        w = w + "W"
+    return w
+
+fn _secs(t0: i64) -> f64:
+    return (time_now_unix_micros() - t0) as f64 / 1000000.0
+
+describe "smux PTY wide line throughput":
+    it "delivers a 300 char line and captures it whole within 5 s":
+        step("100 col pane, 300 char echo, joined history capture")
+        smux_reset_for_test()
+        val s = smux_create_session("wide")
+        val w = smux_list_windows(s.id)[0]
+        val p = smux_list_panes(s.id, w.id)[0]
+        val _r = smux_resize(s.id, w.id, p.id, 100, 24)
+        expect(smux_pane_spawn_pty(s.id, w.id, p.id, _shell()).is_ok()).to_equal(true)
+        var warm = 0
+        while warm < 20:
+            thread_sleep_ms(50)
+            val _c = smux_capture_history(s.id, w.id, p.id, 20)
+            warm = warm + 1
+        val wide = _wide(300)
+        val t0 = time_now_unix_micros()
+        expect(smux_send_command(s.id, w.id, p.id, "echo " + wide).is_ok()).to_equal(true)
+        var joined_seen = false
+        while not joined_seen and _secs(t0) < 60.0:
+            val cap = smux_capture_history(s.id, w.id, p.id, 20, true)
+            if cap.is_ok() and cap.unwrap().content.contains(wide):
+                joined_seen = true
+            else:
+                thread_sleep_ms(20)
+        val elapsed = _secs(t0)
+        print "wide300 joined-capture seconds=" + elapsed.to_string()
+        val legacy = smux_capture_history(s.id, w.id, p.id, 20)
+        val legacy_whole = legacy.is_ok() and legacy.unwrap().content.contains(wide)
+        val _cp = smux_pane_close_pty(s.id, w.id, p.id)
+        expect(joined_seen).to_equal(true)
+        expect(elapsed < 5.0).to_equal(true)
+        # Unjoined capture keeps rows at the pane width (interactive clients rely on it).
+        expect(legacy_whole).to_equal(false)
