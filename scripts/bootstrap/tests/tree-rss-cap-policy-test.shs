@@ -224,6 +224,30 @@ else
 fi
 ok
 
+# 2d. Row-owner provenance (run-process-group-timeout.shs, the real watchdog):
+#     a user-set diagnostic cap is attributed explicit-env/explicit in the row
+#     receipt; the same cap published by the phase policy carries
+#     phase-policy/worker-floor; a malformed attribution is refused (125).
+row() { # RECEIPT [ENV=VALUE ...] -> row_status
+    row_receipt=$1; shift
+    row_status=0
+    env SIMPLE_PROCESS_TREE_RSS_RECEIPT="$scratch/$row_receipt" SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375 "$@" \
+        sh "$root/scripts/bootstrap/run-process-group-timeout.shs" 30 2 /bin/sh -c 'exit 7' \
+        >"$scratch/$row_receipt.out" 2>&1 || row_status=$?
+}
+row diag.env
+[ "$row_status" -eq 7 ] && [ "$(field diag.env cap_source)" = explicit-env ] &&
+    [ "$(field diag.env cap_bound)" = explicit ] ||
+    fail "diagnostic pair not attributed explicit-env in the row receipt (exit $row_status): $(cat "$scratch/diag.env" 2>/dev/null | head -5)"
+row policy.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor
+[ "$row_status" -eq 7 ] && [ "$(field policy.env cap_source)" = phase-policy ] &&
+    [ "$(field policy.env cap_bound)" = worker-floor ] && [ "$(field policy.env rss_limit_kib)" = 5859375 ] ||
+    fail "published phase-policy attribution missing from the row receipt (exit $row_status): $(cat "$scratch/policy.env" 2>/dev/null | head -5)"
+row bad.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE='Phase Policy' SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor
+[ "$row_status" -eq 125 ] && grep -Fq 'invalid published cap attribution' "$scratch/bad.env.out" ||
+    fail "malformed attribution was not refused by the row owner (exit $row_status)"
+ok
+
 # 3. Transcribed runner: an over-ceiling explicit cap is refused BEFORE
 #    execution with the reason in <log>.refusal and on stderr (it was silent).
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"

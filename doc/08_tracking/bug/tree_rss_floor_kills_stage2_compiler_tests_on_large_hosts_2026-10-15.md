@@ -233,6 +233,17 @@ KiB -> 2 workers, cap 54525952 KiB (26 GiB per worker), elevated ceiling
 MemAvailable at each admission (campaign start and every native-build row); a
 busier host reduces to 1 worker (cap 29360128 KiB), and below that refuses.
 
+Consequence to know: because the phase now publishes the cap/ceiling PAIR,
+`run-process-group-timeout.shs` unsets both for non-native-build rows, so the
+interpreter test-runner rows no longer inherit the phase cap and get the
+compile-priced default for the declared 2 workers, (3072 + 2 x 5120) MiB =
+13631488 KiB -- a tightening (single-spec rows, 120 s spec timeout; the
+2026-10-15 phase ran its tests under 5.59 GiB). Provenance: every owner's
+receipt (campaign and build rows) attributes a policy-published cap as
+`cap_source=phase-policy cap_bound=worker-floor[-elevated]`
+(`bootstrap_tree_rss_published_attribution`); a user-set diagnostic pair
+stays `explicit-env/explicit`, so the two are never confused.
+
 Wired: `bootstrap-from-scratch.sh` stage2-compiler-tests block and
 `admit-built-stage2-compiler-tests.shs` (which previously set no cap at all);
 `bootstrap-verification-campaign.shs` now forwards `--cap-source/--cap-bound`.
