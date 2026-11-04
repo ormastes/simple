@@ -214,3 +214,8 @@ allocation and removes none, so a material change in either is a regression to c
   closure, i.e. a whole-lowering promotion per module. Unconfirmed whether the
   workers died (no worker crash line in the campaign logs) or timed out;
   recorded, not fixed.
+
+### Review notes (2026-11-05)
+
+- `test/01_unit/compiler/mir/bootstrap_fn_registry_delta_promote_spec.spl` is 4/5, not a passing gate. Its "journals every registry write" example reports 20 pre-existing offenders: the `= {}` writes in `bootstrap_fn_registries_reset_after_session_v1` (`mir_data.spl` ~2942-2960, from 5965c032f385, 2026-10-26). That red predates this fix and is identical on the base.
+- The native 16/16 → 0/16 proof used a `Dict<i64, Row>` probe. The text-keyed probe SEGV'd in all variants, and the real registry is text-keyed. Compiler-side proof still requires a rebuilt Stage 2 via the sanctioned bootstrap.
