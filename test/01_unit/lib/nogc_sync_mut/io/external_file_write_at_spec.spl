@@ -1,0 +1,27 @@
+"""Positioned byte write creates a missing file and preserves bytes outside the written range, on every host (the descriptor must be the kind rt_fd_pwrite resolves)."""
+use std.spec.{describe, it, expect, fail}
+use std.nogc_sync_mut.io.external_file.{external_file_write_bytes_at, external_file_read_bytes_at}
+use std.nogc_async_mut.io.{file_write_text_at, file_remove}
+
+describe "external_file_write_bytes_at":
+    it "creates a new file and reads the bytes back":
+        val path = "build/external_file_write_at_new.bin"
+        file_remove(path)
+        match external_file_write_bytes_at(path, 0, [65, 66, 67]):
+            case Ok(n): expect(n).to_equal(3)
+            case Err(_): fail("positioned write to a new file failed")
+        match external_file_read_bytes_at(path, 0, 3):
+            case Ok(b): expect(b).to_equal([65, 66, 67])
+            case Err(_): fail("could not read the new file back")
+        file_remove(path)
+
+    it "overwrites in the middle without touching other bytes":
+        val path = "build/external_file_write_at_mid.bin"
+        expect(file_write_text_at(path, 0, "01234")).to_equal(5)
+        match external_file_write_bytes_at(path, 2, [65, 66]):
+            case Ok(n): expect(n).to_equal(2)
+            case Err(_): fail("positioned write failed")
+        match external_file_read_bytes_at(path, 0, 5):
+            case Ok(b): expect(b).to_equal([48, 49, 65, 66, 52])
+            case Err(_): fail("could not read back")
+        file_remove(path)

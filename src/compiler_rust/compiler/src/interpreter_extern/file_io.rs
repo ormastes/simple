@@ -3315,7 +3315,7 @@ pub fn rt_dir_remove_all(args: &[Value]) -> Result<Value, CompileError> {
 // ============================================================================
 
 /// Open file and return a real descriptor (-1 on error), mirroring the
-/// runtime's `rt_file_open` (mode 0=ReadOnly, 1=ReadWrite, 2=WriteOnly).
+/// runtime's `rt_file_open` (mode 0=ReadOnly, 1=ReadWrite, 2=WriteOnly, 3=ReadWrite+create).
 pub fn rt_file_open(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let mode = match args.get(1) {
@@ -3329,6 +3329,7 @@ pub fn rt_file_open(args: &[Value]) -> Result<Value, CompileError> {
             0 => OpenOptions::new().read(true).open(&path),
             1 => OpenOptions::new().read(true).write(true).open(&path),
             2 => OpenOptions::new().write(true).open(&path),
+            3 => OpenOptions::new().read(true).write(true).create(true).open(&path),
             _ => return Ok(Value::Int(-1)),
         };
         match result {
