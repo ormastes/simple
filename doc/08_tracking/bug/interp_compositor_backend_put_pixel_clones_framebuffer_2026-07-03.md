@@ -77,3 +77,13 @@ whose field is being mutated — i.e. recognize self-aliasing so a `me`-in-`me`
 per-element write stays in-place. Until then, the interpreter cannot support
 per-pixel CPU rasterization at interactive sizes.
 
+
+## Resolution 2026-11-04 — fixed upstream (verified, not live)
+
+Not reproducible on the current seed: array storage is `Arc<ArrayData>`
+(9ecc62bf608) with packed u32-word storage for large `[u32]` (18a205d48ec), so
+`self.pixels[i] = v` through me->me delegation and a nested `comp.backend`
+owner stays in place. Measured (release seed, interpreter mode): 200k
+`fill_rect`->`put_pixel` writes into a 1024x768 `[u32]` = ~2.6 s total including
+the 786k-element build (old behaviour: ~28 ms/px, hours). Pinned by
+`test/01_unit/compiler/interp_array_field_write_budget_spec.spl` (60 s budget).
