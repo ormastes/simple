@@ -1,0 +1,50 @@
+"""
+# ctx schema detection reads only a bounded header
+
+`ctx_schema_version` must not read the whole chunk store.
+"""
+
+# @feature mcp_ctx_tools
+# tag: unit
+
+use std.spec
+use std.io_runtime.{env_set, dir_create, dir_remove_all, file_write, time_now_unix_micros}
+use app.mcp.main_lazy_ctx_tools.{ctx_schema_version}
+
+fn _store() -> text:
+    val dir = "build/tmp_ctx_head_" + str(time_now_unix_micros())
+    dir_create(dir, true)
+    env_set("SIMPLE_CTX_DIR", dir)
+    dir
+
+describe "ctx schema head read":
+    it "detects the stamp in a small (<256 byte) file":
+        val dir = _store()
+        file_write(dir + "/chunks.sdn", "# ctx_schema_version: 1\nctx_chunks | id |\n")
+        assert_equal(ctx_schema_version(), 1)
+
+    it "detects the stamp on a large file":
+        val dir = _store()
+        var body = "# ctx chunk store\n# ctx_schema_version: 1\nctx_chunks | id, source, ts, bytes, text |\n"
+        var i = 0
+        while i < 4000:
+            body = body + "    " + str(i) + ", s, 1, 40, aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            i = i + 1
+        file_write(dir + "/chunks.sdn", body)
+        assert_equal(ctx_schema_version(), 1)
+
+    it "reports 0 when a large file has no stamp in the header":
+        val dir = _store()
+        var body = "ctx_chunks | id, source, ts, bytes, text |\n"
+        var i = 0
+        while i < 4000:
+            body = body + "    " + str(i) + ", s, 1, 40, aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            i = i + 1
+        body = body + "# ctx_schema_version: 1\n"
+        file_write(dir + "/chunks.sdn", body)
+        assert_equal(ctx_schema_version(), 0)
+
+    it "does not treat version 10 as version 1":
+        val dir = _store()
+        file_write(dir + "/chunks.sdn", "# ctx_schema_version: 10\nctx_chunks | id |\n")
+        assert_equal(ctx_schema_version(), 0)

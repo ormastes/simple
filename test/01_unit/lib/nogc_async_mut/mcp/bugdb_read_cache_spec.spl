@@ -1,0 +1,72 @@
+"""
+# bugdb_resource parsed-DB read cache
+
+Guards the process-level cache keyed on (path, size, mtime) so repeated
+bugdb_get calls do not re-read and re-parse the whole bug DB.
+
+- A second read of an unchanged file is served from the cache (parse count flat).
+- A foreign change (size/mtime differs) invalidates the entry.
+- Our own add/update writes invalidate the entry.
+- Different paths do not share an entry.
+"""
+
+# @feature mcp_bugdb_cache
+# tag: unit
+
+use std.spec
+use std.io_runtime.{env_get, dir_create, dir_remove_all, file_exists, file_write, time_now_unix_micros}
+use std.database.bug.{load_bug_database, Bug, BugSeverity, BugStatus}
+use std.nogc_async_mut.mcp.bugdb_resource.{get_bug_by_id, add_bug_from_json, update_bug_from_json, bugdb_cache_invalidate, bugdb_cache_parse_count}
+
+fn _tmp_db(tag: text) -> text:
+    val dir = "build/tmp_bugdb_cache_" + tag + "_" + str(time_now_unix_micros())
+    dir_create(dir, true)
+    dir + "/bug_db.sdn"
+
+fn _bug_json(id: text, title: text) -> text:
+    "\{\"id\":\"" + id + "\",\"severity\":\"P2\",\"status\":\"open\",\"title\":\"" + title + "\"\}"
+
+describe "bugdb read cache":
+    it "serves a repeated read of an unchanged file from the cache":
+        val p = _tmp_db("hit")
+        add_bug_from_json(p, _bug_json("b1", "first"))
+        bugdb_cache_invalidate()
+        val before = bugdb_cache_parse_count()
+        val a = get_bug_by_id(p, "b1")
+        val b = get_bug_by_id(p, "b1")
+        val c = get_bug_by_id(p, "b1")
+        assert_equal(a, b)
+        assert_equal(b, c)
+        assert_contains(a, "first")
+        assert_equal(bugdb_cache_parse_count() - before, 1)
+
+    it "invalidates when the file changes outside this module":
+        val p = _tmp_db("foreign")
+        add_bug_from_json(p, _bug_json("b1", "first"))
+        bugdb_cache_invalidate()
+        assert_contains(get_bug_by_id(p, "b1"), "first")
+        assert_contains(get_bug_by_id(p, "b2"), "not found")
+        val db = load_bug_database(p).unwrap()
+        val bug = Bug(id: "b2", severity: BugSeverity.P2, status: BugStatus.Open, title: "second", description: [], file: "", line: 0, reproducible_by: "", fix_strategy: [], investigation_log: [], created_at: "t", updated_at: "t", valid: true)
+        var mdb = db
+        mdb.add_bug(bug)
+        mdb.save()
+        assert_contains(get_bug_by_id(p, "b2"), "second")
+
+    it "invalidates on own add and update writes":
+        val p = _tmp_db("own")
+        add_bug_from_json(p, _bug_json("b1", "first"))
+        assert_contains(get_bug_by_id(p, "b1"), "first")
+        update_bug_from_json(p, "b1", "\{\"title\":\"renamed\"\}")
+        assert_contains(get_bug_by_id(p, "b1"), "renamed")
+        add_bug_from_json(p, _bug_json("b3", "third"))
+        assert_contains(get_bug_by_id(p, "b3"), "third")
+
+    it "does not share an entry across paths":
+        val p1 = _tmp_db("pa")
+        val p2 = _tmp_db("pb")
+        add_bug_from_json(p1, _bug_json("x", "in-one"))
+        add_bug_from_json(p2, _bug_json("x", "in-two"))
+        assert_contains(get_bug_by_id(p1, "x"), "in-one")
+        assert_contains(get_bug_by_id(p2, "x"), "in-two")
+        assert_contains(get_bug_by_id(p1, "x"), "in-one")

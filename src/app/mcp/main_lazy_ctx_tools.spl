@@ -53,7 +53,7 @@ use .main_lazy_telemetry.{tok_record, tok_rollup, tok_load_events, TOK_FEATURE_C
 use .main_lazy_log_opt.{log_opt_optimize, log_opt_optimize_recorded, log_opt_plugins_text, LOG_OPT_FEATURE}
 
 use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, dir_create, time_now_unix_micros}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_text_at}
 use std.database.core.{parse_sdn_table}
 use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
 use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
@@ -1256,9 +1256,34 @@ fn _ctx_detect_schema_version() -> i64:
     val path = _ctx_chunks_path()
     if not file_exists(path):
         return _CTX_SCHEMA_VERSION
-    val content = file_read(path)
-    if content.contains("# ctx_schema_version: " + str(_CTX_SCHEMA_VERSION)):
-        return _CTX_SCHEMA_VERSION
+    # The stamp lives in the header comment: read a bounded head, never the
+    # whole (multi-MB) chunk store. A short file simply returns fewer bytes.
+    # A 256-byte cut can land inside a multi-byte char (strict decode fails);
+    # back off up to 3 bytes so a valid UTF-8 prefix is always found.
+    var head = ""
+    var got = false
+    var n = 256
+    while n >= 253:
+        match file_read_text_at(path, 0, n):
+            case Ok(t):
+                head = t
+                got = true
+                n = 0
+            case Err(_):
+                n = n - 1
+    if not got:
+        # Positioned reads are unavailable on some hosts (native status -38,
+        # ENOSYS): fall back to a whole-file read; the header check below is
+        # unchanged, only the cost differs.
+        head = file_read(path)
+    val stamp = "# ctx_schema_version: " + str(_CTX_SCHEMA_VERSION)
+    var seen = 0
+    for line in head.split("\n"):
+        if seen >= 4:
+            break
+        if line.trim() == stamp:
+            return _CTX_SCHEMA_VERSION
+        seen = seen + 1
     0
 
 # Public accessor for specs — mirrors _ctx_detect_schema_version.

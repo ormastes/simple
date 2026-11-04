@@ -248,35 +248,43 @@ fn dispatch_diag(id: text, tool_name: text, body: text) -> text:
 fn bugdb_db_path() -> text:
     cwd() + "/doc/08_tracking/bug/bug_db.sdn"
 
-# Pull a string argument out of the tools/call `arguments` object. Uses the
-# real JSON parser rather than the scan-based extract helpers so an embedded
-# JSON document (bugdb_add's `bug` string) survives unescaping intact.
-fn bugdb_arg(body: text, key: text) -> text:
+# Pull string arguments out of the tools/call `arguments` object in ONE
+# json_parse of the request. Uses the real JSON parser rather than the
+# scan-based extract helpers so an embedded JSON document (bugdb_add's `bug`
+# string) survives unescaping intact. Returns values in `keys` order ("" when
+# absent or the request is malformed).
+fn bugdb_args(body: text, keys: [text]) -> [text]:
+    var out: [text] = []
     val root = json_parse(body)
-    if root == nil or json_get_type(root) != "object":
-        return ""
-    val params = json_object_get(root, "params")
-    if params == nil or json_get_type(params) != "object":
-        return ""
-    val args = json_object_get(params, "arguments")
-    if args == nil or json_get_type(args) != "object":
-        return ""
-    json_to_string(json_object_get(args, key)) ?? ""
+    var args = nil
+    if root != nil and json_get_type(root) == "object":
+        val params = json_object_get(root, "params")
+        if params != nil and json_get_type(params) == "object":
+            val a = json_object_get(params, "arguments")
+            if a != nil and json_get_type(a) == "object":
+                args = a
+    for key in keys:
+        if args == nil:
+            out.push("")
+        else:
+            out.push(json_to_string(json_object_get(args, key)) ?? "")
+    out
 
 fn dispatch_bugdb(id: text, tool_name: text, body: text) -> text:
     if tool_name == "bugdb_get":
-        val bug_id = bugdb_arg(body, "id")
+        val bug_id = bugdb_args(body, ["id"])[0]
         if bug_id == "":
             return make_error_response(id, -32602, "Missing required parameter: id")
         return make_tool_result(id, get_bug_by_id(bugdb_db_path(), bug_id))
     elif tool_name == "bugdb_add":
-        val bug_json = bugdb_arg(body, "bug")
+        val bug_json = bugdb_args(body, ["bug"])[0]
         if bug_json == "":
             return make_error_response(id, -32602, "Missing required parameter: bug")
         return make_tool_result(id, add_bug_from_json(bugdb_db_path(), bug_json))
     elif tool_name == "bugdb_update":
-        val bug_id = bugdb_arg(body, "id")
-        val bug_json = bugdb_arg(body, "bug")
+        val vals = bugdb_args(body, ["id", "bug"])
+        val bug_id = vals[0]
+        val bug_json = vals[1]
         if bug_id == "":
             return make_error_response(id, -32602, "Missing required parameter: id")
         if bug_json == "":
