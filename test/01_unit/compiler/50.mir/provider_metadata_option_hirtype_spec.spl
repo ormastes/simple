@@ -1,0 +1,167 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Option-derived HirType must not reach relocate_provider_type by value
+
+Stage2 miscompile (sweep 2026-11-04): a HirType obtained from an Option
+(`x ?? HirType(...)`, `.unwrap()`, `if val`, Option fields) keeps the Option
+transport word when passed by value; relocate_provider_type's prologue
+deep-copy then reads span word 0x1 (AV at relocate_provider_type+0xdb on
+fb_driver_entry.spl). The proven workaround unwraps with `if val`, then passes
+a BARE rebuilt HirType (kind copied, span from the enclosing node).
+
+Three parts: (1) repro at the bug site (relocate_provider_callable with
+Some/None symbol type), (2) sibling prevention for the same Option-to-by-value
+pattern, (3) coverage of relocate_provider_type's arms.
+"""
+
+# @tag: unit, compiler, mir, provider, stage2-workaround
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.hir.hir_types.{SymbolTable, SymbolKind, HirType, HirTypeKind, SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn pmo_lowering():
+    MirLowering.new_for_target(SymbolTable.new(), driver_mir_target_context(driver_core_compile_options_default()))
+
+fn pmo_span() -> Span:
+    Span.new(7, 9, 3, 4)
+
+fn pmo_unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Tuple([]), span: pmo_span())
+
+fn pmo_missing_named() -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: 99999), []), span: pmo_span())
+
+# By-value callee: the shape that faulted (reads span through a deep-copied param).
+fn pmo_span_start(t: HirType) -> i64:
+    t.span.start
+
+fn pmo_is_tuple(kind: HirTypeKind) -> bool:
+    match kind:
+        case HirTypeKind.Tuple(_): true
+        case _: false
+
+fn pmo_is_error(kind: HirTypeKind) -> bool:
+    match kind:
+        case HirTypeKind.Error: true
+        case _: false
+
+describe "provider callable relocation with Option symbol type (repro)":
+    it "Some(HirType) symbol type relocates with its kind and the symbol span":
+        var provider = SymbolTable.new()
+        val id = provider.define("pmo_f", SymbolKind.Function, Some(pmo_unit_type()), pmo_span(), Visibility.Public, false, Some("pmo_mod"))
+        var lowering = pmo_lowering()
+        val target = lowering.relocate_provider_callable(id, provider, {id.id: "pmo_f_link"})
+        assert_true(target.id >= 0)
+        val relocated = lowering.symbols.get_symbol_type_raw(target.id)
+        assert_true(relocated.?)
+        val concrete: HirType = relocated.unwrap()
+        assert_true(pmo_is_tuple(concrete.kind))
+        expect(concrete.span.start).to_equal(7)
+
+    it "None symbol type relocates without a type":
+        var provider = SymbolTable.new()
+        val id = provider.define("pmo_g", SymbolKind.Function, nil, pmo_span(), Visibility.Public, false, Some("pmo_mod"))
+        var lowering = pmo_lowering()
+        val target = lowering.relocate_provider_callable(id, provider, {id.id: "pmo_g_link"})
+        assert_true(target.id >= 0)
+        val relocated = lowering.symbols.get_symbol_type_raw(target.id)
+        expect(relocated.?).to_equal(false)
+
+describe "Option to by-value HirType (similar-pattern prevention)":
+    it "?? default keeps span intact into a by-value callee":
+        val opt: HirType? = Some(pmo_unit_type())
+        val t: HirType = opt ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+        expect(pmo_span_start(t)).to_equal(7)
+
+    it ".unwrap() keeps span intact into a by-value callee":
+        val opt: HirType? = Some(pmo_unit_type())
+        expect(pmo_span_start(opt.unwrap())).to_equal(7)
+
+    it "if-val with bare rebuild keeps span intact into a by-value callee":
+        val opt: HirType? = Some(pmo_unit_type())
+        var seen = -1
+        if val present = opt:
+            val bare: HirType = HirType(kind: present.kind, span: pmo_span())
+            seen = pmo_span_start(bare)
+        expect(seen).to_equal(7)
+
+    it "bare rebuilt type survives relocate_provider_type":
+        val opt: HirType? = Some(pmo_unit_type())
+        var lowering = pmo_lowering()
+        var out_start = -1
+        if val present = opt:
+            val bare: HirType = HirType(kind: present.kind, span: pmo_span())
+            val relocated = lowering.relocate_provider_type(bare, SymbolTable.new())
+            out_start = relocated.span.start
+        expect(out_start).to_equal(7)
+
+    it "provider_metadata.spl passes no Option-derived type straight into relocation":
+        val src = file_read("src/compiler/50.mir/_MirLowering/provider_metadata.spl")
+        expect(src.contains("source.type_ ?? HirType(")).to_equal(false)
+        expect(src.contains("relocate_provider_type(key_type, provider)")).to_equal(false)
+        expect(src.contains("relocate_provider_type(enum_type, provider)")).to_equal(false)
+        expect(src.contains("relocate_provider_type(expr.type_, provider)")).to_equal(false)
+        expect(src.contains("relocate_provider_type(field.type_, provider)")).to_equal(false)
+
+describe "relocate_provider_type arms (coverage)":
+    it "Named with a found target relocates into the consumer table":
+        var provider = SymbolTable.new()
+        val widget = provider.define("Widget", SymbolKind.Class, nil, pmo_span(), Visibility.Public, false, Some("pmo_mod"))
+        var lowering = pmo_lowering()
+        val named = HirType(kind: HirTypeKind.Named(widget, []), span: pmo_span())
+        val relocated = lowering.relocate_provider_type(named, provider)
+        var name = ""
+        match relocated.kind:
+            case HirTypeKind.Named(target, _): name = lowering.symbols.symbol_name_scalar_raw(target.id)
+            case _: ()
+        expect(name).to_equal("Widget")
+        expect(relocated.span.start).to_equal(7)
+
+    it "Named with a missing target becomes Error":
+        var lowering = pmo_lowering()
+        val relocated = lowering.relocate_provider_type(pmo_missing_named(), SymbolTable.new())
+        assert_true(pmo_is_error(relocated.kind))
+
+    it "Optional relocates its inner type":
+        var lowering = pmo_lowering()
+        val opt_type = HirType(kind: HirTypeKind.Optional(pmo_missing_named()), span: pmo_span())
+        val relocated = lowering.relocate_provider_type(opt_type, SymbolTable.new())
+        var inner_is_error = false
+        match relocated.kind:
+            case HirTypeKind.Optional(i): inner_is_error = pmo_is_error(i.kind)
+            case _: ()
+        assert_true(inner_is_error)
+
+    it "Tuple relocates every item":
+        var lowering = pmo_lowering()
+        val tuple_type = HirType(kind: HirTypeKind.Tuple([pmo_missing_named(), pmo_unit_type()]), span: pmo_span())
+        val relocated = lowering.relocate_provider_type(tuple_type, SymbolTable.new())
+        var first_error = false
+        var second_tuple = false
+        match relocated.kind:
+            case HirTypeKind.Tuple(items):
+                first_error = pmo_is_error(items[0].kind)
+                second_tuple = pmo_is_tuple(items[1].kind)
+            case _: ()
+        assert_true(first_error)
+        assert_true(second_tuple)
+
+    it "Function relocates params and return type":
+        var lowering = pmo_lowering()
+        val fn_type = HirType(kind: HirTypeKind.Function([pmo_missing_named()], pmo_unit_type(), []), span: pmo_span())
+        val relocated = lowering.relocate_provider_type(fn_type, SymbolTable.new())
+        var param_error = false
+        var ret_tuple = false
+        match relocated.kind:
+            case HirTypeKind.Function(params, ret, _):
+                param_error = pmo_is_error(params[0].kind)
+                ret_tuple = pmo_is_tuple(ret.kind)
+            case _: ()
+        assert_true(param_error)
+        assert_true(ret_tuple)
