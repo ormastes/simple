@@ -55,4 +55,20 @@ a frame-local (so a local shadowing a global name never clobbers the global).
 
 With a `main()` defined, `simple run` (JIT) executes `main` but silently skips
 module-level statements that follow the `main()` call (the interpreter runs them).
-Separate behaviour; not this defect.
+Separate behaviour; not this defect. Now fixed — see follow-up below.
+
+### Follow-up: JIT skipped module-level statements around `main()` — FIXED
+
+Measured on the pre-fix seed: a file `print "before"` / `fn main` / `main()` /
+`print "after"` printed only `in main` under `simple run` (JIT); the interpreter
+printed all three lines in order (it runs top-level statements in source order,
+then calls `main` once unless a top-level `main()` already did). Root cause:
+`ExecCore::run_file_jit` (`driver/src/exec_core.rs`) compiles the module and
+calls `main` only; only top-level BDD examples were guarded. Fix: new
+`jit_skipped_top_level_statements` counts executable top-level items
+(expressions other than a bare `main()`, assignments, control flow, assert,
+defer, with/context) and, when non-zero, returns the same
+"falling back to interpreter" error as the BDD guard, so the interpreter runs
+the module and both engines agree. Bindings (`val`/`var`/`const`/`static`) stay
+on the JIT. Evidence: cargo `jit_top_level_statement_tests` (2) and
+`test/02_integration/app/run/module_statements_around_main_spec.spl`.
