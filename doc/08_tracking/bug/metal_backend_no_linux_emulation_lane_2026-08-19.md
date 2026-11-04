@@ -1,7 +1,7 @@
 # Metal engine2d backend has no Linux emulation lane — blocked on non-macOS hosts
 
 - **Date:** 2026-08-19
-- **Status:** BLOCKER-DOCUMENTED (2026-11-04) — host-neutral verification lane exists; GPU-execution lane needs an owner decision. Not a code defect.
+- **Status:** FIXED (2026-11-04) — owner chose the GPU-execution lane: disclosed `metal-on-vulkan` engine2d backend (Vulkan executes; not Apple Metal semantics). Strict `metal` still reports "Metal requires macOS".
 - **Owner/lane:** Linux — `crosscompile_xray_lead/linux_adapter` (reassigned 2026-11-04 by owner decision; removed from the macOS lane and its open count).
 - **Area:** rendering / engine2d backend matrix
 
@@ -108,3 +108,19 @@ lane but no new evidence; (3) real Metal on the `macos-latest` row of
 `gpu-lane-tests.yml`, gated on an admitted self-hosted macOS `bin/simple` —
 the recommended path. Remaining gap unchanged: no Linux-side MSL compile and no
 GPU execution off macOS.
+
+## 2026-11-04 fix: `metal-on-vulkan` lane (owner decision)
+
+The `Engine2D.create_requested_backend` arm for `metal-on-vulkan` already
+delegated to `VulkanBackend` (frame batching on, like `directx-on-vulkan`); the
+gaps were name normalization (`metal_on_vulkan`), display name, and a probe arm
+that disclosed the lane. Added in `helpers_availability.spl` + `engine.spl`
+`probe_backend`: probe reason = "Vulkan execution emulating the Metal backend
+surface (not Apple Metal semantics)", unavailable with the Vulkan error when no
+device. MSL is not ported: the lane is a plain VulkanBackend. Like directx-on-vulkan, it sets no `vulkan_backend` font-offload field, so glyph rendering for this lane runs on the CPU path.
+Evidence (host Linux aarch64, Vulkan devices NVIDIA GB10 + llvmpipe; which one
+the loader picked is not recorded): `test/02_integration/rendering/metal_on_vulkan_backend_spec.spl`
+RED 3/6 failed (normalization, display name, probe) -> GREEN 6/6 incl. a real 8x4 rect draw
+read back (source `device_readback`, read before `present()`, pixels exact); 3.4s wall, 207 MB max RSS.
+`backend_emulation_spec.spl` 4/4 green (1.8s). Comparison `vulkan_compute_oracle_spec.spl`
+(covers directx-on-vulkan): 18.7s, 195 MB; its 2 failures are identical without this change.
