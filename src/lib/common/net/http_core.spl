@@ -538,8 +538,161 @@ fn validate_static_path(path: text) -> Result<text, text>:
         return Err("path traversal or injection rejected")
     Ok(normalize_path(path))
 
+# =============================================================================
+# Header field-name token grammar and HTTP/1 authority policy
+# =============================================================================
+
+# RFC 9110 tchar set: ALPHA / DIGIT / "!#$%&'*+-.^_`|~". Anything else
+# (whitespace, controls, delimiters, non-ASCII) is not a token byte.
+val _TOKEN_PUNCT: text = "!#$%&'*+-.^_`|~"
+
+fn _is_alnum_char(c: text) -> bool:
+    val letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    c.len() == 1 and letters.contains(c)
+
+# header_field_name_is_token reports whether name is a non-empty RFC 9110
+# token, i.e. a legal header field-name.
+fn header_field_name_is_token(name: text) -> bool:
+    val n = name.len()
+    if n == 0:
+        return false
+    var i = 0
+    while i < n:
+        val c = name.char_at(i)
+        if not (_is_alnum_char(c) or _TOKEN_PUNCT.contains(c)):
+            return false
+        i = i + 1
+    true
+
+fn _all_digits(s: text) -> bool:
+    val n = s.len()
+    var i = 0
+    while i < n:
+        val c = s.char_at(i)
+        if not ("0123456789".contains(c)):
+            return false
+        i = i + 1
+    true
+
+fn _port_valid(port: text) -> bool:
+    if port.len() == 0:
+        return true
+    if port.len() > 5 or not _all_digits(port):
+        return false
+    port.to_i64() <= 65535
+
+fn _ipv6_literal_valid(inner: text) -> bool:
+    if inner.len() < 2 or inner.contains(":::"):
+        return false
+    var colons = 0
+    var i = 0
+    val n = inner.len()
+    while i < n:
+        val c = inner.char_at(i)
+        if c == ":":
+            colons = colons + 1
+        elif not ("0123456789abcdefABCDEF.".contains(c)):
+            return false
+        i = i + 1
+    colons >= 2
+
+fn _reg_name_valid(host: text) -> bool:
+    if host.len() == 0:
+        return false
+    val n = host.len()
+    var i = 0
+    while i < n:
+        val c = host.char_at(i)
+        if not (_is_alnum_char(c) or "-._~%!$&'()*+,;=".contains(c)):
+            return false
+        i = i + 1
+    true
+
+# http_authority_valid checks the bounded `host [":" port]` grammar used for
+# Host and absolute-form authorities: no userinfo, no whitespace, balanced
+# IPv6 brackets, numeric port <= 65535.
+fn http_authority_valid(authority: text) -> bool:
+    if authority.len() == 0:
+        return false
+    if authority.starts_with("["):
+        val close = _char_pos(authority, "]")
+        if close < 0:
+            return false
+        if not _ipv6_literal_valid(authority.slice(1, close)):
+            return false
+        val rest = authority.slice(close + 1, authority.len())
+        if rest.len() == 0:
+            return true
+        if not rest.starts_with(":"):
+            return false
+        return _port_valid(rest.slice(1, rest.len()))
+    val colon = _char_pos(authority, ":")
+    if colon < 0:
+        return _reg_name_valid(authority)
+    if not _reg_name_valid(authority.slice(0, colon)):
+        return false
+    _port_valid(authority.slice(colon + 1, authority.len()))
+
+fn _absolute_form_scheme_end(target: text) -> i64:
+    # Index of "://" when target starts with a URI scheme, else -1.
+    val n = target.len()
+    var i = 0
+    while i < n:
+        val c = target.char_at(i)
+        if c == ":":
+            if i > 0 and target.slice(i, n).starts_with("://"):
+                return i
+            return -1
+        if not (_is_alnum_char(c) or c == "+" or c == "-" or c == "."):
+            return -1
+        i = i + 1
+    -1
+
+# request_authority_error is the shared pre-dispatch authority policy. It
+# returns "" when acceptable, else a "400 ..." reason. HTTP/1.1 requires
+# exactly one valid Host; HTTP/1.0 keeps it optional. An absolute-form
+# request-target must carry a valid http(s) authority that agrees
+# (case-insensitively) with Host.
+fn request_authority_error(headers: [(text, text)], version: text, target: text) -> text:
+    var host_count = 0
+    var host_value = ""
+    for h in headers:
+        if h.0.to_lower() == "host":
+            host_count = host_count + 1
+            host_value = h.1.trim()
+    if host_count > 1:
+        return "400 Multiple Host headers"
+    if host_count == 0 and version == "HTTP/1.1":
+        return "400 Missing Host header"
+    if host_count == 1 and not http_authority_valid(host_value):
+        return "400 Invalid Host header"
+    val scheme_end = _absolute_form_scheme_end(target)
+    if scheme_end < 0:
+        return ""
+    val scheme = target.slice(0, scheme_end).to_lower()
+    val after = target.slice(scheme_end + 3, target.len())
+    var end = after.len()
+    var i = 0
+    while i < after.len():
+        val c = after.char_at(i)
+        if c == "/" or c == "?" or c == "#":
+            end = i
+            break
+        i = i + 1
+    val authority = after.slice(0, end)
+    if authority.len() == 0:
+        return "400 Empty absolute-form authority"
+    if not http_authority_valid(authority):
+        return "400 Invalid absolute-form authority"
+    if scheme != "http" and scheme != "https":
+        return "400 Absolute-form scheme does not match Host"
+    if host_count == 1 and authority.to_lower() != host_value.to_lower():
+        return "400 Absolute-form authority does not match Host"
+    ""
+
 export MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE
 export content_length_from_text, body_decision, path_is_safe
+export header_field_name_is_token, http_authority_valid, request_authority_error
 export hex_chunk_size, decode_chunked_bounded, chunked_body_end_scan
 export match_route_pattern, extract_route_params
 export HttpLimits, http_limits_default

@@ -30,14 +30,14 @@ fn _relocation_result(ok: bool, error: text, delta: i64, relocation_count: i64, 
 fn _tls_result(ok: bool, error: text, callback_count: i64, first_callback_rva: i64, operations: text) -> WinePeTlsCallbackResult:
     WinePeTlsCallbackResult(ok: ok, error: error, callback_count: callback_count, first_callback_rva: first_callback_rva, operations: operations)
 
-fn _read_u16_le(data: [u8], offset: i64) -> i64:
+fn _wine_pe_loader_runtime_read_u16_le(data: [u8], offset: i64) -> i64:
     if offset + 1 >= data.len():
         return 0
     val lo = data[offset] as i64
     val hi = data[offset + 1] as i64
     lo | (hi << 8)
 
-fn _read_u32_le(data: [u8], offset: i64) -> i64:
+fn _wine_pe_loader_runtime_read_u32_le(data: [u8], offset: i64) -> i64:
     if offset + 3 >= data.len():
         return 0
     val b0 = data[offset] as i64
@@ -55,14 +55,14 @@ pub fn wine_pe_apply_relocation_plan(data: [u8], preferred_base: i64, load_base:
     val reloc_rva = pe_relocation_directory_rva(data)
     val reloc_size = pe_relocation_directory_size(data)
     val reloc_offset = pe_rva_to_file_offset(data, reloc_rva)
-    val block_rva = _read_u32_le(data, reloc_offset)
-    val block_size = _read_u32_le(data, reloc_offset + 4)
+    val block_rva = _wine_pe_loader_runtime_read_u32_le(data, reloc_offset)
+    val block_size = _wine_pe_loader_runtime_read_u32_le(data, reloc_offset + 4)
     if block_size == 8:
         return _relocation_result(true, "", delta, 0, 0, "relocation-directory relocation-block relocation-no-entries")
     if block_size < 10 or block_size > reloc_size:
         return _relocation_result(false, "relocation-block-invalid", delta, 0, 0, "relocation-directory")
 
-    val entry = _read_u16_le(data, reloc_offset + 8)
+    val entry = _wine_pe_loader_runtime_read_u16_le(data, reloc_offset + 8)
     val relocation_type = entry >> 12
     val relocation_offset = entry & 0x0fff
     if relocation_type == 0:
@@ -74,7 +74,7 @@ pub fn wine_pe_apply_relocation_plan(data: [u8], preferred_base: i64, load_base:
         return _relocation_result(false, "relocation-target-unmapped", delta, 0, target_rva, "relocation-directory relocation-block")
     _relocation_result(true, "", delta, 1, target_rva, "relocation-directory relocation-block relocation-dir64 relocation-applied")
 
-fn _read_u64_le(data: [u8], offset: i64) -> i64:
+fn _wine_pe_loader_runtime_read_u64_le(data: [u8], offset: i64) -> i64:
     if offset + 7 >= data.len():
         return 0
     val b0 = data[offset] as i64
@@ -94,7 +94,7 @@ fn _patch_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
     data[offset + 3] = ((value >> 24) & 0xff) as u8
     data
 
-fn _patch_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+fn _wine_pe_loader_runtime_patch_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
     data[offset] = (value & 0xff) as u8
     data[offset + 1] = ((value >> 8) & 0xff) as u8
     data[offset + 2] = ((value >> 16) & 0xff) as u8
@@ -130,8 +130,8 @@ pub fn wine_pe_apply_all_relocations(data: [u8], preferred_base: i64, load_base:
         val block_file_offset = reloc_base_offset + block_cursor
         if block_file_offset + 7 >= data.len():
             break
-        val block_rva = _read_u32_le(data, block_file_offset)
-        val block_size = _read_u32_le(data, block_file_offset + 4)
+        val block_rva = _wine_pe_loader_runtime_read_u32_le(data, block_file_offset)
+        val block_size = _wine_pe_loader_runtime_read_u32_le(data, block_file_offset + 4)
         if block_size < 8:
             break
         if block_size == 8:
@@ -143,7 +143,7 @@ pub fn wine_pe_apply_all_relocations(data: [u8], preferred_base: i64, load_base:
             val entry_file_offset = block_file_offset + 8 + (entry_idx * 2)
             if entry_file_offset + 1 >= data.len():
                 break
-            val entry = _read_u16_le(data, entry_file_offset)
+            val entry = _wine_pe_loader_runtime_read_u16_le(data, entry_file_offset)
             val reloc_type = entry >> 12
             val reloc_offset = entry & 0x0fff
             if reloc_type == 0:
@@ -189,8 +189,8 @@ pub fn wine_pe_apply_all_relocations_to_image(data: [u8], preferred_base: i64, l
         val block_file_offset = reloc_base_offset + block_cursor
         if block_file_offset + 7 >= patched.len():
             break
-        val block_rva = _read_u32_le(patched, block_file_offset)
-        val block_size = _read_u32_le(patched, block_file_offset + 4)
+        val block_rva = _wine_pe_loader_runtime_read_u32_le(patched, block_file_offset)
+        val block_size = _wine_pe_loader_runtime_read_u32_le(patched, block_file_offset + 4)
         if block_size < 8:
             break
         val entry_count = (block_size - 8) / 2
@@ -199,7 +199,7 @@ pub fn wine_pe_apply_all_relocations_to_image(data: [u8], preferred_base: i64, l
             val entry_file_offset = block_file_offset + 8 + (entry_idx * 2)
             if entry_file_offset + 1 >= patched.len():
                 break
-            val entry = _read_u16_le(patched, entry_file_offset)
+            val entry = _wine_pe_loader_runtime_read_u16_le(patched, entry_file_offset)
             val reloc_type = entry >> 12
             val reloc_offset = entry & 0x0fff
             if reloc_type == 0:
@@ -212,12 +212,12 @@ pub fn wine_pe_apply_all_relocations_to_image(data: [u8], preferred_base: i64, l
                 continue
             if reloc_type == 3:
                 if target_file_offset + 3 < patched.len():
-                    val original = _read_u32_le(patched, target_file_offset)
+                    val original = _wine_pe_loader_runtime_read_u32_le(patched, target_file_offset)
                     patched = _patch_u32_le(patched, target_file_offset, original + delta)
             else if reloc_type == 10:
                 if target_file_offset + 7 < patched.len():
-                    val original = _read_u64_le(patched, target_file_offset)
-                    patched = _patch_u64_le(patched, target_file_offset, original + delta)
+                    val original = _wine_pe_loader_runtime_read_u64_le(patched, target_file_offset)
+                    patched = _wine_pe_loader_runtime_patch_u64_le(patched, target_file_offset, original + delta)
             entry_idx = entry_idx + 1
         block_cursor = block_cursor + block_size
     patched
@@ -231,13 +231,13 @@ pub fn wine_pe_tls_callback_plan(data: [u8], dynload_apis: text) -> WinePeTlsCal
 
     val tls_rva = pe_tls_directory_rva(data)
     val tls_offset = pe_rva_to_file_offset(data, tls_rva)
-    val callbacks_rva = _read_u32_le(data, tls_offset + 24)
+    val callbacks_rva = _wine_pe_loader_runtime_read_u32_le(data, tls_offset + 24)
     if callbacks_rva == 0:
         return _tls_result(true, "", 0, 0, "tls-directory tls-callback-table-empty")
     val callbacks_offset = pe_rva_to_file_offset(data, callbacks_rva)
     if callbacks_offset < 0:
         return _tls_result(false, "tls-callback-table-unmapped", 0, callbacks_rva, "tls-directory")
-    val first_callback_rva = _read_u32_le(data, callbacks_offset)
+    val first_callback_rva = _wine_pe_loader_runtime_read_u32_le(data, callbacks_offset)
     if first_callback_rva == 0:
         return _tls_result(true, "", 0, 0, "tls-directory tls-callback-table-empty")
     if pe_rva_to_file_offset(data, first_callback_rva) < 0:
