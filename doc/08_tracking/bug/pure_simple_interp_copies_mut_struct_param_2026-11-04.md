@@ -1,7 +1,7 @@
 # Pure-Simple interpreter copies `mut` struct parameters instead of aliasing them
 
 - **Date:** 2026-11-04
-- **Status:** open
+- **Status:** fixed (2026-11-04)
 - **Severity:** P2 (engine divergence)
 - **Area:** `src/compiler/` T1 interpreter, `eval_calls.spl:283`
 
@@ -37,3 +37,18 @@ release/1.0.0 seed).
 
 Make the T1 interpreter alias `mut` struct params (copy only when not `mut`). Then
 add a pure-Simple-interpreter lane run of the same spec.
+
+## Fix evidence (2026-11-04)
+
+Root cause: `eval_function_call` (`src/compiler/10.frontend/core/interpreter/eval_calls.spl`,
+param binding ~L283) ran `val_copy_for_parameter` for every param. Fix: consult
+`decl_get_param_muts`; `mut` params bind the caller's value_id (alias), and after the
+body the final value of `mut` params passed as plain identifiers is written back
+(env + LOAD_FAST slot) so whole reassignment matches the seed. Plain params still copy.
+Spec `test/01_unit/compiler/interpreter/core_interpret_mut_struct_param_alias_spec.spl`:
+RED 2/5 -> GREEN 5/5 (field write, nested field, whole reassign; by-value and class
+unchanged). Related interpreter specs (7 files) unchanged, 0 pass->fail.
+Limit: whole reassignment write-back covers identifier args only (not `f(a.b)`).
+Named-argument calls (`k(r: a)`) are covered; per-decl `mut` flags are memoized.
+Known: `two(a, a)` into two `mut` params is last-write-wins; it violates the
+exclusive-writer contract and belongs to a checker diagnostic, not the interpreter.

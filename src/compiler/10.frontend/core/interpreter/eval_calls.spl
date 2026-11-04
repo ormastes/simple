@@ -9,10 +9,10 @@
 
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
-use compiler.core.ast.{decl_get, expr_get, stmts_contain_yield}
-use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT, expr_get_arg_names}
+use compiler.core.ast.{decl_get, decl_get_param_muts, expr_get, stmts_contain_yield}
+use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT, expr_get_arg_names, expr_owner_int}
 use compiler.core.ast_stmt.{STMT_ASSIGN}
-use compiler.core.interpreter.env.{env_define, env_lookup, env_pop_frame, env_pop_scope, env_push_frame}
+use compiler.core.interpreter.env.{env_assign, env_define, env_has_frame, env_lookup, env_pop_frame, env_pop_scope, env_push_frame}
 use compiler.core.interpreter.env.{env_push_scope, env_set_local}
 use compiler.core.interpreter.eval.{eval_caller_file, eval_current_decl_id, eval_expr, eval_had_error, eval_return_value}
 use compiler.core.interpreter.eval.{eval_returning, eval_set_error, eval_yield_stack}
@@ -24,7 +24,7 @@ use compiler.core.interpreter.eval_tables.{enum_table_lookup_in, func_flat_looku
 use compiler.core.interpreter.eval_tables.{func_table_lookup, struct_table_lookup}
 use compiler.core.interpreter.jit.{jit_is_compiled, jit_record_call, jit_try_execute}
 use compiler.core.interpreter.module_loader_core.{try_force_any_deferred_for}
-use compiler.core.interpreter.resolve.{resolve_cached_local_count, resolve_is_slot_shadowed}
+use compiler.core.interpreter.resolve.{resolve_cached_local_count, resolve_is_fast_local, resolve_is_slot_shadowed}
 use compiler.core.interpreter.value.{val_get_func_decl, val_get_int, val_get_struct_fields, val_get_struct_name, val_get_struct_values}
 use compiler.core.interpreter.value.{val_is_function, val_is_int, val_is_struct, val_make_array, val_make_int}
 use compiler.core.interpreter.value.{val_make_nil, val_make_struct}
@@ -32,6 +32,7 @@ use compiler.core.interpreter.value.{val_is_array, val_get_array, val_array_push
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
 
 var _yield_cache: {} = {}
+var _param_mut_cache: {} = {}
 
 # ===== Float Parsing Utilities =====
 
@@ -198,6 +199,7 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
         if arg_name != "":
             has_named_args = true
             break
+    var wb_eids: [i64] = arg_eids
     if has_named_args:
         if arg_values.len() > param_names.len():
             eval_set_error("too many arguments for function '" + fn_name + "'")
@@ -205,6 +207,9 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
         var ordered_values: [i64] = []
         for pname in param_names:
             ordered_values.push(-1)
+        var ordered_eids: [i64] = []
+        for pname in param_names:
+            ordered_eids.push(-1)
         var next_pos: i64 = 0
         var ai: i64 = 0
         while ai < arg_values.len():
@@ -232,6 +237,7 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
                 target = next_pos
                 next_pos = next_pos + 1
             ordered_values[target] = arg_values[ai]
+            ordered_eids[target] = arg_eids[ai]
             ai = ai + 1
         var pi: i64 = 0
         while pi < ordered_values.len():
@@ -239,6 +245,7 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
                 ordered_values[pi] = val_make_nil()
             pi = pi + 1
         arg_values = ordered_values
+        wb_eids = ordered_eids
 
     # Type check arguments if parameter types are specified
     if param_types.len() > 0:
@@ -274,11 +281,36 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
     if local_count > 0:
         env_push_frame(local_count)
     env_push_scope()
+    val mut_key = "{decl_id}"
+    var param_muts: [i64] = []
+    val cached_mut = _param_mut_cache[mut_key]
+    if cached_mut.?:
+        if cached_mut == "y":
+            param_muts = decl_get_param_muts(decl_id)
+    else:
+        param_muts = decl_get_param_muts(decl_id)
+        var any_mut = false
+        for m in param_muts:
+            if m == 1:
+                any_mut = true
+        _param_mut_cache[mut_key] = if any_mut: "y" else: "n"
+        if not any_mut:
+            param_muts = []
     var pi: i64 = 0
     for pname in param_names:
         var pval = val_make_nil()
         if pi < arg_values.len():
             pval = arg_values[pi]
+            # A `mut T` parameter is the exclusive-writer spelling: bind the
+            # caller's value_id (alias) so callee mutation is visible to the
+            # caller. Only non-mut params take the value-type copy below.
+            val is_mut_param = pi < param_muts.len() and param_muts[pi] == 1
+            if is_mut_param:
+                env_define(pname, pval)
+                if local_count > 0 and resolve_is_slot_shadowed(decl_id, pi) == false:
+                    env_set_local(pi, pval)
+                pi = pi + 1
+                continue
             # Value-type arrays and structs are copied on bind so callee
             # mutations never leak back to the caller's argument. Reference
             # types (class/actor) keep sharing the same value_id — mutations
@@ -337,10 +369,36 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
     # the gate unchanged — that is what keeps case E (class returned) REF.
     last_val = val_copy_if_value_struct(last_val)
 
+    # Write back the final value of `mut` params bound to a plain identifier
+    # argument, so whole-value reassignment (`r = S(..)`) reaches the caller
+    # (field mutation already propagates through the aliased value_id).
+    var wb_names: [text] = []
+    var wb_values: [i64] = []
+    var wb_slots: [i64] = []
+    if param_muts.len() > 0:
+        var wbi: i64 = 0
+        while wbi < param_muts.len() and wbi < wb_eids.len() and wbi < param_names.len():
+            val weid = wb_eids[wbi]
+            if param_muts[wbi] == 1 and weid >= 0 and expr_get(weid).tag == EXPR_IDENT:
+                wb_names.push(expr_get(weid).s_val)
+                wb_values.push(env_lookup(param_names[wbi]))
+                wb_slots.push(expr_owner_int(weid))
+            wbi = wbi + 1
+
     env_pop_scope()
     if local_count > 0:
         env_pop_frame()
     eval_current_decl_id = prev_decl_id
+    var wbj: i64 = 0
+    while wbj < wb_names.len():
+        env_assign(wb_names[wbj], wb_values[wbj])
+        # Keep the caller's LOAD_FAST slot in step (mirrors eval_assign_expr).
+        var wb_slot = wb_slots[wbj]
+        if wb_slot < 0 and eval_current_decl_id >= 0:
+            wb_slot = resolve_is_fast_local(eval_current_decl_id, wb_names[wbj])
+        if wb_slot >= 0 and env_has_frame():
+            env_set_local(wb_slot, wb_values[wbj])
+        wbj = wbj + 1
     last_val
 
 # ===== Struct (value type) vs Class (reference type) param-copy support (#108) =====
