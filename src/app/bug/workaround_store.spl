@@ -94,9 +94,9 @@ fn workaround_fragment_publish(root: text, fragment: WorkaroundFragment, clock: 
     val directory = workaround_fragment_dir(root)
     if not workaround_host_mkdir(directory): return Err("cannot create workaround fragment directory")
     val suffix = "-" + workaround_zero_pad(workaround_host_pid(), 10) + "-" + sha256_text(content)[:16] + ".sdn"
-    # Stage FIRST, then take the delta's clock immediately before the rename:
-    # the compaction margin only has to cover that one syscall, not a stalled
-    # stage write. A base passes its own (pre-listing) clock.
+    # Stage FIRST, then (clock == 0: a delta) take the clock immediately before
+    # the rename, so the compaction margin only has to cover that one syscall,
+    # not a stalled stage write. A base passes its own pre-read clock.
     val staged = directory + "/." + workaround_zero_pad(workaround_host_now_micros(), 20) + suffix + ".tmp"
     if not workaround_host_stage(staged, content): return Err("workaround fragment stage failed")
     val name = workaround_zero_pad(if clock > 0: clock else: workaround_host_now_micros(), 20) + suffix
@@ -442,8 +442,11 @@ fn workaround_refresh_lockless(root: text, revision: text, fullscan: bool, disco
     else:
         WorkaroundFragment(revision: revision, base: false, complete: checked.complete,
             paths: paths, links: links)
-    val clock = if compaction: started - WORKAROUND_FRAGMENT_COMPACT_MARGIN_US else:
-        workaround_host_now_micros()
+    # Delta: 0 -> the publisher stamps the clock after staging, right before
+    # the rename. Full scan: `started`, the clock before its own reads, so a
+    # delta renamed during the scan (read after the scan's reads began) sorts
+    # after it and is re-applied. Compaction: `started` minus the margin.
+    val clock = if compaction: started - WORKAROUND_FRAGMENT_COMPACT_MARGIN_US elif fullscan: started else: 0
     val _name = workaround_fragment_publish(root, fragment, clock)?
     val _reclaimed = workaround_fragment_gc(root, fragment_names)
     Ok(checked)

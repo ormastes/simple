@@ -62,8 +62,11 @@ and `workaround writer lock unavailable`; both locks are gone.
 - Fragment readers re-list when a listed fragment vanished mid-read (a base
   published after their listing may have let the sweeper reclaim it); a delta
   takes its name clock immediately before the rename, so the 5 s compaction
-  margin only has to cover one syscall; compaction counts deltas since the
-  newest base, so the fragment count is bounded by 32 deltas per base.
+  margin only has to cover one syscall; a full-scan base is named by the clock
+  before its own reads and a compaction base by that clock minus the margin,
+  so a delta renamed during either sorts after it and is re-applied;
+  compaction counts deltas since the newest base, so the fragment count is
+  bounded by 32 deltas per base.
 - Follow-up: `src/compiler/80.driver/action_graph/persisted_graph.spl` still
   takes `publication.lock` (bug row
   `persisted_graph_publication_lock_2026-11-04`).
