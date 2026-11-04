@@ -1330,7 +1330,16 @@ impl ExecCore {
         // Same gap for ordinary module-level statements (`print`, calls,
         // assignments, control flow) before or after `main()`: the JIT would
         // drop them, the interpreter runs them in order. Fall back.
-        let skipped_statements = Self::jit_skipped_top_level_statements(&ast.items);
+        // Count only the ENTRY file's own statements: `ast` is the flattened import
+        // closure, and imported modules carry top-level statements of their own
+        // that must not demote every JIT run.
+        let skipped_statements = match std::fs::read_to_string(path)
+            .ok()
+            .and_then(|src| simple_parser::Parser::new(&src).parse().ok())
+        {
+            Some(entry) => Self::jit_skipped_top_level_statements(&entry.items),
+            None => Self::jit_skipped_top_level_statements(&ast.items),
+        };
         if skipped_statements > 0 {
             return Err(format!(
                 "module has {skipped_statements} top-level statement(s) that the JIT entry path \
