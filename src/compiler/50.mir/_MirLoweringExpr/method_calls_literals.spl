@@ -2842,11 +2842,15 @@ impl MirLowering:
         var wb_field_idx: i64 = 0
         var wb_receiver: LocalId = 0
         var receiver_type = MirType.i64()
-        val maybe_receiver_type_for_call = receiver.type_
-        if maybe_receiver_type_for_call != nil:
-            val found_receiver_type = maybe_receiver_type_for_call
-            # `!= nil` CANNOT screen this slot, and the doubled guard above is a
-            # tell that the hazard was already suspected here. The nil sentinel
+        # `has_type_` is the presence bit: since 87aaaa999c7 an untyped receiver
+        # carries a real Unit HirType placeholder, so a `!= nil` test admitted
+        # it and the write-back slot below was loaded as Unit instead of the
+        # documented i64 default (`xs[0].push(1)` / `p.items.push(1)` with an
+        # untyped `xs` / `p`; pinned by methods_mir_receiver_shapes_spec).
+        if receiver.has_type_:
+            val found_receiver_type = receiver.type_
+            # `!= nil` CANNOT screen this slot (the doubled guard that used to
+            # sit above was a tell that the hazard was suspected). The nil sentinel
             # in this runtime is raw 3, so a ZEROED `receiver.type_` -- raw 0 --
             # passes both nil tests and reaches lower_type as a dead object.
             # Measured on the Stage-2 self-hosted lane (SIMPLE_MIRB_TRACE=1):
@@ -3018,8 +3022,8 @@ impl MirLowering:
                 case _: ()
 
         var receiver_is_dict = false
-        if maybe_receiver_type_for_call != nil:
-            val found_receiver_type = maybe_receiver_type_for_call
+        if receiver.has_type_:
+            val found_receiver_type = receiver.type_
             if found_receiver_type != nil:
                 match found_receiver_type.kind:
                     case Dict(_, _): receiver_is_dict = true

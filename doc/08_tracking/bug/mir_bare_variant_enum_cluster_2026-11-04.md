@@ -44,15 +44,54 @@ Seed `simple-ref`, one spec per run. RED: 5 specs failing.
   `rt_string_to_int_lenient`; assertion moved to the dynamic parse.
 - `methods_mir_receiver_shapes_spec`: product bug. Since 87aaaa999c7 an untyped
   HirExpr carries a Unit placeholder in `type_`; the erased text-builtin arm read
-  `receiver.type_` as present. Now gated on `receiver.has_type_`. Six more
-  `if val x = receiver.type_` sites in method_calls_literals.spl have the same
-  shape and were NOT audited.
+  `receiver.type_` as present. Now gated on `receiver.has_type_`.
+  Audit (2026-11-05) of the other `receiver.type_` reads in the same file:
+  the six `if val x = receiver.type_` probes (~2594 Str, ~3603 Int, ~3730 /
+  ~3912 / ~3955 / ~4250 Array|Slice) only SET a flag on a positive match and
+  fall through on `case _`, so the Unit placeholder behaves exactly like an
+  absent type -- benign, left as is, pinned by the "audit pin" case in
+  methods_mir_receiver_shapes_spec. The discriminating criterion is an `else`
+  branch: the fixed arm had one (`erased_recv_ty_ok = true` when untyped). One
+  more site had the same defect shape: the write-back `receiver_type` probe
+  (`val maybe_receiver_type_for_call = receiver.type_; if ... != nil`, ~2841)
+  admitted the placeholder, so `xs[0].push(1)` / `p.items.push(1)` over an
+  untyped `xs` / `p` typed the GEP/load/get_field of the receiver slot as Unit
+  instead of the documented i64 default (measured: MIR local `ty="Unit"`,
+  `Ptr{pointee: Unit}`). Gated on `has_type_` (the `receiver_is_dict` probe
+  ~3021 shared the variable and is converted the same way; it was benign).
+- `to_i64_binop_receiver_spec` (correction): with the `has_type_` gate above, a
+  declared `Any` receiver is admitted by the erased arm and, being a
+  runtime-value local, `to_i64` lowers to the tagged conversion owner
+  `rt_any_to_int` (parses text, unboxes numbers) -- not `rt_to_int_dynamic`.
+  The 2026-11-04 spec edit was measured against the pre-gate product and was
+  red at the commit (`reg_before`: 5/6); assertion moved to `rt_any_to_int`
+  with both raw text parses asserted absent.
 
 ## Open (not fixed)
-- `bare_variant_retained_subject_spec`: `case mut Leaf:` fails in the core parser
-  (patterns are parsed by the expression parser; no `mut` pattern prefix). The
-  Rust seed accepts `case mut x`. Ahead-of-feature: needs a `__mut_binding`-style
-  marker in parser_stmts.spl + convert_flat_pattern (Binding(name, true)).
+- `bare_variant_retained_subject_spec` (2 of 6 red at HEAD, not 1):
+  - `case mut Leaf:` fails in the core parser (patterns are parsed by the
+    expression parser; no `mut` pattern prefix). NOT implemented 2026-11-05 on
+    purpose: `case mut x:` appears in no language doc (syntax quick reference,
+    doc/07_guide/language/*, doc/06_spec, grammar) -- only the Rust seed parses
+    it (`parser_patterns.rs:260`, `Pattern::MutIdentifier`) and the AST/HIR
+    thread the flag (`PatternKind.Binding(name, is_mut)` ->
+    `symbols.define(..., mutable)`). Needs an owner decision to document the
+    form first. Full scope once decided: a `__mut_binding(x)` marker next to
+    `parse_match_region_marker` (same raw-source binder lookahead; `mut` lexes
+    as an identifier), `convert_flat_pattern` -> `Binding(name, true)`, AND a
+    gate in expr_dispatch.spl ~7707 (`case Binding(bsym, _)` reclassifies a
+    bare name into a variant test regardless of the mut flag, unlike
+    switch_operators_calls.spl:4054), plus a grammar-doc line.
+  - `rb` ("re-owned unit-variant arm whose body names the binding reads the
+    subject"): `mir: undefined variable Leaf`. Root cause: expr_dispatch.spl
+    ~7755 rewrites the Binding arm into `HirPatternKind.Enum(.., "Leaf", None)`
+    BEFORE the scrutinee local exists and drops `bsym`, so the body's
+    `Var(Leaf)` is never bound; lower_enum_match_flat's own re-own loop
+    (switch_operators_calls.spl:4046-4077, which binds `own_sym` to
+    `scrut_local`) only sees arms that are still Bindings. Fix sketch: carry
+    the reclassified symbol ids (new MirLowering field) and bind them to
+    `scrut_local` right after `lower_enum_match_flat` lowers the scrutinee.
+    Not in the 2026-11-05 scope; left red.
 - `trait_typed_receiver_dispatch_spec` (10 of 11 red): the spec pins stage2
   devirtualization (`lower_trait_receiver_method_call`), but since ac6c0a021c5b
   (2026-10-12) `lower_method_call` routes every declared trait-typed receiver
