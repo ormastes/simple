@@ -7800,7 +7800,7 @@ impl MirLowering:
             case _: ()
         (out, out_conflicts)
 
-    me infer_erased_call_result_records(result: LocalId, callee: SymbolId, args: [HirCallArg], call_param_types: [HirType], lowered: [MirOperand]):
+    me infer_erased_call_result_records(result: LocalId, callee: SymbolId, args: [HirCallArg], call_param_types: [HirType], lowered: [MirOperand], source_locals: Dict<i64, i64>):
         """Call-site inference for a generic call's RESULT, type information
         only: `sorted = array_sort_by(records, cmp)` returns `[T]`, and the
         caller already knows which record `T` is from its own arguments.
@@ -7818,11 +7818,15 @@ impl MirLowering:
             val bindings = self.erased_callback_record_bindings_for_call(args, call_param_types, lowered)
             if trace:
                 print "[erased-result-inference] result={result.id} bindings={bindings.len()} params={call_param_types.len()} args={args.len()}"
-            if bindings.len() == 0: return
+            if bindings.len() == 0:
+                self.infer_erased_call_result_instance(result, return_hir, args, call_param_types, lowered, source_locals)
+                return
             val inferred = self.substitute_record_binders(return_hir, bindings)
             if trace:
                 print "[erased-result-inference] result={result.id} substituted={inferred != nil}"
-            if inferred == nil: return
+            if inferred == nil:
+                self.infer_erased_call_result_instance(result, return_hir, args, call_param_types, lowered, source_locals)
+                return
             val inferred_type: HirType = inferred ?? return_hir
             self.remember_local_hir_type(result.id, inferred_type, 0, 0)
             match inferred_type.kind:
@@ -7838,6 +7842,70 @@ impl MirLowering:
                     self.runtime_dict_locals[result.id] = true
                     self.mark_runtime_value_local(result.id)
                 case _: ()
+
+    me infer_erased_call_result_instance(result: LocalId, return_hir: HirType, args: [HirCallArg], call_param_types: [HirType], lowered: [MirOperand], source_locals: Dict<i64, i64>):
+        """A generic call whose declared result is a generic struct INSTANCE
+        (`fn boxit<T>(x: T) -> Box<T>`) is typed at the USE SITE by the
+        arguments that bind its parameters: `boxit("t")` remembers `Box<text>`
+        so a field read on the result is typed exactly like one on a parameter
+        or a construct site (generic_instance_field_substituted). Binding
+        reuses the construct-site rule (construct_field_source_hir_type:
+        the argument's remembered HIR type, else a text proven by its word;
+        an erased word never guesses), but only a binder whose value keeps
+        ONE representation across the call -- a text handle, a record
+        pointer, an array -- may type the result: a scalar argument is
+        boxed into a tagged word by the erased `T` slot, so a `Box<i64>`
+        instance here would read that tag raw. A bare `T` result (or a
+        container of one) is left to the tagged erased decode arms, as the
+        record route above does. Nothing is specialized: one erased body."""
+        match return_hir.kind:
+            case HirTypeKind.Named(_, return_args):
+                if return_args.len() == 0: return
+            case _: return
+        val names: [text] = self.hir_type_param_names_into(return_hir, self.symbols, [])
+        if names.len() == 0: return
+        var bindings: Dict<text, HirType> = {}
+        var index = 0
+        while index < args.len() and index < call_param_types.len() and index < lowered.len():
+            val call_arg: HirCallArg = args[index]
+            if not call_arg.has_name:
+                # The argument as lowered, before the erased `T` slot boxed it
+                # into a tagged word (lower_call's arg_source_locals); the
+                # operand itself only when no source local was recorded.
+                var arg_local = LocalId(id: -1)
+                if source_locals.contains(index):
+                    arg_local = LocalId(id: source_locals[index])
+                else:
+                    val lowered_operand: MirOperand = lowered[index]
+                    match lowered_operand.kind:
+                        case MirOperandKind.Copy(operand_local) | MirOperandKind.Move(operand_local):
+                            arg_local = operand_local
+                        case _: ()
+                if arg_local.id >= 0:
+                    val arg_expr: HirExpr = call_arg.value
+                    val actual = self.construct_field_source_hir_type(arg_expr, arg_local, arg_expr.span)
+                    bindings = self.bind_struct_type_params(call_param_types[index], actual, names, bindings)
+            index = index + 1
+        var bound_args: [HirType] = []
+        for name in names:
+            val bound_name: text = name
+            if not bindings.has(bound_name): return
+            val bound: HirType = bindings[bound_name]
+            # A scalar bound here reaches the erased body's field as the
+            # TAGGED word the `T` slot boxed it into (rt_value_int_wide /
+            # bool tag), whereas a construct-site instance stores it raw. A
+            # substituted raw read would add the tag bits; keep the tagged
+            # erased decode arms (rt_value_as_int_wide / rt_value_truthy).
+            if hir_type_is_plain_scalar(bound): return
+            bound_args = bound_args.push(bound)
+        val instance = self.substitute_struct_type_params(return_hir, names, bound_args)
+        if self.hir_type_mentions_type_param(instance, self.symbols): return
+        if (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+            print "[erased-result-instance] result={result.id} params={names.len()} bound={bound_args.len()}"
+        self.remember_local_hir_type(result.id, instance, 0, 0)
+        val record = self.optional_payload_struct_name(instance)
+        if record != "" and not self.struct_value_syms.contains(result.id):
+            self.struct_value_syms[result.id] = record
 
     me substitute_record_binders(ty: HirType, bindings: Dict<text, text>) -> HirType?:
         """`ty` with every bound RECORD binder replaced by its `Named`
@@ -8692,6 +8760,10 @@ impl MirLowering:
         # several callee shapes (direct/indirect/lambda/bitfield) -- not
         # attempted in this lane; scoped out per binding-transfer-only.
         var arg_operands: [MirOperand] = []
+        # Operand index -> the argument local as LOWERED, before the erased-
+        # slot boxing below replaces it: the use-site instance typing of a
+        # generic call result reads the argument's own word (text vs literal).
+        var arg_source_locals: Dict<i64, i64> = {}
         val is_thread_boundary = is_direct and self.call_has_thread_transfer_boundary(direct_name, direct_symbol)
         var call_param_types: [HirType] = []
         # A Var/NamedVar callee keeps its resolved symbol even when it names a
@@ -8829,6 +8901,7 @@ impl MirLowering:
                 self.lower_expr_for_slot(arg_value, call_param_types[current_arg_index])
             else:
                 self.lower_expr(arg_value)
+            arg_source_locals[arg_operands.len()] = arg_local.id
             var boundary_transfer_mode = MirTransferMode.Copy
             var boundary_transfer_payload = MirTransferPayload.InlineCopy
             var boundary_runtime_classify = true
@@ -9064,7 +9137,7 @@ impl MirLowering:
                 result = abi_builder.emit_binop(MirBinOp.Ne, mir_operand_copy(wide_result), mir_operand_copy(zero_result), MirType.bool())
                 self.builder = abi_builder
             self.remember_call_hir_return(result, direct_symbol)
-            self.infer_erased_call_result_records(result, direct_symbol, args, call_param_types, arg_operands)
+            self.infer_erased_call_result_records(result, direct_symbol, args, call_param_types, arg_operands, arg_source_locals)
             if stamped_struct_name != "" and not self.struct_value_syms.contains(result.id):
                 self.struct_value_syms[result.id] = stamped_struct_name
             if stamped_return != nil:
