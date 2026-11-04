@@ -3,27 +3,22 @@
 # Stage2: method calls on receivers typed with an imported generic class
 
 `fn f(b: Box<i64>): b.get()` -- and a method an extension module adds with
-`impl Box<T>:` -- had no callable target on the native path: the parser
-collapsed an imported `Box<i64>` to `Any`, HIR flags every method of a generic
-impl `is_generic_template`, MIR never emits a template, and 40.mono kept
-instance calls untouched.
-
-The parser now keeps `Name<args>` for a name the file imports by an explicit
-`use` item, HIR retains each resolved declaration's arguments, and 40.mono
-registers each instance method of a generic inherent impl as a function
-template over the impl's type parameters (receiver first). A call whose
-receiver is declared as a concrete instantiation -- matched by the class's
-ownership identity -- is rewritten into a direct call of the specialization.
-build error) rather than left to bind the never-emitted template.
+`impl Box<T>:` -- must resolve to a callable target on the native path: the
+parser keeps `Name<args>` for a name the file imports by an explicit `use`
+item, HIR retains each resolved declaration's arguments, and every instance
+method of a generic impl lowers as ONE erased body shared by all
+instantiations (generics are type-erased; there is no per-type copy). A call
+whose receiver is declared as a concrete instantiation therefore resolves
+without an `unresolved method call` error.
 
 Each example runs HIR -> MIR in-process on a small fixture.
 
 | Receiver / method | Outcome |
 |-------------------|---------|
-| parameter `b: Box<i64>`, the class's own `get` | calls `Box__get$i64` |
-| parameter `b: Box<i64>`, `ext_peek` from an `impl Box<T>:` extension module | calls `Box__ext_peek$i64` |
-| field `h.b` with `b: Box<i64>` | calls `Box__get$i64` |
-| `if val b = ob` with `ob: Box<i64>?` | calls `Box__get$i64` |
+| parameter `b: Box<i64>`, the class's own `get` | resolves, no unresolved-method error |
+| parameter `b: Box<i64>`, `ext_peek` from an `impl Box<T>:` extension module | resolves, no unresolved-method error |
+| field `h.b` with `b: Box<i64>` | resolves, no unresolved-method error |
+| `if val b = ob` with `ob: Box<i64>?` | resolves, no unresolved-method error |
 | parameters typed with an imported generic enum / trait | retain named arguments |
 """
 
@@ -119,12 +114,6 @@ fn callees_of(function_name: text) -> [text]:
                                     case _: ()
                             case _: ()
     out
-
-fn calls_specialization(prefix: text) -> bool:
-    for callee in callees_of("f"):
-        if callee.contains(prefix + "$"):
-            return true
-    false
 
 fn param_kind_name(index: i64) -> text:
     """`any`, `named<argc>` or `other` for parameter `index` of consumer `f`."""

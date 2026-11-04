@@ -8,6 +8,7 @@ use std.js.engine.vm_object_store.{ObjectStore}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use common.js.engine.string_trim.{js_trim_text}
+use std.js.builtins.regexp.{RegExpObj, regexp_exec}
 use std.nogc_sync_mut.js.engine.interpreter_exec.{JsInterpreter}
 
 impl JsInterpreter:
@@ -245,12 +246,15 @@ impl JsInterpreter:
             if args.len() >= 2:
                 val search_val = self.eval_expression(args.get(0), env)?
                 val replace_val = self.eval_expression(args.get(1), env)?
+                match self._regexp_of(_get_obj_id(search_val)):
+                    Some(re): return self._regexp_replace(str_val, re, replace_val, env)
+                    nil: pass_dn
                 val search_s = js_to_string(search_val)
-                val replace_str = js_to_string(replace_val)
                 val slen = str_val.len()
                 val needle_len = search_s.len()
                 if needle_len == 0:
-                    return Ok(JsValue.String(v: replace_str + str_val))
+                    val head = self._replace_expand(replace_val, "", 0, str_val, env)?
+                    return Ok(JsValue.String(v: head + str_val))
                 var i = 0
                 while i <= slen - needle_len:
                     var matched = true
@@ -266,7 +270,7 @@ impl JsInterpreter:
                         while bi < i:
                             result = result + str_val[bi]
                             bi = bi + 1
-                        result = result + replace_str
+                        result = result + self._replace_expand(replace_val, search_s, i, str_val, env)?
                         var ai = i + needle_len
                         while ai < slen:
                             result = result + str_val[ai]
@@ -274,6 +278,35 @@ impl JsInterpreter:
                         return Ok(JsValue.String(v: result))
                     i = i + 1
             return Ok(JsValue.String(v: str_val))
+
+        if method == "match":
+            if args.len() >= 1:
+                val pat_val = self.eval_expression(args.get(0), env)?
+                var re = RegExpObj.create(js_to_string(pat_val), "")
+                match self._regexp_of(_get_obj_id(pat_val)):
+                    Some(found): re = RegExpObj.create(found.source, found.flags)
+                    nil: pass_dn
+                var values: [JsValue] = []
+                var first_index = 0
+                var pos = 0
+                while pos <= str_val.len():
+                    re.last_index = pos
+                    val m = regexp_exec(re, str_val)
+                    if not m.matched:
+                        break
+                    values.push(JsValue.String(v: m.value))
+                    first_index = m.index
+                    if not re.global:
+                        break
+                    pos = m.index + (if m.value.len() == 0: 1 else: m.value.len())
+                if values.len() == 0:
+                    return Ok(JsValue.Null)
+                val arr_id = self._js_array_from(values)
+                if not re.global:
+                    self.set_object_property(arr_id, "index", JsValue.Number(v: first_index.to_f64()))
+                    self.set_object_property(arr_id, "input", JsValue.String(v: str_val))
+                return Ok(JsValue.Array(id: arr_id))
+            return Ok(JsValue.Null)
 
         if method == "replaceAll":
             if args.len() >= 2:
@@ -379,6 +412,68 @@ impl JsInterpreter:
 
         self.logger.warn("Unknown string method: {method}")
         Ok(JsValue.Undefined)
+
+    # String.prototype.replace with a RegExp search value: every match when
+    # the `g` flag is set, otherwise only the first.
+    me _regexp_replace(input: text, re_in: RegExpObj, replace_val: JsValue, env: i64) -> JsBrowserResult<JsValue>:
+        # Own the cursor: `last_index` is advanced per match, and mutating a
+        # class argument in place is unreliable under the seed interpreter.
+        var re = RegExpObj.create(re_in.source, re_in.flags)
+        var result = ""
+        var last = 0
+        var pos = 0
+        val n = input.len()
+        while pos <= n:
+            re.last_index = pos
+            val m = regexp_exec(re, input)
+            if not m.matched:
+                break
+            result = result + input.slice(last, m.index)
+            result = result + self._replace_expand(replace_val, m.value, m.index, input, env)?
+            last = m.index + m.value.len()
+            if not re.global:
+                break
+            pos = if m.value.len() == 0: last + 1 else: last
+        result = result + input.slice(last, n)
+        Ok(JsValue.String(v: result))
+
+    # Replacement text for one match: a function replacer is called with
+    # (match, offset, string); a string replacer expands `$&` and `$$`.
+    # Capture groups (`$1`) are not available — the regexp engine does not
+    # record them.
+    me _replace_expand(replace_val: JsValue, matched: text, index: i64, input: text, env: i64) -> JsBrowserResult<text>:
+        match replace_val:
+            JsValue.Function(fn_id):
+                val call_args = [JsValue.String(v: matched), JsValue.Number(v: index.to_f64()), JsValue.String(v: input)]
+                val r = self._invoke_function(fn_id, call_args, env)?
+                return Ok(js_to_string(r))
+            _: pass_dn
+        val tmpl = js_to_string(replace_val)
+        var out = ""
+        var i = 0
+        while i < tmpl.len():
+            val ch = tmpl.slice(i, i + 1)
+            val nx = if i + 1 < tmpl.len(): tmpl.slice(i + 1, i + 2) else: ""
+            if ch == "$" and nx == "&":
+                out = out + matched
+                i = i + 2
+            else if ch == "$" and nx == "$":
+                out = out + "$"
+                i = i + 2
+            else:
+                out = out + ch
+                i = i + 1
+        Ok(out)
+
+    # Allocate a JS array holding `values`; returns its object id.
+    me _js_array_from(values: [JsValue]) -> i64:
+        val arr_id = self.create_object()
+        var i = 0
+        while i < values.len():
+            self.set_object_property(arr_id, "{i}", values.get(i))
+            i = i + 1
+        self.set_object_property(arr_id, "length", JsValue.Number(v: values.len().to_f64()))
+        arr_id
 
     # Invoke a JS function by id with the given argument values
     me _invoke_function(fn_id: i64, arg_vals: [JsValue], env: i64) -> JsBrowserResult<JsValue>:

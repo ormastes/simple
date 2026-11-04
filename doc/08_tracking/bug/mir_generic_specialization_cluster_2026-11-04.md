@@ -16,5 +16,9 @@ iterate an Option. Bisected 401883ab000 (pass) -> fd65c66254d (fail).
 Fix: `.unwrap()` (fail-closed; the producers always carry a list, so None is a compiler bug and [] is a legitimate value that must not mask it) at the three `[Type]` sites in
 `src/compiler/10.frontend/parser_types_expr.spl`. Scalar/Type sites left as is.
 
-Clusters B and C are specs written for the deleted mono pass; they need an
-owner decision (erased-body decision 3b94b409c17; mono deletion ab9305d783e).
+## Resolution of B and C (owner decision 2026-11-04: per-type specialization is obsolete)
+
+- C: `generic_return_owner_spec.spl` and fixture `test/fixtures/bootstrap/generic_return_owner/` deleted (both examples only exercised removed `mono_caller_return_owner`).
+- B, `generic_struct_composite_field_spec`: 4 specialization examples rewritten to the erased-body contract (`Box.get` is one shared call with no `Box__get$` copy; `wrap`/`rebox`/`listed` call and define agree on the return type). 10 examples REMAIN FAILING and are real bugs, not obsolete: instance-typed field reads of `[T]`/`T?`/`T` on `Bag<text>`/`Box<text>` lower as integer add instead of string concat, and constructing `Bag(items: [...], first: ...)` reports `mir: enum payload array element type mismatch`.
+- B, `generic_struct_field_instance_paths_spec`: 3 failing kept (`array element` and `nested instance: W<W<text>>` lower add instead of concat; `parameter declared without type arguments` no longer refuses `r.v + r.v` on bare `W`). Needs owner call on whether the refusal is still wanted.
+- B, `generic_struct_type_param_field_spec`: 1 failing kept (`Pair<text, i64>` operator on a field is no longer refused; same refusal question).

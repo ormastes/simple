@@ -1,0 +1,58 @@
+# Directory-wide prevention policy, end to end through a spec child.
+# Feature: doc/08_tracking/bug/sspec_no_dir_wide_prevention_scope_2026-08-07.md
+#
+# The fixtures under test/fixtures/dir_prevention/ declare NO prevention
+# guard of their own; the policy comes from their directory's
+# `_prevention.sdn`, handed to the child through SIMPLE_SPEC_DIR_PREVENTION
+# exactly as the runner does (std.nogc_sync_mut.test_runner.test_runner_execute).
+# RED before this feature: every run below reported 0 failures.
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val FIXTURE_ROOT: text = "test/fixtures/dir_prevention"
+val POLICY_FILE: text = FIXTURE_ROOT + "/policy_dir/_prevention.sdn"
+val NESTED_POLICY_FILE: text = FIXTURE_ROOT + "/policy_dir/nested/_prevention.sdn"
+val GUARDED_EXAMPLE: text = FIXTURE_ROOT + "/policy_dir/guarded_example.spl"
+val NESTED_EXAMPLE: text = FIXTURE_ROOT + "/policy_dir/nested/nested_example.spl"
+
+fn simple_binary() -> text:
+    # The runner publishes its child binary as SIMPLE_TEST_BINARY /
+    # SIMPLE_BINARY (test_runner_main.spl:1419-1427, test_runner_single.spl:1411);
+    # SIMPLE_BIN is the manual override; bin/simple the plain fallback.
+    for name in ["SIMPLE_TEST_BINARY", "SIMPLE_BINARY", "SIMPLE_BIN"]:
+        val configured = env_get(name) ?? ""
+        if configured != "":
+            return configured
+    "bin/simple"
+
+fn run_example(example: text, policy_env: text) -> text:
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_SPEC_DIR_PREVENTION='" + policy_env + "' " +
+        simple_binary() + " run " + example + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "directory-wide prevention policy":
+    it "fails the examples that break the directory's policy (no per-file declaration)":
+        val out = run_example(GUARDED_EXAMPLE, POLICY_FILE)
+        expect(out).to_contain("4 examples, 2 failures")
+        expect(out).to_contain("forbidden_seam called 1x in this example (allowed 0)")
+        expect(out).to_contain("budgeted_seam called 3x in this example (allowed 2)")
+        expect(out).to_contain("directory policy " + POLICY_FILE)
+        expect(out).to_contain("specs in this directory must not touch the forbidden seam")
+
+    it "leaves a spec unchanged when no policy applies":
+        val out = run_example(GUARDED_EXAMPLE, "")
+        expect(out).to_contain("4 examples, 0 failures")
+        expect(out).not_to_contain("forbidden call")
+
+    it "merges an ancestor policy with the nested directory's own":
+        val out = run_example(NESTED_EXAMPLE, POLICY_FILE + ";" + NESTED_POLICY_FILE)
+        expect(out).to_contain("2 examples, 2 failures")
+        expect(out).to_contain("nested_seam called 1x")
+        expect(out).to_contain("forbidden_seam called 1x")
+
+    it "applies only the nested policy when the ancestor is absent from the chain":
+        val out = run_example(NESTED_EXAMPLE, NESTED_POLICY_FILE)
+        expect(out).to_contain("2 examples, 1 failure")
+        expect(out).to_contain("nested_seam called 1x")
+        expect(out).not_to_contain("forbidden_seam called")

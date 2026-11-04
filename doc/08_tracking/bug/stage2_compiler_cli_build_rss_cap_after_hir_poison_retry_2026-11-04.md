@@ -43,6 +43,27 @@ So the RSS kill is a consequence; the root cause is the poison.
   `?.m()` safe-navigation semantics (wraps `Some`); the seed has no static
   lowering for it. Spec: `test/01_unit/compiler/frontend/optional_member_call_parser_spec.spl`
   (3/3; 2 of 3 fail without the parser change).
+- **SUPERSEDED (work/bug-optchain-20261105): `?.` semantics reconciled.**
+  The try-then-call parse above contradicted the language docs
+  (`syntax_quick_reference.md` "Safe Navigation (`?.`)", incl.
+  `result?.process()?.validate()`) and the seed (`OptionalMethodCall`:
+  unwrap Some/Ok, else None; result wrapped in `Some`), and silently changed
+  the meaning of documented optional-chaining sites (`linker_gen/parser.spl`
+  x26 `dict["k"]?.as_text() ?? ""`, `svim/tui_shell.spl:124`). Decision:
+  `?.` is safe navigation on BOTH compilers; try-then-access is spelled
+  `(expr?).m()` / `(expr?).f`. The self-hosted parser now emits
+  `OptionalChain` for `x?.f` and `Call(OptionalChain(x, m), args)` for
+  `x?.m(args)` (previously it dropped the `?` for BOTH forms). Native MIR
+  still has no OptionalChain lowering and rejects it LOUDLY
+  (`E-MIR-EXPR-OptionalChain`) -- remaining gap. All 87 in-tree
+  try-then-access sites (`)?.m(` / `)?.f` on Result-returning calls in
+  git_provider, scv/db, task_runner journal, compiler 50/70/80, os, lib)
+  were rewritten to the explicit `(expr?).x` form; on the seed they had been
+  swallowing `Err` into `None`. Nil-guarded compiler sites
+  (`record != nil and record?.f`) use `record.unwrap().f`;
+  `70.backend/interrupt.spl` uses `if val`. Spec:
+  `optional_member_call_parser_spec.spl` 5/5 on the seed (parser via the
+  self-hosted frontend + runtime cases for both forms).
 - `git_provider.spl:161,174` `"...^{tree}"` interpolated the local `tree`
   (still `""`) -> `rev^`; escaped as `^\{tree\}` (genuine source bug).
 - **No in-process MIR retry after HIR compile errors.** A MIR shard child
@@ -56,8 +77,21 @@ So the RSS kill is a consequence; the root cause is the poison.
   with the HIR errors already on stderr. Without the marker (transient/infra:
   no HIR inventory/cache) the fallback is kept. Spec:
   `test/01_unit/compiler/driver/native_mir_shard_spec.spl` (12/12).
-- Verification of both in a real Stage 2: pending the next sanctioned
-  bootstrap (s2e).
+- Verified in s2e (`/private/tmp/boot2-out/s2e`, PR #6708): Stage 2 sanity
+  PASSED; `git_provider` no longer poisoned; on the remaining HIR errors the
+  coordinator logged `HIR compile errors recorded by the shard frontend
+  (errors=396 poisoned_modules=3); deterministic, no in-process MIR retry` ->
+  `outcome=fail`, no second frontend pass, no rss-cap kill.
+- s2e blocker: 3 modules (`sprof_collection_profile`, `adaptive_map`,
+  `adaptive_set`) poisoned with `unresolved type: Eq` (71x). #6682 only
+  silenced the dependency check; the imported owner's type-parameter bounds
+  were still lowered as types in
+  `project_imported_owner_type_parameters` (`module_callable_types.spl`),
+  which lacked the builtin-bound erasure the local `lower_type_param` has.
+  Now erased when the bound is a bare Clone/Copy/Debug/Default/Drop/Eq/Ord the
+  owner does not declare (`hir_imported_bound_erases_builtin_v1`). Spec:
+  `test/01_unit/compiler/20.hir/builtin_trait_where_bound_spec.spl` (6/6).
+  Verification pending s2f.
 
 ## Remaining (not fixed here)
 - `SHARD_TREE_HEADROOM_KB_V1` (24 GiB default) >= host RAM on a 24 GiB Mac, so
