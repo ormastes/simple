@@ -73,3 +73,9 @@ value semantics, not just fix a parse error.
 `seed_assignment_trailing_equals_continuation_2026-07-31.md`,
 `doc/08_tracking/bug/seed_line_continuation_family_enumeration_2026-07-31.md`
 (full family table).
+
+## Resolution (2026-11-04)
+
+The self-hosted parser (`parser_stmts.spl`, `kind == 49`) also treats `return` + Newline as a bare return, so both parsers reject the shape. No grammar change: the seed now emits
+"`return` value must be on the same line as `return`" when bare `return` is followed by Newline + Indent
+(`jump.rs::parse_return`). Test: `src/compiler_rust/parser/tests/return_value_next_line_diagnostic.rs`.
