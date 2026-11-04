@@ -982,6 +982,52 @@ impl MirLowering:
                 return true
         false
 
+    fn hir_type_param_names_into(ty: HirType, symbols: SymbolTable, names: [text]) -> [text]:
+        """`names` plus every type parameter `ty` mentions (either spelling,
+        same walk as hir_type_mentions_type_param), each once, in first
+        occurrence order."""
+        var out: [text] = names
+        match ty.kind:
+            case HirTypeKind.TypeParam(name, _):
+                if not self.text_list_has(out, name):
+                    out = out.push(name)
+            case HirTypeKind.Named(sym, args):
+                var param_name = ""
+                if val present = symbols.get_symbol_raw(sym.id):
+                    if present.kind == SymbolKind.TypeParam:
+                        param_name = present.name
+                if param_name != "":
+                    if not self.text_list_has(out, param_name):
+                        out = out.push(param_name)
+                else:
+                    out = self.hir_type_param_names_into_all(args, symbols, out)
+            case HirTypeKind.Array(elem, _): out = self.hir_type_param_names_into(elem, symbols, out)
+            case HirTypeKind.Slice(elem): out = self.hir_type_param_names_into(elem, symbols, out)
+            case HirTypeKind.Optional(inner): out = self.hir_type_param_names_into(inner, symbols, out)
+            case HirTypeKind.Dict(k, v):
+                out = self.hir_type_param_names_into(v, symbols, self.hir_type_param_names_into(k, symbols, out))
+            case HirTypeKind.Result(ok, err):
+                out = self.hir_type_param_names_into(err, symbols, self.hir_type_param_names_into(ok, symbols, out))
+            case HirTypeKind.Tuple(elems): out = self.hir_type_param_names_into_all(elems, symbols, out)
+            case HirTypeKind.Function(params, ret, _):
+                out = self.hir_type_param_names_into(ret, symbols, self.hir_type_param_names_into_all(params, symbols, out))
+            case _: ()
+        out
+
+    fn hir_type_param_names_into_all(types: [HirType], symbols: SymbolTable, names: [text]) -> [text]:
+        var out: [text] = names
+        for raw in types:
+            val t: HirType = raw
+            out = self.hir_type_param_names_into(t, symbols, out)
+        out
+
+    fn text_list_has(items: [text], name: text) -> bool:
+        for raw in items:
+            val item: text = raw
+            if item == name:
+                return true
+        false
+
     me remember_local_hir_type(local_id: i64, type_: HirType, isolation_state: i64, resource_state: i64):
         val normalized_state = if isolation_state == 1:
             1

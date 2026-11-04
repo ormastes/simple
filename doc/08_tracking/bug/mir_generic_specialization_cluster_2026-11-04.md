@@ -91,10 +91,45 @@ Before -> after (seed `simple-ref`, one spec per process):
 
 | spec | before | after | still failing |
 |---|---|---|---|
-| generic_struct_composite_field | 7/17 (origin, mono examples already rewritten) | 16/17 | 1 real, open: `boxit("t")` generic CALL result carrying `Box<text>` to a field read (call-site argument binding, not field typing) |
+| generic_struct_composite_field | 7/17 (origin, mono examples already rewritten) | 16/17 -> 17/17 (2026-11-05, below) | -- |
 | generic_struct_field_instance_paths | 11/14 | 15/15 (one example added) | -- |
 | generic_struct_type_param_field | 6/7 | 7/7 | -- |
 
 Regression set (16 rc=0 `50.mir` generic/struct/operator/concat/any specs,
 incl. `any_binop_boxed_result`, `any_index_read`): all pass before and
 after; no pass -> fail.
+
+## 2026-11-05: generic CALL result typed by the use-site instance (`boxit("t")`)
+
+`val b = boxit("t"); b.item + b.item` (`fn boxit<T>(x: T) -> Box<T>`) was
+an integer add. `remember_call_hir_return` recorded the declared `Box<T>`
+for the result; `infer_erased_call_result_records`
+(`switch_operators_calls.spl`) only binds RECORD binders (a `T` argument
+that is statically a struct), so a text argument bound nothing and
+`generic_instance_field_substituted` saw a type that still mentioned `T`
+(nil -> erased i64 field). Fix (same change): when the record route binds
+nothing, `infer_erased_call_result_instance` binds the callee's parameters
+from the call's arguments with #6722's construct-site pieces --
+`construct_field_source_hir_type` (the argument's remembered HIR type,
+else a text proven by its word; an erased word never guesses) and
+`bind_struct_type_params` -- and remembers
+`substitute_struct_type_params(Box<T>) = Box<text>` for the result local,
+only when every parameter bound and the result mentions no parameter.
+Only representation-stable binders may bind (text handle, record pointer,
+array): a scalar argument (`boxit(5)`, `boxit(n)`, `boxit(true)`) is boxed
+into a tagged word by the erased `T` slot and the erased body stores that
+word, so a `Box<i64>` instance would read the tag raw (`add i64` with no
+`rt_value_as_int_wide` -- caught in review); `hir_type_is_plain_scalar`
+binders return without typing and the tagged decode arms stay in charge,
+pinned by two new spec cases (`rt_value_as_int_wide` / `rt_value_truthy`
+calls in the probe body). The
+binding reads the argument local AS LOWERED (`lower_call` records it per
+operand in `arg_source_locals`), because by the time the operands reach the
+hook the erased `T` slot has boxed the text into a tagged i64 word and
+`local_is_str` can no longer see it. Scope: the declared result must be a
+`Named` instance with arguments (`Box<T>`); a bare `T` or `[T]` result stays
+with the tagged erased decode arms, so instance_paths' "an erased generic
+call result does not guess the instance" (`ident("a")`) is unchanged.
+Collector `hir_type_param_names_into` (`mir_lowering_types.spl`, same walk
+as `hir_type_mentions_type_param`). After: 17/17; the 11-spec 50.mir
+regression set (generic_struct_*, bare_variant_*, enum_match_*) unchanged.

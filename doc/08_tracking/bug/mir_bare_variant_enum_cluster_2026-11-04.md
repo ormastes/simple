@@ -88,10 +88,22 @@ Seed `simple-ref`, one spec per run. RED: 5 specs failing.
     BEFORE the scrutinee local exists and drops `bsym`, so the body's
     `Var(Leaf)` is never bound; lower_enum_match_flat's own re-own loop
     (switch_operators_calls.spl:4046-4077, which binds `own_sym` to
-    `scrut_local`) only sees arms that are still Bindings. Fix sketch: carry
-    the reclassified symbol ids (new MirLowering field) and bind them to
-    `scrut_local` right after `lower_enum_match_flat` lowers the scrutinee.
-    Not in the 2026-11-05 scope; left red.
+    `scrut_local`) only sees arms that are still Bindings.
+    **FIXED 2026-11-05 (later the same day):** no new field -- the
+    reclassification loop in `lower_match_case` (expr_dispatch.spl, the
+    `case Binding(bsym, _)` arm) collects each reclassified `bsym.id` into
+    `reowned_binding_syms`, passed as a new defaulted trailing parameter
+    through `lower_enum_match` (all three of its `lower_enum_match_flat`
+    calls forward it) into `lower_enum_match_flat`, which binds every id to
+    `scrut_local` (`local_map` + `bind_local`, exactly like its own re-own
+    loop) right after `lower_expr(scrutinee)`. A parameter rather than a
+    field so a nested match inside the scrutinee cannot consume or clobber
+    it. The two other `lower_enum_match` callers (semantic-capture and
+    explicit enum-only routes) pass unreclassified arms and use the default
+    `[]`. Spec 4/6 -> 5/6 (`rb` green, 3 variant tests); the only red left
+    is `case mut Leaf:` above, which stays unimplemented on purpose. 11-spec
+    50.mir regression set (bare_variant_*, enum_match_*, generic_struct_*)
+    identical before/after.
 - `trait_typed_receiver_dispatch_spec` (10 of 11 red): the spec pins stage2
   devirtualization (`lower_trait_receiver_method_call`), but since ac6c0a021c5b
   (2026-10-12) `lower_method_call` routes every declared trait-typed receiver

@@ -7950,6 +7950,12 @@ impl MirLowering:
         if val typed_subject = match_subject_type:
             match_subject_owner = self.enum_match_type_owner_key(typed_subject)
         var norm_arms: [HirMatchArm] = []
+        # HIR defined each reclassified Binding's symbol as a binding of the
+        # whole subject; its arm body may still name it (`case Leaf: if Leaf
+        # == KindA.Leaf: ...`). The symbol is dropped from the Enum pattern
+        # below, so lower_enum_match_flat binds these ids to the scrutinee
+        # local once it exists (like its own re-own loop and bind_catch_all_arm).
+        var reowned_binding_syms: [i64] = []
         var norm_i = 0
         while norm_i < arms.len():
             val arm0: HirMatchArm = arms[norm_i]
@@ -8025,6 +8031,7 @@ impl MirLowering:
                             body: arm0.body,
                             span: arm0.span
                         ))
+                        reowned_binding_syms = reowned_binding_syms.push(bsym.id)
                     else:
                         # SIMPLE_ENUM_REG_TRACE=1 (cycle-51/52 discriminator):
                         # the bare-variant Binding arm stayed a default because
@@ -8064,7 +8071,7 @@ impl MirLowering:
                     only_catchall_arms = false
             scan_i = scan_i + 1
         if has_enum_arm:
-            return self.lower_enum_match(scrutinee, norm_arms, expected_type)
+            return self.lower_enum_match(scrutinee, norm_arms, expected_type, reowned_binding_syms)
 
         # Wildcard/capture-only matches bypass lower_enum_match. Validate their
         # static coverage from already-resolved subject metadata, without
