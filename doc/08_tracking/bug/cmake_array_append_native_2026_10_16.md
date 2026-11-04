@@ -19,3 +19,13 @@ The actual first build completed with seven genuine SPL COFF objects; the parse-
 Strict candidate SHA256 `2B7724792E25CDA9C1B8C4C2113D4E20423F76B696BB52F243C15252037194A4` linked without diagnostics or suppression flags. It executed once: exit0, exact `PASS cmake-native-parts 6 output controls and input preservation`, empty stderr, unchanged pre/post hash. The 58.07ms observation is not a benchmark. All three real renderer functions and the actual fixture/main are rooted in the retained link map.
 
 The SSpec now explicitly imports the canonical `std.spec` prelude, matching neighboring backend specs. This affects only the unrun BDD path; the qualified native entry, shared fixture and production file are unchanged. BDD, broad compiler/library/MCP/LSP gates, the filesystem-writing generator path, whole Phase 3 and deployment remain UNRUN. Native PASS does not constitute release verification or permission to remove the workaround. Cache, scripts, preflight receipts, strict map, one-shot invocation ledger and stdout/stderr are retained under `phase3-validation-20261016/cmake-native-parts-native-cycle1`.
+
+## 2026-11-04 triage (n88b) - status fix-implemented-verification-pending
+
+Source compiler already lowers array `.append(x)` (alias of push) on unresolved
+array receivers: `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
+`array_append_alias`, landed in b8fe5bfeb3f. Spec
+`test/01_unit/compiler/50.mir/unresolved_builtin_ufcs_method_spec.spl` passes 6/6
+on the current seed. The `[text]`/`push` workaround in `cmake_gen.spl` stays until
+a rebuilt stage3 producer compiles the original `parts.append` form; stage3 repro:
+`bootstrap/stage3/simple native-build <cmake_gen renderer fixture>` per section above.

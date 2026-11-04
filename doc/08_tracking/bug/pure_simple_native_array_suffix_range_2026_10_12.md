@@ -57,3 +57,7 @@ claimed by this report.
 
 Application commit: `707a469fb59074166e5ad307423ef8421bf7e536`.
 Remote landing remains subject to the user's Phase 3 buildability gate.
+
+## Resolution (2026-11-04, opus-n88b)
+
+Status: fix-implemented-verification-pending. Landed in 3a16118c603 (array range slices via lower_runtime_array_slice in text_index_ranges.spl; Result unwrap/unwrap_err admit Enum payloads in method_calls_literals.spl lower_result_unwrap_core). Pass-level spec: `bin/simple.exe test test/01_unit/compiler/50.mir/array_range_unwrap_enum_lowering_spec.spl` (2/2 pass). Native verify (stage3): rebuild with a native producer and compile a[1..].join / Result<_, Enum>.unwrap_err() fixtures; then remove the source workarounds.
