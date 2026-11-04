@@ -97,3 +97,6 @@ pending the provider implementation; authored Rc tests remain unexecuted.
 ## Canonical database reconciliation — 2026-11-03
 
 OPEN umbrella; partial source candidate PR #6292 MERGED at 9f8f65dd6376e9e53c4f137fab450dc531496f5b. It adds only multicore_green_try_spawn submission/rejected-join handling; other missing functions and ArcBox providers remain unresolved. TEST_BLOCKED: qualified self-hosted runtime unavailable; behavioral submission/rejection/join proof and required core/MCP checks UNRUN. Await producer-qualified verification; no umbrella closure.
+
+## 2026-11-04 enumeration (libbug-async)
+Seed `run` results: tls_record_capability 3/3 pass (fn exists in http_server/types.spl); driver_write_completion 5/5 pass (io/driver.spl); quic_udp_initial 9/9 pass (spec defines `build_unprotected_initial_shape` itself, so that bullet is stale); `rt_fd_pread` is backed in the seed (file_io.rs) and declared in sffi/fs.spl, but sosix/posix_spec 0/3 still fails. multicore_green_try_spawn_contract 5/6: the failure is `variable rt_pool_submit not found` in the seed interpreter (no runtime provider; native-runtime gap, not pure Simple). ArcBox weak-acquire provider remains open (needs Rust/C provider). No pure-Simple function remains missing.

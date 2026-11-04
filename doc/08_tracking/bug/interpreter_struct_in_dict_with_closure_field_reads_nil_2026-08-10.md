@@ -123,3 +123,6 @@ Leaving OPEN, no attempt (per the record's own explicit guidance).
 ## Canonical database reconciliation — 2026-11-03
 
 OPEN; PR #6301 MERGED at 5cec7885187661e950f941045cdb6b8d522a4884 and contributes real actor singleton/closure persistence detectors only, not a production repair. TEST_BLOCKED: named/lambda/empty-handler production API scenarios UNRUN without a qualified self-hosted runtime. Await detector execution and triage; no current interpreter regression or repair is claimed from source inspection alone.
+
+## 2026-11-04 triage (libbug-async): INTERPRETER-ROOT
+Real-API repro: under `fn main` (JIT) `actor_count=1`; same code in a non-`main` function (tree-walk interpreter) `actor_count=0`. `actor_singleton_closure_persistence_spec.spl` under seed `run`: 0/3. Likely same root as the class-field value-copy aliasing in the Promise/Future record (class embedded in a container is copied, not aliased, by the interpreter). No lib change made.
