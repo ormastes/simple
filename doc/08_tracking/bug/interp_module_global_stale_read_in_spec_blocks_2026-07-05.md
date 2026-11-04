@@ -1,6 +1,6 @@
 ---
 id: interp_module_global_stale_read_in_spec_blocks_2026-07-05
-status: OPEN
+status: FIXED (verified 2026-11-04 on seed 0b2c3d015b7)
 severity: medium
 discovered: 2026-07-05
 discovered_by: std.diag (easy-debug-infra P0) implementation + spec work
