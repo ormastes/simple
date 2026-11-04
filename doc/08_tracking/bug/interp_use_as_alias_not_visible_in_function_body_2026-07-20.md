@@ -1,7 +1,7 @@
 # Bug: module-level `use <module> as <alias>` binding not resolvable when referenced inside a function/method body — "variable `<alias>` not found"
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** fixed (stale; closed 2026-11-04)
 - **Area:** interpreter/semantic name resolution for aliased module imports. Reproduced in two independent files:
   - `src/compiler/90.tools/verify/checker.spl:8` (`use verification.regenerate as regen`), used inside top-level `fn known_verification_files()` at line 130
   - `src/compiler_rust/lib/std/src/verification/toolchain.spl:8` (`use host.process as process`), used inside `class ToolchainInfo`'s `static fn detect()` at line 30
@@ -43,3 +43,10 @@ Confirm whether `use MODULE as ALIAS` bindings are supposed to be visible for th
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/tool_checker_spec.spl --no-session-daemon
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/toolchain_detection_spec.spl --no-session-daemon
 ```
+
+## Resolution (2026-11-04): stale, not reproducible on origin/release/1.0.0
+
+- The two cited specs now pass on a test-only seed built from origin/release/1.0.0 (0b2c3d015b7): `tool_checker_spec.spl` 3/3, `toolchain_detection_spec.spl` 9/9.
+- The toolchain failure was a dead import (`host.process` module did not exist), repaired by 4b687ebd924 (-> `std.process`), not an alias-scoping defect.
+- A minimal two-file repro (`use pkg.sub.m as mm` used in a free fn and a `static fn`, dotted path, alias equal to last segment) prints the expected values.
+- Regression spec: `test/01_unit/compiler/use_alias/use_alias_fn_body_spec.spl` (2/2 green).
