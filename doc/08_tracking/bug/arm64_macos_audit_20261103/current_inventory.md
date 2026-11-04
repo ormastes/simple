@@ -58,7 +58,7 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `board_vulkan_cross_arch_boundary_only_x86_64_proven_2026-08-11` |
 | P3 | open | macOS: platform/shared context; native acceptance not inferred | `bootstrap_macos_blocked_seed_compile_and_linux_only_stage3_authority_2026-09-06` |
 | P3 | fix-implemented-verification-pending | ARM64: platform/shared context; native acceptance not inferred | `cargo_test_lib_does_not_compile_on_aarch64_2026-09-13` |
-| P3 | open | macOS: platform/shared context; native acceptance not inferred | `crash_handler_and_fork_bridge_absent_from_seed_macos_2026-09-06` |
+| P3 | fix-implemented, verification-pending | macOS: C selfcheck rt_fork_crash_handler_selfcheck PASS natively (rc=139, 15/15); Simple spec skip_on_interpreter, awaits self-hosted run | `crash_handler_and_fork_bridge_absent_from_seed_macos_2026-09-06` |
 | P3 | closed | macOS: platform/shared context; native acceptance not inferred | `engine2d_metal_gpu_only_clip_unimplemented_2026-07-06` |
 | P3 | closed | macOS, ARM64: platform/shared context; native acceptance not inferred | `gui_smf_dynlib_hot_call_runtime_missing_2026-06-01` |
 | P3 | closed | ARM64: platform/shared context; native acceptance not inferred | `lld_defsym_symbol_argv_quoting_2026-07-12` |
