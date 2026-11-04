@@ -49,7 +49,7 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P2 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_vulkan_provider_availability_live_2026-07-26` |
 | P2 | fixed | ARM64: platform/shared context; native acceptance not inferred | `pristine_seed_cargo_build_broken_blocks_virtio_arm64_repro_2026-08-11` |
 | P2 | fixing | ARM64: platform/shared context; native acceptance not inferred | `simpleos_arm64_el0_server_syscall_and_virtio_net_gap_2026-08-14` |
-| P2 | open | macOS: platform/shared context; native acceptance not inferred | `wm_metal_glass_multi_receipt_opacity_2026-07-27` |
+| P2 | fix-implemented, verification-pending | macOS: specs reconciled 2026-11-04 (seed interp); native Metal blocked on admitted Stage 2 | `wm_metal_glass_multi_receipt_opacity_2026-07-27` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_attested_build_rejects_rust_seed_by_design_2026-09-01` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_desktop_engine2d_media_chain_blockers_2026-09-01` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_desktop_engine2d_seed_codegen_dbd_unresolved_global_2026-09-01` |
