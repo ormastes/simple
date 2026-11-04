@@ -64,6 +64,25 @@ So the RSS kill is a consequence; the root cause is the poison.
   `70.backend/interrupt.spl` uses `if val`. Spec:
   `optional_member_call_parser_spec.spl` 5/5 on the seed (parser via the
   self-hosted frontend + runtime cases for both forms).
+  **Native gap closed (2026-11-05, fix-implemented-verification-pending):**
+  HIR lowering (`expression_core.spl` `optional_chain_desugar`) now desugars
+  `x?.f` and `Call(OptionalChain(x, m), args)` into the bridge's proven
+  `if val` shape -- `{ val __optchain_<line>_<col>_<depth> = x.?`
+  (`bind_optional_payload`) `; if tmp != nil: tmp.f / tmp.m(args) else: nil }`
+  -- so no OptionalChain reaches MIR from the self-hosted frontend (the MIR
+  `E-MIR-EXPR-OptionalChain` arm stays as a backstop for other HIR producers).
+  Spec `test/01_unit/compiler/hir/optional_chain_desugar_spec.spl` 7/7 on the
+  seed (3 HIR-shape cases fail 3/7 without the fix; 4 semantic cases on
+  Some/None/nil/Ok/Err receivers, `??`, chains). Native build of
+  `linker_gen/parser.spl` / `svim/tui_shell.spl` NOT run: needs a compiler
+  deployed from this source (bootstrap lane). Known semantic edges, both
+  pre-existing and recorded rather than changed: (1) the seed wraps a method
+  result in `Some` unconditionally (`x?.maybe(0)` = `Some(None)`, so
+  `x?.maybe(0) ?? d` yields `None`, not `d`) and wraps a nil FIELD as
+  `Some(nil)` (so `a?.next?.next?.v` errors on the seed); native Option is
+  payload-or-nil and flattens, matching the guide's "returns nil if any part
+  is nil". (2) a native `Err` receiver follows whatever `if val v = result`
+  does natively (`.?` -> `rt_is_some` on the Err handle).
 - `git_provider.spl:161,174` `"...^{tree}"` interpolated the local `tree`
   (still `""`) -> `rev^`; escaped as `^\{tree\}` (genuine source bug).
 - **No in-process MIR retry after HIR compile errors.** A MIR shard child

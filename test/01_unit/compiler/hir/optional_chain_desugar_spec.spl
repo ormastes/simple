@@ -1,0 +1,105 @@
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl 5%
+"""
+# Safe navigation (`?.`) lowers to the if-val shape native MIR already supports
+
+**Category:** Compiler / HIR lowering
+**Guide:** doc/07_guide/quick_reference/syntax_quick_reference.md § Safe Navigation
+
+PR #6720 made the self-hosted parser emit `OptionalChain` for `recv?.f` and
+`recv?.m(args)`. Native MIR has no OptionalChain lowering
+(`E-MIR-EXPR-OptionalChain`), so native builds of `src/app/linker_gen/parser.spl`
+and `src/app/svim/tui_shell.spl` failed. HIR lowering now desugars both forms to
+
+    { val __optchain_<line>_<col>_<depth> = recv.?     # bind_optional_payload
+      if __optchain_.. != nil: __optchain_...f  else: nil }
+
+The first group pins that shape; the second pins the observable semantics
+(Some/None/nil/Ok/Err receivers, `??`, chains) the desugar must preserve.
+"""
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering._Expressions.expression_core.*
+use compiler.hir.hir_lowering._Expressions.expression_support.*
+
+fn oc_ident(name: text) -> Expr:
+    Expr(kind: ExprKind.Ident(name), span: Span.empty())
+
+fn oc_lowered_shape(hir: HirExpr) -> text:
+    """`let+if` when `hir` is the desugared block, else the kind seen."""
+    match hir.kind:
+        case HirExprKind.Block(block):
+            if block.stmts.len() < 1:
+                return "empty-block"
+            var saw_let = false
+            match block.stmts[0].kind:
+                case HirStmtKind.Let(_, _, _): saw_let = true
+                case _: ()
+            if not saw_let:
+                return "block-without-let"
+            return "let+if"
+        case HirExprKind.OptionalChain(_, _): return "OptionalChain"
+        case _: return "other"
+
+describe "HIR lowering desugars safe navigation":
+    it "lowers the field form recv?.f to a payload binding plus nil test":
+        var hir = HirLowering.new()
+        hir.symbols.define("recv", SymbolKind.Parameter, nil, Span.empty(), Visibility.Private, false, nil)
+        val chain = Expr(kind: ExprKind.OptionalChain(oc_ident("recv"), "f"), span: Span.empty())
+        expect(oc_lowered_shape(hir.lower_hir_expr(chain))).to_equal("let+if")
+
+    it "lowers the method form recv?.m(args) instead of an indirect call":
+        var hir = HirLowering.new()
+        hir.symbols.define("recv", SymbolKind.Parameter, nil, Span.empty(), Visibility.Private, false, nil)
+        val arg = CallArg(has_name: false, name: "", value: Expr(kind: ExprKind.IntLit(1), span: Span.empty()), span: Span.empty())
+        val callee = Expr(kind: ExprKind.OptionalChain(oc_ident("recv"), "m"), span: Span.empty())
+        val call = Expr(kind: ExprKind.Call(callee, [arg]), span: Span.empty())
+        expect(oc_lowered_shape(hir.lower_hir_expr(call))).to_equal("let+if")
+
+    it "gives nested links distinct temporaries":
+        val inner = Expr(kind: ExprKind.OptionalChain(oc_ident("a"), "b"), span: Span.empty())
+        expect(optional_chain_spine_depth(inner)).to_equal(1)
+        val outer = Expr(kind: ExprKind.OptionalChain(inner, "c"), span: Span.empty())
+        expect(optional_chain_spine_depth(outer)).to_equal(2)
+
+class OcBox:
+    v: i64
+    next: OcBox?
+    fn get() -> i64:
+        self.v
+
+describe "safe navigation semantics":
+    it "accesses a field of a present receiver and yields nil otherwise":
+        val some_box: OcBox? = Some(OcBox(v: 7, next: nil))
+        val none_box: OcBox? = nil
+        expect(some_box?.v ?? -1).to_equal(7)
+        expect(none_box?.v ?? -1).to_equal(-1)
+
+    it "calls a method on a present receiver and yields nil otherwise":
+        val some_box: OcBox? = Some(OcBox(v: 7, next: nil))
+        val none_box: OcBox? = nil
+        expect(some_box?.get() ?? -1).to_equal(7)
+        expect(none_box?.get() ?? -1).to_equal(-1)
+
+    it "unwraps Ok and treats Err as absent":
+        val ok: Result<OcBox, text> = Ok(OcBox(v: 9, next: nil))
+        val er: Result<OcBox, text> = Err("e")
+        expect(ok?.v ?? -1).to_equal(9)
+        expect(er?.v ?? -1).to_equal(-1)
+        expect(ok?.get() ?? -1).to_equal(9)
+        expect(er?.get() ?? -2).to_equal(-2)
+
+    it "short-circuits a chain on the first absent link":
+        val tail = OcBox(v: 3, next: nil)
+        val head: OcBox? = Some(OcBox(v: 1, next: Some(tail)))
+        expect(head?.next?.v ?? -1).to_equal(3)
+        val lone: OcBox? = Some(OcBox(v: 5, next: nil))
+        expect(lone?.v ?? -1).to_equal(5)
+        val missing: OcBox? = nil
+        expect(missing?.next?.v ?? -1).to_equal(-1)

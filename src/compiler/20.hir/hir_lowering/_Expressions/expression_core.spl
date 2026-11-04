@@ -385,6 +385,9 @@ impl HirLowering:
                                     type_: cast_target,
                                     span: e.span
                                 )
+                    case ExprKind.OptionalChain(oc_receiver, oc_method):
+                        # `recv?.m(args)` parses as Call(OptionalChain(recv, m), args).
+                        return self.lower_hir_expr(optional_chain_desugar(oc_receiver, oc_method, true, call_args_t, e.explicit_call_types, e.span))
                     case _:
                         pass
                 var hir_args: [HirCallArg] = []
@@ -401,6 +404,8 @@ impl HirLowering:
                     val call_type_t: Type = call_type
                     hir_type_args = hir_type_args.push(self.lower_type(call_type_t))
                 return HirExpr(kind: HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, hir_type_args), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
+            case ExprKind.OptionalChain(oc_base, oc_field):
+                return self.lower_hir_expr(optional_chain_desugar(oc_base, oc_field, false, [], [], e.span))
             case _:
                 pass
         # SEED PATTERN HAZARD (bug doc iteration 18): when a variant pattern's
@@ -998,9 +1003,6 @@ impl HirLowering:
                                 case _: ()
                         HirExprKind.Index(lowered_base, lowered_index)
 
-            case ExprKind.OptionalChain(base, field):
-                HirExprKind.OptionalChain(self.lower_hir_expr(base), field)
-
             case ExprKind.NullCoalesce(left, right):
                 HirExprKind.NullCoalesce(self.lower_hir_expr(left), self.lower_hir_expr(right))
 
@@ -1396,3 +1398,49 @@ impl HirLowering:
                 HirExprKind.Error
         val wrapped_expr = HirExpr(kind: kind, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
         wrapped_expr
+
+
+# ---------------------------------------------------------------------------
+# Safe navigation (`recv?.f`, `recv?.m(args)`) -- syntax_quick_reference.md
+# § Safe Navigation: a present receiver (Some/Ok payload, or any non-nil
+# value) is accessed, an absent one (nil/None/Err) yields nil, and a chain
+# short-circuits on the first absent link.
+#
+# Desugared here into the exact shape the flat-AST bridge emits for
+# `if val` (convert_nodes.spl STMT_VAL_DECL, bind_optional_payload), which is
+# already lowered on every lane:
+#
+#     { val __optchain_<line>_<col>_<depth> = recv.?
+#       if __optchain_.. != nil: __optchain_...f  else: nil }
+#
+# so `tmp` is bound to the PAYLOAD with its payload type and the access
+# resolves exactly like a hand-written if-val body. Before this, HIR kept an
+# OptionalChain node that native MIR rejects (E-MIR-EXPR-OptionalChain), and
+# the method form reached MIR as an indirect Call through it.
+# ---------------------------------------------------------------------------
+
+fn optional_chain_spine_depth(e: Expr) -> i64:
+    """Number of `?.` links under `e`, so nested links get distinct temps
+    (`a?.b?.c` puts both links at the same source position)."""
+    match e.kind:
+        case ExprKind.OptionalChain(inner, _): return 1 + optional_chain_spine_depth(inner)
+        case ExprKind.Call(callee, _): return optional_chain_spine_depth(callee)
+        case ExprKind.MethodCall(recv, _, _): return optional_chain_spine_depth(recv)
+        # No `Field`/`Block` arms: both are also struct names, and the seed
+        # compiles such a variant test as always-true (see lower_hir_expr's
+        # SEED PATTERN HAZARD note). Spine depth only needs `?.` links.
+        case _: return 0
+
+fn optional_chain_desugar(receiver: Expr, member: text, is_call: bool, args: [CallArg], call_types: [Type], span: Span) -> Expr:
+    val tmp = "__optchain_{span.line}_{span.col}_{optional_chain_spine_depth(receiver)}"
+    val tmp_ref = Expr(kind: ExprKind.Ident(tmp), span: span)
+    val bind = Stmt(kind: StmtKind.Val(tmp, nil, Expr(kind: ExprKind.ExistsCheck(receiver), span: span)), span: span, bind_optional_payload: true)
+    val present_test = Expr(kind: ExprKind.Binary(BinOp.NotEq, tmp_ref, Expr(kind: ExprKind.NilLit, span: span)), span: span)
+    val access = if is_call:
+        Expr(kind: ExprKind.MethodCall(tmp_ref, member, args), span: span, explicit_call_types: call_types)
+    else:
+        Expr(kind: ExprKind.Field(tmp_ref, member), span: span)
+    val then_block = Block(stmts: [Stmt(kind: StmtKind.Expr(access), span: span)], span: span)
+    val else_block = Block(stmts: [Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)], span: span)
+    val select = Expr(kind: ExprKind.If(present_test, then_block, Some(else_block)), span: span)
+    Expr(kind: ExprKind.Block(Block(stmts: [bind, Stmt(kind: StmtKind.Expr(select), span: span)], span: span)), span: span)

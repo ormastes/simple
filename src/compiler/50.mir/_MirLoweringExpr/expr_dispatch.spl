@@ -266,6 +266,15 @@ impl MirLowering:
                                 val identity = self.declared_struct_layout_key(self.composite_layout_key(owner))
                                 if identity != "": return identity
                             case _: ()
+                case TypeParam(param_name, _):
+                    # A type-param field read whose instance nothing records
+                    # (`r.v` on an argumentless `r: W`): the Field arm notes
+                    # the parameter's name as the value's owner so an operator
+                    # on it is refused ("operator overload for struct T"), never
+                    # lowered as arithmetic on two erased words. The note alone
+                    # is not evidence; it must agree with the declared type.
+                    if (self.struct_value_syms.get(local.id) ?? "") == param_name:
+                        return param_name
                 case _: ()
         fallback
 
@@ -948,6 +957,221 @@ impl MirLowering:
                 case _:
                     return nil
         nil
+
+    fn struct_type_param_position(name: text, names: [text]) -> i64:
+        var i = 0
+        while i < names.len():
+            if names[i] == name:
+                return i
+            i = i + 1
+        -1
+
+    fn substitute_struct_type_params(ty: HirType, names: [text], args: [HirType]) -> HirType:
+        """`ty` with every type parameter of `names` (either spelling:
+        `TypeParam`, or `Named` of a symbol declared as a type parameter)
+        replaced by the positional argument in `args`. A parameter without
+        an argument stays as written. Generics are erased (one body per
+        generic fn): this is the USE SITE's instance (`Bag<text>`) typing a
+        field read, not a specialization of the declaration."""
+        match ty.kind:
+            case HirTypeKind.TypeParam(name, _):
+                val at = self.struct_type_param_position(name, names)
+                if at >= 0 and at < args.len():
+                    val arg: HirType = args[at]
+                    return arg
+                ty
+            case HirTypeKind.Named(sym, sub_args):
+                val optional_info: HirSymbol? = self.symbols.get_symbol_raw(sym.id)
+                if val present_info = optional_info:
+                    val info: HirSymbol = present_info
+                    if info.kind == SymbolKind.TypeParam:
+                        val named_at = self.struct_type_param_position(info.name, names)
+                        if named_at >= 0 and named_at < args.len():
+                            val named_arg: HirType = args[named_at]
+                            return named_arg
+                        return ty
+                if sub_args.len() == 0:
+                    return ty
+                HirType(kind: HirTypeKind.Named(sym, self.substitute_struct_type_params_all(sub_args, names, args)), span: ty.span)
+            case HirTypeKind.Array(elem, size):
+                HirType(kind: HirTypeKind.Array(self.substitute_struct_type_params(elem, names, args), size), span: ty.span)
+            case HirTypeKind.Slice(elem):
+                HirType(kind: HirTypeKind.Slice(self.substitute_struct_type_params(elem, names, args)), span: ty.span)
+            case HirTypeKind.Optional(inner):
+                HirType(kind: HirTypeKind.Optional(self.substitute_struct_type_params(inner, names, args)), span: ty.span)
+            case HirTypeKind.Dict(k, v):
+                HirType(kind: HirTypeKind.Dict(self.substitute_struct_type_params(k, names, args), self.substitute_struct_type_params(v, names, args)), span: ty.span)
+            case HirTypeKind.Result(ok, err):
+                HirType(kind: HirTypeKind.Result(self.substitute_struct_type_params(ok, names, args), self.substitute_struct_type_params(err, names, args)), span: ty.span)
+            case HirTypeKind.Tuple(elems):
+                HirType(kind: HirTypeKind.Tuple(self.substitute_struct_type_params_all(elems, names, args)), span: ty.span)
+            case _: ty
+
+    fn substitute_struct_type_params_all(types: [HirType], names: [text], args: [HirType]) -> [HirType]:
+        var out: [HirType] = []
+        for raw in types:
+            val t: HirType = raw
+            out.push(self.substitute_struct_type_params(t, names, args))
+        out
+
+    me generic_instance_field_substituted(owner: text, base_local: LocalId, field_idx: i64) -> HirType?:
+        """Declared type of field `field_idx` of generic struct `owner` with
+        the base local's own HIR type arguments (`Bag<text>` on a parameter,
+        an annotated let, a call result, a construct site) substituted for
+        the struct's type parameters: `items: [T]` reads as `[text]`,
+        `first: T?` as `text?`. nil when the base carries no arguments or
+        the result still mentions a parameter (an erased generic body's
+        `Bag<T>` substitutes to itself and stays unknown here)."""
+        if not self.struct_type_param_names.has(owner):
+            return nil
+        if not self.struct_field_hir_type.contains(owner):
+            return nil
+        val field_types: [HirType] = self.struct_field_hir_type[owner]
+        if field_idx < 0 or field_idx >= field_types.len():
+            return nil
+        val base_hir: HirType? = self.find_local_hir_type(base_local.id)
+        if val present_base = base_hir:
+            val base_t: HirType = present_base
+            match base_t.kind:
+                case HirTypeKind.Named(_, args):
+                    if args.len() == 0:
+                        return nil
+                    val declared: HirType = field_types[field_idx]
+                    val substituted = self.substitute_struct_type_params(declared, self.struct_type_param_names[owner], args)
+                    if self.hir_type_mentions_type_param(substituted, self.symbols):
+                        return nil
+                    return Some(substituted)
+                case _:
+                    return nil
+        nil
+
+    fn bind_struct_type_params(declared: HirType, actual: HirType, names: [text], bindings: Dict<text, HirType>) -> Dict<text, HirType>:
+        """Bind the type parameters of `names` that `declared` (a field's
+        declared type) mentions to the matching parts of `actual` (the type
+        of the value a construct site stores in that field): `v: T` against
+        `text` binds T=text, `items: [T]` against `[text]` binds T=text, a
+        present `T?` slot binds from the bare payload. Only a fully
+        instantiated part binds; the first binding of a name wins."""
+        match actual.kind:
+            case HirTypeKind.Error | HirTypeKind.Infer(_, _): return bindings
+            case _: ()
+        match declared.kind:
+            case HirTypeKind.TypeParam(name, _):
+                if self.struct_type_param_position(name, names) >= 0 and not bindings.has(name) and not self.hir_type_mentions_type_param(actual, self.symbols):
+                    bindings[name] = actual
+                bindings
+            case HirTypeKind.Named(sym, d_args):
+                val optional_info: HirSymbol? = self.symbols.get_symbol_raw(sym.id)
+                if val present_info = optional_info:
+                    val info: HirSymbol = present_info
+                    if info.kind == SymbolKind.TypeParam:
+                        if self.struct_type_param_position(info.name, names) >= 0 and not bindings.has(info.name) and not self.hir_type_mentions_type_param(actual, self.symbols):
+                            bindings[info.name] = actual
+                        return bindings
+                match actual.kind:
+                    case HirTypeKind.Named(_, a_args):
+                        return self.bind_struct_type_params_all(d_args, a_args, names, bindings)
+                    case _: ()
+                bindings
+            case HirTypeKind.Array(d_elem, _):
+                match actual.kind:
+                    case HirTypeKind.Array(a_elem, _) | HirTypeKind.Slice(a_elem):
+                        return self.bind_struct_type_params(d_elem, a_elem, names, bindings)
+                    case _: ()
+                bindings
+            case HirTypeKind.Slice(d_elem):
+                match actual.kind:
+                    case HirTypeKind.Array(a_elem, _) | HirTypeKind.Slice(a_elem):
+                        return self.bind_struct_type_params(d_elem, a_elem, names, bindings)
+                    case _: ()
+                bindings
+            case HirTypeKind.Optional(d_inner):
+                match actual.kind:
+                    case HirTypeKind.Optional(a_inner):
+                        return self.bind_struct_type_params(d_inner, a_inner, names, bindings)
+                    case _:
+                        return self.bind_struct_type_params(d_inner, actual, names, bindings)
+            case HirTypeKind.Dict(d_key, d_value):
+                match actual.kind:
+                    case HirTypeKind.Dict(a_key, a_value):
+                        val with_key = self.bind_struct_type_params(d_key, a_key, names, bindings)
+                        return self.bind_struct_type_params(d_value, a_value, names, with_key)
+                    case _: ()
+                bindings
+            case HirTypeKind.Tuple(d_elems):
+                match actual.kind:
+                    case HirTypeKind.Tuple(a_elems):
+                        return self.bind_struct_type_params_all(d_elems, a_elems, names, bindings)
+                    case _: ()
+                bindings
+            case _: bindings
+
+    fn bind_struct_type_params_all(declared: [HirType], actual: [HirType], names: [text], bindings: Dict<text, HirType>) -> Dict<text, HirType>:
+        var out = bindings
+        var i = 0
+        while i < declared.len() and i < actual.len():
+            val d: HirType = declared[i]
+            val a: HirType = actual[i]
+            out = self.bind_struct_type_params(d, a, names, out)
+            i = i + 1
+        out
+
+    me construct_field_source_hir_type(source: HirExpr, local: LocalId, span: Span) -> HirType:
+        """HIR type of a value stored into a generic struct's field at a
+        construct site: the remembered/stamped HIR type when there is one,
+        else the primitive the lowered local's MIR type proves (a text or
+        scalar literal carries no HIR type of its own). Error when unknown."""
+        val source_type = self.aggregate_literal_source_type(source, local)
+        match source_type.kind:
+            case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+            case _: return source_type
+        if self.local_is_str(local):
+            return HirType(kind: HirTypeKind.Str, span: span)
+        # A bare scalar MIR word proves a type only for a LITERAL source: an
+        # erased generic call result (`W(v: ident("a"))`) is an I64 word too,
+        # and binding T=i64 from it would mistype the instance. Unknown stays
+        # unknown (the construct remembers an argumentless `W`).
+        val scalar_literal = match source.kind:
+            case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.BoolLit(_): true
+            case _: false
+        if val mir_type = self.local_mir_type_of(local):
+            match mir_type.kind:
+                case MirTypeKind.I64:
+                    if scalar_literal: return HirType(kind: HirTypeKind.Int(64, true), span: span)
+                case MirTypeKind.F64:
+                    if scalar_literal: return HirType(kind: HirTypeKind.Float(64), span: span)
+                case MirTypeKind.Bool:
+                    if scalar_literal: return HirType(kind: HirTypeKind.Bool, span: span)
+                case MirTypeKind.Array(elem, _):
+                    # Same rule per element: a scalar element type counts
+                    # only for a literal array whose elements are all scalar
+                    # literals; a text element is proven by its MIR type.
+                    var scalar_literal_elements = false
+                    match source.kind:
+                        case HirExprKind.ArrayLit(array_elements, _):
+                            scalar_literal_elements = array_elements.len() > 0
+                            for array_element in array_elements:
+                                val ae: HirExpr = array_element
+                                match ae.kind:
+                                    case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.BoolLit(_): ()
+                                    case _: scalar_literal_elements = false
+                        case _: ()
+                    match elem.kind:
+                        case MirTypeKind.Opaque(tag):
+                            if tag == "str":
+                                return HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Str, span: span), None), span: span)
+                        case MirTypeKind.I64:
+                            if scalar_literal_elements:
+                                return HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Int(64, true), span: span), None), span: span)
+                        case MirTypeKind.F64:
+                            if scalar_literal_elements:
+                                return HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Float(64), span: span), None), span: span)
+                        case MirTypeKind.Bool:
+                            if scalar_literal_elements:
+                                return HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Bool, span: span), None), span: span)
+                        case _: ()
+                case _: ()
+        HirType(kind: HirTypeKind.Error, span: span)
 
     me declared_field_type_in_current_table(owner: text, field_idx: i64, declared: HirType) -> HirType:
         """Rebind a declared field type's `Named` symbol into `self.symbols`.
@@ -3930,6 +4154,18 @@ impl MirLowering:
                 # defaulting to field index 0 for every field name.
                 if has_real_struct_name:
                     self.struct_value_syms[decoded_elem.id] = esn
+                    # An element of `[W<text>]` keeps its instance arguments
+                    # on the decoded local, so a type-param field read off it
+                    # (`xs[0].v`) is typed by that instance, not the template.
+                    if val indexed_base_hir = self.find_local_hir_type(base_local.id):
+                        match indexed_base_hir.kind:
+                            case HirTypeKind.Array(indexed_elem_hir, _) | HirTypeKind.Slice(indexed_elem_hir):
+                                match indexed_elem_hir.kind:
+                                    case HirTypeKind.Named(_, indexed_elem_args):
+                                        if indexed_elem_args.len() > 0 and not self.hir_type_mentions_type_param(indexed_elem_hir, self.symbols):
+                                            self.remember_local_hir_type(decoded_elem.id, indexed_elem_hir, 0, 0)
+                                    case _: ()
+                            case _: ()
                 self.remember_array_index_projection_provenance(base_local, decoded_elem)
                 decoded_elem
             else:
@@ -5794,6 +6030,20 @@ impl MirLowering:
                                     generic_field_hir = self.generic_instance_field_hir_arg(generic_owner, base_local, field_idx)
                                 else:
                                     generic_field_unknown_param = bare_param
+                            else:
+                                # `items: [T]` / `first: T?` read off a base whose
+                                # HIR type carries the instance's arguments: the
+                                # declared shape with the arguments substituted
+                                # (erased generics -- the use site's `Bag<text>`
+                                # types the read, the template stays one body).
+                                val substituted_field: HirType? = self.generic_instance_field_substituted(generic_owner, base_local, field_idx)
+                                if val present_substituted = substituted_field:
+                                    val substituted_t: HirType = present_substituted
+                                    val (sub_type, sub_nested) = self.instance_field_mir_type(substituted_t)
+                                    generic_field_resolved = true
+                                    generic_field_hir = substituted_field
+                                    field_type = sub_type
+                                    generic_field_nested_name = sub_nested
                     var field_builder = self.builder
                     val field_result = field_builder.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                     self.builder = field_builder

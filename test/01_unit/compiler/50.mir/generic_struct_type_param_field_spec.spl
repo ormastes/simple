@@ -114,13 +114,14 @@ describe "generic struct type-param fields take the instantiation's type (BUG-IT
             "    w.v.n\n")
         expect_clean(s)
 
-    # The frontend drops the arguments of a same-module `Pair<text, i64>`
-    # ANNOTATION (the parameter reaches HIR as bare `Pair`), so nothing knows
-    # this instance. Moving the field is fine; an operator on it is refused
-    # exactly as before BUG-IT-6 -- never lowered as an integer add of two
-    # field words. (This example used to claim the declared arguments typed
-    # the read; its only assertion was the absence of a diagnostic.)
-    it "a parameter declared Pair<text, i64>: a field move lowers, an operator on it is refused":
+    # A same-module `Pair<text, i64>` ANNOTATION retains its arguments
+    # (H-ANNOT, 1f20215b28d; see generic_struct_field_instance_paths_spec),
+    # so the parameter's instance IS known: moving the field lowers, and an
+    # operator on `p.b` is the instantiation's integer add -- the refusal
+    # this example used to pin was for the frontend gap that dropped the
+    # arguments, which no longer exists. Only a genuinely argumentless
+    # receiver (`p: Pair`) stays unknown and is refused.
+    it "a parameter declared Pair<text, i64>: a field move lowers, an operator on it adds as an integer":
         val moved = shape(
             "fn first(p: Pair<text, i64>) -> text:\n" +
             "    p.a\n" +
@@ -136,12 +137,10 @@ describe "generic struct type-param fields take the instantiation's type (BUG-IT
             "\n" +
             "fn main() -> i64:\n" +
             "    second(Pair<text, i64>(a: \"a\", b: 7))\n")
-        var refused = false
-        for e in operated.mir_errors:
-            val et: text = e
-            if et.contains("operator overload for struct B"):
-                refused = true
-        expect(refused).to_equal(true)
+        expect_clean(operated)
+        expect(operated.ir.contains("add nsw i64")).to_equal(true)
+        # The runtime `declare` of rt_strcat is in every module; only a call counts.
+        expect(operated.ir.contains("call ptr @rt_strcat")).to_equal(false)
 
     it "a copied binding keeps the instance's field types":
         val s = shape(
