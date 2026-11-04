@@ -2,7 +2,7 @@
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
 use compiler.core.ast.{decl_get, decl_get_field_types, expr_get, stmts_contain_yield}
-use compiler.core.ast_expr.{EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_LAMBDA, EXPR_METHOD_CALL}
+use compiler.core.ast_expr.{EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_LAMBDA, EXPR_METHOD_CALL, expr_owner_int}
 use compiler.core.ast_expr.{EXPR_SPREAD, expr_get_arg_names, expr_get_left, expr_get_tag}
 use compiler.core.interpreter.eval.{eval_block, eval_current_decl_id, eval_defer_depth, eval_defer_depths, eval_defer_eids}
 use compiler.core.interpreter.eval.{eval_errdefer_depths, eval_errdefer_eids, eval_expr, eval_had_error, eval_implicit_new_stack}
@@ -10,7 +10,7 @@ use compiler.core.interpreter.eval.{eval_return_value, eval_returning, eval_set_
 use compiler.core.interpreter.eval.{eval_caller_file, type_check_value, val_is_boxed_enum}
 use compiler.core.interpreter.eval_builtins.{eval_builtin_call}
 use compiler.core.interpreter.eval_stmts.{eval_stmt}
-use compiler.core.interpreter.eval_tables.{enum_table_lookup, func_flat_lookup_for_caller, func_resolve_for_caller, func_table_lookup, struct_table_lookup}
+use compiler.core.interpreter.eval_tables.{enum_table_lookup, func_flat_lookup_for_caller, func_module_namespace_lookup, func_resolve_for_caller, func_resolve_module_member_for_caller, func_table_lookup, struct_table_lookup}
 use compiler.core.types.{TYPE_I16, TYPE_I32, TYPE_I8, TYPE_U16, TYPE_U32}
 use compiler.core.types.{TYPE_U64, TYPE_U8}
 use compiler.frontend.core.interpreter.eval_ops.*
@@ -700,6 +700,20 @@ fn eval_method_call(eid: i64) -> i64:
     # first, then Type__method in the function table.
     if expr_get(receiver_eid).tag == EXPR_IDENT:
         val type_name = expr_get(receiver_eid).s_val
+        # `use mod as ns` namespace: `ns.member(args)` is a call on the
+        # provider's member, not a method call on a value named `ns`.
+        if expr_owner_int(receiver_eid) < 0 and env_lookup(type_name) < 0 and
+           struct_table_lookup(type_name) < 0 and
+           func_module_namespace_lookup(eval_caller_file(), type_name) != "":
+            val member_decl = func_resolve_module_member_for_caller(
+                eval_caller_file(), type_name, method_name)
+            if member_decl >= 0:
+                return eval_function_call(member_decl, arg_eids, arg_names)
+            val member_struct = struct_table_lookup(method_name)
+            if member_struct >= 0:
+                return eval_struct_constructor(method_name, member_struct, arg_eids, arg_names)
+            eval_set_error("undefined namespace member: " + type_name + "." + method_name)
+            return -1
         val enum_variants = enum_table_lookup(type_name)
         if enum_variants != "":
             val variant_list = enum_variants.split(",")
