@@ -21,6 +21,7 @@ use compiler.mir._MirLowering.function_lowering.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_cfg_select.{mir_cfg_select_arm, mir_cfg_item_enabled}
 use compiler.core.cfg_platform.{cfg_enabled_features}
+use compiler.mir.mir_target_hir_select.{mir_target_hir_mode_from_env, mir_target_hir_live_select}
 use compiler.mir.mir_verify_levels.{mir_verify_levels_from_env}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
@@ -122,7 +123,20 @@ impl MirLowering:
         if else_.?:
             conditions.push("")
             has_else = true
-        val idx = mir_cfg_select_arm(conditions, self.target_context, cfg_enabled_features())
+        val features = cfg_enabled_features()
+        var idx = mir_cfg_select_arm(conditions, self.target_context, features)
+        # P4: SIMPLE_TARGET_HIR_MODE=shadow|typed routes through the TargetHIR
+        # reader (off by default). A shadow divergence is fatal.
+        val th_mode = mir_target_hir_mode_from_env()
+        if th_mode.is_err():
+            self.error_fatal(th_mode.unwrap_err(), nil)
+            return self.builder.new_temp(MirType.unit())
+        if th_mode.unwrap() != "legacy":
+            val checked = mir_target_hir_live_select(th_mode.unwrap(), self.current_module_id, conditions, self.target_context, features, idx)
+            if checked.is_err():
+                self.error_fatal(checked.unwrap_err(), nil)
+                return self.builder.new_temp(MirType.unit())
+            idx = checked.unwrap()
         if idx == -2:
             self.error_fatal("malformed @cfg/@when condition in cfg select", nil)
             return self.builder.new_temp(MirType.unit())

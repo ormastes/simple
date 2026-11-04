@@ -2,13 +2,20 @@
 # MIR consumes the target only through a TargetHIR handle bound to a frozen
 # snapshot; a handle for a different snapshot is rejected instead of silently
 # selecting with the wrong target. Selection itself delegates to the existing
-# mir_cfg_select_arm, so this reader is equivalent to the legacy path. The
-# legacy MirLowering.lower_cfg_select route is unchanged; no caller is
-# switched over yet.
+# mir_cfg_select_arm, so this reader is equivalent to the legacy path.
+#
+# P4 wiring: MirLowering.lower_cfg_select consults SIMPLE_TARGET_HIR_MODE
+# (legacy|shadow|typed, default legacy). shadow recomputes the arm through the
+# typed reader and fails on divergence but keeps the legacy arm; typed uses the
+# typed arm. The live path has no frozen HirSnapshot yet, so it binds a
+# synthetic per-module snapshot id: snapshot identity is NOT enforced on the
+# live path until P5/P6.
 
+use compiler.hir.target_hir.target_hir_flags.{target_hir_mode_parse_strict, target_hir_mode_strict}
+use compiler.common.mir_target_context.{MirTargetContext}
 use compiler.mir.mir_cfg_select.{mir_cfg_select_arm}
-use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_equals, hir_snapshot_id_text}
-use compiler.hir.target_hir.target_hir.{TargetHIR}
+use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_new, hir_snapshot_id_equals, hir_snapshot_id_text}
+use compiler.hir.target_hir.target_hir.{TargetHIR, target_hir_for_context}
 
 # Ok(index of the chosen arm) or Ok(-1) for "no arm"; malformed -> Err.
 fn mir_target_hir_select_arm(view: TargetHIR, snapshot: HirSnapshotId, conditions: [text], features: [text]) -> Result<i64, text>:
@@ -20,3 +27,40 @@ fn mir_target_hir_select_arm(view: TargetHIR, snapshot: HirSnapshotId, condition
     if idx < 0:
         return Ok(-1)
     Ok(idx)
+
+# Mode is owned by target_hir_flags (U0). The live path uses the STRICT form:
+# a typo is a fatal MIR error, never a silent legacy.
+fn mir_target_hir_mode_parse(raw: text) -> Result<text, text>:
+    target_hir_mode_parse_strict(raw)
+
+fn mir_target_hir_mode_from_env() -> Result<text, text>:
+    target_hir_mode_strict()
+
+# Equivalence mapping: legacy -2 <=> Err(malformed); legacy <0 <=> Ok(-1);
+# legacy i <=> Ok(i). Returns the arm index lower_cfg_select must use
+# (legacy encoding: -2 malformed, -1 none) or Err on a shadow divergence.
+fn mir_target_hir_live_select(mode: text, module_name: text, conditions: [text], target: MirTargetContext, features: [text], legacy_idx: i64) -> Result<i64, text>:
+    if mode == "legacy":
+        return Ok(legacy_idx)
+    val snap = hir_snapshot_id_new(if module_name.trim() == "": "mir.live_lowering" else: module_name, "live-lowering-unfrozen", 0)
+    if snap.is_err():
+        return Err(snap.unwrap_err())
+    val view = target_hir_for_context(snap.unwrap(), target, "cfg_select")
+    if view.is_err():
+        return Err(view.unwrap_err())
+    val typed = mir_target_hir_select_arm(view.unwrap(), snap.unwrap(), conditions, features)
+    var typed_idx = -1
+    if typed.is_err():
+        if typed.unwrap_err() != "target_hir_malformed_cfg_condition":
+            return Err(typed.unwrap_err())
+        typed_idx = -2
+    else:
+        typed_idx = typed.unwrap()
+    var legacy_norm = legacy_idx
+    if legacy_norm < 0 and legacy_norm != -2:
+        legacy_norm = -1
+    if typed_idx != legacy_norm:
+        return Err("target_hir_shadow_mismatch: legacy=" + legacy_idx.to_string() + " typed=" + typed_idx.to_string())
+    if mode == "typed":
+        return Ok(typed_idx)
+    Ok(legacy_idx)
