@@ -15,7 +15,7 @@ use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use compiler.backend.runtime_object_cache_windows.{runtime_windows_cache_toolchain_v1, runtime_windows_cached_compile_v1, runtime_windows_cache_publish_batch_v1}
 use compiler.backend.runtime_tagged_callback_owner_v1.{runtime_tagged_callback_owner_v1}
 use compiler.backend.runtime_object_cache_posix.{runtime_posix_cache_fingerprint_command_v1}
-use std.io_runtime.{host_arch, host_os, env_get_nullable, file_copy, file_exists, file_delete, file_write, file_hash_sha256_or_empty, process_run}
+use std.io_runtime.{host_arch, host_os, env_get_nullable, file_copy, file_exists, file_delete, file_read, file_write, file_hash_sha256_or_empty, process_run}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_cap_bytes}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
@@ -679,6 +679,68 @@ pub fn runtime_thread_rust_owner_v1(runtime_owner: text, include_dynload: bool,
     if include_dynload or core_c_profile: return false
     coff_host or target.contains("-windows-")
 
+pub fn runtime_bundle_nested_c_include_v1(source_text: text, bundle: [text]) -> text:
+    """Name the bundle member that `source_text` textually `#include`s as a `.c`
+    translation unit, or "" when it includes none.
+
+    Only a preprocessor line counts: `#include "x.c"` (any spacing after the
+    `#`). Header includes, `<...>` system includes, and prose that merely
+    mentions a `.c` file inside a comment (runtime_process_owned.c:369 cites
+    `rt_proc_start_time (runtime_process_tree.c)`) never match. The included
+    path is matched against the bundle names as spelled in the source lists
+    (`runtime_process_tree`, `platform/async_windows`), so a `.c` include of a
+    file the bundle does NOT compile separately is allowed -- that is exactly
+    the frozen-stage2 process-tree shadow (stage2-runtime-process-tree-shadow.shs),
+    whose source list omits runtime_process_tree.
+    """
+    for raw_line in source_text.split("\n"):
+        val line = raw_line.trim()
+        if not line.starts_with("#"):
+            continue
+        val directive = line.substring(1, line.len()).trim()
+        if not directive.starts_with("include"):
+            continue
+        val open_quote = directive.find("\"")
+        if open_quote < 0:
+            continue
+        val after_open = directive.substring(open_quote + 1, directive.len())
+        val close_quote = after_open.find("\"")
+        if close_quote < 0:
+            continue
+        val included = after_open.substring(0, close_quote)
+        if not included.ends_with(".c"):
+            continue
+        val stem = included.substring(0, included.len() - 2)
+        for name in bundle:
+            if name == stem:
+                return name
+    ""
+
+pub fn runtime_bundle_duplicate_owner_sources_v1(rt_dir: text, sources: [text]) -> [text]:
+    """Every bundle source that would define another bundle member's exports a
+    second time, as `"<a>.c includes <b>.c"` lines.
+
+    Incident 2026-11-04: a stale shadow root (SIMPLE_PROJECT_ROOT pointing at a
+    stage2 process-tree shadow) carried runtime_process_owned.c with
+    `#include "runtime_process_tree.c"` appended, while the core-C list already
+    compiled runtime_process_tree.c on its own. Both objects then exported
+    rt_process_tree_support, rt_process_spawn_session, rt_process_kill_tree,
+    rt_proc_start_time, ... and every link of the stage3 output died on
+    `duplicate symbol` with no hint of which root was stale. The source lists
+    are the authority on which translation units own which exports, so the
+    overlap is detectable before a compiler runs. Missing sources are not
+    reported here; the compile loop already rejects them by name.
+    """
+    var offenders: [text] = []
+    for name in sources:
+        val src_path = "{rt_dir}/{name}.c"
+        if not file_exists(src_path):
+            continue
+        val nested = runtime_bundle_nested_c_include_v1(file_read(src_path), sources)
+        if nested != "":
+            offenders = offenders.push("{name}.c includes {nested}.c")
+    offenders
+
 pub fn runtime_object_paths_v1(sources: [text], prefix: text, ext: text) -> [text]:
     """Keep each object basename paired with the source that produced it."""
     var objects: [text] = []
@@ -803,6 +865,10 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     for name in sources:
         if name == "runtime_legacy_core":
             legacy_owner = true
+    val nested_owners = runtime_bundle_duplicate_owner_sources_v1(rt_dir, sources)
+    if nested_owners.len() > 0:
+        val nested_list = nested_owners.join("; ")
+        return Err("runtime bundle '{runtime_profile}' would define its exports twice ({nested_list}) in {rt_dir}; the runtime source dir carries a stale stage2 process-tree shadow include -- point SIMPLE_PROJECT_ROOT (or cwd) at a checkout whose src/runtime matches this compiler")
     val objects = runtime_object_paths_v1(sources, object_prefix, ext)
     var object_count = 0
     val cache_dir = _runtime_object_cache_dir(
