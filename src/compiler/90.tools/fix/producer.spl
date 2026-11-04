@@ -1,0 +1,70 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# Shared source-edit core — the analysed unit producers run over, and the
+# producer descriptor (rev-3 FixProvider). A producer maps one unit to
+# proposals and NOTHING else: it never writes, never validates its own output.
+#
+# Producers are routed by stable diagnostic code through an explicit, greppable
+# dispatcher (compiler.tools.fix.builtins.run_builtin_producer and
+# rules.registry.run_registry_producer) rather than fn values stored in the
+# descriptor: `--diagnostic=CODE`, profiling labels and the code->rule map stay
+# in one place, and the descriptor stays plain data for the LSP/MCP listings.
+use std.tooling.easy_fix.snapshot.{SourceSnapshot, source_snapshot}
+use std.tooling.easy_fix.node_view.{NodeView}
+use std.tooling.easy_fix.rules_helpers.{EasyFixSourceView, easy_fix_source_view, LineContext}
+use compiler.tools.fix.node_view_walk.{collect_node_views}
+use std.nogc_sync_mut.io_runtime.{env_get, time_now_unix_micros}
+
+pub struct FixUnit:
+    file: text
+    source: text
+    snapshot: SourceSnapshot
+    lines: [text]
+    std_view: EasyFixSourceView
+    contexts: [LineContext]
+    views: [NodeView]
+    views_ready: bool
+
+pub struct FixProducer:
+    code: text
+    needs_views: bool
+
+pub fn fix_producer(code: text) -> FixProducer:
+    FixProducer(code: code, needs_views: false)
+
+pub fn fix_view_producer(code: text) -> FixProducer:
+    FixProducer(code: code, needs_views: true)
+
+pub fn fix_unit_from_snapshot(snapshot: SourceSnapshot) -> FixUnit:
+    val lines = snapshot.source.split("\n")
+    val std_view: EasyFixSourceView = easy_fix_source_view(lines)
+    FixUnit(file: snapshot.file, source: snapshot.source, snapshot: snapshot, lines: lines,
+        std_view: std_view, contexts: std_view.contexts, views: [], views_ready: false)
+
+pub fn fix_unit_from_source(file: text, source: text) -> FixUnit:
+    fix_unit_from_snapshot(source_snapshot(file, source))
+
+# Node views are built once, only when a producer asks for them. A file that
+# does not parse yields no views (view producers see an empty list).
+pub fn fix_unit_views(mut unit: FixUnit) -> [NodeView]:
+    if not unit.views_ready:
+        match collect_node_views(unit.snapshot):
+            case Ok(views): unit.views = views
+            case Err(_): unit.views = []
+        unit.views_ready = true
+    unit.views
+
+# Per-rule timing probe (level-gated, DEFAULT OFF) — same idiom as
+# lint_prof_now/mark in lint._LintMain.lint_checks. With SIMPLE_LINT_PROFILE
+# unset, no clock read, no output, no behaviour change.
+pub fn rules_prof_now() -> i64:
+    if env_get("SIMPLE_LINT_PROFILE") == "":
+        return 0
+    time_now_unix_micros()
+
+pub fn rules_prof_mark(label: text, t0: i64) -> i64:
+    if t0 == 0:
+        return 0
+    val now = time_now_unix_micros()
+    print("LINTPROF\trule:{label}\t{now - t0}")
+    now
+

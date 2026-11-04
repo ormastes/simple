@@ -3,18 +3,20 @@
 # Usage: simple fix <file.spl> [--dry-run] [--fix-all] [--fix-interactive]
 
 # I/O imports
-use std.nogc_sync_mut.io.file_ops (file_read, file_atomic_write, file_exists, file_size_raw)
+use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_size_raw)
 use std.nogc_sync_mut.io_runtime.{dir_exists}
 use app.io.cli_ops (get_args)
 use std.async.future.{Future}
 
 # Import EasyFix data types from stdlib
 use std.tooling.easy_fix.types.{EasyFix, Replacement, FixReport, FixConfidence, FixApplicator}
-use std.tooling.easy_fix.types.{easyfix_replacements, easyfix_id, easyfix_description}
-use compiler.tools.fix.rules.registry.{check_all_rules}
+use std.tooling.easy_fix.types.{easyfix_replacements, easyfix_id}
+
 use compiler.tools.fix.source_edits.{validated_fix_sources}
-use compiler.tools.fix.rules.impl_.lint_primitive_api.{check_primitive_api}
-use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_required}
+
+use compiler.tools.fix.producer.{fix_unit_from_source}
+use compiler.tools.fix.builtins.{builtin_fix_producers, run_fix_producers}
+use compiler.tools.fix.engine.{snapshots_from_sources, fix_validate, fix_apply_outcome}
 
 # `stdin_read_char` is an always-linked runtime primitive (see
 # std.mcp_sdk.transport.stdio.stdio_read_line for the reference pattern).
@@ -69,33 +71,14 @@ class FixToolApplicator:
                 out = out.push(f)
         out
 
+# Snapshot-writer entry for `simple fix` and lint --fix: staged validation
+# (version, edits, reparse) then the drift-guarded atomic write — all in
+# compiler.tools.fix.engine, shared with `simple code refactor` and the LSP.
 pub fn apply_fixes_to_disk(fixes: [EasyFix], sources: Dict<String, String>, dry_run: Bool) -> Result<FixReport, String>:
-    val result = FixToolApplicator.apply(fixes, sources)
-    match result:
-        case Err(e):
-            return Err(e)
-        case Ok(new_contents):
-            var report = FixReport(applied: 0, skipped: 0, modified_files: [], details: [])
-            report.applied = fixes.len()
-
-            # Admit every current file before the first write. The source map
-            # is the analyzed revision, not a fresh replacement for its authority.
-            for file in new_contents.keys():
-                if not file_exists(file) or file_read(file) != sources[file]:
-                    return Err("{file}:1:1: source changed since analysis; no fixes applied; rerun lint")
-            for file in new_contents.keys():
-                # Recheck immediately before each atomic write. This is a stale
-                # snapshot guard, not a filesystem compare-and-swap transaction.
-                if not file_exists(file) or file_read(file) != sources[file]:
-                    return Err("{file}:1:1: source changed before fix write; stopped; rerun lint")
-                if not dry_run and not file_atomic_write(file, new_contents[file]):
-                    return Err("Atomic fix write failed: {file}")
-                report.modified_files.push(file)
-
-            for fix in fixes:
-                report.details.push("[{easyfix_id(fix)}] {easyfix_description(fix)}")
-
-            Ok(report)
+    val outcome = fix_validate(fixes, snapshots_from_sources(sources))
+    if not outcome.report.ok:
+        return Err(outcome.report.errors.join("; "))
+    fix_apply_outcome(outcome, dry_run)
 
 pub fn fix_read_source(path: text) -> Result<text, text>:
     if not file_exists(path):
@@ -233,63 +216,8 @@ async fn main() -> Int:
 
     return 0
 
-# Collect EasyFix instances from source analysis using shared rules
+# Collect proposals for one source through the shared built-in producer set
+# (compiler.tools.fix.builtins); same path as lint --fix and code actions.
 pub fn collect_fixes_from_source(file_path: String, source: String) -> [EasyFix]:
-    # Use shared rules module for all text-scanning rules
-    var fixes = check_all_rules(source, file_path)
+    run_fix_producers(builtin_fix_producers(), fix_unit_from_source(file_path, source))
 
-    val primitive_api_fixes = check_primitive_api(source, file_path)
-    for f in primitive_api_fixes:
-        fixes.push(f)
-
-    val script_language_fixes = check_simple_script_required(source, file_path)
-    for f in script_language_fixes:
-        fixes.push(f)
-
-    # Also run the original todo_format check for backward compat
-    val todo_fixes = _check_todo_format_legacy(file_path, source)
-    for f in todo_fixes:
-        fixes.push(f)
-
-    fixes
-
-fn _check_todo_format_legacy(file_path: String, source: String) -> [EasyFix]:
-    var fixes: [EasyFix] = []
-    val lines = source.split("\n")
-    var line_num = 0
-    var byte_offset = 0
-
-    for line in lines:
-        line_num = line_num + 1
-        val trimmed = line.trim()
-
-        # Check for TODO/FIXME without proper format
-        if trimmed.starts_with("#"):
-            val comment = trimmed.slice(1).trim()
-            if comment.starts_with("TODO:") or comment.starts_with("FIXME:"):
-                val keyword = if comment.starts_with("TODO:"): "TODO" else: "FIXME"
-                val after_colon = comment.slice(keyword.len() + 1).trim()
-
-                if not after_colon.starts_with("["):
-                    val keyword_pos = line.find(keyword)
-                    val colon_pos = keyword_pos + keyword.len() + 1
-                    val insert_pos = byte_offset + colon_pos + 1
-
-                    var fix = EasyFix.create(
-                        id: "L:todo_format:{line_num}",
-                        description: "add [area][priority] format to {keyword} comment",
-                        confidence: FixConfidence.Uncertain
-                    )
-                    fix.add_replacement(Replacement.create(
-                        file: file_path,
-                        start: insert_pos,
-                        end: insert_pos,
-                        line: line_num,
-                        column: colon_pos + 2,
-                        new_text: "[runtime][P2] "
-                    ))
-                    fixes.push(fix)
-
-        byte_offset = byte_offset + line.len() + 1
-
-    fixes

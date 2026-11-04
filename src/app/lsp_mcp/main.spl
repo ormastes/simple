@@ -17,7 +17,8 @@
 
 # --- Extern declarations ---
 
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, write_file, file_delete, time_now_unix_micros, env_set_process}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
 extern fn stdin_read_char() -> text
 use app.io.mod.{env_get, process_run}
 
@@ -27,6 +28,7 @@ val SERVER_NAME = "simple-lsp-mcp"
 val SERVER_VERSION = "0.1.0-mvp"
 val NL = "\n"
 val LSP_QUERY_PATH = "src/app/lsp/lsp_query.spl"
+val CODE_ENTRY_PATH = "src/app/cli/code_entry.spl"
 
 # --- Protocol state ---
 
@@ -299,6 +301,8 @@ fn make_tools_list(id: text) -> text:
     tool_parts.push(make_lsp_tool_schema("lsp_hover", "Get hover information for a symbol in Simple source.", true))
     tool_parts.push(make_lsp_tool_schema("lsp_symbols", "List symbols in a Simple source file.", false))
     tool_parts.push(make_lsp_tool_schema("lsp_diagnostics", "Run lightweight diagnostics via simple lint.", false))
+    tool_parts.push(make_lsp_tool_schema("lsp_ast_views", "List matchable AST node views (fn decls, calls, index sites, nil literals, unsafe) of a Simple source file as JSON.", false))
+    tool_parts.push(make_refactor_tool_schema())
 
     val tools = SB_L() + tool_parts.join(",") + SB_R()
     val result = jo1(jp("tools", tools))
@@ -331,6 +335,56 @@ fn run_lsp_diagnostics(file: text) -> text:
     var rc: i64 = 0
     (stdout, stderr, rc) = process_run(bin, ["lint", file])
     stdout.trim()
+
+# simple code refactor --closure: a closure (Simple source) is written to a
+# temp file and run through the shared source-edit core in a child process.
+# Preview (WorkspaceEdit JSON) unless apply=true; the core validates every
+# proposal, so the model-supplied closure never writes anything itself.
+fn make_refactor_tool_schema() -> text:
+    var props = LB()
+    props = props + jp("closure", jo2(jp("type", js("string")), jp("description", js("Simple source defining `fn rewrite(node: NodeView, ctx: RewriteCtx) -> [Edit]` and optionally `fn matches(node: NodeView) -> bool`, or a class with those methods."))))
+    props = props + "," + jp("scope", jo2(jp("type", js("string")), jp("description", js("Space-separated file globs, e.g. `src/app/**/*.spl`; default src/**/*.spl"))))
+    props = props + "," + jp("apply", jo2(jp("type", js("boolean")), jp("description", js("Write the validated edits (default false = preview only)"))))
+    props = props + RB()
+    val schema = jo3(jp("type", js("object")), jp("properties", props), jp("required", SB_L() + js("closure") + SB_R()))
+    val annotations = jo3(jp("readOnlyHint", "false"), jp("destructiveHint", "true"), jp("idempotentHint", "false"))
+    var tool_obj = LB()
+    tool_obj = tool_obj + jp("name", js("lsp_refactor_closure"))
+    tool_obj = tool_obj + "," + jp("description", js("Closure-driven refactoring over Simple syntax trees; returns a WorkspaceEdit plus a per-file summary (dry run by default)."))
+    tool_obj = tool_obj + "," + jp("inputSchema", schema)
+    tool_obj = tool_obj + "," + jp("annotations", annotations)
+    tool_obj = tool_obj + RB()
+    tool_obj
+
+fn run_code_entry(args: [text]) -> text:
+    val bin = _mcp_find_simple_binary()
+    var argv: [text] = [CODE_ENTRY_PATH]
+    for a in args: argv.push(a)
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    # pin the child to the interpreter: the seed's hybrid engine drops comprehensions
+    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    val _ = env_set_process("SIMPLE_EXECUTION_MODE", "interpret")
+    (stdout, stderr, rc) = process_run(bin, argv)
+    val _ = env_set_process("SIMPLE_EXECUTION_MODE", previous)
+    if rc != 0 and stdout.trim() == "":
+        return "error (exit {rc}): " + stderr.trim()
+    stdout.trim()
+
+fn run_refactor_closure(closure: text, scope: text, apply: bool) -> text:
+    val path = get_temp_dir() + "/simple_mcp_closure_{time_now_unix_micros()}.spl"
+    if not write_file(path, closure):
+        return "error: cannot write closure to {path}"
+    var args: [text] = ["code", "refactor", "--closure", path, "--json"]
+    for g in scope.split(" "):
+        if g.trim() != "":
+            args.push("--scope")
+            args.push(g.trim())
+    if apply: args.push("--apply")
+    val out = run_code_entry(args)
+    val _ = file_delete(path)
+    out
 
 fn tool_text_result(id: text, output: text) -> text:
     val content = SB_L() + jo2(jp("type", js("text")), jp("text", js(output))) + SB_R()
@@ -367,6 +421,15 @@ fn handle_tool_call(id: text, body: text) -> text:
 
     elif tool_name == "lsp_diagnostics":
         return tool_text_result(id, run_lsp_diagnostics(file))
+
+    elif tool_name == "lsp_ast_views":
+        return tool_text_result(id, run_code_entry(["code", "ast", file, "--json"]))
+
+    elif tool_name == "lsp_refactor_closure":
+        val closure = extract_nested(body, "closure")
+        val scope = extract_nested(body, "scope")
+        val apply = extract_nested(body, "apply") == "true"
+        return tool_text_result(id, run_refactor_closure(closure, scope, apply))
 
     make_error(id, -32602, "Unknown tool: " + tool_name)
 
