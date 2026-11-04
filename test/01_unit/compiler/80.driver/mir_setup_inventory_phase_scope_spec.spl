@@ -1,0 +1,167 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR setup inventory: one transient scope per phase, same registries
+
+The direct MIR lane's setup (driver_pipeline_lowering.spl) runs three
+registry-filling phases before any module is lowered: the struct-name prescan,
+the enum inventory and the composite inventory. #5709 wrapped every module of
+every phase in its own transient scope, and each scope end calls
+`promote_transient_owner`, which promotes ~280 lowering field roots and walks
+the whole reachable registry graph for each -- so the per-module scope end
+cost O(roots x accumulated graph), quadratic in the closure. Measured on the
+admitted aarch64 stage2 (2026-11-05): 319 modules = 2.1 s / 2.2 s / 2.4 s per
+phase; the 3006-module CLI closure spent 545-569 s in the prescan alone and the
+MIR shard workers timed out before claiming a module (claimed=0).
+
+The fix opens one scope per PHASE (driver_mir_inventory_scope_end_v1 runs
+three times, not ~9000). These probes pin the two things the change must keep:
+the cadence does not alter what the registries hold (per-module vs per-phase
+scopes yield a byte-identical sorted inventory digest), and the digest helper
+itself is deterministic. The digest covers six of the ~20 registries the phases
+write (see driver_mir_inventory_digest_v1), so it is a partial equality check.
+"""
+
+# @tag: unit, compiler, mir, driver
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.driver.driver_pipeline_lowering.{driver_mir_inventory_scope_end_v1, driver_mir_inventory_digest_v1}
+
+fn phase_scope_hir(src: text, file: text) -> HirModule:
+    val parsed = parse_full_frontend(src, file, "fixture_inventory_phase_scope", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    hir_lowering.lower_module(parsed)
+
+fn phase_scope_fixture() -> [HirModule]:
+    val first = phase_scope_hir(
+        "enum Tone:\n    Low\n    High\n\nstruct Knob:\n    level: i64\n    label: text = \"k\"\n\nfn turn(k: Knob) -> i64:\n    k.level\n",
+        "testdata/fixture_inventory_phase_scope_first.spl")
+    val second = phase_scope_hir(
+        "enum Gear:\n    Park\n    Drive\n    Reverse\n\nclass Dial:\n    pos: i64\n    name: text\n\nstruct Knob:\n    level: i64\n\nfn spin(d: Dial) -> i64:\n    d.pos\n",
+        "testdata/fixture_inventory_phase_scope_second.spl")
+    val third = phase_scope_hir(
+        "struct Span2:\n    start: i64\n    end: i64\n\nenum Shade:\n    Dark\n    Light\n\nfn width(s: Span2) -> i64:\n    s.end - s.start\n",
+        "testdata/fixture_inventory_phase_scope_third.spl")
+    [first, second, third]
+
+fn phase_scope_lowering() -> MirLowering:
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    MirLowering.new_for_target(SymbolTable.new(), target_context)
+
+fn phase_scope_module_dict(modules: [HirModule]) -> Dict<text, HirModule>:
+    var by_name: Dict<text, HirModule> = {}
+    var i = 0
+    while i < modules.len():
+        by_name[modules[i].name] = modules[i]
+        i = i + 1
+    by_name
+
+# The pre-fix cadence: every module of every phase in its own scope.
+fn phase_scope_register_per_module(modules: [HirModule]) -> (MirLowering, bool, i64):
+    var lowering = phase_scope_lowering()
+    val by_name = phase_scope_module_dict(modules)
+    var scopes_ok = true
+    var scopes_seen = 0
+    var i = 0
+    while i < modules.len():
+        val prescan_active = transient_array_scope_begin_v1()
+        lowering.prescan_module_struct_names(by_name, modules[i].name)
+        if prescan_active:
+            scopes_seen = scopes_seen + 1
+        scopes_ok = driver_mir_inventory_scope_end_v1(lowering) and scopes_ok
+        i = i + 1
+    i = 0
+    while i < modules.len():
+        val enum_active = transient_array_scope_begin_v1()
+        lowering.register_module_enum_inventory_v1([modules[i]])
+        if enum_active:
+            scopes_seen = scopes_seen + 1
+        scopes_ok = driver_mir_inventory_scope_end_v1(lowering) and scopes_ok
+        i = i + 1
+    i = 0
+    while i < modules.len():
+        val composite_active = transient_array_scope_begin_v1()
+        lowering.register_module_composite_inventory_v1([modules[i]])
+        if composite_active:
+            scopes_seen = scopes_seen + 1
+        scopes_ok = driver_mir_inventory_scope_end_v1(lowering) and scopes_ok
+        i = i + 1
+    (lowering, scopes_ok, scopes_seen)
+
+# The fixed cadence: one scope per phase.
+fn phase_scope_register_per_phase(modules: [HirModule]) -> (MirLowering, bool, i64):
+    var lowering = phase_scope_lowering()
+    val by_name = phase_scope_module_dict(modules)
+    var scopes_ok = true
+    var scopes_seen = 0
+    val prescan_active = transient_array_scope_begin_v1()
+    var i = 0
+    while i < modules.len():
+        lowering.prescan_module_struct_names(by_name, modules[i].name)
+        i = i + 1
+    if prescan_active:
+        scopes_seen = scopes_seen + 1
+        scopes_ok = driver_mir_inventory_scope_end_v1(lowering) and scopes_ok
+    val enum_active = transient_array_scope_begin_v1()
+    i = 0
+    while i < modules.len():
+        lowering.register_module_enum_inventory_v1([modules[i]])
+        i = i + 1
+    if enum_active:
+        scopes_seen = scopes_seen + 1
+        scopes_ok = driver_mir_inventory_scope_end_v1(lowering) and scopes_ok
+    val composite_active = transient_array_scope_begin_v1()
+    i = 0
+    while i < modules.len():
+        lowering.register_module_composite_inventory_v1([modules[i]])
+        i = i + 1
+    if composite_active:
+        scopes_seen = scopes_seen + 1
+        scopes_ok = driver_mir_inventory_scope_end_v1(lowering) and scopes_ok
+    (lowering, scopes_ok, scopes_seen)
+
+describe "MIR setup inventory phase scope":
+    it "per-phase scopes produce the same inventory digest as per-module scopes":
+        val modules = phase_scope_fixture()
+        val (per_module, per_module_ok, per_module_scopes) = phase_scope_register_per_module(modules)
+        val (per_phase, per_phase_ok, per_phase_scopes) = phase_scope_register_per_phase(modules)
+        # The scopes must really open and end on this runtime, or the
+        # equivalence below would be vacuous: 3 modules x 3 phases vs 3 phases.
+        expect(per_module_scopes).to_equal(9)
+        expect(per_phase_scopes).to_equal(3)
+        expect(per_module_ok).to_equal(true)
+        expect(per_phase_ok).to_equal(true)
+        val per_module_digest = driver_mir_inventory_digest_v1(per_module)
+        val per_phase_digest = driver_mir_inventory_digest_v1(per_phase)
+        expect(per_phase_digest).to_equal(per_module_digest)
+        # The digest covers real rows, not an empty inventory.
+        expect(per_phase_digest.starts_with("rows=0 ")).to_equal(false)
+
+    it "the digest is deterministic across two identical registrations":
+        val modules = phase_scope_fixture()
+        val (first_lowering, _first_ok, _first_scopes) = phase_scope_register_per_phase(modules)
+        val (second_lowering, _second_ok, _second_scopes) = phase_scope_register_per_phase(modules)
+        val first = driver_mir_inventory_digest_v1(first_lowering)
+        val second = driver_mir_inventory_digest_v1(second_lowering)
+        expect(second).to_equal(first)
+
+    it "the registries the phases write reach the lowering (enum, struct, class rows)":
+        val modules = phase_scope_fixture()
+        val (lowering, _ok, _scopes) = phase_scope_register_per_phase(modules)
+        expect(lowering.enum_variant_names("Tone")).to_equal(["Low", "High"])
+        expect(lowering.enum_variant_names("Gear")).to_equal(["Park", "Drive", "Reverse"])
+        expect(lowering.enum_variant_names("Shade")).to_equal(["Dark", "Light"])
+        expect(lowering.struct_field_order.has("Span2")).to_equal(true)
+        expect(lowering.struct_field_order["Span2"]).to_equal(["start", "end"])
+        expect(lowering.class_type_names.has("Dial")).to_equal(true)
+        # Same-named `Knob` in two modules keeps the FIRST registration
+        # (keep-first prescan semantics), under either cadence.
+        expect(lowering.struct_field_order["Knob"]).to_equal(["level", "label"])
