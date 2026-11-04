@@ -47,3 +47,6 @@ Teach the self-hosted HIR to resolve `self`/field subjects inside a generic
 impl to the impl's type-parameter bindings (declaration-ordered) and accept
 them the way parameter subjects are accepted, with the payload substitution
 the existing code path already performs.
+
+## 2026-11-04 triage (libbug-async)
+Compiler-root (self-hosted HIR, expression_components.spl). Workaround in poll.spl/future.spl is still required: no self-hosted stage3 is available here to show the HIR now accepts self/field subjects, and the seed accepts both shapes so it cannot prove removal. Keep until the HIR fix lands.

@@ -147,3 +147,6 @@ applied locally for clarity; that fix is not present in the committed file.
 ## Canonical database reconciliation — 2026-11-03
 
 OPEN; PR #6301 MERGED at 5cec7885187661e950f941045cdb6b8d522a4884 and contributes production-owner Promise/Future detectors only, not a production repair. TEST_BLOCKED: real anonymous-tuple readiness/value/second-completion scenarios UNRUN without a qualified self-hosted runtime. Await detector execution and triage; historical surrogate-spec repairs are not production-state proof.
+
+## 2026-11-04 triage (libbug-async): INTERPRETER-ROOT, lib is correct
+`async_promise_pair_spec.spl` under Rust-seed `run`: 0/4 pass. Not tuple-related and not Promise/Future: a class instance stored in another class's field is value-copied by the seed tree-walk interpreter when the entry is not `main` (JIT path under `fn main` aliases correctly). Lib-free repro: `class Fu: n:i64; me set(v)`, `class Pr: fu: Fu; fn complete(v): self.fu.set(v)`; `val f = Fu(n: 0); val p = Pr(fu: f); p.complete(42); print f.n` called from a non-`main` function prints 0 (expected 42); same code under `fn main` prints 42. No lib change made.
