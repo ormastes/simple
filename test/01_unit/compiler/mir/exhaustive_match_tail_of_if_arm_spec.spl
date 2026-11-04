@@ -1,0 +1,49 @@
+# @tag:in-development
+# @req REQ-SSPEC-COMPILER
+"""
+# Exhaustive-arms check must not warn for a fully covered match
+
+Bug: exhaustive_match_warning_misfires_on_if_arm_tail_2026-11-04. A `match` whose
+arms cover every variant but which is the tail of an `if` arm emits the
+"non-exhaustive enum match ... Arms are textually exhaustive" warning
+(src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl ~5159-5190).
+Expected to FAIL until the 50.mir owner lane fixes it; excluded from whole-suite runs.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn exhaustive_warnings(src: text) -> [text]:
+    val parsed = parse_full_frontend(src, "testdata/exh.spl", "exh", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/exh.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var out: [text] = []
+    for err in lowering.errors:
+        if err.message.contains("non-exhaustive enum match"):
+            out = out.push(err.message)
+    out
+
+val ENUMS: text = "enum RouteLoad:\n    Loaded(v: i64)\n    Failed(e: text)\n\n"
+
+describe "fully covered match produces no non-exhaustive warning":
+    it "match as a plain function tail":
+        val src = ENUMS + "fn f(r: RouteLoad) -> i64:\n    match r:\n        case RouteLoad.Loaded(v): v\n        case RouteLoad.Failed(e): 0\n"
+        expect(exhaustive_warnings(src).join(" | ")).to_equal("")
+    it "match as the tail of an if arm":
+        val src = ENUMS + "fn f(c: bool, r: RouteLoad) -> i64:\n    val x = if c:\n        match r:\n            case RouteLoad.Loaded(v): v\n            case RouteLoad.Failed(e): 0\n    else:\n        1\n    x\n"
+        expect(exhaustive_warnings(src).join(" | ")).to_equal("")
+    it "match as the tail of an else arm":
+        val src = ENUMS + "fn f(c: bool, r: RouteLoad) -> i64:\n    val x = if c:\n        1\n    else:\n        match r:\n            case RouteLoad.Loaded(v): v\n            case RouteLoad.Failed(e): 0\n    x\n"
+        expect(exhaustive_warnings(src).join(" | ")).to_equal("")
+    it "still warns when a variant is genuinely missing":
+        val src = ENUMS + "fn f(r: RouteLoad) -> i64:\n    match r:\n        case RouteLoad.Loaded(v): v\n"
+        expect(exhaustive_warnings(src).len()).to_equal(1)
