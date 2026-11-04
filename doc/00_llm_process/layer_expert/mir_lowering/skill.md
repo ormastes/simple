@@ -643,3 +643,8 @@ Package: `src/compiler/20.hir/target_hir/` (kept in a subdirectory, not the 20.h
   scalar layouts (size/align; i386-SysV 8-byte align 4, MSVC natural) and the calling ABI per explicit
   target into an immutable `TargetHIRResolved`. Unknown types / out-of-region reads are named errors.
   Spec: `test/01_unit/compiler/hir/target_hir_builder_layout_spec.spl` (two targets, one frozen snapshot).
+- **PR-D** `src/compiler/50.mir/mir_target_hir_select.spl`: `mir_target_hir_select_arm(view, snapshot,
+  conditions, features)` — typed cfg-arm reader; rejects a handle bound to another snapshot, delegates to
+  `mir_cfg_select_arm`. Shadow equivalence vs legacy for x86/x86_64 x Linux/Windows/SimpleOS, forward and
+  reverse order, snapshot bytes unchanged. `lower_cfg_select` is NOT switched yet (legacy path unchanged).
+  Spec: `test/01_unit/compiler/50.mir/mir_target_hir_select_spec.spl`.
