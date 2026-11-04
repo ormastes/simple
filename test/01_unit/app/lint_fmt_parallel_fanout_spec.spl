@@ -1,0 +1,124 @@
+"""Per-file child fan-out for `simple lint` / `simple fmt` multi-file runs.
+
+Repro: lint/fmt looped over files serially in one process. Contract: with >1
+file the command fans out one child per file, collects output, prints it in
+INPUT order, and is byte-identical (stdout + exit code) to `--jobs 1`.
+"""
+# @req: REQ-012
+
+use std.spec.*
+use std.fs.{read_file}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use app.io.cli_ops.{cli_kernel_executable_path}
+use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms}
+use app.io.cli_parallel_children.{
+    cli_jobs_from_args, cli_parallel_workers, cli_fanout_worthwhile, cli_strip_gc_warnings, cli_all_unique}
+
+val FX = "test/01_unit/app/fixtures/lint_fanout"
+val SLOW = "{FX}/00_slow.spl"
+val CLEAN_A = "{FX}/a_clean.spl"
+val DIRTY = "{FX}/b_dirty.spl"
+val CLEAN_C = "{FX}/c_clean.spl"
+val SLOWS = ["{FX}/00_slow.spl", "{FX}/01_slow.spl", "{FX}/02_slow.spl", "{FX}/03_slow.spl"]
+val UNFMT = "{FX}/d_unformatted.spl"
+
+fn run_cli(args: [text]) -> (text, text, i64):
+    process_run_timeout(cli_kernel_executable_path(), args, 280000)
+
+describe "cli fan-out worker policy":
+    it "parses --jobs N and --jobs=N and rejects bad values":
+        step("jobs flag forms")
+        expect(cli_jobs_from_args(["lint", "a", "--jobs", "3"]).0).to_equal(3)
+        expect(cli_jobs_from_args(["lint", "a", "--jobs=5"]).0).to_equal(5)
+        expect(cli_jobs_from_args(["lint", "a"]).0).to_equal(0)
+        expect(cli_jobs_from_args(["lint", "--jobs", "0"]).1).to_equal(true)
+        expect(cli_jobs_from_args(["lint", "--jobs", "x"]).1).to_equal(true)
+        expect(cli_jobs_from_args(["lint", "--jobs"]).1).to_equal(true)
+
+    it "caps workers at min(cores, memory cap, files) unless --jobs overrides":
+        step("worker cap arithmetic")
+        expect(cli_parallel_workers(0, 1, 8, 8)).to_equal(1)
+        expect(cli_parallel_workers(0, 10, 8, 8)).to_equal(8)
+        expect(cli_parallel_workers(0, 10, 8, 3)).to_equal(3)
+        expect(cli_parallel_workers(0, 2, 8, 8)).to_equal(2)
+        expect(cli_parallel_workers(0, 10, 8, 0)).to_equal(8)
+        expect(cli_parallel_workers(6, 10, 2, 1)).to_equal(6)
+        expect(cli_parallel_workers(6, 4, 2, 1)).to_equal(4)
+        expect(cli_parallel_workers(1, 10, 8, 8)).to_equal(1)
+
+    it "fans out automatically only when work beyond the largest file beats child startup":
+        step("auto-mode threshold")
+        expect(cli_fanout_worthwhile([1000])).to_equal(false)
+        expect(cli_fanout_worthwhile([1000, 1000, 1000, 1000])).to_equal(false)
+        expect(cli_fanout_worthwhile([16000, 1000])).to_equal(false)
+        expect(cli_fanout_worthwhile([16000, 16000, 16000, 16000])).to_equal(true)
+        expect(cli_fanout_worthwhile([8000, 8000, 8000])).to_equal(true)
+
+    it "drops per-child gc-warning banners and detects duplicate inputs":
+        step("helpers")
+        expect(cli_strip_gc_warnings("[gc-warning] x\nreal\n")).to_equal("real\n")
+        expect(cli_strip_gc_warnings("plain")).to_equal("plain")
+        expect(cli_all_unique(["a", "b"])).to_equal(true)
+        expect(cli_all_unique(["a", "b", "a"])).to_equal(false)
+
+describe "lint fan-out equivalence":
+    it "matches --jobs 1 for clean, dirty, clean with identical exit":
+        step("serial vs parallel lint")
+        val (so1, _e1, c1) = run_cli(["lint", CLEAN_A, DIRTY, CLEAN_C, "--jobs", "1"])
+        val (so3, _e3, c3) = run_cli(["lint", CLEAN_A, DIRTY, CLEAN_C, "--jobs", "3"])
+        expect(so3).to_equal(so1)
+        expect(c3).to_equal(c1)
+        expect(c1).to_equal(1)
+
+    it "keeps input order when the first file is the slowest":
+        step("slow first")
+        val (so1, _e1, c1) = run_cli(["lint", SLOW, DIRTY, CLEAN_C, "--jobs", "1"])
+        val (so3, _e3, c3) = run_cli(["lint", SLOW, DIRTY, CLEAN_C, "--jobs", "3"])
+        expect(so3).to_equal(so1)
+        expect(c3).to_equal(c1)
+        expect(c1).to_equal(1)
+
+    it "runs 4 equally heavy files at least 25 percent faster with 4 workers than 1":
+        step("wall-time budget: fan-out must beat serial")
+        val t1 = time_now_monotonic_ms()
+        val (so1, _e1, c1) = run_cli(["lint", SLOWS[0], SLOWS[1], SLOWS[2], SLOWS[3], "--jobs", "1"])
+        val serial_ms = time_now_monotonic_ms() - t1
+        val t4 = time_now_monotonic_ms()
+        val (so4, _e4, c4) = run_cli(["lint", SLOWS[0], SLOWS[1], SLOWS[2], SLOWS[3], "--jobs", "4"])
+        val fan_ms = time_now_monotonic_ms() - t4
+        expect(so4).to_equal(so1)
+        expect(c4).to_equal(c1)
+        expect(fan_ms * 4 < serial_ms * 3).to_equal(true)
+
+    it "matches in json mode":
+        step("json parity")
+        val (so1, _e1, c1) = run_cli(["lint", CLEAN_A, DIRTY, CLEAN_C, "--json", "--jobs", "1"])
+        val (so3, _e3, c3) = run_cli(["lint", CLEAN_A, DIRTY, CLEAN_C, "--json", "--jobs", "3"])
+        expect(so3).to_equal(so1)
+        expect(c3).to_equal(c1)
+
+    it "reports a missing file the same way":
+        step("missing file parity")
+        val (so1, e1, c1) = run_cli(["lint", CLEAN_A, "{FX}/nope.spl", CLEAN_C, "--jobs", "1"])
+        val (so3, e3, c3) = run_cli(["lint", CLEAN_A, "{FX}/nope.spl", CLEAN_C, "--jobs", "3"])
+        expect(so3).to_equal(so1)
+        expect(c3).to_equal(c1)
+        expect(e3.contains("File not found")).to_equal(e1.contains("File not found"))
+
+describe "fmt fan-out equivalence":
+    it "matches --jobs 1 in --check mode":
+        step("serial vs parallel fmt --check")
+        val (so1, _e1, c1) = run_cli(["fmt", CLEAN_A, UNFMT, CLEAN_C, "--check", "--jobs", "1"])
+        val (so3, _e3, c3) = run_cli(["fmt", CLEAN_A, UNFMT, CLEAN_C, "--check", "--jobs", "3"])
+        expect(so3).to_equal(so1)
+        expect(c3).to_equal(c1)
+
+describe "fan-out source contracts":
+    it "spawns the two repo-gate scripts concurrently and children never recurse":
+        step("source shape")
+        val src = read_file("src/app/io/cli_lint_commands.spl")
+        expect(src).to_contain("cli_run_children_ordered(")
+        expect(src).to_contain("check-ui-backend-isolation.shs")
+        expect(src).to_contain("check-cpu-hotloop-idiom.shs")
+        expect(src).to_contain("fan_args.push(\"--lint-child-stats\")")
+        expect(src).to_contain("fan_args.push(\"1\")")

@@ -1699,6 +1699,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_bdd_expect_fail",
     "rt_bdd_expect_truthy",
     "rt_bdd_expect_truthy_rv",
+    "rt_bdd_fail_rv",
     "rt_bdd_format_results",
     "rt_bdd_has_failure",
     "rt_bdd_it_end",

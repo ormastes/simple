@@ -18,4 +18,5 @@ mod array_bool_tagging;
 mod array_move_tests;
 mod erased_arg_scalar_param_tests;
 mod bdd_matcher_boxing;
+mod bdd_fail_twin;
 mod bdd_skip_count;

@@ -2290,6 +2290,24 @@ mod jit_top_level_statement_tests {
         assert_eq!(skipped(src), 2);
     }
 
+    /// The per-module JIT links a Simple function imported from another
+    /// module: the loader flattens the import into the same JIT module, so
+    /// strict mode (no interpreter fallback) still runs it. Pins the evidence
+    /// that the `unresolved external symbol 'fail'` refusal in
+    /// doc/08_tracking/bug/seed_jit_spec_files_never_jit_2026-11-04.md was an
+    /// interpreter-only builtin, not a cross-module link gap.
+    #[test]
+    fn imported_simple_function_links_under_strict_jit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("modb.spl"), "pub fn helper(x: i64) -> i64:\n    x + 41\n").unwrap();
+        let entry = dir.path().join("main.spl");
+        std::fs::write(&entry, "use modb.{helper}\n\nfn main() -> i64:\n    helper(1)\n").unwrap();
+        std::env::set_var("SIMPLE_JIT_STRICT", "1");
+        let rc = ExecCore::new().run_file_jit(&entry);
+        std::env::remove_var("SIMPLE_JIT_STRICT");
+        assert_eq!(rc, Ok(42), "imported helper must run on the JIT");
+    }
+
     #[test]
     fn bindings_and_bare_main_call_stay_on_jit() {
         let src = "val greeting = \"hi\"\nfn main():\n    print greeting\nmain()\n";
