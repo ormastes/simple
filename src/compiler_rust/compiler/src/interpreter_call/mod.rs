@@ -9,7 +9,7 @@ pub(crate) use core::aop_runtime;
 mod mock;
 
 // Re-export public items
-pub use bdd::{clear_bdd_state, get_ignored_tests, get_test_results};
+pub use bdd::{clear_bdd_state, get_ignored_tests, get_test_results, record_external_test_result};
 pub use core::clear_class_instantiation_state;
 pub(crate) use bdd::{
     exec_block_value, finish_bare_expect_statement, finish_bdd_matcher, push_bdd_failure, BDD_AFTER_ALL, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,

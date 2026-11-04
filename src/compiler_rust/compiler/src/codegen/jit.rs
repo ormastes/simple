@@ -343,7 +343,18 @@ impl JitCompiler {
                     } = inst
                     {
                         let _ = callee;
-                        if !(crate::codegen::jit_closure_abi_supports(*return_type)
+                        // A VOID result carries no value, so no encoding can be
+                        // wrong for it: `block()` on a `fn()` (every std.spec
+                        // `describe`/`it`/`skip_if` body) is carryable.
+                        // BOOL is likewise carryable as a call RESULT: the boxed
+                        // entry boxes it full-width and `unbox_from_closure_boundary`
+                        // compares it against 0. (The documented BOOL defect is the
+                        // outlined BODY declared as `i8`, which shared.rs avoids by
+                        // keeping such bodies I64.) skip_if's `condition()` is this.
+                        let return_ok = *return_type == crate::hir::TypeId::VOID
+                            || *return_type == crate::hir::TypeId::BOOL
+                            || crate::codegen::jit_closure_abi_supports(*return_type);
+                        if !(return_ok
                             && param_types
                                 .iter()
                                 .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
@@ -368,8 +379,13 @@ impl JitCompiler {
                 // \\x: x + 100`). The object convention is right; the boxing of
                 // the HANDLE on the way out is not, so this one shape stays
                 // refused and named.
+                // Only an `any`-typed return slot boxes the handle. A slot typed
+                // as a function (`-> fn(text, fn())`, std.spec's `skip`
+                // decorator) carries the closure object pointer untouched, so
+                // refusing it de-JITed every module importing std.spec.
+                // See doc/08_tracking/bug/seed_jit_spec_files_never_jit_2026-11-04.md.
                 if let crate::mir::Terminator::Return(Some(reg)) = &block.terminator {
-                    if closure_regs.contains(reg) {
+                    if closure_regs.contains(reg) && func.return_type == crate::hir::TypeId::ANY {
                         return Some((
                             func.name.clone(),
                             "the closure is returned from the function, whose return slot boxes \

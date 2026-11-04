@@ -170,7 +170,7 @@ pub(crate) use interpreter_call::{
     captured_env_with_live_globals, execute_function_body, publish_and_repoint, publish_live_bound_globals,
     sync_owned_captured_globals,
 };
-pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests, get_test_results};
+pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests, get_test_results, record_external_test_result};
 use interpreter_call::{
     bind_args, bind_args_with_injected, evaluate_call, exec_function, exec_function_with_bound_args,
     exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_ALL,

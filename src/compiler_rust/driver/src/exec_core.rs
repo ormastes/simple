@@ -1146,6 +1146,25 @@ impl ExecCore {
         // that runs (bug x64_freestanding_cfg_multivariant_misdispatch).
         simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut ast);
 
+        // Spec files declare their examples at module level and have no `main`.
+        // Synthesize the spec entry (module statements in order, then the
+        // std.spec exit code) so the JIT executes the spec instead of bailing
+        // with `jit-bail:no-main-fn` to the interpreter.
+        // See doc/08_tracking/bug/seed_jit_spec_files_never_jit_2026-11-04.md.
+        // Opt-in until JIT/interpreter spec verdict parity holds: measured
+        // 2026-11-04, 4 of 6 sampled specs that pass on the interpreter fail on
+        // the compiled rt_bdd lane (value-encoding mismatches in
+        // rt_bdd_expect_eq_rv). Default-on would turn those green runs red
+        // for reasons unrelated to the code under test.
+        let spec_entry = std::env::var_os("SIMPLE_JIT_SPEC_ENTRY").is_some_and(|v| v != "0")
+            && synthesize_spec_main(&mut ast.items);
+        if spec_entry {
+            simple_runtime::value::rt_bdd_clear_state();
+            if trace || std::env::var_os("SIMPLE_JIT_TRACE_SPEC_ENTRY").is_some() {
+                eprintln!("[jit-spec-entry] synthesized main for {}", path.display());
+            }
+        }
+
         // Lower to HIR with context so imported types (enums, classes) are resolved.
         // Lenient variant: aligns this lane's `Lowerer::with_module_resolver`
         // memory-safety strictness with the canonical native-build/compile lane
@@ -1270,6 +1289,19 @@ impl ExecCore {
             simple_common::engine_receipt::record_demotion("jit-bail:no-main-fn", &path.display().to_string());
             // Never exit 0 silently — see `reject_silent_no_op_module`.
             Self::reject_silent_no_op_module(&ast.items)?;
+            // The fallback must be VISIBLE, and fatal under strict mode.
+            if std::env::var_os("SIMPLE_JIT_STRICT").is_some_and(|v| v != "0") {
+                return Err(format!(
+                    "SIMPLE_JIT_STRICT: jit-bail:no-main-fn: {} has no `main` (spec entry synthesis is \
+                     opt-in: SIMPLE_JIT_SPEC_ENTRY=1); refusing to fall back to the interpreter",
+                    path.display()
+                ));
+            }
+            eprintln!(
+                "[jit-fallback] jit-bail:no-main-fn: {} has no `main`; running on the interpreter \
+                 (set SIMPLE_JIT_SPEC_ENTRY=1 to run a spec's module-level examples on the JIT)",
+                path.display()
+            );
             let exit_code = evaluate_module(&ast.items).map_err(|e| format!("{}", e))?;
             set_current_file(None);
             self.collect_gc();
@@ -1358,9 +1390,15 @@ impl ExecCore {
         simple_runtime::rt_set_jit_runtime(true);
         let exit_code = em.execute("main", &[]);
         simple_runtime::rt_set_jit_runtime(false);
-        let exit_code = exit_code?;
+        let mut exit_code = exit_code?;
         if trace {
             eprintln!("[rust-jit] execute main done exit={}", exit_code);
+        }
+        if spec_entry {
+            // Compiled specs report through the rt_bdd_* runtime (HIR lowers
+            // describe/it/expect to it), not std.spec's counters: derive the
+            // exit code and the harness evidence file from that state.
+            exit_code = finish_jit_spec_entry(path) as i64;
         }
         set_current_file(None);
         self.collect_gc();
@@ -1454,6 +1492,73 @@ impl ExecCore {
 /// by the lowering/codegen paths. `SIMPLE_JIT_STRICT_ALL=1` is a separate,
 /// opt-in diagnostic switch for callers that need the raw first JIT failure;
 /// it never changes the default fallback behavior.
+/// Wrap module-level executable statements of a `main`-less spec module into a
+/// synthesized `fn main() -> i64`. Only fires when the module declares
+/// module-level BDD examples. Global bindings (`val`/`var`/`const`/`static`)
+/// stay at module level so functions and closures keep seeing them as
+/// globals. The exit code is derived afterwards by [`finish_jit_spec_entry`].
+/// Returns true if a `main` was synthesized.
+pub(crate) fn synthesize_spec_main(items: &mut Vec<simple_parser::ast::Node>) -> bool {
+    use simple_parser::ast::Node as N;
+    if items.iter().any(|i| matches!(i, N::Function(f) if f.name == "main")) {
+        return false;
+    }
+    if simple_parser::test_analyzer::extract_file_test_meta(items, None).total_tests == 0 {
+        return false;
+    }
+    let mut parser = simple_parser::Parser::new("fn main() -> i64:\n    0\n");
+    let Ok(stub) = parser.parse() else { return false };
+    let Some(N::Function(mut main_fn)) = stub.items.into_iter().next() else {
+        return false;
+    };
+    let mut kept = Vec::with_capacity(items.len());
+    let mut body = Vec::new();
+    for item in std::mem::take(items) {
+        let is_global_binding = matches!(item, N::Let(_) | N::Const(_) | N::Static(_));
+        if is_global_binding || ExecCore::is_pure_declaration(&item) {
+            kept.push(item);
+        } else {
+            body.push(item);
+        }
+    }
+    body.append(&mut main_fn.body.statements);
+    main_fn.body.statements = body;
+    kept.push(N::Function(main_fn));
+    *items = kept;
+    true
+}
+
+/// Summarise a JIT-executed spec from the rt_bdd_* runtime state: print the
+/// record each example in the shared BDD result table (verdict + evidence
+/// file), and return the exit code
+/// (1 when any example failed).
+fn finish_jit_spec_entry(path: &Path) -> i32 {
+    let results = simple_runtime::value::rt_bdd_snapshot_results();
+    let total: usize = results.iter().map(|(t, _)| *t).sum();
+    let failed: usize = results.iter().map(|(_, f)| *f).sum();
+    let passed = total.saturating_sub(failed);
+    // Feed the shared result table: it drives the `SPEC FILE VERDICT` drop
+    // check and writes the `simple-bdd-v1` evidence the test harness reads.
+    // rt_bdd keeps counts only, so examples are recorded by ordinal.
+    for i in 0..total {
+        simple_compiler::interpreter::record_external_test_result(
+            "jit".to_string(),
+            format!("example #{}", i + 1),
+            i < passed,
+            false,
+        );
+    }
+    eprintln!(
+        "[jit-spec-entry] {} executed on cranelift-jit: {passed} passed, {failed} failed",
+        path.display()
+    );
+    if failed > 0 {
+        1
+    } else {
+        0
+    }
+}
+
 fn jit_failure_must_propagate(jit_err: &str, strict_all: bool) -> bool {
     strict_all || jit_err.contains("SIMPLE_JIT_STRICT:")
 }
@@ -1823,6 +1928,35 @@ mod tests {
         let mut parser = simple_parser::Parser::new(source);
         let ast = parser.parse().expect("fixture must parse");
         simple_parser::test_analyzer::extract_file_test_meta(&ast.items, None).total_tests
+    }
+
+    #[test]
+    fn synthesizes_spec_entry_main_for_mainless_spec_module() {
+        use simple_parser::ast::Node as N;
+        let source = "val k = 1\n\nfn helper() -> i64:\n    k\n\ndescribe \"g\":\n    it \"a\":\n        expect(helper()).to_equal(1)\n";
+        let mut ast = simple_parser::Parser::new(source).parse().expect("fixture must parse");
+        assert!(super::synthesize_spec_main(&mut ast.items));
+        let main = ast
+            .items
+            .iter()
+            .find_map(|i| match i {
+                N::Function(f) if f.name == "main" => Some(f),
+                _ => None,
+            })
+            .expect("main synthesized");
+        // describe moved into main (+ the `0` tail); the global and fn stay put.
+        assert_eq!(main.body.statements.len(), 2);
+        assert!(ast.items.iter().any(|i| matches!(i, N::Let(_))));
+        assert!(ast.items.iter().any(|i| matches!(i, N::Function(f) if f.name == "helper")));
+        assert_eq!(module_level_example_count_items(&ast.items), 0);
+        // Idempotent / never fires for a module that already has main or no examples.
+        assert!(!super::synthesize_spec_main(&mut ast.items));
+        let mut plain = simple_parser::Parser::new("print \"hi\"\n").parse().unwrap();
+        assert!(!super::synthesize_spec_main(&mut plain.items));
+    }
+
+    fn module_level_example_count_items(items: &[simple_parser::ast::Node]) -> usize {
+        simple_parser::test_analyzer::extract_file_test_meta(items, None).total_tests
     }
 
     #[test]
