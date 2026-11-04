@@ -17,3 +17,4 @@ mod array_push_header_abi;
 mod array_bool_tagging;
 mod array_move_tests;
 mod erased_arg_scalar_param_tests;
+mod bdd_matcher_boxing;

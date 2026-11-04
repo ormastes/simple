@@ -280,6 +280,30 @@ impl<'a> MirLowerer<'a> {
             return result;
         }
 
+        // The BDD matcher builtins take tagged `RuntimeValue`s, but a typed
+        // scalar operand reaches MIR raw. `expect(x).to_equal(0)` with `x: any`
+        // compared a tagged word against a raw `0`, so equal values failed and
+        // the message rendered nonsense ("Expected nil to equal 0"). Box each
+        // operand by its static type, the same rule as an `any` parameter.
+        // Bug: doc/08_tracking/bug/seed_jit_spec_files_never_jit_2026-11-04.md
+        if matches!(name, "rt_bdd_expect_eq_rv" | "rt_bdd_expect_truthy_rv") {
+            let mut regs = Vec::with_capacity(args.len());
+            for arg in args {
+                let reg = self.lower_expr(arg)?;
+                regs.push(self.box_arg_for_any_param(reg, arg)?);
+            }
+            let name = name.to_string();
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name(&name),
+                    args: regs,
+                });
+                dest
+            });
+        }
+
         // Optional bool payloads use rt_value_bool, not BoxInt. After HIR
         // peels bool? for an if-val binding, decode the tagged payload into
         // a native bool. Do not use rt_is_some: Some(false) is present.
