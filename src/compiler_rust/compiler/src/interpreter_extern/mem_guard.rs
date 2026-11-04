@@ -239,7 +239,7 @@ fn install_fault_handler() {
     HANDLER_INSTALLED.call_once(|| unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = fault_handler as usize;
-        sa.sa_flags = libc::SA_SIGINFO;
+        sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(libc::SIGSEGV, &sa, (&raw mut PREV_SEGV) as *mut libc::sigaction);
     });

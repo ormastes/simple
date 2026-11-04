@@ -209,12 +209,12 @@ static void rt_mem_guard_fault_handler(int sig, siginfo_t* info, void* ctx) {
 }
 
 static void rt_mem_guard_install_handler(void) {
-    if (rt_mem_guard_handler_installed) return;
+    if (__atomic_exchange_n(&rt_mem_guard_handler_installed, 1, __ATOMIC_ACQ_REL)) return; /* race-free: first caller installs */
     struct sigaction sa;
-    sa.sa_flags = SA_SIGINFO;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
     sa.sa_sigaction = rt_mem_guard_fault_handler;
-    if (sigaction(SIGSEGV, &sa, &rt_mem_guard_prev_segv) == 0) rt_mem_guard_handler_installed = 1;
+    if (sigaction(SIGSEGV, &sa, &rt_mem_guard_prev_segv) != 0) __atomic_store_n(&rt_mem_guard_handler_installed, 0, __ATOMIC_RELEASE);
 }
 
 /* Allocate `size` bytes on their own guard-paged mmap slot. Right-aligns so
