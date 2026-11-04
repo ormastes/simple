@@ -41,7 +41,7 @@ phases are not verified.
 
 ## Specs and gates
 
-- [ ] Rework the stale `generic_return_owner` spec.
+- [x] Stale `generic_return_owner` spec deleted (2026-11-04; helper removed with mono).
 - [ ] `trait_typed_receiver_dispatch_spec`: devirtualization counts are 0.
 - [ ] Lease script kinds.
 - [ ] `check-guard-wiring.shs` fails on this branch and needs triage.

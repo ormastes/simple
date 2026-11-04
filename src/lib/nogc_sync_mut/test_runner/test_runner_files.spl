@@ -327,14 +327,45 @@ fn extract_cover_annotations(file_path: text) -> [text]:
     the first `use`/`describe` line -- see extract_cover_annotations_for_coverage)."""
     extract_cover_annotations_for_coverage(file_path)
 
+# Legacy exemption list: checked-in, reviewed, sorted, shrink-only. Specs on it
+# run without a header `# @cover`; every other system spec still needs one.
+val COVER_EXEMPTIONS_PATH = "config/test/cover_exemptions.txt"
+
+fn cover_exemption_key(norm: text) -> text:
+    """Repo-relative `test/...` key for a normalized spec path."""
+    if norm.starts_with("test/"):
+        return norm
+    val parts = norm.split("/test/")
+    if parts.len() < 2:
+        return norm
+    var key = "test"
+    var i = 1
+    while i < parts.len():
+        key = key + "/" + parts[i]
+        i = i + 1
+    key
+
+fn load_cover_exemptions() -> Dict<text, bool>:
+    var set: Dict<text, bool> = {}
+    val content = file_read(COVER_EXEMPTIONS_PATH) ?? ""
+    for line in content.split("\n"):
+        val t = line.trim()
+        if t != "" and not t.starts_with("#"):
+            set[t] = true
+    set
+
 fn validate_system_test_covers(files: [text]) -> [text]:
-    """Return system test files missing required # @cover annotations."""
+    """Return system test files missing required # @cover annotations,
+    excluding the legacy exemption list (config/test/cover_exemptions.txt)."""
     var missing: [text] = []
+    val exempt = load_cover_exemptions()
     for f in files:
         val norm = f.replace("\\", "/")
         if not norm.contains("/system/") and not norm.contains("/03_system/"):
             continue
         if norm.contains("/helpers/") or norm.contains("/fixtures/"):
+            continue
+        if exempt.contains_key(cover_exemption_key(norm)):
             continue
         val covers = extract_cover_annotations(f)
         if covers.len() == 0:

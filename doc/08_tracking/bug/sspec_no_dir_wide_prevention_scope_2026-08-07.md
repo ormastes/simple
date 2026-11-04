@@ -117,3 +117,103 @@ forwarder to `prevent()`, and no per-directory config/setup hook exists in
 in the test runner (per-example persistence of module-level spec state),
 explicitly scoped as "verify and record" with no code path to reproduce —
 out of scope for a shard fix. No change made. Leaving OPEN, doc-only.
+
+## 2026-11-04 — LANDED: `_prevention.sdn` directory-wide policy (lane work/feat-sspec-dir-prevention-20261104)
+
+Status: **closed by feature** (unblock condition 1 above — a per-directory
+hook in spec discovery/launch — is now met).
+
+### Design note
+
+- **Policy file is data, not code: `_prevention.sdn`.** A `_prevention.spl`
+  would have to be *imported* by the spec child; there is no runtime
+  module-load-by-path, the only path-based `use` form in the tree is
+  `use test.fixtures...` (digit-leading segments such as `01_unit` are
+  untested grammar), and splicing a `use` line into the runner's rewritten
+  spec copy would shift every reported line number. The policy is a list of
+  `(mock name, budget, reason)` anyway. The file is an sdn subset parsed
+  line-by-line in `src/lib/nogc_sync_mut/spec/dir_prevention.spl` (the full
+  sdn parser is not imported into `spec.spl`, which every spec child loads).
+- **Merged root->leaf, not nearest-wins.** The runner walks from the spec's
+  directory up to `test/` (or the filesystem root, max 24 levels), collects
+  every `_prevention.sdn`, and joins them with `;` into
+  `SIMPLE_SPEC_DIR_PREVENTION`. A nested directory can add rules; it cannot
+  silently cancel a parent's. Resolution is cached per directory
+  (`dir_prevention_env_value`, one walk per directory, misses counted).
+- **Two dispatch sites set/restore the variable**: the lane `match` in
+  `test_runner_main.spl` (directory targets, `[route] mode=...`, every
+  lane's child inherits it) and the direct single-file lane in
+  `test_runner_single.spl` `main` ("light daemon requires Linux /proc;
+  running directly on windows"). Both are runtime-verified below. The first
+  attempt set the env inside `run_test_file_interpreter`, a name defined in
+  both `src/lib/nogc_sync_mut/test_runner/` and `src/app/test_runner_new/`;
+  with marker prints in BOTH copies neither ever printed on the directory
+  lane (which still reported 0 failures), so the set moved up to the
+  dispatcher where it is lane-agnostic. The restore keeps a later
+  policy-free spec from inheriting it.
+- **Check mechanism (spec side).** Under the seed `describe`/`it`/
+  `before_each`/`after_each`/`fail_assertion` are intrinsics
+  (`interpreter_call/bdd.rs`): a print added to `spec.spl`'s `_execute_it`
+  never appeared under `simple run`, so the hook point is hook
+  *registration*. `spec.spl` registers a before/after_each pair from its own
+  module initialiser (`val _dir_prevention_armed = _dir_prevention_init()`,
+  last statement of the file) when the env var is non-empty; verified to
+  wrap every example and to fail the current example from `after_each`
+  (`fail_assertion` sets `BDD_EXPECT_FAILED`, which is read after the after
+  hooks: probe gave `2 examples, 2 failures`). Under the self-hosted binary
+  the same two calls land in `spec.spl`'s own `before_hooks`/`after_hooks`.
+- **Non-vacuity.** `MockFunction.new` (`builder.spl`) records every instance
+  in a module-level auto-registry, enabled only when a policy is present
+  (`mock_auto_registry_enable`), so a policy-free process is byte-for-byte
+  unchanged. `before_each` snapshots each registered mock's call count;
+  `after_each` fails the example when `count - baseline` exceeds a matching
+  rule's `at_most` (default 0). Per-example delta, so a mock reused across
+  examples is not double-counted.
+- **Engine traps hit and designed around (not fixed here):** (1) a file
+  read or a cross-module global write issued while `spec.spl` is still
+  initialising silently does nothing under the seed — every text-read
+  provider (`io_runtime.file_read`, `file_ops.file_read`,
+  `file_read_result`) died at the call with no error while `env_get` and
+  `file_exists` worked; the policy load and registry enable therefore run
+  lazily in the first `before_each`. (2) a named constructor argument spelled `mock:`
+  fails to parse ("expected Comma, found Colon") and renaming the field to
+  `mock_name` fixed it — the parser was not read to confirm why, so this is
+  an observation, not a grammar claim. (3) private helper names are
+  resolved last-wins across co-loaded modules (`_dir_of` already exists in
+  two other modules), hence the `_dprev_` prefix.
+- Residual (stated in the guide): mocks built before the first example
+  (module level, `before_all`) are outside the per-example window; native/SMF
+  lanes do not set the variable; a hand `simple run` needs it set explicitly.
+
+### Evidence (seed `D:/dev/wt/seed/simple.exe`, release tip, class-ref on)
+
+RED -> GREEN on the fixture `test/fixtures/dir_prevention/policy_dir/`
+(`_prevention.sdn` + `guarded_example.spl`, which declares no guard):
+
+| run | before feature | after |
+|---|---|---|
+| `SIMPLE_SPEC_DIR_PREVENTION=<policy> simple run guarded_example.spl` | `4 examples, 0 failures` (env var had no consumer) | `4 examples, 2 failures` — `forbidden_seam called 1x in this example (allowed 0)`, `budgeted_seam called 3x in this example (allowed 2)` |
+| same, no env var | `4 examples, 0 failures` | `4 examples, 0 failures` (unchanged) |
+| runner e2e, file target (single lane): fixture copied as `guarded_spec.spl` beside its `_prevention.sdn`, `simple test <file>` | `Results: 4 total, 4 passed, 0 failed` (before the single-lane site was wired) | `Results: 4 total, 2 passed, 2 failed`, policy messages name the absolute `_prevention.sdn` |
+| runner e2e, directory target (main dispatch, `[route] mode=interpreter`): `simple test <dir>` holding `policy_dir/guarded_spec.spl` and `no_policy_dir/guarded_spec.spl` | policy spec `4 passed, 0 failed` (before the dispatcher site was wired) | policy spec `2 passed, 2 failed`; no-policy sibling `4 passed, 0 failed` in the same run (restore proven) |
+
+New specs (both GREEN through the runner):
+`test/01_unit/lib/std/spec/dir_prevention_spec.spl` — Results: 12 total, 12 passed, 0 failed
+(walk order/merge/boundary, backslash paths, cache: two specs in one directory = exactly one walk, parser, loader);
+`test/01_unit/lib/std/spec/dir_prevention_policy_runner_spec.spl` — Results: 4 total, 4 passed, 0 failed
+(policy applies without per-file declaration; no policy = unchanged; ancestor+nested merge; nested-only).
+
+Collateral, BEFORE -> AFTER (all unchanged):
+- `test/01_unit/lib/std/spec/it_block_error_accumulation_spec.spl` — Results: 3 total, 3 passed, 0 failed -> same
+- `test/01_unit/app/test_runner_new/runner_files_filters_spec.spl` — Results: 65 total, 65 passed, 0 failed -> same
+- `test/01_unit/lib/common/mock_verification_spec.spl` — Results: 27 total, 27 passed, 0 failed -> same
+- `test/01_unit/compiler/di/di_lock_spec.spl` — Results: 15 total, 15 passed, 0 failed -> same
+- `test/01_unit/app/devhub/adapter_bitbucket_spec.spl` — Results: 76 total, 76 passed, 0 failed -> same
+
+Perf: runner wall on the 4-example fixture, same host, same run batch:
+no policy 4s, with policy 3s (noise-level; discovery is a handful of
+`file_exists` calls per directory, cached; the hooks cost one `call_count`
+per registered mock per example).
+
+Related, same day: `prevention_mock_deferred_arming_impossible_2026-08-07.md`
+Defects 1 and 2 re-verified GONE (see its 2026-11-04 note).

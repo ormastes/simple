@@ -614,18 +614,28 @@ fn compile_source_inventory_publish_reasoned_v1(
     val generation_path = "{root}/generations/{digest}.inventory"
     if not compile_source_inventory_publish_blob_v1(generation_path, content):
         return ("", "publish-generation-write-failed")
-    # Final compare before the swap. The rename itself is the only window a
-    # concurrent same-base publisher can win; its pointer also names a complete
-    # immutable generation, so the next refresh re-derives from whichever won.
-    if cursor_head != "":
-        val latest = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
-        if sha256_text(latest) != expected_pointer_digest:
-            if latest == pointer_content:
-                return (digest, "ok")
-            return ("", "publish-cursor-superseded")
+    # Final compare before the swap, for EVERY caller: the base is the pointer
+    # read at the top of this publication (cursor callers additionally bound it
+    # to their observed digest above), so a cursor-less publisher can never
+    # roll CURRENT back over a newer generation. The rename itself is the only
+    # window a concurrent same-base publisher can win; its pointer also names a
+    # complete immutable generation, so the next refresh re-derives from it.
+    val latest = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    if sha256_text(latest) != sha256_text(current_pointer_content):
+        if latest == pointer_content:
+            return (digest, "ok")
+        return ("", "publish-cursor-superseded")
     if not file_atomic_write("{root}/CURRENT", pointer_content):
         return ("", "publish-current-write-failed")
+    # A sweeper that read the OLD pointer may have just reclaimed a blob we
+    # reused; CURRENT names it now, so put it back (content is in hand).
+    if not rt_file_exists(generation_path) and
+            not compile_source_inventory_publish_blob_v1(generation_path, content):
+        return ("", "publish-generation-write-failed")
     (digest, "ok")
+
+# Half the inventory GC floor (compiler_inventory_gc_v1 uses one day).
+val COMPILE_SOURCE_INVENTORY_REUSE_TOUCH_S: i64 = 43200
 
 fn compile_source_inventory_publish_blob_v1(final_path: text, content: text) -> bool:
     """Publish one content-addressed immutable file without a lock.
@@ -636,7 +646,17 @@ fn compile_source_inventory_publish_blob_v1(final_path: text, content: text) -> 
     """
     if rt_file_exists(final_path):
         val existing = compile_source_inventory_read_text_v1(final_path)
-        return existing != nil and existing! == content
+        if existing == nil or existing! != content:
+            return false
+        # Reuse refreshes the age an age-based sweeper reads: an identical
+        # record last referenced long ago must not look reclaimable at the
+        # moment a new pointer is about to name it. Rewriting identical bytes
+        # through the atomic replace is harmless to any concurrent reader; a
+        # refused replace (open file on Windows) keeps the existing bytes.
+        val modified = file_modified_time(final_path)
+        if modified > 0 and time_now_unix_micros() / 1000000 - modified > COMPILE_SOURCE_INVENTORY_REUSE_TOUCH_S:
+            val _touched = file_atomic_write(final_path, content)
+        return true
     val staged = "{final_path}.tmp.{rt_getpid()}.{time_now_unix_micros()}"
     rt_file_delete(staged)
     if not file_create_excl(staged, content):
@@ -672,6 +692,15 @@ fn compile_source_inventory_gc_generations_v1(cache_root: text, min_age_s: i64) 
         val path = "{root}/generations/{name}"
         val modified = file_modified_time(path)
         if modified <= 0 or now - modified < min_age_s:
+            continue
+        # Re-read the pointer immediately before the unlink: a publisher may
+        # have named this blob since the listing (and touched it on reuse).
+        val latest = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        val latest_separator = latest.index_of("\n")
+        if digest == (if latest_separator < 0: latest else: latest[:latest_separator]):
+            continue
+        val recheck = file_modified_time(path)
+        if recheck <= 0 or now - recheck < min_age_s:
             continue
         if rt_file_delete(path):
             removed = removed + 1
