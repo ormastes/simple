@@ -1,0 +1,78 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Lambda-bound and nested-fn calls stay direct in MIR
+
+Regression: since cd656fa2d69 bind_local mirrors every binding into local_map,
+and the call demotion in switch_operators_calls.spl had no lambda_bindings
+guard, so `val f = \x: x + 1; f(2)` reached the indirect path with no
+remembered Function type and failed with
+"indirect callable lacks a proven function signature".
+"""
+
+# @tag: unit, compiler, mir, lambda, stage3
+
+use std.common.string_core.{char_from_code}
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_app(body: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(body, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: body, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["app_hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "app_hir")
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    print "app errors: [{out}]"
+    out
+
+val BS = char_from_code(92)
+val NOSIG = "indirect callable lacks"
+
+describe "lambda-bound call stays direct (REPRO)":
+    it "val f = lambda; f(2)":
+        val out = lower_app("fn main() -> i64:\n    val f = {BS}x: x + 1\n    return f(2)\n")
+        expect(out.contains(NOSIG)).to_equal(false)
+
+    it "nested fn called by name":
+        val out = lower_app("fn outer(n: i64) -> i64:\n    fn inner(m: i64) -> i64:\n        return m * 2\n    return inner(n) + 1\n\nfn main() -> i64:\n    return outer(4)\n")
+        expect(out.contains(NOSIG)).to_equal(false)
+
+describe "lambda-bound call siblings (PREVENTION)":
+    it "closure capturing a local":
+        val out = lower_app("fn main() -> i64:\n    val k = 10\n    val f = {BS}x: x + k\n    return f(5)\n")
+        expect(out.contains(NOSIG)).to_equal(false)
+
+    it "lambda passed as argument and called in the callee":
+        val out = lower_app("fn apply(g: fn(i64) -> i64, v: i64) -> i64:\n    return g(v)\n\nfn main() -> i64:\n    return apply({BS}x: x + 1, 3)\n")
+        expect(out.contains(NOSIG)).to_equal(false)
+
+    it "lambda stored then reassigned":
+        val out = lower_app("fn main() -> i64:\n    var f = {BS}x: x + 1\n    f = {BS}x: x * 2\n    return f(4)\n")
+        expect(out.contains(NOSIG)).to_equal(false)
+
+describe "fail-closed message (PREVENTION)":
+    it "pins the diagnostic text in the producer":
+        val src = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+        expect(src.contains("indirect callable lacks a proven function signature")).to_equal(true)
