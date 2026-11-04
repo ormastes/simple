@@ -71,6 +71,29 @@ status=0
   BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT="${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-$native_internal_default}"
   export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE SIMPLE_PROJECT_ROOT \
     BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT
+  # Same whole-build phase pricing bootstrap-from-scratch.sh gives this gate.
+  # Without it the campaign watchdog fell to its literal 5859375 KiB default
+  # and killed the single in-process full-CLI build at HIR module 9/3005
+  # (2026-11-05, data point 6 of doc/08_tracking/bug/tree_rss_floor_kills_
+  # stage2_compiler_tests_on_large_hosts_2026-10-15.md). The requested thread
+  # count is an upper bound (8 = the from-scratch lane's hard ceiling, never
+  # above the CPU count); the policy reduces it to what the host budget holds
+  # at the per-worker floor and refuses, naming the requirement, when not
+  # even one worker fits. An explicit cap in the environment is kept as-is.
+  admit_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-8}
+  # A typo must not quietly become a different worker count (the verifier
+  # would die on it anyway): refuse non-numeric, never substitute.
+  case "$admit_threads" in
+    ''|*[!0-9]*|0) echo "admit-stage2: BOOTSTRAP_VERIFY_BUILD_THREADS must be a positive decimal, got '$admit_threads'" >&2; exit 64 ;;
+  esac
+  admit_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || :)
+  case "$admit_cpus" in ''|*[!0-9]*|0) ;; *) [ "$admit_threads" -le "$admit_cpus" ] || admit_threads=$admit_cpus ;; esac
+  . "$src/scripts/bootstrap/lib/tree-rss-policy.shs"
+  bootstrap_tree_rss_whole_build_export "$admit_threads" "$src" || {
+    echo "admit-stage2: $bootstrap_tree_rss_refusal" >&2
+    exit 125
+  }
+  echo "admit-stage2: tree RSS cap ${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB} KiB, build-threads=${BOOTSTRAP_VERIFY_BUILD_THREADS} ($bootstrap_tree_rss_plan_summary)"
   sh "$src/scripts/bootstrap/bootstrap-phase-verification.shs" --phase=stage2 \
     "--backend=$backend" "--compiler=$compiler" "--compiler-sha256=$sha" \
     "--strategy=$strategy" "--profile=$profile" --hash-policy=canonical \
