@@ -1409,7 +1409,13 @@ impl HirLowering:
                             materialize_enum, owner_type_params)
                         # Never fall back to a same-spelled importer declaration
                         # when the declaring owner's constraint is unresolved.
-                        if self.qtype_raw_counted(imported_mod.module_name, name) < 0:
+                        # Builtin bound traits (Eq/Ord/Clone/...) resolve without a
+                        # declaration when none exists, exactly as the local
+                        # where-bound lowering treats them (types.spl builtin
+                        # bound arm); an imported owner's `where K: Eq + Ord`
+                        # must not poison every importer.
+                        if self.qtype_raw_counted(imported_mod.module_name, name) < 0 and
+                           not hir_owner_bound_is_ambient_builtin_trait(name):
                             self.error("unresolved imported owner type parameter dependency: {name}", type_.span)
                             valid = false
         valid
@@ -1737,6 +1743,16 @@ fn hir_payload_origin_miss_key(owner_key: text, dependency: text) -> text:
     the owner makes the cached fact exactly the question that was asked.
     See doc/08_tracking/bug/hir_builtin_container_origin_search_storm_2026-08-22.md"""
     owner_key + " " + dependency
+
+fn hir_owner_bound_is_ambient_builtin_trait(name: text) -> bool:
+    """Builtin bound-trait spellings with no library declaration.
+
+    Mirrors the builtin arm of the where-bound lowering in types.spl
+    (Clone/Copy/Debug/Default/Drop/Eq/Ord), so an imported owner's bound on
+    one of them is not reported as an unresolved dependency."""
+    match name:
+        case "Clone" | "Copy" | "Debug" | "Default" | "Drop" | "Eq" | "Ord": true
+        case _: false
 
 fn hir_dependency_is_builtin_type(dependency: text) -> bool:
     """True for a PRIMITIVE/builtin spelling that no user module can ever own.
