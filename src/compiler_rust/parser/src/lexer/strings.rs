@@ -2,6 +2,69 @@ use super::escapes::EscapeResult;
 use crate::token::TokenKind;
 
 impl<'a> super::Lexer<'a> {
+    /// Dispatch for a single-quoted literal after the opening quote has been
+    /// consumed: legacy raw string (gate OFF) or ADR-005 char literal (gate ON).
+    pub(super) fn scan_single_quoted(&mut self) -> TokenKind {
+        if self.char_literal_mode {
+            self.scan_char_literal()
+        } else {
+            self.scan_raw_string()
+        }
+    }
+
+    /// ADR-005 char literal: exactly one Unicode scalar or one escape, then `'`.
+    /// Any other content is a lex error that points at `r"..."`.
+    pub(super) fn scan_char_literal(&mut self) -> TokenKind {
+        const HINT: &str = "use r\"...\" for raw text";
+        let value = match self.peek() {
+            None | Some('\n') => {
+                return TokenKind::Error(format!("Unterminated char literal; {}", HINT));
+            }
+            Some('\'') => {
+                self.advance();
+                return TokenKind::Error(format!("Empty char literal ''; {}", HINT));
+            }
+            Some('\\') => {
+                self.advance();
+                match self.process_escape(false) {
+                    EscapeResult::Char(c) => c,
+                    EscapeResult::Error(msg) => return TokenKind::Error(msg),
+                    EscapeResult::Unterminated => {
+                        return TokenKind::Error(format!("Unterminated char literal; {}", HINT));
+                    }
+                }
+            }
+            Some(c) => {
+                self.advance();
+                c
+            }
+        };
+        if self.peek() == Some('\'') {
+            self.advance();
+            return TokenKind::CharLit(value);
+        }
+        // Consume the rest of the would-be literal on this line so lexing resumes cleanly.
+        let mut closed = false;
+        while let Some(c) = self.peek() {
+            if c == '\n' {
+                break;
+            }
+            self.advance();
+            if c == '\'' {
+                closed = true;
+                break;
+            }
+        }
+        if closed {
+            TokenKind::Error(format!(
+                "Char literal holds more than one Unicode scalar; {}",
+                HINT
+            ))
+        } else {
+            TokenKind::Error(format!("Unterminated char literal; {}", HINT))
+        }
+    }
+
     pub(super) fn scan_raw_string(&mut self) -> TokenKind {
         let mut value = String::new();
 

@@ -129,6 +129,11 @@ pub enum TokenKind {
     RawString(String),              // 'raw string' - no escapes, no interpolation
     TypedString(String, String),    // "value"_suffix - string with unit suffix (e.g., "127.0.0.1"_ip)
     TypedRawString(String, String), // 'value'_suffix - raw string with unit suffix
+    /// `'x'` char literal (one Unicode scalar or one escape). Only produced when the
+    /// ADR-005 char-literal lexer gate is ON (`SIMPLE_CHAR_LITERAL_LEXER=1`); the
+    /// parser does not accept it yet (activation step 1 in
+    /// doc/08_tracking/bug/char_literal_lexer_switch_staged_2026-11-03.md).
+    CharLit(char),
     Bool(bool),
     Nil,
     Symbol(String), // :symbol

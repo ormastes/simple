@@ -35,7 +35,7 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P2 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_qemu_ivshmem_preboot_2026-07-12` |
 | P2 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_simpleos_virtio_blk_durable_write_gap_2026-08-14` |
 | P2 | open | macOS: shared dependency; not platform-exclusive | `char_condition_type_check_staged_2026-11-03` |
-| P2 | open | macOS: shared dependency; not platform-exclusive | `char_literal_lexer_switch_staged_2026-11-03` |
+| P2 | implemented-behind-gate | macOS: shared dependency; not platform-exclusive | `char_literal_lexer_switch_staged_2026-11-03` |
 | P2 | fixing | ARM64: platform/shared context; native acceptance not inferred | `comment_cheat_absent_capabilities_2026-08-10` |
 | P2 | fix-implemented-verification-pending | macOS: platform/shared context; native acceptance not inferred | `gpu_ffi_loader_probes_linux_sonames_on_macos_2026_09_19` |
 | P2 | fixing | macOS: platform/shared context; native acceptance not inferred | `gui_winit_window_not_registered_window_server_2026-07-06` |
