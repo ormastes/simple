@@ -932,6 +932,18 @@ fn _compiler_inventory_refresh_observed_cost_v1(
         return compiler_inventory_invalid_v1(
             "observed-event-apply:" + inventory.reason)
     if trace != nil: trace!.published(inventory.digest, inventory.inventory!.generation)
+    # CURRENT names membership_digest now. A sweeper that read the OLD pointer
+    # may have just reclaimed a record we reused; put it back from the paths
+    # in hand rather than leave a pointer at a missing record.
+    if membership_digest != "" and
+            compiler_inventory_membership_read_v1(cache_root, membership_digest) == nil:
+        val restore_paths = if cold_init or membership_changed:
+            next_membership_paths
+        else:
+            previous_membership ?? next_membership_paths
+        val restored = compiler_inventory_membership_publish_v1(cache_root, restore_paths)
+        if restored.digest != membership_digest:
+            return compiler_inventory_invalid_v1("untracked-membership-restore-failed")
     # Never retire the previous membership record here: a concurrent observer
     # may still be reading it. Age-based GC reclaims unreferenced records.
     val _reclaimed = compiler_inventory_gc_v1(cache_root, COMPILER_INVENTORY_GC_MIN_AGE_S)
@@ -970,6 +982,15 @@ fn compiler_inventory_gc_v1(cache_root: text, min_age_s: i64) -> i64:
         val path = "{directory}/{name}"
         val modified = file_modified_time(path)
         if modified <= 0 or now - modified < min_age_s:
+            continue
+        # Re-read the pointer immediately before the unlink: a publisher may
+        # have named this record since the listing (and touched it on reuse).
+        val latest = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        val latest_cursor = compiler_inventory_cursor_read_v1(cache_root, latest)
+        if latest_cursor.valid and latest_cursor.untracked_membership_digest == digest:
+            continue
+        val recheck = file_modified_time(path)
+        if recheck <= 0 or now - recheck < min_age_s:
             continue
         if file_delete(path):
             removed = removed + 1
@@ -1017,7 +1038,9 @@ fn _compiler_inventory_refresh_owned_cost_v1(
             if compiler_inventory_cursor_read_v1(cache_root, winner).valid:
                 cold = false
         attempt = attempt + 1
-    compiler_inventory_invalid_v1("compile-event-refresh-snapshot-superseded")
+    compiler_inventory_invalid_v1(
+        "compile-event-refresh-snapshot-superseded (a concurrent publisher won " +
+        "{COMPILER_INVENTORY_REFRESH_ATTEMPTS_V1} times; retry, or clear {cache_root} if it persists)")
 
 val COMPILER_INVENTORY_REFRESH_ATTEMPTS_V1: i64 = 4
 

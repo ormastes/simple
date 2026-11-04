@@ -21,6 +21,7 @@ use std.common.crypto.sha256.{sha256_text}
 val WORKAROUND_FRAGMENT_MIN_AGE_S: i64 = 600
 val WORKAROUND_FRAGMENT_COMPACT_AT: i64 = 32
 val WORKAROUND_FRAGMENT_COMPACT_MARGIN_US: i64 = 5000000
+val WORKAROUND_FRAGMENT_LIST_ATTEMPTS: i64 = 4
 val WORKAROUND_FRAGMENT_MAX_BYTES: i64 = 16777216
 
 struct WorkaroundFragmentFile:
@@ -45,22 +46,32 @@ fn workaround_fragment_names(root: text) -> [text]:
 # full scan) already replaced everything before it; then it is garbage awaiting
 # the sweeper.
 fn workaround_fragment_files(root: text) -> Result<[WorkaroundFragmentFile], text>:
-    var files: [WorkaroundFragmentFile] = []
-    var damaged = ""
-    for name in workaround_fragment_names(root):
-        val path = workaround_fragment_dir(root) + "/" + name
-        if not workaround_host_exists(path): continue
-        val content: text = match workaround_host_read(path, WORKAROUND_FRAGMENT_MAX_BYTES):
-            case Ok(v): v
-            case Err(_): continue
-        match decode_workaround_fragment(content):
-            case Ok(fragment):
-                if fragment.base: damaged = ""
-                files.push(WorkaroundFragmentFile(name: name, fragment: fragment))
-            case Err(reason):
-                if damaged == "": damaged = "workaround fragment {name}: {reason}"
-    if damaged != "": return Err(damaged)
-    Ok(files)
+    # A listed fragment that vanished was reclaimed by a concurrent sweeper
+    # AFTER a base superseded it. That base may postdate THIS listing, so the
+    # fold must not continue on a partial set: list again (bounded).
+    var attempt = 0
+    while attempt < WORKAROUND_FRAGMENT_LIST_ATTEMPTS:
+        var files: [WorkaroundFragmentFile] = []
+        var damaged = ""
+        var vanished = false
+        for name in workaround_fragment_names(root):
+            val path = workaround_fragment_dir(root) + "/" + name
+            val content: text = match workaround_host_read(path, WORKAROUND_FRAGMENT_MAX_BYTES):
+                case Ok(v): v
+                case Err(_):
+                    vanished = true
+                    break
+            match decode_workaround_fragment(content):
+                case Ok(fragment):
+                    if fragment.base: damaged = ""
+                    files.push(WorkaroundFragmentFile(name: name, fragment: fragment))
+                case Err(reason):
+                    if damaged == "": damaged = "workaround fragment {name}: {reason}"
+        if not vanished:
+            if damaged != "": return Err(damaged)
+            return Ok(files)
+        attempt = attempt + 1
+    Err("workaround fragments kept vanishing during the read; retry")
 
 fn workaround_zero_pad(value: i64, width: i64) -> text:
     var out = "{value}"
@@ -82,10 +93,13 @@ fn workaround_fragment_publish(root: text, fragment: WorkaroundFragment, clock: 
     if checked.links.len() != fragment.links.len(): return Err("workaround fragment round trip failed")
     val directory = workaround_fragment_dir(root)
     if not workaround_host_mkdir(directory): return Err("cannot create workaround fragment directory")
-    val name = workaround_zero_pad(if clock > 0: clock else: 0, 20) + "-" +
-        workaround_zero_pad(workaround_host_pid(), 10) + "-" + sha256_text(content)[:16] + ".sdn"
-    val staged = directory + "/." + name + ".tmp"
+    val suffix = "-" + workaround_zero_pad(workaround_host_pid(), 10) + "-" + sha256_text(content)[:16] + ".sdn"
+    # Stage FIRST, then take the delta's clock immediately before the rename:
+    # the compaction margin only has to cover that one syscall, not a stalled
+    # stage write. A base passes its own (pre-listing) clock.
+    val staged = directory + "/." + workaround_zero_pad(workaround_host_now_micros(), 20) + suffix + ".tmp"
     if not workaround_host_stage(staged, content): return Err("workaround fragment stage failed")
+    val name = workaround_zero_pad(if clock > 0: clock else: workaround_host_now_micros(), 20) + suffix
     val published = workaround_host_publish_noreplace(staged, directory + "/" + name)
     if workaround_host_exists(staged):
         val _removed = workaround_host_remove(staged)
@@ -105,9 +119,9 @@ fn workaround_fragment_gc(root: text, names: [text]) -> i64:
         val content: text = match workaround_host_read(path, WORKAROUND_FRAGMENT_MAX_BYTES):
             case Ok(v): v
             case Err(_): ""
-        if content.starts_with("workaround_fragment |schema, revision, base, complete|\n    1, ") and
-                content.split("\n")[1].ends_with(", true, true") or
-                content.split("\n")[1].ends_with(", true, false"):
+        val lines = content.split("\n")
+        if lines.len() > 1 and content.starts_with("workaround_fragment |schema, revision, base, complete|\n") and
+                (lines[1].ends_with(", true, true") or lines[1].ends_with(", true, false")):
             newest_base = i
         i = i + 1
     var removed = 0
@@ -402,7 +416,21 @@ fn workaround_refresh_lockless(root: text, revision: text, fullscan: bool, disco
     # it and are re-applied). A delta carries exactly the re-read paths. The
     # first publication is never a base: N first writers would each replace
     # the others, which is the lost update this store exists to prevent.
-    val compaction = not fullscan and fragment_names.len() >= WORKAROUND_FRAGMENT_COMPACT_AT
+    # Count only the deltas published after the newest base: once a base
+    # exists, superseded fragments wait for the age sweep, and counting them
+    # would make every refresh in that window publish another base.
+    var deltas_since_base = 0
+    for name in fragment_names:
+        val path = workaround_fragment_dir(root) + "/" + name
+        val content: text = match workaround_host_read(path, WORKAROUND_FRAGMENT_MAX_BYTES):
+            case Ok(v): v
+            case Err(_): ""
+        val lines = content.split("\n")
+        if lines.len() > 1 and (lines[1].ends_with(", true, true") or lines[1].ends_with(", true, false")):
+            deltas_since_base = 0
+        else:
+            deltas_since_base = deltas_since_base + 1
+    val compaction = not fullscan and deltas_since_base >= WORKAROUND_FRAGMENT_COMPACT_AT
     val base = fullscan or compaction
     var fragment_paths = paths
     if base:

@@ -45,6 +45,29 @@ and `workaround writer lock unavailable`; both locks are gone.
    fragments superseded by a later base + 600 s, dead-pid stages via
    `compile_source_inventory_recover_v1`.
 
+## Race hardening (from the PR #6669 review)
+
+- The pre-swap compare runs for EVERY publisher (cursor-less callers too), so
+  a cold or legacy publisher can never roll CURRENT back over a newer
+  generation.
+- Reuse of an identical content-addressed record refreshes its age
+  (`COMPILE_SOURCE_INVENTORY_REUSE_TOUCH_S`, half the GC floor), sweepers
+  re-read CURRENT and re-stat immediately before every unlink, and a
+  publisher verifies its generation blob / membership record still exists
+  after the swap and republishes it from the bytes in hand. Residual window:
+  a sweeper that stat'ed before the touch and unlinks after the post-swap
+  verify - microseconds of sweeper work stalled across a whole publication,
+  on a record last referenced over 24 h ago; the next refresh then reports
+  `untracked-membership-record-invalid` and a cold init repairs it.
+- Fragment readers re-list when a listed fragment vanished mid-read (a base
+  published after their listing may have let the sweeper reclaim it); a delta
+  takes its name clock immediately before the rename, so the 5 s compaction
+  margin only has to cover one syscall; compaction counts deltas since the
+  newest base, so the fragment count is bounded by 32 deltas per base.
+- Follow-up: `src/compiler/80.driver/action_graph/persisted_graph.spl` still
+  takes `publication.lock` (bug row
+  `persisted_graph_publication_lock_2026-11-04`).
+
 ## What was removed
 
 - `src/app/compiler_entrypoint/inventory_refresh_lease.spl` (the lease,
