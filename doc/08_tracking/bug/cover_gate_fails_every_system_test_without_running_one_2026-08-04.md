@@ -132,3 +132,14 @@ checkpoint totals, timeout, and unknown runtime error controls.
 
 Status remains OPEN / TEST_BLOCKED: no qualified self-hosted CLI is available.
 Shell syntax/static guards do not substitute for executing these regressions.
+
+## 2026-11-04 rollout decision: legacy exemption list
+
+Owner chose the exemption list. `validate_system_test_covers` now skips specs
+named in `config/test/cover_exemptions.txt` (661 legacy system specs without a
+header `# @cover`, sorted, shrink-only; regenerate with
+`sh scripts/check/regen-cover-exemptions.shs`). Listed specs run and report
+their real verdict; any other system spec without `# @cover` still fails the
+gate. Verified on `test/03_system/tools/llm/claude_full/ink/events`: before,
+2 specs ADMISSION FAILED unexecuted; after, 9/9 files run, 35/35 pass. A new
+unlisted spec still fails admission; `cover_admission_spec` 10/10.
