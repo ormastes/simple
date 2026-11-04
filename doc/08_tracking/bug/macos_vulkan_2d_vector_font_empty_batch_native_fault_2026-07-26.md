@@ -667,3 +667,57 @@ Not the `[u8]` write-back root.
 
 Status: Engine2D interpreter row green; JIT row blocked on the JIT aliasing defect;
 Engine3D row open.
+
+## 2026-11-04 — Engine3D row root-caused (lane vk3dfont)
+
+Seed built from `origin/release/1.0.0` @ `5920c7c83fc` (`cargo build --release --bin simple`), M4 / MoltenVK.
+
+**The Engine3D adapter itself installs.** Under `simple run` (seed JIT, hybrid) a
+standalone probe of `VulkanRenderBackend3D` + `VulkanFontAdapter3D.create(64, 64)`
+gives `init=true`, HUD pipeline native=5, world pipeline native=8, color=9,
+depth=10, `adapter ready=true`, and `Engine3D.create_with_backend(64,64,"vulkan")`
+reports `backend_name()=vulkan-font` — also after a full Engine2D Vulkan font
+draw + readback + shutdown in the same process.
+
+**Why the spec row fails.** `simple test` runs the spec on the seed
+*interpreter* (the runner says so: "Ran on the interpreter"). There the
+`rt_vulkan_*` family is split across two unrelated sessions:
+- session/compute calls (`rt_vulkan_init`, `rt_vulkan_get_device`, buffers,
+  compute dispatch) go to the interpreter's private ash/dlopen `VK_STATE`
+  (`compiler/src/interpreter_extern/gpu.rs`), which is why Engine2D's
+  compute-based font path passes (device is a raw `VkDevice` pointer, e.g.
+  `44963561496`, not the runtime crate's small handle `2`);
+- graphics calls — `rt_vulkan_create_offscreen_render_pass`,
+  `rt_vulkan_create_font_sampler`, framebuffer/pipeline/draw — are registered
+  to `gpu::rt_vulkan_graphics_unavailable_fn` (constant `0`,
+  `interpreter_extern/mod.rs:2727-2760`).
+So `VulkanRenderBackend3D.init` borrows the interpreter device, gets
+`render_pass_handle=0`, and fails with `vulkan-base-resource-init-failed`.
+Captured in the spec row now:
+`reason=public-vulkan-font-install-failed:vulkan-font-adapter-init-failed:vulkan-base-resource-init-failed`.
+No VkResult is involved — no graphics Vulkan call is ever made on this path.
+
+**Fix landed here (Simple layer, honest diagnostics only):** the adapter now
+carries the backend's `blocker_reason` (`vulkan-font-adapter-init-failed:<step>`),
+`Engine3D.vulkan_font_install_reason()` exposes it, and the system spec reports
+it instead of the generic label. Regression:
+`test/01_unit/lib/gpu/engine3d/vulkan_font_adapter_branch_spec.spl`
+("exposes the adapter install failure reason through Engine3D", 5/5 pass).
+Engine2D/Metal twins unaffected (no shared code touched).
+
+**Remaining blocker (not fixable in this lane):** turning the Engine3D row green
+under `simple test` needs either (a) the self-hosted test runner (not the seed
+interpreter) or (b) a seed-interpreter change that serves the graphics family
+from the same session as `rt_vulkan_init` — today the two sessions own
+different devices, so simply re-pointing graphics rows at the runtime crate
+(`interpreter_extern/vulkan.rs` dispatch) would mix handles. Seed is
+bootstrap-only per policy; recorded, not patched. Under JIT the row would
+additionally hit `seed_jit_class_field_array_assign_aliases_local_2026-11-04.md`
+territory for readback, not re-verified here.
+
+Latency/budget row: fails with "durable performance evidence is missing" — it
+needs a recorded evidence file from a native performance run, not a code fix;
+left as is. SimpleOS row untouched (needs a guest run).
+
+Status: Engine2D interpreter row green; Engine3D row blocker-documented
+(seed interpreter graphics externs stubbed); latency row needs evidence run.
