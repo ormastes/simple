@@ -717,3 +717,48 @@ re-open-and-compare proof), so this was deliberately not patched here: it needs
 an owner decision on the non-procfs pinning mechanism (e.g. `fstat` of the
 held fd via a helper vs. `F_GETPATH` on Darwin). BSD: FreeBSD without
 `linprocfs` has the identical gap.
+
+## 2026-11-04 (later): Option 1 implemented — portable open-fd identity helper
+
+Owner decision: Option 1 (compare the OPEN fd's identity against a fresh stat of
+the path). Implemented in `scripts/check/lib/bootstrap-stage3/manifest-verify.shs`:
+
+- `bootstrap_stage3_fd_identity N` — `dev ino mode_hex size` of an fd this shell
+  holds. Linux: unchanged GNU `stat -Lc '%d %i %f %s' /proc/<pid>/fd/N`; the three
+  Linux manifest re-open sites (old `:877`, `:891`, `:915`) now call it with the
+  byte-identical command, so the `[ "$3" = 8100 ]` raw-mode check and all Linux
+  strength are unchanged.
+- `bootstrap_stage3_fd_stamp N` + `bootstrap_stage3_fd_matches_path N PATH STAMP` —
+  stamp (`dev ino mode size mtime_ns ctime_ns`) taken right after `exec N<path`,
+  later compared against BOTH a fresh fstat of the fd and a no-follow lstat of the
+  path. 0 = same unchanged file; 1 = renamed over / removed / modified after open;
+  2 = cannot determine (unknown OS, missing tool, closed fd) — never a pass.
+- Non-procfs backend is `fstat(2)` on the inherited fd via the tool-authority-pinned
+  python3 the portable lane already requires. NOT `stat -L /dev/fd/N`: measured on
+  this Darwin 25 host it reports the fdesc device (`1820675567`) for `st_dev`
+  instead of the file's (`16777232`); on FreeBSD `/dev/fd/N` for N>2 exists only
+  with `fdescfs` mounted. fstat has neither dependency, so Darwin and FreeBSD/
+  NetBSD/OpenBSD/DragonFly share one arm; any other OS returns 2 (fail closed).
+- Wired into the portable (non-procfs) lane: the bound map (fd 9) and the manifest
+  (fd 8) are stamped at open and re-checked after the positioned-read seal
+  (`portable-authority-{map,manifest}-fd-{stamp,identity}`).
+- Fixtures: `sh scripts/check/check-bootstrap-fd-identity.shs --selftest` —
+  `PASS — 14 fixture(s) checked on Darwin arm` (same file PASS; rename-over FAIL;
+  same-size in-place modify FAIL; removed FAIL; missing stat/python tool ERROR;
+  closed/malformed fd and empty stamp ERROR).
+
+**What Stage 3 on macOS/BSD still needs (NOT solved by an fd-identity helper):**
+1. Capsule mode: `manifest-verify.shs` refuses `BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1`
+   without procfs (`portable-descriptor-capsule-not-supported`), and
+   `bootstrap-stage3-provenance-verifier.sh:~198` sets it for the
+   Stage-2-parent-trust-root entry — i.e. the fresh Stage-2 -> Stage-3 route.
+2. Cross-process descriptor transport: the perl shared runner hands every input to
+   the verifier as `/proc/<pid>/fd/N` (validated by `expr` in manifest-write,
+   sanity, command-snapshot, provenance-verifier), and `authority.shs:264-332`
+   reads descriptors owned by ANOTHER pid plus `/proc/<owner>/stat` field 20 for
+   owner liveness. A child cannot address a parent's fd without procfs; this needs
+   an inherit-the-fd protocol redesign, not an identity helper.
+3. Pre-existing, unrelated, observed on this host while testing: the provenance
+   self-test stops at `bootstrap_stage3_seed_inputs_fingerprint` (empty ABI
+   policy), and `check-bootstrap-portability.shs` fails its process-lock fixture;
+   both fail identically without this change.
