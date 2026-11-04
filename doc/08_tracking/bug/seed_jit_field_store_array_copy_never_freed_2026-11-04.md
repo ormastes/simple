@@ -41,3 +41,11 @@ Regression test: `compiler/tests/jit_field_store_array_handover.rs` — the
 dead-local loop's live array bytes must be < 80% of a forced-copy twin
 (fails before the fix: `moved=4194432 copied=4194432`), plus value-semantics
 cases. Spec: `test/01_unit/compiler/interpreter/nullable_receiver_method_and_field_handover_spec.spl`.
+
+
+## Follow-up (2026-11-04): replaced buffer is now freed
+
+The remaining linear growth above is gone for function-local structs: the
+replaced field buffer is released when provably unshared. 100k: 27.8 MB,
+400k: 27.8 MB (flat). Details and proof obligations:
+`seed_jit_array_copy_never_freed_2026-10-19.md` § "Field-store release".
