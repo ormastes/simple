@@ -14,7 +14,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.{HirLowering, hir_type_kind_disc, hir_type_env_get}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, _hir_expr_symbol_or_invalid}
-use compiler.hir.exhaustiveness.char_condition.{cc_code, cc_env_name, cc_mode_resolve, cc_is_char_type}
+use compiler.hir.exhaustiveness.char_condition.{cc_message, cc_env_name, cc_mode_resolve, cc_is_char_type}
 
 extern fn rt_enum_payload(value: StmtKind) -> Expr?
 extern fn rt_enum_discriminant(value: StmtKind) -> i64
@@ -84,12 +84,15 @@ impl HirLowering:
         Diagnostic only; mode via SIMPLE_CHAR_CONDITION (warn | error)."""
         if not cc_is_char_type(self.binding_payload_type(cond)):
             return
-        val msg = "{cc_code()}: a char has no truthiness; compare explicitly (e.g. c == 'a') at {cond.span.line}:{cond.span.col}"
+        val mode = cc_mode_resolve(hir_type_env_get(cc_env_name()) ?? "", hir_type_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+        val msg = cc_message(mode, cond.span.line, cond.span.col)
         # Some statement forms (while) are lowered more than once; report each site once.
         for seen in self.diagnostic_messages:
             if seen.contains(msg):
                 return
-        val mode = cc_mode_resolve(hir_type_env_get(cc_env_name()) ?? "", hir_type_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+        for err in self.errors:
+            if err.message == msg:
+                return
         if mode == "error":
             self.error(msg, cond.span)
         else:
