@@ -188,3 +188,28 @@ Specs (Windows Rust seed `D:/dev/wt/seed/simple.exe`):
 13/17 -> 17/17 (4 new cases RED on the unpatched lib);
 `test/01_unit/lib/nogc_sync_mut/js/engine/promise_constructor_spec.spl`
 1/6 -> 6/6.
+
+## Note 2026-11-05 — item 1 verified closed on release/1.0.0 (worktree re-verification)
+
+Worktree branch `work/libbug-std-jsregex-20261105` (off `origin/release/1.0.0`,
+which already contains merges #6712 regex-literals and #6733 capture-groups).
+No source change was needed: the regex `String.replace` fix is already merged.
+
+TDD evidence (seed binary `build/phase_snapshots/phase1_1793422538/simple`,
+`--mode=interpreter`):
+
+- New repro spec
+  `test/01_unit/lib/nogc_sync_mut/js/engine/regex_replace_noop_repro_spec.spl`
+  (5 cases: `'aaa'.replace(/a/,'b')`, global-flag replace, result-differs
+  cases, `String.match` with regex literal, plain-string replace).
+- RED at pre-fix commit `59488dc3590` (parent of merge #6712): 1/5 passed,
+  4/5 failed with the exact no-op symptom
+  (`expected abc to equal aXc`, `expected a-b-a to equal Z-b-Z`,
+  `expected hello world to equal hell0 w0rld`, `expected undefined to equal b`).
+- GREEN at branch HEAD: 5/5 passed.
+- Regression sweep of `test/01_unit/lib/nogc_sync_mut/js/engine/*.spl`:
+  interpreter_object_single_owner 1/1, object_store_slot_index 6/6,
+  promise_constructor 6/6, regex_literal_replace 17/17, repro 5/5 OK;
+  `js_vm_reclamation_spec.spl` 0/4 remains RED but is a pre-existing
+  intentional placeholder noted in the 2026-11-04 note above, untouched by
+  this verification.

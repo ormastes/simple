@@ -1,0 +1,44 @@
+# Repro for bug js_engine_missing_builtins_regex_promise_prototype_2026-07-11 (item 1).
+# String.replace with a regex argument used to be a silent no-op: the regex
+# literal either lexed as division or, once lexed, fell through the
+# string-search path of String.prototype.replace and returned the input
+# unchanged. These cases pin the fixed behaviour.
+
+use std.spec.*
+use std.js.engine.js_error.{JsLogger, LogLevel}
+use std.js.engine.parser.{JsParser}
+use std.js.types.js_types.{JsValue}
+use std.js.engine.interpreter_types.{js_to_string}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_exec.*
+
+fn run_js(source: text) -> text:
+    val logger = JsLogger.new("regex-replace-repro", LogLevel.Error)
+    val parser = JsParser.new(source, logger)
+    match parser.parse_program():
+        Ok(statements):
+            val interpreter = JsInterpreter.new(logger)
+            match interpreter.execute(statements):
+                Ok(value): js_to_string(value)
+                Err(error): "ERR: {error.message}"
+        Err(error): "PARSE-ERR: {error.message}"
+
+describe "JS engine regex String.replace is not a no-op":
+    it "replaces the first match instead of returning the original string":
+        expect(run_js("'aaa'.replace(/a/, 'b')")).to_equal("baa")
+        expect(run_js("'abc'.replace(/b/, 'X')")).to_equal("aXc")
+
+    it "replaces every match with the global flag":
+        expect(run_js("'aaa'.replace(/a/g, 'b')")).to_equal("bbb")
+        expect(run_js("'a-b-a'.replace(/a/g, 'Z')")).to_equal("Z-b-Z")
+
+    it "result differs from the input whenever the pattern matches":
+        expect(run_js("'hello world'.replace(/world/, 'there')")).to_equal("hello there")
+        expect(run_js("'hello world'.replace(/o/g, '0')")).to_equal("hell0 w0rld")
+
+    it "String.match with a regex literal finds matches":
+        expect(run_js("'aaa'.match(/a/g).length")).to_equal("3")
+        expect(run_js("'abc'.match(/b/)[0]")).to_equal("b")
+
+    it "plain string search values still behave as before":
+        expect(run_js("'aaa'.replace('a', 'b')")).to_equal("baa")
