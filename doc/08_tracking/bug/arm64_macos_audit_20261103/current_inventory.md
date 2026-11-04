@@ -73,7 +73,7 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P3 | closed | ARM64: shared dependency; not platform-exclusive | `rv64_host_gpu_real_runtime_exit_facade_2026-07-12` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `simpleos_arm64_qmp_input_transport_missing_2026-07-24` |
 | P3 | closed | ARM64: platform/shared context; native acceptance not inferred | `simpleos_arm64_riscv64_embedded_gui_missing_theme_install_call_2026-09-06` |
-| P3 | open | macOS: platform/shared context; native acceptance not inferred | `spipe_docgen_deployed_macos_cli_stale_2026-09-09` |
+| P3 | manual-regenerated; stale binary awaits bootstrap redeploy | macOS: platform/shared context; native acceptance not inferred | `spipe_docgen_deployed_macos_cli_stale_2026-09-09` |
 | P3 | fixing | macOS, ARM64: platform/shared context; native acceptance not inferred | `stage2_link_undefined_cpu_probe_and_surface_symbols_2026-09-13` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `stage2_native_codegen_silent_wrong_values_aarch64_2026-09-05` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `stage2_native_f64_arithmetic_lowered_as_integer_ops_aarch64_2026-09-05` |

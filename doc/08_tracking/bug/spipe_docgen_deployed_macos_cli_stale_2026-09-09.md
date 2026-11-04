@@ -2,7 +2,7 @@
 
 Date: 2026-09-09
 
-Status: blocked on a current admitted pure-Simple CLI; generated manual remains stale.
+Status: manual regenerated from current source (2026-11-04); stale `bin/release/macos-arm64/simple` itself awaits the bootstrap-lane redeploy.
 
 ## Affected output
 
@@ -94,3 +94,34 @@ scenario source. Preserve that run's executable/source/output identities.
 The focused source whitespace check passed. The executable-spec layout scan
 returned zero `*_spec.spl` files under `doc/06_spec`. These checks do not close
 the missing regeneration evidence or establish a generator PASS.
+
+## Update 2026-11-04: docgen no longer depends on the stale deployed CLI
+
+`spipe-docgen` is pure-Simple source (`src/app/spipe_docgen/main.spl`) read at
+run time, so it does not need the stale April Mach-O. `bin/simple` on this host
+now resolves to the release/1.0 seed
+`~/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple`
+(SHA-256 `f923ed0f7248bc8a53e001c9a32a66ac8bc2b3f8c812b49dead4fa15ead62aa9`),
+which dispatches `spipe-docgen` to the current source generator:
+
+```sh
+bin/simple spipe-docgen \
+  test/02_integration/app/llm_process/knowledge_routing_process_spec.spl \
+  --output <dir> --no-index
+```
+
+Result at `origin/release/1.0.0` `fb18c371767`: exit 0,
+`Generated 1 docs (1 complete, 0 stubs)`. Source SHA-256 unchanged
+(`5e966b45...e3e5`). The regenerated manual now carries both previously missing
+visible steps ("Exercise exact feature and longest source-prefix selection",
+"Keep sibling names outside the renderer source-prefix boundary"); new manual
+SHA-256 `d90dae7e52c3ed2ff5575a09a8e15ee9369f298e09bdec5f86222518cda7944b`.
+The placeholder `sdn-diagram` block (unrendered `# run: simple md-diagram-update`)
+is replaced by the generator's current description line.
+
+Caveat, stated honestly: the regeneration ran on the seed, not an admitted
+pure-Simple CLI (none exists on macOS today; lane 1 Stage 2 was built but not
+admitted, 2026-11-04). The generator logic executed is the current source either
+way. Remaining gap, owned by the bootstrap lane: `bin/release/macos-arm64/simple`
+(SHA `277f8ac9...6767`) is still stale and still misroutes `spipe-docgen` as a
+filename; do not invoke it directly until redeployed.
