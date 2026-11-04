@@ -760,9 +760,16 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             if at_search_boundary(&parent_dir, &boundary) {
                 break;
             }
-            if let Some(ref root) = project_root {
-                if parent_dir == *root || parent_dir.parent().is_none() {
-                    break;
+            // A nested directory that merely contains a `src/` folder (e.g.
+            // `test/01_unit/lib/nogc_sync_mut/src`) must not end the climb before
+            // the repository root, or `test.*` imports from specs beneath it never
+            // reach `<repo>/test`. With a workspace boundary, the boundary check
+            // above is authoritative.
+            if boundary.is_none() {
+                if let Some(ref root) = project_root {
+                    if parent_dir == *root || parent_dir.parent().is_none() {
+                        break;
+                    }
                 }
             }
         } else {
