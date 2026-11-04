@@ -123,3 +123,6 @@ works once the trait and the implementing type are directly imported by the
 same module, or the type crosses a module boundary via a plain function
 rather than a bare type import). Gap 2 remains open rather than silently
 working around the discovered defect.
+
+## Triage note 2026-11-04 (n88_a)
+Gap 1 (trait-only module -> "MIR module has no functions") is FIXED on release/1.0.0: `driver_native_module_is_export_facade` in `src/compiler/80.driver/driver_aot_output.spl` accepts a trait declaration as code-free evidence (see "Gap 1 source fix (2026-07-17)"). Gap 2 remains open; row stays PARTIAL.
