@@ -22,6 +22,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_cfg_select.{mir_cfg_select_arm, mir_cfg_item_enabled}
 use compiler.core.cfg_platform.{cfg_enabled_features}
 use compiler.mir.mir_target_hir_select.{mir_target_hir_mode_from_env, mir_target_hir_live_select}
+use compiler.mir.mir_target_hir_decl_cfg.{mir_target_hir_live_decl_cfg}
 use compiler.mir.mir_verify_levels.{mir_verify_levels_from_env}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
@@ -160,7 +161,19 @@ impl MirLowering:
             return won == arm
         if cfg.len() == 0:
             return true
-        val verdict = mir_cfg_item_enabled(cfg, self.target_context, cfg_enabled_features())
+        val features = cfg_enabled_features()
+        var verdict = mir_cfg_item_enabled(cfg, self.target_context, features)
+        # P8: SIMPLE_TARGET_HIR_MODE=shadow|typed re-checks through TargetHIR.
+        val th_mode = mir_target_hir_mode_from_env()
+        if th_mode.is_err():
+            self.error_fatal(th_mode.unwrap_err(), nil)
+            return false
+        if th_mode.unwrap() != "legacy":
+            val checked = mir_target_hir_live_decl_cfg(th_mode.unwrap(), self.current_module_id, cfg, self.target_context, features, verdict)
+            if checked.is_err():
+                self.error_fatal(checked.unwrap_err(), nil)
+                return false
+            verdict = checked.unwrap()
         if verdict == -2:
             self.error_fatal("malformed @cfg guard on {name}", nil)
             return false
@@ -243,7 +256,20 @@ impl MirLowering:
                     arms.insert(pos, rec_arm[rj])
                     conds.insert(pos, rec_cond[rj])
                 rj = rj + 1
-            val idx = mir_cfg_select_arm(conds, self.target_context, cfg_enabled_features())
+            val features = cfg_enabled_features()
+            var idx = mir_cfg_select_arm(conds, self.target_context, features)
+            # P8: SIMPLE_TARGET_HIR_MODE=shadow|typed re-selects through TargetHIR.
+            val th_mode = mir_target_hir_mode_from_env()
+            if th_mode.is_err():
+                self.error_fatal(th_mode.unwrap_err(), nil)
+                idx = -2
+            elif th_mode.unwrap() != "legacy":
+                val checked = mir_target_hir_live_select(th_mode.unwrap(), self.current_module_id, conds, self.target_context, features, idx)
+                if checked.is_err():
+                    self.error_fatal(checked.unwrap_err(), nil)
+                    idx = -2
+                else:
+                    idx = checked.unwrap()
             if idx == -2:
                 self.error_fatal("malformed @cfg guard in group {g}", nil)
                 winners[g] = -99
