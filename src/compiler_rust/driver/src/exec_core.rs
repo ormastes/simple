@@ -441,6 +441,42 @@ impl ExecCore {
         )
     }
 
+    /// Count module-level statements the JIT entry path would silently skip.
+    ///
+    /// The JIT calls `main` and nothing else, while the interpreter (and the
+    /// language's module semantics) runs every top-level statement in source
+    /// order and then calls `main` once, unless a top-level `main()` call
+    /// already did. A file with `print "x"` before or after `main()` therefore
+    /// lost those statements under `simple run`. Bindings (`val`/`var`/`const`/
+    /// `static`) are module globals the JIT already lowers; a bare top-level
+    /// `main()` call is the entry invocation the JIT performs itself.
+    /// See doc/08_tracking/bug/seed_interp_module_var_mut_array_param_write_back_lost_2026-11-04.md.
+    pub(crate) fn jit_skipped_top_level_statements(items: &[simple_parser::ast::Node]) -> usize {
+        use simple_parser::ast::{Expr, Node as N};
+        items
+            .iter()
+            .filter(|item| match item {
+                N::Expression(Expr::Call { callee, args, .. }) => {
+                    !(args.is_empty() && matches!(callee.as_ref(), Expr::Identifier(name) if name == "main"))
+                }
+                N::Expression(_)
+                | N::Assignment(_)
+                | N::If(_)
+                | N::Match(_)
+                | N::For(_)
+                | N::While(_)
+                | N::Loop(_)
+                | N::Guard(_)
+                | N::Assert(_)
+                | N::Defer(_)
+                | N::ErrDefer(_)
+                | N::Context(_)
+                | N::With(_) => true,
+                _ => false,
+            })
+            .count()
+    }
+
     /// Guard the silent no-op run.
     ///
     /// A module with no `fn main` AND no executable top-level item runs
@@ -1258,6 +1294,17 @@ impl ExecCore {
         // not descend into function bodies, so total_tests counts module-level
         // examples only.
         let module_level_examples = simple_parser::test_analyzer::extract_file_test_meta(&ast.items, None).total_tests;
+
+        // Same gap for ordinary module-level statements (`print`, calls,
+        // assignments, control flow) before or after `main()`: the JIT would
+        // drop them, the interpreter runs them in order. Fall back.
+        let skipped_statements = Self::jit_skipped_top_level_statements(&ast.items);
+        if skipped_statements > 0 {
+            return Err(format!(
+                "module has {skipped_statements} top-level statement(s) that the JIT entry path \
+                 would silently skip (it calls `main` only); falling back to interpreter"
+            ));
+        }
         if module_level_examples > 0 {
             return Err(format!(
                 "module declares {module_level_examples} top-level BDD example(s) that the JIT \
@@ -2079,5 +2126,30 @@ mod execution_mode_validation_tests {
             "match is case-sensitive"
         );
         assert!(ExecutionMode::parse_str_checked("native").is_err());
+    }
+}
+
+#[cfg(test)]
+mod jit_top_level_statement_tests {
+    use super::ExecCore;
+
+    fn skipped(src: &str) -> usize {
+        let mut parser = simple_parser::Parser::new(src);
+        let module = parser.parse().expect("parse fixture");
+        ExecCore::jit_skipped_top_level_statements(&module.items)
+    }
+
+    /// A file with `fn main` used to run only `main` under the JIT, silently
+    /// dropping module-level statements before/after the `main()` call.
+    #[test]
+    fn statements_around_main_call_force_interpreter_fallback() {
+        let src = "print \"before\"\nfn main():\n    print \"in main\"\nmain()\nprint \"after\"\n";
+        assert_eq!(skipped(src), 2);
+    }
+
+    #[test]
+    fn bindings_and_bare_main_call_stay_on_jit() {
+        let src = "val greeting = \"hi\"\nfn main():\n    print greeting\nmain()\n";
+        assert_eq!(skipped(src), 0);
     }
 }
