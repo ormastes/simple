@@ -4335,6 +4335,8 @@ pub fn compile_call<M: Module>(
                 // plain text mapping cannot mis-route a non-text receiver the
                 // way `index_of` and `at` did.
                 "char_count" => Some("rt_string_char_count"),
+                "to_digit" => Some("rt_string_to_digit"),
+                "byte_len" => Some("rt_string_len"),
                 "capitalize" => Some("rt_string_capitalize"),
                 "swapcase" => Some("rt_string_swapcase"),
                 "title" | "titlecase" => Some("rt_string_title"),
