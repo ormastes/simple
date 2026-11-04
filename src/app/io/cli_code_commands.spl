@@ -5,7 +5,8 @@
 # Preview (unified diff) is the default; `--apply` is the snapshot writer.
 # The same engine serves `simple fix`, lint --fix, the LSP and the MCP bridge.
 use std.io_runtime.{read_file, file_exists, dir_exists, dir_walk}
-use std.nogc_sync_mut.sffi.diag.{stdin_read_line, eprintln}
+use std.nogc_sync_mut.io.pipe.{stdin_read_line}
+use app.io.cli_ops.{_cli_eprint}
 use std.glob.{glob_match}
 use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
 use std.tooling.easy_fix.types.{EasyFix}
@@ -70,7 +71,7 @@ pub fn scope_matches(path: text, pattern: text) -> bool:
     # try every suffix of `tail` at a path-component boundary
     var i = 0
     while i <= tail.len():
-        if i == 0 or tail[i - 1] == "/":
+        if i == 0 or tail.byte_at(i - 1) == 47:
             if glob_match(tail.slice(i), rest): return true
         i = i + 1
     false
@@ -122,13 +123,13 @@ fn _print_notes(proposals: [EasyFix]):
 pub fn run_code_refactor(args: [text]) -> i64:
     val opts = parse_code_refactor_args(args)
     if opts.error != "":
-        eprintln("Error: {opts.error}")
-        eprintln(_usage())
+        _cli_eprint("Error: {opts.error}")
+        _cli_eprint(_usage())
         return 2
     var closure_src = ""
     match _read_closure(opts.closure_path):
         case Err(e):
-            eprintln("Error: {e}")
+            _cli_eprint("Error: {e}")
             return 2
         case Ok(src): closure_src = src
     var spec_name = opts.name
@@ -140,12 +141,12 @@ pub fn run_code_refactor(args: [text]) -> i64:
         spec_name = base
     val admitted = closure_admit(spec_name, closure_src)
     if admitted.is_err():
-        eprintln("Error: {admitted.unwrap_err()}")
+        _cli_eprint("Error: {admitted.unwrap_err()}")
         return 3
     val spec = admitted.unwrap()
     val files = scope_files(opts.scopes)
     if files.len() == 0:
-        eprintln("Error: no .spl files match scope {opts.scopes.join(" ")}")
+        _cli_eprint("Error: no .spl files match scope {opts.scopes.join(" ")}")
         return 2
     var snaps: [SourceSnapshot] = []
     var by_path: Dict<text, SourceSnapshot> = {}
@@ -155,7 +156,7 @@ pub fn run_code_refactor(args: [text]) -> i64:
         by_path[f] = snap
     val collected = closure_collect(spec, snaps, closure_default_binary(), opts.timeout_ms)
     if collected.is_err():
-        eprintln("Error: {collected.unwrap_err()}")
+        _cli_eprint("Error: {collected.unwrap_err()}")
         return 3
     val proposals = collected.unwrap()
     val outcome = fix_validate(proposals, by_path)
@@ -164,7 +165,7 @@ pub fn run_code_refactor(args: [text]) -> i64:
         if not outcome.report.ok: return 1
     else:
         if not outcome.report.ok:
-            eprintln("Error: validation failed at stage {outcome.report.stage}: {outcome.report.errors.join("; ")}")
+            _cli_eprint("Error: validation failed at stage {outcome.report.stage}: {outcome.report.errors.join("; ")}")
             return 1
         _print_notes(proposals)
         val diff = fix_outcome_diff(outcome)
@@ -178,7 +179,7 @@ pub fn run_code_refactor(args: [text]) -> i64:
         return 0
     match fix_apply_outcome(outcome, false):
         case Err(e):
-            eprintln("Error applying refactor: {e}")
+            _cli_eprint("Error applying refactor: {e}")
             return 1
         case Ok(report):
             if not opts.json:
@@ -203,7 +204,7 @@ pub fn run_code_ast(args: [text]) -> i64:
         elif a == "code" or a == "ast": val _ = 0
         elif not a.starts_with("-"): file = a
     if file == "" or not file_exists(file):
-        eprintln(_usage())
+        _cli_eprint(_usage())
         return 2
     val views = fix_unit_views(fix_unit_from_source(file, read_file(file)))
     if json:
@@ -226,7 +227,7 @@ pub fn run_code_command(args: [text]) -> i64:
         return if sub == "": 1 else: 0
     if sub == "refactor": return run_code_refactor(args)
     if sub == "ast": return run_code_ast(args)
-    eprintln("Error: unknown subcommand: {sub}")
-    eprintln(_usage())
+    _cli_eprint("Error: unknown subcommand: {sub}")
+    _cli_eprint(_usage())
     2
 

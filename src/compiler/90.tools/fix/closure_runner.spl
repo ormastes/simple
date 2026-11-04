@@ -25,8 +25,9 @@ pub struct ClosureSpec:
 # annotations, raw runtime symbols, a competing entry point.
 val DENIED: [text] = ["use", "import", "extern", "unsafe", "danger", "rt_", "fn main("]
 
-fn _is_ident_char(c: text) -> bool:
-    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+# Byte-based scanning: `len()`/`slice`/`find` are bytes, `s[i]` is chars.
+fn _is_ident_byte(b: i64) -> bool:
+    (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 57) or b == 95
 
 fn _has_denied_token(line: text, tok: text) -> bool:
     var from = 0
@@ -35,33 +36,35 @@ fn _has_denied_token(line: text, tok: text) -> bool:
         if at < 0: return false
         val i = from + at
         var before_ok = true
-        if i > 0: before_ok = not _is_ident_char(line[i - 1])
+        if i > 0: before_ok = not _is_ident_byte(line.byte_at(i - 1))
         val after = i + tok.len()
         # `rt_` is a prefix; keywords must end at a boundary (`unsafe:`, `use `, `@unsafe(`)
         var after_ok = true
         if not tok.ends_with("_") and not tok.ends_with("(") and after < line.len():
-            after_ok = not _is_ident_char(line[after])
+            after_ok = not _is_ident_byte(line.byte_at(after))
         if before_ok and after_ok: return true
         from = i + 1
     false
 
 # Drop string-literal bodies so a message like "use get()" is not a token.
 fn _strip_strings(line: text) -> text:
-    var out = ""
+    var parts: [text] = []
     var in_str = false
+    var seg_start = 0
     var i = 0
     while i < line.len():
-        val c = line[i]
+        val c = line.byte_at(i)
         if in_str:
-            if c == "\\": i = i + 1
-            elif c == "\"": in_str = false
-        elif c == "\"":
+            if c == 92: i = i + 1
+            elif c == 34:
+                in_str = false
+                seg_start = i + 1
+        elif c == 34:
             in_str = true
-            out = out + " "
-        else:
-            out = out + c
+            parts.push(line.slice(seg_start, i) + " ")
         i = i + 1
-    out
+    if not in_str: parts.push(line.slice(seg_start))
+    parts.join("")
 
 # Static sandbox admission. Err names the first denied token.
 pub fn closure_admit(name: text, source: text) -> Result<ClosureSpec, text>:
@@ -147,7 +150,7 @@ fn _line_col(source: text, offset: i64) -> (i64, i64):
     var col = 1
     var i = 0
     while i < offset and i < source.len():
-        if source[i] == "\n":
+        if source.byte_at(i) == 10:
             line = line + 1
             col = 1
         else:
