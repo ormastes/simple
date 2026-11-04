@@ -1,0 +1,111 @@
+#!/bin/sh
+# Guard: every `match <expr>.kind:` over HirExprKind (arm set >= 40 variant
+# names) must list every variant or carry `case _`/`else`. Stage2 does not
+# enforce exhaustiveness, so a missing arm is a runtime rt_panic ("total enum
+# match fell through"), e.g. any_check_expr missing TypeTest/TryCatch.
+# Verdict is the last stdout line: PASS (0) / FAIL (1) / ERROR (2).
+# Usage: check-hir-expr-kind-exhaustive.shs [--selftest] [--root DIR]
+set -u
+
+# scan <defs-file> <src-root>  -> prints detail lines then "N <checked> <bad>"
+scan() {
+  defs="$1"; root="$2"
+  vfile=$(mktemp)
+  awk '
+    /^enum HirExprKind:/ {inenum=1; next}
+    inenum && /^[^ #\t]/ {exit}
+    inenum && /^    [A-Z][A-Za-z0-9_]*/ {
+      s=$0; sub(/^    /,"",s); sub(/[^A-Za-z0-9_].*$/,"",s); print s
+    }' "$defs" > "$vfile"
+  if [ ! -s "$vfile" ]; then rm -f "$vfile"; echo "NOVARIANTS"; return; fi
+  files=$(find "$root" -name '*.spl' 2>/dev/null)
+  [ -z "$files" ] && { rm -f "$vfile"; echo "SUMMARY 0 0"; return; }
+  # shellcheck disable=SC2086
+  awk -v VF="$vfile" '
+    BEGIN { while ((getline l < VF) > 0) { V[l]=1; nv++ } }
+    function indent(s,  m) { match(s,/^ */); return RLENGTH }
+    function finish(  k,missing,cnt,hit) {
+      if (!act) return
+      hit=0; for (k in arms) if (k in V) hit++
+      if (hit >= 40) {
+        checked++
+        if (!wild) {
+          missing=""
+          for (k in V) if (!(k in arms)) missing = missing (missing==""?"":",") k
+          if (missing != "") { bad++; print "BAD " mfile ":" mline " missing: " missing }
+        }
+      }
+      act=0; delete arms; wild=0
+    }
+    FNR==1 { finish() }
+    {
+      line=$0
+      if (line ~ /^[ \t]*$/) next
+      ind=indent(line)
+      if (act && ind <= mind) finish()
+      if (act && ind == mind+4 && line ~ /^ *(case|else)/) {
+        s=line; sub(/^ */,"",s)
+        if (s ~ /^else[ :]/ || s ~ /^else$/) { wild=1; next }
+        sub(/^case +/,"",s)
+        if (s ~ /^_( |:|$)/) { wild=1; next }
+        # arm pattern ends at first ":" outside parens, or "if" guard; take the head
+        n=split(s, alts, /\|/)
+        for (i=1;i<=n;i++) {
+          a=alts[i]; sub(/^ +/,"",a)
+          sub(/[^A-Za-z0-9_.].*$/,"",a)
+          sub(/^.*\./,"",a)
+          if (a != "") arms[a]=1
+        }
+      }
+      if (!act && line ~ /^ *match +[^#]*\.kind *:/) {
+        act=1; mind=ind; mfile=FILENAME; mline=FNR; wild=0
+      }
+    }
+    END { finish(); print "SUMMARY " checked+0 " " bad+0 }
+  ' $files
+  rm -f "$vfile"
+}
+
+verdict() {
+  out=$(scan "$1" "$2")
+  case "$out" in NOVARIANTS*) echo "ERROR — nothing was checked (no HirExprKind variants parsed)"; return 2;; esac
+  echo "$out" | grep '^BAD ' | sed 's/^BAD //'
+  sum=$(echo "$out" | grep '^SUMMARY ')
+  n=$(echo "$sum" | awk '{print $2}'); b=$(echo "$sum" | awk '{print $3}')
+  if [ "${n:-0}" -eq 0 ]; then echo "ERROR — nothing was checked"; return 2; fi
+  if [ "$b" -gt 0 ]; then echo "FAIL — $n match(es) checked, $b non-exhaustive"; return 1; fi
+  echo "PASS — $n match(es) checked, 0 non-exhaustive"; return 0
+}
+
+selftest() {
+  d=$(mktemp -d)
+  {
+    echo "enum HirExprKind:"
+    i=1; while [ $i -le 42 ]; do echo "    V$i(x: i64)"; i=$((i+1)); done
+    echo "struct Other:"; echo "    a: i64"
+  } > "$d/defs.spl"
+  mkdir -p "$d/ok" "$d/bad"
+  gen() { # $1=out $2=skip-variant
+    { echo "fn f(e: HirExpr):"; echo "    match e.kind:"
+      i=1; while [ $i -le 42 ]; do
+        [ "V$i" != "$2" ] && { echo "        case V$i(x):"; echo "            pass"; }
+        i=$((i+1)); done; } > "$1"
+  }
+  gen "$d/ok/a.spl" ""; gen "$d/bad/a.spl" "V7"
+  verdict "$d/defs.spl" "$d/ok" >/dev/null; rc1=$?
+  r=$(verdict "$d/defs.spl" "$d/bad"); rc2=$?
+  rm -rf "$d"
+  if [ $rc1 -ne 0 ] || [ $rc2 -ne 1 ] || ! echo "$r" | grep -q 'missing: V7'; then
+    echo "ERROR — selftest failed (exhaustive rc=$rc1, missing-variant rc=$rc2)"; return 2
+  fi
+  return 0
+}
+
+root=src/compiler; mode=run
+while [ $# -gt 0 ]; do
+  case "$1" in --selftest) mode=self;; --root) shift; root="$1";; esac; shift
+done
+selftest || exit 2
+[ "$mode" = self ] && { echo "PASS — selftest ok (2 fixtures)"; exit 0; }
+verdict "$root/20.hir/hir_definitions.spl" "$root"
+exit $?

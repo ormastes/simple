@@ -1,0 +1,57 @@
+# @req REQ-MC-ANY-001
+# any_check_expr must handle every HirExprKind variant: TypeTest and TryCatch
+# used to fall through the exhaustive match (rt_panic "total enum match fell
+# through"). Regression for the stage3 object sweep.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.semantics.any_escape.types.{AnyEscapeProfile}
+use compiler.semantics.any_escape.checker.{any_escape_state_new, any_check_expr}
+
+fn leaf(erased: bool) -> HirExpr:
+    val type_ = HirType(kind: if erased: HirTypeKind.Any else: HirTypeKind.Int(64, true), span: Span.empty())
+    HirExpr(kind: HirExprKind.IntLit(2, nil), has_type_: true, type_: type_, span: Span.empty())
+
+fn block_of(value: HirExpr) -> HirBlock:
+    HirBlock(stmts: [], has: true, value: value, span: Span.empty())
+
+fn codes_of(e: HirExpr) -> [text]:
+    var state = any_escape_state_new(SymbolTable.new(), "exhaustive")
+    any_check_expr(state, AnyEscapeProfile.census([]), e)
+    var codes: [text] = []
+    for diag in state.diags:
+        codes = codes.push(diag.code)
+    codes
+
+fn wrap(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: Span.empty())
+
+fn catch_clause(value: HirExpr) -> HirCatchClause:
+    val pat = HirPattern(kind: HirPatternKind.Wildcard, type_: nil, span: Span.empty())
+    val ty = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+    HirCatchClause(has_pattern: false, pattern: pat, has_type_: false, type_: ty,
+                   body: block_of(value), span: Span.empty())
+
+describe "Any escape analysis covers TypeTest and TryCatch":
+    it "walks a TypeTest operand without panicking":
+        expect(codes_of(wrap(HirExprKind.TypeTest(leaf(false), "i64"))).len()).to_equal(0)
+
+    it "reports an erased TypeTest operand":
+        expect(codes_of(wrap(HirExprKind.TypeTest(leaf(true), "i64")))).to_contain("E-MC-ANY-001")
+
+    it "walks a clean TryCatch with a finally block":
+        val e = wrap(HirExprKind.TryCatch(block_of(leaf(false)), [catch_clause(leaf(false))], block_of(leaf(false))))
+        expect(codes_of(e).len()).to_equal(0)
+
+    it "reports an erased value in the try body":
+        val e = wrap(HirExprKind.TryCatch(block_of(leaf(true)), [], nil))
+        expect(codes_of(e)).to_contain("E-MC-ANY-001")
+
+    it "reports an erased value in a catch clause":
+        val e = wrap(HirExprKind.TryCatch(block_of(leaf(false)), [catch_clause(leaf(true))], nil))
+        expect(codes_of(e)).to_contain("E-MC-ANY-001")
+
+    it "reports an erased value in the finally block":
+        val e = wrap(HirExprKind.TryCatch(block_of(leaf(false)), [], block_of(leaf(true))))
+        expect(codes_of(e)).to_contain("E-MC-ANY-001")
