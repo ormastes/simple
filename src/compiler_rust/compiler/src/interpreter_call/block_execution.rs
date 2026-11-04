@@ -30,15 +30,16 @@ enum ModuleGlobalTarget {
 }
 
 fn module_global_target(name: &str, env: &Env) -> Option<ModuleGlobalTarget> {
+    // A frame local shadows any same-named module global (e.g. a module namespace).
+    if env.is_local(name) {
+        return None;
+    }
     let current_owner = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
     let Some(owner) = current_owner else {
         return MODULE_GLOBALS
             .with(|cell| cell.borrow().contains_key(name))
             .then_some(ModuleGlobalTarget::Legacy);
     };
-    if env.is_local(name) {
-        return None;
-    }
     if crate::interpreter::owned_global_present(&owner, name) {
         return Some(ModuleGlobalTarget::Owned {
             owner,
