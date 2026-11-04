@@ -449,7 +449,6 @@ in MIR to "fix" a dropped write. Escape: `SIMPLE_CAPTURE_WRITE_CHECK=warning|off
 - So the JIT keeps base aliasing at literals (a known bug, DEFERRED). Any argument that
   is not handed over makes the struct non-unique, and so do `@inject`-constructor types.
 - Bug record: `doc/08_tracking/bug/seed_jit_array_copy_never_freed_2026-10-19.md`.
-||||||| parent of c3b03b5c78c (docs(llm-wiki): mir_lowering note for the array move-vs-copy pass)
 
 
 ## 2026-10-19 — array move instead of copy (`mir_array_move.spl`)
@@ -664,3 +663,4 @@ Package: `src/compiler/20.hir/target_hir/` (kept in a subdirectory, not the 20.h
   Evidence: `mir_target_hir_select_spec.spl` (6 cases incl. injected-divergence) and
   `hir_cfg_select_lowering_spec.spl` green under legacy/shadow/typed (fails under a bogus mode).
 - **TargetHIR P6 cache identity (U5, 2026-11-04):** `80.driver/driver_hir_cache.spl` `_hir_cache_key_target_part` reads `target_hir_mode()`; legacy (default) uses the unchanged fold (key byte-identical, CACHE-TH-01), otherwise appends `;thir:target-hir-cache-v1:<hir_target_constraints_digest(c)>` (`none` when no constraints passed to `hir_cache_key(..., thir_constraints)` — no caller passes them yet). `80.driver/driver_target_hir_cache_v1.spl` overlay record codec (parent snapshot id + schema); unknown/old/corrupt/mismatched -> Err. Spec `test/01_unit/compiler/80.driver/target_hir_cache_identity_spec.spl` (CACHE-TH-01..04).
+- **TargetHIR P3 struct/fn ABI (U2, 2026-11-04):** `50.mir/mir_target_hir_layout.spl` — `mir_target_hir_struct_layout(view, snapshot, type_name, fields, attr)` delegates to `compute_struct_layout_for_arch` with the view's explicit arch (offsets in declaration order); `mir_target_hir_fn_abi(view, snapshot, fn_name)` reuses the TargetHIR builder ABI. Snapshot mismatch / unsupported arch are named Errs. Not yet wired into lowering. Spec `test/01_unit/compiler/50.mir/mir_target_hir_layout_spec.spl` (THIR-01/02/07).
