@@ -225,3 +225,7 @@ divergence. Re-pinned to `verify(error != nil)` and
 above; both specs then went 33/33 green. Recorded here so a future pass does
 not read the removed pins as fresh evidence that the operator must yield
 bool; the operator-vs-call-sites ruling question above is unchanged.
+
+## Triage 2026-11-04 (c28-w4)
+
+Census 2026-11-04 (multiline grep, non-exhaustive) of tail .? in -> bool fns still live: src/compiler/25.traits/trait_def.spl:62 has_default; src/compiler/20.hir/hir_codec_key_order.spl:70 return right.?; src/compiler/35.semantics/const_keys.spl:174 has_suggestion and :299 can_validate (self.is_const and self.schema.?); src/lib/nogc_sync_mut/database/bug.spl:155 and src/lib/nogc_async_mut/database/bug.spl:151 is_split_table_db; src/app/interpreter/lazy/lazy_val.spl:390 and lazy_val_fixed.spl:388 contains; src/app/pkg/manifest.spl:108 has_dep; src/compiler/70.backend/backend/vhdl/vhdl_call_lowering.spl:292 and :855; src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl:276. Earlier-listed unfixed: lock.spl:47 dict.spl:94 llvm_backend.spl:344 llvm_loader.spl:41 macho_inspect.spl:204 pe_parser.spl:299 lean/runner.spl:102 durability.spl:483 vfs.spl:147 (not re-read). No code change in this PR: several sit in lint/compiler lanes and each needs a caller audit. QUESTION (still blocking): operator-vs-call-sites ruling; contract doc says .? returns T? so sites should become != nil.

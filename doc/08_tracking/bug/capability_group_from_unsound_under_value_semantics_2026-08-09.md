@@ -97,3 +97,7 @@ Reconfirmed: design-level unsoundness (capability-group `.from()` assumes
 reference semantics on value-typed classes) affecting multiple downstream
 streams. Needs a design-level API change, not a quick fix. Left OPEN (P2),
 no code change attempted.
+
+## Triage 2026-11-04 (c28-w4)
+
+Triage 2026-11-04 on seed 0b2c3d015b7: debug_target_ref_spec 71/71 pass in 12.6s (library-side corrected single-value group shape holds). Remaining item is P0 desugar of .from() (lint detector dynamic_capability_acquire.spl only flags spellings). NOTE premise risk: the unsoundness rests on classes having value semantics; other lanes report an interpreter class-ref default flip (SIMPLE_INTERP_CLASS_REF=1) is pending - if it lands the premise changes and this row must be re-scoped. QUESTION: is class-ref flip the intended direction (then close as obsolete) or do value-class semantics stay?

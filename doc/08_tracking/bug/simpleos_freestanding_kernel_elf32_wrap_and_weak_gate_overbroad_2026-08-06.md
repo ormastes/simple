@@ -336,3 +336,7 @@ board-proxy pipeline (`.claude/rules/board-runnable.md`) to re-verify — not a
 unit-spec-TDD-fixable defect in isolation, and well beyond this pass's
 per-bug budget (kernel + guest binary rebuild plus a boot cycle). Leaving
 OPEN as previously narrowed; no code change made this pass.
+
+## Triage 2026-11-04 (c28-w4)
+
+Triage 2026-11-04: root causes 1 and 2 fixed; open part is root cause 3 (in-guest hello.spl rc=70, str.clear receiver=0x0) which needs a rebuilt kernel plus guest simple through the OVMF-pflash board-proxy pipeline; not reproducible on this Windows host without that lane. Premise may be stale: the interpreter/seed was redeployed 2026-11-04 (0b2c3d015b7). QUESTION: is there a current SimpleOS guest image build to re-run the rc=70 probe on, or should this be set to verification-pending against the next kernel build?
