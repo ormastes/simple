@@ -174,19 +174,25 @@ codes as built-in closures. Fix-its are *not* machine-applicable: they contain a
 | PANIC-W-UNWRAP | `.unwrap()` / `.expect(..)` without presence proof | `x ?? <default>`, or `if val v = x:` |
 | PANIC-W-DIV | `/`, `%`, `/=` by a divisor not proven non-zero | `checked_div(<lhs>, d) ?? <default>`, or guard `if d != 0:` |
 
-It is conservative by construction: it cannot see types, so a float `a / b` and
-a dict `m[k]` also warn. It never assumes safety it has not seen. Spec:
+It is conservative by construction. It reads cheap declared-type hints only
+(`x: f64`/`f32` params and locals, float-literal initialisers, `m: Dict<..>`,
+`val m = Dict.new()`/`{}`) and skips float division (IEEE, never panics) and
+indexing of a declared `Dict` (`rt_dict_get` returns `nil` on a miss: a total
+`get`). Everything else with an unknown type still warns; the diagnostic text
+says "upper bound". Warnings exit 0, so `scripts/check/lint-cached.shs`
+(which caches on exit status) still caches files whose only findings are
+`panic_free` warnings. It never assumes safety it has not seen. Spec:
 `test/01_unit/compiler/lint/panic_free_rule_spec.spl` (true positives, guarded
 negatives, exact fix-it text).
 
-**Migration size (P0 count, 2026-11-04, 12,520 files in `src/lib` + `src/app`):**
+**Migration size (P0 count, 2026-11-04, 12,520 files in `src/lib` + `src/app`; an UPPER BOUND -- the rule reads only cheap declared-type hints, so undeclared float division and dict indexing still count; first pass without hints was 51,571 / 1,581 / 3,481):**
 
 | Code | Sites |
 |---|---|
-| PANIC-W-INDEX | 51,571 |
+| PANIC-W-INDEX | 49,344 |
 | PANIC-W-UNWRAP | 1,581 |
-| PANIC-W-DIV | 3,481 |
-| **total** | **56,633** |
+| PANIC-W-DIV | 2,790 |
+| **total** | **53,715** (upper bound) |
 
 ## Rollout
 
