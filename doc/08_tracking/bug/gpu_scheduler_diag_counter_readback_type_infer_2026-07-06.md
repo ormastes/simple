@@ -1,6 +1,6 @@
 ---
 id: gpu_scheduler_diag_counter_readback_type_infer_2026-07-06
-status: OPEN
+status: FIXED (verified 2026-11-04 on seed 0b2c3d015b7)
 severity: medium
 discovered: 2026-07-06
 discovered_by: GPU event/job scheduler std.diag instrumentation spec authoring
