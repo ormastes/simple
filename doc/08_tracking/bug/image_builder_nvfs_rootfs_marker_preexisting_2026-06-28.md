@@ -65,3 +65,21 @@ returns before writing), so the nvfs marker file is empty in block 3.
   `SYS/ROOTFS.CFG` containing `rootfs_carrier=fat32` and `rootfs_backend=nvfs`,
   and block 3 passes — without regressing block 1/2.
 
+
+## Triage 2026-11-04 (lane g-image-builder-nvfs, Windows seed host)
+
+- RED on origin/release/1.0.0 (`bin/simple.exe test image_builder_artifact_spec.spl`):
+  3 executed, 1 passed, 2 failed. The "3 undefined symbols" from the 2026-09-19
+  note no longer exist: every `use` in `image_builder.spl` resolves and
+  `build_install_image_with_rootfs` runs.
+- The marker defect itself is fixed: a 512 MB nvfs build stages
+  `SYS/ROOTFS.CFG` = `rootfs_backend=nvfs / rootfs_carrier=fat32 / rootfs_boot_mode=fat32-carrier`.
+- Remaining reds, both outside the marker code:
+  1. `MIN_IMAGE_SIZE_MB_V1 = 67` with `EFI_PARTITION_SIZE_MB = 64` leaves a root
+     partition of about 2 MB, below `_IMAGE_ROOTFS_METADATA_MIN_BYTES_V1` (4 MiB), so
+     `_validate_staged_rootfs_budget_v1` returns "metadata reserve exceeds root
+     partition capacity" for the spec's size. The minimum must be derived from the
+     EFI size + 4 MiB reserve + the font bundle (needs a measured staged size, not a guess).
+  2. FAT32 generation (`refusing non-bootable descriptor fallback`) and the spec's
+     `/bin/sh` `_reset_dir` need a Linux host; unverifiable on this Windows seed.
+- No source change made: choosing the new minimum needs a measured staged-size budget on Linux.
