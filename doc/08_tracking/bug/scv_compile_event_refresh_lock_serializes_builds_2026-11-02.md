@@ -57,3 +57,22 @@ Static validation passed: scoped snapshot/discovery/publication/reclamation
 source ordering and the two-attempt retry bound; working and staged direct
 env/runtime guards; whitespace check; tracked `doc/06_spec` executable spec
 count zero. These checks do not establish runtime or performance correctness.
+
+## Resolution 2026-11-04: lockless refresh (supersedes the lease candidate)
+
+User directive: "the compiler must be LOCKLESS." The lease (`refresh.lock`,
+PR #6541's 900 s wait), `publication.lock` and `.simple/workarounds.sdn.lock`
+are removed outright; no compatibility wrapper (MIG-01).
+Design: `doc/05_design/compiler/scv/lockless_refresh.md`. Readers never
+lock; writers stage privately (pid + clock) and publish by no-replace
+publish / one atomic rename; CURRENT is compared against the observed base
+right before the swap (`publish-cursor-superseded` -> re-observe warm, 4
+attempts); identical-content races are benign; the workaround index is
+per-writer fragments merged at read; GC is age-based and tolerant of
+concurrent deletes. Ratchet: `scripts/check/check-no-refresh-file-lock.shs`.
+Evidence: `test/01_unit/lib/scv/compile_source_inventory_lockless_publish_spec.spl`,
+`test/01_unit/app/bug/workaround_fragment_spec.spl`,
+`test/01_unit/app/compiler_entrypoint/lockless_refresh_stress_test.shs`
+(N concurrent cold + warm refreshes on ONE checkout + ONE cache root).
+The former `test/02_integration/app/compiler_inventory_refresh_interleaving_spec.spl`
+lease-interleaving examples are superseded: there is no lease to interleave.

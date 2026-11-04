@@ -286,6 +286,13 @@ fn record_describe_level_skip(name: String) {
     record_test_result(desc_path, name, true, true);
 }
 
+/// Record an example executed OUTSIDE the tree-walk interpreter (a spec run
+/// on the JIT through the rt_bdd_* runtime), so the file verdict and the
+/// `SIMPLE_TEST_RESULT_FILE` evidence count it exactly like an interpreted one.
+pub fn record_external_test_result(describe_path: String, test_name: String, passed: bool, skipped: bool) {
+    record_test_result(describe_path, test_name, passed, skipped);
+}
+
 fn record_test_result(describe_path: String, test_name: String, passed: bool, skipped: bool) {
     BDD_TEST_RESULTS.with(|cell| cell.borrow_mut().push((describe_path, test_name, passed, skipped)));
     if let Ok(path) = std::env::var("SIMPLE_TEST_RESULT_FILE") {

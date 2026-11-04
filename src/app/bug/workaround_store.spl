@@ -1,10 +1,130 @@
 # Parent-only index maintenance. Query loads never run Git or inspect sources.
+#
+# LOCKLESS (doc/05_design/compiler/scv/lockless_refresh.md): the index is a
+# set of immutable per-writer fragment files under .simple/workarounds.d/,
+# each staged privately and published with the no-replace primitive, and
+# merged in name order at read time. Readers never lock; writers never lock;
+# concurrent writers never lose each other's per-path updates. The legacy
+# single file .simple/workarounds.sdn is read only while no fragment exists.
 use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink, empty_workaround_index,
     parse_workaround_source, encode_workaround_index, decode_workaround_index,
-    replace_workaround_paths, workaround_path_valid, workaround_recovery_valid}
+    replace_workaround_paths, workaround_path_valid, workaround_recovery_valid,
+    WorkaroundFragment, encode_workaround_fragment, decode_workaround_fragment,
+    merge_workaround_fragments}
 use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read, workaround_host_read_bytes,
-    workaround_host_exists, workaround_host_publish, workaround_host_lock,
-    workaround_host_unlock, workaround_host_mkdir, workaround_host_cwd, workaround_host_process}
+    workaround_host_exists, workaround_host_stage, workaround_host_publish_noreplace,
+    workaround_host_modified_time, workaround_host_remove, workaround_host_list,
+    workaround_host_mkdir, workaround_host_cwd, workaround_host_process,
+    workaround_host_now_micros, workaround_host_pid}
+use std.common.crypto.sha256.{sha256_text}
+
+val WORKAROUND_FRAGMENT_MIN_AGE_S: i64 = 600
+val WORKAROUND_FRAGMENT_COMPACT_AT: i64 = 32
+val WORKAROUND_FRAGMENT_COMPACT_MARGIN_US: i64 = 5000000
+val WORKAROUND_FRAGMENT_MAX_BYTES: i64 = 16777216
+
+struct WorkaroundFragmentFile:
+    name: text
+    fragment: WorkaroundFragment
+
+fn workaround_fragment_dir(root: text) -> text:
+    root + "/.simple/workarounds.d"
+
+fn workaround_fragment_names(root: text) -> [text]:
+    var names: [text] = []
+    for name in workaround_host_list(workaround_fragment_dir(root)):
+        if name.ends_with(".sdn") and not name.starts_with("."):
+            names.push(name)
+    names.sort()
+    names
+
+# A fragment that vanished between the listing and the read was reclaimed by a
+# concurrent sweeper; it was superseded by a base fragment published before the
+# sweep, which this listing therefore also contains. Skip it. A fragment that
+# does not decode is a damaged index unless a later base fragment (an explicit
+# full scan) already replaced everything before it; then it is garbage awaiting
+# the sweeper.
+fn workaround_fragment_files(root: text) -> Result<[WorkaroundFragmentFile], text>:
+    var files: [WorkaroundFragmentFile] = []
+    var damaged = ""
+    for name in workaround_fragment_names(root):
+        val path = workaround_fragment_dir(root) + "/" + name
+        if not workaround_host_exists(path): continue
+        val content: text = match workaround_host_read(path, WORKAROUND_FRAGMENT_MAX_BYTES):
+            case Ok(v): v
+            case Err(_): continue
+        match decode_workaround_fragment(content):
+            case Ok(fragment):
+                if fragment.base: damaged = ""
+                files.push(WorkaroundFragmentFile(name: name, fragment: fragment))
+            case Err(reason):
+                if damaged == "": damaged = "workaround fragment {name}: {reason}"
+    if damaged != "": return Err(damaged)
+    Ok(files)
+
+fn workaround_zero_pad(value: i64, width: i64) -> text:
+    var out = "{value}"
+    while out.len() < width:
+        out = "0" + out
+    out
+
+# Publish one immutable fragment: unique private stage, no-replace publish.
+# The name orders by `clock` (micros), then pid, then content hash; two
+# writers with identical content publish two idempotent fragments. A delta
+# uses the publication clock. A compaction base uses the clock captured BEFORE
+# its listing, minus a margin, so every delta a concurrent writer published
+# while it folded sorts after it and is applied again (idempotently) rather
+# than replaced: compaction can never lose an update.
+fn workaround_fragment_publish(root: text, fragment: WorkaroundFragment, clock: i64) -> Result<text, text>:
+    val content = encode_workaround_fragment(fragment)
+    if content.len() > WORKAROUND_FRAGMENT_MAX_BYTES: return Err("workaround fragment exceeded bound")
+    val checked = decode_workaround_fragment(content)?
+    if checked.links.len() != fragment.links.len(): return Err("workaround fragment round trip failed")
+    val directory = workaround_fragment_dir(root)
+    if not workaround_host_mkdir(directory): return Err("cannot create workaround fragment directory")
+    val name = workaround_zero_pad(if clock > 0: clock else: 0, 20) + "-" +
+        workaround_zero_pad(workaround_host_pid(), 10) + "-" + sha256_text(content)[:16] + ".sdn"
+    val staged = directory + "/." + name + ".tmp"
+    if not workaround_host_stage(staged, content): return Err("workaround fragment stage failed")
+    val published = workaround_host_publish_noreplace(staged, directory + "/" + name)
+    if workaround_host_exists(staged):
+        val _removed = workaround_host_remove(staged)
+    if published != 1: return Err("workaround fragment publication failed")
+    Ok(name)
+
+# Lock-free reclamation. Every fragment published before the newest base
+# fragment is fully superseded; delete those older than the age floor, plus
+# abandoned stages. A delete that loses to a concurrent sweep is not an error.
+fn workaround_fragment_gc(root: text, names: [text]) -> i64:
+    val directory = workaround_fragment_dir(root)
+    val now = workaround_host_now_micros() / 1000000
+    var newest_base = -1
+    var i = 0
+    while i < names.len():
+        val path = directory + "/" + names[i]
+        val content: text = match workaround_host_read(path, WORKAROUND_FRAGMENT_MAX_BYTES):
+            case Ok(v): v
+            case Err(_): ""
+        if content.starts_with("workaround_fragment |schema, revision, base, complete|\n    1, ") and
+                content.split("\n")[1].ends_with(", true, true") or
+                content.split("\n")[1].ends_with(", true, false"):
+            newest_base = i
+        i = i + 1
+    var removed = 0
+    i = 0
+    while i < newest_base:
+        val path = directory + "/" + names[i]
+        val modified = workaround_host_modified_time(path)
+        if modified > 0 and now - modified >= WORKAROUND_FRAGMENT_MIN_AGE_S:
+            if workaround_host_remove(path): removed = removed + 1
+        i = i + 1
+    for name in workaround_host_list(directory):
+        if name.starts_with(".") and name.ends_with(".tmp"):
+            val path = directory + "/" + name
+            val modified = workaround_host_modified_time(path)
+            if modified > 0 and now - modified >= WORKAROUND_FRAGMENT_MIN_AGE_S:
+                if workaround_host_remove(path): removed = removed + 1
+    removed
 use std.nogc_async_mut.database.bug.{BugDatabase}
 use std.nogc_async_mut.database.core.{SdnDatabase, SdnRow, SdnTable, parse_sdn_table, interner_from_sdn}
 use std.nogc_sync_mut.database.csm_seal.{csm_verify_bytes, csm_strip_legacy_header, CsmVerdict, CSM_CORRUPT}
@@ -73,12 +193,42 @@ fn workaround_git(root: text, args: [text]) -> Result<text, text>:
     if out.len() >= 16777216: return Err("workaround Git output exceeded bound")
     Ok(out)
 
+fn workaround_index_present(root: text) -> bool:
+    workaround_fragment_names(root).len() > 0 or
+        workaround_host_exists(root + "/.simple/workarounds.sdn")
+
+# The legacy single file (.simple/workarounds.sdn, written before fragments
+# existed) folds as the implicit earliest base fragment, so migration needs no
+# racy "first writer publishes a base" step; a later explicit full scan
+# supersedes it. Damaged legacy bytes follow the fragment rule: an error
+# unless a base fragment already replaced them.
+fn workaround_fold(root: text) -> Result<[WorkaroundFragment], text>:
+    var fragments: [WorkaroundFragment] = []
+    var damaged = ""
+    val legacy = root + "/.simple/workarounds.sdn"
+    if workaround_host_exists(legacy):
+        val content: text = match workaround_host_read(legacy, WORKAROUND_FRAGMENT_MAX_BYTES):
+            case Ok(v): v
+            case Err(reason): return Err(reason)
+        match decode_workaround_index(content):
+            case Ok(index):
+                var paths: [text] = []
+                for link in index.links:
+                    if not paths.contains(link.path): paths.push(link.path)
+                fragments.push(WorkaroundFragment(revision: index.revision, base: true,
+                    complete: index.complete, paths: paths, links: index.links))
+            case Err(reason): damaged = reason
+    for file in workaround_fragment_files(root)?:
+        if file.fragment.base: damaged = ""
+        fragments.push(file.fragment)
+    if damaged != "": return Err(damaged)
+    Ok(fragments)
+
 fn load_workarounds_at(root: text) -> Result<WorkaroundIndex, text>:
-    val path = root + "/.simple/workarounds.sdn"
-    if not workaround_host_exists(path):
+    val fragments = workaround_fold(root)?
+    if fragments.len() == 0:
         return Err("workaround index missing; run simple check-dbs --fullscan bugs")
-    val content = workaround_host_read(path, 16777216)?
-    decode_workaround_index(content)
+    Ok(merge_workaround_fragments(fragments))
 
 fn load_workarounds() -> Result<WorkaroundIndex, text>:
     load_workarounds_at(workaround_host_cwd())
@@ -165,13 +315,15 @@ fn byte_array_contains(haystack: [u8], needle: [u8]) -> bool:
         i = i + 1
     false
 
-fn workaround_refresh_locked(root: text, revision: text, fullscan: bool, discovered: [text]) -> Result<WorkaroundIndex, text>:
-    val index_path = root + "/.simple/workarounds.sdn"
+fn workaround_refresh_lockless(root: text, revision: text, fullscan: bool, discovered: [text]) -> Result<WorkaroundIndex, text>:
     var previous = empty_workaround_index(revision)
     var previous_encoded = ""
     # A full reconciliation can repair corrupt derived bytes. Incremental
     # updates must preserve them and report the required explicit recovery.
-    if workaround_host_exists(index_path):
+    # `started` precedes the listing: a compaction base is named by it.
+    val started = workaround_host_now_micros()
+    val fragment_names = workaround_fragment_names(root)
+    if workaround_index_present(root):
         match load_workarounds_at(root):
             case Ok(index):
                 previous = index
@@ -203,6 +355,14 @@ fn workaround_refresh_locked(root: text, revision: text, fullscan: bool, discove
     # Ordinary builds with no markers need no canonical bug database read.
     # Parse the whole batch before loading its validation dependency once.
     if links.len() > 0:
+        # A pending canonical WAL means the DB bytes below are stale authority.
+        val wal = root + "/doc/08_tracking/bug/bug_db.sdn.wal"
+        if workaround_host_exists(wal):
+            val pending: text = match workaround_host_read(wal, WORKAROUND_FRAGMENT_MAX_BYTES):
+                case Ok(v): v
+                case Err(e): return Err(e)
+            if pending.trim() != "":
+                return Err("checkpoint the canonical bug database WAL before workaround refresh")
         # Canonical-bug-ID validation against the RAW DB BYTES (cycle-173).
         # The parsed-table lookup (bugs.get_bug) reads erased on
         # candidate-seednew -- the sdn parse yields empty tables (0 rows)
@@ -235,10 +395,32 @@ fn workaround_refresh_locked(root: text, revision: text, fullscan: bool, discove
     if final_head.trim() != revision:
         return Err("Git HEAD changed during workaround refresh; retry on a stable checkout")
     if encoded == previous_encoded: return Ok(checked)
-    if not workaround_host_publish(index_path, encoded): return Err("atomic workaround publication failed")
+    # A base fragment carries the whole merged index: an explicit full scan
+    # (named by the publication clock: it re-read every file, so it replaces
+    # everything before it), or a compaction once the fold would read too many
+    # deltas (named by `started` minus a margin, so concurrent deltas sort after
+    # it and are re-applied). A delta carries exactly the re-read paths. The
+    # first publication is never a base: N first writers would each replace
+    # the others, which is the lost update this store exists to prevent.
+    val compaction = not fullscan and fragment_names.len() >= WORKAROUND_FRAGMENT_COMPACT_AT
+    val base = fullscan or compaction
+    var fragment_paths = paths
+    if base:
+        for link in checked.links:
+            if not fragment_paths.contains(link.path): fragment_paths.push(link.path)
+    val fragment = if base:
+        WorkaroundFragment(revision: revision, base: true, complete: checked.complete,
+            paths: fragment_paths, links: checked.links)
+    else:
+        WorkaroundFragment(revision: revision, base: false, complete: checked.complete,
+            paths: paths, links: links)
+    val clock = if compaction: started - WORKAROUND_FRAGMENT_COMPACT_MARGIN_US else:
+        workaround_host_now_micros()
+    val _name = workaround_fragment_publish(root, fragment, clock)?
+    val _reclaimed = workaround_fragment_gc(root, fragment_names)
     Ok(checked)
 
-fn workaround_refresh_discover_locked(root: text, fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:
+fn workaround_refresh_discover(root: text, fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:
     # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 ef0681fc0e1 decodes a `?`-unwrapped Result<text,_> payload as an i64 local (handle rendered as digits / compared as int); bind through a typed match
     val head: text = match workaround_git(root, ["rev-parse", "--verify", "HEAD"]):
         case Ok(v): v
@@ -258,19 +440,13 @@ fn workaround_refresh_discover_locked(root: text, fullscan: bool, known_paths: [
             case Ok(v): v
             case Err(e): return Err(e)
         discovered = workaround_status_paths(trytext_78)?
-    workaround_refresh_locked(root, revision, fullscan, discovered)
+    workaround_refresh_lockless(root, revision, fullscan, discovered)
 
 fn refresh_workarounds_at(root: text, fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:
     if not workaround_host_mkdir(root + "/.simple"): return Err("cannot create workaround index directory")
-    val lock = workaround_host_lock(root + "/.simple/workarounds.sdn.lock", 5)
-    if lock < 0: return Err("workaround writer lock unavailable")
-    # Discovery belongs to the writer transaction too. A losing coordinator
-    # must not run a full Git status scan before discovering lock contention.
-    # Capture every Result before releasing; no ? may escape the lock owner.
-    val result = workaround_refresh_discover_locked(root, fullscan, known_paths)
-    val unlocked = workaround_host_unlock(lock)
-    if not unlocked: return Err("workaround writer lock release failed")
-    result
+    # No writer lock: discovery and publication are both lock-free, and a
+    # concurrent writer's fragment is merged, never overwritten.
+    workaround_refresh_discover(root, fullscan, known_paths)
 
 fn refresh_workarounds(fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:
     refresh_workarounds_at(workaround_host_cwd(), fullscan, known_paths)

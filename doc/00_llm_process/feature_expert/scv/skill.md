@@ -231,3 +231,19 @@ imports; an export list alone hits unsupported private-static accessor emission.
 Preserve values and internal visibility. Native paired fixtures verify the
 boundary, but real SCV allocation behavior remains a separate runtime gate.
 Evidence: `doc/08_tracking/bug/scv_exported_static_native_visibility_2026_10_29.md`.
+
+## Lockless compile refresh (2026-11-04)
+
+The compile-event refresh, inventory publication, snapshot retention and the
+workaround index are LOCKLESS: readers never lock, writers stage privately
+(pid + clock) and publish by `file_publish_noreplace_raw` / one atomic
+rename, mutable pointers (`source-inventory/CURRENT`) are compared against the
+observed base right before the swap (`publish-cursor-superseded` -> re-observe
+warm, bounded 4 attempts), the workaround index is per-writer fragments under
+`.simple/workarounds.d/` folded at read, and GC is age-based and tolerant of
+concurrent deletes (24 h generations/membership, 600 s snapshots/fragments).
+`inventory_refresh_lease.spl`, `refresh.lock`, `publication.lock`,
+`workarounds.sdn.lock` and `SIMPLE_SCV_REFRESH_LOCK_WAIT_S` no longer exist.
+Design: `doc/05_design/compiler/scv/lockless_refresh.md`. Ratchet:
+`scripts/check/check-no-refresh-file-lock.shs`. Stress:
+`test/01_unit/app/compiler_entrypoint/lockless_refresh_stress_test.shs`.

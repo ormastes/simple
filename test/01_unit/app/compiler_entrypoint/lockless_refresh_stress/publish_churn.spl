@@ -1,0 +1,48 @@
+# Helper for lockless_refresh_stress_test.shs. MODE=write: publish COUNT
+# distinct generations back to back on CACHE_ROOT. MODE=read: read CURRENT
+# COUNT times; every read must resolve to a complete generation.
+use std.scv.compile_source_inventory.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+val HEAD = "0123456789abcdef0123456789abcdef01234567"
+
+fn main():
+    val cache_root = env_get("CACHE_ROOT") ?? ""
+    val count = (env_get("COUNT") ?? "50").to_int()
+    val mode = env_get("MODE") ?? "read"
+    if mode == "write":
+        var generation: i64 = 0
+        var inventory = CompileSourceInventoryV1(1, 0, [])
+        var published = 0
+        var i = 0
+        while i < count:
+            val pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+            val change = compile_source_inventory_apply_event_v1(
+                inventory, compile_source_inventory_git_event_v1("create", "src/f{i}.spl", "fn f{i}(): {i}"))
+            inventory = change.inventory!
+            val (digest, reason) = compile_source_inventory_publish_reasoned_v1(
+                cache_root, inventory, HEAD, 0, sha256_text(""), sha256_text(pointer))
+            if reason == "ok": published = published + 1
+            else:
+                print("WRITE-FAIL reason={reason}")
+                return
+            i = i + 1
+        print("WRITE-OK published={published}")
+        return
+    var valid = 0
+    var invalid = 0
+    var i = 0
+    while i < count:
+        val pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        if pointer == "":
+            i = i + 1
+            continue
+        val current = compile_source_inventory_read_at_pointer_v1(cache_root, pointer)
+        if current.valid: valid = valid + 1
+        else:
+            invalid = invalid + 1
+            print("READ-INVALID reason={current.reason}")
+        i = i + 1
+    print("READ-OK valid={valid} invalid={invalid}")
+main()

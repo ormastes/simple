@@ -1,0 +1,91 @@
+# Lockless workaround index: per-writer immutable fragments merged at read.
+# Bug: scv_compile_event_refresh_lock_serializes_builds_2026-11-02 (the
+# "workaround writer lock unavailable" half). Prevention: two writers that
+# refresh different paths from one base must both survive the merge; a base
+# fragment replaces everything before it; the store exposes no lock seam.
+use std.spec.*
+use app.bug.workaround_index.*
+use std.io_runtime.{file_read}
+
+fn link(bug: text, path: text, line: i64) -> WorkaroundLink:
+    WorkaroundLink(bug_id: bug, path: path, line: line, recover: "", reason: "r")
+
+val REV = "0123456789abcdef0123456789abcdef01234567"
+
+describe "workaround fragment codec":
+    it "round-trips a delta fragment with refreshed paths and links":
+        val fragment = WorkaroundFragment(revision: REV, base: false, complete: true,
+            paths: ["src/a.spl", "src/b.spl"], links: [link("bug_a", "src/a.spl", 3)])
+        val encoded = encode_workaround_fragment(fragment)
+        expect(encoded).to_contain("workaround_fragment |schema, revision, base, complete|")
+        expect(encoded).to_contain("refreshed |path|")
+        val decoded = decode_workaround_fragment(encoded)
+        expect(decoded.is_ok()).to_equal(true)
+        val value = decoded.unwrap()
+        expect(value.base).to_equal(false)
+        expect(value.complete).to_equal(true)
+        expect(value.paths.len()).to_equal(2)
+        expect(value.links.len()).to_equal(1)
+        expect(value.links[0].path).to_equal("src/a.spl")
+
+    it "rejects a link outside its refreshed paths and a foreign schema":
+        val bad = WorkaroundFragment(revision: REV, base: false, complete: false,
+            paths: ["src/a.spl"], links: [link("bug_b", "src/b.spl", 1)])
+        expect(decode_workaround_fragment(encode_workaround_fragment(bad)).is_err()).to_equal(true)
+        expect(decode_workaround_fragment("workaround_index |schema, revision, complete|\n    1, \"{REV}\", true\n").is_err()).to_equal(true)
+        expect(decode_workaround_fragment("").is_err()).to_equal(true)
+
+describe "workaround fragment merge":
+    it "keeps both writers' per-path updates from one base (no lost update)":
+        val base = WorkaroundFragment(revision: REV, base: true, complete: true,
+            paths: ["src/a.spl", "src/b.spl", "src/c.spl"],
+            links: [link("old", "src/a.spl", 1), link("old", "src/b.spl", 1), link("keep", "src/c.spl", 9)])
+        val writer_a = WorkaroundFragment(revision: REV, base: false, complete: true,
+            paths: ["src/a.spl"], links: [link("new_a", "src/a.spl", 2)])
+        val writer_b = WorkaroundFragment(revision: REV, base: false, complete: true,
+            paths: ["src/b.spl"], links: [])
+        val merged = merge_workaround_fragments([base, writer_a, writer_b])
+        expect(merged.complete).to_equal(true)
+        expect(merged.revision).to_equal(REV)
+        expect(merged.links.len()).to_equal(2)
+        var a_seen = false
+        var c_seen = false
+        for item in merged.links:
+            if item.path == "src/a.spl":
+                a_seen = true
+                expect(item.bug_id).to_equal("new_a")
+            if item.path == "src/c.spl": c_seen = true
+            expect(item.path != "src/b.spl").to_equal(true)
+        expect(a_seen and c_seen).to_equal(true)
+
+    it "lets a later base fragment replace everything before it":
+        val first = WorkaroundFragment(revision: REV, base: true, complete: true,
+            paths: ["src/a.spl"], links: [link("old", "src/a.spl", 1)])
+        val delta = WorkaroundFragment(revision: REV, base: false, complete: true,
+            paths: ["src/z.spl"], links: [link("z", "src/z.spl", 1)])
+        val rebase = WorkaroundFragment(revision: REV, base: true, complete: false,
+            paths: ["src/q.spl"], links: [link("q", "src/q.spl", 4)])
+        val merged = merge_workaround_fragments([first, delta, rebase])
+        expect(merged.links.len()).to_equal(1)
+        expect(merged.links[0].bug_id).to_equal("q")
+        expect(merged.complete).to_equal(false)
+
+    it "drops completeness when a delta arrives at another revision":
+        val other = "fedcba9876543210fedcba9876543210fedcba98"
+        val first = WorkaroundFragment(revision: REV, base: true, complete: true,
+            paths: ["src/a.spl"], links: [link("old", "src/a.spl", 1)])
+        val delta = WorkaroundFragment(revision: other, base: false, complete: false,
+            paths: ["src/b.spl"], links: [])
+        val merged = merge_workaround_fragments([first, delta])
+        expect(merged.revision).to_equal(other)
+        expect(merged.complete).to_equal(false)
+        expect(merged.links.len()).to_equal(1)
+
+describe "workaround store exposes no lock":
+    it "neither the store nor its host seam names a file lock":
+        val store = file_read("src/app/bug/workaround_store.spl")
+        val host = file_read("src/lib/nogc_async_mut/sosix/workaround_host.spl")
+        expect(store.contains("workaround_host_lock")).to_equal(false)
+        expect(host.contains("file_lock")).to_equal(false)
+        expect(store).to_contain("workaround_host_publish_noreplace")
+        expect(store).to_contain("merge_workaround_fragments")

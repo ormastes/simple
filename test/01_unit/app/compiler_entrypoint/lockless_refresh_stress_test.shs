@@ -1,0 +1,106 @@
+#!/bin/sh
+# Stress for the LOCKLESS SCV compile-event refresh and workaround index
+# (doc/05_design/compiler/scv/lockless_refresh.md). Replaces the former
+# refresh_lock_stress_test.shs (which proved contenders could *wait* on one
+# refresh.lock; there is no lock to wait on any more).
+#  A) N concurrent COLD refreshes on ONE shared checkout + ONE shared cache
+#     root must all succeed, inside a wall budget, with no lock file created
+#     and no lock diagnostic on stderr.
+#  B) N concurrent WARM refreshes likewise.
+#  C) Readers during publish: a writer publishes COUNT generations while R
+#     readers resolve CURRENT in a loop; every read is a complete generation.
+#  D) N concurrent workaround refreshes on distinct paths lose no update and
+#     create no lock file.
+# Usage: SIMPLE=bin/simple.exe sh lockless_refresh_stress_test.shs [N] [budget_s]
+N=${1:-16}; BUDGET=${2:-300}
+SIMPLE=${SIMPLE:-bin/simple.exe}
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+helpers="$here/lockless_refresh_stress"
+tmp=$(mktemp -d) || exit 2
+tmp=$(cd "$tmp" && pwd -P)
+# The helpers hand ROOT to a native binary and to git.exe: on an MSYS shell a
+# /c/... path must be the mixed C:/... form.
+if command -v cygpath > /dev/null 2>&1; then tmp=$(cygpath -m "$tmp"); helpers=$(cygpath -m "$helpers"); fi
+fail() { echo "FAIL - $1"; grep -h 'FAIL\|INVALID\|lock' "$tmp"/out.* "$tmp"/err.* 2>/dev/null | sort | uniq -c | head -10; rm -rf "$tmp"; exit 1; }
+
+# One real git checkout with a few sources, as the refresh observes Git.
+repo="$tmp/repo"; mkdir -p "$repo/src" "$repo/test" "$repo/doc/08_tracking/bug"
+git -C "$tmp" init -q repo 2>/dev/null || git init -q "$repo"
+git -C "$repo" config user.email stress@example.invalid
+git -C "$repo" config user.name stress
+i=0
+while [ $i -lt 8 ]; do
+  printf 'fn f%s(): %s\n' "$i" "$i" > "$repo/src/f$i.spl"
+  printf '# @workaround bug=stress_bug_%s reason=stress\nfn t%s(): %s\n' "$i" "$i" "$i" > "$repo/src/w$i.spl"
+  i=$((i+1))
+done
+i=0; : > "$repo/doc/08_tracking/bug/bug_db.sdn"
+while [ $i -lt 8 ]; do printf 'stress_bug_%s\n' "$i" >> "$repo/doc/08_tracking/bug/bug_db.sdn"; i=$((i+1)); done
+printf 'fn t(): 0\n' > "$repo/test/t_spec.spl"
+git -C "$repo" add -A && git -C "$repo" commit -q -m init || { echo "ERROR - fixture commit failed"; rm -rf "$tmp"; exit 2; }
+cache="$repo/build/scv"
+
+run_wave() {
+  cold=$1; label=$2
+  rm -f "$tmp"/out.* "$tmp"/err.*
+  start=$(date +%s)
+  j=0
+  while [ $j -lt "$N" ]; do
+    ROOT="$repo" CACHE_ROOT="$cache" COLD="$cold" "$SIMPLE" run "$helpers/refresh_worker.spl" > "$tmp/out.$j" 2> "$tmp/err.$j" &
+    j=$((j+1))
+  done
+  wait
+  el=$(( $(date +%s) - start ))
+  ok=$(cat "$tmp"/out.* | grep -c '^REFRESH-OK')
+  echo "$label: contenders=$N ok=$ok elapsed_s=$el budget_s=$BUDGET"
+  [ "$ok" -eq "$N" ] || fail "$label: only $ok/$N refreshed"
+  [ "$el" -le "$BUDGET" ] || fail "$label: over budget"
+  if grep -q 'refresh-lock\|lock-unavailable\|lock-waiting' "$tmp"/err.* "$tmp"/out.* 2>/dev/null; then fail "$label: lock diagnostic emitted"; fi
+  [ -e "$cache/compile-events/refresh.lock" ] && fail "$label: refresh.lock was created"
+  [ -e "$cache/source-inventory/publication.lock" ] && fail "$label: publication.lock was created"
+  # Warm contenders see no events and must all answer the one published
+  # (digest, generation). A cold listing is complete authority and always
+  # publishes a new generation, so cold contenders are only required to succeed.
+  if [ "$cold" -eq 0 ]; then
+    distinct=$(grep -h '^REFRESH-OK' "$tmp"/out.* | sort -u | wc -l | tr -d ' ')
+    [ "$distinct" -eq 1 ] || fail "$label: $distinct distinct (digest, generation) results"
+  fi
+}
+run_wave 1 "A cold"
+run_wave 0 "B warm"
+
+# C: readers during publish on a private cache root.
+churn="$tmp/churn/build/scv"; mkdir -p "$churn"
+rm -f "$tmp"/out.* "$tmp"/err.*
+CACHE_ROOT="$churn" MODE=write COUNT=1 "$SIMPLE" run "$helpers/publish_churn.spl" > "$tmp/out.seed" 2>&1
+grep -q '^WRITE-OK' "$tmp/out.seed" || fail "C: seed publish failed: $(cat "$tmp/out.seed")"
+CACHE_ROOT="$churn" MODE=write COUNT=40 "$SIMPLE" run "$helpers/publish_churn.spl" > "$tmp/out.w" 2> "$tmp/err.w" &
+wp=$!
+r=0
+while [ $r -lt 4 ]; do
+  CACHE_ROOT="$churn" MODE=read COUNT=200 "$SIMPLE" run "$helpers/publish_churn.spl" > "$tmp/out.r$r" 2> "$tmp/err.r$r" &
+  r=$((r+1))
+done
+wait
+grep -q '^WRITE-OK' "$tmp/out.w" || fail "C: writer failed: $(cat "$tmp/out.w")"
+grep -q 'READ-INVALID' "$tmp"/out.r* && fail "C: a reader saw an incomplete generation"
+reads=$(grep -h '^READ-OK' "$tmp"/out.r* | wc -l | tr -d ' ')
+[ "$reads" -eq 4 ] || fail "C: only $reads/4 readers finished"
+echo "C: readers-during-publish ok ($(grep -h '^READ-OK' "$tmp"/out.r* | tr '\n' ' '))"
+
+# D: concurrent workaround refreshes on distinct paths, one shared root.
+rm -f "$tmp"/out.* "$tmp"/err.*
+j=0
+while [ $j -lt 8 ]; do
+  ROOT="$repo" PATHS="src/w$j.spl" "$SIMPLE" run "$helpers/workaround_worker.spl" > "$tmp/out.$j" 2> "$tmp/err.$j" &
+  j=$((j+1))
+done
+wait
+ok=$(cat "$tmp"/out.* | grep -c '^WA-OK')
+[ "$ok" -eq 8 ] || fail "D: only $ok/8 workaround refreshes succeeded"
+[ -e "$repo/.simple/workarounds.sdn.lock" ] && fail "D: workaround lock file was created"
+ROOT="$repo" MODE=load "$SIMPLE" run "$helpers/workaround_worker.spl" > "$tmp/out.load" 2>&1
+grep -q '^LOAD-OK links=8 ' "$tmp/out.load" || fail "D: merged index lost an update: $(cat "$tmp/out.load")"
+echo "D: workaround refreshes=8 merged links=8 (no lost update)"
+rm -rf "$tmp"
+echo "PASS - $N/$N cold + $N/$N warm lockless refreshes; readers never saw an incomplete generation; 8/8 workaround writers merged"

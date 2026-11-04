@@ -1,8 +1,10 @@
-"""Real refresh owners with a deterministic overlapping observation schedule.
+"""Real refresh owners interleaving WITHOUT a lease (lockless refresh).
 
-The paused observer retains copied membership while a competing refresh
-publishes and retires its old record. Resumption must reject stale authority
-without deleting the winner's record. A separate two-thread scenario exercises
+doc/05_design/compiler/scv/lockless_refresh.md. A refresh that observed an
+older pointer never blocks a competing publisher, never deletes the record it
+copied (reclamation is age-based), and a competing publication is reported
+as superseded by complete-byte pointer comparison, after which the ordinary
+public refresh re-derives from the winner. A two-thread scenario exercises
 ordinary concurrent refresh calls; no timing threshold substitutes for data
 and ownership assertions.
 """
@@ -13,11 +15,11 @@ use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{
     compile_source_inventory_read_current_v1,
-    compile_source_inventory_read_pointer_content_v1}
+    compile_source_inventory_read_pointer_content_v1,
+    compile_source_inventory_revalidate_pointer_v1}
 use app.compiler_entrypoint.inventory_events.{
     compiler_inventory_refresh_v1, compiler_inventory_cursor_decode_v1,
-    compiler_inventory_membership_decode_v1}
-use app.compiler_entrypoint.inventory_refresh_lease.{CompilerInventoryRefreshLeaseV1}
+    compiler_inventory_membership_decode_v1, compiler_inventory_gc_v1}
 
 extern fn rt_getpid() -> i64
 
@@ -54,21 +56,18 @@ fn concurrent_refresh_worker(root: text, cache: text) -> i64:
     if result.valid: 1 else: 0
 
 describe "p2_p3_bug_reproduction SCV refresh ownership":
-    it "permits another publisher during observation and rejects stale resumption":
+    it "permits another publisher during observation and keeps the record it copied":
         step("Reproduce the exact failure")
         val root = refresh_checkout("snapshot")
         val cache = root + "/build/scv"
-        val observer = CompilerInventoryRefreshLeaseV1(cache)
-        expect(observer.acquire(0)).to_equal(true)
         val before = refresh_pointer(cache)
         val old_record = refresh_membership(cache, before)
         val old_paths = compiler_inventory_membership_decode_v1(file_read(old_record))
         expect(old_paths != nil).to_equal(true)
         expect(old_paths!.len()).to_equal(0)
+        expect(file_exists(cache + "/compile-events/refresh.lock")).to_equal(false)
 
-        step("Exercise the repaired owner")
-        expect(observer.release()).to_equal(true)
-        expect(observer.handle).to_equal(-1)
+        step("Exercise the lockless owner")
         expect(file_write(root + "/src/new.spl", "export fn added(): 2\n")).to_equal(true)
         val winner = compiler_inventory_refresh_v1(root, cache, ["src"], false)
         expect(winner.valid).to_equal(true)
@@ -76,26 +75,18 @@ describe "p2_p3_bug_reproduction SCV refresh ownership":
         val new_record = refresh_membership(cache, after)
         expect(after == before).to_equal(false)
         expect(file_exists(new_record)).to_equal(true)
-        expect(file_exists(old_record)).to_equal(false)
-        # The paused observer owns a copy, even after the on-disk GC.
-        expect(old_paths!.len()).to_equal(0)
-        expect(observer.resume(before, 0)).to_equal("compile-event-refresh-snapshot-superseded")
-        expect(observer.handle).to_be_greater_than(-1)
+        # The observer's copied record is NOT retired by the winner: only an
+        # age-based sweep reclaims unreferenced records, and a sweep with a
+        # day-scale floor keeps a record published seconds ago.
+        expect(file_exists(old_record)).to_equal(true)
+        expect(compiler_inventory_gc_v1(cache, 86400)).to_equal(0)
+        expect(file_exists(old_record)).to_equal(true)
+        # The stale observer's base is reported superseded by complete-byte comparison.
+        expect(compile_source_inventory_revalidate_pointer_v1(cache, before).reason).to_equal("publish-cursor-superseded")
         expect(refresh_pointer(cache)).to_equal(after)
-        expect(file_exists(new_record)).to_equal(true)
+        expect(file_exists(cache + "/source-inventory/publication.lock")).to_equal(false)
 
         step("Reject the adjacent regression")
-        val competitor = CompilerInventoryRefreshLeaseV1(cache)
-        expect(competitor.acquire(0)).to_equal(false)
-        expect(observer.release()).to_equal(true)
-        expect(competitor.acquire(0)).to_equal(true)
-        # Releasing an already suspended owner cannot close the new owner.
-        expect(observer.release()).to_equal(true)
-        val third = CompilerInventoryRefreshLeaseV1(cache)
-        expect(third.acquire(0)).to_equal(false)
-        expect(competitor.release()).to_equal(true)
-        expect(third.resume(after, 0)).to_equal("")
-        expect(third.release()).to_equal(true)
         expect(compiler_inventory_refresh_v1(root, cache, ["src"], false).valid).to_equal(true)
         val current = compile_source_inventory_read_current_v1(cache)
         expect(current.valid).to_equal(true)
@@ -120,23 +111,18 @@ describe "p2_p3_bug_reproduction SCV refresh ownership":
         dir_remove(root, true)
 
 describe "p2_p3_adjacent_regression SCV refresh authority":
-    it "rejects a complete-byte pointer change after NUL and releases its lease":
+    it "rejects a complete-byte pointer change after NUL without any lease":
         val root = refresh_checkout("nul")
         val cache = root + "/build/scv"
         val before = refresh_pointer(cache)
         val record = refresh_membership(cache, before)
-        val observer = CompilerInventoryRefreshLeaseV1(cache)
-        expect(observer.acquire(0)).to_equal(true)
-        expect(observer.release()).to_equal(true)
         val mutated = before + "\0different-authority"
         expect(file_write(cache + "/source-inventory/CURRENT", mutated)).to_equal(true)
-        expect(observer.resume(before, 0)).to_equal("compile-event-refresh-snapshot-superseded")
-        expect(observer.release()).to_equal(true)
+        expect(compile_source_inventory_revalidate_pointer_v1(cache, before).reason).to_equal("publish-cursor-superseded")
         expect(sha256_text(file_read(cache + "/source-inventory/CURRENT"))).to_equal(sha256_text(mutated))
         expect(file_exists(record)).to_equal(true)
         expect(file_write(cache + "/source-inventory/CURRENT", before)).to_equal(true)
-        expect(observer.resume(before, 0)).to_equal("")
-        expect(observer.release()).to_equal(true)
+        expect(compile_source_inventory_revalidate_pointer_v1(cache, before).valid).to_equal(true)
         expect(compiler_inventory_refresh_v1(root, cache, ["src"], false).valid).to_equal(true)
         expect(refresh_pointer(cache)).to_equal(before)
         dir_remove(root, true)

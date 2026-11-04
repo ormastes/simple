@@ -240,3 +240,79 @@ fn decode_workaround_index(content: text) -> Result<WorkaroundIndex, text>:
         links.push(WorkaroundLink(bug_id: fields[0], path: fields[1], line: line,
             recover: fields[3], reason: fields[4]))
     Ok(WorkaroundIndex(revision: header[1], complete: header[2] == "true", links: links))
+
+# One immutable per-writer publication of the index. A `base` fragment
+# replaces everything before it (a full scan, or a compaction of the merged
+# state); a delta fragment replaces exactly the `paths` it re-read. Readers
+# fold fragments in name order, so concurrent writers never lose each other's
+# updates and no writer lock is needed.
+struct WorkaroundFragment:
+    revision: text
+    base: bool
+    complete: bool
+    paths: [text]
+    links: [WorkaroundLink]
+
+fn encode_workaround_fragment(fragment: WorkaroundFragment) -> text:
+    var out = "workaround_fragment |schema, revision, base, complete|\n    1, "
+    out = out + workaround_sdn_quote(fragment.revision)
+    out = out + (if fragment.base: ", true" else: ", false")
+    out = out + (if fragment.complete: ", true\n" else: ", false\n")
+    out = out + "refreshed |path|\n"
+    for path in fragment.paths:
+        out = out + "    " + workaround_sdn_quote(path) + "\n"
+    out = out + encode_workaround_index(WorkaroundIndex(
+        revision: fragment.revision, complete: fragment.complete, links: fragment.links))
+    out
+
+fn decode_workaround_fragment(content: text) -> Result<WorkaroundFragment, text>:
+    val lines = content.split("\n")
+    if lines.len() < 3 or lines[0].trim() != "workaround_fragment |schema, revision, base, complete|":
+        return Err("unknown workaround fragment schema")
+    val header = workaround_sdn_fields(lines[1].trim())?
+    if header.len() != 4 or header[0] != "1" or not workaround_recovery_valid(header[1]):
+        return Err("invalid workaround fragment metadata")
+    if (header[2] != "true" and header[2] != "false") or (header[3] != "true" and header[3] != "false"):
+        return Err("invalid workaround fragment flags")
+    if lines[2].trim() != "refreshed |path|":
+        return Err("invalid workaround fragment path table")
+    var paths: [text] = []
+    var i = 3
+    while i < lines.len() and lines[i].trim() != "workaround_index |schema, revision, complete|":
+        val row = lines[i].trim()
+        i = i + 1
+        if row == "": continue
+        val fields = workaround_sdn_fields(row)?
+        if fields.len() != 1 or not workaround_path_valid(fields[0]):
+            return Err("invalid workaround fragment path")
+        if not paths.contains(fields[0]): paths.push(fields[0])
+    if i >= lines.len():
+        return Err("missing workaround fragment index")
+    var rest: [text] = []
+    while i < lines.len():
+        rest.push(lines[i])
+        i = i + 1
+    val index = decode_workaround_index(rest.join("\n"))?
+    if index.revision != header[1]:
+        return Err("workaround fragment revision mismatch")
+    for link in index.links:
+        if not paths.contains(link.path):
+            return Err("workaround fragment link outside its refreshed paths")
+    Ok(WorkaroundFragment(revision: header[1], base: header[2] == "true",
+        complete: header[3] == "true", paths: paths, links: index.links))
+
+# Fold fragments (already in publication order) into one index. Completeness
+# follows the single-file semantics it replaces: a base fragment sets it, a
+# delta at another revision clears it.
+fn merge_workaround_fragments(fragments: [WorkaroundFragment]) -> WorkaroundIndex:
+    var index = empty_workaround_index("")
+    for fragment in fragments:
+        if fragment.base:
+            index = WorkaroundIndex(revision: fragment.revision, complete: fragment.complete,
+                links: fragment.links)
+        else:
+            val complete = index.complete and index.revision == fragment.revision
+            val replaced = replace_workaround_paths(index, fragment.paths, fragment.links)
+            index = WorkaroundIndex(revision: fragment.revision, complete: complete,
+                links: replaced.links)
+    index

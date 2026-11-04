@@ -1,12 +1,16 @@
 # Existing snapshot-store retention, isolated from snapshot materialization.
-# Managed stores serialize legacy collectors and pin/lease publication under
-# the same lock; a protected root can only be evicted by its checked permit.
+# LOCKLESS (doc/05_design/compiler/scv/lockless_refresh.md): snapshots are
+# immutable content-addressed directories, so a sweep deletes only entries
+# that are unreferenced (not `keep`), past the min-age floor and provenance-
+# checked, and tolerates a concurrent sweep deleting the same entry first.
+# A managed store (.build-retention-v1.sdn) owns its own pin/lease authority;
+# the unmanaged collectors here refuse to touch one.
 use std.scv.compile_snapshot_values_v1.*
 use app.io.mod.{file_exists, file_delete, dir_exists}
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
-use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_lock, file_unlock}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time}
 use std.nogc_sync_mut.io_runtime.{dir_list, dir_remove, process_is_running}
 use std.scv.store.{scv_write_text}
 
@@ -31,13 +35,9 @@ fn scv_compile_snapshot_recover_v1(cache_root: text) -> i64:
 fn scv_compile_snapshot_gc_v1(
     cache_root: text, retained_revisions: [text], max_remove: i64
 ) -> i64:
-    val lock = file_lock("{cache_root}/.build-retention-v1.lock", 1)
-    if lock < 0: return 0
-    val removed = scv_compile_snapshot_gc_unmanaged_locked_v1(cache_root, retained_revisions, max_remove)
-    file_unlock(lock)
-    removed
+    scv_compile_snapshot_gc_unmanaged_v1(cache_root, retained_revisions, max_remove)
 
-fn scv_compile_snapshot_gc_unmanaged_locked_v1(
+fn scv_compile_snapshot_gc_unmanaged_v1(
     cache_root: text, retained_revisions: [text], max_remove: i64
 ) -> i64:
     # Managed build stores have a root/pin/reader-lease authority. Legacy
@@ -180,13 +180,9 @@ fn scv_compile_snapshot_cleanup_v1(snapshot: ScvCompileSnapshotV1) -> bool:
     val receipt_suffix = "/receipts/{snapshot.revision_id}.receipt"
     if not snapshot.receipt_path.ends_with(receipt_suffix): return false
     val cache_root = snapshot.receipt_path[:snapshot.receipt_path.len() - receipt_suffix.len()]
-    val lock = file_lock("{cache_root}/.build-retention-v1.lock", 1)
-    if lock < 0: return false
-    val removed = scv_compile_snapshot_cleanup_unmanaged_locked_v1(snapshot, cache_root)
-    file_unlock(lock)
-    removed
+    scv_compile_snapshot_cleanup_unmanaged_v1(snapshot, cache_root)
 
-fn scv_compile_snapshot_cleanup_unmanaged_locked_v1(snapshot: ScvCompileSnapshotV1, cache_root: text) -> bool:
+fn scv_compile_snapshot_cleanup_unmanaged_v1(snapshot: ScvCompileSnapshotV1, cache_root: text) -> bool:
     if file_exists("{cache_root}/.build-retention-v1.sdn"): return false
     val expected = scv_compile_snapshot_provenance_v1(
         snapshot.revision_id, snapshot.commit_id, snapshot.tree_id,
