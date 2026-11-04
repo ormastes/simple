@@ -1498,7 +1498,9 @@ impl MirLowering:
         if val base_type = self.find_local_hir_type(base_local.id):
             match base_type.kind:
                 case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
-                    if val stable_owner = self.array_element_struct_syms.get(base_local.id):
+                    # @workaround bug=stage2_if_val_text_option_transport_tls_end_2026-11-04 reason=frozen stage2 can bind the Option box (not the text payload) for `if val x = dict.get(k)`; result_err_layout_identity then interpolates a garbage text (s4e e0011 _tls_end AV, frame result_err_layout_identity+0x2c). Unwrap with ?? into a bare text first.
+                    val stable_owner: text = self.array_element_struct_syms.get(base_local.id) ?? ""
+                    if stable_owner != "":
                         val stable_identity = result_err_layout_identity(stable_owner)
                         if stable_identity != "":
                             # Stable return metadata wins over a Named ID from
@@ -6923,6 +6925,19 @@ impl MirLowering:
                 var result_type = MirType.i64()
                 if val expr_type = expr_value.type_:
                     result_type = self.lower_type(expr_type)
+                    # `.?` yields payload-or-nil (sentinel 3), never the
+                    # flat-option Tuple(Bool, I64) that lower_type(T?) gives.
+                    # A scalar payload is one raw i64 word; typing it Tuple
+                    # made "{v}" of `if val v = find(7)` render it as a
+                    # 2-field tuple and load from address 7 (capmap
+                    # t1_option, stage3 rc=139).
+                    match expr_type.kind:
+                        case HirTypeKind.Optional(exists_scalar_inner):
+                            match exists_scalar_inner.kind:
+                                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                                    result_type = MirType.i64()
+                                case _: ()
+                        case _: ()
                 # Struct-typed payload: `enum_payload_value`'s default arm
                 # (just below) hands back the raw ptrtoint'd handle
                 # untouched -- correct bits, but with no struct-name
