@@ -90,7 +90,7 @@ fn _receipt_index_plan(root: text, head: text, request: DbReceiptIndexGitRequest
     val digest_entry = _receipt_index_blob(root, head, "entries/" + db_receipt_digest(request.receipt)?)?
     var sequence = 1u64
     if val existing = digest_entry:
-        sequence = db_receipt_index_entry_decode(existing)?.sequence
+        sequence = (db_receipt_index_entry_decode(existing)?).sequence
     else:
         if cursor.count == 18446744073709551615u64: return Err("SCVDB_INDEX_EXHAUSTED")
         sequence = cursor.count + 1u64
@@ -116,8 +116,8 @@ fn _receipt_index_fetch(request: DbReceiptIndexGitRequest, scratch: text, refere
     if observed != "":
         if scv_sj_lease_is_held(request.source_root): return Err("SCVDB_INDEX_NETWORK_UNDER_LEASE")
         val fetched = _receipt_index_git(scratch, ["-c", "fetch.fsckObjects=true", "fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--depth=1", request.remote, reference + ":refs/scv-index/readback"])?
-        if _receipt_index_git(scratch, ["rev-parse", "refs/scv-index/readback"], 256)?.trim() != observed: return Err("SCVDB_INDEX_READBACK_MOVED")
-        if _receipt_index_git(scratch, ["cat-file", "-t", observed], 256)?.trim() != "commit": return Err("SCVDB_INDEX_NOT_COMMIT")
+        if (_receipt_index_git(scratch, ["rev-parse", "refs/scv-index/readback"], 256)?).trim() != observed: return Err("SCVDB_INDEX_READBACK_MOVED")
+        if (_receipt_index_git(scratch, ["cat-file", "-t", observed], 256)?).trim() != "commit": return Err("SCVDB_INDEX_NOT_COMMIT")
     if _receipt_index_head(request, scratch, reference)? != observed: return Err("SCVDB_INDEX_READBACK_MOVED")
     Ok(observed)
 
@@ -143,14 +143,14 @@ fn _receipt_index_write(request: DbReceiptIndexGitRequest, scratch: text, refere
     for index in 0..paths.len():
         if contents[index].len() > 262144: return Err("SCVDB_INDEX_BLOB_QUOTA")
         if not file_write_bytes(scratch + "/payload", text_to_utf8_bytes(contents[index])): return Err("SCVDB_INDEX_BLOB_WRITE")
-        val oid = _receipt_index_git(scratch, ["hash-object", "-w", "--no-filters", "--", scratch + "/payload"], 256)?.trim()
+        val oid = (_receipt_index_git(scratch, ["hash-object", "-w", "--no-filters", "--", scratch + "/payload"], 256)?).trim()
         val width = if request.receipt.object_format == "sha1": 40 else: 64
         if not _receipt_index_hex(oid, width): return Err("SCVDB_INDEX_OBJECT")
         val staged = _receipt_index_git(scratch, ["update-index", "--add", "--cacheinfo", "100644,{oid},{paths[index]}"])?
-    val tree = _receipt_index_git(scratch, ["write-tree"], 256)?.trim()
+    val tree = (_receipt_index_git(scratch, ["write-tree"], 256)?).trim()
     var parent: [text] = []
     if observed != "": parent = ["-p", observed]
-    val candidate = _receipt_index_git(scratch, ["-c", "user.name=SCV Receipt Index", "-c", "user.email=scv-receipts@invalid", "commit-tree", tree] + parent + ["-m", "SCV receipt index v1"], 256)?.trim()
+    val candidate = (_receipt_index_git(scratch, ["-c", "user.name=SCV Receipt Index", "-c", "user.email=scv-receipts@invalid", "commit-tree", tree] + parent + ["-m", "SCV receipt index v1"], 256)?).trim()
     val width = if request.receipt.object_format == "sha1": 40 else: 64
     if not _receipt_index_hex(candidate, width): return Err("SCVDB_INDEX_OBJECT")
     if _receipt_index_head(request, scratch, reference)? != observed: return Err("SCVDB_INDEX_STALE_HEAD")
@@ -171,9 +171,9 @@ fn _receipt_index_scope(request: DbReceiptIndexGitRequest, local_write: bool) ->
     if db_local_path_scope(request.source_root, []) != "" or db_local_path_scope(request.scratch_parent, []) != "": return Err("SCVDB_INDEX_SCOPE")
     var source = path_final_existing(request.source_root)?
     val parent = path_final_existing(request.scratch_parent)?
-    val common = path_final_existing(_receipt_index_git(source.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"], 4096)?.trim())?
-    if _receipt_index_git(source.path, ["rev-parse", "--is-bare-repository"], 256)?.trim() == "false":
-        source = path_final_existing(_receipt_index_git(source.path, ["rev-parse", "--show-toplevel"], 4096)?.trim())?
+    val common = path_final_existing((_receipt_index_git(source.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"], 4096)?).trim())?
+    if (_receipt_index_git(source.path, ["rev-parse", "--is-bare-repository"], 256)?).trim() == "false":
+        source = path_final_existing((_receipt_index_git(source.path, ["rev-parse", "--show-toplevel"], 4096)?).trim())?
     if path_identity_contains(source, parent) or path_identity_contains(common, parent): return Err("SCVDB_INDEX_SCOPE")
     if request.remote.starts_with("https://github.com/") and not local_write:
         val parts = request.remote[19:].split("/")
@@ -185,9 +185,9 @@ fn _receipt_index_scope(request: DbReceiptIndexGitRequest, local_write: bool) ->
                 if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or [45, 46, 95].contains(code)): return Err("SCVDB_INDEX_REMOTE")
     else:
         if not dir_is_real_no_follow(request.remote) or db_local_path_scope(request.remote, []) != "": return Err("SCVDB_INDEX_LOCAL_REMOTE_REQUIRED")
-        if path_final_existing(request.remote)?.path != request.remote: return Err("SCVDB_INDEX_LOCAL_REMOTE_REQUIRED")
+        if (path_final_existing(request.remote)?).path != request.remote: return Err("SCVDB_INDEX_LOCAL_REMOTE_REQUIRED")
         if path_identity_contains(path_final_existing(request.remote)?, parent): return Err("SCVDB_INDEX_SCOPE")
-        if _receipt_index_git(request.remote, ["rev-parse", "--is-bare-repository"], 256)?.trim() != "true": return Err("SCVDB_INDEX_LOCAL_REMOTE_REQUIRED")
+        if (_receipt_index_git(request.remote, ["rev-parse", "--is-bare-repository"], 256)?).trim() != "true": return Err("SCVDB_INDEX_LOCAL_REMOTE_REQUIRED")
     Ok(parent)
 
 fn _receipt_index_effect(request: DbReceiptIndexGitRequest, local_write: bool) -> Result<DbReceiptIndexGitProof, text>:
