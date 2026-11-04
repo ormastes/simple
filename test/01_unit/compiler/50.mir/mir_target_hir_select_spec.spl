@@ -4,7 +4,8 @@ use compiler.common.mir_target_context.{mir_target_context_from_explicit}
 use compiler.mir.mir_cfg_select.{mir_cfg_select_arm}
 use compiler.hir.target_hir.hir_freeze.{hir_snapshot_freeze, hir_snapshot_read}
 use compiler.hir.target_hir.target_hir.{target_hir_for_explicit}
-use compiler.mir.mir_target_hir_select.{mir_target_hir_select_arm}
+use compiler.mir.mir_target_hir_select.{mir_target_hir_select_arm, mir_target_hir_mode_parse, mir_target_hir_live_select}
+use std.nogc_sync_mut.io.file_ops.{file_read}
 
 val ARMS: [text] = ["arch = \"x86\" and os = \"windows\"", "arch = \"x86\"", "arch == \"x86_64\" and os = \"linux\"", "os = \"simpleos\"", ""]
 
@@ -43,3 +44,35 @@ describe "TargetHIR cfg arm reader (TargetHIR PR-D)":
         expect(mir_target_hir_select_arm(view, b.id, ARMS, no_feat).unwrap_err()).to_start_with("target_hir_snapshot_mismatch:")
         expect(mir_target_hir_select_arm(view, a.id, ["bogus_atom"], no_feat).unwrap_err()).to_equal("target_hir_malformed_cfg_condition")
         expect(mir_target_hir_select_arm(view, a.id, ["windows"], no_feat).unwrap()).to_equal(-1)
+
+describe "live lower_cfg_select TargetHIR wiring (P4, SIMPLE_TARGET_HIR_MODE)":
+    it "parses legacy|shadow|typed, defaults to legacy, rejects unknown":
+        expect(mir_target_hir_mode_parse("").unwrap()).to_equal("legacy")
+        expect(mir_target_hir_mode_parse("Shadow").unwrap()).to_equal("shadow")
+        expect(mir_target_hir_mode_parse("typed").unwrap()).to_equal("typed")
+        expect(mir_target_hir_mode_parse("on").unwrap_err()).to_start_with("target_hir_mode_unknown:")
+
+    it "shadow and typed agree with legacy on every target and malformed input":
+        val no_feat: [text] = []
+        val triples = ["x86-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86-pc-windows-msvc",
+            "x86_64-pc-windows-msvc", "x86-unknown-simpleos", "x86_64-unknown-simpleos"]
+        for t in triples:
+            val ctx = mir_target_context_from_explicit(t, "llvm", 23).unwrap()
+            val legacy = mir_cfg_select_arm(ARMS, ctx, no_feat)
+            expect(mir_target_hir_live_select("shadow", "app.main", ARMS, ctx, no_feat, legacy).unwrap()).to_equal(legacy)
+            expect(mir_target_hir_live_select("typed", "app.main", ARMS, ctx, no_feat, legacy).unwrap()).to_equal(legacy)
+            expect(mir_target_hir_live_select("legacy", "app.main", ARMS, ctx, no_feat, legacy).unwrap()).to_equal(legacy)
+        val ctx = mir_target_context_from_explicit("x86_64-unknown-linux-gnu", "llvm", 23).unwrap()
+        expect(mir_target_hir_live_select("shadow", "", ["bogus_atom"], ctx, no_feat, -2).unwrap()).to_equal(-2)
+        expect(mir_target_hir_live_select("typed", "", ["windows"], ctx, no_feat, -1).unwrap()).to_equal(-1)
+
+    it "shadow detects an injected legacy divergence; legacy mode does not check":
+        val no_feat: [text] = []
+        val ctx = mir_target_context_from_explicit("x86_64-unknown-linux-gnu", "llvm", 23).unwrap()
+        expect(mir_target_hir_live_select("shadow", "app.main", ARMS, ctx, no_feat, 0).unwrap_err()).to_equal("target_hir_shadow_mismatch: legacy=0 typed=2")
+        expect(mir_target_hir_live_select("legacy", "app.main", ARMS, ctx, no_feat, 0).unwrap()).to_equal(0)
+
+    it "source-shape pin: live lower_cfg_select routes through the flag-gated reader":
+        val src = file_read("src/compiler/50.mir/_MirLowering/asm_and_targets.spl")
+        expect(src.contains("mir_target_hir_mode_from_env()")).to_be(true)
+        expect(src.contains("mir_target_hir_live_select(th_mode.unwrap()")).to_be(true)

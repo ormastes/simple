@@ -1,6 +1,6 @@
 # Stage 3 HIR cache: the direct route misses every entry the sharded route stored
 
-- Status: OPEN
+- Status: FIX-IMPLEMENTED, VERIFICATION PENDING (2026-11-04; fix 7b595fe78d4)
 - Date: 2026-10-20
 - Platform: aarch64-unknown-linux-gnu
 - Severity: P2 (each route change re-lowers the whole closure: ~50 min)

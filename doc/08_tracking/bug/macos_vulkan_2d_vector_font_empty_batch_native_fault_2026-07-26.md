@@ -581,3 +581,55 @@ Native rerun (M4, MoltenVK, Rust seed `release100-7a0e6fe516f-20261031`):
   fixed here.
 
 Status: fix-implemented (evidence promotion); open for parity + sync-wait items.
+
+## 2026-11-04 parity triage + sync clock fix (vkfont3 lane)
+
+**Correction to the previous section.** The "device/CPU-oracle pixel mismatch"
+is not a raster divergence (no swizzle/premul/AA/y-flip difference was found).
+Both buffers were dumped per pixel on the oracle path
+(`backend_vulkan_font.spl`, packed single-submit branch) in both modes:
+
+- `simple test` (seed interpreter): `parity=true`, `device_checksum ==
+  oracle_checksum`, but **both frames are all-zero** (`nonblank before=0
+  after=0`, `readback_nonblank_pixels=0`). Cause: the batch atlas cells are
+  `0x00FFFFFF` (alpha 0). `sfnt_render_glyph_into` computes the coverage
+  (`meta[9]=64` for '2') but its `mut pixels: [u8]` writes never reach the
+  caller under the interpreter. Seed defect, filed with a 10-line repro:
+  `seed_interp_mut_u8_array_param_element_write_lost_2026-11-04.md`. The row is
+  `failed` because `readback_nonblank_pixels == 0` fails
+  `vulkan_font_stage_evidence_ready`, not because checksums differ.
+- `simple run` (seed JIT, `set_vulkan_font_oracle_mode(true)`): the GPU frame is
+  correct (135 changed pixels, e.g. `(8,9)=0xFFFFFFFF`, `(6,9)=0x5FFFFFFF`
+  coverage edges) while the CPU oracle stays all-zero: glyph quads are
+  non-empty (`nonzero 64`/`71`), `oracle` is 64x64 with no clip/mask and the
+  scalar blend path, yet `SoftwareBackend.draw_image_blend` leaves `oracle.buf`
+  zero. A standalone `SoftwareBackend` blend of the same shape works under both
+  JIT and interpreter, so this is the seed's hybrid JIT/interp-splice boundary
+  losing writes to the class's array field (same family as the
+  `RenderBackend.read_pixels_region` dispatch gap above), not the Simple source.
+  Not separately root-caused in the Rust seed here.
+
+So the pixel side of acceptance item 7 is blocked on the seed runtime, both
+lanes; the GPU raster itself matches what the CPU oracle produces whenever the
+CPU side actually runs (interpreter: both blank, equal).
+
+**Fixed: `sync_wait_ns == 0`.** The fence-wait measurement in
+`_composite_font_batch_impl` (packed submit) and in
+`_flush_pending_compute_impl` (batched flush record) now uses the existing
+nanosecond monotonic primitive `time_monotonic_ns()`
+(`std.nogc_sync_mut.sffi.time`) instead of `FrameClock.now_micros() * 1000`.
+Measured: `sync_wait_ns` 16,416–21,583 ns (interpreter), 2,625 ns (JIT).
+Honest scope: `vulkan_counted_submit_and_wait_fence` has already blocked, so
+this is the cost of the confirming `vkWaitForFences` on a signalled fence, not
+device execution time.
+
+Native rerun (M4, MoltenVK, seed `release100-7a0e6fe516f-20261031`):
+`native_gpu_font_readback_spec.spl` 5/8 (unchanged; Engine2D row now fails
+only on blank glyphs), `backend_vulkan_font_flush_promotion_spec.spl` 3/3,
+`font_empty_batch_fail_closed_spec.spl` 5/5. Engine3D row
+(`public-vulkan-font-install-failed`) not investigated in this lane.
+
+What turns the Engine2D row green: the interpreter `[u8]` param writeback fix
+(or an admitted self-hosted macOS binary running the spec), then a rerun.
+
+Status: open — sync item fixed; parity item blocked on seed runtime defects.

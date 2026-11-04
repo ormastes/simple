@@ -1,0 +1,51 @@
+# TargetHIR cache identity (P6): CACHE-TH-01..04.
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.driver.driver_target_hir_cache_v1.{target_hir_cache_key_suffix, target_hir_cache_record_new, target_hir_cache_record_encode, target_hir_cache_record_decode, target_hir_cache_record_admit}
+
+val SRC = "src/compiler/80.driver/driver_hir_cache.spl"
+
+# Today's (pre-P6) target fold, reproduced verbatim for the byte-identity proof.
+fn legacy_fold(ctx_id: text, native_target: text) -> text:
+    "hir-target-v2:" + ctx_id + ";native-target={native_target.len()}:{native_target}"
+
+fn enc(parent: text, digest: text) -> text:
+    target_hir_cache_record_encode(target_hir_cache_record_new(parent, "x86_64-unknown-linux-gnu", digest, "p" * 64)).unwrap()
+
+describe "TargetHIR cache identity":
+    it "CACHE-TH-01 legacy mode key is byte-identical to the pre-P6 fold":
+        val ctx_id = "os=linux;arch=x86_64;cpu=generic;features="
+        for t in ["", "x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]:
+            expect(legacy_fold(ctx_id, t) + target_hir_cache_key_suffix("legacy", "d" * 64)).to_equal(legacy_fold(ctx_id, t))
+        expect(target_hir_cache_key_suffix("legacy", "")).to_equal("")
+        # The production fold is exactly the pre-P6 expression + suffix, defaulting to legacy.
+        val src = file_read(SRC)
+        # (braces avoided: spec strings interpolate {..})
+        expect(src.contains("fn _hir_cache_target_context(native_target: text, thir_mode: text = \"legacy\", thir_constraints_digest: text = \"\") -> text:\n    \"hir-target-v2:\" + cfg_guard_context_identity_v1() + \";native-target=")).to_equal(true)
+        expect(src.contains("\" + target_hir_cache_key_suffix(thir_mode, thir_constraints_digest)\n")).to_equal(true)
+        # Legacy mode takes the unchanged one-argument fold.
+        expect(src.contains("val fold = if thir_mode == \"legacy\": _hir_cache_target_context(native_target) else:")).to_equal(true)
+        expect(src.contains("val thir_mode = target_hir_mode()")).to_equal(true)
+        expect(src.contains("hir_target_constraints_digest(thir_constraints.unwrap())")).to_equal(true)
+
+    it "CACHE-TH-02 non-legacy key changes only with the constraints digest":
+        val a = target_hir_cache_key_suffix("shadow", "a" * 64)
+        expect(a).to_equal(";thir:target-hir-cache-v1:" + "a" * 64)
+        expect(target_hir_cache_key_suffix("typed", "a" * 64)).to_equal(a)
+        expect(target_hir_cache_key_suffix("shadow", "b" * 64) == a).to_equal(false)
+
+    it "CACHE-TH-03 record admits only its parent snapshot, target and constraints":
+        val rec = enc("snap-1", "c" * 64)
+        expect(target_hir_cache_record_admit(rec, "snap-1", "x86_64-unknown-linux-gnu", "c" * 64).is_ok()).to_equal(true)
+        expect(target_hir_cache_record_admit(rec, "snap-2", "x86_64-unknown-linux-gnu", "c" * 64).is_err()).to_equal(true)
+        expect(target_hir_cache_record_admit(rec, "snap-1", "aarch64-apple-darwin", "c" * 64).is_err()).to_equal(true)
+        expect(target_hir_cache_record_admit(rec, "snap-1", "x86_64-unknown-linux-gnu", "e" * 64).is_err()).to_equal(true)
+
+    it "CACHE-TH-04 missing, old, unknown or corrupt records are rejected":
+        val rec = enc("snap-1", "c" * 64)
+        expect(target_hir_cache_record_decode(rec).unwrap().parent_snapshot_id).to_equal("snap-1")
+        expect(target_hir_cache_record_decode("").is_err()).to_equal(true)
+        expect(target_hir_cache_record_decode(rec.replace("target-hir-cache-v1", "target-hir-cache-v0")).is_err()).to_equal(true)
+        expect(target_hir_cache_record_decode(rec.replace("THIRREC", "XXXXREC")).is_err()).to_equal(true)
+        expect(target_hir_cache_record_decode(rec.replace("snap-1\n", "\n")).is_err()).to_equal(true)
+        expect(target_hir_cache_record_decode(rec + "extra\n").is_err()).to_equal(true)
