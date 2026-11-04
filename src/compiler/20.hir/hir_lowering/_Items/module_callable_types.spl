@@ -643,6 +643,12 @@ impl HirLowering:
             val tp: ParserTypeParam = raw_tp
             var bounds: [HirType] = []
             for bound in tp.bounds:
+                # Same erasure as the local lower_type_param: a bare builtin
+                # trait bound (`where K: Eq + Ord`) the owner never declares
+                # has no HIR symbol; lowering it as a type hard-errored
+                # `unresolved type: Eq` in every importer (s2e Stage 2).
+                if self.imported_owner_bound_is_erased_builtin(bound, imported_module_name):
+                    continue
                 bounds = bounds.push(self.imported_surface_type(bound, imported_module_name))
             val default_ = if tp.has_default:
                 self.imported_surface_type(tp.default, imported_module_name)
@@ -661,6 +667,14 @@ impl HirLowering:
                 kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
                 span: parameter.span)
         parameters
+
+    me imported_owner_bound_is_erased_builtin(bound: Type, imported_module_name: text) -> bool:
+        # "" for a non-Named bound, which never matches the builtin set.
+        val name = parser_type_kind_named_name(bound.kind)
+        if name == "":
+            return false
+        hir_imported_bound_erases_builtin_v1(name, parser_type_kind_named_args(bound.kind).len(),
+            self.qtype_raw_counted(imported_module_name, name) >= 0)
 
     me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
         # An imported generic callable (`fn array_sort_by<T>(arr: [T], ..)
@@ -1220,3 +1234,13 @@ impl HirLowering:
                 return_scan_empty()
             case _:
                 return_scan_empty()
+
+# A bound erases only for a builtin trait spelling (the set the local
+# where-bound lowering erases), without type arguments, that the declaring
+# owner module does not itself declare or import.
+pub fn hir_imported_bound_erases_builtin_v1(name: text, arg_count: i64, owner_declares: bool) -> bool:
+    if arg_count != 0 or owner_declares:
+        return false
+    match name:
+        case "Clone" | "Copy" | "Debug" | "Default" | "Drop" | "Eq" | "Ord": true
+        case _: false
