@@ -291,9 +291,20 @@ redeploy this lane's contract holds only for the `Results:` line. Note
   its cursor-invariant spec is RED for the interpreter trap below, not for a
   defect in the code under test.
 - [prevention_mocks](../../feature_expert/prevention_mocks/skill.md) — its
-  directory-wide scope is blocked specifically by this layer's lack of a
-  per-directory config/fixture hook (`find_config_file`,
-  `test_runner/test_config.spl:297-302`, cwd-relative parent-walk only).
+  directory-wide scope landed 2026-11-04 as this layer's first per-directory
+  hook: `std.nogc_sync_mut.spec.dir_prevention` walks the spec's directory
+  chain for `_prevention.sdn` (cached per directory) and both dispatch
+  sites — the lane `match` in `test_runner_main.spl` (`[route] mode=...`,
+  directory targets, all lanes) and the direct single-file lane in
+  `test_runner_single.spl` `main` (file targets: "light daemon requires
+  Linux /proc; running directly") — set and restore
+  `SIMPLE_SPEC_DIR_PREVENTION` around the child. Trap met while landing:
+  the env was first set inside `run_test_file_interpreter`, which exists in
+  BOTH `src/lib/nogc_sync_mut/test_runner/` and `src/app/test_runner_new/`
+  under the same name; the copy that actually ran was neither of the edited
+  ones (no marker print ever appeared), so the set moved up to the
+  dispatcher. Any new spawn site outside those two must do the same or that
+  lane silently runs policy-free.
 
 ## Update Rule
 

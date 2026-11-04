@@ -58,6 +58,7 @@ use std.test_runner.test_runner_execute.{run_test_file_interpreter, mcdc_compile
 use std.test_runner.test_runner_mcdc_report.{test_runner_mcdc_run_gate}
 
 use std.io_runtime.{file_exists, file_read_nullable}
+use std.nogc_sync_mut.spec.dir_prevention.{DIR_PREVENTION_ENV, DIR_PREVENTION_SEP, dir_prevention_env_value}
 @unsafe(reason: "raw test-source/coverage text ABI; helper return types cannot carry I/O errors", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{file_write}
@@ -1515,7 +1516,19 @@ fn main() -> i64:
     val child_binary = if child_moved: child_cwd_absolute(binary, runner_cwd) else: binary
     val child_spec = if child_moved: child_exec_path else: exec_path
     val child_args = ["run", child_spec, "--test-result-file={evidence_path}"]
+    # Directory-wide prevention policy: hand the spec's `_prevention.sdn`
+    # chain (cached per directory) to the child, absolute when the child's
+    # cwd moved; restored afterwards so nothing leaks to a later lane.
+    val previous_dir_prevention = env_get(DIR_PREVENTION_ENV) ?? ""
+    var dir_prevention_value = dir_prevention_env_value(run.path)
+    if child_moved and dir_prevention_value != "":
+        var absolute_policies: [text] = []
+        for policy_path in dir_prevention_value.split(DIR_PREVENTION_SEP):
+            absolute_policies.push(child_cwd_absolute(policy_path, runner_cwd))
+        dir_prevention_value = absolute_policies.join(DIR_PREVENTION_SEP)
+    val _ = env_set(DIR_PREVENTION_ENV, dir_prevention_value)
     val (stdout, stderr, code) = process_run_bounded(child_binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    val _ = env_set(DIR_PREVENTION_ENV, previous_dir_prevention)
     if child_moved and not env_set_cwd_raw(runner_cwd):
         val _ = env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path)
         remove_structured_result_evidence(evidence_path)
