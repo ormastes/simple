@@ -13560,6 +13560,7 @@ void rt_mem_attr_set_owner(const uint8_t* name_ptr, uint64_t name_len) {
     if (n >= RT_BUCKET2_MEM_ATTR_OWNER_MAX) n = RT_BUCKET2_MEM_ATTR_OWNER_MAX - 1;
     memcpy(rt_bucket2_mem_attr_owner, name_ptr, n);
     rt_bucket2_mem_attr_owner[n] = '\0';
+    rt_mem_guard_set_owner(rt_bucket2_mem_attr_owner, n); /* guard-trap owner report */
 }
 
 /* ---- log_sffi.rs: rt_log_* family ----------------------------------------
