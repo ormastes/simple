@@ -8,7 +8,7 @@ The optional-array pattern binding must retain the array and element types. Nega
 
 Compatibility workaround: explicitly type the bound entries/dependencies/outputs arrays as [SdnValue] inside their existing present branches, preserving missing/wrong-type behavior, order and all cache identity checks. No cast or Any. Removal condition: a rebuilt pure-Simple producer compiles and runs the equivalent unannotated if-val iteration and actual BuildCache.load/native_noop entry without issue143; remove annotation workarounds and rerun real cache load caller checks.
 
-## Verification pending (n88_b, 2026-11-04)
+## Workaround pinned only (n88_b, 2026-11-04) - real fix still open
 
 Source repair/workaround is pinned by `bin/simple.exe test test/01_unit/compiler/80.driver/n88b_native_workaround_shapes_spec.spl` (8/8 pass on the seed).
 Native repro fixture: `test/fixtures/compiler/n88b_native_producer_idioms_native.spl` (+ `.expected`); covers the BINDER_ line.

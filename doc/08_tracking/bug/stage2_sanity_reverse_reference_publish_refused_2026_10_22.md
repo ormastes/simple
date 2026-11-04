@@ -198,7 +198,7 @@ this lane's scalar-global mirror as d819cb542b9. Its observations, merged here:
   (ab07dfa3567 scalar mirror + ff1f69fd931 array-limb mirror), so only this
   evidence section was ported.
 
-## Verification pending (n88_b, 2026-11-04)
+## Workaround pinned only (n88_b, 2026-11-04) - real fix still open
 
 Source repair/workaround is pinned by `bin/simple.exe test test/01_unit/compiler/80.driver/n88b_native_workaround_shapes_spec.spl` (8/8 pass on the seed).
 Native repro fixture: `test/fixtures/compiler/n88b_native_producer_idioms_native.spl` (+ `.expected`); scalar mirrors in src/compiler/00.common/cache/reverse_reference_facts.spl remain the workaround; fixture does not cover the mixed scalar+array inline-class layout.
