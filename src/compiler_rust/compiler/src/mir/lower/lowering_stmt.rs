@@ -689,6 +689,32 @@ impl<'a> MirLowerer<'a> {
                                 val_reg
                             };
 
+                            // Free the replaced buffer when `array_move.rs`
+                            // proved the field is its only holder (bug
+                            // seed_jit_array_copy_never_freed_2026-10-19). The
+                            // new value is already materialised, so
+                            // `st.buf = st.buf` style copies read it first.
+                            let release_old = matches!(&receiver.kind,
+                                HirExprKind::Local(r) if self.array_move_sites.field_release_structs.contains(r))
+                                && self.type_registry.and_then(|tr| tr.get_array_element(target.ty)).is_some();
+                            let old_reg = if release_old {
+                                let owner_name = owner_name.clone();
+                                Some(self.with_func(|func, current_block| {
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::FieldGet {
+                                        dest,
+                                        object: receiver_reg,
+                                        owner_name,
+                                        owner_has_vtable,
+                                        byte_offset,
+                                        field_type: target.ty,
+                                    });
+                                    dest
+                                })?)
+                            } else {
+                                None
+                            };
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
                                 block.instructions.push(MirInst::FieldSet {
@@ -712,6 +738,16 @@ impl<'a> MirLowerer<'a> {
                                     value: val_reg,
                                 });
                             })?;
+                            if let Some(old_reg) = old_reg {
+                                self.with_func(|func, current_block| {
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::Call {
+                                        dest: None,
+                                        target: CallTarget::from_name("rt_array_free"),
+                                        args: vec![old_reg],
+                                    });
+                                })?;
+                            }
                         }
                     }
 

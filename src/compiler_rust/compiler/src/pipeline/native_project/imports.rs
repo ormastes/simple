@@ -279,8 +279,22 @@ pub(crate) fn resolve_name_variants(
 }
 
 pub(crate) fn suffix_of(name: &str) -> Option<&str> {
-    if let Some((_, suffix)) = name.rsplit_once("__") {
-        Some(suffix)
+    if let Some(pos) = name.rfind("__") {
+        // The module/name separator is the FIRST `__` of the trailing
+        // underscore run: `mod___u64` is `mod` + `__` + `_u64`. Splitting at
+        // the last `__` indexed a private `_u64` helper as `u64`, and
+        // `resolve_by_suffix("to_u64")` -> ("to", "u64") then bound every
+        // erased-receiver `.to_u64()` to that helper (Stage 2 SIGSEGV in
+        // xxh3 via elf_artifact_gate::_u64, 2026-11-04).
+        let bytes = name.as_bytes();
+        let mut start = pos;
+        while start > 0 && bytes[start - 1] == b'_' {
+            start -= 1;
+        }
+        if start == 0 {
+            return Some(&name[pos + 2..]);
+        }
+        Some(&name[start + 2..])
     } else if let Some((_, suffix)) = name.rsplit_once('.') {
         Some(suffix)
     } else {
