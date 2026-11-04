@@ -105,3 +105,13 @@ Secondary symptom: JIT cannot lower module-namespace access at all —
 3. Wrap the call in a module-level helper `fn` in the spec file and call that.
 
 Workaround 2 is what the LLVM/rust/disk-boot port specs now use.
+
+## Re-verification 2026-11-04 (c28-w3): FIXED on the redeployed seed
+
+Ran the doc's repro (interpolation, `expect(fs.exists(P)).to_equal(true)`, bare-global
+member) via `bin/simple.exe test` on seed 0b2c3d015b7: 3/3 pass; the
+`function expects 1 argument(s), but 2 were provided` error no longer occurs.
+Regression spec (5 cases: interpolation x2, matcher chain, comparison in expect,
+assignment) added: `test/01_unit/compiler/interpreter/module_namespace_member_in_it_block_spec.spl`
+-> 5 total, 5 passed, ~10 s wall. Status set to fixed. The JIT secondary symptom
+(module-namespace access forces interpreter fallback) was not re-checked.
