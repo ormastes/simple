@@ -1597,3 +1597,14 @@ See [coding_style.md](../language/coding_style.md) for the current inheritance p
 - [../../06_spec/app/compiler/modules/grammar/grammar_reference.md](../../06_spec/app/compiler/modules/grammar/grammar_reference.md) - Grammar registry output
 - [../import_quick_reference.md](import_quick_reference.md) - Import patterns
 - [../../05_design/pipeline_operators_design.md](../../05_design/pipeline_operators_design.md) - Pipeline operator design
+
+---
+
+## Reserved Words Used as Names
+
+`on` is a reserved keyword (it introduces AOP advice: `on pc{...} use X`). It is
+accepted in expressions and as `on = ...` / `on.field`, but a statement that
+starts with `on` followed by anything other than a `pc{...}` pointcut is rejected
+with "`on` is a reserved keyword and cannot be used as an identifier". Pick a
+different name (`enabled`, `is_on`). Bug:
+`doc/08_tracking/bug/on_is_an_undocumented_reserved_word_2026-08-02.md`.
