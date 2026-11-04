@@ -409,6 +409,27 @@ Design docs under `doc/05_design/` applying this architecture:
 
 ECS is strictly the **internal business-state model** of one capsule. Inter-capsule communication stays on MDSOC ports + capabilities.
 
+## Concurrency: lockless by default {#concurrency-lockless-by-default}
+
+**Adopted:** 2026-11-04. This section applies the
+[lockless-by-default concurrency architecture](../../language/concurrency/concurrency_architecture.md)
+to MDSOC+.
+
+- **ECS business layer:** systems read an immutable World snapshot and publish
+  the next one by atomic swap or versioned CAS. Writers own per-system or
+  per-shard state, and readers merge it at read time. No shared mutable
+  component store is guarded by a lock.
+- **MDSOC outer layers:** concerns and capsules communicate over ports by
+  message passing with ownership transfer (actors/rings), or by CAS on small
+  cells.
+- **Cross-concern state is shared only as immutable values**: snapshots,
+  content-addressed objects, and append-only logs with unique entries.
+- **Locks only at the explicitly specified kernel/driver HAL boundary**, such as
+  hardware registers and lock-requiring external APIs. Each one needs a
+  documented exception and an owner, must be bounded and fail closed, and is
+  never held across await or I/O. Kernel and drivers stay MDSOC-only (see the
+  Layer Rules above). This rule adds no ECS there.
+
 ## Acceptance Criteria
 
 1. `src/lib/nogc_sync_mut/ecs/` landed with `entity / component_store / world / query / system / change_detection`.
