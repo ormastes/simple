@@ -1,0 +1,74 @@
+# Seed JIT follow-ups to PR #6627. Spec files have no `main`, so `simple run`
+# bails the JIT (`jit-bail:no-main-fn`) and both lanes interpret this file; the
+# JIT lane is pinned by compiler/tests/jit_nullable_receiver_method_return_type.rs
+# and compiler/tests/jit_field_store_array_handover.rs. Semantics checked here:
+# 1. a method call on a `T?` receiver (`val a = opt.?`) is typed by `T.method`,
+#    not by a shorter-named owner of a same-named method (was: struct 'Void'
+#    field 'ready' -> whole module dropped to the interpreter).
+#    Bug: doc/08_tracking/bug/seed_jit_nullable_receiver_method_typed_by_shorter_owner_2026-11-04.md
+# 2. `st.buf = o` from a dead `var` local hands the buffer over; a live local
+#    is still copied.
+#    Bug: doc/08_tracking/bug/seed_jit_field_store_array_copy_never_freed_2026-11-04.md
+use std.spec.*
+
+class NrEv:
+    ready: bool
+    n: i64
+
+class NrOther:
+    ready: i64
+
+class NrAdapterLong:
+    ok: bool
+    me finish() -> NrEv:
+        NrEv(ready: self.ok, n: 7)
+
+class NrE:
+    _ad: NrAdapterLong? = nil
+    _n: i64 = 0
+    me finish():
+        val active = self._ad
+        if active != nil:
+            val a = active.?
+            val evidence = a.finish()
+            if evidence.ready:
+                self._n = evidence.n
+
+class NrHold:
+    buf: [i64]
+
+fn nr_loop_store(n: i64) -> i64:
+    var st = NrHold(buf: [])
+    var i = 0
+    while i < n:
+        var o: [i64] = [i, i + 1, i + 2]
+        st.buf = o
+        i = i + 1
+    st.buf[0] + st.buf[2]
+
+describe "nullable receiver method type and field-store hand-over":
+    it "types a method on a T? receiver by T":
+        var e = NrE(_ad: NrAdapterLong(ok: true), _n: 0)
+        e.finish()
+        expect(e._n).to_equal(7)
+    it "dead local field store keeps the stored values":
+        expect(nr_loop_store(1000)).to_equal(999 + 1001)
+    it "live local field store still copies":
+        var h = NrHold(buf: [])
+        var a: [i64] = [1, 2]
+        h.buf = a
+        h.buf[0] = 9
+        a[1] = 5
+        expect(a[0]).to_equal(1)
+        expect(h.buf[1]).to_equal(2)
+    it "outer local stored in a loop is snapshotted per store":
+        var st = NrHold(buf: [])
+        var o: [i64] = []
+        var i = 0
+        while i < 3:
+            o.push(i)
+            st.buf = o
+            i = i + 1
+        o.push(99)
+        expect(st.buf.len()).to_equal(3)
+        expect(o.len()).to_equal(4)
