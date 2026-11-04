@@ -1,6 +1,6 @@
 # macOS Vulkan 2D vector-font empty-batch native fault
 
-Status: open, live evidence blocked
+Status: open, live evidence blocked (2026-11-04: device present, batched evidence never promoted; see last section)
 
 ## 2026-09-22 delegated continuation: truncated producer receipt
 
@@ -507,3 +507,38 @@ binary `/Users/ormastes/.local/share/simple-seeds/release100-7a0e6fe516f-2026103
 The focused SFNT producer probe passes natively. Not yet run: the Engine2D +
 Vulkan device-readback gates, which need an admitted pure-Simple runtime
 (Lane 1). Status stays open; producer step VERIFIED on seed lane.
+
+## 2026-11-04 native Vulkan readback attempt (vkfont lane)
+
+Host macOS 26 arm64 (M4), Homebrew MoltenVK (`/opt/homebrew/lib/libvulkan.1.dylib`,
+`VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json`), tree
+release/1.0.0 at `61285af3445`, binary = Rust seed
+`release100-7a0e6fe516f-20261031/simple` (`SIMPLE_LIB=src`). No admitted
+self-hosted macOS build exists (lane 1 stage2 built but NOT admitted).
+
+1. `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl`:
+   5/8 pass, 3 fail. The Vulkan device is real and the font pipeline is
+   installed, but the Engine2D gate reports
+   `engine2d_font status=unavailable reason=queued-packed-font-batch
+   device=40077983768 pipeline=15 atlas=2 fence=0 readback_bytes=0`.
+   Root cause of this row (not a native fault): `Engine2D` runs the Vulkan
+   backend with `frame_batching_enabled`, so
+   `composite_font_batch` (`backend_vulkan_font.spl:1600,1671`) takes the
+   packed-pool path and returns `status=recorded` evidence before any
+   submit/fence/readback. `Engine2D.last_vulkan_font_evidence`
+   (`engine.spl:1982`) is never refreshed when the pending font descriptors
+   are flushed, so `vulkan_font_performance_evidence()` can never report
+   `promotion_ready`/`device_readback` on the batched path. Acceptance item 7
+   is therefore unreachable on the production (batched) path until flush
+   publishes completed evidence (fence + readback handle + bytes) back to
+   the engine. Engine3D row: `public-vulkan-font-install-failed`.
+2. `test/02_integration/rendering/engine2d_font_state_native_probe.spl`:
+   exit 70, `Runtime error: Function 'RenderBackend.read_pixels_region' not
+   found` (seed hybrid-JIT dispatch gap, `[engine-demotion]
+   hybrid-interp-splice`), so it never reaches its status line on the seed.
+
+Status: open. Blockers: (a) evidence-refresh-on-flush gap above (code fix
+needed in `backend_vulkan_font.spl`/`engine.spl`; verifying it needs a native
+run that executes the flush, which the seed interpreter path cannot prove
+authoritatively); (b) admitted self-hosted macOS build from lane 1 for the
+native Engine2D gates.
