@@ -1,6 +1,6 @@
 # A bare unit variant inside a tuple pattern binds instead of testing the variant
 
-Status: OPEN. Severity: P1 (silent wrong code in the compiler's own type
+Status: FIXED (verified 2026-11-04: `case (R, R)` now resolves S.R, no W-HIR-MATCH-GUARD-UNREACHABLE; spec flipped to 0). Severity: P1 (silent wrong code in the compiler's own type
 unifier on the stage-2 path). Found 2026-10-10 by the new
 `W-HIR-MATCH-GUARD-UNREACHABLE` warning (robustness item 3a). Belongs to the
 bare-variant family (item 2a); not fixed here.
