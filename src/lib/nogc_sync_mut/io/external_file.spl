@@ -69,12 +69,10 @@ fn external_file_write_bytes_at(path: text, offset: i64, bytes: [u8]) -> Result<
     # Legacy zero-size writes do not create a file.
     if bytes.len() == 0:
         return Ok(0)
-    val descriptor = io_file_open(host_path_native(path), 2)
+    # mode 3 = read/write, created when missing, never truncated; a CRT fd like rt_fd_pwrite needs.
+    val descriptor = file_open(host_path_native(path), 3)
     if descriptor < 0:
         return Err(TextIoError.Io("positioned file open failed: {path}"))
-    if descriptor > 2147483647:
-        io_file_close(descriptor)
-        return Err(TextIoError.Io("positioned descriptor exceeds provider range"))
     var written: i64 = 0
     var failure: TextIoError? = nil
     while written < bytes.len():
@@ -86,7 +84,7 @@ fn external_file_write_bytes_at(path: text, offset: i64, bytes: [u8]) -> Result<
         unsafe(capabilities: [ffi, raw_ptr]):
             address = foreign_bytes_copy_in(window)
             if address != 0:
-                count = file_pwrite_fd(descriptor.to_i32(), address, requested, offset + written)
+                count = file_pwrite_fd(descriptor, address, requested, offset + written)
                 foreign_bytes_release(address)
         if address == 0:
             failure = TextIoError.Io("positioned write allocation failed")
@@ -98,7 +96,7 @@ fn external_file_write_bytes_at(path: text, offset: i64, bytes: [u8]) -> Result<
             failure = TextIoError.Io("positioned write returned an invalid byte extent")
             break
         written = written + count
-    val closed = io_file_close(descriptor)
+    val closed = file_close(descriptor)
     if val error = failure:
         return Err(error)
     if not closed:
