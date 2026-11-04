@@ -54,9 +54,13 @@ pub class EasyFix:
     description: String
     replacements: [Replacement]
     confidence: FixConfidence
+    # rev-3 EditProposal binding: the SourceSnapshot version the proposal was
+    # computed against ("" = unbound, accepted only when the snapshot matches
+    # the analysed text, which the applier re-checks on disk anyway).
+    base_version: String
 
     static fn create(id: String, description: String, confidence: FixConfidence) -> EasyFix:
-        EasyFix(id: id, description: description, replacements: [], confidence: confidence)
+        EasyFix(id: id, description: description, replacements: [], confidence: confidence, base_version: "")
 
     me add_replacement(replacement: Replacement):
         self.replacements.push(replacement)
@@ -97,6 +101,22 @@ pub fn easyfix_description(fix: EasyFix) -> String:
 pub fn easyfix_replacements(fix: EasyFix) -> [Replacement]:
     return fix.replacements
 
+# Stable diagnostic code of a proposal: the id without its trailing ":<line>"
+# ("L:todo_format:12" -> "L:todo_format", "PANIC-W-INDEX:7" -> "PANIC-W-INDEX").
+pub fn easyfix_code(fix: EasyFix) -> String:
+    val id = fix.id
+    var i = id.len() - 1
+    while i >= 0 and id[i] >= "0" and id[i] <= "9":
+        i = i - 1
+    if i >= 0 and id[i] == ":" and i < id.len() - 1:
+        return id.slice(0, i)
+    id
+
+pub fn easyfix_with_base(fix: EasyFix, version: String) -> EasyFix:
+    var bound = fix
+    bound.base_version = version
+    bound
+
 # ============================================================================
 # FixReport: result of applying fixes
 # ============================================================================
@@ -106,9 +126,11 @@ pub class FixReport:
     skipped: Int
     modified_files: [String]
     details: [String]
+    # rev-3 ApplyResult receipts: "<file> <old_version> -> <new_version>" per write.
+    receipts: [String]
 
     static fn empty() -> FixReport:
-        FixReport(applied: 0, skipped: 0, modified_files: [], details: [])
+        FixReport(applied: 0, skipped: 0, modified_files: [], details: [], receipts: [])
 
     fn format(dry_run: Bool) -> String:
         val prefix = if dry_run: "Would apply" else: "Applied"

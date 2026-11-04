@@ -495,3 +495,15 @@ is produced and before/while pixel-bearing `SfntGlyfBitmap`, tuple, and
 `GlyphBitmap?` results are published. The next fix should preserve the
 owner-local parsing path and publish coverage through a raw scalar descriptor
 or owner-local void copy, without duplicating parse work in `get_glyph`.
+
+## 2026-11-04 native macOS run (lane 4)
+
+Host macOS 26 arm64, Homebrew `libvulkan.1.dylib`; tree release/1.0.0 `1ebaf7d1e1f`;
+binary `/Users/ormastes/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple` (Rust seed, `SIMPLE_LIB=src`).
+- `font_empty_batch_fail_closed_spec.spl`: 5/5 passed.
+- `sfnt_glyf_bungee_native_probe.spl`: now executes (the old `expected LParen,
+  found LBracket` parse stop is gone) and prints
+  `sfnt_glyf_bungee_native_status=pass width=62 height=72 pixels=4464`.
+The focused SFNT producer probe passes natively. Not yet run: the Engine2D +
+Vulkan device-readback gates, which need an admitted pure-Simple runtime
+(Lane 1). Status stays open; producer step VERIFIED on seed lane.

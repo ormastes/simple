@@ -100,3 +100,7 @@ named binding (legacy path). (c) `layout_input`'s omitted default `layout_oracle
 not a call-site constant, so the real probe now raises a hard lowering error ("omits argument ... not a call-site
 constant") in the JIT lowering; the driver then drops the module to the interpreter via the existing `[jit-fallback]`
 path (no segfault). Making call defaults fillable is the follow-up (not done here).
+
+## Verified fixed 2026-11-04
+
+Seed 0b2c3d015b7: the probe above prints `boxes=2 backend=serial_cpu`, rc=0 (was rc=139). Fixed by the named-argument slot binding in HIR lowering (PR #6398). Status: fixed.

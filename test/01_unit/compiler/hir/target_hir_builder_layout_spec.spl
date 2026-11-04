@@ -1,0 +1,50 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_equals}
+use compiler.hir.target_hir.hir_freeze.{hir_snapshot_freeze}
+use compiler.hir.target_hir.target_hir.{target_hir_for_explicit}
+use compiler.hir.target_hir.target_hir_resolution.{target_hir_builder_new, target_hir_builder_resolve_required, target_hir_builder_freeze, target_hir_layout, target_hir_abi}
+
+fn fixture() -> HirModule:
+    HirModule(name: "app.main", path: "a.spl", imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn resolve(snap_id, triple: text):
+    val view = target_hir_for_explicit(snap_id, triple, "llvm", 23, "types").unwrap()
+    val built = target_hir_builder_resolve_required(target_hir_builder_new(view, ["i64", "usize", "bool", "f64"])).unwrap()
+    target_hir_builder_freeze(built).unwrap()
+
+describe "TargetHIRBuilder layout/ABI resolution (TargetHIR PR-C)":
+    it "resolves two targets against one identical frozen HIR snapshot":
+        val snap = hir_snapshot_freeze(fixture(), 0).unwrap()
+        val wide = resolve(snap.id, "x86_64-unknown-linux-gnu")
+        val narrow = resolve(snap.id, "x86-unknown-linux-gnu")
+        expect(hir_snapshot_id_equals(wide.view.snapshot, narrow.view.snapshot)).to_be(true)
+        expect(target_hir_layout(wide, "usize").unwrap().size).to_equal(8)
+        expect(target_hir_layout(narrow, "usize").unwrap().size).to_equal(4)
+        expect(target_hir_layout(wide, "i64").unwrap().align).to_equal(8)
+        expect(target_hir_layout(narrow, "i64").unwrap().align).to_equal(4)
+        expect(target_hir_abi(wide)).to_equal("sysv64")
+        expect(target_hir_abi(narrow)).to_equal("i386-sysv")
+        expect(wide.identity == narrow.identity).to_be(false)
+
+    it "separates operating-system ABIs for the same architecture":
+        val snap = hir_snapshot_freeze(fixture(), 0).unwrap()
+        expect(target_hir_abi(resolve(snap.id, "x86_64-pc-windows-msvc"))).to_equal("win64")
+        val win32 = resolve(snap.id, "x86-pc-windows-msvc")
+        expect(target_hir_layout(win32, "i64").unwrap().align).to_equal(8)
+        expect(target_hir_abi(resolve(snap.id, "aarch64-apple-darwin"))).to_equal("aapcs64-darwin")
+        expect(target_hir_abi(resolve(snap.id, "riscv64-unknown-linux-lp64d"))).to_equal("lp64d")
+        expect(target_hir_abi(resolve(snap.id, "armv7-unknown-linux-gnueabihf"))).to_equal("aapcs-vfp")
+
+    it "names unresolved reads and refuses to freeze before resolution":
+        val snap = hir_snapshot_freeze(fixture(), 0).unwrap()
+        val view = target_hir_for_explicit(snap.id, "riscv32-unknown-linux-ilp32d", "llvm", 23, "types").unwrap()
+        expect(target_hir_builder_freeze(target_hir_builder_new(view, ["i32"])).unwrap_err()).to_equal("target_hir_not_resolved")
+        expect(target_hir_builder_resolve_required(target_hir_builder_new(view, ["Widget"])).unwrap_err()).to_equal("target_hir_unresolved_type: Widget")
+        val r = target_hir_builder_freeze(target_hir_builder_resolve_required(target_hir_builder_new(view, ["i32"])).unwrap()).unwrap()
+        expect(target_hir_layout(r, "usize").unwrap_err()).to_equal("target_hir_layout_not_in_region: usize")
