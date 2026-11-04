@@ -235,3 +235,16 @@ property write (5 of 6 JS-engine specs red). Worked around in the lib by
 routing the writes through `ObjectStore` `me` methods
 (`vm_object_store.spl: update_slot / append_slot / alloc_object`); the
 interpreter defect itself remains.
+
+## Note 2026-11-05 — nested class-field array push FIXED (interpreter root cause)
+
+Root cause: `place_is_live` (`interpreter/place.rs`) walked the parent hops with
+`step_ref`, which has no `Value::ClassInstance` arm (fields sit behind a lock).
+For `self.store.items.push(x)` the `self.store` hop is a ClassInstance, so the
+place was reported "not live" and `try_place_receiver_method_call` /
+the statement-position kernel declined; the mutator then ran on a throwaway
+copy of the array. `self.store.items[0] = x` worked because `write_through`
+already handles the ClassInstance hop. Fix: `place_is_live` now walks hops with
+`projections_live`, which reads the field through the instance (Arc-handle
+clone) and continues on the owned value; `write_place` then lands the result.
+Regression spec: `test/01_unit/compiler/interpreter/nested_class_field_array_mutation_spec.spl`.
