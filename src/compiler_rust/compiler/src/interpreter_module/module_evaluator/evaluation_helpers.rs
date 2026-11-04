@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tracing::{trace, warn};
 
-use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, Node, Pattern, Visibility};
+use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, Node, Pattern, Type, Visibility};
 
 use crate::error::CompileError;
 use crate::value::{Env, ExportTable, LayeredEnv, ModuleTable, TableView, Value};
@@ -601,6 +601,35 @@ pub(super) fn process_imports_and_assignments(
                 )?;
             }
             _ => {}
+        }
+    }
+    // Third step: resolve `type X = Y` aliases once imports are bound, so that
+    // `X.new()` / `X.static()` dispatch to the target type instead of seeing nil
+    // (bug type_alias_static_dispatch_unresolved_2026-08-04). Done after the
+    // loop because the target may be imported or declared after the alias.
+    for item in items.iter() {
+        if let Node::TypeAlias(t) = item {
+            let target = match &t.ty {
+                Type::Simple(name) => Some(name.as_str()),
+                Type::Generic { name, .. } => Some(name.as_str()),
+                _ => None,
+            };
+            let Some(target) = target else { continue };
+            let resolved = if local_classes.contains_key(target) || global_classes.contains_key(target) {
+                Some(Value::Constructor {
+                    class_name: target.to_string(),
+                })
+            } else if local_enums.contains_key(target) || global_enums.contains_key(target) {
+                Some(Value::EnumType {
+                    enum_name: target.to_string(),
+                })
+            } else {
+                None
+            };
+            if let Some(value) = resolved {
+                exports.insert(t.name.clone(), value.clone());
+                env.insert(t.name.clone(), value);
+            }
         }
     }
     Ok(())
