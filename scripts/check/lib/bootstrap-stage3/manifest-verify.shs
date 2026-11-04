@@ -680,6 +680,91 @@ bootstrap_stage3_own_pid() {
     fi
 }
 
+# Identity of an fd THIS shell holds open, as "dev ino mode_hex size". Linux
+# keeps its exact historical spelling, GNU `stat -Lc '%d %i %f %s'` through the
+# procfs magic link (which reopens the real inode). Hosts without procfs MUST
+# NOT stat /dev/fd/N: measured on Darwin 25, `stat -L /dev/fd/N` reports the
+# fdesc device for st_dev, and FreeBSD only has /dev/fd/N (N>2) when fdescfs is
+# mounted. They use fstat(2) on the inherited fd itself, through the pinned
+# python3 already required by the portable lane. Exit 0 = identity printed,
+# 2 = could not determine (unknown OS, missing tool, bad fd): never a pass.
+# bootstrap_stage3_fd_identity_tool overrides the tool (self-test only).
+bootstrap_stage3_fd_identity() {
+    [ "$#" = 1 ] || return 2
+    case "$1" in ''|*[!0-9]*) return 2 ;; esac
+    if [ -r /proc/self/stat ]; then
+        "${bootstrap_stage3_fd_identity_tool:-stat}" -Lc '%d %i %f %s' \
+            "/proc/${bootstrap_stage3_local_pid:-$$}/fd/$1" 2>/dev/null || return 2
+        return 0
+    fi
+    case "$(uname -s 2>/dev/null)" in
+        Darwin|FreeBSD|NetBSD|OpenBSD|DragonFly) ;;
+        *) return 2 ;;
+    esac
+    "${bootstrap_stage3_fd_identity_tool:-${bootstrap_stage3_portable_python:-python3}}" \
+        -I -c 'import os,sys
+st = os.fstat(int(sys.argv[1]))
+print("%d %d %x %d" % (st.st_dev, st.st_ino, st.st_mode, st.st_size))' \
+        "$1" 2>/dev/null || return 2
+}
+
+# Stamp of fd $1 (held open by this shell): "dev ino mode_hex size mtime_ns
+# ctime_ns" from the open file itself. Take it right after `exec N<path`.
+# Exit 0 = printed, 2 = could not determine.
+bootstrap_stage3_fd_stamp() {
+    [ "$#" = 1 ] || return 2
+    case "$1" in ''|*[!0-9]*) return 2 ;; esac
+    if [ -r /proc/self/stat ]; then
+        "${bootstrap_stage3_fd_identity_tool:-stat}" -Lc '%d %i %f %s %.9Y %.9Z' \
+            "/proc/${bootstrap_stage3_local_pid:-$$}/fd/$1" 2>/dev/null || return 2
+        return 0
+    fi
+    bootstrap_stage3_fd_stamp_py "$1" ''
+}
+
+# fstat/lstat backend for hosts without procfs. $2 empty = stamp the fd;
+# otherwise lstat pathname $2 (exit 1 if it no longer exists).
+bootstrap_stage3_fd_stamp_py() {
+    case "$(uname -s 2>/dev/null)" in
+        Darwin|FreeBSD|NetBSD|OpenBSD|DragonFly) ;;
+        *) return 2 ;;
+    esac
+    "${bootstrap_stage3_fd_identity_tool:-${bootstrap_stage3_portable_python:-python3}}" \
+        -I -c 'import os,sys
+try:
+    st = os.lstat(sys.argv[2]) if sys.argv[2] else os.fstat(int(sys.argv[1]))
+except FileNotFoundError:
+    sys.exit(1 if sys.argv[2] else 2)
+except (OSError, ValueError):
+    sys.exit(2)
+print("%d %d %x %d %d %d" % (st.st_dev, st.st_ino, st.st_mode, st.st_size,
+                             st.st_mtime_ns, st.st_ctime_ns))' "$1" "$2" 2>/dev/null
+    bootstrap_stage3_fd_stamp_status=$?
+    case "$bootstrap_stage3_fd_stamp_status" in 0|1) return "$bootstrap_stage3_fd_stamp_status" ;; esac
+    return 2
+}
+
+# Does fd $1 still hold, and pathname $2 still name, the exact file stamped
+# at open ($3, from bootstrap_stage3_fd_stamp)? Exit 0 = same unchanged file;
+# 1 = path replaced/renamed over/removed, or file modified after open;
+# 2 = could not determine (unknown OS, missing tool, closed fd).
+bootstrap_stage3_fd_matches_path() {
+    [ "$#" = 3 ] || return 2
+    case "$1" in ''|*[!0-9]*) return 2 ;; esac
+    [ -n "$3" ] || return 2
+    bootstrap_stage3_fdm_held=$(bootstrap_stage3_fd_stamp "$1") || return 2
+    if [ -r /proc/self/stat ]; then
+        [ -e "$2" ] || [ -L "$2" ] || return 1
+        bootstrap_stage3_fdm_path=$("${bootstrap_stage3_fd_identity_tool:-stat}" \
+            -c '%d %i %f %s %.9Y %.9Z' -- "$2" 2>/dev/null) || return 2
+    else
+        bootstrap_stage3_fdm_path=$(bootstrap_stage3_fd_stamp_py "$1" "$2")
+        case $? in 0) ;; 1) return 1 ;; *) return 2 ;; esac
+    fi
+    [ "$bootstrap_stage3_fdm_held" = "$3" ] &&
+        [ "$bootstrap_stage3_fdm_path" = "$3" ] || return 1
+}
+
 bootstrap_stage3_verify_manifest_impl() {
     bootstrap_stage3_own_pid || return 1
     case "$bootstrap_stage3_local_pid" in
@@ -718,9 +803,18 @@ bootstrap_stage3_verify_manifest_impl() {
         bootstrap_stage3_normalized_absolute "$bootstrap_stage3_bound_map" || return 1
         [ -f "$bootstrap_stage3_bound_map" ] && [ ! -L "$bootstrap_stage3_bound_map" ] || return 1
         exec 9<"$bootstrap_stage3_bound_map" || return 1
+        bootstrap_stage3_map_open_stamp=$(bootstrap_stage3_fd_stamp 9) || {
+            bootstrap_stage3_provenance_fail "portable-authority-map-fd-stamp"
+            return 1
+        }
         bootstrap_stage3_map_receipt=$(bootstrap_stage3_descriptor_read \
             9 '' seal "$bootstrap_stage3_bound_map") || {
             bootstrap_stage3_provenance_fail "portable-authority-map-seal"
+            return 1
+        }
+        bootstrap_stage3_fd_matches_path 9 "$bootstrap_stage3_bound_map" \
+            "$bootstrap_stage3_map_open_stamp" || {
+            bootstrap_stage3_provenance_fail "portable-authority-map-fd-identity"
             return 1
         }
         bootstrap_stage3_portable_map=1
@@ -866,16 +960,24 @@ bootstrap_stage3_verify_manifest_impl() {
     bootstrap_stage3_manifest_a_failure_code=U2
     exec 8<"$bootstrap_stage3_manifest" || return 1
     if [ "$bootstrap_stage3_portable_map" = 1 ]; then
+        bootstrap_stage3_manifest_open_stamp=$(bootstrap_stage3_fd_stamp 8) || {
+            bootstrap_stage3_provenance_fail "portable-authority-manifest-fd-stamp"
+            return 1
+        }
         bootstrap_stage3_manifest_receipt=$(bootstrap_stage3_descriptor_read \
             8 '' seal "$bootstrap_stage3_manifest") || {
             bootstrap_stage3_provenance_fail "portable-authority-manifest-seal"
             return 1
         }
+        bootstrap_stage3_fd_matches_path 8 "$bootstrap_stage3_manifest" \
+            "$bootstrap_stage3_manifest_open_stamp" || {
+            bootstrap_stage3_provenance_fail "portable-authority-manifest-fd-identity"
+            return 1
+        }
         bootstrap_stage3_portable_manifest=1
     else
     bootstrap_stage3_manifest_source_before=$(
-        stat -Lc '%d %i %f %s' \
-            "/proc/$bootstrap_stage3_local_pid/fd/8"
+        bootstrap_stage3_fd_identity 8
     ) || return 1
     [ -f "/proc/$bootstrap_stage3_local_pid/fd/8" ] || return 1
     bootstrap_stage3_manifest_a_failure_code=U3
@@ -888,8 +990,7 @@ bootstrap_stage3_verify_manifest_impl() {
     chmod 0400 "$bootstrap_stage3_manifest_snapshot" || return 1
     bootstrap_stage3_manifest_a_failure_code=U5
     bootstrap_stage3_manifest_source_after=$(
-        stat -Lc '%d %i %f %s' \
-            "/proc/$bootstrap_stage3_local_pid/fd/8"
+        bootstrap_stage3_fd_identity 8
     ) || return 1
     [ "$bootstrap_stage3_manifest_source_before" = \
         "$bootstrap_stage3_manifest_source_after" ] || return 1
@@ -912,8 +1013,7 @@ bootstrap_stage3_verify_manifest_impl() {
         stat -Lc '%d %i %f %s' "$bootstrap_stage3_manifest_snapshot"
     ) || return 1
     bootstrap_stage3_manifest_snapshot_fd_identity=$(
-        stat -Lc '%d %i %f %s' \
-            "/proc/$bootstrap_stage3_local_pid/fd/8"
+        bootstrap_stage3_fd_identity 8
     ) || return 1
     [ "$bootstrap_stage3_manifest_snapshot_path_identity" = \
         "$bootstrap_stage3_manifest_snapshot_fd_identity" ] || return 1
