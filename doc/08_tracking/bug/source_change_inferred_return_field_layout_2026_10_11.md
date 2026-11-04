@@ -38,3 +38,13 @@ Next qualification must use a newly admitted producer with the codec fix and
 intact symbol IDs, retain fresh/warm cache identities, then establish actual
 returned fields and real case counts. Full CLI/TestRunner qualification and
 authenticated review admission remain required before this draft can land.
+
+## Verification pending (n88_b, 2026-11-04)
+
+The retained-HIR inspection above ties the failure to the frozen producer's old codec (fixed in source). Re-qualify on a stage3 producer:
+
+```
+bin/simple native-build --entry test/fixtures/compiler/source_change_contract_native.spl -o build/source_change_contract.exe && build/source_change_contract.exe
+```
+
+Expect SOURCE_CONTRACT_RETURN_INFERRED_OK and 16 SOURCE_CONTRACT_CASE_PASS. Source shape pinned by `bin/simple.exe test test/01_unit/compiler/80.driver/n88b_native_workaround_shapes_spec.spl`.
