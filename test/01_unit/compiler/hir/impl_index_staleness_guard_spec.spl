@@ -1,0 +1,136 @@
+# Impl index staleness: the impl_index_* projections hold positions into
+# ModuleSurface.impls arrays. They are promoted out of the transient scope, so
+# they outlived the staged teardown that releases those arrays and a later
+# query indexed a dead array (PANIC bounds_check index=2 len=0 at
+# register_imported_type_methods_inner). Lifetime fix: invalidate_impl_index()
+# runs in the staged teardown. Prevention: fail-closed length guards that report
+# one precise diagnostic instead of indexing.
+
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: pin the impl index lifetime fix and its fail-closed guards.  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/hir/impl_index_staleness_guard_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/impl_index_staleness_guard_spec.md
+# doc-path: doc/03_plan/sys_test/impl_index_staleness_guard_spec.md
+# doc-path: doc/04_architecture/impl_index_staleness_guard_spec.md
+# doc-path: doc/05_design/impl_index_staleness_guard_spec_oracles.md
+# @manual: primary
+
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering.module_surface.*
+use std.spec.step
+use std.spec.{describe, it, expect, assert_true}
+
+val SPAN_OWNER_NAME: text = "Widget"
+
+fn fixture_body() -> text:
+    "pub struct Widget:\n    a: i64\n\nimpl Widget:\n    fn m0() -> i64:\n        1\n\nimpl Widget:\n    fn m1() -> i64:\n        2\n\nimpl Widget:\n    fn m2() -> i64:\n        3\n"
+
+fn build_registry() -> ModuleSurfacesByName:
+    var modules: {text: ParserModule} = {}
+    val body = fixture_body()
+    modules["pkg.w"] = parse_and_build_module(body, "pkg/w.spl")
+    val sources: [SourceFile] = [SourceFile(path: "pkg/w.spl", content: body, module_name: "pkg.w")]
+    module_surfaces_from_modules(modules, sources).unwrap()
+
+fn count_stale_diagnostics(lowering: HirLowering, kind: text) -> i64:
+    var found = 0
+    var i = 0
+    while i < lowering.lowering_error_count():
+        val message = lowering.lowering_error_message_at(i, "pkg.w")
+        if message.contains("stale surface index [{kind}]"):
+            found = found + 1
+        i = i + 1
+    found
+
+describe("impl index staleness guard", fn():
+    it("registers all 3 impls on the normal path with no diagnostic", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: normal 3-impl path")
+        val registry = build_registry()
+        var lowering = hirlowering_for_module("app/main.spl", registry)
+        lowering.begin_module("app/main.spl")
+        val idx = registry.index_by_name["pkg.w"]
+        lowering.register_imported_symbol(idx, "pkg.w", SPAN_OWNER_NAME, SPAN_OWNER_NAME, Span.empty(), true)
+        expect(lowering.impl_index_build_count).to_equal(1)
+        expect(lowering.lowering_error_count()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("pkg.w.Widget::m0").is_valid()).to_equal(true)
+        expect(lowering.symbols.lookup_or_invalid("pkg.w.Widget::m1").is_valid()).to_equal(true)
+        expect(lowering.symbols.lookup_or_invalid("pkg.w.Widget::m2").is_valid()).to_equal(true)
+    )
+
+    it("teardown invalidation then rebuilt surfaces resolve against the rebuilt array", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: invalidate_impl_index then rebuild")
+        val first = build_registry()
+        var lowering = hirlowering_for_module("app/main.spl", first)
+        lowering.begin_module("app/main.spl")
+        val idx = first.index_by_name["pkg.w"]
+        val key_before = lowering.ensure_impl_index(first.surfaces[idx])
+        expect(lowering.impl_index_built.contains_key(key_before)).to_equal(true)
+        # The real teardown entry point the driver calls with the surfaces.
+        lowering.invalidate_impl_index()
+        expect(lowering.impl_index_built.len()).to_equal(0)
+        expect(lowering.impl_index_positions.len()).to_equal(0)
+        expect(lowering.impl_method_name_index.len()).to_equal(0)
+        expect(lowering.impl_trait_name_index.len()).to_equal(0)
+        expect(lowering.impl_index_build_count).to_equal(0)
+        val rebuilt = build_registry()
+        val idx2 = rebuilt.index_by_name["pkg.w"]
+        lowering.register_imported_symbol(idx2, "pkg.w", SPAN_OWNER_NAME, SPAN_OWNER_NAME, Span.empty(), true)
+        expect(lowering.impl_index_build_count).to_equal(1)
+        expect(lowering.lowering_error_count()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("pkg.w.Widget::m2").is_valid()).to_equal(true)
+    )
+
+    it("a stale index over an emptied surface reports one diagnostic and never indexes", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: teardown without invalidation hits the fail-closed guard")
+        val registry = build_registry()
+        var lowering = hirlowering_for_module("app/main.spl", registry)
+        lowering.begin_module("app/main.spl")
+        val idx = registry.index_by_name["pkg.w"]
+        val live = registry.surfaces[idx]
+        val _key = lowering.ensure_impl_index(live)
+        # What the staged teardown leaves behind: same physical_index, no impls.
+        var dead = live
+        dead.impls = []
+        lowering.register_imported_type_methods_inner(
+            dead, "pkg.w", SPAN_OWNER_NAME, SymbolId(id: 0), Span.empty(), true)
+        expect(count_stale_diagnostics(lowering, "impls")).to_equal(1)
+        expect(lowering.symbols.lookup_or_invalid("pkg.w.Widget::m0").is_valid()).to_equal(false)
+    )
+
+    it("the diagnostic names module, surface key, owner, position and len", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: message fields")
+        val message = hir_stale_surface_index_message("trait_values", "pkg.w", "7 3", "Widget", 2, 0)
+        expect(message.contains("[trait_values]")).to_equal(true)
+        expect(message.contains("module=pkg.w")).to_equal(true)
+        expect(message.contains("surface_key=7 3")).to_equal(true)
+        expect(message.contains("owner=Widget")).to_equal(true)
+        expect(message.contains("position=2")).to_equal(true)
+        expect(message.contains("live_len=0")).to_equal(true)
+    )
+)
