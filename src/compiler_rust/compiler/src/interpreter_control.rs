@@ -267,10 +267,11 @@ pub(super) fn exec_if(
                 // NON-local binding. A bound name that also exists as a module
                 // global therefore read back as the GLOBAL — in the bootstrap
                 // closure `if val get_value = …` returned `<fn:get_value>`.
-                env.mark_local(name.clone());
-                env.insert(name, inner);
+                let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), env);
                 record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                let result = exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                crate::interpreter::restore_block_scope_shadows(saved, env);
+                return result;
             }
             // value absent — fall through to elif branches / else below.
             LetBind::Skip => {}
@@ -278,11 +279,11 @@ pub(super) fn exec_if(
                 let mut bindings = HashMap::new();
                 if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
                     // Pattern matched - add bindings and execute then block
-                    for (name, val) in bindings {
-                        env.insert(name, val);
-                    }
+                    let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
                     record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                    return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                    let result = exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                    crate::interpreter::restore_block_scope_shadows(saved, env);
+                    return result;
                 }
                 // Pattern didn't match - fall through to elif branches / else below.
                 // (Previously this returned the else block directly, silently skipping
@@ -337,20 +338,21 @@ pub(super) fn exec_if(
                     // NON-local binding. A bound name that also exists as a module
                     // global therefore read back as the GLOBAL — in the bootstrap
                     // closure `if val get_value = …` returned `<fn:get_value>`.
-                    env.mark_local(name.clone());
-                    env.insert(name, inner);
+                    let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), env);
                     record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(idx), true);
-                    return exec_block(block, env, functions, classes, enums, impl_methods);
+                    let result = exec_block(block, env, functions, classes, enums, impl_methods);
+                    crate::interpreter::restore_block_scope_shadows(saved, env);
+                    return result;
                 }
                 LetBind::Skip => {}
                 LetBind::NotApplicable => {
                     let mut bindings = HashMap::new();
                     if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                        for (name, val) in bindings {
-                            env.insert(name, val);
-                        }
+                        let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
                         record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(idx), true);
-                        return exec_block(block, env, functions, classes, enums, impl_methods);
+                        let result = exec_block(block, env, functions, classes, enums, impl_methods);
+                        crate::interpreter::restore_block_scope_shadows(saved, env);
+                        return result;
                     }
                 }
             }
@@ -468,10 +470,10 @@ pub(super) fn exec_while(
                 break;
             }
             // Pattern matched - add bindings and execute body
-            for (name, val) in bindings {
-                env.insert(name, val);
-            }
-            let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
+            let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
+            let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods);
+            crate::interpreter::restore_block_scope_shadows(saved, env);
+            let ctrl = ctrl?;
             if let Some(result) = handle_loop_control_labeled(ctrl, &while_stmt.label) {
                 return result;
             }
@@ -5546,11 +5548,11 @@ pub(crate) fn exec_if_core(
                 // NON-local binding. A bound name that also exists as a module
                 // global therefore read back as the GLOBAL — in the bootstrap
                 // closure `if val get_value = …` returned `<fn:get_value>`.
-                env.mark_local(name.clone());
-                env.insert(name, inner);
+                let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), env);
                 record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                let (flow, last_val) =
-                    exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
+                let branch = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                crate::interpreter::restore_block_scope_shadows(saved, env);
+                let (flow, last_val) = branch?;
                 return match flow {
                     Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                     other => Ok((other, Value::Nil)),
@@ -5560,12 +5562,11 @@ pub(crate) fn exec_if_core(
             LetBind::NotApplicable => {
                 let mut bindings = HashMap::new();
                 if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                    for (name, val) in bindings {
-                        env.insert(name, val);
-                    }
+                    let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
                     record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                    let (flow, last_val) =
-                        exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
+                    let branch = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+                    crate::interpreter::restore_block_scope_shadows(saved, env);
+                    let (flow, last_val) = branch?;
                     return match flow {
                         Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                         other => Ok((other, Value::Nil)),
@@ -5631,10 +5632,11 @@ pub(crate) fn exec_if_core(
                     // NON-local binding. A bound name that also exists as a module
                     // global therefore read back as the GLOBAL — in the bootstrap
                     // closure `if val get_value = …` returned `<fn:get_value>`.
-                    env.mark_local(name.clone());
-                    env.insert(name, inner);
+                    let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), env);
                     record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), true);
-                    let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+                    let branch = exec_block_fn(block, env, functions, classes, enums, impl_methods);
+                    crate::interpreter::restore_block_scope_shadows(saved, env);
+                    let (flow, last_val) = branch?;
                     return match flow {
                         Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                         other => Ok((other, Value::Nil)),
@@ -5644,11 +5646,11 @@ pub(crate) fn exec_if_core(
                 LetBind::NotApplicable => {
                     let mut bindings = HashMap::new();
                     if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                        for (name, val) in bindings {
-                            env.insert(name, val);
-                        }
+                        let saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
                         record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), true);
-                        let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+                        let branch = exec_block_fn(block, env, functions, classes, enums, impl_methods);
+                        crate::interpreter::restore_block_scope_shadows(saved, env);
+                        let (flow, last_val) = branch?;
                         return match flow {
                             Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                             other => Ok((other, Value::Nil)),

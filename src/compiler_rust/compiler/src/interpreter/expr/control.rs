@@ -117,13 +117,17 @@ pub(super) fn eval_control_expr(
             // both forms agree -- including on the "0 is falsy" landmine
             // (`Some(0)` is PRESENT and must take the then-branch).
             let mut pattern_decision: Option<bool> = None;
+            // Pattern bindings shadow same-named modules/globals only while the
+            // chosen branch runs; restored right after (not frame-permanent).
+            let mut scope_saved: Vec<(String, Option<Value>)> = Vec::new();
             if let Some(pattern) = let_pattern {
                 match crate::interpreter::interpreter_control::optional_let_binding(pattern, &cond_val) {
                     crate::interpreter::interpreter_control::LetBind::Bind(name, inner) => {
-                        // `mark_local` before `insert`, exactly as `exec_if_core`
-                        // does: without it `is_local(NAME)` stays false and the
-                        // identifier read prefers a same-named MODULE GLOBAL.
-                        env.mark_local(name.clone());
+                        // Block-local (not `mark_local`): without a local mark the
+                        // read prefers a same-named MODULE GLOBAL, but a
+                        // frame-permanent mark would hide the module afterwards.
+                        scope_saved.push((name.clone(), env.get(&name).cloned()));
+                        env.enter_block_local(name.clone());
                         env.insert(name, inner);
                         pattern_decision = Some(true);
                     }
@@ -133,10 +137,7 @@ pub(super) fn eval_control_expr(
                     crate::interpreter::interpreter_control::LetBind::NotApplicable => {
                         let mut bindings = HashMap::new();
                         if pattern_matches(pattern, &cond_val, &mut bindings, enums, classes)? {
-                            for (name, val) in bindings {
-                                env.mark_local(name.clone());
-                                env.insert(name, val);
-                            }
+                            scope_saved = crate::interpreter::bind_block_scope_shadows(bindings, env);
                             pattern_decision = Some(true);
                         } else {
                             pattern_decision = Some(false);
@@ -161,12 +162,14 @@ pub(super) fn eval_control_expr(
                 crate::interpreter::interpreter_call::publish_before_block_clone(env);
             }
             let branch_result = if take_then {
-                evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)?
+                evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)
             } else if let Some(else_b) = else_branch {
-                evaluate_expr(else_b, env, functions, classes, enums, impl_methods)?
+                evaluate_expr(else_b, env, functions, classes, enums, impl_methods)
             } else {
-                Value::Nil
+                Ok(Value::Nil)
             };
+            crate::interpreter::restore_block_scope_shadows(scope_saved, env);
+            let branch_result = branch_result?;
             // If branch returned a BlockClosure (from DoBlock), execute it immediately
             // This handles the case where if branches are parsed as DoBlock expressions
             let result = if let Value::BlockClosure {
