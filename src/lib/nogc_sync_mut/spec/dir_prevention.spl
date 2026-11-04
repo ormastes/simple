@@ -1,0 +1,151 @@
+# Directory-wide prevention policy for SSpec.
+#
+# A `_prevention.sdn` file placed in a test directory declares prevention-mock
+# rules that apply to EVERY spec under that directory without any per-file
+# declaration. The runner resolves the files that apply to a spec (root-most
+# first, merged — a child directory adds rules, it cannot cancel a parent's)
+# and hands them to the child through SIMPLE_SPEC_DIR_PREVENTION; std.spec
+# loads them in the first example and checks every example through
+# before/after hooks. Design + evidence:
+# doc/08_tracking/bug/sspec_no_dir_wide_prevention_scope_2026-08-07.md
+#
+# File shape (an sdn subset parsed here line-by-line, like config_parse_line
+# does for config/simple.test.sdn — the full sdn parser is deliberately NOT
+# imported so a policy-free spec child pays nothing extra at load):
+#
+#   prevent:
+#     - mock: forbidden_seam
+#       reason: specs in this directory must not touch the seam
+#     - mock: budgeted_seam
+#       at_most: 2
+#       reason: at most two calls per example
+#
+# `mock` names the MockFunction (MockFunction.new(name)) that the forbidden
+# call path is routed through; `at_most` defaults to 0.
+#
+# Private helpers carry a `_dprev_` prefix on purpose: the interpreter resolves
+# same-named private functions across co-loaded modules by last-wins, and
+# generic names such as `_dir_of` already exist elsewhere in src/lib.
+
+use std.io_runtime.{file_exists, file_read}
+
+pub val DIR_PREVENTION_FILE: text = "_prevention.sdn"
+pub val DIR_PREVENTION_ENV: text = "SIMPLE_SPEC_DIR_PREVENTION"
+pub val DIR_PREVENTION_SEP: text = ";"
+val DIR_PREVENTION_MAX_DEPTH: i64 = 24
+
+class DirPreventionRule:
+    mock_name: text
+    max_allowed: i64
+    reason: text
+    source: text
+
+# Per-directory cache: spec directory -> SEP-joined policy file list ("" = none).
+var _dir_prevention_cache: Dict<text, text> = {}
+var _dir_prevention_cache_misses: i64 = 0
+
+fn _dprev_dir_of(path: text) -> text:
+    val norm = path.replace("\\", "/")
+    val slash = norm.rfind("/")
+    if slash < 0:
+        return "."
+    if slash == 0:
+        return "/"
+    norm.substring(0, slash)
+
+fn _dprev_base_of(dir: text) -> text:
+    val slash = dir.rfind("/")
+    if slash < 0:
+        return dir
+    dir.substring(slash + 1, dir.len())
+
+fn _dprev_parent_of(dir: text) -> text?:
+    if dir == "/" or dir == "." or dir == "":
+        return nil
+    val slash = dir.rfind("/")
+    if slash < 0:
+        return "."
+    if slash == 0:
+        return "/"
+    val parent = dir.substring(0, slash)
+    # "C:" style drive roots have no parent either.
+    if parent.len() == 2 and parent.substring(1, 2) == ":":
+        return nil
+    parent
+
+pub fn dir_prevention_walk(spec_dir: text) -> [text]:
+    """Policy files applying to a spec in spec_dir, root-most first. The walk
+    stops after the directory named `test` (or at the filesystem root, or
+    after DIR_PREVENTION_MAX_DEPTH levels). Uncached."""
+    var found: [text] = []
+    var dir = spec_dir.replace("\\", "/")
+    var depth = 0
+    while depth < DIR_PREVENTION_MAX_DEPTH:
+        val candidate = if dir == "/": "/" + DIR_PREVENTION_FILE else: dir + "/" + DIR_PREVENTION_FILE
+        if file_exists(candidate):
+            found.push(candidate)
+        if _dprev_base_of(dir) == "test":
+            break
+        val next = _dprev_parent_of(dir) ?? ""
+        if next == "":
+            break
+        dir = next
+        depth = depth + 1
+    found.reverse()
+
+pub fn dir_prevention_env_value(spec_path: text) -> text:
+    """SEP-joined policy file list for spec_path, cached per directory."""
+    val dir = _dprev_dir_of(spec_path)
+    val hit = _dir_prevention_cache.get(dir)
+    if hit != nil:
+        return hit
+    _dir_prevention_cache_misses = _dir_prevention_cache_misses + 1
+    val joined = dir_prevention_walk(dir).join(DIR_PREVENTION_SEP)
+    _dir_prevention_cache[dir] = joined
+    joined
+
+pub fn dir_prevention_cache_misses() -> i64:
+    _dir_prevention_cache_misses
+
+fn _dprev_value_after(line: text, key: text) -> text:
+    # line is already trimmed and starts with key
+    line.substring(key.len(), line.len()).trim()
+
+pub fn dir_prevention_parse(source: text, origin: text) -> [DirPreventionRule]:
+    """Parse the `prevent:` rule list. Lines outside a `- mock:` item and
+    comment/blank lines are ignored; a rule without a `mock` name is dropped."""
+    var rules: [DirPreventionRule] = []
+    var mock = ""
+    var max_allowed: i64 = 0
+    var reason = ""
+    var open = false
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        if line.starts_with("- mock:"):
+            if open and mock != "":
+                rules.push(DirPreventionRule(mock_name: mock, max_allowed: max_allowed, reason: reason, source: origin))
+            mock = _dprev_value_after(line, "- mock:")
+            max_allowed = 0
+            reason = ""
+            open = true
+        elif open and line.starts_with("reason:"):
+            reason = _dprev_value_after(line, "reason:")
+        elif open and line.starts_with("at_most:"):
+            max_allowed = _dprev_value_after(line, "at_most:").to_int() ?? 0
+    if open and mock != "":
+        rules.push(DirPreventionRule(mock_name: mock, max_allowed: max_allowed, reason: reason, source: origin))
+    rules
+
+pub fn dir_prevention_load(env_value: text) -> [DirPreventionRule]:
+    """Rules from every file named in a SEP-joined env value, in order."""
+    var rules: [DirPreventionRule] = []
+    if env_value == "":
+        return rules
+    for path in env_value.split(DIR_PREVENTION_SEP):
+        if path == "" or not file_exists(path):
+            continue
+        for rule in dir_prevention_parse(file_read(path), path):
+            rules.push(rule)
+    rules

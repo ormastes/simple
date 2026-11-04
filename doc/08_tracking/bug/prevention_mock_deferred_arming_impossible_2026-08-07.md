@@ -165,3 +165,38 @@ in a field / dict / array being value-copied — is removed by the default flip
 of `SIMPLE_INTERP_CLASS_REF` (seed `Value::ClassInstance` carrier). Whether a
 deferred-arming `prevent` can now be built in pure Simple is unverified in
 this lane (no spec exercised it); re-triage on the rebuilt seed.
+
+## Re-verify 2026-11-04 — Defects 1 and 2 GONE on the class-ref seed (lane: work/feat-sspec-dir-prevention-20261104)
+
+Re-ran the Defect 1 probe shapes from this record plus the Defect 2 counter
+probe, as a throwaway `zz_probe_prevent_defect_spec.spl` under
+`D:/dev/wt/seed/simple.exe run` (seed from release tip, class-ref default on):
+
+| probe | 2026-08-07 | 2026-11-04 |
+|---|---|---|
+| array push `probe_mocks.push(m)`; `m.record_call`; `probe_mocks[0].call_count()` | 0 | **1** |
+| `ForbiddenCallGuard.new(m, ..)` built BEFORE the call; `check_guards` msgs | 0 | **1** |
+| closure `fn() -> i64: m.call_count()` captured before the call | 0 | **1** |
+| Defect 2: module `var` counter + mock mutated in example 1, read in example 2 | 0 / 0 | **1 / 1** |
+
+Results: `5 examples, 0 failures` (probe deleted after use, not landed).
+A deferred-arming prevention check is therefore buildable in pure Simple, and
+the directory-wide policy that landed the same day
+(`sspec_no_dir_wide_prevention_scope_2026-08-07.md`) IS exactly that: a
+before/after_each pair in `spec.spl` reading per-example call deltas off a
+`MockFunction` auto-registry. `prevent`/`prevent_at_most`/`prevent_file`
+keep their immediate-check semantics unchanged in that change; converting
+`prevent_file` to true auto-checked file scope is now unblocked but was not
+done (API-semantics change, separate decision). Defect 3 (wildcard
+`use std.spec.*` not exposing every pub fn) was not re-checked and is still
+assumed open — the new policy needs no import from the spec at all, so it
+is unaffected.
+
+Two engine facts learned on the way, recorded because they shape what a
+deferred check may do: (a) under the seed, `describe`/`it`/`before_each`/
+`after_each`/`fail_assertion` are intrinsics (`interpreter_call/bdd.rs`), so
+`spec.spl`'s `_execute_it` is NOT the live path under `simple run` — the
+only hook point is hook registration, which works from `spec.spl`'s own
+module initialiser; (b) a file read or a cross-module global write issued
+while `spec.spl` is still initialising silently does nothing, so such work
+must be deferred into the first hook invocation.
