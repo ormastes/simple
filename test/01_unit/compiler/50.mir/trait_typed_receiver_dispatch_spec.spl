@@ -2,23 +2,16 @@
 """
 # Stage2 MIR: method call on a trait-typed receiver
 
-Bug: doc/08_tracking/bug/stage2_trait_typed_receiver_method_unresolved_2026-10-10.md
+Owner decision 2026-11-05: trait-typed (dyn) receivers use the native
+trait-object ABI. A field or parameter whose static type IS a trait is a
+(data, table) pair and `recv.method(..)` lowers via `lower_native_trait_method`
+to a vtable load plus `CallIndirect`, independent of how many implementors the
+build closure holds. Concrete-typed receivers stay direct calls. The legacy
+whole-closure devirtualization (`lower_trait_receiver_method_call`) remains
+only for receivers with no native trait owner (see
+`option_trait_payload_receiver_spec.spl`).
 
-A field or parameter whose static type IS a trait (`store: Store`) is a trait
-object. Before the fix stage2 MIR reported `unresolved method call: list` for
-`self.store.list(n)`. The seed emits a vtable call, or an aborting bare-name
-call when no impl exists in the unit.
-
-Stage2 objects carry no vtable word, so MIR devirtualizes, and only when the
-lowering covers the whole build closure (`trait_impl_closure_complete`, set by
-the driver for entry-closure builds without a demand/package-index route):
-
-| situation | lowering |
-|-----------|----------|
-| 1 implementor in closure | direct call to that impl's method |
-| 0 implementors in closure | operands evaluated, then `rt_panic` naming the trait method |
-| 2+ implementors, or a generic implementor | loud compile error |
-| partial (demand/incremental) lowering | loud compile error |
+Bug: doc/08_tracking/bug/mir_trait_devirt_dead_after_native_abi_2026-11-05.md
 """
 use std.spec.*
 use compiler.common.config.{Logger}
@@ -39,6 +32,7 @@ val CONSUMER_SRC = "struct Consumer:\n    store: Store\n\nimpl Consumer:\n    fn
 val MEM_IMPL_SRC = "struct Mem:\n    base: i64\n\nimpl Store for Mem:\n    fn list(n: i64) -> i64:\n        self.base + n\n\n"
 val DISK_IMPL_SRC = "struct Disk:\n    root: i64\n\nimpl Store for Disk:\n    fn list(n: i64) -> i64:\n        self.root * n\n\n"
 val GENERIC_IMPL_SRC = "struct Boxed<T>:\n    item: T\n\nimpl<T> Store for Boxed<T>:\n    fn list(n: i64) -> i64:\n        n\n\n"
+val CONCRETE_SRC = "fn via_concrete(m: Mem) -> i64:\n    m.list(1)\n\nfn main() -> i64:\n    0\n"
 
 # Cross-module closure: trait in A, implementor in B, consumer in C.
 val XM_A_SRC = "pub trait Store:\n    fn list(n: i64) -> i64\n"
@@ -49,6 +43,7 @@ struct Lowered:
     errors: [text]
     fatal_count: i64
     callees: [text]
+    indirect_calls: i64
 
 fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
     var errors: [text] = []
@@ -58,6 +53,7 @@ fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
             fatal_count = fatal_count + 1
         errors = errors.push(e.message)
     var callees: [text] = []
+    var indirect_calls = 0
     for function in mir.functions.values():
         for block in function.blocks:
             for instruction in block.instructions:
@@ -67,8 +63,10 @@ fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
                             case MirOperandKind.Const(MirConstValue.Str(name), _):
                                 callees = callees.push(name)
                             case _: pass
+                    case MirInstKind.CallIndirect(_, _, _, _):
+                        indirect_calls = indirect_calls + 1
                     case _: pass
-    Lowered(errors: errors, fatal_count: fatal_count, callees: callees)
+    Lowered(errors: errors, fatal_count: fatal_count, callees: callees, indirect_calls: indirect_calls)
 
 fn lower_source(src: text, closure_complete: bool) -> Lowered:
     val parsed = parse_full_frontend(src, "trait_recv.spl", "trait_recv", Logger(level: 0))
@@ -80,7 +78,7 @@ fn lower_source(src: text, closure_complete: bool) -> Lowered:
     val mir = ml.lower_module(hir)
     collect(ml, mir)
 
-fn lower_cross_module(include_impl_module: bool, via_trait_provider_modules: bool, consumer_first: bool) -> Lowered:
+fn lower_cross_module(include_impl_module: bool, consumer_first: bool) -> Lowered:
     val a = parse_and_build_module(XM_A_SRC, "pkg/xm_a.spl")
     val b = parse_and_build_module(XM_B_SRC, "pkg/xm_b.spl")
     val c = parse_and_build_module(XM_C_SRC, "pkg/xm_c.spl")
@@ -113,11 +111,7 @@ fn lower_cross_module(include_impl_module: bool, via_trait_provider_modules: boo
         var prescan_mods: Dict<text, HirModule> = {}
         prescan_mods["provider"] = provider
         ml.prescan_module_struct_names(prescan_mods, "provider")
-    # Stage3 bootstrap-fixed shape: lower_module gets no providers; the
-    # closure reaches trait-implementor registration only.
-    if via_trait_provider_modules:
-        ml.trait_impl_provider_modules = providers
-    val mir = if via_trait_provider_modules: ml.lower_module(c_hir) else: ml.lower_module(c_hir, providers, false)
+    val mir = ml.lower_module(c_hir, providers, false)
     collect(ml, mir)
 
 fn count_matching(names: [text], needle: text) -> i64:
@@ -127,86 +121,75 @@ fn count_matching(names: [text], needle: text) -> i64:
             n = n + 1
     n
 
-describe "stage2 MIR trait-typed receiver dispatch":
-    it "devirtualizes a trait-typed field and parameter call to the single implementor":
+describe "stage2 MIR trait-typed receiver dispatch (native trait-object ABI)":
+    it "dispatches a trait-typed field and parameter call through the vtable even with one implementor":
         val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + CONSUMER_SRC, true)
         expect(lowered.errors.len()).to_equal(0)
-        # `self.store.list(n)` and `s.list(2)` both call Mem's impl method.
-        expect(count_matching(lowered.callees, "Mem.list")).to_equal(2)
+        # `self.store.list(n)` and `s.list(2)` both load a vtable slot.
+        # Each trait-typed call site emits 2 CallIndirect: the slot call plus
+        # the copy thunk (native_trait_conversion.spl). 2 sites -> 4.
+        expect(lowered.indirect_calls).to_equal(4)
+        expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
         expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
 
-    it "traps with a named runtime message when no implementor is in the closure":
+    it "dispatches through the vtable when no implementor is in the closure":
         val lowered = lower_source(TRAIT_SRC + CONSUMER_SRC, true)
         expect(lowered.errors.len()).to_equal(0)
-        expect(count_matching(lowered.callees, "rt_panic")).to_equal(2)
+        expect(lowered.indirect_calls).to_equal(4)
+        expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
 
-    it "refuses to guess between several implementors":
+    it "supports several implementors without guessing one":
         val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + DISK_IMPL_SRC + CONSUMER_SRC, true)
-        expect(lowered.errors.len()).to_equal(2)
-        # Fatal: the driver must abort the build, not downgrade to a warning
-        # and ship the rt_panic placeholder as a runtime trap.
-        expect(lowered.fatal_count).to_equal(2)
-        expect(lowered.errors[0].contains("2 implementors")).to_equal(true)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.indirect_calls).to_equal(4)
+        expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
+        expect(count_matching(lowered.callees, "Disk.list")).to_equal(0)
 
-    it "rejects a generic implementor instead of guessing an instantiation":
-        val lowered = lower_source(TRAIT_SRC + GENERIC_IMPL_SRC + CONSUMER_SRC, true)
-        expect(lowered.errors.len()).to_equal(2)
-        # Fatal: the driver must abort the build, not downgrade to a warning
-        # and ship the rt_panic placeholder as a runtime trap.
-        expect(lowered.fatal_count).to_equal(2)
-        expect(lowered.errors[0].contains("generic implementor")).to_equal(true)
-
-    it "fails closed when the lowering does not cover the whole closure":
-        # Demand/incremental lanes reuse archived MIR for clean packages, so
-        # a single visible impl proves nothing about the closure.
+    it "dispatches through the vtable when the lowering does not cover the whole closure":
         val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + CONSUMER_SRC, false)
-        expect(lowered.errors.len()).to_equal(2)
-        # Fatal: the driver must abort the build, not downgrade to a warning
-        # and ship the rt_panic placeholder as a runtime trap.
-        expect(lowered.fatal_count).to_equal(2)
-        expect(lowered.errors[0].contains("whole build closure")).to_equal(true)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.indirect_calls).to_equal(4)
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
 
-    it "devirtualizes across modules: trait in A, implementor in B, consumer in C":
-        val lowered = lower_cross_module(true, false, false)
+
+    it "dispatches through the vtable for a generic implementor too":
+        val lowered = lower_source(TRAIT_SRC + GENERIC_IMPL_SRC + CONSUMER_SRC, true)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.indirect_calls).to_equal(4)
+    it "keeps a concrete-typed receiver a direct call":
+        val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + CONCRETE_SRC, true)
         expect(lowered.errors.len()).to_equal(0)
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(1)
-        expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
+        expect(lowered.indirect_calls).to_equal(0)
 
-    it "traps at runtime when the implementing module is outside the closure":
-        val lowered = lower_cross_module(false, false, false)
+    it "dispatches through the vtable across modules: trait in A, implementor in B, consumer in C":
+        val lowered = lower_cross_module(true, false)
         expect(lowered.errors.len()).to_equal(0)
+        expect(lowered.indirect_calls).to_equal(2)
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
-        expect(count_matching(lowered.callees, "rt_panic")).to_equal(1)
 
-    it "reuses per-provider link tables index-aligned when the consumer and a type-less module come first":
-        val lowered = lower_cross_module(true, false, true)
+    it "dispatches through the vtable when the implementing module is outside the closure":
+        val lowered = lower_cross_module(false, false)
         expect(lowered.errors.len()).to_equal(0)
-        expect(count_matching(lowered.callees, "Mem.list")).to_equal(1)
+        expect(lowered.indirect_calls).to_equal(2)
         expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
 
-    it "devirtualizes on the stage3 bootstrap-fixed shape (closure via trait_impl_provider_modules)":
-        val lowered = lower_cross_module(true, true, false)
+    it "dispatches through the vtable when the consumer and a type-less module come first":
+        val lowered = lower_cross_module(true, true)
         expect(lowered.errors.len()).to_equal(0)
-        expect(count_matching(lowered.callees, "Mem.list")).to_equal(1)
-        expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
+        expect(lowered.indirect_calls).to_equal(2)
 
 describe "driver gate for trait-object devirtualization":
-    it "devirtualizes only in whole-closure lanes that never archive MIR":
-        # entry-closure / AOT / stage3 / Stage 5 MCP cold-init lanes
+    # The gate still guards the legacy whole-closure fallback used by
+    # receivers without a native trait owner (e.g. `Trait?` payloads).
+    it "allows the fallback only in whole-closure lanes that never archive MIR":
         expect(driver_trait_devirtualization_allowed_v1(true, false, false)).to_equal(true)
-        # full-inventory cold lane publishes package archives: a later demand
-        # build would reuse a consumer devirtualized against a stale
-        # implementor set, so it must never devirtualize
         expect(driver_trait_devirtualization_allowed_v1(true, true, false)).to_equal(false)
-        # demand/package-index route: dirty packages only, archived MIR for the rest
         expect(driver_trait_devirtualization_allowed_v1(true, false, true)).to_equal(false)
-        # sources not all lowered from HIR here
         expect(driver_trait_devirtualization_allowed_v1(false, false, false)).to_equal(false)
 
-
-describe "lifted trait dispatch archive evidence":
-    it "retains actual full-HIR dispatch counts across sibling lifts":
+describe "lifted trait dispatch":
+    it "dispatches lifted-closure trait calls through the vtable":
         val lifted_source = "fn invoke(callback: fn(Store) -> i64, s: Store) -> i64:\n    callback(s)\nfn via_lifts(s: Store) -> i64:\n    invoke(\\item: item.list(2), s) + invoke(\\item: item.list(3), s)\nfn main() -> i64:\n    0\n"
         val parsed = parse_full_frontend(TRAIT_SRC + MEM_IMPL_SRC + lifted_source,
             "lifted_trait_recv.spl", "lifted_trait_recv", Logger(level: 0))
@@ -215,10 +198,11 @@ describe "lifted trait dispatch archive evidence":
         expect(hl.errors.len()).to_equal(0)
         var ml = MirLowering.new(hir.symbols)
         ml.trait_impl_closure_complete = true
-        val before = ml.devirtualized_calls
         val mir = ml.lower_module(hir)
         val lowered = collect(ml, mir)
-        expect(lowered.fatal_count).to_equal(0)
-        expect(count_matching(lowered.callees, "Mem.list")).to_equal(2)
-        val delta = ml.devirtualized_calls - before
-        expect(delta).to_equal(2)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
+        # 2 lifted sites x 2 (slot call + copy thunk) + 2 from the
+        # `callback(s)` call through the fn value in `invoke`.
+        expect(lowered.indirect_calls).to_equal(6)
+        expect(ml.devirtualized_calls).to_equal(0)
