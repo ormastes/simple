@@ -10,12 +10,34 @@ use std.js.engine.vm_object_store.{ObjectStore}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask, MAX_SCRIPT_EXECUTION_STEPS, js_timer_deadline_ms}
 use std.nogc_sync_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value}
 use std.nogc_sync_mut.http.types.{status_text}
-use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
+use std.js.engine.runtime.{dispatch_native, NATIVE_PROMISE_EXECUTOR_RESOLVE, NATIVE_PROMISE_EXECUTOR_REJECT, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_string_methods.{JsInterpreter}
 
 val MAX_PROMISE_CALLBACKS_PER_DRAIN: i64 = 1000
 val MAX_PENDING_PROMISE_HANDLERS: i64 = 4096
+
+# Promise id carried by a `__simple_promise_settle:<id>` native name, or -1.
+fn _promise_id_from_settler_name(name: text) -> i64:
+    val prefix = "__simple_promise_settle:"
+    if name.len() <= prefix.len() or name.slice(0, prefix.len()) != prefix:
+        return -1
+    val digits = "0123456789"
+    var n = 0
+    var i = prefix.len()
+    while i < name.len():
+        val ch = name.slice(i, i + 1)
+        var d = -1
+        var k = 0
+        while k < 10:
+            if digits.slice(k, k + 1) == ch:
+                d = k
+            k = k + 1
+        if d < 0:
+            return -1
+        n = n * 10 + d
+        i = i + 1
+    n
 
 impl JsInterpreter:
     me take_pending_async_request() -> i64?:
@@ -225,6 +247,61 @@ impl JsInterpreter:
             idx = idx + 1
         Err("unknown async fetch request: {request_id}")
 
+    # `new Promise(executor)`: run the executor synchronously with resolve /
+    # reject functions bound to a fresh pending promise. (The subset parser
+    # has no `throw`, so executor/handler throws are not observable here.)
+    me _construct_promise(arg_vals: [JsValue], env: i64) -> JsBrowserResult<JsValue>:
+        val promise_id = self._create_pending_promise_object()
+        if arg_vals.len() > 0:
+            val executor_id = _get_fn_id(arg_vals.get(0))
+            if executor_id >= 0:
+                val settlers = [
+                    JsValue.Function(id: self._promise_settler_fn(promise_id, NATIVE_PROMISE_EXECUTOR_RESOLVE)),
+                    JsValue.Function(id: self._promise_settler_fn(promise_id, NATIVE_PROMISE_EXECUTOR_REJECT))
+                ]
+                val _ = self._invoke_function(executor_id, settlers, env)?
+        Ok(JsValue.Object(id: promise_id))
+
+    # A native resolve/reject function whose target promise id rides in its name.
+    me _promise_settler_fn(promise_id: i64, native_id: i64) -> i64:
+        self._register_native("__simple_promise_settle:{promise_id}", native_id)
+
+    me _native_promise_executor_settle(fn_id: i64, native_id: i64, arg_vals: [JsValue]) -> JsValue:
+        if fn_id < 0 or fn_id >= self.functions.len():
+            return JsValue.Undefined
+        val promise_id = _promise_id_from_settler_name(self.functions.get(fn_id).name)
+        if promise_id < 0 or _simple_fetch_state(promise_id, self.object_store) != "pending":
+            return JsValue.Undefined
+        val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
+        if native_id == NATIVE_PROMISE_EXECUTOR_REJECT:
+            self._settle_promise(promise_id, value, true)
+            return JsValue.Undefined
+        # resolve(thenable): adopt the inner promise's state.
+        val inner_id = _get_obj_id(value)
+        if inner_id >= 0 and to_boolean(self.get_object_property(inner_id, "__simple_promise_host")):
+            val inner_state = _simple_fetch_state(inner_id, self.object_store)
+            if inner_state == "pending":
+                val settlers = [
+                    JsValue.Function(id: self._promise_settler_fn(promise_id, NATIVE_PROMISE_EXECUTOR_RESOLVE)),
+                    JsValue.Function(id: self._promise_settler_fn(promise_id, NATIVE_PROMISE_EXECUTOR_REJECT))
+                ]
+                val _ = self._native_promise_then(value, settlers)
+                return JsValue.Undefined
+            self._settle_promise(promise_id, _simple_fetch_value(inner_id, self.object_store), inner_state == "rejected")
+            return JsValue.Undefined
+        self._settle_promise(promise_id, value, false)
+        JsValue.Undefined
+
+    # Native id registered for `fn_id`, or 0 when it is a script function.
+    me _native_id_of_fn(fn_id: i64) -> i64:
+        var ni = 0
+        while ni < self.native_id_map.len():
+            val mapping = self.native_id_map.get(ni)
+            if mapping.first == fn_id:
+                return mapping.second
+            ni = ni + 1
+        0
+
     me _create_pending_promise_object() -> i64:
         var promise_id = self.create_object()
         while _get_obj_id(JsValue.Object(id: promise_id)) != promise_id or promise_id % 10 == 9:
@@ -351,6 +428,11 @@ impl JsInterpreter:
     me _invoke_promise_callback(fn_id: i64, arg_vals: [JsValue]) -> JsBrowserResult<JsValue>:
         if fn_id < 0 or fn_id >= self.functions.len():
             return Ok(JsValue.Undefined)
+        val native_id = self._native_id_of_fn(fn_id)
+        if native_id == NATIVE_PROMISE_EXECUTOR_RESOLVE or native_id == NATIVE_PROMISE_EXECUTOR_REJECT:
+            return Ok(self._native_promise_executor_settle(fn_id, native_id, arg_vals))
+        if native_id != 0:
+            return Ok(self._dispatch_native_with_receiver(native_id, JsValue.Undefined, arg_vals, self.global_env))
         val js_fn = self.functions.get(fn_id)
         val fn_env = self.env_stack.create_env(js_fn.closure_env)
         var gi = 0
