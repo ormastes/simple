@@ -82,3 +82,9 @@ interpreter) — consistent semantics, not this defect.
 
 Downstream: `native_gpu_font_readback_spec.spl` Engine2D row now PASSes under
 `simple test` — see `macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26.md`.
+
+## 2026-11-04 note (jitalias lane)
+
+The module-level `var` mut-param write-back gap above remains open; it is not the
+same root as the JIT field-store alias fixed in
+`seed_jit_class_field_array_assign_aliases_local_2026-11-04.md`.
