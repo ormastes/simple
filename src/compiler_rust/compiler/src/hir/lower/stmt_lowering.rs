@@ -3837,6 +3837,30 @@ impl Lowerer {
                 ]))
             }
 
+            // `fail`/`fail_assertion`/`fail_test` are interpreter builtins
+            // (interpreter_call/bdd.rs) that take precedence over any Simple
+            // definition, including std.spec's. `use std.spec.{fail}` resolves
+            // to `spec/__init__.spl`, which does not define them, so the
+            // compiled lane had no symbol (`unresolved external symbol 'fail'`
+            // under SIMPLE_JIT_STRICT). Lower them to the runtime twin so both
+            // engines record the same failure.
+            "fail" | "fail_assertion" | "fail_test" if args.len() <= 1 && args.iter().all(|a| a.name.is_none()) => {
+                let msg = match args.first() {
+                    Some(a) => self.lower_expr(&a.value, ctx)?,
+                    None => HirExpr {
+                        kind: HirExprKind::String("assertion failed".to_string()),
+                        ty: TypeId::STRING,
+                    },
+                };
+                Ok(Some(vec![HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_bdd_fail_rv".to_string(),
+                        args: vec![msg],
+                    },
+                    ty: TypeId::NIL,
+                })]))
+            }
+
             "it" | "test" | "example" | "specify" => {
                 // it "name": body
                 // → rt_bdd_it_start_rv(name), <body>, rt_bdd_it_end(passed)
