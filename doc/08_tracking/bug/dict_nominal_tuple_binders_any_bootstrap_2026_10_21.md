@@ -97,3 +97,20 @@ Archive SHA-256 values, in table order:
 LLVM 23.1.1 `llvm-nm --defined-only` confirmed the actual failing function
 symbols in these archives. Archive construction does not prove the full
 compiler executable links, nor qualify Phase 2/3 or general SPipe execution.
+
+## 2026-11-04 fix (n88b) - status fix-implemented-verification-pending
+
+Pure-Simple HIR fix in `src/compiler/20.hir/hir_lowering/statements.spl`
+(StmtKind.For tuple branch, flagged for phase-3 owner): when the iterable's
+declared type resolves to `Dict<K, V>`, the two tuple binders are defined and
+`Let`-typed as K and V instead of nil/Infer. Only a declared Dict type is used;
+no field-name guessing. Limit: iterables whose type is not known at early HIR
+lowering (e.g. `self.module.types`) are unchanged until HIR inference runs; keep
+the typed-local workaround there.
+
+TDD spec (fails before: "expected infer to equal named"; passes after, seed
+`bin/simple.exe`): `test/01_unit/compiler/20.hir/dict_tuple_for_binder_types_spec.spl`.
+
+Stage3 repro (native fixture, expected output `PASS: dictionary nominal tuple binders = 31`):
+`bootstrap/stage3/simple native-build test/fixtures/native_dict_nominal_loop/main.spl -o build/dictloop.exe && build/dictloop.exe`
+(remove the typed-local workaround blocks only after this passes on a rebuilt producer).

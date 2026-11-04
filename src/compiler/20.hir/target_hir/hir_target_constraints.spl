@@ -1,0 +1,123 @@
+# TargetHIR P2: target constraints captured while a module's static guards
+# (`@when` / cfg) were evaluated. Every guard read is recorded as a witness:
+# positive_reads held, negative_reads did not. A cached HIR built under these
+# witnesses is reusable for another target only when every witness evaluates
+# the same way there (THIR-04/THIR-05). Keys the checker cannot evaluate are
+# kept in `deferred` and refuse reuse with a named error, never a silent pass.
+#
+# Read encoding: "<key>=<value>", key in {os, target_os, arch, target_arch,
+# feature, abi, backend}; value lower-cased and trimmed.
+
+use compiler.common.mir_target_context.{MirTargetContext}
+use std.common.crypto.sha256.{sha256_text}
+
+val HIR_TARGET_CONSTRAINTS_SCHEMA = "hir-target-constraints-v1"
+
+struct HirTargetConstraints:
+    module: text
+    positive_reads: [text]
+    negative_reads: [text]
+    features_snapshot: [text]
+    deferred: [text]
+
+struct HirGuardRead:
+    key: text
+    value: text
+    held: bool
+
+fn _constraint_key_supported(key: text) -> bool:
+    key == "os" or key == "target_os" or key == "arch" or key == "target_arch" or key == "feature" or key == "abi" or key == "backend"
+
+fn _sorted_unique(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        if not out.contains(item):
+            out.push(item)
+    out.sort()
+
+fn hir_target_constraints_capture(module: text, reads: [HirGuardRead], features: [text]) -> Result<HirTargetConstraints, text>:
+    val name = module.trim()
+    if name == "":
+        return Err("hir_target_constraints_module_required")
+    var pos: [text] = []
+    var neg: [text] = []
+    var deferred: [text] = []
+    for r in reads:
+        val key = r.key.trim().to_lower()
+        val value = r.value.trim().to_lower()
+        if key == "" or value == "":
+            return Err("hir_target_constraints_read_incomplete:" + key + "=" + value)
+        val entry = key + "=" + value
+        if not _constraint_key_supported(key):
+            deferred.push(entry)
+        elif r.held:
+            pos.push(entry)
+        else:
+            neg.push(entry)
+    var feats: [text] = []
+    for f in features:
+        val n = f.trim().to_lower()
+        if n != "":
+            feats.push(n)
+    Ok(HirTargetConstraints(module: name, positive_reads: _sorted_unique(pos), negative_reads: _sorted_unique(neg), features_snapshot: _sorted_unique(feats), deferred: _sorted_unique(deferred)))
+
+fn _frame_list(tag: text, items: [text]) -> text:
+    var out = tag + ":" + items.len().to_string() + "["
+    for item in items:
+        out = out + item.len().to_string() + ":" + item + ";"
+    out + "]"
+
+fn hir_target_constraints_canonical(c: HirTargetConstraints) -> text:
+    var out = HIR_TARGET_CONSTRAINTS_SCHEMA + "|m:" + c.module.len().to_string() + ":" + c.module
+    out = out + "|" + _frame_list("pos", _sorted_unique(c.positive_reads))
+    out = out + "|" + _frame_list("neg", _sorted_unique(c.negative_reads))
+    out = out + "|" + _frame_list("feat", _sorted_unique(c.features_snapshot))
+    out + "|" + _frame_list("def", _sorted_unique(c.deferred))
+
+# AGREED SIGNATURE (U5 cache identity depends on it): stable hex digest.
+fn hir_target_constraints_digest(c: HirTargetConstraints) -> text:
+    sha256_text(hir_target_constraints_canonical(c))
+
+fn _eval_read(entry: text, target: MirTargetContext, features: [text]) -> Result<bool, text>:
+    val eq = entry.index_of("=")
+    if eq == nil or eq.unwrap() <= 0:
+        return Err("hir_target_constraint_malformed:" + entry)
+    val at = eq.unwrap()
+    val key = entry[0:at]
+    val value = entry[at + 1:]
+    if key == "os" or key == "target_os":
+        return Ok(target.os.to_lower() == value)
+    if key == "arch" or key == "target_arch":
+        return Ok(target.arch.to_lower() == value)
+    if key == "abi":
+        return Ok(target.abi.to_lower() == value)
+    if key == "backend":
+        return Ok(target.backend.to_lower() == value)
+    if key == "feature":
+        return Ok(features.contains(value))
+    Err("hir_target_constraint_unsupported:" + key)
+
+fn hir_target_constraints_satisfied(c: HirTargetConstraints, target: MirTargetContext, features: [text]) -> Result<bool, text>:
+    if c.deferred.len() > 0:
+        return Err("hir_target_constraint_unsupported:" + c.deferred[0])
+    var feats: [text] = []
+    for f in features:
+        val n = f.trim().to_lower()
+        if n != "":
+            feats.push(n)
+    val current = _sorted_unique(feats)
+    if current != _sorted_unique(c.features_snapshot):
+        return Ok(false)
+    for entry in c.positive_reads:
+        val r = _eval_read(entry, target, current)
+        if r.is_err():
+            return Err(r.unwrap_err())
+        if not r.unwrap():
+            return Ok(false)
+    for entry in c.negative_reads:
+        val r = _eval_read(entry, target, current)
+        if r.is_err():
+            return Err(r.unwrap_err())
+        if r.unwrap():
+            return Ok(false)
+    Ok(true)

@@ -717,3 +717,144 @@ re-open-and-compare proof), so this was deliberately not patched here: it needs
 an owner decision on the non-procfs pinning mechanism (e.g. `fstat` of the
 held fd via a helper vs. `F_GETPATH` on Darwin). BSD: FreeBSD without
 `linprocfs` has the identical gap.
+
+## 2026-11-04 (later): Option 1 implemented — portable open-fd identity helper
+
+Owner decision: Option 1 (compare the OPEN fd's identity against a fresh stat of
+the path). Implemented in `scripts/check/lib/bootstrap-stage3/manifest-verify.shs`:
+
+- `bootstrap_stage3_fd_identity N` — `dev ino mode_hex size` of an fd this shell
+  holds. Linux: unchanged GNU `stat -Lc '%d %i %f %s' /proc/<pid>/fd/N`; the three
+  Linux manifest re-open sites (old `:877`, `:891`, `:915`) now call it with the
+  byte-identical command, so the `[ "$3" = 8100 ]` raw-mode check and all Linux
+  strength are unchanged.
+- `bootstrap_stage3_fd_stamp N` + `bootstrap_stage3_fd_matches_path N PATH STAMP` —
+  stamp (`dev ino mode size mtime_ns ctime_ns`) taken right after `exec N<path`,
+  later compared against BOTH a fresh fstat of the fd and a no-follow lstat of the
+  path. 0 = same unchanged file; 1 = renamed over / removed / modified after open;
+  2 = cannot determine (unknown OS, missing tool, closed fd) — never a pass.
+- Non-procfs backend is `fstat(2)` on the inherited fd via the tool-authority-pinned
+  python3 the portable lane already requires. NOT `stat -L /dev/fd/N`: measured on
+  this Darwin 25 host it reports the fdesc device (`1820675567`) for `st_dev`
+  instead of the file's (`16777232`); on FreeBSD `/dev/fd/N` for N>2 exists only
+  with `fdescfs` mounted. fstat has neither dependency, so Darwin and FreeBSD/
+  NetBSD/OpenBSD/DragonFly share one arm; any other OS returns 2 (fail closed).
+- Wired into the portable (non-procfs) lane: the bound map (fd 9) and the manifest
+  (fd 8) are stamped at open and re-checked after the positioned-read seal
+  (`portable-authority-{map,manifest}-fd-{stamp,identity}`).
+- Fixtures: `sh scripts/check/check-bootstrap-fd-identity.shs --selftest` —
+  `PASS — 14 fixture(s) checked on Darwin arm` (same file PASS; rename-over FAIL;
+  same-size in-place modify FAIL; removed FAIL; missing stat/python tool ERROR;
+  closed/malformed fd and empty stamp ERROR).
+
+**What Stage 3 on macOS/BSD still needs (NOT solved by an fd-identity helper):**
+1. Capsule mode: `manifest-verify.shs` refuses `BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1`
+   without procfs (`portable-descriptor-capsule-not-supported`), and
+   `bootstrap-stage3-provenance-verifier.sh:~198` sets it for the
+   Stage-2-parent-trust-root entry — i.e. the fresh Stage-2 -> Stage-3 route.
+2. Cross-process descriptor transport: the perl shared runner hands every input to
+   the verifier as `/proc/<pid>/fd/N` (validated by `expr` in manifest-write,
+   sanity, command-snapshot, provenance-verifier), and `authority.shs:264-332`
+   reads descriptors owned by ANOTHER pid plus `/proc/<owner>/stat` field 20 for
+   owner liveness. A child cannot address a parent's fd without procfs; this needs
+   an inherit-the-fd protocol redesign, not an identity helper.
+3. Pre-existing, unrelated, observed on this host while testing: the provenance
+   self-test stops at `bootstrap_stage3_seed_inputs_fingerprint` (empty ABI
+   policy), and `check-bootstrap-portability.shs` fails its process-lock fixture;
+   both fail identically without this change.
+
+## 2026-11-04 (inheritfd): inherited-descriptor protocol on the VERIFIER side
+
+Status: **fix-implemented for the verifier; producer side still OPEN** (Stage 3
+on macOS/BSD remains blocked — see "Still open" below).
+
+Implemented in `scripts/check/lib/bootstrap-stage3/authority.shs`:
+
+- New descriptor spelling `fd:N` = "descriptor N inherited into the validating
+  process". `bootstrap_stage3_inherited_fd_verify` checks `dev ino mode` by
+  `fstat(2)` on the inherited fd and hashes by `pread(2)` from offset 0 (immune
+  to the offset shared with the parent); a size/mtime/ctime change during the
+  hash is a mismatch; directories are identity-only. No procfs, no `/dev/fd`.
+- `bootstrap_stage3_validate_descriptor_map` accepts the map itself as `fd:N`
+  and per-role `fd:N` entries. The `/proc/<owner>/fd/N` path is byte-for-byte
+  unchanged, so Linux keeps its strength; `fd:N` on Linux uses the same
+  fstat/pread proof held by the verifier itself (equal or stronger).
+- Owner liveness: `bootstrap_stage3_owner_matches PID STAMP`. Linux = the same
+  `/proc/<pid>/stat` field-20 comparison. Darwin/BSD = `kill -0` plus the
+  launch stamp from `ps -o lstart=` (epoch seconds). Residual window: pid
+  reuse inside the owner's own start second (1 s resolution); content is still
+  pinned by the inherited fd. Unknown OS → exit 2, never a pass.
+- Fixtures: `sh scripts/check/check-bootstrap-fd-identity.shs --selftest` →
+  `PASS — 33 fixture(s) checked on Darwin arm` (inherited child match;
+  shared-offset; wrong sha/ino FAIL; rename-over FAIL via path check while the
+  fd still pins the inode; same-size modify-after-open FAIL; dir identity;
+  not-inherited ERROR; unknown OS ERROR; owner live/dead/reused; end-to-end
+  map validation in a child with map + inputs on inherited fds, plus reused
+  owner / bad payload digest / bad external sha FAIL).
+  `check-bootstrap-positioned-authority.py`: 36 tests OK before and after.
+
+**Still open (why Stage 3 is not yet runnable on macOS):**
+1. Producer: `bootstrap-stage3-shared-runner.pl` still writes
+   `/proc/<pid>/fd/N` descriptors (:1158, :1175) and `proc_start_ticks`
+   (:1402). It must write `fd:N`, clear FD_CLOEXEC on those handles before
+   exec (perl sets CLOEXEC above `$^F`), and record
+   `bootstrap_stage3_process_start_stamp` as the owner stamp. Note
+   `$F_DUPFD_CLOEXEC = 1030` (:16) is the Linux value (Darwin: 67).
+2. The runner also depends on Linux-only primitives with no Darwin equivalent:
+   exec through `/proc/self/fd/N` (no `fexecve`), O_TMPFILE +
+   `linkat` via `/proc/self/fd` (`link_anonymous_final` :447), and opening
+   leaves through a directory descriptor path (`/proc/self/fd/N/leaf`).
+3. Capsule mode stays refused without procfs
+   (`portable-descriptor-capsule-not-supported`, manifest-write/verify) because
+   ~15 capsule sites (sanity.shs:27, manifest-write :44/:57/:142/:339,
+   manifest-verify :1852-1934, authority capsule sites) address
+   `/proc/<pid>/fd/<dir>/<leaf>`; lifting the refusal before the producer
+   writes `fd:N` would be a capability-free pass, so it remains fail-closed.
+4. Pre-existing, not touched: `check-bootstrap-portability.shs` process-lock
+   fixture ("TERM successor acquired while worker survived") and the
+   provenance self-test empty seed ABI policy — neither blocks the fixtures here.
+
+Stage-3 command once an admitted Stage 2 exists (it will still stop at the
+producer gap above until item 1 lands):
+`sh scripts/bootstrap/resume-stage3-from-admitted.sh <admitted-stage2-output-dir>`
+(e.g. `/private/tmp/boot2-out/s2`).
+
+## 2026-11-04 (runnerport): premise correction — the perl shared runner is not on the macOS route
+
+Status: **no code change; the "producer side" items above do not gate macOS Stage 3.**
+Source-traced at `b77b1631b9a` (release/1.0.0); no Stage 3 run was attempted.
+
+- `scripts/check/lib/bootstrap-stage3-shared-runner.pl` is reached only through
+  `bootstrap_stage3_run_evidenced` (`scripts/check/lib/bootstrap-stage3/runner.shs:4`),
+  which refuses any other platform: `[ "$BSTAGE3_RUN_ARCHITECTURE" = x86_64-unknown-linux-gnu ] || return 64`
+  (`runner.shs:40`) and requires `BSTAGE3_RUN_SYSTEMD_RUN`/`SYSTEMCTL`/`CGROUP_ROOT`.
+  The runner itself validates a systemd unit plan with `exit_type=cgroup` and an
+  active-cgroup receipt (`shared-runner.pl:658-847`), and its directory walks use
+  Linux `syscall` numbers (`:19-20`, dies "unsupported syscall architecture" elsewhere).
+- Its only caller is `bootstrap-stage23-coordinator.pl:568`, which no script under
+  `scripts/` or `src/` invokes (only `test/01_unit/scripts/bootstrap_stage3_*runner*_test.shs`).
+  That lane is a Linux-x86_64 systemd lane on every OS, not a macOS path.
+- The macOS Stage 3 route is `scripts/bootstrap/resume-stage3-from-admitted.sh`
+  Darwin branch (`:1057-1083`): `process-tree-rss-watchdog.pl` -> 
+  `scripts/bootstrap/lib/stage3-native-build-worker.sh` (its only `/proc` use,
+  `:134`, is inside `*-linux-*`), then in-process `bootstrap_stage3_write_manifest`
+  + `bootstrap_stage3_verify_manifest` (`:1401-1404`). It never sources the perl
+  runner and never sets `BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1` (only
+  `bootstrap-stage3-provenance-verifier.sh:198,356` do, and that verifier is
+  referenced only by the runner/runner.shs lane).
+- Therefore porting the runner's `/proc/<pid>/fd/N`, `proc_start_ticks`,
+  O_TMPFILE+linkat and `/proc/self/fd` exec to Darwin would not unblock anything:
+  it would still stop at systemd/cgroup validation and at `runner.shs:40`. A port is
+  only meaningful together with a Darwin containment backend for that lane, which is
+  an owner design decision (no systemd/cgroup on Darwin/BSD), not a bug fix.
+- The capsule refusal (`portable-descriptor-capsule-not-supported`) stays fail-closed;
+  nothing on the macOS route reaches it.
+
+What actually gates macOS Stage 3 today: an admitted Stage 2 (lane1 runs on this host
+were built but refused by the 12288 MiB sanity memory reserve,
+`/private/tmp/lanes/stage_artifacts.txt`), then the non-capsule manifest
+write/verify on Darwin, which is so far verified only by fixtures, not a real run.
+
+Stage-3 resume command once an admitted Stage 2 exists:
+`sh scripts/bootstrap/resume-stage3-from-admitted.sh <admitted-stage2-output-dir>`
+(e.g. `/private/tmp/boot2-out/s2`).

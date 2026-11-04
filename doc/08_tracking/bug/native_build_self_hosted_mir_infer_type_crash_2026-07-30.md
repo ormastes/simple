@@ -155,3 +155,6 @@ existing `Error`-case precedent, adding an `Infer` arm to
 distinct piece of work in a codebase (`src/compiler/**`) this session's
 JIT-focused sweep never otherwise touched, and is left for its own pass.
 
+
+## Resolution 2026-11-04 (n88_a triage)
+FIXED on release/1.0.0: `mir_folded_const_type` (src/compiler/50.mir/_MirLowering/function_lowering.spl) recovers a concrete type for folded Binary module constants instead of lower_type(Infer); commits 683e2d1009e, a95b6c8010f; spec test/01_unit/compiler/mir/folded_const_type_branch_spec.spl. Native repro for stage3: `val DERIVED = 5 + 5` + `fn main(): print("DERIVED={DERIVED}")` via `simple native-build --entry main.spl --entry-closure`.

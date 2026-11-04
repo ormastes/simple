@@ -542,3 +542,227 @@ needed in `backend_vulkan_font.spl`/`engine.spl`; verifying it needs a native
 run that executes the flush, which the seed interpreter path cannot prove
 authoritatively); (b) admitted self-hosted macOS build from lane 1 for the
 native Engine2D gates.
+
+## 2026-11-04 batched-flush evidence promotion fix (vkfont2 lane)
+
+Fixed the evidence-refresh gap recorded above, at its layer:
+- `_flush_pending_compute_impl` (`backend_vulkan_helpers.spl`) now records the
+  real completion of any flush that carried queued font work
+  (`last_font_flush_{rc,glyphs,fence,waited,fence_destroyed,queue_ns,sync_ns}`
+  on `VulkanBackend`); queueing a new packed batch invalidates the record.
+- New pure `vulkan_font_promote_flushed_batch` (`backend_vulkan_font.spl`)
+  folds that record plus the device readback into the saved
+  `queued-packed-font-batch` evidence; `Engine2D.read_pixels_with_source`
+  applies it after its flush. Promotion is still computed by
+  `_vulkan_font_completion` (needs CPU-oracle parity) — never asserted.
+  Non-queued / empty-batch evidence passes through unchanged (fail-closed).
+- `Engine2D.set_vulkan_font_oracle_mode` exposes the existing backend opt-in
+  so evidence collectors can reach parity; the readback spec opts in and
+  reads evidence after the readback flush.
+- Regression spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_flush_promotion_spec.spl` 3/3.
+
+Native rerun (M4, MoltenVK, Rust seed `release100-7a0e6fe516f-20261031`):
+- `font_empty_batch_fail_closed_spec.spl`: 5/5.
+- `native_gpu_font_readback_spec.spl`: still 5/8, but the Engine2D row moved from
+  `unavailable reason=queued-packed-font-batch fence=0 readback_bytes=0` to
+  `failed reason=single-packed-font-submit fence=<real> readback_bytes=16384`.
+  Probe of the evidence: real fence (waited+destroyed), readback handle matches
+  `read_pixels_with_source`, 135 nonblank pixels, stage identity all present.
+  Remaining blockers to acceptance item 7 (NOT faked):
+  1. device/CPU-oracle pixel parity mismatch on MoltenVK
+     (`device_checksum != oracle_checksum`) — real raster divergence, next to triage.
+  2. `sync_wait_ns == 0`: fence already signalled by `submit_and_wait_fence`,
+     microsecond clock reads 0; `vulkan_font_stage_evidence_ready` requires > 0.
+  Engine3D row unchanged (`public-vulkan-font-install-failed`).
+- `engine2d_font_state_native_probe.spl` exit 70 (`RenderBackend.read_pixels_region`
+  not found): the Simple source is correct — `RenderBackend` declares it as a trait
+  DEFAULT method (`backend.spl:112`); the seed's hybrid-interp dispatch does not
+  resolve trait default methods on impls that don't override. Seed-side gap, not
+  fixed here.
+
+Status: fix-implemented (evidence promotion); open for parity + sync-wait items.
+
+## 2026-11-04 parity triage + sync clock fix (vkfont3 lane)
+
+**Correction to the previous section.** The "device/CPU-oracle pixel mismatch"
+is not a raster divergence (no swizzle/premul/AA/y-flip difference was found).
+Both buffers were dumped per pixel on the oracle path
+(`backend_vulkan_font.spl`, packed single-submit branch) in both modes:
+
+- `simple test` (seed interpreter): `parity=true`, `device_checksum ==
+  oracle_checksum`, but **both frames are all-zero** (`nonblank before=0
+  after=0`, `readback_nonblank_pixels=0`). Cause: the batch atlas cells are
+  `0x00FFFFFF` (alpha 0). `sfnt_render_glyph_into` computes the coverage
+  (`meta[9]=64` for '2') but its `mut pixels: [u8]` writes never reach the
+  caller under the interpreter. Seed defect, filed with a 10-line repro:
+  `seed_interp_mut_u8_array_param_element_write_lost_2026-11-04.md`. The row is
+  `failed` because `readback_nonblank_pixels == 0` fails
+  `vulkan_font_stage_evidence_ready`, not because checksums differ.
+- `simple run` (seed JIT, `set_vulkan_font_oracle_mode(true)`): the GPU frame is
+  correct (135 changed pixels, e.g. `(8,9)=0xFFFFFFFF`, `(6,9)=0x5FFFFFFF`
+  coverage edges) while the CPU oracle stays all-zero: glyph quads are
+  non-empty (`nonzero 64`/`71`), `oracle` is 64x64 with no clip/mask and the
+  scalar blend path, yet `SoftwareBackend.draw_image_blend` leaves `oracle.buf`
+  zero. A standalone `SoftwareBackend` blend of the same shape works under both
+  JIT and interpreter, so this is the seed's hybrid JIT/interp-splice boundary
+  losing writes to the class's array field (same family as the
+  `RenderBackend.read_pixels_region` dispatch gap above), not the Simple source.
+  Not separately root-caused in the Rust seed here.
+
+So the pixel side of acceptance item 7 is blocked on the seed runtime, both
+lanes; the GPU raster itself matches what the CPU oracle produces whenever the
+CPU side actually runs (interpreter: both blank, equal).
+
+**Fixed: `sync_wait_ns == 0`.** The fence-wait measurement in
+`_composite_font_batch_impl` (packed submit) and in
+`_flush_pending_compute_impl` (batched flush record) now uses the existing
+nanosecond monotonic primitive `time_monotonic_ns()`
+(`std.nogc_sync_mut.sffi.time`) instead of `FrameClock.now_micros() * 1000`.
+Measured: `sync_wait_ns` 16,416–21,583 ns (interpreter), 2,625 ns (JIT).
+Honest scope: `vulkan_counted_submit_and_wait_fence` has already blocked, so
+this is the cost of the confirming `vkWaitForFences` on a signalled fence, not
+device execution time.
+
+Native rerun (M4, MoltenVK, seed `release100-7a0e6fe516f-20261031`):
+`native_gpu_font_readback_spec.spl` 5/8 (unchanged; Engine2D row now fails
+only on blank glyphs), `backend_vulkan_font_flush_promotion_spec.spl` 3/3,
+`font_empty_batch_fail_closed_spec.spl` 5/5. Engine3D row
+(`public-vulkan-font-install-failed`) not investigated in this lane.
+
+What turns the Engine2D row green: the interpreter `[u8]` param writeback fix
+(or an admitted self-hosted macOS binary running the spec), then a rerun.
+
+Status: open — sync item fixed; parity item blocked on seed runtime defects.
+
+## 2026-11-04 u8param lane: Engine2D row PASS under `simple test`
+
+Rerun with a seed freshly built from `release/1.0.0` (contains `bafc15f38a7`, the
+`[u8]` mut-param write-back fix; see
+`seed_interp_mut_u8_array_param_element_write_lost_2026-11-04.md`):
+
+- Glyph coverage now reaches the atlas: interpreter probe shows
+  `status=promoted reason=fence-device-identity-readback-proven`,
+  `readback_nonblank_pixels=135`, `device_checksum == oracle_checksum`.
+- **New Simple-side defect found and fixed:** `engine2d_vulkan_font_batch_admits`
+  admitted only `executed`/`recorded`; `_vulkan_font_completion` rewrites a proven
+  batch to `promoted`, so the BEST outcome was rejected and the frame fell back to
+  CPU (`target=cpu`, spec reason `native-vulkan-font-target-not-selected`). It now
+  admits `promoted` (`engine.spl`); covered by
+  `test/01_unit/lib/gpu/engine2d/vulkan_font_batch_admission_spec.spl` (8/8).
+- `native_gpu_font_readback_spec.spl` (interpreter, M4/MoltenVK): still 5/8, but
+  `engine2d_font status=pass reason=`. The 3 failures are the Engine3D row
+  (`public-vulkan-font-install-failed`), the SimpleOS guest capture, and the
+  budgets row — not investigated here.
+
+**`simple run` (JIT) — different root, documented not fixed.** With the fresh
+seed the JIT oracle is no longer blank (`parity=true`, checksums equal) but
+`readback_nonblank_pixels=0`, so `vulkan_font_stage_evidence_ready` fails and the
+status stays `executed` / `single-packed-font-submit`. Cause: in
+`backend_vulkan_font.spl` the oracle is seeded with `oracle.buf = oracle_before`;
+under the seed JIT a class-field array assignment ALIASES the source local
+(interpreter copies), so `draw_image_blend` also mutates `oracle_before` and
+`vulkan_font_changed_pixel_count(oracle_before, after)` counts 0. Minimal repro
+and record: `seed_jit_class_field_array_assign_aliases_local_2026-11-04.md`.
+Not the `[u8]` write-back root.
+
+Status: Engine2D interpreter row green; JIT row blocked on the JIT aliasing defect;
+Engine3D row open.
+
+## 2026-11-04 — Engine3D row root-caused (lane vk3dfont)
+
+Seed built from `origin/release/1.0.0` @ `5920c7c83fc` (`cargo build --release --bin simple`), M4 / MoltenVK.
+
+**The Engine3D adapter itself installs.** Under `simple run` (seed JIT, hybrid) a
+standalone probe of `VulkanRenderBackend3D` + `VulkanFontAdapter3D.create(64, 64)`
+gives `init=true`, HUD pipeline native=5, world pipeline native=8, color=9,
+depth=10, `adapter ready=true`, and `Engine3D.create_with_backend(64,64,"vulkan")`
+reports `backend_name()=vulkan-font` — also after a full Engine2D Vulkan font
+draw + readback + shutdown in the same process.
+
+**Why the spec row fails.** `simple test` runs the spec on the seed
+*interpreter* (the runner says so: "Ran on the interpreter"). There the
+`rt_vulkan_*` family is split across two unrelated sessions:
+- session/compute calls (`rt_vulkan_init`, `rt_vulkan_get_device`, buffers,
+  compute dispatch) go to the interpreter's private ash/dlopen `VK_STATE`
+  (`compiler/src/interpreter_extern/gpu.rs`), which is why Engine2D's
+  compute-based font path passes (device is a raw `VkDevice` pointer, e.g.
+  `44963561496`, not the runtime crate's small handle `2`);
+- graphics calls — `rt_vulkan_create_offscreen_render_pass`,
+  `rt_vulkan_create_font_sampler`, framebuffer/pipeline/draw — are registered
+  to `gpu::rt_vulkan_graphics_unavailable_fn` (constant `0`,
+  `interpreter_extern/mod.rs:2727-2760`).
+So `VulkanRenderBackend3D.init` borrows the interpreter device, gets
+`render_pass_handle=0`, and fails with `vulkan-base-resource-init-failed`.
+Captured in the spec row now:
+`reason=public-vulkan-font-install-failed:vulkan-font-adapter-init-failed:vulkan-base-resource-init-failed`.
+No VkResult is involved — no graphics Vulkan call is ever made on this path.
+
+**Fix landed here (Simple layer, honest diagnostics only):** the adapter now
+carries the backend's `blocker_reason` (`vulkan-font-adapter-init-failed:<step>`),
+`Engine3D.vulkan_font_install_reason()` exposes it, and the system spec reports
+it instead of the generic label. Regression:
+`test/01_unit/lib/gpu/engine3d/vulkan_font_adapter_branch_spec.spl`
+("exposes the adapter install failure reason through Engine3D", 5/5 pass).
+Engine2D/Metal twins unaffected (no shared code touched).
+
+**Remaining blocker (not fixable in this lane):** turning the Engine3D row green
+under `simple test` needs either (a) the self-hosted test runner (not the seed
+interpreter) or (b) a seed-interpreter change that serves the graphics family
+from the same session as `rt_vulkan_init` — today the two sessions own
+different devices, so simply re-pointing graphics rows at the runtime crate
+(`interpreter_extern/vulkan.rs` dispatch) would mix handles. Seed is
+bootstrap-only per policy; recorded, not patched. Under JIT the row would
+additionally hit `seed_jit_class_field_array_assign_aliases_local_2026-11-04.md`
+territory for readback, not re-verified here.
+
+Latency/budget row: fails with "durable performance evidence is missing" — it
+needs a recorded evidence file from a native performance run, not a code fix;
+left as is. SimpleOS row untouched (needs a guest run).
+
+Status: Engine2D interpreter row green; Engine3D row blocker-documented
+(seed interpreter graphics externs stubbed); latency row needs evidence run.
+
+## 2026-11-04 vkrows lane: budgets row + SimpleOS capture row
+
+**Budgets row** (`should meet warm latency, ... budgets`) never measured
+anything. No latency was ever over budget: the durable record
+`build/shared_multilingual_gpu_fonts_perf/evidence.env` was missing, so the row
+reported "evidence unavailable". Its collector
+(`test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl`) could
+not run. Three defects were found and fixed, in order:
+
+1. Collector used the removed `engine.font_renderer = x` field write
+   (`semantic: undefined field 'font_renderer'`). Changed to
+   `engine.install_font_renderer(x)`.
+2. `_layout_feature_variations_valid` (`ot_parser_layout.spl`) rejected shared
+   alternate FeatureTables. OpenType allows sharing them, and fontTools
+   deduplicates them. NotoSansSC's GPOS FeatureVariations points features
+   33–43 at one table and 77–87 at another. As a result the whole GPOS plan
+   was invalid and every Latin/CJK run had `positioning_complete=false`. The
+   validator now checks each distinct alternate once.
+3. The GSUB work budget (`_budget`, `ot_layout_apply.spl`) was capped at
+   65536. Validation plus application of NotoSansDevanagari's 53 default
+   lookups ran it down to 36 on a 6-glyph run, and a Context format-3
+   coverage check then failed, so Devanagari was reported incomplete. The cap
+   now matches the GPOS twin `gpos_data_budget` (1048576).
+
+After these fixes, multi-face shaping succeeds for all witnesses.
+**Remaining blocker (budgets row):** the collector now stops at
+`semantic: unknown extern function: rt_font_glyph_bitmap_index`. That extern
+is backed only by the C runtime (`src/runtime/runtime_font.c`), not by the
+Rust-seed interpreter. So the evidence can only be produced by an admitted
+self-hosted macOS binary, or after a seed extern registration is added. No
+budget numbers exist yet. The budgets were not changed.
+
+**SimpleOS guest-capture row:** this row needs retained
+`build/simpleos_wm_fullscreen_evidence/evidence.env` from
+`scripts/check/check-simpleos-wm-fullscreen-evidence.shs`. It was not run in
+this lane because the shared host's bootstrap lane (boot2) was still
+`BOOTSTRAP RUNNING`, and landing was halted by the coordinator. The open
+question is whether the pinned `FONT_REGION_RGB_SHA256` was captured on
+x86_64 OVMF. If so, an aarch64 AAVMF lane may not reproduce it, and that must
+be checked before any run.
+
+Status: open. The shaper and collector defects are fixed (local branch
+`work/bug-vkrows-20261104`). The budgets row is blocked on the
+interpreter extern gap. The SimpleOS row has not been run.

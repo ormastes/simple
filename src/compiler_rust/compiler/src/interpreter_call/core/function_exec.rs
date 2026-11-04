@@ -1609,6 +1609,9 @@ fn write_back_mutable_arguments(
     // diagnostic and exit code 0. Track the mutated names and never let a
     // non-`mut` parameter clobber one.
     let mut mut_written: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Same rule for `obj.field` arguments: `f(h.items, h.items)` against
+    // `fn f(mut a, b)` must not let `b`'s stale snapshot revert `a`'s write.
+    let mut mut_field_written: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for arg in args {
         // A spread can bind multiple parameters, so later positional arguments
         // cannot be reconstructed safely without binder provenance. Named
@@ -1694,7 +1697,10 @@ fn write_back_mutable_arguments(
                     .unwrap_or(false);
                 // Aliased argument: a non-`mut` parameter must never overwrite a
                 // caller binding that a `mut` parameter has already updated.
-                if !param_is_mut && mut_written.contains(&caller_name) {
+                if !param_is_mut
+                    && (mut_written.contains(&caller_name)
+                        || mut_field_written.iter().any(|(o, _)| *o == caller_name))
+                {
                     continue;
                 }
                 if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
@@ -1723,7 +1729,13 @@ fn write_back_mutable_arguments(
                         if param_is_mut {
                             mut_written.insert(caller_name.clone());
                         }
-                        outer_env.insert(caller_name, new_val);
+                        outer_env.insert(caller_name.clone(), new_val);
+                        // A module-level `var` passed from module scope: reads
+                        // resolve through the module-global stores, so the
+                        // frame insert alone is invisible to the caller.
+                        if !outer_env.is_local(&caller_name) {
+                            crate::interpreter::place::sync_module_global(outer_env, &caller_name);
+                        }
                     } else if !param_is_mut && is_value_type_struct(callee_val, classes) {
                         // Value-type struct: fields stay value-copied, but its
                         // container-valued fields are shared handles. See
@@ -1757,6 +1769,17 @@ fn write_back_mutable_arguments(
                 // Write back mutated field value into the caller's object.
                 // e.g., `write_first(self.values, next)` — after the call,
                 // write the callee's `values` param back into `self.values`.
+                let field_param_is_mut = params_to_bind
+                    .iter()
+                    .find(|p| p.name == param_name)
+                    .map(|p| p.mutability.is_mutable())
+                    .unwrap_or(false);
+                if !field_param_is_mut
+                    && (mut_field_written.contains(&(obj_name.clone(), field_name.clone()))
+                        || mut_written.contains(&obj_name))
+                {
+                    continue;
+                }
                 if let Some(callee_val) = local_env.get(&param_name).cloned() {
                     // Value-type structs (task #91) keep VALUE semantics: a
                     // struct passed as `obj.field` is not mutated back either.
@@ -1785,8 +1808,14 @@ fn write_back_mutable_arguments(
                                             );
                                         }
                                     }
+                                    if field_param_is_mut {
+                                        mut_field_written.insert((obj_name.clone(), field_name.clone()));
+                                    }
                                     Arc::make_mut(&mut fields).insert(field_name, callee_val);
-                                    outer_env.insert(obj_name, Value::Object { class, fields });
+                                    outer_env.insert(obj_name.clone(), Value::Object { class, fields });
+                                    if !outer_env.is_local(&obj_name) {
+                                        crate::interpreter::place::sync_module_global(outer_env, &obj_name);
+                                    }
                                 }
                                 // Reference-semantics class: write the field
                                 // into the shared cell; every handle sees it.

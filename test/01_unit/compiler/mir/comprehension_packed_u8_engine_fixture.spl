@@ -1,0 +1,45 @@
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+# Lowers `source` through parse -> HIR -> MIR and returns the number of
+# diagnostics plus how many rt_bytes_u8_at raw reads were emitted.
+fn comprehension_packed_case(source: text) -> [i64]:
+    val filename = "comprehension_packed_control.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var raw_reads = 0
+    var tagged_reads = 0
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str("rt_bytes_u8_at"), _):
+                                raw_reads = raw_reads + 1
+                            case MirOperandKind.Const(MirConstValue.Str("rt_array_get"), _):
+                                tagged_reads = tagged_reads + 1
+                            case _: ()
+                    case _: ()
+    [hir_lowering.errors.len() + lowering.errors.len(), raw_reads, tagged_reads]
+
+fn comprehension_packed_u8_controls() -> text:
+    val widen = comprehension_packed_case("fn widen(bytes: [u8]) -> [i64]:\n    [value as i64 for value in bytes]\n")
+    if widen[0] != 0: return "comprehension over [u8] still rejected"
+    if widen[1] != 1: return "comprehension over [u8] must read raw bytes via rt_bytes_u8_at"
+    if widen[2] != 0: return "comprehension over [u8] must not use tagged rt_array_get"
+    val filtered = comprehension_packed_case("fn keep(bytes: [u8]) -> [i64]:\n    [value as i64 for value in bytes if value > 9]\n")
+    if filtered[0] != 0: return "filtered comprehension over [u8] still rejected"
+    if filtered[1] != 1: return "filtered comprehension must read raw bytes"
+    val unpacked = comprehension_packed_case("fn plain(values: [i64]) -> [i64]:\n    [value + 1 for value in values]\n")
+    if unpacked[0] != 0: return "i64 comprehension regressed"
+    if unpacked[1] != 0: return "i64 comprehension must not read raw bytes"
+    if unpacked[2] != 1: return "i64 comprehension must keep tagged rt_array_get"
+    ""

@@ -17,6 +17,7 @@ and hardens those owners; it does not add another runtime.
   payload lifetime, a sleeping executor, or the whole compiler.
 - Native and future pure-Simple backends share interfaces/conformance;
   backend addresses and native value layouts remain private.
+- Concurrency is lockless by default: [concurrency architecture](concurrency/concurrency_architecture_tldr.md).
 - [Collection capabilities](../compiler/collection_backend_capabilities.md)
   keep DataFrame/layout/profile selection consistent with the same resource
   contracts; static/no-capture/unsupported switching stays explicit.

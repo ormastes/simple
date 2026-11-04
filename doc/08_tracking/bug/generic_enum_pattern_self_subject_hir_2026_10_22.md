@@ -50,3 +50,16 @@ the existing code path already performs.
 
 ## 2026-11-04 triage (libbug-async)
 Compiler-root (self-hosted HIR, expression_components.spl). Workaround in poll.spl/future.spl is still required: no self-hosted stage3 is available here to show the HIR now accepts self/field subjects, and the seed accepts both shapes so it cannot prove removal. Keep until the HIR fix lands.
+
+## 2026-11-04 workarounds retired
+
+Root fix is the `own_params_only` branch of `lower_declared_enum_pattern`
+(e7b5c93ba65, same series as hir_generic_enum_self_match_2026-10-23). Proven on
+the self-hosted HIR via `test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl`,
+which lowers `poll.spl`, `future.spl` (with poll.spl as prelude so `Poll`
+resolves) and both failsafe cores from disk and asserts zero
+`generic enum pattern` / lost-binder diagnostics; knockout reproduces the
+original poll.spl error. `poll.spl` `is_ready`/`is_pending` and `future.spl`
+`complete`/`map`/`then` now match `self` / `self.poll_result` directly;
+`poll_is_ready` is kept as a thin helper for `poll_rti007_wa_spec`, and
+`poll_unwrap` stays for rti007_any_return_rows_2026-11-01.

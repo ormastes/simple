@@ -21,3 +21,12 @@ Validation cycle 2: after replacing factories with concrete constructors, the ex
 Native validation of candidate `93d2d24fc570c1ffb2b5fe1bf938b64a59357703`: all 238 modules passed MIR and native compilation, and the fixed P2 produced a regular ARM64 Mach-O relocatable object (3,702,552 bytes, SHA256 `73f1ae5d2d725deb55f7494c309242779ceb2bb1bf486db3d0cdd4a8ea925c1b`). The coordinator nevertheless returned 1 after the worker returned 0 and emitted the exact artifact-publication receipt. The original build failure and object-validation failure remain preserved; the coordinator cause is unresolved, and this is not a normal compiler-command PASS.
 
 A separately reviewed manual system link used that exact aggregate, 39 retained runtime objects, and a canonical entry shim with all 47 aggregate initialization functions. Only the entry shim was compiled. Shim, link, and native fixture execution each returned 0; output exactly matched `TLDR future binding: PASS`. The executable SHA256 is `d1beda863bbf0ca52bb19f34ca173ac7dc329949a611794b0d6a0249946d9ce1`. All input boundaries matched, and each enforced 3 GiB guard finished quiescent with zero observer errors. Evidence: `/Users/ormastes/wt/release-phase2-review/build/verify/tldr-future-manual-system-link-20261025-01/`. This establishes native behavior for the source workaround, not canonical Simple linker qualification or repair of generic inference itself.
+
+## c28-w2 triage 2026-11-04: deferred
+
+Reproduces only under native MIR lowering of `Future<T>` static factories in
+stage3 (error carries no expression span); no pure-Simple source root cause is
+visible without a native module trace. Concrete-constructor workaround kept.
+Next step: with a stage3 build, bisect the factory module with
+`SIMPLE_MIR_TRACE` per expression to find the T-typed expression, then fix
+static-method owner substitution in 50.mir. Status left open.

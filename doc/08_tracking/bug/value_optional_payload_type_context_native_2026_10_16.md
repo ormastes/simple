@@ -19,3 +19,14 @@ This source belongs to the same bounded constructor feature; do not reset the
 three-cycle budget or infer a successful full compiler from a small probe.
 
 The original some/none/ok/err methods now delegate those typed fields to genuine top-level option/result factories beside the same declaration. The probe calls these actual functions with Some/nil combinations, not imported static methods or a mirrored constructor. Payload presence and contained Value are checked; all controls remain UNRUN.
+
+## Verification pending (n88_b, 2026-11-04)
+
+Source repair/workaround is pinned by `bin/simple.exe test test/01_unit/compiler/80.driver/n88b_native_workaround_shapes_spec.spl` (8/8 pass on the seed).
+Native repro fixture: `test/fixtures/compiler/n88b_native_producer_idioms_native.spl` (+ `.expected`); covers the SOME_ line (typed optional payload). Source now lives in src/compiler/00.common/runtime_value_v1.spl (moved from backend_types.spl:233).
+
+Stage3 repro (expected: no diff output, exit 0; then remove the matching `@workaround` tags):
+
+```
+bin/simple native-build --entry test/fixtures/compiler/n88b_native_producer_idioms_native.spl -o build/n88b_idioms.exe && build/n88b_idioms.exe | diff - test/fixtures/compiler/n88b_native_producer_idioms_native.spl.expected
+```

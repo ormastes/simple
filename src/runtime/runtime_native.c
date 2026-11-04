@@ -16568,6 +16568,7 @@ int32_t rt_file_open(const uint8_t* path_ptr, uint64_t path_len, int32_t mode) {
         case 0: fd = _open(path, _O_RDONLY | _O_BINARY); break;
         case 1: fd = _open(path, _O_RDWR | _O_BINARY); break;
         case 2: fd = _open(path, _O_WRONLY | _O_BINARY); break;
+        case 3: fd = _open(path, _O_RDWR | _O_CREAT | _O_BINARY, 0666); break;
         default: fd = -1; break;
     }
 #else
@@ -16575,6 +16576,7 @@ int32_t rt_file_open(const uint8_t* path_ptr, uint64_t path_len, int32_t mode) {
         case 0: fd = open(path, O_RDONLY); break;
         case 1: fd = open(path, O_RDWR); break;
         case 2: fd = open(path, O_WRONLY); break;
+        case 3: fd = open(path, O_RDWR | O_CREAT, 0666); break;
         default: fd = -1; break;
     }
 #endif

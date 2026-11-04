@@ -1,0 +1,97 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_text}
+use compiler.hir.target_hir.hir_freeze.{hir_snapshot_freeze}
+use compiler.hir.target_hir.target_hir_region_slot.{RegionSlotTable, RegionClaim, region_slot_key}
+
+fn fixture(name: text) -> HirModule:
+    HirModule(name: name, path: "a.spl", imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn claim_gen(c: RegionClaim) -> i64:
+    match c:
+        case RegionClaim.Producer(g):
+            return g
+        case _:
+            return -1
+
+fn is_awaiter(c: RegionClaim) -> bool:
+    match c:
+        case RegionClaim.Awaiter(_):
+            return true
+        case _:
+            return false
+
+describe "TargetHIR region slots (P5)":
+    it "keys slots by snapshot, target and region":
+        expect(region_slot_key("hir:m@d#0", "x86_64", "fn:main")).to_equal("thir-slot:hir:m@d#0|x86_64|fn:main")
+        expect(region_slot_key("s", "a", "r") == region_slot_key("s", "b", "r")).to_be(false)
+
+    it "THIR-09: 3000 same-key claims yield exactly one producer and one shared result":
+        var t = RegionSlotTable.new()
+        val key = region_slot_key("hir:m@d#0", "x86_64", "fn:main")
+        var producers = 0
+        var awaiters = 0
+        var gen = -1
+        for i in 0..3000:
+            val c = t.claim(key, "w" + i.to_string())
+            if claim_gen(c) > 0:
+                producers = producers + 1
+                gen = claim_gen(c)
+            elif is_awaiter(c):
+                awaiters = awaiters + 1
+        expect(producers).to_equal(1)
+        expect(awaiters).to_equal(2999)
+        expect(t.await_slot(key, gen).unwrap_err()).to_equal("pending")
+        expect(t.publish(key, "w0", gen, "region-bytes").is_ok()).to_be(true)
+        expect(t.await_slot(key, gen).unwrap()).to_equal("region-bytes")
+        match t.claim(key, "late"):
+            case RegionClaim.Done(v):
+                expect(v).to_equal("region-bytes")
+            case _:
+                expect("not done").to_equal("done")
+
+    it "THIR-10: rejects double publish, non-owner publish and stale generation":
+        var t = RegionSlotTable.new()
+        val key = region_slot_key("s", "t", "r")
+        val g1 = claim_gen(t.claim(key, "a"))
+        expect(t.publish(key, "b", g1, "x").is_err()).to_be(true)
+        expect(t.cancel(key, "a", g1, "boom").unwrap()).to_be(true)
+        expect(t.await_slot(key, g1).unwrap_err()).to_equal("region_slot_failed: boom")
+        val g2 = claim_gen(t.claim(key, "b"))
+        expect(g2).to_equal(g1 + 1)
+        expect(t.publish(key, "a", g1, "stale").is_err()).to_be(true)
+        expect(t.await_slot(key, g1).unwrap_err()).to_start_with("region_slot_stale_generation:")
+        expect(t.publish(key, "b", g2, "fresh").unwrap()).to_equal("fresh")
+        expect(t.publish(key, "b", g2, "again").is_err()).to_be(true)
+        expect(t.cancel(key, "b", g2, "late").is_err()).to_be(true)
+        expect(t.await_slot(key, g2).unwrap()).to_equal("fresh")
+
+    it "IHIR-03: readers of one snapshot share one pinned decode":
+        var t = RegionSlotTable.new()
+        val snap = hir_snapshot_freeze(fixture("app.main"), 0).unwrap()
+        val a = t.pin(snap).unwrap()
+        val b = t.pin(snap).unwrap()
+        expect(a.name).to_equal("app.main")
+        expect(b.path).to_equal(a.path)
+        expect(t.decode_count).to_equal(1)
+        expect(t.pin_count(hir_snapshot_id_text(snap.id))).to_equal(2)
+
+    it "IHIR-06: pin keeps the decode alive until the last holder unpins":
+        var t = RegionSlotTable.new()
+        val snap = hir_snapshot_freeze(fixture("app.lib"), 3).unwrap()
+        val sid = hir_snapshot_id_text(snap.id)
+        t.pin(snap)
+        t.pin(snap)
+        expect(t.unpin(sid)).to_equal(1)
+        expect(t.pin(snap).unwrap().name).to_equal("app.lib")
+        expect(t.decode_count).to_equal(1)
+        t.unpin(sid)
+        expect(t.unpin(sid)).to_equal(0)
+        expect(t.pin_count(sid)).to_equal(0)
+        t.pin(snap)
+        expect(t.decode_count).to_equal(2)

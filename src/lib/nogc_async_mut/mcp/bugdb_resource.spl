@@ -10,7 +10,7 @@ use std.nogc_async_mut.mcp.resource_utils.{
     extract_json_string, extract_json_int, extract_json_array,
     current_timestamp, error_json, success_json, items_to_json
 }
-use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists as file_exists_backend}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists as file_exists_backend, file_size, file_modified_time}
 
 fn file_exists(path: text) -> bool:
     file_exists_backend(path)
@@ -132,10 +132,26 @@ fn parse_sdn_row_fields(line: text) -> [text]:
     fields.push(current.trim())
     fields
 
-fn load_bugs_for_read(db_path: text) -> Result<[Bug], text>:
-    if not file_exists(db_path):
-        return Err("Database not found: {db_path}")
+# Process-level parsed-DB cache keyed on (path, size, mtime). The bug DB is
+# multi-MB; without this every bugdb_get re-read and re-parsed all of it.
+# Writes made through this module invalidate the entry; foreign writes are
+# caught by the size/mtime key. mtime 0 means "unavailable" and is never cached.
+var _BUGDB_CACHE_VALID: bool = false
+var _BUGDB_CACHE_PATH: text = ""
+var _BUGDB_CACHE_SIZE: i64 = 0
+var _BUGDB_CACHE_MTIME: i64 = 0
+var _BUGDB_CACHE_BUGS: [Bug] = []
+var _BUGDB_PARSE_COUNT: i64 = 0
 
+fn bugdb_cache_invalidate():
+    _BUGDB_CACHE_VALID = false
+    _BUGDB_CACHE_BUGS = []
+
+fn bugdb_cache_parse_count() -> i64:
+    _BUGDB_PARSE_COUNT
+
+fn parse_bugs_uncached(db_path: text) -> Result<[Bug], text>:
+    _BUGDB_PARSE_COUNT = _BUGDB_PARSE_COUNT + 1
     val content = file_read(db_path)
     if content == "":
         return Ok([])
@@ -149,6 +165,33 @@ fn load_bugs_for_read(db_path: text) -> Result<[Bug], text>:
             Ok(bugdb.all_bugs())
         nil:
             Ok([])
+
+fn load_bugs_for_read(db_path: text) -> Result<[Bug], text>:
+    if not file_exists(db_path):
+        bugdb_cache_invalidate()
+        return Err("Database not found: {db_path}")
+
+    # Stamp taken BEFORE the read so a concurrent write can only make the
+    # cached entry look older than the data (a later miss), never newer.
+    val size = file_size(db_path)
+    val mtime = file_modified_time(db_path)
+    if _BUGDB_CACHE_VALID and _BUGDB_CACHE_PATH == db_path and _BUGDB_CACHE_SIZE == size and _BUGDB_CACHE_MTIME == mtime:
+        return Ok(_BUGDB_CACHE_BUGS)
+
+    val parsed = parse_bugs_uncached(db_path)
+    match parsed:
+        Ok(bugs):
+            if mtime != 0:
+                _BUGDB_CACHE_PATH = db_path
+                _BUGDB_CACHE_SIZE = size
+                _BUGDB_CACHE_MTIME = mtime
+                _BUGDB_CACHE_BUGS = bugs
+                _BUGDB_CACHE_VALID = true
+            else:
+                bugdb_cache_invalidate()
+        Err(_):
+            bugdb_cache_invalidate()
+    parsed
 
 fn open_or_create_bug_database(db_path: text) -> BugDatabase:
     if file_exists(db_path):
@@ -267,6 +310,7 @@ fn add_bug_from_json(db_path: text, json: String) -> String:
         return error_json("Failed to add bug")
 
     val saved = bugdb.save()
+    bugdb_cache_invalidate()
     if not saved:
         return error_json("Failed to save database")
 
@@ -309,6 +353,7 @@ fn update_bug_from_json(db_path: text, bug_id: text, json: String) -> String:
         return error_json("Failed to update bug")
 
     val saved = bugdb.save()
+    bugdb_cache_invalidate()
     if not saved:
         return error_json("Failed to save database")
 

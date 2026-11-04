@@ -38,6 +38,28 @@ use crate::hir::{HirExpr, HirExprKind, HirFunction, HirStmt, HirType, TypeId, Ty
 pub(crate) struct ArrayMoveSites {
     /// Locals whose single array `Let` from a place may move its source.
     pub let_locals: HashSet<usize>,
+    /// `var` array locals whose every `obj.f = o` field store is proven
+    /// dead after the store: the field takes the buffer over with no
+    /// `rt_array_copy` (bug seed_jit_field_store_array_copy_never_freed_2026-11-04).
+    pub field_store_locals: HashSet<usize>,
+    /// Struct/class locals whose array-typed fields only ever hold a buffer
+    /// no other binding can reach: `st.f = v` may `rt_array_free` the
+    /// replaced buffer (bug seed_jit_array_copy_never_freed_2026-10-19).
+    /// See `Analysis::release_bad` for the proof obligations.
+    pub field_release_structs: HashSet<usize>,
+}
+
+/// `obj.f = Local(o)` field store of an array value: the hand-over candidate.
+fn field_store_source(a: &Analysis<'_>, target: &HirExpr, value: &HirExpr) -> Option<usize> {
+    match (&target.kind, &value.kind) {
+        (HirExprKind::FieldAccess { .. }, HirExprKind::Local(o))
+            if (a.is_array(value.ty) || a.is_array(a.local_ty(*o)) || a.is_array(target.ty))
+                && a.handed_over.contains(o) =>
+        {
+            Some(*o)
+        }
+        _ => None,
+    }
 }
 
 /// True when a struct-literal array argument hands the struct a buffer no
@@ -98,11 +120,24 @@ struct Analysis<'a> {
     disqualified: HashSet<usize>,
     let_counts: HashMap<usize, usize>,
     struct_arg_counts: HashMap<usize, usize>,
+    /// Field-store hand-over uses per local; also counted in
+    /// `struct_arg_counts` so the fixpoint requires each to be proven.
+    field_store_counts: HashMap<usize, usize>,
     /// Locals mentioned anywhere inside a lambda/generator/future/actor body.
     closure_locals: HashSet<usize>,
     /// `var` locals assumed handed over at their struct-literal uses this
     /// round (see the fixpoint in `compute_array_move_sites`).
     handed_over: HashSet<usize>,
+    /// Locals that may NOT release replaced array-field buffers. A struct
+    /// local qualifies only when (1) every write to it is a struct literal
+    /// giving each array-typed field a private buffer (fresh literal or a
+    /// handed-over `var`), (2) every store to one of its array fields is a
+    /// fresh literal, a handed-over local, or a place (which lowering copies),
+    /// and (3) it and its non-primitive fields are never read in a context
+    /// that can create a second holder (call/struct argument, plain assign,
+    /// method receiver, capture, ...). Under those rules the field's buffer is
+    /// reachable from the field alone, so freeing it on overwrite is exact.
+    release_bad: HashSet<usize>,
     poisoned: bool,
 }
 
@@ -130,8 +165,10 @@ pub(crate) fn compute_array_move_sites(
             disqualified: HashSet::new(),
             let_counts: HashMap::new(),
             struct_arg_counts: HashMap::new(),
+            field_store_counts: HashMap::new(),
             closure_locals: HashSet::new(),
             handed_over: handed_over.clone(),
+            release_bad: HashSet::new(),
             poisoned: false,
         };
         // The body's trailing expression statement is the implicit return value.
@@ -157,6 +194,15 @@ pub(crate) fn compute_array_move_sites(
             .map(|(o, _)| *o)
             .collect();
         if not_moved.is_empty() {
+            sites.field_store_locals = a.field_store_counts.keys().copied().collect();
+            sites.field_release_structs = (a.nparams..a.local_tys.len())
+                .filter(|idx| {
+                    !a.release_bad.contains(idx)
+                        && !a.closure_locals.contains(idx)
+                        && a.let_counts.get(idx).is_some_and(|n| *n >= 1)
+                        && a.release_struct_fields(a.local_ty(*idx)).is_some()
+                })
+                .collect();
             return sites;
         }
         for o in not_moved {
@@ -250,6 +296,54 @@ impl<'a> Analysis<'a> {
 
     fn disqualify(&mut self, idx: usize) {
         self.disqualified.insert(idx);
+        self.release_bad.insert(idx);
+    }
+
+    /// Disqualify `idx` as a move source only; field release has its own
+    /// write rules (`release_write_ok`, `release_field_store_ok`).
+    fn disqualify_move_only(&mut self, idx: usize) {
+        self.disqualified.insert(idx);
+    }
+
+    /// Declared fields of a concrete (non-generic) struct/class type.
+    fn release_struct_fields(&self, ty: TypeId) -> Option<&'a [(String, TypeId)]> {
+        match self.registry.get(ty) {
+            Some(HirType::Struct {
+                fields,
+                is_generic_template: false,
+                ..
+            }) => Some(fields.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Rule (1): a write to a field-release candidate must be a full struct
+    /// literal of its own type whose array-typed fields all get private buffers.
+    fn release_write_ok(&self, idx: usize, value: Option<&HirExpr>) -> bool {
+        let Some(value) = value else { return false };
+        let Some(decl) = self.release_struct_fields(self.local_ty(idx)) else {
+            return false;
+        };
+        match &value.kind {
+            HirExprKind::StructInit { ty, fields } => {
+                *ty == self.local_ty(idx)
+                    && !self.has_inject_ctor(*ty)
+                    && fields.len() == decl.len()
+                    && fields.iter().zip(decl).all(|(f, (_, fty))| {
+                        !self.is_array(*fty) || struct_arg_gets_private_buffer(&f.kind, true, &self.handed_over)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Rule (2): what an `st.f = value` store into an array-typed field may be.
+    fn release_field_store_ok(&self, target: &HirExpr, value: &HirExpr) -> bool {
+        matches!(
+            value.kind,
+            HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. } | HirExprKind::VecLiteral(_)
+        ) || field_store_source(self, target, value).is_some()
+            || is_place(&value.kind)
     }
 
     fn owned(&self, idx: usize) -> bool {
@@ -299,9 +393,12 @@ impl<'a> Analysis<'a> {
         match stmt {
             HirStmt::Let { local_index, value, .. } => {
                 *self.let_counts.entry(*local_index).or_insert(0) += 1;
+                if !self.release_write_ok(*local_index, value.as_ref()) {
+                    self.release_bad.insert(*local_index);
+                }
                 if let Some(value) = value {
                     if !self.write_keeps_unique(*local_index, value, true) {
-                        self.disqualify(*local_index);
+                        self.disqualify_move_only(*local_index);
                     }
                     let array_place = is_place(&value.kind) && self.let_is_array(*local_index, value);
                     self.scan_expr(value, if array_place { Ctx::PlaceInit } else { Ctx::Bare });
@@ -310,15 +407,22 @@ impl<'a> Analysis<'a> {
             HirStmt::Assign { target, value } => {
                 match &target.kind {
                     HirExprKind::Local(idx) => {
+                        if !self.release_write_ok(*idx, Some(value)) {
+                            self.release_bad.insert(*idx);
+                        }
                         if !self.write_keeps_unique(*idx, value, false) {
-                            self.disqualify(*idx);
+                            self.disqualify_move_only(*idx);
                         }
                     }
                     HirExprKind::FieldAccess { receiver, .. } => {
                         // `s.f = arr` makes `s.f` share `arr`'s buffer.
                         if !is_primitive(value.ty) {
                             if let Some(root) = root_local(receiver) {
-                                self.disqualify(root);
+                                self.disqualify_move_only(root);
+                                let direct = matches!(receiver.kind, HirExprKind::Local(r) if r == root);
+                                if direct && self.is_array(target.ty) && !self.release_field_store_ok(target, value) {
+                                    self.release_bad.insert(root);
+                                }
                             }
                         }
                         self.scan_expr(receiver, Ctx::ProjectionBase);
@@ -329,7 +433,13 @@ impl<'a> Analysis<'a> {
                     }
                     _ => self.scan_expr(target, Ctx::Bare),
                 }
-                self.scan_expr(value, Ctx::Bare);
+                if let Some(o) = field_store_source(self, target, value) {
+                    *self.struct_arg_counts.entry(o).or_insert(0) += 1;
+                    *self.field_store_counts.entry(o).or_insert(0) += 1;
+                    self.scan_expr(value, Ctx::StructArg);
+                } else {
+                    self.scan_expr(value, Ctx::Bare);
+                }
             }
             HirStmt::Expr(e) => self.scan_expr(e, Ctx::Stmt),
             HirStmt::Return(Some(e)) => self.scan_expr(e, Ctx::Return),
@@ -521,6 +631,11 @@ impl<'a> Analysis<'a> {
             ) {
                 for e in stmt_direct_exprs(stmt) {
                     struct_arg_locals(self, e, &mut args);
+                }
+                if let HirStmt::Assign { target, value } = stmt {
+                    if let Some(o) = field_store_source(self, target, value) {
+                        args.push(o);
+                    }
                 }
             }
             // A `return` ends the frame, so nothing after it can observe `o`.

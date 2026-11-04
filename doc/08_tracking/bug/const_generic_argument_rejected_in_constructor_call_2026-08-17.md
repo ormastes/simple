@@ -174,3 +174,14 @@ and deployed; Layer 2 (const generics themselves) is a deliberate,
 documented design decision not to implement, not an open defect. No action
 needed; correctly diagnosed already.
 
+
+## CLOSED 2026-11-04 (c28-w1) — fixed per recorded design decision (option b)
+
+- Spec oracle already rewritten against `Tensor(...)` with inferred generics:
+  `test/01_unit/lib/nogc_sync_mut/array_builder_tensor_spec.spl` (moved from `.../src/`)
+  runs 2/2 PASS on seed 0b2c3d015b7 (9.6 s). The "stays RED" note above is obsolete.
+- Diagnostic deployed: `Box2<i64, 2>(v: 7)` now fails with "expected a type in generic
+  argument position (Simple has no const generic parameters ...)", no stale comma error.
+- The two subprocess-driven parser specs shell out to `bin/simple`, which does not exist
+  in a sparse worktree (fail only there, "bin/simple: No such file"); not a product bug.
+- Const generic parameters remain unimplemented by design (rank is runtime `_shape.len()`).

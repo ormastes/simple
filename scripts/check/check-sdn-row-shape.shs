@@ -1,0 +1,96 @@
+#!/bin/sh
+# check-sdn-row-shape.shs — every row of a table-style SDN file (bug_db.sdn) must
+# have the header's column count and exactly ONE row terminator.
+#
+# WHY: PR #6633 landed bug_db.sdn rows FUSED (two versions of one row spliced into
+# one line, the id repeated 8 times). The CRC seal cannot see that: the seal is
+# computed over whatever bytes are there. Checks per row line (4-space indent):
+#   1. (column counts are NOT checked: unquoted commas in titles pre-exist; fusion is caught by 2 and 3)
+#   2. the dated tables (`bugs`, `bugs_active`) contain at most one
+#      `, <date>, <date>, true|false` terminator and the line ENDS with it;
+#   3. the row's leading id does not reappear as `, <id>, ` glued later in the line.
+# Verdict is the last stdout line: PASS — <n> row(s) checked / FAIL — ... / ERROR — ...
+# Usage: sh scripts/check/check-sdn-row-shape.shs [--selftest] [file.sdn]
+#        (default doc/08_tracking/bug/bug_db.sdn)
+set -u
+
+scan() {
+    awk '
+    function fail(msg) { bad++; if (bad <= 10) print "  line " NR ": " msg }
+    /^[a-z_]+ \|.*\|$/ {
+        t = $1; hdr = $0; sub(/^[^|]*\|/, "", hdr); sub(/\|$/, "", hdr)
+        ncol[t] = gsub(/,/, ",", hdr) + 1; cur = t; next
+    }
+    /^    / && cur != "" {
+        n++
+        s = $0; q = 0; c = 1
+        for (i = 1; i <= length(s); i++) {
+            ch = substr(s, i, 1)
+            if (ch == "\"") q = !q
+            else if (ch == "," && !q) c++
+        }
+        id = $0; sub(/^    /, "", id); sub(/,.*/, "", id)
+        if (cur == "bugs" || cur == "bugs_active") {
+            t2 = $0; k = gsub(/, [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9], [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9], (true|false)/, "&", t2)
+            if (k > 1) fail(cur " row " id ": " k " row terminators (fused row)")
+            else if (k == 1 && $0 !~ /, (true|false)$/) fail(cur " row " id ": text after row terminator (fused row)")
+        }
+        rest = substr($0, length(id) + 6)
+        if (index(rest, ", " id ", ") > 0 || index(rest, "    " id ", ") > 0) fail(cur " row " id ": id repeated inside the row (fused row)")
+    }
+    END {
+        if (n == 0) { print "ERROR — nothing was checked (no table rows)"; exit 2 }
+        if (bad > 0) { print "FAIL — " n " row(s) checked, " bad " malformed"; exit 1 }
+        print "PASS — " n " row(s) checked, 0 malformed"; exit 0
+    }' "$1"
+}
+
+selftest() {
+    d=$(mktemp -d) || return 1
+    good='    a_1, P2, open, "t", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true'
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n%s\n' "$good" > "$d/ok.sdn"
+    fused="    a_1, P2, fix, \"t\", src    a_1, P2, open, \"t\", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, truecompiler    a_1, P2, open, \"t\", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n%s\n' "$fused" > "$d/fused.sdn"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    a_1, P2, open, "t", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true, extra\n' > "$d/wide.sdn"
+    : > "$d/empty.sdn"
+    scan "$d/ok.sdn" >/dev/null; r1=$?
+    scan "$d/fused.sdn" >/dev/null; r2=$?
+    scan "$d/wide.sdn" >/dev/null; r3=$?
+    scan "$d/empty.sdn" >/dev/null; r4=$?
+    rm -rf "$d"
+    if [ "$r1" = 0 ] && [ "$r2" = 1 ] && [ "$r3" = 1 ] && [ "$r4" = 2 ]; then return 0; fi
+    echo "selftest FAILED: ok=$r1 fused=$r2 wide=$r3 empty=$r4" >&2; return 1
+}
+
+FILE=doc/08_tracking/bug/bug_db.sdn
+RUN_SELFTEST_ONLY=0
+RANGE=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) RUN_SELFTEST_ONLY=1 ;;
+        --range) RANGE=${2:-}; shift ;;
+        *) FILE=$1 ;;
+    esac
+    shift
+done
+if [ "$RANGE" != "" ]; then
+    selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+    case "$RANGE" in *..*) ;; *) echo "ERROR — nothing was checked (--range needs <base>..<head>)"; exit 2 ;; esac
+    head=${RANGE#*..}
+    files=$(git diff --name-only --diff-filter=AM "$RANGE" -- '*.sdn') || { echo "ERROR — nothing was checked (git diff failed)"; exit 2; }
+    tmp=$(mktemp) || exit 2; checked=0; failed=""
+    for p in $files; do
+        git show "$head:$p" > "$tmp" 2>/dev/null || continue
+        out=$(scan "$tmp"); rc=$?
+        [ "$rc" = 2 ] && continue
+        checked=$((checked + 1))
+        if [ "$rc" != 0 ]; then failed="$failed $p"; printf '%s\n' "$out" | sed 's/^/  /'; fi
+    done
+    rm -f "$tmp"
+    if [ -n "$failed" ]; then echo "FAIL — $checked touched table .sdn file(s) checked, malformed:$failed"; exit 1; fi
+    echo "PASS — $checked touched table .sdn file(s) checked at $head, 0 malformed"; exit 0
+fi
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+if [ "$RUN_SELFTEST_ONLY" = 1 ]; then echo "PASS — selftest 4 fixtures"; exit 0; fi
+[ -f "$FILE" ] || { echo "ERROR — nothing was checked ($FILE missing)"; exit 2; }
+scan "$FILE"

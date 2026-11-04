@@ -237,3 +237,7 @@ re-routing to an architecture decision (ADR) rather than the bug queue.
 Reconfirmed: this is an audit-window record (structure/architecture rule
 compliance over a specific commit range on origin/main), not a single
 fixable defect. Left as-is, no code change attempted.
+
+## Triage 2026-11-04 (c28-w4)
+
+F2 (std.async manifest row) still live: runtime.spl:12-14 import std.async.* while src/lib/async/ does not exist and gc_boundary_check.spl:163 keeps the rank-3 async row whose comment claims nothing imports it - comment is wrong. F4 (class X(Y) inheritance) is RESOLVED: zero class X(Y) declarations remain under src/compiler (the 3 cited files moved or were rewritten). F1 still present: host_vulkan_lavapipe_provider.spl:97 imports std.gpu (nogc_sync_mut -> gc). F3 (fanout RED) not re-run this pass. QUESTIONS FOR OWNER: (1) F1 choose (a) read device name via rt_vulkan extern or (b) move vulkan_sffi_device_name to common/ ; (2) F2 retire the async manifest row or rewrite the 3 imports to std.nogc_async_mut.async.* ; (3) 389-violation runtime-family backlog: ratchet-only or burn-down?

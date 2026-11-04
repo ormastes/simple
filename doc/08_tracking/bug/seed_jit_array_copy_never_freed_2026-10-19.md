@@ -2,7 +2,7 @@
 
 - **Date:** 2026-10-19
 - **Lane:** Rust seed, `SIMPLE_EXECUTION_MODE=jit` (Cranelift)
-- **Status:** mitigated (the `Let` place copy now moves when its source is provably dead and unique, plus a zstd hot-loop rewrite). The general problem and the pre-existing struct-literal aliasing are DEFERRED.
+- **Status:** field-store case FIXED 2026-11-04 (see end); otherwise mitigated (the `Let` place copy now moves when its source is provably dead and unique, plus a zstd hot-loop rewrite). The general problem and the pre-existing struct-literal aliasing are DEFERRED.
 
 ## Root cause
 
@@ -119,3 +119,48 @@ copy per iteration.
     (`maybe_copy_array_value`).
   - `Drop` is a no-op there too (`70.backend/backend/_MirToLlvm/core_codegen.spl`).
   - Struct literals do not copy `var` arrays there either.
+
+
+## Field-store release (2026-11-04, jitfree lane)
+
+**Status: FIXED for array fields of function-local structs.** `st.f = v`
+now `rt_array_free`s the replaced buffer when `array_move.rs` proves the field
+was its only holder (`ArrayMoveSites::field_release_structs`, consumed in the
+field-store arm of `lowering_stmt.rs`: `FieldGet` old, `FieldSet` new, free old).
+
+Why not a runtime refcount: no seed heap value has one (`HeapHeader` carries
+only type/gc flags/size), and a sound rc needs an increment at every share
+site -- struct-literal and call arguments, returns, closure captures,
+nested-array/dict element stores, `Any` boxing, struct copies, and every
+`rt_*` that stashes an array. One missed site is a use-after-free, so the
+release is instead a precise drop gated by compile-time proof.
+
+Proof obligations for a struct local `st` (anything unproven keeps the leak):
+1. not a parameter, not captured, no generators/`defer` in the function;
+2. every write to `st` is a full literal of its own concrete struct type whose
+   array-typed fields get a fresh literal or a handed-over `var`;
+3. every store to an array field is a fresh literal, a handed-over local, or a
+   place (which lowering copies);
+4. `st` and its non-primitive fields are never read where a second holder can
+   form (call/struct argument, plain assign, non-builtin method receiver, `for`).
+   Copying `Let`s, index/len/push reads and `return` are allowed.
+The free is shallow, so inner arrays of `[[T]]` stay owned by their sharers.
+
+RSS (`SIMPLE_EXECUTION_MODE=jit simple run`, `/usr/bin/time -l` max RSS,
+macOS arm64, seed built from the worktree), loop
+`var o: [i64] = <16-literal>; o[0] = i; st.buf = o`:
+
+| iterations | #6627 seed | #6634 seed | this fix |
+|---|---|---|---|
+| 100k | 63.4 MB | 45.6 MB | 27.8 MB |
+| 400k | 168.2 MB | 98.5 MB | 27.8 MB |
+
+Tests: `compiler/tests/jit_array_field_release.rs` -- the 4096x64 loop must
+retain < 64 KiB of array data (fails before: no free is emitted), plus
+sharing cases that must emit NO free and keep correct values (struct literal
+of a live local, plain-assign alias, copy `Let`, nested arrays, closure
+capture, field passed to / returned from a call, struct passed to a call).
+
+Still open: whole-struct overwrite (`st = St(..)`), parameter/`me` receivers,
+plain locals, and the callee-side `var out = buf` copy (`out = f(out)`) still
+leak on this lane; those need the refcount redesign above.

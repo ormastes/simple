@@ -44,3 +44,12 @@ The guard records peak RSS 2,540,840 KiB and a complete, quiescent process tree.
 This qualifies the pure validator plus typed scalar conversion and enum
 extraction for the fixture cases. It does not resolve the original public
 validation API failure, or qualify the production CharLit codec.
+
+## 2026-11-04 triage (n88b, opus-n88b): deferred, needs stage3 isolation
+
+Public helpers (`src/lib/common/encoding/utf8.spl:252,262`) call externs `rt_text_count_codepoints_cached`
+/ `rt_text_validate_utf8` declared `-> i64` / `-> bool`, while the C owners in
+`src/runtime/runtime_simd_utf8.c:653,680` return raw `int64_t` (1/0, count). Hypothesis, UNPROVEN:
+the native extern return convention (`bool` vs raw int64, tagged vs raw count) mismatches, making
+`text_is_valid_utf8("a") and text_codepoint_len("a") == 1` false. Isolate under stage3 by printing each
+helper separately for "a"; the seed interpreter does not exercise the native extern ABI. Status stays open.

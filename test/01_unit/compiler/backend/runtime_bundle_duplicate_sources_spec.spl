@@ -1,0 +1,98 @@
+use std.spec.*
+use std.io_runtime.{env_get_opt, file_write, dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use compiler.backend.runtime_compiler.{runtime_bundle_nested_c_include_v1, runtime_bundle_duplicate_owner_sources_v1, runtime_core_c_sources_v1, runtime_core_c_platform_sources_v1}
+
+# Incident 2026-11-04 (stage3 s3_fable38, hello/variable smoke + 8 sanity
+# cases): SIMPLE_PROJECT_ROOT pointed at a stale stage2 process-tree shadow
+# whose runtime_process_owned.c ended with `#include "runtime_process_tree.c"`
+# while the core-C bundle already compiled runtime_process_tree.c on its own.
+# Both objects exported rt_process_tree_support, rt_process_spawn_session,
+# rt_process_session_wait, rt_process_session_is_running,
+# rt_process_kill_session, rt_process_kill_tree, rt_child_set_pdeathsig and
+# rt_proc_start_time, and the link died on `duplicate symbol` without naming
+# the stale root. The bundle source list is the authority on which translation
+# unit owns which exports, so the overlap is rejected before any C compiles.
+
+val core_c: [text] = ["runtime_native", "runtime_process", "runtime_process_tree", "runtime_process_owned", "platform/async_windows"]
+
+fn fixture_root() -> text:
+    val parent = env_get_opt("TEMP") ?? (env_get_opt("TMPDIR") ?? "/tmp")
+    secure_temp_dir(parent, "runtime-bundle-dup-spec-").unwrap()
+
+describe "runtime bundle nested .c include detection":
+    it "REPRO: a bundle .c that #includes another bundle .c names that member":
+        val shadowed = "#include \"runtime.h\"\nint rt_process_spawn(void) { return 0; }\n/* Shadow-only: the frozen stage2 never compiles runtime_process_tree.c. */\n#include \"runtime_process_tree.c\"\n"
+        expect(runtime_bundle_nested_c_include_v1(shadowed, core_c)).to_equal("runtime_process_tree")
+
+    it "a .c include of a file the bundle does not compile separately is allowed (frozen-stage2 shadow list)":
+        val stage2_list: [text] = ["runtime_native", "runtime_process", "runtime_process_owned"]
+        val shadowed = "int x;\n#include \"runtime_process_tree.c\"\n"
+        expect(runtime_bundle_nested_c_include_v1(shadowed, stage2_list)).to_equal("")
+
+    it "header includes never match, even for a bundle member's header":
+        val clean = "#include \"runtime.h\"\n#include \"runtime_process_tree.h\"\n#include <stdio.h>\n"
+        expect(runtime_bundle_nested_c_include_v1(clean, core_c)).to_equal("")
+
+    it "a comment that merely cites a bundle .c does not match (runtime_process_owned.c:369 shape)":
+        val prose = "/*\n * rt_proc_start_time (runtime_process_tree.c), shared with\n * the owned spawner.\n */\n// #include \"runtime_process_tree.c\"\nint y;\n"
+        expect(runtime_bundle_nested_c_include_v1(prose, core_c)).to_equal("")
+
+    it "spacing after the # and indentation are tolerated":
+        val spaced = "  #  include   \"runtime_process_tree.c\"  \n"
+        expect(runtime_bundle_nested_c_include_v1(spaced, core_c)).to_equal("runtime_process_tree")
+
+    it "a subdirectory member is matched by its bundle spelling":
+        val nested = "#include \"platform/async_windows.c\"\n"
+        expect(runtime_bundle_nested_c_include_v1(nested, core_c)).to_equal("platform/async_windows")
+
+    it "an unterminated or quote-less include line is ignored":
+        expect(runtime_bundle_nested_c_include_v1("#include \"runtime_process_tree.c\n", core_c)).to_equal("")
+        expect(runtime_bundle_nested_c_include_v1("#include runtime_process_tree.c\n", core_c)).to_equal("")
+        expect(runtime_bundle_nested_c_include_v1("#define X 1\n#pragma once\n", core_c)).to_equal("")
+
+    it "a non-member .c include is allowed":
+        expect(runtime_bundle_nested_c_include_v1("#include \"vendor/miniaudio_impl.c\"\n", core_c)).to_equal("")
+
+describe "runtime bundle duplicate owner sources (directory scan)":
+    it "REPRO: a shadow dir with the stage2 process-tree include is reported once, by name":
+        val root = fixture_root()
+        expect(dir_create_all(root + "/platform")).to_equal(true)
+        file_write(root + "/runtime_process_tree.c", "int rt_process_tree_support(void) { return 1; }\n")
+        file_write(root + "/runtime_process_owned.c", "int rt_process_spawn(void) { return 0; }\n#include \"runtime_process_tree.c\"\n")
+        file_write(root + "/runtime_process.c", "/* see runtime_process_tree.c */\nint rt_process_wait(void) { return 0; }\n")
+        file_write(root + "/runtime_native.c", "#include \"runtime.h\"\n")
+        file_write(root + "/platform/async_windows.c", "int spl_driver_create_iocp(void) { return 0; }\n")
+        val offenders = runtime_bundle_duplicate_owner_sources_v1(root, core_c)
+        expect(offenders).to_equal(["runtime_process_owned.c includes runtime_process_tree.c"])
+        dir_remove_all(root)
+
+    it "a missing source is not an offender (the compile loop rejects it by name)":
+        val root = fixture_root()
+        file_write(root + "/runtime_process_owned.c", "#include \"runtime_process_tree.c\"\n")
+        val partial: [text] = ["runtime_process_owned", "runtime_process_tree"]
+        val offenders = runtime_bundle_duplicate_owner_sources_v1(root, partial)
+        expect(offenders).to_equal(["runtime_process_owned.c includes runtime_process_tree.c"])
+        val nothing = runtime_bundle_duplicate_owner_sources_v1(root, ["runtime_memory", "runtime_process_tree"])
+        expect(nothing.len()).to_equal(0)
+        dir_remove_all(root)
+
+    it "every member of a bundle that includes the same .c is reported":
+        val root = fixture_root()
+        file_write(root + "/runtime_process_tree.c", "int t;\n")
+        file_write(root + "/runtime_process_owned.c", "#include \"runtime_process_tree.c\"\n")
+        file_write(root + "/runtime_process.c", "#include \"runtime_process_tree.c\"\n")
+        val offenders = runtime_bundle_duplicate_owner_sources_v1(root, ["runtime_process", "runtime_process_tree", "runtime_process_owned"])
+        expect(offenders).to_equal(["runtime_process.c includes runtime_process_tree.c", "runtime_process_owned.c includes runtime_process_tree.c"])
+        dir_remove_all(root)
+
+    it "PREVENTION: the real src/runtime core-C bundle (plus Windows platform owners) has no nested .c include":
+        var bundle = runtime_core_c_sources_v1()
+        for extra in runtime_core_c_platform_sources_v1(true):
+            bundle = bundle.push(extra)
+        bundle = bundle.push("hosted_cocoa")
+        bundle = bundle.push("hosted_win32")
+        bundle = bundle.push("runtime_legacy_core")
+        bundle = bundle.push("runtime_dynload")
+        bundle = bundle.push("runtime_sqlite_demand")
+        expect(runtime_bundle_duplicate_owner_sources_v1("src/runtime", bundle)).to_equal([])

@@ -203,6 +203,19 @@ impl ModuleSurfaceBuilder:
                         surface.export_origins = surface.export_origin_index.origins
                         continue
 
+                    val qualified_result = module_surface_qualified_export_origin(
+                        self.surfaces, name_index, source_name,
+                        self.library_mode, surface.module_name)
+                    if qualified_result.found:
+                        val put_result = module_surface_export_origin_index_put(
+                            surface.export_origin_index,
+                            module_surface_dotted_leaf(local_name), qualified_result.owner_module,
+                            qualified_result.source_name, qualified_result.resolution_kind)
+                        if put_result.is_err():
+                            return Err(put_result.unwrap_err())
+                        surface.export_origins = surface.export_origin_index.origins
+                        continue
+
                     # Generated facade comments carry the precise source file
                     # when two sibling modules intentionally expose the same
                     # declaration. Keep that provenance ahead of inference.
@@ -362,6 +375,25 @@ impl ModuleSurfaceBuilder:
                                 revisit_surface.export_origins = revisit_surface.export_origin_index.origins
                                 origin_changed = true
                             continue
+                        val revisit_qualified = module_surface_qualified_export_origin(
+                            self.surfaces, name_index, source_name,
+                            self.library_mode, revisit_surface.module_name)
+                        if revisit_qualified.found:
+                            val qualified_local = module_surface_dotted_leaf(local_name)
+                            val revisit_qualified_index: ModuleSurfaceExportOriginIndex = revisit_surface.export_origin_index
+                            val previous_qualified = module_surface_export_origin_index_lookup(revisit_qualified_index, qualified_local)
+                            if not previous_qualified.found or
+                               previous_qualified.owner_module != revisit_qualified.owner_module or
+                               previous_qualified.source_name != revisit_qualified.source_name:
+                                val put_result = module_surface_export_origin_index_put(
+                                    revisit_surface.export_origin_index,
+                                    qualified_local, revisit_qualified.owner_module,
+                                    revisit_qualified.source_name, revisit_qualified.resolution_kind)
+                                if put_result.is_err():
+                                    return Err(put_result.unwrap_err())
+                                revisit_surface.export_origins = revisit_surface.export_origin_index.origins
+                                origin_changed = true
+                            continue
                         if module_surface_has_explicit_import_route(
                             self.surfaces, name_index, revisit_surface,
                             source_name, local_name, self.library_mode):
@@ -467,6 +499,42 @@ pub(package) fn module_surface_origin_error(message: text) -> ModuleSurfaceOrigi
         is_error: true, error: message, found: false,
         owner_module: "", source_name: "", resolution_kind: "")
 
+pub(package) fn module_surface_dotted_leaf(name: text) -> text:
+    val dot = name.last_index_of(".")
+    if dot < 0:
+        return name
+    name.substring(dot + 1)
+
+# `export use M.{a}` / `export use M.a as b` record the export item qualified
+# (`M.a`, see parser_decls_use.spl) with no matching ImportItem on the facade,
+# so the named-import tier cannot see it. Resolve the qualified spelling
+# directly against module M: a declaration of M, or M's own (possibly delayed)
+# export origin. Returns missing until M's origin exists; the fixpoint revisits.
+pub(package) fn module_surface_qualified_export_origin(
+    surfaces: [ModuleSurface],
+    name_index: Dict<text, i64>,
+    source_name: text,
+    library_mode: text,
+    facade_module: text
+) -> ModuleSurfaceOriginResolution:
+    if not source_name.contains("."):
+        return module_surface_origin_missing()
+    val item_name = module_surface_dotted_leaf(source_name)
+    val module_name = source_name.substring(0, source_name.len() - item_name.len() - 1)
+    val owner_index = module_surface_index_by_name(
+        name_index, library_mode_import_key_v1(module_name, library_mode, facade_module))
+    if owner_index < 0 or owner_index >= surfaces.len():
+        return module_surface_origin_missing()
+    val owner: ModuleSurface = surfaces[owner_index]
+    if module_surface_declares_item(owner, item_name):
+        return module_surface_origin_found(owner.module_name, item_name, "explicit")
+    val owner_origin_index: ModuleSurfaceExportOriginIndex = owner.export_origin_index
+    val terminal_lookup = module_surface_export_origin_index_lookup(owner_origin_index, item_name)
+    if terminal_lookup.found:
+        return module_surface_origin_found(
+            terminal_lookup.owner_module, terminal_lookup.source_name, "explicit")
+    module_surface_origin_missing()
+
 pub(package) fn module_surface_explicit_import_origin(
     surfaces: [ModuleSurface],
     name_index: Dict<text, i64>,
@@ -485,9 +553,16 @@ pub(package) fn module_surface_explicit_import_origin(
     var selected_source_name = ""
     var selected_resolution_kind = ""
     var import_index = 0
-    while import_index < facade.import_target_indices.len() and
+    while import_index < facade.imports.len() and
           import_index + 1 < facade.import_item_offsets.len():
-        val owner_index = facade.import_target_indices[import_index]
+        # Scalar routes (import_target_indices) are published by
+        # module_surfaces_freeze, AFTER resolve_export_origins runs. Until then
+        # derive the owner from the import declaration through name_index.
+        val owner_index = if import_index < facade.import_target_indices.len():
+            facade.import_target_indices[import_index]
+        else:
+            module_surface_index_by_name(
+                name_index, library_mode_import_key_v1(facade.imports[import_index].module, library_mode, facade.module_name))
         val item_end = facade.import_item_offsets[import_index + 1]
         var item_index = facade.import_item_offsets[import_index]
         if owner_index >= 0 and owner_index < surfaces.len():

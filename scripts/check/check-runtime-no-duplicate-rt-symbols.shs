@@ -1,0 +1,236 @@
+#!/bin/sh
+# check-runtime-no-duplicate-rt-symbols.shs -- the runtime bundle must define
+# every exported rt_* / spl_* symbol in exactly ONE object.
+#
+# WHY (incident 2026-11-04, stage3 s3_fable38): a stale stage2 process-tree
+# shadow root carried runtime_process_owned.c with
+# `#include "runtime_process_tree.c"` appended while the core-C bundle list
+# (runtime_compiler.spl runtime_core_c_sources_v1) already compiled
+# runtime_process_tree.c on its own. Both objects then exported
+# rt_process_tree_support, rt_process_spawn_session, rt_process_session_wait,
+# rt_process_session_is_running, rt_process_kill_session, rt_process_kill_tree,
+# rt_child_set_pdeathsig and rt_proc_start_time, and every link of a stage3
+# output (hello, variable, 8 of 20 sanity cases) died on `duplicate symbol`.
+# Every existing guard was blind: the C-runtime guard runs -fsyntax-only on each
+# file ALONE, the api-regression guard diffs DEFINED names per file (a name
+# defined twice is still "defined"), and the symbol-set census unions files.
+# A duplicate definition is a property of the OBJECT SET, so this guard compiles
+# the bundle's objects and reads their defined symbol tables with nm.
+#
+# MECHANISM
+#   1. Take the bundle source list from runtime_compiler.spl
+#      (runtime_core_c_sources_v1 literal + the Windows platform owners),
+#      or an explicit --sources "a b c" list for fixtures.
+#   2. $CC -c each <root>/src/runtime/<name>.c (-I src/runtime, the v1 ABI
+#      defines, -w) into a private temp dir. A file whose compile fails ONLY
+#      on a missing header that does not exist in-repo is SKIPPED (external
+#      SDK, same policy as check-c-runtime-compiles-push.shs); any other
+#      compile failure is an ERROR, never a pass.
+#   3. nm --defined-only each object, keep global text/data symbols
+#      (T/D/B/R) whose name starts with rt_ or spl_, and FAIL when any name is
+#      defined by more than one object. COMDAT/weak (W/V) definitions are
+#      legitimate multi-definitions and are ignored.
+#
+# VERDICT (always the last stdout line; exit status is read directly, never via a pipe)
+#   PASS — <n> symbol(s) checked across <k> object(s), 0 duplicated   exit 0, n > 0, k > 1
+#   FAIL — <n> symbol(s) checked ..., <m> duplicated: <name>(<obj>,<obj>) ... exit 1
+#   ERROR — nothing was checked (<reason>)                              exit 2
+#
+# USAGE
+#   sh scripts/check/check-runtime-no-duplicate-rt-symbols.shs            # core-C bundle at the working tree
+#   sh ... --root DIR            # another checkout / shadow root (must hold src/runtime/runtime.c)
+#   sh ... --sources "a b"       # explicit bundle names (relative to <root>/src/runtime, no .c)
+#   sh ... --selftest            # fixtures only (also runs, fatally, before every scan)
+#   sh ... --no-selftest         # skip the pre-scan selftest (CI shards that already ran it)
+set -u
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SCAN_ROOT="$ROOT"
+SOURCES=''
+RUN_SELFTEST=1
+ONLY_SELFTEST=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) SCAN_ROOT="$2"; shift 2 ;;
+        --sources) SOURCES="$2"; shift 2 ;;
+        --selftest) ONLY_SELFTEST=1; shift ;;
+        --no-selftest) RUN_SELFTEST=0; shift ;;
+        -h|--help)
+            sed -n '2,45p' "$0"
+            printf 'ERROR — nothing was checked (help requested)\n'; exit 2 ;;
+        *) printf 'ERROR — nothing was checked (unknown argument %s)\n' "$1"; exit 2 ;;
+    esac
+done
+
+verdict_pass()  { printf 'PASS — %s\n' "$1"; exit 0; }
+verdict_fail()  { printf 'FAIL — %s\n' "$1"; exit 1; }
+verdict_error() { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+
+TMP="${TMPDIR:-${TEMP:-/tmp}}/rt-dup-syms.$$"
+mkdir -p "$TMP" || verdict_error "cannot create temp dir $TMP"
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+detect_cc() {
+    if [ -n "${CC:-}" ] && command -v "$CC" >/dev/null 2>&1; then printf '%s' "$CC"; return 0; fi
+    for c in clang cc; do
+        if command -v "$c" >/dev/null 2>&1; then printf '%s' "$c"; return 0; fi
+    done
+    return 1
+}
+detect_nm() {
+    # Prefer the nm that ships beside the compiler (llvm-mingw / llvm-N), then PATH.
+    _ccdir="$(dirname "$(command -v "$1")")"
+    for n in "$_ccdir/llvm-nm" "$_ccdir/llvm-nm.exe" llvm-nm nm; do
+        if command -v "$n" >/dev/null 2>&1; then printf '%s' "$n"; return 0; fi
+    done
+    return 1
+}
+
+CC_BIN="$(detect_cc)" || verdict_error "no C compiler (CC, clang or cc) on PATH -- absence of a compiler is absence of evidence"
+case "$CC_BIN" in *gcc*) verdict_error "CC is gcc ($CC_BIN); this repo never uses GCC" ;; esac
+NM_BIN="$(detect_nm "$CC_BIN")" || verdict_error "no llvm-nm / nm beside $CC_BIN or on PATH"
+CC_TARGET=''
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*|Windows_NT) CC_TARGET='--target=x86_64-w64-windows-gnu' ;; esac
+
+# bundle_sources <root>: the core-C list literal from runtime_compiler.spl plus
+# the Windows platform owners when the host is Windows (what the stage3 link
+# on this host actually bundles).
+bundle_sources() {
+    # A shadow root (--root) may carry only src/runtime; the bundle list then
+    # comes from this checkout's compiler, which is the compiler that will link it.
+    _spl="$1/src/compiler/70.backend/backend/runtime_compiler.spl"
+    [ -f "$_spl" ] || _spl="$ROOT/src/compiler/70.backend/backend/runtime_compiler.spl"
+    [ -f "$_spl" ] || return 1
+    awk '/^pub fn runtime_core_c_sources_v1\(\)/ {f=1; next} f && /^    \[/ {gsub(/[\[\]",]/, " "); print; exit}' "$_spl"
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT) printf 'platform/async_driver platform/async_windows\n' ;;
+    esac
+}
+
+# scan <root> <sources...>: prints "symbol<TAB>object" lines to $TMP/defs, sets
+# SCAN_OBJS / SCAN_SKIPPED, returns 0 unless a compile failed for a non-SDK reason.
+scan() {
+    _root="$1"; shift
+    : > "$TMP/defs"; : > "$TMP/compile_fail"
+    SCAN_OBJS=0; SCAN_SKIPPED=0
+    for _name in "$@"; do
+        _src="$_root/src/runtime/$_name.c"
+        [ -f "$_src" ] || { printf '%s: missing source\n' "$_src" >> "$TMP/compile_fail"; continue; }
+        _obj="$TMP/$(printf '%s' "$_name" | tr '/' '_').o"
+        # Same ownership defines as compile_runtime_objects' core-C arm
+        # (runtime_compiler.spl ~:952-986): runtime_memory.c is the sole
+        # allocator owner, core-C is standalone, timestamp/array-packing owners
+        # set. Without them runtime_native.c legitimately carries hosted
+        # fallback copies of rt_alloc & co. and the scan would report 16
+        # ownership duplicates that the real link never sees.
+        # shellcheck disable=SC2086  # $CC_TARGET is a deliberate 0-or-1 word expansion.
+        "$CC_BIN" -c -w -O0 -std=gnu11 $CC_TARGET \
+            -DSIMPLE_ABI_VERSION=1 -DSIMPLE_ABI_VERSION_DEFERRED=0 \
+            -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_CORE_C_STANDALONE=1 \
+            -DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1 -DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1 \
+            -I "$_root/src/runtime" -I "$_root/src/runtime/include" -I "$_root/include" \
+            -o "$_obj" "$_src" > "$TMP/diag" 2>&1
+        _rc=$?
+        if [ "$_rc" -ne 0 ]; then
+            # External-SDK skip: every error is a missing header that exists nowhere in the repo.
+            _missing="$(grep -o "fatal error: '[^']*' file not found" "$TMP/diag" | sed "s/fatal error: '\(.*\)' file not found/\1/")"
+            _only_sdk=1
+            [ -n "$_missing" ] || _only_sdk=0
+            for _h in $_missing; do
+                _base="$(basename "$_h")"
+                if find "$_root/src/runtime" "$_root/include" -name "$_base" 2>/dev/null | grep -q .; then _only_sdk=0; fi
+            done
+            if [ "$_only_sdk" -eq 1 ]; then SCAN_SKIPPED=$((SCAN_SKIPPED + 1)); continue; fi
+            { printf '%s: ' "$_name.c"; head -n 1 "$TMP/diag"; } >> "$TMP/compile_fail"
+            continue
+        fi
+        SCAN_OBJS=$((SCAN_OBJS + 1))
+        "$NM_BIN" --defined-only "$_obj" 2>/dev/null | awk -v o="$_name.c" '
+            NF >= 3 && ($2 == "T" || $2 == "D" || $2 == "B" || $2 == "R") {
+                s = $3; sub(/^_/, "", s)
+                if (s ~ /^(rt_|spl_)/) printf "%s\t%s\n", s, o
+            }' >> "$TMP/defs"
+    done
+    [ -s "$TMP/compile_fail" ] && return 1
+    return 0
+}
+
+# duplicates: prints "name(obj1,obj2,...)" per symbol defined by >1 object.
+duplicates() {
+    sort -u "$TMP/defs" | awk -F'\t' '
+        { n[$1]++; o[$1] = (o[$1] == "" ? $2 : o[$1] "," $2) }
+        END { for (s in n) if (n[s] > 1) printf "%s(%s)\n", s, o[s] }' | sort
+}
+
+selftest() {
+    _fx="$TMP/fx"; mkdir -p "$_fx/src/runtime"
+    cat > "$_fx/src/runtime/runtime_process_tree.c" <<'EOF'
+long rt_process_tree_support(void) { return 1; }
+long rt_process_kill_tree(long pid) { return pid; }
+static long helper(void) { return 2; }
+long rt_proc_start_time(long pid) { return helper() + pid; }
+EOF
+    cat > "$_fx/src/runtime/runtime_process_owned.c" <<'EOF'
+long rt_process_spawn(void) { return 0; }
+/* Shadow-only: the frozen stage2 never compiles runtime_process_tree.c. */
+#include "runtime_process_tree.c"
+EOF
+    cat > "$_fx/src/runtime/runtime_memory.c" <<'EOF'
+long rt_heap_live_bytes(void) { return 0; }
+long rt_process_spawn_helper_private(void) { return 0; }
+EOF
+    cat > "$_fx/src/runtime/runtime_broken.c" <<'EOF'
+#include <no_such_sdk_header_xyz.h>
+long rt_broken(void) { return 0; }
+EOF
+    cat > "$_fx/src/runtime/runtime_syntax.c" <<'EOF'
+long rt_syntax(void) { return ; }
+EOF
+    _fails=0
+    # F1: the incident shape must FAIL naming all three duplicated symbols and both objects.
+    scan "$_fx" runtime_process_tree runtime_process_owned runtime_memory || { echo "selftest F1: unexpected compile failure: $(cat "$TMP/compile_fail")"; _fails=$((_fails + 1)); }
+    _d="$(duplicates | tr '\n' ' ')"
+    case "$_d" in
+        *"rt_proc_start_time(runtime_process_owned.c,runtime_process_tree.c)"*"rt_process_kill_tree(runtime_process_owned.c,runtime_process_tree.c)"*"rt_process_tree_support(runtime_process_owned.c,runtime_process_tree.c)"*) : ;;
+        *) echo "selftest F1 FAILED: duplicates were [$_d]"; _fails=$((_fails + 1)) ;;
+    esac
+    case "$_d" in *rt_process_spawn\(*|*rt_heap_live_bytes*|*helper*) echo "selftest F1 FAILED: single-owner or static symbol reported as duplicate [$_d]"; _fails=$((_fails + 1)) ;; esac
+    # F2: the same files without the including owner must PASS (0 duplicates, 2 objects).
+    scan "$_fx" runtime_process_tree runtime_memory || { echo "selftest F2: unexpected compile failure"; _fails=$((_fails + 1)); }
+    [ -z "$(duplicates)" ] || { echo "selftest F2 FAILED: clean pair reported duplicates"; _fails=$((_fails + 1)); }
+    [ "$SCAN_OBJS" -eq 2 ] || { echo "selftest F2 FAILED: expected 2 objects, got $SCAN_OBJS"; _fails=$((_fails + 1)); }
+    # F3: an external-SDK header is SKIPPED, never counted and never a pass by itself.
+    scan "$_fx" runtime_broken runtime_memory || { echo "selftest F3: SDK skip reported as failure"; _fails=$((_fails + 1)); }
+    [ "$SCAN_SKIPPED" -eq 1 ] && [ "$SCAN_OBJS" -eq 1 ] || { echo "selftest F3 FAILED: skipped=$SCAN_SKIPPED objs=$SCAN_OBJS"; _fails=$((_fails + 1)); }
+    # F4: a real compile error is a failure of the scan (-> ERROR), not a skip.
+    if scan "$_fx" runtime_syntax runtime_memory; then echo "selftest F4 FAILED: syntax error passed the scan"; _fails=$((_fails + 1)); fi
+    # F5: a missing source is a scan failure (-> ERROR), not silently 0 objects.
+    if scan "$_fx" runtime_nonexistent runtime_memory; then echo "selftest F5 FAILED: missing source passed the scan"; _fails=$((_fails + 1)); fi
+    # F6: the bundle list extraction from runtime_compiler.spl yields the real owners.
+    _b="$(bundle_sources "$ROOT" | tr '\n' ' ')"
+    case "$_b" in *runtime_process_tree*runtime_process_owned*) : ;; *) echo "selftest F6 FAILED: bundle list [$_b]"; _fails=$((_fails + 1)) ;; esac
+    rm -f "$TMP"/*.o
+    [ "$_fails" -eq 0 ] || verdict_error "selftest failed ($_fails fixture(s))"
+    echo "selftest: 6 fixtures passed (cc=$CC_BIN nm=$NM_BIN)"
+}
+
+if [ "$RUN_SELFTEST" -eq 1 ] || [ "$ONLY_SELFTEST" -eq 1 ]; then selftest; fi
+[ "$ONLY_SELFTEST" -eq 1 ] && verdict_pass "6 selftest fixture(s) checked, 0 duplicated (selftest only)"
+
+[ -f "$SCAN_ROOT/src/runtime/runtime.c" ] || verdict_error "$SCAN_ROOT holds no src/runtime/runtime.c"
+if [ -z "$SOURCES" ]; then
+    SOURCES="$(bundle_sources "$SCAN_ROOT" | tr '\n' ' ')"
+    [ -n "$SOURCES" ] || verdict_error "could not read runtime_core_c_sources_v1 from $SCAN_ROOT/src/compiler/70.backend/backend/runtime_compiler.spl"
+fi
+# shellcheck disable=SC2086  # the list is deliberately word-split.
+if ! scan "$SCAN_ROOT" $SOURCES; then
+    verdict_error "runtime object(s) failed to compile in $SCAN_ROOT: $(tr '\n' ';' < "$TMP/compile_fail")"
+fi
+[ "$SCAN_OBJS" -gt 1 ] || verdict_error "only $SCAN_OBJS object(s) compiled ($SCAN_SKIPPED skipped); a duplicate needs two"
+SYMS=$(sort -u "$TMP/defs" | cut -f1 | sort -u | wc -l | tr -d ' ')
+[ "$SYMS" -gt 0 ] || verdict_error "0 rt_*/spl_* symbols defined across $SCAN_OBJS objects"
+DUPS="$(duplicates)"
+if [ -n "$DUPS" ]; then
+    verdict_fail "$SYMS symbol(s) checked across $SCAN_OBJS object(s) in $SCAN_ROOT, $(printf '%s\n' "$DUPS" | wc -l | tr -d ' ') duplicated: $(printf '%s' "$DUPS" | tr '\n' ' ')"
+fi
+verdict_pass "$SYMS symbol(s) checked across $SCAN_OBJS object(s) in $SCAN_ROOT, 0 duplicated ($SCAN_SKIPPED skipped for unavailable external dependencies)"

@@ -364,7 +364,9 @@ class ParallelBuilder:
     stats: BuildStats
     # Owner-thread completion hook. Compile callbacks never receive shared
     # cache authority; the orchestrator invokes this after each successful unit.
-    owner_collect_fn: Option<fn(text, text) -> text>
+    # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+    owner_collect_fn: fn(text, text) -> text
+    has_owner_collect: bool
     # Process-spawn dispatcher for build()'s "parallel" branch. nil (the
     # default) preserves today's exact in-process, one-at-a-time behaviour --
     # every existing caller of build(compile_fn) that never calls
@@ -373,21 +375,36 @@ class ParallelBuilder:
     # collect_fn) instead of the serial `while chunk_idx < chunk_end:
     # compile_fn(...)` loop, so units genuinely run in concurrent OS
     # processes. See doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md.
-    spawn_dispatch_fn: Option<fn(text) -> i64>
-    spawn_collect_fn: Option<fn(i64, text) -> Result<text, text>>
+    # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+    spawn_dispatch_fn: fn(text) -> i64
+    has_spawn_dispatch: bool
+    spawn_collect_fn: fn(i64, text) -> Result<text, text>
 
 # @workaround bug=native_optional_fn_payload_binding_arity_mir_2026_10_20 recover=35123ed70c0 reason=declared_fn_parameter_gives_the_indirect_call_its_proven_signature
 fn _parallel_owner_collect_call(collect: fn(text, text) -> text, path: text, output: text) -> text:
     collect(path, output)
 
+# stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+fn _parallel_owner_collect_none(path: text, output: text) -> text:
+    ""
+
+fn _parallel_spawn_dispatch_none(path: text) -> i64:
+    -1
+
+fn _parallel_spawn_collect_none(exit_code: i64, path: text) -> Result<text, text>:
+    Ok("")
+
 impl ParallelBuilder:
     static fn create(config: ParallelBuildConfig) -> ParallelBuilder:
         ParallelBuilder(config: config, graph: BuildGraph.empty(),
-                        stats: BuildStats.empty(), owner_collect_fn: nil,
-                        spawn_dispatch_fn: nil, spawn_collect_fn: nil)
+                        stats: BuildStats.empty(), owner_collect_fn: _parallel_owner_collect_none, has_owner_collect: false,
+                        spawn_dispatch_fn: _parallel_spawn_dispatch_none, has_spawn_dispatch: false,
+                        spawn_collect_fn: _parallel_spawn_collect_none)
 
     me set_owner_collect(collect_fn: fn(text, text) -> text):
-        self.owner_collect_fn = Some(collect_fn)
+        # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+        self.owner_collect_fn = collect_fn
+        self.has_owner_collect = true
 
     # Configure real process-based dispatch for the "parallel" branch of
     # build(). spawn_fn/collect_fn have exactly build_parallel()'s own
@@ -396,8 +413,10 @@ impl ParallelBuilder:
     # below-threshold builds are NOT affected -- they keep the sequential
     # path unconditionally, per build()'s own gating.
     me set_spawn_dispatch(spawn_fn: fn(text) -> i64, collect_fn: fn(i64, text) -> Result<text, text>):
-        self.spawn_dispatch_fn = Some(spawn_fn)
-        self.spawn_collect_fn = Some(collect_fn)
+        # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+        self.spawn_dispatch_fn = spawn_fn
+        self.has_spawn_dispatch = true
+        self.spawn_collect_fn = collect_fn
 
     fn wait_for_finished_process(live_pid: [i64]) -> (i64, i64):
         """Wait for any in-flight process to finish using bounded polling.
@@ -495,7 +514,8 @@ impl ParallelBuilder:
                 match result:
                     case Ok(output):
                         var collect_error: text = ""
-                        if val owner_collect = self.owner_collect_fn:
+                        # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+                        if self.has_owner_collect:
                             # Bind the closure-valued field to a local before
                             # calling it. Invoking the field directly on the
                             # receiver is resolved as a METHOD call on
@@ -505,7 +525,7 @@ impl ParallelBuilder:
                             # `ParallelBuilder`". See
                             # doc/08_tracking/bug/native_build_closure_field_call_resolved_as_method_2026-08-17.md
                             # @workaround bug=native_optional_fn_payload_binding_arity_mir_2026_10_20 recover=35123ed70c0 reason=if_val_bound_option_fn_payload_loses_function_type_so_indirect_call_has_no_arity
-                            collect_error = _parallel_owner_collect_call(owner_collect, build_unit.path, output)
+                            collect_error = _parallel_owner_collect_call(self.owner_collect_fn, build_unit.path, output)
                         if collect_error != "":
                             self.graph.mark_failed(id, collect_error)
                             errors = errors.push((build_unit.path, collect_error))
@@ -540,9 +560,9 @@ impl ParallelBuilder:
             # capsules, which cannot cross a process boundary -- see the
             # comment in build() above) falls through to the exact same
             # serial loop as before.
-            if val dispatch_spawn = self.spawn_dispatch_fn:
-                if val dispatch_collect = self.spawn_collect_fn:
-                    return self.build_parallel(dispatch_spawn, dispatch_collect)
+            # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+            if self.has_spawn_dispatch:
+                return self.build_parallel(self.spawn_dispatch_fn, self.spawn_collect_fn)
 
             # "Batch-concurrent" here means the ready set is CHUNKED by
             # max_workers -- it does NOT mean the chunk runs concurrently. The
@@ -596,11 +616,12 @@ impl ParallelBuilder:
                         match result:
                             case Ok(output):
                                 var collect_error: text = ""
-                                if val owner_collect = self.owner_collect_fn:
+                                # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+                                if self.has_owner_collect:
                                     # Same closure-field-call defect as above;
                                     # bind to a local before invoking.
                                     # @workaround bug=native_optional_fn_payload_binding_arity_mir_2026_10_20 recover=35123ed70c0 reason=if_val_bound_option_fn_payload_loses_function_type_so_indirect_call_has_no_arity
-                                    collect_error = _parallel_owner_collect_call(owner_collect, build_unit.path, output)
+                                    collect_error = _parallel_owner_collect_call(self.owner_collect_fn, build_unit.path, output)
                                 if collect_error != "":
                                     self.graph.mark_failed(build_unit.id, collect_error)
                                     errors = errors.push((build_unit.path, collect_error))

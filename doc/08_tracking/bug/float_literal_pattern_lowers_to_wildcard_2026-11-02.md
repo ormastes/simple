@@ -40,3 +40,24 @@ standard SSpec execution. The added HIR regression in
 `test/01_unit/compiler/hir/float_literal_pattern_bridge_spec.spl` remains
 unexecuted. Keep this bug OPEN until that HIR regression runs and a real float
 match verifies both equality selection and non-exhaustive handling.
+
+### 2026-11-04 (c28-w1) verification on seed 0b2c3d015b7
+
+- `bin/simple.exe test test/01_unit/compiler/hir/float_literal_pattern_bridge_spec.spl`:
+  4 total, 4 passed (27 s). The HIR regression now executes.
+- Real float match (`case 1.5: 10; case _: 20`): f(1.5)=10, f(2.5)=20 -> equality
+  selection verified (no longer matches every value).
+- Non-exhaustive check (`case 1.5` / `case 2.5` without wildcard) is NOT diagnosed
+  when run on the Rust seed interpreter (prints a=10, rc 0); exhaustiveness is a
+  pure-Simple pass. Verification pending on a stage3 binary:
+  `stage3 compile` a fn with a wildcard-less f64 match and expect
+  E-MATCH-NONEXHAUSTIVE-VALUE.
+Status: fix-implemented-verification-pending.
+
+### 2026-11-04 — verified, closed (c28-w1b)
+
+On the 2026-11-04 seed (release 0b2c3d015b7, interpreter):
+- `test/01_unit/compiler/hir/float_literal_pattern_bridge_spec.spl`: 4/4 pass (19 s).
+- Real float match `match s: case 1.5: 10; case _: 20` selects 10 for 1.5 and 20 for 2.5.
+- `test/03_system/app/compiler/feature/exhaustive_value_match_spec.spl` gained two float-literal-arm
+  cases (partial `case 1.5:` reports E-MATCH-NONEXHAUSTIVE-VALUE; with `_` it is silenced): 28/28 pass (68 s).

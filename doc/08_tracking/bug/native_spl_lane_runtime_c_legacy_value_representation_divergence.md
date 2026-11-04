@@ -194,3 +194,10 @@ core-c-bootstrap lane builds `runtime_native.c` / `runtime_legacy_core.c` (both
 present in tree). The divergence is intact.
 Not proven: any behavioural impact — this doc's own LATENT assessment stands.
 
+
+## Native repro fixture (2026-11-04)
+Fixture: `test/03_system/native/runtime_lane_value_representation.spl` (expected rc 42; passes under seed interpreter).
+Stage3 command:
+```sh
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <stage3-simple> native-build --entry test/03_system/native/runtime_lane_value_representation.spl -o /tmp/b && /tmp/b; echo rc=$?
+```

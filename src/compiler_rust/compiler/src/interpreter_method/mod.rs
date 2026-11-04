@@ -11,7 +11,7 @@ use super::{
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{format_f32_display, Env, Value};
-use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef, Type};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -1805,9 +1805,26 @@ pub(crate) fn evaluate_method_call(
     // for user-defined trait implementations on built-in types (e.g., `impl MyTrait for text:`).
     {
         // Map Value type to the possible type names used in `impl Trait for TypeName:`
+        // Runtime ints carry no width, so an explicit `(x as u64).m()` cast names the
+        // impl type; use it first so `impl Trait for i32` does not collapse onto i64.
+        let cast_int_ty: Option<&str> = match (receiver.as_ref(), &recv_val) {
+            (Expr::Cast { target_type: Type::Simple(t), .. }, Value::Int(_)) => {
+                match t.as_str() {
+                    "i8" | "i16" | "i32" | "i64" => Some(t.as_str()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let cast_names: [&str; 4] = [cast_int_ty.unwrap_or(""), "i64", "i32", "int"];
         let type_names: &[&str] = match &recv_val {
             Value::Str(_) | Value::StrBytes(_) => &["text", "str", "String"],
+            Value::Int(_) if cast_int_ty.is_some() => &cast_names,
             Value::Int(_) => &["i64", "i32", "int"],
+            Value::UInt { width: 8, .. } => &["u8"],
+            Value::UInt { width: 16, .. } => &["u16"],
+            Value::UInt { width: 32, .. } => &["u32"],
+            Value::UInt { width: 64, .. } => &["u64"],
             Value::Float(_) => &["f64", "float"],
             Value::Float32(_) => &["f32", "float"],
             Value::Bool(_) => &["bool"],

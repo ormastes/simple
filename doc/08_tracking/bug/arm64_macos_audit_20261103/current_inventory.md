@@ -1,6 +1,6 @@
 # Current ARM64/macOS bug inventory — 2026-11-03
 
-73 unique tracked records: 10 open, 22 fixing, 11 verification-pending, 18 fixed, 12 closed. The 22 fixing labels are owner claims, including execution-blocked candidates; they do not mean 22 implemented fixes. The remaining 10 open records are macOS-only platform mentions. All 15 previously unassigned ARM64/shared records were actually dispatched and claimed; see `assigned-15-arm64-shared.md`.
+73 unique tracked records (72 on the macOS/ARM64 lane; `metal_backend_no_linux_emulation_lane_2026-08-19` reassigned to the Linux lane 2026-11-04 and excluded from macOS counts): 10 open, 22 fixing, 11 verification-pending, 18 fixed, 12 closed. The 22 fixing labels are owner claims, including execution-blocked candidates; they do not mean 22 implemented fixes. The remaining 10 open records are macOS-only platform mentions. All 15 previously unassigned ARM64/shared records were actually dispatched and claimed; see `assigned-15-arm64-shared.md`.
 
 This is the initial71-record platform-term inventory plus two newly diagnosed compiler defects, not73reproduced native failures. Windows-only historical context is excluded from platform defect totals; Linux Metal emulation is a capability request. Shared staging/deployment dependencies remain labeled. Historical fixed/closed records are not newly qualified; eight historical acceptance followups remain separate.
 
@@ -35,7 +35,7 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P2 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_qemu_ivshmem_preboot_2026-07-12` |
 | P2 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_simpleos_virtio_blk_durable_write_gap_2026-08-14` |
 | P2 | open | macOS: shared dependency; not platform-exclusive | `char_condition_type_check_staged_2026-11-03` |
-| P2 | open | macOS: shared dependency; not platform-exclusive | `char_literal_lexer_switch_staged_2026-11-03` |
+| P2 | implemented-behind-gate | macOS: shared dependency; not platform-exclusive | `char_literal_lexer_switch_staged_2026-11-03` |
 | P2 | fixing | ARM64: platform/shared context; native acceptance not inferred | `comment_cheat_absent_capabilities_2026-08-10` |
 | P2 | fix-implemented-verification-pending | macOS: platform/shared context; native acceptance not inferred | `gpu_ffi_loader_probes_linux_sonames_on_macos_2026_09_19` |
 | P2 | fixing | macOS: platform/shared context; native acceptance not inferred | `gui_winit_window_not_registered_window_server_2026-07-06` |
@@ -44,12 +44,12 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P2 | fixed | macOS: shared dependency; not platform-exclusive | `llm-caret-tui-extern-gaps` |
 | P2 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_bootstrap_copy_mem_provider_gap_2026-07-17` |
 | P2 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_stage4_full_cli_low_memory_runaway_2026-07-17` |
-| P2 | open | macOS: platform/shared context; native acceptance not inferred | `macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26` |
+| P2 | open | macOS: Engine2D Vulkan font row PASS under interpreter (2026-11-04); Engine2D CPU-oracle PASS under JIT too (collector-in-main probe, jitvoid 2026-11-04; spec files themselves still interpret: no-main-fn); Engine3D row open | `macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26` |
 | P2 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_vulkan_native_entry_blockers_2026-07-24` |
 | P2 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_vulkan_provider_availability_live_2026-07-26` |
 | P2 | fixed | ARM64: platform/shared context; native acceptance not inferred | `pristine_seed_cargo_build_broken_blocks_virtio_arm64_repro_2026-08-11` |
 | P2 | fixing | ARM64: platform/shared context; native acceptance not inferred | `simpleos_arm64_el0_server_syscall_and_virtio_net_gap_2026-08-14` |
-| P2 | open | macOS: platform/shared context; native acceptance not inferred | `wm_metal_glass_multi_receipt_opacity_2026-07-27` |
+| P2 | fix-implemented, verification-pending | macOS: specs reconciled 2026-11-04 (seed interp); native Metal blocked on admitted Stage 2 | `wm_metal_glass_multi_receipt_opacity_2026-07-27` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_attested_build_rejects_rust_seed_by_design_2026-09-01` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_desktop_engine2d_media_chain_blockers_2026-09-01` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `arm64_desktop_engine2d_seed_codegen_dbd_unresolved_global_2026-09-01` |
@@ -58,7 +58,7 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `board_vulkan_cross_arch_boundary_only_x86_64_proven_2026-08-11` |
 | P3 | open | macOS: platform/shared context; native acceptance not inferred | `bootstrap_macos_blocked_seed_compile_and_linux_only_stage3_authority_2026-09-06` |
 | P3 | fix-implemented-verification-pending | ARM64: platform/shared context; native acceptance not inferred | `cargo_test_lib_does_not_compile_on_aarch64_2026-09-13` |
-| P3 | open | macOS: platform/shared context; native acceptance not inferred | `crash_handler_and_fork_bridge_absent_from_seed_macos_2026-09-06` |
+| P3 | fix-implemented, verification-pending | macOS: C selfcheck rt_fork_crash_handler_selfcheck PASS natively (rc=139, 15/15); Simple spec skip_on_interpreter, awaits self-hosted run | `crash_handler_and_fork_bridge_absent_from_seed_macos_2026-09-06` |
 | P3 | closed | macOS: platform/shared context; native acceptance not inferred | `engine2d_metal_gpu_only_clip_unimplemented_2026-07-06` |
 | P3 | closed | macOS, ARM64: platform/shared context; native acceptance not inferred | `gui_smf_dynlib_hot_call_runtime_missing_2026-06-01` |
 | P3 | closed | ARM64: platform/shared context; native acceptance not inferred | `lld_defsym_symbol_argv_quoting_2026-07-12` |
@@ -67,7 +67,7 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P3 | open | macOS: platform/shared context; native acceptance not inferred | `macos_test_runner_blocked_inline_unsafe_and_wrong_deploy_slot_2026-08-31` |
 | P3 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_vulkan_host_wm_live_evidence_cpu_mirror_and_input_gap_2026-07-26` |
 | P3 | open | macOS: platform/shared context; native acceptance not inferred | `main_test_runnable_unsatisfiable_on_macos_2026-09-03` |
-| P3 | blocker-documented | macOS: capability request: Linux Metal emulation (host-neutral lane documented; GPU lane needs owner decision) | `metal_backend_no_linux_emulation_lane_2026-08-19` |
+| P3 | reassigned-linux | Linux (owner `crosscompile_xray_lead/linux_adapter`): capability request: Linux Metal emulation — excluded from macOS counts per owner decision 2026-11-04 | `metal_backend_no_linux_emulation_lane_2026-08-19` |
 | P3 | fixing | macOS, ARM64: platform/shared context; native acceptance not inferred | `phase2_native_build_hello_world_invalid_heap_and_scorer_segv_2026-09-05` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `phase2_stage2_native_build_len_on_i64_aarch64_linux_2026-09-13` |
 | P3 | closed | ARM64: shared dependency; not platform-exclusive | `rv64_host_gpu_real_runtime_exit_facade_2026-07-12` |

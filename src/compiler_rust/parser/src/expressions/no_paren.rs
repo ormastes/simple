@@ -422,6 +422,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::TypedFloat(_, _)
                 | TokenKind::String(_)
                 | TokenKind::RawString(_)
+                | TokenKind::CharLit(_)
                 | TokenKind::TypedString(_, _)
                 | TokenKind::TypedRawString(_, _)
                 | TokenKind::FString(_)

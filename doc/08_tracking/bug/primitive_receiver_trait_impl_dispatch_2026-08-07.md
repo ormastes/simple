@@ -871,3 +871,22 @@ Verify after a seed rebuild: `SIMPLE_EXECUTION_MODE=jit bin/simple run
 test/fixtures/repro/compiler/primitive_trait_impl_dispatch_repro.spl` must show the
 user sentinels for i64/bool/f32/f64. Remaining open: the interpreter i32->i64-impl
 collapse row (spec 6/7, Defect B tail). Status: fix-implemented-verification-pending (Defect A).
+
+## Interpreter seed fix: i32 collapse and u64 lookup (2026-11-04)
+
+Root cause: `src/compiler_rust/compiler/src/interpreter_method/mod.rs` (trait-impl
+fallback for built-in receivers, ~line 1780). `Value::Int` carries no width and was
+mapped to `["i64","i32","int"]`, so `impl T for i32` lost to the i64 impl; and
+`Value::UInt{width,..}` had no entry at all, so `impl T for u64` was never found.
+
+Fix: `Value::UInt` maps to `u8/u16/u32/u64` by width; an `Int` receiver written as
+`(x as <int type>)` tries the cast's type name first (then the old list). A bare
+`i32` variable receiver still has no static type at runtime and resolves to i64
+(remaining limitation).
+
+Evidence (before = release/1.0.0 seed, after = fixed seed):
+- probe, interpreter: before `FAIL i32_receiver expected=1003 actual=1002`, then
+  `method marker_probe not found on type u64`; after `ALL PASS`.
+- `primitive_receiver_trait_impl_dispatch_spec.spl`: 6/7 -> 7/7 (spec already asserted 1003; unchanged).
+- `..._class_spec.spl`: interpreter example now GREEN; the two JIT examples still FAIL
+  (`Function 'str.marker_probe' not found`) - that is Defect A, not addressed here.

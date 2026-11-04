@@ -327,3 +327,16 @@ row-by-row here:
 4. Update `doc/07_guide/language/dict_native_pitfalls.md` to add `.set()`
    silent-insert-failure as a third documented defect alongside `.get()`/`.len()`.
 
+
+## Triage 2026-11-04 (c28-w3)
+
+- The "src/app/interpreter/* no longer exists" path-drift note is wrong: the dir
+  exists (23 files); `helpers/imports.spl` still has a `.set(` site.
+- Since this audit: `244170a1819` ("dispatch erased Dict set dynamically", native
+  codegen + runtime) landed, and `kms_vendor_adapters.spl` (the HIGH finding) now
+  uses bracket assignment with a comment about `.set()` on builtin Dict.
+- Not verified natively (needs a native build); so not closed. Proposed next step:
+  one native-codegen repro spec for `val d: Dict<text,text> = {}; d.set("k","v")`
+  then `d.contains_key("k")`; if green, close and re-point the 69 AFFECTED sites
+  list as verified. `doc/07_guide/language/dict_native_pitfalls.md` is absent on
+  this branch, so the "update the pitfalls doc" action item is blocked on that too.

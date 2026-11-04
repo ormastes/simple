@@ -26,3 +26,11 @@ returns `Ok(true)`.
 Open compiler bug: array `==`/`!=` lowering must compare contents (length +
 elements), matching interpreter semantics. Not fixed here; per policy it takes
 effect when the Phase 3 compiler rebuilds itself.
+
+## 2026-11-04 triage (n88b): fix already landed
+
+Root fix: `ff9555ded33` "fix(mir): array ==/!= compares contents via rt_native_eq, not handle identity (A1)"
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`, `bin_is_array_eq` arm; its comment cites this bug).
+Status: fix-implemented-verification-pending. Native repro (needs a stage3 built after ff9555ded33):
+`bin/simple native-build` the 3-line entry above; expected `lit_ne=false`. The `_retained_bytes_equal`
+workaround in `retained_file.spl` may be retired after that passes.

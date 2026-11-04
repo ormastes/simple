@@ -22,7 +22,7 @@ use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.hir.hir_types.{SymbolKind}
-use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity_raw}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_nominal_kind}
@@ -986,7 +986,7 @@ impl MirLowering:
                     match declaration.kind:
                         case SymbolKind.Struct | SymbolKind.Class:
                             val owner_key = if declaration.kind == SymbolKind.Class:
-                                mir_class_identity(declaration)
+                                mir_class_identity_raw(self.symbols, owner.id)
                             else:
                                 self.declared_struct_layout_key(self.composite_layout_key(declaration))
                             if self.struct_field_order.has(owner_key):
@@ -1032,7 +1032,7 @@ impl MirLowering:
                             case SymbolKind.Struct:
                                 self.struct_value_syms[payload_value.id] = self.declared_struct_layout_key(self.composite_layout_key(declaration))
                             case SymbolKind.Class:
-                                self.struct_value_syms[payload_value.id] = mir_class_identity(declaration)
+                                self.struct_value_syms[payload_value.id] = mir_class_identity_raw(self.symbols, owner.id)
                             case SymbolKind.Enum:
                                 if self.enum_constructor_symbol_owner(owner) != "":
                                     self.mark_runtime_value_local(payload_value.id)
@@ -1271,6 +1271,7 @@ impl MirLowering:
         var bound_local: LocalId = 0
         var collection_local: LocalId = 0
         var elem_type = MirType.i64()
+        var elem_is_u8 = false
         if iter_is_range:
             if val start_expr = range_start:
                 counter_start = self.lower_expr(start_expr)
@@ -1295,8 +1296,11 @@ impl MirLowering:
             if known_elem == nil:
                 return self.builtin_extra_fail_closed("E-MIR-EXPR-Comprehension: unsupported in stage2: comprehension over an array whose element type is not statically known", Some(span))
             elem_type = known_elem ?? MirType.i64()
-            if self.builtin_elem_mir_is_packed(elem_type):
-                return self.builtin_extra_fail_closed("E-MIR-EXPR-Comprehension: unsupported in stage2: comprehension over a packed [u8]/[u64] array (its slots are raw, not tagged); index it in a while loop", Some(span))
+            elem_is_u8 = match elem_type.kind:
+                case MirTypeKind.U8: true
+                case _: false
+            if self.builtin_elem_mir_is_packed(elem_type) and not elem_is_u8:
+                return self.builtin_extra_fail_closed("E-MIR-EXPR-Comprehension: unsupported in stage2: comprehension over a packed [u64] array (its slots are raw, not tagged); index it in a while loop", Some(span))
             var b_bound = self.builder
             bound_local = b_bound.emit_call_value(self.rt_array_len_operand(), [mir_operand_copy(collection_local)], MirType.i64())
             counter_start = b_bound.emit_const_int(0)
@@ -1336,23 +1340,40 @@ impl MirLowering:
             self.builder = b_var
             self.bind_local(loop_symbol, range_var)
         else:
-            var b_get = self.builder
-            val elem_tagged = b_get.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(collection_local), mir_operand_copy(counter)], MirType.i64())
-            self.builder = b_get
-            # Same element-struct handling as lower_for_array_indexed.
-            val elem_struct_name = self.array_element_struct_syms.get(collection_local.id) ?? ""
-            val has_struct_name = elem_struct_name != "" and elem_struct_name != "__runtime_array__"
-            val decode_type = if has_struct_name: MirType(kind: MirTypeKind.Opaque(elem_struct_name)) else: elem_type
-            if has_struct_name:
-                self.mark_runtime_value_local(elem_tagged.id)
-            val decoded = self.decode_runtime_value(elem_tagged, decode_type)
-            var b_var = self.builder
-            val elem_var = b_var.new_local(nil, elem_type, LocalKind.Var)
-            b_var.emit_copy(elem_var, decoded)
-            self.builder = b_var
-            self.bind_local(loop_symbol, elem_var)
-            if has_struct_name:
-                self.struct_value_syms[elem_var.id] = elem_struct_name
+            if elem_is_u8:
+                # Packed [u8]: read the raw byte through rt_bytes_u8_at (the
+                # accessor lower_for_array_indexed and `arr[i]` use); the slot
+                # is not a tagged word, so there is no decode.
+                var b_byte = self.builder
+                val raw_byte = b_byte.emit_call_value(
+                    MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_bytes_u8_at"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    )),
+                    [mir_operand_copy(collection_local), mir_operand_copy(counter)], MirType.i64())
+                val byte_value = b_byte.emit_cast(mir_operand_copy(raw_byte), elem_type)
+                val byte_var = b_byte.new_local(nil, elem_type, LocalKind.Var)
+                b_byte.emit_copy(byte_var, byte_value)
+                self.builder = b_byte
+                self.bind_local(loop_symbol, byte_var)
+            else:
+                var b_get = self.builder
+                val elem_tagged = b_get.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(collection_local), mir_operand_copy(counter)], MirType.i64())
+                self.builder = b_get
+                # Same element-struct handling as lower_for_array_indexed.
+                val elem_struct_name = self.array_element_struct_syms.get(collection_local.id) ?? ""
+                val has_struct_name = elem_struct_name != "" and elem_struct_name != "__runtime_array__"
+                val decode_type = if has_struct_name: MirType(kind: MirTypeKind.Opaque(elem_struct_name)) else: elem_type
+                if has_struct_name:
+                    self.mark_runtime_value_local(elem_tagged.id)
+                val decoded = self.decode_runtime_value(elem_tagged, decode_type)
+                var b_var = self.builder
+                val elem_var = b_var.new_local(nil, elem_type, LocalKind.Var)
+                b_var.emit_copy(elem_var, decoded)
+                self.builder = b_var
+                self.bind_local(loop_symbol, elem_var)
+                if has_struct_name:
+                    self.struct_value_syms[elem_var.id] = elem_struct_name
 
         var cond_index = 0
         while cond_index < conditions.len():

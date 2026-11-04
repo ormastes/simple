@@ -10088,3 +10088,18 @@ fn build_import_map_prefers_extern_identity_over_same_named_method_in_either_ord
         assert_eq!(result.map.get("free").map(String::as_str), Some("free"));
     }
 }
+
+#[test]
+fn suffix_index_keeps_leading_underscore_of_private_helper() {
+    use super::imports::{build_suffix_index, resolve_by_suffix, suffix_of};
+    let gate = "compiler__backend__introspection__elf_artifact_gate___u64".to_string();
+    assert_eq!(suffix_of(&gate), Some("_u64"));
+    assert_eq!(suffix_of("mod__Foo.bar"), Some("Foo.bar"));
+    assert_eq!(suffix_of("a__b__c"), Some("c"));
+    let mut all = std::collections::HashMap::new();
+    all.insert("gate".to_string(), vec![gate]);
+    let index = build_suffix_index(&all);
+    assert!(index.get("u64").is_none());
+    // An erased-receiver `.to_u64()` must not bind to the private `_u64`.
+    assert_eq!(resolve_by_suffix("to_u64", &index), None);
+}

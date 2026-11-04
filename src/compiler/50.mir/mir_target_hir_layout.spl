@@ -1,0 +1,130 @@
+# TargetHIR P3: struct layout + function ABI read through a TargetHIR view.
+# Lives in 50.mir because 20.hir must not import 30.types. Every read is bound
+# to the view's explicit target; a snapshot mismatch or an arch with no layout
+# table is a named Err, never a host default.
+
+use compiler.hir.hir_definitions.{HirField}
+use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_equals, hir_snapshot_id_text}
+use compiler.hir.target_hir.target_hir.{TargetHIR}
+use compiler.hir.target_hir.target_hir_resolution.{target_hir_builder_new, target_hir_builder_resolve_required, target_hir_builder_freeze, target_hir_abi}
+use compiler.types.type_layout.{LayoutAttr, TypeLayout, FieldLayout, compute_struct_layout, compute_struct_layout_for_arch}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_new}
+use compiler.hir.target_hir.target_hir.{target_hir_for_context}
+use std.common.target.{TargetArch}
+
+struct ResolvedStructLayout:
+    type_name: text
+    size: i64
+    align: i64
+    field_offsets: [i64]
+
+fn _mir_thir_arch(name: text) -> Result<TargetArch, text>:
+    if name == "x86_64":
+        return Ok(TargetArch.X86_64)
+    if name == "x86":
+        return Ok(TargetArch.X86)
+    if name == "aarch64":
+        return Ok(TargetArch.Aarch64)
+    if name == "arm":
+        return Ok(TargetArch.Arm)
+    if name == "riscv64":
+        return Ok(TargetArch.Riscv64)
+    if name == "riscv32":
+        return Ok(TargetArch.Riscv32)
+    Err("target_hir_unsupported_arch: " + name)
+
+fn _mir_thir_check_snapshot(view: TargetHIR, snapshot: HirSnapshotId) -> Result<bool, text>:
+    if not hir_snapshot_id_equals(view.snapshot, snapshot):
+        return Err("target_hir_snapshot_mismatch: view=" + hir_snapshot_id_text(view.snapshot) + " read=" + hir_snapshot_id_text(snapshot))
+    Ok(true)
+
+fn mir_target_hir_struct_layout(view: TargetHIR, snapshot: HirSnapshotId, type_name: text, fields: [HirField], attr: LayoutAttr) -> Result<ResolvedStructLayout, text>:
+    val same = _mir_thir_check_snapshot(view, snapshot)
+    if same.is_err():
+        return Err(same.unwrap_err())
+    val arch = _mir_thir_arch(view.target.arch)
+    if arch.is_err():
+        return Err(arch.unwrap_err())
+    val layout: TypeLayout = compute_struct_layout_for_arch(fields, attr, arch.unwrap())
+    # Offsets are reported in declaration order, whatever the physical order.
+    var offsets: [i64] = []
+    for field in fields:
+        var found: i64 = -1
+        for fl in layout.fields:
+            if fl.name == field.name:
+                found = fl.offset
+        if found < 0:
+            return Err("target_hir_field_unresolved: " + type_name + "." + field.name)
+        offsets.push(found)
+    Ok(ResolvedStructLayout(type_name: type_name, size: layout.size, align: layout.align, field_offsets: offsets))
+
+fn mir_target_hir_fn_abi(view: TargetHIR, snapshot: HirSnapshotId, fn_name: text) -> Result<text, text>:
+    val same = _mir_thir_check_snapshot(view, snapshot)
+    if same.is_err():
+        return Err(same.unwrap_err())
+    if fn_name.trim() == "":
+        return Err("target_hir_fn_name_required")
+    val built = target_hir_builder_resolve_required(target_hir_builder_new(view, []))
+    if built.is_err():
+        return Err(built.unwrap_err())
+    val frozen = target_hir_builder_freeze(built.unwrap())
+    if frozen.is_err():
+        return Err(frozen.unwrap_err())
+    Ok(target_hir_abi(frozen.unwrap()))
+
+# ---------------------------------------------------------------------------
+# Legacy lowering layout, made target-aware (bug: legacy_struct_layout_host_arch).
+# The legacy compute_struct_layout table is fixed LP64 (pointer/usize = 8,
+# i64/f64 align 8). Every supported host and every 64-bit target uses exactly
+# that table, so those keep calling it unchanged (byte-identical host builds).
+# A 32-bit lowering target must not inherit LP64 offsets: it gets the arch table.
+fn mir_legacy_layout_arch(arch: text) -> TargetArch?:
+    if arch == "x86":
+        return Some(TargetArch.X86)
+    if arch == "arm":
+        return Some(TargetArch.Arm)
+    if arch == "riscv32":
+        return Some(TargetArch.Riscv32)
+    nil
+
+fn mir_target_aware_struct_layout(target: MirTargetContext, fields: [HirField], attr: LayoutAttr) -> TypeLayout:
+    val arch = mir_legacy_layout_arch(target.arch)
+    if arch.?:
+        return compute_struct_layout_for_arch(fields, attr, arch.unwrap())
+    compute_struct_layout(fields, attr)
+
+# Live wiring (SIMPLE_TARGET_HIR_MODE): legacy returns the legacy layout
+# untouched; shadow recomputes through mir_target_hir_struct_layout and any
+# size/align/offset divergence is a named Err (fatal at the call site); typed
+# returns the layout with the reader's size/align/offsets.
+fn mir_target_hir_live_struct_layout(mode: text, module_name: text, target: MirTargetContext, type_name: text, fields: [HirField], attr: LayoutAttr, legacy: TypeLayout) -> Result<TypeLayout, text>:
+    if mode == "legacy":
+        return Ok(legacy)
+    val snap = hir_snapshot_id_new(if module_name.trim() == "": "mir.live_lowering" else: module_name, "live-lowering-unfrozen", 0)
+    if snap.is_err():
+        return Err(snap.unwrap_err())
+    val view = target_hir_for_context(snap.unwrap(), target, "struct_layout")
+    if view.is_err():
+        return Err(view.unwrap_err())
+    val v = view.unwrap()
+    val typed = mir_target_hir_struct_layout(v, v.snapshot, type_name, fields, attr)
+    if typed.is_err():
+        return Err(typed.unwrap_err())
+    val r = typed.unwrap()
+    if r.size != legacy.size or r.align != legacy.align:
+        return Err("target_hir_shadow_mismatch: layout " + type_name + " legacy=" + legacy.size.to_string() + "/" + legacy.align.to_string() + " typed=" + r.size.to_string() + "/" + r.align.to_string())
+    var out: [FieldLayout] = []
+    for fl in legacy.fields:
+        var typed_off: i64 = -1
+        var i = 0
+        while i < fields.len():
+            if fields[i].name == fl.name:
+                typed_off = r.field_offsets[i]
+            i = i + 1
+        if typed_off != fl.offset:
+            return Err("target_hir_shadow_mismatch: layout " + type_name + "." + fl.name + " legacy=" + fl.offset.to_string() + " typed=" + typed_off.to_string())
+        out.push(FieldLayout(name: fl.name, type_: fl.type_, offset: typed_off, size: fl.size, align: fl.align, has_bits: fl.has_bits, bits_width: fl.bits_width, bit_offset: fl.bit_offset))
+    if mode == "typed":
+        return Ok(TypeLayout(size: r.size, align: r.align, fields: out, stride: legacy.stride))
+    Ok(legacy)

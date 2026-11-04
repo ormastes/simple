@@ -53,3 +53,10 @@ no-regression, Boot A verified: 1 distinct titlebar color, 0 exceptions) with
 an in-code comment recording this investigation. Fix the seed's spill-slot
 handling with a minimal repro (scalar hoisted over a call-bearing loop) as
 the regression test, then sweep the workaround back out.
+
+## Native repro fixture (2026-11-04)
+Fixture: `test/03_system/native/scalar_spill_loop_intervening_calls.spl` (expected rc 42; passes under seed interpreter).
+Stage3 command:
+```sh
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <stage3-simple> native-build --entry test/03_system/native/scalar_spill_loop_intervening_calls.spl -o /tmp/b && /tmp/b; echo rc=$?
+```

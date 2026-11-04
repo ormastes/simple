@@ -41,3 +41,6 @@ non-member. Execution awaits a fresh runnable pure-Simple compiler artifact.
 - bdd `it`-block typed block-lambdas return nil in the interpreter test
   runner (same first-class-lambda family, interpreter side).
 
+
+## Status 2026-11-04 (n88_a triage)
+Source fix landed 2026-07-15; row moved to fix-implemented-verification-pending. Repro for stage3: `sh scripts/check/check-native-capturing-lambda-values.shs`.

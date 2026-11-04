@@ -1,0 +1,66 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# HIR lowering: dictionary tuple-for binders keep declared K/V types
+
+`for (k, v) in d:` over a declared `Dict<K, V>` used to record nil/Infer
+binder types, so the bootstrap producer erased `k.id` / `v.field` to ANY
+(dict_nominal_tuple_binders_any_bootstrap_2026_10_21). The HIR desugar now
+types the key binder as K and the value binder as V.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+fn lower_for_binder_kinds(src: text) -> [text]:
+    val file = "testdata/fixture_dict_tuple_for.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_dict_tuple_for", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var kinds: [text] = []
+    for f in hir.functions.values():
+        if f.name != "total":
+            continue
+        for st in f.body.stmts:
+            match st.kind:
+                case HirStmtKind.Expr(e):
+                    match e.kind:
+                        case HirExprKind.For(_, _, body, _):
+                            for inner in body.stmts:
+                                match inner.kind:
+                                    case HirStmtKind.Let(_, t, _):
+                                        match t.kind:
+                                            case HirTypeKind.Named(_, _): kinds = kinds.push("named")
+                                            case HirTypeKind.Infer(_, _): kinds = kinds.push("infer")
+                                            case _: kinds = kinds.push("other")
+                                    case _: ()
+                        case _: ()
+                case _: ()
+    kinds
+
+val src = "struct LoopKey:\n" +
+    "    id: i64\n" +
+    "\n" +
+    "struct LoopValue:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "fn total(d: Dict<LoopKey, LoopValue>) -> i64:\n" +
+    "    var s = 0\n" +
+    "    for (k, v) in d:\n" +
+    "        s = s + k.id + v.n\n" +
+    "    s\n"
+
+describe "HIR lowering: Dict tuple-for binder types":
+    it "types both binders with the declared nominal key and value":
+        val kinds = lower_for_binder_kinds(src)
+        expect(kinds.len()).to_equal(2)
+        expect(kinds[0]).to_equal("named")
+        expect(kinds[1]).to_equal("named")

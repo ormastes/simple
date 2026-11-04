@@ -70,3 +70,10 @@ nontrivial fields (`snapshot`, `token_map`, and `widget_css_by_name`) after:
 Inspect the HIR/MIR destination type and `Ret` operand in each row. A source
 workaround that defaults nil fields, adds raw runtime aliases, or further
 special-cases theme startup is explicitly rejected.
+
+## Native repro fixture (2026-11-04)
+Fixture: `test/03_system/native/theme_package_aggregate_return.spl` (expected rc 42; passes under seed interpreter).
+Stage3 command:
+```sh
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <stage3-simple> native-build --entry test/03_system/native/theme_package_aggregate_return.spl -o /tmp/b && /tmp/b; echo rc=$?
+```
