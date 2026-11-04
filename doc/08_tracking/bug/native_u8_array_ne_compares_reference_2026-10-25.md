@@ -26,3 +26,12 @@ returns `Ok(true)`.
 Open compiler bug: array `==`/`!=` lowering must compare contents (length +
 elements), matching interpreter semantics. Not fixed here; per policy it takes
 effect when the Phase 3 compiler rebuilds itself.
+
+## 2026-11-04 triage (n88b) - status fix-implemented-verification-pending
+
+Fixed in source by ff9555ded33 (`expr_dispatch.spl` array `==`/`!=` via
+`rt_native_eq`, element-wise incl. byte-packed). Spec:
+`test/01_unit/compiler/codegen/native_array_eq_compares_contents_spec.spl` (needs a
+native producer; errors under the seed). Stage3 repro: native-build the tiny entry in
+the Repro section above; expected `lit_ne=false`. The `_retained_bytes_equal`
+workaround may be retired after that passes.

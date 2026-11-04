@@ -897,6 +897,20 @@ impl HirLowering:
                     val for_inner = var_.slice(1, var_.len() - 1)
                     val for_parts = for_inner.split(",")
                     val for_elem_sym = self.symbols.define("__for_tuple_elem", SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
+                    # Dictionary iteration yields (K, V) pairs: retain the
+                    # declared key/value types for the two binders instead of
+                    # letting them erase (dict_nominal_tuple_binders_any_bootstrap_2026_10_21).
+                    # Only an already-declared Dict iterable is used; nothing is
+                    # guessed from field names.
+                    var for_dict_key: HirType? = nil
+                    var for_dict_val: HirType? = nil
+                    if for_parts.len() == 2:
+                        val for_iter_type = self.binding_source_type(hir_iter)
+                        match for_iter_type.kind:
+                            case HirTypeKind.Dict(dict_key_t, dict_val_t):
+                                for_dict_key = Some(dict_key_t)
+                                for_dict_val = Some(dict_val_t)
+                            case _: ()
                     var for_prefix: [HirStmt] = []
                     var for_pi = 0
                     while for_pi < for_parts.len():
@@ -906,8 +920,10 @@ impl HirLowering:
                                 HirExpr(kind: HirExprKind.Var(for_elem_sym), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span),
                                 HirExpr(kind: HirExprKind.IntLit(for_pi, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)
                             ), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span)
-                            val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
-                            for_prefix = for_prefix.push(HirStmt(kind: HirStmtKind.Let(for_psym, self.binding_payload_type(for_idx_expr), for_idx_expr), span: s.span))
+                            val for_declared: HirType? = if for_pi == 0: for_dict_key else: for_dict_val
+                            val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, for_declared, s.span, Visibility.Private, false, nil)
+                            val for_let_type: HirType = if val declared = for_declared: declared else: self.binding_payload_type(for_idx_expr)
+                            for_prefix = for_prefix.push(HirStmt(kind: HirStmtKind.Let(for_psym, for_let_type, for_idx_expr), span: s.span))
                         for_pi = for_pi + 1
                     val for_hir_body_raw = self.lower_hir_block(body)
                     val for_hir_body = HirBlock(

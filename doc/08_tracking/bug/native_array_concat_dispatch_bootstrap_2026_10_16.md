@@ -67,3 +67,13 @@ Cycle2 strictcandidateAF40D56A... ran once: owner-text/async/hir/production-byte
 Independent read-only source review found the positive fixture violated the real receipt contract: both projections used direct-import-export, while the production decoder requires all ten REVERSE_REFERENCE_FAMILIES_V1 families. Encoder permitting partial frame serialization does not imply full receipt admission. The runtime decoded.reason was not printed, so this source finding is NOT proof of the exact observed native branch. No production decoder/key helper is changed or weakened.
 
 Fixture-only finalcycle3 preparation adds all ten genuine families plus two distinct direct consumers (11projections), checks every decoded key/consumer/schema/owner/root plus canonicalheader/count/order and digest. Original two-same-family receipt becomes a required missing-family negative with exact reason. Additional header/schema/count/order/mixed-generation and key domain/length/trailing-data negatives retain actual reason on failure. New receipt-only entry shares the same updated real control helper; the four green groups and prior nine-byte entry are not executed. All corrected receipt controls remain UNRUN; finalcycle3 not launched. No renamedfeature/budgetreset; no more than3cycles total.
+
+## 2026-11-04 triage (n88b) - status fix-implemented-verification-pending
+
+Source compiler dispatches typed array `.concat(...)` (8bf5daec825:
+`method_calls_literals.spl` concat arm + element-authority checks). Spec
+`test/01_unit/compiler/mir/array_concat_spec.spl` passes on the current seed;
+native fixture `test/04_smoke/array_concat_runtime_native.spl`. The
+`concat_copy_v1` workarounds stay until a rebuilt stage3 producer compiles the
+original call sites. Stage3 repro:
+`bootstrap/stage3/simple native-build test/04_smoke/array_concat_runtime_native.spl -o build/concat.exe && build/concat.exe`.
