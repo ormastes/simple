@@ -148,7 +148,7 @@ pub use collections::{
     rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at, rt_interp_cstr, rt_string_bytes,
     rt_string_chars, rt_string_lines, rt_string_byte_at, rt_string_char_code_at, rt_string_concat, rt_string_contains,
     rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_free, rt_string_capitalize,
-    rt_string_char_count, rt_string_chomp, rt_string_index_of, rt_string_is_alnum, rt_string_is_alpha,
+    rt_string_char_count, rt_string_to_digit, rt_string_chomp, rt_string_index_of, rt_string_is_alnum, rt_string_is_alpha,
     rt_string_is_digit, rt_string_is_whitespace, rt_string_join, rt_string_len, rt_string_new, rt_string_new_literal,
     rt_string_remove_prefix, rt_string_remove_suffix, rt_string_repeat, rt_string_replace, rt_string_replace_first,
     rt_string_rfind, rt_string_squeeze, rt_string_swapcase, rt_string_title, rt_string_trim_end_matches,
