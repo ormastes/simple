@@ -176,7 +176,7 @@ codes as built-in closures. Fix-its are *not* machine-applicable: they contain a
 
 It is conservative by construction. It reads cheap declared-type hints only
 (`x: f64`/`f32` params and locals, float-literal initialisers, `m: Dict<..>`,
-`val m = Dict.new()`/`{}`) and skips float division (IEEE, never panics) and
+`val m = Dict.new()`/`{}`) and skips, only for a name declared exactly once in its function (a shadowed or re-typed name gets no hint, SAF-05), float division (IEEE, never panics) and
 indexing of a declared `Dict` (`rt_dict_get` returns `nil` on a miss: a total
 `get`). Everything else with an unknown type still warns; the diagnostic text
 says "upper bound". Warnings exit 0, so `scripts/check/lint-cached.shs`
@@ -189,10 +189,10 @@ negatives, exact fix-it text).
 
 | Code | Sites |
 |---|---|
-| PANIC-W-INDEX | 49,344 |
+| PANIC-W-INDEX | 49,579 |
 | PANIC-W-UNWRAP | 1,581 |
-| PANIC-W-DIV | 2,790 |
-| **total** | **53,715** (upper bound) |
+| PANIC-W-DIV | 2,799 |
+| **total** | **53,959** (upper bound) |
 
 ## Rollout
 
