@@ -1,3 +1,22 @@
+# Status 2026-11-04 — source-level parts FIXED; redeploy dependency on the bootstrap lane
+
+- **Inline `unsafe(...): expr` (Defect 2): fixed.** Rust seed parser carries
+  `parser/src/unsafe_inline_body_test.rs`; pure-Simple parser handles it at
+  `src/compiler/10.frontend/core/parser_stmts.spl:644`. Re-verified 2026-11-04:
+  the minimal `inline.spl` reproduction below prints `ok` under the current seed
+  (`release100-7a0e6fe516f-20261031`).
+- **Wrong deploy slot (Defect 1): fixed at source.** Slot selection is
+  canonicalised by `scripts/setup/release-platform.shs`
+  (`aarch64-apple-darwin` -> `aarch64-apple-darwin-macho`, never a legacy dir).
+  `scripts/setup/setup.shs` now probes `--version` and refuses to point
+  `bin/simple` at a slot binary reporting `simple-bootstrap`, so the bootstrap
+  CLI can no longer silently become the tool path.
+- **Remaining (not fixable here): redeploy.** The only deployed macOS
+  self-hosted full CLI, `bin/release/aarch64-apple-darwin-macho/simple`
+  (`Simple v1.0.0-rc.1`, Sep 18), SIGSEGVs in test-runner setup. A fresh
+  admitted Stage 4 deploy is owned by the bootstrap lane; `bin/simple test` on
+  the self-hosted binary stays blocked until it lands.
+
 # CORRECTION (2026-08-31, after this record was drafted)
 ## Open 2026-09-16 — needs owner triage
 
