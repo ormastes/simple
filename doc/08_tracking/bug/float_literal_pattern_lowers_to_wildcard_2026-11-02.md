@@ -40,3 +40,16 @@ standard SSpec execution. The added HIR regression in
 `test/01_unit/compiler/hir/float_literal_pattern_bridge_spec.spl` remains
 unexecuted. Keep this bug OPEN until that HIR regression runs and a real float
 match verifies both equality selection and non-exhaustive handling.
+
+### 2026-11-04 (c28-w1) verification on seed 0b2c3d015b7
+
+- `bin/simple.exe test test/01_unit/compiler/hir/float_literal_pattern_bridge_spec.spl`:
+  4 total, 4 passed (27 s). The HIR regression now executes.
+- Real float match (`case 1.5: 10; case _: 20`): f(1.5)=10, f(2.5)=20 -> equality
+  selection verified (no longer matches every value).
+- Non-exhaustive check (`case 1.5` / `case 2.5` without wildcard) is NOT diagnosed
+  when run on the Rust seed interpreter (prints a=10, rc 0); exhaustiveness is a
+  pure-Simple pass. Verification pending on a stage3 binary:
+  `stage3 compile` a fn with a wildcard-less f64 match and expect
+  E-MATCH-NONEXHAUSTIVE-VALUE.
+Status: fix-implemented-verification-pending.
