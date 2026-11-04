@@ -80,3 +80,13 @@ Let). Not extended to field stores here.
 Not same root, not fixed: module-level `var` passed to a `mut` array param is
 not written back in either engine (see
 `seed_interp_mut_u8_array_param_element_write_lost_2026-11-04.md`).
+
+## 2026-11-04 follow-ups (jitvoid lane)
+
+- The `struct 'Void' field 'ready'` HIR error is fixed:
+  `seed_jit_nullable_receiver_method_typed_by_shorter_owner_2026-11-04.md`.
+  Engine2D CPU-oracle path under the real JIT (collector wrapped in `main`):
+  `status=pass cpu_oracle_parity=true`.
+- The per-iteration copy retention from the field-store copy is fixed for dead
+  sources: `seed_jit_field_store_array_copy_never_freed_2026-11-04.md`
+  (400k iterations 168 MB -> 98 MB RSS).

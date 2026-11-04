@@ -38,6 +38,23 @@ use crate::hir::{HirExpr, HirExprKind, HirFunction, HirStmt, HirType, TypeId, Ty
 pub(crate) struct ArrayMoveSites {
     /// Locals whose single array `Let` from a place may move its source.
     pub let_locals: HashSet<usize>,
+    /// `var` array locals whose every `obj.f = o` field store is proven
+    /// dead after the store: the field takes the buffer over with no
+    /// `rt_array_copy` (bug seed_jit_field_store_array_copy_never_freed_2026-11-04).
+    pub field_store_locals: HashSet<usize>,
+}
+
+/// `obj.f = Local(o)` field store of an array value: the hand-over candidate.
+fn field_store_source(a: &Analysis<'_>, target: &HirExpr, value: &HirExpr) -> Option<usize> {
+    match (&target.kind, &value.kind) {
+        (HirExprKind::FieldAccess { .. }, HirExprKind::Local(o))
+            if (a.is_array(value.ty) || a.is_array(a.local_ty(*o)) || a.is_array(target.ty))
+                && a.handed_over.contains(o) =>
+        {
+            Some(*o)
+        }
+        _ => None,
+    }
 }
 
 /// True when a struct-literal array argument hands the struct a buffer no
@@ -98,6 +115,9 @@ struct Analysis<'a> {
     disqualified: HashSet<usize>,
     let_counts: HashMap<usize, usize>,
     struct_arg_counts: HashMap<usize, usize>,
+    /// Field-store hand-over uses per local; also counted in
+    /// `struct_arg_counts` so the fixpoint requires each to be proven.
+    field_store_counts: HashMap<usize, usize>,
     /// Locals mentioned anywhere inside a lambda/generator/future/actor body.
     closure_locals: HashSet<usize>,
     /// `var` locals assumed handed over at their struct-literal uses this
@@ -130,6 +150,7 @@ pub(crate) fn compute_array_move_sites(
             disqualified: HashSet::new(),
             let_counts: HashMap::new(),
             struct_arg_counts: HashMap::new(),
+            field_store_counts: HashMap::new(),
             closure_locals: HashSet::new(),
             handed_over: handed_over.clone(),
             poisoned: false,
@@ -157,6 +178,7 @@ pub(crate) fn compute_array_move_sites(
             .map(|(o, _)| *o)
             .collect();
         if not_moved.is_empty() {
+            sites.field_store_locals = a.field_store_counts.keys().copied().collect();
             return sites;
         }
         for o in not_moved {
@@ -329,7 +351,13 @@ impl<'a> Analysis<'a> {
                     }
                     _ => self.scan_expr(target, Ctx::Bare),
                 }
-                self.scan_expr(value, Ctx::Bare);
+                if let Some(o) = field_store_source(self, target, value) {
+                    *self.struct_arg_counts.entry(o).or_insert(0) += 1;
+                    *self.field_store_counts.entry(o).or_insert(0) += 1;
+                    self.scan_expr(value, Ctx::StructArg);
+                } else {
+                    self.scan_expr(value, Ctx::Bare);
+                }
             }
             HirStmt::Expr(e) => self.scan_expr(e, Ctx::Stmt),
             HirStmt::Return(Some(e)) => self.scan_expr(e, Ctx::Return),
@@ -521,6 +549,11 @@ impl<'a> Analysis<'a> {
             ) {
                 for e in stmt_direct_exprs(stmt) {
                     struct_arg_locals(self, e, &mut args);
+                }
+                if let HirStmt::Assign { target, value } = stmt {
+                    if let Some(o) = field_store_source(self, target, value) {
+                        args.push(o);
+                    }
                 }
             }
             // A `return` ends the frame, so nothing after it can observe `o`.
