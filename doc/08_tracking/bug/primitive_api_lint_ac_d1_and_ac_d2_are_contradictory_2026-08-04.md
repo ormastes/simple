@@ -120,3 +120,7 @@ wins.
 
 Already marked ARCHITECTURAL-OPEN (a genuine spec/rule-design contradiction needing an owner to choose an AST/body-aware discriminator, not a code bug). No new evidence this pass. Leaving OPEN.
 
+
+## Triage 2026-11-04 (c28-w4)
+
+Triage 2026-11-04 (no change, lint rules owned by other lanes): still a spec/rule design contradiction (lint_primitive_api.spl:160 _all_same_primitive is a single-line text scan). Proposed resolution for owner: AC-D2 discriminator = body is a pass-through to an extern fn, implemented in the AST-driven primitive_api.spl check_call_site, leaving the EasyFix text rule to AC-D1 only. QUESTION: accept that split, or drop AC-D2?

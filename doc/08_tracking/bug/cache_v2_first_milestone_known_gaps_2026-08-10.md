@@ -156,3 +156,7 @@ OPEN; the doc's own Status ("OPEN - recorded, not fixed") is accurate.
 Reconfirmed: milestone-tracking record for cache v2 work (tier router,
 GC/leases, CompileInterfaceDigest, fixtures landed; other gaps tracked).
 Not a single fixable defect. Left as-is, no code change attempted.
+
+## Triage 2026-11-04 (c28-w4)
+
+Triage 2026-11-04: gaps 1 (placeholder-v0 abi/semantic/link digests, module_identity.spl:19-20), 5 (6h lease fallback, lease.spl:50) and 6 still present; gap 3 fixed. Correction: lease.spl EXISTS at src/compiler/80.driver/cache/lease/lease.spl (the 2026-08-17 ABSENT note was path drift). Gap 4 partly moved: disk_cache_bound_v1.spl and HIR free-space admission landed in Oct but admission.spl:96-98 still scopes min_free_ratio to the cache budget with no host free-bytes rt symbol. This is a milestone ledger, not one defect: keep open as tracking; QUESTION: close it and file gaps 1/2/4/5 as separate rows?

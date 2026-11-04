@@ -225,3 +225,7 @@ code change made in this pass.**
 
 Out of lane: fixing a verb-only lint heuristic overfiring on ~208 findings needs a real disambiguation design (handle-acquire vs value-constructor), not a bounded fix. No change made.
 
+
+## Triage 2026-11-04 (c28-w4)
+
+Triage 2026-11-04 (no change, lint rule owned by others): claim p2-resource-lint-20261103 was taken and released 2026-11-03 with no open PR, so the row is unclaimed. Blocker unchanged: the residual ~160 findings need the resource registry consumed by the rule dispatch (shared lint registry). QUESTION: is resource-registry wiring scheduled, or should the rule be demoted to opt-in (critical profile only) until it is?

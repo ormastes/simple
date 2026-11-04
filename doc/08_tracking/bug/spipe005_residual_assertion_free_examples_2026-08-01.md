@@ -254,3 +254,7 @@ genuine assertion idiom (paren-less `check`/`fail`), was proven additive
 (NEW-ONLY = 0) and precision-tested against assignment lookalikes. No `pass` was
 added to any spec to suppress a finding.
 
+
+## Triage 2026-11-04 (c28-w4)
+
+Triage 2026-11-04 (no change; rule lives under lint infra owned by other lanes): residual count 1790 firings / 196 files not re-measured, a full lint sweep is unaffordable per the doc. Suggested concrete next step for owner: run the rule only over the 196 recorded files via check-lint-cost-budget style cached runs and re-baseline the number, then burn down by directory. QUESTION: is SPIPE005 intended to stay warn-level or become deny once under 100 firings?

@@ -628,3 +628,7 @@ Same superlinear lint/check cost family already documented in
 redeploy per that doc's own note, but root cause still not fully
 located). Not a bounded fix for this lane. Leaving OPEN.
 
+
+## Triage 2026-11-04 (c28-w4)
+
+CLOSED-STALE 2026-11-04. Measured once on seed 0b2c3d015b7 (bin/simple.exe lint): generated file of 120 simple fns / 480 lines lints clean in 32.5s wall (premise was ~119s for 120 lines, ~3.3-4s per decl; 2026-08-18 redeploy fixed the cause). Content-heavy declarations remain costly: tracked separately in lint_timeout_hwir_zca_rows_2026-08-17 and gated by scripts/check/check-lint-cost-budget.shs.
