@@ -650,3 +650,12 @@ Package: `src/compiler/20.hir/target_hir/` (kept in a subdirectory, not the 20.h
   Spec: `test/01_unit/compiler/50.mir/mir_target_hir_select_spec.spl`.
 
 - **TargetHIR flags (U0, 2026-11-04):** all TargetHIR env knobs are owned by `src/compiler/20.hir/target_hir/target_hir_flags.spl` — `target_hir_mode()` (`SIMPLE_TARGET_HIR_MODE`, legacy|shadow|typed, invalid->legacy; `target_hir_mode_strict()` returns Err on a typo), `target_hir_verify()`, `target_hir_storage()`, `stage3_compiler_path()` (`SIMPLE_STAGE3_COMPILER`, nil = Stage-3 work reports PENDING). Import these; never read the env vars directly. Spec: `test/01_unit/compiler/hir/target_hir_flags_spec.spl`.
+- **P4 wiring** live `MirLowering.lower_cfg_select` now consults `SIMPLE_TARGET_HIR_MODE=legacy|shadow|typed`
+  via U0 `target_hir_mode_strict()` (default `legacy`, unknown value = fatal MIR error). `shadow` recomputes the arm via
+  `mir_target_hir_live_select` (TargetHIR reader) and makes a divergence fatal
+  (`target_hir_shadow_mismatch`) while keeping the legacy arm; `typed` uses the typed arm. The view is
+  bound by `target_hir_for_context` (refuses empty arch/os/backend; MirTargetContext keeps no triple, so
+  no explicit round trip). The live path binds a synthetic `live-lowering-unfrozen` snapshot id: snapshot
+  identity is NOT enforced there until P5/P6. Env is read per select (cfg selects are rare).
+  Evidence: `mir_target_hir_select_spec.spl` (6 cases incl. injected-divergence) and
+  `hir_cfg_select_lowering_spec.spl` green under legacy/shadow/typed (fails under a bogus mode).
