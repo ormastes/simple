@@ -20,43 +20,71 @@ struct WalkState:
     module_path: text
     views: [NodeView]
     type_params: Dict<text, text>
+    char_to_byte: [i64]
     stmt_start: i64
     indent: text
     in_unsafe: bool
     parent_kind: text
 
+# All scanning is BYTE based (`byte_at`): offsets, `len()` and `slice` are
+# bytes while `s[i]` indexes chars, so a non-ASCII comment would otherwise
+# shift or overrun every position after it. Parser spans count CHARS, so the
+# walk state carries a char->byte table.
 fn _line_start(source: text, offset: i64) -> i64:
     var i = offset
-    while i > 0 and source[i - 1] != "\n":
+    while i > 0 and source.byte_at(i - 1) != 10:
         i = i - 1
     i
 
-fn _is_ident_char(c: text) -> bool:
-    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+fn _is_ident_byte(b: i64) -> bool:
+    (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 57) or b == 95
 
 fn _indent_at(source: text, line_start: i64) -> text:
     var i = line_start
-    while i < source.len() and (source[i] == " " or source[i] == "\t"):
+    while i < source.len() and (source.byte_at(i) == 32 or source.byte_at(i) == 9):
         i = i + 1
     source.slice(line_start, i)
 
 # Offset of the bracket closing the one opened at `open_idx`, or -1.
 fn _match_close(source: text, open_idx: i64, open: text, close: text) -> i64:
+    val open_b = open.byte_at(0)
+    val close_b = close.byte_at(0)
     var depth = 0
     var i = open_idx
     var in_str = false
     while i < source.len():
-        val c = source[i]
+        val c = source.byte_at(i)
         if in_str:
-            if c == "\\": i = i + 1
-            elif c == "\"": in_str = false
-        elif c == "\"": in_str = true
-        elif c == open: depth = depth + 1
-        elif c == close:
+            if c == 92: i = i + 1
+            elif c == 34: in_str = false
+        elif c == 34: in_str = true
+        elif c == open_b: depth = depth + 1
+        elif c == close_b:
             depth = depth - 1
             if depth == 0: return i
         i = i + 1
     -1
+
+fn _char_to_byte_table(source: text) -> [i64]:
+    var table: [i64] = []
+    var i = 0
+    while i < source.len():
+        val b = source.byte_at(i)
+        if b < 128 or b >= 192: table.push(i)
+        i = i + 1
+    table.push(source.len())
+    table
+
+fn _byte_of(st: WalkState, char_offset: i64) -> i64:
+    if char_offset < 0: return -1
+    if char_offset >= st.char_to_byte.len(): return st.snapshot.source.len()
+    st.char_to_byte[char_offset]
+
+fn _span_start_b(st: WalkState, sp: i64) -> i64:
+    _byte_of(st, span_start(sp))
+
+fn _span_end_b(st: WalkState, sp: i64) -> i64:
+    _byte_of(st, span_end(sp))
 
 fn _base(st: WalkState, kind: text, start: i64, end: i64, sp: i64) -> NodeView:
     var v = node_view_empty()
@@ -67,7 +95,7 @@ fn _base(st: WalkState, kind: text, start: i64, end: i64, sp: i64) -> NodeView:
     v.start = start
     v.end = end
     v.line = span_line(sp)
-    v.col = span_col(sp)
+    v.col = start - _line_start(st.snapshot.source, start) + 1   # byte column, as Replacement expects
     v.text = st.snapshot.source.slice(start, end)
     v.stmt_start = st.stmt_start
     v.indent = st.indent
@@ -78,7 +106,7 @@ fn _base(st: WalkState, kind: text, start: i64, end: i64, sp: i64) -> NodeView:
 fn _trim_decl_end(source: text, start: i64, end: i64) -> i64:
     # Decl spans run up to the next decl; drop trailing blank lines.
     var e = end
-    while e > start and (source[e - 1] == "\n" or source[e - 1] == " " or source[e - 1] == "\r"):
+    while e > start and (source.byte_at(e - 1) == 10 or source.byte_at(e - 1) == 32 or source.byte_at(e - 1) == 13):
         e = e - 1
     e
 
@@ -86,8 +114,8 @@ fn _fn_decl_view(st: WalkState, d: i64) -> NodeView?:
     val sp = decl_get_span(d)
     if not span_is_valid(sp): return nil
     val source = st.snapshot.source
-    val start = span_start(sp)
-    val end = _trim_decl_end(source, start, span_end(sp))
+    val start = _span_start_b(st, sp)
+    val end = _trim_decl_end(source, start, _span_end_b(st, sp))
     var v = _base(st, "fn_decl", start, end, sp)
     val full_name = decl_get_name(d)
     var name = full_name
@@ -146,14 +174,14 @@ fn _walk_expr(mut st: WalkState, e: i64):
     val saved_unsafe = st.in_unsafe
     if kind != "" and span_is_valid(sp):
         val source = st.snapshot.source
-        var start = span_start(sp)
-        var end = span_end(sp)
+        var start = _span_start_b(st, sp)
+        var end = _span_end_b(st, sp)
         if kind == "method_call" or kind == "call" or kind == "index":
             # The parser's postfix span can start at the '(' for a zero-arg
             # method call on a bare identifier; anchor on the receiver/callee.
             val left0 = expr_get_left(e)
             val lsp0 = if left0 >= 0: expr_get_span(left0) else: 0
-            if span_is_valid(lsp0) and span_start(lsp0) < start: start = span_start(lsp0)
+            if span_is_valid(lsp0) and _span_start_b(st, lsp0) < start: start = _span_start_b(st, lsp0)
         var v = _base(st, kind, start, end, sp)
         if kind == "ident":
             v.name = expr_get_str(e)
@@ -164,8 +192,8 @@ fn _walk_expr(mut st: WalkState, e: i64):
             val lsp = if left >= 0: expr_get_span(left) else: 0
             var left_end = start
             if span_is_valid(lsp):
-                left_end = span_end(lsp)
-                val left_text = source.slice(span_start(lsp), left_end)
+                left_end = _span_end_b(st, lsp)
+                val left_text = source.slice(_span_start_b(st, lsp), left_end)
                 if kind == "call": v.callee = left_text
                 else: v.receiver = left_text
             if kind == "method_call":
@@ -176,10 +204,10 @@ fn _walk_expr(mut st: WalkState, e: i64):
                     var p = start
                     if p >= v.name.len() and source.slice(p - v.name.len(), p) == v.name:
                         p = p - v.name.len()
-                        if p > 0 and source[p - 1] == ".":
+                        if p > 0 and source.byte_at(p - 1) == 46:
                             p = p - 1
                             var q = p
-                            while q > 0 and (_is_ident_char(source[q - 1]) or source[q - 1] == "."):
+                            while q > 0 and (_is_ident_byte(source.byte_at(q - 1)) or source.byte_at(q - 1) == 46):
                                 q = q - 1
                             if q < p:
                                 v.receiver = source.slice(q, p)
@@ -232,13 +260,13 @@ fn _walk_stmt(mut st: WalkState, s: i64):
         val csp = expr_get_span(c)
         if span_is_valid(csp):
             if not span_is_valid(anchor): anchor = csp
-            if span_end(csp) > child_end: child_end = span_end(csp)
+            if _span_end_b(st, csp) > child_end: child_end = _span_end_b(st, csp)
     if span_is_valid(anchor):
-        st.stmt_start = _line_start(source, span_start(anchor))
+        st.stmt_start = _line_start(source, _span_start_b(st, anchor))
         st.indent = _indent_at(source, st.stmt_start)
         if stmt_get_tag(s) == STMT_RETURN:
-            var start = span_start(anchor)
-            var end = span_end(anchor)
+            var start = _span_start_b(st, anchor)
+            var end = _span_end_b(st, anchor)
             if not span_is_valid(sp):
                 val kw = st.stmt_start + st.indent.len()
                 if source.slice(kw, kw + 6) == "return": start = kw
@@ -265,8 +293,8 @@ fn _walk_decl(mut st: WalkState, d: i64):
             st.indent = v.indent
             st.parent_kind = "fn_decl"
     elif (tag == DECL_STRUCT or tag == DECL_CLASS) and span_is_valid(sp) and span_end(sp) > span_start(sp):
-        val start = span_start(sp)
-        val end = _trim_decl_end(st.snapshot.source, start, span_end(sp))
+        val start = _span_start_b(st, sp)
+        val end = _trim_decl_end(st.snapshot.source, start, _span_end_b(st, sp))
         var v = _base(st, "class_decl", start, end, sp)
         v.name = decl_get_name(d)
         v.owner_type_params = decl_get_type_params(d).join(",")
@@ -280,7 +308,7 @@ pub fn collect_node_views(snapshot: SourceSnapshot) -> Result<[NodeView], text>:
     if parse_module_silent_checked(snapshot.source, snapshot.file):
         return Err("{snapshot.file}: parse failed")
     var st = WalkState(snapshot: snapshot, module_path: module_path_for_file(snapshot.file), views: [],
-        type_params: {}, stmt_start: 0, indent: "", in_unsafe: false, parent_kind: "")
+        type_params: {}, char_to_byte: _char_to_byte_table(snapshot.source), stmt_start: 0, indent: "", in_unsafe: false, parent_kind: "")
     val decls = module_get_decls()
     for d in decls:
         val tag = decl_get_tag(d)
