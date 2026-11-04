@@ -1,0 +1,60 @@
+use std.spec.*
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_new, hir_snapshot_id_equals, hir_snapshot_id_text}
+use compiler.hir.target_hir.target_hir.{target_hir_for_explicit, target_hir_snapshot, target_hir_target, target_hir_target_id, target_hir_identity}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val MODULE_LOWERING = "src/compiler/50.mir/_MirLowering/module_lowering.spl"
+val ARCHIVE_BORROWED = "src/compiler/50.mir/_MirLowering/archive_borrowed_module_v1.spl"
+
+describe "TargetHIR PR-A identity facade":
+    it "builds scoped snapshot ids and rejects incomplete identities":
+        val a = hir_snapshot_id_new(" app.main ", " d1 ", 0).unwrap()
+        expect(hir_snapshot_id_text(a)).to_equal("hir:app.main@d1#0")
+        val same = hir_snapshot_id_new("app.main", "d1", 0).unwrap()
+        expect(hir_snapshot_id_equals(a, same)).to_be(true)
+        expect(hir_snapshot_id_equals(a, hir_snapshot_id_new("app.main", "d1", 1).unwrap())).to_be(false)
+        expect(hir_snapshot_id_equals(a, hir_snapshot_id_new("app.other", "d1", 0).unwrap())).to_be(false)
+        expect(hir_snapshot_id_new("", "d1", 0).unwrap_err()).to_equal("hir_snapshot_module_required")
+        expect(hir_snapshot_id_new("m", " ", 0).unwrap_err()).to_equal("hir_snapshot_digest_required")
+        expect(hir_snapshot_id_new("m", "d", -1).unwrap_err()).to_start_with("hir_snapshot_generation_negative:")
+
+    it "binds one snapshot to distinct explicit targets without changing the snapshot":
+        val snap = hir_snapshot_id_new("app.main", "d1", 3).unwrap()
+        val linux = target_hir_for_explicit(snap, "x86_64-unknown-linux-gnu", "llvm", 23, "module").unwrap()
+        val windows = target_hir_for_explicit(snap, "x86_64-pc-windows-msvc", "llvm", 23, "module").unwrap()
+        expect(hir_snapshot_id_equals(target_hir_snapshot(linux), target_hir_snapshot(windows))).to_be(true)
+        expect(target_hir_target(linux).os).to_equal("linux")
+        expect(target_hir_target(windows).os).to_equal("windows")
+        expect(target_hir_target_id(linux)).to_equal("x86_64-linux-gnu/llvm@23")
+        expect(target_hir_identity(windows)).to_equal("hir:app.main@d1#3|x86_64-windows-msvc/llvm@23|region:module")
+        val arm = target_hir_for_explicit(snap, "armv7-unknown-linux-gnueabihf", "llvm", 23, "module").unwrap()
+        expect(target_hir_target_id(arm)).to_equal("arm(armv7)-linux-eabihf/llvm@23")
+
+    it "refuses implicit hosts, unresolved backends and empty regions":
+        val snap = hir_snapshot_id_new("app.main", "d1", 0).unwrap()
+        expect(target_hir_for_explicit(snap, "host", "llvm", 23, "module").unwrap_err()).to_start_with("explicit_target_required:")
+        expect(target_hir_for_explicit(snap, "aarch64-apple-darwin", "auto", 23, "module").unwrap_err()).to_start_with("explicit_backend_required:")
+        expect(target_hir_for_explicit(snap, "aarch64-apple-darwin", "llvm", 23, " ").unwrap_err()).to_equal("target_hir_region_required")
+
+    it "records the raw-HIR MIR lowering entrypoints that later PRs must migrate":
+        # Inventory from doc/03_plan/compiler/hir/immutable_hir_p0_mir_inventory_20261103.md.
+        # PR-A changes none of them; this pins that they still exist by name.
+        val src = rt_file_read_text(MODULE_LOWERING) ?? ""
+        expect(src.len() > 0).to_be(true)
+        for entry in ["static fn new(symbols: SymbolTable) -> MirLowering",
+            "static fn new_for_target(symbols: SymbolTable, target_context: MirTargetContext) -> MirLowering",
+            "me prescan_module_struct_names(modules: Dict<text, HirModule>",
+            "me prescan_module_functions_v1(modules: Dict<text, HirModule>",
+            "me lower_bootstrap_entry_module(module: HirModule",
+            "me lower_bootstrap_closure_module(module: HirModule",
+            "me lower_module_transient_scoped(module: HirModule",
+            "me lower_module(module: HirModule",
+            "me lower_module_guarded_v1(module: HirModule",
+            "me lower_module_emit_all_v1(module: HirModule",
+            "me lower_module_emit_fn_v1(module: HirModule"]:
+            expect(src.contains(entry)).to_be(true)
+        val archive = rt_file_read_text(ARCHIVE_BORROWED) ?? ""
+        expect(archive.contains("me lower_archive_module_in_owned_scope_v1(module: HirModule")).to_be(true)
+        # No MIR lowerer consumes TargetHIR yet (PR-D migrates one reader).
+        expect(src.contains("TargetHIR")).to_be(false)
