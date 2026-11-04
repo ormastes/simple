@@ -58,6 +58,30 @@ impl<'a> MirLowerer<'a> {
             // entry-closure defect C3).
             self.lower_short_circuit_logical(op, left, right)
         } else if matches!(op, BinOp::Eq | BinOp::NotEq)
+            && ((matches!(right.kind, HirExprKind::Nil) && self.is_tagged_optional_slot(left.ty))
+                || (matches!(left.kind, HirExprKind::Nil) && self.is_tagged_optional_slot(right.ty)))
+        {
+            // OPTIONAL-VS-NIL COMPARISON. A tagged `T?` slot may hold either the
+            // nil sentinel or a canonical `Option::None` (typed `Dict.get` builds
+            // a real Option since 9d21958ee39). A word compare against the
+            // sentinel only saw the former, so `d.get(k) == nil` was false and
+            // `!= nil` true on a miss -- the pure-Simple HIR SymbolTable then
+            // returned a garbage id for every fresh struct name ("own struct has
+            // a stale declaration"). Use the same presence predicate as `??`.
+            let value_expr = if matches!(right.kind, HirExprKind::Nil) { left } else { right };
+            let value_reg = self.lower_expr(value_expr)?;
+            let predicate = if op == BinOp::Eq { "rt_is_none" } else { "rt_is_some" };
+            self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name(predicate),
+                    args: vec![value_reg],
+                });
+                dest
+            })
+        } else if matches!(op, BinOp::Eq | BinOp::NotEq)
             && ((matches!(right.kind, HirExprKind::Nil) && matches!(left.ty, TypeId::F32 | TypeId::F64))
                 || (matches!(left.kind, HirExprKind::Nil) && matches!(right.ty, TypeId::F32 | TypeId::F64)))
         {
@@ -762,6 +786,25 @@ impl<'a> MirLowerer<'a> {
                 args: vec![boxed],
             });
             dest
+        })
+    }
+}
+
+impl<'a> MirLowerer<'a> {
+    /// A tagged `T?` slot (same test as the `??` presence check in
+    /// hir/lower/expr): a shared/unique/weak/handle pointer type.
+    fn is_tagged_optional_slot(&self, ty: TypeId) -> bool {
+        self.type_registry.is_some_and(|tr| {
+            matches!(
+                tr.get(ty),
+                Some(HirType::Pointer {
+                    kind: crate::hir::PointerKind::Shared
+                        | crate::hir::PointerKind::Unique
+                        | crate::hir::PointerKind::Weak
+                        | crate::hir::PointerKind::Handle,
+                    ..
+                })
+            )
         })
     }
 }
