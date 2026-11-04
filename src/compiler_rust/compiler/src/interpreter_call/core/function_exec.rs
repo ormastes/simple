@@ -1788,6 +1788,14 @@ fn write_back_mutable_arguments(
                                     Arc::make_mut(&mut fields).insert(field_name, callee_val);
                                     outer_env.insert(obj_name, Value::Object { class, fields });
                                 }
+                                // Reference-semantics class: write the field
+                                // into the shared cell; every handle sees it.
+                                Value::ClassInstance(instance) => {
+                                    instance.set_field(field_name, callee_val);
+                                    if took {
+                                        outer_env.restore_frame_owned(obj_name, Value::ClassInstance(instance));
+                                    }
+                                }
                                 other => {
                                     if took {
                                         outer_env.restore_frame_owned(obj_name, other);

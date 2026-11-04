@@ -162,6 +162,20 @@ pub(crate) fn pattern_matches(
     enums: &Enums,
     classes: &Classes,
 ) -> Result<bool, CompileError> {
+    // Pattern matching is unchanged by the reference-semantics class carrier
+    // (class_instance_reference_storage_2026-11-03.md): a `Value::ClassInstance`
+    // is matched through an `Object` view of its class + fields. Field values are
+    // Arc-clones, so a class-typed field bound by a sub-pattern keeps its identity.
+    let object_view;
+    let value = if let Value::ClassInstance(instance) = value {
+        object_view = Value::Object {
+            class: instance.class().to_string(),
+            fields: std::sync::Arc::new(instance.fields_snapshot()),
+        };
+        &object_view
+    } else {
+        value
+    };
     match pattern {
         Pattern::Wildcard => Ok(true),
 

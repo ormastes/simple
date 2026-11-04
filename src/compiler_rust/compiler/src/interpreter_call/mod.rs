@@ -452,7 +452,7 @@ pub(crate) fn call_value_as_callable(
 ) -> Result<Option<Value>, CompileError> {
     // Callable objects use the `__call__` protocol and need `val` by reference,
     // so they are handled before the by-value match below takes ownership.
-    if matches!(val, Value::Object { .. }) {
+    if matches!(val, Value::Object { .. } | Value::ClassInstance(_)) {
         let evaluated_args: Vec<Value> = args
             .iter()
             .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))

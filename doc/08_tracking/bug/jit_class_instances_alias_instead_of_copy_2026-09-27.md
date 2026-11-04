@@ -46,3 +46,12 @@ would keep working; sites relying on aliasing without a write-back would break).
 ## Regression gate
 `dict_class_value_identity_spec.spl` asserts the ruling on the interpreter
 engine only. When this is fixed, add the JIT run back to that spec.
+
+## 2026-11-04 note (fix-classref lane): the JIT behaviour is now the contract
+
+The interpreter was flipped to reference-semantics class storage by default
+(`Value::ClassInstance`, PR "fix(interp): class reference semantics by
+default"), so the JIT's aliasing in these shapes is no longer a divergence —
+both engines now share one handle per `class` instance; `struct` stays a copy.
+`dict_class_value_identity_spec` was retargeted accordingly. Coordinator owns
+the bug_db status change.

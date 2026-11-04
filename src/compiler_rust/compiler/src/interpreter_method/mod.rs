@@ -17,6 +17,87 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// `obj.name(args)` where `name` is a callable FIELD (lambda, function, block
+/// closure, native function, constructor, or `__call__` object) rather than a
+/// method. Shared by the `Value::Object` and `Value::ClassInstance` receiver
+/// arms of `call_method` so `self.callback(x)` behaves the same on a struct
+/// and a class. `Ok(None)` when the field holds no callable shape.
+#[allow(clippy::too_many_arguments)] // reason: mirrors the dispatcher it is split out of
+fn call_callable_field(
+    field_value: &Value,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    match field_value {
+        Value::Lambda {
+            params,
+            body,
+            env: captured_env,
+        } => {
+            // Call the lambda stored in the field
+            let mut arg_vals = Vec::new();
+            for arg in args {
+                arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+            }
+            // Create local env from captured env and bind params
+            let mut local_env = Env::clone(captured_env);
+            for (i, param) in params.iter().enumerate() {
+                if let Some(val) = arg_vals.get(i) {
+                    local_env.insert(param.clone(), val.clone());
+                }
+            }
+            // Evaluate the body expression
+            let result = evaluate_expr(body.as_ref(), &mut local_env, functions, classes, enums, impl_methods)?;
+            Ok(Some(result))
+        }
+        Value::Function { def, captured_env, .. } => {
+            // Call the function stored in the field
+            exec_function_with_captured_env(
+                def,
+                args,
+                env,
+                &mut Env::clone(captured_env),
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )
+            .map(Some)
+        }
+        // Any OTHER callable field shape (block closure, native
+        // function, constructor, or an object implementing the
+        // `__call__` protocol) routes through the single place that
+        // knows which `Value` variants are invocable, so
+        // `obj.handler(x)` agrees with `(obj.handler)(x)`.
+        other => {
+            let candidate = other.clone();
+            if matches!(
+                candidate,
+                Value::BlockClosure { .. }
+                    | Value::NativeFunction(_)
+                    | Value::Constructor { .. }
+                    | Value::Object { .. }
+                    | Value::ClassInstance(_)
+            ) {
+                return crate::interpreter::interpreter_call::call_value_as_callable(
+                    candidate,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
+            }
+            Ok(None)
+        }
+    }
+}
+
 /// Byte offset of the first byte >= 0x80, or `bytes.len()` when all-ASCII.
 /// Word-at-a-time so an all-ASCII document costs ~len/8 iterations.
 fn first_non_ascii(bytes: &[u8]) -> usize {
@@ -1461,42 +1542,38 @@ pub(crate) fn evaluate_method_call(
         // fields live behind a shared RwLock.
         Value::ClassInstance(instance) => {
             let class_name = instance.class().to_string();
-            let method_def: Option<Arc<FunctionDef>> = classes
-                .get(class_name.as_str())
-                .and_then(|class_def| class_def.methods.iter().find(|m| m.name == method).cloned())
-                .map(Arc::new)
-                .or_else(|| {
-                    impl_methods
-                        .get(class_name.as_str())
-                        .and_then(|ms| ms.iter().find(|m| m.name == method).cloned())
-                })
-                .or_else(|| {
-                    GLOBAL_IMPL_METHODS.with(|cell| {
-                        cell.borrow()
-                            .get(class_name.as_str())
-                            .and_then(|ms| ms.iter().find(|m| m.name == method).cloned())
-                    })
-                })
-                .or_else(|| {
-                    TRAIT_IMPLS.with(|cell| {
-                        cell.borrow().iter().find_map(|((_t, ty), ms)| {
-                            (ty == &class_name)
-                                .then(|| ms.iter().find(|m| m.name == method).cloned())
-                                .flatten()
-                        })
-                    })
-                });
-            if let Some(method_def) = method_def {
-                let mut arg_vals = Vec::with_capacity(args.len());
-                for arg in args {
-                    arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
-                }
-                let mut self_fields = HashMap::new();
-                self_fields.insert("self".to_string(), recv_val.clone());
-                let self_fields = Arc::new(self_fields);
-                return crate::interpreter::interpreter_call::exec_function_with_values_and_self(
+            // Bind `self` to the ClassInstance value itself through the
+            // single-key `{"self": value}` convention `exec_function_inner`
+            // already honours for enum receivers; that keeps reference
+            // semantics (fields live behind a shared RwLock) while routing the
+            // call through the SAME path as `Value::Object` — so `&mut` /
+            // `mut` argument write-back, trait impls and blanket impls apply
+            // to a class receiver exactly as they do to a struct receiver.
+            let mut self_fields = HashMap::new();
+            self_fields.insert("self".to_string(), recv_val.clone());
+            let self_fields = Arc::new(self_fields);
+            if let Some(result) = find_and_exec_method(
+                method,
+                args,
+                &class_name,
+                &self_fields,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                return Ok(result);
+            }
+            let global_impl: Option<Arc<FunctionDef>> = GLOBAL_IMPL_METHODS.with(|cell| {
+                cell.borrow()
+                    .get(class_name.as_str())
+                    .and_then(|ms| ms.iter().find(|m| m.name == method).cloned())
+            });
+            if let Some(method_def) = global_impl {
+                return exec_function(
                     method_def.as_ref(),
-                    &arg_vals,
+                    args,
                     env,
                     functions,
                     classes,
@@ -1504,6 +1581,15 @@ pub(crate) fn evaluate_method_call(
                     impl_methods,
                     Some((class_name.as_str(), &self_fields)),
                 );
+            }
+            // `obj.handler(x)` where `handler` is a callable field — same
+            // fallback as the `Value::Object` arm below.
+            if let Some(field_value) = instance.field(method) {
+                if let Some(result) =
+                    call_callable_field(&field_value, args, env, functions, classes, enums, impl_methods)?
+                {
+                    return Ok(result);
+                }
             }
             // Not found — fall through to the shared error/UFCS path below.
         }
@@ -1525,69 +1611,10 @@ pub(crate) fn evaluate_method_call(
             // Check if the method name corresponds to a callable field (Lambda/Function)
             // This allows patterns like: self.callback(arg) where callback is a lambda field
             if let Some(field_value) = fields.get(method) {
-                match field_value {
-                    Value::Lambda {
-                        params,
-                        body,
-                        env: captured_env,
-                    } => {
-                        // Call the lambda stored in the field
-                        let mut arg_vals = Vec::new();
-                        for arg in args {
-                            arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
-                        }
-                        // Create local env from captured env and bind params
-                        let mut local_env = Env::clone(captured_env);
-                        for (i, param) in params.iter().enumerate() {
-                            if let Some(val) = arg_vals.get(i) {
-                                local_env.insert(param.clone(), val.clone());
-                            }
-                        }
-                        // Evaluate the body expression
-                        let result =
-                            evaluate_expr(body.as_ref(), &mut local_env, functions, classes, enums, impl_methods)?;
-                        return Ok(result);
-                    }
-                    Value::Function { def, captured_env, .. } => {
-                        // Call the function stored in the field
-                        return exec_function_with_captured_env(
-                            def,
-                            args,
-                            env,
-                            &mut Env::clone(captured_env),
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        );
-                    }
-                    // Any OTHER callable field shape (block closure, native
-                    // function, constructor, or an object implementing the
-                    // `__call__` protocol) routes through the single place that
-                    // knows which `Value` variants are invocable, so
-                    // `obj.handler(x)` agrees with `(obj.handler)(x)`.
-                    other => {
-                        let candidate = other.clone();
-                        if matches!(
-                            candidate,
-                            Value::BlockClosure { .. }
-                                | Value::NativeFunction(_)
-                                | Value::Constructor { .. }
-                                | Value::Object { .. }
-                        ) {
-                            if let Some(result) = crate::interpreter::interpreter_call::call_value_as_callable(
-                                candidate,
-                                args,
-                                env,
-                                functions,
-                                classes,
-                                enums,
-                                impl_methods,
-                            )? {
-                                return Ok(result);
-                            }
-                        }
-                    }
+                if let Some(result) =
+                    call_callable_field(field_value, args, env, functions, classes, enums, impl_methods)?
+                {
+                    return Ok(result);
                 }
             }
             // Try method_missing hook
@@ -2407,6 +2434,14 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // `StrBytes` is text too (a raw-byte text fragment; see `value.rs`), so it
     // is covered by the same rule.
     if matches!(recv_val, Value::Str(_) | Value::StrBytes(_)) {
+        return Ok((result, None));
+    }
+    // A reference-semantics `class` receiver mutates its shared cell in place:
+    // there is never anything to write back, and a method that RETURNS a new
+    // instance of the same class (`list.prepend(x)` on a persistent list) must
+    // not be mistaken for an in-place mutator by the same-discriminant test
+    // below — that rebound the receiver binding to the fresh instance.
+    if matches!(recv_val, Value::ClassInstance(_)) {
         return Ok((result, None));
     }
 

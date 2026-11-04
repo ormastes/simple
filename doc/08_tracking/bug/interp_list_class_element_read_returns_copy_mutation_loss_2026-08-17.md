@@ -213,3 +213,10 @@ Design: `doc/05_design/compiler/interpreter/class_instance_reference_storage_202
 Spec (RED on tree-walk, 2 of 4 fail; tagged in-development):
 `test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`.
 No narrow fix: needs `Value::ClassInstance` producers in the Rust seed + redeploy. Stays OPEN.
+
+## 2026-11-04 note (fix-classref lane): FIXED by the default flip
+
+`Value::ClassInstance` is the seed interpreter's default class carrier now
+(`SIMPLE_INTERP_CLASS_REF=0` opts out). `class_element_reference_spec` is 4/4 by
+default on the rebuilt seed (was 2/4) and its `@tag:in-development` is dropped.
+Coordinator owns the bug_db status change.
