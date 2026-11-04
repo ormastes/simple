@@ -43,6 +43,27 @@ So the RSS kill is a consequence; the root cause is the poison.
   `?.m()` safe-navigation semantics (wraps `Some`); the seed has no static
   lowering for it. Spec: `test/01_unit/compiler/frontend/optional_member_call_parser_spec.spl`
   (3/3; 2 of 3 fail without the parser change).
+- **SUPERSEDED (work/bug-optchain-20261105): `?.` semantics reconciled.**
+  The try-then-call parse above contradicted the language docs
+  (`syntax_quick_reference.md` "Safe Navigation (`?.`)", incl.
+  `result?.process()?.validate()`) and the seed (`OptionalMethodCall`:
+  unwrap Some/Ok, else None; result wrapped in `Some`), and silently changed
+  the meaning of documented optional-chaining sites (`linker_gen/parser.spl`
+  x26 `dict["k"]?.as_text() ?? ""`, `svim/tui_shell.spl:124`). Decision:
+  `?.` is safe navigation on BOTH compilers; try-then-access is spelled
+  `(expr?).m()` / `(expr?).f`. The self-hosted parser now emits
+  `OptionalChain` for `x?.f` and `Call(OptionalChain(x, m), args)` for
+  `x?.m(args)` (previously it dropped the `?` for BOTH forms). Native MIR
+  still has no OptionalChain lowering and rejects it LOUDLY
+  (`E-MIR-EXPR-OptionalChain`) -- remaining gap. All 87 in-tree
+  try-then-access sites (`)?.m(` / `)?.f` on Result-returning calls in
+  git_provider, scv/db, task_runner journal, compiler 50/70/80, os, lib)
+  were rewritten to the explicit `(expr?).x` form; on the seed they had been
+  swallowing `Err` into `None`. Nil-guarded compiler sites
+  (`record != nil and record?.f`) use `record.unwrap().f`;
+  `70.backend/interrupt.spl` uses `if val`. Spec:
+  `optional_member_call_parser_spec.spl` 5/5 on the seed (parser via the
+  self-hosted frontend + runtime cases for both forms).
 - `git_provider.spl:161,174` `"...^{tree}"` interpolated the local `tree`
   (still `""`) -> `rev^`; escaped as `^\{tree\}` (genuine source bug).
 - **No in-process MIR retry after HIR compile errors.** A MIR shard child
